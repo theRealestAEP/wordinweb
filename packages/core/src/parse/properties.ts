@@ -1,0 +1,354 @@
+import {
+  XmlElement,
+  attr,
+  child,
+  children,
+  childVal,
+  intAttr,
+  localName,
+  onOff,
+} from "../xml.js";
+import {
+  Alignment,
+  Border,
+  BorderStyle,
+  LineSpacing,
+  ParaProps,
+  ParagraphBorders,
+  RunProps,
+  TabStop,
+  Theme,
+} from "../model.js";
+import { eighthPtToPx, halfPtToPx, ptToPx, twipsToPx } from "../units.js";
+
+export interface ParseContext {
+  theme?: Theme;
+}
+
+// ---------- colors ----------
+
+const HIGHLIGHT_COLORS: Record<string, string> = {
+  yellow: "#ffff00",
+  green: "#00ff00",
+  cyan: "#00ffff",
+  magenta: "#ff00ff",
+  blue: "#0000ff",
+  red: "#ff0000",
+  darkBlue: "#00008b",
+  darkCyan: "#008b8b",
+  darkGreen: "#006400",
+  darkMagenta: "#800080",
+  darkRed: "#8b0000",
+  darkYellow: "#808000",
+  darkGray: "#a9a9a9",
+  lightGray: "#d3d3d3",
+  black: "#000000",
+  white: "#ffffff",
+};
+
+export function parseColor(
+  el: XmlElement | undefined,
+  ctx: ParseContext,
+): string | undefined {
+  if (!el) return undefined;
+  const themeColor = attr(el, "themeColor");
+  if (themeColor && ctx.theme) {
+    const mapped = ctx.theme.colors.get(themeColor);
+    if (mapped) {
+      const tint = attr(el, "themeTint");
+      const shade = attr(el, "themeShade");
+      return applyTintShade(mapped, tint, shade);
+    }
+  }
+  const val = attr(el, "val");
+  if (!val || val === "auto") return val === "auto" ? "auto" : undefined;
+  return "#" + val;
+}
+
+function applyTintShade(hex: string, tint?: string, shade?: string): string {
+  let rgb = hexToRgb(hex);
+  if (!rgb) return hex;
+  if (tint) {
+    const t = parseInt(tint, 16) / 255;
+    rgb = rgb.map((c) => Math.round(c * t + 255 * (1 - t))) as [number, number, number];
+  }
+  if (shade) {
+    const s = parseInt(shade, 16) / 255;
+    rgb = rgb.map((c) => Math.round(c * s)) as [number, number, number];
+  }
+  return rgbToHex(rgb);
+}
+
+function hexToRgb(hex: string): [number, number, number] | null {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
+  if (!m) return null;
+  const v = parseInt(m[1], 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+}
+function rgbToHex([r, g, b]: [number, number, number]): string {
+  return "#" + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
+}
+
+/** w:shd → CSS fill color or undefined. */
+export function parseShading(el: XmlElement | undefined, ctx: ParseContext): string | undefined {
+  if (!el) return undefined;
+  const fill = attr(el, "fill");
+  const themeFill = attr(el, "themeFill");
+  if (themeFill && ctx.theme) {
+    const mapped = ctx.theme.colors.get(themeFill);
+    if (mapped) return applyTintShade(mapped, attr(el, "themeFillTint"), attr(el, "themeFillShade"));
+  }
+  if (fill && fill !== "auto") return "#" + fill;
+  // val="pct.." patterns with a color are rare in body text; treat solid val
+  const val = attr(el, "val");
+  const color = attr(el, "color");
+  if (val === "solid" && color && color !== "auto") return "#" + color;
+  return undefined;
+}
+
+// ---------- borders ----------
+
+const BORDER_STYLE_MAP: Record<string, BorderStyle> = {
+  single: "single",
+  thick: "thick",
+  double: "double",
+  dotted: "dotted",
+  dashed: "dashed",
+  dotDash: "dotDash",
+  dotDotDash: "dotDotDash",
+  triple: "triple",
+  wave: "wave",
+  none: "none",
+  nil: "none",
+};
+
+export function parseBorder(el: XmlElement | undefined, ctx: ParseContext): Border | undefined {
+  if (!el) return undefined;
+  const val = attr(el, "val") ?? "single";
+  const style = BORDER_STYLE_MAP[val] ?? "single";
+  if (style === "none") return { style: "none", width: 0, color: "transparent", space: 0 };
+  const sz = intAttr(el, "sz") ?? 4; // eighth-points
+  const space = intAttr(el, "space") ?? 0; // points
+  let color = "#000000";
+  const themeColor = attr(el, "themeColor");
+  const mapped = themeColor ? ctx.theme?.colors.get(themeColor) : undefined;
+  if (mapped) color = mapped;
+  else {
+    const colorAttr = attr(el, "color");
+    if (colorAttr && colorAttr !== "auto") color = "#" + colorAttr;
+  }
+  return {
+    style,
+    width: Math.max(eighthPtToPx(sz), 0.75),
+    color,
+    space: ptToPx(space),
+  };
+}
+
+export function parseParagraphBorders(
+  el: XmlElement | undefined,
+  ctx: ParseContext,
+): ParagraphBorders | undefined {
+  if (!el) return undefined;
+  const out: ParagraphBorders = {};
+  for (const side of ["top", "bottom", "left", "right", "between"] as const) {
+    const b = parseBorder(child(el, side), ctx);
+    if (b) out[side] = b;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+// ---------- run properties ----------
+
+export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): RunProps {
+  const props: RunProps = {};
+  if (!rPr) return props;
+
+  const b = onOff(child(rPr, "b"));
+  if (b !== undefined) props.bold = b;
+  const i = onOff(child(rPr, "i"));
+  if (i !== undefined) props.italic = i;
+  const strike = onOff(child(rPr, "strike"));
+  if (strike !== undefined) props.strike = strike;
+  const dstrike = onOff(child(rPr, "dstrike"));
+  if (dstrike !== undefined) props.doubleStrike = dstrike;
+  const caps = onOff(child(rPr, "caps"));
+  if (caps !== undefined) props.caps = caps;
+  const smallCaps = onOff(child(rPr, "smallCaps"));
+  if (smallCaps !== undefined) props.smallCaps = smallCaps;
+  const vanish = onOff(child(rPr, "vanish"));
+  if (vanish !== undefined) props.vanish = vanish;
+
+  const u = childVal(rPr, "u");
+  if (u !== undefined) props.underline = u;
+
+  const rFonts = child(rPr, "rFonts");
+  if (rFonts) {
+    const theme = ctx.theme;
+    const asciiTheme = attr(rFonts, "asciiTheme");
+    let font = attr(rFonts, "ascii") ?? attr(rFonts, "hAnsi");
+    if (!font && asciiTheme && theme) {
+      font = asciiTheme.startsWith("major") ? theme.majorFont : theme.minorFont;
+    }
+    if (font) props.font = font;
+  }
+
+  const sz = childVal(rPr, "sz");
+  if (sz !== undefined) props.size = halfPtToPx(parseFloat(sz));
+
+  const color = parseColor(child(rPr, "color"), ctx);
+  if (color !== undefined) props.color = color;
+
+  const highlight = childVal(rPr, "highlight");
+  if (highlight && highlight !== "none") props.highlight = HIGHLIGHT_COLORS[highlight] ?? highlight;
+
+  const shd = parseShading(child(rPr, "shd"), ctx);
+  if (shd !== undefined) props.shading = shd;
+
+  const vertAlign = childVal(rPr, "vertAlign");
+  if (vertAlign === "superscript" || vertAlign === "subscript") props.verticalAlign = vertAlign;
+  else if (vertAlign === "baseline") props.verticalAlign = "baseline";
+
+  const spacing = intAttr(child(rPr, "spacing"), "val");
+  if (spacing !== undefined) props.letterSpacing = twipsToPx(spacing);
+
+  const rStyle = childVal(rPr, "rStyle");
+  if (rStyle) props.styleId = rStyle;
+
+  const lang = childVal(rPr, "lang");
+  if (lang) props.lang = lang;
+
+  return props;
+}
+
+// ---------- paragraph properties ----------
+
+const ALIGN_MAP: Record<string, Alignment> = {
+  left: "left",
+  start: "left",
+  center: "center",
+  right: "right",
+  end: "right",
+  both: "justify",
+  distribute: "justify",
+};
+
+export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): ParaProps {
+  const props: ParaProps = {};
+  if (!pPr) return props;
+
+  const styleId = childVal(pPr, "pStyle");
+  if (styleId) props.styleId = styleId;
+
+  const jc = childVal(pPr, "jc");
+  if (jc && ALIGN_MAP[jc]) props.alignment = ALIGN_MAP[jc];
+
+  const ind = child(pPr, "ind");
+  if (ind) {
+    const left = intAttr(ind, "left") ?? intAttr(ind, "start");
+    if (left !== undefined) props.indentLeft = twipsToPx(left);
+    const right = intAttr(ind, "right") ?? intAttr(ind, "end");
+    if (right !== undefined) props.indentRight = twipsToPx(right);
+    const firstLine = intAttr(ind, "firstLine");
+    if (firstLine !== undefined) props.indentFirstLine = twipsToPx(firstLine);
+    const hanging = intAttr(ind, "hanging");
+    if (hanging !== undefined) props.indentHanging = twipsToPx(hanging);
+  }
+
+  const spacing = child(pPr, "spacing");
+  if (spacing) {
+    const before = intAttr(spacing, "before");
+    if (before !== undefined) props.spacingBefore = twipsToPx(before);
+    const after = intAttr(spacing, "after");
+    if (after !== undefined) props.spacingAfter = twipsToPx(after);
+    const line = intAttr(spacing, "line");
+    const lineRule = attr(spacing, "lineRule") ?? "auto";
+    if (line !== undefined) {
+      const ls: LineSpacing =
+        lineRule === "exact"
+          ? { rule: "exact", value: twipsToPx(line) }
+          : lineRule === "atLeast"
+            ? { rule: "atLeast", value: twipsToPx(line) }
+            : { rule: "auto", value: line / 240 };
+      props.lineSpacing = ls;
+    }
+  }
+
+  const contextual = onOff(child(pPr, "contextualSpacing"));
+  if (contextual !== undefined) props.contextualSpacing = contextual;
+  const keepNext = onOff(child(pPr, "keepNext"));
+  if (keepNext !== undefined) props.keepNext = keepNext;
+  const keepLines = onOff(child(pPr, "keepLines"));
+  if (keepLines !== undefined) props.keepLines = keepLines;
+  const pageBreakBefore = onOff(child(pPr, "pageBreakBefore"));
+  if (pageBreakBefore !== undefined) props.pageBreakBefore = pageBreakBefore;
+  const widowControl = onOff(child(pPr, "widowControl"));
+  if (widowControl !== undefined) props.widowControl = widowControl;
+
+  const borders = parseParagraphBorders(child(pPr, "pBdr"), ctx);
+  if (borders) props.borders = borders;
+
+  const shd = parseShading(child(pPr, "shd"), ctx);
+  if (shd !== undefined) props.shading = shd;
+
+  const numPr = child(pPr, "numPr");
+  if (numPr) {
+    const numId = intAttr(child(numPr, "numId"), "val");
+    const ilvl = intAttr(child(numPr, "ilvl"), "val") ?? 0;
+    if (numId !== undefined) {
+      props.numbering = numId === 0 ? null : { numId, ilvl };
+    }
+  }
+
+  const tabsEl = child(pPr, "tabs");
+  if (tabsEl) {
+    const tabs: TabStop[] = [];
+    for (const t of children(tabsEl, "tab")) {
+      const val = attr(t, "val") ?? "left";
+      if (val === "clear") continue;
+      const pos = intAttr(t, "pos");
+      if (pos === undefined) continue;
+      tabs.push({
+        pos: twipsToPx(pos),
+        align: (val === "center" || val === "right" || val === "decimal" || val === "bar"
+          ? val
+          : "left") as TabStop["align"],
+        leader: (attr(t, "leader") as TabStop["leader"]) ?? "none",
+      });
+    }
+    tabs.sort((a, b) => a.pos - b.pos);
+    props.tabs = tabs;
+  }
+
+  const outline = intAttr(child(pPr, "outlineLvl"), "val");
+  if (outline !== undefined) props.outlineLevel = outline;
+
+  const markRPr = child(pPr, "rPr");
+  if (markRPr) props.markRunProps = parseRunProps(markRPr, ctx);
+
+  return props;
+}
+
+/** Shallow merge where defined values in `over` win. */
+export function mergeRunProps(base: RunProps, over: RunProps): RunProps {
+  const out: RunProps = { ...base };
+  for (const key of Object.keys(over) as (keyof RunProps)[]) {
+    const v = over[key];
+    if (v !== undefined) (out as Record<string, unknown>)[key] = v;
+  }
+  return out;
+}
+
+export function mergeParaProps(base: ParaProps, over: ParaProps): ParaProps {
+  const out: ParaProps = { ...base };
+  for (const key of Object.keys(over) as (keyof ParaProps)[]) {
+    const v = over[key];
+    if (v !== undefined) (out as Record<string, unknown>)[key] = v;
+  }
+  if (base.markRunProps && over.markRunProps) {
+    out.markRunProps = mergeRunProps(base.markRunProps, over.markRunProps);
+  }
+  return out;
+}
+
+export { localName };

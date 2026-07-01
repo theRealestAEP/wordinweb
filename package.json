@@ -1,0 +1,20 @@
+{
+  "name": "docxinweb",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Open-source high-fidelity Word/.docx viewer and editor for the web",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @docxinweb/core -w @docxinweb/react",
+    "test": "npm run test -w @docxinweb/core",
+    "dev": "npm run dev -w demo"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
