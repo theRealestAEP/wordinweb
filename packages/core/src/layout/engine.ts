@@ -408,6 +408,31 @@ class Engine {
         });
         continue;
       }
+      if (span.drawing) {
+        const bx = originX + span.x;
+        const by = baseline - span.drawing.height;
+        for (const img of span.drawing.images) {
+          page.items.push({
+            kind: "image",
+            x: bx + img.x,
+            y: by + img.y,
+            width: img.width,
+            height: img.height,
+            part: img.part,
+          });
+        }
+        for (const l of span.drawing.lines) {
+          page.items.push({
+            kind: "edge",
+            x1: bx + l.x1,
+            y1: by + l.y1,
+            x2: bx + l.x2,
+            y2: by + l.y2,
+            border: { style: "single", width: l.weight, color: l.color, space: 0 },
+          });
+        }
+        continue;
+      }
       if (span.text === undefined || span.text === "\t") continue;
 
       let b = baseline;

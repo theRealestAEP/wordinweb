@@ -84,8 +84,13 @@ export function DocxView({
       const layout = layoutDocument(doc);
       const container = containerRef.current;
       if (!container) return 0;
+      // Re-rendering replaces the page DOM; keep the user's scroll position
+      // (destroy-then-append clamps scrollTop to 0 otherwise).
+      const { scrollTop, scrollLeft } = container;
       handle?.destroy();
       handle = renderToDom(doc, layout, container, { zoom });
+      container.scrollTop = scrollTop;
+      container.scrollLeft = scrollLeft;
       return layout.totalPages;
     };
 
@@ -165,3 +170,4 @@ export function DocxView({
 
 export { DocxDocument, layoutDocument, renderToDom } from "@docxinweb/core";
 export type { RunFormatPatch, SelectionFormat } from "@docxinweb/core";
+export { DocxToolbar } from "./toolbar.js";

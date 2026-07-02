@@ -1,7 +1,10 @@
-import { XmlElement, attr, child, children, intAttr, localName, onOff } from "../xml.js";
+import { XmlElement, attr, child, children, intAttr, localName, onOff, path } from "../xml.js";
 import {
   Block,
   Border,
+  DrawingContent,
+  DrawingImage,
+  DrawingLine,
   Hyperlink,
   ImageContent,
   ParaChild,
@@ -245,8 +248,9 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
         run.content.push(...parseVmlPict(el, ctx));
         break;
       case "AlternateContent": {
-        // Prefer the DrawingML choice for plain images; otherwise use the
-        // VML fallback (textboxes, lines).
+        // Prefer the DrawingML choice when it's a plain picture. For choices
+        // we can't render (wpg groups etc.), producers ship a Fallback that
+        // is either a rasterized w:drawing (Google Docs) or VML w:pict.
         const choice = child(el, "Choice");
         const choiceDrawing = choice ? child(choice, "drawing") : undefined;
         const img = choiceDrawing ? parseDrawing(choiceDrawing, ctx) : null;
@@ -254,8 +258,14 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
           run.content.push(img);
         } else {
           const fallback = child(el, "Fallback");
-          const pictEl = fallback ? child(fallback, "pict") : undefined;
-          if (pictEl) run.content.push(...parseVmlPict(pictEl, ctx));
+          const fbDrawing = fallback ? child(fallback, "drawing") : undefined;
+          const fbImg = fbDrawing ? parseDrawing(fbDrawing, ctx) : null;
+          if (fbImg) {
+            run.content.push(fbImg);
+          } else {
+            const pictEl = fallback ? child(fallback, "pict") : undefined;
+            if (pictEl) run.content.push(...parseVmlPict(pictEl, ctx));
+          }
         }
         break;
       }
@@ -294,7 +304,12 @@ function findDescendant(el: XmlElement, local: string): XmlElement | undefined {
   return undefined;
 }
 
-function parseDrawing(drawing: XmlElement, ctx: DocParseContext): ImageContent | null {
+const EMU_PER_PT = 12700;
+
+function parseDrawing(
+  drawing: XmlElement,
+  ctx: DocParseContext,
+): ImageContent | DrawingContent | null {
   const inline = child(drawing, "inline");
   const anchor = child(drawing, "anchor");
   const holder = inline ?? anchor;
@@ -302,18 +317,103 @@ function parseDrawing(drawing: XmlElement, ctx: DocParseContext): ImageContent |
   const extent = child(holder, "extent");
   const cx = intAttr(extent, "cx") ?? 0;
   const cy = intAttr(extent, "cy") ?? 0;
-  const blip = findDescendant(holder, "blip");
-  if (!blip) return null;
-  const rid = attr(blip, "embed") ?? attr(blip, "link");
-  if (!rid) return null;
-  const rel = ctx.rels.get(rid);
-  if (!rel || rel.external) return null;
+
+  const images: DrawingImage[] = [];
+  const lines: DrawingLine[] = [];
+
+  // Walk the graphic tree, carrying the group coordinate transform:
+  // childEmu → boxEmu = (childEmu - chOff) * (ext / chExt) + off, composed.
+  const walk = (el: XmlElement, ox: number, oy: number, sx: number, sy: number) => {
+    const ln = localName(el.name);
+    if (ln === "pic") {
+      const xfrm = path(el, "spPr", "xfrm");
+      const off = child(xfrm, "off");
+      const ext = child(xfrm, "ext");
+      const blip = findDescendant(el, "blip");
+      const rid = blip ? (attr(blip, "embed") ?? attr(blip, "link")) : undefined;
+      const rel = rid ? ctx.rels.get(rid) : undefined;
+      if (rel && !rel.external) {
+        const x = ox + (intAttr(off, "x") ?? 0) * sx;
+        const y = oy + (intAttr(off, "y") ?? 0) * sy;
+        const w = (intAttr(ext, "cx") ?? cx) * sx;
+        const h = (intAttr(ext, "cy") ?? cy) * sy;
+        images.push({ part: rel.target, x: emuToPx(x), y: emuToPx(y), width: emuToPx(w), height: emuToPx(h) });
+      }
+      return;
+    }
+    if (ln === "wsp") {
+      const spPr = child(el, "spPr");
+      const prst = attr(child(spPr, "prstGeom"), "prst") ?? "";
+      const lnEl = child(spPr, "ln");
+      const isLine = prst === "line" || prst.startsWith("straightConnector") || prst.startsWith("bentConnector");
+      if (isLine && lnEl) {
+        const xfrm = child(spPr, "xfrm");
+        const off = child(xfrm, "off");
+        const ext = child(xfrm, "ext");
+        const x = ox + (intAttr(off, "x") ?? 0) * sx;
+        const y = oy + (intAttr(off, "y") ?? 0) * sy;
+        const w = (intAttr(ext, "cx") ?? 0) * sx;
+        const h = (intAttr(ext, "cy") ?? 0) * sy;
+        const flipH = attr(xfrm, "flipH") === "1";
+        const flipV = attr(xfrm, "flipV") === "1";
+        const srgb = findDescendant(lnEl, "srgbClr");
+        const color = srgb ? "#" + (attr(srgb, "val") ?? "000000") : "#000000";
+        const weightEmu = intAttr(lnEl, "w") ?? EMU_PER_PT; // default 1pt
+        let [x1, y1, x2, y2] = [x, y, x + w, y + h];
+        if (flipH) [x1, x2] = [x2, x1];
+        if (flipV) [y1, y2] = [y2, y1];
+        lines.push({
+          x1: emuToPx(x1),
+          y1: emuToPx(y1),
+          x2: emuToPx(x2),
+          y2: emuToPx(y2),
+          color,
+          weight: Math.max((weightEmu / EMU_PER_PT) * (4 / 3), 0.75),
+        });
+      }
+      // Textboxes inside shapes are ignored here (rendered via VML fallback
+      // when present); recurse for nested pics.
+      for (const c of el.children) walk(c, ox, oy, sx, sy);
+      return;
+    }
+    if (ln === "wgp" || ln === "grpSp") {
+      const xfrm = path(el, "grpSpPr", "xfrm");
+      const off = child(xfrm, "off");
+      const chOff = child(xfrm, "chOff");
+      const ext = child(xfrm, "ext");
+      const chExt = child(xfrm, "chExt");
+      const extX = intAttr(ext, "cx") ?? 1;
+      const extY = intAttr(ext, "cy") ?? 1;
+      const chX = intAttr(chExt, "cx") ?? extX;
+      const chY = intAttr(chExt, "cy") ?? extY;
+      const nsx = sx * (chX ? extX / chX : 1);
+      const nsy = sy * (chY ? extY / chY : 1);
+      const nox = ox + (intAttr(off, "x") ?? 0) * sx - (intAttr(chOff, "x") ?? 0) * nsx;
+      const noy = oy + (intAttr(off, "y") ?? 0) * sy - (intAttr(chOff, "y") ?? 0) * nsy;
+      for (const c of el.children) walk(c, nox, noy, nsx, nsy);
+      return;
+    }
+    for (const c of el.children) walk(c, ox, oy, sx, sy);
+  };
+  walk(holder, 0, 0, 1, 1);
+
+  // Plain single image covering the extent: keep the simple content kind.
+  if (lines.length === 0 && images.length === 1) {
+    return {
+      kind: "image",
+      part: images[0].part,
+      width: images[0].width || emuToPx(cx),
+      height: images[0].height || emuToPx(cy),
+      anchored: !!anchor,
+    };
+  }
+  if (lines.length === 0 && images.length === 0) return null;
   return {
-    kind: "image",
-    part: rel.target,
+    kind: "drawing",
     width: emuToPx(cx),
     height: emuToPx(cy),
-    anchored: !!anchor,
+    lines,
+    images,
   };
 }
 

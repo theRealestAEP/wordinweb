@@ -201,13 +201,44 @@ export interface AnchorContent {
   shape: Shape;
 }
 
+/** A stroked segment inside a composite drawing, px relative to its box. */
+export interface DrawingLine {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  color: string;
+  weight: number;
+}
+
+export interface DrawingImage {
+  part: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Composite inline drawing (DrawingML groups): vector lines + placed images
+ * inside a width×height box that flows like an image.
+ */
+export interface DrawingContent {
+  kind: "drawing";
+  width: number;
+  height: number;
+  lines: DrawingLine[];
+  images: DrawingImage[];
+}
+
 export type RunContent =
   | TextContent
   | BreakContent
   | TabContent
   | ImageContent
   | FieldContent
-  | AnchorContent;
+  | AnchorContent
+  | DrawingContent;
 
 export interface Run {
   type: "run";

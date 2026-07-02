@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import {
+  DrawingContent,
   Paragraph,
   ParaProps,
   Run,
@@ -47,11 +48,15 @@ interface ImageAtom {
   width: number;
   height: number;
 }
+interface DrawingAtom {
+  kind: "drawing";
+  drawing: DrawingContent;
+}
 interface BreakAtom {
   kind: "break";
   breakType: "line" | "page" | "column";
 }
-type Atom = FragAtom | SpaceAtom | TabAtom | ImageAtom | BreakAtom;
+type Atom = FragAtom | SpaceAtom | TabAtom | ImageAtom | DrawingAtom | BreakAtom;
 
 export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
   let size = props.size ?? 14.666;
@@ -79,6 +84,7 @@ export interface LineSpan {
   width: number;
   text?: string;
   image?: { part: string; width: number; height: number };
+  drawing?: DrawingContent;
   props: RunProps;
   font: FontSpec;
   href?: string;
@@ -259,19 +265,22 @@ export function breakParagraph(
       x += atom.width;
       continue;
     }
-    if (atom.kind === "image") {
-      if (curWidth > 0 && x + atom.width > lineStartX(lineIndex) + availFor(lineIndex)) {
+    if (atom.kind === "image" || atom.kind === "drawing") {
+      const w = atom.kind === "image" ? atom.width : atom.drawing.width;
+      const h = atom.kind === "image" ? atom.height : atom.drawing.height;
+      if (curWidth > 0 && x + w > lineStartX(lineIndex) + availFor(lineIndex)) {
         flush(false, false);
       }
       cur.push({
         x,
-        width: atom.width,
-        image: { part: atom.part, width: atom.width, height: atom.height },
+        width: w,
+        image: atom.kind === "image" ? { part: atom.part, width: w, height: h } : undefined,
+        drawing: atom.kind === "drawing" ? atom.drawing : undefined,
         props: {},
         font: fontOf({}, fallbackFamily),
       });
-      curWidth += atom.width;
-      x += atom.width;
+      curWidth += w;
+      x += w;
       continue;
     }
     // frag
@@ -399,6 +408,7 @@ function finishLine(
   } else {
     for (const s of spans) {
       if (s.image) consider(s.font, s.image.height);
+      else if (s.drawing) consider(s.font, s.drawing.height);
       else consider(s.font);
     }
   }
@@ -466,6 +476,9 @@ function buildAtoms(
           break;
         case "anchor":
           anchors.push(content.shape);
+          break;
+        case "drawing":
+          atoms.push({ kind: "drawing", drawing: content });
           break;
       }
     }

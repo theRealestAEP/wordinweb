@@ -162,8 +162,31 @@ export class DocxEditor {
         e.preventDefault();
         this.moveCaret(e.key === "ArrowLeft" ? -1 : 1);
       }
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      if (this.caret) {
+        e.preventDefault();
+        this.moveCaretVertically(e.key === "ArrowUp" ? -1 : 1);
+      }
     }
   };
+
+  /** Move to the visually adjacent line, keeping the horizontal position. */
+  private moveCaretVertically(dir: -1 | 1): void {
+    const rect = this.caretEl.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return;
+    const x = rect.left;
+    const lineH = Math.max(rect.height, 8);
+    // Probe successive line offsets to jump gaps (spacing, page breaks).
+    for (let step = 1; step <= 6; step++) {
+      const y = dir === -1 ? rect.top - step * lineH * 0.9 : rect.bottom + step * lineH * 0.9 - lineH / 2;
+      const caret = this.caretFromPoint(x, y) ?? this.nearestCaret(x, y);
+      if (caret && !(caret.t === this.caret!.t && caret.offset === this.caret!.offset)) {
+        this.caret = caret;
+        this.positionCaret();
+        return;
+      }
+    }
+  }
 
   // ---------- edit operations ----------
 
@@ -271,10 +294,11 @@ export class DocxEditor {
   private splitParagraph(): void {
     const caret = this.caret;
     if (!caret) return;
-    const rEl = caret.run.src;
-    if (!rEl) return;
-    // Locate the paragraph and its container.
-    let pEl: XmlElement | undefined = caret.run.srcParent;
+    // Resolve containers from the w:t itself — cached run/model objects go
+    // stale after any refresh, but the t element's identity is durable.
+    const rEl = this.host.doc.findParentOf(caret.t);
+    if (!rEl || localName(rEl.name) !== "r") return;
+    let pEl: XmlElement | undefined = this.host.doc.findParentOf(rEl);
     while (pEl && localName(pEl.name) !== "p") pEl = this.host.doc.findParentOf(pEl);
     if (!pEl) return;
     const pParent = this.host.doc.findParentOf(pEl);
@@ -358,7 +382,8 @@ export class DocxEditor {
       }
     }
     if (!best) {
-      this.caretEl.style.display = "none";
+      // Don't hide: the t may momentarily lack a binding (mid-edit). Keep the
+      // caret where it was; if it was never placed, there is nothing to show.
       return;
     }
     const src = best.item.src!;

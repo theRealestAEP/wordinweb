@@ -171,9 +171,17 @@ function renderText(item: TextItem): HTMLElement {
   el.style.whiteSpace = "pre";
   el.style.font = cssFont(item.font);
   el.style.lineHeight = `${item.lineHeight}px`;
-  // Word (mac) renders regular text lighter than Chrome's subpixel AA but
-  // bold text heavier than Chrome's grayscale AA. Match per weight.
-  el.style.setProperty("-webkit-font-smoothing", item.font.bold ? "auto" : "antialiased");
+  // Word (mac) rasterizes between Chrome's two smoothing modes: grayscale AA
+  // alone reads too thin, subpixel too thick. Grayscale plus a hairline
+  // stroke lands on Word's apparent weight; bold keeps subpixel (Word bold
+  // is heavier still). The stroke doesn't affect glyph advances, so measured
+  // layout is untouched.
+  if (item.font.bold) {
+    el.style.setProperty("-webkit-font-smoothing", "auto");
+  } else {
+    el.style.setProperty("-webkit-font-smoothing", "antialiased");
+    el.style.setProperty("-webkit-text-stroke", "0.15px currentColor");
+  }
 
   const props = item.props;
   let color = props.color && props.color !== "auto" ? props.color : "#000000";
