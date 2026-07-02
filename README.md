@@ -90,4 +90,4 @@ text color, highlight — over any selection, including partial runs.
 
 ## License
 
-MIT
+PolyForm Noncommercial 1.0.0 — free for noncommercial use; commercial use requires permission. See LICENSE.

@@ -109,6 +109,28 @@ export class DocxDocument {
   }
 
   /**
+   * Find the parent element of `target` in any modeled XML tree (document
+   * body, headers, footers). Linear scan — documents are small and this only
+   * runs on structural edits (Enter, paragraph merge).
+   */
+  findParentOf(target: XmlElement): XmlElement | undefined {
+    const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
+    const walk = (el: XmlElement): XmlElement | undefined => {
+      for (const c of el.children) {
+        if (c === target) return el;
+        const found = walk(c);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    for (const root of roots) {
+      const found = walk(root);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  /**
    * Serialize the (possibly edited) document back to .docx bytes. Only the
    * XML parts we model are re-serialized; every other part round-trips
    * byte-for-byte.

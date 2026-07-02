@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Open-source high-fidelity Word/.docx viewer and editor for the web",
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "workspaces": [
     "packages/*",
     "apps/*"

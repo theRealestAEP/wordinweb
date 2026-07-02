@@ -94,11 +94,6 @@ function renderPage(
   el.style.background = "#ffffff";
   el.style.overflow = "hidden";
   el.style.flexShrink = "0";
-  // Word (mac) uses grayscale smoothing; Chrome's default subpixel AA reads
-  // noticeably heavier/darker. Match Word.
-  (el.style as CSSStyleDeclaration & { webkitFontSmoothing?: string }).webkitFontSmoothing = "antialiased";
-  el.style.setProperty("-webkit-font-smoothing", "antialiased");
-  el.style.setProperty("text-rendering", "optimizeLegibility");
   if (options.pageShadow !== false) {
     el.style.boxShadow = "0 1px 3px rgba(0,0,0,.28), 0 4px 14px rgba(0,0,0,.12)";
   }
@@ -176,6 +171,9 @@ function renderText(item: TextItem): HTMLElement {
   el.style.whiteSpace = "pre";
   el.style.font = cssFont(item.font);
   el.style.lineHeight = `${item.lineHeight}px`;
+  // Word (mac) renders regular text lighter than Chrome's subpixel AA but
+  // bold text heavier than Chrome's grayscale AA. Match per weight.
+  el.style.setProperty("-webkit-font-smoothing", item.font.bold ? "auto" : "antialiased");
 
   const props = item.props;
   let color = props.color && props.color !== "auto" ? props.color : "#000000";

@@ -1,6 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
-import { XmlElement } from "../xml.js";
+import { XmlElement, cloneXml, localName } from "../xml.js";
 import { RenderHandle, TextBinding } from "../render/dom.js";
 import { selectionToSegments } from "./selection.js";
 
@@ -67,7 +67,8 @@ export class DocxEditor {
       this.hideCaret();
       return;
     }
-    const caret = this.caretFromPoint(e.clientX, e.clientY);
+    const caret =
+      this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     if (caret) {
       this.caret = caret;
       this.positionCaret();
@@ -76,6 +77,34 @@ export class DocxEditor {
       this.hideCaret();
     }
   };
+
+  /**
+   * Snap to the closest character boundary on the clicked line — makes
+   * clicks in whitespace, margins, and past line ends behave predictably.
+   */
+  private nearestCaret(x: number, y: number): Caret | null {
+    const handle = this.host.getHandle();
+    if (!handle) return null;
+    let best: { binding: TextBinding; after: boolean } | null = null;
+    let bestDist = Infinity;
+    for (const b of handle.bindings) {
+      if (!b.item.src?.t) continue;
+      const r = b.el.getBoundingClientRect();
+      if (y < r.top - 2 || y > r.bottom + 2) continue;
+      const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+      if (dx < bestDist) {
+        bestDist = dx;
+        best = { binding: b, after: x > r.right };
+      }
+    }
+    if (!best) return null;
+    const src = best.binding.item.src!;
+    return {
+      t: src.t as XmlElement,
+      run: src.run,
+      offset: src.offset + (best.after ? best.binding.item.text.length : 0),
+    };
+  }
 
   private caretFromPoint(x: number, y: number): Caret | null {
     const doc = document as Document & {
@@ -125,6 +154,9 @@ export class DocxEditor {
     } else if (e.key === "Delete") {
       e.preventDefault();
       this.deleteContents(hasRange ? undefined : 1);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      this.splitParagraph();
     } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       if (this.caret) {
         e.preventDefault();
@@ -235,6 +267,62 @@ export class DocxEditor {
     return true;
   }
 
+  /** Enter: split the paragraph at the caret into two w:p elements. */
+  private splitParagraph(): void {
+    const caret = this.caret;
+    if (!caret) return;
+    const rEl = caret.run.src;
+    if (!rEl) return;
+    // Locate the paragraph and its container.
+    let pEl: XmlElement | undefined = caret.run.srcParent;
+    while (pEl && localName(pEl.name) !== "p") pEl = this.host.doc.findParentOf(pEl);
+    if (!pEl) return;
+    const pParent = this.host.doc.findParentOf(pEl);
+    if (!pParent) return;
+    const runIdx = pEl.children.indexOf(rEl);
+    const tIdx = rEl.children.indexOf(caret.t);
+    if (runIdx === -1 || tIdx === -1) return;
+
+    const prefix = pEl.name.includes(":") ? pEl.name.slice(0, pEl.name.indexOf(":") + 1) : "";
+    const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
+
+    // Split the caret run: text after the caret moves to a new run.
+    const afterT: XmlElement = {
+      name: caret.t.name,
+      attrs: { ...caret.t.attrs, "xml:space": "preserve" },
+      text: caret.t.text.slice(caret.offset),
+      children: [],
+    };
+    const afterRun: XmlElement = {
+      name: rEl.name,
+      attrs: { ...rEl.attrs },
+      text: "",
+      children: [...(rPr ? [cloneXml(rPr)] : []), afterT, ...rEl.children.slice(tIdx + 1)],
+    };
+    caret.t.text = caret.t.text.slice(0, caret.offset);
+    rEl.children = rEl.children.slice(0, tIdx + 1);
+
+    // New paragraph: cloned pPr (minus any section break!) + moved content.
+    const pPrEl = pEl.children.find((c) => localName(c.name) === "pPr");
+    const newPPr = pPrEl ? cloneXml(pPrEl) : undefined;
+    if (newPPr) {
+      newPPr.children = newPPr.children.filter((c) => localName(c.name) !== "sectPr");
+    }
+    const moved = pEl.children.slice(runIdx + 1);
+    pEl.children = pEl.children.slice(0, runIdx + 1);
+    const newP: XmlElement = {
+      name: prefix + "p",
+      attrs: {},
+      text: "",
+      children: [...(newPPr ? [newPPr] : []), afterRun, ...moved],
+    };
+    const pIdx = pParent.children.indexOf(pEl);
+    pParent.children.splice(pIdx + 1, 0, newP);
+
+    this.caret = { t: afterT, run: caret.run, offset: 0 };
+    this.commit();
+  }
+
   private commit(): void {
     this.host.doc.refresh();
     this.host.rerender();
@@ -289,10 +377,11 @@ export class DocxEditor {
     }
     const surface = best.el.parentElement!;
     if (this.caretEl.parentElement !== surface) surface.appendChild(this.caretEl);
+    const fs = best.item.font.size;
     const s = this.caretEl.style;
     s.left = `${xPx}px`;
-    s.top = `${best.item.lineTop + 1}px`;
-    s.height = `${best.item.lineHeight - 2}px`;
+    s.top = `${best.item.baseline - fs}px`;
+    s.height = `${fs * 1.25}px`;
     s.display = "block";
     if (this.blinkTimer) clearInterval(this.blinkTimer);
     this.caretEl.style.opacity = "1";

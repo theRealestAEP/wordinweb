@@ -9,6 +9,7 @@ import {
 } from "../model.js";
 import { FontSpec, TextSource } from "./types.js";
 import { TextMeasurer } from "./measure.js";
+import { XmlElement } from "../xml.js";
 
 /** Resolves field instructions to display text at layout time. */
 export interface FieldContext {
@@ -172,11 +173,36 @@ export function breakParagraph(
     curWidth = x - lineStartX(0);
   }
 
+  // A zero-width anchor span lets the caret land in empty paragraphs/lines.
+  let anchorSrc: { run: Run; t: XmlElement } | undefined;
+  outer: for (const c of para.children) {
+    const runs = c.type === "run" ? [c] : c.runs;
+    for (const r of runs) {
+      for (const rc of r.content) {
+        if (rc.kind === "text" && rc.srcT) {
+          anchorSrc = { run: r, t: rc.srcT };
+          break outer;
+        }
+      }
+    }
+  }
+
   const flush = (isLast: boolean, endsWithBreak: boolean, forced?: "page" | "column") => {
     // Trim trailing space spans (they don't affect alignment).
     while (cur.length > 0 && cur[cur.length - 1].isSpace) {
       curWidth -= cur[cur.length - 1].width;
       cur.pop();
+    }
+    if (cur.length === 0 && isLast && anchorSrc) {
+      const anchorProps = doc.effectiveRunProps(para, anchorSrc.run.props);
+      cur.push({
+        x: lineStartX(lineIndex),
+        width: 0,
+        text: "",
+        props: anchorProps,
+        font: fontOf(anchorProps, fallbackFamily),
+        src: { run: anchorSrc.run, t: anchorSrc.t, offset: 0 },
+      });
     }
     const line = finishLine(cur, curWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak);
     line.forcedBreakAfter = forced;
