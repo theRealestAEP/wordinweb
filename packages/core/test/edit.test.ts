@@ -206,3 +206,61 @@ describe("block commands", () => {
     expect(reloaded.sections[0].props.pageWidth).toBeGreaterThan(reloaded.sections[0].props.pageHeight);
   });
 });
+
+describe("table operations", () => {
+  const tableDoc = () =>
+    loadDoc(
+      `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+       <w:tr><w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc></w:tr>
+       <w:tr><w:tc><w:p><w:r><w:t>A2</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc></w:tr>
+       </w:tbl>` + p("after"),
+    );
+  const caretIn = (doc: DocxDocument, text: string) => {
+    let found: unknown = null;
+    const walk = (el: { children: { name: string; text: string; children: unknown[] }[] } & { name?: string; text?: string }) => {
+      for (const c of el.children as never[]) {
+        const e = c as { name: string; text: string; children: never[] };
+        if (e.name.endsWith("t") && e.text === text) found = e;
+        walk(e);
+      }
+    };
+    walk(doc.editableRoots()[0] as never);
+    return found as never;
+  };
+
+  it("inserts and deletes rows", async () => {
+    const { applyTableOp } = await import("../src/edit/tables.js");
+    const doc = tableDoc();
+    expect(applyTableOp(doc, caretIn(doc, "A1"), "rowBelow")).toBe(true);
+    let tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error("not a table");
+    expect(tbl.rows.length).toBe(3);
+    expect(applyTableOp(doc, caretIn(doc, "A2"), "deleteRow")).toBe(true);
+    tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error("not a table");
+    expect(tbl.rows.length).toBe(2);
+  });
+
+  it("inserts and deletes columns incl. grid", async () => {
+    const { applyTableOp } = await import("../src/edit/tables.js");
+    const doc = tableDoc();
+    expect(applyTableOp(doc, caretIn(doc, "B1"), "colRight")).toBe(true);
+    let tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error("not a table");
+    expect(tbl.rows[0].cells.length).toBe(3);
+    expect(tbl.grid.length).toBe(3);
+    expect(applyTableOp(doc, caretIn(doc, "A1"), "deleteCol")).toBe(true);
+    tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error("not a table");
+    expect(tbl.rows[0].cells.length).toBe(2);
+    expect(tbl.grid.length).toBe(2);
+  });
+
+  it("deleting the last row removes the table", async () => {
+    const { applyTableOp } = await import("../src/edit/tables.js");
+    const doc = tableDoc();
+    applyTableOp(doc, caretIn(doc, "A2"), "deleteRow");
+    applyTableOp(doc, caretIn(doc, "A1"), "deleteRow");
+    expect(doc.sections[0].blocks.every((b) => b.type !== "table")).toBe(true);
+  });
+});

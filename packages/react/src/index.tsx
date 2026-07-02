@@ -8,7 +8,9 @@ import {
   RenderHandle,
   RunFormatPatch,
   SelectionFormat,
+  TableOp,
   applyRunFormat,
+  applyTableOp,
   insertTableAfter,
   layoutDocument,
   renderToDom,
@@ -27,6 +29,8 @@ export interface DocxViewApi {
   canRedo(): boolean;
   /** Insert a rows×cols table at the caret's paragraph. */
   insertTable(rows: number, cols: number): void;
+  /** Row/column/table operations on the table containing the caret. */
+  tableOp(op: TableOp): void;
   /** Align the paragraph(s) under the caret or selection. */
   setAlignment(align: ParagraphAlignment): void;
   /** Change margins / page size / orientation (inches). */
@@ -161,6 +165,12 @@ export function DocxView({
             if (!caret) return;
             history.checkpoint();
             if (insertTableAfter(doc, caret.t, rows, cols)) pages = rerender(doc);
+          },
+          tableOp: (op) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return;
+            history.checkpoint();
+            if (applyTableOp(doc, caret.t, op)) pages = rerender(doc);
           },
           setAlignment: (align) => {
             if (!handle) return;

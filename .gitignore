@@ -3,3 +3,4 @@ dist/
 *.tsbuildinfo
 apps/demo/public/fixtures/*.docx
 .DS_Store
+parity/
