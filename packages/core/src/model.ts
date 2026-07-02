@@ -152,7 +152,53 @@ export interface FieldContent {
   /** Last cached result text from the file, used for unsupported fields. */
   cachedResult: string;
 }
-export type RunContent = TextContent | BreakContent | TabContent | ImageContent | FieldContent;
+
+/** What an anchored shape's coordinates are measured from. */
+export type AnchorRel = "page" | "margin" | "text" | "column";
+
+export interface ShapeLine {
+  type: "line";
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  color: string;
+  /** Stroke weight px. */
+  weight: number;
+  hRel: AnchorRel;
+  vRel: AnchorRel;
+}
+
+export interface ShapeTextbox {
+  type: "textbox";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  hRel: AnchorRel;
+  vRel: AnchorRel;
+  blocks: Block[];
+}
+
+export type Shape = ShapeLine | ShapeTextbox;
+
+/**
+ * Floating/anchored object: does not occupy inline space; positioned against
+ * page/margin/paragraph during layout. (How classic pleading paper draws its
+ * margin line numbers and vertical rules.)
+ */
+export interface AnchorContent {
+  kind: "anchor";
+  shape: Shape;
+}
+
+export type RunContent =
+  | TextContent
+  | BreakContent
+  | TabContent
+  | ImageContent
+  | FieldContent
+  | AnchorContent;
 
 export interface Run {
   type: "run";

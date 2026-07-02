@@ -8,6 +8,7 @@ import {
   ParaProps,
   RunProps,
   SectionProps,
+  Shape,
   Table,
   TableRow,
 } from "../model.js";
@@ -286,6 +287,10 @@ class Engine {
 
     this.y += spacingBefore;
 
+    if (broken.anchors.length > 0) {
+      this.emitAnchors(broken.anchors, this.cur, this.fieldCtx(), this.colX, this.y);
+    }
+
     // Plan natural page-break indices with widow/orphan control (Word default: on).
     const widow = props.widowControl !== false;
     const breaks = new Set<number>(); // line index that starts a new column/page
@@ -476,6 +481,8 @@ class Engine {
     blocks: Block[],
     width: number,
     fields: FieldContext,
+    /** Page coordinates where this frame will be placed (for anchored shapes). */
+    origin?: { x: number; y: number },
   ): { items: PageItem[]; height: number } {
     const items: PageItem[] = [];
     let y = 0;
@@ -501,6 +508,9 @@ class Engine {
         const spacingAfter = props.spacingAfter ?? 0;
         y += spacingBefore;
         const top = y;
+        if (broken.anchors.length > 0) {
+          this.emitAnchors(broken.anchors, fake, fields, 0, top, origin);
+        }
         for (const line of broken.lines) {
           this.emitLine(line, fake, 0, y);
           y += line.height;
@@ -512,6 +522,59 @@ class Engine {
       }
     }
     return { items, height: y };
+  }
+
+  /**
+   * Emit floating shapes anchored at (textX, textY). Coordinates in the shape
+   * are resolved against page/margin/text origins. When emitting into a frame
+   * (header/footer/textbox), `frameOrigin` is the frame's future page position
+   * so page-/margin-relative shapes land correctly after the frame offset.
+   */
+  private emitAnchors(
+    shapes: Shape[],
+    page: InternalPage,
+    fields: FieldContext,
+    textX: number,
+    textY: number,
+    frameOrigin?: { x: number; y: number },
+  ): void {
+    const sp = page.physIndex === -1 ? this.sp : page.sp;
+    const fx = frameOrigin?.x ?? 0;
+    const fy = frameOrigin?.y ?? 0;
+    const textPageX = fx + textX;
+    const textPageY = fy + textY;
+    const originX = (rel: Shape["hRel"]) =>
+      rel === "page" ? 0 : rel === "margin" ? sp.marginLeft : textPageX;
+    const originY = (rel: Shape["vRel"]) =>
+      rel === "page" ? 0 : rel === "margin" ? sp.marginTop : textPageY;
+
+    for (const shape of shapes) {
+      if (shape.type === "line") {
+        const ox = originX(shape.hRel);
+        const oy = originY(shape.vRel);
+        page.items.push({
+          kind: "edge",
+          x1: ox + shape.x1 - fx,
+          y1: oy + shape.y1 - fy,
+          x2: ox + shape.x2 - fx,
+          y2: oy + shape.y2 - fy,
+          border: {
+            style: "single",
+            width: Math.max(shape.weight, 0.75),
+            color: shape.color,
+            space: 0,
+          },
+        });
+      } else {
+        const ox = originX(shape.hRel) + shape.x;
+        const oy = originY(shape.vRel) + shape.y;
+        const inner = this.layoutFrame(shape.blocks, shape.width, fields, { x: ox, y: oy });
+        for (const it of inner.items) {
+          offsetItem(it, ox - fx, oy - fy);
+          page.items.push(it);
+        }
+      }
+    }
   }
 
   private measureHeaderFooter(hf: HeaderFooter | undefined, page: InternalPage, contentWidth: number): number {
@@ -532,6 +595,7 @@ class Engine {
     const total = this.pages.length;
     for (const page of this.pages) {
       const sp = page.sp;
+      this.sp = sp; // frames built here must resolve anchors against this page's section
       const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
       const fields: FieldContext = {
         pageNumber: () => page.displayNumber,
@@ -541,17 +605,28 @@ class Engine {
       const header = this.doc.headers.get(page.headerRel ?? "");
       if (header && header.blocks.length > 0) {
         const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-        const { items } = this.layoutFrame(header.blocks, contentWidth, fields);
+        const { items } = this.layoutFrame(header.blocks, contentWidth, fields, {
+          x: sp.marginLeft,
+          y: sp.headerDistance,
+        });
         this.counters = snapshot;
         for (const it of items) offsetItem(it, sp.marginLeft, sp.headerDistance);
         page.items.push(...items);
       }
       const footer = this.doc.footers.get(page.footerRel ?? "");
       if (footer && footer.blocks.length > 0) {
-        const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-        const { items, height } = this.layoutFrame(footer.blocks, contentWidth, fields);
+        // Two passes: the frame's page position depends on its own height,
+        // which anchored-shape resolution needs up front.
+        let snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+        const measured = this.layoutFrame(footer.blocks, contentWidth, fields);
         this.counters = snapshot;
-        const top = sp.pageHeight - sp.footerDistance - height;
+        const top = sp.pageHeight - sp.footerDistance - measured.height;
+        snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+        const { items } = this.layoutFrame(footer.blocks, contentWidth, fields, {
+          x: sp.marginLeft,
+          y: top,
+        });
+        this.counters = snapshot;
         for (const it of items) offsetItem(it, sp.marginLeft, top);
         page.items.push(...items);
       }

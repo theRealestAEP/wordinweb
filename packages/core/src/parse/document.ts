@@ -238,9 +238,22 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
         if (img) run.content.push(img);
         break;
       }
-      case "pict": {
-        const img = parseVmlPict(el, ctx);
-        if (img) run.content.push(img);
+      case "pict":
+        run.content.push(...parseVmlPict(el, ctx));
+        break;
+      case "AlternateContent": {
+        // Prefer the DrawingML choice for plain images; otherwise use the
+        // VML fallback (textboxes, lines).
+        const choice = child(el, "Choice");
+        const choiceDrawing = choice ? child(choice, "drawing") : undefined;
+        const img = choiceDrawing ? parseDrawing(choiceDrawing, ctx) : null;
+        if (img) {
+          run.content.push(img);
+        } else {
+          const fallback = child(el, "Fallback");
+          const pictEl = fallback ? child(fallback, "pict") : undefined;
+          if (pictEl) run.content.push(...parseVmlPict(pictEl, ctx));
+        }
         break;
       }
       case "noBreakHyphen":
@@ -301,25 +314,103 @@ function parseDrawing(drawing: XmlElement, ctx: DocParseContext): ImageContent |
   };
 }
 
-function parseVmlPict(pict: XmlElement, ctx: DocParseContext): ImageContent | null {
-  const imagedata = findDescendant(pict, "imagedata");
-  if (!imagedata) return null;
-  const rid = attr(imagedata, "id");
-  if (!rid) return null;
-  const rel = ctx.rels.get(rid);
-  if (!rel || rel.external) return null;
-  // VML size comes from the shape's style string (pt units)
-  let width = 100;
-  let height = 100;
-  const shape = findDescendant(pict, "shape");
-  const style = shape?.attrs["style"];
-  if (style) {
-    const w = /width:\s*([\d.]+)pt/.exec(style);
-    const h = /height:\s*([\d.]+)pt/.exec(style);
-    if (w) width = (parseFloat(w[1]) * 4) / 3;
-    if (h) height = (parseFloat(h[1]) * 4) / 3;
+// ---------- VML (legacy drawing markup: textboxes, lines, pictures) ----------
+
+/** Parse a VML length ("36pt", "1in", "669.6pt", "12px", bare number = px). */
+function vmlLength(raw: string | undefined): number {
+  if (!raw) return 0;
+  const m = /^(-?[\d.]+)\s*(pt|in|px|cm|mm|pc)?$/.exec(raw.trim());
+  if (!m) return 0;
+  const v = parseFloat(m[1]);
+  switch (m[2]) {
+    case "pt": return (v * 4) / 3;
+    case "in": return v * 96;
+    case "cm": return (v / 2.54) * 96;
+    case "mm": return (v / 25.4) * 96;
+    case "pc": return v * 16;
+    default: return v; // px
   }
-  return { kind: "image", part: rel.target, width, height };
+}
+
+function parseVmlStyle(style: string | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!style) return out;
+  for (const decl of style.split(";")) {
+    const idx = decl.indexOf(":");
+    if (idx > 0) out.set(decl.slice(0, idx).trim(), decl.slice(idx + 1).trim());
+  }
+  return out;
+}
+
+function anchorRel(v: string | undefined): "page" | "margin" | "text" | "column" {
+  return v === "page" || v === "margin" || v === "column" ? v : "text";
+}
+
+export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent[] {
+  const out: RunContent[] = [];
+  const walk = (el: XmlElement) => {
+    const ln = localName(el.name);
+    if (ln === "shapetype") return; // template definition, not an instance
+    if (ln === "line") {
+      const style = parseVmlStyle(el.attrs["style"]);
+      const from = (el.attrs["from"] ?? "0,0").split(",");
+      const to = (el.attrs["to"] ?? "0,0").split(",");
+      out.push({
+        kind: "anchor",
+        shape: {
+          type: "line",
+          x1: vmlLength(from[0]),
+          y1: vmlLength(from[1]),
+          x2: vmlLength(to[0]),
+          y2: vmlLength(to[1]),
+          color: el.attrs["strokecolor"] ?? "#000000",
+          weight: vmlLength(el.attrs["strokeweight"]) || 1,
+          hRel: anchorRel(style.get("mso-position-horizontal-relative")),
+          vRel: anchorRel(style.get("mso-position-vertical-relative")),
+        },
+      });
+      return;
+    }
+    if (ln === "shape" || ln === "rect") {
+      const imagedata = findDescendant(el, "imagedata");
+      if (imagedata) {
+        const rid = attr(imagedata, "id");
+        const rel = rid ? ctx.rels.get(rid) : undefined;
+        if (rel && !rel.external) {
+          const style = parseVmlStyle(el.attrs["style"]);
+          out.push({
+            kind: "image",
+            part: rel.target,
+            width: vmlLength(style.get("width")) || 100,
+            height: vmlLength(style.get("height")) || 100,
+          });
+        }
+        return;
+      }
+      const txbx = findDescendant(el, "txbxContent");
+      if (txbx) {
+        const style = parseVmlStyle(el.attrs["style"]);
+        out.push({
+          kind: "anchor",
+          shape: {
+            type: "textbox",
+            x: vmlLength(style.get("margin-left")),
+            y: vmlLength(style.get("margin-top")),
+            width: vmlLength(style.get("width")),
+            height: vmlLength(style.get("height")),
+            hRel: anchorRel(style.get("mso-position-horizontal-relative")),
+            vRel: anchorRel(style.get("mso-position-vertical-relative")),
+            blocks: parseBlocks(txbx, ctx),
+          },
+        });
+        return;
+      }
+      return;
+    }
+    for (const c of el.children) walk(c);
+  };
+  for (const c of pict.children) walk(c);
+  return out;
 }
 
 // ---------- tables ----------

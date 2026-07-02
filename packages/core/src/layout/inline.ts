@@ -4,6 +4,7 @@ import {
   ParaProps,
   Run,
   RunProps,
+  Shape,
   TabStop,
 } from "../model.js";
 import { FontSpec, PageItem, TextItem } from "./types.js";
@@ -102,6 +103,8 @@ export interface LineBox {
 export interface BrokenParagraph {
   lines: LineBox[];
   props: ParaProps;
+  /** Floating shapes anchored to this paragraph (don't occupy inline space). */
+  anchors: Shape[];
 }
 
 const DEFAULT_TAB = 48; // 0.5in
@@ -127,7 +130,7 @@ export function breakParagraph(
   const hanging = props.indentHanging ?? 0;
   const firstLineExtra = hanging > 0 ? -hanging : (props.indentFirstLine ?? 0);
 
-  const atoms = buildAtoms(doc, para, measurer, fields, fallbackFamily);
+  const { atoms, anchors } = buildAtoms(doc, para, measurer, fields, fallbackFamily);
 
   const lines: LineBox[] = [];
   let cur: LineSpan[] = [];
@@ -258,7 +261,7 @@ export function breakParagraph(
   }
 
   flush(true, false);
-  return { lines, props };
+  return { lines, props, anchors };
 }
 
 function nextDefaultTab(x: number): number {
@@ -375,8 +378,9 @@ function buildAtoms(
   measurer: TextMeasurer,
   fields: FieldContext,
   fallbackFamily: string,
-): Atom[] {
+): { atoms: Atom[]; anchors: Shape[] } {
   const atoms: Atom[] = [];
+  const anchors: Shape[] = [];
 
   const pushRun = (run: Run, href?: string) => {
     const props = doc.effectiveRunProps(para, run.props);
@@ -400,6 +404,9 @@ function buildAtoms(
           break;
         case "image":
           atoms.push({ kind: "image", part: content.part, width: content.width, height: content.height });
+          break;
+        case "anchor":
+          anchors.push(content.shape);
           break;
       }
     }
@@ -430,7 +437,7 @@ function buildAtoms(
     if (childEl.type === "run") pushRun(childEl);
     else for (const r of childEl.runs) pushRun(r, childEl.href ?? (childEl.anchor ? "#" + childEl.anchor : undefined));
   }
-  return atoms;
+  return { atoms, anchors };
 }
 
 // ---------- fields ----------
