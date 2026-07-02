@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   DocxDocument,
+  DocxEditor,
   RenderHandle,
   RunFormatPatch,
   SelectionFormat,
@@ -76,6 +77,7 @@ export function DocxView({
   useEffect(() => {
     let cancelled = false;
     let handle: RenderHandle | null = null;
+    let editor: DocxEditor | null = null;
     setError(null);
 
     const rerender = (doc: DocxDocument): number => {
@@ -103,7 +105,17 @@ export function DocxView({
       let pages = pageCount;
       onLoad?.({ pageCount, document: doc });
 
-      if (editable) {
+      if (editable && containerRef.current) {
+        editor = new DocxEditor({
+          doc,
+          container: containerRef.current,
+          getHandle: () => handle,
+          rerender: () => {
+            pages = rerender(doc);
+          },
+          zoom,
+        });
+        editor.attach();
         const api: DocxViewApi = {
           document: doc,
           pageCount: () => pages,
@@ -129,6 +141,8 @@ export function DocxView({
 
     return () => {
       cancelled = true;
+      editor?.detach();
+      editor = null;
       handle?.destroy();
       handle = null;
     };
