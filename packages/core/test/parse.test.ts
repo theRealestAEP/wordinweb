@@ -36,7 +36,7 @@ describe("document parsing", () => {
     if (run.type !== "run") return;
     expect(run.props.bold).toBe(true);
     expect(run.props.size).toBeCloseTo((14 * 4) / 3, 3); // 28 half-points = 14pt
-    expect(run.content[0]).toEqual({ kind: "text", text: "Bold text" });
+    expect(run.content[0]).toMatchObject({ kind: "text", text: "Bold text" });
   });
 
   it("parses section properties (page size, margins)", () => {

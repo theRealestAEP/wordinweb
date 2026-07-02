@@ -202,6 +202,54 @@ export function onOff(el: XmlElement | undefined): boolean | undefined {
   return !(v === "0" || v === "false" || v === "off" || v === "none");
 }
 
+// ---------- serialization (for docx write-back) ----------
+
+function escapeText(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function escapeAttr(s: string): string {
+  return escapeText(s).replace(/"/g, "&quot;").replace(/\r?\n/g, "&#10;");
+}
+
+/**
+ * Serialize an element tree back to XML. OOXML elements either carry element
+ * children (containers) or character data (w:t, w:instrText) — never meaningful
+ * mixed content — so text is emitted only for leaf elements.
+ */
+export function serializeXml(el: XmlElement, declaration = false): string {
+  const out: string[] = [];
+  if (declaration) out.push('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
+  const write = (e: XmlElement) => {
+    out.push("<", e.name);
+    for (const [k, v] of Object.entries(e.attrs)) {
+      out.push(" ", k, '="', escapeAttr(v), '"');
+    }
+    if (e.children.length === 0 && e.text.length === 0) {
+      out.push("/>");
+      return;
+    }
+    out.push(">");
+    if (e.children.length > 0) {
+      for (const c of e.children) write(c);
+    } else {
+      out.push(escapeText(e.text));
+    }
+    out.push("</", e.name, ">");
+  };
+  write(el);
+  return out.join("");
+}
+
+/** Deep-clone an element (attrs and children copied, text preserved). */
+export function cloneXml(el: XmlElement): XmlElement {
+  return {
+    name: el.name,
+    attrs: { ...el.attrs },
+    text: el.text,
+    children: el.children.map(cloneXml),
+  };
+}
+
 /** Descend through a path of local names. */
 export function path(el: XmlElement | undefined, ...locals: string[]): XmlElement | undefined {
   let cur = el;

@@ -5,8 +5,15 @@ Open-source, high-fidelity **Word/.docx viewer (and, soon, editor) for the web**
 ```tsx
 import { DocxView } from "@docxinweb/react";
 
-<DocxView source="/report.docx" zoom={1} />
+<DocxView source="/report.docx" zoom={1} />              // render-only viewer
+<DocxView source="/report.docx" editable onReady={api => {
+  // api.applyFormat({ bold: true }) on the current selection
+  // api.save() → edited .docx bytes
+}} />
 ```
+
+Editing is strictly opt-in via the `editable` flag — the default is a pure
+render-only viewer.
 
 ## Why another docx renderer?
 
@@ -57,10 +64,23 @@ npm run dev              # demo app at http://localhost:5173
 
 The layout output (`LaidOutPage[]` of `PageItem`s) is renderer-agnostic — a canvas or SVG/PDF backend can consume the same geometry, and the future editor will map DOM positions back to model offsets through it.
 
+## Editing architecture
+
+The OOXML tree is the **source of truth**. Model nodes keep `src` references
+to their `w:r`/`w:t` elements; every rendered text span maps back to
+`(run, w:t, char offset)`. Commands split runs at selection boundaries,
+mutate `w:rPr`, re-parse (`doc.refresh()`), and re-lay out — full relayout is
+single-digit milliseconds. `doc.save()` re-serializes only the XML parts we
+model; **everything untouched round-trips byte-for-byte** (comments,
+footnotes, custom XML, embedded fonts survive edits unscathed).
+
+Supported today: bold, italic, underline, strike, font size, font family,
+text color, highlight — over any selection, including partial runs.
+
 ## Roadmap
 
-- [ ] Editing: cursor/selection mapping, model mutation + incremental relayout, docx write-back
-- [ ] Floating/anchored objects with text wrap
+- [ ] Editing phase 2: caret + text insert/delete, paragraph-level edits (alignment, indents, spacing), then page-layout edits (margins, sections)
+- [ ] Floating/anchored DrawingML objects with text wrap (VML lines/textboxes already supported)
 - [ ] Footnotes/endnotes, comments, tracked changes
 - [ ] Font embedding (`fontTable.xml` + embedded font parts) and font substitution metrics
 - [ ] Table autofit (content-based column sizing), vertically merged cell content spanning

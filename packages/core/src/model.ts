@@ -4,7 +4,14 @@
  * otherwise. Property bags are Partial-style: `undefined` means "not set at
  * this level" so the style-inheritance merge can distinguish absence from an
  * explicit value.
+ *
+ * Model nodes keep `src` references to the XML elements they were parsed
+ * from: the XML tree is the source of truth for editing — commands mutate it
+ * and the model is re-derived, which preserves round-trip fidelity for
+ * everything untouched.
  */
+
+import type { XmlElement } from "./xml.js";
 
 // ---------- shared property primitives ----------
 
@@ -128,6 +135,8 @@ export interface ParaProps {
 export interface TextContent {
   kind: "text";
   text: string;
+  /** Source w:t element inside the run, when this text came verbatim from one. */
+  srcT?: XmlElement;
 }
 export interface BreakContent {
   kind: "break";
@@ -204,6 +213,10 @@ export interface Run {
   type: "run";
   props: RunProps;
   content: RunContent[];
+  /** Source w:r element. */
+  src?: XmlElement;
+  /** Element whose children array contains src (w:p, w:hyperlink, …). */
+  srcParent?: XmlElement;
 }
 
 export interface Hyperlink {
@@ -223,6 +236,8 @@ export interface Paragraph {
   children: ParaChild[];
   /** Section break attached to this paragraph's pPr (ends a section). */
   sectionBreak?: SectionProps;
+  /** Source w:p element. */
+  src?: XmlElement;
 }
 
 export interface TableCellProps {

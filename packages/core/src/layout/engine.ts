@@ -425,6 +425,7 @@ class Engine {
         lineTop: topY,
         lineHeight: line.height,
         href: span.href,
+        src: span.src,
       });
     }
   }

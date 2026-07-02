@@ -7,7 +7,7 @@ import {
   Shape,
   TabStop,
 } from "../model.js";
-import { FontSpec, PageItem, TextItem } from "./types.js";
+import { FontSpec, TextSource } from "./types.js";
 import { TextMeasurer } from "./measure.js";
 
 /** Resolves field instructions to display text at layout time. */
@@ -26,12 +26,14 @@ interface FragAtom {
   font: FontSpec;
   width: number;
   href?: string;
+  src?: TextSource;
 }
 interface SpaceAtom {
   kind: "space";
   props: RunProps;
   font: FontSpec;
   width: number;
+  src?: TextSource;
 }
 interface TabAtom {
   kind: "tab";
@@ -81,6 +83,7 @@ export interface LineSpan {
   href?: string;
   /** Spans produced from expandable spaces (for justification). */
   isSpace?: boolean;
+  src?: TextSource;
 }
 
 export interface LineBox {
@@ -212,7 +215,7 @@ export function breakParagraph(
     if (atom.kind === "space") {
       // Never start a (non-first) line with a space.
       if (cur.length === 0 && lineIndex > 0) continue;
-      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true });
+      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src });
       curWidth += atom.width;
       x += atom.width;
       continue;
@@ -247,7 +250,16 @@ export function breakParagraph(
         }
         const piece = rest.slice(0, take);
         const w = measurer.width(piece, atom.font, atom.props.letterSpacing);
-        cur.push({ x, width: w, text: piece, props: atom.props, font: atom.font, href: atom.href });
+        const sliceOff = atom.text.length - rest.length;
+        cur.push({
+          x,
+          width: w,
+          text: piece,
+          props: atom.props,
+          font: atom.font,
+          href: atom.href,
+          src: atom.src ? { ...atom.src, offset: atom.src.offset + sliceOff } : undefined,
+        });
         curWidth += w;
         x += w;
         rest = rest.slice(take);
@@ -255,7 +267,7 @@ export function breakParagraph(
       }
       continue;
     }
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src });
     curWidth += atom.width;
     x += atom.width;
   }
@@ -389,11 +401,16 @@ function buildAtoms(
     for (const content of run.content) {
       switch (content.kind) {
         case "text":
-          pushText(displayText(content.text, props), props, font, href);
+          pushText(displayText(content.text, props), props, font, href, {
+            run,
+            t: (content.srcT as TextSource["t"]) ?? null,
+            offset: 0,
+          });
           break;
         case "field": {
           const text = resolveField(content.instruction, content.cachedResult, fields);
-          if (text) pushText(displayText(text, props), props, font, href);
+          // Fields are atomic: src.t === null means "format the whole run".
+          if (text) pushText(displayText(text, props), props, font, href, { run, t: null, offset: 0 });
           break;
         }
         case "tab":
@@ -412,15 +429,24 @@ function buildAtoms(
     }
   };
 
-  const pushText = (text: string, props: RunProps, font: FontSpec, href?: string) => {
+  const pushText = (text: string, props: RunProps, font: FontSpec, href?: string, srcBase?: TextSource) => {
     const parts = text.split(/( +)/);
+    let offset = 0;
     for (const part of parts) {
       if (part.length === 0) continue;
+      const src = srcBase ? { run: srcBase.run, t: srcBase.t, offset: srcBase.offset + offset } : undefined;
       if (part[0] === " ") {
         const w = measurer.width(" ", font, props.letterSpacing);
-        for (let i = 0; i < part.length; i++) atoms.push({ kind: "space", props, font, width: w });
+        for (let i = 0; i < part.length; i++) {
+          atoms.push({
+            kind: "space",
+            props,
+            font,
+            width: w,
+            src: src ? { ...src, offset: src.offset + i } : undefined,
+          });
+        }
       } else {
-        // Merge with a preceding frag not separated by space (mid-word format change).
         atoms.push({
           kind: "frag",
           text: part,
@@ -428,8 +454,10 @@ function buildAtoms(
           font,
           width: measurer.width(part, font, props.letterSpacing),
           href,
+          src,
         });
       }
+      offset += part.length;
     }
   };
 

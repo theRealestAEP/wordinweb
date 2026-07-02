@@ -12,9 +12,16 @@ export interface RenderOptions {
   pageShadow?: boolean;
 }
 
+export interface TextBinding {
+  el: HTMLElement;
+  item: TextItem;
+}
+
 export interface RenderHandle {
   /** Root element containing all pages. */
   root: HTMLElement;
+  /** Rendered text elements in paint order, for selection mapping. */
+  bindings: TextBinding[];
   /** Revoke object URLs etc. */
   destroy: () => void;
 }
@@ -45,6 +52,7 @@ export function renderToDom(
   const zoom = options.zoom ?? 1;
   const gap = options.pageGap ?? 24;
   const urls: string[] = [];
+  const bindings: TextBinding[] = [];
 
   const root = document.createElement("div");
   root.className = "dxw-pages";
@@ -55,12 +63,13 @@ export function renderToDom(
   root.style.padding = `${gap}px 0`;
 
   for (const page of layout.pages) {
-    root.appendChild(renderPage(doc, page, zoom, urls, options));
+    root.appendChild(renderPage(doc, page, zoom, urls, options, bindings));
   }
 
   container.appendChild(root);
   return {
     root,
+    bindings,
     destroy: () => {
       for (const u of urls) URL.revokeObjectURL(u);
       root.remove();
@@ -74,6 +83,7 @@ function renderPage(
   zoom: number,
   urls: string[],
   options: RenderOptions,
+  bindings: TextBinding[],
 ): HTMLElement {
   const el = document.createElement("div");
   el.className = "dxw-page";
@@ -101,7 +111,10 @@ function renderPage(
 
   for (const item of page.items) {
     const node = renderItem(doc, item, urls);
-    if (node) surface.appendChild(node);
+    if (node) {
+      surface.appendChild(node);
+      if (item.kind === "text") bindings.push({ el: node, item });
+    }
   }
   return el;
 }

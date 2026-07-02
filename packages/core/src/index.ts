@@ -14,5 +14,9 @@ export {
 } from "./layout/measure.js";
 export type { TextMeasurer, FontMetrics } from "./layout/measure.js";
 export { renderToDom } from "./render/dom.js";
-export type { RenderHandle, RenderOptions } from "./render/dom.js";
+export type { RenderHandle, RenderOptions, TextBinding } from "./render/dom.js";
 export { formatNumber } from "./parse/numbering.js";
+export { applyRunFormat, summarizeSelection } from "./edit/commands.js";
+export type { RunFormatPatch, SelectionSegment, SelectionFormat } from "./edit/commands.js";
+export { selectionToSegments } from "./edit/selection.js";
+export { serializeXml } from "./xml.js";

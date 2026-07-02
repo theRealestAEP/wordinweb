@@ -1,20 +1,43 @@
 import { useEffect, useRef, useState } from "react";
 import {
   DocxDocument,
-  LayoutResult,
   RenderHandle,
+  RunFormatPatch,
+  SelectionFormat,
+  applyRunFormat,
   layoutDocument,
   renderToDom,
+  selectionToSegments,
+  summarizeSelection,
 } from "@docxinweb/core";
+
+export interface DocxViewApi {
+  /** Apply character formatting to the current browser selection. */
+  applyFormat(patch: RunFormatPatch): void;
+  /** Effective formatting of the current selection (toolbar state), or null. */
+  getSelectionFormat(): SelectionFormat | null;
+  /** Serialize the (edited) document back to .docx bytes. */
+  save(): Uint8Array;
+  /** Page count after the latest layout. */
+  pageCount(): number;
+  document: DocxDocument;
+}
 
 export interface DocxViewProps {
   /** The document: raw bytes, a File/Blob, or a URL to fetch. */
   source: ArrayBuffer | Uint8Array | Blob | string;
   /** Zoom factor, 1 = 100%. */
   zoom?: number;
+  /**
+   * Enable editing commands (selection-based formatting, save-back).
+   * Default false: pure render-only viewer.
+   */
+  editable?: boolean;
   className?: string;
   style?: React.CSSProperties;
   onLoad?: (info: { pageCount: number; document: DocxDocument }) => void;
+  /** Fires when the document is ready; the api is only usable while mounted. */
+  onReady?: (api: DocxViewApi) => void;
   onError?: (error: Error) => void;
 }
 
@@ -30,13 +53,23 @@ async function toBytes(source: DocxViewProps["source"]): Promise<Uint8Array> {
 }
 
 /**
- * High-fidelity paginated DOCX viewer.
+ * High-fidelity paginated DOCX viewer (and, with `editable`, editor).
  *
  * ```tsx
- * <DocxView source="/report.docx" zoom={1} />
+ * <DocxView source="/report.docx" />                          // render-only
+ * <DocxView source="/report.docx" editable onReady={setApi} /> // editing
  * ```
  */
-export function DocxView({ source, zoom = 1, className, style, onLoad, onError }: DocxViewProps) {
+export function DocxView({
+  source,
+  zoom = 1,
+  editable = false,
+  className,
+  style,
+  onLoad,
+  onReady,
+  onError,
+}: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<Error | null>(null);
 
@@ -45,10 +78,18 @@ export function DocxView({ source, zoom = 1, className, style, onLoad, onError }
     let handle: RenderHandle | null = null;
     setError(null);
 
+    const rerender = (doc: DocxDocument): number => {
+      const layout = layoutDocument(doc);
+      const container = containerRef.current;
+      if (!container) return 0;
+      handle?.destroy();
+      handle = renderToDom(doc, layout, container, { zoom });
+      return layout.totalPages;
+    };
+
     (async () => {
       const bytes = await toBytes(source);
       if (cancelled) return;
-      // Wait for document fonts so canvas measurement uses the real metrics.
       if (typeof document !== "undefined" && document.fonts?.ready) {
         try {
           await document.fonts.ready;
@@ -58,11 +99,27 @@ export function DocxView({ source, zoom = 1, className, style, onLoad, onError }
       }
       if (cancelled) return;
       const doc = DocxDocument.load(bytes);
-      const layout: LayoutResult = layoutDocument(doc);
-      const container = containerRef.current;
-      if (!container || cancelled) return;
-      handle = renderToDom(doc, layout, container, { zoom });
-      onLoad?.({ pageCount: layout.totalPages, document: doc });
+      const pageCount = rerender(doc);
+      let pages = pageCount;
+      onLoad?.({ pageCount, document: doc });
+
+      if (editable) {
+        const api: DocxViewApi = {
+          document: doc,
+          pageCount: () => pages,
+          getSelectionFormat: () =>
+            handle ? summarizeSelection(selectionToSegments(handle.bindings)) : null,
+          applyFormat: (patch) => {
+            if (!handle) return;
+            const segments = selectionToSegments(handle.bindings);
+            if (segments.length === 0) return;
+            applyRunFormat(doc, segments, patch);
+            pages = rerender(doc);
+          },
+          save: () => doc.save(),
+        };
+        onReady?.(api);
+      }
     })().catch((e: unknown) => {
       if (cancelled) return;
       const err = e instanceof Error ? e : new Error(String(e));
@@ -73,8 +130,9 @@ export function DocxView({ source, zoom = 1, className, style, onLoad, onError }
     return () => {
       cancelled = true;
       handle?.destroy();
+      handle = null;
     };
-  }, [source, zoom]);
+  }, [source, zoom, editable]);
 
   return (
     <div
@@ -92,3 +150,4 @@ export function DocxView({ source, zoom = 1, className, style, onLoad, onError }
 }
 
 export { DocxDocument, layoutDocument, renderToDom } from "@docxinweb/core";
+export type { RunFormatPatch, SelectionFormat } from "@docxinweb/core";

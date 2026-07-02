@@ -95,6 +95,7 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
     type: "paragraph",
     props: parseParaProps(pPr, ctx),
     children: [],
+    src: p,
   };
   const sectPr = child(pPr, "sectPr");
   if (sectPr) para.sectionBreak = parseSectionProps(sectPr);
@@ -116,6 +117,7 @@ function parseParaChildren(
     const ln = localName(el.name);
     if (ln === "r") {
       const run = parseRun(el, ctx, field);
+      if (run) run.srcParent = parent;
       // Keep empty runs that carry an open complex field: the field content
       // is appended to the carrier when fldChar end arrives.
       if (run && (run.content.length > 0 || field.carrier === run)) out.push(run);
@@ -186,6 +188,7 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
     type: "run",
     props: parseRunProps(child(r, "rPr"), ctx),
     content: [],
+    src: r,
   };
 
   for (const el of r.children) {
@@ -193,7 +196,7 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
     switch (ln) {
       case "t":
         if (field.mode === "result") field.cachedResult += el.text;
-        else if (field.mode !== "instr") run.content.push({ kind: "text", text: el.text });
+        else if (field.mode !== "instr") run.content.push({ kind: "text", text: el.text, srcT: el });
         break;
       case "instrText":
         if (field.mode === "instr") field.instruction += el.text;

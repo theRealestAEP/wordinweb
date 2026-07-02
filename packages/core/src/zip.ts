@@ -29,6 +29,11 @@ export class Package {
     return Object.keys(this.files);
   }
 
+  /** Raw entry map (shared, do not mutate) — used for write-back. */
+  raw(): Record<string, Uint8Array> {
+    return this.files;
+  }
+
   /** OPC part names never start with '/' inside the zip; tolerate both. */
   private normalize(name: string): string {
     return name.startsWith("/") ? name.slice(1) : name;

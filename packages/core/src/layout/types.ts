@@ -1,4 +1,14 @@
-import { Border, RunProps } from "../model.js";
+import { Border, Run, RunProps } from "../model.js";
+import type { XmlElement } from "../xml.js";
+
+/** Maps a rendered text item back to its source XML for editing. */
+export interface TextSource {
+  run: Run;
+  /** Source w:t; null when the text is synthetic (fields, symbols). */
+  t: XmlElement | null;
+  /** Char offset of this item's first character within t's text. */
+  offset: number;
+}
 
 /**
  * Layout output: pages of absolutely positioned primitives (px, page-relative).
@@ -26,6 +36,8 @@ export interface TextItem {
   lineTop: number;
   lineHeight: number;
   href?: string;
+  /** Present for editable text (absent on numbering labels etc.). */
+  src?: TextSource;
 }
 
 export interface RectItem {
