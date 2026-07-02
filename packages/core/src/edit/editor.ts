@@ -3,6 +3,7 @@ import { Run } from "../model.js";
 import { XmlElement, cloneXml, localName } from "../xml.js";
 import { RenderHandle, TextBinding } from "../render/dom.js";
 import { selectionToSegments } from "./selection.js";
+import { EditHistory } from "./history.js";
 
 /**
  * Interactive text editing: caret placement, typing, Backspace/Delete,
@@ -18,6 +19,8 @@ export interface EditorHost {
   /** Re-layout and re-render after a model change (host updates its handle). */
   rerender(): void;
   zoom?: number;
+  /** Shared undo/redo stack (also fed by toolbar formatting commands). */
+  history?: EditHistory;
 }
 
 interface Caret {
@@ -44,6 +47,13 @@ export class DocxEditor {
   }
 
   attach(): void {
+    if (this.host.history) {
+      this.host.history.getCaret = () =>
+        this.caret ? { t: this.caret.t, offset: this.caret.offset } : null;
+      this.host.history.setCaret = (t, offset) => {
+        this.caret = { t, run: this.caret?.run ?? ({} as Caret["run"]), offset };
+      };
+    }
     const c = this.host.container;
     c.tabIndex = 0;
     c.style.outline = "none";
@@ -140,6 +150,16 @@ export class DocxEditor {
   // ---------- keyboard ----------
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      this.applyHistory(e.shiftKey ? "redo" : "undo");
+      return;
+    }
+    if (e.ctrlKey && e.key.toLowerCase() === "y") {
+      e.preventDefault();
+      this.applyHistory("redo");
+      return;
+    }
     if (e.metaKey || e.ctrlKey || e.altKey) return; // let shortcuts through
     const sel = window.getSelection();
     const hasRange = !!sel && !sel.isCollapsed;
@@ -190,7 +210,17 @@ export class DocxEditor {
 
   // ---------- edit operations ----------
 
+  applyHistory(kind: "undo" | "redo"): void {
+    const h = this.host.history;
+    if (!h) return;
+    const changed = kind === "undo" ? h.undo() : h.redo();
+    if (!changed) return;
+    this.host.rerender();
+    this.positionCaret();
+  }
+
   private insertText(text: string): void {
+    this.host.history?.checkpoint("typing");
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed) this.removeSelectedText();
     const caret = this.caret;
@@ -203,12 +233,14 @@ export class DocxEditor {
 
   private deleteContents(direction?: -1 | 1): void {
     if (direction === undefined) {
+      this.host.history?.checkpoint();
       this.removeSelectedText();
       this.commit();
       return;
     }
     const caret = this.caret;
     if (!caret) return;
+    this.host.history?.checkpoint("deleting");
     if (direction === -1) {
       if (caret.offset === 0) {
         if (!this.stepToNeighbor(-1)) return;
@@ -294,6 +326,7 @@ export class DocxEditor {
   private splitParagraph(): void {
     const caret = this.caret;
     if (!caret) return;
+    this.host.history?.checkpoint();
     // Resolve containers from the w:t itself — cached run/model objects go
     // stale after any refresh, but the t element's identity is durable.
     const rEl = this.host.doc.findParentOf(caret.t);

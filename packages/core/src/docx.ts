@@ -108,6 +108,11 @@ export class DocxDocument {
     }
   }
 
+  /** The mutable XML roots (document body, then header/footer parts). */
+  editableRoots(): XmlElement[] {
+    return [this.docRoot, ...this.hfParts.map((p) => p.root)];
+  }
+
   /**
    * Find the parent element of `target` in any modeled XML tree (document
    * body, headers, footers). Linear scan — documents are small and this only

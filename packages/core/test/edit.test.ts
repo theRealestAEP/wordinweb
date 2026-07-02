@@ -116,3 +116,54 @@ describe("run formatting commands", () => {
     expect(after.props.highlight).toBeUndefined();
   });
 });
+
+describe("undo/redo history", () => {
+  it("undoes and redoes a text mutation", async () => {
+    const { EditHistory } = await import("../src/edit/history.js");
+    const doc = loadDoc(p("Hello world"));
+    const history = new EditHistory(doc);
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT as { text: string };
+
+    history.checkpoint("typing");
+    t.text = "Hello brave world";
+    doc.refresh();
+    expect(textOf(firstRun(doc).para)).toBe("Hello brave world");
+
+    expect(history.undo()).toBe(true);
+    expect(textOf(firstRun(doc).para)).toBe("Hello world");
+    expect(history.redo()).toBe(true);
+    expect(textOf(firstRun(doc).para)).toBe("Hello brave world");
+  });
+
+  it("coalesces rapid same-kind checkpoints into one undo step", async () => {
+    const { EditHistory } = await import("../src/edit/history.js");
+    const doc = loadDoc(p("ab"));
+    const history = new EditHistory(doc);
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT as { text: string };
+
+    history.checkpoint("typing");
+    t.text = "abc";
+    history.checkpoint("typing"); // coalesced
+    t.text = "abcd";
+    doc.refresh();
+
+    expect(history.undo()).toBe(true);
+    expect(textOf(firstRun(doc).para)).toBe("ab"); // whole burst undone
+    expect(history.undo()).toBe(false);
+  });
+
+  it("formatting commands are undoable", async () => {
+    const { EditHistory } = await import("../src/edit/history.js");
+    const doc = loadDoc(p("Hello brave world"));
+    const history = new EditHistory(doc);
+    const { run } = firstRun(doc);
+    history.checkpoint();
+    applyRunFormat(doc, [segFor(run, 6, 11)], { bold: true });
+    expect((firstRun(doc).para.children as Run[]).length).toBe(3);
+    history.undo();
+    expect((firstRun(doc).para.children as Run[]).length).toBe(1);
+    expect(textOf(firstRun(doc).para)).toBe("Hello brave world");
+  });
+});

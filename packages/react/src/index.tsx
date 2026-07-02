@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   DocxDocument,
   DocxEditor,
+  EditHistory,
   RenderHandle,
   RunFormatPatch,
   SelectionFormat,
@@ -15,6 +16,10 @@ import {
 export interface DocxViewApi {
   /** Apply character formatting to the current browser selection. */
   applyFormat(patch: RunFormatPatch): void;
+  undo(): void;
+  redo(): void;
+  canUndo(): boolean;
+  canRedo(): boolean;
   /** Effective formatting of the current selection (toolbar state), or null. */
   getSelectionFormat(): SelectionFormat | null;
   /** Serialize the (edited) document back to .docx bytes. */
@@ -111,6 +116,7 @@ export function DocxView({
       onLoad?.({ pageCount, document: doc });
 
       if (editable && containerRef.current) {
+        const history = new EditHistory(doc);
         editor = new DocxEditor({
           doc,
           container: containerRef.current,
@@ -119,6 +125,7 @@ export function DocxView({
             pages = rerender(doc);
           },
           zoom,
+          history,
         });
         editor.attach();
         const api: DocxViewApi = {
@@ -130,9 +137,14 @@ export function DocxView({
             if (!handle) return;
             const segments = selectionToSegments(handle.bindings);
             if (segments.length === 0) return;
+            history.checkpoint();
             applyRunFormat(doc, segments, patch);
             pages = rerender(doc);
           },
+          undo: () => editor?.applyHistory("undo"),
+          redo: () => editor?.applyHistory("redo"),
+          canUndo: () => history.canUndo,
+          canRedo: () => history.canRedo,
           save: () => doc.save(),
         };
         onReady?.(api);

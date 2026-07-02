@@ -20,5 +20,6 @@ export { applyRunFormat, summarizeSelection } from "./edit/commands.js";
 export type { RunFormatPatch, SelectionSegment, SelectionFormat } from "./edit/commands.js";
 export { selectionToSegments } from "./edit/selection.js";
 export { DocxEditor } from "./edit/editor.js";
+export { EditHistory } from "./edit/history.js";
 export type { EditorHost } from "./edit/editor.js";
 export { serializeXml } from "./xml.js";

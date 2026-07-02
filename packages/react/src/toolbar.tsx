@@ -70,6 +70,12 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
         flexWrap: "wrap",
       }}
     >
+      <button style={btn(false)} title="Undo (Cmd+Z)" onMouseDown={keepSelection} onClick={() => { api?.undo(); refresh(); }}>
+        {"\u21b6"}
+      </button>
+      <button style={btn(false)} title="Redo (Shift+Cmd+Z)" onMouseDown={keepSelection} onClick={() => { api?.redo(); refresh(); }}>
+        {"\u21b7"}
+      </button>
       <select
         title="Font"
         value={fmt?.fontFamily ?? ""}
