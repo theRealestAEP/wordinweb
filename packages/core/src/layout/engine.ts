@@ -62,6 +62,9 @@ class Engine {
   private y = 0;
   private sp!: SectionProps;
   private sectionFirstPagePhys = 0;
+  /** Previous paragraph's spacing-after: Word collapses it against the next
+   * paragraph's spacing-before (larger wins), verified against Word PDFs. */
+  private lastParaSpacingAfter = 0;
   /** List counters per numId. */
   private counters = new Map<number, number[]>();
 
@@ -153,12 +156,14 @@ class Engine {
     this.cur = page;
     this.col = 0;
     this.y = page.bodyTop;
+    this.lastParaSpacingAfter = 0;
   }
 
   private nextColumn(): void {
     if (this.col + 1 < this.cur.colXs.length) {
       this.col++;
       this.y = this.cur.bodyTop;
+      this.lastParaSpacingAfter = 0;
     } else {
       this.newPage(false);
     }
@@ -285,7 +290,9 @@ class Engine {
       this.nextColumn();
     }
 
-    this.y += spacingBefore;
+    // Adjacent before/after collapse: the larger of the previous paragraph's
+    // spacing-after (already advanced) and this spacing-before wins.
+    this.y += Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
 
     if (broken.anchors.length > 0) {
       this.emitAnchors(broken.anchors, this.cur, this.fieldCtx(), this.colX, this.y);
@@ -392,6 +399,7 @@ class Engine {
 
     closeFragment(lines.length, true);
     this.y += spacingAfter;
+    this.lastParaSpacingAfter = spacingAfter;
   }
 
   private emitLine(line: LineBox, page: InternalPage, originX: number, topY: number): void {
@@ -537,6 +545,7 @@ class Engine {
       colWidths: [width],
     };
 
+    let framePrevAfter = 0;
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (block.type === "paragraph") {
@@ -545,7 +554,8 @@ class Engine {
         const broken = breakParagraph(this.doc, this.measurer, block, width, fields, label);
         const spacingBefore = props.spacingBefore ?? 0;
         const spacingAfter = props.spacingAfter ?? 0;
-        y += spacingBefore;
+        y += Math.max(spacingBefore, framePrevAfter) - framePrevAfter;
+        framePrevAfter = spacingAfter;
         const top = y;
         if (broken.anchors.length > 0) {
           this.emitAnchors(broken.anchors, fake, fields, 0, top, origin);
@@ -558,6 +568,7 @@ class Engine {
         y += spacingAfter;
       } else {
         y = this.layoutTableInFrame(block, fake, 0, y, width, fields);
+        framePrevAfter = 0;
       }
     }
     return { items, height: y };
@@ -675,6 +686,7 @@ class Engine {
   // ---------- tables ----------
 
   private placeTable(tbl: Table): void {
+    this.lastParaSpacingAfter = 0;
     const colWidth = this.colWidth;
     const widths = resolveGrid(tbl, colWidth);
     const tableWidth = widths.reduce((a, b) => a + b, 0);
