@@ -264,3 +264,36 @@ describe("table operations", () => {
     expect(doc.sections[0].blocks.every((b) => b.type !== "table")).toBe(true);
   });
 });
+
+describe("paragraph merge", () => {
+  it("merges a paragraph into the previous one, keeping prev pPr", async () => {
+    const { mergeParagraphBackward, paragraphOf } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(
+      `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>first</w:t></w:r></w:p>` +
+        `<w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t>second</w:t></w:r></w:p>`,
+    );
+    const para2 = doc.sections[0].blocks[1] as Paragraph;
+    const t2 = ((para2.children[0] as Run).content[0] as TextContent).srcT!;
+    const pEl = paragraphOf(doc, t2 as never)!;
+    expect(mergeParagraphBackward(doc, pEl)).toBe(true);
+    expect(doc.sections[0].blocks.length).toBe(1);
+    const merged = doc.sections[0].blocks[0] as Paragraph;
+    expect(textOf(merged)).toBe("firstsecond");
+    expect(merged.props.alignment).toBe("center"); // prev pPr wins
+    const reloaded = DocxDocument.load(doc.save());
+    expect(textOf(reloaded.sections[0].blocks[0] as Paragraph)).toBe("firstsecond");
+  });
+
+  it("refuses to merge across a table", async () => {
+    const { mergeParagraphBackward, paragraphOf } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(
+      p("before") +
+        `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>` +
+        p("after"),
+    );
+    const para = doc.sections[0].blocks[2] as Paragraph;
+    const t = ((para.children[0] as Run).content[0] as TextContent).srcT!;
+    const pEl = paragraphOf(doc, t as never)!;
+    expect(mergeParagraphBackward(doc, pEl)).toBe(false);
+  });
+});

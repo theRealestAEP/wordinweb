@@ -5,6 +5,7 @@ import { RenderHandle, TextBinding } from "../render/dom.js";
 import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
 import { resizeTableColumn } from "./tables.js";
+import { firstTextOf, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 
 /**
  * Interactive text editing: caret placement, typing, Backspace/Delete,
@@ -61,6 +62,9 @@ export class DocxEditor {
     c.addEventListener("mousedown", this.onGripMouseDown, true);
     c.addEventListener("mouseup", this.onMouseUp);
     c.addEventListener("keydown", this.onKeyDown);
+    c.addEventListener("copy", this.onCopy);
+    c.addEventListener("cut", this.onCut);
+    c.addEventListener("paste", this.onPaste);
   }
 
   detach(): void {
@@ -68,8 +72,69 @@ export class DocxEditor {
     c.removeEventListener("mousedown", this.onGripMouseDown, true);
     c.removeEventListener("mouseup", this.onMouseUp);
     c.removeEventListener("keydown", this.onKeyDown);
+    c.removeEventListener("copy", this.onCopy);
+    c.removeEventListener("cut", this.onCut);
+    c.removeEventListener("paste", this.onPaste);
     this.hideCaret();
   }
+
+  // ---------- clipboard ----------
+
+  /** Selection text with real spaces and newlines at paragraph boundaries. */
+  private selectionText(): string {
+    const handle = this.host.getHandle();
+    if (!handle) return "";
+    const segments = selectionToSegments(handle.bindings);
+    let out = "";
+    let lastPara: XmlElement | null = null;
+    for (const seg of segments) {
+      if (!seg.t) continue;
+      const t = seg.t as XmlElement;
+      const para = paragraphOf(this.host.doc, t);
+      if (lastPara && para !== lastPara) out += "\n";
+      lastPara = para;
+      out += t.text.slice(seg.start, seg.end);
+    }
+    return out;
+  }
+
+  private onCopy = (e: ClipboardEvent): void => {
+    const text = this.selectionText();
+    if (!text) return;
+    e.preventDefault();
+    e.clipboardData?.setData("text/plain", text);
+  };
+
+  private onCut = (e: ClipboardEvent): void => {
+    const text = this.selectionText();
+    if (!text) return;
+    e.preventDefault();
+    e.clipboardData?.setData("text/plain", text);
+    this.host.history?.checkpoint();
+    this.removeSelectedText();
+    this.commit();
+  };
+
+  private onPaste = (e: ClipboardEvent): void => {
+    const text = e.clipboardData?.getData("text/plain");
+    if (!text) return;
+    const sel = window.getSelection();
+    const hasRange = !!sel && !sel.isCollapsed;
+    if (!this.caret && !hasRange) return;
+    e.preventDefault();
+    this.host.history?.checkpoint();
+    if (hasRange) this.removeSelectedText();
+    const chunks = text.replace(/\r/g, "").split("\n");
+    for (let i = 0; i < chunks.length; i++) {
+      if (i > 0) this.splitParagraphNoHistory();
+      const caret = this.caret;
+      if (!caret) break;
+      const chunk = chunks[i];
+      caret.t.text = caret.t.text.slice(0, caret.offset) + chunk + caret.t.text.slice(caret.offset);
+      caret.offset += chunk.length;
+    }
+    this.commit();
+  };
 
   // ---------- table column drag-resize ----------
 
@@ -304,6 +369,19 @@ export class DocxEditor {
     this.host.history?.checkpoint("deleting");
     if (direction === -1) {
       if (caret.offset === 0) {
+        const pEl = paragraphOf(this.host.doc, caret.t);
+        if (pEl && firstTextOf(pEl) === caret.t) {
+          // Start of paragraph: merge into the previous paragraph.
+          const prev = siblingParagraph(this.host.doc, pEl, -1);
+          if (!prev) return;
+          const junction = lastTextOf(prev);
+          this.host.history?.checkpoint();
+          if (mergeParagraphBackward(this.host.doc, pEl)) {
+            if (junction) this.caret = { t: junction, run: caret.run, offset: junction.text.length };
+            this.commit();
+          }
+          return;
+        }
         if (!this.stepToNeighbor(-1)) return;
         this.deleteContents(-1);
         return;
@@ -312,6 +390,15 @@ export class DocxEditor {
       caret.offset -= 1;
     } else {
       if (caret.offset >= caret.t.text.length) {
+        const pEl = paragraphOf(this.host.doc, caret.t);
+        if (pEl && lastTextOf(pEl) === caret.t) {
+          // End of paragraph: merge the next paragraph into this one.
+          const next = siblingParagraph(this.host.doc, pEl, 1);
+          if (!next) return;
+          this.host.history?.checkpoint();
+          if (mergeParagraphBackward(this.host.doc, next)) this.commit();
+          return;
+        }
         if (!this.stepToNeighbor(1)) return;
         this.deleteContents(1);
         return;
@@ -385,9 +472,13 @@ export class DocxEditor {
 
   /** Enter: split the paragraph at the caret into two w:p elements. */
   private splitParagraph(): void {
+    this.host.history?.checkpoint();
+    this.splitParagraphNoHistory();
+  }
+
+  private splitParagraphNoHistory(): void {
     const caret = this.caret;
     if (!caret) return;
-    this.host.history?.checkpoint();
     // Resolve containers from the w:t itself — cached run/model objects go
     // stale after any refresh, but the t element's identity is durable.
     const rEl = this.host.doc.findParentOf(caret.t);

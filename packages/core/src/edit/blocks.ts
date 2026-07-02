@@ -189,3 +189,59 @@ export function setPageLayout(doc: DocxDocument, patch: PageLayoutPatch): boolea
   doc.refresh();
   return true;
 }
+
+/**
+ * Merge a paragraph into the one before it (Backspace at paragraph start).
+ * The previous paragraph's pPr wins, matching Word. Returns false when
+ * there is no preceding paragraph sibling (start of document/cell, or a
+ * table sits in between).
+ */
+export function mergeParagraphBackward(doc: DocxDocument, pEl: XmlElement): boolean {
+  const parent = doc.findParentOf(pEl);
+  if (!parent) return false;
+  const idx = parent.children.indexOf(pEl);
+  if (idx <= 0) return false;
+  const prev = parent.children[idx - 1];
+  if (localName(prev.name) !== "p") return false;
+  const moved = pEl.children.filter((c) => localName(c.name) !== "pPr");
+  prev.children.push(...moved);
+  parent.children.splice(idx, 1);
+  doc.refresh();
+  return true;
+}
+
+/** First w:t element inside a paragraph (document order), if any. */
+export function firstTextOf(pEl: XmlElement): XmlElement | null {
+  const walk = (el: XmlElement): XmlElement | null => {
+    for (const c of el.children) {
+      if (localName(c.name) === "pPr") continue;
+      if (localName(c.name) === "t") return c;
+      const found = walk(c);
+      if (found) return found;
+    }
+    return null;
+  };
+  return walk(pEl);
+}
+
+/** Last w:t element inside a paragraph (document order), if any. */
+export function lastTextOf(pEl: XmlElement): XmlElement | null {
+  let last: XmlElement | null = null;
+  const walk = (el: XmlElement) => {
+    for (const c of el.children) {
+      if (localName(c.name) === "t") last = c;
+      walk(c);
+    }
+  };
+  walk(pEl);
+  return last;
+}
+
+/** Next/previous sibling paragraph of pEl within its container, if any. */
+export function siblingParagraph(doc: DocxDocument, pEl: XmlElement, dir: -1 | 1): XmlElement | null {
+  const parent = doc.findParentOf(pEl);
+  if (!parent) return null;
+  const idx = parent.children.indexOf(pEl);
+  const sib = parent.children[idx + dir];
+  return sib && localName(sib.name) === "p" ? sib : null;
+}
