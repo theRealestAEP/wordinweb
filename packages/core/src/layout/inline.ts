@@ -145,7 +145,10 @@ export function breakParagraph(
   const lines: LineBox[] = [];
   let cur: LineSpan[] = [];
   let curWidth = 0;
+  let curSpaceWidth = 0;
   let lineIndex = 0;
+  // (With metric-correct fonts, Word's justified breaks match natural
+  // widths — no space-compression allowance is needed in the fit check.)
 
   const lineStartX = (idx: number) => indentLeft + (idx === 0 ? firstLineExtra : 0);
   const availFor = (idx: number) => contentWidth - lineStartX(idx) - indentRight;
@@ -197,6 +200,7 @@ export function breakParagraph(
     // Trim trailing space spans (they don't affect alignment).
     while (cur.length > 0 && cur[cur.length - 1].isSpace) {
       curWidth -= cur[cur.length - 1].width;
+      curSpaceWidth -= cur[cur.length - 1].width;
       cur.pop();
     }
     if (cur.length === 0 && isLast && anchorSrc) {
@@ -219,6 +223,7 @@ export function breakParagraph(
     lines.push(line);
     cur = [];
     curWidth = 0;
+    curSpaceWidth = 0;
     lineIndex++;
     x = lineStartX(lineIndex);
   };
@@ -262,6 +267,7 @@ export function breakParagraph(
       if (cur.length === 0 && lineIndex > 0) continue;
       cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src });
       curWidth += atom.width;
+      curSpaceWidth += atom.width;
       x += atom.width;
       continue;
     }
@@ -353,6 +359,24 @@ function applyAlignment(
 ): void {
   const align = props.alignment ?? "left";
   const slack = avail - line.width;
+  if (align === "justify" && !suppressJustify && slack < 0) {
+    // Line was packed beyond natural width: compress spaces (Word allows
+    // roughly a third of the space width before breaking earlier).
+    const spaces = line.spans.filter((s) => s.isSpace);
+    if (spaces.length > 0) {
+      const shrink = slack / spaces.length; // negative
+      let shift = 0;
+      for (const s of line.spans) {
+        s.x += shift;
+        if (s.isSpace) {
+          s.width += shrink;
+          shift += shrink;
+        }
+      }
+      line.width = avail;
+    }
+    return;
+  }
   if (slack <= 0) return;
   if (align === "center") {
     for (const s of line.spans) s.x += slack / 2;
@@ -487,11 +511,19 @@ function buildAtoms(
   const pushText = (text: string, props: RunProps, font: FontSpec, href?: string, srcBase?: TextSource) => {
     const parts = text.split(/( +)/);
     let offset = 0;
+    // Measure by cumulative prefix differences: atom widths then sum exactly
+    // to the whole string's measure. Summing independently measured words +
+    // spaces overshoots by ~1px per space (side bearings/kerning), which
+    // accumulates enough to move line breaks off Word's.
+    let prevCum = 0;
     for (const part of parts) {
       if (part.length === 0) continue;
+      const end = offset + part.length;
+      const cum = measurer.width(text.slice(0, end), font, props.letterSpacing);
+      const partWidth = Math.max(cum - prevCum, 0);
       const src = srcBase ? { run: srcBase.run, t: srcBase.t, offset: srcBase.offset + offset } : undefined;
       if (part[0] === " ") {
-        const w = measurer.width(" ", font, props.letterSpacing);
+        const w = partWidth / part.length;
         for (let i = 0; i < part.length; i++) {
           atoms.push({
             kind: "space",
@@ -507,12 +539,13 @@ function buildAtoms(
           text: part,
           props,
           font,
-          width: measurer.width(part, font, props.letterSpacing),
+          width: partWidth,
           href,
           src,
         });
       }
-      offset += part.length;
+      prevCum = cum;
+      offset = end;
     }
   };
 

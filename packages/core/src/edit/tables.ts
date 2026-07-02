@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, cloneXml, localName, child } from "../xml.js";
+import { pxToTwips } from "../units.js";
 
 /**
  * Table manipulation: add/remove rows and columns relative to the cell
@@ -174,6 +175,67 @@ export function applyTableOp(doc: DocxDocument, target: XmlElement, op: TableOp)
     case "deleteTable": {
       tblParent.children.splice(tblParent.children.indexOf(tbl), 1);
       break;
+    }
+  }
+  doc.refresh();
+  return true;
+}
+
+const MIN_COL_TWIPS = 144; // 0.1"
+
+/**
+ * Drag-resize a table column boundary by deltaPx. Interior boundaries trade
+ * width between the two adjacent columns (table width constant, like Word);
+ * the rightmost boundary grows/shrinks the table.
+ */
+export function resizeTableColumn(
+  doc: DocxDocument,
+  tblEl: XmlElement,
+  boundary: number,
+  deltaPx: number,
+): boolean {
+  const grid = child(tblEl, "tblGrid");
+  if (!grid) return false;
+  const cols = grid.children.filter((c) => localName(c.name) === "gridCol");
+  if (boundary < 1 || boundary > cols.length) return false;
+
+  const widthOf = (c: XmlElement): number => {
+    const key = Object.keys(c.attrs).find((k) => localName(k) === "w");
+    return key ? parseInt(c.attrs[key], 10) || 0 : 0;
+  };
+  const setWidth = (c: XmlElement, tw: number) => {
+    const key = Object.keys(c.attrs).find((k) => localName(k) === "w") ?? prefixOf(c) + "w";
+    c.attrs[key] = String(Math.round(tw));
+  };
+
+  let d = Math.round(pxToTwips(deltaPx));
+  const left = cols[boundary - 1];
+  const lw = widthOf(left);
+  if (boundary === cols.length) {
+    setWidth(left, Math.max(lw + d, MIN_COL_TWIPS));
+  } else {
+    const right = cols[boundary];
+    const rw = widthOf(right);
+    d = Math.max(Math.min(d, rw - MIN_COL_TWIPS), MIN_COL_TWIPS - lw);
+    setWidth(left, lw + d);
+    setWidth(right, rw - d);
+  }
+
+  // Keep per-cell tcW (dxa) in sync when the table has no merged cells.
+  if (!hasSpans(tblEl)) {
+    for (const tr of rowsOf(tblEl)) {
+      const cells = cellsOf(tr);
+      cells.forEach((tc, i) => {
+        const tcPr = child(tc, "tcPr");
+        const tcW = tcPr ? child(tcPr, "tcW") : undefined;
+        if (tcW && cols[i]) {
+          const typeKey = Object.keys(tcW.attrs).find((k) => localName(k) === "type");
+          if (!typeKey || tcW.attrs[typeKey] === "dxa") {
+            const wKey = Object.keys(tcW.attrs).find((k) => localName(k) === "w") ?? prefixOf(tcW) + "w";
+            tcW.attrs[wKey] = String(widthOf(cols[i]));
+          }
+        }
+      });
     }
   }
   doc.refresh();

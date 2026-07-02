@@ -108,7 +108,7 @@ export function DocxView({
       // (destroy-then-append clamps scrollTop to 0 otherwise).
       const { scrollTop, scrollLeft } = container;
       handle?.destroy();
-      handle = renderToDom(doc, layout, container, { zoom });
+      handle = renderToDom(doc, layout, container, { zoom, interactive: editable });
       container.scrollTop = scrollTop;
       container.scrollLeft = scrollLeft;
       return layout.totalPages;
@@ -119,6 +119,15 @@ export function DocxView({
       if (cancelled) return;
       if (typeof document !== "undefined" && document.fonts?.ready) {
         try {
+          // Canvas measurement doesn't trigger webfont loads; request the
+          // metric-compatible substitutes explicitly if the host provides them.
+          const loads: Promise<unknown>[] = [];
+          for (const fam of ["Carlito", "Caladea"]) {
+            for (const variant of ["", "italic ", "bold ", "bold italic "]) {
+              loads.push(document.fonts.load(`${variant}16px ${fam}`).catch(() => []));
+            }
+          }
+          await Promise.all(loads);
           await document.fonts.ready;
         } catch {
           /* non-fatal */

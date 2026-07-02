@@ -688,6 +688,9 @@ class Engine {
       else break;
     }
 
+    let segTop = this.y;
+    let segPage = this.cur;
+
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const row = tbl.rows[ri];
       const laid = this.layoutRow(tbl, row, ri, widths);
@@ -699,7 +702,10 @@ class Engine {
             : Math.max(rowHeight, row.props.height);
       }
       if (this.y + rowHeight > this.bodyBottom + 0.01 && !this.pageIsEmptyAtCursor()) {
+        this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
         this.nextColumn();
+        segTop = this.y;
+        segPage = this.cur;
         // Repeat header rows at the top of the continuation page.
         if (!row.props.tblHeader) {
           for (const hr of headerRows) {
@@ -712,6 +718,24 @@ class Engine {
       }
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
       this.y += rowHeight;
+    }
+    this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
+  }
+
+  /** Interactive column-resize zones over each vertical table boundary. */
+  private emitTableGrips(
+    tbl: Table,
+    page: InternalPage,
+    x0: number,
+    widths: number[],
+    top: number,
+    bottom: number,
+  ): void {
+    if (!tbl.src || bottom - top < 2) return;
+    let x = x0;
+    for (let b = 1; b <= widths.length; b++) {
+      x += widths[b - 1];
+      page.items.push({ kind: "grip", x, y1: top, y2: bottom, tbl: tbl.src, boundary: b });
     }
   }
 
@@ -932,6 +956,11 @@ function offsetItem(item: PageItem, dx: number, dy: number): void {
     case "edge":
       item.x1 += dx;
       item.x2 += dx;
+      item.y1 += dy;
+      item.y2 += dy;
+      break;
+    case "grip":
+      item.x += dx;
       item.y1 += dy;
       item.y2 += dy;
       break;

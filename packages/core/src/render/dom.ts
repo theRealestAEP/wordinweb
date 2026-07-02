@@ -1,5 +1,5 @@
 import { DocxDocument } from "../docx.js";
-import { LaidOutPage, LayoutResult, PageItem, TextItem } from "../layout/types.js";
+import { GripItem, LaidOutPage, LayoutResult, PageItem, TextItem } from "../layout/types.js";
 import { cssFont } from "../layout/measure.js";
 import { Border } from "../model.js";
 
@@ -10,6 +10,8 @@ export interface RenderOptions {
   pageGap?: number;
   /** Page drop shadow / chrome. */
   pageShadow?: boolean;
+  /** Materialize interactive affordances (table resize grips). */
+  interactive?: boolean;
 }
 
 export interface TextBinding {
@@ -17,11 +19,18 @@ export interface TextBinding {
   item: TextItem;
 }
 
+export interface GripBinding {
+  el: HTMLElement;
+  item: GripItem;
+}
+
 export interface RenderHandle {
   /** Root element containing all pages. */
   root: HTMLElement;
   /** Rendered text elements in paint order, for selection mapping. */
   bindings: TextBinding[];
+  /** Table column-resize grips (only when options.interactive). */
+  grips: GripBinding[];
   /** Revoke object URLs etc. */
   destroy: () => void;
 }
@@ -53,6 +62,7 @@ export function renderToDom(
   const gap = options.pageGap ?? 24;
   const urls: string[] = [];
   const bindings: TextBinding[] = [];
+  const grips: GripBinding[] = [];
 
   const root = document.createElement("div");
   root.className = "dxw-pages";
@@ -63,13 +73,14 @@ export function renderToDom(
   root.style.padding = `${gap}px 0`;
 
   for (const page of layout.pages) {
-    root.appendChild(renderPage(doc, page, zoom, urls, options, bindings));
+    root.appendChild(renderPage(doc, page, zoom, urls, options, bindings, grips));
   }
 
   container.appendChild(root);
   return {
     root,
     bindings,
+    grips,
     destroy: () => {
       for (const u of urls) URL.revokeObjectURL(u);
       root.remove();
@@ -84,6 +95,7 @@ function renderPage(
   urls: string[],
   options: RenderOptions,
   bindings: TextBinding[],
+  grips: GripBinding[],
 ): HTMLElement {
   const el = document.createElement("div");
   el.className = "dxw-page";
@@ -110,6 +122,21 @@ function renderPage(
   el.appendChild(surface);
 
   for (const item of page.items) {
+    if (item.kind === "grip") {
+      if (!options.interactive) continue;
+      const g = document.createElement("div");
+      g.style.position = "absolute";
+      g.style.left = `${item.x - 3}px`;
+      g.style.top = `${item.y1}px`;
+      g.style.width = "6px";
+      g.style.height = `${item.y2 - item.y1}px`;
+      g.style.cursor = "col-resize";
+      g.style.zIndex = "5";
+      g.dataset.dxwGrip = String(grips.length);
+      surface.appendChild(g);
+      grips.push({ el: g, item });
+      continue;
+    }
     const node = renderItem(doc, item, urls);
     if (node) {
       surface.appendChild(node);
@@ -153,6 +180,8 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
     }
     case "text":
       return renderText(item);
+    case "grip":
+      return null; // handled by renderPage when interactive
   }
 }
 

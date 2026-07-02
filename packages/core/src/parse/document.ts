@@ -573,7 +573,7 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
     rows.push(parseRow(tr, ctx));
   }
 
-  return { type: "table", props, grid, rows };
+  return { type: "table", props, grid, rows, src: tbl };
 }
 
 function parseCellMargins(el: XmlElement): { top?: number; right?: number; bottom?: number; left?: number } {

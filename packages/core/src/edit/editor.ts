@@ -4,6 +4,7 @@ import { XmlElement, cloneXml, localName } from "../xml.js";
 import { RenderHandle, TextBinding } from "../render/dom.js";
 import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
+import { resizeTableColumn } from "./tables.js";
 
 /**
  * Interactive text editing: caret placement, typing, Backspace/Delete,
@@ -57,20 +58,75 @@ export class DocxEditor {
     const c = this.host.container;
     c.tabIndex = 0;
     c.style.outline = "none";
+    c.addEventListener("mousedown", this.onGripMouseDown, true);
     c.addEventListener("mouseup", this.onMouseUp);
     c.addEventListener("keydown", this.onKeyDown);
   }
 
   detach(): void {
     const c = this.host.container;
+    c.removeEventListener("mousedown", this.onGripMouseDown, true);
     c.removeEventListener("mouseup", this.onMouseUp);
     c.removeEventListener("keydown", this.onKeyDown);
     this.hideCaret();
   }
 
+  // ---------- table column drag-resize ----------
+
+  private suppressNextMouseUp = false;
+
+  private onGripMouseDown = (e: MouseEvent): void => {
+    const gripEl = (e.target as HTMLElement).closest?.("[data-dxw-grip]") as HTMLElement | null;
+    if (!gripEl) return;
+    const handle = this.host.getHandle();
+    const grip = handle?.grips[parseInt(gripEl.dataset.dxwGrip ?? "-1", 10)];
+    if (!grip) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const surface = grip.el.parentElement!;
+    const guide = document.createElement("div");
+    guide.style.position = "absolute";
+    guide.style.left = `${grip.item.x}px`;
+    guide.style.top = `${grip.item.y1}px`;
+    guide.style.width = "1.5px";
+    guide.style.height = `${grip.item.y2 - grip.item.y1}px`;
+    guide.style.background = "#1a73e8";
+    guide.style.zIndex = "20";
+    guide.style.pointerEvents = "none";
+    surface.appendChild(guide);
+
+    const zoom = this.host.zoom ?? 1;
+    const startX = e.clientX;
+    let dx = 0;
+    const onMove = (me: MouseEvent) => {
+      dx = (me.clientX - startX) / zoom;
+      guide.style.left = `${grip.item.x + dx}px`;
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      guide.remove();
+      this.suppressNextMouseUp = true;
+      if (Math.abs(dx) >= 1) {
+        this.host.history?.checkpoint();
+        if (resizeTableColumn(this.host.doc, grip.item.tbl, grip.item.boundary, dx)) {
+          this.host.rerender();
+          this.positionCaret();
+        }
+      }
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+
   // ---------- caret placement ----------
 
   private onMouseUp = (e: MouseEvent): void => {
+    if (this.suppressNextMouseUp) {
+      this.suppressNextMouseUp = false;
+      return;
+    }
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed) {
       // Range selection active — caret hidden; formatting/typing use it.

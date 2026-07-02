@@ -68,7 +68,19 @@ export interface ImageItem {
   part: string;
 }
 
-export type PageItem = TextItem | RectItem | LineEdgeItem | ImageItem;
+/** Interactive column-resize zone over a table's vertical boundary. */
+export interface GripItem {
+  kind: "grip";
+  x: number;
+  y1: number;
+  y2: number;
+  /** Source w:tbl element. */
+  tbl: XmlElement;
+  /** Boundary index: 1..n (after column boundary-1); n = table right edge. */
+  boundary: number;
+}
+
+export type PageItem = TextItem | RectItem | LineEdgeItem | ImageItem | GripItem;
 
 export interface LaidOutPage {
   width: number;

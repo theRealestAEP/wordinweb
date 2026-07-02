@@ -330,6 +330,8 @@ export interface Table {
   /** Column grid widths px (tblGrid). */
   grid: number[];
   rows: TableRow[];
+  /** Source w:tbl element. */
+  src?: XmlElement;
 }
 
 export type Block = Paragraph | Table;
