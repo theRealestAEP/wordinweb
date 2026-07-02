@@ -3,13 +3,18 @@ import {
   DocxDocument,
   DocxEditor,
   EditHistory,
+  PageLayoutPatch,
+  ParagraphAlignment,
   RenderHandle,
   RunFormatPatch,
   SelectionFormat,
   applyRunFormat,
+  insertTableAfter,
   layoutDocument,
   renderToDom,
   selectionToSegments,
+  setPageLayout,
+  setParagraphAlignment,
   summarizeSelection,
 } from "@docxinweb/core";
 
@@ -20,6 +25,12 @@ export interface DocxViewApi {
   redo(): void;
   canUndo(): boolean;
   canRedo(): boolean;
+  /** Insert a rows×cols table at the caret's paragraph. */
+  insertTable(rows: number, cols: number): void;
+  /** Align the paragraph(s) under the caret or selection. */
+  setAlignment(align: ParagraphAlignment): void;
+  /** Change margins / page size / orientation (inches). */
+  setPageLayout(patch: PageLayoutPatch): void;
   /** Effective formatting of the current selection (toolbar state), or null. */
   getSelectionFormat(): SelectionFormat | null;
   /** Serialize the (edited) document back to .docx bytes. */
@@ -145,6 +156,29 @@ export function DocxView({
           redo: () => editor?.applyHistory("redo"),
           canUndo: () => history.canUndo,
           canRedo: () => history.canRedo,
+          insertTable: (rows, cols) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return;
+            history.checkpoint();
+            if (insertTableAfter(doc, caret.t, rows, cols)) pages = rerender(doc);
+          },
+          setAlignment: (align) => {
+            if (!handle) return;
+            const caret = editor?.getCaretTarget();
+            const segTs = selectionToSegments(handle.bindings)
+              .map((s) => s.t)
+              .filter((t): t is NonNullable<typeof t> => !!t);
+            const targets = segTs.length > 0 ? segTs : caret ? [caret.t] : [];
+            if (targets.length === 0) return;
+            history.checkpoint();
+            if (setParagraphAlignment(doc, targets as Parameters<typeof setParagraphAlignment>[1], align)) {
+              pages = rerender(doc);
+            }
+          },
+          setPageLayout: (patch) => {
+            history.checkpoint();
+            if (setPageLayout(doc, patch)) pages = rerender(doc);
+          },
           save: () => doc.save(),
         };
         onReady?.(api);
@@ -181,5 +215,5 @@ export function DocxView({
 }
 
 export { DocxDocument, layoutDocument, renderToDom } from "@docxinweb/core";
-export type { RunFormatPatch, SelectionFormat } from "@docxinweb/core";
+export type { RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch } from "@docxinweb/core";
 export { DocxToolbar } from "./toolbar.js";

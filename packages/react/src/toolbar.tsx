@@ -135,6 +135,81 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
           style={{ width: 26, height: 22, padding: 0, border: "1px solid #dadce0" }}
         />
       </label>
+      <span style={{ display: "inline-flex", gap: 2 }} title="Alignment">
+        {([
+          ["left", "\u2b62L", "Align left"],
+          ["center", "\u2b0d", "Center"],
+          ["right", "R\u2b60", "Align right"],
+          ["justify", "\u2630", "Justify"],
+        ] as const).map(([a, glyph, title]) => (
+          <button
+            key={a}
+            style={btn(false)}
+            title={title}
+            onMouseDown={keepSelection}
+            onClick={() => api?.setAlignment(a)}
+          >
+            {glyph}
+          </button>
+        ))}
+      </span>
+      <select
+        title="Insert table"
+        defaultValue=""
+        onMouseDown={(e) => e.stopPropagation()}
+        onChange={(e) => {
+          if (e.target.value) {
+            const [r, c] = e.target.value.split("x").map(Number);
+            api?.insertTable(r, c);
+          }
+          e.target.value = "";
+        }}
+        style={{ height: 26 }}
+      >
+        <option value="" disabled>
+          Table
+        </option>
+        {["2x2", "3x3", "4x4", "5x2", "2x5"].map((v) => (
+          <option key={v} value={v}>
+            {v.replace("x", " \u00d7 ")}
+          </option>
+        ))}
+      </select>
+      <select
+        title="Page layout"
+        defaultValue=""
+        onMouseDown={(e) => e.stopPropagation()}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === "portrait" || v === "landscape") api?.setPageLayout({ orientation: v });
+          else if (v === "normal") api?.setPageLayout({ margins: { top: 1, right: 1, bottom: 1, left: 1 } });
+          else if (v === "narrow") api?.setPageLayout({ margins: { top: 0.5, right: 0.5, bottom: 0.5, left: 0.5 } });
+          else if (v === "wide") api?.setPageLayout({ margins: { top: 1, right: 1.5, bottom: 1, left: 1.5 } });
+          else if (v === "letter") api?.setPageLayout({ size: { width: 8.5, height: 11 } });
+          else if (v === "legal") api?.setPageLayout({ size: { width: 8.5, height: 14 } });
+          else if (v === "a4") api?.setPageLayout({ size: { width: 8.27, height: 11.69 } });
+          e.target.value = "";
+        }}
+        style={{ height: 26 }}
+      >
+        <option value="" disabled>
+          Layout
+        </option>
+        <optgroup label="Margins">
+          <option value="normal">Normal (1&quot;)</option>
+          <option value="narrow">Narrow (0.5&quot;)</option>
+          <option value="wide">Wide (1.5&quot;)</option>
+        </optgroup>
+        <optgroup label="Orientation">
+          <option value="portrait">Portrait</option>
+          <option value="landscape">Landscape</option>
+        </optgroup>
+        <optgroup label="Size">
+          <option value="letter">Letter</option>
+          <option value="legal">Legal</option>
+          <option value="a4">A4</option>
+        </optgroup>
+      </select>
       <span style={{ display: "inline-flex", gap: 2 }} title="Highlight">
         {HIGHLIGHTS.map((h) => (
           <button

@@ -167,3 +167,42 @@ describe("undo/redo history", () => {
     expect(textOf(firstRun(doc).para)).toBe("Hello brave world");
   });
 });
+
+describe("block commands", () => {
+  it("inserts a table after the caret paragraph and round-trips", async () => {
+    const { insertTableAfter } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(p("before") + p("after"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    expect(insertTableAfter(doc, t as never, 2, 3)).toBe(true);
+    const blocks = doc.sections[0].blocks;
+    expect(blocks[1].type).toBe("table");
+    if (blocks[1].type !== "table") return;
+    expect(blocks[1].rows.length).toBe(2);
+    expect(blocks[1].rows[0].cells.length).toBe(3);
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.sections[0].blocks[1].type).toBe("table");
+  });
+
+  it("sets paragraph alignment", async () => {
+    const { setParagraphAlignment } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(p("some text"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    setParagraphAlignment(doc, [t as never], "center");
+    expect(firstRun(doc).para.props.alignment).toBe("center");
+  });
+
+  it("changes margins and orientation", async () => {
+    const { setPageLayout } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(
+      p("text") + `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`,
+    );
+    setPageLayout(doc, { margins: { left: 0.5, right: 0.5 }, orientation: "landscape" });
+    const sp = doc.sections[0].props;
+    expect(sp.marginLeft).toBeCloseTo(48, 1); // 0.5in = 48px
+    expect(sp.pageWidth).toBeGreaterThan(sp.pageHeight); // landscape
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.sections[0].props.pageWidth).toBeGreaterThan(reloaded.sections[0].props.pageHeight);
+  });
+});

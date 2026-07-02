@@ -210,6 +210,11 @@ export class DocxEditor {
 
   // ---------- edit operations ----------
 
+  /** Current caret target (durable w:t element + offset), for block commands. */
+  getCaretTarget(): { t: XmlElement; offset: number } | null {
+    return this.caret ? { t: this.caret.t, offset: this.caret.offset } : null;
+  }
+
   applyHistory(kind: "undo" | "redo"): void {
     const h = this.host.history;
     if (!h) return;
