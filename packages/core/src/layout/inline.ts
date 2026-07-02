@@ -199,17 +199,30 @@ export function breakParagraph(
       continue;
     }
     if (atom.kind === "tab") {
-      const stopX = nextTabStop(x, props.tabs, contentWidth - indentRight);
+      const stop = nextTabStop(x, props.tabs, contentWidth - indentRight);
+      let target = stop.pos;
+      if (stop.align === "right" || stop.align === "center" || stop.align === "decimal") {
+        // Aligned stops position the upcoming text (until the next tab or
+        // break) so it ends at / centers on the stop.
+        let w = 0;
+        for (let j = ai + 1; j < atoms.length; j++) {
+          const a = atoms[j];
+          if (a.kind === "tab" || a.kind === "break") break;
+          if (a.kind === "frag" || a.kind === "space" || a.kind === "image") w += a.width;
+        }
+        target = stop.align === "center" ? stop.pos - w / 2 : stop.pos - w;
+      }
+      const width = Math.max(target - x, 2);
       cur.push({
         x,
-        width: Math.max(0, stopX - x),
+        width,
         text: "\t",
         props: atom.props,
         font: atom.font,
         isSpace: false,
       });
-      curWidth += Math.max(0, stopX - x);
-      x = stopX;
+      curWidth += width;
+      x += width;
       continue;
     }
     if (atom.kind === "space") {
@@ -280,17 +293,20 @@ function nextDefaultTab(x: number): number {
   return (Math.floor(x / DEFAULT_TAB) + 1) * DEFAULT_TAB;
 }
 
-function nextTabStop(x: number, tabs: TabStop[] | undefined, rightEdge: number): number {
+function nextTabStop(
+  x: number,
+  tabs: TabStop[] | undefined,
+  rightEdge: number,
+): { pos: number; align: TabStop["align"] } {
   if (tabs) {
     for (const t of tabs) {
-      if (t.pos > x + 0.5) {
-        // v1: right/center stops treated as left (lookahead alignment TODO)
-        return t.pos;
+      if (t.pos > x + 0.5 && t.align !== "bar") {
+        return { pos: t.pos, align: t.align };
       }
     }
   }
   const next = nextDefaultTab(x);
-  return next < rightEdge ? next : x + 4;
+  return { pos: next < rightEdge ? next : x + 4, align: "left" };
 }
 
 function applyAlignment(

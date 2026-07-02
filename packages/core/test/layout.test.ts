@@ -200,3 +200,38 @@ describe("layout engine", () => {
     expect(bodyItem.lineTop).toBeGreaterThanOrEqual(95);
   });
 });
+
+describe("pagination robustness", () => {
+  it("terminates when orphan control cannot fit two lines on any page", () => {
+    // Two lines of 400pt exact spacing (533px) on a US Letter body (~848px):
+    // a lone first line at the bottom triggers the orphan push; after the
+    // push the pair still cannot share a page. Must not loop forever.
+    const body =
+      p("filler before") +
+      `<w:p><w:pPr><w:spacing w:line="8000" w:lineRule="exact"/></w:pPr>
+        <w:r><w:t>first tall line</w:t><w:br/><w:t>second tall line</w:t></w:r>
+      </w:p>` +
+      p("after");
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    expect(result.totalPages).toBeGreaterThanOrEqual(2);
+    const all = result.pages.map((_, i) => pageText(result, i)).join("");
+    expect(all).toContain("first tall line");
+    expect(all).toContain("second tall line");
+    expect(all).toContain("after");
+  });
+
+  it("lays out the chronology-style header (exact small line + colored border)", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:color="7A6E73" w:sz="4" w:space="2"/></w:pBdr><w:spacing w:after="0" w:before="0" w:line="170" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:color w:val="7A6E73"/><w:sz w:val="17"/></w:rPr><w:t>Created by Cobbery</w:t></w:r></w:p>` +
+          p("body"),
+      ),
+    });
+    const txt = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes("Created"));
+    if (txt?.kind !== "text") throw new Error("missing header text");
+    expect(txt.props.color).toBe("#7A6E73");
+    const edge = result.pages[0].items.find((i) => i.kind === "edge");
+    if (edge?.kind !== "edge") throw new Error("missing border edge");
+    expect(edge.border.color).toBe("#7A6E73");
+  });
+});

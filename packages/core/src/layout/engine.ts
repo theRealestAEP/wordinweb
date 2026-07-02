@@ -298,24 +298,37 @@ class Engine {
       let simY = this.y;
       let segStart = 0;
       let bottom = this.bodyBottom;
+      // Whether the current segment starts on an already-partial page. Must be
+      // simulated (not read from the live cursor) — after a planned break the
+      // next segment starts a fresh page by construction.
+      let onPartialPage = !this.pageIsEmptyAtCursor();
       for (let li = 0; li < lines.length; li++) {
         if (simY + lines[li].height > bottom + 0.01 && li > segStart) {
           let breakAt = li;
           if (widow) {
             // Orphan: a lone first line at the bottom → push whole paragraph.
-            if (breakAt - segStart === 1 && lines.length > 1 && segStart === 0 && !this.pageIsEmptyAtCursor()) {
-              breakAt = segStart;
+            if (breakAt - segStart === 1 && lines.length > 1 && segStart === 0 && onPartialPage) {
+              breakAt = 0;
             }
             // Widow: a lone last line on the next page → take one more with it.
             else if (breakAt === lines.length - 1 && breakAt - segStart >= 2) {
               breakAt = li - 1;
             }
           }
-          if (breakAt === segStart) breakAt = segStart === 0 && li > 0 ? 0 : li;
+          // Progress guards: never re-add an existing break or break behind
+          // the segment start — both would loop forever.
+          if (breaks.has(breakAt) || (breakAt <= segStart && !(breakAt === 0 && segStart === 0))) {
+            breakAt = li;
+            if (breaks.has(breakAt)) {
+              simY += lines[li].height;
+              continue;
+            }
+          }
           breaks.add(breakAt);
           segStart = breakAt;
           simY = this.cur.bodyTop;
           bottom = this.cur.bodyTop + bodyHeight;
+          onPartialPage = false;
           // Re-simulate from the break line.
           li = breakAt - 1;
           continue;
