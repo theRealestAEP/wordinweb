@@ -45,6 +45,7 @@ interface InternalPage {
   bodyBottom: number;
   colXs: number[];
   colWidths: number[];
+  hfStart?: number;
 }
 
 const PAGE_FMT: Record<string, string> = {
@@ -90,6 +91,9 @@ class Engine {
       index: p.physIndex,
       number: p.displayNumber,
       items: p.items,
+      bodyTop: p.bodyTop,
+      bodyBottom: p.bodyBottom,
+      hfStart: p.hfStart ?? p.items.length,
     }));
     return { pages, totalPages: pages.length };
   }
@@ -647,6 +651,7 @@ class Engine {
     for (const page of this.pages) {
       const sp = page.sp;
       this.sp = sp; // frames built here must resolve anchors against this page's section
+      page.hfStart = page.items.length;
       const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
       const fields: FieldContext = {
         pageNumber: () => page.displayNumber,

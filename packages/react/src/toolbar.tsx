@@ -57,6 +57,27 @@ function Sep() {
   return <span style={{ width: 1, height: 18, background: "#dadce0", margin: "0 4px", flexShrink: 0 }} />;
 }
 
+const icon = { width: 16, height: 16, display: "block" } as const;
+
+function ImageIcon() {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1" />
+      <circle cx="5.2" cy="6" r="1.2" fill="#3c4043" stroke="none" />
+      <path d="M2.5 12l3.5-4 2.8 3 2-2.4 2.7 3.4" />
+    </svg>
+  );
+}
+
+function HighlightIcon({ color }: { color: string }) {
+  return (
+    <svg style={icon} viewBox="0 0 16 16">
+      <path d="M3 9.5L9.5 3l3.5 3.5L6.5 13H4.5L3 11.5v-2z" fill="none" stroke="#3c4043" strokeWidth="1.3" />
+      <rect x="2" y="13.5" width="12" height="2.5" rx="0.5" fill={color} />
+    </svg>
+  );
+}
+
 /** Menu select that runs an action and resets (never shows a value). */
 function ActionMenu({
   label,
@@ -98,6 +119,59 @@ function ActionMenu({
         ),
       )}
     </select>
+  );
+}
+
+/** Highlight swatch popover (marker icon + colors + none). */
+function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: string | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        title="Highlight color"
+        style={btnStyle(open)}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpen(!open)}
+      >
+        <HighlightIcon color={current ?? "#ffff00"} />
+      </button>
+      {open && (
+        <div
+          onMouseDown={(e) => e.preventDefault()}
+          style={{
+            position: "absolute", top: 28, left: 0, zIndex: 100, background: "#fff",
+            border: "1px solid #dadce0", borderRadius: 6, boxShadow: "0 4px 16px rgba(0,0,0,.15)",
+            padding: 8, display: "flex", gap: 4, alignItems: "center",
+          }}
+        >
+          {HIGHLIGHTS.map((h) => (
+            <div
+              key={h.name}
+              title={h.name}
+              onClick={() => { onPick(h.name); setOpen(false); }}
+              style={{ width: 20, height: 20, background: h.css, border: "1px solid #dadce0", borderRadius: 3, cursor: "pointer" }}
+            />
+          ))}
+          <div
+            title="No highlight"
+            onClick={() => { onPick(null); setOpen(false); }}
+            style={{
+              width: 20, height: 20, border: "1px solid #dadce0", borderRadius: 3, cursor: "pointer",
+              background: "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
+            }}
+          />
+        </div>
+      )}
+    </span>
   );
 }
 
@@ -301,16 +375,7 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
           style={{ width: 0, height: 0, opacity: 0, border: "none", padding: 0 }}
         />
       </label>
-      <ActionMenu
-        label="🖊"
-        title="Highlight"
-        width={44}
-        groups={[
-          { items: HIGHLIGHTS.map((h) => [h.name, h.name] as [string, string]) },
-          { items: [["__none", "remove"]] },
-        ]}
-        onPick={(v) => apply({ highlight: v === "__none" ? null : v })}
-      />
+      <HighlightMenu current={fmt?.highlight} onPick={(v) => apply({ highlight: v })} />
       <Sep />
       <Btn label={"≡"} title="Align left" onClick={() => api?.setAlignment("left")} />
       <Btn label={"≣"} title="Center" onClick={() => api?.setAlignment("center")} />
@@ -318,7 +383,7 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
       <Btn label={"☰"} title="Justify" onClick={() => api?.setAlignment("justify")} />
       <Sep />
       <TableMenu api={api} />
-      <Btn label={"🖼"} title="Insert image" onClick={() => imageInput.current?.click()} />
+      <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
       <input
         ref={imageInput}
         type="file"

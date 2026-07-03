@@ -72,6 +72,7 @@ export function renderToDom(
   const grips: GripBinding[] = [];
   const images: ImageBinding[] = [];
 
+  ensureStylesheet();
   const root = document.createElement("div");
   root.className = "dxw-pages";
   root.style.display = "flex";
@@ -120,6 +121,9 @@ function renderPage(
     el.style.boxShadow = "0 1px 3px rgba(0,0,0,.28), 0 4px 14px rgba(0,0,0,.12)";
   }
 
+  el.dataset.bodyTop = String(page.bodyTop);
+  el.dataset.bodyBottom = String(page.bodyBottom);
+
   // Inner surface scaled by zoom so item coordinates stay in layout px.
   const surface = document.createElement("div");
   surface.style.position = "absolute";
@@ -129,9 +133,13 @@ function renderPage(
   surface.style.height = `${page.height}px`;
   surface.style.transformOrigin = "0 0";
   if (zoom !== 1) surface.style.transform = `scale(${zoom})`;
+  if (options.interactive) surface.style.cursor = "text";
   el.appendChild(surface);
 
+  let itemIndex = -1;
   for (const item of page.items) {
+    itemIndex++;
+    const isHf = itemIndex >= page.hfStart;
     if (item.kind === "grip") {
       if (!options.interactive) continue;
       const g = document.createElement("div");
@@ -157,15 +165,33 @@ function renderPage(
     }
     const node = renderItem(doc, item, urls);
     if (node) {
+      if (isHf) node.dataset.dxwHf = "1";
       surface.appendChild(node);
       if (item.kind === "text") bindings.push({ el: node, item });
       if (item.kind === "image") {
         (node as HTMLImageElement).draggable = false;
+        (node as HTMLImageElement).style.cursor = "move";
         images.push({ el: node, item });
       }
     }
   }
   return el;
+}
+
+/** One-time stylesheet for editing chrome (header/footer mode dimming). */
+function ensureStylesheet(): void {
+  if (document.getElementById("dxw-style")) return;
+  const style = document.createElement("style");
+  style.id = "dxw-style";
+  style.textContent = `
+.dxw-hf-mode .dxw-page span:not([data-dxw-hf]),
+.dxw-hf-mode .dxw-page a:not([data-dxw-hf]),
+.dxw-hf-mode .dxw-page img:not([data-dxw-hf]) { opacity: .45; }
+.dxw-body-mode .dxw-page span[data-dxw-hf],
+.dxw-body-mode .dxw-page a[data-dxw-hf],
+.dxw-body-mode .dxw-page img[data-dxw-hf] { opacity: .55; }
+`;
+  document.head.appendChild(style);
 }
 
 function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElement | null {

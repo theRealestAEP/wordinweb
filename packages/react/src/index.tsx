@@ -114,6 +114,7 @@ export function DocxView({
       handle = renderToDom(doc, layout, container, { zoom, interactive: editable });
       container.scrollTop = scrollTop;
       container.scrollLeft = scrollLeft;
+      editor?.afterRender();
       return layout.totalPages;
     };
 

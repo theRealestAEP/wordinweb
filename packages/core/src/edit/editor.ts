@@ -50,6 +50,45 @@ export class DocxEditor {
     s.zIndex = "10";
   }
 
+  /** Re-apply editing chrome after the host re-renders the pages. */
+  afterRender(): void {
+    this.applyHfChrome();
+    this.positionCaret();
+  }
+
+  /** Word-style cue: dim the inactive region; dashed boundary + tab labels
+   * while editing headers/footers. */
+  private applyHfChrome(): void {
+    const root = this.host.getHandle()?.root;
+    if (!root) return;
+    root.classList.toggle("dxw-hf-mode", this.inHeaderFooter);
+    root.classList.toggle("dxw-body-mode", !this.inHeaderFooter);
+    root.querySelectorAll(".dxw-hf-marker").forEach((m) => m.remove());
+    if (!this.inHeaderFooter) return;
+    for (const pageEl of Array.from(root.querySelectorAll<HTMLElement>(".dxw-page"))) {
+      const surface = pageEl.firstElementChild as HTMLElement | null;
+      if (!surface) continue;
+      const bodyTop = parseFloat(pageEl.dataset.bodyTop ?? "96");
+      const bodyBottom = parseFloat(pageEl.dataset.bodyBottom ?? "0");
+      const mk = (y: number, label: string, labelBelow: boolean) => {
+        const line = document.createElement("div");
+        line.className = "dxw-hf-marker";
+        line.style.cssText = `position:absolute;left:0;right:0;top:${y}px;border-top:1.5px dashed #9aa0a6;pointer-events:none;z-index:8;`;
+        const tag = document.createElement("div");
+        tag.className = "dxw-hf-marker";
+        tag.textContent = label;
+        tag.style.cssText =
+          `position:absolute;left:24px;top:${labelBelow ? y : y - 17}px;height:17px;line-height:17px;` +
+          `padding:0 8px;font:11px system-ui,sans-serif;color:#fff;background:#9aa0a6;` +
+          `border-radius:${labelBelow ? "0 0 4px 4px" : "4px 4px 0 0"};pointer-events:none;z-index:8;`;
+        surface.appendChild(line);
+        surface.appendChild(tag);
+      };
+      mk(bodyTop, "Header", true);
+      if (bodyBottom > 0) mk(bodyBottom, "Footer", false);
+    }
+  }
+
   attach(): void {
     if (this.host.history) {
       this.host.history.getCaret = () =>
@@ -67,6 +106,7 @@ export class DocxEditor {
     c.addEventListener("copy", this.onCopy);
     c.addEventListener("cut", this.onCut);
     c.addEventListener("paste", this.onPaste);
+    this.applyHfChrome();
   }
 
   detach(): void {
@@ -353,6 +393,7 @@ export class DocxEditor {
       // also natively selects a word — clear it and place the caret instead.
       if (e.detail >= 2 && caret) {
         this.inHeaderFooter = true;
+        this.applyHfChrome();
         sel?.removeAllRanges();
         this.caret = caret;
         this.positionCaret();
@@ -362,7 +403,12 @@ export class DocxEditor {
       }
       return;
     }
-    if (region === "body") this.inHeaderFooter = false;
+    if (region === "body" && this.inHeaderFooter) {
+      this.inHeaderFooter = false;
+      this.applyHfChrome();
+    } else if (region === "body") {
+      this.inHeaderFooter = false;
+    }
 
     if (sel && !sel.isCollapsed) {
       // Range selection active — caret hidden; formatting/typing use it.
@@ -754,6 +800,7 @@ export class DocxEditor {
   private commit(): void {
     this.host.doc.refresh();
     this.host.rerender();
+    this.applyHfChrome();
     this.positionCaret();
   }
 

@@ -99,6 +99,11 @@ export interface LaidOutPage {
   /** Display page number after pgNumType.start is applied. */
   number: number;
   items: PageItem[];
+  /** Body box (for header/footer editing chrome). */
+  bodyTop: number;
+  bodyBottom: number;
+  /** Items from this index on belong to the header/footer parts. */
+  hfStart: number;
 }
 
 export interface LayoutResult {
