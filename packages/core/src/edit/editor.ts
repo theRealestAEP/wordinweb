@@ -46,6 +46,9 @@ export class DocxEditor {
    * our own highlight, which kills the flicker and survives toolbar focus). */
   private selection: { anchor: SelPoint; focus: SelPoint } | null = null;
   private selectionRects: HTMLElement[] = [];
+  /** True while a drag-selection is in progress (checked by onMouseUp, which
+   * bubbles from the container BEFORE the document-level drag-end listener). */
+  private dragSelecting = false;
   private caretEl: HTMLDivElement;
   private blinkTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -385,7 +388,7 @@ export class DocxEditor {
       if (Math.abs(delta) >= 1) {
         this.host.history?.checkpoint();
         const ok = isCol
-          ? resizeTableColumn(this.host.doc, grip.item.tbl, grip.item.boundary, dx)
+          ? resizeTableColumn(this.host.doc, grip.item.tbl, grip.item.boundary, dx, grip.item.renderedWidths)
           : resizeTableRow(this.host.doc, grip.item.tbl, grip.item.boundary, (grip.item.rowHeightPx ?? 0) + dy);
         if (ok) {
           this.host.rerender();
@@ -408,7 +411,10 @@ export class DocxEditor {
     const onMove = (me: MouseEvent) => {
       const focus = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
       if (!focus) return;
-      if (!dragging && (focus.t !== anchor.t || focus.offset !== anchor.offset)) dragging = true;
+      if (!dragging && (focus.t !== anchor.t || focus.offset !== anchor.offset)) {
+        dragging = true;
+        this.dragSelecting = true;
+      }
       if (dragging) {
         this.hideCaret();
         this.selection = {
@@ -421,11 +427,6 @@ export class DocxEditor {
     const onUp = () => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
-      if (dragging) {
-        this.suppressNextMouseUp = true;
-        this.notifySelection();
-        this.host.container.focus({ preventScroll: true });
-      }
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
@@ -613,6 +614,13 @@ export class DocxEditor {
   private onMouseUp = (e: MouseEvent): void => {
     if (this.suppressNextMouseUp) {
       this.suppressNextMouseUp = false;
+      return;
+    }
+    if (this.dragSelecting) {
+      // Finalize a drag-selection: keep it, don't collapse to a caret.
+      this.dragSelecting = false;
+      this.notifySelection();
+      this.host.container.focus({ preventScroll: true });
       return;
     }
     this.deselectImage();

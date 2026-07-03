@@ -182,17 +182,20 @@ export function applyTableOp(doc: DocxDocument, target: XmlElement, op: TableOp)
 }
 
 const MIN_COL_TWIPS = 144; // 0.1"
+const MIN_COL_PX = 12;
 
 /**
- * Drag-resize a table column boundary by deltaPx. Interior boundaries trade
- * width between the two adjacent columns (table width constant, like Word);
- * the rightmost boundary grows/shrinks the table.
+ * Drag-resize a table column boundary by deltaPx, working in the RENDERED
+ * pixel space (grids are often stale/percent-scaled). Like Word, dragging
+ * normalizes the table to explicit fixed widths: the grid is rewritten to
+ * the rendered widths with the delta applied, and tblW becomes dxa.
  */
 export function resizeTableColumn(
   doc: DocxDocument,
   tblEl: XmlElement,
   boundary: number,
   deltaPx: number,
+  renderedWidths?: number[],
 ): boolean {
   const grid = child(tblEl, "tblGrid");
   if (!grid) return false;
@@ -208,17 +211,42 @@ export function resizeTableColumn(
     c.attrs[key] = String(Math.round(tw));
   };
 
-  let d = Math.round(pxToTwips(deltaPx));
-  const left = cols[boundary - 1];
-  const lw = widthOf(left);
-  if (boundary === cols.length) {
-    setWidth(left, Math.max(lw + d, MIN_COL_TWIPS));
+  if (renderedWidths && renderedWidths.length === cols.length) {
+    const px = [...renderedWidths];
+    if (boundary === cols.length) {
+      px[boundary - 1] = Math.max(px[boundary - 1] + deltaPx, MIN_COL_PX);
+    } else {
+      const d = Math.max(
+        Math.min(deltaPx, px[boundary] - MIN_COL_PX),
+        MIN_COL_PX - px[boundary - 1],
+      );
+      px[boundary - 1] += d;
+      px[boundary] -= d;
+    }
+    cols.forEach((c, i) => setWidth(c, pxToTwips(px[i])));
+    // Word converts dragged tables to explicit fixed widths.
+    const tblPr = child(tblEl, "tblPr");
+    const tblW = tblPr ? child(tblPr, "tblW") : undefined;
+    if (tblW) {
+      const total = Math.round(pxToTwips(px.reduce((a, b) => a + b, 0)));
+      const wKey = Object.keys(tblW.attrs).find((k) => localName(k) === "w") ?? prefixOf(tblW) + "w";
+      const tKey = Object.keys(tblW.attrs).find((k) => localName(k) === "type") ?? prefixOf(tblW) + "type";
+      tblW.attrs[wKey] = String(total);
+      tblW.attrs[tKey] = "dxa";
+    }
   } else {
-    const right = cols[boundary];
-    const rw = widthOf(right);
-    d = Math.max(Math.min(d, rw - MIN_COL_TWIPS), MIN_COL_TWIPS - lw);
-    setWidth(left, lw + d);
-    setWidth(right, rw - d);
+    let d = Math.round(pxToTwips(deltaPx));
+    const left = cols[boundary - 1];
+    const lw = widthOf(left);
+    if (boundary === cols.length) {
+      setWidth(left, Math.max(lw + d, MIN_COL_TWIPS));
+    } else {
+      const right = cols[boundary];
+      const rw = widthOf(right);
+      d = Math.max(Math.min(d, rw - MIN_COL_TWIPS), MIN_COL_TWIPS - lw);
+      setWidth(left, lw + d);
+      setWidth(right, rw - d);
+    }
   }
 
   // Keep per-cell tcW (dxa) in sync when the table has no merged cells.

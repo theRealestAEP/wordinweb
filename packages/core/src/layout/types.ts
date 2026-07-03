@@ -87,6 +87,8 @@ export interface GripItem {
   boundary: number;
   /** Laid-out height of the row above (row grips), px. */
   rowHeightPx?: number;
+  /** Rendered column widths px (col grips) — resize works in this space. */
+  renderedWidths?: number[];
 }
 
 export type PageItem = TextItem | RectItem | LineEdgeItem | ImageItem | GripItem;

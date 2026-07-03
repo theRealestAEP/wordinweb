@@ -767,7 +767,16 @@ class Engine {
     let x = x0;
     for (let b = 1; b <= widths.length; b++) {
       x += widths[b - 1];
-      page.items.push({ kind: "grip", axis: "col", x, y1: top, y2: bottom, tbl: tbl.src, boundary: b });
+      page.items.push({
+        kind: "grip",
+        axis: "col",
+        x,
+        y1: top,
+        y2: bottom,
+        tbl: tbl.src,
+        boundary: b,
+        renderedWidths: widths,
+      });
     }
   }
 
