@@ -293,13 +293,17 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
       savedRange.current = sel.getRangeAt(0).cloneRange();
-      setFmt(api?.getSelectionFormat() ?? null);
     }
+    setFmt(api?.getSelectionFormat() ?? null);
   }, [api]);
 
   useEffect(() => {
     document.addEventListener("selectionchange", refresh);
-    return () => document.removeEventListener("selectionchange", refresh);
+    document.addEventListener("dxw-selection", refresh);
+    return () => {
+      document.removeEventListener("selectionchange", refresh);
+      document.removeEventListener("dxw-selection", refresh);
+    };
   }, [refresh]);
 
   const restoreSelection = () => {

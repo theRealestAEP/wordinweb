@@ -5,7 +5,8 @@ import { RenderHandle, TextBinding } from "../render/dom.js";
 import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
 import { moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
-import { firstTextOf, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
+import { firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
+import { SelectionSegment } from "./commands.js";
 
 /**
  * Interactive text editing: caret placement, typing, Backspace/Delete,
@@ -32,10 +33,19 @@ interface Caret {
   offset: number;
 }
 
+interface SelPoint {
+  t: XmlElement;
+  offset: number;
+}
+
 export class DocxEditor {
   private caret: Caret | null = null;
   /** Header/footer editing is gated behind double-click, like Word. */
   private inHeaderFooter = false;
+  /** Owned selection (native selection is disabled in edit mode — we paint
+   * our own highlight, which kills the flicker and survives toolbar focus). */
+  private selection: { anchor: SelPoint; focus: SelPoint } | null = null;
+  private selectionRects: HTMLElement[] = [];
   private caretEl: HTMLDivElement;
   private blinkTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -53,7 +63,146 @@ export class DocxEditor {
   /** Re-apply editing chrome after the host re-renders the pages. */
   afterRender(): void {
     this.applyHfChrome();
+    this.paintSelection();
     this.positionCaret();
+  }
+
+  // ---------- owned selection ----------
+
+  hasSelection(): boolean {
+    return this.selection !== null;
+  }
+
+  clearSelection(): void {
+    this.selection = null;
+    this.paintSelection();
+    this.notifySelection();
+  }
+
+  private notifySelection(): void {
+    document.dispatchEvent(new CustomEvent("dxw-selection"));
+  }
+
+  /** Ordinal position of a selection point in paint order. */
+  private pointIndex(pt: SelPoint): number | null {
+    const handle = this.host.getHandle();
+    if (!handle) return null;
+    for (let i = 0; i < handle.bindings.length; i++) {
+      const src = handle.bindings[i].item.src;
+      if (!src?.t || src.t !== pt.t) continue;
+      const start = src.offset;
+      const end = src.offset + handle.bindings[i].item.text.length;
+      if (pt.offset >= start && pt.offset <= end) return i * 1e6 + (pt.offset - start);
+    }
+    return null;
+  }
+
+  /** Segments covered by the owned selection, in document paint order. */
+  getSelectionSegments(): SelectionSegment[] {
+    const sel = this.selection;
+    const handle = this.host.getHandle();
+    if (!sel || !handle) return [];
+    let a = this.pointIndex(sel.anchor);
+    let f = this.pointIndex(sel.focus);
+    if (a === null || f === null) return [];
+    let [startPt, endPt] = a <= f ? [sel.anchor, sel.focus] : [sel.focus, sel.anchor];
+    if (a > f) [a, f] = [f, a];
+    const segments: SelectionSegment[] = [];
+    const startIdx = Math.floor(a / 1e6);
+    const endIdx = Math.floor(f / 1e6);
+    for (let i = startIdx; i <= endIdx; i++) {
+      const b = handle.bindings[i];
+      const src = b.item.src;
+      if (!src?.t || b.item.text.length === 0) continue;
+      let s0 = src.offset;
+      let e0 = src.offset + b.item.text.length;
+      if (i === startIdx) s0 = Math.max(s0, startPt.offset);
+      if (i === endIdx) e0 = Math.min(e0, endPt.offset);
+      if (s0 >= e0) continue;
+      segments.push({
+        run: src.run,
+        t: src.t,
+        start: s0,
+        end: e0,
+        props: b.item.props,
+      });
+    }
+    // merge adjacent on same t
+    const merged: SelectionSegment[] = [];
+    for (const seg of segments) {
+      const prev = merged[merged.length - 1];
+      if (prev && prev.t === seg.t && seg.start <= prev.end + 1) prev.end = Math.max(prev.end, seg.end);
+      else merged.push(seg);
+    }
+    return merged;
+  }
+
+  /** Select the given post-edit ranges (used after formatting to persist). */
+  selectRanges(ranges: { t: XmlElement; start: number; end: number }[]): void {
+    if (ranges.length === 0) return;
+    const first = ranges[0];
+    const last = ranges[ranges.length - 1];
+    this.selection = {
+      anchor: { t: first.t, offset: first.start },
+      focus: { t: last.t, offset: last.end },
+    };
+    this.paintSelection();
+    this.notifySelection();
+  }
+
+  private paintSelection(): void {
+    for (const r of this.selectionRects) r.remove();
+    this.selectionRects = [];
+    const sel = this.selection;
+    const handle = this.host.getHandle();
+    if (!sel || !handle) return;
+    let a = this.pointIndex(sel.anchor);
+    let f = this.pointIndex(sel.focus);
+    if (a === null || f === null) return;
+    const [startPt, endPt] = a <= f ? [sel.anchor, sel.focus] : [sel.focus, sel.anchor];
+    if (a > f) [a, f] = [f, a];
+    const startIdx = Math.floor(a / 1e6);
+    const endIdx = Math.floor(f / 1e6);
+    const zoom = this.host.zoom ?? 1;
+    for (let i = startIdx; i <= endIdx; i++) {
+      const b = handle.bindings[i];
+      const item = b.item;
+      const src = item.src;
+      if (!src?.t) continue;
+      let x0 = item.x;
+      let x1 = item.x + item.width;
+      const textNode = b.el.firstChild;
+      const surface = b.el.parentElement;
+      if (!surface) continue;
+      const surfaceRect = surface.getBoundingClientRect();
+      const localX = (client: number) => (client - surfaceRect.left) / zoom;
+      if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+        try {
+          if (i === startIdx && startPt.offset > src.offset) {
+            const rg = document.createRange();
+            rg.setStart(textNode, Math.min(startPt.offset - src.offset, item.text.length));
+            rg.collapse(true);
+            x0 = localX(rg.getBoundingClientRect().left);
+          }
+          if (i === endIdx && endPt.offset < src.offset + item.text.length) {
+            const rg = document.createRange();
+            rg.setStart(textNode, Math.max(0, endPt.offset - src.offset));
+            rg.collapse(true);
+            x1 = localX(rg.getBoundingClientRect().left);
+          }
+        } catch {
+          /* keep full-span rect */
+        }
+      }
+      if (x1 <= x0) continue;
+      const rect = document.createElement("div");
+      rect.className = "dxw-sel";
+      rect.style.cssText =
+        `position:absolute;left:${x0}px;top:${item.lineTop}px;width:${x1 - x0}px;` +
+        `height:${item.lineHeight}px;background:rgba(26,115,232,.28);pointer-events:none;z-index:4;`;
+      surface.appendChild(rect);
+      this.selectionRects.push(rect);
+    }
   }
 
   /** Word-style cue: dim the inactive region; dashed boundary + tab labels
@@ -106,6 +255,8 @@ export class DocxEditor {
     c.addEventListener("copy", this.onCopy);
     c.addEventListener("cut", this.onCut);
     c.addEventListener("paste", this.onPaste);
+    c.addEventListener("dragover", this.onDragOver);
+    c.addEventListener("drop", this.onDrop);
     this.applyHfChrome();
   }
 
@@ -117,6 +268,8 @@ export class DocxEditor {
     c.removeEventListener("copy", this.onCopy);
     c.removeEventListener("cut", this.onCut);
     c.removeEventListener("paste", this.onPaste);
+    c.removeEventListener("dragover", this.onDragOver);
+    c.removeEventListener("drop", this.onDrop);
     this.hideCaret();
   }
 
@@ -124,9 +277,7 @@ export class DocxEditor {
 
   /** Selection text with real spaces and newlines at paragraph boundaries. */
   private selectionText(): string {
-    const handle = this.host.getHandle();
-    if (!handle) return "";
-    const segments = selectionToSegments(handle.bindings);
+    const segments = this.getSelectionSegments();
     let out = "";
     let lastPara: XmlElement | null = null;
     for (const seg of segments) {
@@ -160,12 +311,10 @@ export class DocxEditor {
   private onPaste = (e: ClipboardEvent): void => {
     const text = e.clipboardData?.getData("text/plain");
     if (!text) return;
-    const sel = window.getSelection();
-    const hasRange = !!sel && !sel.isCollapsed;
-    if (!this.caret && !hasRange) return;
+    if (!this.caret && !this.hasSelection()) return;
     e.preventDefault();
     this.host.history?.checkpoint();
-    if (hasRange) this.removeSelectedText();
+    if (this.hasSelection()) this.removeSelectedText();
     const chunks = text.replace(/\r/g, "").split("\n");
     for (let i = 0; i < chunks.length; i++) {
       if (i > 0) this.splitParagraphNoHistory();
@@ -186,7 +335,10 @@ export class DocxEditor {
     const target = e.target as HTMLElement;
     if (this.startImageInteraction(e, target)) return;
     const gripEl = target.closest?.("[data-dxw-grip]") as HTMLElement | null;
-    if (!gripEl) return;
+    if (!gripEl) {
+      this.beginSelectionDrag(e);
+      return;
+    }
     const handle = this.host.getHandle();
     const grip = handle?.grips[parseInt(gripEl.dataset.dxwGrip ?? "-1", 10)];
     if (!grip) return;
@@ -243,6 +395,87 @@ export class DocxEditor {
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+  };
+
+  /** Track a potential drag-selection from a text mousedown. */
+  private beginSelectionDrag(e: MouseEvent): void {
+    if (e.button !== 0) return;
+    const anchor = this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
+    if (!anchor) return;
+    // Respect the header/footer gate for selection too.
+    if (this.regionOf(anchor.t) === "hf" && !this.inHeaderFooter) return;
+    let dragging = false;
+    const onMove = (me: MouseEvent) => {
+      const focus = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
+      if (!focus) return;
+      if (!dragging && (focus.t !== anchor.t || focus.offset !== anchor.offset)) dragging = true;
+      if (dragging) {
+        this.hideCaret();
+        this.selection = {
+          anchor: { t: anchor.t, offset: anchor.offset },
+          focus: { t: focus.t, offset: focus.offset },
+        };
+        this.paintSelection();
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      if (dragging) {
+        this.suppressNextMouseUp = true;
+        this.notifySelection();
+        this.host.container.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
+
+  /** Manual word selection on double-click (native selection is disabled). */
+  private selectWordAt(caret: Caret): void {
+    const text = caret.t.text;
+    let s = caret.offset;
+    let e = caret.offset;
+    const isWord = (ch: string) => /[^\s]/.test(ch);
+    while (s > 0 && isWord(text[s - 1])) s--;
+    while (e < text.length && isWord(text[e])) e++;
+    if (e > s) {
+      this.hideCaret();
+      this.selection = { anchor: { t: caret.t, offset: s }, focus: { t: caret.t, offset: e } };
+      this.paintSelection();
+      this.notifySelection();
+    }
+  }
+
+  // ---------- OS drag-and-drop images ----------
+
+  private onDragOver = (e: DragEvent): void => {
+    if (e.dataTransfer?.types.includes("Files")) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    }
+  };
+
+  private onDrop = (e: DragEvent): void => {
+    const file = Array.from(e.dataTransfer?.files ?? []).find((f) => f.type.startsWith("image/"));
+    if (!file) return;
+    e.preventDefault();
+    const dest = this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
+    if (!dest) return;
+    void (async () => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const bmp = await createImageBitmap(new Blob([bytes.buffer as ArrayBuffer]));
+      const sp = this.host.doc.sections[0]?.props;
+      const maxW = sp ? sp.pageWidth - sp.marginLeft - sp.marginRight : 624;
+      const scale = Math.min(1, maxW / bmp.width);
+      const ext = (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg") === "jpg" ? "jpeg" : (file.type.split("/")[1] ?? "png");
+      this.host.history?.checkpoint();
+      const relId = this.host.doc.addImageResource(bytes, ext);
+      if (insertImageAt(this.host.doc, dest.t, relId, bmp.width * scale, bmp.height * scale)) {
+        this.host.rerender();
+      }
+      bmp.close();
+    })();
   };
 
   // ---------- images: select, corner-resize, drag-move ----------
@@ -383,18 +616,16 @@ export class DocxEditor {
       return;
     }
     this.deselectImage();
-    const sel = window.getSelection();
     const caret =
       this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     const region = caret ? this.regionOf(caret.t) : "body";
 
     if (region === "hf" && !this.inHeaderFooter) {
-      // Word UX: double-click enters header/footer editing. The double-click
-      // also natively selects a word — clear it and place the caret instead.
+      // Word UX: double-click enters header/footer editing.
       if (e.detail >= 2 && caret) {
         this.inHeaderFooter = true;
         this.applyHfChrome();
-        sel?.removeAllRanges();
+        this.clearSelection();
         this.caret = caret;
         this.positionCaret();
         this.host.container.focus({ preventScroll: true });
@@ -410,11 +641,13 @@ export class DocxEditor {
       this.inHeaderFooter = false;
     }
 
-    if (sel && !sel.isCollapsed) {
-      // Range selection active — caret hidden; formatting/typing use it.
-      this.hideCaret();
+    if (caret && e.detail >= 2) {
+      this.clearSelection();
+      this.selectWordAt(caret);
       return;
     }
+    // A plain click collapses any owned selection and places the caret.
+    if (this.selection) this.clearSelection();
     if (caret) {
       this.caret = caret;
       this.positionCaret();
@@ -531,9 +764,27 @@ export class DocxEditor {
       this.applyHistory("redo");
       return;
     }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
+      const text = this.selectionText();
+      if (text) {
+        e.preventDefault();
+        void navigator.clipboard?.writeText(text);
+      }
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "x") {
+      const text = this.selectionText();
+      if (text) {
+        e.preventDefault();
+        void navigator.clipboard?.writeText(text);
+        this.host.history?.checkpoint();
+        this.removeSelectedText();
+        this.commit();
+      }
+      return;
+    }
     if (e.metaKey || e.ctrlKey || e.altKey) return; // let shortcuts through
-    const sel = window.getSelection();
-    const hasRange = !!sel && !sel.isCollapsed;
+    const hasRange = this.hasSelection();
     if (!this.caret && !hasRange) return;
 
     if ((e.key === "Backspace" || e.key === "Delete") && this.selectedImage) {
@@ -612,8 +863,7 @@ export class DocxEditor {
 
   private insertText(text: string): void {
     this.host.history?.checkpoint("typing");
-    const sel = window.getSelection();
-    if (sel && !sel.isCollapsed) this.removeSelectedText();
+    if (this.hasSelection()) this.removeSelectedText();
     const caret = this.caret;
     if (!caret) return;
     const t = caret.t;
@@ -673,11 +923,9 @@ export class DocxEditor {
     this.commit();
   }
 
-  /** Delete the current DOM selection's text from the XML; caret → start. */
+  /** Delete the owned selection's text from the XML; caret → start. */
   private removeSelectedText(): void {
-    const handle = this.host.getHandle();
-    if (!handle) return;
-    const segments = selectionToSegments(handle.bindings);
+    const segments = this.getSelectionSegments();
     // Group ranges per w:t, delete from the end so offsets stay valid.
     const byT = new Map<XmlElement, { start: number; end: number }[]>();
     let first: Caret | null = null;
@@ -695,7 +943,7 @@ export class DocxEditor {
         t.text = t.text.slice(0, r.start) + t.text.slice(r.end);
       }
     }
-    window.getSelection()?.removeAllRanges();
+    this.clearSelection();
     if (first) this.caret = first;
   }
 

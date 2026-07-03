@@ -159,47 +159,20 @@ export function DocxView({
         const api: DocxViewApi = {
           document: doc,
           pageCount: () => pages,
-          getSelectionFormat: () =>
-            handle ? summarizeSelection(selectionToSegments(handle.bindings)) : null,
+          getSelectionFormat: () => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            return summarizeSelection(segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : []);
+          },
           applyFormat: (patch) => {
             if (!handle) return;
-            const segments = selectionToSegments(handle.bindings);
+            const own = editor?.getSelectionSegments() ?? [];
+            const segments = own.length > 0 ? own : selectionToSegments(handle.bindings);
             if (segments.length === 0) return;
             history.checkpoint();
             const formatted = applyRunFormat(doc, segments, patch);
             pages = rerender(doc);
-            // Restore a visible selection over the formatted text so repeated
-            // toolbar actions compose (Google Docs behavior).
-            if (formatted.length > 0 && handle) {
-              const findPos = (t: unknown, off: number, atEnd: boolean) => {
-                for (const b of handle!.bindings) {
-                  const src = b.item.src;
-                  if (!src || src.t !== t) continue;
-                  const start = src.offset;
-                  const end = src.offset + b.item.text.length;
-                  if (off >= start && off <= end && (atEnd ? off > start || off === end : off < end || off === start)) {
-                    return { node: b.el.firstChild, offset: off - start };
-                  }
-                }
-                return null;
-              };
-              const first = formatted[0];
-              const last = formatted[formatted.length - 1];
-              const s = findPos(first.t, first.start, false);
-              const e2 = findPos(last.t, last.end, true);
-              if (s?.node && e2?.node) {
-                try {
-                  const range = document.createRange();
-                  range.setStart(s.node, s.offset);
-                  range.setEnd(e2.node, e2.offset);
-                  const sel = window.getSelection();
-                  sel?.removeAllRanges();
-                  sel?.addRange(range);
-                } catch {
-                  /* selection restore is best-effort */
-                }
-              }
-            }
+            // Keep the formatted text selected so toolbar actions compose.
+            if (formatted.length > 0) editor?.selectRanges(formatted);
           },
           undo: () => editor?.applyHistory("undo"),
           redo: () => editor?.applyHistory("redo"),

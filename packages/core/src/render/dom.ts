@@ -133,7 +133,13 @@ function renderPage(
   surface.style.height = `${page.height}px`;
   surface.style.transformOrigin = "0 0";
   if (zoom !== 1) surface.style.transform = `scale(${zoom})`;
-  if (options.interactive) surface.style.cursor = "text";
+  if (options.interactive) {
+    surface.style.cursor = "text";
+    // Native selection flickers over absolutely-positioned spans; the editor
+    // paints its own selection layer instead.
+    surface.style.userSelect = "none";
+    (surface.style as CSSStyleDeclaration & { webkitUserSelect?: string }).webkitUserSelect = "none";
+  }
   el.appendChild(surface);
 
   let itemIndex = -1;
