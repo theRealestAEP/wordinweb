@@ -21,7 +21,7 @@ export type { RunFormatPatch, SelectionSegment, SelectionFormat } from "./edit/c
 export { selectionToSegments } from "./edit/selection.js";
 export { DocxEditor } from "./edit/editor.js";
 export { EditHistory } from "./edit/history.js";
-export { insertTableAfter, setParagraphAlignment, setPageLayout } from "./edit/blocks.js";
+export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, mergeParagraphBackward } from "./edit/blocks.js";
 export { applyTableOp, cellContextOf } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";
 export type { ParagraphAlignment, PageLayoutPatch } from "./edit/blocks.js";

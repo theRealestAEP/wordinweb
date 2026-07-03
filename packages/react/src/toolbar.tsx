@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { DocxViewApi } from "./index.js";
 
 const FONTS = [
@@ -101,15 +101,126 @@ function ActionMenu({
   );
 }
 
+/** Google-Docs-style table menu: hover grid picker + row/column operations. */
+function TableMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const ROWS = 8, COLS = 10;
+  const ops: [string, string][] = [
+    ["rowAbove", "Insert row above"],
+    ["rowBelow", "Insert row below"],
+    ["deleteRow", "Delete row"],
+    ["colLeft", "Insert column left"],
+    ["colRight", "Insert column right"],
+    ["deleteCol", "Delete column"],
+    ["deleteTable", "Delete table"],
+  ];
+
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        title="Table"
+        style={btnStyle(open)}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpen(!open)}
+      >
+        Table ▾
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: 28,
+            left: 0,
+            zIndex: 100,
+            background: "#fff",
+            border: "1px solid #dadce0",
+            borderRadius: 6,
+            boxShadow: "0 4px 16px rgba(0,0,0,.15)",
+            padding: 8,
+            width: COLS * 18 + 16,
+          }}
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          <div style={{ fontSize: 12, color: "#5f6368", marginBottom: 4 }}>
+            {hover.r > 0 ? `${hover.r} × ${hover.c}` : "Insert table"}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 16px)`, gap: 2 }}>
+            {Array.from({ length: ROWS * COLS }, (_, i) => {
+              const r = Math.floor(i / COLS) + 1;
+              const c = (i % COLS) + 1;
+              const lit = r <= hover.r && c <= hover.c;
+              return (
+                <div
+                  key={i}
+                  onMouseEnter={() => setHover({ r, c })}
+                  onClick={() => {
+                    api?.insertTable(r, c);
+                    setOpen(false);
+                    setHover({ r: 0, c: 0 });
+                  }}
+                  style={{
+                    width: 16,
+                    height: 16,
+                    border: `1px solid ${lit ? "#1a73e8" : "#dadce0"}`,
+                    background: lit ? "#dfe7f5" : "#fff",
+                    borderRadius: 2,
+                    cursor: "pointer",
+                  }}
+                />
+              );
+            })}
+          </div>
+          <div style={{ borderTop: "1px solid #eee", marginTop: 8, paddingTop: 4 }}>
+            {ops.map(([op, label]) => (
+              <div
+                key={op}
+                onClick={() => {
+                  api?.tableOp(op as Parameters<NonNullable<typeof api>["tableOp"]>[0]);
+                  setOpen(false);
+                }}
+                style={{ padding: "4px 6px", fontSize: 13, cursor: "pointer", borderRadius: 4, color: "#3c4043" }}
+                onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#f1f3f4")}
+                onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
+              >
+                {label}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 /**
  * Default formatting toolbar for an editable DocxView. Compact, grouped like
  * a word processor; every control preserves the selection/caret.
  */
 export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?: (bytes: Uint8Array) => void }) {
   const [fmt, setFmt] = useState<ReturnType<NonNullable<DocxViewApi["getSelectionFormat"]>> | null>(null);
+  // Native <select>/<input type=color> steal focus and collapse the document
+  // selection; remember the last real range and restore it before applying.
+  const savedRange = useRef<Range | null>(null);
+  const imageInput = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(() => {
-    setFmt(api?.getSelectionFormat() ?? null);
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+      savedRange.current = sel.getRangeAt(0).cloneRange();
+      setFmt(api?.getSelectionFormat() ?? null);
+    }
   }, [api]);
 
   useEffect(() => {
@@ -117,9 +228,22 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
     return () => document.removeEventListener("selectionchange", refresh);
   }, [refresh]);
 
+  const restoreSelection = () => {
+    const sel = window.getSelection();
+    if (sel && sel.isCollapsed && savedRange.current) {
+      try {
+        sel.removeAllRanges();
+        sel.addRange(savedRange.current);
+      } catch {
+        /* range may be stale after re-render */
+      }
+    }
+  };
+
   const apply = (patch: Parameters<DocxViewApi["applyFormat"]>[0]) => {
+    restoreSelection();
     api?.applyFormat(patch);
-    refresh();
+    setFmt(api?.getSelectionFormat() ?? null);
   };
 
   return (
@@ -193,32 +317,17 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
       <Btn label={"≢"} title="Align right" onClick={() => api?.setAlignment("right")} />
       <Btn label={"☰"} title="Justify" onClick={() => api?.setAlignment("justify")} />
       <Sep />
-      <ActionMenu
-        label="Table"
-        title="Insert or edit table"
-        width={64}
-        groups={[
-          { label: "Insert", items: [["i:2x2", "2 × 2"], ["i:3x3", "3 × 3"], ["i:4x4", "4 × 4"], ["i:2x5", "2 × 5"]] },
-          {
-            label: "Rows / columns (at caret)",
-            items: [
-              ["op:rowAbove", "Insert row above"],
-              ["op:rowBelow", "Insert row below"],
-              ["op:deleteRow", "Delete row"],
-              ["op:colLeft", "Insert column left"],
-              ["op:colRight", "Insert column right"],
-              ["op:deleteCol", "Delete column"],
-            ],
-          },
-          { label: "Table", items: [["op:deleteTable", "Delete table"]] },
-        ]}
-        onPick={(v) => {
-          if (v.startsWith("i:")) {
-            const [r, c] = v.slice(2).split("x").map(Number);
-            api?.insertTable(r, c);
-          } else {
-            api?.tableOp(v.slice(3) as Parameters<NonNullable<typeof api>["tableOp"]>[0]);
-          }
+      <TableMenu api={api} />
+      <Btn label={"🖼"} title="Insert image" onClick={() => imageInput.current?.click()} />
+      <input
+        ref={imageInput}
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void api?.insertImage(f);
+          e.target.value = "";
         }}
       />
       <ActionMenu

@@ -34,6 +34,8 @@ interface Caret {
 
 export class DocxEditor {
   private caret: Caret | null = null;
+  /** Header/footer editing is gated behind double-click, like Word. */
+  private inHeaderFooter = false;
   private caretEl: HTMLDivElement;
   private blinkTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -201,6 +203,18 @@ export class DocxEditor {
     const caret =
       this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     if (caret) {
+      const region = this.regionOf(caret.t);
+      if (region === "hf") {
+        // Word UX: single clicks in the header/footer do nothing until the
+        // user double-clicks in; afterwards single clicks work normally.
+        if (!this.inHeaderFooter && e.detail < 2) {
+          this.hideCaret();
+          return;
+        }
+        this.inHeaderFooter = true;
+      } else {
+        this.inHeaderFooter = false;
+      }
       this.caret = caret;
       this.positionCaret();
       this.host.container.focus({ preventScroll: true });
@@ -208,6 +222,18 @@ export class DocxEditor {
       this.hideCaret();
     }
   };
+
+  /** Which part tree the element lives in: document body or header/footer. */
+  private regionOf(t: XmlElement): "body" | "hf" {
+    let cur: XmlElement | undefined = t;
+    let root: XmlElement | undefined;
+    while (cur) {
+      root = cur;
+      cur = this.host.doc.findParentOf(cur);
+    }
+    const ln = root ? localName(root.name) : "";
+    return ln === "hdr" || ln === "ftr" ? "hf" : "body";
+  }
 
   /**
    * Snap to the closest character boundary on the clicked line — makes

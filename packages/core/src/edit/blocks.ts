@@ -245,3 +245,60 @@ export function siblingParagraph(doc: DocxDocument, pEl: XmlElement, dir: -1 | 1
   const sib = parent.children[idx + dir];
   return sib && localName(sib.name) === "p" ? sib : null;
 }
+
+const EMU_PER_PX = 9525;
+const NS_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+const NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const NS_PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture";
+const NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+/**
+ * Insert an inline image (already registered via doc.addImageResource) after
+ * the run containing the caret. Namespaces are declared on the drawing
+ * subtree so the document root needs no changes.
+ */
+export function insertImageAt(
+  doc: DocxDocument,
+  caretT: XmlElement,
+  relId: string,
+  widthPx: number,
+  heightPx: number,
+): boolean {
+  const rEl = doc.findParentOf(caretT);
+  if (!rEl || localName(rEl.name) !== "r") return false;
+  const parent = doc.findParentOf(rEl);
+  if (!parent) return false;
+  const w = prefixOf(rEl);
+  const cx = String(Math.round(widthPx * EMU_PER_PX));
+  const cy = String(Math.round(heightPx * EMU_PER_PX));
+  const id = String(doc.nextDrawingId());
+
+  const drawing = el(`${w}drawing`, {}, [
+    el("wp:inline", { "xmlns:wp": NS_WP, distT: "0", distB: "0", distL: "0", distR: "0" }, [
+      el("wp:extent", { cx, cy }),
+      el("wp:docPr", { id, name: `Picture ${id}` }),
+      el("a:graphic", { "xmlns:a": NS_A }, [
+        el("a:graphicData", { uri: NS_PIC }, [
+          el("pic:pic", { "xmlns:pic": NS_PIC }, [
+            el("pic:nvPicPr", {}, [
+              el("pic:cNvPr", { id, name: `Picture ${id}` }),
+              el("pic:cNvPicPr"),
+            ]),
+            el("pic:blipFill", {}, [
+              el("a:blip", { "xmlns:r": NS_R, "r:embed": relId }),
+              el("a:stretch", {}, [el("a:fillRect")]),
+            ]),
+            el("pic:spPr", {}, [
+              el("a:xfrm", {}, [el("a:off", { x: "0", y: "0" }), el("a:ext", { cx, cy })]),
+              el("a:prstGeom", { prst: "rect" }, [el("a:avLst")]),
+            ]),
+          ]),
+        ]),
+      ]),
+    ]),
+  ]);
+  const run = el(`${w}r`, {}, [drawing]);
+  parent.children.splice(parent.children.indexOf(rEl) + 1, 0, run);
+  doc.refresh();
+  return true;
+}

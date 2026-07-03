@@ -45,6 +45,10 @@ export class DocxDocument {
   private readonly docRoot: XmlElement;
   private readonly hfParts: { relId: string; target: string; root: XmlElement; isHeader: boolean; rels: Relationships }[] = [];
   private readonly ctxBase: { theme: Theme };
+  private readonly relsPath: string;
+  private relsRoot: XmlElement | null = null;
+  private contentTypesRoot: XmlElement | null = null;
+  private nextDocPrId = 1000;
 
   private constructor(pkg: Package) {
     this.pkg = pkg;
@@ -60,10 +64,10 @@ export class DocxDocument {
     this.styles = parseStyles(this.readXmlOptional(docDir + "styles.xml"), this.ctxBase);
     this.numbering = parseNumbering(this.readXmlOptional(docDir + "numbering.xml"), this.ctxBase);
 
-    this.documentRels = parseRelationships(
-      this.readXmlOptional(relsPathFor(docPart)),
-      docPart,
-    );
+    this.relsPath = relsPathFor(docPart);
+    this.relsRoot = this.readXmlOptional(this.relsPath) ?? null;
+    this.contentTypesRoot = this.readXmlOptional("[Content_Types].xml") ?? null;
+    this.documentRels = parseRelationships(this.relsRoot ?? undefined, docPart);
 
     const docRoot = this.readXmlOptional(docPart);
     if (!docRoot) throw new Error(`Missing ${docPart} in package`);
@@ -146,7 +150,73 @@ export class DocxDocument {
     for (const part of this.hfParts) {
       files[part.target] = strToU8(serializeXml(part.root, true));
     }
+    if (this.relsRoot) files[this.relsPath] = strToU8(serializeXml(this.relsRoot, true));
+    if (this.contentTypesRoot) files["[Content_Types].xml"] = strToU8(serializeXml(this.contentTypesRoot, true));
     return zipSync(files);
+  }
+
+  /** Fresh unique docPr id for inserted drawings. */
+  nextDrawingId(): number {
+    return this.nextDocPrId++;
+  }
+
+  /**
+   * Add image bytes as a new media part + relationship (+ content-type
+   * default). Returns the relationship id for use in a w:drawing.
+   */
+  addImageResource(bytes: Uint8Array, ext: string): string {
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    // Unique media name
+    let n = 1;
+    while (this.pkg.has(`${docDir}media/image${n}.${ext}`)) n++;
+    const part = `${docDir}media/image${n}.${ext}`;
+    this.pkg.raw()[part] = bytes;
+
+    // Relationship
+    if (!this.relsRoot) {
+      this.relsRoot = {
+        name: "Relationships",
+        attrs: { xmlns: "http://schemas.openxmlformats.org/package/2006/relationships" },
+        children: [],
+        text: "",
+      };
+    }
+    let maxId = 0;
+    for (const r of this.relsRoot.children) {
+      const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+      if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+    }
+    const relId = `rId${maxId + 1}`;
+    this.relsRoot.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: relId,
+        Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        Target: `media/image${n}.${ext}`,
+      },
+      children: [],
+      text: "",
+    });
+    this.documentRels.set(relId, { id: relId, type: "image", target: part, external: false });
+
+    // Content type default for the extension
+    const MIME: Record<string, string> = {
+      png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+    };
+    if (this.contentTypesRoot && MIME[ext]) {
+      const has = this.contentTypesRoot.children.some(
+        (c) => c.name.endsWith("Default") && (c.attrs["Extension"] ?? "").toLowerCase() === ext,
+      );
+      if (!has) {
+        this.contentTypesRoot.children.unshift({
+          name: "Default",
+          attrs: { Extension: ext, ContentType: MIME[ext] },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    return relId;
   }
 
   static load(data: ArrayBuffer | Uint8Array): DocxDocument {

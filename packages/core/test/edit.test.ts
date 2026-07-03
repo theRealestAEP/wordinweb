@@ -297,3 +297,37 @@ describe("paragraph merge", () => {
     expect(mergeParagraphBackward(doc, pEl)).toBe(false);
   });
 });
+
+describe("image insertion", () => {
+  it("adds media, relationship, content type, and inline drawing that round-trips", async () => {
+    const { insertImageAt } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(p("caption here"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    const relId = doc.addImageResource(png, "png");
+    expect(relId).toMatch(/^rId\d+$/);
+    expect(insertImageAt(doc, t as never, relId, 200, 100)).toBe(true);
+
+    // model sees the image
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    const imgs = para.children.flatMap((c) =>
+      c.type === "run" ? c.content.filter((rc) => rc.kind === "image") : [],
+    );
+    expect(imgs.length).toBe(1);
+    if (imgs[0].kind !== "image") throw new Error("not image");
+    expect(imgs[0].width).toBeCloseTo(200, 0);
+    expect(doc.media(imgs[0].part)).toBeDefined();
+
+    // full zip round trip
+    const reloaded = DocxDocument.load(doc.save());
+    const rpara = reloaded.sections[0].blocks[0] as Paragraph;
+    const rimgs = rpara.children.flatMap((c) =>
+      c.type === "run" ? c.content.filter((rc) => rc.kind === "image") : [],
+    );
+    expect(rimgs.length).toBe(1);
+    if (rimgs[0].kind !== "image") throw new Error("not image");
+    expect(reloaded.media(rimgs[0].part)?.length).toBe(png.length);
+    expect(reloaded.pkg.text("[Content_Types].xml")).toContain('Extension="png"');
+  });
+});

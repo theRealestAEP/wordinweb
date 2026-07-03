@@ -11,6 +11,7 @@ import {
   TableOp,
   applyRunFormat,
   applyTableOp,
+  insertImageAt,
   insertTableAfter,
   layoutDocument,
   renderToDom,
@@ -31,6 +32,8 @@ export interface DocxViewApi {
   insertTable(rows: number, cols: number): void;
   /** Row/column/table operations on the table containing the caret. */
   tableOp(op: TableOp): void;
+  /** Insert an image file at the caret (inline, natural size clamped to column). */
+  insertImage(file: Blob): Promise<void>;
   /** Align the paragraph(s) under the caret or selection. */
   setAlignment(align: ParagraphAlignment): void;
   /** Change margins / page size / orientation (inches). */
@@ -180,6 +183,22 @@ export function DocxView({
             if (!caret) return;
             history.checkpoint();
             if (applyTableOp(doc, caret.t, op)) pages = rerender(doc);
+          },
+          insertImage: async (file) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return;
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            const bmp = await createImageBitmap(new Blob([bytes.buffer as ArrayBuffer]));
+            const sp = doc.sections[0]?.props;
+            const maxW = sp ? sp.pageWidth - sp.marginLeft - sp.marginRight : 624;
+            const scale = Math.min(1, maxW / bmp.width);
+            const ext = (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
+            history.checkpoint();
+            const relId = doc.addImageResource(bytes, ext === "jpg" ? "jpeg" : ext);
+            if (insertImageAt(doc, caret.t, relId, bmp.width * scale, bmp.height * scale)) {
+              pages = rerender(doc);
+            }
+            bmp.close();
           },
           setAlignment: (align) => {
             if (!handle) return;
