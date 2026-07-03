@@ -610,6 +610,22 @@ export class DocxEditor {
 
     el.parentElement!.appendChild(overlay);
     this.imageOverlay = overlay;
+    this.host.container.focus({ preventScroll: true });
+  }
+
+  private deleteSelectedImage(): void {
+    if (!this.selectedImage) return;
+    const src = this.selectedImage.src;
+    this.host.history?.checkpoint();
+    let run: XmlElement | undefined = this.host.doc.findParentOf(src);
+    while (run && localName(run.name) !== "r") run = this.host.doc.findParentOf(run);
+    const parent = run ? this.host.doc.findParentOf(run) : undefined;
+    if (run && parent) {
+      parent.children.splice(parent.children.indexOf(run), 1);
+      this.host.doc.refresh();
+      this.host.rerender();
+    }
+    this.deselectImage();
   }
 
   private currentWrap(drawingEl: XmlElement): "square" | "topAndBottom" | "none" {
@@ -872,6 +888,13 @@ export class DocxEditor {
   // ---------- keyboard ----------
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    // A selected image is deleted by Backspace/Delete regardless of caret
+    // state (selecting an image hides the caret).
+    if ((e.key === "Backspace" || e.key === "Delete") && this.selectedImage) {
+      e.preventDefault();
+      this.deleteSelectedImage();
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
       e.preventDefault();
       this.applyHistory(e.shiftKey ? "redo" : "undo");
@@ -905,21 +928,6 @@ export class DocxEditor {
     const hasRange = this.hasSelection();
     if (!this.caret && !hasRange) return;
 
-    if ((e.key === "Backspace" || e.key === "Delete") && this.selectedImage) {
-      e.preventDefault();
-      const src = this.selectedImage.src;
-      this.host.history?.checkpoint();
-      let run: XmlElement | undefined = this.host.doc.findParentOf(src);
-      while (run && localName(run.name) !== "r") run = this.host.doc.findParentOf(run);
-      const parent = run ? this.host.doc.findParentOf(run) : undefined;
-      if (run && parent) {
-        parent.children.splice(parent.children.indexOf(run), 1);
-        this.host.doc.refresh();
-        this.host.rerender();
-      }
-      this.deselectImage();
-      return;
-    }
     if (e.key.length === 1) {
       e.preventDefault();
       this.insertText(e.key);
