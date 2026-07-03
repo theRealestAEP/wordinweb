@@ -153,6 +153,8 @@ export interface ImageContent {
   height: number;
   /** True when the drawing is floating (wp:anchor); v1 lays it out inline. */
   anchored?: boolean;
+  /** Source w:drawing (or pict) element, for resize/move editing. */
+  srcDrawing?: XmlElement;
 }
 export interface FieldContent {
   kind: "field";

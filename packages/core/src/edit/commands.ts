@@ -36,11 +36,19 @@ export interface RunFormatPatch {
   fontFamily?: string;
 }
 
+/** A formatted char-range in the post-edit XML (for re-selection). */
+export interface FormattedRange {
+  t: XmlElement;
+  start: number;
+  end: number;
+}
+
 export function applyRunFormat(
   doc: DocxDocument,
   segments: SelectionSegment[],
   patch: RunFormatPatch,
-): void {
+): FormattedRange[] {
+  const formatted: FormattedRange[] = [];
   // Group by run; merge ranges on the same w:t.
   const byRun = new Map<Run, SelectionSegment[]>();
   for (const seg of segments) {
@@ -77,23 +85,22 @@ export function applyRunFormat(
       wholeRun ||
       (tTargets.size >= countTextChildren(rEl) && fullyCovered);
 
-    if (coversAllTs) {
+    if (coversAllTs || !parent || tTargets.size !== 1) {
+      // Whole-run formatting (also the safe fallback for multi-t partials).
       setRunProps(rEl, patch);
-      continue;
-    }
-
-    if (!parent || tTargets.size !== 1) {
-      // Can't split safely (no parent ref or multi-t partial selection):
-      // fall back to whole-run formatting.
-      setRunProps(rEl, patch);
+      for (const c of rEl.children) {
+        if (localName(c.name) === "t") formatted.push({ t: c, start: 0, end: c.text.length });
+      }
       continue;
     }
 
     const [t, range] = Array.from(tTargets)[0];
-    splitAndFormat(parent, rEl, t, range.start, range.end, patch);
+    const middleT = splitAndFormat(parent, rEl, t, range.start, range.end, patch);
+    if (middleT) formatted.push({ t: middleT, start: 0, end: middleT.text.length });
   }
 
   doc.refresh();
+  return formatted;
 }
 
 function countTextChildren(rEl: XmlElement): number {
@@ -111,15 +118,15 @@ function splitAndFormat(
   start: number,
   end: number,
   patch: RunFormatPatch,
-): void {
+): XmlElement | null {
   const idx = parent.children.indexOf(rEl);
   const tIdx = rEl.children.indexOf(t);
-  if (idx === -1 || tIdx === -1) return;
+  if (idx === -1 || tIdx === -1) return null;
 
   const text = t.text;
   start = Math.max(0, Math.min(start, text.length));
   end = Math.max(start, Math.min(end, text.length));
-  if (start === end) return;
+  if (start === end) return null;
 
   const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
   const prefix = rEl.name.includes(":") ? rEl.name.slice(0, rEl.name.indexOf(":") + 1) : "";
@@ -145,7 +152,8 @@ function splitAndFormat(
   if (start > 0) beforeChildren.push(makeT(text.slice(0, start)));
   if (beforeChildren.length > 0) newRuns.push(makeRun(beforeChildren));
 
-  const middle = makeRun([makeT(text.slice(start, end))]);
+  const middleT = makeT(text.slice(start, end));
+  const middle = makeRun([middleT]);
   setRunProps(middle, patch);
   newRuns.push(middle);
 
@@ -156,6 +164,7 @@ function splitAndFormat(
 
   parent.children.splice(idx, 1, ...newRuns);
   void prefix;
+  return middleT;
 }
 
 // ---------- rPr mutation ----------

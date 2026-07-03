@@ -241,7 +241,10 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
         break;
       case "drawing": {
         const img = parseDrawing(el, ctx);
-        if (img) run.content.push(img);
+        if (img) {
+          if (img.kind === "image") img.srcDrawing = el;
+          run.content.push(img);
+        }
         break;
       }
       case "pict":
@@ -255,12 +258,14 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
         const choiceDrawing = choice ? child(choice, "drawing") : undefined;
         const img = choiceDrawing ? parseDrawing(choiceDrawing, ctx) : null;
         if (img) {
+          if (img.kind === "image") img.srcDrawing = choiceDrawing;
           run.content.push(img);
         } else {
           const fallback = child(el, "Fallback");
           const fbDrawing = fallback ? child(fallback, "drawing") : undefined;
           const fbImg = fbDrawing ? parseDrawing(fbDrawing, ctx) : null;
           if (fbImg) {
+            if (fbImg.kind === "image") fbImg.srcDrawing = fbDrawing;
             run.content.push(fbImg);
           } else {
             const pictEl = fallback ? child(fallback, "pict") : undefined;

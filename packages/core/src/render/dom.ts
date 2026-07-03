@@ -1,5 +1,5 @@
 import { DocxDocument } from "../docx.js";
-import { GripItem, LaidOutPage, LayoutResult, PageItem, TextItem } from "../layout/types.js";
+import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem } from "../layout/types.js";
 import { cssFont } from "../layout/measure.js";
 import { Border } from "../model.js";
 
@@ -24,13 +24,20 @@ export interface GripBinding {
   item: GripItem;
 }
 
+export interface ImageBinding {
+  el: HTMLElement;
+  item: ImageItem;
+}
+
 export interface RenderHandle {
   /** Root element containing all pages. */
   root: HTMLElement;
   /** Rendered text elements in paint order, for selection mapping. */
   bindings: TextBinding[];
-  /** Table column-resize grips (only when options.interactive). */
+  /** Table resize grips (only when options.interactive). */
   grips: GripBinding[];
+  /** Rendered images, for interactive select/resize/move. */
+  images: ImageBinding[];
   /** Revoke object URLs etc. */
   destroy: () => void;
 }
@@ -63,6 +70,7 @@ export function renderToDom(
   const urls: string[] = [];
   const bindings: TextBinding[] = [];
   const grips: GripBinding[] = [];
+  const images: ImageBinding[] = [];
 
   const root = document.createElement("div");
   root.className = "dxw-pages";
@@ -73,7 +81,7 @@ export function renderToDom(
   root.style.padding = `${gap}px 0`;
 
   for (const page of layout.pages) {
-    root.appendChild(renderPage(doc, page, zoom, urls, options, bindings, grips));
+    root.appendChild(renderPage(doc, page, zoom, urls, options, bindings, grips, images));
   }
 
   container.appendChild(root);
@@ -81,6 +89,7 @@ export function renderToDom(
     root,
     bindings,
     grips,
+    images,
     destroy: () => {
       for (const u of urls) URL.revokeObjectURL(u);
       root.remove();
@@ -96,6 +105,7 @@ function renderPage(
   options: RenderOptions,
   bindings: TextBinding[],
   grips: GripBinding[],
+  images: ImageBinding[],
 ): HTMLElement {
   const el = document.createElement("div");
   el.className = "dxw-page";
@@ -126,11 +136,19 @@ function renderPage(
       if (!options.interactive) continue;
       const g = document.createElement("div");
       g.style.position = "absolute";
-      g.style.left = `${item.x - 3}px`;
-      g.style.top = `${item.y1}px`;
-      g.style.width = "6px";
-      g.style.height = `${item.y2 - item.y1}px`;
-      g.style.cursor = "col-resize";
+      if (item.axis === "col") {
+        g.style.left = `${item.x - 3}px`;
+        g.style.top = `${item.y1}px`;
+        g.style.width = "6px";
+        g.style.height = `${item.y2 - item.y1}px`;
+        g.style.cursor = "col-resize";
+      } else {
+        g.style.left = `${item.x}px`;
+        g.style.top = `${item.y1 - 3}px`;
+        g.style.width = `${(item.x2 ?? item.x) - item.x}px`;
+        g.style.height = "6px";
+        g.style.cursor = "row-resize";
+      }
       g.style.zIndex = "5";
       g.dataset.dxwGrip = String(grips.length);
       surface.appendChild(g);
@@ -141,6 +159,10 @@ function renderPage(
     if (node) {
       surface.appendChild(node);
       if (item.kind === "text") bindings.push({ el: node, item });
+      if (item.kind === "image") {
+        (node as HTMLImageElement).draggable = false;
+        images.push({ el: node, item });
+      }
     }
   }
   return el;

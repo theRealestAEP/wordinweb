@@ -413,6 +413,7 @@ class Engine {
           width: span.image.width,
           height: span.image.height,
           part: span.image.part,
+          src: span.image.srcDrawing,
         });
         continue;
       }
@@ -730,6 +731,20 @@ class Engine {
       }
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
       this.y += rowHeight;
+      if (tbl.src) {
+        const tw = widths.reduce((a, b) => a + b, 0);
+        this.cur.items.push({
+          kind: "grip",
+          axis: "row",
+          x: x0,
+          x2: x0 + tw,
+          y1: this.y,
+          y2: this.y,
+          tbl: tbl.src,
+          boundary: ri,
+          rowHeightPx: rowHeight,
+        });
+      }
     }
     this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
   }
@@ -747,7 +762,7 @@ class Engine {
     let x = x0;
     for (let b = 1; b <= widths.length; b++) {
       x += widths[b - 1];
-      page.items.push({ kind: "grip", x, y1: top, y2: bottom, tbl: tbl.src, boundary: b });
+      page.items.push({ kind: "grip", axis: "col", x, y1: top, y2: bottom, tbl: tbl.src, boundary: b });
     }
   }
 

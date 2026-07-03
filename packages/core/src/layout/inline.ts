@@ -47,6 +47,7 @@ interface ImageAtom {
   part: string;
   width: number;
   height: number;
+  srcDrawing?: XmlElement;
 }
 interface DrawingAtom {
   kind: "drawing";
@@ -83,7 +84,7 @@ export interface LineSpan {
   x: number;
   width: number;
   text?: string;
-  image?: { part: string; width: number; height: number };
+  image?: { part: string; width: number; height: number; srcDrawing?: XmlElement };
   drawing?: DrawingContent;
   props: RunProps;
   font: FontSpec;
@@ -280,7 +281,10 @@ export function breakParagraph(
       cur.push({
         x,
         width: w,
-        image: atom.kind === "image" ? { part: atom.part, width: w, height: h } : undefined,
+        image:
+          atom.kind === "image"
+            ? { part: atom.part, width: w, height: h, srcDrawing: atom.srcDrawing }
+            : undefined,
         drawing: atom.kind === "drawing" ? atom.drawing : undefined,
         props: {},
         font: fontOf({}, fallbackFamily),
@@ -496,7 +500,13 @@ function buildAtoms(
           atoms.push({ kind: "break", breakType: content.breakType });
           break;
         case "image":
-          atoms.push({ kind: "image", part: content.part, width: content.width, height: content.height });
+          atoms.push({
+            kind: "image",
+            part: content.part,
+            width: content.width,
+            height: content.height,
+            srcDrawing: content.srcDrawing,
+          });
           break;
         case "anchor":
           anchors.push(content.shape);

@@ -241,3 +241,83 @@ export function resizeTableColumn(
   doc.refresh();
   return true;
 }
+
+/** Drag-resize a table row: set trHeight (atLeast) on the given row. */
+export function resizeTableRow(
+  doc: DocxDocument,
+  tblEl: XmlElement,
+  rowIdx: number,
+  newHeightPx: number,
+): boolean {
+  const rows = rowsOf(tblEl);
+  const tr = rows[rowIdx];
+  if (!tr) return false;
+  const w = prefixOf(tr);
+  let trPr = tr.children.find((c) => localName(c.name) === "trPr");
+  if (!trPr) {
+    trPr = { name: `${w}trPr`, attrs: {}, children: [], text: "" };
+    tr.children.unshift(trPr);
+  }
+  const tw = String(Math.max(Math.round(pxToTwips(newHeightPx)), 120));
+  let h = trPr.children.find((c) => localName(c.name) === "trHeight");
+  if (!h) {
+    h = { name: `${w}trHeight`, attrs: {}, children: [], text: "" };
+    trPr.children.push(h);
+  }
+  const valKey = Object.keys(h.attrs).find((k) => localName(k) === "val") ?? `${w}val`;
+  const ruleKey = Object.keys(h.attrs).find((k) => localName(k) === "hRule") ?? `${w}hRule`;
+  h.attrs[valKey] = tw;
+  if (h.attrs[ruleKey] !== "exact") h.attrs[ruleKey] = "atLeast";
+  doc.refresh();
+  return true;
+}
+
+/** Set the extents of an inline drawing (wp:extent + a:ext), px. */
+export function resizeDrawing(
+  doc: DocxDocument,
+  drawingEl: XmlElement,
+  widthPx: number,
+  heightPx: number,
+): boolean {
+  const EMU = 9525;
+  const cx = String(Math.max(Math.round(widthPx * EMU), EMU));
+  const cy = String(Math.max(Math.round(heightPx * EMU), EMU));
+  let touched = false;
+  const walk = (el: XmlElement) => {
+    const ln = localName(el.name);
+    if (ln === "extent" || ln === "ext") {
+      const cxKey = Object.keys(el.attrs).find((k) => localName(k) === "cx") ?? "cx";
+      const cyKey = Object.keys(el.attrs).find((k) => localName(k) === "cy") ?? "cy";
+      el.attrs[cxKey] = cx;
+      el.attrs[cyKey] = cy;
+      touched = true;
+    }
+    for (const c of el.children) walk(c);
+  };
+  walk(drawingEl);
+  if (touched) doc.refresh();
+  return touched;
+}
+
+/** Move the run containing a drawing to sit after the run containing targetT. */
+export function moveDrawingTo(
+  doc: DocxDocument,
+  drawingEl: XmlElement,
+  targetT: XmlElement,
+): boolean {
+  // Climb from the drawing to its w:r
+  let imgRun: XmlElement | undefined = doc.findParentOf(drawingEl);
+  while (imgRun && localName(imgRun.name) !== "r") imgRun = doc.findParentOf(imgRun);
+  if (!imgRun) return false;
+  const imgParent = doc.findParentOf(imgRun);
+  let destRun: XmlElement | undefined = doc.findParentOf(targetT);
+  while (destRun && localName(destRun.name) !== "r") destRun = doc.findParentOf(destRun);
+  if (!imgParent || !destRun) return false;
+  const destParent = doc.findParentOf(destRun);
+  if (!destParent) return false;
+  if (destRun === imgRun) return false;
+  imgParent.children.splice(imgParent.children.indexOf(imgRun), 1);
+  destParent.children.splice(destParent.children.indexOf(destRun) + 1, 0, imgRun);
+  doc.refresh();
+  return true;
+}

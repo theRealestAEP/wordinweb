@@ -66,18 +66,27 @@ export interface ImageItem {
   height: number;
   /** Package part path; renderer resolves bytes via DocxDocument.media(). */
   part: string;
+  /** Source w:drawing element (for interactive resize/move). */
+  src?: XmlElement;
 }
 
-/** Interactive column-resize zone over a table's vertical boundary. */
+/** Interactive resize zone over a table boundary (column or row). */
 export interface GripItem {
   kind: "grip";
+  /** "col": vertical zone at x spanning y1..y2. "row": horizontal zone at y1
+   * spanning x..x2. */
+  axis: "col" | "row";
   x: number;
   y1: number;
   y2: number;
+  /** Right edge for row grips. */
+  x2?: number;
   /** Source w:tbl element. */
   tbl: XmlElement;
-  /** Boundary index: 1..n (after column boundary-1); n = table right edge. */
+  /** col: boundary 1..n (n = right edge). row: row index above the boundary. */
   boundary: number;
+  /** Laid-out height of the row above (row grips), px. */
+  rowHeightPx?: number;
 }
 
 export type PageItem = TextItem | RectItem | LineEdgeItem | ImageItem | GripItem;

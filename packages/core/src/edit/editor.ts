@@ -4,7 +4,7 @@ import { XmlElement, cloneXml, localName } from "../xml.js";
 import { RenderHandle, TextBinding } from "../render/dom.js";
 import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
-import { resizeTableColumn } from "./tables.js";
+import { moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
 import { firstTextOf, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 
 /**
@@ -138,12 +138,14 @@ export class DocxEditor {
     this.commit();
   };
 
-  // ---------- table column drag-resize ----------
+  // ---------- table drag-resize (columns and rows) ----------
 
   private suppressNextMouseUp = false;
 
   private onGripMouseDown = (e: MouseEvent): void => {
-    const gripEl = (e.target as HTMLElement).closest?.("[data-dxw-grip]") as HTMLElement | null;
+    const target = e.target as HTMLElement;
+    if (this.startImageInteraction(e, target)) return;
+    const gripEl = target.closest?.("[data-dxw-grip]") as HTMLElement | null;
     if (!gripEl) return;
     const handle = this.host.getHandle();
     const grip = handle?.grips[parseInt(gripEl.dataset.dxwGrip ?? "-1", 10)];
@@ -151,33 +153,49 @@ export class DocxEditor {
     e.preventDefault();
     e.stopPropagation();
 
+    const isCol = grip.item.axis === "col";
     const surface = grip.el.parentElement!;
     const guide = document.createElement("div");
     guide.style.position = "absolute";
-    guide.style.left = `${grip.item.x}px`;
-    guide.style.top = `${grip.item.y1}px`;
-    guide.style.width = "1.5px";
-    guide.style.height = `${grip.item.y2 - grip.item.y1}px`;
     guide.style.background = "#1a73e8";
     guide.style.zIndex = "20";
     guide.style.pointerEvents = "none";
+    if (isCol) {
+      guide.style.left = `${grip.item.x}px`;
+      guide.style.top = `${grip.item.y1}px`;
+      guide.style.width = "1.5px";
+      guide.style.height = `${grip.item.y2 - grip.item.y1}px`;
+    } else {
+      guide.style.left = `${grip.item.x}px`;
+      guide.style.top = `${grip.item.y1}px`;
+      guide.style.width = `${(grip.item.x2 ?? grip.item.x) - grip.item.x}px`;
+      guide.style.height = "1.5px";
+    }
     surface.appendChild(guide);
 
     const zoom = this.host.zoom ?? 1;
     const startX = e.clientX;
+    const startY = e.clientY;
     let dx = 0;
+    let dy = 0;
     const onMove = (me: MouseEvent) => {
       dx = (me.clientX - startX) / zoom;
-      guide.style.left = `${grip.item.x + dx}px`;
+      dy = (me.clientY - startY) / zoom;
+      if (isCol) guide.style.left = `${grip.item.x + dx}px`;
+      else guide.style.top = `${grip.item.y1 + dy}px`;
     };
     const onUp = () => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       guide.remove();
       this.suppressNextMouseUp = true;
-      if (Math.abs(dx) >= 1) {
+      const delta = isCol ? dx : dy;
+      if (Math.abs(delta) >= 1) {
         this.host.history?.checkpoint();
-        if (resizeTableColumn(this.host.doc, grip.item.tbl, grip.item.boundary, dx)) {
+        const ok = isCol
+          ? resizeTableColumn(this.host.doc, grip.item.tbl, grip.item.boundary, dx)
+          : resizeTableRow(this.host.doc, grip.item.tbl, grip.item.boundary, (grip.item.rowHeightPx ?? 0) + dy);
+        if (ok) {
           this.host.rerender();
           this.positionCaret();
         }
@@ -187,6 +205,136 @@ export class DocxEditor {
     document.addEventListener("mouseup", onUp);
   };
 
+  // ---------- images: select, corner-resize, drag-move ----------
+
+  private selectedImage: { el: HTMLElement; src: XmlElement } | null = null;
+  private imageOverlay: HTMLDivElement | null = null;
+
+  private deselectImage(): void {
+    this.imageOverlay?.remove();
+    this.imageOverlay = null;
+    this.selectedImage = null;
+  }
+
+  private selectImage(el: HTMLElement, src: XmlElement): void {
+    this.deselectImage();
+    this.hideCaret();
+    this.selectedImage = { el, src };
+    const overlay = document.createElement("div");
+    overlay.style.position = "absolute";
+    overlay.style.left = el.style.left;
+    overlay.style.top = el.style.top;
+    overlay.style.width = el.style.width;
+    overlay.style.height = el.style.height;
+    overlay.style.border = "2px solid #1a73e8";
+    overlay.style.pointerEvents = "none";
+    overlay.style.zIndex = "9";
+    const handleEl = document.createElement("div");
+    handleEl.style.position = "absolute";
+    handleEl.style.right = "-6px";
+    handleEl.style.bottom = "-6px";
+    handleEl.style.width = "10px";
+    handleEl.style.height = "10px";
+    handleEl.style.background = "#1a73e8";
+    handleEl.style.borderRadius = "50%";
+    handleEl.style.cursor = "nwse-resize";
+    handleEl.style.pointerEvents = "auto";
+    handleEl.dataset.dxwImgHandle = "1";
+    overlay.appendChild(handleEl);
+    el.parentElement!.appendChild(overlay);
+    this.imageOverlay = overlay;
+  }
+
+  /** Handle mousedown on images / their resize handle. Returns true if consumed. */
+  private startImageInteraction(e: MouseEvent, target: HTMLElement): boolean {
+    const zoom = this.host.zoom ?? 1;
+
+    // Corner handle: aspect-locked resize
+    if (target.dataset.dxwImgHandle && this.selectedImage) {
+      e.preventDefault();
+      e.stopPropagation();
+      const { el, src } = this.selectedImage;
+      const w0 = parseFloat(el.style.width);
+      const h0 = parseFloat(el.style.height);
+      const startX = e.clientX;
+      let scale = 1;
+      const onMove = (me: MouseEvent) => {
+        scale = Math.max(0.05, (w0 + (me.clientX - startX) / zoom) / w0);
+        el.style.width = `${w0 * scale}px`;
+        el.style.height = `${h0 * scale}px`;
+        if (this.imageOverlay) {
+          this.imageOverlay.style.width = `${w0 * scale}px`;
+          this.imageOverlay.style.height = `${h0 * scale}px`;
+        }
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        this.suppressNextMouseUp = true;
+        if (Math.abs(scale - 1) > 0.01) {
+          this.host.history?.checkpoint();
+          if (resizeDrawing(this.host.doc, src, w0 * scale, h0 * scale)) {
+            this.host.rerender();
+          }
+        }
+        this.deselectImage();
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      return true;
+    }
+
+    // Click/drag on an image
+    if (target.tagName === "IMG") {
+      const handle = this.host.getHandle();
+      const binding = handle?.images.find((b) => b.el === target);
+      if (!binding?.item.src) return false;
+      e.preventDefault();
+      e.stopPropagation();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let moved = false;
+      let ghost: HTMLElement | null = null;
+      const onMove = (me: MouseEvent) => {
+        if (!moved && Math.hypot(me.clientX - startX, me.clientY - startY) > 5) {
+          moved = true;
+          ghost = target.cloneNode() as HTMLElement;
+          ghost.style.position = "fixed";
+          ghost.style.opacity = "0.5";
+          ghost.style.pointerEvents = "none";
+          ghost.style.zIndex = "1000";
+          document.body.appendChild(ghost);
+        }
+        if (ghost) {
+          ghost.style.left = `${me.clientX + 4}px`;
+          ghost.style.top = `${me.clientY + 4}px`;
+        }
+      };
+      const onUp = (me: MouseEvent) => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        ghost?.remove();
+        this.suppressNextMouseUp = true;
+        if (!moved) {
+          this.selectImage(target, binding.item.src!);
+          return;
+        }
+        const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
+        if (dest) {
+          this.host.history?.checkpoint();
+          if (moveDrawingTo(this.host.doc, binding.item.src!, dest.t)) {
+            this.host.rerender();
+          }
+        }
+        this.deselectImage();
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      return true;
+    }
+    return false;
+  }
+
   // ---------- caret placement ----------
 
   private onMouseUp = (e: MouseEvent): void => {
@@ -194,27 +342,34 @@ export class DocxEditor {
       this.suppressNextMouseUp = false;
       return;
     }
+    this.deselectImage();
     const sel = window.getSelection();
+    const caret =
+      this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
+    const region = caret ? this.regionOf(caret.t) : "body";
+
+    if (region === "hf" && !this.inHeaderFooter) {
+      // Word UX: double-click enters header/footer editing. The double-click
+      // also natively selects a word — clear it and place the caret instead.
+      if (e.detail >= 2 && caret) {
+        this.inHeaderFooter = true;
+        sel?.removeAllRanges();
+        this.caret = caret;
+        this.positionCaret();
+        this.host.container.focus({ preventScroll: true });
+      } else {
+        this.hideCaret();
+      }
+      return;
+    }
+    if (region === "body") this.inHeaderFooter = false;
+
     if (sel && !sel.isCollapsed) {
       // Range selection active — caret hidden; formatting/typing use it.
       this.hideCaret();
       return;
     }
-    const caret =
-      this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     if (caret) {
-      const region = this.regionOf(caret.t);
-      if (region === "hf") {
-        // Word UX: single clicks in the header/footer do nothing until the
-        // user double-clicks in; afterwards single clicks work normally.
-        if (!this.inHeaderFooter && e.detail < 2) {
-          this.hideCaret();
-          return;
-        }
-        this.inHeaderFooter = true;
-      } else {
-        this.inHeaderFooter = false;
-      }
       this.caret = caret;
       this.positionCaret();
       this.host.container.focus({ preventScroll: true });
@@ -242,10 +397,12 @@ export class DocxEditor {
   private nearestCaret(x: number, y: number): Caret | null {
     const handle = this.host.getHandle();
     if (!handle) return null;
+    const page = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(".dxw-page");
     let best: { binding: TextBinding; after: boolean } | null = null;
     let bestDist = Infinity;
     for (const b of handle.bindings) {
       if (!b.item.src?.t) continue;
+      if (page && b.el.closest(".dxw-page") !== page) continue;
       const r = b.el.getBoundingClientRect();
       if (y < r.top - 2 || y > r.bottom + 2) continue;
       const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
@@ -253,6 +410,27 @@ export class DocxEditor {
         bestDist = dx;
         best = { binding: b, after: x > r.right };
       }
+    }
+    if (!best) {
+      // Nothing on this line: snap to the closest line above the click on the
+      // same page (clicking blank space below text puts the caret at the end).
+      let bestAbove: TextBinding | null = null;
+      let bestBottom = -Infinity;
+      let bestRight = -Infinity;
+      for (const b of handle.bindings) {
+        if (!b.item.src?.t) continue;
+        if (page && b.el.closest(".dxw-page") !== page) continue;
+        const r = b.el.getBoundingClientRect();
+        if (r.bottom > y) continue;
+        if (r.bottom > bestBottom + 1 || (Math.abs(r.bottom - bestBottom) <= 1 && r.right > bestRight)) {
+          bestBottom = Math.max(bestBottom, r.bottom);
+          if (Math.abs(r.bottom - bestBottom) <= 1) {
+            bestAbove = b;
+            bestRight = r.right;
+          }
+        }
+      }
+      if (bestAbove) best = { binding: bestAbove, after: true };
     }
     if (!best) return null;
     const src = best.binding.item.src!;
@@ -312,6 +490,21 @@ export class DocxEditor {
     const hasRange = !!sel && !sel.isCollapsed;
     if (!this.caret && !hasRange) return;
 
+    if ((e.key === "Backspace" || e.key === "Delete") && this.selectedImage) {
+      e.preventDefault();
+      const src = this.selectedImage.src;
+      this.host.history?.checkpoint();
+      let run: XmlElement | undefined = this.host.doc.findParentOf(src);
+      while (run && localName(run.name) !== "r") run = this.host.doc.findParentOf(run);
+      const parent = run ? this.host.doc.findParentOf(run) : undefined;
+      if (run && parent) {
+        parent.children.splice(parent.children.indexOf(run), 1);
+        this.host.doc.refresh();
+        this.host.rerender();
+      }
+      this.deselectImage();
+      return;
+    }
     if (e.key.length === 1) {
       e.preventDefault();
       this.insertText(e.key);
