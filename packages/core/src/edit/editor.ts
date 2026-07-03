@@ -25,6 +25,8 @@ export interface EditorHost {
   zoom?: number;
   /** Shared undo/redo stack (also fed by toolbar formatting commands). */
   history?: EditHistory;
+  /** Cmd+B/I/U handler (host applies formatting and persists selection). */
+  onFormatShortcut?: (kind: "bold" | "italic" | "underline") => void;
 }
 
 interface Caret {
@@ -139,6 +141,143 @@ export class DocxEditor {
       else merged.push(seg);
     }
     return merged;
+  }
+
+  /** Current caret or selection-focus as a point (for keyboard extension). */
+  private focusPoint(): SelPoint | null {
+    if (this.selection) return this.selection.focus;
+    if (this.caret) return { t: this.caret.t, offset: this.caret.offset };
+    return null;
+  }
+
+  private anchorPoint(): SelPoint | null {
+    if (this.selection) return this.selection.anchor;
+    if (this.caret) return { t: this.caret.t, offset: this.caret.offset };
+    return null;
+  }
+
+  /** Step a point by one character across item boundaries in paint order. */
+  private stepPoint(pt: SelPoint, delta: -1 | 1): SelPoint | null {
+    const next = pt.offset + delta;
+    if (next >= 0 && next <= pt.t.text.length) return { t: pt.t, offset: next };
+    const handle = this.host.getHandle();
+    if (!handle) return null;
+    const bindings = handle.bindings.filter((b) => b.item.src?.t);
+    const idx = bindings.findIndex(
+      (b) =>
+        b.item.src!.t === pt.t &&
+        pt.offset >= b.item.src!.offset &&
+        pt.offset <= b.item.src!.offset + b.item.text.length,
+    );
+    const neighbor = bindings[idx + delta];
+    if (idx === -1 || !neighbor?.item.src?.t) return null;
+    const src = neighbor.item.src;
+    return {
+      t: src.t as XmlElement,
+      offset: delta === -1 ? src.offset + neighbor.item.text.length : src.offset,
+    };
+  }
+
+  /** Point one visual line above/below the focus, keeping the x position. */
+  private stepPointVertically(pt: SelPoint, dir: -1 | 1): SelPoint | null {
+    const handle = this.host.getHandle();
+    if (!handle) return null;
+    const binding = handle.bindings.find(
+      (b) =>
+        b.item.src?.t === pt.t &&
+        pt.offset >= b.item.src.offset &&
+        pt.offset <= b.item.src.offset + b.item.text.length,
+    );
+    if (!binding) return null;
+    const rect = binding.el.getBoundingClientRect();
+    const localFrac = binding.item.text.length
+      ? (pt.offset - binding.item.src!.offset) / binding.item.text.length
+      : 0;
+    const x = rect.left + rect.width * localFrac;
+    const lineH = Math.max(rect.height, 8);
+    for (let step = 1; step <= 6; step++) {
+      const y = dir === -1 ? rect.top - step * lineH * 0.9 : rect.bottom + step * lineH * 0.9 - lineH / 2;
+      const c = this.caretFromPoint(x, y) ?? this.nearestCaret(x, y);
+      if (c && !(c.t === pt.t && c.offset === pt.offset)) return { t: c.t, offset: c.offset };
+    }
+    return null;
+  }
+
+  /** First/last point of the focus's visual line. */
+  private lineEdgePoint(pt: SelPoint, edge: "start" | "end"): SelPoint | null {
+    const handle = this.host.getHandle();
+    if (!handle) return null;
+    const bindings = handle.bindings;
+    const idx = bindings.findIndex(
+      (b) =>
+        b.item.src?.t === pt.t &&
+        pt.offset >= b.item.src.offset &&
+        pt.offset <= b.item.src.offset + b.item.text.length,
+    );
+    if (idx === -1) return null;
+    const surface = bindings[idx].el.parentElement;
+    const top = bindings[idx].item.lineTop;
+    let i = idx;
+    const onSameLine = (k: number) =>
+      k >= 0 && k < bindings.length &&
+      bindings[k].el.parentElement === surface &&
+      Math.abs(bindings[k].item.lineTop - top) < 0.5 &&
+      !!bindings[k].item.src?.t;
+    if (edge === "start") {
+      while (onSameLine(i - 1)) i--;
+      const src = bindings[i].item.src!;
+      return { t: src.t as XmlElement, offset: src.offset };
+    }
+    while (onSameLine(i + 1)) i++;
+    const src = bindings[i].item.src!;
+    return { t: src.t as XmlElement, offset: src.offset + bindings[i].item.text.length };
+  }
+
+  private setSelectionOrCaret(anchor: SelPoint, focus: SelPoint): void {
+    if (anchor.t === focus.t && anchor.offset === focus.offset) {
+      this.clearSelection();
+      this.caret = { t: focus.t, run: this.caret?.run ?? ({} as Caret["run"]), offset: focus.offset };
+      this.positionCaret();
+      return;
+    }
+    this.hideCaret();
+    this.selection = { anchor, focus };
+    this.paintSelection();
+    this.notifySelection();
+  }
+
+  /** Extend (shift) or move the focus; used by keyboard selection. */
+  private moveFocus(compute: (pt: SelPoint) => SelPoint | null, extend: boolean): void {
+    const focus = this.focusPoint();
+    const anchor = this.anchorPoint();
+    if (!focus || !anchor) return;
+    const next = compute(focus);
+    if (!next) return;
+    if (extend) {
+      this.setSelectionOrCaret(anchor, next);
+    } else {
+      this.clearSelection();
+      this.caret = { t: next.t, run: this.caret?.run ?? ({} as Caret["run"]), offset: next.offset };
+      this.positionCaret();
+    }
+  }
+
+  selectAll(): void {
+    const handle = this.host.getHandle();
+    if (!handle) return;
+    const editable = handle.bindings.filter(
+      (b) => b.item.src?.t && this.regionOf(b.item.src.t as XmlElement) === (this.inHeaderFooter ? "hf" : "body"),
+    );
+    if (editable.length === 0) return;
+    const first = editable[0].item.src!;
+    const last = editable[editable.length - 1].item.src!;
+    this.hideCaret();
+    this.selection = {
+      anchor: { t: first.t as XmlElement, offset: first.offset },
+      focus: { t: last.t as XmlElement, offset: last.offset + editable[editable.length - 1].item.text.length },
+    };
+    this.paintSelection();
+    this.notifySelection();
   }
 
   /** Select the given post-edit ranges (used after formatting to persist). */
@@ -431,6 +570,22 @@ export class DocxEditor {
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
+  }
+
+  /** Select the whole paragraph containing the caret (triple-click). */
+  private selectParagraphAt(caret: Caret): void {
+    const pEl = paragraphOf(this.host.doc, caret.t);
+    if (!pEl) return;
+    const first = firstTextOf(pEl);
+    const last = lastTextOf(pEl);
+    if (!first || !last) return;
+    this.hideCaret();
+    this.selection = {
+      anchor: { t: first, offset: 0 },
+      focus: { t: last, offset: last.text.length },
+    };
+    this.paintSelection();
+    this.notifySelection();
   }
 
   /** Manual word selection on double-click (native selection is disabled). */
@@ -775,6 +930,17 @@ export class DocxEditor {
       this.inHeaderFooter = false;
     }
 
+    if (caret && e.shiftKey) {
+      const anchor = this.anchorPoint();
+      if (anchor) {
+        this.setSelectionOrCaret(anchor, { t: caret.t, offset: caret.offset });
+        return;
+      }
+    }
+    if (caret && e.detail >= 3) {
+      this.selectParagraphAt(caret);
+      return;
+    }
     if (caret && e.detail >= 2) {
       this.clearSelection();
       this.selectWordAt(caret);
@@ -924,7 +1090,44 @@ export class DocxEditor {
       }
       return;
     }
-    if (e.metaKey || e.ctrlKey || e.altKey) return; // let shortcuts through
+    const meta = e.metaKey || e.ctrlKey;
+    if (meta && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (k === "a") {
+        e.preventDefault();
+        this.selectAll();
+        return;
+      }
+      if (k === "b" || k === "i" || k === "u") {
+        if (this.hasSelection()) {
+          e.preventDefault();
+          this.host.onFormatShortcut?.(k === "b" ? "bold" : k === "i" ? "italic" : "underline");
+        }
+        return;
+      }
+      // Cmd+Left/Right = line start/end; Cmd+Up/Down = document start/end.
+      if (e.key.startsWith("Arrow")) {
+        e.preventDefault();
+        const extend = e.shiftKey;
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          this.moveFocus((pt) => this.lineEdgePoint(pt, e.key === "ArrowLeft" ? "start" : "end"), extend);
+        } else {
+          const handle = this.host.getHandle();
+          const list = handle?.bindings.filter((b) => b.item.src?.t) ?? [];
+          const b = e.key === "ArrowUp" ? list[0] : list[list.length - 1];
+          if (b?.item.src) {
+            const target = {
+              t: b.item.src.t as XmlElement,
+              offset: e.key === "ArrowUp" ? b.item.src.offset : b.item.src.offset + b.item.text.length,
+            };
+            this.moveFocus(() => target, extend);
+          }
+        }
+        return;
+      }
+      return; // other shortcuts pass through (undo handled above, copy/cut above)
+    }
+    if (e.altKey) return;
     const hasRange = this.hasSelection();
     if (!this.caret && !hasRange) return;
 
@@ -941,15 +1144,31 @@ export class DocxEditor {
       e.preventDefault();
       this.splitParagraph();
     } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-      if (this.caret) {
-        e.preventDefault();
-        this.moveCaret(e.key === "ArrowLeft" ? -1 : 1);
-      }
+      e.preventDefault();
+      const delta = e.key === "ArrowLeft" ? -1 : 1;
+      if (e.shiftKey) this.moveFocus((pt) => this.stepPoint(pt, delta), true);
+      else if (this.hasSelection()) {
+        // Collapse to the corresponding edge, like every editor.
+        const segs = this.getSelectionSegments();
+        const edge = delta === -1 ? segs[0] : segs[segs.length - 1];
+        if (edge?.t) {
+          this.clearSelection();
+          this.caret = {
+            t: edge.t as XmlElement,
+            run: this.caret?.run ?? ({} as Caret["run"]),
+            offset: delta === -1 ? edge.start : edge.end,
+          };
+          this.positionCaret();
+        }
+      } else if (this.caret) this.moveCaret(delta);
     } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-      if (this.caret) {
-        e.preventDefault();
-        this.moveCaretVertically(e.key === "ArrowUp" ? -1 : 1);
-      }
+      e.preventDefault();
+      const dir = e.key === "ArrowUp" ? -1 : 1;
+      if (e.shiftKey) this.moveFocus((pt) => this.stepPointVertically(pt, dir as -1 | 1), true);
+      else if (this.caret) this.moveCaretVertically(dir as -1 | 1);
+    } else if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      this.moveFocus((pt) => this.lineEdgePoint(pt, e.key === "Home" ? "start" : "end"), e.shiftKey);
     }
   };
 

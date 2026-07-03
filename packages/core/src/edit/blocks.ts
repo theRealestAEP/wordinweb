@@ -302,3 +302,35 @@ export function insertImageAt(
   doc.refresh();
   return true;
 }
+
+/** Apply (or clear, with null) a paragraph style to the target paragraphs. */
+export function setParagraphStyle(
+  doc: DocxDocument,
+  targets: XmlElement[],
+  styleId: string | null,
+): boolean {
+  const paragraphs = new Set<XmlElement>();
+  for (const t of targets) {
+    const p = paragraphOf(doc, t);
+    if (p) paragraphs.add(p);
+  }
+  if (paragraphs.size === 0) return false;
+  for (const pEl of paragraphs) {
+    const w = prefixOf(pEl);
+    let pPr = pEl.children.find((c) => localName(c.name) === "pPr");
+    if (!pPr) {
+      pPr = el(`${w}pPr`);
+      pEl.children.unshift(pPr);
+    }
+    const idx = pPr.children.findIndex((c) => localName(c.name) === "pStyle");
+    if (styleId === null) {
+      if (idx !== -1) pPr.children.splice(idx, 1);
+    } else {
+      const st = el(`${w}pStyle`, { [`${w}val`]: styleId });
+      if (idx !== -1) pPr.children[idx] = st;
+      else pPr.children.unshift(st); // pStyle must lead pPr
+    }
+  }
+  doc.refresh();
+  return true;
+}

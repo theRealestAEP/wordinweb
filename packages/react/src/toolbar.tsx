@@ -341,6 +341,25 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
       <Btn label={"↷"} title="Redo (⇧⌘Z)" onClick={() => { api?.redo(); refresh(); }} />
       <Sep />
       <select
+        title="Paragraph style"
+        value=""
+        onMouseDown={(e) => e.stopPropagation()}
+        onChange={(e) => {
+          if (e.target.value) api?.setParagraphStyle(e.target.value === "__normal" ? null : e.target.value);
+        }}
+        style={{ ...selectStyle, width: 92 }}
+      >
+        <option value="" disabled>
+          Styles
+        </option>
+        <option value="__normal">Normal</option>
+        {(api?.listParagraphStyles() ?? [])
+          .filter((s) => !/^normal$/i.test(s.name))
+          .map((s) => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+      </select>
+      <select
         title="Font"
         value={fmt?.fontFamily ?? ""}
         onMouseDown={(e) => e.stopPropagation()}

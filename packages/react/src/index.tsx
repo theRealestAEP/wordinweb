@@ -18,6 +18,7 @@ import {
   selectionToSegments,
   setPageLayout,
   setParagraphAlignment,
+  setParagraphStyle,
   summarizeSelection,
 } from "@docxinweb/core";
 
@@ -36,6 +37,10 @@ export interface DocxViewApi {
   insertImage(file: Blob): Promise<void>;
   /** Align the paragraph(s) under the caret or selection. */
   setAlignment(align: ParagraphAlignment): void;
+  /** Apply a named paragraph style (null clears back to Normal). */
+  setParagraphStyle(styleId: string | null): void;
+  /** Paragraph styles declared by the document (for the style menu). */
+  listParagraphStyles(): { id: string; name: string }[];
   /** Change margins / page size / orientation (inches). */
   setPageLayout(patch: PageLayoutPatch): void;
   /** Effective formatting of the current selection (toolbar state), or null. */
@@ -154,6 +159,20 @@ export function DocxView({
           },
           zoom,
           history,
+          onFormatShortcut: (kind) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            if (segs.length === 0) return;
+            const fmt = summarizeSelection(segs);
+            const patch =
+              kind === "bold" ? { bold: !fmt?.bold } :
+              kind === "italic" ? { italic: !fmt?.italic } :
+              { underline: !fmt?.underline };
+            history.checkpoint();
+            const formatted = applyRunFormat(doc, segs, patch);
+            pages = rerender(doc);
+            if (formatted.length > 0) editor?.selectRanges(formatted);
+            document.dispatchEvent(new CustomEvent("dxw-selection"));
+          },
         });
         editor.attach();
         const api: DocxViewApi = {
@@ -222,6 +241,27 @@ export function DocxView({
           setPageLayout: (patch) => {
             history.checkpoint();
             if (setPageLayout(doc, patch)) pages = rerender(doc);
+          },
+          setParagraphStyle: (styleId) => {
+            const caret = editor?.getCaretTarget();
+            const segs = editor?.getSelectionSegments() ?? [];
+            const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
+            if (targets.length === 0) return;
+            history.checkpoint();
+            if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId)) {
+              pages = rerender(doc);
+            }
+          },
+          listParagraphStyles: () => {
+            const out: { id: string; name: string }[] = [];
+            for (const st of doc.styles.byId.values()) {
+              if (st.type !== "paragraph" || !st.name) continue;
+              if (/^(normal|title|subtitle|heading \d)$/i.test(st.name)) {
+                out.push({ id: st.id, name: st.name });
+              }
+            }
+            out.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+            return out;
           },
           save: () => doc.save(),
         };

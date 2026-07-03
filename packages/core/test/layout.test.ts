@@ -284,3 +284,23 @@ describe("floating images", () => {
     expect(below.some((t) => t.kind === "text" && t.x < img.x + img.width)).toBe(true);
   });
 });
+
+describe("tab leaders", () => {
+  it("fills dotted leaders up to the tab stop (TOC pattern)", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr>
+          <w:r><w:t>Chapter One</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>4</w:t></w:r>
+        </w:p>`,
+      ),
+    });
+    const dots = result.pages[0].items.find(
+      (i) => i.kind === "text" && /^\.{10,}$/.test(i.text),
+    );
+    expect(dots).toBeDefined();
+    if (dots?.kind !== "text") return;
+    const num = result.pages[0].items.find((i) => i.kind === "text" && i.text === "4");
+    if (num?.kind !== "text") throw new Error("page number missing");
+    expect(dots.x + dots.width).toBeLessThanOrEqual(num.x + 4);
+  });
+});

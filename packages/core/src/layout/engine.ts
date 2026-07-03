@@ -510,7 +510,28 @@ class Engine {
         }
         continue;
       }
-      if (span.text === undefined || span.text === "\t") continue;
+      if (span.text === "\t") {
+        if (span.leader && span.width > 6) {
+          const ch = span.leader === "dot" ? "." : span.leader === "hyphen" ? "-" : span.leader === "middleDot" ? "\u00b7" : "_";
+          const chW = this.measurer.width(ch, span.font);
+          const count = Math.max(0, Math.floor((span.width - 4) / chW));
+          if (count > 0) {
+            page.items.push({
+              kind: "text",
+              x: originX + span.x + 2,
+              baseline,
+              width: chW * count,
+              text: ch.repeat(count),
+              props: span.props,
+              font: span.font,
+              lineTop: topY,
+              lineHeight: line.height,
+            });
+          }
+        }
+        continue;
+      }
+      if (span.text === undefined) continue;
 
       let b = baseline;
       if (span.props.verticalAlign === "superscript") b -= span.font.size * 0.55;

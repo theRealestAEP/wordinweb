@@ -92,6 +92,8 @@ export interface LineSpan {
   /** Spans produced from expandable spaces (for justification). */
   isSpace?: boolean;
   src?: TextSource;
+  /** Tab leader character style (dot/hyphen/underscore/middleDot). */
+  leader?: "dot" | "hyphen" | "underscore" | "middleDot";
 }
 
 export interface LineBox {
@@ -278,6 +280,7 @@ export function breakParagraph(
     }
     if (atom.kind === "tab") {
       const stop = nextTabStop(x, props.tabs, contentWidth - indentRight);
+      const leader = stop.leader && stop.leader !== "none" ? stop.leader : undefined;
       let target = stop.pos;
       if (stop.align === "right" || stop.align === "center" || stop.align === "decimal") {
         // Aligned stops position the upcoming text (until the next tab or
@@ -298,6 +301,7 @@ export function breakParagraph(
         props: atom.props,
         font: atom.font,
         isSpace: false,
+        leader,
       });
       curLineWidth += width;
       x += width;
@@ -382,11 +386,11 @@ function nextTabStop(
   x: number,
   tabs: TabStop[] | undefined,
   rightEdge: number,
-): { pos: number; align: TabStop["align"] } {
+): { pos: number; align: TabStop["align"]; leader?: TabStop["leader"] } {
   if (tabs) {
     for (const t of tabs) {
       if (t.pos > x + 0.5 && t.align !== "bar") {
-        return { pos: t.pos, align: t.align };
+        return { pos: t.pos, align: t.align, leader: t.leader };
       }
     }
   }
