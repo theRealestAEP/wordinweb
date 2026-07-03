@@ -7,6 +7,7 @@ import { EditHistory } from "./history.js";
 import { moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
 import { firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 import { SelectionSegment } from "./commands.js";
+import { adjustFloatingPosition, isFloatingDrawing, setImageWrap } from "./images.js";
 
 /**
  * Interactive text editing: caret placement, typing, Backspace/Delete,
@@ -448,16 +449,68 @@ export class DocxEditor {
     }
   }
 
+  // ---------- drop-position indicator ----------
+
+  private dropIndicator: HTMLElement | null = null;
+
+  /** Blue insertion bar at the caret position nearest (x, y), like Docs. */
+  private showDropIndicator(x: number, y: number): void {
+    const dest = this.caretFromPoint(x, y) ?? this.nearestCaret(x, y);
+    const handle = this.host.getHandle();
+    if (!dest || !handle) {
+      this.hideDropIndicator();
+      return;
+    }
+    const binding = handle.bindings.find((b) => {
+      const src = b.item.src;
+      return src?.t === dest.t && dest.offset >= src.offset && dest.offset <= src.offset + b.item.text.length;
+    });
+    if (!binding) {
+      this.hideDropIndicator();
+      return;
+    }
+    const surface = binding.el.parentElement!;
+    let px = binding.item.x;
+    const textNode = binding.el.firstChild;
+    if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+      try {
+        const rg = document.createRange();
+        rg.setStart(textNode, Math.min(dest.offset - binding.item.src!.offset, binding.item.text.length));
+        rg.collapse(true);
+        const zoom = this.host.zoom ?? 1;
+        px = (rg.getBoundingClientRect().left - surface.getBoundingClientRect().left) / zoom;
+      } catch {
+        /* fall back to span start */
+      }
+    }
+    if (!this.dropIndicator) {
+      this.dropIndicator = document.createElement("div");
+      this.dropIndicator.style.cssText =
+        "position:absolute;width:2.5px;background:#1a73e8;border-radius:1px;pointer-events:none;z-index:30;";
+    }
+    if (this.dropIndicator.parentElement !== surface) surface.appendChild(this.dropIndicator);
+    this.dropIndicator.style.left = `${px - 1}px`;
+    this.dropIndicator.style.top = `${binding.item.lineTop}px`;
+    this.dropIndicator.style.height = `${binding.item.lineHeight}px`;
+  }
+
+  private hideDropIndicator(): void {
+    this.dropIndicator?.remove();
+    this.dropIndicator = null;
+  }
+
   // ---------- OS drag-and-drop images ----------
 
   private onDragOver = (e: DragEvent): void => {
     if (e.dataTransfer?.types.includes("Files")) {
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
+      this.showDropIndicator(e.clientX, e.clientY);
     }
   };
 
   private onDrop = (e: DragEvent): void => {
+    this.hideDropIndicator();
     const file = Array.from(e.dataTransfer?.files ?? []).find((f) => f.type.startsWith("image/"));
     if (!file) return;
     e.preventDefault();
@@ -490,7 +543,7 @@ export class DocxEditor {
     this.selectedImage = null;
   }
 
-  private selectImage(el: HTMLElement, src: XmlElement): void {
+  private selectImage(el: HTMLElement, src: XmlElement, item?: { x: number; y: number }): void {
     this.deselectImage();
     this.hideCaret();
     this.selectedImage = { el, src };
@@ -515,8 +568,56 @@ export class DocxEditor {
     handleEl.style.pointerEvents = "auto";
     handleEl.dataset.dxwImgHandle = "1";
     overlay.appendChild(handleEl);
+
+    // Wrap-mode mini toolbar (Word: Inline / Square / Top and bottom).
+    const bar = document.createElement("div");
+    bar.style.cssText =
+      "position:absolute;top:-30px;left:0;display:flex;gap:2px;background:#fff;" +
+      "border:1px solid #dadce0;border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,.18);" +
+      "padding:2px;pointer-events:auto;font:11px system-ui,sans-serif;white-space:nowrap;";
+    const isFloating = isFloatingDrawing(src);
+    const modes: ["inline" | "square" | "topAndBottom", string][] = [
+      ["inline", "Inline"],
+      ["square", "Wrap"],
+      ["topAndBottom", "Top+Bottom"],
+    ];
+    for (const [mode, label] of modes) {
+      const b = document.createElement("button");
+      b.textContent = label;
+      const active =
+        (mode === "inline" && !isFloating) ||
+        (isFloating && this.currentWrap(src) === mode);
+      b.style.cssText =
+        `border:none;border-radius:3px;padding:3px 7px;cursor:pointer;color:#3c4043;` +
+        `background:${active ? "#dfe7f5" : "transparent"};`;
+      b.addEventListener("mousedown", (me) => {
+        me.preventDefault();
+        me.stopPropagation();
+      });
+      b.addEventListener("click", (ce) => {
+        ce.stopPropagation();
+        this.host.history?.checkpoint();
+        const sp = this.host.doc.sections[0]?.props;
+        const pos = item ? { x: item.x - (sp?.marginLeft ?? 96), y: 0 } : undefined;
+        if (setImageWrap(this.host.doc, src, mode, pos)) {
+          this.host.rerender();
+        }
+        this.deselectImage();
+      });
+      bar.appendChild(b);
+    }
+    overlay.appendChild(bar);
+
     el.parentElement!.appendChild(overlay);
     this.imageOverlay = overlay;
+  }
+
+  private currentWrap(drawingEl: XmlElement): "square" | "topAndBottom" | "none" {
+    const anchor = drawingEl.children.find((c) => localName(c.name) === "anchor");
+    if (!anchor) return "none";
+    if (anchor.children.some((c) => localName(c.name) === "wrapTopAndBottom")) return "topAndBottom";
+    if (anchor.children.some((c) => localName(c.name) === "wrapNone")) return "none";
+    return "square";
   }
 
   /** Handle mousedown on images / their resize handle. Returns true if consumed. */
@@ -567,6 +668,7 @@ export class DocxEditor {
       e.stopPropagation();
       const startX = e.clientX;
       const startY = e.clientY;
+      const floating = isFloatingDrawing(binding.item.src!);
       let moved = false;
       let ghost: HTMLElement | null = null;
       const onMove = (me: MouseEvent) => {
@@ -582,21 +684,29 @@ export class DocxEditor {
         if (ghost) {
           ghost.style.left = `${me.clientX + 4}px`;
           ghost.style.top = `${me.clientY + 4}px`;
+          // Inline images re-anchor into text: show the insertion point.
+          if (!floating) this.showDropIndicator(me.clientX, me.clientY);
         }
       };
       const onUp = (me: MouseEvent) => {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
         ghost?.remove();
+        this.hideDropIndicator();
         this.suppressNextMouseUp = true;
         if (!moved) {
-          this.selectImage(target, binding.item.src!);
+          this.selectImage(target, binding.item.src!, binding.item);
           return;
         }
-        const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
-        if (dest) {
-          this.host.history?.checkpoint();
-          if (moveDrawingTo(this.host.doc, binding.item.src!, dest.t)) {
+        const zoom = this.host.zoom ?? 1;
+        this.host.history?.checkpoint();
+        if (floating) {
+          if (adjustFloatingPosition(this.host.doc, binding.item.src!, (me.clientX - startX) / zoom, (me.clientY - startY) / zoom)) {
+            this.host.rerender();
+          }
+        } else {
+          const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
+          if (dest && moveDrawingTo(this.host.doc, binding.item.src!, dest.t)) {
             this.host.rerender();
           }
         }

@@ -109,6 +109,8 @@ export interface LineBox {
   endsWithBreak: boolean;
   /** Page/column break requested after this line. */
   forcedBreakAfter?: "page" | "column";
+  /** Extra vertical offset before this line (float top-and-bottom wrap). */
+  floatYOffset?: number;
 }
 
 export interface BrokenParagraph {
@@ -116,6 +118,15 @@ export interface BrokenParagraph {
   props: ParaProps;
   /** Floating shapes anchored to this paragraph (don't occupy inline space). */
   anchors: Shape[];
+}
+
+/** Column-relative horizontal bounds for a line, supplied by the engine when
+ * floating images exclude regions. skipTo: move the line top to this
+ * paragraph-relative y first (top-and-bottom wrap). */
+export interface LineBounds {
+  x: number;
+  width: number;
+  skipTo?: number;
 }
 
 const DEFAULT_TAB = 48; // 0.5in
@@ -132,6 +143,8 @@ export function breakParagraph(
   contentWidth: number,
   fields: FieldContext,
   numberingLabel?: { text: string; props: RunProps; suffix: "tab" | "space" | "nothing" },
+  /** Float-aware bounds per line (yOffset is paragraph-relative line top). */
+  boundsAt?: (yOffset: number, estHeight: number) => LineBounds,
 ): BrokenParagraph {
   const props = doc.effectiveParaProps(para);
   const fallbackFamily = doc.styles.defaultRPr.font ?? "Calibri";
@@ -145,15 +158,39 @@ export function breakParagraph(
 
   const lines: LineBox[] = [];
   let cur: LineSpan[] = [];
-  let curWidth = 0;
+  let curLineWidth = 0;
   let curSpaceWidth = 0;
   let lineIndex = 0;
   // (With metric-correct fonts, Word's justified breaks match natural
   // widths — no space-compression allowance is needed in the fit check.)
 
-  const lineStartX = (idx: number) => indentLeft + (idx === 0 ? firstLineExtra : 0);
-  const availFor = (idx: number) => contentWidth - lineStartX(idx) - indentRight;
+  // Per-line horizontal bounds. With floats, the engine narrows them per y.
+  let yOff = 0;
+  let lineFloatOffset = 0;
+  let curBase = 0;
+  let curWidth = contentWidth;
+  const EST_LINE = 20;
+  const beginLine = (idx: number) => {
+    lineFloatOffset = 0;
+    curBase = 0;
+    curWidth = contentWidth;
+    if (boundsAt) {
+      let guard = 0;
+      let b = boundsAt(yOff, EST_LINE);
+      while (b.skipTo !== undefined && b.skipTo > yOff && guard++ < 20) {
+        lineFloatOffset += b.skipTo - yOff;
+        yOff = b.skipTo;
+        b = boundsAt(yOff, EST_LINE);
+      }
+      curBase = b.x;
+      curWidth = b.width;
+    }
+    void idx;
+  };
+  const lineStartX = (idx: number) => curBase + indentLeft + (idx === 0 ? firstLineExtra : 0);
+  const availFor = (idx: number) => curWidth - indentLeft - (idx === 0 ? firstLineExtra : 0) - indentRight;
 
+  beginLine(0);
   let x = lineStartX(0);
 
   // Numbering label occupies the hanging region of the first line.
@@ -180,7 +217,7 @@ export function breakParagraph(
     } else {
       x = labelX + labelWidth;
     }
-    curWidth = x - lineStartX(0);
+    curLineWidth = x - lineStartX(0);
   }
 
   // A zero-width anchor span lets the caret land in empty paragraphs/lines.
@@ -200,7 +237,7 @@ export function breakParagraph(
   const flush = (isLast: boolean, endsWithBreak: boolean, forced?: "page" | "column") => {
     // Trim trailing space spans (they don't affect alignment).
     while (cur.length > 0 && cur[cur.length - 1].isSpace) {
-      curWidth -= cur[cur.length - 1].width;
+      curLineWidth -= cur[cur.length - 1].width;
       curSpaceWidth -= cur[cur.length - 1].width;
       cur.pop();
     }
@@ -215,17 +252,20 @@ export function breakParagraph(
         src: { run: anchorSrc.run, t: anchorSrc.t, offset: 0 },
       });
     }
-    const line = finishLine(cur, curWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak);
+    const line = finishLine(cur, curLineWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak);
     line.forcedBreakAfter = forced;
+    line.floatYOffset = lineFloatOffset;
     // Alignment
     const avail = availFor(lineIndex);
     const startX = lineStartX(lineIndex);
     applyAlignment(line, props, avail, startX, isLast || endsWithBreak);
     lines.push(line);
     cur = [];
-    curWidth = 0;
+    curLineWidth = 0;
     curSpaceWidth = 0;
     lineIndex++;
+    yOff += line.height;
+    beginLine(lineIndex);
     x = lineStartX(lineIndex);
   };
 
@@ -259,7 +299,7 @@ export function breakParagraph(
         font: atom.font,
         isSpace: false,
       });
-      curWidth += width;
+      curLineWidth += width;
       x += width;
       continue;
     }
@@ -267,7 +307,7 @@ export function breakParagraph(
       // Never start a (non-first) line with a space.
       if (cur.length === 0 && lineIndex > 0) continue;
       cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src });
-      curWidth += atom.width;
+      curLineWidth += atom.width;
       curSpaceWidth += atom.width;
       x += atom.width;
       continue;
@@ -275,7 +315,7 @@ export function breakParagraph(
     if (atom.kind === "image" || atom.kind === "drawing") {
       const w = atom.kind === "image" ? atom.width : atom.drawing.width;
       const h = atom.kind === "image" ? atom.height : atom.drawing.height;
-      if (curWidth > 0 && x + w > lineStartX(lineIndex) + availFor(lineIndex)) {
+      if (curLineWidth > 0 && x + w > lineStartX(lineIndex) + availFor(lineIndex)) {
         flush(false, false);
       }
       cur.push({
@@ -289,16 +329,16 @@ export function breakParagraph(
         props: {},
         font: fontOf({}, fallbackFamily),
       });
-      curWidth += w;
+      curLineWidth += w;
       x += w;
       continue;
     }
     // frag
     const fits = x + atom.width <= lineStartX(lineIndex) + availFor(lineIndex) + 0.01;
-    if (!fits && curWidth > 0) {
+    if (!fits && curLineWidth > 0) {
       flush(false, false);
     }
-    if (atom.width > availFor(lineIndex) && curWidth === 0) {
+    if (atom.width > availFor(lineIndex) && curLineWidth === 0) {
       // Single fragment wider than the line: hard character wrap.
       let rest = atom.text;
       while (rest.length > 0) {
@@ -318,7 +358,7 @@ export function breakParagraph(
           href: atom.href,
           src: atom.src ? { ...atom.src, offset: atom.src.offset + sliceOff } : undefined,
         });
-        curWidth += w;
+        curLineWidth += w;
         x += w;
         rest = rest.slice(take);
         if (rest.length > 0) flush(false, false);
@@ -326,7 +366,7 @@ export function breakParagraph(
       continue;
     }
     cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src });
-    curWidth += atom.width;
+    curLineWidth += atom.width;
     x += atom.width;
   }
 

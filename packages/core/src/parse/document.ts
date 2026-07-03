@@ -1,5 +1,7 @@
 import { XmlElement, attr, child, children, intAttr, localName, onOff, path } from "../xml.js";
 import {
+  AnchorContent,
+  AnchorRel,
   Block,
   Border,
   DrawingContent,
@@ -243,6 +245,7 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
         const img = parseDrawing(el, ctx);
         if (img) {
           if (img.kind === "image") img.srcDrawing = el;
+          if (img.kind === "anchor" && img.shape.type === "image") img.shape.srcDrawing = el;
           run.content.push(img);
         }
         break;
@@ -314,7 +317,7 @@ const EMU_PER_PT = 12700;
 function parseDrawing(
   drawing: XmlElement,
   ctx: DocParseContext,
-): ImageContent | DrawingContent | null {
+): ImageContent | DrawingContent | AnchorContent | null {
   const inline = child(drawing, "inline");
   const anchor = child(drawing, "anchor");
   const holder = inline ?? anchor;
@@ -404,12 +407,48 @@ function parseDrawing(
 
   // Plain single image covering the extent: keep the simple content kind.
   if (lines.length === 0 && images.length === 1) {
+    if (anchor) {
+      // Floating image: position + wrap mode.
+      const rel = (el: XmlElement | undefined): AnchorRel => {
+        const v = el ? attr(el, "relativeFrom") : undefined;
+        return v === "page" ? "page" : v === "margin" ? "margin" : v === "column" ? "column" : "text";
+      };
+      const posH = child(anchor, "positionH");
+      const posV = child(anchor, "positionV");
+      const offEmu = (el: XmlElement | undefined): number => {
+        const po = el ? child(el, "posOffset") : undefined;
+        return po ? parseInt(po.text, 10) || 0 : 0;
+      };
+      const alignEl = posH ? child(posH, "align") : undefined;
+      const hAlign = alignEl?.text === "center" || alignEl?.text === "right" || alignEl?.text === "left"
+        ? (alignEl.text as "left" | "center" | "right")
+        : undefined;
+      let wrap: "square" | "topAndBottom" | "none" = "square";
+      if (child(anchor, "wrapNone")) wrap = "none";
+      else if (child(anchor, "wrapTopAndBottom")) wrap = "topAndBottom";
+      // wrapSquare/wrapTight/wrapThrough all treated as square.
+      return {
+        kind: "anchor",
+        shape: {
+          type: "image",
+          part: images[0].part,
+          x: emuToPx(offEmu(posH)),
+          y: emuToPx(offEmu(posV)),
+          width: images[0].width || emuToPx(cx),
+          height: images[0].height || emuToPx(cy),
+          hRel: rel(posH),
+          vRel: rel(posV),
+          hAlign,
+          wrap,
+        },
+      };
+    }
     return {
       kind: "image",
       part: images[0].part,
       width: images[0].width || emuToPx(cx),
       height: images[0].height || emuToPx(cy),
-      anchored: !!anchor,
+      anchored: false,
     };
   }
   if (lines.length === 0 && images.length === 0) return null;

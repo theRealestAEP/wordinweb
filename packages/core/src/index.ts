@@ -23,6 +23,7 @@ export { DocxEditor } from "./edit/editor.js";
 export { EditHistory } from "./edit/history.js";
 export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, mergeParagraphBackward } from "./edit/blocks.js";
 export { applyTableOp, cellContextOf } from "./edit/tables.js";
+export { setImageWrap, adjustFloatingPosition, isFloatingDrawing } from "./edit/images.js";
 export type { TableOp } from "./edit/tables.js";
 export type { ParagraphAlignment, PageLayoutPatch } from "./edit/blocks.js";
 export type { EditorHost } from "./edit/editor.js";

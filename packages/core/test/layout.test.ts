@@ -235,3 +235,52 @@ describe("pagination robustness", () => {
     expect(edge.border.color).toBe("#7A6E73");
   });
 });
+
+describe("floating images", () => {
+  it("wraps text beside a square-anchored image", () => {
+    const anchor = `<w:p><w:r><w:drawing>
+      <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+        <wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>
+        <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+        <wp:extent cx="1905000" cy="1905000"/>
+        <wp:wrapSquare wrapText="bothSides"/>
+        <a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+            <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>
+              <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1905000" cy="1905000"/></a:xfrm></pic:spPr>
+            </pic:pic>
+          </a:graphicData>
+        </a:graphic>
+      </wp:anchor>
+    </w:drawing></w:r>
+    <w:r><w:t>${"words flow beside the floating image ".repeat(40)}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(anchor),
+      "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>
+</Relationships>`,
+      "word/media/x.png": "PNGDATA",
+    });
+    const items = result.pages[0].items;
+    const img = items.find((i) => i.kind === "image");
+    expect(img).toBeDefined();
+    if (img?.kind !== "image") return;
+    expect(Math.round(img.width)).toBe(200); // 1905000 EMU = 200px
+    // Text beside the image starts to its right; text below spans full width.
+    const beside = items.filter(
+      (i) => i.kind === "text" && i.text.trim() && i.lineTop < img.y + img.height,
+    );
+    const below = items.filter(
+      (i) => i.kind === "text" && i.text.trim() && i.lineTop > img.y + img.height + 2,
+    );
+    expect(beside.length).toBeGreaterThan(0);
+    expect(below.length).toBeGreaterThan(0);
+    for (const t of beside) {
+      if (t.kind !== "text") continue;
+      expect(t.x).toBeGreaterThanOrEqual(img.x + img.width);
+    }
+    expect(below.some((t) => t.kind === "text" && t.x < img.x + img.width)).toBe(true);
+  });
+});

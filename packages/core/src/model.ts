@@ -191,7 +191,27 @@ export interface ShapeTextbox {
   blocks: Block[];
 }
 
-export type Shape = ShapeLine | ShapeTextbox;
+/** How text interacts with a floating image. */
+export type WrapMode = "square" | "topAndBottom" | "none";
+
+export interface ShapeImage {
+  type: "image";
+  part: string;
+  /** Offset from the anchor origin, px. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  hRel: AnchorRel;
+  vRel: AnchorRel;
+  /** Horizontal alignment when the file uses wp:align instead of an offset. */
+  hAlign?: "left" | "center" | "right";
+  wrap: WrapMode;
+  /** Source w:drawing element (editing). */
+  srcDrawing?: XmlElement;
+}
+
+export type Shape = ShapeLine | ShapeTextbox | ShapeImage;
 
 /**
  * Floating/anchored object: does not occupy inline space; positioned against

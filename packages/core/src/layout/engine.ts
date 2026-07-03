@@ -68,6 +68,8 @@ class Engine {
   private lastParaSpacingAfter = 0;
   /** List counters per numId. */
   private counters = new Map<number, number[]>();
+  /** Floating-image exclusion rects per page (page coords). */
+  private floats = new Map<InternalPage, { x0: number; x1: number; y0: number; y1: number; mode: "square" | "topAndBottom" }[]>();
 
   constructor(
     private doc: DocxDocument,
@@ -260,6 +262,55 @@ class Engine {
 
   // ---------- paragraphs ----------
 
+  /** Anchored shapes declared in a paragraph's runs (pre-break scan). */
+  private collectAnchors(para: Paragraph): Shape[] {
+    const out: Shape[] = [];
+    for (const c of para.children) {
+      const runs = c.type === "run" ? [c] : c.runs;
+      for (const r of runs) {
+        for (const rc of r.content) if (rc.kind === "anchor") out.push(rc.shape);
+      }
+    }
+    return out;
+  }
+
+  /** Line bounds callback honoring this page's floating-image exclusions. */
+  private makeBoundsAt(paraTop: number) {
+    const page = this.cur;
+    const colX = this.colX;
+    const colW = this.colWidth;
+    return (yOffset: number, estHeight: number) => {
+      const y0 = paraTop + yOffset;
+      const y1 = y0 + estHeight;
+      let left = colX;
+      let right = colX + colW;
+      let skipTo: number | undefined;
+      const floats = this.floats.get(page) ?? [];
+      for (const f of floats) {
+        if (f.y1 <= y0 || f.y0 >= y1) continue;
+        if (f.mode === "topAndBottom") {
+          skipTo = Math.max(skipTo ?? 0, f.y1 - paraTop + 2);
+          continue;
+        }
+        // square: shrink from the side the float occupies
+        const floatCenter = (f.x0 + f.x1) / 2;
+        const colCenter = colX + colW / 2;
+        if (floatCenter <= colCenter) left = Math.max(left, f.x1 + 8);
+        else right = Math.min(right, f.x0 - 8);
+      }
+      if (right - left < 40 && skipTo === undefined) {
+        // No room beside the float: push below it.
+        let bottom = y0;
+        for (const f of floats) {
+          if (f.y1 <= y0 || f.y0 >= y1) continue;
+          if (f.mode === "square") bottom = Math.max(bottom, f.y1);
+        }
+        if (bottom > y0) skipTo = bottom - paraTop + 2;
+      }
+      return { x: left - colX, width: right - left, skipTo };
+    };
+  }
+
   private placeParagraph(para: Paragraph, prev?: Block, next?: Block): void {
     const props = this.doc.effectiveParaProps(para);
 
@@ -267,8 +318,23 @@ class Engine {
       this.newPage(false);
     }
 
+    // Floats anchored here must exclude this paragraph's own text: emit them
+    // (registering exclusion rects) before breaking.
+    const anchors = this.collectAnchors(para);
     const label = this.numberingLabel(props, para);
-    const broken = breakParagraph(this.doc, this.measurer, para, this.colWidth, this.fieldCtx(), label);
+    const paraTopEstimate = this.y + (props.spacingBefore ?? 0);
+    if (anchors.length > 0) {
+      this.emitAnchors(anchors, this.cur, this.fieldCtx(), this.colX, paraTopEstimate);
+    }
+    const broken = breakParagraph(
+      this.doc,
+      this.measurer,
+      para,
+      this.colWidth,
+      this.fieldCtx(),
+      label,
+      this.floats.get(this.cur)?.length ? this.makeBoundsAt(paraTopEstimate) : undefined,
+    );
 
     // Contextual spacing: suppress before/after between same-style neighbors.
     let spacingBefore = props.spacingBefore ?? 0;
@@ -298,10 +364,6 @@ class Engine {
     // spacing-after (already advanced) and this spacing-before wins.
     this.y += Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
 
-    if (broken.anchors.length > 0) {
-      this.emitAnchors(broken.anchors, this.cur, this.fieldCtx(), this.colX, this.y);
-    }
-
     // Plan natural page-break indices with widow/orphan control (Word default: on).
     const widow = props.widowControl !== false;
     const breaks = new Set<number>(); // line index that starts a new column/page
@@ -314,6 +376,7 @@ class Engine {
       // next segment starts a fresh page by construction.
       let onPartialPage = !this.pageIsEmptyAtCursor();
       for (let li = 0; li < lines.length; li++) {
+        simY += lines[li].floatYOffset ?? 0;
         if (simY + lines[li].height > bottom + 0.01 && li > segStart) {
           let breakAt = li;
           if (widow) {
@@ -390,6 +453,7 @@ class Engine {
         startFragment(li);
       }
 
+      this.y += line.floatYOffset ?? 0;
       this.emitLine(line, this.cur, this.colX, this.y);
       this.y += line.height;
 
@@ -604,6 +668,36 @@ class Engine {
       rel === "page" ? 0 : rel === "margin" ? sp.marginTop : textPageY;
 
     for (const shape of shapes) {
+      if (shape.type === "image") {
+        let ox = originX(shape.hRel);
+        const oy = originY(shape.vRel);
+        let x = ox + shape.x;
+        if (shape.hAlign) {
+          const baseW =
+            shape.hRel === "page" ? sp.pageWidth :
+            shape.hRel === "margin" ? sp.pageWidth - sp.marginLeft - sp.marginRight :
+            page.physIndex === -1 ? page.colWidths[0] : this.colWidth;
+          if (shape.hAlign === "center") x = ox + (baseW - shape.width) / 2;
+          else if (shape.hAlign === "right") x = ox + baseW - shape.width;
+          else x = ox;
+        }
+        const y = oy + shape.y;
+        page.items.push({
+          kind: "image",
+          x: x - fx,
+          y: y - fy,
+          width: shape.width,
+          height: shape.height,
+          part: shape.part,
+          src: shape.srcDrawing,
+        });
+        if (shape.wrap !== "none" && page.physIndex !== -1) {
+          const list = this.floats.get(page) ?? [];
+          list.push({ x0: x, x1: x + shape.width, y0: y, y1: y + shape.height, mode: shape.wrap });
+          this.floats.set(page, list);
+        }
+        continue;
+      }
       if (shape.type === "line") {
         const ox = originX(shape.hRel);
         const oy = originY(shape.vRel);
