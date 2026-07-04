@@ -46,6 +46,9 @@ interface InternalPage {
   colXs: number[];
   colWidths: number[];
   hfStart?: number;
+  /** Footnote content bound to this page, emitted above bodyBottom at the end. */
+  footnotes: { items: PageItem[]; height: number }[];
+  footnoteH: number;
 }
 
 const PAGE_FMT: Record<string, string> = {
@@ -55,6 +58,22 @@ const PAGE_FMT: Record<string, string> = {
   lowerLetter: "lowerLetter",
   upperLetter: "upperLetter",
 };
+
+/** Height of the footnote separator strip (one small line, like Word). */
+const NOTE_SEP_H = 14;
+/** Word's separator rule is a short line, 2in max. */
+const NOTE_SEP_LEN = 192;
+
+const CHICAGO = ["*", "†", "‡", "§"];
+
+/** Note marks share numbering formats with page numbers, plus chicago. */
+function formatNoteMark(n: number, fmt: string): string {
+  if (fmt === "chicago") {
+    const sym = CHICAGO[(n - 1) % 4];
+    return sym.repeat(Math.floor((n - 1) / 4) + 1);
+  }
+  return formatNumber(n, PAGE_FMT[fmt] ?? "decimal");
+}
 
 class Engine {
   private pages: InternalPage[] = [];
@@ -70,6 +89,14 @@ class Engine {
   private counters = new Map<number, number[]>();
   /** Floating-image exclusion rects per page (page coords). */
   private floats = new Map<InternalPage, { x0: number; x1: number; y0: number; y1: number; mode: "square" | "topAndBottom" }[]>();
+  /** Note id → sequential display number, assigned in document order pre-layout. */
+  private footnoteNumbers = new Map<number, number>();
+  private endnoteNumbers = new Map<number, number>();
+  private placedFootnotes = new Set<number>();
+  /** Laid-out footnote content cache (id@width → frame). */
+  private noteCache = new Map<string, { items: PageItem[]; height: number }>();
+  /** Mark text for the note body currently being laid out. */
+  private selfNoteMark: string | undefined;
 
   constructor(
     private doc: DocxDocument,
@@ -77,6 +104,7 @@ class Engine {
   ) {}
 
   run(): LayoutResult {
+    this.assignNoteNumbers();
     const sections = this.doc.sections;
     for (const section of sections) {
       this.sp = section.props;
@@ -86,6 +114,8 @@ class Engine {
     if (this.pages.length === 0) {
       this.sp = sections[0]?.props ?? ({} as SectionProps);
     }
+    this.placeEndnotes();
+    this.emitFootnoteAreas();
     this.finalizeHeadersFooters();
     const pages: LaidOutPage[] = this.pages.map((p) => ({
       width: p.sp.pageWidth,
@@ -125,6 +155,8 @@ class Engine {
       bodyBottom: sp.pageHeight - Math.abs(sp.marginBottom),
       colXs,
       colWidths,
+      footnotes: [],
+      footnoteH: 0,
     };
 
     // Header/footer variant selection.
@@ -182,7 +214,7 @@ class Engine {
     return this.cur.colWidths[this.col];
   }
   private get bodyBottom(): number {
-    return this.cur.bodyBottom;
+    return this.cur.bodyBottom - this.footnoteReserve(this.cur);
   }
   private pageIsEmptyAtCursor(): boolean {
     return this.y <= this.cur.bodyTop + 0.01;
@@ -194,7 +226,154 @@ class Engine {
       pageNumber: () => engine.cur.displayNumber,
       totalPages: () => engine.pages.length, // refined in final header/footer pass
       formatPageNumber: (n) => formatNumber(n, PAGE_FMT[engine.cur.sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
+      noteMark: (type, id) => (type === "footnote" ? engine.footnoteMark(id) : engine.endnoteMark(id)),
+      selfNoteMark: () => engine.selfNoteMark ?? "",
     };
+  }
+
+  // ---------- footnotes / endnotes ----------
+
+  /** Marks are numbered by document order of their references, not layout order. */
+  private assignNoteNumbers(): void {
+    let fn = 0;
+    let en = 0;
+    const sp0 = this.doc.sections[0]?.props;
+    const fnStart = sp0?.footnoteNumStart ?? 1;
+    const enStart = sp0?.endnoteNumStart ?? 1;
+    const visit = (blocks: Block[]) => {
+      for (const b of blocks) {
+        if (b.type === "paragraph") {
+          for (const c of b.children) {
+            const runs = c.type === "run" ? [c] : c.runs;
+            for (const r of runs) {
+              for (const rc of r.content) {
+                if (rc.kind !== "noteRef" || rc.self) continue;
+                if (rc.noteType === "footnote" && this.doc.footnotes.has(rc.id) && !this.footnoteNumbers.has(rc.id)) {
+                  this.footnoteNumbers.set(rc.id, fnStart + fn++);
+                } else if (rc.noteType === "endnote" && this.doc.endnotes.has(rc.id) && !this.endnoteNumbers.has(rc.id)) {
+                  this.endnoteNumbers.set(rc.id, enStart + en++);
+                }
+              }
+            }
+          }
+        } else {
+          for (const row of b.rows) for (const cell of row.cells) visit(cell.blocks);
+        }
+      }
+    };
+    for (const s of this.doc.sections) visit(s.blocks);
+  }
+
+  private footnoteMark(id: number): string {
+    const n = this.footnoteNumbers.get(id);
+    if (n === undefined) return "";
+    return formatNoteMark(n, this.sp.footnoteNumFmt ?? "decimal");
+  }
+
+  private endnoteMark(id: number): string {
+    const n = this.endnoteNumbers.get(id);
+    if (n === undefined) return "";
+    return formatNoteMark(n, this.sp.endnoteNumFmt ?? "lowerRoman");
+  }
+
+  /** Bottom-of-body space held by this page's footnotes (separator included).
+   * Capped so a pathological footnote can't push bodyBottom above bodyTop. */
+  private footnoteReserve(page: InternalPage): number {
+    if (page.footnotes.length === 0) return 0;
+    const full = NOTE_SEP_H + page.footnoteH;
+    return Math.min(full, (page.bodyBottom - page.bodyTop) * 0.9);
+  }
+
+  /** Footnote content laid out at the current column width (cached). */
+  private measureFootnote(id: number): { items: PageItem[]; height: number } {
+    const width = this.colWidth;
+    const key = `${id}@${Math.round(width)}`;
+    let laid = this.noteCache.get(key);
+    if (!laid) {
+      const blocks = this.doc.footnotes.get(id) ?? [];
+      const prevSelf = this.selfNoteMark;
+      this.selfNoteMark = this.footnoteMark(id);
+      const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+      laid = this.layoutFrame(blocks, width, this.fieldCtx());
+      this.counters = snapshot;
+      this.selfNoteMark = prevSelf;
+      this.noteCache.set(key, laid);
+    }
+    return laid;
+  }
+
+  /** Extra bottom reserve this line would add if placed on the current page. */
+  private pendingNoteHeight(line: LineBox): number {
+    let h = 0;
+    for (const span of line.spans) {
+      if (span.noteId === undefined || this.placedFootnotes.has(span.noteId)) continue;
+      if (!this.doc.footnotes.has(span.noteId)) continue;
+      h += this.measureFootnote(span.noteId).height;
+    }
+    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_H;
+    return h;
+  }
+
+  /** Bind a footnote's content to the page carrying its reference line. */
+  private registerFootnote(id: number, page: InternalPage): void {
+    if (this.placedFootnotes.has(id) || !this.doc.footnotes.has(id)) return;
+    // Lines emitted into frames (table cells) target a fake page; the real
+    // page is the engine's current one.
+    const target = page.physIndex !== -1 ? page : this.cur?.physIndex !== -1 ? this.cur : undefined;
+    if (!target) return;
+    this.placedFootnotes.add(id);
+    const laid = this.measureFootnote(id);
+    target.footnotes.push(laid);
+    target.footnoteH += laid.height;
+  }
+
+  /** Stack each page's footnotes upward from bodyBottom, under a short rule. */
+  private emitFootnoteAreas(): void {
+    for (const page of this.pages) {
+      if (page.footnotes.length === 0) continue;
+      const x0 = page.colXs[0];
+      let y = page.bodyBottom - page.footnoteH - NOTE_SEP_H;
+      page.items.push({
+        kind: "edge",
+        x1: x0,
+        y1: y + NOTE_SEP_H * 0.6,
+        x2: x0 + Math.min(NOTE_SEP_LEN, page.colWidths[0]),
+        y2: y + NOTE_SEP_H * 0.6,
+        border: { style: "single", width: 0.75, color: "#000000", space: 0 },
+      });
+      y += NOTE_SEP_H;
+      for (const note of page.footnotes) {
+        for (const it of note.items) {
+          offsetItem(it, x0, y);
+          page.items.push(it);
+        }
+        y += note.height;
+      }
+    }
+  }
+
+  /** Endnotes flow after the last body block, under their own separator. */
+  private placeEndnotes(): void {
+    if (this.endnoteNumbers.size === 0 || this.pages.length === 0) return;
+    const ids = [...this.endnoteNumbers.entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id);
+    if (this.y + NOTE_SEP_H > this.bodyBottom) this.nextColumn();
+    const x0 = this.colX;
+    const sepY = this.y + NOTE_SEP_H * 0.6;
+    this.cur.items.push({
+      kind: "edge",
+      x1: x0,
+      y1: sepY,
+      x2: x0 + Math.min(NOTE_SEP_LEN, this.colWidth),
+      y2: sepY,
+      border: { style: "single", width: 0.75, color: "#000000", space: 0 },
+    });
+    this.y += NOTE_SEP_H;
+    this.lastParaSpacingAfter = 0;
+    for (const id of ids) {
+      this.selfNoteMark = this.endnoteMark(id);
+      this.layoutBlocks(this.doc.endnotes.get(id) ?? []);
+    }
+    this.selfNoteMark = undefined;
   }
 
   // ---------- block flow ----------
@@ -440,7 +619,10 @@ class Engine {
     for (let li = 0; li < lines.length; li++) {
       const line = lines[li];
       const planned = breaks.has(li) && li > 0;
-      const overflow = this.y + line.height > this.bodyBottom + 0.01 && !this.pageIsEmptyAtCursor();
+      // A line referencing footnotes must fit above the space its own
+      // footnotes will claim, so line and note land on the same page.
+      const pendingNotes = this.pendingNoteHeight(line);
+      const overflow = this.y + line.height > this.bodyBottom - pendingNotes + 0.01 && !this.pageIsEmptyAtCursor();
       if ((planned || overflow) && li > fragStartLine) {
         closeFragment(li, false);
         this.nextColumn();
@@ -472,6 +654,9 @@ class Engine {
 
   private emitLine(line: LineBox, page: InternalPage, originX: number, topY: number): void {
     const baseline = topY + line.height - line.maxDescent;
+    for (const span of line.spans) {
+      if (span.noteId !== undefined) this.registerFootnote(span.noteId, page);
+    }
     for (const span of line.spans) {
       if (span.image) {
         page.items.push({
@@ -633,6 +818,8 @@ class Engine {
       bodyBottom: Number.POSITIVE_INFINITY,
       colXs: [0],
       colWidths: [width],
+      footnotes: [],
+      footnoteH: 0,
     };
 
     let framePrevAfter = 0;

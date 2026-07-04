@@ -3,6 +3,7 @@ import { XmlElement, parseXml, serializeXml, child, intAttr, onOff } from "./xml
 import { strToU8, zipSync } from "fflate";
 import { twipsToPx } from "./units.js";
 import {
+  Block,
   HeaderFooter,
   Numbering,
   ParaProps,
@@ -16,6 +17,7 @@ import { parseTheme } from "./parse/theme.js";
 import { parseStyles, resolveCharacterStyleChain, resolveParagraphStyleChain } from "./parse/styles.js";
 import { parseNumbering } from "./parse/numbering.js";
 import { parseBody, parseBlocks, DocParseContext } from "./parse/document.js";
+import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
 import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
 
@@ -34,6 +36,9 @@ export class DocxDocument {
   /** Header/footer parts keyed by relationship id from document.xml.rels. */
   readonly headers: Map<string, HeaderFooter> = new Map();
   readonly footers: Map<string, HeaderFooter> = new Map();
+  /** Note content by note id (render-only; sources stripped). */
+  readonly footnotes: Map<number, Block[]> = new Map();
+  readonly endnotes: Map<number, Block[]> = new Map();
   readonly documentRels: Relationships;
   /** settings.xml w:evenAndOddHeaders — enables the "even" header/footer variants. */
   readonly evenAndOddHeaders: boolean = false;
@@ -89,6 +94,18 @@ export class DocxDocument {
       if (!root) continue;
       const partRels = parseRelationships(this.readXmlOptional(relsPathFor(rel.target)), rel.target);
       this.hfParts.push({ relId: rel.id, target: rel.target, root, isHeader, rels: partRels });
+    }
+
+    // Footnote/endnote parts (static: notes aren't editable in v1).
+    for (const rel of this.documentRels.values()) {
+      const isFn = rel.type.endsWith("/footnotes");
+      const isEn = rel.type.endsWith("/endnotes");
+      if (!isFn && !isEn) continue;
+      const root = this.readXmlOptional(rel.target);
+      if (!root) continue;
+      const partRels = parseRelationships(this.readXmlOptional(relsPathFor(rel.target)), rel.target);
+      const notes = parseNotesPart(root, { ...this.ctxBase, rels: partRels });
+      for (const [id, blocks] of notes) (isFn ? this.footnotes : this.endnotes).set(id, blocks);
     }
 
     this.refresh();

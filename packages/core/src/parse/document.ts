@@ -295,6 +295,27 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
       case "cr":
         run.content.push({ kind: "break", breakType: "line" });
         break;
+      case "footnoteReference":
+      case "endnoteReference": {
+        const id = intAttr(el, "id");
+        if (id !== undefined) {
+          run.content.push({
+            kind: "noteRef",
+            noteType: ln === "footnoteReference" ? "footnote" : "endnote",
+            id,
+          });
+        }
+        break;
+      }
+      case "footnoteRef":
+      case "endnoteRef":
+        run.content.push({
+          kind: "noteRef",
+          noteType: ln === "footnoteRef" ? "footnote" : "endnote",
+          id: -1,
+          self: true,
+        });
+        break;
     }
   }
 

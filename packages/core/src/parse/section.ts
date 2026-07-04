@@ -102,5 +102,20 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     props.vAlign = vAlign;
   }
 
+  const fnPr = child(sectPr, "footnotePr");
+  if (fnPr) {
+    const fmt = attr(child(fnPr, "numFmt"), "val");
+    if (fmt) props.footnoteNumFmt = fmt;
+    const start = intAttr(child(fnPr, "numStart"), "val");
+    if (start !== undefined) props.footnoteNumStart = start;
+  }
+  const enPr = child(sectPr, "endnotePr");
+  if (enPr) {
+    const fmt = attr(child(enPr, "numFmt"), "val");
+    if (fmt) props.endnoteNumFmt = fmt;
+    const start = intAttr(child(enPr, "numStart"), "val");
+    if (start !== undefined) props.endnoteNumStart = start;
+  }
+
   return props;
 }
