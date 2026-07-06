@@ -253,6 +253,19 @@ export interface DrawingContent {
   images: DrawingImage[];
 }
 
+/**
+ * Footnote/endnote reference mark. In body text (w:footnoteReference /
+ * w:endnoteReference) `id` points into the notes part. Inside a note body,
+ * w:footnoteRef / w:endnoteRef render the note's own mark: `self` is true and
+ * `id` is meaningless.
+ */
+export interface NoteRefContent {
+  kind: "noteRef";
+  noteType: "footnote" | "endnote";
+  id: number;
+  self?: boolean;
+}
+
 export type RunContent =
   | TextContent
   | BreakContent
@@ -260,7 +273,8 @@ export type RunContent =
   | ImageContent
   | FieldContent
   | AnchorContent
-  | DrawingContent;
+  | DrawingContent
+  | NoteRefContent;
 
 export interface Run {
   type: "run";
@@ -396,6 +410,11 @@ export interface SectionProps {
   type?: "nextPage" | "continuous" | "evenPage" | "oddPage" | "nextColumn";
   /** Vertical alignment of page content. */
   vAlign?: "top" | "center" | "both" | "bottom";
+  /** Footnote/endnote mark numbering (w:footnotePr / w:endnotePr). */
+  footnoteNumFmt?: string;
+  footnoteNumStart?: number;
+  endnoteNumFmt?: string;
+  endnoteNumStart?: number;
 }
 
 export interface Section {

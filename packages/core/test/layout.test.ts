@@ -304,3 +304,163 @@ describe("tab leaders", () => {
     expect(dots.x + dots.width).toBeLessThanOrEqual(num.x + 4);
   });
 });
+
+describe("footnotes and endnotes", () => {
+  const FN_RELS = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdFn" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>
+  <Relationship Id="rIdEn" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>
+</Relationships>`;
+
+  const footnotesXml = (notes: string) => `<?xml version="1.0"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>
+  <w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>
+  ${notes}
+</w:footnotes>`;
+
+  const endnotesXml = (notes: string) => `<?xml version="1.0"?>
+<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>
+  ${notes}
+</w:endnotes>`;
+
+  const note = (tag: "footnote" | "endnote", id: number, text: string) =>
+    `<w:${tag} w:id="${id}"><w:p><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:${tag}Ref/></w:r><w:r><w:t xml:space="preserve"> ${text}</w:t></w:r></w:p></w:${tag}>`;
+
+  it("renders a footnote at the bottom of the referencing page with a separator", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:r><w:t>Body text</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`,
+      ),
+      "word/_rels/document.xml.rels": FN_RELS,
+      "word/footnotes.xml": footnotesXml(note("footnote", 1, "alpha note text")),
+    });
+    expect(result.totalPages).toBe(1);
+    const page = result.pages[0];
+    expect(pageText(result, 0)).toContain("alpha note text");
+
+    // Reference mark and the note's own mark are both superscript "1"s.
+    const marks = page.items.filter(
+      (i) => i.kind === "text" && i.text === "1" && i.props.verticalAlign === "superscript",
+    );
+    expect(marks.length).toBe(2);
+
+    // Separator rule: a short (2in) line above the note, below the body text.
+    const body = page.items.find((i) => i.kind === "text" && i.text.includes("Body"));
+    if (body?.kind !== "text") throw new Error("body text missing");
+    const sep = page.items.find(
+      (i) => i.kind === "edge" && Math.abs(i.x2 - i.x1 - 192) < 1 && i.y1 === i.y2,
+    );
+    expect(sep).toBeDefined();
+    if (sep?.kind !== "edge") return;
+    expect(sep.y1).toBeGreaterThan(body.lineTop);
+
+    // Note text sits at the bottom of the body box (1in margins on US Letter).
+    const noteText = page.items.find((i) => i.kind === "text" && i.text.includes("alpha"));
+    if (noteText?.kind !== "text") throw new Error("note text missing");
+    expect(noteText.lineTop).toBeGreaterThan(sep.y1);
+    expect(noteText.lineTop).toBeGreaterThan(880);
+    expect(noteText.lineTop + noteText.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 0.5);
+  });
+
+  it("keeps each footnote on the same page as its reference", () => {
+    const filler = (n: number, from = 0) =>
+      Array.from({ length: n }, (_, i) => p(`Filler paragraph ${from + i}`)).join("");
+    const refPara = (word: string, id: number) =>
+      `<w:p><w:r><w:t xml:space="preserve">${word}</w:t></w:r><w:r><w:footnoteReference w:id="${id}"/></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        refPara("HEADREF", 1) + filler(70) + refPara("TAILREF", 2) + filler(5, 70),
+      ),
+      "word/_rels/document.xml.rels": FN_RELS,
+      "word/footnotes.xml": footnotesXml(
+        note("footnote", 1, "alphanote") + note("footnote", 2, "betanote"),
+      ),
+    });
+    expect(result.totalPages).toBeGreaterThan(1);
+    const pageOf = (needle: string) =>
+      result.pages.findIndex((pg) =>
+        pg.items.some((i) => i.kind === "text" && i.text.includes(needle)),
+      );
+    expect(pageOf("HEADREF")).toBe(0);
+    expect(pageOf("alphanote")).toBe(0);
+    const tailPage = pageOf("TAILREF");
+    expect(tailPage).toBeGreaterThan(0);
+    expect(pageOf("betanote")).toBe(tailPage);
+    // Numbering follows document order.
+    expect(pageText(result, 0)).toContain("alphanote");
+    const tailMarks = result.pages[tailPage].items.filter(
+      (i) => i.kind === "text" && i.text === "2" && i.props.verticalAlign === "superscript",
+    );
+    expect(tailMarks.length).toBe(2);
+  });
+
+  it("shrinks the body so footnote content never overlaps the footer margin", () => {
+    const longNote = Array.from({ length: 4 }, (_, i) => p(`NOTETOKEN${i} with a good amount of text to wrap around`)).join("");
+    const filler = Array.from({ length: 60 }, (_, i) => p(`Body ${i}`)).join("");
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        filler + `<w:p><w:r><w:t>REFHERE</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`,
+      ),
+      "word/_rels/document.xml.rels": FN_RELS,
+      "word/footnotes.xml": footnotesXml(
+        `<w:footnote w:id="1">${longNote}</w:footnote>`,
+      ),
+    });
+    for (const pg of result.pages) {
+      for (const item of pg.items.slice(0, pg.hfStart)) {
+        if (item.kind === "text") {
+          expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(pg.bodyBottom + 0.5);
+        }
+      }
+    }
+    const refPage = result.pages.findIndex((pg) =>
+      pg.items.some((i) => i.kind === "text" && i.text.includes("REFHERE")),
+    );
+    const notePage = result.pages.findIndex((pg) =>
+      pg.items.some((i) => i.kind === "text" && i.text.includes("NOTETOKEN0")),
+    );
+    expect(notePage).toBe(refPage);
+  });
+
+  it("flows endnotes after the last body block with lowerRoman marks", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:r><w:t>Body start</w:t></w:r><w:r><w:endnoteReference w:id="1"/></w:r></w:p>` +
+          p("Body end"),
+      ),
+      "word/_rels/document.xml.rels": FN_RELS,
+      "word/endnotes.xml": endnotesXml(note("endnote", 1, "closing remark")),
+    });
+    expect(result.totalPages).toBe(1);
+    const page = result.pages[0];
+    expect(pageText(result, 0)).toContain("closing remark");
+    const marks = page.items.filter(
+      (i) => i.kind === "text" && i.text === "i" && i.props.verticalAlign === "superscript",
+    );
+    expect(marks.length).toBe(2);
+    // Endnote content comes after the last body paragraph, not at page bottom.
+    const bodyEnd = page.items.find((i) => i.kind === "text" && i.text === "end");
+    const noteText = page.items.find((i) => i.kind === "text" && i.text.includes("closing"));
+    if (bodyEnd?.kind !== "text" || noteText?.kind !== "text") throw new Error("items missing");
+    expect(noteText.lineTop).toBeGreaterThan(bodyEnd.lineTop);
+    expect(noteText.lineTop).toBeLessThan(400);
+  });
+
+  it("honors sectPr footnote number format", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:r><w:t>Text</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>` +
+          `<w:sectPr><w:footnotePr><w:numFmt w:val="chicago"/></w:footnotePr>
+            <w:pgSz w:w="12240" w:h="15840"/>
+            <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>
+          </w:sectPr>`,
+      ),
+      "word/_rels/document.xml.rels": FN_RELS,
+      "word/footnotes.xml": footnotesXml(note("footnote", 1, "starred note")),
+    });
+    const marks = result.pages[0].items.filter((i) => i.kind === "text" && i.text === "*");
+    expect(marks.length).toBe(2);
+  });
+});

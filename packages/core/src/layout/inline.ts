@@ -17,6 +17,10 @@ export interface FieldContext {
   pageNumber: () => number;
   totalPages: () => number;
   formatPageNumber: (n: number) => string;
+  /** Display mark for a footnote/endnote reference in body text. */
+  noteMark?: (type: "footnote" | "endnote", id: number) => string;
+  /** Inside a note body: the note's own mark (w:footnoteRef / w:endnoteRef). */
+  selfNoteMark?: () => string;
 }
 
 // ---------- atoms ----------
@@ -29,6 +33,8 @@ interface FragAtom {
   width: number;
   href?: string;
   src?: TextSource;
+  /** Footnote id when this fragment is a footnote reference mark. */
+  noteId?: number;
 }
 interface SpaceAtom {
   kind: "space";
@@ -94,6 +100,8 @@ export interface LineSpan {
   src?: TextSource;
   /** Tab leader character style (dot/hyphen/underscore/middleDot). */
   leader?: "dot" | "hyphen" | "underscore" | "middleDot";
+  /** Footnote id whose content must land on the page carrying this line. */
+  noteId?: number;
 }
 
 export interface LineBox {
@@ -373,7 +381,7 @@ export function breakParagraph(
       }
       continue;
     }
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId });
     curLineWidth += atom.width;
     x += atom.width;
   }
@@ -562,6 +570,26 @@ function buildAtoms(
         case "drawing":
           atoms.push({ kind: "drawing", drawing: content });
           break;
+        case "noteRef": {
+          const text = content.self
+            ? (fields.selfNoteMark?.() ?? "")
+            : (fields.noteMark?.(content.noteType, content.id) ?? "");
+          if (!text) break;
+          // Word's FootnoteReference style supplies superscript; force it
+          // when the document's style chain doesn't, matching Word's look.
+          const markProps = props.verticalAlign ? props : { ...props, verticalAlign: "superscript" as const };
+          const markFont = fontOf(markProps, fallbackFamily);
+          atoms.push({
+            kind: "frag",
+            text,
+            props: markProps,
+            font: markFont,
+            width: measurer.width(text, markFont, markProps.letterSpacing),
+            href,
+            noteId: content.noteType === "footnote" && !content.self ? content.id : undefined,
+          });
+          break;
+        }
       }
     }
   };
