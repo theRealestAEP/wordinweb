@@ -11,6 +11,7 @@ import {
   TableOp,
   applyRunFormat,
   applyTableOp,
+  deleteComment,
   exactLineHeightAt,
   insertImageAt,
   setImageWrap,
@@ -108,6 +109,7 @@ export function DocxView({
     let cancelled = false;
     let handle: RenderHandle | null = null;
     let editor: DocxEditor | null = null;
+    let onDeleteComment: ((id: string) => void) | undefined;
     setError(null);
 
     const rerender = (doc: DocxDocument): number => {
@@ -118,7 +120,7 @@ export function DocxView({
       // (destroy-then-append clamps scrollTop to 0 otherwise).
       const { scrollTop, scrollLeft } = container;
       handle?.destroy();
-      handle = renderToDom(doc, layout, container, { zoom, interactive: editable });
+      handle = renderToDom(doc, layout, container, { zoom, interactive: editable, onDeleteComment });
       container.scrollTop = scrollTop;
       container.scrollLeft = scrollLeft;
       editor?.afterRender();
@@ -177,6 +179,11 @@ export function DocxView({
           },
         });
         editor.attach();
+        onDeleteComment = (id) => {
+          history.checkpoint();
+          if (deleteComment(doc, id)) pages = rerender(doc);
+        };
+        pages = rerender(doc); // re-render with the delete affordance wired
         const api: DocxViewApi = {
           document: doc,
           pageCount: () => pages,

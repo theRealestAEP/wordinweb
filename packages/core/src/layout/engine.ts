@@ -1035,10 +1035,74 @@ class Engine {
 
   // ---------- tables ----------
 
+  /**
+   * Column widths for a table. Word-authored files carry a realistic
+   * tblGrid that already reflects the rendered layout — honor it. Generated
+   * files often have absent or placeholder grids (e.g. every gridCol a few
+   * twips); Word ignores those and autofits columns to content, so we do
+   * the same: measure each column's preferred (unwrapped) and minimum
+   * (widest atom) content width and fit them to the table width.
+   */
+  private resolveGridWidths(tbl: Table, available: number): number[] {
+    const base = resolveGrid(tbl, available);
+    if (tbl.props.layout === "fixed") return base;
+    const gridTotal = tbl.grid.reduce((a, b) => a + b, 0);
+    const target = base.reduce((a, b) => a + b, 0);
+    if (tbl.grid.length > 0 && gridTotal >= target * 0.5) return base; // realistic grid
+
+    const nCols = base.length;
+    const margins = tbl.props.cellMargins ?? { left: 7.2, right: 7.2 };
+    const pad = (margins.left ?? 0) + (margins.right ?? 0) + 2;
+    const minW = new Array<number>(nCols).fill(pad + 8);
+    const prefW = new Array<number>(nCols).fill(pad + 8);
+    for (const row of tbl.rows) {
+      let gridPos = 0;
+      for (const cell of row.cells) {
+        const span = cell.props.gridSpan;
+        if (span === 1 && gridPos < nCols && cell.props.vMerge !== "continue") {
+          for (const block of cell.blocks) {
+            if (block.type !== "paragraph") continue;
+            const wide = breakParagraph(this.doc, this.measurer, block, 1e6, this.fieldCtx());
+            for (const ln of wide.lines) prefW[gridPos] = Math.max(prefW[gridPos], ln.width + pad);
+            const narrow = breakParagraph(this.doc, this.measurer, block, 1, this.fieldCtx());
+            for (const ln of narrow.lines) minW[gridPos] = Math.max(minW[gridPos], ln.width + pad);
+          }
+        }
+        gridPos += span;
+      }
+    }
+
+    const sumPref = prefW.reduce((a, b) => a + b, 0);
+    if (sumPref <= 0) return base;
+    const hasExplicit = tbl.props.width !== undefined || tbl.props.widthPct !== undefined;
+    const want = hasExplicit ? target : Math.min(sumPref, available);
+    // Scale preferred widths to the target, clamping at each column's
+    // minimum and redistributing the deficit over still-flexible columns.
+    const widths = prefW.map((w) => (w * want) / sumPref);
+    for (let pass = 0; pass < 3; pass++) {
+      let deficit = 0;
+      let flexible = 0;
+      for (let i = 0; i < nCols; i++) {
+        if (widths[i] < minW[i]) {
+          deficit += minW[i] - widths[i];
+          widths[i] = minW[i];
+        } else {
+          flexible += widths[i] - minW[i];
+        }
+      }
+      if (deficit <= 0.5 || flexible <= 0) break;
+      const k = Math.max(0, 1 - deficit / flexible);
+      for (let i = 0; i < nCols; i++) {
+        if (widths[i] > minW[i]) widths[i] = minW[i] + (widths[i] - minW[i]) * k;
+      }
+    }
+    return widths;
+  }
+
   private placeTable(tbl: Table): void {
     this.lastParaSpacingAfter = 0;
     const colWidth = this.colWidth;
-    const widths = resolveGrid(tbl, colWidth);
+    const widths = this.resolveGridWidths(tbl, colWidth);
     const tableWidth = widths.reduce((a, b) => a + b, 0);
     let x0 = this.colX + (tbl.props.indent ?? 0);
     if (tbl.props.alignment === "center") x0 = this.colX + (colWidth - tableWidth) / 2;

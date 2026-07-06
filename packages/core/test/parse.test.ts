@@ -194,4 +194,42 @@ describe("document parsing", () => {
     // Point comment (no range) anchors to the nearest preceding w:t.
     expect(anchors.get("8")!.map((t) => t.text)).toEqual(["point anchor"]);
   });
+
+  it("deletes a comment with undo and save round-trip", async () => {
+    const { deleteComment } = await import("../src/edit/comments.js");
+    const { EditHistory } = await import("../src/edit/history.js");
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p>
+            <w:commentRangeStart w:id="7"/>
+            <w:r><w:t>flagged</w:t></w:r>
+            <w:commentRangeEnd w:id="7"/>
+            <w:r><w:commentReference w:id="7"/></w:r>
+          </w:p>`,
+        ),
+        "word/comments.xml": `<?xml version="1.0"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="7" w:author="Ada"><w:p><w:r><w:t>Note.</w:t></w:r></w:p></w:comment>
+</w:comments>`,
+      }),
+    );
+    const history = new EditHistory(doc);
+    expect(doc.comments.length).toBe(1);
+
+    history.checkpoint();
+    expect(deleteComment(doc, "7")).toBe(true);
+    expect(doc.comments.length).toBe(0);
+    expect(doc.commentAnchors().size).toBe(0);
+    // Markers are gone from the document part; text survives.
+    const saved = DocxDocument.load(doc.save());
+    expect(saved.comments.length).toBe(0);
+    expect(saved.pkg.text("word/document.xml")).not.toContain("commentRangeStart");
+    expect(saved.pkg.text("word/document.xml")).toContain("flagged");
+
+    // Undo restores both the markers and the comment body.
+    expect(history.undo()).toBe(true);
+    expect(doc.comments.length).toBe(1);
+    expect(doc.commentAnchors().get("7")!.map((t) => t.text)).toEqual(["flagged"]);
+  });
 });

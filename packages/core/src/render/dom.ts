@@ -14,6 +14,9 @@ export interface RenderOptions {
   interactive?: boolean;
   /** Show review comments (highlight + margin balloons). Default true. */
   comments?: boolean;
+  /** Called when the user deletes a comment from its balloon. The balloon
+   * shows a delete button only when this is provided. */
+  onDeleteComment?: (id: string) => void;
 }
 
 export interface TextBinding {
@@ -89,7 +92,7 @@ export function renderToDom(
 
   container.appendChild(root);
   if (options.comments !== false && doc.comments.length > 0) {
-    renderComments(doc, root, bindings, zoom);
+    renderComments(doc, root, bindings, zoom, options.onDeleteComment);
   }
   return {
     root,
@@ -200,6 +203,7 @@ function renderComments(
   root: HTMLElement,
   bindings: TextBinding[],
   zoom: number,
+  onDelete?: (id: string) => void,
 ): void {
   const anchors = doc.commentAnchors();
   if (anchors.size === 0) return;
@@ -212,12 +216,42 @@ function renderComments(
       else idsByT.set(t, [id]);
     }
   }
-  for (const b of bindings) {
-    const t = b.item.src?.t;
-    const ids = t ? idsByT.get(t) : undefined;
-    if (!ids) continue;
-    b.el.style.backgroundColor = "rgba(255, 200, 90, 0.4)";
-    b.el.dataset.dxwComment = ids.join(" ");
+
+  // Continuous per-line highlight rects (word-granular spans would leave
+  // gaps at every space if each span carried its own background).
+  for (const [id, ts] of anchors) {
+    const tsSet = new Set<unknown>(ts);
+    let run: { surface: HTMLElement; top: number; height: number; x0: number; x1: number } | null = null;
+    const flush = (): void => {
+      if (run && run.x1 > run.x0) {
+        const hl = document.createElement("div");
+        hl.className = "dxw-comment-hl";
+        hl.dataset.dxwCommentId = id;
+        hl.style.cssText =
+          `position:absolute;left:${run.x0}px;top:${run.top}px;width:${run.x1 - run.x0}px;` +
+          `height:${run.height}px;pointer-events:none;z-index:3;`;
+        run.surface.appendChild(hl);
+      }
+      run = null;
+    };
+    for (const b of bindings) {
+      const t = b.item.src?.t;
+      if (!t || !tsSet.has(t)) continue;
+      const surface = b.el.parentElement;
+      if (!surface) continue;
+      const ids = idsByT.get(t);
+      if (ids) b.el.dataset.dxwComment = ids.join(" ");
+      const x0 = b.item.x;
+      const x1 = b.item.x + b.item.width;
+      if (run && (run.surface !== surface || run.top !== b.item.lineTop)) flush();
+      if (!run) run = { surface, top: b.item.lineTop, height: b.item.lineHeight, x0, x1 };
+      else {
+        run.x0 = Math.min(run.x0, x0);
+        run.x1 = Math.max(run.x1, x1);
+        run.height = Math.max(run.height, b.item.lineHeight);
+      }
+    }
+    flush();
   }
 
   // Reserve the balloon rail before reading page offsets — the flex
@@ -251,16 +285,40 @@ function renderComments(
     card.dataset.dxwCommentId = comment.id;
     const when = comment.date ? new Date(comment.date) : null;
     const dateText = when && !isNaN(when.getTime()) ? when.toLocaleDateString() : "";
+
+    const head = document.createElement("div");
+    head.className = "dxw-comment-head";
+    const avatar = document.createElement("div");
+    avatar.className = "dxw-comment-avatar";
+    avatar.textContent = initialsOf(comment.author, comment.initials);
+    avatar.style.background = avatarColor(comment.author);
+    const who = document.createElement("div");
+    who.className = "dxw-comment-who";
     const author = document.createElement("div");
     author.className = "dxw-comment-author";
     author.textContent = comment.author || "Comment";
     const meta = document.createElement("div");
     meta.className = "dxw-comment-date";
     meta.textContent = dateText;
+    who.append(author, meta);
+    head.append(avatar, who);
+    if (onDelete) {
+      const del = document.createElement("button");
+      del.className = "dxw-comment-delete";
+      del.title = "Delete comment";
+      del.textContent = "×";
+      del.addEventListener("mousedown", (e) => e.stopPropagation());
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        onDelete(comment.id);
+      });
+      head.append(del);
+    }
+
     const body = document.createElement("div");
     body.className = "dxw-comment-text";
     body.textContent = comment.text;
-    card.append(author, meta, body);
+    card.append(head, body);
     card.style.left = `${pageEl.offsetLeft + pageEl.offsetWidth + 12}px`;
     root.appendChild(card);
     const top = Math.max(pageEl.offsetTop + binding.item.lineTop * zoom, lastBottom + 8);
@@ -284,13 +342,27 @@ function renderComments(
 
 const COMMENT_RAIL_WIDTH = 232;
 
+function initialsOf(author: string, initials?: string): string {
+  if (initials) return initials.slice(0, 2).toUpperCase();
+  const parts = author.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  return ((parts[0][0] ?? "") + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
+}
+
+/** Stable per-author avatar color, like Word's reviewer colors. */
+function avatarColor(author: string): string {
+  const palette = ["#1a73e8", "#188038", "#a50e0e", "#8430ce", "#007b83", "#b06000"];
+  let h = 0;
+  for (let i = 0; i < author.length; i++) h = (h * 31 + author.charCodeAt(i)) | 0;
+  return palette[Math.abs(h) % palette.length];
+}
+
 function setCommentHot(root: HTMLElement, id: string, hot: boolean): void {
   for (const card of Array.from(root.querySelectorAll<HTMLElement>(".dxw-comment-card"))) {
     if (card.dataset.dxwCommentId === id) card.classList.toggle("dxw-hot", hot);
   }
-  for (const span of Array.from(root.querySelectorAll<HTMLElement>("[data-dxw-comment]"))) {
-    const ids = span.dataset.dxwComment!.split(" ");
-    if (ids.includes(id)) span.classList.toggle("dxw-hot", hot);
+  for (const hl of Array.from(root.querySelectorAll<HTMLElement>(".dxw-comment-hl"))) {
+    if (hl.dataset.dxwCommentId === id) hl.classList.toggle("dxw-hot", hot);
   }
 }
 
@@ -306,25 +378,40 @@ function ensureStylesheet(): void {
 .dxw-body-mode .dxw-page span[data-dxw-hf],
 .dxw-body-mode .dxw-page a[data-dxw-hf],
 .dxw-body-mode .dxw-page img[data-dxw-hf] { opacity: .55; }
+.dxw-comment-hl { background: rgba(255, 200, 90, .38); }
+.dxw-comment-hl.dxw-hot { background: rgba(255, 170, 0, .55); }
 .dxw-comment-card {
   position: absolute;
   width: 220px;
   box-sizing: border-box;
-  padding: 8px 10px;
+  padding: 10px 12px;
   background: #fff;
-  border: 1px solid #dadce0;
-  border-left: 3px solid #f9ab00;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0,0,0,.15);
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.10);
   font: 12px system-ui, sans-serif;
   color: #3c4043;
   z-index: 3;
 }
-.dxw-comment-card.dxw-hot { border-color: #f9ab00; box-shadow: 0 2px 8px rgba(249,171,0,.45); }
-.dxw-comment-author { font-weight: 600; }
-.dxw-comment-date { color: #5f6368; font-size: 11px; margin-bottom: 4px; }
-.dxw-comment-text { white-space: pre-wrap; }
-span.dxw-hot[data-dxw-comment] { background-color: rgba(255, 170, 0, .65) !important; }
+.dxw-comment-card.dxw-hot { border-color: #1a73e8; box-shadow: 0 2px 8px rgba(26,115,232,.25); }
+.dxw-comment-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.dxw-comment-avatar {
+  width: 24px; height: 24px; border-radius: 50%; flex: none;
+  color: #fff; font-size: 10px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center;
+}
+.dxw-comment-who { min-width: 0; }
+.dxw-comment-author { font-weight: 600; line-height: 1.2; overflow-wrap: break-word; }
+.dxw-comment-date { color: #5f6368; font-size: 11px; line-height: 1.2; }
+.dxw-comment-delete {
+  margin-left: auto; flex: none; border: none; background: transparent;
+  width: 20px; height: 20px; border-radius: 4px; cursor: pointer;
+  color: #5f6368; font-size: 15px; line-height: 1; padding: 0;
+  visibility: hidden;
+}
+.dxw-comment-card:hover .dxw-comment-delete { visibility: visible; }
+.dxw-comment-delete:hover { background: #f1f3f4; color: #a50e0e; }
+.dxw-comment-text { white-space: pre-wrap; overflow-wrap: break-word; }
 `;
   document.head.appendChild(style);
 }

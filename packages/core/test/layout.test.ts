@@ -152,6 +152,56 @@ describe("layout engine", () => {
     expect(c1.x).toBeGreaterThan(c0.x + 100);
   });
 
+  it("autofits columns to content when the grid is a placeholder", () => {
+    // Junk grid (100 twips per column, like generator output) + 100% width:
+    // Word ignores the grid and sizes columns by content.
+    const tbl = `<w:tbl>
+      <w:tblPr><w:tblW w:type="pct" w:w="100%"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="100"/><w:gridCol w:w="100"/><w:gridCol w:w="100"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>Tiny</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Mid col</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>A distinctly longer notes column with plenty of words</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + p("after")) });
+    const cell = (t: string) => {
+      const it = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes(t));
+      if (it?.kind !== "text") throw new Error(`cell ${t} not found`);
+      return it;
+    };
+    const x0 = cell("Tiny").x;
+    const x1 = cell("Mid").x;
+    const x2 = cell("distinctly").x;
+    const w0 = x1 - x0;
+    const w1 = x2 - x1;
+    // An even split would give each column ~1/3 of the content width
+    // (~200px). Content-proportional sizing keeps the short columns narrow,
+    // leaving the notes column with the bulk of the width.
+    expect(w0).toBeLessThan(120);
+    expect(w1).toBeLessThan(160);
+    expect(w0 + w1).toBeLessThan(300);
+    expect(w0).toBeLessThan(w1 + 40); // both stay near content size
+  });
+
+  it("honors a realistic authored grid unchanged", () => {
+    // A Word-authored grid (sums to the content width) must be respected
+    // even though the content is lopsided.
+    const tbl = `<w:tbl>
+      <w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>a much much much longer cell body here</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + p("after")) });
+    const a = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes("x"));
+    const b = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes("longer"));
+    if (a?.kind !== "text" || b?.kind !== "text") throw new Error("cells not found");
+    // Equal 4680-twip columns: the second cell starts at the halfway point.
+    expect(b.x - a.x).toBeGreaterThan(280);
+  });
+
   it("applies pgNumType start to display numbers", () => {
     const { result } = layout({
       "word/document.xml": wrapDocument(

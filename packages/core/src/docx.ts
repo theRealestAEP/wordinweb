@@ -45,8 +45,12 @@ export class DocxDocument {
   readonly evenAndOddHeaders: boolean = false;
   /** settings.xml w:defaultTabStop in px (Word default 0.5"). */
   readonly defaultTabStop: number = 48;
-  /** Review comments from word/comments.xml (empty when the part is absent). */
-  readonly comments: DocComment[] = [];
+  /** Review comments from word/comments.xml (empty when the part is absent).
+   * Re-derived from the retained comments XML on every refresh(). */
+  comments: DocComment[] = [];
+  /** Retained comments.xml tree (editing + save round-trip), when present. */
+  private commentsPart: string | null = null;
+  private commentsRoot: XmlElement | null = null;
 
   /** Retained XML roots — source of truth for editing and save(). */
   private readonly docPart: string;
@@ -88,34 +92,12 @@ export class DocxDocument {
       if (tabStop !== undefined && tabStop > 0) this.defaultTabStop = twipsToPx(tabStop);
     }
 
-    // Review comments (optional part).
+    // Review comments (optional part). The XML tree is retained so comments
+    // can be deleted (with undo) and round-trip through save().
     const commentsRoot = this.readXmlOptional(docDir + "comments.xml");
     if (commentsRoot) {
-      for (const c of commentsRoot.children) {
-        if (localName(c.name) !== "comment") continue;
-        const paras: string[] = [];
-        const collectPara = (el: XmlElement): void => {
-          if (localName(el.name) === "p") {
-            let text = "";
-            const collectT = (e: XmlElement): void => {
-              if (localName(e.name) === "t") text += e.text;
-              for (const ch of e.children) collectT(ch);
-            };
-            collectT(el);
-            paras.push(text);
-            return;
-          }
-          for (const ch of el.children) collectPara(ch);
-        };
-        for (const ch of c.children) collectPara(ch);
-        this.comments.push({
-          id: attr(c, "id") ?? "",
-          author: attr(c, "author") ?? "",
-          initials: attr(c, "initials"),
-          date: attr(c, "date"),
-          text: paras.join("\n"),
-        });
-      }
+      this.commentsPart = docDir + "comments.xml";
+      this.commentsRoot = commentsRoot;
     }
 
     // Collect header/footer parts referenced from the document rels.
@@ -160,6 +142,43 @@ export class DocxDocument {
       const hf: HeaderFooter = { blocks: parseBlocks(part.root, partCtx) };
       (part.isHeader ? this.headers : this.footers).set(part.relId, hf);
     }
+    this.comments = this.deriveComments();
+  }
+
+  private deriveComments(): DocComment[] {
+    const out: DocComment[] = [];
+    if (!this.commentsRoot) return out;
+    for (const c of this.commentsRoot.children) {
+      if (localName(c.name) !== "comment") continue;
+      const paras: string[] = [];
+      const collectPara = (el: XmlElement): void => {
+        if (localName(el.name) === "p") {
+          let text = "";
+          const collectT = (e: XmlElement): void => {
+            if (localName(e.name) === "t") text += e.text;
+            for (const ch of e.children) collectT(ch);
+          };
+          collectT(el);
+          paras.push(text);
+          return;
+        }
+        for (const ch of el.children) collectPara(ch);
+      };
+      for (const ch of c.children) collectPara(ch);
+      out.push({
+        id: attr(c, "id") ?? "",
+        author: attr(c, "author") ?? "",
+        initials: attr(c, "initials"),
+        date: attr(c, "date"),
+        text: paras.join("\n"),
+      });
+    }
+    return out;
+  }
+
+  /** Retained comments tree for edit commands (null when the doc has none). */
+  commentsTree(): XmlElement | null {
+    return this.commentsRoot;
   }
 
   /**
@@ -203,9 +222,12 @@ export class DocxDocument {
     return map;
   }
 
-  /** The mutable XML roots (document body, then header/footer parts). */
+  /** The mutable XML roots (document body, header/footer parts, comments).
+   * The comments root is last so history snapshot indices stay stable. */
   editableRoots(): XmlElement[] {
-    return [this.docRoot, ...this.hfParts.map((p) => p.root)];
+    const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
+    if (this.commentsRoot) roots.push(this.commentsRoot);
+    return roots;
   }
 
   /**
@@ -240,6 +262,9 @@ export class DocxDocument {
     files[this.docPart] = strToU8(serializeXml(this.docRoot, true));
     for (const part of this.hfParts) {
       files[part.target] = strToU8(serializeXml(part.root, true));
+    }
+    if (this.commentsRoot && this.commentsPart) {
+      files[this.commentsPart] = strToU8(serializeXml(this.commentsRoot, true));
     }
     if (this.relsRoot) files[this.relsPath] = strToU8(serializeXml(this.relsRoot, true));
     if (this.contentTypesRoot) files["[Content_Types].xml"] = strToU8(serializeXml(this.contentTypesRoot, true));
