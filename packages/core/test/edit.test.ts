@@ -307,7 +307,7 @@ describe("image insertion", () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
     const relId = doc.addImageResource(png, "png");
     expect(relId).toMatch(/^rId\d+$/);
-    expect(insertImageAt(doc, t as never, relId, 200, 100)).toBe(true);
+    expect(insertImageAt(doc, t as never, relId, 200, 100)).not.toBeNull();
 
     // model sees the image
     const para = doc.sections[0].blocks[0] as Paragraph;

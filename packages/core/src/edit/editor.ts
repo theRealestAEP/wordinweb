@@ -1,13 +1,13 @@
 import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
 import { XmlElement, cloneXml, localName } from "../xml.js";
-import { RenderHandle, TextBinding } from "../render/dom.js";
+import { ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
 import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
 import { moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
-import { firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
+import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 import { SelectionSegment } from "./commands.js";
-import { adjustFloatingPosition, isFloatingDrawing, setImageWrap } from "./images.js";
+import { adjustFloatingPosition, isFloatingDrawing, setFloatingPosition, setImageWrap } from "./images.js";
 
 /**
  * Interactive text editing: caret placement, typing, Backspace/Delete,
@@ -680,6 +680,7 @@ export class DocxEditor {
     e.preventDefault();
     const dest = this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     if (!dest) return;
+    const dropX = this.surfaceX(e.clientX, e.clientY);
     void (async () => {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const bmp = await createImageBitmap(new Blob([bytes.buffer as ArrayBuffer]));
@@ -689,12 +690,91 @@ export class DocxEditor {
       const ext = (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg") === "jpg" ? "jpeg" : (file.type.split("/")[1] ?? "png");
       this.host.history?.checkpoint();
       const relId = this.host.doc.addImageResource(bytes, ext);
-      if (insertImageAt(this.host.doc, dest.t, relId, bmp.width * scale, bmp.height * scale)) {
+      const w = bmp.width * scale;
+      const h = bmp.height * scale;
+      const drawing = insertImageAt(this.host.doc, dest.t, relId, w, h);
+      if (drawing) {
+        this.floatIfClipped(drawing, dest.t, h, dropX !== null ? dropX - w / 2 : null);
         this.host.rerender();
       }
       bmp.close();
     })();
   };
+
+  /**
+   * Move a floating image by (dx, dy) client px. Like Word, the anchor
+   * follows the drag: the image is re-anchored to the first paragraph whose
+   * lines it now overlaps, so the wrap exclusion covers every affected line
+   * (one-pass layout cannot wrap lines laid out before the anchor).
+   */
+  private moveFloatingImage(binding: ImageBinding, dxClient: number, dyClient: number): boolean {
+    const doc = this.host.doc;
+    const src = binding.item.src!;
+    const zoom = this.host.zoom ?? 1;
+    const r = binding.el.getBoundingClientRect();
+    const newLeftClient = r.left + dxClient;
+    const newTopClient = r.top + dyClient;
+    const pageEl = (document.elementFromPoint(newLeftClient + r.width / 2, newTopClient + r.height / 2) as HTMLElement | null)
+      ?.closest(".dxw-page") as HTMLElement | null;
+    const surface = pageEl?.firstElementChild as HTMLElement | null;
+    const handle = this.host.getHandle();
+    if (surface && handle) {
+      const srect = surface.getBoundingClientRect();
+      const x = (newLeftClient - srect.left) / zoom;
+      const y = (newTopClient - srect.top) / zoom;
+      const h = binding.item.height;
+      let first: TextBinding | null = null;
+      for (const b of handle.bindings) {
+        if (!b.item.src?.t) continue;
+        if (b.el.closest(".dxw-page") !== pageEl) continue;
+        if (this.regionOf(b.item.src.t as XmlElement) !== "body") continue;
+        if (b.item.lineTop + b.item.lineHeight <= y || b.item.lineTop >= y + h) continue;
+        if (!first || b.item.lineTop < first.item.lineTop) first = b;
+      }
+      if (first?.item.src?.t) {
+        const destT = first.item.src.t as XmlElement;
+        const pEl = paragraphOf(doc, destT);
+        let paraTop = first.item.lineTop;
+        if (pEl) {
+          for (const b of handle.bindings) {
+            if (!b.item.src?.t || b.el.closest(".dxw-page") !== pageEl) continue;
+            if (paragraphOf(doc, b.item.src.t as XmlElement) === pEl) {
+              paraTop = Math.min(paraTop, b.item.lineTop);
+            }
+          }
+        }
+        const sp = doc.sections[0]?.props;
+        moveDrawingTo(doc, src, destT); // no-op when already anchored there
+        return setFloatingPosition(doc, src, Math.max(0, x - (sp?.marginLeft ?? 96)), y - paraTop);
+      }
+    }
+    // No text under the new position (or off-page): plain offset nudge.
+    return adjustFloatingPosition(doc, src, dxClient / zoom, dyClient / zoom);
+  }
+
+  /** Layout-px x of a client point on its page surface, or null off-page. */
+  private surfaceX(clientX: number, clientY: number): number | null {
+    const pageEl = (document.elementFromPoint(clientX, clientY) as HTMLElement | null)?.closest(".dxw-page");
+    const surface = pageEl?.firstElementChild as HTMLElement | null;
+    if (!surface) return null;
+    const zoom = this.host.zoom ?? 1;
+    return (clientX - surface.getBoundingClientRect().left) / zoom;
+  }
+
+  /**
+   * Word clips content taller than an "exact"-spaced line, so an image that
+   * can't fit its destination line is converted to a floating image with
+   * square wrap instead of being left inline (pleading paper, line grids).
+   * xPx is the desired left edge in page coordinates (null → left margin).
+   */
+  private floatIfClipped(drawingEl: XmlElement, destT: XmlElement, heightPx: number, xPx: number | null): boolean {
+    const exact = exactLineHeightAt(this.host.doc, destT);
+    if (exact === null || heightPx <= exact + 0.5) return false;
+    const sp = this.host.doc.sections[0]?.props;
+    const marginLeft = sp?.marginLeft ?? 96;
+    const x = Math.max(0, (xPx ?? marginLeft) - marginLeft);
+    return setImageWrap(this.host.doc, drawingEl, "square", { x, y: 0 });
+  }
 
   // ---------- images: select, corner-resize, drag-move ----------
 
@@ -829,6 +909,9 @@ export class DocxEditor {
         if (Math.abs(scale - 1) > 0.01) {
           this.host.history?.checkpoint();
           if (resizeDrawing(this.host.doc, src, w0 * scale, h0 * scale)) {
+            if (!isFloatingDrawing(src)) {
+              this.floatIfClipped(src, src, h0 * scale, parseFloat(el.style.left) || null);
+            }
             this.host.rerender();
           }
         }
@@ -881,12 +964,19 @@ export class DocxEditor {
         const zoom = this.host.zoom ?? 1;
         this.host.history?.checkpoint();
         if (floating) {
-          if (adjustFloatingPosition(this.host.doc, binding.item.src!, (me.clientX - startX) / zoom, (me.clientY - startY) / zoom)) {
+          if (this.moveFloatingImage(binding, me.clientX - startX, me.clientY - startY)) {
             this.host.rerender();
           }
         } else {
           const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
           if (dest && moveDrawingTo(this.host.doc, binding.item.src!, dest.t)) {
+            const dropX = this.surfaceX(me.clientX, me.clientY);
+            this.floatIfClipped(
+              binding.item.src!,
+              dest.t,
+              binding.item.height,
+              dropX !== null ? dropX - binding.item.width / 2 : null,
+            );
             this.host.rerender();
           }
         }

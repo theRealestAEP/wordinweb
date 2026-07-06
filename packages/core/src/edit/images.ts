@@ -90,6 +90,37 @@ export function setImageWrap(
   return true;
 }
 
+/**
+ * Set a floating image's position absolutely: x from the left margin,
+ * y from the anchor paragraph's top (px). Forces margin/paragraph-relative
+ * offsets, replacing any wp:align.
+ */
+export function setFloatingPosition(
+  doc: DocxDocument,
+  drawingEl: XmlElement,
+  xPx: number,
+  yPx: number,
+): boolean {
+  const anchor = child(drawingEl, "anchor");
+  if (!anchor) return false;
+  const set = (posName: string, rel: string, px: number): void => {
+    let posEl = child(anchor, posName);
+    if (!posEl) {
+      posEl = el(`wp:${posName}`);
+      // Schema order: simplePos, positionH, positionV, then extent/wrap.
+      const at = anchor.children.findIndex((c) => localName(c.name) === "extent");
+      anchor.children.splice(at === -1 ? 0 : at, 0, posEl);
+    }
+    const relKey = Object.keys(posEl.attrs).find((k) => localName(k) === "relativeFrom") ?? "relativeFrom";
+    posEl.attrs[relKey] = rel;
+    posEl.children = [el("wp:posOffset", {}, [], String(Math.round(px * EMU_PER_PX)))];
+  };
+  set("positionH", "margin", xPx);
+  set("positionV", "paragraph", yPx);
+  doc.refresh();
+  return true;
+}
+
 /** Nudge a floating image by (dx, dy) px via its position offsets. */
 export function adjustFloatingPosition(
   doc: DocxDocument,

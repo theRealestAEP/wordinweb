@@ -1,4 +1,5 @@
 import { DocxDocument } from "../docx.js";
+import { Block, Paragraph } from "../model.js";
 import { XmlElement, child, localName } from "../xml.js";
 import { pxToTwips } from "../units.js";
 
@@ -263,11 +264,11 @@ export function insertImageAt(
   relId: string,
   widthPx: number,
   heightPx: number,
-): boolean {
+): XmlElement | null {
   const rEl = doc.findParentOf(caretT);
-  if (!rEl || localName(rEl.name) !== "r") return false;
+  if (!rEl || localName(rEl.name) !== "r") return null;
   const parent = doc.findParentOf(rEl);
-  if (!parent) return false;
+  if (!parent) return null;
   const w = prefixOf(rEl);
   const cx = String(Math.round(widthPx * EMU_PER_PX));
   const cy = String(Math.round(heightPx * EMU_PER_PX));
@@ -300,7 +301,45 @@ export function insertImageAt(
   const run = el(`${w}r`, {}, [drawing]);
   parent.children.splice(parent.children.indexOf(rEl) + 1, 0, run);
   doc.refresh();
-  return true;
+  return drawing;
+}
+
+/** Model paragraph for a w:p element (searched across sections and tables). */
+function modelParagraphOf(doc: DocxDocument, pEl: XmlElement): Paragraph | null {
+  const walk = (blocks: Block[]): Paragraph | null => {
+    for (const b of blocks) {
+      if (b.type === "paragraph") {
+        if (b.src === pEl) return b;
+      } else if (b.type === "table") {
+        for (const row of b.rows) {
+          for (const cell of row.cells) {
+            const hit = walk(cell.blocks);
+            if (hit) return hit;
+          }
+        }
+      }
+    }
+    return null;
+  };
+  for (const s of doc.sections) {
+    const hit = walk(s.blocks);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * Fixed line height (px) of the paragraph containing target, when its
+ * effective line spacing uses the "exact" rule — content taller than this
+ * cannot grow the line (Word clips it). Null for auto/atLeast spacing.
+ */
+export function exactLineHeightAt(doc: DocxDocument, target: XmlElement): number | null {
+  const pEl = paragraphOf(doc, target);
+  if (!pEl) return null;
+  const para = modelParagraphOf(doc, pEl);
+  if (!para) return null;
+  const ls = doc.effectiveParaProps(para).lineSpacing;
+  return ls?.rule === "exact" ? ls.value : null;
 }
 
 /** Apply (or clear, with null) a paragraph style to the target paragraphs. */

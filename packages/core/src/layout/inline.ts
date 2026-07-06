@@ -171,7 +171,11 @@ export function breakParagraph(
   let lineFloatOffset = 0;
   let curBase = 0;
   let curWidth = contentWidth;
-  const EST_LINE = 20;
+  // Estimated line height for float-exclusion checks. Fixed-height rules
+  // (exact/atLeast) are known before the line is built — use them, or a
+  // too-short estimate misses floats overlapping the lower band of the line.
+  const ls = props.lineSpacing;
+  const EST_LINE = ls && ls.rule !== "auto" ? Math.max(20, ls.value) : 20;
   const beginLine = (idx: number) => {
     lineFloatOffset = 0;
     curBase = 0;

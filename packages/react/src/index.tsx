@@ -11,7 +11,9 @@ import {
   TableOp,
   applyRunFormat,
   applyTableOp,
+  exactLineHeightAt,
   insertImageAt,
+  setImageWrap,
   insertTableAfter,
   layoutDocument,
   renderToDom,
@@ -220,7 +222,15 @@ export function DocxView({
             const ext = (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
             history.checkpoint();
             const relId = doc.addImageResource(bytes, ext === "jpg" ? "jpeg" : ext);
-            if (insertImageAt(doc, caret.t, relId, bmp.width * scale, bmp.height * scale)) {
+            const h = bmp.height * scale;
+            const drawing = insertImageAt(doc, caret.t, relId, bmp.width * scale, h);
+            if (drawing) {
+              // An image taller than an "exact"-spaced line would be clipped
+              // (Word) or overlap neighbors — float it with square wrap.
+              const exact = exactLineHeightAt(doc, caret.t);
+              if (exact !== null && h > exact + 0.5) {
+                setImageWrap(doc, drawing, "square", { x: 0, y: 0 });
+              }
               pages = rerender(doc);
             }
             bmp.close();
