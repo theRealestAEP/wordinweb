@@ -13,6 +13,7 @@ import {
   applyTableOp,
   deleteComment,
   exactLineHeightAt,
+  replyToComment,
   insertImageAt,
   setImageWrap,
   insertTableAfter,
@@ -74,6 +75,8 @@ export interface DocxViewProps {
   /** Fires when the document is ready; the api is only usable while mounted. */
   onReady?: (api: DocxViewApi) => void;
   onError?: (error: Error) => void;
+  /** Author name stamped on comment replies (default "You"). */
+  commentAuthor?: string;
 }
 
 async function toBytes(source: DocxViewProps["source"]): Promise<Uint8Array> {
@@ -104,6 +107,7 @@ export function DocxView({
   onLoad,
   onReady,
   onError,
+  commentAuthor = "You",
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -113,6 +117,7 @@ export function DocxView({
     let handle: RenderHandle | null = null;
     let editor: DocxEditor | null = null;
     let onDeleteComment: ((id: string) => void) | undefined;
+    let onReplyComment: ((id: string, text: string) => void) | undefined;
     let applyStyleShortcut: ((styleId: string | null) => void) | undefined;
     setError(null);
 
@@ -124,7 +129,7 @@ export function DocxView({
       // (destroy-then-append clamps scrollTop to 0 otherwise).
       const { scrollTop, scrollLeft } = container;
       handle?.destroy();
-      handle = renderToDom(doc, layout, container, { zoom, interactive: editable, onDeleteComment });
+      handle = renderToDom(doc, layout, container, { zoom, interactive: editable, onDeleteComment, onReplyComment });
       container.scrollTop = scrollTop;
       container.scrollLeft = scrollLeft;
       editor?.afterRender();
@@ -198,6 +203,18 @@ export function DocxView({
         onDeleteComment = (id) => {
           history.checkpoint();
           if (deleteComment(doc, id)) pages = rerender(doc);
+        };
+        onReplyComment = (id, text) => {
+          history.checkpoint();
+          const initials = commentAuthor
+            .split(/\s+/)
+            .map((part) => part[0] ?? "")
+            .join("")
+            .slice(0, 2)
+            .toUpperCase();
+          if (replyToComment(doc, id, text, commentAuthor, initials || undefined)) {
+            pages = rerender(doc);
+          }
         };
         pages = rerender(doc); // re-render with the delete affordance wired
         const api: DocxViewApi = {
@@ -324,7 +341,7 @@ export function DocxView({
       handle?.destroy();
       handle = null;
     };
-  }, [source, zoom, editable]);
+  }, [source, zoom, editable, commentAuthor]);
 
   return (
     <div

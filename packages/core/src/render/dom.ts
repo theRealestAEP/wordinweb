@@ -17,6 +17,9 @@ export interface RenderOptions {
   /** Called when the user deletes a comment from its balloon. The balloon
    * shows a delete button only when this is provided. */
   onDeleteComment?: (id: string) => void;
+  /** Called when the user submits a reply from a balloon's reply box. The
+   * reply box only renders when this is provided. */
+  onReplyComment?: (id: string, text: string) => void;
 }
 
 export interface TextBinding {
@@ -92,7 +95,7 @@ export function renderToDom(
 
   container.appendChild(root);
   if (options.comments !== false && doc.comments.length > 0) {
-    renderComments(doc, root, bindings, zoom, options.onDeleteComment);
+    renderComments(doc, root, bindings, zoom, options.onDeleteComment, options.onReplyComment);
   }
   return {
     root,
@@ -204,9 +207,22 @@ function renderComments(
   bindings: TextBinding[],
   zoom: number,
   onDelete?: (id: string) => void,
+  onReply?: (id: string, text: string) => void,
 ): void {
-  const anchors = doc.commentAnchors();
-  if (anchors.size === 0) return;
+  const allAnchors = doc.commentAnchors();
+  if (allAnchors.size === 0) return;
+
+  // Replies share the parent's range and render inside its balloon — only
+  // top-level comments get their own highlight and balloon.
+  const replyIds = new Set(doc.comments.filter((c) => c.parentId).map((c) => c.id));
+  const repliesByParent = new Map<string, typeof doc.comments>();
+  for (const c of doc.comments) {
+    if (!c.parentId) continue;
+    const list = repliesByParent.get(c.parentId);
+    if (list) list.push(c);
+    else repliesByParent.set(c.parentId, [c]);
+  }
+  const anchors = new Map([...allAnchors].filter(([id]) => !replyIds.has(id)));
 
   const idsByT = new Map<unknown, string[]>();
   for (const [id, ts] of anchors) {
@@ -262,6 +278,7 @@ function renderComments(
   // Balloons in document order (bindings are in paint order).
   const placed: { comment: (typeof doc.comments)[number]; binding: TextBinding }[] = [];
   for (const comment of doc.comments) {
+    if (comment.parentId) continue;
     const ts = anchors.get(comment.id);
     if (!ts?.length) continue;
     const tsSet = new Set<unknown>(ts);
@@ -319,6 +336,63 @@ function renderComments(
     body.className = "dxw-comment-text";
     body.textContent = comment.text;
     card.append(head, body);
+
+    // Reply thread, nested inside the parent balloon like Word.
+    for (const reply of repliesByParent.get(comment.id) ?? []) {
+      const row = document.createElement("div");
+      row.className = "dxw-comment-reply";
+      const rHead = document.createElement("div");
+      rHead.className = "dxw-comment-head";
+      const rAvatar = document.createElement("div");
+      rAvatar.className = "dxw-comment-avatar";
+      rAvatar.textContent = initialsOf(reply.author, reply.initials);
+      rAvatar.style.background = avatarColor(reply.author);
+      const rWho = document.createElement("div");
+      rWho.className = "dxw-comment-who";
+      const rAuthor = document.createElement("div");
+      rAuthor.className = "dxw-comment-author";
+      rAuthor.textContent = reply.author || "Reply";
+      const rWhen = reply.date ? new Date(reply.date) : null;
+      const rMeta = document.createElement("div");
+      rMeta.className = "dxw-comment-date";
+      rMeta.textContent = rWhen && !isNaN(rWhen.getTime()) ? rWhen.toLocaleDateString() : "";
+      rWho.append(rAuthor, rMeta);
+      rHead.append(rAvatar, rWho);
+      if (onDelete) {
+        const rDel = document.createElement("button");
+        rDel.className = "dxw-comment-delete";
+        rDel.title = "Delete reply";
+        rDel.textContent = "×";
+        rDel.addEventListener("mousedown", (e) => e.stopPropagation());
+        rDel.addEventListener("click", (e) => {
+          e.stopPropagation();
+          onDelete(reply.id);
+        });
+        rHead.append(rDel);
+      }
+      const rBody = document.createElement("div");
+      rBody.className = "dxw-comment-text";
+      rBody.textContent = reply.text;
+      row.append(rHead, rBody);
+      card.append(row);
+    }
+
+    if (onReply) {
+      const input = document.createElement("input");
+      input.className = "dxw-comment-reply-input";
+      input.placeholder = "Reply…";
+      // The editor listens on the container — keep typing out of the doc.
+      for (const evt of ["mousedown", "mouseup", "click", "keydown", "keyup"] as const) {
+        input.addEventListener(evt, (e) => e.stopPropagation());
+      }
+      input.addEventListener("keydown", (e) => {
+        if ((e as KeyboardEvent).key === "Enter" && input.value.trim()) {
+          onReply(comment.id, input.value.trim());
+        }
+      });
+      card.append(input);
+    }
+
     // Pages are flex-centered in the root (which reserves the rail via
     // padding-right), so anchor the balloon to the page's right edge with a
     // calc — a static pixel offset would stay put when a window resize
@@ -417,6 +491,13 @@ function ensureStylesheet(): void {
 .dxw-comment-card:hover .dxw-comment-delete { visibility: visible; }
 .dxw-comment-delete:hover { background: #f1f3f4; color: #a50e0e; }
 .dxw-comment-text { white-space: pre-wrap; overflow-wrap: break-word; }
+.dxw-comment-reply { margin-top: 8px; padding: 8px 0 0 10px; border-top: 1px solid #f1f3f4; border-left: 2px solid #e8eaed; }
+.dxw-comment-reply-input {
+  width: 100%; box-sizing: border-box; margin-top: 8px;
+  border: 1px solid #dadce0; border-radius: 12px; padding: 4px 10px;
+  font: 12px system-ui, sans-serif; color: #3c4043; outline: none;
+}
+.dxw-comment-reply-input:focus { border-color: #1a73e8; }
 `;
   document.head.appendChild(style);
 }

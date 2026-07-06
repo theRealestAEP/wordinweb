@@ -76,6 +76,10 @@ export class DocxDocument {
   /** Retained comments.xml tree (editing + save round-trip), when present. */
   private commentsPart: string | null = null;
   private commentsRoot: XmlElement | null = null;
+  /** Retained commentsExtended.xml tree (comment threading), when present. */
+  private commentsExtPart: string | null = null;
+  private commentsExtRoot: XmlElement | null = null;
+  private commentsExtDirty = false;
   /** Retained styles.xml tree (built-in style injection + save). */
   private stylesPart: string | null = null;
   private stylesRoot: XmlElement | null = null;
@@ -132,6 +136,11 @@ export class DocxDocument {
     if (commentsRoot) {
       this.commentsPart = docDir + "comments.xml";
       this.commentsRoot = commentsRoot;
+    }
+    const commentsExtRoot = this.readXmlOptional(docDir + "commentsExtended.xml");
+    if (commentsExtRoot) {
+      this.commentsExtPart = docDir + "commentsExtended.xml";
+      this.commentsExtRoot = commentsExtRoot;
     }
 
     // Collect header/footer parts referenced from the document rels.
@@ -200,13 +209,39 @@ export class DocxDocument {
         for (const ch of el.children) collectPara(ch);
       };
       for (const ch of c.children) collectPara(ch);
+      // Threading key: the w14:paraId of the comment's last body paragraph.
+      let paraId: string | undefined;
+      const lastPara = (el: XmlElement): void => {
+        if (localName(el.name) === "p") {
+          paraId = attr(el, "paraId") ?? paraId;
+          return;
+        }
+        for (const ch of el.children) lastPara(ch);
+      };
+      for (const ch of c.children) lastPara(ch);
       out.push({
         id: attr(c, "id") ?? "",
         author: attr(c, "author") ?? "",
         initials: attr(c, "initials"),
         date: attr(c, "date"),
         text: paras.join("\n"),
+        paraId,
       });
+    }
+    // commentsExtended threading: paraIdParent links a reply to its parent.
+    if (this.commentsExtRoot) {
+      const parentOf = new Map<string, string>();
+      for (const ex of this.commentsExtRoot.children) {
+        if (localName(ex.name) !== "commentEx") continue;
+        const pid = attr(ex, "paraId");
+        const parent = attr(ex, "paraIdParent");
+        if (pid && parent) parentOf.set(pid, parent);
+      }
+      const byParaId = new Map(out.filter((c) => c.paraId).map((c) => [c.paraId!, c]));
+      for (const c of out) {
+        const parentPara = c.paraId ? parentOf.get(c.paraId) : undefined;
+        if (parentPara) c.parentId = byParaId.get(parentPara)?.id;
+      }
     }
     return out;
   }
@@ -235,6 +270,65 @@ export class DocxDocument {
   /** Called by comment edit commands after mutating the comments tree. */
   markCommentsChanged(): void {
     this.commentsDirty = true;
+  }
+
+  /**
+   * Retained commentsExtended tree (threading). With create=true, a missing
+   * part is created and registered (content type + document relationship) so
+   * Word picks up reply threading.
+   */
+  commentsExtendedTree(create = false): XmlElement | null {
+    if (this.commentsExtRoot || !create) return this.commentsExtRoot;
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    this.commentsExtPart = docDir + "commentsExtended.xml";
+    this.commentsExtRoot = {
+      name: "w15:commentsEx",
+      attrs: {
+        "xmlns:w15": "http://schemas.microsoft.com/office/word/2012/wordml",
+        "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+      },
+      children: [],
+      text: "",
+    };
+    if (this.relsRoot) {
+      let maxId = 0;
+      for (const r of this.relsRoot.children) {
+        const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+        if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+      }
+      this.relsRoot.children.push({
+        name: "Relationship",
+        attrs: {
+          Id: `rId${maxId + 1}`,
+          Type: "http://schemas.microsoft.com/office/2011/relationships/commentsExtended",
+          Target: "commentsExtended.xml",
+        },
+        children: [],
+        text: "",
+      });
+    }
+    if (this.contentTypesRoot) {
+      const partName = "/" + this.commentsExtPart;
+      const has = this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName);
+      if (!has) {
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: {
+            PartName: partName,
+            ContentType:
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml",
+          },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    this.commentsExtDirty = true;
+    return this.commentsExtRoot;
+  }
+
+  markCommentsExtendedChanged(): void {
+    this.commentsExtDirty = true;
   }
 
   /**
@@ -283,6 +377,7 @@ export class DocxDocument {
   editableRoots(): XmlElement[] {
     const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
     if (this.commentsRoot) roots.push(this.commentsRoot);
+    if (this.commentsExtRoot) roots.push(this.commentsExtRoot);
     return roots;
   }
 
@@ -321,6 +416,9 @@ export class DocxDocument {
     }
     if (this.commentsDirty && this.commentsRoot && this.commentsPart) {
       files[this.commentsPart] = strToU8(serializeXml(this.commentsRoot, true));
+    }
+    if (this.commentsExtDirty && this.commentsExtRoot && this.commentsExtPart) {
+      files[this.commentsExtPart] = strToU8(serializeXml(this.commentsExtRoot, true));
     }
     if (this.stylesDirty && this.stylesRoot && this.stylesPart) {
       files[this.stylesPart] = strToU8(serializeXml(this.stylesRoot, true));

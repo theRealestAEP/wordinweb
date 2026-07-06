@@ -433,6 +433,10 @@ export interface DocComment {
   date?: string;
   /** Plain text of the comment body (paragraphs joined with newlines). */
   text: string;
+  /** w14:paraId of the comment's last body paragraph (threading key). */
+  paraId?: string;
+  /** Parent comment id when this comment is a reply (commentsExtended). */
+  parentId?: string;
 }
 
 // ---------- headers / footers ----------

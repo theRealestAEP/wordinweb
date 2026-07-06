@@ -232,4 +232,44 @@ describe("document parsing", () => {
     expect(doc.comments.length).toBe(1);
     expect(doc.commentAnchors().get("7")!.map((t) => t.text)).toEqual(["flagged"]);
   });
+
+  it("replies thread under the parent and round-trip; thread delete cascades", async () => {
+    const { replyToComment, deleteComment } = await import("../src/edit/comments.js");
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p>
+            <w:commentRangeStart w:id="0"/>
+            <w:r><w:t>flagged</w:t></w:r>
+            <w:commentRangeEnd w:id="0"/>
+            <w:r><w:commentReference w:id="0"/></w:r>
+          </w:p>`,
+        ),
+        "word/comments.xml": `<?xml version="1.0"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="0" w:author="Ada"><w:p><w:r><w:t>Parent note.</w:t></w:r></w:p></w:comment>
+</w:comments>`,
+      }),
+    );
+    expect(replyToComment(doc, "0", "I agree.", "Bob", "B")).toBe(true);
+    expect(doc.comments.length).toBe(2);
+    const reply = doc.comments.find((c) => c.author === "Bob")!;
+    expect(reply.parentId).toBe("0");
+    expect(reply.text).toBe("I agree.");
+    // The reply is anchored to the same text as the parent.
+    expect(doc.commentAnchors().get(reply.id)!.map((t) => t.text)).toEqual(["flagged"]);
+
+    // Round-trip: threading survives save/load (via commentsExtended).
+    const reloaded = DocxDocument.load(doc.save());
+    const rr = reloaded.comments.find((c) => c.author === "Bob")!;
+    expect(rr.parentId).toBe("0");
+    expect(reloaded.pkg.text("word/commentsExtended.xml")).toContain("paraIdParent");
+
+    // Deleting the parent removes the whole thread and all markers.
+    expect(deleteComment(doc, "0")).toBe(true);
+    expect(doc.comments.length).toBe(0);
+    expect(doc.commentAnchors().size).toBe(0);
+    const saved = DocxDocument.load(doc.save());
+    expect(saved.pkg.text("word/document.xml")).not.toContain("commentReference");
+  });
 });
