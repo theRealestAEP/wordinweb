@@ -723,14 +723,25 @@ export class DocxEditor {
       const x = (newLeftClient - srect.left) / zoom;
       const y = (newTopClient - srect.top) / zoom;
       const h = binding.item.height;
+      // Anchor to the first line the image now overlaps; when it lands in
+      // empty space, to the nearest line above (or below, at a page top) so
+      // the anchor still lives on the drop page.
       let first: TextBinding | null = null;
+      let above: TextBinding | null = null;
+      let below: TextBinding | null = null;
       for (const b of handle.bindings) {
         if (!b.item.src?.t) continue;
         if (b.el.closest(".dxw-page") !== pageEl) continue;
         if (this.regionOf(b.item.src.t as XmlElement) !== "body") continue;
-        if (b.item.lineTop + b.item.lineHeight <= y || b.item.lineTop >= y + h) continue;
-        if (!first || b.item.lineTop < first.item.lineTop) first = b;
+        if (b.item.lineTop + b.item.lineHeight > y && b.item.lineTop < y + h) {
+          if (!first || b.item.lineTop < first.item.lineTop) first = b;
+        } else if (b.item.lineTop + b.item.lineHeight <= y) {
+          if (!above || b.item.lineTop > above.item.lineTop) above = b;
+        } else if (!below || b.item.lineTop < below.item.lineTop) {
+          below = b;
+        }
       }
+      first = first ?? above ?? below;
       if (first?.item.src?.t) {
         const destT = first.item.src.t as XmlElement;
         const pEl = paragraphOf(doc, destT);

@@ -319,22 +319,43 @@ class Engine {
     }
 
     // Floats anchored here must exclude this paragraph's own text: emit them
-    // (registering exclusion rects) before breaking.
+    // (registering exclusion rects) before breaking. If the paragraph later
+    // turns out to start on another page/column, they are retracted and
+    // re-emitted there (see restartOnNextColumn).
     const anchors = this.collectAnchors(para);
     const label = this.numberingLabel(props, para);
-    const paraTopEstimate = this.y + (props.spacingBefore ?? 0);
-    if (anchors.length > 0) {
-      this.emitAnchors(anchors, this.cur, this.fieldCtx(), this.colX, paraTopEstimate);
-    }
-    const broken = breakParagraph(
-      this.doc,
-      this.measurer,
-      para,
-      this.colWidth,
-      this.fieldCtx(),
-      label,
-      this.floats.get(this.cur)?.length ? this.makeBoundsAt(paraTopEstimate) : undefined,
-    );
+    let anchorMark: { page: InternalPage; items: number; floats: number } | null = null;
+    const emitParaAnchors = (paraTop: number): void => {
+      if (anchors.length === 0) return;
+      anchorMark = {
+        page: this.cur,
+        items: this.cur.items.length,
+        floats: (this.floats.get(this.cur) ?? []).length,
+      };
+      this.emitAnchors(anchors, this.cur, this.fieldCtx(), this.colX, paraTop);
+    };
+    const retractParaAnchors = (): void => {
+      if (!anchorMark) return;
+      // Anchor items were appended last and nothing has been emitted since.
+      anchorMark.page.items.length = anchorMark.items;
+      const fl = this.floats.get(anchorMark.page);
+      if (fl) fl.length = anchorMark.floats;
+      anchorMark = null;
+    };
+    const breakNow = (paraTop: number) =>
+      breakParagraph(
+        this.doc,
+        this.measurer,
+        para,
+        this.colWidth,
+        this.fieldCtx(),
+        label,
+        this.floats.get(this.cur)?.length ? this.makeBoundsAt(paraTop) : undefined,
+      );
+
+    let paraTopEstimate = this.y + (props.spacingBefore ?? 0);
+    emitParaAnchors(paraTopEstimate);
+    let broken = breakNow(paraTopEstimate);
 
     // Contextual spacing: suppress before/after between same-style neighbors.
     let spacingBefore = props.spacingBefore ?? 0;
@@ -347,9 +368,21 @@ class Engine {
       if (nextStyle === myStyle) spacingAfter = 0;
     }
 
-    const lines = broken.lines;
+    let lines = broken.lines;
     const totalHeight = spacingBefore + lines.reduce((a, l) => a + l.height, 0);
     const bodyHeight = this.bodyBottom - this.cur.bodyTop;
+
+    /** Move the whole paragraph to the next column/page, taking its floats
+     * along (retract + re-emit) and re-breaking against the new bounds. */
+    const restartOnNextColumn = (extraSpacing: number): void => {
+      retractParaAnchors();
+      this.nextColumn();
+      paraTopEstimate = this.y + extraSpacing;
+      emitParaAnchors(paraTopEstimate);
+      broken = breakNow(paraTopEstimate);
+      lines = broken.lines;
+    };
+
     // keepLines: move the whole paragraph if it would split but fits on a page.
     if (
       props.keepLines &&
@@ -357,7 +390,8 @@ class Engine {
       totalHeight <= bodyHeight &&
       !this.pageIsEmptyAtCursor()
     ) {
-      this.nextColumn();
+      if (anchors.length > 0) restartOnNextColumn(spacingBefore);
+      else this.nextColumn();
     }
 
     // Adjacent before/after collapse: the larger of the previous paragraph's
@@ -366,8 +400,8 @@ class Engine {
 
     // Plan natural page-break indices with widow/orphan control (Word default: on).
     const widow = props.widowControl !== false;
-    const breaks = new Set<number>(); // line index that starts a new column/page
-    {
+    const planBreaks = (): Set<number> => {
+      const breaks = new Set<number>(); // line index that starts a new column/page
       let simY = this.y;
       let segStart = 0;
       let bottom = this.bodyBottom;
@@ -409,6 +443,14 @@ class Engine {
         }
         simY += lines[li].height;
       }
+      return breaks;
+    };
+    let breaks = planBreaks();
+    // A paragraph pushed entirely to the next column/page takes its floats
+    // along: retract, move, re-emit, and re-plan against the new geometry.
+    if (anchors.length > 0 && breaks.has(0) && !this.pageIsEmptyAtCursor()) {
+      restartOnNextColumn(0);
+      breaks = planBreaks();
     }
 
     let fragStartY = this.y;
