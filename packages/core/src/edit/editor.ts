@@ -45,6 +45,9 @@ export class DocxEditor {
   private caret: Caret | null = null;
   /** Header/footer editing is gated behind double-click, like Word. */
   private inHeaderFooter = false;
+  /** Page whose header/footer is being edited. The same hdr/ftr XML renders
+   * on every page, so the caret needs this to pick the right page's copy. */
+  private hfPage: string | null = null;
   /** Owned selection (native selection is disabled in edit mode — we paint
    * our own highlight, which kills the flicker and survives toolbar focus). */
   private selection: { anchor: SelPoint; focus: SelPoint } | null = null;
@@ -172,6 +175,9 @@ export class DocxEditor {
     const neighbor = bindings[idx + delta];
     if (idx === -1 || !neighbor?.item.src?.t) return null;
     const src = neighbor.item.src;
+    // Paint order interleaves body and header/footer items — don't step
+    // across the region boundary.
+    if (!this.inActiveRegion(src.t as XmlElement)) return null;
     return {
       t: src.t as XmlElement,
       offset: delta === -1 ? src.offset + neighbor.item.text.length : src.offset,
@@ -198,6 +204,7 @@ export class DocxEditor {
     for (let step = 1; step <= 6; step++) {
       const y = dir === -1 ? rect.top - step * lineH * 0.9 : rect.bottom + step * lineH * 0.9 - lineH / 2;
       const c = this.caretFromPoint(x, y) ?? this.nearestCaret(x, y);
+      if (c && !this.inActiveRegion(c.t)) continue; // don't cross into the dimmed region
       if (c && !(c.t === pt.t && c.offset === pt.offset)) return { t: c.t, offset: c.offset };
     }
     return null;
@@ -545,8 +552,10 @@ export class DocxEditor {
     if (e.button !== 0) return;
     const anchor = this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     if (!anchor) return;
-    // Respect the header/footer gate for selection too.
-    if (this.regionOf(anchor.t) === "hf" && !this.inHeaderFooter) return;
+    // Respect the header/footer gate for selection too, in both directions:
+    // no selecting hf text from body mode, no selecting dimmed body text
+    // while editing a header/footer.
+    if ((this.regionOf(anchor.t) === "hf") !== this.inHeaderFooter) return;
     let dragging = false;
     const onMove = (me: MouseEvent) => {
       const focus = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
@@ -908,6 +917,12 @@ export class DocxEditor {
     const caret =
       this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     const region = caret ? this.regionOf(caret.t) : "body";
+    if (region === "hf") {
+      const pageEl = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null)?.closest(
+        ".dxw-page",
+      ) as HTMLElement | null;
+      if (pageEl?.dataset.page) this.hfPage = pageEl.dataset.page;
+    }
 
     if (region === "hf" && !this.inHeaderFooter) {
       // Word UX: double-click enters header/footer editing.
@@ -924,10 +939,20 @@ export class DocxEditor {
       return;
     }
     if (region === "body" && this.inHeaderFooter) {
+      // Word UX: the dimmed body is inert; double-click returns to body
+      // editing (single clicks stay in the header/footer).
+      if (e.detail < 2 || !caret) return;
       this.inHeaderFooter = false;
+      this.hfPage = null;
       this.applyHfChrome();
+      this.clearSelection();
+      this.caret = caret;
+      this.positionCaret();
+      this.host.container.focus({ preventScroll: true });
+      return;
     } else if (region === "body") {
       this.inHeaderFooter = false;
+      this.hfPage = null;
     }
 
     if (caret && e.shiftKey) {
@@ -956,6 +981,11 @@ export class DocxEditor {
       this.hideCaret();
     }
   };
+
+  /** True when the element belongs to the region currently being edited. */
+  private inActiveRegion(t: XmlElement): boolean {
+    return (this.regionOf(t) === "hf") === this.inHeaderFooter;
+  }
 
   /** Which part tree the element lives in: document body or header/footer. */
   private regionOf(t: XmlElement): "body" | "hf" {
@@ -1113,7 +1143,12 @@ export class DocxEditor {
           this.moveFocus((pt) => this.lineEdgePoint(pt, e.key === "ArrowLeft" ? "start" : "end"), extend);
         } else {
           const handle = this.host.getHandle();
-          const list = handle?.bindings.filter((b) => b.item.src?.t) ?? [];
+          const list =
+            handle?.bindings.filter(
+              (b) =>
+                b.item.src?.t &&
+                (this.regionOf(b.item.src.t as XmlElement) === "hf") === this.inHeaderFooter,
+            ) ?? [];
           const b = e.key === "ArrowUp" ? list[0] : list[list.length - 1];
           if (b?.item.src) {
             const target = {
@@ -1182,6 +1217,7 @@ export class DocxEditor {
     for (let step = 1; step <= 6; step++) {
       const y = dir === -1 ? rect.top - step * lineH * 0.9 : rect.bottom + step * lineH * 0.9 - lineH / 2;
       const caret = this.caretFromPoint(x, y) ?? this.nearestCaret(x, y);
+      if (caret && !this.inActiveRegion(caret.t)) continue; // don't cross into the dimmed region
       if (caret && !(caret.t === this.caret!.t && caret.offset === this.caret!.offset)) {
         this.caret = caret;
         this.positionCaret();
@@ -1320,6 +1356,9 @@ export class DocxEditor {
     const neighbor = bindings[idx + delta];
     if (!neighbor?.item.src?.t) return false;
     const src = neighbor.item.src;
+    // Paint order interleaves body and header/footer items — don't step
+    // across the region boundary (also guards boundary Backspace/Delete).
+    if (!this.inActiveRegion(src.t as XmlElement)) return false;
     this.caret = {
       t: src.t as XmlElement,
       run: src.run,
@@ -1414,17 +1453,27 @@ export class DocxEditor {
     if (!caret || !handle) return;
     // Prefer the binding containing the offset; at boundaries prefer the one
     // whose range ends exactly at the caret (keeps the caret after the char).
-    let best: TextBinding | undefined;
-    for (const b of handle.bindings) {
-      const src = b.item.src;
-      if (!src || src.t !== caret.t) continue;
-      const start = src.offset;
-      const end = src.offset + b.item.text.length;
-      if (caret.offset >= start && caret.offset <= end) {
-        best = b;
-        if (caret.offset < end) break; // fully inside — done
+    const pick = (list: TextBinding[]): TextBinding | undefined => {
+      let found: TextBinding | undefined;
+      for (const b of list) {
+        const src = b.item.src!;
+        const start = src.offset;
+        const end = src.offset + b.item.text.length;
+        if (caret.offset >= start && caret.offset <= end) {
+          found = b;
+          if (caret.offset < end) break; // fully inside — done
+        }
       }
-    }
+      return found;
+    };
+    const candidates = handle.bindings.filter((b) => b.item.src?.t === caret.t);
+    // Headers/footers render the same XML on every page — pin the caret to
+    // the page copy the user is actually editing.
+    const wantPage = this.inHeaderFooter ? this.hfPage : null;
+    let best = wantPage
+      ? pick(candidates.filter((b) => (b.el.closest(".dxw-page") as HTMLElement | null)?.dataset.page === wantPage))
+      : undefined;
+    if (!best) best = pick(candidates);
     if (!best) {
       // Don't hide: the t may momentarily lack a binding (mid-edit). Keep the
       // caret where it was; if it was never placed, there is nothing to show.
