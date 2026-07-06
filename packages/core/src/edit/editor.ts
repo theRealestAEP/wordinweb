@@ -314,6 +314,25 @@ export class DocxEditor {
     const startIdx = Math.floor(a / 1e6);
     const endIdx = Math.floor(f / 1e6);
     const zoom = this.host.zoom ?? 1;
+
+    // One rect per visual line, not per binding: word-granular documents
+    // have thousands of bindings per page, and per-binding rects make
+    // drag-selection unusably slow.
+    let run: { surface: HTMLElement; top: number; height: number; x0: number; x1: number } | null = null;
+    const flush = (): void => {
+      if (!run) return;
+      if (run.x1 > run.x0) {
+        const rect = document.createElement("div");
+        rect.className = "dxw-sel";
+        rect.style.cssText =
+          `position:absolute;left:${run.x0}px;top:${run.top}px;width:${run.x1 - run.x0}px;` +
+          `height:${run.height}px;background:rgba(26,115,232,.28);pointer-events:none;z-index:4;`;
+        run.surface.appendChild(rect);
+        this.selectionRects.push(rect);
+      }
+      run = null;
+    };
+
     for (let i = startIdx; i <= endIdx; i++) {
       const b = handle.bindings[i];
       const item = b.item;
@@ -321,12 +340,14 @@ export class DocxEditor {
       if (!src?.t) continue;
       let x0 = item.x;
       let x1 = item.x + item.width;
-      const textNode = b.el.firstChild;
       const surface = b.el.parentElement;
       if (!surface) continue;
-      const surfaceRect = surface.getBoundingClientRect();
-      const localX = (client: number) => (client - surfaceRect.left) / zoom;
-      if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+      const textNode = b.el.firstChild;
+      // Partial-offset edges need real glyph positions — only ever the two
+      // boundary bindings, so the DOM measurement cost stays constant.
+      if ((i === startIdx || i === endIdx) && textNode && textNode.nodeType === Node.TEXT_NODE) {
+        const surfaceRect = surface.getBoundingClientRect();
+        const localX = (client: number) => (client - surfaceRect.left) / zoom;
         try {
           if (i === startIdx && startPt.offset > src.offset) {
             const rg = document.createRange();
@@ -344,15 +365,16 @@ export class DocxEditor {
           /* keep full-span rect */
         }
       }
-      if (x1 <= x0) continue;
-      const rect = document.createElement("div");
-      rect.className = "dxw-sel";
-      rect.style.cssText =
-        `position:absolute;left:${x0}px;top:${item.lineTop}px;width:${x1 - x0}px;` +
-        `height:${item.lineHeight}px;background:rgba(26,115,232,.28);pointer-events:none;z-index:4;`;
-      surface.appendChild(rect);
-      this.selectionRects.push(rect);
+      if (run && (run.surface !== surface || run.top !== item.lineTop)) flush();
+      if (!run) {
+        run = { surface, top: item.lineTop, height: item.lineHeight, x0, x1 };
+      } else {
+        run.x0 = Math.min(run.x0, x0);
+        run.x1 = Math.max(run.x1, x1);
+        run.height = Math.max(run.height, item.lineHeight);
+      }
     }
+    flush();
   }
 
   /** Word-style cue: dim the inactive region; dashed boundary + tab labels
@@ -557,8 +579,14 @@ export class DocxEditor {
     // while editing a header/footer.
     if ((this.regionOf(anchor.t) === "hf") !== this.inHeaderFooter) return;
     let dragging = false;
-    const onMove = (me: MouseEvent) => {
-      const focus = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
+    // Coalesce mousemoves to one update per frame — hit-testing and
+    // repainting on every event lags badly on large documents.
+    let raf = 0;
+    let lastX = 0;
+    let lastY = 0;
+    const update = () => {
+      raf = 0;
+      const focus = this.caretFromPoint(lastX, lastY) ?? this.nearestCaret(lastX, lastY);
       if (!focus) return;
       if (!dragging && (focus.t !== anchor.t || focus.offset !== anchor.offset)) {
         dragging = true;
@@ -573,9 +601,19 @@ export class DocxEditor {
         this.paintSelection();
       }
     };
+    const onMove = (me: MouseEvent) => {
+      lastX = me.clientX;
+      lastY = me.clientY;
+      if (!raf) raf = requestAnimationFrame(update);
+    };
     const onUp = () => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      // Apply the final pointer position so the selection never trails it.
+      if (raf) {
+        cancelAnimationFrame(raf);
+        update();
+      }
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
@@ -616,9 +654,24 @@ export class DocxEditor {
   // ---------- drop-position indicator ----------
 
   private dropIndicator: HTMLElement | null = null;
+  private dropIndicatorRaf = 0;
 
-  /** Blue insertion bar at the caret position nearest (x, y), like Docs. */
+  /** Blue insertion bar at the caret position nearest (x, y), like Docs.
+   * Coalesced to one hit-test per frame — dragover fires per pointer event. */
   private showDropIndicator(x: number, y: number): void {
+    this.dropIndicatorX = x;
+    this.dropIndicatorY = y;
+    if (this.dropIndicatorRaf) return;
+    this.dropIndicatorRaf = requestAnimationFrame(() => {
+      this.dropIndicatorRaf = 0;
+      this.placeDropIndicator(this.dropIndicatorX, this.dropIndicatorY);
+    });
+  }
+
+  private dropIndicatorX = 0;
+  private dropIndicatorY = 0;
+
+  private placeDropIndicator(x: number, y: number): void {
     const dest = this.caretFromPoint(x, y) ?? this.nearestCaret(x, y);
     const handle = this.host.getHandle();
     if (!dest || !handle) {
@@ -659,6 +712,10 @@ export class DocxEditor {
   }
 
   private hideDropIndicator(): void {
+    if (this.dropIndicatorRaf) {
+      cancelAnimationFrame(this.dropIndicatorRaf);
+      this.dropIndicatorRaf = 0;
+    }
     this.dropIndicator?.remove();
     this.dropIndicator = null;
   }
@@ -1107,18 +1164,43 @@ export class DocxEditor {
   private nearestCaret(x: number, y: number): Caret | null {
     const handle = this.host.getHandle();
     if (!handle) return null;
-    const page = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(".dxw-page");
+    // Resolve the page under (or nearest to) the pointer once, then compare
+    // in surface coordinates from item geometry — calling
+    // getBoundingClientRect per binding is far too slow for drag handlers
+    // on large documents.
+    let pageEl = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(".dxw-page") as HTMLElement | null;
+    if (!pageEl) {
+      let bestD = Infinity;
+      for (const p of Array.from(handle.root.querySelectorAll<HTMLElement>(".dxw-page"))) {
+        const r = p.getBoundingClientRect();
+        const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+        const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) {
+          bestD = d;
+          pageEl = p;
+        }
+      }
+    }
+    const surface = pageEl?.firstElementChild as HTMLElement | null;
+    if (!surface) return null;
+    const srect = surface.getBoundingClientRect();
+    const zoom = this.host.zoom ?? 1;
+    const lx = (x - srect.left) / zoom;
+    const ly = (y - srect.top) / zoom;
+
     let best: { binding: TextBinding; after: boolean } | null = null;
     let bestDist = Infinity;
     for (const b of handle.bindings) {
       if (!b.item.src?.t) continue;
-      if (page && b.el.closest(".dxw-page") !== page) continue;
-      const r = b.el.getBoundingClientRect();
-      if (y < r.top - 2 || y > r.bottom + 2) continue;
-      const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+      if (b.el.parentElement !== surface) continue;
+      if (ly < b.item.lineTop - 2 || ly > b.item.lineTop + b.item.lineHeight + 2) continue;
+      const x0 = b.item.x;
+      const x1 = b.item.x + b.item.width;
+      const dx = lx < x0 ? x0 - lx : lx > x1 ? lx - x1 : 0;
       if (dx < bestDist) {
         bestDist = dx;
-        best = { binding: b, after: x > r.right };
+        best = { binding: b, after: lx > x1 };
       }
     }
     if (!best) {
@@ -1129,14 +1211,15 @@ export class DocxEditor {
       let bestRight = -Infinity;
       for (const b of handle.bindings) {
         if (!b.item.src?.t) continue;
-        if (page && b.el.closest(".dxw-page") !== page) continue;
-        const r = b.el.getBoundingClientRect();
-        if (r.bottom > y) continue;
-        if (r.bottom > bestBottom + 1 || (Math.abs(r.bottom - bestBottom) <= 1 && r.right > bestRight)) {
-          bestBottom = Math.max(bestBottom, r.bottom);
-          if (Math.abs(r.bottom - bestBottom) <= 1) {
+        if (b.el.parentElement !== surface) continue;
+        const bottom = b.item.lineTop + b.item.lineHeight;
+        if (bottom > ly) continue;
+        const right = b.item.x + b.item.width;
+        if (bottom > bestBottom + 1 || (Math.abs(bottom - bestBottom) <= 1 && right > bestRight)) {
+          bestBottom = Math.max(bestBottom, bottom);
+          if (Math.abs(bottom - bestBottom) <= 1) {
             bestAbove = b;
-            bestRight = r.right;
+            bestRight = right;
           }
         }
       }
