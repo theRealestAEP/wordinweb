@@ -152,4 +152,46 @@ describe("document parsing", () => {
     const hdr = doc.headers.get("rId5")!;
     expect(hdr.blocks.length).toBe(1);
   });
+
+  it("parses review comments and maps their anchor ranges", () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p>
+            <w:r><w:t>before </w:t></w:r>
+            <w:commentRangeStart w:id="7"/>
+            <w:r><w:t>flagged</w:t></w:r>
+            <w:r><w:t> words</w:t></w:r>
+            <w:commentRangeEnd w:id="7"/>
+            <w:r><w:commentReference w:id="7"/></w:r>
+            <w:r><w:t> after</w:t></w:r>
+          </w:p>` +
+            `<w:p>
+            <w:r><w:t>point anchor</w:t></w:r>
+            <w:r><w:commentReference w:id="8"/></w:r>
+          </w:p>`,
+        ),
+        "word/comments.xml": `<?xml version="1.0"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:comment w:id="7" w:author="Ada" w:initials="A" w:date="2026-06-01T10:00:00Z">
+    <w:p><w:r><w:t>First line.</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Second line.</w:t></w:r></w:p>
+  </w:comment>
+  <w:comment w:id="8" w:author="Bob">
+    <w:p><w:r><w:t>Point comment.</w:t></w:r></w:p>
+  </w:comment>
+</w:comments>`,
+      }),
+    );
+    expect(doc.comments.length).toBe(2);
+    expect(doc.comments[0]).toMatchObject({ id: "7", author: "Ada", initials: "A" });
+    expect(doc.comments[0].text).toBe("First line.\nSecond line.");
+    expect(doc.comments[1]).toMatchObject({ id: "8", author: "Bob", text: "Point comment." });
+
+    const anchors = doc.commentAnchors();
+    const ranged = anchors.get("7")!;
+    expect(ranged.map((t) => t.text)).toEqual(["flagged", " words"]);
+    // Point comment (no range) anchors to the nearest preceding w:t.
+    expect(anchors.get("8")!.map((t) => t.text)).toEqual(["point anchor"]);
+  });
 });

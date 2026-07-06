@@ -1,8 +1,9 @@
 import { Package } from "./zip.js";
-import { XmlElement, parseXml, serializeXml, child, intAttr, onOff } from "./xml.js";
+import { XmlElement, parseXml, serializeXml, child, intAttr, onOff, attr, localName } from "./xml.js";
 import { strToU8, zipSync } from "fflate";
 import { twipsToPx } from "./units.js";
 import {
+  DocComment,
   HeaderFooter,
   Numbering,
   ParaProps,
@@ -39,6 +40,8 @@ export class DocxDocument {
   readonly evenAndOddHeaders: boolean = false;
   /** settings.xml w:defaultTabStop in px (Word default 0.5"). */
   readonly defaultTabStop: number = 48;
+  /** Review comments from word/comments.xml (empty when the part is absent). */
+  readonly comments: DocComment[] = [];
 
   /** Retained XML roots — source of truth for editing and save(). */
   private readonly docPart: string;
@@ -80,6 +83,36 @@ export class DocxDocument {
       if (tabStop !== undefined && tabStop > 0) this.defaultTabStop = twipsToPx(tabStop);
     }
 
+    // Review comments (optional part).
+    const commentsRoot = this.readXmlOptional(docDir + "comments.xml");
+    if (commentsRoot) {
+      for (const c of commentsRoot.children) {
+        if (localName(c.name) !== "comment") continue;
+        const paras: string[] = [];
+        const collectPara = (el: XmlElement): void => {
+          if (localName(el.name) === "p") {
+            let text = "";
+            const collectT = (e: XmlElement): void => {
+              if (localName(e.name) === "t") text += e.text;
+              for (const ch of e.children) collectT(ch);
+            };
+            collectT(el);
+            paras.push(text);
+            return;
+          }
+          for (const ch of el.children) collectPara(ch);
+        };
+        for (const ch of c.children) collectPara(ch);
+        this.comments.push({
+          id: attr(c, "id") ?? "",
+          author: attr(c, "author") ?? "",
+          initials: attr(c, "initials"),
+          date: attr(c, "date"),
+          text: paras.join("\n"),
+        });
+      }
+    }
+
     // Collect header/footer parts referenced from the document rels.
     for (const rel of this.documentRels.values()) {
       const isHeader = rel.type.endsWith("/header");
@@ -110,6 +143,47 @@ export class DocxDocument {
       const hf: HeaderFooter = { blocks: parseBlocks(part.root, partCtx) };
       (part.isHeader ? this.headers : this.footers).set(part.relId, hf);
     }
+  }
+
+  /**
+   * The w:t elements covered by each comment's range, in document order.
+   * Point comments (a bare commentReference with no range) anchor to the
+   * nearest preceding w:t.
+   */
+  commentAnchors(): Map<string, XmlElement[]> {
+    const map = new Map<string, XmlElement[]>();
+    const active = new Set<string>();
+    let lastT: XmlElement | null = null;
+    const walk = (el: XmlElement): void => {
+      const ln = localName(el.name);
+      if (ln === "commentRangeStart") {
+        const id = attr(el, "id");
+        if (id !== undefined) active.add(id);
+        return;
+      }
+      if (ln === "commentRangeEnd") {
+        const id = attr(el, "id");
+        if (id !== undefined) active.delete(id);
+        return;
+      }
+      if (ln === "commentReference") {
+        const id = attr(el, "id");
+        if (id !== undefined && !map.has(id) && lastT) map.set(id, [lastT]);
+        return;
+      }
+      if (ln === "t") {
+        lastT = el;
+        for (const id of active) {
+          const list = map.get(id);
+          if (list) list.push(el);
+          else map.set(id, [el]);
+        }
+        return;
+      }
+      for (const c of el.children) walk(c);
+    };
+    walk(this.docRoot);
+    return map;
   }
 
   /** The mutable XML roots (document body, then header/footer parts). */

@@ -403,6 +403,19 @@ export interface Section {
   blocks: Block[];
 }
 
+// ---------- comments ----------
+
+/** A review comment from word/comments.xml. */
+export interface DocComment {
+  id: string;
+  author: string;
+  initials?: string;
+  /** ISO timestamp from w:date, verbatim. */
+  date?: string;
+  /** Plain text of the comment body (paragraphs joined with newlines). */
+  text: string;
+}
+
 // ---------- headers / footers ----------
 
 export interface HeaderFooter {

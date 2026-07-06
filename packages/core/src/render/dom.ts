@@ -12,6 +12,8 @@ export interface RenderOptions {
   pageShadow?: boolean;
   /** Materialize interactive affordances (table resize grips). */
   interactive?: boolean;
+  /** Show review comments (highlight + margin balloons). Default true. */
+  comments?: boolean;
 }
 
 export interface TextBinding {
@@ -86,6 +88,9 @@ export function renderToDom(
   }
 
   container.appendChild(root);
+  if (options.comments !== false && doc.comments.length > 0) {
+    renderComments(doc, root, bindings, zoom);
+  }
   return {
     root,
     bindings,
@@ -184,6 +189,111 @@ function renderPage(
   return el;
 }
 
+/**
+ * Word-style review comments: highlight each commented range and hang a
+ * balloon in the rail right of the page, vertically aligned with the first
+ * commented line (stacked downward when balloons would overlap). Runs after
+ * the root is in the live DOM — balloon stacking measures real heights.
+ */
+function renderComments(
+  doc: DocxDocument,
+  root: HTMLElement,
+  bindings: TextBinding[],
+  zoom: number,
+): void {
+  const anchors = doc.commentAnchors();
+  if (anchors.size === 0) return;
+
+  const idsByT = new Map<unknown, string[]>();
+  for (const [id, ts] of anchors) {
+    for (const t of ts) {
+      const list = idsByT.get(t);
+      if (list) list.push(id);
+      else idsByT.set(t, [id]);
+    }
+  }
+  for (const b of bindings) {
+    const t = b.item.src?.t;
+    const ids = t ? idsByT.get(t) : undefined;
+    if (!ids) continue;
+    b.el.style.backgroundColor = "rgba(255, 200, 90, 0.4)";
+    b.el.dataset.dxwComment = ids.join(" ");
+  }
+
+  // Reserve the balloon rail before reading page offsets — the flex
+  // centering shifts pages left once the padding is applied.
+  root.style.position = "relative";
+  root.style.paddingRight = `${COMMENT_RAIL_WIDTH + 24}px`;
+
+  // Balloons in document order (bindings are in paint order).
+  const placed: { comment: (typeof doc.comments)[number]; binding: TextBinding }[] = [];
+  for (const comment of doc.comments) {
+    const ts = anchors.get(comment.id);
+    if (!ts?.length) continue;
+    const tsSet = new Set<unknown>(ts);
+    const first = bindings.find((b) => b.item.src?.t && tsSet.has(b.item.src.t));
+    if (first) placed.push({ comment, binding: first });
+  }
+  let lastBottom = -Infinity;
+  for (const { comment, binding } of placed
+    .map((p) => ({
+      ...p,
+      pageEl: p.binding.el.closest(".dxw-page") as HTMLElement | null,
+    }))
+    .filter((p) => p.pageEl)
+    .sort(
+      (p, q) =>
+        p.pageEl!.offsetTop + p.binding.item.lineTop * zoom - (q.pageEl!.offsetTop + q.binding.item.lineTop * zoom),
+    )) {
+    const pageEl = binding.el.closest(".dxw-page") as HTMLElement;
+    const card = document.createElement("div");
+    card.className = "dxw-comment-card";
+    card.dataset.dxwCommentId = comment.id;
+    const when = comment.date ? new Date(comment.date) : null;
+    const dateText = when && !isNaN(when.getTime()) ? when.toLocaleDateString() : "";
+    const author = document.createElement("div");
+    author.className = "dxw-comment-author";
+    author.textContent = comment.author || "Comment";
+    const meta = document.createElement("div");
+    meta.className = "dxw-comment-date";
+    meta.textContent = dateText;
+    const body = document.createElement("div");
+    body.className = "dxw-comment-text";
+    body.textContent = comment.text;
+    card.append(author, meta, body);
+    card.style.left = `${pageEl.offsetLeft + pageEl.offsetWidth + 12}px`;
+    root.appendChild(card);
+    const top = Math.max(pageEl.offsetTop + binding.item.lineTop * zoom, lastBottom + 8);
+    card.style.top = `${top}px`;
+    lastBottom = top + card.offsetHeight;
+
+    // Hover linking, both directions.
+    card.addEventListener("mouseenter", () => setCommentHot(root, comment.id, true));
+    card.addEventListener("mouseleave", () => setCommentHot(root, comment.id, false));
+  }
+
+  root.addEventListener("mouseover", (e) => {
+    const span = (e.target as HTMLElement).closest?.("[data-dxw-comment]") as HTMLElement | null;
+    if (span) for (const id of span.dataset.dxwComment!.split(" ")) setCommentHot(root, id, true);
+  });
+  root.addEventListener("mouseout", (e) => {
+    const span = (e.target as HTMLElement).closest?.("[data-dxw-comment]") as HTMLElement | null;
+    if (span) for (const id of span.dataset.dxwComment!.split(" ")) setCommentHot(root, id, false);
+  });
+}
+
+const COMMENT_RAIL_WIDTH = 232;
+
+function setCommentHot(root: HTMLElement, id: string, hot: boolean): void {
+  for (const card of Array.from(root.querySelectorAll<HTMLElement>(".dxw-comment-card"))) {
+    if (card.dataset.dxwCommentId === id) card.classList.toggle("dxw-hot", hot);
+  }
+  for (const span of Array.from(root.querySelectorAll<HTMLElement>("[data-dxw-comment]"))) {
+    const ids = span.dataset.dxwComment!.split(" ");
+    if (ids.includes(id)) span.classList.toggle("dxw-hot", hot);
+  }
+}
+
 /** One-time stylesheet for editing chrome (header/footer mode dimming). */
 function ensureStylesheet(): void {
   if (document.getElementById("dxw-style")) return;
@@ -196,6 +306,25 @@ function ensureStylesheet(): void {
 .dxw-body-mode .dxw-page span[data-dxw-hf],
 .dxw-body-mode .dxw-page a[data-dxw-hf],
 .dxw-body-mode .dxw-page img[data-dxw-hf] { opacity: .55; }
+.dxw-comment-card {
+  position: absolute;
+  width: 220px;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px solid #dadce0;
+  border-left: 3px solid #f9ab00;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.15);
+  font: 12px system-ui, sans-serif;
+  color: #3c4043;
+  z-index: 3;
+}
+.dxw-comment-card.dxw-hot { border-color: #f9ab00; box-shadow: 0 2px 8px rgba(249,171,0,.45); }
+.dxw-comment-author { font-weight: 600; }
+.dxw-comment-date { color: #5f6368; font-size: 11px; margin-bottom: 4px; }
+.dxw-comment-text { white-space: pre-wrap; }
+span.dxw-hot[data-dxw-comment] { background-color: rgba(255, 170, 0, .65) !important; }
 `;
   document.head.appendChild(style);
 }
