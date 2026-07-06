@@ -4,3 +4,6 @@ dist/
 apps/demo/public/fixtures/*.docx
 .DS_Store
 parity/
+
+# node_modules symlinks (worktree dev setups)
+node_modules
