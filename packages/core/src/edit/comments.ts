@@ -24,7 +24,10 @@ export function deleteComment(doc: DocxDocument, id: string): boolean {
     touched = stripMarkers(root, id) || touched;
   }
 
-  if (touched) doc.refresh();
+  if (touched) {
+    doc.markCommentsChanged();
+    doc.refresh();
+  }
   return touched;
 }
 

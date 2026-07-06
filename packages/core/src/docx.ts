@@ -24,6 +24,31 @@ import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
 
 const REL_TYPE_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 
+/** Word's built-in heading/title looks (modern Office theme), injected when a
+ * file uses one without declaring it. Sizes in half-points. */
+const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
+  const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const heading = (n: number, sizeHalfPt: number, color: string, extraRpr = ""): string =>
+    `<w:style ${W} w:type="paragraph" w:styleId="Heading${n}">
+      <w:name w:val="Heading ${n}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>
+      <w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="${n === 1 ? 240 : 40}" w:after="0"/><w:outlineLvl w:val="${n - 1}"/></w:pPr>
+      <w:rPr><w:color w:val="${color}"/><w:sz w:val="${sizeHalfPt}"/><w:szCs w:val="${sizeHalfPt}"/>${extraRpr}</w:rPr>
+    </w:style>`;
+  return {
+    Heading1: heading(1, 32, "2F5496"),
+    Heading2: heading(2, 26, "2F5496"),
+    Heading3: heading(3, 24, "1F3863"),
+    Heading4: heading(4, 22, "2F5496", "<w:i/>"),
+    Heading5: heading(5, 22, "2F5496"),
+    Heading6: heading(6, 22, "1F3863"),
+    Title: `<w:style ${W} w:type="paragraph" w:styleId="Title">
+      <w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>
+      <w:pPr><w:spacing w:after="80"/></w:pPr>
+      <w:rPr><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr>
+    </w:style>`,
+  };
+})();
+
 /**
  * A fully parsed .docx: sections of blocks, styles, numbering, theme, and
  * header/footer parts, with helpers to resolve effective formatting.
@@ -31,7 +56,7 @@ const REL_TYPE_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006
 export class DocxDocument {
   readonly pkg: Package;
   readonly theme: Theme;
-  readonly styles: Styles;
+  styles: Styles;
   readonly numbering: Numbering;
   sections: Section[] = [];
   /** Header/footer parts keyed by relationship id from document.xml.rels. */
@@ -51,6 +76,13 @@ export class DocxDocument {
   /** Retained comments.xml tree (editing + save round-trip), when present. */
   private commentsPart: string | null = null;
   private commentsRoot: XmlElement | null = null;
+  /** Retained styles.xml tree (built-in style injection + save). */
+  private stylesPart: string | null = null;
+  private stylesRoot: XmlElement | null = null;
+  /** Serialize retained optional parts only once actually mutated, keeping
+   * untouched parts byte-identical through save(). */
+  private stylesDirty = false;
+  private commentsDirty = false;
 
   /** Retained XML roots — source of truth for editing and save(). */
   private readonly docPart: string;
@@ -73,7 +105,9 @@ export class DocxDocument {
     this.theme = parseTheme(themeXml);
     this.ctxBase = { theme: this.theme };
 
-    this.styles = parseStyles(this.readXmlOptional(docDir + "styles.xml"), this.ctxBase);
+    this.stylesPart = docDir + "styles.xml";
+    this.stylesRoot = this.readXmlOptional(this.stylesPart) ?? null;
+    this.styles = parseStyles(this.stylesRoot ?? undefined, this.ctxBase);
     this.numbering = parseNumbering(this.readXmlOptional(docDir + "numbering.xml"), this.ctxBase);
 
     this.relsPath = relsPathFor(docPart);
@@ -143,6 +177,7 @@ export class DocxDocument {
       (part.isHeader ? this.headers : this.footers).set(part.relId, hf);
     }
     this.comments = this.deriveComments();
+    this.styles = parseStyles(this.stylesRoot ?? undefined, this.ctxBase);
   }
 
   private deriveComments(): DocComment[] {
@@ -179,6 +214,27 @@ export class DocxDocument {
   /** Retained comments tree for edit commands (null when the doc has none). */
   commentsTree(): XmlElement | null {
     return this.commentsRoot;
+  }
+
+  /**
+   * Make sure a paragraph style is usable: Word ships built-in definitions
+   * for Heading 1-6/Title even when a file doesn't declare them, so applying
+   * one to such a file must inject a standard definition (otherwise the
+   * paragraph would reference an undefined style and render as Normal).
+   */
+  ensureParagraphStyle(styleId: string): boolean {
+    if (this.styles.byId.has(styleId)) return true;
+    const def = BUILTIN_PARA_STYLES[styleId];
+    if (!def || !this.stylesRoot) return false;
+    this.stylesRoot.children.push(parseXml(def));
+    this.styles = parseStyles(this.stylesRoot, this.ctxBase);
+    this.stylesDirty = true;
+    return true;
+  }
+
+  /** Called by comment edit commands after mutating the comments tree. */
+  markCommentsChanged(): void {
+    this.commentsDirty = true;
   }
 
   /**
@@ -263,8 +319,11 @@ export class DocxDocument {
     for (const part of this.hfParts) {
       files[part.target] = strToU8(serializeXml(part.root, true));
     }
-    if (this.commentsRoot && this.commentsPart) {
+    if (this.commentsDirty && this.commentsRoot && this.commentsPart) {
       files[this.commentsPart] = strToU8(serializeXml(this.commentsRoot, true));
+    }
+    if (this.stylesDirty && this.stylesRoot && this.stylesPart) {
+      files[this.stylesPart] = strToU8(serializeXml(this.stylesRoot, true));
     }
     if (this.relsRoot) files[this.relsPath] = strToU8(serializeXml(this.relsRoot, true));
     if (this.contentTypesRoot) files["[Content_Types].xml"] = strToU8(serializeXml(this.contentTypesRoot, true));

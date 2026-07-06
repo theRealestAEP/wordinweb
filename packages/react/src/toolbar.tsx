@@ -284,6 +284,7 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
  */
 export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?: (bytes: Uint8Array) => void }) {
   const [fmt, setFmt] = useState<ReturnType<NonNullable<DocxViewApi["getSelectionFormat"]>> | null>(null);
+  const [curStyle, setCurStyle] = useState<string | null>(null);
   // Native <select>/<input type=color> steal focus and collapse the document
   // selection; remember the last real range and restore it before applying.
   const savedRange = useRef<Range | null>(null);
@@ -295,6 +296,7 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
       savedRange.current = sel.getRangeAt(0).cloneRange();
     }
     setFmt(api?.getSelectionFormat() ?? null);
+    setCurStyle(api?.getParagraphStyleId?.() ?? null);
   }, [api]);
 
   useEffect(() => {
@@ -342,22 +344,28 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
       <Sep />
       <select
         title="Paragraph style"
-        value=""
+        value={curStyle ?? "__normal"}
         onMouseDown={(e) => e.stopPropagation()}
         onChange={(e) => {
-          if (e.target.value) api?.setParagraphStyle(e.target.value === "__normal" ? null : e.target.value);
+          if (e.target.value) {
+            api?.setParagraphStyle(e.target.value === "__normal" ? null : e.target.value);
+            setCurStyle(api?.getParagraphStyleId?.() ?? null);
+          }
         }}
         style={{ ...selectStyle, width: 92 }}
       >
-        <option value="" disabled>
-          Styles
-        </option>
         <option value="__normal">Normal</option>
         {(api?.listParagraphStyles() ?? [])
           .filter((s) => !/^normal$/i.test(s.name))
           .map((s) => (
             <option key={s.id} value={s.id}>{s.name}</option>
           ))}
+        {curStyle !== null &&
+          !(api?.listParagraphStyles() ?? []).some((s) => s.id === curStyle) && (
+            <option value={curStyle}>
+              {api?.document.styles.byId.get(curStyle)?.name ?? curStyle}
+            </option>
+          )}
       </select>
       <select
         title="Font"

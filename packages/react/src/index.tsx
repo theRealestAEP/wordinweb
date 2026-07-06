@@ -17,6 +17,7 @@ import {
   setImageWrap,
   insertTableAfter,
   layoutDocument,
+  paragraphStyleIdOf,
   renderToDom,
   selectionToSegments,
   setPageLayout,
@@ -42,8 +43,10 @@ export interface DocxViewApi {
   setAlignment(align: ParagraphAlignment): void;
   /** Apply a named paragraph style (null clears back to Normal). */
   setParagraphStyle(styleId: string | null): void;
-  /** Paragraph styles declared by the document (for the style menu). */
+  /** Paragraph styles for the style menu (declared + Word built-ins). */
   listParagraphStyles(): { id: string; name: string }[];
+  /** pStyle id of the caret paragraph (null = Normal). */
+  getParagraphStyleId(): string | null;
   /** Change margins / page size / orientation (inches). */
   setPageLayout(patch: PageLayoutPatch): void;
   /** Effective formatting of the current selection (toolbar state), or null. */
@@ -110,6 +113,7 @@ export function DocxView({
     let handle: RenderHandle | null = null;
     let editor: DocxEditor | null = null;
     let onDeleteComment: ((id: string) => void) | undefined;
+    let applyStyleShortcut: ((styleId: string | null) => void) | undefined;
     setError(null);
 
     const rerender = (doc: DocxDocument): number => {
@@ -177,8 +181,20 @@ export function DocxView({
             if (formatted.length > 0) editor?.selectRanges(formatted);
             document.dispatchEvent(new CustomEvent("dxw-selection"));
           },
+          onStyleShortcut: (styleId) => applyStyleShortcut?.(styleId),
         });
         editor.attach();
+        applyStyleShortcut = (styleId) => {
+          const caret = editor?.getCaretTarget();
+          const segs = editor?.getSelectionSegments() ?? [];
+          const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
+          if (targets.length === 0) return;
+          history.checkpoint();
+          if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId)) {
+            pages = rerender(doc);
+            document.dispatchEvent(new CustomEvent("dxw-selection"));
+          }
+        };
         onDeleteComment = (id) => {
           history.checkpoint();
           if (deleteComment(doc, id)) pages = rerender(doc);
@@ -270,15 +286,25 @@ export function DocxView({
             }
           },
           listParagraphStyles: () => {
-            const out: { id: string; name: string }[] = [];
+            const out = new Map<string, string>();
+            // Word built-ins are always offered; applying one injects its
+            // standard definition if the file lacks it.
+            for (let n = 1; n <= 6; n++) out.set(`Heading${n}`, `Heading ${n}`);
+            out.set("Title", "Title");
             for (const st of doc.styles.byId.values()) {
               if (st.type !== "paragraph" || !st.name) continue;
               if (/^(normal|title|subtitle|heading \d)$/i.test(st.name)) {
-                out.push({ id: st.id, name: st.name });
+                out.set(st.id, st.name);
               }
             }
-            out.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-            return out;
+            const list = [...out.entries()].map(([id, name]) => ({ id, name }));
+            list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+            return list;
+          },
+          getParagraphStyleId: () => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const t = segs.find((sg) => sg.t)?.t ?? editor?.getCaretTarget()?.t;
+            return t ? paragraphStyleIdOf(doc, t) : null;
           },
           save: () => doc.save(),
         };

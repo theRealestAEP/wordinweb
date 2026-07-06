@@ -21,7 +21,7 @@ export type { RunFormatPatch, SelectionSegment, SelectionFormat } from "./edit/c
 export { selectionToSegments } from "./edit/selection.js";
 export { DocxEditor } from "./edit/editor.js";
 export { EditHistory } from "./edit/history.js";
-export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, setParagraphStyle } from "./edit/blocks.js";
+export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";
 export { applyTableOp, cellContextOf } from "./edit/tables.js";
 export { setImageWrap, adjustFloatingPosition, isFloatingDrawing } from "./edit/images.js";
 export { deleteComment } from "./edit/comments.js";

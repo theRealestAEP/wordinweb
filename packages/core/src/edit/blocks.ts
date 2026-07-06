@@ -342,12 +342,25 @@ export function exactLineHeightAt(doc: DocxDocument, target: XmlElement): number
   return ls?.rule === "exact" ? ls.value : null;
 }
 
+/** The pStyle id of the paragraph containing target (null = Normal/none). */
+export function paragraphStyleIdOf(doc: DocxDocument, target: XmlElement): string | null {
+  const pEl = paragraphOf(doc, target);
+  if (!pEl) return null;
+  const pPr = pEl.children.find((c) => localName(c.name) === "pPr");
+  const pStyle = pPr?.children.find((c) => localName(c.name) === "pStyle");
+  if (!pStyle) return null;
+  const key = Object.keys(pStyle.attrs).find((k) => localName(k) === "val");
+  return key ? pStyle.attrs[key] : null;
+}
+
 /** Apply (or clear, with null) a paragraph style to the target paragraphs. */
 export function setParagraphStyle(
   doc: DocxDocument,
   targets: XmlElement[],
   styleId: string | null,
 ): boolean {
+  // Word's built-in styles work without a declaration; inject one if needed.
+  if (styleId !== null) doc.ensureParagraphStyle(styleId);
   const paragraphs = new Set<XmlElement>();
   for (const t of targets) {
     const p = paragraphOf(doc, t);

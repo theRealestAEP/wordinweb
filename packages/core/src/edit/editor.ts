@@ -27,6 +27,8 @@ export interface EditorHost {
   history?: EditHistory;
   /** Cmd+B/I/U handler (host applies formatting and persists selection). */
   onFormatShortcut?: (kind: "bold" | "italic" | "underline") => void;
+  /** Cmd/Ctrl+Alt+1..6 / 0 handler: apply Heading N / Normal (null). */
+  onStyleShortcut?: (styleId: string | null) => void;
 }
 
 interface Caret {
@@ -1138,6 +1140,8 @@ export class DocxEditor {
     } else {
       this.hideCaret();
     }
+    // Caret moves change toolbar state (current paragraph style etc.).
+    this.notifySelection();
   };
 
   /** True when the element belongs to the region currently being edited. */
@@ -1305,6 +1309,12 @@ export class DocxEditor {
       return;
     }
     const meta = e.metaKey || e.ctrlKey;
+    // Word parity: Ctrl/Cmd+Alt+1..6 apply Heading 1..6; +0 back to Normal.
+    if (meta && e.altKey && /^[0-6]$/.test(e.key)) {
+      e.preventDefault();
+      this.host.onStyleShortcut?.(e.key === "0" ? null : `Heading${e.key}`);
+      return;
+    }
     if (meta && !e.altKey) {
       const k = e.key.toLowerCase();
       if (k === "a") {

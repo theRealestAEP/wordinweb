@@ -117,6 +117,29 @@ describe("run formatting commands", () => {
   });
 });
 
+describe("paragraph styles", () => {
+  it("applying an undeclared built-in heading injects Word's definition", async () => {
+    const { setParagraphStyle, paragraphStyleIdOf } = await import("../src/edit/blocks.js");
+    const styles = `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:styles>`;
+    const doc = loadDoc(p("make me a heading"), { "word/styles.xml": styles });
+    expect(doc.styles.byId.has("Heading1")).toBe(false);
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    expect(setParagraphStyle(doc, [t as never], "Heading1")).toBe(true);
+    expect(paragraphStyleIdOf(doc, t as never)).toBe("Heading1");
+    // The injected definition resolves: heading renders larger and colored.
+    expect(doc.styles.byId.get("Heading1")?.name).toBe("Heading 1");
+    const para = firstRun(doc).para;
+    const props = doc.effectiveRunProps(para, (para.children[0] as Run).props);
+    expect(props.size).toBeCloseTo((16 * 4) / 3, 1); // 32 half-points = 16pt
+    expect(props.color?.toLowerCase()).toBe("#2f5496");
+    // Round-trips: the reloaded file still declares and resolves the style.
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.styles.byId.get("Heading1")?.name).toBe("Heading 1");
+  });
+});
+
 describe("undo/redo history", () => {
   it("undoes and redoes a text mutation", async () => {
     const { EditHistory } = await import("../src/edit/history.js");
