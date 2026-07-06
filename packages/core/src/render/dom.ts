@@ -319,7 +319,12 @@ function renderComments(
     body.className = "dxw-comment-text";
     body.textContent = comment.text;
     card.append(head, body);
-    card.style.left = `${pageEl.offsetLeft + pageEl.offsetWidth + 12}px`;
+    // Pages are flex-centered in the root (which reserves the rail via
+    // padding-right), so anchor the balloon to the page's right edge with a
+    // calc — a static pixel offset would stay put when a window resize
+    // re-centers the pages.
+    const railPad = COMMENT_RAIL_WIDTH + 24;
+    card.style.left = `calc(50% + ${Math.round(pageEl.offsetWidth / 2 - railPad / 2 + 12)}px)`;
     root.appendChild(card);
     const top = Math.max(pageEl.offsetTop + binding.item.lineTop * zoom, lastBottom + 8);
     card.style.top = `${top}px`;
