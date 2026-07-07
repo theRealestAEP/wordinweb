@@ -509,11 +509,14 @@ class Engine {
           skipTo = Math.max(skipTo ?? 0, f.y1 - paraTop + 2);
           continue;
         }
-        // square: shrink from the side the float occupies
+        // square: shrink from the side the float occupies. Word wraps text
+        // at exactly the float edge + its wrap distance (already folded into
+        // the float record) - no extra padding (parity-wrapmodes: text
+        // resumes at image x + width to the hundredth of a point).
         const floatCenter = (f.x0 + f.x1) / 2;
         const colCenter = colX + colW / 2;
-        if (floatCenter <= colCenter) left = Math.max(left, f.x1 + 8);
-        else right = Math.min(right, f.x0 - 8);
+        if (floatCenter <= colCenter) left = Math.max(left, f.x1);
+        else right = Math.min(right, f.x0);
       }
       if (right - left < 40 && skipTo === undefined) {
         // No room beside the float: push below it.
@@ -1001,7 +1004,14 @@ class Engine {
         });
         if (shape.wrap !== "none" && page.physIndex !== -1) {
           const list = this.floats.get(page) ?? [];
-          list.push({ x0: x, x1: x + shape.width, y0: y, y1: y + shape.height, mode: shape.wrap });
+          const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
+          list.push({
+            x0: x - d.l,
+            x1: x + shape.width + d.r,
+            y0: y - d.t,
+            y1: y + shape.height + d.b,
+            mode: shape.wrap,
+          });
           this.floats.set(page, list);
         }
         continue;

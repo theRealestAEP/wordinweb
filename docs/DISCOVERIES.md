@@ -102,6 +102,12 @@ positions it antialiases across ~1.5 device pixels and reads as light gray,
 while Word draws crisp dark hairlines. Fix: snap border width AND position
 to whole device pixels in `renderEdge` (`render/dom.ts`).
 
+### Square wrap clears floats by their wrap distance, nothing more
+Text beside a wrapSquare image resumes at exactly image edge + the
+anchor's distL/R (parity-wrapmodes: x matches to a hundredth of a point
+with dist=0). The engine folds distT/B/L/R into the float record; no
+hardcoded padding.
+
 ## Editing UX
 
 ### Pleading paper headers have no typeable text
