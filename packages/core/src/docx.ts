@@ -555,6 +555,48 @@ export class DocxDocument {
    * Add image bytes as a new media part + relationship (+ content-type
    * default). Returns the relationship id for use in a w:drawing.
    */
+  /** Register an external hyperlink relationship and return its rId. */
+  addHyperlinkRel(url: string): string {
+    if (!this.relsRoot) {
+      this.relsRoot = {
+        name: "Relationships",
+        attrs: { xmlns: "http://schemas.openxmlformats.org/package/2006/relationships" },
+        children: [],
+        text: "",
+      };
+    }
+    let maxId = 0;
+    for (const r of this.relsRoot.children) {
+      const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+      if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+    }
+    const id = `rId${maxId + 1}`;
+    this.relsRoot.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: id,
+        Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        Target: url,
+        TargetMode: "External",
+      },
+      children: [],
+      text: "",
+    });
+    // documentRels is what refresh() resolves r:id through - keep it live.
+    this.documentRels.set(id, { id, type: "hyperlink", target: url, external: true });
+    return id;
+  }
+
+  /** Retarget an existing external relationship (hyperlink href edit). */
+  setRelTarget(relId: string, url: string): boolean {
+    const rel = this.documentRels.get(relId);
+    if (!rel || !rel.external) return false;
+    rel.target = url;
+    const el = this.relsRoot?.children.find((r) => r.attrs["Id"] === relId);
+    if (el) el.attrs["Target"] = url;
+    return true;
+  }
+
   addImageResource(bytes: Uint8Array, ext: string): string {
     const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
     // Unique media name

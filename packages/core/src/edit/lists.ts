@@ -60,13 +60,17 @@ function ensureListNum(doc: DocxDocument, kind: ListKind): number | null {
   }
   const absId = String(maxAbs + 1);
   const numId = maxNum + 1;
-  const lvl = el(`${w}lvl`, { [`${w}ilvl`]: "0" }, [
-    el(`${w}start`, { [`${w}val`]: "1" }),
-    el(`${w}numFmt`, { [`${w}val`]: kind === "bullet" ? "bullet" : "decimal" }),
-    el(`${w}lvlText`, { [`${w}val`]: kind === "bullet" ? "•" : "%1." }),
-    el(`${w}lvlJc`, { [`${w}val`]: "left" }),
-    el(`${w}pPr`, {}, [el(`${w}ind`, { [`${w}left`]: "720", [`${w}hanging`]: "360" })]),
-  ]);
+  // Nine levels like Word's defaults, so Tab/Shift-Tab demotion has labels.
+  const BULLETS = ["•", "○", "■"];
+  const levels = Array.from({ length: 9 }, (_, i) =>
+    el(`${w}lvl`, { [`${w}ilvl`]: String(i) }, [
+      el(`${w}start`, { [`${w}val`]: "1" }),
+      el(`${w}numFmt`, { [`${w}val`]: kind === "bullet" ? "bullet" : i % 3 === 1 ? "lowerLetter" : i % 3 === 2 ? "lowerRoman" : "decimal" }),
+      el(`${w}lvlText`, { [`${w}val`]: kind === "bullet" ? BULLETS[i % 3] : `%${i + 1}.` }),
+      el(`${w}lvlJc`, { [`${w}val`]: "left" }),
+      el(`${w}pPr`, {}, [el(`${w}ind`, { [`${w}left`]: String(720 * (i + 1)), [`${w}hanging`]: "360" })]),
+    ]),
+  );
   // abstractNum elements must precede num elements in the part.
   let insertAt = root.children.length;
   for (let i = 0; i < root.children.length; i++) {
@@ -75,12 +79,41 @@ function ensureListNum(doc: DocxDocument, kind: ListKind): number | null {
       break;
     }
   }
-  root.children.splice(insertAt, 0, el(`${w}abstractNum`, { [`${w}abstractNumId`]: absId }, [lvl]));
+  root.children.splice(insertAt, 0, el(`${w}abstractNum`, { [`${w}abstractNumId`]: absId }, levels));
   root.children.push(
     el(`${w}num`, { [`${w}numId`]: String(numId) }, [el(`${w}abstractNumId`, { [`${w}val`]: absId })]),
   );
   doc.markNumberingChanged();
   return numId;
+}
+
+/** Step the list level of the target paragraphs (Tab / Shift-Tab), 0..8. */
+export function setListLevel(doc: DocxDocument, targets: XmlElement[], delta: 1 | -1): boolean {
+  const paragraphs = new Set<XmlElement>();
+  for (const t of targets) {
+    const p = paragraphOf(doc, t);
+    if (p) paragraphs.add(p);
+  }
+  let touched = false;
+  for (const pEl of paragraphs) {
+    const pPr = pEl.children.find((c) => localName(c.name) === "pPr");
+    const numPr = pPr?.children.find((c) => localName(c.name) === "numPr");
+    if (!numPr) continue;
+    const w = prefixOf(pEl);
+    let ilvl = numPr.children.find((c) => localName(c.name) === "ilvl");
+    if (!ilvl) {
+      ilvl = el(`${w}ilvl`, { [`${w}val`]: "0" });
+      numPr.children.unshift(ilvl);
+    }
+    const key = Object.keys(ilvl.attrs).find((k) => localName(k) === "val") ?? `${w}val`;
+    const cur = parseInt(ilvl.attrs[key] ?? "0", 10) || 0;
+    const next = Math.min(8, Math.max(0, cur + delta));
+    if (next === cur) continue;
+    ilvl.attrs[key] = String(next);
+    touched = true;
+  }
+  if (touched) doc.refresh();
+  return touched;
 }
 
 /**

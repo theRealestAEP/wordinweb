@@ -25,8 +25,13 @@ export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, 
 export { applyTableOp, cellContextOf } from "./edit/tables.js";
 export { setImageWrap, adjustFloatingPosition, isFloatingDrawing } from "./edit/images.js";
 export { addComment, deleteComment, replyToComment } from "./edit/comments.js";
-export { setListType, listTypeAt } from "./edit/lists.js";
+export { setListType, listTypeAt, setListLevel } from "./edit/lists.js";
 export type { ListKind } from "./edit/lists.js";
+export { setLink, removeLink, linkAt } from "./edit/links.js";
+export { adjustIndent, setParagraphSpacing } from "./edit/paragraph.js";
+export type { ParagraphSpacingPatch } from "./edit/paragraph.js";
+export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
+export type { FindMatch } from "./edit/find.js";
 export type { TableOp } from "./edit/tables.js";
 export type { ParagraphAlignment, PageLayoutPatch } from "./edit/blocks.js";
 export type { EditorHost } from "./edit/editor.js";

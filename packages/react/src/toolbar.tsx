@@ -197,6 +197,92 @@ function NumberListIcon() {
   );
 }
 
+function LinkIcon() {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+      <path d="M6.5 9.5l3-3" strokeLinecap="round" />
+      <path d="M7.5 4.5l1.2-1.2a2.6 2.6 0 013.7 3.7L11.2 8.2" strokeLinecap="round" />
+      <path d="M8.5 11.5l-1.2 1.2a2.6 2.6 0 01-3.7-3.7l1.2-1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ClearFormatIcon() {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+      <path d="M5 3h8M9 3l-2.5 9" strokeLinecap="round" />
+      <path d="M3 13.5l3.5-3.5M3 10l3.5 3.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IndentIcon({ dir }: { dir: 1 | -1 }) {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+      <path d="M2 3h12M8 6.5h6M8 9.5h6M2 13h12" strokeLinecap="round" />
+      {dir === 1 ? <path d="M2.5 6l3 2-3 2z" fill="#3c4043" stroke="none" /> : <path d="M5.5 6l-3 2 3 2z" fill="#3c4043" stroke="none" />}
+    </svg>
+  );
+}
+
+/** Insert/edit/remove hyperlink on the current selection. */
+function LinkMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    setUrl(api?.getLinkAt() ?? "");
+    inputRef.current?.focus();
+    const close = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open, api]);
+  const submit = () => {
+    const v = url.trim();
+    if (v) api?.setLink(/^[a-z][a-z0-9+.-]*:/i.test(v) ? v : `https://${v}`);
+    setOpen(false);
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert link" style={btnStyle(open)} onMouseDown={(e) => e.preventDefault()} onClick={() => setOpen(!open)}>
+        <LinkIcon />
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute", top: 28, left: 0, zIndex: 100, background: "#fff",
+            border: "1px solid #dadce0", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,.15)",
+            padding: 10, width: 260, display: "flex", gap: 6, alignItems: "center",
+          }}
+        >
+          <input
+            ref={inputRef}
+            value={url}
+            placeholder="Paste or type a link"
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            style={{ flex: 1, border: "1px solid #dadce0", borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+          />
+          <button style={pillBtn} disabled={!url.trim()} onClick={submit}>Apply</button>
+          {api?.getLinkAt() && (
+            <button
+              title="Remove link"
+              style={{ ...pillBtn, background: "#fff", color: "#3c4043" }}
+              onClick={() => { api?.setLink(null); setOpen(false); }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
 function CommentIcon() {
   return (
     <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
@@ -404,6 +490,9 @@ export type ToolbarFeature =
   | "color"
   | "highlight"
   | "alignment"
+  | "indent"
+  | "spacing"
+  | "link"
   | "lists"
   | "table"
   | "image"
@@ -610,6 +699,14 @@ export function DocxToolbar({
         active={fmt?.verticalAlign === "subscript"}
         onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "subscript" ? null : "subscript" })}
       />
+      <Btn label={<ClearFormatIcon />} title="Clear formatting" onClick={() => apply({ clear: true })} />
+      <ActionMenu
+        label="Aa"
+        title="Change case"
+        width={52}
+        groups={[{ items: [["upper", "UPPERCASE"], ["lower", "lowercase"], ["title", "Title Case"]] }]}
+        onPick={(v) => { restoreSelection(); api?.changeCase(v as "upper" | "lower" | "title"); }}
+      />
       </>
       )}
       {on("color") && (
@@ -635,6 +732,30 @@ export function DocxToolbar({
           <Sep />
         </>
       )}
+      {on("indent") && (
+        <>
+          <Btn label={<IndentIcon dir={-1} />} title="Decrease indent" onClick={() => api?.adjustIndent(-1)} />
+          <Btn label={<IndentIcon dir={1} />} title="Increase indent" onClick={() => api?.adjustIndent(1)} />
+        </>
+      )}
+      {on("spacing") && (
+        <ActionMenu
+          label="↕"
+          title="Line & paragraph spacing"
+          width={44}
+          groups={[
+            { label: "Line spacing", items: [["l:1", "Single"], ["l:1.15", "1.15"], ["l:1.5", "1.5"], ["l:2", "Double"]] },
+            { label: "Paragraph", items: [["b:add", "Add space before"], ["b:none", "Remove space before"], ["a:add", "Add space after"], ["a:none", "Remove space after"]] },
+          ]}
+          onPick={(v) => {
+            if (v.startsWith("l:")) api?.setParagraphSpacing({ lineMultiple: parseFloat(v.slice(2)) });
+            else if (v === "b:add") api?.setParagraphSpacing({ beforePt: 10 });
+            else if (v === "b:none") api?.setParagraphSpacing({ beforePt: null });
+            else if (v === "a:add") api?.setParagraphSpacing({ afterPt: 10 });
+            else if (v === "a:none") api?.setParagraphSpacing({ afterPt: null });
+          }}
+        />
+      )}
       {on("lists") && (
         <>
           <Btn
@@ -654,6 +775,7 @@ export function DocxToolbar({
       )}
       {on("table") && <TableMenu api={api} />}
       {on("image") && <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />}
+      {on("link") && <LinkMenu api={api} />}
       {on("comment") && <CommentMenu api={api} />}
       <input
         ref={imageInput}

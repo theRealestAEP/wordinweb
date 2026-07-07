@@ -12,7 +12,16 @@ import {
   applyRunFormat,
   applyTableOp,
   addComment,
+  adjustIndent,
   deleteComment,
+  findAll,
+  linkAt,
+  removeLink,
+  replaceMatch,
+  replaceAll,
+  setLink,
+  setParagraphSpacing,
+  transformCase,
   exactLineHeightAt,
   replyToComment,
   insertImageAt,
@@ -53,6 +62,26 @@ export interface DocxViewApi {
   toggleList(kind: "bullet" | "number"): void;
   /** Current list kind at the caret ("bullet" | "number" | null). */
   getListType(): "bullet" | "number" | null;
+  /** Link the selection to a URL; null removes the link at the caret. */
+  setLink(url: string | null): void;
+  /** URL of the hyperlink at the caret/selection, or null. */
+  getLinkAt(): string | null;
+  /** Step paragraph indent by half an inch (Word's indent buttons). */
+  adjustIndent(direction: 1 | -1): void;
+  /** Line spacing multiple and/or space before/after (points). */
+  setParagraphSpacing(patch: { lineMultiple?: number; beforePt?: number | null; afterPt?: number | null }): void;
+  /** Remove direct character formatting from the selection. */
+  clearFormatting(): void;
+  /** Change the selection's case. */
+  changeCase(mode: "upper" | "lower" | "title"): void;
+  /** Find matches for a query; selects the first and returns the count. */
+  find(query: string, opts?: { matchCase?: boolean }): number;
+  /** Select the next/previous match; returns 1-based index or 0. */
+  findStep(delta: 1 | -1): number;
+  /** Replace the current match; returns remaining match count. */
+  replaceCurrent(replacement: string): number;
+  /** Replace every match; returns how many were replaced. */
+  replaceAll(query: string, replacement: string): number;
   /** Paragraph styles for the style menu (declared + Word built-ins). */
   listParagraphStyles(): { id: string; name: string }[];
   /** pStyle id of the caret paragraph (null = Normal). */
@@ -235,6 +264,16 @@ export function DocxView({
           }
         };
         pages = rerender(doc); // re-render with the delete affordance wired
+        let findState: { matches: ReturnType<typeof findAll>; index: number } = { matches: [], index: 0 };
+        const selectMatch = (i: number) => {
+          const m = findState.matches[i];
+          if (!m || !editor) return;
+          editor.selectRanges(m.ranges);
+          // Bring the hit into view.
+          const t = m.ranges[0]?.t;
+          const el = handle?.bindings.find((b) => b.item.src?.t === t)?.el;
+          el?.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+        };
         const api: DocxViewApi = {
           document: doc,
           pageCount: () => pages,
@@ -326,6 +365,74 @@ export function DocxView({
           setPageLayout: (patch) => {
             history.checkpoint();
             if (setPageLayout(doc, patch)) pages = rerender(doc);
+          },
+          setLink: (url) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const t = segs.find((sg) => sg.t)?.t ?? editor?.getCaretTarget()?.t;
+            history.checkpoint();
+            const changed = url === null ? (t ? removeLink(doc, t) : false) : setLink(doc, segs, url);
+            if (changed) pages = rerender(doc);
+          },
+          getLinkAt: () => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const t = segs.find((sg) => sg.t)?.t ?? editor?.getCaretTarget()?.t;
+            return t ? linkAt(doc, t) : null;
+          },
+          adjustIndent: (direction) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : editor?.getCaretTarget() ? [editor.getCaretTarget()!.t] : [];
+            if (targets.length === 0) return;
+            history.checkpoint();
+            if (adjustIndent(doc, targets as Parameters<typeof adjustIndent>[1], direction)) pages = rerender(doc);
+          },
+          setParagraphSpacing: (patch) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : editor?.getCaretTarget() ? [editor.getCaretTarget()!.t] : [];
+            if (targets.length === 0) return;
+            history.checkpoint();
+            if (setParagraphSpacing(doc, targets as Parameters<typeof setParagraphSpacing>[1], patch)) pages = rerender(doc);
+          },
+          clearFormatting: () => {
+            api.applyFormat({ clear: true });
+          },
+          changeCase: (mode) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            if (segs.length === 0) return;
+            history.checkpoint();
+            const changed = transformCase(doc, segs, mode);
+            if (changed.length > 0) {
+              pages = rerender(doc);
+              editor?.selectRanges(changed);
+            }
+          },
+          find: (query, opts) => {
+            findState = { matches: findAll(doc, query, opts), index: 0 };
+            if (findState.matches.length > 0) selectMatch(0);
+            return findState.matches.length;
+          },
+          findStep: (delta) => {
+            if (findState.matches.length === 0) return 0;
+            findState.index = (findState.index + delta + findState.matches.length) % findState.matches.length;
+            selectMatch(findState.index);
+            return findState.index + 1;
+          },
+          replaceCurrent: (replacement) => {
+            const m = findState.matches[findState.index];
+            if (!m) return 0;
+            history.checkpoint();
+            replaceMatch(doc, m, replacement);
+            pages = rerender(doc);
+            findState.matches.splice(findState.index, 1);
+            if (findState.index >= findState.matches.length) findState.index = 0;
+            if (findState.matches.length > 0) selectMatch(findState.index);
+            return findState.matches.length;
+          },
+          replaceAll: (query, replacement) => {
+            history.checkpoint();
+            const n = replaceAll(doc, query, replacement);
+            if (n > 0) pages = rerender(doc);
+            findState = { matches: [], index: 0 };
+            return n;
           },
           toggleList: (kind) => {
             const caret = editor?.getCaretTarget();
