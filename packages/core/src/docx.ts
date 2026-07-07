@@ -474,6 +474,95 @@ export class DocxDocument {
     return this.footnotesRoot;
   }
 
+  /**
+   * Create an empty header/footer part (with a default-type reference in
+   * every sectPr) when the document has none - Word does this implicitly the
+   * first time you edit the header area. Returns the part's root.
+   */
+  ensureHfPart(kind: "header" | "footer"): XmlElement {
+    const isHeader = kind === "header";
+    const existing = this.hfParts.find((p2) => p2.isHeader === isHeader);
+    if (existing) return existing.root;
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    let n = 1;
+    while (this.pkg.has(`${docDir}${kind}${n}.xml`)) n++;
+    const target = `${docDir}${kind}${n}.xml`;
+    const rootName = isHeader ? "w:hdr" : "w:ftr";
+    const root: XmlElement = {
+      name: rootName,
+      attrs: { "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main" },
+      children: [
+        {
+          name: "w:p",
+          attrs: {},
+          children: [
+            {
+              name: "w:r",
+              attrs: {},
+              children: [{ name: "w:t", attrs: { "xml:space": "preserve" }, children: [], text: "" }],
+              text: "",
+            },
+          ],
+          text: "",
+        },
+      ],
+      text: "",
+    };
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const r of rels.children) {
+      const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+      if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+    }
+    const relId = `rId${maxId + 1}`;
+    rels.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: relId,
+        Type: `http://schemas.openxmlformats.org/officeDocument/2006/relationships/${kind}`,
+        Target: `${kind}${n}.xml`,
+      },
+      children: [],
+      text: "",
+    });
+    if (this.contentTypesRoot) {
+      const partName = "/" + target;
+      if (!this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) {
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: {
+            PartName: partName,
+            ContentType: `application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml`,
+          },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    this.hfParts.push({ relId, target, root, isHeader, rels: new Map() });
+    // Reference from every sectPr (schema: hf references lead the sectPr).
+    const refName = isHeader ? "w:headerReference" : "w:footerReference";
+    const addRef = (e: XmlElement): void => {
+      if (localName(e.name) === "sectPr") {
+        e.children.unshift({
+          name: refName,
+          attrs: {
+            "xmlns:r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            "w:type": "default",
+            "r:id": relId,
+          },
+          children: [],
+          text: "",
+        });
+        return;
+      }
+      for (const c of e.children) addRef(c);
+    };
+    addRef(this.docRoot);
+    this.refresh();
+    return root;
+  }
+
   markFootnotesChanged(): void {
     this.footnotesDirty = true;
     // Re-derive the id -> blocks map so layout sees the new note.

@@ -129,6 +129,36 @@ function buildOmml(node: MathNode, m: string): XmlElement {
   }
 }
 
+/**
+ * Move an equation to a text position: detach the m:oMath from its
+ * paragraph and re-insert it at `offset` inside the w:t `t` (splitting the
+ * destination run when the drop lands mid-text).
+ */
+export function moveMath(doc: DocxDocument, oMathEl: XmlElement, t: XmlElement, offset: number): boolean {
+  const curParent = doc.findParentOf(oMathEl);
+  const rEl = doc.findParentOf(t);
+  const pEl = rEl && doc.findParentOf(rEl);
+  if (!curParent || !rEl || !pEl || localName(rEl.name) !== "r") return false;
+  if (rEl === oMathEl || curParent === oMathEl) return false;
+  curParent.children.splice(curParent.children.indexOf(oMathEl), 1);
+  const rw = rEl.name.includes(":") ? rEl.name.slice(0, rEl.name.indexOf(":") + 1) : "";
+  const rIdx = pEl.children.indexOf(rEl);
+  if (offset >= t.text.length) {
+    pEl.children.splice(rIdx + 1, 0, oMathEl);
+  } else if (offset <= 0) {
+    pEl.children.splice(rIdx, 0, oMathEl);
+  } else {
+    const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
+    const clone = (e: XmlElement): XmlElement => ({ name: e.name, attrs: { ...e.attrs }, children: e.children.map(clone), text: e.text });
+    const tailT: XmlElement = { name: `${rw}t`, attrs: { "xml:space": "preserve" }, children: [], text: t.text.slice(offset) };
+    t.text = t.text.slice(0, offset);
+    const tail: XmlElement = { name: `${rw}r`, attrs: {}, children: [...(rPr ? [clone(rPr)] : []), tailT], text: "" };
+    pEl.children.splice(rIdx + 1, 0, oMathEl, tail);
+  }
+  doc.refresh();
+  return true;
+}
+
 /** The math AST currently in an oMath element (for prefilling the editor). */
 export function mathLinearOf(doc: DocxDocument, oMathEl: XmlElement): string {
   void doc;

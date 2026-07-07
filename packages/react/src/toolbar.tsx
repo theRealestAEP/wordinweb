@@ -306,6 +306,7 @@ function CommentIcon() {
 function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
+  const [hint, setHint] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
@@ -320,7 +321,10 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
   const submit = () => {
     if (api?.addFootnote(text)) {
       setText("");
+      setHint("");
       setOpen(false);
+    } else {
+      setHint("Click into the text first so the reference has a place to go.");
     }
   };
   return (
@@ -353,6 +357,7 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
               font: "13px system-ui, sans-serif", outline: "none",
             }}
           />
+          {hint && <div style={{ color: "#c5221f", fontSize: 12, marginTop: 4 }}>{hint}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
             <button style={{ ...pillBtn, background: "#fff", color: "#3c4043" }} onClick={() => setOpen(false)}>Cancel</button>
             <button style={pillBtn} disabled={!text.trim()} onClick={submit}>Insert</button>
@@ -901,6 +906,7 @@ export function DocxToolbar({
           { label: "Orientation", items: [["o:portrait", "Portrait"], ["o:landscape", "Landscape"]] },
           { label: "Size", items: [["s:letter", "Letter"], ["s:legal", "Legal"], ["s:a4", "A4"]] },
           { label: "Columns", items: [["c:1", "One column"], ["c:2", "Two columns"], ["c:3", "Three columns"]] },
+          { label: "Page border", items: [["pb:none", "No border"], ["pb:thin", "Thin box (½pt)"], ["pb:thick", "Thick box (1½pt)"], ["pb:accent", "Blue box"]] },
         ]}
         onPick={(v) => {
           if (v === "m:normal") api?.setPageLayout({ margins: { top: 1, right: 1, bottom: 1, left: 1 } });
@@ -911,6 +917,10 @@ export function DocxToolbar({
           else if (v === "s:legal") api?.setPageLayout({ size: { width: 8.5, height: 14 } });
           else if (v === "s:a4") api?.setPageLayout({ size: { width: 8.27, height: 11.69 } });
           else if (v.startsWith("c:")) api?.setPageLayout({ columns: parseInt(v.slice(2), 10) });
+          else if (v === "pb:none") api?.setPageLayout({ pageBorders: null });
+          else if (v === "pb:thin") api?.setPageLayout({ pageBorders: { sz: 4 } });
+          else if (v === "pb:thick") api?.setPageLayout({ pageBorders: { sz: 12 } });
+          else if (v === "pb:accent") api?.setPageLayout({ pageBorders: { sz: 8, color: "4472C4" } });
         }}
       />
       )}

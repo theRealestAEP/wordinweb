@@ -125,6 +125,8 @@ export interface PageLayoutPatch {
   orientation?: "portrait" | "landscape";
   /** Equal-width text columns (1 removes w:cols). */
   columns?: number;
+  /** Box page border (null removes). sz in eighth-points, color hex. */
+  pageBorders?: { sz?: number; color?: string; offsetFrom?: "text" | "page" } | null;
 }
 
 const TWIPS_PER_INCH = 1440;
@@ -186,6 +188,20 @@ export function setPageLayout(doc: DocxDocument, patch: PageLayoutPatch): boolea
       for (const side of ["top", "right", "bottom", "left"] as const) {
         const v = patch.margins[side];
         if (v !== undefined) setAttr(pgMar, side, String(Math.round(v * TWIPS_PER_INCH)));
+      }
+    }
+    if (patch.pageBorders !== undefined) {
+      sectPr.children = sectPr.children.filter((c) => localName(c.name) !== "pgBorders");
+      if (patch.pageBorders !== null) {
+        const sz = String(patch.pageBorders.sz ?? 4);
+        const color = (patch.pageBorders.color ?? "auto").replace(/^#/, "");
+        const side = (name: string) =>
+          el(`${w}${name}`, { [`${w}val`]: "single", [`${w}sz`]: sz, [`${w}space`]: "24", [`${w}color`]: color });
+        const pgB = el(`${w}pgBorders`, { [`${w}offsetFrom`]: patch.pageBorders.offsetFrom ?? "text" }, [
+          side("top"), side("left"), side("bottom"), side("right"),
+        ]);
+        const idx = sectPr.children.indexOf(pgMar);
+        sectPr.children.splice(idx + 1, 0, pgB);
       }
     }
     if (patch.columns !== undefined) {

@@ -850,6 +850,26 @@ class Engine {
         glyphBoxH = m.ascent + m.descent;
       }
 
+      // Word draws strikethrough centered 0.216em above the baseline with a
+      // ~0.75pt rule (measured from the benchmark reference); CSS
+      // line-through sits noticeably higher, so we paint our own.
+      if ((span.props.strike || span.props.doubleStrike) && span.text && span.text.trim()) {
+        const size = span.font.size;
+        const thick = Math.max(0.75, size * 0.045);
+        const yMid = b - size * 0.216;
+        const offs = span.props.doubleStrike ? [-size * 0.06, size * 0.06] : [0];
+        for (const o of offs) {
+          page.items.push({
+            kind: "rect",
+            x: originX + span.x,
+            y: yMid + o - thick / 2,
+            width: span.width,
+            height: thick,
+            fill: span.props.color && span.props.color !== "auto" ? span.props.color : "#000000",
+          });
+        }
+      }
+
       // Character highlight / shading backgrounds.
       const bg = span.props.highlight ?? span.props.shading;
       if (bg) {
@@ -1229,7 +1249,15 @@ class Engine {
    * style chain, else the default table style, else 0 (the spec default —
    * Word's usual 108-twip side margins come from the TableNormal style). */
   private cellMarginsOf(tbl: Table): { top?: number; right?: number; bottom?: number; left?: number } {
-    if (tbl.props.cellMargins) return tbl.props.cellMargins;
+    // Word insets cell content ~0.75pt (1px) from the rules even when the
+    // effective cell margin is zero (measured: benchmark table, text x0
+    // exactly 0.75pt past the border). Floor the sides accordingly.
+    const floor = (m: { top?: number; right?: number; bottom?: number; left?: number }) => ({
+      ...m,
+      left: Math.max(m.left ?? 0, 1),
+      right: Math.max(m.right ?? 0, 1),
+    });
+    if (tbl.props.cellMargins) return floor(tbl.props.cellMargins);
     const byId = this.doc.styles.byId;
     const fromChain = (id: string | undefined) => {
       let cur = id;
@@ -1243,14 +1271,14 @@ class Engine {
       return undefined;
     };
     const own = fromChain(tbl.props.styleId);
-    if (own) return own;
+    if (own) return floor(own);
     for (const st of byId.values()) {
       if (st.type === "table" && st.isDefault) {
         const d = fromChain(st.id);
-        if (d) return d;
+        if (d) return floor(d);
       }
     }
-    return {};
+    return floor({});
   }
 
   private placeTable(tbl: Table): void {
