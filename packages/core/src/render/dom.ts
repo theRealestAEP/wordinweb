@@ -656,6 +656,10 @@ function renderText(item: TextItem): HTMLElement {
   if (props.smallCaps) el.style.fontVariant = "small-caps";
   if (props.letterSpacing) el.style.letterSpacing = `${props.letterSpacing}px`;
 
+  if (item.mathSrc) {
+    el.dataset.dxwMath = "1";
+    el.style.cursor = "pointer";
+  }
   if (item.href) {
     (el as HTMLAnchorElement).href = item.href;
     (el as HTMLAnchorElement).target = "_blank";

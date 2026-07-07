@@ -33,6 +33,7 @@ export type { ParagraphSpacingPatch } from "./edit/paragraph.js";
 export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertFootnote } from "./edit/notes.js";
+export { linearizeMath, parseMathLinear, setMathLinear, mathLinearOf } from "./edit/math.js";
 export { printPages } from "./render/dom.js";
 export type { FindMatch } from "./edit/find.js";
 export type { TableOp } from "./edit/tables.js";

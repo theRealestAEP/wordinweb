@@ -178,7 +178,7 @@ function parseParaChildren(
       // (scripts raised, fractions stacked over a rule) like Word.
       const nodes = parseOmml(el);
       if (nodes.length > 0) {
-        out.push({ type: "run", props: {}, content: [{ kind: "math", nodes }] });
+        out.push({ type: "run", props: {}, content: [{ kind: "math", nodes, src: el }] });
       }
     } else if (ln === "hyperlink") {
       const rid = attr(el, "id");
