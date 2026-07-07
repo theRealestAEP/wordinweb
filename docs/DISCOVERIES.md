@@ -222,3 +222,19 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   paragraph whose only role is carrying `pPr/sectPr` renders no mark line
   (columns start exactly one line-advance below the intro). Same family as
   the trailing-page-break rule.
+- **The OMML n-ary element is `m:nary`, all lowercase** — `m:nAry` does not
+  exist and Word hard-rejects the whole file ("Word experienced an error
+  trying to open the file"), unlike most schema slips which it repairs.
+  Found by exporting the same formula from LibreOffice (MathML .fodt →
+  `soffice --headless --convert-to docx`) and reading LO's OMML — a good
+  Word-free way to get canonical OOXML for any construct.
+- **A docx without settings.xml opens in Compatibility Mode**, which
+  silently FLATTENS math (an nAry degrades to plain runs on save). Probe
+  packages must always carry `compatSetting compatibilityMode 15` or their
+  verdicts lie.
+- **Word-open bisects go through modal error dialogs**: each rejected file
+  leaves a dialog that makes every later AppleEvent time out (-1712) and
+  queues subsequent opens, which then deliver at random later moments.
+  Dismiss via System Events named-button clicks (`click button "No" of
+  window 1`) between attempts, and expect force-quit + relaunch to replay
+  queued opens.

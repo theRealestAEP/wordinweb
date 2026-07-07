@@ -670,6 +670,16 @@ describe("insertPageField", () => {
 });
 
 describe("math editing", () => {
+  it("linearizes n-ary, delimiter and matrix nodes", () => {
+    expect(
+      linearizeMath([
+        { t: "nary", chr: "\u2211", sub: [{ t: "run", text: "i=1" }], sup: [{ t: "run", text: "n" }], e: [{ t: "run", text: "i" }] },
+        { t: "dlm", beg: "(", end: ")", e: [[{ t: "run", text: "x" }]] },
+        { t: "mat", rows: [[[{ t: "run", text: "a" }], [{ t: "run", text: "b" }]], [[{ t: "run", text: "c" }], [{ t: "run", text: "d" }]]] },
+      ]),
+    ).toBe("\u2211_{i=1}^ni(x)[a&b;c&d]");
+  });
+
   it("linear form round-trips through the parser", () => {
     const cases = ["e^x=1+x+x/2", "a_i+b^{2y}", "{a+b}/{2c}", "√{x+1}"];
     for (const c of cases) {

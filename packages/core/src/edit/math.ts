@@ -30,6 +30,15 @@ export function linearizeMath(nodes: MathNode[]): string {
       case "rad":
         out += "√" + group(n.e);
         break;
+      case "nary":
+        out += n.chr + (n.sub.length ? "_" + group(n.sub) : "") + (n.sup.length ? "^" + group(n.sup) : "") + group(n.e);
+        break;
+      case "dlm":
+        out += n.beg + n.e.map((part) => linearizeMath(part)).join("|") + n.end;
+        break;
+      case "mat":
+        out += "[" + n.rows.map((row) => row.map((cell) => linearizeMath(cell)).join("&")).join(";") + "]";
+        break;
     }
   }
   return out;
@@ -126,6 +135,25 @@ function buildOmml(node: MathNode, m: string): XmlElement {
       ]);
     case "rad":
       return el(`${m}rad`, [el(`${m}e`, node.e.map((n) => buildOmml(n, m)))]);
+    case "nary": {
+      const pr = el(`${m}naryPr`, [el(`${m}chr`)]);
+      pr.children[0].attrs[`${m}val`] = node.chr;
+      return el(`${m}nary`, [
+        pr,
+        el(`${m}sub`, node.sub.map((n) => buildOmml(n, m))),
+        el(`${m}sup`, node.sup.map((n) => buildOmml(n, m))),
+        el(`${m}e`, node.e.map((n) => buildOmml(n, m))),
+      ]);
+    }
+    case "dlm": {
+      const beg = el(`${m}begChr`);
+      beg.attrs[`${m}val`] = node.beg;
+      const end = el(`${m}endChr`);
+      end.attrs[`${m}val`] = node.end;
+      return el(`${m}d`, [el(`${m}dPr`, [beg, end]), ...node.e.map((part) => el(`${m}e`, part.map((n) => buildOmml(n, m))))]);
+    }
+    case "mat":
+      return el(`${m}m`, node.rows.map((row) => el(`${m}mr`, row.map((cell) => el(`${m}e`, cell.map((n) => buildOmml(n, m)))))));
   }
 }
 
@@ -170,6 +198,28 @@ export function mathLinearOf(doc: DocxDocument, oMathEl: XmlElement): string {
       return c ? parse(c) : [];
     };
     if (ln === "f") return [{ t: "frac", num: kids("num"), den: kids("den") }];
+    if (ln === "nary") {
+      const pr = e.children.find((c) => localName(c.name) === "naryPr");
+      const chrEl = pr?.children.find((c) => localName(c.name) === "chr");
+      const chrKey = chrEl && Object.keys(chrEl.attrs).find((k) => localName(k) === "val");
+      return [{ t: "nary", chr: (chrKey && chrEl.attrs[chrKey]) || "\u222b", sub: kids("sub"), sup: kids("sup"), e: kids("e") }];
+    }
+    if (ln === "d") {
+      const pr = e.children.find((c) => localName(c.name) === "dPr");
+      const chr = (name: string, dflt: string) => {
+        const c = pr?.children.find((ch) => localName(ch.name) === name);
+        const k = c && Object.keys(c.attrs).find((key) => localName(key) === "val");
+        return c && k ? c.attrs[k] : dflt;
+      };
+      const parts = e.children.filter((c) => localName(c.name) === "e").map(parse);
+      return [{ t: "dlm", beg: chr("begChr", "("), end: chr("endChr", ")"), e: parts }];
+    }
+    if (ln === "m" && e.children.some((c) => localName(c.name) === "mr")) {
+      const rows = e.children
+        .filter((c) => localName(c.name) === "mr")
+        .map((mr) => mr.children.filter((c) => localName(c.name) === "e").map(parse));
+      return [{ t: "mat", rows }];
+    }
     if (ln === "sSup") return [{ t: "sup", base: kids("e"), script: kids("sup") }];
     if (ln === "sSub") return [{ t: "sub", base: kids("e"), script: kids("sub") }];
     if (ln === "rad") return [{ t: "rad", e: kids("e") }];

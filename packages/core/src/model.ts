@@ -165,7 +165,13 @@ export type MathNode =
   | { t: "run"; text: string }
   | { t: "sup" | "sub"; base: MathNode[]; script: MathNode[] }
   | { t: "frac"; num: MathNode[]; den: MathNode[] }
-  | { t: "rad"; e: MathNode[] };
+  | { t: "rad"; e: MathNode[] }
+  /** n-ary operator (sum/integral); chr defaults to the integral sign. */
+  | { t: "nary"; chr: string; sub: MathNode[]; sup: MathNode[]; e: MathNode[] }
+  /** Delimiters grown to the content height; beg/end default to parens. */
+  | { t: "dlm"; beg: string; end: string; e: MathNode[][] }
+  /** Matrix: rows x cells. */
+  | { t: "mat"; rows: MathNode[][][] };
 
 export interface MathContent {
   kind: "math";
