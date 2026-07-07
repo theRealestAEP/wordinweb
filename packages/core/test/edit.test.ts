@@ -7,9 +7,10 @@ import { setLink, removeLink, linkAt } from "../src/edit/links.js";
 import { adjustIndent, setParagraphSpacing } from "../src/edit/paragraph.js";
 import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
 import { applyTableOp } from "../src/edit/tables.js";
+import { imageAltText, setImageAltText, replaceImageBlip } from "../src/edit/images.js";
 import { XmlElement } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
-import { makeDocx, wrapDocument, p } from "./helpers.js";
+import { makeDocx, makeDocxWithMedia, wrapDocument, p } from "./helpers.js";
 import { Paragraph, Run, TextContent } from "../src/model.js";
 
 function loadDoc(body: string, extra: Record<string, string> = {}) {
@@ -559,5 +560,61 @@ describe("cell merge/split", () => {
     if (tbl.type !== "table") throw new Error();
     expect(tbl.rows[1].cells[1].props.shading?.toUpperCase()).toContain("FFF2CC");
     expect(tbl.rows[1].cells[1].props.verticalAlign).toBe("center");
+  });
+});
+
+describe("image editing", () => {
+  const DRAWING = `<w:p><w:r><w:drawing>
+    <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0">
+      <wp:extent cx="914400" cy="914400"/>
+      <wp:docPr id="1" name="Pic" descr="old alt"/>
+      <a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+        <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+          <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+            <pic:blipFill><a:blip r:embed="rIdIMG" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/><a:srcRect l="25000" t="10000"/></pic:blipFill>
+            <pic:spPr><a:xfrm rot="5400000"><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm></pic:spPr>
+          </pic:pic>
+        </a:graphicData>
+      </a:graphic>
+    </wp:inline>
+  </w:drawing></w:r></w:p>`;
+  const RELS = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+  const DOCRELS = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdIMG" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+</Relationships>`;
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  function loadWithImage() {
+    return DocxDocument.load(
+      makeDocxWithMedia(
+        { "word/document.xml": wrapDocument(DRAWING), "word/_rels/document.xml.rels": DOCRELS, "_rels/.rels": RELS },
+        { "word/media/image1.png": PNG },
+      ),
+    );
+  }
+
+  it("parses crop and rotation; edits alt text and blip target", () => {
+    const doc = loadWithImage();
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    const run = para.children[0] as Run;
+    const img = run.content.find((c) => c.kind === "image");
+    if (!img || img.kind !== "image") throw new Error("no image");
+    expect(img.crop?.l).toBeCloseTo(0.25, 3);
+    expect(img.crop?.t).toBeCloseTo(0.1, 3);
+    expect(img.rotation).toBeCloseTo(90, 1);
+    // alt text
+    expect(imageAltText(img.srcDrawing!)).toBe("old alt");
+    expect(setImageAltText(doc, img.srcDrawing!, "new alt")).toBe(true);
+    expect(imageAltText(img.srcDrawing!)).toBe("new alt");
+    // replace blip
+    const relId = doc.addImageResource(PNG, "png");
+    expect(replaceImageBlip(doc, img.srcDrawing!, relId)).toBe(true);
+    const para2 = doc.sections[0].blocks[0] as Paragraph;
+    const img2 = (para2.children[0] as Run).content.find((c) => c.kind === "image");
+    expect(img2 && img2.kind === "image" ? img2.part : "").toContain("media/image");
   });
 });

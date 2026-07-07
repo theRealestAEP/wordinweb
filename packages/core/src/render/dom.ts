@@ -143,6 +143,7 @@ function renderPage(
   surface.style.width = `${page.width}px`;
   surface.style.height = `${page.height}px`;
   surface.style.transformOrigin = "0 0";
+  surface.style.isolation = "isolate";
   if (zoom !== 1) surface.style.transform = `scale(${zoom})`;
   if (options.interactive) {
     surface.style.cursor = "text";
@@ -529,11 +530,35 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       const img = document.createElement("img");
       img.src = url;
       img.style.position = "absolute";
-      img.style.left = `${item.x}px`;
-      img.style.top = `${item.y}px`;
-      img.style.width = `${item.width}px`;
-      img.style.height = `${item.height}px`;
-      return img;
+      let node: HTMLElement = img;
+      const c = item.crop;
+      if (c && (c.l || c.t || c.r || c.b)) {
+        // srcRect crop: clip a scaled-up bitmap inside a fixed viewport.
+        const viewport = document.createElement("div");
+        viewport.style.position = "absolute";
+        viewport.style.overflow = "hidden";
+        const sw = Math.max(1 - c.l - c.r, 0.01);
+        const sh = Math.max(1 - c.t - c.b, 0.01);
+        img.style.width = `${item.width / sw}px`;
+        img.style.height = `${item.height / sh}px`;
+        img.style.left = `${(-item.width / sw) * c.l}px`;
+        img.style.top = `${(-item.height / sh) * c.t}px`;
+        viewport.appendChild(img);
+        node = viewport;
+      } else {
+        img.style.width = `${item.width}px`;
+        img.style.height = `${item.height}px`;
+      }
+      node.style.position = "absolute";
+      node.style.left = `${item.x}px`;
+      node.style.top = `${item.y}px`;
+      node.style.width = `${item.width}px`;
+      node.style.height = `${item.height}px`;
+      if (item.rotation) node.style.transform = `rotate(${item.rotation}deg)`;
+      // behindDoc: under the text layer (the surface isolates stacking so a
+      // negative z-index stays above the page background).
+      if (item.behind) node.style.zIndex = "-1";
+      return node;
     }
     case "text":
       return renderText(item);

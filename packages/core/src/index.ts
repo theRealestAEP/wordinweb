@@ -31,6 +31,7 @@ export { setLink, removeLink, linkAt } from "./edit/links.js";
 export { adjustIndent, setParagraphSpacing } from "./edit/paragraph.js";
 export type { ParagraphSpacingPatch } from "./edit/paragraph.js";
 export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
+export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export type { FindMatch } from "./edit/find.js";
 export type { TableOp } from "./edit/tables.js";
 export type { ParagraphAlignment, PageLayoutPatch } from "./edit/blocks.js";

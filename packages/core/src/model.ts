@@ -153,6 +153,10 @@ export interface ImageContent {
   height: number;
   /** True when the drawing is floating (wp:anchor); v1 lays it out inline. */
   anchored?: boolean;
+  /** a:srcRect crop, fractions of the source bitmap. */
+  crop?: { l: number; t: number; r: number; b: number };
+  /** a:xfrm rotation, degrees clockwise. */
+  rotation?: number;
   /** Source w:drawing (or pict) element, for resize/move editing. */
   srcDrawing?: XmlElement;
 }
@@ -207,6 +211,10 @@ export interface ShapeImage {
   /** Horizontal alignment when the file uses wp:align instead of an offset. */
   hAlign?: "left" | "center" | "right";
   wrap: WrapMode;
+  /** behindDoc anchors render under the text and never displace it. */
+  behind?: boolean;
+  crop?: { l: number; t: number; r: number; b: number };
+  rotation?: number;
   /** Source w:drawing element (editing). */
   srcDrawing?: XmlElement;
 }
@@ -239,6 +247,8 @@ export interface DrawingImage {
   y: number;
   width: number;
   height: number;
+  crop?: { l: number; t: number; r: number; b: number };
+  rotation?: number;
 }
 
 /**

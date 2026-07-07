@@ -708,6 +708,8 @@ class Engine {
           width: span.image.width,
           height: span.image.height,
           part: span.image.part,
+          crop: span.image.crop,
+          rotation: span.image.rotation,
           src: span.image.srcDrawing,
         });
         continue;
@@ -953,6 +955,9 @@ class Engine {
           width: shape.width,
           height: shape.height,
           part: shape.part,
+          crop: shape.crop,
+          rotation: shape.rotation,
+          behind: shape.behind,
           src: shape.srcDrawing,
         });
         if (shape.wrap !== "none" && page.physIndex !== -1) {

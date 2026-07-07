@@ -366,7 +366,21 @@ function parseDrawing(
         const y = oy + (intAttr(off, "y") ?? 0) * sy;
         const w = (intAttr(ext, "cx") ?? cx) * sx;
         const h = (intAttr(ext, "cy") ?? cy) * sy;
-        images.push({ part: rel.target, x: emuToPx(x), y: emuToPx(y), width: emuToPx(w), height: emuToPx(h) });
+        // a:srcRect crop (units: 1/1000 of a percent) and a:xfrm rotation
+        // (60000ths of a degree).
+        const srcRect = findDescendant(el, "srcRect");
+        const cropOf = (name: string) => (srcRect ? (intAttr(srcRect, name) ?? 0) / 100000 : 0);
+        const crop = srcRect ? { l: cropOf("l"), t: cropOf("t"), r: cropOf("r"), b: cropOf("b") } : undefined;
+        const rot = intAttr(xfrm, "rot");
+        images.push({
+          part: rel.target,
+          x: emuToPx(x),
+          y: emuToPx(y),
+          width: emuToPx(w),
+          height: emuToPx(h),
+          ...(crop && (crop.l || crop.t || crop.r || crop.b) ? { crop } : {}),
+          ...(rot ? { rotation: rot / 60000 } : {}),
+        });
       }
       return;
     }
@@ -448,6 +462,7 @@ function parseDrawing(
       if (child(anchor, "wrapNone")) wrap = "none";
       else if (child(anchor, "wrapTopAndBottom")) wrap = "topAndBottom";
       // wrapSquare/wrapTight/wrapThrough all treated as square.
+      const behind = attr(anchor, "behindDoc") === "1" && wrap === "none";
       return {
         kind: "anchor",
         shape: {
@@ -461,6 +476,9 @@ function parseDrawing(
           vRel: rel(posV),
           hAlign,
           wrap,
+          ...(behind ? { behind: true } : {}),
+          ...(images[0].crop ? { crop: images[0].crop } : {}),
+          ...(images[0].rotation ? { rotation: images[0].rotation } : {}),
         },
       };
     }
@@ -470,6 +488,8 @@ function parseDrawing(
       width: images[0].width || emuToPx(cx),
       height: images[0].height || emuToPx(cy),
       anchored: false,
+      ...(images[0].crop ? { crop: images[0].crop } : {}),
+      ...(images[0].rotation ? { rotation: images[0].rotation } : {}),
     };
   }
   if (lines.length === 0 && images.length === 0) return null;
