@@ -1,6 +1,6 @@
 import { XmlElement, attr, child, children, intAttr, localName, onOff } from "../xml.js";
-import { ColumnSpec, HeaderFooterRefs, SectionProps } from "../model.js";
-import { twipsToPx } from "../units.js";
+import { Border, ColumnSpec, HeaderFooterRefs, SectionProps } from "../model.js";
+import { ptToPx, twipsToPx } from "../units.js";
 
 /** US Letter portrait with 1" margins — Word's fallback geometry. */
 export function defaultSectionProps(): SectionProps {
@@ -90,6 +90,31 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
       spec.widths = colEls.map((c) => twipsToPx(intAttr(c, "w") ?? 0));
     }
     props.columns = spec;
+  }
+
+  const pgBorders = child(sectPr, "pgBorders");
+  if (pgBorders) {
+    const side = (name: string): Border | undefined => {
+      const el = child(pgBorders, name);
+      if (!el) return undefined;
+      const val = attr(el, "val") ?? "single";
+      if (val === "none" || val === "nil") return undefined;
+      const sz = intAttr(el, "sz") ?? 4; // eighth-points
+      const colorAttr = attr(el, "color");
+      return {
+        style: val === "double" ? "double" : val === "dashed" ? "dashed" : val === "dotted" ? "dotted" : "single",
+        width: Math.max((sz / 8) * (4 / 3), 0.75),
+        color: colorAttr && colorAttr !== "auto" ? "#" + colorAttr : "#000000",
+        space: ptToPx(intAttr(el, "space") ?? 0),
+      };
+    };
+    const borders = { top: side("top"), bottom: side("bottom"), left: side("left"), right: side("right") };
+    if (borders.top || borders.bottom || borders.left || borders.right) {
+      props.pageBorders = {
+        ...borders,
+        offsetFrom: attr(pgBorders, "offsetFrom") === "page" ? "page" : "text",
+      };
+    }
   }
 
   const type = attr(child(sectPr, "type"), "val");

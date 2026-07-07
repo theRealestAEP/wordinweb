@@ -827,6 +827,7 @@ export function DocxToolbar({
           { label: "Margins", items: [["m:normal", 'Normal (1")'], ["m:narrow", 'Narrow (0.5")'], ["m:wide", 'Wide (1.5")']] },
           { label: "Orientation", items: [["o:portrait", "Portrait"], ["o:landscape", "Landscape"]] },
           { label: "Size", items: [["s:letter", "Letter"], ["s:legal", "Legal"], ["s:a4", "A4"]] },
+          { label: "Columns", items: [["c:1", "One column"], ["c:2", "Two columns"], ["c:3", "Three columns"]] },
         ]}
         onPick={(v) => {
           if (v === "m:normal") api?.setPageLayout({ margins: { top: 1, right: 1, bottom: 1, left: 1 } });
@@ -836,6 +837,7 @@ export function DocxToolbar({
           else if (v === "s:letter") api?.setPageLayout({ size: { width: 8.5, height: 11 } });
           else if (v === "s:legal") api?.setPageLayout({ size: { width: 8.5, height: 14 } });
           else if (v === "s:a4") api?.setPageLayout({ size: { width: 8.27, height: 11.69 } });
+          else if (v.startsWith("c:")) api?.setPageLayout({ columns: parseInt(v.slice(2), 10) });
         }}
       />
       )}

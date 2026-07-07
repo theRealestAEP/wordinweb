@@ -420,6 +420,8 @@ export interface SectionProps {
   type?: "nextPage" | "continuous" | "evenPage" | "oddPage" | "nextColumn";
   /** Vertical alignment of page content. */
   vAlign?: "top" | "center" | "both" | "bottom";
+  /** w:pgBorders. Offsets (border.space, px) measure from text or page edge. */
+  pageBorders?: { top?: Border; bottom?: Border; left?: Border; right?: Border; offsetFrom: "text" | "page" };
   /** Footnote/endnote mark numbering (w:footnotePr / w:endnotePr). */
   footnoteNumFmt?: string;
   footnoteNumStart?: number;

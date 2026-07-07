@@ -610,3 +610,73 @@ describe("superscript / subscript", () => {
     expect(base.glyphTop).toBeUndefined();
   });
 });
+
+describe("sections & page borders", () => {
+  it("continuous section shares the page; new-page section does not", () => {
+    const cont = wrapDocument(
+      p("first section text") +
+        `<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:pPr></w:p>` +
+        p("second section text") +
+        `<w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`,
+    );
+    const { result } = layout({ "word/document.xml": cont });
+    expect(result.totalPages).toBe(1);
+    // and without continuous: two pages
+    const hard = cont.replace('<w:type w:val="continuous"/>', "");
+    const { result: r2 } = layout({ "word/document.xml": hard });
+    expect(r2.totalPages).toBe(2);
+  });
+
+  it("renders page borders inset from the text margins", () => {
+    const docXml = wrapDocument(
+      p("bordered page") +
+        `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+        `<w:pgBorders w:offsetFrom="text"><w:top w:val="single" w:sz="8" w:space="24" w:color="FF0000"/>` +
+        `<w:left w:val="single" w:sz="8" w:space="24"/><w:bottom w:val="single" w:sz="8" w:space="24"/>` +
+        `<w:right w:val="single" w:sz="8" w:space="24"/></w:pgBorders></w:sectPr>`,
+    );
+    const { result } = layout({ "word/document.xml": docXml });
+    const edges = result.pages[0].items.filter((i) => i.kind === "edge");
+    expect(edges.length).toBe(4);
+    const top = edges.find((e) => e.kind === "edge" && e.y1 === e.y2 && e.y1 < 100);
+    if (!top || top.kind !== "edge") throw new Error();
+    expect(top.border.color).toBe("#FF0000");
+    // 1in margin (96px) minus 24pt (32px) offset = 64px
+    expect(top.y1).toBeCloseTo(64, 0);
+  });
+});
+
+describe("table row splitting", () => {
+  const bigRow = (n: number, extra = "") => {
+    const paras = Array.from({ length: n }, (_, i) => `<w:p><w:r><w:t>cell line ${i}</w:t></w:r></w:p>`).join("");
+    return `<w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid>
+      <w:tr>${extra}<w:tc>${paras}</w:tc></w:tr></w:tbl>`;
+  };
+
+  it("splits a too-tall row across pages by default", () => {
+    // ~90 lines at ~17px in a ~700px body: must span pages, content intact.
+    const { result } = layout({ "word/document.xml": wrapDocument(bigRow(90)) });
+    expect(result.totalPages).toBeGreaterThan(1);
+    const all = result.pages.flatMap((pg) => pg.items.filter((i) => i.kind === "text"));
+    expect(all.some((i) => i.kind === "text" && i.text.includes("0"))).toBe(true);
+    const last = result.pages[result.pages.length - 1].items.filter((i) => i.kind === "text");
+    expect(last.length).toBeGreaterThan(0);
+    // every page's text stays inside the body box
+    for (const pg of result.pages) {
+      for (const it of pg.items) {
+        if (it.kind === "text") expect(it.lineTop + it.lineHeight).toBeLessThanOrEqual(pg.height - 90);
+      }
+    }
+  });
+
+  it("honors cantSplit by moving the row whole", () => {
+    const xml = wrapDocument(p("lead") + bigRow(20, '<w:trPr><w:cantSplit/></w:trPr>') );
+    // Fill most of page 1 first so the row doesn't fit
+    const filler = Array.from({ length: 42 }, (_, i) => p(`filler ${i}`)).join("");
+    const { result } = layout({ "word/document.xml": wrapDocument(filler + bigRow(25, "<w:trPr><w:cantSplit/></w:trPr>")) });
+    void xml;
+    // The row starts on page 2 (its first cell line is not on page 1).
+    const p1 = result.pages[0].items.filter((i) => i.kind === "text").map((i) => (i.kind === "text" ? i.text : ""));
+    expect(p1.some((t) => t.includes("cell"))).toBe(false);
+  });
+});
