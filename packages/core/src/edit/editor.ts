@@ -1084,9 +1084,26 @@ export class DocxEditor {
       return;
     }
     this.deselectImage();
-    const caret =
+    let caret =
       this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
-    const region = caret ? this.regionOf(caret.t) : "body";
+    let region = caret ? this.regionOf(caret.t) : "body";
+    // Word UX: a double-click in the top/bottom margin band is header/footer
+    // intent even when the nearest text is body text (or there is none at
+    // all - e.g. pleading paper, whose header is one VML sidebar and no
+    // typed text). Give the part an editable caret target if it lacks one.
+    if (!this.inHeaderFooter && e.detail >= 2 && region !== "hf") {
+      const bandPage = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null)?.closest(
+        ".dxw-page",
+      ) as HTMLElement | null;
+      const band = bandPage ? this.hfBandAt(bandPage, e.clientY) : null;
+      if (band) {
+        const hfCaret = this.hfCaretForBand(bandPage!, band);
+        if (hfCaret) {
+          caret = hfCaret;
+          region = "hf";
+        }
+      }
+    }
     if (region === "hf") {
       const pageEl = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null)?.closest(
         ".dxw-page",
@@ -1160,6 +1177,74 @@ export class DocxEditor {
   }
 
   /** Which part tree the element lives in: document body or header/footer. */
+  /** Header/footer margin band under a client-space y, if any. */
+  private hfBandAt(pageEl: HTMLElement, clientY: number): "header" | "footer" | null {
+    const rect = pageEl.getBoundingClientRect();
+    const zoom = this.host.zoom ?? 1;
+    const y = (clientY - rect.top) / zoom;
+    const bodyTop = parseFloat(pageEl.dataset.bodyTop ?? "0");
+    const bodyBottom = parseFloat(pageEl.dataset.bodyBottom ?? "1e9");
+    if (y < bodyTop) return "header";
+    if (y > bodyBottom) return "footer";
+    return null;
+  }
+
+  /** Root element kind of a node: header, footer, or body document. */
+  private hfRootOf(t: XmlElement): { root: XmlElement; kind: "hdr" | "ftr" } | null {
+    let cur: XmlElement | undefined = t;
+    let root: XmlElement | undefined;
+    while (cur) {
+      root = cur;
+      cur = this.host.doc.findParentOf(cur);
+    }
+    const ln = root ? localName(root.name) : "";
+    return root && (ln === "hdr" || ln === "ftr") ? { root, kind: ln as "hdr" | "ftr" } : null;
+  }
+
+  /**
+   * A caret target inside the header/footer rendered in the given band of a
+   * page. When the part has no directly typed text (pleading paper: all its
+   * text sits inside an anchored VML textbox), an empty run is added to its
+   * last paragraph so a real header can be typed alongside the shapes.
+   */
+  private hfCaretForBand(pageEl: HTMLElement, band: "header" | "footer"): Caret | null {
+    const handle = this.host.getHandle();
+    if (!handle) return null;
+    const wantKind = band === "header" ? "hdr" : "ftr";
+    let part: XmlElement | null = null;
+    for (const b of handle.bindings) {
+      if (!b.item.src?.t) continue;
+      if (b.el.closest(".dxw-page") !== pageEl) continue;
+      const hf = this.hfRootOf(b.item.src.t as XmlElement);
+      if (hf?.kind === wantKind) {
+        part = hf.root;
+        break;
+      }
+    }
+    if (!part) return null;
+    const paras = part.children.filter((c) => localName(c.name) === "p");
+    const last = paras[paras.length - 1];
+    if (!last) return null;
+    // A w:t directly under one of the paragraph's own runs (never inside an
+    // anchored shape's textbox).
+    const caretAt = (tEl: XmlElement, offset: number): Caret | null => {
+      const b = this.host.getHandle()?.bindings.find((bd) => bd.item.src?.t === tEl);
+      return b?.item.src ? { t: tEl, run: b.item.src.run, offset } : null;
+    };
+    for (const r of last.children) {
+      if (localName(r.name) !== "r") continue;
+      for (const c of r.children) {
+        if (localName(c.name) === "t") return caretAt(c, c.text.length);
+      }
+    }
+    const w = last.name.includes(":") ? last.name.slice(0, last.name.indexOf(":") + 1) : "";
+    const t: XmlElement = { name: `${w}t`, attrs: { "xml:space": "preserve" }, children: [], text: "" };
+    last.children.push({ name: `${w}r`, attrs: {}, children: [t], text: "" });
+    this.host.doc.refresh();
+    this.host.rerender();
+    return caretAt(t, 0);
+  }
+
   private regionOf(t: XmlElement): "body" | "hf" {
     let cur: XmlElement | undefined = t;
     let root: XmlElement | undefined;
