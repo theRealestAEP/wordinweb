@@ -433,6 +433,28 @@ describe("footnotes and endnotes", () => {
     expect(noteText.lineTop + noteText.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 0.5);
   });
 
+  it("binds a footnote in a split table row to the page painting its partition", () => {
+    // A single row taller than a page: the split's rest-partition carries a
+    // footnote reference and must register the note on page 2.
+    const cellParas =
+      Array.from({ length: 70 }, (_, i) => `<w:p><w:r><w:t>Row line ${i}</w:t></w:r></w:p>`).join("") +
+      `<w:p><w:r><w:t xml:space="preserve">noted line</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`;
+    const tbl =
+      `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="9026"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="9026" w:type="dxa"/></w:tcPr>${cellParas}</w:tc></w:tr></w:tbl>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(tbl + `<w:p><w:r><w:t>after table</w:t></w:r></w:p>`),
+      "word/_rels/document.xml.rels": FN_RELS,
+      "word/footnotes.xml": footnotesXml(note("footnote", 1, "split row note")),
+    });
+    expect(result.totalPages).toBeGreaterThan(1);
+    // The reference line and the note text must share a page.
+    const refPage = result.pages.findIndex((pg) => pg.items.some((i) => i.kind === "text" && i.text.includes("noted")));
+    const notePage = result.pages.findIndex((pg) => pg.items.some((i) => i.kind === "text" && i.text.includes("split")));
+    expect(refPage).toBeGreaterThan(0);
+    expect(notePage).toBe(refPage);
+  });
+
   it("keeps each footnote on the same page as its reference", () => {
     const filler = (n: number, from = 0) =>
       Array.from({ length: n }, (_, i) => p(`Filler paragraph ${from + i}`)).join("");

@@ -396,6 +396,25 @@ class Engine {
     return h;
   }
 
+  /** Unplaced-footnote reserve for a laid row (mirror of pendingNoteHeight
+   * for body lines): a row referencing notes must fit above the space those
+   * notes will claim. */
+  private rowNoteHeight(laid: { cells: { items: PageItem[] }[] }): number {
+    let h = 0;
+    const seen = new Set<number>();
+    for (const cell of laid.cells) {
+      for (const it of cell.items) {
+        if (it.kind !== "text" || it.noteId === undefined) continue;
+        if (seen.has(it.noteId) || this.placedFootnotes.has(it.noteId)) continue;
+        if (!this.doc.footnotes.has(it.noteId)) continue;
+        seen.add(it.noteId);
+        h += this.measureFootnote(it.noteId).height;
+      }
+    }
+    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_H;
+    return h;
+  }
+
   /** Bind a footnote's content to the page carrying its reference line. */
   private registerFootnote(id: number, page: InternalPage): void {
     if (this.placedFootnotes.has(id) || !this.doc.footnotes.has(id)) return;
@@ -800,7 +819,10 @@ class Engine {
     // diffused: the cursor accumulates raw heights, each baseline snaps).
     const baseline = quantizeQuarterPt(topY + line.height - line.maxDescent);
     for (const span of line.spans) {
-      if (span.noteId !== undefined) this.registerFootnote(span.noteId, page);
+      // Frame-laid lines (table cells) register at PAINT time instead: the
+      // partition that ends up on the next page after a row split must bind
+      // its notes there, not to the page current during cell layout.
+      if (span.noteId !== undefined && page.physIndex !== -1) this.registerFootnote(span.noteId, page);
     }
     for (const span of line.spans) {
       if (span.math) {
@@ -953,6 +975,7 @@ class Engine {
         text: span.text,
         props: span.props,
         font: span.font,
+        noteId: span.noteId,
         lineTop: topY,
         lineHeight: line.height,
         glyphTop,
@@ -1411,7 +1434,7 @@ class Engine {
       // (w:cantSplit opts out; exact-height, header, and vertically merged
       // rows never split).
       let guard = 0;
-      while (this.y + rowHeight > this.bodyBottom + 0.01 && guard++ < 50) {
+      while (this.y + rowHeight > this.bodyBottom - this.rowNoteHeight(laid) + 0.01 && guard++ < 50) {
         const canSplit =
           !row.props.cantSplit &&
           row.props.heightRule !== "exact" &&
@@ -1622,6 +1645,9 @@ class Engine {
 
       for (const it of cellLay.items) {
         offsetItem(it, cx, y + dy);
+        // Cell footnotes bind to the page painting this partition (split
+        // rows carry their references to the continuation page).
+        if (it.kind === "text" && it.noteId !== undefined) this.registerFootnote(it.noteId, page);
         page.items.push(it);
       }
 
