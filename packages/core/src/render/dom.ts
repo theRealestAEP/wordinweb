@@ -710,18 +710,41 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
   const w = Math.max(1 / dpr, Math.round(border.width * dpr) / dpr);
   const snap = (v: number) => Math.round(v * dpr) / dpr;
+  // Word's dash pattern is [3 1] x line width (read from its own PDF
+  // export) - noticeably longer than CSS `dashed`. Paint dashes/dots as a
+  // repeating gradient so the rhythm matches.
+  const dashPattern =
+    border.style === "dashed" || border.style === "dotDash" || border.style === "dotDotDash"
+      ? [3, 1]
+      : border.style === "dotted"
+        ? [1, 1]
+        : null;
   if (horizontal) {
     el.style.left = `${Math.min(x1, x2)}px`;
     el.style.top = `${snap(y1 - w / 2)}px`;
     el.style.width = `${Math.abs(x2 - x1)}px`;
-    el.style.height = "0";
-    el.style.borderTop = `${w}px ${cssStyle} ${border.color}`;
+    if (dashPattern) {
+      const on = Math.max(dashPattern[0] * border.width, 2);
+      const period = on + Math.max(dashPattern[1] * border.width, 1);
+      el.style.height = `${w}px`;
+      el.style.background = `repeating-linear-gradient(90deg, ${border.color} 0 ${on}px, transparent ${on}px ${period}px)`;
+    } else {
+      el.style.height = "0";
+      el.style.borderTop = `${w}px ${cssStyle} ${border.color}`;
+    }
   } else {
     el.style.left = `${snap(x1 - w / 2)}px`;
     el.style.top = `${Math.min(y1, y2)}px`;
-    el.style.width = "0";
     el.style.height = `${Math.abs(y2 - y1)}px`;
-    el.style.borderLeft = `${w}px ${cssStyle} ${border.color}`;
+    if (dashPattern) {
+      const on = Math.max(dashPattern[0] * border.width, 2);
+      const period = on + Math.max(dashPattern[1] * border.width, 1);
+      el.style.width = `${w}px`;
+      el.style.background = `repeating-linear-gradient(180deg, ${border.color} 0 ${on}px, transparent ${on}px ${period}px)`;
+    } else {
+      el.style.width = "0";
+      el.style.borderLeft = `${w}px ${cssStyle} ${border.color}`;
+    }
   }
   return el;
 }

@@ -293,3 +293,12 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
 - **Word save-as can wedge on documents with 3D content**: an invisible
   modal makes every AppleEvent time out (-1712) and `quit` reports "User
   canceled" - needs a human to dismiss.
+- **Word's dashed borders are [3 1] x line width** (dash operator read from
+  its PDF export) - CSS `dashed` is much shorter-dashed. renderEdge paints
+  dash patterns as repeating gradients to match the rhythm ("For Sale"
+  tear-off separators).
+- **Playwright element-screenshots of tall absolutely-positioned pages can
+  silently omit content below the viewport fold** - the DOM said 14 rail
+  items and a title existed while two element screenshots showed blank
+  space. Trust DOM measurements or viewport screenshots when they
+  disagree.
