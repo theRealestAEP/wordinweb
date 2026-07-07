@@ -141,10 +141,16 @@ export interface LineBounds {
 
 const DEFAULT_TAB = 48; // 0.5in
 
-/** How much of a justified line's space width Word will compress to pack one
- * more word (calibrated against Word-rendered references: 16% shrink must be
- * accepted, 19% rejected). */
-const JUSTIFY_SHRINK = 0.175;
+/** Word's justify packing rule, measured empirically (probe docs swept the
+ * needed space-compression across final words of different widths, exported
+ * through Word-mac itself; see scripts/make-justify-probe*.py): a word is
+ * packed onto the line iff the space compression it needs is at most HALF the
+ * space stretch that breaking before it would leave on this line, and never
+ * more than 25%. The stretch comparison is what a flat threshold can't model:
+ * a wide word (whose break leaves a gaping line) packs at 24% compression
+ * while a narrow one is rejected at 12%. */
+const JUSTIFY_MAX_COMPRESS = 0.25;
+const JUSTIFY_STRETCH_FACTOR = 0.5;
 
 /**
  * Break a paragraph into measured, positioned line boxes for a given content
@@ -176,8 +182,12 @@ export function breakParagraph(
   let curLineWidth = 0;
   let curSpaceWidth = 0;
   let lineIndex = 0;
-  // (With metric-correct fonts, Word's justified breaks match natural
-  // widths — no space-compression allowance is needed in the fit check.)
+  // Set when the justify rule commits to packing a word: its remaining frag
+  // atoms (a word can be split across formatting runs) must follow suit.
+  let packUntilSpace = false;
+  // Spans at the line start that word-head backtracking must not consume
+  // (the numbering label on a list paragraph's first line).
+  let minSpans = 0;
 
   // Per-line horizontal bounds. With floats, the engine narrows them per y.
   let yOff = 0;
@@ -237,6 +247,7 @@ export function breakParagraph(
       x = labelX + labelWidth;
     }
     curLineWidth = x - lineStartX(0);
+    minSpans = cur.length;
   }
 
   // A zero-width anchor span lets the caret land in empty paragraphs/lines.
@@ -282,6 +293,7 @@ export function breakParagraph(
     cur = [];
     curLineWidth = 0;
     curSpaceWidth = 0;
+    minSpans = 0;
     lineIndex++;
     yOff += line.height;
     beginLine(lineIndex);
@@ -290,6 +302,7 @@ export function breakParagraph(
 
   for (let ai = 0; ai < atoms.length; ai++) {
     const atom = atoms[ai];
+    if (atom.kind !== "frag") packUntilSpace = false;
     if (atom.kind === "break") {
       if (atom.breakType === "line") flush(false, true);
       else flush(false, true, atom.breakType);
@@ -354,15 +367,57 @@ export function breakParagraph(
       x += w;
       continue;
     }
-    // frag. Word packs justified lines beyond the natural width by
-    // compressing spaces (applyAlignment shrinks them back to fit); the
-    // allowance is a fraction of the accumulated space width on the line.
-    const shrinkAllowance =
-      props.alignment === "justify" ? curSpaceWidth * JUSTIFY_SHRINK : 0;
-    const fits =
-      x + atom.width <= lineStartX(lineIndex) + availFor(lineIndex) + shrinkAllowance + 0.01;
+    // frag. A word is the unit of breaking, and it may be split across
+    // several frag atoms when formatting runs divide it: the "head" is the
+    // part already placed on this line, the "tail" the frag atoms after this
+    // one with no space between.
+    const lineEnd = lineStartX(lineIndex) + availFor(lineIndex);
+    let fits = x + atom.width <= lineEnd + 0.01;
+    if (!fits && packUntilSpace) fits = true; // continuation of a packed word
     if (!fits && curLineWidth > 0) {
-      flush(false, false);
+      let hi = cur.length;
+      let headW = 0;
+      while (hi > minSpans) {
+        const s = cur[hi - 1];
+        if (s.isSpace || !s.text || s.text === "\t" || s.image || s.drawing) break;
+        headW += s.width;
+        hi--;
+      }
+      let tailW = 0;
+      for (let j = ai + 1; j < atoms.length && atoms[j].kind === "frag"; j++) {
+        tailW += (atoms[j] as { width: number }).width;
+      }
+      const wordW = headW + atom.width + tailW;
+      if (props.alignment === "justify" && curSpaceWidth > 0) {
+        // Word packs justified lines beyond the natural width by compressing
+        // spaces (applyAlignment shrinks them back to fit) when the
+        // pack-vs-break comparison favors it. Compression counts all spaces
+        // on the line; the stretch alternative loses the trailing space.
+        let trail = 0;
+        for (let j = hi - 1; j >= 0 && cur[j].isSpace; j--) trail += cur[j].width;
+        const spacesAfterBreak = curSpaceWidth - trail;
+        const compress = (x - headW + wordW - lineEnd) / curSpaceWidth;
+        if (spacesAfterBreak > 1e-6) {
+          const stretch = (lineEnd - (x - headW - trail)) / spacesAfterBreak;
+          if (compress <= Math.min(JUSTIFY_MAX_COMPRESS, stretch * JUSTIFY_STRETCH_FACTOR)) {
+            fits = true;
+            packUntilSpace = true;
+          }
+        }
+      }
+      if (!fits) {
+        // Word never breaks a word at a run boundary: the head (if any, and
+        // if it isn't the whole line) moves down with the rest of the word.
+        const head = hi > minSpans && hi < cur.length && cur[hi - 1].isSpace ? cur.splice(hi) : [];
+        for (const h of head) curLineWidth -= h.width;
+        flush(false, false);
+        for (const h of head) {
+          h.x = x;
+          x += h.width;
+          cur.push(h);
+          curLineWidth += h.width;
+        }
+      }
     }
     if (atom.width > availFor(lineIndex) && curLineWidth === 0) {
       // Single fragment wider than the line: hard character wrap.

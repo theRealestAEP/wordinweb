@@ -514,3 +514,56 @@ describe("footnotes and endnotes", () => {
     expect(marks.length).toBe(2);
   });
 });
+
+describe("justified line breaking (Word pack-vs-break rule)", () => {
+  // ApproxMeasurer: n/o = 0.5em, i = 0.28em, m = 0.85em, space = 0.25em,
+  // em = 14.666px. Ten "no" fillers + 9 spaces = 179.6585px of line.
+  const fillers = Array(10).fill("no").join(" ");
+  const jp = (text: string) =>
+    `<w:p><w:pPr><w:jc w:val="both"/></w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+  const sect = (pgW: number) =>
+    `<w:sectPr><w:pgSz w:w="${pgW}" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+  const linesOf = (result: ReturnType<typeof layoutDocument>) => {
+    const tops = new Map<number, string[]>();
+    for (const i of result.pages[0].items) {
+      if (i.kind !== "text") continue;
+      const key = Math.round(i.lineTop);
+      if (!tops.has(key)) tops.set(key, []);
+      tops.get(key)!.push(i.text);
+    }
+    return [...tops.entries()].sort((a, b) => a[0] - b[0]).map(([, t]) => t.join("").replace(/\s+/g, " ").trim());
+  };
+
+  it("packs a wide final word at ~20% compression (break would leave a gaping line)", () => {
+    // content 225.87px; "mmmm" needs 20% space compression, the break
+    // alternative a 140% stretch: Word packs (compress <= stretch/2, <= 25%).
+    const { result } = layout({
+      "word/document.xml": wrapDocument(jp(`${fillers} mmmm`) + sect(6268)),
+    });
+    const lines = linesOf(result);
+    expect(lines[0].endsWith("mmmm")).toBe(true);
+  });
+
+  it("breaks before a narrow final word at ~16% compression (stretch is cheap)", () => {
+    // content 188.87px; "in" needs only 16% compression but breaking costs a
+    // mere 28% stretch: Word breaks (16% > 28%/2).
+    const { result } = layout({
+      "word/document.xml": wrapDocument(jp(`${fillers} in`) + sect(5713)),
+    });
+    const lines = linesOf(result);
+    expect(lines[0].endsWith("no")).toBe(true);
+    expect(lines[1]).toBe("in");
+  });
+
+  it("never splits a word at a formatting-run boundary", () => {
+    // "c" (run 1) + "cc" (bold run 2) form one word; "c" alone fits on line 1
+    // but the word must move down as a unit.
+    const para =
+      '<w:p><w:r><w:t xml:space="preserve">aa bb c</w:t></w:r>' +
+      '<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">cc</w:t></w:r></w:p>';
+    const { result } = layout({ "word/document.xml": wrapDocument(para + sect(3650)) });
+    const lines = linesOf(result);
+    expect(lines[0]).toBe("aa bb");
+    expect(lines[1]).toBe("ccc");
+  });
+});
