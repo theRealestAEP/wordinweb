@@ -238,3 +238,18 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   Dismiss via System Events named-button clicks (`click button "No" of
   window 1`) between attempts, and expect force-quit + relaunch to replay
   queued opens.
+- **Word math geometry, advanced constructs** (parity-math2 at 11pt): the
+  n-ary operator keeps the SURROUNDING font size (math fonts carry a large
+  ∑ glyph; ∑ baseline +0.5pt, ∫ -0.5pt); sum-class limits sit at
+  +4.25/-2.75pt beside the operator, integral-class at +6.75/-4.5pt with a
+  2.2pt slant stagger; the operand follows 2.5pt after the wider limit.
+  Matrix rows pitch 12.75pt with their baseline centroid 0.62pt BELOW the
+  main baseline; columns gap 12.2pt. Delimiters keep the font size and swap
+  in a taller GLYPH VARIANT (the PDF shows "(" at sz 11 spanning a 2x2
+  matrix) - we approximate with a paint-time scaleY around the math axis so
+  advances stay natural. Binary-operator spacing applies to FULL-SIZE
+  content only: scripts, fraction parts and n-ary limits set tight
+  ("i=1" under a sum advances glyph-to-glyph). parity-math2's 2 residual
+  line diffs are extraction-order artifacts of vertically stacked pieces,
+  not geometry (positions verified within ~1pt; the ∑ advance differs
+  because STIX Two Math substitutes for Cambria Math).
