@@ -211,3 +211,14 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   the msa body by exactly one line: 43 vs 44 lines, probe-footerheight).
   Body bottom = min(pageH − marginBottom, pageH − footerDistance −
   footerH).
+- **Column balancing before a continuous break** (parity-colbalance): a
+  multi-column section followed by a continuous section balances by HEIGHT
+  (nine 2-line paragraphs split 5/4 = 10/8 lines, not 9/9): target =
+  bandTop + totalStackedHeight/nCols, a line stays in the earlier column
+  while its TOP is above the target, the final column uses the true body
+  bottom, and the next band resumes below the TALLEST column. No balancing
+  happens at document end (parity-columns fills column 1 first).
+- **An empty section-break paragraph takes no vertical space**: a
+  paragraph whose only role is carrying `pPr/sectPr` renders no mark line
+  (columns start exactly one line-advance below the intro). Same family as
+  the trailing-page-break rule.

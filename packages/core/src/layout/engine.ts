@@ -121,7 +121,7 @@ class Engine {
         sp.type === "continuous" &&
         prevSp !== null &&
         this.pages.length > 0 &&
-        this.col === 0 &&
+        (this.col === 0 || this.prevBandBalanced) &&
         !this.pageIsEmptyAtCursor() &&
         sp.pageWidth === prevSp.pageWidth &&
         sp.pageHeight === prevSp.pageHeight &&
@@ -130,7 +130,16 @@ class Engine {
       this.sp = sp;
       if (canContinue) this.newBand();
       else this.newPage(true);
+      this.armColumnBalancing(section, sections[sections.indexOf(section) + 1]);
       this.layoutBlocks(section.blocks);
+      this.prevBandBalanced = this.balanceBottom !== undefined;
+      if (this.balanceBottom !== undefined) {
+        // Resume below the tallest column; reset to the first column so the
+        // next band spans the full width from a clean cursor.
+        this.y = Math.max(this.y, this.balanceMaxY);
+        this.col = 0;
+        this.balanceBottom = undefined;
+      }
       prevSp = sp;
     }
     if (this.pages.length === 0) {
@@ -235,7 +244,24 @@ class Engine {
     this.lastParaSpacingAfter = 0;
   }
 
+  /** See balanceBottom. Dry-measures the section stacked at column width;
+   * arms only when the balanced band fits above the true body bottom. */
+  private armColumnBalancing(section: { blocks: Block[] }, next?: { props: SectionProps }): void {
+    this.balanceBottom = undefined;
+    if (this.cur.colXs.length < 2) return;
+    const np = next?.props;
+    if (!np || np.type !== "continuous") return;
+    if (np.pageWidth !== this.sp.pageWidth || np.pageHeight !== this.sp.pageHeight) return;
+    const { height } = this.layoutFrame(section.blocks, this.cur.colWidths[0], this.fieldCtx());
+    const target = this.y + quantizeQuarterPt(height / this.cur.colXs.length);
+    const realBottom = this.cur.bodyBottom - this.footnoteReserve(this.cur);
+    if (target > realBottom) return; // does not fit balanced in this band - normal flow
+    this.balanceBottom = target;
+    this.balanceMaxY = this.y;
+  }
+
   private nextColumn(): void {
+    if (this.balanceBottom !== undefined) this.balanceMaxY = Math.max(this.balanceMaxY, this.y);
     if (this.col + 1 < this.cur.colXs.length) {
       this.col++;
       this.y = this.cur.bandTop;
@@ -252,8 +278,26 @@ class Engine {
     return this.cur.colWidths[this.col];
   }
   private get bodyBottom(): number {
+    // Balanced band: non-final columns stop at the balance target so the
+    // columns even out; the final column falls back to the true bottom.
+    if (this.balanceBottom !== undefined && this.col + 1 < this.cur.colXs.length) {
+      return this.balanceBottom;
+    }
     return this.cur.bodyBottom - this.footnoteReserve(this.cur);
   }
+
+  /** Word balances the columns of a multi-column section that is followed by
+   * a continuous break: content splits at bandTop + totalHeight/nCols, and a
+   * line stays in the earlier column while its TOP is above that target
+   * (parity-colbalance: nine 2-line paragraphs split 5/4 by height, 10/8 by
+   * lines). Undefined outside balanced bands. */
+  private balanceBottom: number | undefined;
+  /** Tallest column bottom seen while balancing - the next band resumes here. */
+  private balanceMaxY = 0;
+  /** The previous section's final band was balanced, so a continuous
+   * successor may share the page even though the cursor sits in a later
+   * column. */
+  private prevBandBalanced = false;
   private pageIsEmptyAtCursor(): boolean {
     return this.y <= this.cur.bodyTop + 0.01;
   }
@@ -420,6 +464,10 @@ class Engine {
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (block.type === "paragraph") {
+        // An empty paragraph that only carries a section break takes no
+        // vertical space in Word (parity-colbalance: the columns start
+        // exactly one line-advance below the intro, no mark line).
+        if (block.sectionBreak && !paragraphHasContent(block)) continue;
         this.placeParagraph(block, blocks[i - 1], blocks[i + 1]);
       } else {
         this.placeTable(block);
@@ -634,7 +682,8 @@ class Engine {
       let onPartialPage = !this.pageIsEmptyAtCursor();
       for (let li = 0; li < lines.length; li++) {
         simY += lines[li].floatYOffset ?? 0;
-        if (simY + lines[li].fitHeight > bottom + 0.01 && li > segStart) {
+        const simBalancing = this.balanceBottom !== undefined && this.col + 1 < this.cur.colXs.length;
+        if ((simBalancing ? simY > bottom + 0.01 : simY + lines[li].fitHeight > bottom + 0.01) && li > segStart) {
           let breakAt = li;
           if (widow) {
             // Orphan: a lone first line at the bottom → push whole paragraph.
@@ -712,8 +761,11 @@ class Engine {
       // A line referencing footnotes must fit above the space its own
       // footnotes will claim, so line and note land on the same page.
       const pendingNotes = this.pendingNoteHeight(line);
+      const balancing = this.balanceBottom !== undefined && this.col + 1 < this.cur.colXs.length;
       const overflow =
-        this.y + line.fitHeight > this.bodyBottom - pendingNotes + 0.01 && !this.pageIsEmptyAtCursor();
+        (balancing
+          ? this.y > this.bodyBottom + 0.01
+          : this.y + line.fitHeight > this.bodyBottom - pendingNotes + 0.01) && !this.pageIsEmptyAtCursor();
       if ((planned || overflow) && li > fragStartLine) {
         closeFragment(li, false);
         this.nextColumn();
@@ -1723,4 +1775,18 @@ function mapBulletChar(text: string): string {
 
 function isSymbolFont(name: string): boolean {
   return /symbol|wingdings|webdings/i.test(name);
+}
+
+/** True when a paragraph has any visible run content (text, images, breaks). */
+function paragraphHasContent(p: Paragraph): boolean {
+  for (const c of p.children) {
+    const runs = c.type === "run" ? [c] : c.runs;
+    for (const r of runs) {
+      for (const rc of r.content) {
+        if (rc.kind === "text" && rc.text.length > 0) return true;
+        if (rc.kind !== "text") return true;
+      }
+    }
+  }
+  return false;
 }
