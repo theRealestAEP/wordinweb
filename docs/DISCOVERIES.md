@@ -286,3 +286,10 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
 - **Office-private theme fonts need substitutes**: Gill Sans MT (cover
   letter/resume templates) falls back to Helvetica silently and every
   measurement is wrong; macOS ships metrically-similar Gill Sans.
+- **Office 3D models (am3d) ship their own render**: `am3d:model3d` embeds
+  the .glb via r:embed AND an `am3d:raster rName="Office3DRenderer"` poster
+  blip - Word's static/PDF output just draws the poster, so painting that
+  image at the model extent is exact parity. No 3D engine needed.
+- **Word save-as can wedge on documents with 3D content**: an invisible
+  modal makes every AppleEvent time out (-1712) and `quit` reports "User
+  canceled" - needs a human to dismiss.
