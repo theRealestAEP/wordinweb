@@ -451,6 +451,7 @@ function ensureStylesheet(): void {
   const style = document.createElement("style");
   style.id = "dxw-style";
   style.textContent = `
+.dxw-page span { font-kerning: none; font-variant-ligatures: none; }
 .dxw-hf-mode .dxw-page span:not([data-dxw-hf]),
 .dxw-hf-mode .dxw-page a:not([data-dxw-hf]),
 .dxw-hf-mode .dxw-page img:not([data-dxw-hf]) { opacity: .45; }

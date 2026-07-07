@@ -98,14 +98,19 @@ export class DocxEditor {
   private pointIndex(pt: SelPoint): number | null {
     const handle = this.host.getHandle();
     if (!handle) return null;
+    // Prefer the binding that contains the offset strictly inside its range;
+    // a boundary offset (end of one span == start of the next) would
+    // otherwise resolve to the preceding span — usually a space.
+    let boundary: number | null = null;
     for (let i = 0; i < handle.bindings.length; i++) {
       const src = handle.bindings[i].item.src;
       if (!src?.t || src.t !== pt.t) continue;
       const start = src.offset;
       const end = src.offset + handle.bindings[i].item.text.length;
-      if (pt.offset >= start && pt.offset <= end) return i * 1e6 + (pt.offset - start);
+      if (pt.offset >= start && pt.offset < end) return i * 1e6 + (pt.offset - start);
+      if (pt.offset === end && boundary === null) boundary = i * 1e6 + (pt.offset - start);
     }
-    return null;
+    return boundary;
   }
 
   /** Segments covered by the owned selection, in document paint order. */
@@ -355,13 +360,18 @@ export class DocxEditor {
             const rg = document.createRange();
             rg.setStart(textNode, Math.min(startPt.offset - src.offset, item.text.length));
             rg.collapse(true);
-            x0 = localX(rg.getBoundingClientRect().left);
+            const r = rg.getBoundingClientRect();
+            // Whitespace-only spans collapse to a zero rect at the viewport
+            // origin — keep the span-geometry fallback in that case.
+            if (r.height > 0) x0 = localX(r.left);
           }
           if (i === endIdx && endPt.offset < src.offset + item.text.length) {
             const rg = document.createRange();
             rg.setStart(textNode, Math.max(0, endPt.offset - src.offset));
             rg.collapse(true);
-            x1 = localX(rg.getBoundingClientRect().left);
+            const r = rg.getBoundingClientRect();
+            if (r.height > 0) x1 = localX(r.left);
+            else if (endPt.offset === src.offset) x1 = item.x; // boundary at span start
           }
         } catch {
           /* keep full-span rect */

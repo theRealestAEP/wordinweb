@@ -141,6 +141,11 @@ export interface LineBounds {
 
 const DEFAULT_TAB = 48; // 0.5in
 
+/** How much of a justified line's space width Word will compress to pack one
+ * more word (calibrated against Word-rendered references: 16% shrink must be
+ * accepted, 19% rejected). */
+const JUSTIFY_SHRINK = 0.175;
+
 /**
  * Break a paragraph into measured, positioned line boxes for a given content
  * width. Handles indents, numbering label, tabs, justification, and line
@@ -349,8 +354,13 @@ export function breakParagraph(
       x += w;
       continue;
     }
-    // frag
-    const fits = x + atom.width <= lineStartX(lineIndex) + availFor(lineIndex) + 0.01;
+    // frag. Word packs justified lines beyond the natural width by
+    // compressing spaces (applyAlignment shrinks them back to fit); the
+    // allowance is a fraction of the accumulated space width on the line.
+    const shrinkAllowance =
+      props.alignment === "justify" ? curSpaceWidth * JUSTIFY_SHRINK : 0;
+    const fits =
+      x + atom.width <= lineStartX(lineIndex) + availFor(lineIndex) + shrinkAllowance + 0.01;
     if (!fits && curLineWidth > 0) {
       flush(false, false);
     }

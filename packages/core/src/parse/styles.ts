@@ -1,5 +1,6 @@
-import { XmlElement, attr, child, children, childVal, onOff } from "../xml.js";
+import { XmlElement, attr, child, children, childVal, intAttr, onOff } from "../xml.js";
 import { ParaProps, RunProps, Style, Styles } from "../model.js";
+import { twipsToPx } from "../units.js";
 import { ParseContext, mergeParaProps, mergeRunProps, parseParaProps, parseRunProps } from "./properties.js";
 
 export function parseStyles(root: XmlElement | undefined, ctx: ParseContext): Styles {
@@ -36,6 +37,23 @@ export function parseStyles(root: XmlElement | undefined, ctx: ParseContext): St
     if (pPr) style.pPr = parseParaProps(pPr, ctx);
     const rPr = child(s, "rPr");
     if (rPr) style.rPr = parseRunProps(rPr, ctx);
+    const tblPr = child(s, "tblPr");
+    if (tblPr && type === "table") {
+      const cellMar = child(tblPr, "tblCellMar");
+      if (cellMar) {
+        const margins: { top?: number; right?: number; bottom?: number; left?: number } = {};
+        for (const side of ["top", "right", "bottom", "left"] as const) {
+          const m =
+            child(cellMar, side) ??
+            (side === "right" ? child(cellMar, "end") : side === "left" ? child(cellMar, "start") : undefined);
+          if (m && attr(m, "type") !== "pct") {
+            const w = intAttr(m, "w");
+            if (w !== undefined) margins[side] = twipsToPx(w);
+          }
+        }
+        style.tblPr = { cellMargins: margins };
+      }
+    }
     styles.byId.set(id, style);
     if (style.isDefault && type === "paragraph") styles.defaultParagraphStyle = id;
   }

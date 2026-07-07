@@ -1051,7 +1051,7 @@ class Engine {
     if (tbl.grid.length > 0 && gridTotal >= target * 0.5) return base; // realistic grid
 
     const nCols = base.length;
-    const margins = tbl.props.cellMargins ?? { left: 7.2, right: 7.2 };
+    const margins = this.cellMarginsOf(tbl);
     const pad = (margins.left ?? 0) + (margins.right ?? 0) + 2;
     const minW = new Array<number>(nCols).fill(pad + 8);
     const prefW = new Array<number>(nCols).fill(pad + 8);
@@ -1097,6 +1097,34 @@ class Engine {
       }
     }
     return widths;
+  }
+
+  /** Effective default cell margins: direct tblCellMar, else the table
+   * style chain, else the default table style, else 0 (the spec default —
+   * Word's usual 108-twip side margins come from the TableNormal style). */
+  private cellMarginsOf(tbl: Table): { top?: number; right?: number; bottom?: number; left?: number } {
+    if (tbl.props.cellMargins) return tbl.props.cellMargins;
+    const byId = this.doc.styles.byId;
+    const fromChain = (id: string | undefined) => {
+      let cur = id;
+      let guard = 0;
+      while (cur && guard++ < 20) {
+        const st = byId.get(cur);
+        if (!st) break;
+        if (st.tblPr?.cellMargins) return st.tblPr.cellMargins;
+        cur = st.basedOn;
+      }
+      return undefined;
+    };
+    const own = fromChain(tbl.props.styleId);
+    if (own) return own;
+    for (const st of byId.values()) {
+      if (st.type === "table" && st.isDefault) {
+        const d = fromChain(st.id);
+        if (d) return d;
+      }
+    }
+    return {};
   }
 
   private placeTable(tbl: Table): void {
@@ -1229,7 +1257,7 @@ class Engine {
     widths: number[],
     fields?: FieldContext,
   ): { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[]; height: number } {
-    const defaults = tbl.props.cellMargins ?? { top: 0, left: 7.2, right: 7.2, bottom: 0 };
+    const defaults = this.cellMarginsOf(tbl);
     const cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[] = [];
     let gridPos = 0;
     let maxH = 0;
