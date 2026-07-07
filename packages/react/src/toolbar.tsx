@@ -1,10 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DocxViewApi } from "./index.js";
 
-const FONTS = [
-  "Arial", "Calibri", "Cambria", "Courier New", "Garamond",
-  "Georgia", "Helvetica", "Times New Roman", "Trebuchet MS", "Verdana",
+/** Candidate families: always-usable ones (bundled substitutes or web-safe)
+ * plus common document fonts. The dropdown filters to fonts the browser can
+ * actually render (canvas width probe against the generic fallback). */
+const FONT_CANDIDATES = [
+  "Arial", "Arial Black", "Arial Narrow", "Avenir", "Avenir Next", "Baskerville", "Bookman Old Style",
+  "Brush Script MT", "Calibri", "Cambria", "Century Gothic", "Chalkboard", "Charter", "Comic Sans MS",
+  "Copperplate", "Courier New", "Didot", "Futura", "Garamond", "Georgia", "Gill Sans", "Helvetica",
+  "Helvetica Neue", "Hoefler Text", "Impact", "Lucida Grande", "Menlo", "Monaco", "Optima",
+  "Palatino", "Rockwell", "Seravek", "Tahoma", "Times New Roman", "Trebuchet MS", "Verdana",
 ];
+
+let availableFonts: string[] | null = null;
+function detectFonts(): string[] {
+  if (availableFonts) return availableFonts;
+  try {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d")!;
+    const probe = "mmmwwwlliiWQ@";
+    const widthIn = (family: string): number => {
+      ctx.font = `16px ${family.includes(" ") ? `"${family}"` : family}, monospace`;
+      return ctx.measureText(probe).width;
+    };
+    ctx.font = "16px monospace";
+    const base = ctx.measureText(probe).width;
+    // Bundled substitutes make Calibri/Cambria always renderable.
+    const always = new Set(["Calibri", "Cambria"]);
+    availableFonts = FONT_CANDIDATES.filter((f) => always.has(f) || Math.abs(widthIn(f) - base) > 0.5);
+  } catch {
+    availableFonts = FONT_CANDIDATES;
+  }
+  return availableFonts;
+}
+
 
 const SIZES = [8, 9, 10, 10.5, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48];
 
@@ -848,7 +877,7 @@ export function DocxToolbar({
         style={{ ...selectStyle, width: 130 }}
       >
         <option value="" disabled>Font</option>
-        {FONTS.map((f) => (
+        {(fmt?.fontFamily && !detectFonts().includes(fmt.fontFamily) ? [fmt.fontFamily, ...detectFonts()] : detectFonts()).map((f) => (
           <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
         ))}
       </select>
