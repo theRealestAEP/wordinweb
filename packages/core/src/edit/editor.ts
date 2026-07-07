@@ -457,11 +457,24 @@ export class DocxEditor {
 
   /** Word-style cue: dim the inactive region; dashed boundary + tab labels
    * while editing headers/footers. */
+  /** Leave header/footer editing and return to the body (hotbar Close). */
+  exitHeaderFooter(): void {
+    if (!this.inHeaderFooter) return;
+    this.inHeaderFooter = false;
+    this.caret = null;
+    this.clearSelection();
+    this.applyHfChrome();
+  }
+
   private applyHfChrome(): void {
     const root = this.host.getHandle()?.root;
     if (!root) return;
     root.classList.toggle("dxw-hf-mode", this.inHeaderFooter);
     root.classList.toggle("dxw-body-mode", !this.inHeaderFooter);
+    // Hosts show contextual header/footer tools (hotbar) off this signal.
+    this.host.container.dispatchEvent(
+      new CustomEvent("dxw-hfmode", { detail: { active: this.inHeaderFooter }, bubbles: true }),
+    );
     root.querySelectorAll(".dxw-hf-marker").forEach((m) => m.remove());
     if (!this.inHeaderFooter) return;
     for (const pageEl of Array.from(root.querySelectorAll<HTMLElement>(".dxw-page"))) {

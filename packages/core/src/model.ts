@@ -242,6 +242,9 @@ export interface ShapeArt {
   type: "art";
   x: number;
   y: number;
+  /** Percent-of-page offsets (wp14:pctPos*Offset), 0..1. */
+  pctX?: number;
+  pctY?: number;
   width: number;
   height: number;
   hRel: AnchorRel;

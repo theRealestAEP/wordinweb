@@ -580,12 +580,27 @@ function parseDrawing(
       const v = el ? attr(el, "relativeFrom") : undefined;
       return v === "page" ? "page" : v === "margin" ? "margin" : v === "column" ? "column" : "text";
     };
+    // positionH/V may appear twice (mc:Choice with wp14 percent offsets +
+    // mc:Fallback with a plain posOffset) - merge across all copies.
     const posH = findDescendant(anchor, "positionH");
     const posV = findDescendant(anchor, "positionV");
-    const offEmu = (el: XmlElement | undefined): number => {
-      const po = el ? findDescendant(el, "posOffset") : undefined;
-      return po ? parseInt(po.text, 10) || 0 : 0;
+    const offOf = (name: string): { px: number; pct?: number } => {
+      let px = 0;
+      let pct: number | undefined;
+      const walkPos = (el: XmlElement): void => {
+        if (localName(el.name) === name) {
+          const po = findDescendant(el, "posOffset");
+          if (po) px = emuToPx(parseInt(po.text, 10) || 0);
+          const pp = el.children.find((c) => localName(c.name).startsWith("pctPos"));
+          if (pp) pct = (parseInt(pp.text, 10) || 0) / 100000;
+        }
+        for (const c of el.children) walkPos(c);
+      };
+      walkPos(anchor);
+      return { px, pct };
     };
+    const oh = offOf("positionH");
+    const ov = offOf("positionV");
     const alignEl = posH ? findDescendant(posH, "align") : undefined;
     const hAlign = alignEl?.text === "center" || alignEl?.text === "right" || alignEl?.text === "left"
       ? (alignEl.text as "left" | "center" | "right")
@@ -594,8 +609,10 @@ function parseDrawing(
       kind: "anchor",
       shape: {
         type: "art",
-        x: emuToPx(offEmu(posH)),
-        y: emuToPx(offEmu(posV)),
+        x: oh.px,
+        y: ov.px,
+        pctX: oh.pct,
+        pctY: ov.pct,
         width: emuToPx(cx),
         height: emuToPx(cy),
         hRel: rel(posH),

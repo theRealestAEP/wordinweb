@@ -28,6 +28,10 @@ import {
   setImageWrap,
   insertFootnote,
   insertPageField,
+  insertBreakAt,
+  insertSectionBreak,
+  sectPrAt,
+  type XmlElement,
   insertTableAfter,
   layoutDocument,
   listTypeAt,
@@ -94,7 +98,11 @@ export interface DocxViewApi {
   /** pStyle id of the caret paragraph (null = Normal). */
   getParagraphStyleId(): string | null;
   /** Change margins / page size / orientation (inches). */
-  setPageLayout(patch: PageLayoutPatch): void;
+  setPageLayout(patch: PageLayoutPatch, scope?: "document" | "section"): void;
+  /** Insert a page/column break or a section break at the caret. */
+  insertBreak(kind: "page" | "column" | "sectionNextPage" | "sectionContinuous"): boolean;
+  /** Leave header/footer editing mode. */
+  closeHeaderFooter(): void;
   /** Effective formatting of the current selection (toolbar state), or null. */
   getSelectionFormat(): SelectionFormat | null;
   /** Print the rendered pages (browser print dialog / save as PDF). */
@@ -164,6 +172,18 @@ export function DocxView({
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<Error | null>(null);
+  // Contextual header/footer hotbar: the editor announces hf-mode via a
+  // bubbled dxw-hfmode event; the tools that only make sense there (page
+  // numbers, close) surface right where the user is editing.
+  const [hfMode, setHfMode] = useState(false);
+  const apiRef = useRef<DocxViewApi | null>(null);
+  useEffect(() => {
+    const c = containerRef.current;
+    if (!c) return;
+    const onHf = (e: Event) => setHfMode(!!(e as CustomEvent<{ active: boolean }>).detail?.active);
+    c.addEventListener("dxw-hfmode", onHf);
+    return () => c.removeEventListener("dxw-hfmode", onHf);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -407,9 +427,31 @@ export function DocxView({
               pages = rerender(doc);
             }
           },
-          setPageLayout: (patch) => {
+          closeHeaderFooter: () => editor?.exitHeaderFooter(),
+          insertBreak: (kind) => {
+            let target = editor?.getCaretTarget() ?? null;
+            if (!target) {
+              const segs = editor?.getSelectionSegments() ?? [];
+              const last = [...segs].reverse().find((sg) => sg.t);
+              if (last?.t) target = { t: last.t, offset: last.end };
+            }
+            if (!target) return false;
             history.checkpoint();
-            if (setPageLayout(doc, patch)) pages = rerender(doc);
+            const done =
+              kind === "page" || kind === "column"
+                ? insertBreakAt(doc, target.t, target.offset, kind)
+                : insertSectionBreak(doc, target.t, kind === "sectionNextPage" ? "nextPage" : "continuous");
+            if (done) pages = rerender(doc);
+            return done;
+          },
+          setPageLayout: (patch, scope) => {
+            history.checkpoint();
+            let target: XmlElement | undefined;
+            if (scope === "section") {
+              const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t;
+              if (t) target = sectPrAt(doc, t) ?? undefined;
+            }
+            if (setPageLayout(doc, patch, target)) pages = rerender(doc);
           },
           setLink: (url) => {
             const segs = editor?.getSelectionSegments() ?? [];
@@ -534,6 +576,7 @@ export function DocxView({
           },
           save: () => doc.save(),
         };
+        apiRef.current = api;
         onReady?.(api);
       }
     })().catch((e: unknown) => {
@@ -552,15 +595,66 @@ export function DocxView({
     };
   }, [source, zoom, editable, commentAuthor, showComments, revisions]);
 
-  return (
-    <div
-      ref={containerRef}
-      className={className}
-      style={{ background: "#e8eaed", overflow: "auto", ...style }}
+  const hotBtn = (label: string, title: string, onClick: () => void) => (
+    <button
+      title={title}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={onClick}
+      style={{
+        border: "1px solid #dadce0",
+        background: "#fff",
+        color: "#3c4043",
+        font: "12.5px system-ui, sans-serif",
+        padding: "4px 10px",
+        borderRadius: 14,
+        cursor: "pointer",
+        boxShadow: "0 1px 3px rgba(0,0,0,.12)",
+      }}
     >
-      {error && (
-        <div style={{ padding: 16, color: "#b00020", fontFamily: "system-ui" }}>
-          Failed to render document: {error.message}
+      {label}
+    </button>
+  );
+  return (
+    <div style={{ position: "relative", ...(style?.height ? { height: style.height } : {}) }}>
+      <div
+        ref={containerRef}
+        className={className}
+        style={{ background: "#e8eaed", overflow: "auto", height: "100%", ...style }}
+      >
+        {error && (
+          <div style={{ padding: 16, color: "#b00020", fontFamily: "system-ui" }}>
+            Failed to render document: {error.message}
+          </div>
+        )}
+      </div>
+      {editable && hfMode && (
+        <div
+          data-dxw-hf-hotbar=""
+          style={{
+            position: "absolute",
+            top: 10,
+            left: "50%",
+            transform: "translateX(-50%)",
+            display: "flex",
+            gap: 6,
+            zIndex: 40,
+            background: "rgba(249,251,253,.96)",
+            border: "1px solid #dadce0",
+            borderRadius: 18,
+            padding: "5px 8px",
+            boxShadow: "0 2px 10px rgba(0,0,0,.15)",
+            alignItems: "center",
+          }}
+        >
+          <span style={{ font: "600 11.5px system-ui, sans-serif", color: "#5f6368", padding: "0 4px" }}>
+            Header &amp; footer
+          </span>
+          {hotBtn("Page number", "Insert a dynamic page number at the caret", () => apiRef.current?.insertPageNumber("page"))}
+          {hotBtn("Page X of Y", "Insert 'Page X of Y' at the caret", () => apiRef.current?.insertPageNumber("pageOfTotal"))}
+          {hotBtn("Close", "Return to the document body", () => {
+            apiRef.current?.closeHeaderFooter();
+            setHfMode(false);
+          })}
         </div>
       )}
     </div>
