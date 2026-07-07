@@ -27,6 +27,7 @@ import {
   insertImageAt,
   setImageWrap,
   insertFootnote,
+  insertPageField,
   insertTableAfter,
   layoutDocument,
   listTypeAt,
@@ -48,6 +49,8 @@ export interface DocxViewApi {
   addComment(text: string): boolean;
   /** Insert a footnote at the caret. False without a caret. */
   addFootnote(text: string): boolean;
+  /** Insert a dynamic page-number field at the caret (body, header or footer). */
+  insertPageNumber(kind?: "page" | "pageOfTotal"): boolean;
   undo(): void;
   redo(): void;
   canUndo(): boolean;
@@ -313,6 +316,22 @@ export function DocxView({
             if (!target) return false;
             history.checkpoint();
             if (insertFootnote(doc, target.t, target.offset, text) !== null) {
+              pages = rerender(doc);
+              return true;
+            }
+            return false;
+          },
+          insertPageNumber: (kind = "page") => {
+            // Caret first; else the end of the current selection.
+            let target = editor?.getCaretTarget() ?? null;
+            if (!target) {
+              const segs = editor?.getSelectionSegments() ?? [];
+              const last = [...segs].reverse().find((sg) => sg.t);
+              if (last?.t) target = { t: last.t, offset: last.end };
+            }
+            if (!target) return false;
+            history.checkpoint();
+            if (insertPageField(doc, target.t, target.offset, kind)) {
               pages = rerender(doc);
               return true;
             }

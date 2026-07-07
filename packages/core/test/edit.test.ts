@@ -9,6 +9,7 @@ import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
 import { applyTableOp } from "../src/edit/tables.js";
 import { imageAltText, setImageAltText, replaceImageBlip } from "../src/edit/images.js";
 import { insertFootnote } from "../src/edit/notes.js";
+import { insertPageField } from "../src/edit/fields.js";
 import { linearizeMath, parseMathLinear, setMathLinear, mathLinearOf } from "../src/edit/math.js";
 import { XmlElement } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
@@ -632,6 +633,39 @@ describe("insertFootnote", () => {
     // reference is between "needed" and " here"
     const doc2 = DocxDocument.load(doc.save());
     expect(doc2.footnotes.get(1)).toBeTruthy();
+  });
+});
+
+describe("insertPageField", () => {
+  it("splits at the caret and inserts a PAGE fldSimple that round-trips", () => {
+    const doc = loadDoc(p("Footer text here"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c) => c.kind === "text")!.srcT!;
+    expect(insertPageField(doc, t, 11, "page")).toBe(true);
+    const doc2 = DocxDocument.load(doc.save());
+    const para = doc2.sections[0].blocks[0] as Paragraph;
+    const fields = para.children.flatMap((c) =>
+      (c.type === "run" ? [c] : c.runs).flatMap((r) => r.content.filter((rc) => rc.kind === "field")),
+    );
+    expect(fields.length).toBe(1);
+    expect((fields[0] as { instruction: string }).instruction).toContain("PAGE");
+  });
+
+  it("pageOfTotal inserts Page {PAGE} of {NUMPAGES}", () => {
+    const doc = loadDoc(p("x"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c) => c.kind === "text")!.srcT!;
+    expect(insertPageField(doc, t, 1, "pageOfTotal")).toBe(true);
+    const doc2 = DocxDocument.load(doc.save());
+    const para = doc2.sections[0].blocks[0] as Paragraph;
+    const runs = para.children.flatMap((c) => (c.type === "run" ? [c] : c.runs));
+    const instrs = runs.flatMap((r) => r.content.filter((rc) => rc.kind === "field"))
+      .map((f) => (f as { instruction: string }).instruction);
+    expect(instrs.some((i) => i.includes("PAGE"))).toBe(true);
+    expect(instrs.some((i) => i.includes("NUMPAGES"))).toBe(true);
+    const text = runs.flatMap((r) => r.content).map((rc) => (rc.kind === "text" ? rc.text : "")).join("");
+    expect(text).toContain("Page ");
+    expect(text).toContain(" of ");
   });
 });
 
