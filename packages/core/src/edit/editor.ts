@@ -1800,23 +1800,73 @@ export class DocxEditor {
     }
   };
 
-  /** Move to the visually adjacent line, keeping the horizontal position. */
+  /** Move to the visually adjacent line, keeping the horizontal position.
+   * Structural, not probe-based: a caret in a trailing table row or before a
+   * page gap must still reach the next line however far away it paints. */
   private moveCaretVertically(dir: -1 | 1): void {
+    const handle = this.host.getHandle();
     const rect = this.caretEl.getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) return;
-    const x = rect.left;
-    const lineH = Math.max(rect.height, 8);
-    // Probe successive line offsets to jump gaps (spacing, page breaks).
-    for (let step = 1; step <= 6; step++) {
-      const y = dir === -1 ? rect.top - step * lineH * 0.9 : rect.bottom + step * lineH * 0.9 - lineH / 2;
-      const caret = this.caretFromPoint(x, y) ?? this.nearestCaret(x, y);
-      if (caret && !this.inActiveRegion(caret.t)) continue; // don't cross into the dimmed region
-      if (caret && !(caret.t === this.caret!.t && caret.offset === this.caret!.offset)) {
-        this.caret = caret;
-        this.positionCaret();
-        return;
+    if (!handle || (rect.width === 0 && rect.height === 0)) return;
+    const surface = this.caretEl.parentElement;
+    if (!surface) return;
+    const caretTopIn = parseFloat(this.caretEl.style.top || "0");
+    const caretXIn = parseFloat(this.caretEl.style.left || "0");
+
+    const pages = Array.from(handle.root.querySelectorAll<HTMLElement>(".dxw-page"));
+    type Line = { page: number; top: number; bindings: TextBinding[] };
+    const lines = new Map<string, Line>();
+    for (const b of handle.bindings) {
+      if (!b.item.src?.t) continue;
+      if (!this.inActiveRegion(b.item.src.t as XmlElement)) continue;
+      const pageEl = b.el.closest(".dxw-page") as HTMLElement | null;
+      const page = pageEl ? pages.indexOf(pageEl) : -1;
+      if (page < 0) continue;
+      const key = `${page}:${Math.round(b.item.lineTop)}`;
+      let line = lines.get(key);
+      if (!line) {
+        line = { page, top: b.item.lineTop, bindings: [] };
+        lines.set(key, line);
+      }
+      line.bindings.push(b);
+    }
+    const ordered = [...lines.values()].sort((a, b) => a.page - b.page || a.top - b.top);
+    if (ordered.length === 0) return;
+    const curPage = pages.indexOf(surface.closest(".dxw-page") as HTMLElement);
+    // The caret's own line: same page, vertical span containing the caret top
+    // (fall back to the nearest line on the page).
+    let curIdx = -1;
+    let bestD = Infinity;
+    ordered.forEach((l, i) => {
+      if (l.page !== curPage) return;
+      const h = l.bindings[0]?.item.lineHeight ?? 16;
+      const contained = caretTopIn >= l.top - 2 && caretTopIn <= l.top + h + 2;
+      // Adjacent lines can overlap by a few px (glyph boxes vs pitch): among
+      // containing lines, the one whose top is nearest the caret's wins.
+      const dd = contained ? Math.abs(caretTopIn - l.top) : 1000 + Math.abs(l.top + h / 2 - caretTopIn);
+      if (dd < bestD) {
+        bestD = dd;
+        curIdx = i;
+      }
+    });
+    const target = ordered[curIdx + dir];
+    if (!target) return;
+    // Nearest binding horizontally on the target line.
+    let best: TextBinding | null = null;
+    let bestDx = Infinity;
+    for (const b of target.bindings) {
+      const x0 = b.item.x;
+      const x1 = b.item.x + b.item.width;
+      const dx = caretXIn < x0 ? x0 - caretXIn : caretXIn > x1 ? caretXIn - x1 : 0;
+      if (dx < bestDx) {
+        bestDx = dx;
+        best = b;
       }
     }
+    if (!best?.item.src) return;
+    const within = Math.max(0, Math.min(1, (caretXIn - best.item.x) / Math.max(best.item.width, 1)));
+    const offset = best.item.src.offset + Math.round(within * best.item.text.length);
+    this.caret = { t: best.item.src.t as XmlElement, run: best.item.src.run, offset };
+    this.positionCaret();
   }
 
   // ---------- edit operations ----------
