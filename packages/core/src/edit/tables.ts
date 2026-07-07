@@ -249,19 +249,29 @@ export function resizeTableColumn(
     }
   }
 
-  // Keep per-cell tcW (dxa) in sync when the table has no merged cells.
+  // Keep per-cell tcW (dxa) in sync when the table has no merged cells,
+  // creating tcPr/tcW when absent: Word stamps explicit cell widths on drag,
+  // and a grid without tcW is otherwise treated as autofit (Word semantics).
   if (!hasSpans(tblEl)) {
     for (const tr of rowsOf(tblEl)) {
       const cells = cellsOf(tr);
       cells.forEach((tc, i) => {
-        const tcPr = child(tc, "tcPr");
-        const tcW = tcPr ? child(tcPr, "tcW") : undefined;
-        if (tcW && cols[i]) {
-          const typeKey = Object.keys(tcW.attrs).find((k) => localName(k) === "type");
-          if (!typeKey || tcW.attrs[typeKey] === "dxa") {
-            const wKey = Object.keys(tcW.attrs).find((k) => localName(k) === "w") ?? prefixOf(tcW) + "w";
-            tcW.attrs[wKey] = String(widthOf(cols[i]));
-          }
+        if (!cols[i]) return;
+        const w = prefixOf(tc);
+        let tcPr = child(tc, "tcPr");
+        if (!tcPr) {
+          tcPr = { name: `${w}tcPr`, attrs: {}, children: [], text: "" };
+          tc.children.unshift(tcPr);
+        }
+        let tcW = child(tcPr, "tcW");
+        if (!tcW) {
+          tcW = { name: `${w}tcW`, attrs: { [`${w}type`]: "dxa" }, children: [], text: "" };
+          tcPr.children.unshift(tcW);
+        }
+        const typeKey = Object.keys(tcW.attrs).find((k) => localName(k) === "type");
+        if (!typeKey || tcW.attrs[typeKey] === "dxa") {
+          const wKey = Object.keys(tcW.attrs).find((k) => localName(k) === "w") ?? prefixOf(tcW) + "w";
+          tcW.attrs[wKey] = String(widthOf(cols[i]));
         }
       });
     }

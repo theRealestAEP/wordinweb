@@ -57,7 +57,7 @@ export class DocxDocument {
   readonly pkg: Package;
   readonly theme: Theme;
   styles: Styles;
-  readonly numbering: Numbering;
+  numbering: Numbering;
   sections: Section[] = [];
   /** Header/footer parts keyed by relationship id from document.xml.rels. */
   readonly headers: Map<string, HeaderFooter> = new Map();
@@ -83,6 +83,10 @@ export class DocxDocument {
   /** Retained styles.xml tree (built-in style injection + save). */
   private stylesPart: string | null = null;
   private stylesRoot: XmlElement | null = null;
+  /** Retained numbering.xml tree (list creation + save round-trip). */
+  private numberingPart: string | null = null;
+  private numberingRoot: XmlElement | null = null;
+  private numberingDirty = false;
   /** Serialize retained optional parts only once actually mutated, keeping
    * untouched parts byte-identical through save(). */
   private stylesDirty = false;
@@ -112,7 +116,12 @@ export class DocxDocument {
     this.stylesPart = docDir + "styles.xml";
     this.stylesRoot = this.readXmlOptional(this.stylesPart) ?? null;
     this.styles = parseStyles(this.stylesRoot ?? undefined, this.ctxBase);
-    this.numbering = parseNumbering(this.readXmlOptional(docDir + "numbering.xml"), this.ctxBase);
+    const numberingRoot = this.readXmlOptional(docDir + "numbering.xml");
+    if (numberingRoot) {
+      this.numberingPart = docDir + "numbering.xml";
+      this.numberingRoot = numberingRoot;
+    }
+    this.numbering = parseNumbering(this.numberingRoot ?? undefined, this.ctxBase);
 
     this.relsPath = relsPathFor(docPart);
     this.relsRoot = this.readXmlOptional(this.relsPath) ?? null;
@@ -187,6 +196,7 @@ export class DocxDocument {
     }
     this.comments = this.deriveComments();
     this.styles = parseStyles(this.stylesRoot ?? undefined, this.ctxBase);
+    this.numbering = parseNumbering(this.numberingRoot ?? undefined, this.ctxBase);
   }
 
   private deriveComments(): DocComment[] {
@@ -247,7 +257,57 @@ export class DocxDocument {
   }
 
   /** Retained comments tree for edit commands (null when the doc has none). */
-  commentsTree(): XmlElement | null {
+  /**
+   * Retained comments tree. With create=true, a missing comments.xml part is
+   * created and registered (content type + document relationship) so newly
+   * added comments serialize and round-trip through Word.
+   */
+  commentsTree(create = false): XmlElement | null {
+    if (this.commentsRoot || !create) return this.commentsRoot;
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    this.commentsPart = docDir + "comments.xml";
+    this.commentsRoot = {
+      name: "w:comments",
+      attrs: {
+        "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "xmlns:w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+      },
+      children: [],
+      text: "",
+    };
+    if (this.relsRoot) {
+      let maxId = 0;
+      for (const r of this.relsRoot.children) {
+        const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+        if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+      }
+      this.relsRoot.children.push({
+        name: "Relationship",
+        attrs: {
+          Id: `rId${maxId + 1}`,
+          Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments",
+          Target: "comments.xml",
+        },
+        children: [],
+        text: "",
+      });
+    }
+    if (this.contentTypesRoot) {
+      const partName = "/" + this.commentsPart;
+      if (!this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) {
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: {
+            PartName: partName,
+            ContentType:
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+          },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    this.commentsDirty = true;
     return this.commentsRoot;
   }
 
@@ -265,6 +325,61 @@ export class DocxDocument {
     this.styles = parseStyles(this.stylesRoot, this.ctxBase);
     this.stylesDirty = true;
     return true;
+  }
+
+  /**
+   * Retained numbering tree. With create=true, a missing numbering.xml part
+   * is created and registered (content type + document relationship) so list
+   * definitions added by editing serialize and round-trip.
+   */
+  numberingTree(create = false): XmlElement | null {
+    if (this.numberingRoot || !create) return this.numberingRoot;
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    this.numberingPart = docDir + "numbering.xml";
+    this.numberingRoot = {
+      name: "w:numbering",
+      attrs: { "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main" },
+      children: [],
+      text: "",
+    };
+    if (this.relsRoot) {
+      let maxId = 0;
+      for (const r of this.relsRoot.children) {
+        const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+        if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+      }
+      this.relsRoot.children.push({
+        name: "Relationship",
+        attrs: {
+          Id: `rId${maxId + 1}`,
+          Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
+          Target: "numbering.xml",
+        },
+        children: [],
+        text: "",
+      });
+    }
+    if (this.contentTypesRoot) {
+      const partName = "/" + this.numberingPart;
+      if (!this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) {
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: {
+            PartName: partName,
+            ContentType:
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml",
+          },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    this.numberingDirty = true;
+    return this.numberingRoot;
+  }
+
+  markNumberingChanged(): void {
+    this.numberingDirty = true;
   }
 
   /** Called by comment edit commands after mutating the comments tree. */
@@ -422,6 +537,9 @@ export class DocxDocument {
     }
     if (this.stylesDirty && this.stylesRoot && this.stylesPart) {
       files[this.stylesPart] = strToU8(serializeXml(this.stylesRoot, true));
+    }
+    if (this.numberingDirty && this.numberingRoot && this.numberingPart) {
+      files[this.numberingPart] = strToU8(serializeXml(this.numberingRoot, true));
     }
     if (this.relsRoot) files[this.relsPath] = strToU8(serializeXml(this.relsRoot, true));
     if (this.contentTypesRoot) files["[Content_Types].xml"] = strToU8(serializeXml(this.contentTypesRoot, true));

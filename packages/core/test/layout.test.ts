@@ -149,7 +149,10 @@ describe("layout engine", () => {
     const c1 = result.pages[0].items.find((it) => it.kind === "text" && it.text.includes("R0C1"));
     if (c0?.kind !== "text" || c1?.kind !== "text") throw new Error("cells not found");
     expect(Math.abs(c0.lineTop - c1.lineTop)).toBeLessThan(0.5);
-    expect(c1.x).toBeGreaterThan(c0.x + 100);
+    // No tcW anywhere: Word ignores the authored grid and autofits columns
+    // to content (probe-tablegrid), so the second column hugs the first.
+    expect(c1.x - c0.x).toBeGreaterThan(20);
+    expect(c1.x - c0.x).toBeLessThan(90);
   });
 
   it("autofits columns to content when the grid is a placeholder", () => {
@@ -184,9 +187,10 @@ describe("layout engine", () => {
     expect(w0).toBeLessThan(w1 + 40); // both stay near content size
   });
 
-  it("honors a realistic authored grid unchanged", () => {
-    // A Word-authored grid (sums to the content width) must be respected
-    // even though the content is lopsided.
+  it("autofits a tcW-less grid to content like Word", () => {
+    // Word only trusts a grid it wrote itself, and it writes tcW on every
+    // cell. A plausible-looking grid with no tcW is ignored: Word sizes the
+    // "x" column to its content (5.75pt in the probe-tablegrid export).
     const tbl = `<w:tbl>
       <w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>
       <w:tr>
@@ -196,7 +200,22 @@ describe("layout engine", () => {
     </w:tbl>`;
     const { result } = layout({ "word/document.xml": wrapDocument(tbl + p("after")) });
     const a = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes("x"));
-    const b = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes("longer"));
+    const b = result.pages[0].items.find((i) => i.kind === "text" && i.text === "a");
+    if (a?.kind !== "text" || b?.kind !== "text") throw new Error("cells not found");
+    expect(b.x - a.x).toBeLessThan(40);
+  });
+
+  it("honors a Word-authored grid (cells carry tcW)", () => {
+    const tbl = `<w:tbl>
+      <w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:type="dxa" w:w="4680"/></w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:type="dxa" w:w="4680"/></w:tcPr><w:p><w:r><w:t>a much much much longer cell body here</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + p("after")) });
+    const a = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes("x"));
+    const b = result.pages[0].items.find((i) => i.kind === "text" && i.text === "a");
     if (a?.kind !== "text" || b?.kind !== "text") throw new Error("cells not found");
     // Equal 4680-twip columns: the second cell starts at the halfway point.
     expect(b.x - a.x).toBeGreaterThan(280);

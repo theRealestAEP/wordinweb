@@ -601,18 +601,25 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
   el.style.position = "absolute";
   const horizontal = Math.abs(y2 - y1) < 0.01;
   const cssStyle = borderCss(border);
+  // Hairline borders (Word default 0.5pt = 0.67px) land on fractional device
+  // pixels and antialias to light gray — noticeably fainter than Word. Snap
+  // the width up to whole device pixels and the position onto the device
+  // grid so the ink covers full pixels.
+  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  const w = Math.max(1 / dpr, Math.round(border.width * dpr) / dpr);
+  const snap = (v: number) => Math.round(v * dpr) / dpr;
   if (horizontal) {
     el.style.left = `${Math.min(x1, x2)}px`;
-    el.style.top = `${y1 - border.width / 2}px`;
+    el.style.top = `${snap(y1 - w / 2)}px`;
     el.style.width = `${Math.abs(x2 - x1)}px`;
     el.style.height = "0";
-    el.style.borderTop = `${border.width}px ${cssStyle} ${border.color}`;
+    el.style.borderTop = `${w}px ${cssStyle} ${border.color}`;
   } else {
-    el.style.left = `${x1 - border.width / 2}px`;
+    el.style.left = `${snap(x1 - w / 2)}px`;
     el.style.top = `${Math.min(y1, y2)}px`;
     el.style.width = "0";
     el.style.height = `${Math.abs(y2 - y1)}px`;
-    el.style.borderLeft = `${border.width}px ${cssStyle} ${border.color}`;
+    el.style.borderLeft = `${w}px ${cssStyle} ${border.color}`;
   }
   return el;
 }

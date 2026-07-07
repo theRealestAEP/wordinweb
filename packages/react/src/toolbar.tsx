@@ -175,6 +175,118 @@ function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: stri
   );
 }
 
+function BulletListIcon() {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+      <circle cx="3" cy="4" r="1.1" fill="#3c4043" stroke="none" />
+      <circle cx="3" cy="8" r="1.1" fill="#3c4043" stroke="none" />
+      <circle cx="3" cy="12" r="1.1" fill="#3c4043" stroke="none" />
+      <path d="M6.5 4h8M6.5 8h8M6.5 12h8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function NumberListIcon() {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+      <text x="1" y="5.6" fontSize="5.4" fill="#3c4043" stroke="none" fontFamily="system-ui">1</text>
+      <text x="1" y="9.9" fontSize="5.4" fill="#3c4043" stroke="none" fontFamily="system-ui">2</text>
+      <text x="1" y="14.2" fontSize="5.4" fill="#3c4043" stroke="none" fontFamily="system-ui">3</text>
+      <path d="M6.5 4h8M6.5 8h8M6.5 12h8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CommentIcon() {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+      <path d="M1.5 3.5h13v8h-7l-3 3v-3h-3z" strokeLinejoin="round" />
+      <path d="M8 5.5v4M6 7.5h4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** Google-Docs-style "add comment": popover with a text box, anchored to the
+ * current selection (the editor keeps its owned selection while typing). */
+function CommentMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    inputRef.current?.focus();
+    const close = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const submit = () => {
+    if (api?.addComment(text)) {
+      setText("");
+      setOpen(false);
+    }
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        title="Add comment (select text first)"
+        style={btnStyle(open)}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpen(!open)}
+      >
+        <CommentIcon />
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute", top: 28, right: 0, zIndex: 100, background: "#fff",
+            border: "1px solid #dadce0", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,.15)",
+            padding: 10, width: 240,
+          }}
+        >
+          <textarea
+            ref={inputRef}
+            value={text}
+            placeholder="Comment on the selection…"
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            style={{
+              width: "100%", minHeight: 54, resize: "vertical", boxSizing: "border-box",
+              border: "1px solid #dadce0", borderRadius: 6, padding: 6,
+              font: "13px system-ui, sans-serif", outline: "none",
+            }}
+          />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
+            <button style={{ ...pillBtn, background: "#fff", color: "#3c4043" }} onClick={() => setOpen(false)}>
+              Cancel
+            </button>
+            <button style={pillBtn} disabled={!text.trim()} onClick={submit}>
+              Comment
+            </button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+const pillBtn: React.CSSProperties = {
+  border: "1px solid #dadce0",
+  borderRadius: 14,
+  padding: "3px 12px",
+  fontSize: 12.5,
+  cursor: "pointer",
+  background: "#1a73e8",
+  color: "#fff",
+};
+
 /** Google-Docs-style table menu: hover grid picker + row/column operations. */
 function TableMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
@@ -282,9 +394,37 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
  * Default formatting toolbar for an editable DocxView. Compact, grouped like
  * a word processor; every control preserves the selection/caret.
  */
-export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?: (bytes: Uint8Array) => void }) {
+/** Toolbar control groups a host can disable via the `features` prop. */
+export type ToolbarFeature =
+  | "history"
+  | "styles"
+  | "font"
+  | "size"
+  | "format"
+  | "color"
+  | "highlight"
+  | "alignment"
+  | "lists"
+  | "table"
+  | "image"
+  | "comment"
+  | "layout"
+  | "download";
+
+export function DocxToolbar({
+  api,
+  onSave,
+  features,
+}: {
+  api: DocxViewApi | null;
+  onSave?: (bytes: Uint8Array) => void;
+  /** Per-group overrides; every group defaults to enabled. */
+  features?: Partial<Record<ToolbarFeature, boolean>>;
+}) {
+  const on = (k: ToolbarFeature) => features?.[k] !== false;
   const [fmt, setFmt] = useState<ReturnType<NonNullable<DocxViewApi["getSelectionFormat"]>> | null>(null);
   const [curStyle, setCurStyle] = useState<string | null>(null);
+  const [listKind, setListKind] = useState<"bullet" | "number" | null>(null);
   // Native <select>/<input type=color> steal focus and collapse the document
   // selection; remember the last real range and restore it before applying.
   const savedRange = useRef<Range | null>(null);
@@ -297,6 +437,7 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
     }
     setFmt(api?.getSelectionFormat() ?? null);
     setCurStyle(api?.getParagraphStyleId?.() ?? null);
+    setListKind(api?.getListType?.() ?? null);
   }, [api]);
 
   useEffect(() => {
@@ -339,9 +480,14 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
         fontFamily: "system-ui, sans-serif",
       }}
     >
-      <Btn label={"↶"} title="Undo (⌘Z)" onClick={() => { api?.undo(); refresh(); }} />
-      <Btn label={"↷"} title="Redo (⇧⌘Z)" onClick={() => { api?.redo(); refresh(); }} />
-      <Sep />
+      {on("history") && (
+        <>
+          <Btn label={"↶"} title="Undo (⌘Z)" onClick={() => { api?.undo(); refresh(); }} />
+          <Btn label={"↷"} title="Redo (⇧⌘Z)" onClick={() => { api?.redo(); refresh(); }} />
+          <Sep />
+        </>
+      )}
+      {on("styles") && (
       <select
         title="Paragraph style"
         value={curStyle ?? "__normal"}
@@ -367,6 +513,8 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
             </option>
           )}
       </select>
+      )}
+      {on("font") && (
       <select
         title="Font"
         value={fmt?.fontFamily ?? ""}
@@ -379,6 +527,8 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
           <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
         ))}
       </select>
+      )}
+      {on("size") && (
       <select
         title="Font size"
         value={fmt?.fontSizePt ?? ""}
@@ -391,11 +541,29 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
           <option key={s} value={s}>{s}</option>
         ))}
       </select>
+      )}
       <Sep />
+      {on("format") && (
+      <>
       <Btn label={<b>B</b>} title="Bold (⌘B)" active={!!fmt?.bold} onClick={() => apply({ bold: !fmt?.bold })} />
       <Btn label={<i>I</i>} title="Italic" active={!!fmt?.italic} onClick={() => apply({ italic: !fmt?.italic })} />
       <Btn label={<u>U</u>} title="Underline" active={!!fmt?.underline} onClick={() => apply({ underline: !fmt?.underline })} />
       <Btn label={<s>S</s>} title="Strikethrough" active={!!fmt?.strike} onClick={() => apply({ strike: !fmt?.strike })} />
+      <Btn
+        label={<span style={{ fontSize: 12 }}>x<sup style={{ fontSize: 9 }}>2</sup></span>}
+        title="Superscript"
+        active={fmt?.verticalAlign === "superscript"}
+        onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "superscript" ? null : "superscript" })}
+      />
+      <Btn
+        label={<span style={{ fontSize: 12 }}>x<sub style={{ fontSize: 9 }}>2</sub></span>}
+        title="Subscript"
+        active={fmt?.verticalAlign === "subscript"}
+        onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "subscript" ? null : "subscript" })}
+      />
+      </>
+      )}
+      {on("color") && (
       <label title="Text color" style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
         <span style={{ fontSize: 13, borderBottom: `3px solid ${fmt?.color && fmt.color !== "auto" ? fmt.color : "#000"}`, padding: "0 3px", color: "#3c4043" }}>A</span>
         <input
@@ -406,15 +574,38 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
           style={{ width: 0, height: 0, opacity: 0, border: "none", padding: 0 }}
         />
       </label>
-      <HighlightMenu current={fmt?.highlight} onPick={(v) => apply({ highlight: v })} />
+      )}
+      {on("highlight") && <HighlightMenu current={fmt?.highlight} onPick={(v) => apply({ highlight: v })} />}
       <Sep />
-      <Btn label={"≡"} title="Align left" onClick={() => api?.setAlignment("left")} />
-      <Btn label={"≣"} title="Center" onClick={() => api?.setAlignment("center")} />
-      <Btn label={"≢"} title="Align right" onClick={() => api?.setAlignment("right")} />
-      <Btn label={"☰"} title="Justify" onClick={() => api?.setAlignment("justify")} />
-      <Sep />
-      <TableMenu api={api} />
-      <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
+      {on("alignment") && (
+        <>
+          <Btn label={"≡"} title="Align left" onClick={() => api?.setAlignment("left")} />
+          <Btn label={"≣"} title="Center" onClick={() => api?.setAlignment("center")} />
+          <Btn label={"≢"} title="Align right" onClick={() => api?.setAlignment("right")} />
+          <Btn label={"☰"} title="Justify" onClick={() => api?.setAlignment("justify")} />
+          <Sep />
+        </>
+      )}
+      {on("lists") && (
+        <>
+          <Btn
+            label={<BulletListIcon />}
+            title="Bulleted list"
+            active={listKind === "bullet"}
+            onClick={() => { api?.toggleList("bullet"); refresh(); }}
+          />
+          <Btn
+            label={<NumberListIcon />}
+            title="Numbered list"
+            active={listKind === "number"}
+            onClick={() => { api?.toggleList("number"); refresh(); }}
+          />
+          <Sep />
+        </>
+      )}
+      {on("table") && <TableMenu api={api} />}
+      {on("image") && <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />}
+      {on("comment") && <CommentMenu api={api} />}
       <input
         ref={imageInput}
         type="file"
@@ -426,6 +617,7 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
           e.target.value = "";
         }}
       />
+      {on("layout") && (
       <ActionMenu
         label="Layout"
         title="Page layout"
@@ -445,7 +637,8 @@ export function DocxToolbar({ api, onSave }: { api: DocxViewApi | null; onSave?:
           else if (v === "s:a4") api?.setPageLayout({ size: { width: 8.27, height: 11.69 } });
         }}
       />
-      {onSave && (
+      )}
+      {on("download") && onSave && (
         <>
           <span style={{ flex: 1 }} />
           <Btn label="Download" title="Save edited .docx" onClick={() => api && onSave(api.save())} />

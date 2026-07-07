@@ -1,8 +1,97 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, attr, localName } from "../xml.js";
+import { SelectionSegment, applyRunFormat } from "./commands.js";
 
 function el(name: string, attrs: Record<string, string> = {}, children: XmlElement[] = [], text = ""): XmlElement {
   return { name, attrs, children, text };
+}
+
+/**
+ * Create a new review comment on the selected range, like Word/Google Docs:
+ * commentRangeStart/End markers around the selection, a commentReference run
+ * after the range, and the comment body in comments.xml (the part is created
+ * on demand for documents that have no comments yet). Callers checkpoint
+ * history and rerender afterwards.
+ */
+export function addComment(
+  doc: DocxDocument,
+  segments: SelectionSegment[],
+  text: string,
+  author: string,
+  initials?: string,
+): boolean {
+  if (!text.trim() || segments.length === 0) return false;
+  const commentsRoot = doc.commentsTree(true);
+  if (!commentsRoot) return false;
+  const w = commentsRoot.name.includes(":") ? commentsRoot.name.slice(0, commentsRoot.name.indexOf(":") + 1) : "";
+
+  // Split partially covered runs so the range lands on run boundaries; the
+  // returned ranges reference the fresh post-split w:t elements in order.
+  const ranges = applyRunFormat(doc, segments, {});
+  if (ranges.length === 0) return false;
+  const firstT = ranges[0].t;
+  const lastT = ranges[ranges.length - 1].t;
+  const firstR = doc.findParentOf(firstT);
+  const lastR = doc.findParentOf(lastT);
+  const firstP = firstR && doc.findParentOf(firstR);
+  const lastP = lastR && doc.findParentOf(lastR);
+  if (!firstR || !lastR || !firstP || !lastP) return false;
+
+  // Allocate a fresh numeric id.
+  let idNum = 0;
+  for (const c of doc.comments) {
+    const n = parseInt(c.id, 10);
+    if (Number.isFinite(n)) idNum = Math.max(idNum, n);
+  }
+  const newId = String(idNum + 1);
+
+  const startIdx = firstP.children.indexOf(firstR);
+  firstP.children.splice(startIdx, 0, el(`${w}commentRangeStart`, { [`${w}id`]: newId }));
+  const endIdx = lastP.children.indexOf(lastR);
+  lastP.children.splice(
+    endIdx + 1,
+    0,
+    el(`${w}commentRangeEnd`, { [`${w}id`]: newId }),
+    el(`${w}r`, {}, [
+      el(`${w}rPr`, {}, [el(`${w}rStyle`, { [`${w}val`]: "CommentReference" })]),
+      el(`${w}commentReference`, { [`${w}id`]: newId }),
+    ]),
+  );
+
+  // Comment body; the w14:paraId lets replies thread to it later.
+  const usedParaIds = new Set(doc.comments.map((c) => c.paraId).filter(Boolean));
+  let paraId = "";
+  do {
+    paraId = Math.floor(Math.random() * 0xfffffff0 + 1)
+      .toString(16)
+      .toUpperCase()
+      .padStart(8, "0");
+  } while (usedParaIds.has(paraId));
+  commentsRoot.children.push(
+    el(
+      `${w}comment`,
+      {
+        [`${w}id`]: newId,
+        [`${w}author`]: author,
+        ...(initials ? { [`${w}initials`]: initials } : {}),
+        [`${w}date`]: new Date().toISOString(),
+      },
+      [
+        el(
+          `${w}p`,
+          {
+            "xmlns:w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+            "w14:paraId": paraId,
+          },
+          [el(`${w}r`, {}, [el(`${w}t`, { "xml:space": "preserve" }, [], text)])],
+        ),
+      ],
+    ),
+  );
+
+  doc.markCommentsChanged();
+  doc.refresh();
+  return true;
 }
 
 /**
