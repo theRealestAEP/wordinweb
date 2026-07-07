@@ -741,6 +741,36 @@ class Engine {
       if (span.noteId !== undefined) this.registerFootnote(span.noteId, page);
     }
     for (const span of line.spans) {
+      if (span.math) {
+        const bx = originX + span.x;
+        for (const piece of span.math.pieces) {
+          const m = this.measurer.metrics(piece.font);
+          page.items.push({
+            kind: "text",
+            x: bx + piece.x,
+            baseline: baseline - piece.dy,
+            width: this.measurer.width(piece.text, piece.font),
+            text: piece.text,
+            props: {},
+            font: piece.font,
+            lineTop: topY,
+            lineHeight: line.height,
+            glyphTop: baseline - piece.dy - m.ascent,
+            glyphBoxH: m.ascent + m.descent,
+          });
+        }
+        for (const rule of span.math.rules) {
+          page.items.push({
+            kind: "rect",
+            x: bx + rule.x1,
+            y: baseline - rule.dy - rule.thick / 2,
+            width: rule.x2 - rule.x1,
+            height: rule.thick,
+            fill: "#000000",
+          });
+        }
+        continue;
+      }
       if (span.image) {
         page.items.push({
           kind: "image",

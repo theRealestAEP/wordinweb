@@ -20,6 +20,7 @@ import {
   TableProps,
   TableRow,
   TableRowProps,
+  MathNode,
 } from "../model.js";
 import { emuToPx, twipsToPx } from "../units.js";
 import { ParseContext, parseBorder, parseParaProps, parseRunProps, parseShading } from "./properties.js";
@@ -112,28 +113,28 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
   return para;
 }
 
-/** Flatten OMML to a readable linear string: m:t text with structure hints. */
-function ommlLinearText(el: XmlElement): string {
+/** OMML subset -> MathNode AST (runs, scripts, fractions, radicals). */
+function parseOmml(el: XmlElement): MathNode[] {
+  const out: MathNode[] = [];
+  const childrenOf = (name: string): MathNode[] => {
+    const c = el.children.find((ch) => localName(ch.name) === name);
+    return c ? parseOmml(c) : [];
+  };
   const ln = localName(el.name);
-  if (ln === "t") return el.text;
-  if (ln === "f") {
-    // fraction: num/den
-    const num = el.children.find((c) => localName(c.name) === "num");
-    const den = el.children.find((c) => localName(c.name) === "den");
-    return `${num ? ommlLinearText(num) : ""}\u2044${den ? ommlLinearText(den) : ""}`;
+  if (ln === "f") return [{ t: "frac", num: childrenOf("num"), den: childrenOf("den") }];
+  if (ln === "sSup") return [{ t: "sup", base: childrenOf("e"), script: childrenOf("sup") }];
+  if (ln === "sSub") return [{ t: "sub", base: childrenOf("e"), script: childrenOf("sub") }];
+  if (ln === "rad") return [{ t: "rad", e: childrenOf("e") }];
+  if (ln === "t") return el.text ? [{ t: "run", text: el.text }] : [];
+  for (const c of el.children) out.push(...parseOmml(c));
+  // merge adjacent runs
+  const merged: MathNode[] = [];
+  for (const n of out) {
+    const last = merged[merged.length - 1];
+    if (n.t === "run" && last && last.t === "run") last.text += n.text;
+    else merged.push(n);
   }
-  if (ln === "sSup" || ln === "sSub") {
-    const base = el.children.find((c) => localName(c.name) === "e");
-    const scr = el.children.find((c) => localName(c.name) === (ln === "sSup" ? "sup" : "sub"));
-    return `${base ? ommlLinearText(base) : ""}${ln === "sSup" ? "^" : "_"}${scr ? ommlLinearText(scr) : ""}`;
-  }
-  if (ln === "rad") {
-    const e = el.children.find((c) => localName(c.name) === "e");
-    return `\u221a(${e ? ommlLinearText(e) : ""})`;
-  }
-  let out = "";
-  for (const c of el.children) out += ommlLinearText(c);
-  return out;
+  return merged;
 }
 
 function parseParaChildren(
@@ -173,16 +174,11 @@ function parseParaChildren(
       }
       out.push(...inner);
     } else if (ln === "oMath" || ln === "oMathPara") {
-      // OMML equations: render the linear text (every m:t in order, with /
-      // between fraction parts) so math is legible rather than lost. Full
-      // 2D math layout is out of scope.
-      const linear = ommlLinearText(el);
-      if (linear) {
-        out.push({
-          type: "run",
-          props: { italic: true },
-          content: [{ kind: "text", text: linear }],
-        });
+      // OMML equations: parsed to a math AST, laid out 2D by layout/math.ts
+      // (scripts raised, fractions stacked over a rule) like Word.
+      const nodes = parseOmml(el);
+      if (nodes.length > 0) {
+        out.push({ type: "run", props: {}, content: [{ kind: "math", nodes }] });
       }
     } else if (ln === "hyperlink") {
       const rid = attr(el, "id");

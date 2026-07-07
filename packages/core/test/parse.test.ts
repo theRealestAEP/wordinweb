@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import { parseXml, child, attr } from "../src/xml.js";
 import { makeDocx, wrapDocument, p } from "./helpers.js";
+import { layoutDocument } from "../src/layout/engine.js";
+import { ApproxMeasurer } from "../src/layout/measure.js";
 
 describe("xml parser", () => {
   it("parses elements, attributes, entities", () => {
@@ -315,23 +317,45 @@ describe("tracked changes", () => {
 });
 
 describe("OMML math", () => {
-  it("extracts a legible linear string from equations", () => {
-    const XML = `<w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
-      <w:r><w:t xml:space="preserve">Euler: </w:t></w:r>
-      <m:oMath>
-        <m:sSup><m:e><m:r><m:t>e</m:t></m:r></m:e><m:sup><m:r><m:t>x</m:t></m:r></m:sup></m:sSup>
-        <m:r><m:t>=1+</m:t></m:r>
-        <m:f><m:num><m:r><m:t>x</m:t></m:r></m:num><m:den><m:r><m:t>1!</m:t></m:r></m:den></m:f>
-      </m:oMath>
-    </w:p>`;
+  const XML = `<w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+    <w:r><w:t xml:space="preserve">Euler: </w:t></w:r>
+    <m:oMath>
+      <m:sSup><m:e><m:r><m:t>e</m:t></m:r></m:e><m:sup><m:r><m:t>x</m:t></m:r></m:sup></m:sSup>
+      <m:r><m:t>=1+</m:t></m:r>
+      <m:f><m:num><m:r><m:t>x</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f>
+    </m:oMath>
+  </w:p>`;
+
+  it("parses equations into a math AST", () => {
     const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(XML) }));
     const para = doc.sections[0].blocks[0];
     if (para.type !== "paragraph") throw new Error();
-    let text = "";
-    for (const c of para.children) {
-      const runs = c.type === "run" ? [c] : c.runs;
-      for (const r of runs) for (const t of r.content) if (t.kind === "text") text += t.text;
-    }
-    expect(text).toBe("Euler: e^x=1+x⁄" + "1!");
+    const math = para.children.flatMap((c) => (c.type === "run" ? c.content : [])).find((c) => c.kind === "math");
+    if (!math || math.kind !== "math") throw new Error("no math content");
+    expect(math.nodes[0].t).toBe("sup");
+    expect(math.nodes[1]).toEqual({ t: "run", text: "=1+" });
+    expect(math.nodes[2].t).toBe("frac");
+  });
+
+  it("lays math out 2D with Word's measured geometry", () => {
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(XML) }));
+    const result = layoutDocument(doc, { measurer: new ApproxMeasurer() });
+    const items = result.pages[0].items;
+    const texts = items.filter((i) => i.kind === "text");
+    const piece = (t: string) => {
+      const it = texts.find((i) => i.kind === "text" && i.text === t);
+      if (!it || it.kind !== "text") throw new Error("missing piece " + t);
+      return it;
+    };
+    const base = piece("𝑒");
+    const sup = piece("𝑥"); // first 𝑥 = the superscript
+    // script raised by 4/11 of the base size, scaled to 8/11
+    expect(base.baseline - sup.baseline).toBeCloseTo(base.font.size * (4 / 11), 1);
+    expect(sup.font.size).toBeCloseTo(base.font.size * (8 / 11), 2);
+    // fraction: numerator above, denominator below, rule between
+    const den = piece("2");
+    expect(den.baseline - base.baseline).toBeCloseTo(base.font.size * (5.5 / 11), 1);
+    const rule = items.find((i) => i.kind === "rect" && i.fill === "#000000" && i.height < 2);
+    expect(rule).toBeTruthy();
   });
 });
