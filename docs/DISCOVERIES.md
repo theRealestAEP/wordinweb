@@ -130,7 +130,13 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
 - **UI scripting requires an unlocked session**: window queries return
   empty and AppleEvents that need a dialog time out (-1712) while the
   screen is locked; plain document AppleEvents keep working. A modal left
-  open makes documents refuse `close` with -1708.
+  open makes documents refuse `close` with -1708. **LaunchServices `open`
+  doesn't deliver documents into a locked session either** — the save-as
+  then targets whatever stale document was already open. And sandbox
+  grants are inode-scoped: copying a new file over a previously granted
+  path does NOT inherit the grant. Net: Word reference exports require an
+  unlocked session, full stop — verify the exported PDF's first line
+  matches the fixture before trusting it.
 
 - **Word-on-mac keeps A4 in PDF export** and docx-lib fixtures default to
   A4 — check `pgSz` before comparing anything against Letter assumptions.
