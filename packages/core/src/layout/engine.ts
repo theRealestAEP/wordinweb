@@ -1212,10 +1212,10 @@ class Engine {
       }
       if (shape.type === "art") {
         const baseW = shape.hRel === "page" ? sp.pageWidth : sp.pageWidth - sp.marginLeft - sp.marginRight;
-        let ox = originX(shape.hRel) + shape.x;
+        let ox = originX(shape.hRel) + (shape.pctX !== undefined ? shape.pctX * sp.pageWidth : shape.x);
         if (shape.hAlign === "center") ox = originX(shape.hRel) + (baseW - shape.width) / 2;
         else if (shape.hAlign === "right") ox = originX(shape.hRel) + baseW - shape.width;
-        const oy = originY(shape.vRel) + shape.y;
+        const oy = originY(shape.vRel) + (shape.pctY !== undefined ? shape.pctY * sp.pageHeight : shape.y);
         for (const img of shape.images) {
           page.items.push({ kind: "image", x: ox + img.x - fx, y: oy + img.y - fy, width: img.width, height: img.height, part: img.part, behind: shape.behind });
         }
