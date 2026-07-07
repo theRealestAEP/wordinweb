@@ -171,3 +171,43 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   `scripts/compare-linebreaks.mjs` (line breaks) and
   `scripts/parity-compare.mjs` (pixels). Word is never invoked per
   comparison run.
+
+## Vertical metrics & pagination (2026-07, per-font recalibration)
+
+- **Word quantizes CUMULATIVE baseline positions, not line heights**: the
+  n-th baseline of a run of same-height lines sits at round¼(n × rawHeight)
+  from the start, so measured gaps alternate around the raw value (Calibri
+  11pt: 13.50/13.25pt around raw 13.428; Arial 11pt × 1.15: 14.50/14.75
+  around 14.546). A per-line quantized advance drifts a full line over ~50
+  rows and flips page breaks. Engine model: the cursor accumulates RAW
+  heights; `emitLine` snaps each painted baseline to the quarter-point grid
+  (probe-lh2 + sample p2 gap sequence).
+- **A trailing page/column break leaves no line behind**: when `w:br
+  type="page"` is a paragraph's last content, the pilcrow stays on the SAME
+  line as the break on the old page and the new page starts clean at the
+  body top (sample/benchmark p2 headings at exactly 72pt). Only content
+  after the break moves. We used to emit the paragraph's empty final line
+  at the top of the new page — one full line of phantom capacity loss.
+- **Widow pull-back cascades into the orphan rule**: 3-line paragraph,
+  2 fit — widow control pulls line 2 back, which leaves a lone first line,
+  which the orphan rule then pushes too: the whole paragraph moves. An
+  if/else widow-orphan implementation misses the cascade (benchmark p2,
+  chronology p1).
+- **trHeight is a CONTENT-box height** (probe-trheight): Word renders an
+  `hRule=atLeast` row at trHeight + top&bottom cell margins + the row's
+  border share (~half of each adjoining sz8 border), and an `hRule=exact`
+  row at trHeight + top margin only. Google-Docs exports carry fractional
+  twip values ("785.92529296875") that must parse as floats.
+- **Line-spacing leading may overhang the body bottom**: Word's page-fit
+  test only requires the FONT box (baseline + raw descent) to clear the
+  body bottom; the extra leading of a spacing multiple (which sits BELOW
+  the baseline in the line box) can hang into the margin (msa p2's last
+  1.15-spaced line, probe-footerheight). Engine: `LineBox.fitHeight` =
+  font-box extent, used by overflow checks; `height` still advances the
+  cursor.
+- **Header/footer heights include ALL paragraph spacing** — Word does NOT
+  suppress the first paragraph's spacing-before in a footer (an empty
+  Heading1 lead paragraph costs its full 14pt spacing-before and shrank
+  the msa body by exactly one line: 43 vs 44 lines, probe-footerheight).
+  Body bottom = min(pageH − marginBottom, pageH − footerDistance −
+  footerH).
