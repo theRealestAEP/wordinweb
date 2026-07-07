@@ -396,8 +396,15 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
     ["colLeft", "Insert column left"],
     ["colRight", "Insert column right"],
     ["deleteCol", "Delete column"],
+    ["mergeRight", "Merge cell right"],
+    ["mergeDown", "Merge cell down"],
+    ["splitCell", "Split cell"],
+    ["valign:top", "Cell align top"],
+    ["valign:center", "Cell align middle"],
+    ["valign:bottom", "Cell align bottom"],
     ["deleteTable", "Delete table"],
   ];
+  const CELL_FILLS = ["FFF2CC", "D9E2F3", "E2EFDA", "FCE4EC", "F1F3F4"];
 
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
@@ -459,7 +466,11 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
               <div
                 key={op}
                 onClick={() => {
-                  api?.tableOp(op as Parameters<NonNullable<typeof api>["tableOp"]>[0]);
+                  if (op.startsWith("valign:")) {
+                    api?.tableOp({ kind: "cellVAlign", v: op.slice(7) as "top" | "center" | "bottom" });
+                  } else {
+                    api?.tableOp(op as Parameters<NonNullable<typeof api>["tableOp"]>[0]);
+                  }
                   setOpen(false);
                 }}
                 style={{ padding: "4px 6px", fontSize: 13, cursor: "pointer", borderRadius: 4, color: "#3c4043" }}
@@ -469,6 +480,25 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
                 {label}
               </div>
             ))}
+            <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 6px" }}>
+              <span style={{ fontSize: 12, color: "#5f6368", marginRight: 2 }}>Cell fill</span>
+              {CELL_FILLS.map((f) => (
+                <div
+                  key={f}
+                  title={`#${f}`}
+                  onClick={() => { api?.tableOp({ kind: "cellShading", fill: f }); setOpen(false); }}
+                  style={{ width: 16, height: 16, background: `#${f}`, border: "1px solid #dadce0", borderRadius: 3, cursor: "pointer" }}
+                />
+              ))}
+              <div
+                title="No fill"
+                onClick={() => { api?.tableOp({ kind: "cellShading", fill: null }); setOpen(false); }}
+                style={{
+                  width: 16, height: 16, border: "1px solid #dadce0", borderRadius: 3, cursor: "pointer",
+                  background: "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
+                }}
+              />
+            </div>
           </div>
         </div>
       )}

@@ -1,5 +1,5 @@
 import { DocxDocument } from "../docx.js";
-import { XmlElement, cloneXml, localName, child } from "../xml.js";
+import { XmlElement, attr, child, cloneXml, localName } from "../xml.js";
 import { pxToTwips } from "../units.js";
 
 /**
@@ -17,7 +17,12 @@ export type TableOp =
   | "colLeft"
   | "colRight"
   | "deleteCol"
-  | "deleteTable";
+  | "deleteTable"
+  | "mergeRight"
+  | "mergeDown"
+  | "splitCell"
+  | { kind: "cellShading"; fill: string | null }
+  | { kind: "cellVAlign"; v: "top" | "center" | "bottom" };
 
 interface CellContext {
   tbl: XmlElement;
@@ -93,6 +98,82 @@ function emptyCellLike(tc: XmlElement, w: string): XmlElement {
   };
 }
 
+/** OOXML tcPr child order (the slice we edit). */
+const TCPR_ORDER = ["tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd", "tcMar", "vAlign"];
+
+function ensureTcPr(tc: XmlElement, w: string): XmlElement {
+  let tcPr = tc.children.find((c) => localName(c.name) === "tcPr");
+  if (!tcPr) {
+    tcPr = { name: `${w}tcPr`, attrs: {}, children: [], text: "" };
+    tc.children.unshift(tcPr);
+  }
+  return tcPr;
+}
+
+/** Set (or with attrs=null remove) a tcPr child, keeping schema order. */
+function setTcPrChild(tc: XmlElement, w: string, name: string, attrs: Record<string, string> | null): void {
+  const tcPr = ensureTcPr(tc, w);
+  const idx = tcPr.children.findIndex((c) => localName(c.name) === name);
+  if (attrs === null) {
+    if (idx !== -1) tcPr.children.splice(idx, 1);
+    return;
+  }
+  const el: XmlElement = { name: `${w}${name}`, attrs, children: [], text: "" };
+  if (idx !== -1) {
+    tcPr.children[idx] = el;
+    return;
+  }
+  const rank = TCPR_ORDER.indexOf(name);
+  let insertAt = tcPr.children.length;
+  for (let i = 0; i < tcPr.children.length; i++) {
+    const r = TCPR_ORDER.indexOf(localName(tcPr.children[i].name));
+    if (r !== -1 && r > rank) {
+      insertAt = i;
+      break;
+    }
+  }
+  tcPr.children.splice(insertAt, 0, el);
+}
+
+function gridSpanOf(tc: XmlElement): number {
+  const tcPr = child(tc, "tcPr");
+  const gs = tcPr ? child(tcPr, "gridSpan") : undefined;
+  return gs ? parseInt(attr(gs, "val") ?? "1", 10) || 1 : 1;
+}
+
+/** Grid column index of a cell (accounts for gridSpans to its left). */
+function gridColOf(tr: XmlElement, tc: XmlElement): number {
+  let col = 0;
+  for (const c of cellsOf(tr)) {
+    if (c === tc) return col;
+    col += gridSpanOf(c);
+  }
+  return col;
+}
+
+/** The cell of `tr` occupying grid column `col`, if any. */
+function cellAtGridCol(tr: XmlElement, col: number): XmlElement | null {
+  let cur = 0;
+  for (const c of cellsOf(tr)) {
+    if (cur === col) return c;
+    cur += gridSpanOf(c);
+    if (cur > col) return null; // covered mid-span
+  }
+  return null;
+}
+
+function contentOf(tc: XmlElement): XmlElement[] {
+  return tc.children.filter((c) => localName(c.name) !== "tcPr");
+}
+
+function hasText(tc: XmlElement): boolean {
+  const walk = (e: XmlElement): boolean => {
+    if (localName(e.name) === "t" && e.text.trim()) return true;
+    return e.children.some(walk);
+  };
+  return contentOf(tc).some(walk);
+}
+
 function hasSpans(tbl: XmlElement): boolean {
   for (const tr of rowsOf(tbl)) {
     for (const tc of cellsOf(tr)) {
@@ -104,6 +185,80 @@ function hasSpans(tbl: XmlElement): boolean {
 }
 
 export function applyTableOp(doc: DocxDocument, target: XmlElement, op: TableOp): boolean {
+  if (typeof op === "object" || op === "mergeRight" || op === "mergeDown" || op === "splitCell") {
+    const ctx = cellContextOf(doc, target);
+    if (!ctx) return false;
+    const { tbl, tr, tc, w } = ctx;
+    if (typeof op === "object") {
+      if (op.kind === "cellShading") {
+        setTcPrChild(tc, w, "shd", op.fill === null ? null : { [`${w}val`]: "clear", [`${w}fill`]: op.fill.replace(/^#/, "").toUpperCase() });
+      } else {
+        setTcPrChild(tc, w, "vAlign", { [`${w}val`]: op.v });
+      }
+      doc.refresh();
+      return true;
+    }
+    if (op === "mergeRight") {
+      const cells = cellsOf(tr);
+      const next = cells[cells.indexOf(tc) + 1];
+      if (!next) return false;
+      setTcPrChild(tc, w, "gridSpan", { [`${w}val`]: String(gridSpanOf(tc) + gridSpanOf(next)) });
+      // Word keeps both cells' content, concatenated.
+      if (hasText(next)) tc.children.push(...contentOf(next));
+      tr.children.splice(tr.children.indexOf(next), 1);
+      doc.refresh();
+      return true;
+    }
+    if (op === "mergeDown") {
+      const rows = rowsOf(tbl);
+      const below = rows[rows.indexOf(tr) + 1];
+      if (!below) return false;
+      const col = gridColOf(tr, tc);
+      const target2 = cellAtGridCol(below, col);
+      if (!target2 || gridSpanOf(target2) !== gridSpanOf(tc)) return false;
+      setTcPrChild(tc, w, "vMerge", { [`${w}val`]: "restart" });
+      if (hasText(target2)) tc.children.push(...contentOf(target2));
+      // The continued cell keeps an empty paragraph (schema requires one).
+      const empty = emptyCellLike(target2, w);
+      target2.children = empty.children;
+      setTcPrChild(target2, w, "vMerge", {});
+      doc.refresh();
+      return true;
+    }
+    // splitCell: undo a horizontal span and/or a vertical merge start.
+    let touched = false;
+    const span = gridSpanOf(tc);
+    if (span > 1) {
+      setTcPrChild(tc, w, "gridSpan", null);
+      const at = tr.children.indexOf(tc);
+      const extras = Array.from({ length: span - 1 }, () => {
+        const cell = emptyCellLike(tc, w);
+        const tcPr = cell.children.find((c) => localName(c.name) === "tcPr");
+        if (tcPr) tcPr.children = tcPr.children.filter((c) => !["gridSpan", "vMerge"].includes(localName(c.name)));
+        return cell;
+      });
+      tr.children.splice(at + 1, 0, ...extras);
+      touched = true;
+    }
+    const tcPrNow = child(tc, "tcPr");
+    const vm = tcPrNow ? child(tcPrNow, "vMerge") : undefined;
+    if (vm && (attr(vm, "val") ?? "restart") === "restart") {
+      setTcPrChild(tc, w, "vMerge", null);
+      const rows = rowsOf(tbl);
+      const col = gridColOf(tr, tc);
+      for (let ri = rows.indexOf(tr) + 1; ri < rows.length; ri++) {
+        const cell = cellAtGridCol(rows[ri], col);
+        if (!cell) break;
+        const pr = child(cell, "tcPr");
+        const cvm = pr ? child(pr, "vMerge") : undefined;
+        if (!cvm || attr(cvm, "val") === "restart") break;
+        setTcPrChild(cell, w, "vMerge", null);
+      }
+      touched = true;
+    }
+    if (touched) doc.refresh();
+    return touched;
+  }
   const ctx = cellContextOf(doc, target);
   if (!ctx) return false;
   const { tbl, tblParent, tr, rowIdx, cellIdx, w } = ctx;
