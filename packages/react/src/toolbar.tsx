@@ -283,12 +283,83 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+function FootnoteIcon() {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+      <path d="M2.5 13V3.5M2.5 3.5h7" strokeLinecap="round" />
+      <text x="10.2" y="6.6" fontSize="6.4" fill="#3c4043" stroke="none" fontFamily="system-ui">1</text>
+      <path d="M2.5 13h11" strokeLinecap="round" strokeDasharray="1.5 1.6" />
+    </svg>
+  );
+}
+
 function CommentIcon() {
   return (
     <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
       <path d="M1.5 3.5h13v8h-7l-3 3v-3h-3z" strokeLinejoin="round" />
       <path d="M8 5.5v4M6 7.5h4" strokeLinecap="round" />
     </svg>
+  );
+}
+
+/** Insert-footnote popover: a text box; the note lands at the caret. */
+function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    inputRef.current?.focus();
+    const close = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const submit = () => {
+    if (api?.addFootnote(text)) {
+      setText("");
+      setOpen(false);
+    }
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert footnote (at the caret)" style={btnStyle(open)} onMouseDown={(e) => e.preventDefault()} onClick={() => setOpen(!open)}>
+        <FootnoteIcon />
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute", top: 28, right: 0, zIndex: 100, background: "#fff",
+            border: "1px solid #dadce0", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,.15)",
+            padding: 10, width: 240,
+          }}
+        >
+          <textarea
+            ref={inputRef}
+            value={text}
+            placeholder="Footnote text…"
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            style={{
+              width: "100%", minHeight: 54, resize: "vertical", boxSizing: "border-box",
+              border: "1px solid #dadce0", borderRadius: 6, padding: 6,
+              font: "13px system-ui, sans-serif", outline: "none",
+            }}
+          />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
+            <button style={{ ...pillBtn, background: "#fff", color: "#3c4043" }} onClick={() => setOpen(false)}>Cancel</button>
+            <button style={pillBtn} disabled={!text.trim()} onClick={submit}>Insert</button>
+          </div>
+        </div>
+      )}
+    </span>
   );
 }
 
@@ -527,6 +598,7 @@ export type ToolbarFeature =
   | "table"
   | "image"
   | "comment"
+  | "footnote"
   | "layout"
   | "download";
 
@@ -807,6 +879,7 @@ export function DocxToolbar({
       {on("image") && <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />}
       {on("link") && <LinkMenu api={api} />}
       {on("comment") && <CommentMenu api={api} />}
+      {on("footnote") && <FootnoteMenu api={api} />}
       <input
         ref={imageInput}
         type="file"
@@ -827,6 +900,7 @@ export function DocxToolbar({
           { label: "Margins", items: [["m:normal", 'Normal (1")'], ["m:narrow", 'Narrow (0.5")'], ["m:wide", 'Wide (1.5")']] },
           { label: "Orientation", items: [["o:portrait", "Portrait"], ["o:landscape", "Landscape"]] },
           { label: "Size", items: [["s:letter", "Letter"], ["s:legal", "Legal"], ["s:a4", "A4"]] },
+          { label: "Columns", items: [["c:1", "One column"], ["c:2", "Two columns"], ["c:3", "Three columns"]] },
         ]}
         onPick={(v) => {
           if (v === "m:normal") api?.setPageLayout({ margins: { top: 1, right: 1, bottom: 1, left: 1 } });
@@ -836,6 +910,7 @@ export function DocxToolbar({
           else if (v === "s:letter") api?.setPageLayout({ size: { width: 8.5, height: 11 } });
           else if (v === "s:legal") api?.setPageLayout({ size: { width: 8.5, height: 14 } });
           else if (v === "s:a4") api?.setPageLayout({ size: { width: 8.27, height: 11.69 } });
+          else if (v.startsWith("c:")) api?.setPageLayout({ columns: parseInt(v.slice(2), 10) });
         }}
       />
       )}

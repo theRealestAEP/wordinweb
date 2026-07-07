@@ -8,7 +8,7 @@ import { moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from 
 import { listTypeAt, setListLevel } from "./lists.js";
 import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 import { SelectionSegment } from "./commands.js";
-import { adjustFloatingPosition, isFloatingDrawing, setFloatingPosition, setImageWrap } from "./images.js";
+import { adjustFloatingPosition, imageAltText, isFloatingDrawing, replaceImageBlip, setFloatingPosition, setImageAltText, setImageWrap } from "./images.js";
 
 /**
  * Interactive text editing: caret placement, typing, Backspace/Delete,
@@ -901,10 +901,11 @@ export class DocxEditor {
       "border:1px solid #dadce0;border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,.18);" +
       "padding:2px;pointer-events:auto;font:11px system-ui,sans-serif;white-space:nowrap;";
     const isFloating = isFloatingDrawing(src);
-    const modes: ["inline" | "square" | "topAndBottom", string][] = [
+    const modes: ["inline" | "square" | "topAndBottom" | "behind", string][] = [
       ["inline", "Inline"],
       ["square", "Wrap"],
       ["topAndBottom", "Top+Bottom"],
+      ["behind", "Behind"],
     ];
     for (const [mode, label] of modes) {
       const b = document.createElement("button");
@@ -931,6 +932,61 @@ export class DocxEditor {
       });
       bar.appendChild(b);
     }
+    const sep = document.createElement("span");
+    sep.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
+    bar.appendChild(sep);
+    const extra = (label: string, title: string, fn: () => void) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.title = title;
+      b.style.cssText = "border:none;border-radius:3px;padding:3px 7px;cursor:pointer;color:#3c4043;background:transparent;";
+      b.addEventListener("mousedown", (me) => {
+        me.preventDefault();
+        me.stopPropagation();
+      });
+      b.addEventListener("click", (ce) => {
+        ce.stopPropagation();
+        fn();
+      });
+      bar.appendChild(b);
+    };
+    extra("Alt", "Alternative text", () => {
+      const cur = imageAltText(src);
+      const next = window.prompt("Alternative text", cur);
+      if (next === null) return;
+      this.host.history?.checkpoint();
+      if (setImageAltText(this.host.doc, src, next)) this.host.rerender();
+      this.deselectImage();
+    });
+    extra("Size", "Exact size (px)", () => {
+      const curW = parseFloat(el.style.width) || 0;
+      const curH = parseFloat(el.style.height) || 0;
+      const cur = `${Math.round(curW)}x${Math.round(curH)}`;
+      const next = window.prompt("Size in px (width x height)", cur);
+      const m = next && /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/i.exec(next);
+      if (!m) return;
+      this.host.history?.checkpoint();
+      if (resizeDrawing(this.host.doc, src, parseInt(m[1], 10), parseInt(m[2], 10))) this.host.rerender();
+      this.deselectImage();
+    });
+    extra("Replace", "Replace image\u2026", () => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/png,image/jpeg,image/gif,image/webp";
+      input.addEventListener("change", () => {
+        const f = input.files?.[0];
+        if (!f) return;
+        void f.arrayBuffer().then((buf) => {
+          const bytes = new Uint8Array(buf);
+          const ext = (f.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
+          this.host.history?.checkpoint();
+          const relId = this.host.doc.addImageResource(bytes, ext === "jpg" ? "jpeg" : ext);
+          if (replaceImageBlip(this.host.doc, src, relId)) this.host.rerender();
+        });
+      });
+      input.click();
+      this.deselectImage();
+    });
     overlay.appendChild(bar);
 
     el.parentElement!.appendChild(overlay);
@@ -953,9 +1009,11 @@ export class DocxEditor {
     this.deselectImage();
   }
 
-  private currentWrap(drawingEl: XmlElement): "square" | "topAndBottom" | "none" {
+  private currentWrap(drawingEl: XmlElement): "square" | "topAndBottom" | "none" | "behind" {
     const anchor = drawingEl.children.find((c) => localName(c.name) === "anchor");
     if (!anchor) return "none";
+    const isBehind = Object.entries(anchor.attrs).some(([k, v]) => localName(k) === "behindDoc" && v === "1");
+    if (isBehind && anchor.children.some((c) => localName(c.name) === "wrapNone")) return "behind";
     if (anchor.children.some((c) => localName(c.name) === "wrapTopAndBottom")) return "topAndBottom";
     if (anchor.children.some((c) => localName(c.name) === "wrapNone")) return "none";
     return "square";

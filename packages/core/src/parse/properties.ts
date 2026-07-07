@@ -23,6 +23,9 @@ import { eighthPtToPx, halfPtToPx, ptToPx, twipsToPx } from "../units.js";
 
 export interface ParseContext {
   theme?: Theme;
+  /** Tracked-changes display: "final" hides deletions and shows insertions
+   * plain (default); "markup" colors both. */
+  revisionView?: "final" | "markup";
 }
 
 // ---------- colors ----------

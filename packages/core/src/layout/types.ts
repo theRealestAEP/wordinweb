@@ -70,6 +70,11 @@ export interface ImageItem {
   height: number;
   /** Package part path; renderer resolves bytes via DocxDocument.media(). */
   part: string;
+  /** a:srcRect crop (fractions) and a:xfrm rotation (degrees). */
+  crop?: { l: number; t: number; r: number; b: number };
+  rotation?: number;
+  /** behindDoc: paint under the text layer. */
+  behind?: boolean;
   /** Source w:drawing element (for interactive resize/move). */
   src?: XmlElement;
 }

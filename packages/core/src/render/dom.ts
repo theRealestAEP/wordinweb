@@ -109,6 +109,50 @@ export function renderToDom(
   };
 }
 
+/**
+ * Print the rendered pages (browser print -> paper or PDF): clones the page
+ * DOM into a hidden same-origin iframe sized to the document's page, strips
+ * screen chrome (shadows, gaps), and invokes the print dialog.
+ */
+export function printPages(root: HTMLElement, pageWidthPx: number, pageHeightPx: number): void {
+  const iframe = document.createElement("iframe");
+  iframe.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;";
+  document.body.appendChild(iframe);
+  const idoc = iframe.contentDocument;
+  if (!idoc) return;
+  idoc.open();
+  idoc.write("<!doctype html><html><head></head><body></body></html>");
+  idoc.close();
+  const base = idoc.createElement("base");
+  base.href = document.location.href;
+  idoc.head.appendChild(base);
+  // Carry over the host page's styles (webfonts, the dxw stylesheet).
+  for (const node of Array.from(document.head.querySelectorAll("style, link[rel=stylesheet]"))) {
+    idoc.head.appendChild(idoc.importNode(node, true));
+  }
+  const style = idoc.createElement("style");
+  style.textContent = `
+    @page { size: ${pageWidthPx / 96}in ${pageHeightPx / 96}in; margin: 0; }
+    html, body { margin: 0; padding: 0; }
+    .dxw-pages { display: block !important; padding: 0 !important; gap: 0 !important; }
+    .dxw-page { box-shadow: none !important; margin: 0 !important; break-after: page; }
+    .dxw-comment-card, .dxw-hf-marker { display: none !important; }
+  `;
+  idoc.head.appendChild(style);
+  idoc.body.appendChild(idoc.importNode(root, true));
+  const win = iframe.contentWindow;
+  const cleanup = () => setTimeout(() => iframe.remove(), 500);
+  if (win) {
+    win.addEventListener("afterprint", cleanup);
+    // Give cloned images/fonts a beat to resolve before the dialog.
+    setTimeout(() => {
+      win.focus();
+      win.print();
+    }, 150);
+    setTimeout(cleanup, 60_000);
+  }
+}
+
 function renderPage(
   doc: DocxDocument,
   page: LaidOutPage,
@@ -143,6 +187,7 @@ function renderPage(
   surface.style.width = `${page.width}px`;
   surface.style.height = `${page.height}px`;
   surface.style.transformOrigin = "0 0";
+  surface.style.isolation = "isolate";
   if (zoom !== 1) surface.style.transform = `scale(${zoom})`;
   if (options.interactive) {
     surface.style.cursor = "text";
@@ -529,11 +574,35 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       const img = document.createElement("img");
       img.src = url;
       img.style.position = "absolute";
-      img.style.left = `${item.x}px`;
-      img.style.top = `${item.y}px`;
-      img.style.width = `${item.width}px`;
-      img.style.height = `${item.height}px`;
-      return img;
+      let node: HTMLElement = img;
+      const c = item.crop;
+      if (c && (c.l || c.t || c.r || c.b)) {
+        // srcRect crop: clip a scaled-up bitmap inside a fixed viewport.
+        const viewport = document.createElement("div");
+        viewport.style.position = "absolute";
+        viewport.style.overflow = "hidden";
+        const sw = Math.max(1 - c.l - c.r, 0.01);
+        const sh = Math.max(1 - c.t - c.b, 0.01);
+        img.style.width = `${item.width / sw}px`;
+        img.style.height = `${item.height / sh}px`;
+        img.style.left = `${(-item.width / sw) * c.l}px`;
+        img.style.top = `${(-item.height / sh) * c.t}px`;
+        viewport.appendChild(img);
+        node = viewport;
+      } else {
+        img.style.width = `${item.width}px`;
+        img.style.height = `${item.height}px`;
+      }
+      node.style.position = "absolute";
+      node.style.left = `${item.x}px`;
+      node.style.top = `${item.y}px`;
+      node.style.width = `${item.width}px`;
+      node.style.height = `${item.height}px`;
+      if (item.rotation) node.style.transform = `rotate(${item.rotation}deg)`;
+      // behindDoc: under the text layer (the surface isolates stacking so a
+      // negative z-index stays above the page background).
+      if (item.behind) node.style.zIndex = "-1";
+      return node;
     }
     case "text":
       return renderText(item);

@@ -43,6 +43,9 @@ interface InternalPage {
   footerRel?: string;
   bodyTop: number;
   bodyBottom: number;
+  /** Top of the current column band (continuous sections restart columns
+   * mid-page; equals bodyTop for the first band). */
+  bandTop: number;
   colXs: number[];
   colWidths: number[];
   hfStart?: number;
@@ -106,10 +109,29 @@ class Engine {
   run(): LayoutResult {
     this.assignNoteNumbers();
     const sections = this.doc.sections;
+    let prevSp: SectionProps | null = null;
     for (const section of sections) {
-      this.sp = section.props;
-      this.newPage(true);
+      const sp = section.props;
+      // A continuous section shares the page: restart the column band at the
+      // current cursor. (Requires matching page geometry, and the previous
+      // band must have ended in its first column - Word balances columns
+      // before a continuous break, which we approximate by falling back to a
+      // page break when content sits in a later column.)
+      const canContinue =
+        sp.type === "continuous" &&
+        prevSp !== null &&
+        this.pages.length > 0 &&
+        this.col === 0 &&
+        !this.pageIsEmptyAtCursor() &&
+        sp.pageWidth === prevSp.pageWidth &&
+        sp.pageHeight === prevSp.pageHeight &&
+        sp.marginLeft === prevSp.marginLeft &&
+        sp.marginRight === prevSp.marginRight;
+      this.sp = sp;
+      if (canContinue) this.newBand();
+      else this.newPage(true);
       this.layoutBlocks(section.blocks);
+      prevSp = sp;
     }
     if (this.pages.length === 0) {
       this.sp = sections[0]?.props ?? ({} as SectionProps);
@@ -152,6 +174,7 @@ class Engine {
       physIndex,
       displayNumber,
       bodyTop: Math.abs(sp.marginTop),
+      bandTop: Math.abs(sp.marginTop),
       bodyBottom: sp.pageHeight - Math.abs(sp.marginBottom),
       colXs,
       colWidths,
@@ -182,6 +205,7 @@ class Engine {
 
     if (sp.marginTop >= 0) {
       page.bodyTop = Math.max(sp.marginTop, headerH > 0 ? sp.headerDistance + headerH : 0);
+      page.bandTop = page.bodyTop;
     }
     if (sp.marginBottom >= 0) {
       page.bodyBottom = Math.min(
@@ -197,10 +221,24 @@ class Engine {
     this.lastParaSpacingAfter = 0;
   }
 
+  /** Restart columns mid-page for a continuous section break. */
+  private newBand(): void {
+    const sp = this.sp;
+    const page = this.cur;
+    page.sp = sp;
+    const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
+    const { colXs, colWidths } = computeColumns(sp, contentWidth);
+    page.colXs = colXs;
+    page.colWidths = colWidths;
+    page.bandTop = this.y;
+    this.col = 0;
+    this.lastParaSpacingAfter = 0;
+  }
+
   private nextColumn(): void {
     if (this.col + 1 < this.cur.colXs.length) {
       this.col++;
-      this.y = this.cur.bodyTop;
+      this.y = this.cur.bandTop;
       this.lastParaSpacingAfter = 0;
     } else {
       this.newPage(false);
@@ -613,8 +651,8 @@ class Engine {
           }
           breaks.add(breakAt);
           segStart = breakAt;
-          simY = this.cur.bodyTop;
-          bottom = this.cur.bodyTop + bodyHeight;
+          simY = this.cur.bandTop;
+          bottom = this.cur.bandTop + bodyHeight;
           onPartialPage = false;
           // Re-simulate from the break line.
           li = breakAt - 1;
@@ -708,6 +746,8 @@ class Engine {
           width: span.image.width,
           height: span.image.height,
           part: span.image.part,
+          crop: span.image.crop,
+          rotation: span.image.rotation,
           src: span.image.srcDrawing,
         });
         continue;
@@ -871,6 +911,7 @@ class Engine {
       physIndex: -1,
       displayNumber: -1,
       bodyTop: 0,
+      bandTop: 0,
       bodyBottom: Number.POSITIVE_INFINITY,
       colXs: [0],
       colWidths: [width],
@@ -953,6 +994,9 @@ class Engine {
           width: shape.width,
           height: shape.height,
           part: shape.part,
+          crop: shape.crop,
+          rotation: shape.rotation,
+          behind: shape.behind,
           src: shape.srcDrawing,
         });
         if (shape.wrap !== "none" && page.physIndex !== -1) {
@@ -1004,11 +1048,33 @@ class Engine {
     return height;
   }
 
+  /** w:pgBorders: a rectangle inset from the page or text edges. */
+  private emitPageBorders(page: InternalPage): void {
+    const pb = page.sp.pageBorders;
+    if (!pb) return;
+    const sp = page.sp;
+    const edge = (b: Border | undefined, from: number, margin: number): number => {
+      if (!b) return 0;
+      // offsetFrom text: space is measured outward from the text margin;
+      // offsetFrom page: space is measured inward from the page edge.
+      return pb.offsetFrom === "page" ? from + b.space : margin - b.space;
+    };
+    const x1 = edge(pb.left, 0, sp.marginLeft);
+    const x2 = pb.right ? (pb.offsetFrom === "page" ? sp.pageWidth - pb.right.space : sp.pageWidth - sp.marginRight + pb.right.space) : sp.pageWidth;
+    const y1 = edge(pb.top, 0, sp.marginTop);
+    const y2 = pb.bottom ? (pb.offsetFrom === "page" ? sp.pageHeight - pb.bottom.space : sp.pageHeight - sp.marginBottom + pb.bottom.space) : sp.pageHeight;
+    if (pb.top) page.items.push({ kind: "edge", x1, y1, x2, y2: y1, border: pb.top });
+    if (pb.bottom) page.items.push({ kind: "edge", x1, y1: y2, x2, y2, border: pb.bottom });
+    if (pb.left) page.items.push({ kind: "edge", x1, y1, x2: x1, y2, border: pb.left });
+    if (pb.right) page.items.push({ kind: "edge", x1: x2, y1, x2, y2, border: pb.right });
+  }
+
   private finalizeHeadersFooters(): void {
     const total = this.pages.length;
     for (const page of this.pages) {
       const sp = page.sp;
       this.sp = sp; // frames built here must resolve anchors against this page's section
+      this.emitPageBorders(page);
       page.hfStart = page.items.length;
       const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
       const fields: FieldContext = {
@@ -1166,7 +1232,7 @@ class Engine {
 
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const row = tbl.rows[ri];
-      const laid = this.layoutRow(tbl, row, ri, widths);
+      let laid = this.layoutRow(tbl, row, ri, widths);
       let rowHeight = laid.height;
       if (row.props.height !== undefined) {
         rowHeight =
@@ -1174,7 +1240,7 @@ class Engine {
             ? row.props.height
             : Math.max(rowHeight, row.props.height);
       }
-      if (this.y + rowHeight > this.bodyBottom + 0.01 && !this.pageIsEmptyAtCursor()) {
+      const advance = () => {
         this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
         this.nextColumn();
         segTop = this.y;
@@ -1188,6 +1254,30 @@ class Engine {
             this.y += hLaid.height;
           }
         }
+      };
+      // Word default: a row that crosses the page boundary SPLITS at it
+      // (w:cantSplit opts out; exact-height, header, and vertically merged
+      // rows never split).
+      let guard = 0;
+      while (this.y + rowHeight > this.bodyBottom + 0.01 && guard++ < 50) {
+        const canSplit =
+          !row.props.cantSplit &&
+          row.props.heightRule !== "exact" &&
+          !row.props.tblHeader &&
+          !row.cells.some((c) => c.props.vMerge);
+        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y) : null;
+        if (parts) {
+          this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
+          this.y += parts.top.height;
+          advance();
+          laid = parts.rest;
+          rowHeight = Math.max(laid.height, 0);
+          continue;
+        }
+        // Nothing splittable: at the top of a page the row simply overflows
+        // (old behavior); mid-page it moves whole and gets one more chance.
+        if (this.pageIsEmptyAtCursor()) break;
+        advance();
       }
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
       this.y += rowHeight;
@@ -1267,6 +1357,52 @@ class Engine {
     this.cur = saveCur;
     this.col = saveCol;
     return endY;
+  }
+
+  /**
+   * Split a laid-out row at `avail`: line-granular partition of every cell's
+   * items. Returns null when nothing fits (or nothing overflows) so the
+   * caller falls back to moving/keeping the row whole.
+   */
+  private splitLaidRow(
+    laid: { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[]; height: number },
+    avail: number,
+  ): { top: typeof laid; rest: typeof laid } | null {
+    if (avail < 12) return null;
+    const bottomOf = (it: PageItem): number =>
+      it.kind === "text" ? it.lineTop + it.lineHeight :
+      it.kind === "rect" || it.kind === "image" ? it.y + it.height :
+      it.kind === "edge" ? Math.max(it.y1, it.y2) : 0;
+    const topOf = (it: PageItem): number =>
+      it.kind === "text" ? it.lineTop :
+      it.kind === "rect" || it.kind === "image" ? it.y :
+      it.kind === "edge" ? Math.min(it.y1, it.y2) : 0;
+
+    let anyKept = false;
+    let anyRest = false;
+    const topCells: typeof laid.cells = [];
+    const restCells: typeof laid.cells = [];
+    let topH = 0;
+    let restH = 0;
+    for (const cell of laid.cells) {
+      const keep = cell.items.filter((it) => bottomOf(it) <= avail + 0.5);
+      const rest = cell.items.filter((it) => bottomOf(it) > avail + 0.5);
+      if (keep.length > 0 && cell.items.length > 0) anyKept = true;
+      if (rest.length > 0) anyRest = true;
+      const keepTop = cell.items.length > 0 ? Math.min(...cell.items.map(topOf)) : 0;
+      const shift = rest.length > 0 ? Math.min(...rest.map(topOf)) - keepTop : 0;
+      for (const it of rest) offsetItem(it, 0, -shift);
+      topCells.push({ ...cell, items: keep, height: Math.min(cell.height, avail) });
+      const cellRestH = rest.length > 0 ? Math.max(...rest.map(bottomOf)) + keepTop : 0;
+      restCells.push({ ...cell, items: rest, height: cellRestH });
+      topH = Math.max(topH, keep.length > 0 ? Math.min(cell.height, avail) : 0);
+      restH = Math.max(restH, cellRestH);
+    }
+    if (!anyKept || !anyRest) return null;
+    return {
+      top: { cells: topCells, height: Math.min(avail, Math.max(topH, 12)) },
+      rest: { cells: restCells, height: restH },
+    };
   }
 
   private layoutRow(
@@ -1443,6 +1579,7 @@ function offsetItem(item: PageItem, dx: number, dy: number): void {
       item.x += dx;
       item.baseline += dy;
       item.lineTop += dy;
+      if (item.glyphTop !== undefined) item.glyphTop += dy;
       break;
     case "rect":
     case "image":

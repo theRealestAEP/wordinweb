@@ -123,6 +123,8 @@ export interface PageLayoutPatch {
   /** Page size in inches (before orientation). */
   size?: { width: number; height: number };
   orientation?: "portrait" | "landscape";
+  /** Equal-width text columns (1 removes w:cols). */
+  columns?: number;
 }
 
 const TWIPS_PER_INCH = 1440;
@@ -184,6 +186,15 @@ export function setPageLayout(doc: DocxDocument, patch: PageLayoutPatch): boolea
       for (const side of ["top", "right", "bottom", "left"] as const) {
         const v = patch.margins[side];
         if (v !== undefined) setAttr(pgMar, side, String(Math.round(v * TWIPS_PER_INCH)));
+      }
+    }
+    if (patch.columns !== undefined) {
+      sectPr.children = sectPr.children.filter((c) => localName(c.name) !== "cols");
+      if (patch.columns > 1) {
+        // Word's default gutter between equal columns is 0.5in.
+        const cols = el(`${w}cols`, { [`${w}num`]: String(patch.columns), [`${w}space`]: "720" });
+        const idx = sectPr.children.indexOf(pgMar);
+        sectPr.children.splice(idx + 1, 0, cols);
       }
     }
   }

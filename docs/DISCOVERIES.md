@@ -114,6 +114,24 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
 
 ## Tooling gotchas
 
+- **Export references with `open`(1) + AppleScript save-as, not
+  `open file name`**: `open -g -a "Microsoft Word" file.docx` goes through
+  LaunchServices, which blesses the file for Word's sandbox — no
+  "Grant File Access" dialog, works even while the screen is locked. Then
+  `save as document "<name>.docx" file name <pdf> file format format PDF`.
+  Address the document BY NAME: after a force-quit Word restores its old
+  session, so `document 1` may be a stale document (we exported seven PDFs
+  of the wrong file this way).
+- **Never drive Word's dialogs with blind keystrokes**: System Events
+  `keystroke` sequences race the dialog; if it closes early the keys type
+  into whatever document is frontmost (potentially the user's). If UI
+  scripting is unavoidable, verify the sheet exists before every keystroke
+  and prefer clicking named buttons.
+- **UI scripting requires an unlocked session**: window queries return
+  empty and AppleEvents that need a dialog time out (-1712) while the
+  screen is locked; plain document AppleEvents keep working. A modal left
+  open makes documents refuse `close` with -1708.
+
 - **Word-on-mac keeps A4 in PDF export** and docx-lib fixtures default to
   A4 — check `pgSz` before comparing anything against Letter assumptions.
 - **Word's sandbox** pops a "Grant File Access" dialog the first time

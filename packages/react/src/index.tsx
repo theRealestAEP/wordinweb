@@ -26,9 +26,11 @@ import {
   replyToComment,
   insertImageAt,
   setImageWrap,
+  insertFootnote,
   insertTableAfter,
   layoutDocument,
   listTypeAt,
+  printPages,
   setListType,
   paragraphStyleIdOf,
   renderToDom,
@@ -44,6 +46,8 @@ export interface DocxViewApi {
   applyFormat(patch: RunFormatPatch): void;
   /** Create a review comment on the current selection. False if no selection. */
   addComment(text: string): boolean;
+  /** Insert a footnote at the caret. False without a caret. */
+  addFootnote(text: string): boolean;
   undo(): void;
   redo(): void;
   canUndo(): boolean;
@@ -90,6 +94,8 @@ export interface DocxViewApi {
   setPageLayout(patch: PageLayoutPatch): void;
   /** Effective formatting of the current selection (toolbar state), or null. */
   getSelectionFormat(): SelectionFormat | null;
+  /** Print the rendered pages (browser print dialog / save as PDF). */
+  print(): void;
   /** Serialize the (edited) document back to .docx bytes. */
   save(): Uint8Array;
   /** Page count after the latest layout. */
@@ -117,6 +123,8 @@ export interface DocxViewProps {
   commentAuthor?: string;
   /** Render review comments (range highlights + margin balloons). Default true. */
   showComments?: boolean;
+  /** Tracked-changes display: "final" (default) or "markup". */
+  revisions?: "final" | "markup";
 }
 
 async function toBytes(source: DocxViewProps["source"]): Promise<Uint8Array> {
@@ -149,6 +157,7 @@ export function DocxView({
   onError,
   commentAuthor = "You",
   showComments = true,
+  revisions = "final",
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -204,6 +213,7 @@ export function DocxView({
       }
       if (cancelled) return;
       const doc = DocxDocument.load(bytes);
+      if (revisions !== "final") doc.setRevisionView(revisions);
       const pageCount = rerender(doc);
       let pages = pageCount;
       onLoad?.({ pageCount, document: doc });
@@ -291,6 +301,16 @@ export function DocxView({
             pages = rerender(doc);
             // Keep the formatted text selected so toolbar actions compose.
             if (formatted.length > 0) editor?.selectRanges(formatted);
+          },
+          addFootnote: (text) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return false;
+            history.checkpoint();
+            if (insertFootnote(doc, caret.t, caret.offset, text) !== null) {
+              pages = rerender(doc);
+              return true;
+            }
+            return false;
           },
           addComment: (text) => {
             const segs = editor?.getSelectionSegments() ?? [];
@@ -482,6 +502,11 @@ export function DocxView({
             const t = segs.find((sg) => sg.t)?.t ?? editor?.getCaretTarget()?.t;
             return t ? paragraphStyleIdOf(doc, t) : null;
           },
+          print: () => {
+            if (!handle) return;
+            const sp = doc.sections[0]?.props;
+            printPages(handle.root, sp?.pageWidth ?? 816, sp?.pageHeight ?? 1056);
+          },
           save: () => doc.save(),
         };
         onReady?.(api);
@@ -500,7 +525,7 @@ export function DocxView({
       handle?.destroy();
       handle = null;
     };
-  }, [source, zoom, editable, commentAuthor, showComments]);
+  }, [source, zoom, editable, commentAuthor, showComments, revisions]);
 
   return (
     <div
@@ -517,6 +542,6 @@ export function DocxView({
   );
 }
 
-export { DocxDocument, layoutDocument, renderToDom } from "@docxinweb/core";
+export { DocxDocument, layoutDocument, renderToDom, printPages } from "@docxinweb/core";
 export type { RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch } from "@docxinweb/core";
 export { DocxToolbar } from "./toolbar.js";

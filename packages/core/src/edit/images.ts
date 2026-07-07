@@ -20,10 +20,45 @@ export function isFloatingDrawing(drawingEl: XmlElement): boolean {
  * Position (px): x relative to the left margin, y relative to the anchor
  * paragraph's top — used when converting inline → floating.
  */
+/** The image's alternative text (wp:docPr descr). */
+export function imageAltText(drawingEl: XmlElement): string {
+  const holder = child(drawingEl, "inline") ?? child(drawingEl, "anchor");
+  const docPr = holder ? child(holder, "docPr") : undefined;
+  if (!docPr) return "";
+  const key = Object.keys(docPr.attrs).find((k) => localName(k) === "descr");
+  return key ? docPr.attrs[key] : "";
+}
+
+export function setImageAltText(doc: DocxDocument, drawingEl: XmlElement, text: string): boolean {
+  const holder = child(drawingEl, "inline") ?? child(drawingEl, "anchor");
+  const docPr = holder ? child(holder, "docPr") : undefined;
+  if (!docPr) return false;
+  const key = Object.keys(docPr.attrs).find((k) => localName(k) === "descr") ?? "descr";
+  if (text) docPr.attrs[key] = text;
+  else delete docPr.attrs[key];
+  doc.refresh();
+  return true;
+}
+
+/** Point the drawing's a:blip at a different media relationship. */
+export function replaceImageBlip(doc: DocxDocument, drawingEl: XmlElement, relId: string): boolean {
+  let blip: XmlElement | undefined;
+  const walk = (e: XmlElement) => {
+    if (localName(e.name) === "blip") blip = e;
+    for (const ch of e.children) walk(ch);
+  };
+  walk(drawingEl);
+  if (!blip) return false;
+  const key = Object.keys(blip.attrs).find((k) => localName(k) === "embed") ?? "r:embed";
+  blip.attrs[key] = relId;
+  doc.refresh();
+  return true;
+}
+
 export function setImageWrap(
   doc: DocxDocument,
   drawingEl: XmlElement,
-  mode: "inline" | WrapMode,
+  mode: "inline" | WrapMode | "behind",
   pos?: { x: number; y: number },
 ): boolean {
   const inline = child(drawingEl, "inline");
@@ -54,12 +89,15 @@ export function setImageWrap(
       : mode === "topAndBottom"
         ? el("wp:wrapTopAndBottom")
         : el("wp:wrapNone");
+  const behind = mode === "behind";
 
   if (anchor) {
     // Replace the existing wrap element in place.
     anchor.children = anchor.children.filter((c) => !localName(c.name).startsWith("wrap"));
     const gIdx = anchor.children.findIndex((c) => localName(c.name) === "docPr" || localName(c.name) === "graphic");
     anchor.children.splice(gIdx === -1 ? anchor.children.length : gIdx, 0, wrapEl);
+    const bKey = Object.keys(anchor.attrs).find((k) => localName(k) === "behindDoc") ?? "behindDoc";
+    anchor.attrs[bKey] = behind ? "1" : "0";
     doc.refresh();
     return true;
   }
@@ -72,7 +110,7 @@ export function setImageWrap(
     {
       "xmlns:wp": NS_WP,
       distT: "0", distB: "0", distL: "114300", distR: "114300",
-      simplePos: "0", relativeHeight: "251658240", behindDoc: "0",
+      simplePos: "0", relativeHeight: "251658240", behindDoc: behind ? "1" : "0",
       locked: "0", layoutInCell: "1", allowOverlap: "1",
     },
     [
