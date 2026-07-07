@@ -907,6 +907,7 @@ export function DocxToolbar({
           { label: "Size", items: [["s:letter", "Letter"], ["s:legal", "Legal"], ["s:a4", "A4"]] },
           { label: "Columns", items: [["c:1", "One column"], ["c:2", "Two columns"], ["c:3", "Three columns"]] },
           { label: "Page border", items: [["pb:none", "No border"], ["pb:thin", "Thin box (½pt)"], ["pb:thick", "Thick box (1½pt)"], ["pb:accent", "Blue box"]] },
+          { label: "Page number", items: [["pn:page", "Page number (at caret)"], ["pn:pageof", "Page X of Y (at caret)"]] },
         ]}
         onPick={(v) => {
           if (v === "m:normal") api?.setPageLayout({ margins: { top: 1, right: 1, bottom: 1, left: 1 } });
@@ -921,6 +922,8 @@ export function DocxToolbar({
           else if (v === "pb:thin") api?.setPageLayout({ pageBorders: { sz: 4 } });
           else if (v === "pb:thick") api?.setPageLayout({ pageBorders: { sz: 12 } });
           else if (v === "pb:accent") api?.setPageLayout({ pageBorders: { sz: 8, color: "4472C4" } });
+          else if (v === "pn:page") api?.insertPageNumber("page");
+          else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
         }}
       />
       )}
