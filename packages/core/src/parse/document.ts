@@ -6,6 +6,7 @@ import {
   Border,
   DrawingContent,
   DrawingImage,
+  DrawingPath,
   DrawingLine,
   Hyperlink,
   ImageContent,
@@ -315,6 +316,15 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
         });
         break;
       }
+      case "ptab": {
+        const al = attr(el, "alignment");
+        run.content.push({
+          kind: "ptab",
+          alignment: al === "center" ? "center" : al === "right" ? "right" : "left",
+          relativeTo: attr(el, "relativeTo") === "indent" ? "indent" : "margin",
+        });
+        break;
+      }
       case "tab":
         run.content.push({ kind: "tab" });
         break;
@@ -426,6 +436,24 @@ function parseDrawing(
 
   const images: DrawingImage[] = [];
   const lines: DrawingLine[] = [];
+  const paths: DrawingPath[] = [];
+
+  // Resolve a DrawingML fill color (srgbClr or theme schemeClr), applying
+  // lumMod/lumOff/shade/tint transforms (template art is built from theme
+  // colors + luminance tweaks: white bg1 at lumMod 85% = the light gray of
+  // Word's decorative bands).
+  const fillColorOf = (container: XmlElement | undefined): string | undefined => {
+    if (!container) return undefined;
+    const solid = child(container, "solidFill");
+    if (!solid) return undefined;
+    const clrEl = child(solid, "srgbClr") ?? child(solid, "schemeClr");
+    if (!clrEl) return undefined;
+    let hex: string | undefined;
+    if (localName(clrEl.name) === "srgbClr") hex = "#" + (attr(clrEl, "val") ?? "000000");
+    else hex = ctx.theme?.colors.get(attr(clrEl, "val") ?? "");
+    if (!hex) return undefined;
+    return applyClrTransforms(hex, clrEl);
+  };
 
   // Walk the graphic tree, carrying the group coordinate transform:
   // childEmu → boxEmu = (childEmu - chOff) * (ext / chExt) + off, composed.
@@ -491,8 +519,36 @@ function parseDrawing(
           weight: Math.max((weightEmu / EMU_PER_PT) * (4 / 3), 0.75),
         });
       }
-      // Textboxes inside shapes are ignored here (rendered via VML fallback
-      // when present); recurse for nested pics.
+      // Freeform template art (icons, decorative bands) is a:custGeom -
+      // convert its pathLst to SVG path data at the shape's placement.
+      const custGeom = child(spPr, "custGeom");
+      const fill = fillColorOf(spPr);
+      if (custGeom && fill) {
+        const xfrm = child(spPr, "xfrm");
+        const off = child(xfrm, "off");
+        const ext = child(xfrm, "ext");
+        const x = ox + (intAttr(off, "x") ?? 0) * sx;
+        const y = oy + (intAttr(off, "y") ?? 0) * sy;
+        const w = (intAttr(ext, "cx") ?? 0) * sx;
+        const h = (intAttr(ext, "cy") ?? 0) * sy;
+        const pathLst = child(custGeom, "pathLst");
+        for (const pEl of pathLst ? children(pathLst, "path") : []) {
+          const d = svgPathOf(pEl);
+          if (!d) continue;
+          paths.push({
+            x: emuToPx(x),
+            y: emuToPx(y),
+            width: emuToPx(w),
+            height: emuToPx(h),
+            d,
+            viewW: intAttr(pEl, "w") ?? 1,
+            viewH: intAttr(pEl, "h") ?? 1,
+            fill,
+          });
+        }
+      }
+      // Textboxes inside shapes are handled by the VML fallback or the
+      // pict path when present; recurse for nested pics.
       for (const c of el.children) walk(c, ox, oy, sx, sy);
       return;
     }
@@ -516,6 +572,42 @@ function parseDrawing(
     for (const c of el.children) walk(c, ox, oy, sx, sy);
   };
   walk(holder, 0, 0, 1, 1);
+
+  // Anchored template art (multi-shape groups, freeform paths): absolute
+  // placement via the anchor, no text-flow participation.
+  if (anchor && (paths.length > 0 || lines.length + images.length > 1)) {
+    const rel = (el: XmlElement | undefined): AnchorRel => {
+      const v = el ? attr(el, "relativeFrom") : undefined;
+      return v === "page" ? "page" : v === "margin" ? "margin" : v === "column" ? "column" : "text";
+    };
+    const posH = findDescendant(anchor, "positionH");
+    const posV = findDescendant(anchor, "positionV");
+    const offEmu = (el: XmlElement | undefined): number => {
+      const po = el ? findDescendant(el, "posOffset") : undefined;
+      return po ? parseInt(po.text, 10) || 0 : 0;
+    };
+    const alignEl = posH ? findDescendant(posH, "align") : undefined;
+    const hAlign = alignEl?.text === "center" || alignEl?.text === "right" || alignEl?.text === "left"
+      ? (alignEl.text as "left" | "center" | "right")
+      : undefined;
+    return {
+      kind: "anchor",
+      shape: {
+        type: "art",
+        x: emuToPx(offEmu(posH)),
+        y: emuToPx(offEmu(posV)),
+        width: emuToPx(cx),
+        height: emuToPx(cy),
+        hRel: rel(posH),
+        vRel: rel(posV),
+        hAlign,
+        behind: attr(anchor, "behindDoc") === "1",
+        lines,
+        images,
+        paths,
+      },
+    };
+  }
 
   // Plain single image covering the extent: keep the simple content kind.
   if (lines.length === 0 && images.length === 1) {
@@ -571,14 +663,60 @@ function parseDrawing(
       ...(images[0].rotation ? { rotation: images[0].rotation } : {}),
     };
   }
-  if (lines.length === 0 && images.length === 0) return null;
+  if (lines.length === 0 && images.length === 0 && paths.length === 0) return null;
   return {
     kind: "drawing",
     width: emuToPx(cx),
     height: emuToPx(cy),
     lines,
     images,
+    ...(paths.length ? { paths } : {}),
   };
+}
+
+/** Apply a:lumMod/lumOff/shade/tint children to a hex color. */
+function applyClrTransforms(hex: string, clrEl: XmlElement): string {
+  let r = parseInt(hex.slice(1, 3), 16) / 255;
+  let g = parseInt(hex.slice(3, 5), 16) / 255;
+  let b = parseInt(hex.slice(5, 7), 16) / 255;
+  for (const t of clrEl.children) {
+    const v = (intAttr(t, "val") ?? 100000) / 100000;
+    switch (localName(t.name)) {
+      case "lumMod":
+        r *= v; g *= v; b *= v;
+        break;
+      case "lumOff":
+        r += v; g += v; b += v;
+        break;
+      case "shade":
+        r *= v; g *= v; b *= v;
+        break;
+      case "tint":
+        r = 1 - (1 - r) * v; g = 1 - (1 - g) * v; b = 1 - (1 - b) * v;
+        break;
+    }
+  }
+  const c = (x: number) => Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16).padStart(2, "0");
+  return `#${c(r)}${c(g)}${c(b)}`;
+}
+
+/** a:path -> SVG path data (moveTo/lnTo/cubicBezTo/quadBezTo/arcTo-as-line/close). */
+function svgPathOf(pathEl: XmlElement): string {
+  let d = "";
+  const pt = (el: XmlElement | undefined): string => {
+    return el ? `${intAttr(el, "x") ?? 0} ${intAttr(el, "y") ?? 0}` : "0 0";
+  };
+  for (const cmd of pathEl.children) {
+    const ln = localName(cmd.name);
+    const pts = children(cmd, "pt");
+    if (ln === "moveTo") d += `M ${pt(pts[0])} `;
+    else if (ln === "lnTo") d += `L ${pt(pts[0])} `;
+    else if (ln === "cubicBezTo") d += `C ${pt(pts[0])} ${pt(pts[1])} ${pt(pts[2])} `;
+    else if (ln === "quadBezTo") d += `Q ${pt(pts[0])} ${pt(pts[1])} `;
+    else if (ln === "arcTo") continue; // rare in template art; approximated away
+    else if (ln === "close") d += "Z ";
+  }
+  return d.trim();
 }
 
 // ---------- VML (legacy drawing markup: textboxes, lines, pictures) ----------
@@ -657,6 +795,24 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
       const txbx = findDescendant(el, "txbxContent");
       if (txbx) {
         const style = parseVmlStyle(el.attrs["style"]);
+        // Word's built-in header/footer designs position their shapes with
+        // mso-*-percent geometry and alignment keywords, and rely on the
+        // fill for contrast (white title text on an accent band).
+        const pct = (key: string): number | undefined => {
+          const v = style.get(key);
+          return v !== undefined ? parseFloat(v) / 1000 : undefined;
+        };
+        const alignOf = (v: string | undefined): "left" | "center" | "right" | undefined =>
+          v === "center" ? "center" : v === "right" ? "right" : v === "left" ? "left" : undefined;
+        const vAlignOf = (v: string | undefined): "top" | "center" | "bottom" | undefined =>
+          v === "center" ? "center" : v === "bottom" ? "bottom" : v === "top" ? "top" : undefined;
+        const relOf = (v: string | undefined): "page" | "margin" | undefined =>
+          v === "page" ? "page" : v === "margin" ? "margin" : undefined;
+        const fillRaw = el.attrs["fillcolor"];
+        const fill = el.attrs["filled"] === "f" ? undefined : fillRaw ? fillRaw.split(" ")[0] : undefined;
+        const strokeColor = el.attrs["strokecolor"];
+        const stroked = el.attrs["stroked"] !== "f" && strokeColor !== undefined;
+        const ta = style.get("v-text-anchor");
         out.push({
           kind: "anchor",
           shape: {
@@ -668,6 +824,17 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
             hRel: anchorRel(style.get("mso-position-horizontal-relative")),
             vRel: anchorRel(style.get("mso-position-vertical-relative")),
             blocks: parseBlocks(txbx, ctx),
+            ...(fill ? { fill } : {}),
+            ...(stroked ? { stroke: { color: strokeColor.split(" ")[0], weight: vmlLength(el.attrs["strokeweight"]) || 1 } } : {}),
+            hAlign: alignOf(style.get("mso-position-horizontal")),
+            vAlign: vAlignOf(style.get("mso-position-vertical")),
+            pctX: pct("mso-left-percent"),
+            pctY: pct("mso-top-percent"),
+            pctWidth: pct("mso-width-percent"),
+            pctHeight: pct("mso-height-percent"),
+            pctWidthRel: relOf(style.get("mso-width-relative")),
+            pctHeightRel: relOf(style.get("mso-height-relative")),
+            textAnchor: ta === "middle" ? "middle" : ta === "bottom" ? "bottom" : undefined,
           },
         });
         return;
@@ -761,7 +928,10 @@ function parseRow(tr: XmlElement, ctx: DocParseContext): TableRow {
       const val = intAttr(height, "val");
       if (val !== undefined) props.height = twipsToPx(val);
       const rule = attr(height, "hRule");
-      props.heightRule = rule === "exact" ? "exact" : rule === "auto" ? "auto" : "atLeast";
+      // Missing hRule defaults to AUTO (val ignored) - Word content-sizes
+      // the "Right side layout table" row (trHeight 10512, no hRule) in the
+      // cover-letter template; treating it as atLeast overflows the page.
+      props.heightRule = rule === "exact" ? "exact" : rule === "atLeast" ? "atLeast" : "auto";
     }
     props.cantSplit = onOff(child(trPr, "cantSplit"));
     props.tblHeader = onOff(child(trPr, "tblHeader"));

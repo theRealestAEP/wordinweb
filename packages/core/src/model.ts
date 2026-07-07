@@ -145,6 +145,12 @@ export interface BreakContent {
 export interface TabContent {
   kind: "tab";
 }
+export interface PTabContent {
+  kind: "ptab";
+  /** Absolute-position tab: jump to left/center/right of the base. */
+  alignment: "left" | "center" | "right";
+  relativeTo: "margin" | "indent";
+}
 export interface ImageContent {
   kind: "image";
   /** Part path of the image inside the package. */
@@ -213,6 +219,38 @@ export interface ShapeTextbox {
   hRel: AnchorRel;
   vRel: AnchorRel;
   blocks: Block[];
+  /** Background fill (CSS color) painted behind the text. */
+  fill?: string;
+  /** Outline. */
+  stroke?: { color: string; weight: number };
+  /** Alignment-based positioning (mso-position-horizontal/vertical). */
+  hAlign?: "left" | "center" | "right";
+  vAlign?: "top" | "center" | "bottom";
+  /** Percent-of-base geometry, 0..1 (mso-*-percent / wp14 pct offsets).
+   * Bases: pctWidthRel/pctHeightRel say page vs margin. */
+  pctX?: number;
+  pctY?: number;
+  pctWidth?: number;
+  pctHeight?: number;
+  pctWidthRel?: "page" | "margin";
+  pctHeightRel?: "page" | "margin";
+  /** Vertical anchoring of the text INSIDE the box (v-text-anchor). */
+  textAnchor?: "top" | "middle" | "bottom";
+}
+
+export interface ShapeArt {
+  type: "art";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  hRel: AnchorRel;
+  vRel: AnchorRel;
+  hAlign?: "left" | "center" | "right";
+  behind?: boolean;
+  lines: DrawingLine[];
+  images: DrawingImage[];
+  paths: DrawingPath[];
 }
 
 /** How text interacts with a floating image. */
@@ -241,7 +279,7 @@ export interface ShapeImage {
   srcDrawing?: XmlElement;
 }
 
-export type Shape = ShapeLine | ShapeTextbox | ShapeImage;
+export type Shape = ShapeLine | ShapeTextbox | ShapeImage | ShapeArt;
 
 /**
  * Floating/anchored object: does not occupy inline space; positioned against
@@ -283,6 +321,22 @@ export interface DrawingContent {
   height: number;
   lines: DrawingLine[];
   images: DrawingImage[];
+  /** Freeform vector shapes (a:custGeom), as SVG path data. */
+  paths?: DrawingPath[];
+}
+
+export interface DrawingPath {
+  /** Position/size inside the drawing, px. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** SVG path in the `viewW x viewH` source coordinate space. */
+  d: string;
+  viewW: number;
+  viewH: number;
+  fill?: string;
+  stroke?: { color: string; width: number };
 }
 
 /**
@@ -303,6 +357,7 @@ export type RunContent =
   | TextContent
   | BreakContent
   | TabContent
+  | PTabContent
   | ImageContent
   | FieldContent
   | AnchorContent

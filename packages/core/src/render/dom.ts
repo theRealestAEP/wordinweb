@@ -560,6 +560,26 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       el.style.background = item.fill;
       return el;
     }
+    case "path": {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", `0 0 ${item.viewW} ${item.viewH}`);
+      svg.setAttribute("preserveAspectRatio", "none");
+      svg.style.position = "absolute";
+      svg.style.left = `${item.x}px`;
+      svg.style.top = `${item.y}px`;
+      svg.style.width = `${item.width}px`;
+      svg.style.height = `${item.height}px`;
+      svg.style.overflow = "visible";
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", item.d);
+      path.setAttribute("fill", item.fill ?? "none");
+      if (item.stroke) {
+        path.setAttribute("stroke", item.stroke.color);
+        path.setAttribute("stroke-width", String(item.stroke.width));
+      }
+      svg.appendChild(path);
+      return svg as unknown as HTMLElement;
+    }
     case "edge":
       return renderEdge(item.x1, item.y1, item.x2, item.y2, item.border);
     case "image": {

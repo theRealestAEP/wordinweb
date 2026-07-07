@@ -40,6 +40,11 @@ export function parseTheme(root: XmlElement | undefined): Theme {
       ["background1", "lt1"],
       ["text2", "dk2"],
       ["background2", "lt2"],
+      // DrawingML a:schemeClr spellings
+      ["tx1", "dk1"],
+      ["bg1", "lt1"],
+      ["tx2", "dk2"],
+      ["bg2", "lt2"],
     ];
     for (const [a, b] of alias) {
       const v = theme.colors.get(b);

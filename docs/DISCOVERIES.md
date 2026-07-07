@@ -253,3 +253,36 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   line diffs are extraction-order artifacts of vertically stacked pieces,
   not geometry (positions verified within ~1pt; the ∑ advance differs
   because STIX Two Math substitutes for Cambria Math).
+
+## Word template rendering (2026-07, header/footer designs + cover letters)
+
+- **Word's built-in h/f templates decode to five constructs**: inline SDTs
+  (placeholder prompts), `w:ptab` alignment tabs (Three Columns), pct-width
+  tables (Ion Light), and anchored `wps` shapes with theme fills + text
+  boxes (Banded/Ion Dark: white title text INVISIBLE without the fill).
+  VML fallbacks carry the full geometry as style keys: mso-position-
+  horizontal/vertical (alignment), mso-top/left-percent (‰ of page),
+  mso-width/height-percent + mso-*-relative (page vs margin), and
+  v-text-anchor (text bottom-anchoring inside the box).
+- **Template art is a:custGeom freeform paths** (icons, decorative bands) -
+  rendered as SVG paths (PathItem). Fills are theme colors with
+  lumMod/lumOff/shade/tint transforms (white bg1 x lumMod 85% = the gray
+  bands); DrawingML scheme spellings bg1/tx1/bg2/tx2 need aliasing to
+  lt1/dk1/lt2/dk2.
+- **wp:positionH/V can be wrapped in mc:AlternateContent** (wp14 percent
+  offsets with posOffset fallbacks) - child() lookups silently miss them;
+  use descendant search.
+- **A bare w:trHeight with no w:hRule means AUTO: the value is ignored**
+  (cover-letter "Right side layout table": trHeight 10512 but Word
+  content-sizes the row; honoring it as atLeast overflows to a phantom
+  page 2).
+- **contextualSpacing applies inside table cells** (layoutFrame), not just
+  body flow - the RECIPIENT/TITLE/ADDRESS block is consecutive Heading2
+  paragraphs whose 20pt spacing-after vanishes between same-style
+  neighbors.
+- **Adjacent same-border paragraphs merge borders** (no rule at the shared
+  boundary), which is what makes a run of bordered paragraphs read as one
+  box.
+- **Office-private theme fonts need substitutes**: Gill Sans MT (cover
+  letter/resume templates) falls back to Helvetica silently and every
+  measurement is wrong; macOS ships metrically-similar Gill Sans.
