@@ -525,6 +525,7 @@ function parseDrawing(
       else if (child(anchor, "wrapTopAndBottom")) wrap = "topAndBottom";
       // wrapSquare/wrapTight/wrapThrough all treated as square.
       const behind = attr(anchor, "behindDoc") === "1" && wrap === "none";
+      const distPx = (name: string): number => emuToPx(intAttr(anchor, name) ?? 0);
       return {
         kind: "anchor",
         shape: {
@@ -539,6 +540,7 @@ function parseDrawing(
           hAlign,
           wrap,
           ...(behind ? { behind: true } : {}),
+          dist: { t: distPx("distT"), b: distPx("distB"), l: distPx("distL"), r: distPx("distR") },
           ...(images[0].crop ? { crop: images[0].crop } : {}),
           ...(images[0].rotation ? { rotation: images[0].rotation } : {}),
         },

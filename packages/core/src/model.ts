@@ -213,6 +213,8 @@ export interface ShapeImage {
   wrap: WrapMode;
   /** behindDoc anchors render under the text and never displace it. */
   behind?: boolean;
+  /** Wrap distances px (wp:anchor distT/B/L/R); text clears the image by these. */
+  dist?: { t: number; b: number; l: number; r: number };
   crop?: { l: number; t: number; r: number; b: number };
   rotation?: number;
   /** Source w:drawing element (editing). */
