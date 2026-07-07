@@ -23,6 +23,20 @@ export interface FontSpec {
   italic: boolean;
 }
 
+export interface PathItem {
+  kind: "path";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** SVG path data in a `viewW x viewH` coordinate space. */
+  d: string;
+  viewW: number;
+  viewH: number;
+  fill?: string;
+  stroke?: { color: string; width: number };
+}
+
 export interface TextItem {
   kind: "text";
   x: number;
@@ -109,7 +123,7 @@ export interface GripItem {
   renderedWidths?: number[];
 }
 
-export type PageItem = TextItem | RectItem | LineEdgeItem | ImageItem | GripItem;
+export type PageItem = TextItem | PathItem | RectItem | LineEdgeItem | ImageItem | GripItem;
 
 export interface LaidOutPage {
   width: number;

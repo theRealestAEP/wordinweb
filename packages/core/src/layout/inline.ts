@@ -49,6 +49,12 @@ interface TabAtom {
   props: RunProps;
   font: FontSpec;
 }
+interface PTabAtom {
+  kind: "ptab";
+  alignment: "left" | "center" | "right";
+  props: RunProps;
+  font: FontSpec;
+}
 interface ImageAtom {
   kind: "image";
   part: string;
@@ -71,7 +77,8 @@ interface BreakAtom {
   kind: "break";
   breakType: "line" | "page" | "column";
 }
-type Atom = FragAtom | SpaceAtom | TabAtom | ImageAtom | DrawingAtom | MathAtom | BreakAtom;
+type Atom = FragAtom | SpaceAtom | TabAtom
+  | PTabAtom | ImageAtom | DrawingAtom | MathAtom | BreakAtom;
 
 export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
   let size = props.size ?? 14.666;
@@ -338,6 +345,37 @@ export function breakParagraph(
       if (atom.breakType === "line") flush(false, true);
       else flush(trailing, true, atom.breakType);
       if (trailing) flushedTrailingBreak = true;
+      continue;
+    }
+    if (atom.kind === "ptab") {
+      // Absolute-position tab (w:ptab): jump so the upcoming text centers
+      // on / right-aligns to the margin width, independent of tab stops
+      // (Word's "Blank (Three Columns)" header spreads its three [Type
+      // here] prompts this way).
+      let target = contentWidth - indentRight;
+      if (atom.alignment === "center") {
+        let w = 0;
+        for (let j = ai + 1; j < atoms.length; j++) {
+          const a = atoms[j];
+          if (a.kind === "tab" || a.kind === "ptab" || a.kind === "break") break;
+          if (a.kind === "frag" || a.kind === "space" || a.kind === "image") w += a.width;
+        }
+        target = contentWidth / 2 - w / 2;
+      } else if (atom.alignment === "right") {
+        let w = 0;
+        for (let j = ai + 1; j < atoms.length; j++) {
+          const a = atoms[j];
+          if (a.kind === "tab" || a.kind === "ptab" || a.kind === "break") break;
+          if (a.kind === "frag" || a.kind === "space" || a.kind === "image") w += a.width;
+        }
+        target = contentWidth - indentRight - w;
+      } else {
+        target = 0;
+      }
+      const width = Math.max(target - x, 2);
+      cur.push({ x, width, text: "\t", props: atom.props, font: atom.font, isSpace: false });
+      curLineWidth += width;
+      x += width;
       continue;
     }
     if (atom.kind === "tab") {
@@ -669,6 +707,9 @@ function buildAtoms(
           if (text) pushText(displayText(text, props), props, font, href, { run, t: null, offset: 0 });
           break;
         }
+        case "ptab":
+          atoms.push({ kind: "ptab", alignment: content.alignment, props, font });
+          break;
         case "tab":
           atoms.push({ kind: "tab", props, font });
           break;

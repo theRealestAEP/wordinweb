@@ -603,6 +603,21 @@ class Engine {
 
   private placeParagraph(para: Paragraph, prev?: Block, next?: Block): void {
     const props = this.doc.effectiveParaProps(para);
+    // Word merges identical borders of consecutive paragraphs: the shared
+    // boundary is not drawn (or draws the "between" border when given), so
+    // a run of bordered paragraphs reads as one box (Alex Pickett cover
+    // letter: RECIPIENT/TITLE/ADDRESS block).
+    const sameBorders = (nb?: Block): boolean => {
+      if (!nb || nb.type !== "paragraph") return false;
+      const np = this.doc.effectiveParaProps(nb);
+      return (
+        JSON.stringify(np.borders ?? null) === JSON.stringify(props.borders ?? null) &&
+        (np.indentLeft ?? 0) === (props.indentLeft ?? 0) &&
+        (np.indentRight ?? 0) === (props.indentRight ?? 0)
+      );
+    };
+    const mergeTop = props.borders !== undefined && sameBorders(prev);
+    const mergeBottom = props.borders !== undefined && sameBorders(next);
 
     if (props.pageBreakBefore && !this.pageIsEmptyAtCursor()) {
       this.newPage(false);
@@ -762,8 +777,8 @@ class Engine {
           fragPage.colWidths[fragCol],
           fragStartY,
           this.y,
-          fragStartLine === 0,
-          isLast,
+          fragStartLine === 0 && !mergeTop,
+          isLast && !mergeBottom,
         );
       }
     };
@@ -893,6 +908,20 @@ class Engine {
             x2: bx + l.x2,
             y2: by + l.y2,
             border: { style: "single", width: l.weight, color: l.color, space: 0 },
+          });
+        }
+        for (const pth of span.drawing.paths ?? []) {
+          page.items.push({
+            kind: "path",
+            x: bx + pth.x,
+            y: by + pth.y,
+            width: pth.width,
+            height: pth.height,
+            d: pth.d,
+            viewW: pth.viewW,
+            viewH: pth.viewH,
+            fill: pth.fill,
+            stroke: pth.stroke,
           });
         }
         continue;
@@ -1061,14 +1090,32 @@ class Engine {
     };
 
     let framePrevAfter = 0;
+    const frameSameBorders = (a: ParaProps, nb?: Block): boolean => {
+      if (!nb || nb.type !== "paragraph") return false;
+      const np = this.doc.effectiveParaProps(nb);
+      return (
+        JSON.stringify(np.borders ?? null) === JSON.stringify(a.borders ?? null) &&
+        (np.indentLeft ?? 0) === (a.indentLeft ?? 0) &&
+        (np.indentRight ?? 0) === (a.indentRight ?? 0)
+      );
+    };
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (block.type === "paragraph") {
         const props = this.doc.effectiveParaProps(block);
         const label = this.numberingLabel(props, block);
         const broken = breakParagraph(this.doc, this.measurer, block, width, fields, label);
-        const spacingBefore = props.spacingBefore ?? 0;
-        const spacingAfter = props.spacingAfter ?? 0;
+        let spacingBefore = props.spacingBefore ?? 0;
+        let spacingAfter = props.spacingAfter ?? 0;
+        // Contextual spacing between same-style neighbors applies inside
+        // cells/frames too (cover-letter RECIPIENT/TITLE/ADDRESS block).
+        if (props.contextualSpacing) {
+          const styleOf = (b?: Block) =>
+            b?.type === "paragraph" ? (b.props.styleId ?? this.doc.styles.defaultParagraphStyle) : undefined;
+          const myStyle = block.props.styleId ?? this.doc.styles.defaultParagraphStyle;
+          if (styleOf(blocks[i - 1]) === myStyle) spacingBefore = 0;
+          if (styleOf(blocks[i + 1]) === myStyle) spacingAfter = 0;
+        }
         y += Math.max(spacingBefore, framePrevAfter) - framePrevAfter;
         framePrevAfter = spacingAfter;
         const top = y;
@@ -1079,7 +1126,16 @@ class Engine {
           this.emitLine(line, fake, 0, y);
           y += line.height;
         }
-        this.emitParagraphDecorations(props, fake, 0, width, top, y, true, true);
+        this.emitParagraphDecorations(
+          props,
+          fake,
+          0,
+          width,
+          top,
+          y,
+          !(props.borders && frameSameBorders(props, blocks[i - 1])),
+          !(props.borders && frameSameBorders(props, blocks[i + 1])),
+        );
         y += spacingAfter;
       } else {
         y = this.layoutTableInFrame(block, fake, 0, y, width, fields);
@@ -1154,6 +1210,23 @@ class Engine {
         }
         continue;
       }
+      if (shape.type === "art") {
+        const baseW = shape.hRel === "page" ? sp.pageWidth : sp.pageWidth - sp.marginLeft - sp.marginRight;
+        let ox = originX(shape.hRel) + shape.x;
+        if (shape.hAlign === "center") ox = originX(shape.hRel) + (baseW - shape.width) / 2;
+        else if (shape.hAlign === "right") ox = originX(shape.hRel) + baseW - shape.width;
+        const oy = originY(shape.vRel) + shape.y;
+        for (const img of shape.images) {
+          page.items.push({ kind: "image", x: ox + img.x - fx, y: oy + img.y - fy, width: img.width, height: img.height, part: img.part, behind: shape.behind });
+        }
+        for (const l of shape.lines) {
+          page.items.push({ kind: "edge", x1: ox + l.x1 - fx, y1: oy + l.y1 - fy, x2: ox + l.x2 - fx, y2: oy + l.y2 - fy, border: { style: "single", width: l.weight, color: l.color, space: 0 } });
+        }
+        for (const pth of shape.paths) {
+          page.items.push({ kind: "path", x: ox + pth.x - fx, y: oy + pth.y - fy, width: pth.width, height: pth.height, d: pth.d, viewW: pth.viewW, viewH: pth.viewH, fill: pth.fill, stroke: pth.stroke });
+        }
+        continue;
+      }
       if (shape.type === "line") {
         const ox = originX(shape.hRel);
         const oy = originY(shape.vRel);
@@ -1171,11 +1244,54 @@ class Engine {
           },
         });
       } else {
-        const ox = originX(shape.hRel) + shape.x;
-        const oy = originY(shape.vRel) + shape.y;
-        const inner = this.layoutFrame(shape.blocks, shape.width, fields, { x: ox, y: oy });
+        // Word's built-in header/footer designs size and place their shapes
+        // with percent-of-page/margin geometry plus alignment keywords, and
+        // paint a fill the text contrasts against.
+        const pageW = sp.pageWidth;
+        const pageH = sp.pageHeight;
+        const marginW = pageW - sp.marginLeft - sp.marginRight;
+        const baseW = (rel: "page" | "margin" | undefined) => (rel === "page" ? pageW : marginW);
+        const baseH = (rel: "page" | "margin" | undefined) =>
+          rel === "margin" ? pageH - sp.marginTop - sp.marginBottom : pageH;
+        const width = shape.pctWidth ? shape.pctWidth * baseW(shape.pctWidthRel) : shape.width;
+        const height = shape.pctHeight ? shape.pctHeight * baseH(shape.pctHeightRel) : shape.height;
+        let ox = originX(shape.hRel) + shape.x;
+        if (shape.pctX !== undefined) ox = originX(shape.hRel) + shape.pctX * pageW;
+        if (shape.hAlign) {
+          const hBase = shape.hRel === "page" ? pageW : marginW;
+          const o = originX(shape.hRel);
+          if (shape.hAlign === "center") ox = o + (hBase - width) / 2;
+          else if (shape.hAlign === "right") ox = o + hBase - width;
+          else ox = o;
+        }
+        let oy = originY(shape.vRel) + shape.y;
+        if (shape.pctY !== undefined) oy = originY(shape.vRel) + shape.pctY * pageH;
+        if (shape.vAlign) {
+          const vBase = shape.vRel === "page" ? pageH : pageH - sp.marginTop - sp.marginBottom;
+          const o = originY(shape.vRel);
+          if (shape.vAlign === "center") oy = o + (vBase - height) / 2;
+          else if (shape.vAlign === "bottom") oy = o + vBase - height;
+          else oy = o;
+        }
+        if (shape.fill) {
+          page.items.push({ kind: "rect", x: ox - fx, y: oy - fy, width, height, fill: shape.fill });
+        }
+        if (shape.stroke) {
+          const b = { style: "single" as const, width: shape.stroke.weight, color: shape.stroke.color, space: 0 };
+          page.items.push({ kind: "edge", x1: ox - fx, y1: oy - fy, x2: ox - fx + width, y2: oy - fy, border: b });
+          page.items.push({ kind: "edge", x1: ox - fx, y1: oy - fy + height, x2: ox - fx + width, y2: oy - fy + height, border: b });
+          page.items.push({ kind: "edge", x1: ox - fx, y1: oy - fy, x2: ox - fx, y2: oy - fy + height, border: b });
+          page.items.push({ kind: "edge", x1: ox - fx + width, y1: oy - fy, x2: ox - fx + width, y2: oy - fy + height, border: b });
+        }
+        // VML textbox default insets: 0.1in left/right, 0.05in top/bottom.
+        const insetX = 9.6;
+        const insetY = 4.8;
+        const inner = this.layoutFrame(shape.blocks, width - 2 * insetX, fields, { x: ox + insetX, y: oy + insetY });
+        let innerTop = oy + insetY;
+        if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
+        else if (shape.textAnchor === "bottom") innerTop = oy + height - insetY - inner.height;
         for (const it of inner.items) {
-          offsetItem(it, ox - fx, oy - fy);
+          offsetItem(it, ox + insetX - fx, innerTop - fy);
           page.items.push(it);
         }
       }
@@ -1414,7 +1530,7 @@ class Engine {
       const row = tbl.rows[ri];
       let laid = this.layoutRow(tbl, row, ri, widths);
       let rowHeight = laid.height;
-      if (row.props.height !== undefined) {
+      if (row.props.height !== undefined && row.props.heightRule !== "auto") {
         rowHeight = this.rowHeightFromTrHeight(tbl, row, ri, rowHeight);
       }
       const advance = () => {
@@ -1520,7 +1636,7 @@ class Engine {
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const laid = this.layoutRow(tbl, tbl.rows[ri], ri, widths, fields);
       let rowHeight = laid.height;
-      if (tbl.rows[ri].props.height !== undefined) {
+      if (tbl.rows[ri].props.height !== undefined && tbl.rows[ri].props.heightRule !== "auto") {
         rowHeight = this.rowHeightFromTrHeight(tbl, tbl.rows[ri], ri, rowHeight);
       }
       this.paintRow(tbl, tbl.rows[ri], ri, laid, x0 + (tbl.props.indent ?? 0), widths, rowHeight);
@@ -1760,6 +1876,7 @@ function offsetItem(item: PageItem, dx: number, dy: number): void {
       break;
     case "rect":
     case "image":
+    case "path":
       item.x += dx;
       item.y += dy;
       break;
