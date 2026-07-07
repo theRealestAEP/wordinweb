@@ -6,6 +6,8 @@ import { setListType, setListLevel } from "../src/edit/lists.js";
 import { setLink, removeLink, linkAt } from "../src/edit/links.js";
 import { adjustIndent, setParagraphSpacing } from "../src/edit/paragraph.js";
 import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
+import { applyTableOp } from "../src/edit/tables.js";
+import { XmlElement } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, wrapDocument, p } from "./helpers.js";
 import { Paragraph, Run, TextContent } from "../src/model.js";
@@ -496,5 +498,66 @@ describe("list levels", () => {
     expect((doc.sections[0].blocks[0] as Paragraph).props.numbering?.ilvl).toBe(1);
     expect(setListLevel(doc, [t], -1)).toBe(true);
     expect(setListLevel(doc, [t], -1)).toBe(false); // clamped at 0
+  });
+});
+
+describe("cell merge/split", () => {
+  const TBL = `<w:tbl>
+    <w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>
+    <w:tr>
+      <w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>
+      <w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc>
+    </w:tr>
+    <w:tr>
+      <w:tc><w:p><w:r><w:t>A2</w:t></w:r></w:p></w:tc>
+      <w:tc><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc>
+    </w:tr>
+  </w:tbl>`;
+  const tOf = (doc: DocxDocument, text: string): XmlElement => {
+    let found: XmlElement | undefined;
+    const walk = (e: XmlElement) => {
+      if (e.name.endsWith("t") && e.text === text) found = e;
+      for (const c of e.children) walk(c);
+    };
+    for (const root of doc.editableRoots()) walk(root);
+    if (!found) throw new Error("t not found: " + text);
+    return found;
+  };
+
+  it("merges right (gridSpan + content) and splits back", () => {
+    const doc = loadDoc(TBL + p("after"));
+    expect(applyTableOp(doc, tOf(doc, "A1"), "mergeRight")).toBe(true);
+    let tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error();
+    expect(tbl.rows[0].cells.length).toBe(1);
+    expect(tbl.rows[0].cells[0].props.gridSpan).toBe(2);
+    expect(applyTableOp(doc, tOf(doc, "A1"), "splitCell")).toBe(true);
+    tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error();
+    expect(tbl.rows[0].cells.length).toBe(2);
+  });
+
+  it("merges down (vMerge) and splits back", () => {
+    const doc = loadDoc(TBL + p("after"));
+    expect(applyTableOp(doc, tOf(doc, "A1"), "mergeDown")).toBe(true);
+    let tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error();
+    expect(tbl.rows[0].cells[0].props.vMerge).toBe("restart");
+    expect(tbl.rows[1].cells[0].props.vMerge).toBe("continue");
+    expect(applyTableOp(doc, tOf(doc, "A1"), "splitCell")).toBe(true);
+    tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error();
+    expect(tbl.rows[0].cells[0].props.vMerge).toBeUndefined();
+    expect(tbl.rows[1].cells[0].props.vMerge).toBeUndefined();
+  });
+
+  it("sets cell shading and vertical alignment", () => {
+    const doc = loadDoc(TBL + p("after"));
+    expect(applyTableOp(doc, tOf(doc, "B2"), { kind: "cellShading", fill: "FFF2CC" })).toBe(true);
+    expect(applyTableOp(doc, tOf(doc, "B2"), { kind: "cellVAlign", v: "center" })).toBe(true);
+    const tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error();
+    expect(tbl.rows[1].cells[1].props.shading?.toUpperCase()).toContain("FFF2CC");
+    expect(tbl.rows[1].cells[1].props.verticalAlign).toBe("center");
   });
 });
