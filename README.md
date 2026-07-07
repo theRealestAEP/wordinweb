@@ -77,6 +77,11 @@ footnotes, custom XML, embedded fonts survive edits unscathed).
 Supported today: bold, italic, underline, strike, font size, font family,
 text color, highlight — over any selection, including partial runs.
 
+## Docs
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the parse → layout → render pipeline fits together
+- [`docs/DISCOVERIES.md`](docs/DISCOVERIES.md) — ledger of non-obvious Word behaviors we measured (justify pack-vs-break rule, tcW/grid autofit semantics, retina hairline antialiasing, canvas ligature measurement, …) and the probe methodology that established them
+
 ## Roadmap
 
 - [ ] Editing phase 2: caret + text insert/delete, paragraph-level edits (alignment, indents, spacing), then page-layout edits (margins, sections)
