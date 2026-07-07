@@ -85,6 +85,17 @@ bottomed every glyph box on the line box (flex-end + line-height), so
 superscript rendered as small text sitting mid-line. Baseline-shifted runs
 now carry an explicit glyph box (`glyphTop`/`glyphBoxH` on `TextItem`).
 
+## Math (OMML)
+
+### Word's inline math geometry (measured from parity-math at 11pt)
+Cambria Math with letters as Unicode math-italic codepoints; scripts at
+**8/11** of the base size; superscript baseline **+4/11 em**; inline
+fraction numerator baseline **+6.5/11 em**, denominator **−5.5/11 em**,
+with a **0.75/11 em** rule centered **+3.125/11 em** above the baseline
+(the math axis); medium spacing around binary operators. Implemented in
+`layout/math.ts`; pieces render as baseline-anchored glyph boxes and the
+rule as a filled rect. Line-break parity: 0 mismatches vs the reference.
+
 ## Tables
 
 ### Word ignores authored grids unless cells carry tcW

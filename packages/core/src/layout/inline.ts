@@ -10,6 +10,7 @@ import {
 } from "../model.js";
 import { FontSpec, TextSource } from "./types.js";
 import { TextMeasurer } from "./measure.js";
+import { MathBox, layoutMath } from "./math.js";
 import { XmlElement } from "../xml.js";
 
 /** Resolves field instructions to display text at layout time. */
@@ -61,11 +62,15 @@ interface DrawingAtom {
   kind: "drawing";
   drawing: DrawingContent;
 }
+interface MathAtom {
+  kind: "math";
+  box: MathBox;
+}
 interface BreakAtom {
   kind: "break";
   breakType: "line" | "page" | "column";
 }
-type Atom = FragAtom | SpaceAtom | TabAtom | ImageAtom | DrawingAtom | BreakAtom;
+type Atom = FragAtom | SpaceAtom | TabAtom | ImageAtom | DrawingAtom | MathAtom | BreakAtom;
 
 export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
   let size = props.size ?? 14.666;
@@ -103,6 +108,7 @@ export interface LineSpan {
     srcDrawing?: XmlElement;
   };
   drawing?: DrawingContent;
+  math?: MathBox;
   props: RunProps;
   font: FontSpec;
   href?: string;
@@ -357,6 +363,16 @@ export function breakParagraph(
       x += atom.width;
       continue;
     }
+    if (atom.kind === "math") {
+      const w = atom.box.width;
+      if (curLineWidth > 0 && x + w > lineStartX(lineIndex) + availFor(lineIndex)) {
+        flush(false, false);
+      }
+      cur.push({ x, width: w, math: atom.box, props: {}, font: fontOf({}, fallbackFamily) });
+      curLineWidth += w;
+      x += w;
+      continue;
+    }
     if (atom.kind === "image" || atom.kind === "drawing") {
       const w = atom.kind === "image" ? atom.width : atom.drawing.width;
       const h = atom.kind === "image" ? atom.height : atom.drawing.height;
@@ -569,7 +585,11 @@ function finishLine(
     for (const s of spans) {
       if (s.image) consider(s.font, s.image.height);
       else if (s.drawing) consider(s.font, s.drawing.height);
-      else consider(s.font);
+      else if (s.math) {
+        maxAscent = Math.max(maxAscent, s.math.ascent);
+        maxDescent = Math.max(maxDescent, s.math.descent);
+        maxNatural = Math.max(maxNatural, s.math.ascent + s.math.descent);
+      } else consider(s.font);
     }
   }
 
@@ -648,6 +668,11 @@ function buildAtoms(
         case "drawing":
           atoms.push({ kind: "drawing", drawing: content });
           break;
+        case "math": {
+          const size = props.size ?? 14.666;
+          atoms.push({ kind: "math", box: layoutMath(content.nodes, size, measurer) });
+          break;
+        }
         case "noteRef": {
           const text = content.self
             ? (fields.selfNoteMark?.() ?? "")

@@ -160,6 +160,18 @@ export interface ImageContent {
   /** Source w:drawing (or pict) element, for resize/move editing. */
   srcDrawing?: XmlElement;
 }
+/** OMML equation node (subset: runs, scripts, fractions, radicals). */
+export type MathNode =
+  | { t: "run"; text: string }
+  | { t: "sup" | "sub"; base: MathNode[]; script: MathNode[] }
+  | { t: "frac"; num: MathNode[]; den: MathNode[] }
+  | { t: "rad"; e: MathNode[] };
+
+export interface MathContent {
+  kind: "math";
+  nodes: MathNode[];
+}
+
 export interface FieldContent {
   kind: "field";
   /** Raw field instruction, e.g. ` PAGE \\* MERGEFORMAT `. */
@@ -279,6 +291,7 @@ export interface NoteRefContent {
 }
 
 export type RunContent =
+  | MathContent
   | TextContent
   | BreakContent
   | TabContent
