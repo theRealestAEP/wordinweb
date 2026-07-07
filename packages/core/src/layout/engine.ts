@@ -842,6 +842,8 @@ class Engine {
             glyphTop: baseline - piece.dy - m.ascent,
             glyphBoxH: m.ascent + m.descent,
             mathSrc: span.mathSrc,
+            mathScaleY: piece.scaleY,
+            mathScaleAnchor: piece.scaleAnchor,
           });
         }
         for (const rule of span.math.rules) {

@@ -35,6 +35,10 @@ export interface TextItem {
   /** Footnote/endnote id referenced by this run (registration happens when
    * the item lands on a real page - split table rows carry it across). */
   noteId?: number;
+  /** Vertical stretch for tall delimiter glyphs (Word's glyph variants). */
+  mathScaleY?: number;
+  /** Stretch anchor above the baseline, px. */
+  mathScaleAnchor?: number;
   /** Line box for selection/highlight backgrounds. */
   lineTop: number;
   lineHeight: number;
