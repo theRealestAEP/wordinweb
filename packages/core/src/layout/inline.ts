@@ -133,6 +133,11 @@ export interface LineBox {
   naturalHeight: number;
   /** Final line height after spacing rules. */
   height: number;
+  /** Extent that must fit above the body bottom: the font box (baseline +
+   * raw descent). Line-spacing leading below the baseline may overhang the
+   * bottom margin in Word (msa p2: a 1.15-spaced line whose full box crosses
+   * the limit still fits because its font box does not). */
+  fitHeight: number;
   /** True when the line ends the paragraph or is terminated by explicit break. */
   isLast: boolean;
   endsWithBreak: boolean;
@@ -319,12 +324,20 @@ export function breakParagraph(
     x = lineStartX(lineIndex);
   };
 
+  let flushedTrailingBreak = false;
   for (let ai = 0; ai < atoms.length; ai++) {
     const atom = atoms[ai];
     if (atom.kind !== "frag") packUntilSpace = false;
     if (atom.kind === "break") {
+      // A page/column break with nothing after it in the paragraph keeps the
+      // paragraph mark on the SAME line as the break (Word puts the pilcrow
+      // right after the break marker on the old page) - no empty line is
+      // carried to the new page. sample.docx p2 starts at the body top in
+      // Word because of this.
+      const trailing = atom.breakType !== "line" && ai === atoms.length - 1;
       if (atom.breakType === "line") flush(false, true);
-      else flush(false, true, atom.breakType);
+      else flush(trailing, true, atom.breakType);
+      if (trailing) flushedTrailingBreak = true;
       continue;
     }
     if (atom.kind === "tab") {
@@ -480,7 +493,7 @@ export function breakParagraph(
     x += atom.width;
   }
 
-  flush(true, false);
+  if (!flushedTrailingBreak) flush(true, false);
   return { lines, props, anchors };
 }
 
@@ -565,6 +578,7 @@ function finishLine(
 ): LineBox {
   let maxAscent = 0;
   let maxDescent = 0;
+  let maxRawDescent = 0;
   let maxNatural = 0;
 
   const consider = (font: FontSpec, imageHeight?: number) => {
@@ -575,7 +589,8 @@ function finishLine(
     }
     const m = measurer.metrics(font);
     maxAscent = Math.max(maxAscent, m.ascent);
-    maxDescent = Math.max(maxDescent, m.descent);
+    maxDescent = Math.max(maxDescent, m.lineDescent ?? m.descent);
+    maxRawDescent = Math.max(maxRawDescent, m.descent);
     maxNatural = Math.max(maxNatural, m.lineHeight);
   };
 
@@ -590,12 +605,18 @@ function finishLine(
       else if (s.math) {
         maxAscent = Math.max(maxAscent, s.math.ascent);
         maxDescent = Math.max(maxDescent, s.math.descent);
+        maxRawDescent = Math.max(maxRawDescent, s.math.descent);
         maxNatural = Math.max(maxNatural, s.math.ascent + s.math.descent);
       } else consider(s.font);
     }
   }
 
   const natural = Math.max(maxNatural, maxAscent + maxDescent);
+  // Heights stay RAW: Word accumulates raw line heights and quantizes the
+  // CUMULATIVE baseline positions to quarter-points at paint time (sample
+  // p2: gaps alternate 13.50/13.25pt around the raw 13.428 - error
+  // diffusion, not per-line rounding). The engine snaps baselines when
+  // emitting items.
   let height = natural;
   const ls = props.lineSpacing;
   if (ls) {
@@ -611,6 +632,7 @@ function finishLine(
     maxDescent,
     naturalHeight: natural,
     height,
+    fitHeight: Math.min(height, natural - maxDescent + maxRawDescent),
     isLast,
     endsWithBreak,
   };

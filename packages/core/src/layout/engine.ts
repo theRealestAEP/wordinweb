@@ -21,7 +21,7 @@ import {
   breakParagraph,
   fontOf,
 } from "./inline.js";
-import { TextMeasurer, createMeasurer } from "./measure.js";
+import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
 import { LaidOutPage, LayoutResult, PageItem } from "./types.js";
 
 export interface LayoutOptions {
@@ -504,7 +504,10 @@ class Engine {
       let skipTo: number | undefined;
       const floats = this.floats.get(page) ?? [];
       for (const f of floats) {
-        if (f.y1 <= y0 || f.y0 >= y1) continue;
+        // Boundary-touching counts as overlap: Word narrows the line whose
+        // top sits exactly at the float's bottom (parity-wrapmodes: a 72px
+        // image over 18px lines wraps five rows, not four).
+        if (f.y1 < y0 - 0.25 || f.y0 > y1 - 0.25) continue;
         if (f.mode === "topAndBottom") {
           skipTo = Math.max(skipTo ?? 0, f.y1 - paraTop + 2);
           continue;
@@ -631,7 +634,7 @@ class Engine {
       let onPartialPage = !this.pageIsEmptyAtCursor();
       for (let li = 0; li < lines.length; li++) {
         simY += lines[li].floatYOffset ?? 0;
-        if (simY + lines[li].height > bottom + 0.01 && li > segStart) {
+        if (simY + lines[li].fitHeight > bottom + 0.01 && li > segStart) {
           let breakAt = li;
           if (widow) {
             // Orphan: a lone first line at the bottom → push whole paragraph.
@@ -641,6 +644,10 @@ class Engine {
             // Widow: a lone last line on the next page → take one more with it.
             else if (breakAt === lines.length - 1 && breakAt - segStart >= 2) {
               breakAt = li - 1;
+              // The pull-back can leave a lone first line at the bottom —
+              // the orphan rule cascades and the whole paragraph moves
+              // (benchmark p2: 3-line filler, 2 fit, Word pushes all 3).
+              if (breakAt - segStart === 1 && segStart === 0 && onPartialPage) breakAt = 0;
             }
           }
           // Progress guards: never re-add an existing break or break behind
@@ -705,7 +712,8 @@ class Engine {
       // A line referencing footnotes must fit above the space its own
       // footnotes will claim, so line and note land on the same page.
       const pendingNotes = this.pendingNoteHeight(line);
-      const overflow = this.y + line.height > this.bodyBottom - pendingNotes + 0.01 && !this.pageIsEmptyAtCursor();
+      const overflow =
+        this.y + line.fitHeight > this.bodyBottom - pendingNotes + 0.01 && !this.pageIsEmptyAtCursor();
       if ((planned || overflow) && li > fragStartLine) {
         closeFragment(li, false);
         this.nextColumn();
@@ -736,7 +744,9 @@ class Engine {
   }
 
   private emitLine(line: LineBox, page: InternalPage, originX: number, topY: number): void {
-    const baseline = topY + line.height - line.maxDescent;
+    // Word quantizes painted baseline positions to quarter-points (error-
+    // diffused: the cursor accumulates raw heights, each baseline snaps).
+    const baseline = quantizeQuarterPt(topY + line.height - line.maxDescent);
     for (const span of line.spans) {
       if (span.noteId !== undefined) this.registerFootnote(span.noteId, page);
     }
@@ -1248,6 +1258,30 @@ class Engine {
   /** Effective default cell margins: direct tblCellMar, else the table
    * style chain, else the default table style, else 0 (the spec default —
    * Word's usual 108-twip side margins come from the TableNormal style). */
+  /**
+   * Word treats trHeight as the height of the cell CONTENT box, not the full
+   * row: hRule=atLeast rows measure trHeight + top/bottom cell margins + the
+   * row's border share, and hRule=exact rows measure trHeight + the top
+   * margin only (probe-trheight: atLeast 785.9tw + 100tw margins + sz8
+   * borders -> 50.25pt row; exact 800tw -> 45pt).
+   */
+  private rowHeightFromTrHeight(tbl: Table, row: TableRow, ri: number, contentHeight: number): number {
+    const trHeight = row.props.height!;
+    const defaults = this.cellMarginsOf(tbl);
+    let topPad = defaults.top ?? 0;
+    let bottomPad = defaults.bottom ?? 0;
+    for (const cell of row.cells) {
+      if (cell.props.margins?.top !== undefined) topPad = Math.max(topPad, cell.props.margins.top);
+      if (cell.props.margins?.bottom !== undefined) bottomPad = Math.max(bottomPad, cell.props.margins.bottom);
+    }
+    if (row.props.heightRule === "exact") return trHeight + topPad;
+    const tb = tbl.props.borders;
+    const bw = (b?: Border) => (b && b.style !== "none" ? b.width : 0);
+    const borderPad =
+      (bw(ri === 0 ? tb?.top : tb?.insideH) + bw(ri === tbl.rows.length - 1 ? tb?.bottom : tb?.insideH)) / 2;
+    return Math.max(contentHeight, trHeight + topPad + bottomPad + borderPad);
+  }
+
   private cellMarginsOf(tbl: Table): { top?: number; right?: number; bottom?: number; left?: number } {
     // Word insets cell content ~0.75pt (1px) from the rules even when the
     // effective cell margin is zero (measured: benchmark table, text x0
@@ -1304,10 +1338,7 @@ class Engine {
       let laid = this.layoutRow(tbl, row, ri, widths);
       let rowHeight = laid.height;
       if (row.props.height !== undefined) {
-        rowHeight =
-          row.props.heightRule === "exact"
-            ? row.props.height
-            : Math.max(rowHeight, row.props.height);
+        rowHeight = this.rowHeightFromTrHeight(tbl, row, ri, rowHeight);
       }
       const advance = () => {
         this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
@@ -1413,10 +1444,7 @@ class Engine {
       const laid = this.layoutRow(tbl, tbl.rows[ri], ri, widths, fields);
       let rowHeight = laid.height;
       if (tbl.rows[ri].props.height !== undefined) {
-        rowHeight =
-          tbl.rows[ri].props.heightRule === "exact"
-            ? tbl.rows[ri].props.height!
-            : Math.max(rowHeight, tbl.rows[ri].props.height!);
+        rowHeight = this.rowHeightFromTrHeight(tbl, tbl.rows[ri], ri, rowHeight);
       }
       this.paintRow(tbl, tbl.rows[ri], ri, laid, x0 + (tbl.props.indent ?? 0), widths, rowHeight);
       this.y += rowHeight;
