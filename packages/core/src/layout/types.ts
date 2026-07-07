@@ -32,6 +32,9 @@ export interface TextItem {
   text: string;
   props: RunProps;
   font: FontSpec;
+  /** Footnote/endnote id referenced by this run (registration happens when
+   * the item lands on a real page - split table rows carry it across). */
+  noteId?: number;
   /** Line box for selection/highlight backgrounds. */
   lineTop: number;
   lineHeight: number;
