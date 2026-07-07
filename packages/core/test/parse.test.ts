@@ -273,3 +273,65 @@ describe("document parsing", () => {
     expect(saved.pkg.text("word/document.xml")).not.toContain("commentReference");
   });
 });
+
+describe("tracked changes", () => {
+  const XML = `<w:p>
+    <w:r><w:t xml:space="preserve">kept </w:t></w:r>
+    <w:ins w:id="1" w:author="A"><w:r><w:t xml:space="preserve">added </w:t></w:r></w:ins>
+    <w:del w:id="2" w:author="A"><w:r><w:delText xml:space="preserve">removed </w:delText></w:r></w:del>
+    <w:r><w:t>tail</w:t></w:r>
+  </w:p>`;
+  const textOf = (doc: DocxDocument): string => {
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error();
+    let out = "";
+    for (const c of para.children) {
+      const runs = c.type === "run" ? [c] : c.runs;
+      for (const r of runs) for (const t of r.content) if (t.kind === "text") out += t.text;
+    }
+    return out;
+  };
+
+  it("final view keeps insertions and hides deletions", () => {
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(XML) }));
+    expect(textOf(doc)).toBe("kept added tail");
+  });
+
+  it("markup view shows both, styled", () => {
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(XML) }));
+    doc.setRevisionView("markup");
+    expect(textOf(doc)).toBe("kept added removed tail");
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error();
+    const runs = para.children.filter((c) => c.type === "run");
+    const added = runs.find((r) => r.type === "run" && r.content.some((c) => c.kind === "text" && c.text.includes("added")));
+    const removed = runs.find((r) => r.type === "run" && r.content.some((c) => c.kind === "text" && c.text.includes("removed")));
+    expect(added && added.type === "run" ? added.props.underline : "").toBe("single");
+    expect(removed && removed.type === "run" ? removed.props.strike : false).toBe(true);
+    // back to final
+    doc.setRevisionView("final");
+    expect(textOf(doc)).toBe("kept added tail");
+  });
+});
+
+describe("OMML math", () => {
+  it("extracts a legible linear string from equations", () => {
+    const XML = `<w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+      <w:r><w:t xml:space="preserve">Euler: </w:t></w:r>
+      <m:oMath>
+        <m:sSup><m:e><m:r><m:t>e</m:t></m:r></m:e><m:sup><m:r><m:t>x</m:t></m:r></m:sup></m:sSup>
+        <m:r><m:t>=1+</m:t></m:r>
+        <m:f><m:num><m:r><m:t>x</m:t></m:r></m:num><m:den><m:r><m:t>1!</m:t></m:r></m:den></m:f>
+      </m:oMath>
+    </w:p>`;
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(XML) }));
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error();
+    let text = "";
+    for (const c of para.children) {
+      const runs = c.type === "run" ? [c] : c.runs;
+      for (const r of runs) for (const t of r.content) if (t.kind === "text") text += t.text;
+    }
+    expect(text).toBe("Euler: e^x=1+x⁄" + "1!");
+  });
+});

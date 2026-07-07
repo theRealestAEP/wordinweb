@@ -109,6 +109,50 @@ export function renderToDom(
   };
 }
 
+/**
+ * Print the rendered pages (browser print -> paper or PDF): clones the page
+ * DOM into a hidden same-origin iframe sized to the document's page, strips
+ * screen chrome (shadows, gaps), and invokes the print dialog.
+ */
+export function printPages(root: HTMLElement, pageWidthPx: number, pageHeightPx: number): void {
+  const iframe = document.createElement("iframe");
+  iframe.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;";
+  document.body.appendChild(iframe);
+  const idoc = iframe.contentDocument;
+  if (!idoc) return;
+  idoc.open();
+  idoc.write("<!doctype html><html><head></head><body></body></html>");
+  idoc.close();
+  const base = idoc.createElement("base");
+  base.href = document.location.href;
+  idoc.head.appendChild(base);
+  // Carry over the host page's styles (webfonts, the dxw stylesheet).
+  for (const node of Array.from(document.head.querySelectorAll("style, link[rel=stylesheet]"))) {
+    idoc.head.appendChild(idoc.importNode(node, true));
+  }
+  const style = idoc.createElement("style");
+  style.textContent = `
+    @page { size: ${pageWidthPx / 96}in ${pageHeightPx / 96}in; margin: 0; }
+    html, body { margin: 0; padding: 0; }
+    .dxw-pages { display: block !important; padding: 0 !important; gap: 0 !important; }
+    .dxw-page { box-shadow: none !important; margin: 0 !important; break-after: page; }
+    .dxw-comment-card, .dxw-hf-marker { display: none !important; }
+  `;
+  idoc.head.appendChild(style);
+  idoc.body.appendChild(idoc.importNode(root, true));
+  const win = iframe.contentWindow;
+  const cleanup = () => setTimeout(() => iframe.remove(), 500);
+  if (win) {
+    win.addEventListener("afterprint", cleanup);
+    // Give cloned images/fonts a beat to resolve before the dialog.
+    setTimeout(() => {
+      win.focus();
+      win.print();
+    }, 150);
+    setTimeout(cleanup, 60_000);
+  }
+}
+
 function renderPage(
   doc: DocxDocument,
   page: LaidOutPage,

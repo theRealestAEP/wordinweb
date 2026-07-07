@@ -87,6 +87,11 @@ export class DocxDocument {
   private numberingPart: string | null = null;
   private numberingRoot: XmlElement | null = null;
   private numberingDirty = false;
+  /** Retained footnotes.xml tree (footnote insertion + save round-trip). */
+  private footnotesPart: string | null = null;
+  private footnotesRoot: XmlElement | null = null;
+  private footnotesDirty = false;
+  private footnotesRels: Relationships = new Map();
   /** Serialize retained optional parts only once actually mutated, keeping
    * untouched parts byte-identical through save(). */
   private stylesDirty = false;
@@ -96,7 +101,9 @@ export class DocxDocument {
   private readonly docPart: string;
   private readonly docRoot: XmlElement;
   private readonly hfParts: { relId: string; target: string; root: XmlElement; isHeader: boolean; rels: Relationships }[] = [];
-  private readonly ctxBase: { theme: Theme };
+  private readonly ctxBase: { theme: Theme; revisionView?: "final" | "markup" };
+  /** Tracked-changes display mode; refresh() re-derives after changes. */
+  revisionView: "final" | "markup" = "final";
   private readonly relsPath: string;
   private relsRoot: XmlElement | null = null;
   private contentTypesRoot: XmlElement | null = null;
@@ -112,6 +119,7 @@ export class DocxDocument {
     const themeXml = this.readXmlOptional(docDir + "theme/theme1.xml");
     this.theme = parseTheme(themeXml);
     this.ctxBase = { theme: this.theme };
+    this.ctxBase.revisionView = this.revisionView;
 
     this.stylesPart = docDir + "styles.xml";
     this.stylesRoot = this.readXmlOptional(this.stylesPart) ?? null;
@@ -163,7 +171,9 @@ export class DocxDocument {
       this.hfParts.push({ relId: rel.id, target: rel.target, root, isHeader, rels: partRels });
     }
 
-    // Footnote/endnote parts (static: notes aren't editable in v1).
+    // Footnote/endnote parts. Footnotes retain their tree so insertion can
+    // mutate and serialize it; note bodies stay non-editable (source refs
+    // stripped by the parser).
     for (const rel of this.documentRels.values()) {
       const isFn = rel.type.endsWith("/footnotes");
       const isEn = rel.type.endsWith("/endnotes");
@@ -171,6 +181,11 @@ export class DocxDocument {
       const root = this.readXmlOptional(rel.target);
       if (!root) continue;
       const partRels = parseRelationships(this.readXmlOptional(relsPathFor(rel.target)), rel.target);
+      if (isFn) {
+        this.footnotesPart = rel.target;
+        this.footnotesRoot = root;
+        this.footnotesRels = partRels;
+      }
       const notes = parseNotesPart(root, { ...this.ctxBase, rels: partRels });
       for (const [id, blocks] of notes) (isFn ? this.footnotes : this.endnotes).set(id, blocks);
     }
@@ -182,6 +197,13 @@ export class DocxDocument {
    * Re-derive the document model from the retained XML trees. Called after
    * edit commands mutate the XML.
    */
+  /** Switch tracked-changes display and re-derive the model. */
+  setRevisionView(view: "final" | "markup"): void {
+    this.revisionView = view;
+    this.ctxBase.revisionView = view;
+    this.refresh();
+  }
+
   refresh(): void {
     const body = child(this.docRoot, "body");
     if (!body) throw new Error("document.xml has no w:body");
@@ -275,13 +297,14 @@ export class DocxDocument {
       children: [],
       text: "",
     };
-    if (this.relsRoot) {
+    {
+      const rels = this.ensureRelsRoot();
       let maxId = 0;
-      for (const r of this.relsRoot.children) {
+      for (const r of rels.children) {
         const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
         if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
       }
-      this.relsRoot.children.push({
+      rels.children.push({
         name: "Relationship",
         attrs: {
           Id: `rId${maxId + 1}`,
@@ -342,13 +365,14 @@ export class DocxDocument {
       children: [],
       text: "",
     };
-    if (this.relsRoot) {
+    {
+      const rels = this.ensureRelsRoot();
       let maxId = 0;
-      for (const r of this.relsRoot.children) {
+      for (const r of rels.children) {
         const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
         if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
       }
-      this.relsRoot.children.push({
+      rels.children.push({
         name: "Relationship",
         attrs: {
           Id: `rId${maxId + 1}`,
@@ -382,6 +406,84 @@ export class DocxDocument {
     this.numberingDirty = true;
   }
 
+  /**
+   * Retained footnotes tree. With create=true, a missing footnotes.xml part
+   * is created and registered (with Word's required separator footnotes) so
+   * inserted footnotes serialize and round-trip.
+   */
+  footnotesTree(create = false): XmlElement | null {
+    if (this.footnotesRoot || !create) return this.footnotesRoot;
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    this.footnotesPart = docDir + "footnotes.xml";
+    const sep = (id: string, type: string, refEl: string): XmlElement => ({
+      name: "w:footnote",
+      attrs: { "w:type": type, "w:id": id },
+      children: [
+        {
+          name: "w:p",
+          attrs: {},
+          children: [
+            { name: "w:pPr", attrs: {}, children: [{ name: "w:spacing", attrs: { "w:after": "0", "w:line": "240", "w:lineRule": "auto" }, children: [], text: "" }], text: "" },
+            { name: "w:r", attrs: {}, children: [{ name: refEl, attrs: {}, children: [], text: "" }], text: "" },
+          ],
+          text: "",
+        },
+      ],
+      text: "",
+    });
+    this.footnotesRoot = {
+      name: "w:footnotes",
+      attrs: { "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main" },
+      children: [sep("-1", "separator", "w:separator"), sep("0", "continuationSeparator", "w:continuationSeparator")],
+      text: "",
+    };
+    {
+      const rels = this.ensureRelsRoot();
+      let maxId = 0;
+      for (const r of rels.children) {
+        const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+        if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+      }
+      rels.children.push({
+        name: "Relationship",
+        attrs: {
+          Id: `rId${maxId + 1}`,
+          Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes",
+          Target: "footnotes.xml",
+        },
+        children: [],
+        text: "",
+      });
+    }
+    if (this.contentTypesRoot) {
+      const partName = "/" + this.footnotesPart;
+      if (!this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) {
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: {
+            PartName: partName,
+            ContentType:
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+          },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    this.footnotesDirty = true;
+    return this.footnotesRoot;
+  }
+
+  markFootnotesChanged(): void {
+    this.footnotesDirty = true;
+    // Re-derive the id -> blocks map so layout sees the new note.
+    this.footnotes.clear();
+    if (this.footnotesRoot) {
+      const notes = parseNotesPart(this.footnotesRoot, { ...this.ctxBase, rels: this.footnotesRels });
+      for (const [id, blocks] of notes) this.footnotes.set(id, blocks);
+    }
+  }
+
   /** Called by comment edit commands after mutating the comments tree. */
   markCommentsChanged(): void {
     this.commentsDirty = true;
@@ -405,13 +507,14 @@ export class DocxDocument {
       children: [],
       text: "",
     };
-    if (this.relsRoot) {
+    {
+      const rels = this.ensureRelsRoot();
       let maxId = 0;
-      for (const r of this.relsRoot.children) {
+      for (const r of rels.children) {
         const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
         if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
       }
-      this.relsRoot.children.push({
+      rels.children.push({
         name: "Relationship",
         attrs: {
           Id: `rId${maxId + 1}`,
@@ -541,6 +644,9 @@ export class DocxDocument {
     if (this.numberingDirty && this.numberingRoot && this.numberingPart) {
       files[this.numberingPart] = strToU8(serializeXml(this.numberingRoot, true));
     }
+    if (this.footnotesDirty && this.footnotesRoot && this.footnotesPart) {
+      files[this.footnotesPart] = strToU8(serializeXml(this.footnotesRoot, true));
+    }
     if (this.relsRoot) files[this.relsPath] = strToU8(serializeXml(this.relsRoot, true));
     if (this.contentTypesRoot) files["[Content_Types].xml"] = strToU8(serializeXml(this.contentTypesRoot, true));
     return zipSync(files);
@@ -555,8 +661,7 @@ export class DocxDocument {
    * Add image bytes as a new media part + relationship (+ content-type
    * default). Returns the relationship id for use in a w:drawing.
    */
-  /** Register an external hyperlink relationship and return its rId. */
-  addHyperlinkRel(url: string): string {
+  private ensureRelsRoot(): XmlElement {
     if (!this.relsRoot) {
       this.relsRoot = {
         name: "Relationships",
@@ -565,13 +670,19 @@ export class DocxDocument {
         text: "",
       };
     }
+    return this.relsRoot;
+  }
+
+  /** Register an external hyperlink relationship and return its rId. */
+  addHyperlinkRel(url: string): string {
+    const rels = this.ensureRelsRoot();
     let maxId = 0;
-    for (const r of this.relsRoot.children) {
+    for (const r of rels.children) {
       const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
       if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
     }
     const id = `rId${maxId + 1}`;
-    this.relsRoot.children.push({
+    rels.children.push({
       name: "Relationship",
       attrs: {
         Id: id,

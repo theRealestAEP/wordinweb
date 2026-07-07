@@ -112,6 +112,30 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
   return para;
 }
 
+/** Flatten OMML to a readable linear string: m:t text with structure hints. */
+function ommlLinearText(el: XmlElement): string {
+  const ln = localName(el.name);
+  if (ln === "t") return el.text;
+  if (ln === "f") {
+    // fraction: num/den
+    const num = el.children.find((c) => localName(c.name) === "num");
+    const den = el.children.find((c) => localName(c.name) === "den");
+    return `${num ? ommlLinearText(num) : ""}\u2044${den ? ommlLinearText(den) : ""}`;
+  }
+  if (ln === "sSup" || ln === "sSub") {
+    const base = el.children.find((c) => localName(c.name) === "e");
+    const scr = el.children.find((c) => localName(c.name) === (ln === "sSup" ? "sup" : "sub"));
+    return `${base ? ommlLinearText(base) : ""}${ln === "sSup" ? "^" : "_"}${scr ? ommlLinearText(scr) : ""}`;
+  }
+  if (ln === "rad") {
+    const e = el.children.find((c) => localName(c.name) === "e");
+    return `\u221a(${e ? ommlLinearText(e) : ""})`;
+  }
+  let out = "";
+  for (const c of el.children) out += ommlLinearText(c);
+  return out;
+}
+
 function parseParaChildren(
   parent: XmlElement,
   ctx: DocParseContext,
@@ -126,6 +150,40 @@ function parseParaChildren(
       // Keep empty runs that carry an open complex field: the field content
       // is appended to the carrier when fldChar end arrives.
       if (run && (run.content.length > 0 || field.carrier === run)) out.push(run);
+    } else if (ln === "ins" || ln === "del") {
+      // Tracked changes. Final view: insertions read as normal text,
+      // deletions disappear. Markup view: both render, author-colored,
+      // insertions underlined and deletions struck through.
+      const markup = ctx.revisionView === "markup";
+      if (ln === "del" && !markup) continue;
+      const inner: ParaChild[] = [];
+      parseParaChildren(el, ctx, inner, field);
+      if (markup) {
+        const style = (r: Run) => {
+          r.props = {
+            ...r.props,
+            color: ln === "ins" ? "#C00000" : "#B0261C",
+            ...(ln === "ins" ? { underline: "single" } : { strike: true }),
+          };
+        };
+        for (const c of inner) {
+          if (c.type === "run") style(c);
+          else c.runs.forEach(style);
+        }
+      }
+      out.push(...inner);
+    } else if (ln === "oMath" || ln === "oMathPara") {
+      // OMML equations: render the linear text (every m:t in order, with /
+      // between fraction parts) so math is legible rather than lost. Full
+      // 2D math layout is out of scope.
+      const linear = ommlLinearText(el);
+      if (linear) {
+        out.push({
+          type: "run",
+          props: { italic: true },
+          content: [{ kind: "text", text: linear }],
+        });
+      }
     } else if (ln === "hyperlink") {
       const rid = attr(el, "id");
       const rel = rid ? ctx.rels.get(rid) : undefined;
@@ -202,6 +260,10 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
       case "t":
         if (field.mode === "result") field.cachedResult += el.text;
         else if (field.mode !== "instr") run.content.push({ kind: "text", text: el.text, srcT: el });
+        break;
+      case "delText":
+        // Deleted text (inside w:del); reaches here only in markup view.
+        run.content.push({ kind: "text", text: el.text, srcT: el });
         break;
       case "instrText":
         if (field.mode === "instr") field.instruction += el.text;

@@ -8,6 +8,7 @@ import { adjustIndent, setParagraphSpacing } from "../src/edit/paragraph.js";
 import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
 import { applyTableOp } from "../src/edit/tables.js";
 import { imageAltText, setImageAltText, replaceImageBlip } from "../src/edit/images.js";
+import { insertFootnote } from "../src/edit/notes.js";
 import { XmlElement } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, makeDocxWithMedia, wrapDocument, p } from "./helpers.js";
@@ -616,5 +617,19 @@ describe("image editing", () => {
     const para2 = doc.sections[0].blocks[0] as Paragraph;
     const img2 = (para2.children[0] as Run).content.find((c) => c.kind === "image");
     expect(img2 && img2.kind === "image" ? img2.part : "").toContain("media/image");
+  });
+});
+
+describe("insertFootnote", () => {
+  it("creates footnotes.xml on demand, splits at the caret, round-trips", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c) => c.kind === "text")!.srcT!;
+    const id = insertFootnote(doc, t, 15, "See Smith 2024.");
+    expect(id).toBe(1);
+    expect(doc.footnotes.get(1)).toBeTruthy();
+    // reference is between "needed" and " here"
+    const doc2 = DocxDocument.load(doc.save());
+    expect(doc2.footnotes.get(1)).toBeTruthy();
   });
 });
