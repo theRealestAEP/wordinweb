@@ -65,6 +65,7 @@ interface DrawingAtom {
 interface MathAtom {
   kind: "math";
   box: MathBox;
+  src?: XmlElement;
 }
 interface BreakAtom {
   kind: "break";
@@ -109,6 +110,7 @@ export interface LineSpan {
   };
   drawing?: DrawingContent;
   math?: MathBox;
+  mathSrc?: XmlElement;
   props: RunProps;
   font: FontSpec;
   href?: string;
@@ -368,7 +370,7 @@ export function breakParagraph(
       if (curLineWidth > 0 && x + w > lineStartX(lineIndex) + availFor(lineIndex)) {
         flush(false, false);
       }
-      cur.push({ x, width: w, math: atom.box, props: {}, font: fontOf({}, fallbackFamily) });
+      cur.push({ x, width: w, math: atom.box, mathSrc: atom.src, props: {}, font: fontOf({}, fallbackFamily) });
       curLineWidth += w;
       x += w;
       continue;
@@ -670,7 +672,7 @@ function buildAtoms(
           break;
         case "math": {
           const size = props.size ?? 14.666;
-          atoms.push({ kind: "math", box: layoutMath(content.nodes, size, measurer) });
+          atoms.push({ kind: "math", box: layoutMath(content.nodes, size, measurer), src: content.src });
           break;
         }
         case "noteRef": {

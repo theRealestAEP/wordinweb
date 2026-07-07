@@ -757,6 +757,7 @@ class Engine {
             lineHeight: line.height,
             glyphTop: baseline - piece.dy - m.ascent,
             glyphBoxH: m.ascent + m.descent,
+            mathSrc: span.mathSrc,
           });
         }
         for (const rule of span.math.rules) {

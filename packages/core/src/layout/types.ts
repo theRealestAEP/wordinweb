@@ -39,6 +39,8 @@ export interface TextItem {
    * the renderer anchors these instead of bottoming on the line box. */
   glyphTop?: number;
   glyphBoxH?: number;
+  /** Source m:oMath element when this text is a piece of an equation. */
+  mathSrc?: XmlElement;
   href?: string;
   /** Present for editable text (absent on numbering labels etc.). */
   src?: TextSource;

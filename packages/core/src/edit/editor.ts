@@ -6,6 +6,7 @@ import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
 import { moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
 import { listTypeAt, setListLevel } from "./lists.js";
+import { mathLinearOf, setMathLinear } from "./math.js";
 import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 import { SelectionSegment } from "./commands.js";
 import { adjustFloatingPosition, imageAltText, isFloatingDrawing, replaceImageBlip, setFloatingPosition, setImageAltText, setImageWrap } from "./images.js";
@@ -1143,6 +1144,15 @@ export class DocxEditor {
       return;
     }
     this.deselectImage();
+    // A click on an equation opens the inline math editor (Word: math zone).
+    const mathEl = (e.target as HTMLElement | null)?.closest?.("[data-dxw-math]") as HTMLElement | null;
+    if (mathEl) {
+      const binding = this.host.getHandle()?.bindings.find((b) => b.el === mathEl);
+      if (binding?.item.mathSrc) {
+        this.openMathEditor(binding.item.mathSrc, e.clientX, e.clientY);
+        return;
+      }
+    }
     let caret =
       this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     let region = caret ? this.regionOf(caret.t) : "body";
@@ -1236,6 +1246,61 @@ export class DocxEditor {
   }
 
   /** Which part tree the element lives in: document body or header/footer. */
+  private mathEditorEl: HTMLDivElement | null = null;
+
+  /** Inline equation editor: linear form in, OMML back out. */
+  private openMathEditor(oMathEl: XmlElement, clientX: number, clientY: number): void {
+    this.closeMathEditor();
+    this.hideCaret();
+    const box = document.createElement("div");
+    box.style.cssText =
+      "position:fixed;z-index:1000;background:#fff;border:1px solid #dadce0;border-radius:8px;" +
+      "box-shadow:0 4px 16px rgba(0,0,0,.18);padding:8px;display:flex;gap:6px;align-items:center;" +
+      "font:13px system-ui,sans-serif;";
+    box.style.left = `${Math.max(8, clientX - 140)}px`;
+    box.style.top = `${clientY + 14}px`;
+    const input = document.createElement("input");
+    input.value = mathLinearOf(this.host.doc, oMathEl);
+    input.title = "Linear math: x^2, x_i, {a+b}/{2}, √{x}";
+    input.style.cssText =
+      "width:260px;border:1px solid #dadce0;border-radius:6px;padding:5px 8px;outline:none;" +
+      "font:14px 'Cambria Math','STIX Two Math',serif;";
+    const apply = document.createElement("button");
+    apply.textContent = "Apply";
+    apply.style.cssText =
+      "border:1px solid #dadce0;border-radius:14px;padding:3px 12px;cursor:pointer;background:#1a73e8;color:#fff;";
+    const commitMath = () => {
+      this.host.history?.checkpoint();
+      if (setMathLinear(this.host.doc, oMathEl, input.value)) this.host.rerender();
+      this.closeMathEditor();
+      // Return keyboard focus to the document so undo works immediately.
+      this.host.container.focus({ preventScroll: true });
+    };
+    input.addEventListener("keydown", (ke) => {
+      ke.stopPropagation();
+      if (ke.key === "Enter") commitMath();
+      if (ke.key === "Escape") this.closeMathEditor();
+    });
+    apply.addEventListener("click", commitMath);
+    box.appendChild(input);
+    box.appendChild(apply);
+    document.body.appendChild(box);
+    this.mathEditorEl = box;
+    setTimeout(() => input.focus(), 0);
+    const close = (me: MouseEvent) => {
+      if (!box.contains(me.target as Node)) {
+        this.closeMathEditor();
+        document.removeEventListener("mousedown", close);
+      }
+    };
+    setTimeout(() => document.addEventListener("mousedown", close), 0);
+  }
+
+  private closeMathEditor(): void {
+    this.mathEditorEl?.remove();
+    this.mathEditorEl = null;
+  }
+
   /** Header/footer margin band under a client-space y, if any. */
   private hfBandAt(pageEl: HTMLElement, clientY: number): "header" | "footer" | null {
     const rect = pageEl.getBoundingClientRect();

@@ -9,6 +9,7 @@ import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
 import { applyTableOp } from "../src/edit/tables.js";
 import { imageAltText, setImageAltText, replaceImageBlip } from "../src/edit/images.js";
 import { insertFootnote } from "../src/edit/notes.js";
+import { linearizeMath, parseMathLinear, setMathLinear, mathLinearOf } from "../src/edit/math.js";
 import { XmlElement } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, makeDocxWithMedia, wrapDocument, p } from "./helpers.js";
@@ -631,5 +632,35 @@ describe("insertFootnote", () => {
     // reference is between "needed" and " here"
     const doc2 = DocxDocument.load(doc.save());
     expect(doc2.footnotes.get(1)).toBeTruthy();
+  });
+});
+
+describe("math editing", () => {
+  it("linear form round-trips through the parser", () => {
+    const cases = ["e^x=1+x+x/2", "a_i+b^{2y}", "{a+b}/{2c}", "√{x+1}"];
+    for (const c of cases) {
+      expect(linearizeMath(parseMathLinear(c))).toBe(c);
+    }
+  });
+
+  it("rewrites an equation from linear text", () => {
+    const XML = `<w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+      <m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>
+    </w:p>`;
+    const doc = loadDoc(XML);
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    const math = (para.children[0] as Run).content.find((c) => c.kind === "math");
+    if (!math || math.kind !== "math" || !math.src) throw new Error();
+    expect(setMathLinear(doc, math.src, "a^2+b^2=c^2")).toBe(true);
+    const para2 = doc.sections[0].blocks[0] as Paragraph;
+    const math2 = (para2.children[0] as Run).content.find((c) => c.kind === "math");
+    if (!math2 || math2.kind !== "math") throw new Error();
+    expect(mathLinearOf(doc, math2.src!)).toBe("a^2+b^2=c^2");
+    expect(math2.nodes.filter((n) => n.t === "sup").length).toBe(3);
+    // and it round-trips through save
+    const doc3 = DocxDocument.load(doc.save());
+    const para3 = doc3.sections[0].blocks[0] as Paragraph;
+    const math3 = (para3.children[0] as Run).content.find((c) => c.kind === "math");
+    expect(math3 && math3.kind === "math" ? mathLinearOf(doc3, math3.src!) : "").toBe("a^2+b^2=c^2");
   });
 });

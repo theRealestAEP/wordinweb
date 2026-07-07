@@ -170,6 +170,8 @@ export type MathNode =
 export interface MathContent {
   kind: "math";
   nodes: MathNode[];
+  /** Source m:oMath element (math editing). */
+  src?: XmlElement;
 }
 
 export interface FieldContent {
