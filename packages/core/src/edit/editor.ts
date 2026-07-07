@@ -61,6 +61,12 @@ export class DocxEditor {
   private dragSelecting = false;
   private caretEl: HTMLDivElement;
   private blinkTimer: ReturnType<typeof setInterval> | null = null;
+  /** Hidden textarea that carries keyboard focus: IME composition needs an
+   * editable target (a plain div never gets compositionstart). Keydown,
+   * copy/cut/paste all bubble from it to the container listeners. */
+  private imeEl: HTMLTextAreaElement;
+  private imeOverlay: HTMLSpanElement | null = null;
+  private composing = false;
 
   constructor(private host: EditorHost) {
     this.caretEl = document.createElement("div");
@@ -71,7 +77,65 @@ export class DocxEditor {
     s.pointerEvents = "none";
     s.display = "none";
     s.zIndex = "10";
+    this.imeEl = document.createElement("textarea");
+    const t = this.imeEl.style;
+    t.position = "absolute";
+    t.left = "0";
+    t.top = "0";
+    t.width = "1px";
+    t.height = "1px";
+    t.opacity = "0";
+    t.border = "0";
+    t.padding = "0";
+    t.resize = "none";
+    t.overflow = "hidden";
+    this.imeEl.setAttribute("autocorrect", "off");
+    this.imeEl.setAttribute("autocapitalize", "off");
+    this.imeEl.setAttribute("spellcheck", "false");
+    this.imeEl.tabIndex = -1;
   }
+
+  /** Focus the hidden text target (keeps IME working); falls back to the
+   * container if the textarea is not attached yet. */
+  private focusText(): void {
+    if (this.imeEl.isConnected) this.imeEl.focus({ preventScroll: true });
+    else this.host.container.focus({ preventScroll: true });
+  }
+
+  private onCompositionStart = (): void => {
+    this.composing = true;
+    const surface = this.caretEl.parentElement;
+    if (surface && this.caretEl.style.display !== "none") {
+      this.imeOverlay = document.createElement("span");
+      const o = this.imeOverlay.style;
+      o.position = "absolute";
+      o.left = this.caretEl.style.left;
+      const h = parseFloat(this.caretEl.style.height || "16");
+      o.top = this.caretEl.style.top;
+      o.font = `${Math.round(h * 0.82)}px sans-serif`;
+      o.lineHeight = this.caretEl.style.height;
+      o.textDecoration = "underline";
+      o.whiteSpace = "pre";
+      o.background = "rgba(26,115,232,0.08)";
+      o.zIndex = "10";
+      surface.appendChild(this.imeOverlay);
+    }
+  };
+
+  private onCompositionUpdate = (e: CompositionEvent): void => {
+    if (this.imeOverlay) this.imeOverlay.textContent = e.data;
+  };
+
+  private onCompositionEnd = (e: CompositionEvent): void => {
+    this.composing = false;
+    this.imeOverlay?.remove();
+    this.imeOverlay = null;
+    this.imeEl.value = "";
+    if (e.data) {
+      this.host.history?.checkpoint();
+      this.insertText(e.data);
+    }
+  };
 
   /** Re-apply editing chrome after the host re-renders the pages. */
   afterRender(): void {
@@ -438,6 +502,10 @@ export class DocxEditor {
     c.addEventListener("mousedown", this.onGripMouseDown, true);
     c.addEventListener("mouseup", this.onMouseUp);
     c.addEventListener("keydown", this.onKeyDown);
+    c.appendChild(this.imeEl);
+    this.imeEl.addEventListener("compositionstart", this.onCompositionStart);
+    this.imeEl.addEventListener("compositionupdate", this.onCompositionUpdate);
+    this.imeEl.addEventListener("compositionend", this.onCompositionEnd);
     c.addEventListener("copy", this.onCopy);
     c.addEventListener("cut", this.onCut);
     c.addEventListener("paste", this.onPaste);
@@ -451,6 +519,11 @@ export class DocxEditor {
     c.removeEventListener("mousedown", this.onGripMouseDown, true);
     c.removeEventListener("mouseup", this.onMouseUp);
     c.removeEventListener("keydown", this.onKeyDown);
+    this.imeEl.removeEventListener("compositionstart", this.onCompositionStart);
+    this.imeEl.removeEventListener("compositionupdate", this.onCompositionUpdate);
+    this.imeEl.removeEventListener("compositionend", this.onCompositionEnd);
+    this.imeEl.remove();
+    this.imeOverlay?.remove();
     c.removeEventListener("copy", this.onCopy);
     c.removeEventListener("cut", this.onCut);
     c.removeEventListener("paste", this.onPaste);
@@ -992,7 +1065,7 @@ export class DocxEditor {
 
     el.parentElement!.appendChild(overlay);
     this.imageOverlay = overlay;
-    this.host.container.focus({ preventScroll: true });
+    this.focusText();
   }
 
   private deleteSelectedImage(): void {
@@ -1173,7 +1246,7 @@ export class DocxEditor {
       // Finalize a drag-selection: keep it, don't collapse to a caret.
       this.dragSelecting = false;
       this.notifySelection();
-      this.host.container.focus({ preventScroll: true });
+      this.focusText();
       return;
     }
     this.deselectImage();
@@ -1221,7 +1294,7 @@ export class DocxEditor {
         this.clearSelection();
         this.caret = caret;
         this.positionCaret();
-        this.host.container.focus({ preventScroll: true });
+        this.focusText();
       } else {
         this.hideCaret();
       }
@@ -1237,7 +1310,7 @@ export class DocxEditor {
       this.clearSelection();
       this.caret = caret;
       this.positionCaret();
-      this.host.container.focus({ preventScroll: true });
+      this.focusText();
       return;
     } else if (region === "body") {
       this.inHeaderFooter = false;
@@ -1265,7 +1338,7 @@ export class DocxEditor {
     if (caret) {
       this.caret = caret;
       this.positionCaret();
-      this.host.container.focus({ preventScroll: true });
+      this.focusText();
     } else {
       this.hideCaret();
     }
@@ -1307,7 +1380,7 @@ export class DocxEditor {
       if (setMathLinear(this.host.doc, oMathEl, input.value)) this.host.rerender();
       this.closeMathEditor();
       // Return keyboard focus to the document so undo works immediately.
-      this.host.container.focus({ preventScroll: true });
+      this.focusText();
     };
     input.addEventListener("keydown", (ke) => {
       ke.stopPropagation();
@@ -1529,6 +1602,9 @@ export class DocxEditor {
   // ---------- keyboard ----------
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    // IME composition owns the keystream until compositionend delivers the
+    // final text (keydown arrives as isComposing / legacy keyCode 229).
+    if (this.composing || e.isComposing || e.keyCode === 229) return;
     // A selected image is deleted by Backspace/Delete regardless of caret
     // state (selecting an image hides the caret).
     if ((e.key === "Backspace" || e.key === "Delete") && this.selectedImage) {
@@ -1967,6 +2043,16 @@ export class DocxEditor {
     s.top = `${top}px`;
     s.height = `${Math.max(8, bottom - top)}px`;
     s.display = "block";
+    // Park the hidden input at the caret so the IME candidate window opens
+    // beside the text being composed (offset computed in container space -
+    // reparenting the focused textarea would blur it).
+    if (this.imeEl.isConnected) {
+      const cRect = this.host.container.getBoundingClientRect();
+      const surfRect = surface.getBoundingClientRect();
+      const zoom = this.host.zoom ?? 1;
+      this.imeEl.style.left = `${surfRect.left - cRect.left + xPx * zoom}px`;
+      this.imeEl.style.top = `${surfRect.top - cRect.top + top * zoom}px`;
+    }
     if (this.blinkTimer) clearInterval(this.blinkTimer);
     this.caretEl.style.opacity = "1";
     this.blinkTimer = setInterval(() => {
