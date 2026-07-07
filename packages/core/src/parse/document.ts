@@ -125,6 +125,25 @@ function parseOmml(el: XmlElement): MathNode[] {
   if (ln === "sSup") return [{ t: "sup", base: childrenOf("e"), script: childrenOf("sup") }];
   if (ln === "sSub") return [{ t: "sub", base: childrenOf("e"), script: childrenOf("sub") }];
   if (ln === "rad") return [{ t: "rad", e: childrenOf("e") }];
+  if (ln === "nary") {
+    const naryPr = el.children.find((ch) => localName(ch.name) === "naryPr");
+    const chrEl = naryPr && child(naryPr, "chr");
+    const chr = (chrEl && attr(chrEl, "val")) || "\u222b";
+    return [{ t: "nary", chr, sub: childrenOf("sub"), sup: childrenOf("sup"), e: childrenOf("e") }];
+  }
+  if (ln === "d") {
+    const dPr = el.children.find((ch) => localName(ch.name) === "dPr");
+    const beg = dPr && child(dPr, "begChr");
+    const end = dPr && child(dPr, "endChr");
+    const parts = el.children.filter((ch) => localName(ch.name) === "e").map((ch) => parseOmml(ch));
+    return [{ t: "dlm", beg: beg ? (attr(beg, "val") ?? "(") : "(", end: end ? (attr(end, "val") ?? ")") : ")", e: parts }];
+  }
+  if (ln === "m" && el.children.some((ch) => localName(ch.name) === "mr")) {
+    const rows = el.children
+      .filter((ch) => localName(ch.name) === "mr")
+      .map((mr) => mr.children.filter((ch) => localName(ch.name) === "e").map((ch) => parseOmml(ch)));
+    return [{ t: "mat", rows }];
+  }
   if (ln === "t") return el.text ? [{ t: "run", text: el.text }] : [];
   for (const c of el.children) out.push(...parseOmml(c));
   // merge adjacent runs
