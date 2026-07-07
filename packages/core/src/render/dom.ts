@@ -548,15 +548,17 @@ function renderText(item: TextItem): HTMLElement {
   el.textContent = item.text;
   el.style.position = "absolute";
   el.style.left = `${item.x}px`;
-  // Position by line top; baseline alignment via line-height trick would be
-  // imprecise across fonts, so anchor the glyph box: top = baseline - ascent.
-  el.style.top = `${item.lineTop}px`;
-  el.style.height = `${item.lineHeight}px`;
+  // Position by line top with glyphs bottomed on the line box. Baseline-
+  // shifted runs (superscript/subscript) instead anchor the exact glyph box
+  // the engine computed: top = baseline - ascent, height = ascent + descent.
+  el.style.top = `${item.glyphTop ?? item.lineTop}px`;
+  const boxH = item.glyphBoxH ?? item.lineHeight;
+  el.style.height = `${boxH}px`;
   el.style.display = "flex";
   el.style.alignItems = "flex-end";
   el.style.whiteSpace = "pre";
   el.style.font = cssFont(item.font);
-  el.style.lineHeight = `${item.lineHeight}px`;
+  el.style.lineHeight = `${boxH}px`;
   // Word (mac) rasterizes between Chrome's two smoothing modes: grayscale AA
   // alone reads too thin, subpixel too thick. Grayscale plus a hairline
   // stroke lands on Word's apparent weight; bold keeps subpixel (Word bold

@@ -68,7 +68,9 @@ type Atom = FragAtom | SpaceAtom | TabAtom | ImageAtom | DrawingAtom | BreakAtom
 export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
   let size = props.size ?? 14.666;
   if (props.verticalAlign === "superscript" || props.verticalAlign === "subscript") {
-    size *= 0.65;
+    // Word: 65% of the base size rounded to half-points (probe-vertalign:
+    // 11pt -> 7pt, 22pt -> 14.5pt). px -> half-points is x1.5.
+    size = Math.round(size * 1.5 * 0.65) / 1.5;
   }
   return {
     family: props.font ?? fallbackFamily,

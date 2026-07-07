@@ -35,6 +35,10 @@ export interface TextItem {
   /** Line box for selection/highlight backgrounds. */
   lineTop: number;
   lineHeight: number;
+  /** Exact glyph box for baseline-shifted runs (superscript/subscript):
+   * the renderer anchors these instead of bottoming on the line box. */
+  glyphTop?: number;
+  glyphBoxH?: number;
   href?: string;
   /** Present for editable text (absent on numbering labels etc.). */
   src?: TextSource;
