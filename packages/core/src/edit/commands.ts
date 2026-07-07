@@ -36,6 +36,8 @@ export interface RunFormatPatch {
   fontFamily?: string;
   /** Superscript/subscript; null returns the run to the baseline. */
   verticalAlign?: "superscript" | "subscript" | null;
+  /** Remove all direct character formatting (and character style). */
+  clear?: boolean;
 }
 
 /** A formatted char-range in the post-edit XML (for re-selection). */
@@ -231,6 +233,10 @@ function prefixAttrs(prefix: string, attrs: Record<string, string>): Record<stri
 }
 
 export function setRunProps(rEl: XmlElement, patch: RunFormatPatch): void {
+  if (patch.clear) {
+    rEl.children = rEl.children.filter((c) => localName(c.name) !== "rPr");
+    return;
+  }
   const rPr = ensureRPr(rEl);
   if (patch.bold !== undefined) {
     setProp(rPr, "b", patch.bold ? {} : { val: "0" });

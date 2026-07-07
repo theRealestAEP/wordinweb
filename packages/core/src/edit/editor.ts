@@ -5,6 +5,7 @@ import { ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
 import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
 import { moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
+import { listTypeAt, setListLevel } from "./lists.js";
 import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 import { SelectionSegment } from "./commands.js";
 import { adjustFloatingPosition, isFloatingDrawing, setFloatingPosition, setImageWrap } from "./images.js";
@@ -1402,6 +1403,17 @@ export class DocxEditor {
         this.commit();
       }
       return;
+    }
+    // Tab in a list item steps its level (Shift-Tab promotes) - Word UX.
+    if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey && this.caret) {
+      if (listTypeAt(this.host.doc, this.caret.t)) {
+        e.preventDefault();
+        this.host.history?.checkpoint();
+        if (setListLevel(this.host.doc, [this.caret.t], e.shiftKey ? -1 : 1)) {
+          this.commit();
+        }
+        return;
+      }
     }
     const meta = e.metaKey || e.ctrlKey;
     // Word parity: Ctrl/Cmd+Alt+1..6 apply Heading 1..6; +0 back to Normal.

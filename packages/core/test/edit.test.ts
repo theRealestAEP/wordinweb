@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import { applyRunFormat, SelectionSegment } from "../src/edit/commands.js";
 import { addComment } from "../src/edit/comments.js";
-import { setListType } from "../src/edit/lists.js";
+import { setListType, setListLevel } from "../src/edit/lists.js";
+import { setLink, removeLink, linkAt } from "../src/edit/links.js";
+import { adjustIndent, setParagraphSpacing } from "../src/edit/paragraph.js";
+import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, wrapDocument, p } from "./helpers.js";
 import { Paragraph, Run, TextContent } from "../src/model.js";
@@ -395,5 +398,103 @@ describe("setListType", () => {
     // toggle off
     expect(setListType(doc, [t], null)).toBe(true);
     expect((doc.sections[0].blocks[0] as Paragraph).props.numbering).toBeUndefined();
+  });
+});
+
+describe("hyperlinks", () => {
+  it("wraps a selection, reports and retargets, and unwraps", () => {
+    const doc = loadDoc(p("Visit our website today"));
+    const { run } = firstRun(doc);
+    expect(setLink(doc, [segFor(run, 6, 17)], "https://a.example")).toBe(true);
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    const link = para.children.find((c) => c.type === "hyperlink");
+    expect(link && link.type === "hyperlink" ? link.href : null).toBe("https://a.example");
+    expect(textOf(para)).toBe("Visit our website today");
+    // linkAt through the covered w:t
+    const linkT = (link && link.type === "hyperlink" ? link.runs[0].content[0] : null);
+    const tEl = linkT && linkT.kind === "text" ? linkT.srcT! : null;
+    expect(linkAt(doc, tEl!)).toBe("https://a.example");
+    // retarget
+    expect(setLink(doc, [{ run: (link as { runs: Run[] }).runs[0], t: tEl, start: 0, end: 3, props: {} }], "https://b.example")).toBe(true);
+    expect(linkAt(doc, tEl!)).toBe("https://b.example");
+    // round-trip
+    const doc2 = DocxDocument.load(doc.save());
+    const para2 = doc2.sections[0].blocks[0] as Paragraph;
+    const link2 = para2.children.find((c) => c.type === "hyperlink");
+    expect(link2 && link2.type === "hyperlink" ? link2.href : null).toBe("https://b.example");
+    // unwrap
+    expect(removeLink(doc, tEl!)).toBe(true);
+    const para3 = doc.sections[0].blocks[0] as Paragraph;
+    expect(para3.children.every((c) => c.type === "run")).toBe(true);
+    expect(textOf(para3)).toBe("Visit our website today");
+  });
+});
+
+describe("paragraph formatting", () => {
+  it("indents and outdents in half-inch steps with a floor at zero", () => {
+    const doc = loadDoc(p("target"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c) => c.kind === "text")!.srcT!;
+    expect(adjustIndent(doc, [t], 1)).toBe(true);
+    expect((doc.sections[0].blocks[0] as Paragraph).props.indentLeft).toBeCloseTo(48, 1); // 720tw = 48px
+    expect(adjustIndent(doc, [t], -1)).toBe(true);
+    expect((doc.sections[0].blocks[0] as Paragraph).props.indentLeft ?? 0).toBe(0);
+    expect(adjustIndent(doc, [t], -1)).toBe(false); // floored
+  });
+
+  it("sets line spacing and space before/after", () => {
+    const doc = loadDoc(p("target"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c) => c.kind === "text")!.srcT!;
+    expect(setParagraphSpacing(doc, [t], { lineMultiple: 1.5, afterPt: 12 })).toBe(true);
+    const props = (doc.sections[0].blocks[0] as Paragraph).props;
+    expect(props.lineSpacing?.rule).toBe("auto");
+    expect(props.lineSpacing?.value).toBeCloseTo(1.5, 2);
+  });
+});
+
+describe("find & replace / case", () => {
+  it("finds across split runs and replaces preserving surroundings", () => {
+    const doc = loadDoc(p("The cat sat on the cat mat"));
+    const { run } = firstRun(doc);
+    // split "cat" across runs by bolding half of the first one
+    applyRunFormat(doc, [segFor(run, 4, 6)], { bold: true });
+    const hits = findAll(doc, "cat");
+    expect(hits.length).toBe(2);
+    expect(hits[0].ranges.length).toBeGreaterThan(1); // spans split runs
+    const n = replaceAll(doc, "cat", "dog");
+    expect(n).toBe(2);
+    expect(textOf(doc.sections[0].blocks[0] as Paragraph)).toBe("The dog sat on the dog mat");
+  });
+
+  it("changes case over a selection", () => {
+    const doc = loadDoc(p("make me shout"));
+    const { run } = firstRun(doc);
+    transformCase(doc, [segFor(run, 0, 13)], "upper");
+    expect(textOf(doc.sections[0].blocks[0] as Paragraph)).toBe("MAKE ME SHOUT");
+  });
+
+  it("clear formatting strips direct run formatting", () => {
+    const doc = loadDoc(p("styled text"));
+    const { run } = firstRun(doc);
+    applyRunFormat(doc, [segFor(run, 0, 11)], { bold: true, color: "#FF0000" });
+    const { run: run2 } = firstRun(doc);
+    applyRunFormat(doc, [segFor(run2, 0, 11)], { clear: true });
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    const r = para.children[0];
+    expect(r.type === "run" ? r.props.bold : true).toBeUndefined();
+  });
+});
+
+describe("list levels", () => {
+  it("steps ilvl with Tab/Shift-Tab semantics, clamped", () => {
+    const doc = loadDoc(p("item"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c) => c.kind === "text")!.srcT!;
+    setListType(doc, [t], "bullet");
+    expect(setListLevel(doc, [t], 1)).toBe(true);
+    expect((doc.sections[0].blocks[0] as Paragraph).props.numbering?.ilvl).toBe(1);
+    expect(setListLevel(doc, [t], -1)).toBe(true);
+    expect(setListLevel(doc, [t], -1)).toBe(false); // clamped at 0
   });
 });
