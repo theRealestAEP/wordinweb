@@ -7,3 +7,4 @@ parity/
 
 # node_modules symlinks (worktree dev setups)
 node_modules
+test-results/
