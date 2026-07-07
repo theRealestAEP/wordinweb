@@ -1062,7 +1062,12 @@ class Engine {
     if (tbl.props.layout === "fixed") return base;
     const gridTotal = tbl.grid.reduce((a, b) => a + b, 0);
     const target = base.reduce((a, b) => a + b, 0);
-    if (tbl.grid.length > 0 && gridTotal >= target * 0.5) return base; // realistic grid
+    // A grid is trustworthy only when Word itself laid the table out: Word
+    // writes tcW on every cell it serializes. Generator files often carry a
+    // plausible-looking grid with no tcW anywhere - Word ignores it and
+    // autofits, so must we.
+    const cellsDeclareWidths = tbl.rows.some((r) => r.cells.some((c) => c.props.width !== undefined));
+    if (tbl.grid.length > 0 && gridTotal >= target * 0.5 && cellsDeclareWidths) return base;
 
     const nCols = base.length;
     const margins = this.cellMarginsOf(tbl);

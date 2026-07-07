@@ -34,6 +34,8 @@ export interface RunFormatPatch {
   /** Font size in points. */
   fontSizePt?: number;
   fontFamily?: string;
+  /** Superscript/subscript; null returns the run to the baseline. */
+  verticalAlign?: "superscript" | "subscript" | null;
 }
 
 /** A formatted char-range in the post-edit XML (for re-selection). */
@@ -258,6 +260,9 @@ export function setRunProps(rEl: XmlElement, patch: RunFormatPatch): void {
   if (patch.fontFamily !== undefined) {
     setProp(rPr, "rFonts", { ascii: patch.fontFamily, hAnsi: patch.fontFamily, cs: patch.fontFamily });
   }
+  if (patch.verticalAlign !== undefined) {
+    setProp(rPr, "vertAlign", patch.verticalAlign === null ? null : { val: patch.verticalAlign });
+  }
 }
 
 // ---------- selection format summary ----------
@@ -272,6 +277,7 @@ export interface SelectionFormat {
   color?: string;
   highlight?: string;
   fontFamily?: string;
+  verticalAlign?: "superscript" | "subscript";
 }
 
 /** Summarize effective formatting across segments (for toolbar state/toggles). */
@@ -291,6 +297,10 @@ export function summarizeSelection(segments: SelectionSegment[]): SelectionForma
     fontSizePt: mapDefined(uniform((p) => p.size), (px) => Math.round(((px * 3) / 4) * 2) / 2),
     color: uniform((p) => p.color),
     highlight: uniform((p) => p.highlight),
+    verticalAlign: mapDefined(
+      uniform((p) => p.verticalAlign),
+      (v) => (v === "superscript" || v === "subscript" ? v : undefined),
+    ),
     fontFamily: uniform((p) => p.font),
   };
 }

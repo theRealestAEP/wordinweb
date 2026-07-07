@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import { applyRunFormat, SelectionSegment } from "../src/edit/commands.js";
+import { addComment } from "../src/edit/comments.js";
+import { setListType } from "../src/edit/lists.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, wrapDocument, p } from "./helpers.js";
 import { Paragraph, Run, TextContent } from "../src/model.js";
@@ -352,5 +354,46 @@ describe("image insertion", () => {
     if (rimgs[0].kind !== "image") throw new Error("not image");
     expect(reloaded.media(rimgs[0].part)?.length).toBe(png.length);
     expect(reloaded.pkg.text("[Content_Types].xml")).toContain('Extension="png"');
+  });
+});
+
+describe("addComment", () => {
+  it("creates comments.xml on demand, anchors the range, and round-trips through save", async () => {
+    const doc = loadDoc(p("Hello brave new world"));
+    const { run } = firstRun(doc);
+    const ok = addComment(doc, [segFor(run, 6, 11)], "Check this", "Reviewer", "RV");
+    expect(ok).toBe(true);
+    expect(doc.comments.length).toBe(1);
+    expect(doc.comments[0].author).toBe("Reviewer");
+    // range anchors around the selected word
+    const anchors = doc.commentAnchors();
+    const ts = anchors.get(doc.comments[0].id) ?? [];
+    expect(ts.map((t) => t.text).join("")).toBe("brave");
+    // survives save/reload including the created part + rels + content types
+    const doc2 = DocxDocument.load(doc.save());
+    expect(doc2.comments.length).toBe(1);
+    expect(doc2.comments[0].author).toBe("Reviewer");
+    const ts2 = doc2.commentAnchors().get(doc2.comments[0].id) ?? [];
+    expect(ts2.map((t) => t.text).join("")).toBe("brave");
+  });
+});
+
+describe("setListType", () => {
+  it("creates numbering.xml on demand, renders a bullet label, and round-trips", () => {
+    const doc = loadDoc(p("alpha") + p("beta"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c): c is TextContent => c.kind === "text")!.srcT!;
+    expect(setListType(doc, [t], "bullet")).toBe(true);
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    expect(para.props.numbering?.numId).toBeGreaterThan(0);
+    // survives save/reload including the created part + rels + content types
+    const doc2 = DocxDocument.load(doc.save());
+    const para2 = doc2.sections[0].blocks[0] as Paragraph;
+    expect(para2.props.numbering?.numId).toBe(para.props.numbering?.numId);
+    const lvl = doc2.numberingLevel(para2.props.numbering!.numId, 0);
+    expect(lvl?.format).toBe("bullet");
+    // toggle off
+    expect(setListType(doc, [t], null)).toBe(true);
+    expect((doc.sections[0].blocks[0] as Paragraph).props.numbering).toBeUndefined();
   });
 });

@@ -11,6 +11,7 @@ import {
   TableOp,
   applyRunFormat,
   applyTableOp,
+  addComment,
   deleteComment,
   exactLineHeightAt,
   replyToComment,
@@ -18,6 +19,8 @@ import {
   setImageWrap,
   insertTableAfter,
   layoutDocument,
+  listTypeAt,
+  setListType,
   paragraphStyleIdOf,
   renderToDom,
   selectionToSegments,
@@ -30,6 +33,8 @@ import {
 export interface DocxViewApi {
   /** Apply character formatting to the current browser selection. */
   applyFormat(patch: RunFormatPatch): void;
+  /** Create a review comment on the current selection. False if no selection. */
+  addComment(text: string): boolean;
   undo(): void;
   redo(): void;
   canUndo(): boolean;
@@ -44,6 +49,10 @@ export interface DocxViewApi {
   setAlignment(align: ParagraphAlignment): void;
   /** Apply a named paragraph style (null clears back to Normal). */
   setParagraphStyle(styleId: string | null): void;
+  /** Toggle bulleted/numbered list on the paragraph(s) under the selection. */
+  toggleList(kind: "bullet" | "number"): void;
+  /** Current list kind at the caret ("bullet" | "number" | null). */
+  getListType(): "bullet" | "number" | null;
   /** Paragraph styles for the style menu (declared + Word built-ins). */
   listParagraphStyles(): { id: string; name: string }[];
   /** pStyle id of the caret paragraph (null = Normal). */
@@ -77,6 +86,8 @@ export interface DocxViewProps {
   onError?: (error: Error) => void;
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
+  /** Render review comments (range highlights + margin balloons). Default true. */
+  showComments?: boolean;
 }
 
 async function toBytes(source: DocxViewProps["source"]): Promise<Uint8Array> {
@@ -108,6 +119,7 @@ export function DocxView({
   onReady,
   onError,
   commentAuthor = "You",
+  showComments = true,
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -129,7 +141,13 @@ export function DocxView({
       // (destroy-then-append clamps scrollTop to 0 otherwise).
       const { scrollTop, scrollLeft } = container;
       handle?.destroy();
-      handle = renderToDom(doc, layout, container, { zoom, interactive: editable, onDeleteComment, onReplyComment });
+      handle = renderToDom(doc, layout, container, {
+        zoom,
+        interactive: editable,
+        comments: showComments,
+        onDeleteComment,
+        onReplyComment,
+      });
       container.scrollTop = scrollTop;
       container.scrollLeft = scrollLeft;
       editor?.afterRender();
@@ -235,6 +253,23 @@ export function DocxView({
             // Keep the formatted text selected so toolbar actions compose.
             if (formatted.length > 0) editor?.selectRanges(formatted);
           },
+          addComment: (text) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const segments = segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : [];
+            if (segments.length === 0) return false;
+            const initials = commentAuthor
+              .split(/\s+/)
+              .map((part) => part[0] ?? "")
+              .join("")
+              .slice(0, 2)
+              .toUpperCase();
+            history.checkpoint();
+            if (addComment(doc, segments, text, commentAuthor, initials || undefined)) {
+              pages = rerender(doc);
+              return true;
+            }
+            return false;
+          },
           undo: () => editor?.applyHistory("undo"),
           redo: () => editor?.applyHistory("redo"),
           canUndo: () => history.canUndo,
@@ -292,6 +327,23 @@ export function DocxView({
             history.checkpoint();
             if (setPageLayout(doc, patch)) pages = rerender(doc);
           },
+          toggleList: (kind) => {
+            const caret = editor?.getCaretTarget();
+            const segs = editor?.getSelectionSegments() ?? [];
+            const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
+            if (targets.length === 0) return;
+            const current = listTypeAt(doc, targets[0]);
+            history.checkpoint();
+            if (setListType(doc, targets as Parameters<typeof setListType>[1], current === kind ? null : kind)) {
+              pages = rerender(doc);
+              document.dispatchEvent(new CustomEvent("dxw-selection"));
+            }
+          },
+          getListType: () => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const t = segs.find((sg) => sg.t)?.t ?? editor?.getCaretTarget()?.t;
+            return t ? listTypeAt(doc, t) : null;
+          },
           setParagraphStyle: (styleId) => {
             const caret = editor?.getCaretTarget();
             const segs = editor?.getSelectionSegments() ?? [];
@@ -341,7 +393,7 @@ export function DocxView({
       handle?.destroy();
       handle = null;
     };
-  }, [source, zoom, editable, commentAuthor]);
+  }, [source, zoom, editable, commentAuthor, showComments]);
 
   return (
     <div
