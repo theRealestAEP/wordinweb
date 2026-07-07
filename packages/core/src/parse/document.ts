@@ -546,6 +546,18 @@ function parseDrawing(
       // convert its pathLst to SVG path data at the shape's placement.
       const custGeom = child(spPr, "custGeom");
       const fill = fillColorOf(spPr);
+      // a:ln strokes matter visually even at w="0": Word renders hairlines
+      // at ~0.75pt on both edges (the cover-letter icon rings look 2px
+      // thinner without them).
+      let stroke: { color: string; width: number } | undefined;
+      const lnEl2 = child(spPr, "ln");
+      if (lnEl2 && !child(lnEl2, "noFill")) {
+        const lnColor = fillColorOf(lnEl2);
+        if (lnColor) {
+          const wEmu = intAttr(lnEl2, "w") ?? 0;
+          stroke = { color: lnColor, width: Math.max(emuToPx(wEmu), 1) };
+        }
+      }
       if (custGeom && fill) {
         const xfrm = child(spPr, "xfrm");
         const off = child(xfrm, "off");
@@ -567,6 +579,7 @@ function parseDrawing(
             viewW: intAttr(pEl, "w") ?? 1,
             viewH: intAttr(pEl, "h") ?? 1,
             fill,
+            stroke,
           });
         }
       }

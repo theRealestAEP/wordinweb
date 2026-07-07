@@ -6,6 +6,7 @@ import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
 import { moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
 import { listTypeAt, setListLevel } from "./lists.js";
+import { insertBreakAt } from "./sections.js";
 import { mathLinearOf, moveMath, setMathLinear } from "./math.js";
 import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 import { SelectionSegment } from "./commands.js";
@@ -1657,6 +1658,13 @@ export class DocxEditor {
     if ((e.key === "Backspace" || e.key === "Delete") && this.selectedImage) {
       e.preventDefault();
       this.deleteSelectedImage();
+      return;
+    }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && this.caret) {
+      // Word: Cmd/Ctrl+Enter inserts a page break.
+      e.preventDefault();
+      this.host.history?.checkpoint();
+      if (insertBreakAt(this.host.doc, this.caret.t, this.caret.offset, "page")) this.commit();
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {

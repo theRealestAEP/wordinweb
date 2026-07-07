@@ -225,6 +225,7 @@ class Engine {
 
     this.pages.push(page);
     this.cur = page;
+    this.lastRealPage = page;
     this.col = 0;
     this.y = page.bodyTop;
     this.lastParaSpacingAfter = 0;
@@ -292,6 +293,9 @@ class Engine {
    * (parity-colbalance: nine 2-line paragraphs split 5/4 by height, 10/8 by
    * lines). Undefined outside balanced bands. */
   private balanceBottom: number | undefined;
+  /** Last real (non-frame) page, for field resolution inside cell frames. */
+  private lastRealPage: InternalPage | null = null;
+
   /** Tallest column bottom seen while balancing - the next band resumes here. */
   private balanceMaxY = 0;
   /** The previous section's final band was balanced, so a continuous
@@ -304,10 +308,14 @@ class Engine {
 
   private fieldCtx(): FieldContext {
     const engine = this;
+    // Frame layout (table cells, text boxes) swaps this.cur for a fake page
+    // whose displayNumber is -1 - PAGE fields inside cells must resolve
+    // against the real page being built.
+    const real = () => (engine.cur.physIndex !== -1 ? engine.cur : engine.lastRealPage ?? engine.cur);
     return {
-      pageNumber: () => engine.cur.displayNumber,
+      pageNumber: () => real().displayNumber,
       totalPages: () => engine.pages.length, // refined in final header/footer pass
-      formatPageNumber: (n) => formatNumber(n, PAGE_FMT[engine.cur.sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
+      formatPageNumber: (n) => formatNumber(n, PAGE_FMT[real().sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
       noteMark: (type, id) => (type === "footnote" ? engine.footnoteMark(id) : engine.endnoteMark(id)),
       selfNoteMark: () => engine.selfNoteMark ?? "",
     };
@@ -1633,6 +1641,7 @@ class Engine {
     this.cur = fake;
     this.col = 0;
     this.y = y;
+    const frameTop = this.y;
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const laid = this.layoutRow(tbl, tbl.rows[ri], ri, widths, fields);
       let rowHeight = laid.height;
@@ -1641,7 +1650,24 @@ class Engine {
       }
       this.paintRow(tbl, tbl.rows[ri], ri, laid, x0 + (tbl.props.indent ?? 0), widths, rowHeight);
       this.y += rowHeight;
+      if (tbl.src) {
+        const tw = widths.reduce((a, b) => a + b, 0);
+        fake.items.push({
+          kind: "grip",
+          axis: "row",
+          x: x0 + (tbl.props.indent ?? 0),
+          x2: x0 + (tbl.props.indent ?? 0) + tw,
+          y1: this.y,
+          y2: this.y,
+          tbl: tbl.src,
+          boundary: ri,
+          rowHeightPx: rowHeight,
+        });
+      }
     }
+    // Nested tables are resizable too (the cover-letter layout puts every
+    // user table inside a layout cell).
+    if (tbl.src) this.emitTableGrips(tbl, fake, x0 + (tbl.props.indent ?? 0), widths, frameTop, this.y);
     const endY = this.y;
     this.y = saveY;
     this.cur = saveCur;

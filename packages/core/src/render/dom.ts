@@ -576,6 +576,8 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       if (item.stroke) {
         path.setAttribute("stroke", item.stroke.color);
         path.setAttribute("stroke-width", String(item.stroke.width));
+        // Stroke width is meant in page px, not viewBox units.
+        path.setAttribute("vector-effect", "non-scaling-stroke");
       }
       svg.appendChild(path);
       return svg as unknown as HTMLElement;
