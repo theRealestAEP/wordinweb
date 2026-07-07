@@ -1960,8 +1960,12 @@ export class DocxEditor {
     const fs = best.item.font.size;
     const s = this.caretEl.style;
     s.left = `${xPx}px`;
-    s.top = `${best.item.baseline - fs}px`;
-    s.height = `${fs * 1.25}px`;
+    // Word's insertion bar hugs the font box (ascent..descent), clamped to
+    // the line so it never pokes into neighbors on tight/exact spacing.
+    const top = Math.max(best.item.lineTop, best.item.baseline - fs * 0.95);
+    const bottom = Math.min(best.item.lineTop + best.item.lineHeight, best.item.baseline + fs * 0.22);
+    s.top = `${top}px`;
+    s.height = `${Math.max(8, bottom - top)}px`;
     s.display = "block";
     if (this.blinkTimer) clearInterval(this.blinkTimer);
     this.caretEl.style.opacity = "1";
