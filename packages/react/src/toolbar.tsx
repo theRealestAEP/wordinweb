@@ -586,6 +586,60 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
  * Default formatting toolbar for an editable DocxView. Compact, grouped like
  * a word processor; every control preserves the selection/caret.
  */
+/** Word's Layout ribbon, scoped to the whole document or the caret's
+ * section (per-page layout = section breaks + section scope). */
+function LayoutTab({ api }: { api: DocxViewApi | null }) {
+  const [scope, setScope] = useState<"document" | "section">("document");
+  const set = (patch: Parameters<NonNullable<typeof api>["setPageLayout"]>[0]) => api?.setPageLayout(patch, scope);
+  const sel = (title: string, entries: [string, string][], onPick: (v: string) => void, width = 96) => (
+    <select
+      title={title}
+      value=""
+      onMouseDown={(e) => e.stopPropagation()}
+      onChange={(e) => { if (e.target.value) onPick(e.target.value); e.target.value = ""; }}
+      style={{ ...selectStyle, width }}
+    >
+      <option value="" disabled>{title}</option>
+      {entries.map(([v, l]) => (
+        <option key={v} value={v}>{l}</option>
+      ))}
+    </select>
+  );
+  return (
+    <>
+      <select
+        title="Apply layout changes to"
+        value={scope}
+        onMouseDown={(e) => e.stopPropagation()}
+        onChange={(e) => setScope(e.target.value as "document" | "section")}
+        style={{ ...selectStyle, width: 118 }}
+      >
+        <option value="document">Whole document</option>
+        <option value="section">This section</option>
+      </select>
+      <Sep />
+      {sel("Margins", [["m:normal", 'Normal (1")'], ["m:narrow", 'Narrow (0.5")'], ["m:wide", 'Wide (1.5")']], (v) => {
+        if (v === "m:normal") set({ margins: { top: 1, right: 1, bottom: 1, left: 1 } });
+        else if (v === "m:narrow") set({ margins: { top: 0.5, right: 0.5, bottom: 0.5, left: 0.5 } });
+        else set({ margins: { top: 1, right: 1.5, bottom: 1, left: 1.5 } });
+      }, 88)}
+      {sel("Orientation", [["portrait", "Portrait"], ["landscape", "Landscape"]], (v) => set({ orientation: v as "portrait" | "landscape" }), 96)}
+      {sel("Size", [["letter", "Letter"], ["legal", "Legal"], ["a4", "A4"]], (v) => {
+        if (v === "letter") set({ size: { width: 8.5, height: 11 } });
+        else if (v === "legal") set({ size: { width: 8.5, height: 14 } });
+        else set({ size: { width: 8.27, height: 11.69 } });
+      }, 64)}
+      {sel("Columns", [["1", "One column"], ["2", "Two columns"], ["3", "Three columns"]], (v) => set({ columns: parseInt(v, 10) }), 84)}
+      {sel("Page border", [["none", "No border"], ["thin", "Thin box (\u00bdpt)"], ["thick", "Thick box (1\u00bdpt)"], ["accent", "Blue box"]], (v) => {
+        if (v === "none") set({ pageBorders: null });
+        else if (v === "thin") set({ pageBorders: { sz: 4 } });
+        else if (v === "thick") set({ pageBorders: { sz: 12 } });
+        else set({ pageBorders: { sz: 8, color: "4472C4" } });
+      }, 96)}
+    </>
+  );
+}
+
 /** Toolbar control groups a host can disable via the `features` prop. */
 export type ToolbarFeature =
   | "history"
@@ -618,6 +672,9 @@ export function DocxToolbar({
   features?: Partial<Record<ToolbarFeature, boolean>>;
 }) {
   const on = (k: ToolbarFeature) => features?.[k] !== false;
+  // Ribbon-style tabs: complex tool groups get their own surface instead of
+  // one overloaded row (Layout especially).
+  const [tab, setTab] = useState<"home" | "insert" | "layout">("home");
   // Subtle delayed tooltips: controls declare `title`; on first hover the
   // title moves to data-tip (suppressing the OS tooltip) and a quiet custom
   // one fades in under the control after a beat.
@@ -725,14 +782,37 @@ export function DocxToolbar({
           {tip.text}
         </div>
       )}
-      {on("history") && (
+      <div style={{ display: "flex", gap: 2, marginRight: 8 }}>
+        {(["home", "insert", "layout"] as const).map((t) => (
+          <button
+            key={t}
+            data-tab={t}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => setTab(t)}
+            style={{
+              border: "none",
+              background: tab === t ? "#e8f0fe" : "transparent",
+              color: tab === t ? "#1a73e8" : "#3c4043",
+              font: "600 12.5px system-ui, sans-serif",
+              padding: "5px 10px",
+              borderRadius: 6,
+              cursor: "pointer",
+              textTransform: "capitalize",
+            }}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+      <Sep />
+      {tab === "home" && on("history") && (
         <>
           <Btn label={"↶"} title="Undo (⌘Z)" onClick={() => { api?.undo(); refresh(); }} />
           <Btn label={"↷"} title="Redo (⇧⌘Z)" onClick={() => { api?.redo(); refresh(); }} />
           <Sep />
         </>
       )}
-      {on("styles") && (
+      {tab === "home" && on("styles") && (
       <select
         title="Paragraph style"
         value={curStyle ?? "__normal"}
@@ -759,7 +839,7 @@ export function DocxToolbar({
           )}
       </select>
       )}
-      {on("font") && (
+      {tab === "home" && on("font") && (
       <select
         title="Font"
         value={fmt?.fontFamily ?? ""}
@@ -773,7 +853,7 @@ export function DocxToolbar({
         ))}
       </select>
       )}
-      {on("size") && (
+      {tab === "home" && on("size") && (
       <select
         title="Font size"
         value={fmt?.fontSizePt ?? ""}
@@ -788,7 +868,7 @@ export function DocxToolbar({
       </select>
       )}
       <Sep />
-      {on("format") && (
+      {tab === "home" && on("format") && (
       <>
       <Btn label={<b>B</b>} title="Bold (⌘B)" active={!!fmt?.bold} onClick={() => apply({ bold: !fmt?.bold })} />
       <Btn label={<i>I</i>} title="Italic" active={!!fmt?.italic} onClick={() => apply({ italic: !fmt?.italic })} />
@@ -816,7 +896,7 @@ export function DocxToolbar({
       />
       </>
       )}
-      {on("color") && (
+      {tab === "home" && on("color") && (
       <label title="Text color" style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
         <span style={{ fontSize: 13, borderBottom: `3px solid ${fmt?.color && fmt.color !== "auto" ? fmt.color : "#000"}`, padding: "0 3px", color: "#3c4043" }}>A</span>
         <input
@@ -828,9 +908,9 @@ export function DocxToolbar({
         />
       </label>
       )}
-      {on("highlight") && <HighlightMenu current={fmt?.highlight} onPick={(v) => apply({ highlight: v })} />}
+      {tab === "home" && on("highlight") && <HighlightMenu current={fmt?.highlight} onPick={(v) => apply({ highlight: v })} />}
       <Sep />
-      {on("alignment") && (
+      {tab === "home" && on("alignment") && (
         <>
           <Btn label={"≡"} title="Align left" onClick={() => api?.setAlignment("left")} />
           <Btn label={"≣"} title="Center" onClick={() => api?.setAlignment("center")} />
@@ -839,13 +919,13 @@ export function DocxToolbar({
           <Sep />
         </>
       )}
-      {on("indent") && (
+      {tab === "home" && on("indent") && (
         <>
           <Btn label={<IndentIcon dir={-1} />} title="Decrease indent" onClick={() => api?.adjustIndent(-1)} />
           <Btn label={<IndentIcon dir={1} />} title="Increase indent" onClick={() => api?.adjustIndent(1)} />
         </>
       )}
-      {on("spacing") && (
+      {tab === "home" && on("spacing") && (
         <ActionMenu
           label="↕"
           title="Line & paragraph spacing"
@@ -863,7 +943,7 @@ export function DocxToolbar({
           }}
         />
       )}
-      {on("lists") && (
+      {tab === "home" && on("lists") && (
         <>
           <Btn
             label={<BulletListIcon />}
@@ -880,11 +960,41 @@ export function DocxToolbar({
           <Sep />
         </>
       )}
-      {on("table") && <TableMenu api={api} />}
-      {on("image") && <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />}
-      {on("link") && <LinkMenu api={api} />}
-      {on("comment") && <CommentMenu api={api} />}
-      {on("footnote") && <FootnoteMenu api={api} />}
+      {tab === "insert" && (
+        <>
+          {on("table") && <TableMenu api={api} />}
+          {on("image") && <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />}
+          {on("link") && <LinkMenu api={api} />}
+          {on("comment") && <CommentMenu api={api} />}
+          {on("footnote") && <FootnoteMenu api={api} />}
+          <Sep />
+          <ActionMenu
+            label="Page number"
+            title="Insert a dynamic page number at the caret"
+            width={104}
+            groups={[{ items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] }]}
+            onPick={(v) => {
+              if (v === "pn:page") api?.insertPageNumber("page");
+              else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
+            }}
+          />
+          <ActionMenu
+            label="Break"
+            title="Insert a page, column or section break at the caret"
+            width={64}
+            groups={[
+              { label: "Breaks", items: [["br:page", "Page break"], ["br:column", "Column break"]] },
+              { label: "Section breaks", items: [["br:next", "Section break (next page)"], ["br:cont", "Section break (continuous)"]] },
+            ]}
+            onPick={(v) => {
+              if (v === "br:page") api?.insertBreak("page");
+              else if (v === "br:column") api?.insertBreak("column");
+              else if (v === "br:next") api?.insertBreak("sectionNextPage");
+              else if (v === "br:cont") api?.insertBreak("sectionContinuous");
+            }}
+          />
+        </>
+      )}
       <input
         ref={imageInput}
         type="file"
@@ -896,37 +1006,7 @@ export function DocxToolbar({
           e.target.value = "";
         }}
       />
-      {on("layout") && (
-      <ActionMenu
-        label="Layout"
-        title="Page layout"
-        width={70}
-        groups={[
-          { label: "Margins", items: [["m:normal", 'Normal (1")'], ["m:narrow", 'Narrow (0.5")'], ["m:wide", 'Wide (1.5")']] },
-          { label: "Orientation", items: [["o:portrait", "Portrait"], ["o:landscape", "Landscape"]] },
-          { label: "Size", items: [["s:letter", "Letter"], ["s:legal", "Legal"], ["s:a4", "A4"]] },
-          { label: "Columns", items: [["c:1", "One column"], ["c:2", "Two columns"], ["c:3", "Three columns"]] },
-          { label: "Page border", items: [["pb:none", "No border"], ["pb:thin", "Thin box (½pt)"], ["pb:thick", "Thick box (1½pt)"], ["pb:accent", "Blue box"]] },
-          { label: "Page number", items: [["pn:page", "Page number (at caret)"], ["pn:pageof", "Page X of Y (at caret)"]] },
-        ]}
-        onPick={(v) => {
-          if (v === "m:normal") api?.setPageLayout({ margins: { top: 1, right: 1, bottom: 1, left: 1 } });
-          else if (v === "m:narrow") api?.setPageLayout({ margins: { top: 0.5, right: 0.5, bottom: 0.5, left: 0.5 } });
-          else if (v === "m:wide") api?.setPageLayout({ margins: { top: 1, right: 1.5, bottom: 1, left: 1.5 } });
-          else if (v === "o:portrait" || v === "o:landscape") api?.setPageLayout({ orientation: v.slice(2) as "portrait" | "landscape" });
-          else if (v === "s:letter") api?.setPageLayout({ size: { width: 8.5, height: 11 } });
-          else if (v === "s:legal") api?.setPageLayout({ size: { width: 8.5, height: 14 } });
-          else if (v === "s:a4") api?.setPageLayout({ size: { width: 8.27, height: 11.69 } });
-          else if (v.startsWith("c:")) api?.setPageLayout({ columns: parseInt(v.slice(2), 10) });
-          else if (v === "pb:none") api?.setPageLayout({ pageBorders: null });
-          else if (v === "pb:thin") api?.setPageLayout({ pageBorders: { sz: 4 } });
-          else if (v === "pb:thick") api?.setPageLayout({ pageBorders: { sz: 12 } });
-          else if (v === "pb:accent") api?.setPageLayout({ pageBorders: { sz: 8, color: "4472C4" } });
-          else if (v === "pn:page") api?.insertPageNumber("page");
-          else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
-        }}
-      />
-      )}
+      {tab === "layout" && on("layout") && <LayoutTab api={api} />}
       {on("download") && onSave && (
         <>
           <span style={{ flex: 1 }} />

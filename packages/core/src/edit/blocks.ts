@@ -132,15 +132,20 @@ export interface PageLayoutPatch {
 const TWIPS_PER_INCH = 1440;
 
 /**
- * Update every section's pgSz/pgMar in the document. Values in inches.
+ * Update section pgSz/pgMar. Values in inches. With `target`, only that
+ * section's sectPr changes (per-section layout); otherwise every section in
+ * the document updates.
  */
-export function setPageLayout(doc: DocxDocument, patch: PageLayoutPatch): boolean {
+export function setPageLayout(doc: DocxDocument, patch: PageLayoutPatch, target?: XmlElement): boolean {
   const sectPrs: XmlElement[] = [];
-  const walk = (e: XmlElement) => {
-    if (localName(e.name) === "sectPr") sectPrs.push(e);
-    for (const c of e.children) walk(c);
-  };
-  walk(doc.editableRoots()[0]);
+  if (target) sectPrs.push(target);
+  else {
+    const walk = (e: XmlElement) => {
+      if (localName(e.name) === "sectPr") sectPrs.push(e);
+      for (const c of e.children) walk(c);
+    };
+    walk(doc.editableRoots()[0]);
+  }
   if (sectPrs.length === 0) return false;
 
   for (const sectPr of sectPrs) {
