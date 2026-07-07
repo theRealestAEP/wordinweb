@@ -422,6 +422,31 @@ export function DocxToolbar({
   features?: Partial<Record<ToolbarFeature, boolean>>;
 }) {
   const on = (k: ToolbarFeature) => features?.[k] !== false;
+  // Subtle delayed tooltips: controls declare `title`; on first hover the
+  // title moves to data-tip (suppressing the OS tooltip) and a quiet custom
+  // one fades in under the control after a beat.
+  const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
+  const tipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onTipOver = useCallback((e: React.MouseEvent) => {
+    const el = (e.target as HTMLElement).closest("[title], [data-tip]") as HTMLElement | null;
+    if (!el) return;
+    const title = el.getAttribute("title");
+    if (title) {
+      el.setAttribute("data-tip", title);
+      el.removeAttribute("title");
+    }
+    const text = el.getAttribute("data-tip");
+    if (!text) return;
+    if (tipTimer.current) clearTimeout(tipTimer.current);
+    tipTimer.current = setTimeout(() => {
+      const r = el.getBoundingClientRect();
+      setTip({ text, x: r.left + r.width / 2, y: r.bottom + 6 });
+    }, 550);
+  }, []);
+  const onTipOut = useCallback(() => {
+    if (tipTimer.current) clearTimeout(tipTimer.current);
+    setTip(null);
+  }, []);
   const [fmt, setFmt] = useState<ReturnType<NonNullable<DocxViewApi["getSelectionFormat"]>> | null>(null);
   const [curStyle, setCurStyle] = useState<string | null>(null);
   const [listKind, setListKind] = useState<"bullet" | "number" | null>(null);
@@ -469,6 +494,9 @@ export function DocxToolbar({
 
   return (
     <div
+      onMouseOver={onTipOver}
+      onMouseOut={onTipOut}
+      onMouseDownCapture={onTipOut}
       style={{
         display: "flex",
         gap: 2,
@@ -480,6 +508,27 @@ export function DocxToolbar({
         fontFamily: "system-ui, sans-serif",
       }}
     >
+      {tip && (
+        <div
+          style={{
+            position: "fixed",
+            left: tip.x,
+            top: tip.y,
+            transform: "translateX(-50%)",
+            background: "rgba(32,33,36,.92)",
+            color: "#fff",
+            font: "11.5px system-ui, sans-serif",
+            padding: "4px 8px",
+            borderRadius: 4,
+            pointerEvents: "none",
+            whiteSpace: "nowrap",
+            zIndex: 1000,
+            boxShadow: "0 2px 6px rgba(0,0,0,.2)",
+          }}
+        >
+          {tip.text}
+        </div>
+      )}
       {on("history") && (
         <>
           <Btn label={"↶"} title="Undo (⌘Z)" onClick={() => { api?.undo(); refresh(); }} />
