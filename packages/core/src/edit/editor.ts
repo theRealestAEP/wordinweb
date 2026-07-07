@@ -688,6 +688,10 @@ export class DocxEditor {
       raf = 0;
       const focus = this.caretFromPoint(lastX, lastY) ?? this.nearestCaret(lastX, lastY);
       if (!focus) return;
+      // The selection never crosses the body/header-footer boundary: a drag
+      // from body text that wanders over a footer keeps its last valid
+      // focus instead of grabbing (and exposing to deletion) hf content.
+      if ((this.regionOf(focus.t) === "hf") !== this.inHeaderFooter) return;
       if (!dragging && (focus.t !== anchor.t || focus.offset !== anchor.offset)) {
         dragging = true;
         this.dragSelecting = true;
@@ -1308,10 +1312,19 @@ export class DocxEditor {
         this.caret = caret;
         this.positionCaret();
         this.focusText();
+        return;
+      }
+      // Single click whose nearest text happens to be a header/footer span
+      // (whitespace near the page edges): place the caret at the nearest
+      // BODY text instead of doing nothing.
+      const bodyCaret = this.nearestCaret(e.clientX, e.clientY, "body");
+      if (bodyCaret) {
+        caret = bodyCaret;
+        region = "body";
       } else {
         this.hideCaret();
+        return;
       }
-      return;
     }
     if (region === "body" && this.inHeaderFooter) {
       // Word UX: the dimmed body is inert; double-click returns to body
@@ -1508,7 +1521,7 @@ export class DocxEditor {
    * Snap to the closest character boundary on the clicked line — makes
    * clicks in whitespace, margins, and past line ends behave predictably.
    */
-  private nearestCaret(x: number, y: number): Caret | null {
+  private nearestCaret(x: number, y: number, regionFilter?: "body" | "hf"): Caret | null {
     const handle = this.host.getHandle();
     if (!handle) return null;
     // Resolve the page under (or nearest to) the pointer once, then compare
@@ -1538,9 +1551,12 @@ export class DocxEditor {
 
     let best: { binding: TextBinding; after: boolean } | null = null;
     let bestDist = Infinity;
+    const regionOk = (b: TextBinding): boolean =>
+      !regionFilter || this.regionOf(b.item.src!.t as XmlElement) === regionFilter;
     for (const b of handle.bindings) {
       if (!b.item.src?.t) continue;
       if (b.el.parentElement !== surface) continue;
+      if (!regionOk(b)) continue;
       if (ly < b.item.lineTop - 2 || ly > b.item.lineTop + b.item.lineHeight + 2) continue;
       const x0 = b.item.x;
       const x1 = b.item.x + b.item.width;
@@ -1559,6 +1575,7 @@ export class DocxEditor {
       for (const b of handle.bindings) {
         if (!b.item.src?.t) continue;
         if (b.el.parentElement !== surface) continue;
+        if (!regionOk(b)) continue;
         const bottom = b.item.lineTop + b.item.lineHeight;
         if (bottom > ly) continue;
         const right = b.item.x + b.item.width;
@@ -1571,6 +1588,23 @@ export class DocxEditor {
         }
       }
       if (bestAbove) best = { binding: bestAbove, after: true };
+    }
+    if (!best) {
+      // Still nothing (click above all text): snap to the first line below,
+      // caret at its start.
+      let bestBelow: TextBinding | null = null;
+      let bestTop = Infinity;
+      for (const b of handle.bindings) {
+        if (!b.item.src?.t) continue;
+        if (b.el.parentElement !== surface) continue;
+        if (!regionOk(b)) continue;
+        if (b.item.lineTop < ly) continue;
+        if (b.item.lineTop < bestTop || (Math.abs(b.item.lineTop - bestTop) <= 1 && b.item.x < (bestBelow?.item.x ?? Infinity))) {
+          bestTop = Math.min(bestTop, b.item.lineTop);
+          if (Math.abs(b.item.lineTop - bestTop) <= 1) bestBelow = b;
+        }
+      }
+      if (bestBelow) return { t: bestBelow.item.src!.t as XmlElement, run: bestBelow.item.src!.run, offset: bestBelow.item.src!.offset };
     }
     if (!best) return null;
     const src = best.binding.item.src!;

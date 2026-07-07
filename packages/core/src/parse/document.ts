@@ -489,6 +489,29 @@ function parseDrawing(
       }
       return;
     }
+    if (ln === "model3d") {
+      // Office 3D models (am3d): render the Office3DRenderer poster raster
+      // at the model's extent - Word's own static/PDF output does the same.
+      const raster = el.children.find((c) => localName(c.name) === "raster");
+      const blip = raster && findDescendant(raster, "blip");
+      const rid = blip ? (attr(blip, "embed") ?? attr(blip, "link")) : undefined;
+      const rel = rid ? ctx.rels.get(rid) : undefined;
+      if (rel && !rel.external) {
+        const xfrm = path(el, "spPr", "xfrm");
+        const off = child(xfrm, "off");
+        const ext = child(xfrm, "ext");
+        const x = ox + (intAttr(off, "x") ?? 0) * sx;
+        const y = oy + (intAttr(off, "y") ?? 0) * sy;
+        images.push({
+          part: rel.target,
+          x: emuToPx(x),
+          y: emuToPx(y),
+          width: emuToPx((intAttr(ext, "cx") ?? cx) * sx),
+          height: emuToPx((intAttr(ext, "cy") ?? cy) * sy),
+        });
+      }
+      return;
+    }
     if (ln === "wsp") {
       const spPr = child(el, "spPr");
       const prst = attr(child(spPr, "prstGeom"), "prst") ?? "";
