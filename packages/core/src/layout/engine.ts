@@ -761,8 +761,20 @@ class Engine {
       if (span.text === undefined) continue;
 
       let b = baseline;
-      if (span.props.verticalAlign === "superscript") b -= span.font.size * 0.55;
-      else if (span.props.verticalAlign === "subscript") b += span.font.size * 0.25;
+      let glyphTop: number | undefined;
+      let glyphBoxH: number | undefined;
+      if (span.props.verticalAlign === "superscript" || span.props.verticalAlign === "subscript") {
+        // Word shifts the baseline by a fraction of the UNSCALED font size:
+        // superscript up 7/22, subscript down 1/11 (measured from Word's own
+        // PDF export at 11pt and 22pt; see scripts/make-vertalign-probe.py).
+        const baseSize = span.props.size ?? 14.666;
+        b += span.props.verticalAlign === "superscript" ? -baseSize * (7 / 22) : baseSize / 11;
+        // The renderer bottoms glyph boxes on the line box, which would undo
+        // the shift - hand it an exact glyph box anchored to this baseline.
+        const m = this.measurer.metrics(span.font);
+        glyphTop = b - m.ascent;
+        glyphBoxH = m.ascent + m.descent;
+      }
 
       // Character highlight / shading backgrounds.
       const bg = span.props.highlight ?? span.props.shading;
@@ -787,6 +799,8 @@ class Engine {
         font: span.font,
         lineTop: topY,
         lineHeight: line.height,
+        glyphTop,
+        glyphBoxH,
         href: span.href,
         src: span.src,
       });

@@ -567,3 +567,27 @@ describe("justified line breaking (Word pack-vs-break rule)", () => {
     expect(lines[1]).toBe("ccc");
   });
 });
+
+describe("superscript / subscript", () => {
+  it("raises superscript and drops subscript from the baseline like Word", () => {
+    const para =
+      '<w:p><w:r><w:t xml:space="preserve">base </w:t></w:r>' +
+      '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>sup</w:t></w:r>' +
+      '<w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>sub</w:t></w:r></w:p>';
+    const { result } = layout({ "word/document.xml": wrapDocument(para) });
+    const items = result.pages[0].items.filter((i) => i.kind === "text");
+    const base = items.find((i) => i.kind === "text" && i.text === "base")!;
+    const sup = items.find((i) => i.kind === "text" && i.text === "sup")!;
+    const sub = items.find((i) => i.kind === "text" && i.text === "sub")!;
+    if (base.kind !== "text" || sup.kind !== "text" || sub.kind !== "text") throw new Error();
+    // Word (probe-vertalign): raise 7/22 and drop 1/11 of the UNSCALED size;
+    // scaled size is 65% rounded to half-points (14.666px -> 9.333px).
+    expect(sup.font.size).toBeCloseTo(9.3333, 3);
+    expect(base.baseline - sup.baseline).toBeCloseTo(14.666 * (7 / 22), 2);
+    expect(sub.baseline - base.baseline).toBeCloseTo(14.666 / 11, 2);
+    // Renderer anchor: explicit glyph box, baseline-aligned.
+    expect(sup.glyphTop).toBeCloseTo(sup.baseline - 0.9 * sup.font.size, 2);
+    expect(sup.glyphBoxH).toBeCloseTo(1.15 * sup.font.size, 2);
+    expect(base.glyphTop).toBeUndefined();
+  });
+});
