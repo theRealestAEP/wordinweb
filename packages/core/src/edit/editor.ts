@@ -6,7 +6,7 @@ import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
 import { moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
 import { listTypeAt, setListLevel } from "./lists.js";
-import { mathLinearOf, setMathLinear } from "./math.js";
+import { mathLinearOf, moveMath, setMathLinear } from "./math.js";
 import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 import { SelectionSegment } from "./commands.js";
 import { adjustFloatingPosition, imageAltText, isFloatingDrawing, replaceImageBlip, setFloatingPosition, setImageAltText, setImageWrap } from "./images.js";
@@ -1062,6 +1062,39 @@ export class DocxEditor {
       return true;
     }
 
+    // Drag on an equation moves it; a plain click opens the math editor
+    // (handled in onMouseUp).
+    const mathTarget = target.closest?.("[data-dxw-math]") as HTMLElement | null;
+    if (mathTarget) {
+      const handle = this.host.getHandle();
+      const mathBinding = handle?.bindings.find((b) => b.el === mathTarget);
+      const oMathEl = mathBinding?.item.mathSrc;
+      if (oMathEl) {
+        e.preventDefault();
+        const startX = e.clientX;
+        const startY = e.clientY;
+        let moved = false;
+        const onMove = (me: MouseEvent) => {
+          if (!moved && Math.hypot(me.clientX - startX, me.clientY - startY) > 5) moved = true;
+          if (moved) this.showDropIndicator(me.clientX, me.clientY);
+        };
+        const onUp = (me: MouseEvent) => {
+          document.removeEventListener("mousemove", onMove);
+          document.removeEventListener("mouseup", onUp);
+          this.hideDropIndicator();
+          if (!moved) return; // mouseup opens the math editor
+          this.suppressNextMouseUp = true;
+          const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
+          if (!dest) return;
+          this.host.history?.checkpoint();
+          if (moveMath(this.host.doc, oMathEl, dest.t, dest.offset)) this.host.rerender();
+        };
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onUp);
+        return true;
+      }
+    }
+
     // Click/drag on an image
     if (target.tagName === "IMG") {
       const handle = this.host.getHandle();
@@ -1345,7 +1378,12 @@ export class DocxEditor {
         break;
       }
     }
-    if (!part) return null;
+    if (!part) {
+      // No header/footer exists yet - create one like Word does on first
+      // entry into the band.
+      part = this.host.doc.ensureHfPart(band);
+      this.host.rerender();
+    }
     const paras = part.children.filter((c) => localName(c.name) === "p");
     const last = paras[paras.length - 1];
     if (!last) return null;

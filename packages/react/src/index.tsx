@@ -303,10 +303,16 @@ export function DocxView({
             if (formatted.length > 0) editor?.selectRanges(formatted);
           },
           addFootnote: (text) => {
-            const caret = editor?.getCaretTarget();
-            if (!caret) return false;
+            // Caret first; else the end of the current selection.
+            let target = editor?.getCaretTarget() ?? null;
+            if (!target) {
+              const segs = editor?.getSelectionSegments() ?? [];
+              const last = [...segs].reverse().find((sg) => sg.t);
+              if (last?.t) target = { t: last.t, offset: last.end };
+            }
+            if (!target) return false;
             history.checkpoint();
-            if (insertFootnote(doc, caret.t, caret.offset, text) !== null) {
+            if (insertFootnote(doc, target.t, target.offset, text) !== null) {
               pages = rerender(doc);
               return true;
             }

@@ -650,9 +650,8 @@ function renderText(item: TextItem): HTMLElement {
     else if (props.underline === "dash") el.style.textDecorationStyle = "dashed";
     else if (props.underline === "wave") el.style.textDecorationStyle = "wavy";
   }
-  if (props.strike || props.doubleStrike) {
-    el.style.textDecoration = (el.style.textDecoration ? el.style.textDecoration + " " : "") + "line-through";
-  }
+  // Strikethrough rules are painted by the engine at Word's position
+  // (0.216em above baseline); CSS line-through would double-draw too high.
   if (props.smallCaps) el.style.fontVariant = "small-caps";
   if (props.letterSpacing) el.style.letterSpacing = `${props.letterSpacing}px`;
 
