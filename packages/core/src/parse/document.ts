@@ -1194,6 +1194,22 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
     rows.push(parseRow(tr, ctx));
   }
 
+  // Tag every paragraph directly in this table (not in a nested table, which
+  // has already tagged its own) with the table's styleId, so the table style's
+  // pPr participates in the paragraph-property cascade (Word applies a table
+  // style's pPr to paragraphs inside it, above docDefaults).
+  if (props.styleId) {
+    for (const row of rows) {
+      for (const cell of row.cells) {
+        for (const block of cell.blocks) {
+          if (block.type === "paragraph" && block.tableStyleId === undefined) {
+            block.tableStyleId = props.styleId;
+          }
+        }
+      }
+    }
+  }
+
   return { type: "table", props, grid, rows, src: tbl };
 }
 

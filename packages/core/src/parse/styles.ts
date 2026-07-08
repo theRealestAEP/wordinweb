@@ -63,7 +63,11 @@ export function parseStyles(root: XmlElement | undefined, ctx: ParseContext): St
 const MAX_CHAIN = 20;
 
 /** Effective paragraph props from the style chain (no direct formatting). */
-export function resolveParagraphStyleChain(styles: Styles, styleId: string | undefined): {
+export function resolveParagraphStyleChain(
+  styles: Styles,
+  styleId: string | undefined,
+  tableStyleId?: string,
+): {
   pPr: ParaProps;
   rPr: RunProps;
 } {
@@ -78,9 +82,37 @@ export function resolveParagraphStyleChain(styles: Styles, styleId: string | und
   }
   let pPr: ParaProps = { ...styles.defaultPPr };
   let rPr: RunProps = { ...styles.defaultRPr };
+  // Table style sits between docDefaults and the paragraph style chain: Word
+  // applies a table style's pPr/rPr to paragraphs inside the table, but the
+  // paragraph's own style (and direct formatting) still win.
+  if (tableStyleId) {
+    const table = resolveTableStyleProps(styles, tableStyleId);
+    if (table.pPr) pPr = mergeParaProps(pPr, table.pPr);
+    if (table.rPr) rPr = mergeRunProps(rPr, table.rPr);
+  }
   for (const s of pChain) {
     if (s.pPr) pPr = mergeParaProps(pPr, s.pPr);
     if (s.rPr) rPr = mergeRunProps(rPr, s.rPr);
+  }
+  return { pPr, rPr };
+}
+
+/** Merged pPr/rPr contributed by a table style's own basedOn chain (no docDefaults). */
+function resolveTableStyleProps(styles: Styles, styleId: string): { pPr?: ParaProps; rPr?: RunProps } {
+  const chain: Style[] = [];
+  let cur: string | undefined = styleId;
+  let guard = 0;
+  while (cur && guard++ < MAX_CHAIN) {
+    const s = styles.byId.get(cur);
+    if (!s) break;
+    chain.unshift(s);
+    cur = s.basedOn;
+  }
+  let pPr: ParaProps | undefined;
+  let rPr: RunProps | undefined;
+  for (const s of chain) {
+    if (s.pPr) pPr = pPr ? mergeParaProps(pPr, s.pPr) : { ...s.pPr };
+    if (s.rPr) rPr = rPr ? mergeRunProps(rPr, s.rPr) : { ...s.rPr };
   }
   return { pPr, rPr };
 }

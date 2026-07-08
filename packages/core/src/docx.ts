@@ -860,9 +860,9 @@ export class DocxDocument {
     return this.pkg.binary(part);
   }
 
-  /** Effective paragraph properties: docDefaults → style chain → direct. */
+  /** Effective paragraph properties: docDefaults → table style → style chain → direct. */
   effectiveParaProps(para: Paragraph): ParaProps {
-    const { pPr } = resolveParagraphStyleChain(this.styles, para.props.styleId);
+    const { pPr } = resolveParagraphStyleChain(this.styles, para.props.styleId, para.tableStyleId);
     let merged = mergeParaProps(pPr, para.props);
     // Numbering level can contribute indentation when the paragraph doesn't set its own.
     const num = merged.numbering;
@@ -878,7 +878,7 @@ export class DocxDocument {
 
   /** Effective run properties for a run inside a paragraph. */
   effectiveRunProps(para: Paragraph, runProps: RunProps): RunProps {
-    const { rPr: paraStyleRPr } = resolveParagraphStyleChain(this.styles, para.props.styleId);
+    const { rPr: paraStyleRPr } = resolveParagraphStyleChain(this.styles, para.props.styleId, para.tableStyleId);
     let props = paraStyleRPr;
     if (runProps.styleId) {
       props = mergeRunProps(props, resolveCharacterStyleChain(this.styles, runProps.styleId));

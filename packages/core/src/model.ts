@@ -438,6 +438,8 @@ export interface Paragraph {
   children: ParaChild[];
   /** Section break attached to this paragraph's pPr (ends a section). */
   sectionBreak?: SectionProps;
+  /** styleId of the innermost table this paragraph lives in (for table-style pPr cascade). */
+  tableStyleId?: string;
   /** Source w:p element. */
   src?: XmlElement;
 }
