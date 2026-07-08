@@ -242,6 +242,41 @@ export interface ShapeTextbox {
   pctHeightRel?: "page" | "margin";
   /** Vertical anchoring of the text INSIDE the box (v-text-anchor). */
   textAnchor?: "top" | "middle" | "bottom";
+  /** How body text flows around a DrawingML textbox (wp:wrap*). */
+  wrap?: WrapMode;
+  /** behindDoc: paint under the body text, never displace it. */
+  behind?: boolean;
+  /** Wrap distances px (wp:anchor distT/B/L/R). */
+  dist?: { t: number; b: number; l: number; r: number };
+  /** a:xfrm rotation, degrees clockwise (rotates the whole box). */
+  rotation?: number;
+  /** Text insets px (bodyPr lIns/tIns/rIns/bIns); default 9.6/4.8. */
+  insets?: { l: number; t: number; r: number; b: number };
+}
+
+/** WordArt (VML v:textpath, e.g. a "CONFIDENTIAL" watermark): text scaled to
+ * fill a box, optionally rotated, painted semi-transparent behind the body. */
+export interface ShapeWordArt {
+  type: "wordart";
+  text: string;
+  fontFamily: string;
+  bold?: boolean;
+  italic?: boolean;
+  /** CSS fill color. */
+  fill: string;
+  /** 0..1 alpha. */
+  opacity: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  hRel: AnchorRel;
+  vRel: AnchorRel;
+  hAlign?: "left" | "center" | "right";
+  vAlign?: "top" | "center" | "bottom";
+  /** Clockwise degrees. */
+  rotation: number;
+  behind?: boolean;
 }
 
 export interface ShapeArt {
@@ -289,7 +324,7 @@ export interface ShapeImage {
   srcDrawing?: XmlElement;
 }
 
-export type Shape = ShapeLine | ShapeTextbox | ShapeImage | ShapeArt;
+export type Shape = ShapeLine | ShapeTextbox | ShapeImage | ShapeArt | ShapeWordArt;
 
 /**
  * Floating/anchored object: does not occupy inline space; positioned against
@@ -512,6 +547,13 @@ export interface SectionProps {
   vAlign?: "top" | "center" | "both" | "bottom";
   /** w:pgBorders. Offsets (border.space, px) measure from text or page edge. */
   pageBorders?: { top?: Border; bottom?: Border; left?: Border; right?: Border; offsetFrom: "text" | "page" };
+  /** w:lnNumType: margin line numbering. distance px from the text edge. */
+  lineNumbering?: {
+    countBy: number;
+    start: number;
+    distance: number;
+    restart: "continuous" | "newPage" | "newSection";
+  };
   /** Footnote/endnote mark numbering (w:footnotePr / w:endnotePr). */
   footnoteNumFmt?: string;
   footnoteNumStart?: number;

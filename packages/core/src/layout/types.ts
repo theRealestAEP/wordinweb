@@ -70,6 +70,10 @@ export interface TextItem {
   href?: string;
   /** Present for editable text (absent on numbering labels etc.). */
   src?: TextSource;
+  /** Rotate about a point (px, relative to this item's top-left). */
+  rotate?: { deg: number; ox: number; oy: number };
+  /** Paint under the body text (behindDoc textbox content). */
+  behind?: boolean;
 }
 
 export interface RectItem {
@@ -79,6 +83,9 @@ export interface RectItem {
   width: number;
   height: number;
   fill: string;
+  /** Rotate about a point (px, relative to this item's top-left). */
+  rotate?: { deg: number; ox: number; oy: number };
+  behind?: boolean;
 }
 
 export interface LineEdgeItem {
@@ -88,6 +95,8 @@ export interface LineEdgeItem {
   x2: number;
   y2: number;
   border: Border;
+  /** Rotate about a point (px, relative to this item's top-left). */
+  rotate?: { deg: number; ox: number; oy: number };
 }
 
 export interface ImageItem {
@@ -140,7 +149,34 @@ export interface GripItem {
   renderedWidths?: number[];
 }
 
-export type PageItem = TextItem | PathItem | RectItem | LineEdgeItem | ImageItem | DrawingHitItem | GripItem;
+/** WordArt/watermark text scaled to fill a box, rotated about its center. */
+export interface WordArtItem {
+  kind: "wordart";
+  /** Box top-left, px. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  text: string;
+  fontFamily: string;
+  bold?: boolean;
+  italic?: boolean;
+  fill: string;
+  opacity: number;
+  /** Clockwise degrees. */
+  rotation: number;
+  behind?: boolean;
+}
+
+export type PageItem =
+  | TextItem
+  | PathItem
+  | RectItem
+  | LineEdgeItem
+  | ImageItem
+  | DrawingHitItem
+  | GripItem
+  | WordArtItem;
 
 export interface LaidOutPage {
   width: number;

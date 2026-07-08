@@ -22,6 +22,7 @@ import {
   TableRow,
   TableRowProps,
   MathNode,
+  WrapMode,
 } from "../model.js";
 import { emuToPx, twipsToPx } from "../units.js";
 import { ParseContext, parseBorder, parseParaProps, parseRunProps, parseShading } from "./properties.js";
@@ -509,6 +510,9 @@ function parseDrawing(
   const images: DrawingImage[] = [];
   const lines: DrawingLine[] = [];
   const paths: DrawingPath[] = [];
+  // First wps shape carrying a text box (DrawingML wps:txbx). Resolved after
+  // the walk into a floating ShapeTextbox honoring the anchor's wrap mode.
+  let textboxEl: XmlElement | undefined;
 
   // Resolve a DrawingML fill color (srgbClr or theme schemeClr), applying
   // lumMod/lumOff/shade/tint transforms (template art is built from theme
@@ -525,6 +529,20 @@ function parseDrawing(
     else hex = ctx.theme?.colors.get(attr(clrEl, "val") ?? "");
     if (!hex) return undefined;
     return applyClrTransforms(hex, clrEl);
+  };
+
+  // Word template shapes carry no explicit fill; the color comes from the
+  // theme format scheme via <wps:style><a:fillRef><a:schemeClr>. Resolve that
+  // as a fallback so decorative bands (Facet cover) paint.
+  const styleFillOf = (wsp: XmlElement): string | undefined => {
+    const styleEl = child(wsp, "style");
+    const fillRef = styleEl ? child(styleEl, "fillRef") : undefined;
+    const clrEl = fillRef ? (child(fillRef, "srgbClr") ?? child(fillRef, "schemeClr")) : undefined;
+    if (!clrEl) return undefined;
+    const hex = localName(clrEl.name) === "srgbClr"
+      ? "#" + (attr(clrEl, "val") ?? "000000")
+      : ctx.theme?.colors.get(attr(clrEl, "val") ?? "");
+    return hex ? applyClrTransforms(hex, clrEl) : undefined;
   };
 
   // Walk the graphic tree, carrying the group coordinate transform:
@@ -586,6 +604,13 @@ function parseDrawing(
     }
     if (ln === "wsp") {
       const spPr = child(el, "spPr");
+      // Text box: defer to a floating ShapeTextbox (resolved post-walk). A
+      // text box shape contributes no lines/paths/images of its own.
+      const txbxEl = child(el, "txbx");
+      if (txbxEl && findDescendant(txbxEl, "txbxContent")) {
+        if (!textboxEl) textboxEl = el;
+        return;
+      }
       const prst = attr(child(spPr, "prstGeom"), "prst") ?? "";
       const lnEl = child(spPr, "ln");
       const isLine = prst === "line" || prst.startsWith("straightConnector") || prst.startsWith("bentConnector");
@@ -617,7 +642,27 @@ function parseDrawing(
       // Freeform template art (icons, decorative bands) is a:custGeom -
       // convert its pathLst to SVG path data at the shape's placement.
       const custGeom = child(spPr, "custGeom");
-      const fill = fillColorOf(spPr);
+      const fill = fillColorOf(spPr) ?? styleFillOf(el);
+      // Image-filled shapes (a:blipFill): the fill picture is stretched over
+      // the shape box - render it as a placed image (Facet cover divider).
+      const blipFill = child(spPr, "blipFill");
+      const fillBlip = blipFill ? child(blipFill, "blip") : undefined;
+      if (fillBlip) {
+        const rid = attr(fillBlip, "embed") ?? attr(fillBlip, "link");
+        const rel = rid ? ctx.rels.get(rid) : undefined;
+        if (rel && !rel.external) {
+          const xfrm = child(spPr, "xfrm");
+          const off = child(xfrm, "off");
+          const ext = child(xfrm, "ext");
+          images.push({
+            part: rel.target,
+            x: emuToPx(ox + (intAttr(off, "x") ?? 0) * sx),
+            y: emuToPx(oy + (intAttr(off, "y") ?? 0) * sy),
+            width: emuToPx((intAttr(ext, "cx") ?? 0) * sx),
+            height: emuToPx((intAttr(ext, "cy") ?? 0) * sy),
+          });
+        }
+      }
       // a:ln strokes matter visually even at w="0": Word renders hairlines
       // at ~0.75pt on both edges (the cover-letter icon rings look 2px
       // thinner without them).
@@ -680,6 +725,88 @@ function parseDrawing(
     for (const c of el.children) walk(c, ox, oy, sx, sy);
   };
   walk(holder, 0, 0, 1, 1);
+
+  // DrawingML text box (wps:txbx): a floating shape with fill/stroke, text
+  // content, wrap mode and (optionally) rotation - the modern equivalent of a
+  // VML v:shape text box.
+  if (anchor && textboxEl) {
+    const relOf = (el: XmlElement | undefined): AnchorRel => {
+      const v = el ? attr(el, "relativeFrom") : undefined;
+      return v === "page" ? "page" : v === "margin" ? "margin" : v === "column" ? "column" : "text";
+    };
+    const posH = findDescendant(anchor, "positionH");
+    const posV = findDescendant(anchor, "positionV");
+    const posOffsetPx = (holder: XmlElement | undefined): number => {
+      const po = holder ? findDescendant(holder, "posOffset") : undefined;
+      return po ? emuToPx(parseInt(po.text, 10) || 0) : 0;
+    };
+    const pctPos = (holder: XmlElement | undefined): number | undefined => {
+      if (!holder) return undefined;
+      const pp = holder.children.find((c) => localName(c.name).startsWith("pctPos"));
+      return pp ? (parseInt(pp.text, 10) || 0) / 100000 : undefined;
+    };
+    const alignOf = (holder: XmlElement | undefined): "left" | "center" | "right" | undefined => {
+      const a = holder ? findDescendant(holder, "align") : undefined;
+      return a?.text === "center" || a?.text === "right" || a?.text === "left" ? (a.text as "left" | "center" | "right") : undefined;
+    };
+    // wp14:sizeRelH/V give a percent-of-page/margin size overriding the extent.
+    const sizeRel = (name: string): { pct: number; rel: "page" | "margin" } | undefined => {
+      const el = findDescendant(anchor, name);
+      const pctEl = el ? el.children.find((c) => localName(c.name).startsWith("pct")) : undefined;
+      if (!pctEl) return undefined;
+      const rf = attr(el!, "relativeFrom");
+      return { pct: (parseInt(pctEl.text, 10) || 0) / 100000, rel: rf === "page" ? "page" : "margin" };
+    };
+
+    const spPr = child(textboxEl, "spPr");
+    const txbxContent = findDescendant(child(textboxEl, "txbx")!, "txbxContent")!;
+    const xfrm = child(spPr, "xfrm");
+    const rot = intAttr(xfrm, "rot");
+    const lnEl = child(spPr, "ln");
+    const strokeColor = lnEl && !child(lnEl, "noFill") ? fillColorOf(lnEl) : undefined;
+    const bodyPr = child(textboxEl, "bodyPr");
+    const insetOf = (name: string, dflt: number): number => {
+      const v = bodyPr ? intAttr(bodyPr, name) : undefined;
+      return v !== undefined ? emuToPx(v) : dflt;
+    };
+    const anchorAttr = bodyPr ? attr(bodyPr, "anchor") : undefined;
+
+    let wrap: WrapMode = "square";
+    if (child(anchor, "wrapNone")) wrap = "none";
+    else if (child(anchor, "wrapTopAndBottom")) wrap = "topAndBottom";
+    // wrapSquare / wrapTight / wrapThrough all narrow the line (square).
+    const behind = attr(anchor, "behindDoc") === "1";
+    const distPx = (name: string): number => emuToPx(intAttr(anchor, name) ?? 0);
+
+    const srh = sizeRel("sizeRelH");
+    const srv = sizeRel("sizeRelV");
+    return {
+      kind: "anchor",
+      shape: {
+        type: "textbox",
+        x: posOffsetPx(posH),
+        y: posOffsetPx(posV),
+        pctX: pctPos(posH),
+        pctY: pctPos(posV),
+        width: emuToPx(cx),
+        height: emuToPx(cy),
+        ...(srh ? { pctWidth: srh.pct, pctWidthRel: srh.rel } : {}),
+        ...(srv ? { pctHeight: srv.pct, pctHeightRel: srv.rel } : {}),
+        hRel: relOf(posH),
+        vRel: relOf(posV),
+        hAlign: alignOf(posH),
+        blocks: parseBlocks(txbxContent, ctx),
+        ...(fillColorOf(spPr) ? { fill: fillColorOf(spPr)! } : {}),
+        ...(strokeColor ? { stroke: { color: strokeColor, weight: Math.max(emuToPx(intAttr(lnEl, "w") ?? 0), 0.75) } } : {}),
+        textAnchor: anchorAttr === "ctr" ? "middle" : anchorAttr === "b" ? "bottom" : anchorAttr === "t" ? "top" : undefined,
+        insets: { l: insetOf("lIns", 9.6), t: insetOf("tIns", 4.8), r: insetOf("rIns", 9.6), b: insetOf("bIns", 4.8) },
+        wrap,
+        ...(behind ? { behind: true } : {}),
+        dist: { t: distPx("distT"), b: distPx("distB"), l: distPx("distL"), r: distPx("distR") },
+        ...(rot ? { rotation: rot / 60000 } : {}),
+      },
+    };
+  }
 
   // Anchored template art (multi-shape groups, freeform paths): absolute
   // placement via the anchor, no text-flow participation.
@@ -902,6 +1029,44 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
       return;
     }
     if (ln === "shape" || ln === "rect") {
+      // WordArt watermark: v:textpath text stretched to fill the shape box,
+      // usually rotated and semi-transparent (a "CONFIDENTIAL" stamp).
+      const textpath = findDescendant(el, "textpath");
+      const tpString = textpath ? attr(textpath, "string") : undefined;
+      if (textpath && tpString) {
+        const style = parseVmlStyle(el.attrs["style"]);
+        const tpStyle = parseVmlStyle(textpath.attrs["style"]);
+        const fontFamily = (tpStyle.get("font-family") ?? "Arial").replace(/["']/g, "").split(",")[0].trim();
+        const fillEl = findDescendant(el, "fill");
+        const opacity = fillEl && fillEl.attrs["opacity"] !== undefined ? parseFloat(fillEl.attrs["opacity"]) : 1;
+        const rotation = parseFloat(style.get("rotation") ?? "0") || 0;
+        const zIndex = parseFloat(style.get("z-index") ?? "0") || 0;
+        const hAlignRaw = style.get("mso-position-horizontal");
+        const vAlignRaw = style.get("mso-position-vertical");
+        out.push({
+          kind: "anchor",
+          shape: {
+            type: "wordart",
+            text: tpString,
+            fontFamily,
+            bold: (tpStyle.get("font-weight") ?? "").includes("bold"),
+            italic: (tpStyle.get("font-style") ?? "").includes("italic"),
+            fill: el.attrs["fillcolor"] ?? "#808080",
+            opacity: Number.isFinite(opacity) ? opacity : 1,
+            x: vmlLength(style.get("margin-left")),
+            y: vmlLength(style.get("margin-top")),
+            width: vmlLength(style.get("width")),
+            height: vmlLength(style.get("height")),
+            hRel: anchorRel(style.get("mso-position-horizontal-relative")),
+            vRel: anchorRel(style.get("mso-position-vertical-relative")),
+            hAlign: hAlignRaw === "center" ? "center" : hAlignRaw === "right" ? "right" : hAlignRaw === "left" ? "left" : undefined,
+            vAlign: vAlignRaw === "center" ? "center" : vAlignRaw === "bottom" ? "bottom" : vAlignRaw === "top" ? "top" : undefined,
+            rotation,
+            behind: zIndex < 0,
+          },
+        });
+        return;
+      }
       const imagedata = findDescendant(el, "imagedata");
       if (imagedata) {
         const rid = attr(imagedata, "id");
