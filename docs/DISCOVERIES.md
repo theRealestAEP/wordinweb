@@ -73,16 +73,42 @@ in `flush`, which packs ~one extra letter-line per word onto the page and loses
 (`layout/inline.ts`): when `availFor(line) < spaceWidth` (column can't hold even
 a space) and a space would overflow the current non-empty line, flush the glyph
 line and emit the space as its own line (kept, not trimmed). Guarded so normal
-columns are untouched (a normal column's `availFor` dwarfs a space width). Still
-open: multi-page column **balancing** of such sections — Word starts each
-overflowing 2-col body section on a fresh page and balances its final band so
-the following 1-col section resumes on it; our engine only balances a section
-that fits ONE band. Content is correct (raw pixel diff 0.54%) but shifted ~½
-column per page; the page COUNT now matches. A dynamic single-pass last-band
-estimate fails (the gapless stacked-height dry measure ≠ real column heights
-once keepNext/widow gaps intervene); a true fix needs two-pass section layout
-plus a per-column bottom in the widow planner (`planBreaks` hard-codes one
-`bodyHeight`).
+columns are untouched (a normal column's `availFor` dwarfs a space width).
+
+### Multi-page column balancing: fresh-page start + measured final band
+Word treats a multi-column section that is followed by a continuous break in
+two distinct ways, and BOTH matter (`layoutSection` in `layout/engine.ts`):
+- **A section that fits one band** balances that band in place — the next
+  section resumes on the same page (parity-colbalance, single-band).
+- **A section that OVERFLOWS several pages** while sharing a partial page does
+  NOT fill the remaining band: Word moves the whole section to a **fresh page**
+  (wild-multicolumn's intro page 1 is left empty below the intro; the 2-col
+  body starts on page 2 with its Heading2, whose spacing-before is dropped as a
+  page-top paragraph). It then flows full columns page by page and balances
+  only its FINAL band so the following 1-col section resumes on it.
+
+Both are handled with a real, break-aware **measure pass**: lay the section with
+ordinary full-column flow and record where every column of the final page ends
+(`balColEnds`); the balance target is `finalBandTop + Σ(colEnds)/nCols` measured
+on the REAL final-page content (not a gapless stacked-height estimate, which
+fails once keepNext/widow gaps intervene). A final pass restores the pre-section
+state (`snapshot`/`restore` of pages, cursor, counters, bookmarks, footnotes,
+line-numbering) and re-lays, arming the balance target on the final page only.
+The target per column never exceeds a full column, so the final page stays final
+and it converges in one balanced pass. This fixed page 2 (63%→24%) and pages
+2-12 / 24-29 (≈45%→≈21%, the single-glyph rasterization floor); parity-colbalance
+1.24% and parity-columns 2.30% are unaffected.
+
+Still open (NOT a balancing bug): in the accurate CanvasMeasurer render
+wild-multicolumn is 46 pages like Word, but section 1's full-column flow drifts
+~one page late by page ~30 — the ultra-narrow off-page column packs a couple of
+lines per page differently from Word (the divergence localizes to the keepNext
+Heading2 regions, `dy` jumps on the parity pages right after each heading). That
+one-page drift cascades misalignment onto the section-2/3/4 pages. This is the
+degenerate-column **vertical packing** problem (per-line/per-column advance in a
+sliver column + keepNext gap placement), independent of balancing; closing it
+needs the off-page column's line capacity and heading keepNext-gap to match
+Word's, verified against a Word export of an isolated overflow probe.
 
 ### Words never split at formatting-run boundaries
 A word split across `w:r` runs ("(" + "“Cobbery”") is one breaking unit in
