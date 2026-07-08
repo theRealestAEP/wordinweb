@@ -1,5 +1,5 @@
 import { DocxDocument } from "../docx.js";
-import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem } from "../layout/types.js";
+import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem } from "../layout/types.js";
 import { cssFont } from "../layout/measure.js";
 import { Border } from "../model.js";
 
@@ -571,6 +571,11 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       el.style.width = `${item.width}px`;
       el.style.height = `${item.height}px`;
       el.style.background = item.fill;
+      if (item.rotate) {
+        el.style.transform = `rotate(${item.rotate.deg}deg)`;
+        el.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
+      }
+      if (item.behind) el.style.zIndex = "-1";
       return el;
     }
     case "path": {
@@ -608,7 +613,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       return hit;
     }
     case "edge":
-      return renderEdge(item.x1, item.y1, item.x2, item.y2, item.border);
+      return renderEdge(item.x1, item.y1, item.x2, item.y2, item.border, item.rotate);
     case "image": {
       const bytes = doc.media(item.part);
       if (!bytes) return null;
@@ -653,9 +658,59 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
     }
     case "text":
       return renderText(item);
+    case "wordart":
+      return renderWordArt(item);
     case "grip":
       return null; // handled by renderPage when interactive
   }
+}
+
+/** WordArt / watermark: fit the text to fill the box (measured via canvas),
+ * then rotate the box about its center. Approximates VML v:textpath stretch. */
+function renderWordArt(item: WordArtItem): HTMLElement {
+  const box = document.createElement("div");
+  box.style.position = "absolute";
+  box.style.left = `${item.x}px`;
+  box.style.top = `${item.y}px`;
+  box.style.width = `${item.width}px`;
+  box.style.height = `${item.height}px`;
+  box.style.transform = `rotate(${item.rotation}deg)`;
+  box.style.transformOrigin = "50% 50%";
+  box.style.overflow = "visible";
+  if (item.behind) box.style.zIndex = "-1";
+
+  const span = document.createElement("div");
+  span.textContent = item.text;
+  span.style.position = "absolute";
+  span.style.whiteSpace = "nowrap";
+  span.style.color = item.fill;
+  span.style.opacity = String(item.opacity);
+  const weight = item.bold ? "bold " : "";
+  const style = item.italic ? "italic " : "";
+  // Fill the height with the glyphs, then stretch horizontally to the width.
+  const fontPx = item.height * 0.82;
+  span.style.font = `${style}${weight}${fontPx}px "${item.fontFamily}", sans-serif`;
+  span.style.lineHeight = `${item.height}px`;
+  span.style.left = "0";
+  span.style.top = "0";
+  // Measure natural width so the horizontal scale fills the box.
+  let natural = item.text.length * fontPx * 0.5;
+  try {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.font = `${style}${weight}${fontPx}px "${item.fontFamily}", sans-serif`;
+      const m = ctx.measureText(item.text);
+      if (m.width > 0) natural = m.width;
+    }
+  } catch {
+    /* canvas unavailable (SSR): keep the estimate */
+  }
+  const scaleX = item.width / natural;
+  span.style.transformOrigin = "0 0";
+  span.style.transform = `scaleX(${scaleX})`;
+  box.appendChild(span);
+  return box;
 }
 
 function renderText(item: TextItem): HTMLElement {
@@ -737,12 +792,22 @@ function renderText(item: TextItem): HTMLElement {
     (el as HTMLAnchorElement).rel = "noreferrer noopener";
     if (!props.color) el.style.color = "#0563c1";
   }
+  if (item.rotate) {
+    const prev = el.style.transform;
+    el.style.transform = `rotate(${item.rotate.deg}deg)${prev ? " " + prev : ""}`;
+    el.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
+  }
+  if (item.behind) el.style.zIndex = "-1";
   return el;
 }
 
-function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Border): HTMLElement {
+function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Border, rotate?: { deg: number; ox: number; oy: number }): HTMLElement {
   const el = document.createElement("div");
   el.style.position = "absolute";
+  if (rotate) {
+    el.style.transform = `rotate(${rotate.deg}deg)`;
+    el.style.transformOrigin = `${rotate.ox}px ${rotate.oy}px`;
+  }
   const horizontal = Math.abs(y2 - y1) < 0.01;
   const cssStyle = borderCss(border);
   // Hairline borders (Word default 0.5pt = 0.67px) land on fractional device

@@ -117,6 +117,18 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     }
   }
 
+  const lnNum = child(sectPr, "lnNumType");
+  if (lnNum) {
+    const restart = attr(lnNum, "restart");
+    props.lineNumbering = {
+      countBy: intAttr(lnNum, "countBy") ?? 1,
+      start: intAttr(lnNum, "start") ?? 1,
+      // w:distance is in twips; default ~0.25in when absent.
+      distance: twipsToPx(intAttr(lnNum, "distance") ?? 360),
+      restart: restart === "continuous" || restart === "newSection" ? restart : "newPage",
+    };
+  }
+
   const type = attr(child(sectPr, "type"), "val");
   if (type === "continuous" || type === "nextPage" || type === "evenPage" || type === "oddPage" || type === "nextColumn") {
     props.type = type;

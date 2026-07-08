@@ -22,7 +22,7 @@ import {
   fontOf,
 } from "./inline.js";
 import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
-import { LaidOutPage, LayoutResult, PageItem } from "./types.js";
+import { FontSpec, LaidOutPage, LayoutResult, PageItem } from "./types.js";
 
 export interface LayoutOptions {
   measurer?: TextMeasurer;
@@ -100,6 +100,15 @@ class Engine {
   private noteCache = new Map<string, { items: PageItem[]; height: number }>();
   /** Mark text for the note body currently being laid out. */
   private selfNoteMark: string | undefined;
+  /** w:lnNumType margin line numbering: running count + restart tracking. */
+  private lnCounter = 0;
+  private lnLastPage: InternalPage | undefined;
+  private lnSectionEpoch = 0;
+  private lnResetEpoch = -1;
+  /** Word (compat 15) drops a paragraph's space-before when it lands at the
+   * top of a page reached by a hard page break. Set by the break, consumed by
+   * the next paragraph. */
+  private suppressNextSpaceBefore = false;
 
   constructor(
     private doc: DocxDocument,
@@ -128,6 +137,7 @@ class Engine {
         sp.marginLeft === prevSp.marginLeft &&
         sp.marginRight === prevSp.marginRight;
       this.sp = sp;
+      this.lnSectionEpoch++;
       // Word carries the paragraph spacing-collapse chain ACROSS section
       // breaks: the first paragraph of a new section page gets only the
       // remainder of its spacing-before over the previous paragraph's
@@ -674,12 +684,24 @@ class Engine {
         this.floats.get(this.cur)?.length ? this.makeBoundsAt(paraTop) : undefined,
       );
 
-    let paraTopEstimate = this.y + (props.spacingBefore ?? 0);
+    // The first paragraph on a page reached by a hard page break lands at the
+    // page top: Word (compat 15) drops both the break paragraph's trailing
+    // space-after and this paragraph's space-before.
+    let dropSpaceBefore = false;
+    if (this.suppressNextSpaceBefore) {
+      this.suppressNextSpaceBefore = false;
+      this.y = this.cur.bandTop;
+      this.lastParaSpacingAfter = 0;
+      dropSpaceBefore = true;
+    }
+    const rawSpacingBefore = dropSpaceBefore ? 0 : (props.spacingBefore ?? 0);
+
+    let paraTopEstimate = this.y + rawSpacingBefore;
     emitParaAnchors(paraTopEstimate);
     let broken = breakNow(paraTopEstimate);
 
     // Contextual spacing: suppress before/after between same-style neighbors.
-    let spacingBefore = props.spacingBefore ?? 0;
+    let spacingBefore = rawSpacingBefore;
     let spacingAfter = props.spacingAfter ?? 0;
     if (props.contextualSpacing) {
       const prevStyle = prev?.type === "paragraph" ? (prev.props.styleId ?? this.doc.styles.defaultParagraphStyle) : undefined;
@@ -835,12 +857,15 @@ class Engine {
 
       this.y += line.floatYOffset ?? 0;
       this.emitLine(line, this.cur, this.colX, this.y);
+      this.emitLineNumber(line, this.cur, this.colX, this.y);
       this.y += line.height;
 
       if (line.forcedBreakAfter) {
         closeFragment(li + 1, li === lines.length - 1);
-        if (line.forcedBreakAfter === "page") this.newPage(false);
-        else this.nextColumn();
+        if (line.forcedBreakAfter === "page") {
+          this.newPage(false);
+          this.suppressNextSpaceBefore = true;
+        } else this.nextColumn();
         startFragment(li + 1);
       }
     }
@@ -848,6 +873,44 @@ class Engine {
     closeFragment(lines.length, true);
     this.y += spacingAfter;
     this.lastParaSpacingAfter = spacingAfter;
+  }
+
+  /** w:lnNumType: a right-aligned number in the left margin for body lines. */
+  private emitLineNumber(line: LineBox, page: InternalPage, colX: number, topY: number): void {
+    const ln = this.sp.lineNumbering;
+    if (!ln || page.physIndex === -1) return;
+    // Restart the count per page / per section as configured.
+    if (ln.restart === "newPage" && this.lnLastPage !== page) {
+      this.lnCounter = 0;
+      this.lnLastPage = page;
+    } else if (ln.restart === "newSection" && this.lnResetEpoch !== this.lnSectionEpoch) {
+      this.lnCounter = 0;
+      this.lnResetEpoch = this.lnSectionEpoch;
+    }
+    this.lnCounter++;
+    const n = ln.start - 1 + this.lnCounter;
+    // countBy N prints only every Nth line (but every line is still counted).
+    if (ln.countBy > 1 && n % ln.countBy !== 0) return;
+    const font: FontSpec = {
+      family: this.doc.styles.defaultRPr.font ?? "Calibri",
+      size: this.doc.styles.defaultRPr.size ?? (10 * 4) / 3,
+      bold: false,
+      italic: false,
+    };
+    const text = String(n);
+    const width = this.measurer.width(text, font);
+    const baseline = quantizeQuarterPt(topY + line.baselineH - line.maxDescent);
+    page.items.push({
+      kind: "text",
+      x: colX - ln.distance - width,
+      baseline,
+      width,
+      text,
+      props: {},
+      font,
+      lineTop: topY,
+      lineHeight: line.height,
+    });
   }
 
   private emitLine(line: LineBox, page: InternalPage, originX: number, topY: number): void {
@@ -1261,14 +1324,17 @@ class Engine {
         if (shape.hAlign === "center") ox = originX(shape.hRel) + (baseW - shape.width) / 2;
         else if (shape.hAlign === "right") ox = originX(shape.hRel) + baseW - shape.width;
         const oy = originY(shape.vRel) + (shape.pctY !== undefined ? shape.pctY * sp.pageHeight : shape.y);
-        for (const img of shape.images) {
-          page.items.push({ kind: "image", x: ox + img.x - fx, y: oy + img.y - fy, width: img.width, height: img.height, part: img.part, behind: shape.behind });
+        // Filled custGeom bands paint first; blip/image fills (e.g. the Facet
+        // cover's white alpha-gradient overlay that lightens the band toward
+        // the bottom) composite on top.
+        for (const pth of shape.paths) {
+          page.items.push({ kind: "path", x: ox + pth.x - fx, y: oy + pth.y - fy, width: pth.width, height: pth.height, d: pth.d, viewW: pth.viewW, viewH: pth.viewH, fill: pth.fill, stroke: pth.stroke });
         }
         for (const l of shape.lines) {
           page.items.push({ kind: "edge", x1: ox + l.x1 - fx, y1: oy + l.y1 - fy, x2: ox + l.x2 - fx, y2: oy + l.y2 - fy, border: { style: "single", width: l.weight, color: l.color, space: 0 } });
         }
-        for (const pth of shape.paths) {
-          page.items.push({ kind: "path", x: ox + pth.x - fx, y: oy + pth.y - fy, width: pth.width, height: pth.height, d: pth.d, viewW: pth.viewW, viewH: pth.viewH, fill: pth.fill, stroke: pth.stroke });
+        for (const img of shape.images) {
+          page.items.push({ kind: "image", x: ox + img.x - fx, y: oy + img.y - fy, width: img.width, height: img.height, part: img.part, behind: shape.behind });
         }
         continue;
       }
@@ -1298,46 +1364,116 @@ class Engine {
         const baseW = (rel: "page" | "margin" | undefined) => (rel === "page" ? pageW : marginW);
         const baseH = (rel: "page" | "margin" | undefined) =>
           rel === "margin" ? pageH - sp.marginTop - sp.marginBottom : pageH;
+        // Center/right/bottom alignment against the page or margin box.
+        const alignH = (o: number, hBase: number, w: number, a?: "left" | "center" | "right") =>
+          a === "center" ? o + (hBase - w) / 2 : a === "right" ? o + hBase - w : o;
+        const alignV = (o: number, vBase: number, h: number, a?: "top" | "center" | "bottom") =>
+          a === "center" ? o + (vBase - h) / 2 : a === "bottom" ? o + vBase - h : o;
+
+        // WordArt (watermark): text scaled to fill the box, rotated as a whole.
+        if (shape.type === "wordart") {
+          const w = shape.width;
+          const h = shape.height;
+          const hBase = shape.hRel === "page" ? pageW : marginW;
+          const vBase = shape.vRel === "page" ? pageH : pageH - sp.marginTop - sp.marginBottom;
+          const ox = shape.hAlign ? alignH(originX(shape.hRel), hBase, w, shape.hAlign) : originX(shape.hRel) + shape.x;
+          const oy = shape.vAlign ? alignV(originY(shape.vRel), vBase, h, shape.vAlign) : originY(shape.vRel) + shape.y;
+          page.items.push({
+            kind: "wordart",
+            x: ox - fx,
+            y: oy - fy,
+            width: w,
+            height: h,
+            text: shape.text,
+            fontFamily: shape.fontFamily,
+            bold: shape.bold,
+            italic: shape.italic,
+            fill: shape.fill,
+            opacity: shape.opacity,
+            rotation: shape.rotation,
+            behind: shape.behind,
+          });
+          continue;
+        }
+
         const width = shape.pctWidth ? shape.pctWidth * baseW(shape.pctWidthRel) : shape.width;
         const height = shape.pctHeight ? shape.pctHeight * baseH(shape.pctHeightRel) : shape.height;
         let ox = originX(shape.hRel) + shape.x;
         if (shape.pctX !== undefined) ox = originX(shape.hRel) + shape.pctX * pageW;
-        if (shape.hAlign) {
-          const hBase = shape.hRel === "page" ? pageW : marginW;
-          const o = originX(shape.hRel);
-          if (shape.hAlign === "center") ox = o + (hBase - width) / 2;
-          else if (shape.hAlign === "right") ox = o + hBase - width;
-          else ox = o;
-        }
+        if (shape.hAlign) ox = alignH(originX(shape.hRel), shape.hRel === "page" ? pageW : marginW, width, shape.hAlign);
         let oy = originY(shape.vRel) + shape.y;
         if (shape.pctY !== undefined) oy = originY(shape.vRel) + shape.pctY * pageH;
-        if (shape.vAlign) {
-          const vBase = shape.vRel === "page" ? pageH : pageH - sp.marginTop - sp.marginBottom;
-          const o = originY(shape.vRel);
-          if (shape.vAlign === "center") oy = o + (vBase - height) / 2;
-          else if (shape.vAlign === "bottom") oy = o + vBase - height;
-          else oy = o;
-        }
+        if (shape.vAlign) oy = alignV(originY(shape.vRel), shape.vRel === "page" ? pageH : pageH - sp.marginTop - sp.marginBottom, height, shape.vAlign);
+
+        // Rotate the whole box (fill + border + text) about its center.
+        const cxc = ox - fx + width / 2;
+        const cyc = oy - fy + height / 2;
+        const rotate = shape.rotation
+          ? (itemX: number, itemY: number) => ({ deg: shape.rotation!, ox: cxc - itemX, oy: cyc - itemY })
+          : undefined;
+        const behind = shape.behind;
+
         if (shape.fill) {
-          page.items.push({ kind: "rect", x: ox - fx, y: oy - fy, width, height, fill: shape.fill });
+          page.items.push({
+            kind: "rect",
+            x: ox - fx,
+            y: oy - fy,
+            width,
+            height,
+            fill: shape.fill,
+            ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
+            ...(behind ? { behind: true } : {}),
+          });
         }
         if (shape.stroke) {
           const b = { style: "single" as const, width: shape.stroke.weight, color: shape.stroke.color, space: 0 };
-          page.items.push({ kind: "edge", x1: ox - fx, y1: oy - fy, x2: ox - fx + width, y2: oy - fy, border: b });
-          page.items.push({ kind: "edge", x1: ox - fx, y1: oy - fy + height, x2: ox - fx + width, y2: oy - fy + height, border: b });
-          page.items.push({ kind: "edge", x1: ox - fx, y1: oy - fy, x2: ox - fx, y2: oy - fy + height, border: b });
-          page.items.push({ kind: "edge", x1: ox - fx + width, y1: oy - fy, x2: ox - fx + width, y2: oy - fy + height, border: b });
+          const x0 = ox - fx;
+          const y0 = oy - fy;
+          const edge = (x1: number, y1: number, x2: number, y2: number) =>
+            page.items.push({
+              kind: "edge",
+              x1,
+              y1,
+              x2,
+              y2,
+              border: b,
+              ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}),
+            });
+          edge(x0, y0, x0 + width, y0);
+          edge(x0, y0 + height, x0 + width, y0 + height);
+          edge(x0, y0, x0, y0 + height);
+          edge(x0 + width, y0, x0 + width, y0 + height);
         }
-        // VML textbox default insets: 0.1in left/right, 0.05in top/bottom.
-        const insetX = 9.6;
-        const insetY = 4.8;
-        const inner = this.layoutFrame(shape.blocks, width - 2 * insetX, fields, { x: ox + insetX, y: oy + insetY });
-        let innerTop = oy + insetY;
+        // Text insets (bodyPr lIns/tIns/rIns/bIns), default 0.1in/0.05in.
+        const ins = shape.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
+        const inner = this.layoutFrame(shape.blocks, Math.max(width - ins.l - ins.r, 1), fields, { x: ox + ins.l, y: oy + ins.t });
+        let innerTop = oy + ins.t;
         if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
-        else if (shape.textAnchor === "bottom") innerTop = oy + height - insetY - inner.height;
+        else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
         for (const it of inner.items) {
-          offsetItem(it, ox + insetX - fx, innerTop - fy);
+          offsetItem(it, ox + ins.l - fx, innerTop - fy);
+          if (rotate && (it.kind === "text" || it.kind === "rect")) {
+            const iy = it.kind === "text" ? (it.glyphTop ?? it.lineTop) : it.y;
+            it.rotate = rotate(it.x, iy);
+          } else if (rotate && it.kind === "edge") {
+            it.rotate = rotate(Math.min(it.x1, it.x2), Math.min(it.y1, it.y2));
+          }
+          if (behind && (it.kind === "text" || it.kind === "rect")) it.behind = true;
           page.items.push(it);
+        }
+
+        // Body text flows around a wrapping text box (square / tight / topAndBottom).
+        if (shape.wrap && shape.wrap !== "none" && !shape.behind && page.physIndex !== -1) {
+          const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
+          const list = this.floats.get(page) ?? [];
+          list.push({
+            x0: ox - d.l,
+            x1: ox + width + d.r,
+            y0: oy - d.t,
+            y1: oy + height + d.b,
+            mode: shape.wrap === "topAndBottom" ? "topAndBottom" : "square",
+          });
+          this.floats.set(page, list);
         }
       }
     }
