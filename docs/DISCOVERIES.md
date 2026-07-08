@@ -149,6 +149,40 @@ anchor's distL/R (parity-wrapmodes: x matches to a hundredth of a point
 with dist=0). The engine folds distT/B/L/R into the float record; no
 hardcoded padding.
 
+### wrapText="bothSides" fills BOTH sides of a mid-column float on the same line band
+A square/tight float that sits in the MIDDLE of the text column (room on
+both sides) makes Word wrap text on the LEFT then continue into the RIGHT
+strip at the SAME y, then drop to the next band — a two-segment line, not a
+one-sided shrink (parity2-textboxes square box: left col [72,293], right col
+[477,540], measured continuous reading order across the two). Modeled by
+having the bounds callback (`makeBoundsAt`) subtract each overlapping float
+from the band to yield a list of free intervals (`LineBounds.segments`); the
+breaker fills interval 0, and on a word that overflows it hops to the next
+interval at the same y before breaking the line. Word won't wrap into a strip
+narrower than ~40pt (the old one-sided push-below threshold, reused as the
+per-segment minimum). Fixed parity2-textboxes p1 44.7%→11.5%.
+
+### A vMerge="restart" cell does NOT inflate its starting row
+Its content height spreads over ALL the rows it spans; each row is sized by
+its own UNmerged cells, and only if the merged content exceeds the sum of the
+spanned rows is the deficit added to the LAST spanned row (parity2-
+nestedtables: "vMerge start (tall)" is 2 lines but rows A and B stay one line
+each — 27pt, not 41+27). `computeRowHeights` runs a pre-pass over all
+laid-out rows; the restart cell then PAINTS (shading/borders/vertical-align)
+at its full spanned height via `spanHeight`, while continue cells only carry
+the vertical rules through.
+
+### The mandatory empty paragraph after a table collapses to zero height
+OOXML requires a `w:p` after every table (and before a cell/frame end); when
+that trailing paragraph is empty Word gives it NO line — a nested table sits
+flush against the cell bottom, not a blank line below it (parity2-
+nestedtables: the `<w:p/>` after both the L3 and L2 tables cost a phantom
+~22.5pt line each — 8pt after + 14.5pt line — and cascaded the whole outer
+row ~45pt too tall). `layoutFrame` skips an empty paragraph whose previous
+block is a table (anchor-carrying paragraphs are NOT empty — collapsing them
+would drop the float). This single rule took nestedtables p1 34.3%→5.3% and
+p2/p3 from 10.7/16.0 to 2.9/3.0.
+
 ## Editing UX
 
 ### Pleading paper headers have no typeable text

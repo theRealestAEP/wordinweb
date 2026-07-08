@@ -592,38 +592,54 @@ class Engine {
     return (yOffset: number, estHeight: number) => {
       const y0 = paraTop + yOffset;
       const y1 = y0 + estHeight;
-      let left = colX;
-      let right = colX + colW;
-      let skipTo: number | undefined;
       const floats = this.floats.get(page) ?? [];
+      // Boundary-touching counts as overlap: Word narrows the line whose top
+      // sits exactly at the float's bottom (parity-wrapmodes: a 72px image
+      // over 18px lines wraps five rows, not four).
+      const overlaps = (f: { y0: number; y1: number }) => f.y1 >= y0 - 0.25 && f.y0 <= y1 - 0.25;
+      // A top-and-bottom float pushes the whole line below it.
+      let skipTo: number | undefined;
       for (const f of floats) {
-        // Boundary-touching counts as overlap: Word narrows the line whose
-        // top sits exactly at the float's bottom (parity-wrapmodes: a 72px
-        // image over 18px lines wraps five rows, not four).
-        if (f.y1 < y0 - 0.25 || f.y0 > y1 - 0.25) continue;
-        if (f.mode === "topAndBottom") {
-          skipTo = Math.max(skipTo ?? 0, f.y1 - paraTop + 2);
-          continue;
-        }
-        // square: shrink from the side the float occupies. Word wraps text
-        // at exactly the float edge + its wrap distance (already folded into
-        // the float record) - no extra padding (parity-wrapmodes: text
-        // resumes at image x + width to the hundredth of a point).
-        const floatCenter = (f.x0 + f.x1) / 2;
-        const colCenter = colX + colW / 2;
-        if (floatCenter <= colCenter) left = Math.max(left, f.x1);
-        else right = Math.min(right, f.x0);
+        if (f.mode === "topAndBottom" && overlaps(f)) skipTo = Math.max(skipTo ?? 0, f.y1 - paraTop + 2);
       }
-      if (right - left < 40 && skipTo === undefined) {
-        // No room beside the float: push below it.
+      if (skipTo !== undefined) return { x: 0, width: colW, skipTo };
+      // Square/tight floats carve free intervals out of the column band. A
+      // float in the MIDDLE leaves free space on BOTH sides, and Word wraps
+      // text on both (wp:wrapSquare wrapText="bothSides"); a float against a
+      // column edge leaves one side. Text resumes at exactly the float edge +
+      // its wrap distance (already folded into the float record) - no extra
+      // padding (parity-wrapmodes: text resumes at image x + width to the
+      // hundredth of a point).
+      let intervals: { x0: number; x1: number }[] = [{ x0: colX, x1: colX + colW }];
+      for (const f of floats) {
+        if (f.mode !== "square" || !overlaps(f)) continue;
+        const next: { x0: number; x1: number }[] = [];
+        for (const iv of intervals) {
+          if (f.x1 <= iv.x0 || f.x0 >= iv.x1) {
+            next.push(iv);
+            continue;
+          }
+          if (f.x0 > iv.x0) next.push({ x0: iv.x0, x1: f.x0 });
+          if (f.x1 < iv.x1) next.push({ x0: f.x1, x1: iv.x1 });
+        }
+        intervals = next;
+      }
+      // Word won't wrap into a strip narrower than ~40pt beside a float; a
+      // band left with no usable room pushes below the lowest float
+      // (parity-wrapmodes calibration).
+      const MIN_SEG = 40;
+      const segs = intervals
+        .filter((iv) => iv.x1 - iv.x0 >= MIN_SEG)
+        .map((iv) => ({ x: iv.x0 - colX, width: iv.x1 - iv.x0 }));
+      if (segs.length === 0) {
         let bottom = y0;
         for (const f of floats) {
-          if (f.y1 <= y0 || f.y0 >= y1) continue;
-          if (f.mode === "square") bottom = Math.max(bottom, f.y1);
+          if (f.mode === "square" && f.y1 > y0 && f.y0 < y1) bottom = Math.max(bottom, f.y1);
         }
-        if (bottom > y0) skipTo = bottom - paraTop + 2;
+        if (bottom > y0) return { x: 0, width: colW, skipTo: bottom - paraTop + 2 };
+        return { x: 0, width: colW };
       }
-      return { x: left - colX, width: right - left, skipTo };
+      return { x: segs[0].x, width: segs[0].width, segments: segs };
     };
   }
 
@@ -1291,6 +1307,20 @@ class Engine {
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (block.type === "paragraph") {
+        // The mandatory empty paragraph OOXML places after a table (and before
+        // the cell/frame end) collapses to zero height in Word - it does NOT
+        // add a blank line under a nested table (parity2-nestedtables: the
+        // trailing <w:p/> after the L3 and L2 tables). A non-empty paragraph
+        // after a table renders normally.
+        if (
+          i > 0 &&
+          blocks[i - 1].type === "table" &&
+          !block.sectionBreak &&
+          isEmptyParagraph(block)
+        ) {
+          framePrevAfter = 0;
+          continue;
+        }
         const props = this.doc.effectiveParaProps(block);
         const label = this.numberingLabel(props, block);
         const broken = breakParagraph(this.doc, this.measurer, block, width, fields, label);
@@ -1798,13 +1828,20 @@ class Engine {
     let segTop = this.y;
     let segPage = this.cur;
 
+    // Lay out all rows up front so vertically-merged cells can be sized across
+    // their spanned rows rather than inflating their starting row.
+    const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
+    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+    for (const [key, ph] of spanPaint) {
+      const ri = Math.floor(key / 1000);
+      const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
+      if (cl) cl.spanHeight = ph;
+    }
+
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const row = tbl.rows[ri];
-      let laid = this.layoutRow(tbl, row, ri, widths);
-      let rowHeight = laid.height + this.rowBorderShare(tbl, ri);
-      if (row.props.height !== undefined && row.props.heightRule !== "auto") {
-        rowHeight = this.rowHeightFromTrHeight(tbl, row, ri, rowHeight);
-      }
+      let laid = laidRows[ri];
+      let rowHeight = rowHeights[ri];
       const advance = () => {
         this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
         this.nextColumn();
@@ -1911,12 +1948,16 @@ class Engine {
     this.col = 0;
     this.y = y;
     const frameTop = this.y;
+    const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths, fields));
+    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+    for (const [key, ph] of spanPaint) {
+      const ri = Math.floor(key / 1000);
+      const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
+      if (cl) cl.spanHeight = ph;
+    }
     for (let ri = 0; ri < tbl.rows.length; ri++) {
-      const laid = this.layoutRow(tbl, tbl.rows[ri], ri, widths, fields);
-      let rowHeight = laid.height + this.rowBorderShare(tbl, ri);
-      if (tbl.rows[ri].props.height !== undefined && tbl.rows[ri].props.heightRule !== "auto") {
-        rowHeight = this.rowHeightFromTrHeight(tbl, tbl.rows[ri], ri, rowHeight);
-      }
+      const laid = laidRows[ri];
+      const rowHeight = rowHeights[ri];
       this.paintRow(tbl, tbl.rows[ri], ri, laid, x0 + (tbl.props.indent ?? 0), widths, rowHeight);
       this.y += rowHeight;
       if (tbl.src) {
@@ -1990,13 +2031,86 @@ class Engine {
     };
   }
 
+  /** Grid-column index where each cell of a row starts (honoring gridSpan). */
+  private cellGridPositions(row: TableRow): number[] {
+    const pos: number[] = [];
+    let g = 0;
+    for (const c of row.cells) {
+      pos.push(g);
+      g += c.props.gridSpan;
+    }
+    return pos;
+  }
+
+  /** How many rows a vertically-merged (vMerge="restart") cell spans: itself
+   * plus the consecutive following rows carrying a vMerge="continue" cell in
+   * the same grid column. */
+  private vMergeRowSpan(tbl: Table, ri: number, gridCol: number): number {
+    let span = 1;
+    for (let r = ri + 1; r < tbl.rows.length; r++) {
+      const positions = this.cellGridPositions(tbl.rows[r]);
+      const idx = positions.indexOf(gridCol);
+      if (idx >= 0 && tbl.rows[r].cells[idx]?.props.vMerge === "continue") span++;
+      else break;
+    }
+    return span;
+  }
+
+  /**
+   * Final painted height of every row, and (keyed by ri*1000+cellIdx) the full
+   * spanned height of each multi-row vMerge="restart" cell. A merged cell's
+   * content does NOT inflate its starting row: each row is sized by its own
+   * unmerged cells, and only if the merged content exceeds the sum of its
+   * spanned rows is the deficit added to the last spanned row (Word behaviour,
+   * parity2-nestedtables: the "vMerge start (tall)" cell leaves rows A and B at
+   * their natural one-line height instead of doubling the first).
+   */
+  private computeRowHeights(
+    tbl: Table,
+    laidRows: { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[]; height: number }[],
+  ): { heights: number[]; spanPaint: Map<number, number> } {
+    const n = tbl.rows.length;
+    const heights = new Array<number>(n).fill(0);
+    const restarts: { ri: number; ci: number; span: number; height: number }[] = [];
+    for (let ri = 0; ri < n; ri++) {
+      const row = tbl.rows[ri];
+      const positions = this.cellGridPositions(row);
+      let h = 0;
+      for (const cl of laidRows[ri].cells) {
+        const cell = row.cells[cl.cellIdx];
+        if (cell.props.vMerge === "continue") continue;
+        if (cell.props.vMerge === "restart" && this.vMergeRowSpan(tbl, ri, positions[cl.cellIdx]) > 1) {
+          restarts.push({ ri, ci: cl.cellIdx, span: this.vMergeRowSpan(tbl, ri, positions[cl.cellIdx]), height: cl.height });
+          continue;
+        }
+        h = Math.max(h, cl.height);
+      }
+      h += this.rowBorderShare(tbl, ri);
+      if (row.props.height !== undefined && row.props.heightRule !== "auto") {
+        h = this.rowHeightFromTrHeight(tbl, row, ri, h);
+      }
+      heights[ri] = h;
+    }
+    const spanPaint = new Map<number, number>();
+    for (const m of restarts) {
+      let avail = 0;
+      for (let r = m.ri; r < m.ri + m.span; r++) avail += heights[r];
+      if (m.height > avail) {
+        heights[m.ri + m.span - 1] += m.height - avail;
+        avail = m.height;
+      }
+      spanPaint.set(m.ri * 1000 + m.ci, avail);
+    }
+    return { heights, spanPaint };
+  }
+
   private layoutRow(
     tbl: Table,
     row: TableRow,
     rowIdx: number,
     widths: number[],
     fields?: FieldContext,
-  ): { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[]; height: number } {
+  ): { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number }[]; height: number } {
     const defaults = this.cellMarginsOf(tbl);
     const cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[] = [];
     let gridPos = 0;
@@ -2025,7 +2139,7 @@ class Engine {
     tbl: Table,
     row: TableRow,
     rowIdx: number,
-    laid: { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[]; height: number },
+    laid: { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number }[]; height: number },
     x0: number,
     widths: number[],
     rowHeight: number,
@@ -2047,14 +2161,18 @@ class Engine {
         continue;
       }
 
+      // A vertically-merged (restart) cell paints across the rows it spans,
+      // not just its starting row.
+      const cellH = cellLay.spanHeight ?? rowHeight;
+
       if (cell.props.shading) {
-        page.items.push({ kind: "rect", x: cx, y, width: cellLay.width, height: rowHeight, fill: cell.props.shading });
+        page.items.push({ kind: "rect", x: cx, y, width: cellLay.width, height: cellH, fill: cell.props.shading });
       }
 
       // Vertical alignment offset.
       let dy = 0;
-      if (cell.props.verticalAlign === "center") dy = Math.max(0, (rowHeight - cellLay.height) / 2);
-      else if (cell.props.verticalAlign === "bottom") dy = Math.max(0, rowHeight - cellLay.height);
+      if (cell.props.verticalAlign === "center") dy = Math.max(0, (cellH - cellLay.height) / 2);
+      else if (cell.props.verticalAlign === "bottom") dy = Math.max(0, cellH - cellLay.height);
 
       // Exact-height rows CLIP overflowing content (Word: content past the
       // fixed row height is hidden, not spilled onto the page - e.g. the
@@ -2072,7 +2190,7 @@ class Engine {
         page.items.push(it);
       }
 
-      this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, rowHeight, isFirstRow, isLastRow, isFirstCol, isLastCol, false);
+      this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, cellH, isFirstRow, isLastRow, isFirstCol, isLastCol, false);
     }
   }
 
@@ -2115,6 +2233,26 @@ class Engine {
 }
 
 // ---------- helpers ----------
+
+/** A paragraph with no rendered content at all: no text, images, drawings,
+ * math, fields, tabs, breaks, note references, or floating anchors. (An
+ * anchor-carrying paragraph is NOT empty - collapsing it would drop the
+ * float.) */
+function isEmptyParagraph(p: Paragraph): boolean {
+  for (const child of p.children) {
+    const runs = child.type === "run" ? [child] : child.runs;
+    for (const r of runs) {
+      for (const rc of r.content) {
+        if (rc.kind === "text") {
+          if (rc.text.length > 0) return false;
+        } else {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
 
 function computeColumns(sp: SectionProps, contentWidth: number): { colXs: number[]; colWidths: number[] } {
   const originX = sp.marginLeft + sp.gutter;

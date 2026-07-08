@@ -194,6 +194,13 @@ export interface LineBounds {
   x: number;
   width: number;
   skipTo?: number;
+  /** Multiple free horizontal intervals in the same line band (column-
+   * relative), left-to-right, when a float sits in the MIDDLE of the column
+   * and Word wraps text on BOTH of its sides (wp:wrapSquare/Tight
+   * wrapText="bothSides"). segments[0] equals {x,width}; when present with
+   * length > 1 the breaker fills each interval in turn at the same y before
+   * advancing to the next line band. */
+  segments?: { x: number; width: number }[];
 }
 
 const DEFAULT_TAB = 48; // 0.5in
@@ -251,6 +258,11 @@ export function breakParagraph(
   let lineFloatOffset = 0;
   let curBase = 0;
   let curWidth = contentWidth;
+  // Free horizontal intervals for the current line band (column-relative) and
+  // which one the cursor is currently filling. length > 1 means a middle float
+  // splits the band and Word wraps text on both of its sides.
+  let curSegments: { x: number; width: number }[] = [{ x: 0, width: contentWidth }];
+  let curSegIdx = 0;
   // Estimated line height for float-exclusion checks. Fixed-height rules
   // (exact/atLeast) are known before the line is built — use them, or a
   // too-short estimate misses floats overlapping the lower band of the line.
@@ -260,6 +272,8 @@ export function breakParagraph(
     lineFloatOffset = 0;
     curBase = 0;
     curWidth = contentWidth;
+    curSegments = [{ x: 0, width: contentWidth }];
+    curSegIdx = 0;
     if (boundsAt) {
       let guard = 0;
       let b = boundsAt(yOff, EST_LINE);
@@ -270,11 +284,27 @@ export function breakParagraph(
       }
       curBase = b.x;
       curWidth = b.width;
+      curSegments = b.segments && b.segments.length > 0 ? b.segments : [{ x: b.x, width: b.width }];
+      curSegIdx = 0;
     }
     void idx;
   };
-  const lineStartX = (idx: number) => curBase + indentLeft + (idx === 0 ? firstLineExtra : 0);
-  const availFor = (idx: number) => curWidth - indentLeft - (idx === 0 ? firstLineExtra : 0) - indentRight;
+  // Move the cursor into the next free interval of the current line band (a
+  // float's far side), keeping the same y. Only segment 0 carries the
+  // paragraph's left indent; later segments start flush at their interval.
+  const advanceSegment = (): boolean => {
+    if (curSegIdx + 1 >= curSegments.length) return false;
+    curSegIdx++;
+    curBase = curSegments[curSegIdx].x;
+    curWidth = curSegments[curSegIdx].width;
+    return true;
+  };
+  // Indents (and first-line indent) apply only to the first free interval of a
+  // band; a float's far-side interval starts flush at its own edge.
+  const lineStartX = (idx: number) =>
+    curSegIdx > 0 ? curBase : curBase + indentLeft + (idx === 0 ? firstLineExtra : 0);
+  const availFor = (idx: number) =>
+    curSegIdx > 0 ? curWidth : curWidth - indentLeft - (idx === 0 ? firstLineExtra : 0) - indentRight;
 
   beginLine(0);
   let x = lineStartX(0);
@@ -523,7 +553,23 @@ export function breakParagraph(
         // if it isn't the whole line) moves down with the rest of the word.
         const head = hi > minSpans && hi < cur.length && cur[hi - 1].isSpace ? cur.splice(hi) : [];
         for (const h of head) curLineWidth -= h.width;
-        flush(false, false);
+        // A float in the MIDDLE of the column leaves free space on both sides;
+        // Word fills the near side, then the far side of the SAME line band,
+        // then the next band. Try each remaining far-side interval (empty
+        // width) before breaking to a new line - never repack the interval the
+        // word already overflowed.
+        let moved = false;
+        while (advanceSegment()) {
+          if (wordW <= availFor(lineIndex) + 0.01) {
+            moved = true;
+            break;
+          }
+        }
+        if (moved) {
+          x = lineStartX(lineIndex);
+        } else {
+          flush(false, false);
+        }
         for (const h of head) {
           h.x = x;
           x += h.width;
