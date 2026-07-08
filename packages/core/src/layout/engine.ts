@@ -128,8 +128,16 @@ class Engine {
         sp.marginLeft === prevSp.marginLeft &&
         sp.marginRight === prevSp.marginRight;
       this.sp = sp;
+      // Word carries the paragraph spacing-collapse chain ACROSS section
+      // breaks: the first paragraph of a new section page gets only the
+      // remainder of its spacing-before over the previous paragraph's
+      // spacing-after (parity2-sections: Heading1 before=12pt after a
+      // Normal after=8pt paragraph starts 4pt below the margin on section
+      // pages, but the full 12pt at the document start).
+      const carryAfter = this.lastParaSpacingAfter;
       if (canContinue) this.newBand();
       else this.newPage(true);
+      if (prevSp !== null) this.lastParaSpacingAfter = carryAfter;
       this.armColumnBalancing(section, sections[sections.indexOf(section) + 1]);
       this.layoutBlocks(section.blocks);
       this.prevBandBalanced = this.balanceBottom !== undefined;
