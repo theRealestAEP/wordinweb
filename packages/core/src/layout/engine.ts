@@ -635,8 +635,10 @@ class Engine {
     const mergeTop = props.borders !== undefined && sameBorders(prev);
     const mergeBottom = props.borders !== undefined && sameBorders(next);
 
+    let breakBeforeForced = false;
     if (props.pageBreakBefore && !this.pageIsEmptyAtCursor()) {
       this.newPage(false);
+      breakBeforeForced = true;
     }
 
     // Floats anchored here must exclude this paragraph's own text: emit them
@@ -679,7 +681,10 @@ class Engine {
     let broken = breakNow(paraTopEstimate);
 
     // Contextual spacing: suppress before/after between same-style neighbors.
-    let spacingBefore = props.spacingBefore ?? 0;
+    // Word drops spacing-before ENTIRELY on the page that w:pageBreakBefore
+    // forced (parity2-toc: Heading1 before=12pt sits at margin + ascent
+    // exactly on its forced page).
+    let spacingBefore = breakBeforeForced ? 0 : (props.spacingBefore ?? 0);
     let spacingAfter = props.spacingAfter ?? 0;
     if (props.contextualSpacing) {
       const prevStyle = prev?.type === "paragraph" ? (prev.props.styleId ?? this.doc.styles.defaultParagraphStyle) : undefined;
@@ -718,6 +723,38 @@ class Engine {
     ) {
       if (anchors.length > 0) restartOnNextColumn(spacingBefore);
       else this.nextColumn();
+    }
+
+    // keepNext: Word never leaves this paragraph at a column bottom without
+    // the start of its next block (headings stay with their body text).
+    // When the paragraph fits but the next block's first line would not,
+    // move it - and, like any paragraph pushed to a page top by an automatic
+    // break, its spacing-before is dropped (parity2-toc p6: the keepNext-
+    // moved Conclusion heading sits at margin + ascent exactly).
+    // TODO: chains of keepNext paragraphs (H1+H2) move one at a time here;
+    // Word moves the whole chain.
+    if (props.keepNext && next !== undefined && !this.pageIsEmptyAtCursor()) {
+      const effBefore = Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
+      let nextFirst = 18; // conservative: one body line (tables etc.)
+      if (next.type === "paragraph") {
+        const np = this.doc.effectiveParaProps(next);
+        const nb = breakParagraph(
+          this.doc,
+          this.measurer,
+          next,
+          this.colWidth,
+          this.fieldCtx(),
+          this.numberingLabel(np, next),
+        );
+        const gap = Math.max(spacingAfter, np.spacingBefore ?? 0) - spacingAfter;
+        nextFirst = gap + (nb.lines[0]?.height ?? 18);
+      }
+      const needed = effBefore + lines.reduce((a, l) => a + l.height, 0) + spacingAfter + nextFirst;
+      if (this.y + needed > this.bodyBottom && needed <= bodyHeight) {
+        spacingBefore = 0;
+        if (anchors.length > 0) restartOnNextColumn(0);
+        else this.nextColumn();
+      }
     }
 
     // Adjacent before/after collapse: the larger of the previous paragraph's
