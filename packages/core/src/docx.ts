@@ -15,7 +15,7 @@ import {
   Theme,
 } from "./model.js";
 import { parseTheme } from "./parse/theme.js";
-import { parseStyles, resolveCharacterStyleChain, resolveParagraphStyleChain } from "./parse/styles.js";
+import { parseStyles, resolveCharacterStyleChain, resolveParagraphStyleChain, resolveTableStyleProps } from "./parse/styles.js";
 import { parseNumbering } from "./parse/numbering.js";
 import { parseBody, parseBlocks, DocParseContext } from "./parse/document.js";
 import { parseNotesPart } from "./parse/notes.js";
@@ -860,7 +860,7 @@ export class DocxDocument {
     return this.pkg.binary(part);
   }
 
-  /** Effective paragraph properties: docDefaults → style chain → direct. */
+  /** Effective paragraph properties: docDefaults → table style → style chain → direct. */
   effectiveParaProps(para: Paragraph): ParaProps {
     let pPr: ParaProps;
     const tableStyleId = para.props.tableStyleId;
@@ -868,10 +868,12 @@ export class DocxDocument {
       // Precedence: docDefaults < table style < paragraph style < direct.
       // The table style's pPr sits just above docDefaults, so a paragraph
       // style that leaves spacing unset (e.g. ListParagraph) inherits the
-      // table style's compact spacing rather than docDefaults'.
-      const tblStyle = this.styles.byId.get(tableStyleId);
+      // table style's compact spacing rather than docDefaults'. The table
+      // style resolves through its own basedOn chain (TableGrid basedOn
+      // TableNormal).
+      const tbl = resolveTableStyleProps(this.styles, tableStyleId);
       let base: ParaProps = { ...this.styles.defaultPPr };
-      if (tblStyle?.pPr) base = mergeParaProps(base, tblStyle.pPr);
+      if (tbl.pPr) base = mergeParaProps(base, tbl.pPr);
       const contrib = resolveParagraphStyleChain(this.styles, para.props.styleId, false);
       pPr = mergeParaProps(base, contrib.pPr);
     } else {
@@ -892,8 +894,19 @@ export class DocxDocument {
 
   /** Effective run properties for a run inside a paragraph. */
   effectiveRunProps(para: Paragraph, runProps: RunProps): RunProps {
-    const { rPr: paraStyleRPr } = resolveParagraphStyleChain(this.styles, para.props.styleId);
-    let props = paraStyleRPr;
+    let props: RunProps;
+    const tableStyleId = para.props.tableStyleId;
+    if (tableStyleId) {
+      // Same layering as effectiveParaProps: the table style's rPr sits
+      // between docDefaults and the paragraph style chain.
+      const tbl = resolveTableStyleProps(this.styles, tableStyleId);
+      let base: RunProps = { ...this.styles.defaultRPr };
+      if (tbl.rPr) base = mergeRunProps(base, tbl.rPr);
+      const contrib = resolveParagraphStyleChain(this.styles, para.props.styleId, false);
+      props = mergeRunProps(base, contrib.rPr);
+    } else {
+      props = resolveParagraphStyleChain(this.styles, para.props.styleId).rPr;
+    }
     if (runProps.styleId) {
       props = mergeRunProps(props, resolveCharacterStyleChain(this.styles, runProps.styleId));
     }

@@ -110,6 +110,26 @@ export function resolveParagraphStyleChain(
   return { pPr, rPr };
 }
 
+/** Merged pPr/rPr contributed by a table style's own basedOn chain (no docDefaults). */
+export function resolveTableStyleProps(styles: Styles, styleId: string): { pPr?: ParaProps; rPr?: RunProps } {
+  const chain: Style[] = [];
+  let cur: string | undefined = styleId;
+  let guard = 0;
+  while (cur && guard++ < MAX_CHAIN) {
+    const s = styles.byId.get(cur);
+    if (!s) break;
+    chain.unshift(s);
+    cur = s.basedOn;
+  }
+  let pPr: ParaProps | undefined;
+  let rPr: RunProps | undefined;
+  for (const s of chain) {
+    if (s.pPr) pPr = pPr ? mergeParaProps(pPr, s.pPr) : { ...s.pPr };
+    if (s.rPr) rPr = rPr ? mergeRunProps(rPr, s.rPr) : { ...s.rPr };
+  }
+  return { pPr, rPr };
+}
+
 /** Effective run props contributed by a character style chain. */
 export function resolveCharacterStyleChain(styles: Styles, styleId: string | undefined): RunProps {
   const chain: Style[] = [];

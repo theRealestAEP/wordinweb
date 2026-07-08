@@ -183,6 +183,22 @@ class Engine {
 
   private newPage(sectionStart: boolean): void {
     const sp = this.sp;
+    // Coalesce a section break with a preceding page break: if the previous
+    // content already broke to a fresh, empty page (nothing laid out on it),
+    // a nextPage section starts ON that page rather than leaving it blank —
+    // Word's rule (athabasca: a page-break paragraph immediately followed by
+    // an empty section-break paragraph must not insert a blank page). Parity
+    // breaks (odd/even page) still force their own page.
+    if (
+      sectionStart &&
+      this.pages.length > 0 &&
+      this.cur &&
+      this.cur.items.length === 0 &&
+      this.pageIsEmptyAtCursor() &&
+      (sp.type === undefined || sp.type === "nextPage")
+    ) {
+      this.pages.pop();
+    }
     const physIndex = this.pages.length + 1;
     let displayNumber: number;
     if (sectionStart && sp.pageNumberStart !== undefined) {

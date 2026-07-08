@@ -34,6 +34,8 @@ interface FragAtom {
   width: number;
   href?: string;
   src?: TextSource;
+  /** A word-internal hyphen ends this fragment: Word may break the line here. */
+  breakAfter?: boolean;
   /** Footnote id when this fragment is a footnote reference mark. */
   noteId?: number;
   /** Font whose metrics set the line height when it differs from the paint
@@ -105,6 +107,28 @@ function displayText(text: string, props: RunProps): string {
   return text;
 }
 
+/** Letter test for hyphen break context (word-internal only). */
+function isWordLetter(ch: string | undefined): boolean {
+  return ch !== undefined && /[^\s\d\-‐-―]/.test(ch) && /\p{L}/u.test(ch);
+}
+
+/**
+ * Offsets *after* each word-internal hyphen where Word allows a line break.
+ * A hyphen-minus (or U+2010 hyphen) between two letters is a break-after
+ * opportunity ("multi-part" -> "multi-" | "part"); leading/numeric hyphens
+ * (a minus sign, "3-4") are not.
+ */
+function hyphenBreaks(word: string): number[] {
+  const out: number[] = [];
+  for (let i = 1; i < word.length - 1; i++) {
+    const ch = word[i];
+    if ((ch === "-" || ch === "‐") && isWordLetter(word[i - 1]) && isWordLetter(word[i + 1])) {
+      out.push(i + 1);
+    }
+  }
+  return out;
+}
+
 /** Word small caps: lowercase letters (and all spaces, even between real
  * capitals) render as capitals at 80% of the size rounded to half-points;
  * uppercase letters, digits and punctuation stay full size. Measured from
@@ -147,6 +171,8 @@ export interface LineSpan {
   leader?: "dot" | "hyphen" | "underscore" | "middleDot";
   /** Footnote id whose content must land on the page carrying this line. */
   noteId?: number;
+  /** A word-internal hyphen ends this span: a line may break after it. */
+  breakAfter?: boolean;
 }
 
 export interface LineBox {
@@ -523,12 +549,18 @@ export function breakParagraph(
       while (hi > minSpans) {
         const s = cur[hi - 1];
         if (s.isSpace || !s.text || s.text === "\t" || s.image || s.drawing) break;
+        // A hyphen break opportunity ends the head: the hyphenated left part
+        // stays on this line, only the current segment (+tail) moves down.
+        if (s.breakAfter) break;
         headW += s.width;
         hi--;
       }
       let tailW = 0;
-      for (let j = ai + 1; j < atoms.length && atoms[j].kind === "frag"; j++) {
-        tailW += (atoms[j] as { width: number }).width;
+      if (!atom.breakAfter) {
+        for (let j = ai + 1; j < atoms.length && atoms[j].kind === "frag"; j++) {
+          tailW += (atoms[j] as { width: number }).width;
+          if ((atoms[j] as FragAtom).breakAfter) break;
+        }
       }
       const wordW = headW + atom.width + tailW;
       if (props.alignment === "justify" && curSpaceWidth > 0) {
@@ -606,7 +638,7 @@ export function breakParagraph(
       }
       continue;
     }
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter });
     curLineWidth += atom.width;
     x += atom.width;
   }
@@ -946,16 +978,36 @@ function buildAtoms(
           });
         }
       } else {
-        atoms.push({
-          kind: "frag",
-          text: part,
-          props,
-          font,
-          width: partWidth,
-          href,
-          src,
-          metricsFont,
-        });
+        // Split the word at word-internal hyphens: Word allows a line break
+        // after a hyphen-minus that sits between two letters ("multi-word").
+        // Emit a frag per segment, keeping the hyphen with its left segment
+        // and marking it breakAfter. Widths stay cumulative-exact.
+        const breaks = hyphenBreaks(part);
+        if (breaks.length === 0) {
+          atoms.push({ kind: "frag", text: part, props, font, width: partWidth, href, src, metricsFont });
+        } else {
+          let segStart = 0;
+          let segPrevCum = prevCum;
+          const bounds = [...breaks, part.length];
+          for (const segEnd of bounds) {
+            const seg = part.slice(segStart, segEnd);
+            const segCum = measurer.width(text.slice(0, offset + segEnd), font, props.letterSpacing);
+            const segWidth = Math.max(segCum - segPrevCum, 0);
+            atoms.push({
+              kind: "frag",
+              text: seg,
+              props,
+              font,
+              width: segWidth,
+              href,
+              src: src ? { run: src.run, t: src.t, offset: src.offset + segStart } : undefined,
+              metricsFont,
+              breakAfter: segEnd < part.length,
+            });
+            segPrevCum = segCum;
+            segStart = segEnd;
+          }
+        }
       }
       prevCum = cum;
       offset = end;
