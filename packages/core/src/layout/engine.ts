@@ -680,6 +680,11 @@ class Engine {
       if (prevStyle === myStyle) spacingBefore = 0;
       if (nextStyle === myStyle) spacingAfter = 0;
     }
+    // A paragraph border reserves vertical room for its rule + space, so the
+    // rule sits in the gap instead of overlapping the neighbor (pleading
+    // footer: the caption's top border must clear the page number above).
+    spacingBefore += this.borderPadImpl(props.borders?.top);
+    spacingAfter += this.borderPadImpl(props.borders?.bottom);
 
     let lines = broken.lines;
     const totalHeight = spacingBefore + lines.reduce((a, l) => a + l.height, 0);
@@ -1025,6 +1030,12 @@ class Engine {
     }
   }
 
+  /** Vertical room a paragraph border claims: its space above/below the text
+   * plus the rule width (Word reserves this so the rule sits in the gap). */
+  private borderPadImpl(b: { style: string; width: number; space: number } | undefined): number {
+    return b && b.style !== "none" ? b.space + b.width : 0;
+  }
+
   private emitParagraphDecorations(
     props: ParaProps,
     page: InternalPage,
@@ -1124,6 +1135,8 @@ class Engine {
           if (styleOf(blocks[i - 1]) === myStyle) spacingBefore = 0;
           if (styleOf(blocks[i + 1]) === myStyle) spacingAfter = 0;
         }
+        spacingBefore += this.borderPadImpl(props.borders?.top);
+        spacingAfter += this.borderPadImpl(props.borders?.bottom);
         y += Math.max(spacingBefore, framePrevAfter) - framePrevAfter;
         framePrevAfter = spacingAfter;
         const top = y;
