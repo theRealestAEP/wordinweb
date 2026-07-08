@@ -666,7 +666,15 @@ function finishLine(
     }
     const m = measurer.metrics(font);
     maxAscent = Math.max(maxAscent, m.ascent);
-    maxDescent = Math.max(maxDescent, m.lineDescent ?? m.descent);
+    // RAW descent, not the quantized lineDescent: the quantized below-share
+    // inflates natural = ascent + descent past the raw line height whenever
+    // quantization rounds up (Calibri 11pt: +0.047pt per line, while 22pt
+    // rounds down and was exact - probe-lineadvance blocks A-I show Word
+    // advances by the raw height at every size and multiplier). The old
+    // inflated-natural + quantized-descent pair cancelled in baseline
+    // placement, which is why baselines looked right while every 11pt page
+    // drifted ~0.05pt per line.
+    maxDescent = Math.max(maxDescent, m.descent);
     maxRawDescent = Math.max(maxRawDescent, m.descent);
     maxNatural = Math.max(maxNatural, m.lineHeight);
     maxNaturalText = Math.max(maxNaturalText, m.lineHeight);
