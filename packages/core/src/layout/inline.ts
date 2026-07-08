@@ -321,9 +321,11 @@ export function breakParagraph(
     }
   }
 
-  const flush = (isLast: boolean, endsWithBreak: boolean, forced?: "page" | "column") => {
-    // Trim trailing space spans (they don't affect alignment).
-    while (cur.length > 0 && cur[cur.length - 1].isSpace) {
+  const flush = (isLast: boolean, endsWithBreak: boolean, forced?: "page" | "column", keepTrailingSpace = false) => {
+    // Trim trailing space spans (they don't affect alignment). In a degenerate
+    // ultra-narrow column Word keeps an inter-word space on its own line
+    // (keepTrailingSpace) so it still costs a line of height.
+    while (!keepTrailingSpace && cur.length > 0 && cur[cur.length - 1].isSpace) {
       curLineWidth -= cur[cur.length - 1].width;
       curSpaceWidth -= cur[cur.length - 1].width;
       cur.pop();
@@ -441,6 +443,21 @@ export function breakParagraph(
       continue;
     }
     if (atom.kind === "space") {
+      // Degenerate column narrower than a single space (e.g. a 2-column
+      // section whose huge w:cols/@space drives the computed column width
+      // negative): Word gives every inter-word space its own line, because it
+      // can't sit beside the glyph on the preceding line. We normally trim
+      // trailing spaces away (they hang for free), which packs ~one extra line
+      // per word onto the page and loses pages. Emit the space as its own line.
+      const lineEnd = lineStartX(lineIndex) + availFor(lineIndex);
+      if (cur.length > 0 && availFor(lineIndex) < atom.width && x + atom.width > lineEnd + 0.01) {
+        flush(false, false); // preceding glyph(s) as their own line
+        cur.push({ x: lineStartX(lineIndex), width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src, metricsFont: atom.metricsFont });
+        curLineWidth += atom.width;
+        curSpaceWidth += atom.width;
+        flush(false, false, undefined, true); // keep the space so it costs a line
+        continue;
+      }
       // Never start a (non-first) line with a space.
       if (cur.length === 0 && lineIndex > 0) continue;
       cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src, metricsFont: atom.metricsFont });
