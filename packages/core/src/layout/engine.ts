@@ -1399,16 +1399,15 @@ class Engine {
     const pb = page.sp.pageBorders;
     if (!pb) return;
     const sp = page.sp;
-    const edge = (b: Border | undefined, from: number, margin: number): number => {
-      if (!b) return 0;
-      // offsetFrom text: space is measured outward from the text margin;
-      // offsetFrom page: space is measured inward from the page edge.
-      return pb.offsetFrom === "page" ? from + b.space : margin - b.space;
-    };
-    const x1 = edge(pb.left, 0, sp.marginLeft);
-    const x2 = pb.right ? (pb.offsetFrom === "page" ? sp.pageWidth - pb.right.space : sp.pageWidth - sp.marginRight + pb.right.space) : sp.pageWidth;
-    const y1 = edge(pb.top, 0, sp.marginTop);
-    const y2 = pb.bottom ? (pb.offsetFrom === "page" ? sp.pageHeight - pb.bottom.space : sp.pageHeight - sp.marginBottom + pb.bottom.space) : sp.pageHeight;
+    // w:space measures to the border edge; edge items store the centerline.
+    const near = (b: Border | undefined, margin: number): number =>
+      b ? (pb.offsetFrom === "page" ? b.space + b.width / 2 : margin - b.space - b.width / 2) : 0;
+    const far = (b: Border | undefined, pageSize: number, margin: number): number =>
+      b ? (pb.offsetFrom === "page" ? pageSize - b.space - b.width / 2 : pageSize - margin + b.space + b.width / 2) : pageSize;
+    const x1 = near(pb.left, sp.marginLeft);
+    const x2 = far(pb.right, sp.pageWidth, sp.marginRight);
+    const y1 = near(pb.top, sp.marginTop);
+    const y2 = far(pb.bottom, sp.pageHeight, sp.marginBottom);
     if (pb.top) page.items.push({ kind: "edge", x1, y1, x2, y2: y1, border: pb.top });
     if (pb.bottom) page.items.push({ kind: "edge", x1, y1: y2, x2, y2, border: pb.bottom });
     if (pb.left) page.items.push({ kind: "edge", x1, y1, x2: x1, y2, border: pb.left });

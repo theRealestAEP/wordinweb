@@ -664,8 +664,9 @@ describe("sections & page borders", () => {
     const top = edges.find((e) => e.kind === "edge" && e.y1 === e.y2 && e.y1 < 100);
     if (!top || top.kind !== "edge") throw new Error();
     expect(top.border.color).toBe("#FF0000");
-    // 1in margin (96px) minus 24pt (32px) offset = 64px
-    expect(top.y1).toBeCloseTo(64, 0);
+    // 1in margin (96px) minus 24pt (32px) offset, then half of a 1pt rule
+    // because w:space measures to the border edge.
+    expect(top.y1).toBeCloseTo(63.33, 1);
   });
 });
 
