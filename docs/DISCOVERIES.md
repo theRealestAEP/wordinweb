@@ -96,6 +96,36 @@ with a **0.75/11 em** rule centered **+3.125/11 em** above the baseline
 `layout/math.ts`; pieces render as baseline-anchored glyph boxes and the
 rule as a filled rect. Line-break parity: 0 mismatches vs the reference.
 
+### Display equations are `m:oMathPara`, and it changes the LAYOUT, not just alignment (parity2-equations at 11pt)
+A bare `m:oMath` is inline; wrapping it in `m:oMathPara` makes it a *display*
+equation, and Word renders it very differently (the fixture dropped from
+86.8% → 10.4% severity once this was modeled). Measured from Word's export:
+- **Centered** on the content column (`m:oMathParaPr/m:jc` default =
+  `centerGroup`) regardless of the host paragraph's own alignment. The engine
+  centers any line carrying a display-math span in `layout/inline.ts`.
+- **Fractions use the FULL base size** for numerator/denominator (not the
+  8/11 script scale inline math uses): quadratic numerator baseline
+  **+8.25/11 em**, denominator **−7.25/11 em** at 11pt. Display-ness
+  propagates through frac num/den, n-ary operands, delimiter/radical content
+  and `func`, but NOT into sup/sub scripts (b², xᵏ stay 8/11, text-style).
+- **n-ary operators (∑) enlarge and stack their limits above/below** (not
+  beside like inline): the grow-variant ∑ glyph is **14.6pt** wide vs the
+  ~9.4pt text glyph (≈**1.55×** the font size, since a browser can't reach
+  the font's size variants via plain CSS), upper limit **+16.5/11 em**, lower
+  **−14/11 em** from the operator baseline, both at 8/11 script size,
+  centered on the widest of {operator, upper, lower}. Integral-class
+  operators keep limits BESIDE even in display (unchanged).
+- **The display-math line height is the math cluster's own ascent+descent —
+  NOT that × the paragraph's auto line-spacing multiplier.** The fixture's
+  Normal style is `line=259 auto` (1.08×); applying that to the tall math box
+  over-inflated every equation line and cascaded the following body text
+  several px too low per section. Skipping the multiplier for display-math
+  lines (`finishLine`) made the body baselines land within ~2px of Word.
+  Rules (fraction bars, radical vinculums) count toward the box's vertical
+  extent too — a display radical's vinculum is the topmost ink.
+- `m:f/m:fPr/m:type val="noBar"` is a barless stacked fraction (binomial
+  coefficient `(n \atop k)` inside big parens) — parse it and skip the rule.
+
 ## Tables
 
 ### Word ignores authored grids unless cells carry tcW
