@@ -65,6 +65,10 @@ export interface TextItem {
    * renderer sizes the outer span with this font and shrinks the text via
    * a baseline-aligned inner span). */
   strutFont?: FontSpec;
+  /** PAGEREF bookmark name: the final pass rewrites this item's text with
+   * the bookmark's page number (Word recomputes PAGEREF on open; the docx
+   * cached result is stale in real TOCs). */
+  pageRef?: string;
   /** Source m:oMath element when this text is a piece of an equation. */
   mathSrc?: XmlElement;
   href?: string;

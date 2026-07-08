@@ -38,6 +38,8 @@ interface FragAtom {
   breakAfter?: boolean;
   /** Footnote id when this fragment is a footnote reference mark. */
   noteId?: number;
+  /** PAGEREF bookmark name (final-pass page-number rewrite). */
+  pageRef?: string;
   /** Font whose metrics set the line height when it differs from the paint
    * font (small-caps reduced segments still key line metrics to the base
    * run size, like Word). */
@@ -173,6 +175,8 @@ export interface LineSpan {
   noteId?: number;
   /** A word-internal hyphen ends this span: a line may break after it. */
   breakAfter?: boolean;
+  /** PAGEREF bookmark name (final-pass page-number rewrite). */
+  pageRef?: string;
 }
 
 export interface LineBox {
@@ -638,7 +642,7 @@ export function breakParagraph(
       }
       continue;
     }
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter, pageRef: atom.pageRef });
     curLineWidth += atom.width;
     x += atom.width;
   }
@@ -855,6 +859,23 @@ function buildAtoms(
           break;
         case "field": {
           const text = resolveField(content.instruction, content.cachedResult, fields);
+          // PAGEREF renders its (stale) cached result now and is rewritten
+          // with the bookmark's real page in the engine's final pass - Word
+          // recomputes these on open, so the docx cache is untrustworthy.
+          const pm = /^\s*PAGEREF\s+([^\s\\]+)/i.exec(content.instruction);
+          if (pm && text) {
+            atoms.push({
+              kind: "frag",
+              text,
+              props,
+              font,
+              width: measurer.width(text, font, props.letterSpacing),
+              href,
+              src: { run, t: null, offset: 0 },
+              pageRef: pm[1],
+            });
+            break;
+          }
           // Fields are atomic: src.t === null means "format the whole run".
           if (text) pushStyled(displayText(text, props), props, font, href, { run, t: null, offset: 0 }, vertMetricsFont);
           break;

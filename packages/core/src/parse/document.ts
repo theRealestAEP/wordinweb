@@ -110,7 +110,9 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
   if (sectPr) para.sectionBreak = parseSectionProps(sectPr);
 
   const field: FieldState = { mode: null, instruction: "", cachedResult: "", carrier: null };
-  parseParaChildren(p, ctx, para.children, field);
+  const bookmarks: string[] = [];
+  parseParaChildren(p, ctx, para.children, field, bookmarks);
+  if (bookmarks.length > 0) para.bookmarks = bookmarks;
   // Unterminated field (shouldn't happen in valid files): flush as text
   flushField(field);
   ensureCaretAnchor(p, para);
@@ -226,9 +228,15 @@ function parseParaChildren(
   ctx: DocParseContext,
   out: ParaChild[],
   field: FieldState,
+  bookmarks?: string[],
 ): void {
   for (const el of parent.children) {
     const ln = localName(el.name);
+    if (ln === "bookmarkStart" && bookmarks) {
+      // PAGEREF targets: record the name so layout can map it to a page.
+      const bm = attr(el, "name");
+      if (bm && !bm.startsWith("_GoBack")) bookmarks.push(bm);
+    }
     if (ln === "r") {
       const run = parseRun(el, ctx, field);
       if (run) run.srcParent = parent;
@@ -242,7 +250,7 @@ function parseParaChildren(
       const markup = ctx.revisionView === "markup";
       if (ln === "del" && !markup) continue;
       const inner: ParaChild[] = [];
-      parseParaChildren(el, ctx, inner, field);
+      parseParaChildren(el, ctx, inner, field, bookmarks);
       if (markup) {
         const style = (r: Run) => {
           r.props = {
@@ -277,7 +285,7 @@ function parseParaChildren(
         runs: [],
       };
       const inner: ParaChild[] = [];
-      parseParaChildren(el, ctx, inner, field);
+      parseParaChildren(el, ctx, inner, field, bookmarks);
       for (const c of inner) {
         if (c.type === "run") link.runs.push(c);
         else link.runs.push(...c.runs);
@@ -287,7 +295,7 @@ function parseParaChildren(
       const instruction = attr(el, "instr") ?? "";
       const inner: ParaChild[] = [];
       const innerField: FieldState = { mode: null, instruction: "", cachedResult: "", carrier: null };
-      parseParaChildren(el, ctx, inner, innerField);
+      parseParaChildren(el, ctx, inner, innerField, bookmarks);
       let cached = "";
       let props = {};
       for (const c of inner) {
@@ -304,7 +312,7 @@ function parseParaChildren(
       });
     } else if (ln === "smartTag" || ln === "sdt") {
       const content = ln === "sdt" ? child(el, "sdtContent") : el;
-      if (content) parseParaChildren(content, ctx, out, field);
+      if (content) parseParaChildren(content, ctx, out, field, bookmarks);
     }
     // bookmarkStart/bookmarkEnd/proofErr/commentRangeStart... ignored
   }

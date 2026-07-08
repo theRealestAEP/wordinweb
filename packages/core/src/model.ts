@@ -445,6 +445,8 @@ export interface Paragraph {
   children: ParaChild[];
   /** Section break attached to this paragraph's pPr (ends a section). */
   sectionBreak?: SectionProps;
+  /** w:bookmarkStart names in this paragraph (PAGEREF targets). */
+  bookmarks?: string[];
   /** Source w:p element. */
   src?: XmlElement;
 }

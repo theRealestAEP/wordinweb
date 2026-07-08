@@ -88,6 +88,8 @@ class Engine {
   /** Previous paragraph's spacing-after: Word collapses it against the next
    * paragraph's spacing-before (larger wins), verified against Word PDFs. */
   private lastParaSpacingAfter = 0;
+  /** Bookmark name -> formatted display page number (PAGEREF rewrite). */
+  private bookmarkPages = new Map<string, string>();
   /** List counters per numId. */
   private counters = new Map<number, number[]>();
   /** Floating-image exclusion rects per page (page coords). */
@@ -166,6 +168,20 @@ class Engine {
     this.placeEndnotes();
     this.emitFootnoteAreas();
     this.finalizeHeadersFooters();
+    // PAGEREF rewrite: replace stale cached results with the bookmark's real
+    // page (Word recomputes these on open). The right edge stays fixed so
+    // TOC right-tab page numbers keep their alignment.
+    for (const page of this.pages) {
+      for (const it of page.items) {
+        if (it.kind !== "text" || it.pageRef === undefined) continue;
+        const resolved = this.bookmarkPages.get(it.pageRef);
+        if (resolved === undefined || resolved === it.text) continue;
+        const w = this.measurer.width(resolved, it.font, it.props.letterSpacing);
+        it.x += it.width - w;
+        it.width = w;
+        it.text = resolved;
+      }
+    }
     const pages: LaidOutPage[] = this.pages.map((p) => ({
       width: p.sp.pageWidth,
       height: p.sp.pageHeight,
@@ -966,6 +982,19 @@ class Engine {
       this.y += line.floatYOffset ?? 0;
       this.emitLine(line, this.cur, this.colX, this.y);
       this.emitLineNumber(line, this.cur, this.colX, this.y);
+      // Bookmark targets resolve to the page carrying the paragraph's first
+      // line (PAGEREF rewrite pass). Frame-laid content (fake page) records
+      // against the engine's current real page.
+      if (li === 0 && para.bookmarks) {
+        const pg = this.cur.physIndex === -1 ? this.lastRealPage : this.cur;
+        if (pg) {
+          for (const bm of para.bookmarks) {
+            if (!this.bookmarkPages.has(bm)) {
+              this.bookmarkPages.set(bm, formatNumber(pg.displayNumber, PAGE_FMT[pg.sp.pageNumberFormat ?? "decimal"] ?? "decimal"));
+            }
+          }
+        }
+      }
       this.y += line.height;
 
       if (line.forcedBreakAfter) {
@@ -1226,6 +1255,7 @@ class Engine {
         // vertAlign spans anchor via glyphTop; their metricsFont only feeds
         // line metrics, not the renderer's small-caps strut mechanism.
         strutFont: span.props.verticalAlign ? undefined : span.metricsFont,
+        pageRef: span.pageRef,
         href: span.href,
         src: span.src,
       });
