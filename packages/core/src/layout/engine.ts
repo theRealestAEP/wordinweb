@@ -1550,11 +1550,20 @@ class Engine {
       if (cell.props.margins?.bottom !== undefined) bottomPad = Math.max(bottomPad, cell.props.margins.bottom);
     }
     if (row.props.heightRule === "exact") return trHeight + topPad;
+    const borderPad = this.rowBorderShare(tbl, ri);
+    return Math.max(contentHeight, trHeight + topPad + bottomPad + borderPad);
+  }
+
+  /** Vertical space the row's horizontal rules occupy: half the boundary
+   * width on each side (interior boundaries use insideH). Word's row
+   * advance includes it for content-sized rows too, not just trHeight rows
+   * (parity2-nestedtables: 56.0pt rows = 3 lines + spacing-after + 4pt
+   * cell margins + 0.5pt of sz-4 borders; without the share, rows run
+   * 0.39pt short and the grid drifts up the page). */
+  private rowBorderShare(tbl: Table, ri: number): number {
     const tb = tbl.props.borders;
     const bw = (b?: Border) => (b && b.style !== "none" ? b.width : 0);
-    const borderPad =
-      (bw(ri === 0 ? tb?.top : tb?.insideH) + bw(ri === tbl.rows.length - 1 ? tb?.bottom : tb?.insideH)) / 2;
-    return Math.max(contentHeight, trHeight + topPad + bottomPad + borderPad);
+    return (bw(ri === 0 ? tb?.top : tb?.insideH) + bw(ri === tbl.rows.length - 1 ? tb?.bottom : tb?.insideH)) / 2;
   }
 
   private cellMarginsOf(tbl: Table): { top?: number; right?: number; bottom?: number; left?: number } {
@@ -1611,7 +1620,7 @@ class Engine {
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const row = tbl.rows[ri];
       let laid = this.layoutRow(tbl, row, ri, widths);
-      let rowHeight = laid.height;
+      let rowHeight = laid.height + this.rowBorderShare(tbl, ri);
       if (row.props.height !== undefined && row.props.heightRule !== "auto") {
         rowHeight = this.rowHeightFromTrHeight(tbl, row, ri, rowHeight);
       }
@@ -1630,12 +1639,17 @@ class Engine {
           }
         }
       };
-      // Word default: a row that crosses the page boundary SPLITS at it
-      // (w:cantSplit opts out; exact-height, header, and vertically merged
-      // rows never split).
+      // Word default: a row that crosses the page boundary moves WHOLE to
+      // the next page when it fits on one; it only splits at the boundary
+      // when it cannot fit even on a fresh page (parity2-nestedtables:
+      // 56pt rows with 31pt remaining move whole; parity-rowsplit's
+      // multi-page row splits). w:cantSplit, exact-height, header, and
+      // vertically merged rows never split.
       let guard = 0;
       while (this.y + rowHeight > this.bodyBottom - this.rowNoteHeight(laid) + 0.01 && guard++ < 50) {
+        const freshBody = this.cur.bodyBottom - this.cur.bodyTop;
         const canSplit =
+          rowHeight > freshBody &&
           !row.props.cantSplit &&
           row.props.heightRule !== "exact" &&
           !row.props.tblHeader &&
@@ -1718,7 +1732,7 @@ class Engine {
     const frameTop = this.y;
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const laid = this.layoutRow(tbl, tbl.rows[ri], ri, widths, fields);
-      let rowHeight = laid.height;
+      let rowHeight = laid.height + this.rowBorderShare(tbl, ri);
       if (tbl.rows[ri].props.height !== undefined && tbl.rows[ri].props.heightRule !== "auto") {
         rowHeight = this.rowHeightFromTrHeight(tbl, tbl.rows[ri], ri, rowHeight);
       }
