@@ -22,6 +22,10 @@ export interface FieldContext {
   noteMark?: (type: "footnote" | "endnote", id: number) => string;
   /** Inside a note body: the note's own mark (w:footnoteRef / w:endnoteRef). */
   selfNoteMark?: () => string;
+  /** SEQ counters (Word recomputes SEQ on open; cached results are stale).
+   * fieldKey identifies THIS field occurrence so re-breaking a paragraph
+   * reuses its first-assigned value instead of double-counting. */
+  seq?: (identifier: string, fieldKey: object, instr: string) => string;
 }
 
 // ---------- atoms ----------
@@ -858,7 +862,7 @@ function buildAtoms(
           }, vertMetricsFont);
           break;
         case "field": {
-          const text = resolveField(content.instruction, content.cachedResult, fields);
+          const text = resolveField(content.instruction, content.cachedResult, fields, content);
           // PAGEREF renders its (stale) cached result now and is rewritten
           // with the bookmark's real page in the engine's final pass - Word
           // recomputes these on open, so the docx cache is untrustworthy.
@@ -1044,7 +1048,7 @@ function buildAtoms(
 
 // ---------- fields ----------
 
-export function resolveField(instruction: string, cachedResult: string, ctx: FieldContext): string {
+export function resolveField(instruction: string, cachedResult: string, ctx: FieldContext, fieldKey?: object): string {
   const instr = instruction.trim();
   const keyword = instr.split(/\s+/)[0]?.toUpperCase();
   switch (keyword) {
@@ -1053,6 +1057,13 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
     case "NUMPAGES":
     case "SECTIONPAGES":
       return String(ctx.totalPages());
+    case "SEQ": {
+      // Word recomputes SEQ on open; the docx cache is stale (and this
+      // repo's sanitizer remaps cached digits). Compute per-identifier.
+      const ident = instr.split(/\s+/)[1];
+      if (ident && ctx.seq && fieldKey) return ctx.seq(ident, fieldKey, instr);
+      return cachedResult || "";
+    }
     case "DATE":
     case "TIME":
     case "CREATEDATE":

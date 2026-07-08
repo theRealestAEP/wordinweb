@@ -368,7 +368,31 @@ class Engine {
       formatPageNumber: (n) => formatNumber(n, PAGE_FMT[real().sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
       noteMark: (type, id) => (type === "footnote" ? engine.footnoteMark(id) : engine.endnoteMark(id)),
       selfNoteMark: () => engine.selfNoteMark ?? "",
+      seq: (ident, key, instr) => engine.resolveSeq(ident, key, instr),
     };
+  }
+
+  /** SEQ counters keyed by identifier; each field occurrence keeps its
+   * first-assigned value so paragraph re-breaks don't double-count. */
+  private seqCounters = new Map<string, number>();
+  private seqAssigned = new WeakMap<object, string>();
+  private resolveSeq(ident: string, key: object, instr: string): string {
+    const prior = this.seqAssigned.get(key);
+    if (prior !== undefined) return prior;
+    const rMatch = /\\r\s+(\d+)/.exec(instr);
+    const repeat = /\\c(\s|$)/.test(instr);
+    let n: number;
+    if (rMatch) n = parseInt(rMatch[1], 10);
+    else if (repeat) n = this.seqCounters.get(ident) ?? 1;
+    else n = (this.seqCounters.get(ident) ?? 0) + 1;
+    this.seqCounters.set(ident, n);
+    const fmt = /\\\*\s+(\w+)/.exec(instr)?.[1]?.toLowerCase();
+    const text =
+      fmt === "roman" ? formatNumber(n, "lowerRoman")
+      : fmt === "alphabetic" ? formatNumber(n, "lowerLetter")
+      : String(n);
+    this.seqAssigned.set(key, text);
+    return text;
   }
 
   // ---------- footnotes / endnotes ----------
