@@ -38,33 +38,34 @@ export function parseBody(body: XmlElement, ctx: DocParseContext): Section[] {
   const sections: Section[] = [];
   let blocks: Block[] = [];
 
-  for (const el of body.children) {
-    const ln = localName(el.name);
-    if (ln === "p") {
-      const para = parseParagraph(el, ctx);
-      blocks.push(para);
-      if (para.sectionBreak) {
-        sections.push({ props: para.sectionBreak, blocks });
-        blocks = [];
-      }
-    } else if (ln === "tbl") {
-      blocks.push(parseTable(el, ctx));
-    } else if (ln === "sectPr") {
-      sections.push({ props: parseSectionProps(el), blocks });
-      blocks = [];
-    }
-    // bookmarkStart/End, proofErr, sdt etc. — sdt handled below, rest ignored
-    else if (ln === "sdt") {
-      const content = child(el, "sdtContent");
-      if (content) {
-        for (const inner of content.children) {
-          const iln = localName(inner.name);
-          if (iln === "p") blocks.push(parseParagraph(inner, ctx));
-          else if (iln === "tbl") blocks.push(parseTable(inner, ctx));
+  // Block-level SDTs (content controls) may nest arbitrarily deep — a form
+  // section wraps a repeating group which wraps each field. Walk into every
+  // sdtContent so nested content controls (SharePoint/RFP forms) aren't
+  // dropped; section breaks inside an SDT still close a section.
+  const walk = (children: XmlElement[]): void => {
+    for (const el of children) {
+      const ln = localName(el.name);
+      if (ln === "p") {
+        const para = parseParagraph(el, ctx);
+        blocks.push(para);
+        if (para.sectionBreak) {
+          sections.push({ props: para.sectionBreak, blocks });
+          blocks = [];
         }
+      } else if (ln === "tbl") {
+        blocks.push(parseTable(el, ctx));
+      } else if (ln === "sectPr") {
+        sections.push({ props: parseSectionProps(el), blocks });
+        blocks = [];
+      } else if (ln === "sdt") {
+        const content = child(el, "sdtContent");
+        if (content) walk(content.children);
       }
+      // bookmarkStart/End, proofErr, etc. — ignored
     }
-  }
+  };
+  walk(body.children);
+
   if (blocks.length > 0) {
     sections.push({ props: defaultSectionProps(), blocks });
   }
@@ -146,9 +147,15 @@ function ensureCaretAnchor(p: XmlElement, para: Paragraph): void {
   // break/image), letting typed text land on the current page.
   const pPrIdx = p.children.findIndex((c) => localName(c.name) === "pPr");
   p.children.splice(pPrIdx + 1, 0, rEl);
+  // Carry the paragraph-mark run props onto the anchor: an empty paragraph's
+  // line height (and the formatting of text later typed into it) is governed
+  // by the mark's rPr, e.g. RFP spacer paragraphs with w:sz 21 (10.5pt) must
+  // advance a 10.5pt line, not the 12pt default. Without this the zero-width
+  // anchor span forces every empty paragraph to the default size and inflates
+  // vertical drift across form-heavy documents.
   para.children.unshift({
     type: "run",
-    props: {},
+    props: para.props.markRunProps ? { ...para.props.markRunProps } : {},
     content: [{ kind: "text", text: "", srcT: tEl }],
     src: rEl,
     srcParent: p,
@@ -1192,6 +1199,21 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
   const rows: TableRow[] = [];
   for (const tr of children(tbl, "tr")) {
     rows.push(parseRow(tr, ctx));
+  }
+
+  // Tag each cell's own paragraphs with this table's style so its pPr layers
+  // beneath the paragraph style. Paragraphs already tagged belong to a nested
+  // table (parsed first, deeper in) — leave them to their own table.
+  if (props.styleId) {
+    for (const row of rows) {
+      for (const cell of row.cells) {
+        for (const block of cell.blocks) {
+          if (block.type === "paragraph" && block.props.tableStyleId === undefined) {
+            block.props.tableStyleId = props.styleId;
+          }
+        }
+      }
+    }
   }
 
   return { type: "table", props, grid, rows, src: tbl };
