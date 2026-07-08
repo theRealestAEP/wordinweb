@@ -336,3 +336,8 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   previous paragraph (pleading footer: the caption's top border cut through
   the page number). Added to spacingBefore/After in both body and frame
   layout.
+- **Exact-height table rows clip overflow** (w:trHeight hRule="exact"):
+  Word hides content past the fixed row height rather than spilling it onto
+  the page or paginating (the For Sale flyer is one full-page fixed cell -
+  typing into it must not push the tear-off tabs off the page). Engine drops
+  cell text items whose line starts at/below the row bottom.
