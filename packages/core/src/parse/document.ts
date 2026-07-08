@@ -380,8 +380,7 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
       case "drawing": {
         const img = parseDrawing(el, ctx);
         if (img) {
-          if (img.kind === "image") img.srcDrawing = el;
-          if (img.kind === "anchor" && img.shape.type === "image") img.shape.srcDrawing = el;
+          tagDrawingSource(img, el);
           run.content.push(img);
         }
         break;
@@ -397,14 +396,14 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
         const choiceDrawing = choice ? child(choice, "drawing") : undefined;
         const img = choiceDrawing ? parseDrawing(choiceDrawing, ctx) : null;
         if (img) {
-          if (img.kind === "image") img.srcDrawing = choiceDrawing;
+          tagDrawingSource(img, choiceDrawing!);
           run.content.push(img);
         } else {
           const fallback = child(el, "Fallback");
           const fbDrawing = fallback ? child(fallback, "drawing") : undefined;
           const fbImg = fbDrawing ? parseDrawing(fbDrawing, ctx) : null;
           if (fbImg) {
-            if (fbImg.kind === "image") fbImg.srcDrawing = fbDrawing;
+            tagDrawingSource(fbImg, fbDrawing!);
             run.content.push(fbImg);
           } else {
             const pictEl = fallback ? child(fallback, "pict") : undefined;
@@ -470,6 +469,20 @@ function findDescendant(el: XmlElement, local: string): XmlElement | undefined {
 }
 
 const EMU_PER_PT = 12700;
+
+/** Attach the source w:drawing element to a parsed drawing so it can be
+ * selected/moved/resized (images, anchored images, anchored art, groups). */
+function tagDrawingSource(
+  img: ImageContent | DrawingContent | AnchorContent,
+  el: XmlElement,
+): void {
+  if (img.kind === "image") img.srcDrawing = el;
+  else if (img.kind === "drawing") img.srcDrawing = el;
+  else if (img.kind === "anchor") {
+    const sh = img.shape as { srcDrawing?: XmlElement };
+    sh.srcDrawing = el;
+  }
+}
 
 function parseDrawing(
   drawing: XmlElement,
