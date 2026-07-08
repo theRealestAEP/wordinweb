@@ -401,17 +401,16 @@ export class DocxEditor {
     // have thousands of bindings per page, and per-binding rects make
     // drag-selection unusably slow.
     let run: { surface: HTMLElement; top: number; height: number; x0: number; x1: number } | null = null;
-    const flush = (): void => {
+    const lineRects: { surface: HTMLElement; top: number; height: number; x0: number; x1: number }[] = [];
+    const flush = (selectionEndsHere: boolean): void => {
       if (!run) return;
-      if (run.x1 > run.x0) {
-        const rect = document.createElement("div");
-        rect.className = "dxw-sel";
-        rect.style.cssText =
-          `position:absolute;left:${run.x0}px;top:${run.top}px;width:${run.x1 - run.x0}px;` +
-          `height:${run.height}px;background:rgba(26,115,232,.28);pointer-events:none;z-index:4;`;
-        run.surface.appendChild(rect);
-        this.selectionRects.push(rect);
-      }
+      // A line that ends INSIDE the selection (it continues on a later line)
+      // highlights its newline/paragraph mark as a small stub past the last
+      // glyph, like Word - this is also what makes empty paragraphs between
+      // selected text show as selected instead of leaving a bare gap.
+      let x1 = run.x1;
+      if (!selectionEndsHere) x1 = Math.max(x1, run.x0) + run.height * 0.3;
+      if (x1 > run.x0) lineRects.push({ ...run, x1 });
       run = null;
     };
 
@@ -452,7 +451,7 @@ export class DocxEditor {
           /* keep full-span rect */
         }
       }
-      if (run && (run.surface !== surface || run.top !== item.lineTop)) flush();
+      if (run && (run.surface !== surface || run.top !== item.lineTop)) flush(false);
       if (!run) {
         run = { surface, top: item.lineTop, height: item.lineHeight, x0, x1 };
       } else {
@@ -461,7 +460,27 @@ export class DocxEditor {
         run.height = Math.max(run.height, item.lineHeight);
       }
     }
-    flush();
+    flush(true);
+
+    // Word paints a CONTINUOUS block through paragraph spacing: stretch each
+    // line rect down to the next selected line's top when the gap is small
+    // (same surface, same flow - column/cell jumps keep their real height).
+    for (let i = 0; i < lineRects.length - 1; i++) {
+      const cur = lineRects[i];
+      const next = lineRects[i + 1];
+      if (cur.surface !== next.surface) continue;
+      const gap = next.top - (cur.top + cur.height);
+      if (gap > 0 && gap < cur.height * 2) cur.height += gap;
+    }
+    for (const r of lineRects) {
+      const rect = document.createElement("div");
+      rect.className = "dxw-sel";
+      rect.style.cssText =
+        `position:absolute;left:${r.x0}px;top:${r.top}px;width:${r.x1 - r.x0}px;` +
+        `height:${r.height}px;background:rgba(26,115,232,.28);pointer-events:none;z-index:4;`;
+      r.surface.appendChild(rect);
+      this.selectionRects.push(rect);
+    }
   }
 
   /** Word-style cue: dim the inactive region; dashed boundary + tab labels
