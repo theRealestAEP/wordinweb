@@ -302,3 +302,24 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   items and a title existed while two element screenshots showed blank
   space. Trust DOM measurements or viewport screenshots when they
   disagree.
+
+## Sanitized real-document fixtures (2026-07)
+
+- **scripts/sanitize-docx.py anonymizes a .docx for use as a fixture**: each
+  word in w:t/w:delText is replaced by a deterministic same-length,
+  same-caps pseudoword (SHA1-seeded), digits remapped, authors → Reviewer,
+  core props → Fixture, external hyperlinks → example.com. Structure
+  (styles/tables/SDTs/drawings/fields/breaks) is untouched, and the Word
+  reference PDF is exported FROM the sanitized file, so line-break parity is
+  preserved by construction. Must split on XML entities (&amp; &#8217;)
+  before scrambling or it corrupts them.
+- **The pleading-paper line-number sidebar breaks the line-break
+  comparator**: the VML textbox column of numbers clusters as its own rows,
+  so compare-linebreaks.mjs reports hundreds of false mismatches even
+  though the render matches Word pixel-for-pixel (7/7 pages verified). Two-
+  column/sidebar layouts need the pixel comparator, not the line comparator.
+- **Databound content controls are a rendering gap**: the cover-letter
+  templates' SDTs (RECIPIENT NAME, [Item], title bands) bind to document
+  properties / a custom-XML data store (w:dataBinding w:xpath); Word renders
+  the BOUND value while we render the placeholder text in document.xml. Any
+  databound-SDT fixture will diverge until we resolve bindings.
