@@ -345,7 +345,14 @@ export function breakParagraph(
     // Alignment
     const avail = availFor(lineIndex);
     const startX = lineStartX(lineIndex);
-    applyAlignment(line, props, avail, startX, isLast || endsWithBreak);
+    // A display equation (m:oMathPara) centers on its line regardless of the
+    // host paragraph's alignment (Word's m:oMathParaPr jc default = centerGroup).
+    if (line.spans.some((s) => s.math?.display)) {
+      const slack = avail - line.width;
+      if (slack > 0) for (const s of line.spans) s.x += slack / 2;
+    } else {
+      applyAlignment(line, props, avail, startX, isLast || endsWithBreak);
+    }
     lines.push(line);
     cur = [];
     curLineWidth = 0;
@@ -690,8 +697,9 @@ function finishLine(
   // emitting items.
   let height = natural;
   let baselineH: number | undefined;
+  const hasDisplayMath = spans.some((s) => s.math?.display);
   const ls = props.lineSpacing;
-  if (ls) {
+  if (ls && !hasDisplayMath) {
     if (ls.rule === "auto") {
       height = natural * ls.value;
       if (maxImage > 0) {
@@ -785,7 +793,7 @@ function buildAtoms(
           break;
         case "math": {
           const size = props.size ?? 14.666;
-          atoms.push({ kind: "math", box: layoutMath(content.nodes, size, measurer), src: content.src });
+          atoms.push({ kind: "math", box: layoutMath(content.nodes, size, measurer, content.display), src: content.src });
           break;
         }
         case "noteRef": {

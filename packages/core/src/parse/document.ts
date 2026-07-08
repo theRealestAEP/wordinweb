@@ -171,7 +171,14 @@ function parseOmml(el: XmlElement): MathNode[] {
     return c ? parseOmml(c) : [];
   };
   const ln = localName(el.name);
-  if (ln === "f") return [{ t: "frac", num: childrenOf("num"), den: childrenOf("den") }];
+  if (ln === "f") {
+    // m:fPr/m:type val="noBar" is a stacked fraction with no rule (binomial
+    // coefficients: (n over k) inside big parens).
+    const fPr = el.children.find((ch) => localName(ch.name) === "fPr");
+    const typeEl = fPr && child(fPr, "type");
+    const bar = !(typeEl && attr(typeEl, "val") === "noBar");
+    return [{ t: "frac", num: childrenOf("num"), den: childrenOf("den"), bar }];
+  }
   if (ln === "sSup") return [{ t: "sup", base: childrenOf("e"), script: childrenOf("sup") }];
   if (ln === "sSub") return [{ t: "sub", base: childrenOf("e"), script: childrenOf("sub") }];
   if (ln === "rad") return [{ t: "rad", e: childrenOf("e") }];
@@ -247,7 +254,10 @@ function parseParaChildren(
       // (scripts raised, fractions stacked over a rule) like Word.
       const nodes = parseOmml(el);
       if (nodes.length > 0) {
-        out.push({ type: "run", props: {}, content: [{ kind: "math", nodes, src: el }] });
+        // m:oMathPara marks a display equation (centered, display-style
+        // layout); a bare m:oMath flows inline.
+        const display = ln === "oMathPara";
+        out.push({ type: "run", props: {}, content: [{ kind: "math", nodes, src: el, display }] });
       }
     } else if (ln === "hyperlink") {
       const rid = attr(el, "id");
