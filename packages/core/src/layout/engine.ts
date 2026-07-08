@@ -14,6 +14,7 @@ import {
 } from "../model.js";
 import { formatLevelText, formatNumber } from "../parse/numbering.js";
 import { mergeRunProps } from "../parse/properties.js";
+import { ptToPx } from "../units.js";
 import {
   BrokenParagraph,
   FieldContext,
@@ -1203,7 +1204,15 @@ class Engine {
   /** Vertical room a paragraph border claims: its space above/below the text
    * plus the rule width (Word reserves this so the rule sits in the gap). */
   private borderPadImpl(b: { style: string; width: number; space: number } | undefined): number {
-    return b && b.style !== "none" ? b.space + b.width : 0;
+    return b && b.style !== "none" ? b.space + this.borderPaintWidth(b) : 0;
+  }
+
+  private borderPaintWidth(b: { style: string; width: number }): number {
+    return b.style === "double" ? b.width * 3 : b.width;
+  }
+
+  private paragraphBorderOverhang(b: { space: number } | undefined): number {
+    return b ? b.space + ptToPx(0.5) : 0;
   }
 
   private emitParagraphDecorations(
@@ -1231,15 +1240,17 @@ class Engine {
     const b = props.borders;
     if (!b) return;
     if (b.top && b.top.style !== "none" && isFirstFrag) {
-      const y = top - b.top.space - b.top.width / 2;
-      page.items.push({ kind: "edge", x1: left - (b.left?.space ?? 0), y1: y, x2: right + (b.right?.space ?? 0), y2: y, border: b.top });
+      const y = top - b.top.space - this.borderPaintWidth(b.top) + b.top.width / 2;
+      const xPad = this.paragraphBorderOverhang(b.top);
+      page.items.push({ kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.top });
     }
     if (b.bottom && b.bottom.style !== "none" && isLastFrag) {
       const y = bottom + b.bottom.space + b.bottom.width / 2;
-      page.items.push({ kind: "edge", x1: left - (b.left?.space ?? 0), y1: y, x2: right + (b.right?.space ?? 0), y2: y, border: b.bottom });
+      const xPad = this.paragraphBorderOverhang(b.bottom);
+      page.items.push({ kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.bottom });
     }
     if (b.left && b.left.style !== "none") {
-      const x = left - b.left.space - b.left.width / 2;
+      const x = left - b.left.space - this.borderPaintWidth(b.left) + b.left.width / 2;
       page.items.push({ kind: "edge", x1: x, y1: top, x2: x, y2: bottom, border: b.left });
     }
     if (b.right && b.right.style !== "none") {
