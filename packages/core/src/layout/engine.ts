@@ -138,7 +138,14 @@ class Engine {
         sp.pageWidth === prevSp.pageWidth &&
         sp.pageHeight === prevSp.pageHeight &&
         sp.marginLeft === prevSp.marginLeft &&
-        sp.marginRight === prevSp.marginRight;
+        sp.marginRight === prevSp.marginRight &&
+        // A continuous break that RESTARTS or reformats page numbering can't
+        // stay on the shared page - two different page numbers can't coexist
+        // on one sheet, so Word promotes it to a page break (wild-gatech: the
+        // roman "start=4" front-matter section begins a fresh page, numbered
+        // iv, even though it is authored as continuous).
+        sp.pageNumberStart === undefined &&
+        (sp.pageNumberFormat ?? "decimal") === (prevSp.pageNumberFormat ?? "decimal");
       this.sp = sp;
       this.lnSectionEpoch++;
       // Word carries the paragraph spacing-collapse chain ACROSS section
@@ -719,8 +726,18 @@ class Engine {
     const mergeBottom = props.borders !== undefined && sameBorders(next);
 
     let breakBeforeForced = false;
-    if (props.pageBreakBefore && !this.pageIsEmptyAtCursor()) {
+    // A leading page/column break (the paragraph opens with w:br, content
+    // follows) is a break-BEFORE: the paragraph starts on a fresh page/column
+    // and its spacing-before drops, exactly like w:pageBreakBefore. The line
+    // breaker drops the break atom itself (no empty line), so it must be
+    // consumed here (wild-gatech: the approval/dedication/List-of-Tables
+    // headings each open with a leading break).
+    const leadBreak = leadingBreakOf(para);
+    if ((props.pageBreakBefore || leadBreak === "page") && !this.pageIsEmptyAtCursor()) {
       this.newPage(false);
+      breakBeforeForced = true;
+    } else if (leadBreak === "column" && !this.pageIsEmptyAtCursor()) {
+      this.nextColumn();
       breakBeforeForced = true;
     }
 
@@ -1136,6 +1153,37 @@ class Engine {
       if (span.drawing) {
         const bx = originX + span.x;
         const by = baseline - span.drawing.height;
+        const tb = span.drawing.textbox;
+        if (tb) {
+          const w = span.drawing.width;
+          const h = span.drawing.height;
+          if (tb.fill) {
+            page.items.push({ kind: "rect", x: bx, y: by, width: w, height: h, fill: tb.fill });
+          }
+          if (tb.stroke) {
+            const b = { style: "single" as const, width: tb.stroke.weight, color: tb.stroke.color, space: 0 };
+            page.items.push({ kind: "edge", x1: bx, y1: by, x2: bx + w, y2: by, border: b });
+            page.items.push({ kind: "edge", x1: bx, y1: by + h, x2: bx + w, y2: by + h, border: b });
+            page.items.push({ kind: "edge", x1: bx, y1: by, x2: bx, y2: by + h, border: b });
+            page.items.push({ kind: "edge", x1: bx + w, y1: by, x2: bx + w, y2: by + h, border: b });
+          }
+          const ins = tb.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
+          const inner = this.layoutFrame(tb.blocks, Math.max(w - ins.l - ins.r, 1), this.fieldCtx(), {
+            x: bx + ins.l,
+            y: by + ins.t,
+          });
+          let innerTop = by + ins.t;
+          if (tb.textAnchor === "middle") innerTop = by + (h - inner.height) / 2;
+          else if (tb.textAnchor === "bottom") innerTop = by + h - ins.b - inner.height;
+          for (const it of inner.items) {
+            offsetItem(it, bx + ins.l, innerTop);
+            page.items.push(it);
+          }
+          if (span.drawing.srcDrawing) {
+            page.items.push({ kind: "drawingHit", x: bx, y: by, width: w, height: h, src: span.drawing.srcDrawing, anchored: false });
+          }
+          continue;
+        }
         for (const img of span.drawing.images) {
           page.items.push({
             kind: "image",
@@ -2419,6 +2467,39 @@ function sum(arr: number[], from: number, to: number): number {
   let s = 0;
   for (let i = from; i < Math.min(to, arr.length); i++) s += arr[i];
   return s;
+}
+
+/** A paragraph that OPENS with a page/column break (before any real content,
+ * with content following) is a break-before: return the break type. A
+ * break-only paragraph, or one whose first content is text/tab/image, returns
+ * undefined (kept on the old flow). */
+function leadingBreakOf(para: Paragraph): "page" | "column" | undefined {
+  let br: "page" | "column" | undefined;
+  for (const child of para.children) {
+    const runs = child.type === "run" ? [child] : child.runs;
+    for (const r of runs) {
+      for (const c of r.content) {
+        if (!br) {
+          if (c.kind === "break") {
+            if (c.breakType === "page" || c.breakType === "column") {
+              br = c.breakType;
+              continue;
+            }
+            return undefined; // a line break opens the paragraph
+          }
+          if (c.kind === "text" && c.text.length === 0) continue;
+          return undefined; // real content precedes any break
+        }
+        // After the opening break: any real content confirms break-before.
+        if (c.kind === "text") {
+          if (c.text.length > 0) return br;
+          continue;
+        }
+        return br;
+      }
+    }
+  }
+  return undefined; // break with nothing after it (break-only paragraph)
 }
 
 function offsetItem(item: PageItem, dx: number, dy: number): void {

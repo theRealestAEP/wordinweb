@@ -375,6 +375,17 @@ export interface DrawingContent {
   images: DrawingImage[];
   /** Freeform vector shapes (a:custGeom), as SVG path data. */
   paths?: DrawingPath[];
+  /** An INLINE wps text box (wp:inline wps:txbx): a fixed-extent box that
+   * flows in the text (occupying its width x height like an inline image) and
+   * carries a fill/border + its own block content. Distinct from the floating
+   * ShapeTextbox, which is absolutely placed via a wp:anchor. */
+  textbox?: {
+    blocks: Block[];
+    fill?: string;
+    stroke?: { color: string; weight: number };
+    insets?: { l: number; t: number; r: number; b: number };
+    textAnchor?: "top" | "middle" | "bottom";
+  };
   /** Source w:drawing element (select/move as a group). */
   srcDrawing?: XmlElement;
 }

@@ -823,6 +823,42 @@ function parseDrawing(
     };
   }
 
+  // Inline wps text box (wp:inline wps:txbx): a fixed-extent box that flows in
+  // the text like an inline image, occupying its full width x height, and
+  // carrying a fill/border + its own block content (the "SOPITA THIS..."
+  // callout boxes in the wild-gatech thesis). Word reserves the extent's
+  // vertical space in the flow; rendering it off-page (the VML fallback path)
+  // loses that space and collapses front-matter pages.
+  if (!anchor && textboxEl) {
+    const spPr = child(textboxEl, "spPr");
+    const txbxContent = findDescendant(child(textboxEl, "txbx")!, "txbxContent");
+    const lnEl = child(spPr, "ln");
+    const strokeColor = lnEl && !child(lnEl, "noFill") ? fillColorOf(lnEl) : undefined;
+    const fill = fillColorOf(spPr) ?? styleFillOf(textboxEl);
+    const bodyPr = child(textboxEl, "bodyPr");
+    const insetOf = (name: string, dflt: number): number => {
+      const v = bodyPr ? intAttr(bodyPr, name) : undefined;
+      return v !== undefined ? emuToPx(v) : dflt;
+    };
+    const anchorAttr = bodyPr ? attr(bodyPr, "anchor") : undefined;
+    return {
+      kind: "drawing",
+      width: emuToPx(cx),
+      height: emuToPx(cy),
+      lines: [],
+      images: [],
+      textbox: {
+        blocks: txbxContent ? parseBlocks(txbxContent, ctx) : [],
+        ...(fill ? { fill } : {}),
+        ...(strokeColor
+          ? { stroke: { color: strokeColor, weight: Math.max(emuToPx(intAttr(lnEl, "w") ?? 0), 0.75) } }
+          : {}),
+        insets: { l: insetOf("lIns", 9.6), t: insetOf("tIns", 4.8), r: insetOf("rIns", 9.6), b: insetOf("bIns", 4.8) },
+        textAnchor: anchorAttr === "ctr" ? "middle" : anchorAttr === "b" ? "bottom" : anchorAttr === "t" ? "top" : undefined,
+      },
+    };
+  }
+
   // Anchored template art (multi-shape groups, freeform paths): absolute
   // placement via the anchor, no text-flow participation.
   if (anchor && (paths.length > 0 || lines.length + images.length > 1)) {

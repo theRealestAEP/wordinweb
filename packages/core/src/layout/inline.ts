@@ -441,6 +441,16 @@ export function breakParagraph(
       // carried to the new page. sample.docx p2 starts at the body top in
       // Word because of this.
       const trailing = atom.breakType !== "line" && ai === atoms.length - 1;
+      // Symmetric LEADING-break rule: a page/column break that opens the
+      // paragraph (no content before it, content after it) is a break-BEFORE
+      // - the paragraph itself starts on a new page and NO empty line is
+      // emitted here (placeParagraph does the actual page break at the block
+      // level, dropping spacing-before). Emitting a mark line would overflow a
+      // nearly-full preceding page and spuriously double-break (wild-gatech
+      // title page -> phantom blank p3).
+      if (atom.breakType !== "line" && cur.length === 0 && lines.length === 0 && !trailing) {
+        continue;
+      }
       if (atom.breakType === "line") flush(false, true);
       else flush(trailing, true, atom.breakType);
       if (trailing) flushedTrailingBreak = true;
@@ -757,6 +767,7 @@ function finishLine(
   let maxNatural = 0;
   let maxImage = 0;
   let maxImageFontDesc = 0;
+  let maxImageFontLine = 0;
   let maxNaturalText = 0;
 
   const consider = (font: FontSpec, imageHeight?: number) => {
@@ -765,6 +776,7 @@ function finishLine(
       maxNatural = Math.max(maxNatural, imageHeight + measurer.metrics(font).descent * 0.3);
       maxImage = Math.max(maxImage, imageHeight);
       maxImageFontDesc = Math.max(maxImageFontDesc, measurer.metrics(font).descent);
+      maxImageFontLine = Math.max(maxImageFontLine, measurer.metrics(font).lineHeight);
       return;
     }
     const m = measurer.metrics(font);
@@ -815,12 +827,19 @@ function finishLine(
       height = natural * ls.value;
       if (maxImage > 0) {
         // Word does NOT scale an inline image with the auto multiplier: an
-        // image-dominated line measures image + k x text-descent, with the
-        // image top at the line top (baseline = top + image height). The
-        // pickett icon rows (25.92pt icons, 1.15 spacing, 12pt Gill Sans)
-        // measure 29.2 +/- 0.2pt in Word's PDF, and the icon tops sit
-        // exactly at the paragraph top.
-        const descSide = Math.max(maxDescent, maxImageFontDesc) * ls.value;
+        // image-dominated line measures image + leading below, with the image
+        // top at the line top (baseline = top + image height). The leading is
+        // the larger of the descent share (k x descent) and the multiplier's
+        // normal inter-line leading, (k-1) x one text line. For modest
+        // multipliers the descent term wins (pickett icon rows: 25.92pt
+        // icons, 1.15 spacing, 12pt Gill Sans measure 29.2 +/- 0.2pt in
+        // Word's PDF); for double-spaced boxes it is a full text line so the
+        // text below clears the box like Word (wild-gatech "SOPITA" callouts
+        // at 2.0 spacing - the following line sits ~a text line below the box).
+        const descSide = Math.max(
+          Math.max(maxDescent, maxImageFontDesc) * ls.value,
+          (ls.value - 1) * maxImageFontLine,
+        );
         const imageH = maxImage + descSide;
         if (imageH > maxNaturalText * ls.value) {
           height = imageH;
