@@ -330,3 +330,9 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   does not vertically contain the click, and score the nearestCaret fallback
   by vertical-dominant 2D distance (dy*3 + dx) so the caret stays in the
   clicked column/cell.
+- **A paragraph border reserves vertical space** for its rule + w:space
+  above/below the text, pushing the paragraph off its neighbor so the rule
+  sits in the gap. Without reserving it, a top border draws INTO the
+  previous paragraph (pleading footer: the caption's top border cut through
+  the page number). Added to spacingBefore/After in both body and frame
+  layout.
