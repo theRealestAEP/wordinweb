@@ -146,9 +146,14 @@ function ensureCaretAnchor(p: XmlElement, para: Paragraph): void {
   // break/image), letting typed text land on the current page.
   const pPrIdx = p.children.findIndex((c) => localName(c.name) === "pPr");
   p.children.splice(pPrIdx + 1, 0, rEl);
+  // The caret anchor also sizes an otherwise-empty paragraph: Word measures
+  // an empty paragraph's line by its paragraph-mark run properties (pPr/rPr),
+  // not the style default. Carry those onto the synthetic run so the empty
+  // line's height matches Word (e.g. a Times New Roman mark is not sized as
+  // the Calibri body default).
   para.children.unshift({
     type: "run",
-    props: {},
+    props: para.props.markRunProps ? { ...para.props.markRunProps } : {},
     content: [{ kind: "text", text: "", srcT: tEl }],
     src: rEl,
     srcParent: p,
