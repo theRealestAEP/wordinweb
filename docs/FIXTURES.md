@@ -119,8 +119,69 @@ path meets producer-quirk XML. Source: `/Applications/Microsoft Word.app/Content
 | Fixture | Source building block | Covers | Pages (Word) | structural% / raw% | Notes |
 |---|---|---|---|---|---|
 | parity2-coverpage | "Facet" cover (Cover Pages.dotx) | wpg shape group with custGeom freeform art, theme lumMod fills, two embedded images, title/subtitle/author SDTs | 3 | p1 92.7/8.3 · p2 97.6/14.1 · p3 1.9/0.7 | **Finding:** the decorative geometric band (wpg/custGeom group) does **not render** — SDT text + layout are correct but the art is absent and the title is a few px offset. Body page (p3) clean. |
-| parity2-watermark | "CONFIDENTIAL" watermark (Watermarks.dotx) + hand-added page borders + line numbering | VML WordArt (`v:textpath` on t136) watermark in header, page borders, `w:lnNumType` line numbering, all in one section | 4 | p1 64.6/17.9 · p2 3.7/11.4 · p3 3.7/11.4 · p4 39.7/6.6 | **Finding:** the VML WordArt watermark and the line-number margin column both **do not render**. Page **borders render correctly**. |
+| parity2-watermark | "CONFIDENTIAL" watermark (Watermarks.dotx) + hand-added page borders + line numbering | VML WordArt (`v:textpath` on t136) watermark in header, page borders, `w:lnNumType` line numbering, all in one section | 4 | p1 3.5/12.8 · p2 3.3/12.6 · p3 3.3/12.6 · p4 12.7/7.5 | **Finding:** the VML WordArt watermark and the line-number margin column both **do not render** (residual raw ~12–13% is that missing column). Page **borders render correctly**. (Reference re-exported 2026-07-08 from the current fixture bytes — the prior PDF had a stale leading empty Heading paragraph that pushed the whole doc down one line and inflated p1/p4 structural.) |
 | parity2-equations | Quadratic/Fourier/Binomial/Taylor (Equations.dotx) | real Word display equations (`m:oMathPara`, producer OMML) | 1 | p1 86.8/3.6 | **Finding:** `m:oMathPara` renders **left-aligned at inline size** instead of **centered display math** with enlarged operators/tall fractions. Content is present and structurally correct, just mis-sized/positioned. |
+
+## Wild real-world fixtures (`wild-*`, this expansion)
+
+Genuinely complex `.docx` documents downloaded from public sources (government
+agencies, universities, a public sample-file host) to exercise the engine on
+producer XML we did not author. Every file was verified as a real `.docx` zip
+(`unzip -t`), run through `scripts/validate-docx.py`, and then run through
+`scripts/sanitize-docx.py` **anyway** (defense in depth) plus the extra URL /
+Company scrubs described in "Sanitization gaps" below, so no external URL,
+email, or organization name survives. The Word reference PDF is exported from
+the sanitized bytes (same as every other fixture), so parity stays meaningful.
+
+Regenerate: re-download from the source URL, `validate-docx.py`, `sanitize-docx.py`,
+apply the URL/Company scrub, export Word ref, `parity-compare`. Baselines below
+are the **first-ever** render of each — they are diagnostic, not targets.
+
+| Fixture | Source (sanitized from) | Producer | Covers | Pages (Word / engine) | Baseline (structural) | Findings |
+|---|---|---|---|---|---|---|
+| wild-gatech | Georgia Tech PhD thesis template `grad.gatech.edu/.../gatechthesis_word_-_08262016.docx` | MS Office Word | TOC field, 7 tables, 9 drawings, 3 sections, 5 header + 5 footer parts, endnotes, 33 field codes | 22 / 21 | p1 4.1% · p2 14% · p3–21 mostly 65–100% (max 100%, maxRaw 32%); 3 clean pages | Renders 1 page short. Heavy divergence from the TOC page (p3 = 100%) onward; 2 near-blank pages (scorer weight `n/a`). |
+| wild-hamburg | U-Hamburg thesis template `bwl.uni-hamburg.de/.../thesis-template.docx` | MS Office Word | TOC + list-of-figures + list-of-tables (4 field groups), 2 JPEG images, 4 tables, 4 sections | 17 / 18 | p1 1.7% · p2 10% · p3–17 60–96% (maxRaw only 4%) | Renders 1 page long. Divergence from p3 is almost entirely **vertical drift** (structural high, raw ≤4%) — content present, pagination/line-advance differs. |
+| wild-doerfp | US DOE ESPC IDIQ RFP `energy.gov/.../rfp_template.docx` | MS Office Word (NREL) | 7 sections, mixed headers/footers, 1 table, 5 HYPERLINK fields, `w:rPr` with Word's own out-of-order `shadow`/`specVanish` | 38 / 36 | p1 2.5% · p2 6% · p6–7 clean · p4–5 & p8–36 40–100% (maxRaw 15%) | Renders 2 pages short. **7 near-blank pages** (weight `n/a`), several at 100% structural — back-half sections lay out very differently. |
+| wild-wirfp | Wisconsin CDBG RFP form `energyandhousing.wi.gov/.../Attach03-G RFP Template.docx` | MS Office Word (SharePoint-managed) | **142 content controls (SDT)**, TOC, tables, HYPERLINK field, SharePoint customXml | 20 / 19 | p1 34% · p2/p8/p9 clean · rest 15–95% (maxRaw **44%**) | Renders 1 page short. Highest **raw** deltas of the set (20–44%) — the form-field / content-control pages have genuinely different content, not just drift. |
+| wild-athabasca | Athabasca U thesis/dissertation template `athabascau.ca/.../thesis-dissertation-template.docx` | MS Office Word (SharePoint) | 4 headers + 4 footers, 59 field codes, TOC, 1 image, 3 sections; **leads with an empty paragraph/span** | 31 / 32 | p2–5 clean (~1%) · p1 76% (title page) · p15–31 near-100% (maxRaw 12%) | Renders 1 page long. **Crashes `parity-compare.mjs`** (see harness note). **14 near-blank pages** in the reference/appendix half. |
+| wild-multicolumn | sample-files.com `sample-files.com-multi-column.docx` | **Microsoft Macintosh Word** | multi-column (`w:cols num=2`) body running many pages | 46 / 41 | p1 5.9% · p2–41 30–99% (maxRaw only 5%) | Renders **5 pages short** — biggest page-count drift. Multi-column reflow diverges throughout; low raw% (≤5%) says content is present but column balancing / line-advance differs. |
+
+No wild fixture crashed the **engine** or produced a hard error page; all six
+render. The recurring pattern is **page-count drift + accumulating vertical /
+column reflow divergence** on long multi-section documents, plus a cluster of
+near-blank pages (scorer weight `n/a`) in document back-halves — see the
+findings column. These are diagnostic baselines, not regressions.
+
+### Sanitization gaps found in `scripts/sanitize-docx.py` (worked around here; not fixed)
+
+While sanitizing the wild docs (and re-checking msa) three real leaks slipped
+past the shared sanitizer; each was scrubbed post-hoc so the committed fixtures
+are clean, but the script itself still has these blind spots:
+
+1. **`scrub_rels` never runs.** In `main()` the `.rels` branch is gated by
+   `if name.endswith(".xml")`, but `.rels` parts end in `.rels` — so external
+   **hyperlink Targets are never redacted**. doe-rfp / wi-rfp / athabasca all
+   shipped their real gov/edu hyperlink URLs until scrubbed by hand.
+2. **`customXml/*` is untouched.** msa's Google-Docs e-signature part carried
+   the real company name in a `SignerLabel`; wi-rfp's SharePoint part carried a
+   `<Url>` doc-ID link. The sanitizer only rewrites `word/*` + `core.xml`.
+3. **`HYPERLINK` field URLs and `docProps/app.xml` (`Company`, `Manager`, HLinks)
+   survive.** `w:instrText` is deliberately skipped, and app.xml is not processed
+   at all, so org names (`Vierbicher`, `NREL`, `Georgia Institute of Technology`,
+   `Athabasca University`) and field-code URLs remained until scrubbed.
+
+The scrub applied here preserves schema/namespace URIs (openxmlformats,
+microsoft, w3.org, …) and only redacts content URLs → `https://example.com/`.
+
+### Parity-harness incompatibility (leading empty span)
+
+`scripts/parity-compare.mjs:80` waits for `.dxw-page span` in the default
+**visible** state. `wild-athabasca` renders a leading empty paragraph whose
+first span has width 0, so the wait times out and the run throws before scoring
+— it also aborts a whole multi-fixture batch. Its baseline above was captured
+with a throwaway local copy of the script using `{ state: "attached" }`; the
+committed script is unchanged. Worth a one-word fix in the harness
+(`state: "attached"`) so a leading empty span can't stall parity runs.
 
 ## Engine findings surfaced (documented, not fixed — `packages/` untouched)
 
@@ -155,6 +216,20 @@ Coverage and Word page counts. Baselines for these live in
 `parity/history.jsonl` / the generated `parity/out/report.html`; re-run
 `node scripts/parity-compare.mjs <name>` to refresh a single one.
 
+> **Re-sanitized 2026-07-08:** `msa` and `chronology` still held real,
+> non-anonymized business/legal text (real entity "Ultimate Tournament Inc.",
+> the "Cobbery" d/b/a in a Google-Docs e-signature customXml part, etc.). Both
+> were re-run through `sanitize-docx.py` (msa also needed a customXml
+> `SignerLabel` scrub), their **Word reference PDFs and `*-word-lines.json`
+> re-exported from the sanitized bytes**, and verified at **0 line-break
+> mismatches** (`compare-linebreaks.mjs`) with pixel parity unchanged from the
+> pre-sanitization baseline (chronology ~1.5%; msa p1–7 ~1.1–1.8%). msa grew
+> 8 → 9 Word pages because the same-length pseudowords have different glyph
+> widths, so line/page breaks shift — expected, and harmless since the
+> reference is re-exported from the same bytes. **Note:** `real.docx` (older
+> fixture, out of this task's scope) still contains the real "Ultimate
+> Tournament" legal name despite being listed as sanitized — flag for cleanup.
+
 | Fixture | Covers | Pages (Word) | Generator |
 |---|---|---|---|
 | parity-text | baseline body text / wrapping | 1 | docx lib |
@@ -177,7 +252,7 @@ Coverage and Word page counts. Baselines for these live in
 | sample | multi-page body, headings, spacing | 4 | docx lib |
 | benchmark | pagination / widow-orphan stress | 4 | docx lib |
 | exact | metric calibration doc | — | docx lib |
-| msa | sanitized real contract (tables, headings, 1.15 spacing) | 8 | sanitize-docx.py |
+| msa | sanitized real contract (tables, headings, 1.15 spacing) | 9 | sanitize-docx.py + customXml scrub |
 | chronology | sanitized real doc | 2 | sanitize-docx.py |
 | pleading | sanitized legal pleading (VML line-number sidebar) | 7 | sanitize-docx.py |
 | forsale | sanitized flyer (fixed-height cells, dashed tear-offs) | — | sanitize-docx.py |
