@@ -111,7 +111,56 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
   parseParaChildren(p, ctx, para.children, field);
   // Unterminated field (shouldn't happen in valid files): flush as text
   flushField(field);
+  ensureCaretAnchor(p, para);
   return para;
+}
+
+/**
+ * Every editable paragraph needs a caret home: the anchor system binds
+ * carets to w:t elements, so a paragraph with only a break/image/field (or
+ * nothing) has nowhere for the caret to land and can't be typed into
+ * (clicking below a table, into an empty line, etc). Prepend an empty w:t
+ * run - matching Word, which materializes a run when you click an empty
+ * paragraph. Section-break-only paragraphs are skipped (they render no
+ * line).
+ */
+function ensureCaretAnchor(p: XmlElement, para: Paragraph): void {
+  if (para.sectionBreak && !paragraphHasVisibleContent(para)) return;
+  for (const c of para.children) {
+    const runs = c.type === "run" ? [c] : c.runs;
+    for (const r of runs) {
+      for (const rc of r.content) {
+        if (rc.kind === "text" && rc.srcT) return;
+        // Image/drawing/math/field paragraphs already have an interaction
+        // target; injecting a text run would shift their content and is
+        // unnecessary. Only break-only / empty paragraphs need an anchor.
+        if (rc.kind === "image" || rc.kind === "drawing" || rc.kind === "anchor" || rc.kind === "math" || rc.kind === "field") return;
+      }
+    }
+  }
+  const w = p.name.includes(":") ? p.name.slice(0, p.name.indexOf(":") + 1) : "";
+  const tEl: XmlElement = { name: `${w}t`, attrs: { "xml:space": "preserve" }, children: [], text: "" };
+  const rEl: XmlElement = { name: `${w}r`, attrs: {}, children: [tEl], text: "" };
+  // Insert after pPr so the caret sits at the paragraph start (before any
+  // break/image), letting typed text land on the current page.
+  const pPrIdx = p.children.findIndex((c) => localName(c.name) === "pPr");
+  p.children.splice(pPrIdx + 1, 0, rEl);
+  para.children.unshift({
+    type: "run",
+    props: {},
+    content: [{ kind: "text", text: "", srcT: tEl }],
+    src: rEl,
+    srcParent: p,
+  });
+}
+
+/** Any run content that renders (text/image/drawing/field/break/tab). */
+function paragraphHasVisibleContent(para: Paragraph): boolean {
+  for (const c of para.children) {
+    const runs = c.type === "run" ? [c] : c.runs;
+    for (const r of runs) if (r.content.length > 0) return true;
+  }
+  return false;
 }
 
 /** OMML subset -> MathNode AST (runs, scripts, fractions, radicals). */
