@@ -1568,44 +1568,32 @@ export class DocxEditor {
       }
     }
     if (!best) {
-      // Nothing on this line: snap to the closest line above the click on the
-      // same page (clicking blank space below text puts the caret at the end).
-      let bestAbove: TextBinding | null = null;
-      let bestBottom = -Infinity;
-      let bestRight = -Infinity;
+      // Nothing on the click's line (e.g. an empty table cell taller than one
+      // text line, or blank space between lines): pick the binding minimizing
+      // a vertical-dominant 2D distance so the caret stays in the clicked
+      // COLUMN/cell instead of snapping to the globally-highest line above.
+      // Vertical distance is weighted heavily; horizontal breaks ties, which
+      // keeps clicks inside the right cell of a multi-cell row.
+      let bestScore = Infinity;
+      let bestAfter = false;
       for (const b of handle.bindings) {
         if (!b.item.src?.t) continue;
         if (b.el.parentElement !== surface) continue;
         if (!regionOk(b)) continue;
-        const bottom = b.item.lineTop + b.item.lineHeight;
-        if (bottom > ly) continue;
-        const right = b.item.x + b.item.width;
-        if (bottom > bestBottom + 1 || (Math.abs(bottom - bestBottom) <= 1 && right > bestRight)) {
-          bestBottom = Math.max(bestBottom, bottom);
-          if (Math.abs(bottom - bestBottom) <= 1) {
-            bestAbove = b;
-            bestRight = right;
-          }
+        const top = b.item.lineTop;
+        const bottom = top + b.item.lineHeight;
+        const dy = ly < top ? top - ly : ly > bottom ? ly - bottom : 0;
+        const x0 = b.item.x;
+        const x1 = b.item.x + b.item.width;
+        const dx = lx < x0 ? x0 - lx : lx > x1 ? lx - x1 : 0;
+        const score = dy * 3 + dx;
+        if (score < bestScore) {
+          bestScore = score;
+          best = { binding: b, after: lx > (x0 + x1) / 2 };
+          bestAfter = lx > x1;
         }
       }
-      if (bestAbove) best = { binding: bestAbove, after: true };
-    }
-    if (!best) {
-      // Still nothing (click above all text): snap to the first line below,
-      // caret at its start.
-      let bestBelow: TextBinding | null = null;
-      let bestTop = Infinity;
-      for (const b of handle.bindings) {
-        if (!b.item.src?.t) continue;
-        if (b.el.parentElement !== surface) continue;
-        if (!regionOk(b)) continue;
-        if (b.item.lineTop < ly) continue;
-        if (b.item.lineTop < bestTop || (Math.abs(b.item.lineTop - bestTop) <= 1 && b.item.x < (bestBelow?.item.x ?? Infinity))) {
-          bestTop = Math.min(bestTop, b.item.lineTop);
-          if (Math.abs(b.item.lineTop - bestTop) <= 1) bestBelow = b;
-        }
-      }
-      if (bestBelow) return { t: bestBelow.item.src!.t as XmlElement, run: bestBelow.item.src!.run, offset: bestBelow.item.src!.offset };
+      if (best) best.after = bestAfter;
     }
     if (!best) return null;
     const src = best.binding.item.src!;
@@ -1640,6 +1628,13 @@ export class DocxEditor {
     const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as HTMLElement);
     const binding = this.host.getHandle()?.bindings.find((b) => b.el === el);
     if (!binding?.item.src?.t) return null;
+    // caretRangeFromPoint snaps to the nearest TEXT node, which jumps to a
+    // different cell when the click lands in an empty cell (its zero-width
+    // anchor is not a caret target). Reject an answer whose element rect does
+    // not vertically contain the click - nearestCaret's geometry then picks
+    // the correct cell/column.
+    const r = binding.el.getBoundingClientRect();
+    if (y < r.top - 4 || y > r.bottom + 4) return null;
     return {
       t: binding.item.src.t,
       run: binding.item.src.run,

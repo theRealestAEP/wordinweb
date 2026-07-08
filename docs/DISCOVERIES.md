@@ -323,3 +323,10 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   properties / a custom-XML data store (w:dataBinding w:xpath); Word renders
   the BOUND value while we render the placeholder text in document.xml. Any
   databound-SDT fixture will diverge until we resolve bindings.
+- **caretRangeFromPoint jumps to a distant cell on empty-cell clicks**: the
+  browser snaps to the nearest TEXT node, and an empty table cell's
+  zero-width anchor is not a caret target, so a click resolves into a random
+  neighboring cell. Fix: reject caretFromPoint answers whose element rect
+  does not vertically contain the click, and score the nearestCaret fallback
+  by vertical-dominant 2D distance (dy*3 + dx) so the caret stays in the
+  clicked column/cell.
