@@ -1780,8 +1780,40 @@ class Engine {
     return floor({});
   }
 
+  /**
+   * Fill in a styled table's borders from its table-style chain when it has
+   * no direct tblBorders — the built-in "Table Grid" style (referenced by
+   * tblStyle) supplies the cell grid that would otherwise be missing.
+   */
+  private ensureTableBorders(tbl: Table): void {
+    if (tbl.props.borders !== undefined) return;
+    const byId = this.doc.styles.byId;
+    const fromChain = (id: string | undefined) => {
+      let cur = id;
+      let guard = 0;
+      while (cur && guard++ < 20) {
+        const st = byId.get(cur);
+        if (!st) break;
+        if (st.tblPr?.borders) return st.tblPr.borders;
+        cur = st.basedOn;
+      }
+      return undefined;
+    };
+    let b = fromChain(tbl.props.styleId);
+    if (!b) {
+      for (const st of byId.values()) {
+        if (st.type === "table" && st.isDefault) {
+          b = fromChain(st.id);
+          if (b) break;
+        }
+      }
+    }
+    if (b) tbl.props.borders = b;
+  }
+
   private placeTable(tbl: Table): void {
     this.lastParaSpacingAfter = 0;
+    this.ensureTableBorders(tbl);
     const colWidth = this.colWidth;
     const widths = this.resolveGridWidths(tbl, colWidth);
     const tableWidth = widths.reduce((a, b) => a + b, 0);
@@ -1903,6 +1935,7 @@ class Engine {
     width: number,
     fields: FieldContext,
   ): number {
+    this.ensureTableBorders(tbl);
     const widths = resolveGrid(tbl, width);
     const saveY = this.y;
     const saveCur = this.cur;

@@ -862,7 +862,21 @@ export class DocxDocument {
 
   /** Effective paragraph properties: docDefaults → style chain → direct. */
   effectiveParaProps(para: Paragraph): ParaProps {
-    const { pPr } = resolveParagraphStyleChain(this.styles, para.props.styleId);
+    let pPr: ParaProps;
+    const tableStyleId = para.props.tableStyleId;
+    if (tableStyleId) {
+      // Precedence: docDefaults < table style < paragraph style < direct.
+      // The table style's pPr sits just above docDefaults, so a paragraph
+      // style that leaves spacing unset (e.g. ListParagraph) inherits the
+      // table style's compact spacing rather than docDefaults'.
+      const tblStyle = this.styles.byId.get(tableStyleId);
+      let base: ParaProps = { ...this.styles.defaultPPr };
+      if (tblStyle?.pPr) base = mergeParaProps(base, tblStyle.pPr);
+      const contrib = resolveParagraphStyleChain(this.styles, para.props.styleId, false);
+      pPr = mergeParaProps(base, contrib.pPr);
+    } else {
+      pPr = resolveParagraphStyleChain(this.styles, para.props.styleId).pPr;
+    }
     let merged = mergeParaProps(pPr, para.props);
     // Numbering level can contribute indentation when the paragraph doesn't set its own.
     const num = merged.numbering;

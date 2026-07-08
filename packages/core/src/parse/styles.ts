@@ -1,7 +1,7 @@
 import { XmlElement, attr, child, children, childVal, intAttr, onOff } from "../xml.js";
-import { ParaProps, RunProps, Style, Styles } from "../model.js";
+import { ParaProps, RunProps, Style, Styles, TableProps } from "../model.js";
 import { twipsToPx } from "../units.js";
-import { ParseContext, mergeParaProps, mergeRunProps, parseParaProps, parseRunProps } from "./properties.js";
+import { ParseContext, mergeParaProps, mergeRunProps, parseBorder, parseParaProps, parseRunProps } from "./properties.js";
 
 export function parseStyles(root: XmlElement | undefined, ctx: ParseContext): Styles {
   const styles: Styles = {
@@ -39,6 +39,7 @@ export function parseStyles(root: XmlElement | undefined, ctx: ParseContext): St
     if (rPr) style.rPr = parseRunProps(rPr, ctx);
     const tblPr = child(s, "tblPr");
     if (tblPr && type === "table") {
+      const tp: TableProps = {};
       const cellMar = child(tblPr, "tblCellMar");
       if (cellMar) {
         const margins: { top?: number; right?: number; bottom?: number; left?: number } = {};
@@ -51,8 +52,23 @@ export function parseStyles(root: XmlElement | undefined, ctx: ParseContext): St
             if (w !== undefined) margins[side] = twipsToPx(w);
           }
         }
-        style.tblPr = { cellMargins: margins };
+        tp.cellMargins = margins;
       }
+      // Table styles carry the grid borders (e.g. the built-in "Table Grid"
+      // style, referenced by tblStyle with no direct tblBorders) — resolve
+      // them so styled tables render their cell grid.
+      const borders = child(tblPr, "tblBorders");
+      if (borders) {
+        tp.borders = {
+          top: parseBorder(child(borders, "top"), ctx),
+          bottom: parseBorder(child(borders, "bottom"), ctx),
+          left: parseBorder(child(borders, "left"), ctx),
+          right: parseBorder(child(borders, "right"), ctx),
+          insideH: parseBorder(child(borders, "insideH"), ctx),
+          insideV: parseBorder(child(borders, "insideV"), ctx),
+        };
+      }
+      style.tblPr = tp;
     }
     styles.byId.set(id, style);
     if (style.isDefault && type === "paragraph") styles.defaultParagraphStyle = id;
@@ -62,8 +78,17 @@ export function parseStyles(root: XmlElement | undefined, ctx: ParseContext): St
 
 const MAX_CHAIN = 20;
 
-/** Effective paragraph props from the style chain (no direct formatting). */
-export function resolveParagraphStyleChain(styles: Styles, styleId: string | undefined): {
+/**
+ * Effective paragraph props from the style chain (no direct formatting).
+ * When `includeDefaults` is false, only the style chain's own contribution is
+ * returned (docDefaults omitted) so a caller can interpose another layer
+ * (e.g. a table style's pPr) beneath the paragraph style.
+ */
+export function resolveParagraphStyleChain(
+  styles: Styles,
+  styleId: string | undefined,
+  includeDefaults = true,
+): {
   pPr: ParaProps;
   rPr: RunProps;
 } {
@@ -76,8 +101,8 @@ export function resolveParagraphStyleChain(styles: Styles, styleId: string | und
     pChain.unshift(s);
     cur = s.basedOn;
   }
-  let pPr: ParaProps = { ...styles.defaultPPr };
-  let rPr: RunProps = { ...styles.defaultRPr };
+  let pPr: ParaProps = includeDefaults ? { ...styles.defaultPPr } : {};
+  let rPr: RunProps = includeDefaults ? { ...styles.defaultRPr } : {};
   for (const s of pChain) {
     if (s.pPr) pPr = mergeParaProps(pPr, s.pPr);
     if (s.rPr) rPr = mergeRunProps(rPr, s.rPr);

@@ -130,6 +130,13 @@ export interface ParaProps {
   outlineLevel?: number;
   /** Run props declared on pPr/rPr — apply to the paragraph mark & numbering label. */
   markRunProps?: RunProps;
+  /**
+   * styleId of the enclosing table (set on cell paragraphs at parse time).
+   * A table style's own pPr layers between docDefaults and the paragraph
+   * style, e.g. TableGrid's `spacing after=0 line=240` overrides docDefaults'
+   * `after=200 line=276` so list cells lay out compactly.
+   */
+  tableStyleId?: string;
 }
 
 // ---------- run content ----------
