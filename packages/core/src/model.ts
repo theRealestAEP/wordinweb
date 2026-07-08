@@ -131,6 +131,10 @@ export interface ParaProps {
   /** Paragraph shading fill as CSS color. */
   shading?: string;
   numbering?: NumberingRef | null; // null = explicitly removed (numId 0)
+  /** A numPr that carries ilvl but no numId (Heading3 basedOn Heading2)
+   * overrides only the list LEVEL, keeping the inherited numId; the style
+   * chain applies it to `numbering` on merge. */
+  numberingLevelOverride?: number;
   tabs?: TabStop[];
   outlineLevel?: number;
   /** Run props declared on pPr/rPr — apply to the paragraph mark & numbering label. */
@@ -380,6 +384,17 @@ export interface DrawingContent {
   images: DrawingImage[];
   /** Freeform vector shapes (a:custGeom), as SVG path data. */
   paths?: DrawingPath[];
+  /** An INLINE wps text box (wp:inline wps:txbx): a fixed-extent box that
+   * flows in the text (occupying its width x height like an inline image) and
+   * carries a fill/border + its own block content. Distinct from the floating
+   * ShapeTextbox, which is absolutely placed via a wp:anchor. */
+  textbox?: {
+    blocks: Block[];
+    fill?: string;
+    stroke?: { color: string; weight: number };
+    insets?: { l: number; t: number; r: number; b: number };
+    textAnchor?: "top" | "middle" | "bottom";
+  };
   /** Source w:drawing element (select/move as a group). */
   srcDrawing?: XmlElement;
 }

@@ -314,9 +314,13 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
   const numPr = child(pPr, "numPr");
   if (numPr) {
     const numId = intAttr(child(numPr, "numId"), "val");
-    const ilvl = intAttr(child(numPr, "ilvl"), "val") ?? 0;
+    const ilvl = intAttr(child(numPr, "ilvl"), "val");
     if (numId !== undefined) {
-      props.numbering = numId === 0 ? null : { numId, ilvl };
+      props.numbering = numId === 0 ? null : { numId, ilvl: ilvl ?? 0 };
+    } else if (ilvl !== undefined) {
+      // ilvl with no numId: override only the level, keeping the numId the
+      // style inherits (Heading3 basedOn Heading2 sets ilvl=2 -> "1.1.2").
+      props.numberingLevelOverride = ilvl;
     }
   }
 
@@ -367,6 +371,13 @@ export function mergeParaProps(base: ParaProps, over: ParaProps): ParaProps {
   }
   if (base.markRunProps && over.markRunProps) {
     out.markRunProps = mergeRunProps(base.markRunProps, over.markRunProps);
+  }
+  // Apply a level-only numPr override to the inherited numbering (keeping its
+  // numId). Consume it once applied; keep it pending if numbering isn't set
+  // yet so a later merge in the style chain can apply it.
+  if (out.numberingLevelOverride !== undefined && out.numbering) {
+    out.numbering = { ...out.numbering, ilvl: out.numberingLevelOverride };
+    out.numberingLevelOverride = undefined;
   }
   return out;
 }

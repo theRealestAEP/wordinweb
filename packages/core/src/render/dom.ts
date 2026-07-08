@@ -774,6 +774,12 @@ function renderText(item: TextItem): HTMLElement {
     else if (props.underline === "dotted") el.style.textDecorationStyle = "dotted";
     else if (props.underline === "dash") el.style.textDecorationStyle = "dashed";
     else if (props.underline === "wave") el.style.textDecorationStyle = "wavy";
+  } else if (props.underline === "none" && item.href) {
+    // A hyperlink whose character style explicitly clears the underline
+    // (Word's TOC entries use a redefined "Hyperlink" style = black, u=none)
+    // must override the <a> user-agent underline. A bare link with no
+    // underline info keeps the default so auto-hyperlinks still read as links.
+    el.style.textDecoration = "none";
   }
   // Strikethrough rules are painted by the engine at Word's position
   // (0.216em above baseline); CSS line-through would double-draw too high.
