@@ -99,6 +99,10 @@ export interface MathBox {
   rules: MathRule[];
   /** Display equation (centered on its own line, display-style layout). */
   display?: boolean;
+  /** Base equation font size (px) - the line-spacing multiple applies to the
+   * math font's single-line height at this size, not to the glyph cluster.
+   * Set on the top-level box returned by layoutMath; sub-boxes omit it. */
+  baseSize?: number;
 }
 
 function fontAt(size: number): FontSpec {
@@ -106,7 +110,7 @@ function fontAt(size: number): FontSpec {
 }
 
 export function layoutMath(nodes: MathNode[], baseSize: number, measurer: TextMeasurer, display = false): MathBox {
-  const box: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [], display };
+  const box: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [], display, baseSize };
   flow(nodes, baseSize, 0, box, measurer, false, display);
   // Line metrics: at least the math font's own box at each piece's offset.
   for (const p of box.pieces) {

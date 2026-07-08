@@ -589,10 +589,29 @@ class Engine {
     const abs = this.doc.numbering.abstract.get(inst.abstractNumId);
     if (!abs) return undefined;
 
-    let counters = this.counters.get(num.numId);
+    // An empty paragraph that only carries a section break (the last, contentless
+    // paragraph of a section) is a structural break, not a list item: Word gives
+    // it no number and does not advance the counter. (wild-doerfp: the empty
+    // Heading1 paragraphs holding sectPr must NOT consume a SECTION letter, or
+    // every section after the first would be lettered one ahead of Word.)
+    if (para.sectionBreak && !paragraphHasContent(para)) return undefined;
+
+    // Word maintains numbering counter state per ABSTRACT numbering definition,
+    // not per w:num instance: all w:num that reference the same abstractNum with
+    // no lvlOverride share one running counter. wild-doerfp drives its section
+    // headings this way - Heading1 numbers via style numId=4 ilvl=0 (SECTION A/B/
+    // ...) while Heading2 carries a direct numId=3 ilvl=1 (%1.%2); both resolve to
+    // abstractNum 8, so numId=4's letter increments feed numId=3's %1 and the
+    // subsection counter runs continuously across the two instances (H.1 via the
+    // style, H.2 via the direct numId). parity2-lists confirms it: num1 -> 1,2,3
+    // then num2 (same abstract, no override) continues 4,5 - Word does not restart.
+    // An instance WITH overrides keeps an independent counter (its own key), which
+    // both matches Word's restart intent and preserves prior behavior.
+    const cKey = inst.overrides.size > 0 ? 1_000_000 + num.numId : inst.abstractNumId;
+    let counters = this.counters.get(cKey);
     if (!counters) {
       counters = [];
-      this.counters.set(num.numId, counters);
+      this.counters.set(cKey, counters);
     }
     const lvl = this.doc.numberingLevel(num.numId, num.ilvl);
     if (!lvl) return undefined;
@@ -859,13 +878,24 @@ class Engine {
       let nextFirst = 18; // conservative: one body line (tables etc.)
       if (next.type === "paragraph") {
         const np = this.doc.effectiveParaProps(next);
+        // This is a MEASUREMENT of the next paragraph, not its placement:
+        // numberingLabel() advances the shared list counter as a side effect,
+        // so snapshot/restore around it or the real placement of `next` would
+        // number one step too high (wild-doerfp: F.1 shown as F.2, G.4/H.2
+        // skipped, because a keepNext paragraph preceding a numbered heading
+        // consumed the heading's number during this look-ahead).
+        const counterSnapshot = new Map(
+          Array.from(this.counters, ([k, v]) => [k, [...v]]),
+        );
+        const nextLabel = this.numberingLabel(np, next);
+        this.counters = counterSnapshot;
         const nb = breakParagraph(
           this.doc,
           this.measurer,
           next,
           this.colWidth,
           this.fieldCtx(),
-          this.numberingLabel(np, next),
+          nextLabel,
         );
         const gap = Math.max(spacingAfter, np.spacingBefore ?? 0) - spacingAfter;
         nextFirst = gap + (nb.lines[0]?.height ?? 18);
