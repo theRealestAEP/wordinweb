@@ -937,6 +937,19 @@ class Engine {
             stroke: pth.stroke,
           });
         }
+        // A transparent hit target over the group makes the whole drawing
+        // (icon, logo) selectable and draggable as one unit.
+        if (span.drawing.srcDrawing) {
+          page.items.push({
+            kind: "drawingHit",
+            x: bx,
+            y: by,
+            width: span.drawing.width,
+            height: span.drawing.height,
+            src: span.drawing.srcDrawing,
+            anchored: false,
+          });
+        }
         continue;
       }
       if (span.text === "\t") {

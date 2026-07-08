@@ -341,3 +341,14 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   the page or paginating (the For Sale flyer is one full-page fixed cell -
   typing into it must not push the tear-off tabs off the page). Engine drops
   cell text items whose line starts at/below the row bottom.
+- **Vector drawing groups (icons/logos) need a hit overlay to be
+  draggable**: their pieces render as separate SVG paths/images with no
+  single target. The engine emits a transparent DrawingHitItem over each
+  inline group (carrying the source w:drawing); the renderer materializes it
+  only in interactive mode; dragging it re-anchors the drawing to the drop
+  position (moveDrawingTo), same as an inline image.
+- **Header/footer single-click gating must distinguish on-glyph from
+  whitespace clicks**: clicking squarely on header text stays gated (inert
+  until double-click), but a whitespace click near a page edge whose nearest
+  text is an hf span retries the nearest BODY text. Keyed on whether
+  caretFromPoint (a real glyph hit) returned a result.

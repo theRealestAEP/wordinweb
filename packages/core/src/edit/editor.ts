@@ -1186,6 +1186,38 @@ export class DocxEditor {
       }
     }
 
+    // Click/drag on a vector drawing group (icon/logo overlay): re-anchor to
+    // the drop position, same as an inline image.
+    if (target.dataset.dxwDrawing) {
+      const handle = this.host.getHandle();
+      const binding = handle?.drawings.find((b) => b.el === target);
+      if (!binding) return false;
+      e.preventDefault();
+      e.stopPropagation();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let moved = false;
+      const onMove = (me: MouseEvent) => {
+        if (!moved && Math.hypot(me.clientX - startX, me.clientY - startY) > 5) moved = true;
+        if (moved && !binding.item.anchored) this.showDropIndicator(me.clientX, me.clientY);
+      };
+      const onUp = (me: MouseEvent) => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        this.hideDropIndicator();
+        this.suppressNextMouseUp = true;
+        if (!moved) return;
+        const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
+        if (dest) {
+          this.host.history?.checkpoint();
+          if (moveDrawingTo(this.host.doc, binding.item.src, dest.t)) this.host.rerender();
+        }
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      return true;
+    }
+
     // Click/drag on an image
     if (target.tagName === "IMG") {
       const handle = this.host.getHandle();
@@ -1277,8 +1309,8 @@ export class DocxEditor {
         return;
       }
     }
-    let caret =
-      this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
+    const onGlyph = this.caretFromPoint(e.clientX, e.clientY);
+    let caret = onGlyph ?? this.nearestCaret(e.clientX, e.clientY);
     let region = caret ? this.regionOf(caret.t) : "body";
     // Word UX: a double-click in the top/bottom margin band is header/footer
     // intent even when the nearest text is body text (or there is none at
@@ -1315,9 +1347,14 @@ export class DocxEditor {
         this.focusText();
         return;
       }
-      // Single click whose nearest text happens to be a header/footer span
-      // (whitespace near the page edges): place the caret at the nearest
-      // BODY text instead of doing nothing.
+      // A single click squarely ON header/footer text is gated (Word: the
+      // header is inert until you double-click). Only a click in WHITESPACE
+      // whose nearest text happens to be an hf span (page edges) retries the
+      // nearest body text.
+      if (onGlyph) {
+        this.hideCaret();
+        return;
+      }
       const bodyCaret = this.nearestCaret(e.clientX, e.clientY, "body");
       if (bodyCaret) {
         caret = bodyCaret;
