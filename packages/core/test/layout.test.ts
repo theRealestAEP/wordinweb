@@ -703,3 +703,39 @@ describe("table row splitting", () => {
     expect(p1.some((t) => t.includes("cell"))).toBe(false);
   });
 });
+
+describe("inline drawing groups", () => {
+  const GROUP =
+    '<w:p><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"' +
+    ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"' +
+    ' xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"' +
+    ' xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+    '<wp:inline><wp:extent cx="329184" cy="329184"/>' +
+    '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">' +
+    "<wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"329184\" cy=\"329184\"/>" +
+    '<a:chOff x="0" y="0"/><a:chExt cx="208" cy="208"/></a:xfrm></wpg:grpSpPr>' +
+    "<wps:wsp><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"208\" cy=\"208\"/></a:xfrm>" +
+    '<a:solidFill><a:srgbClr val="37B6AE"/></a:solidFill>' +
+    '<a:custGeom><a:pathLst><a:path w="208" h="208">' +
+    '<a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="208" y="208"/></a:lnTo>' +
+    "</a:path></a:pathLst></a:custGeom></wps:spPr></wps:wsp>" +
+    "</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>";
+
+  it("keeps the drawingHit target on the group when it sits inside a table cell", () => {
+    const tbl =
+      "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"4000\"/></w:tblGrid>" +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${GROUP}</w:tc></w:tr></w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + p("after")) });
+    const items = result.pages[0].items;
+    const hit = items.find((i) => i.kind === "drawingHit");
+    const path = items.find((i) => i.kind === "path");
+    expect(hit).toBeDefined();
+    expect(path).toBeDefined();
+    if (hit?.kind !== "drawingHit" || path?.kind !== "path") throw new Error();
+    // The transparent hit target must sit exactly over the painted group
+    // even after the cell-frame offset (offsetItem must shift drawingHit).
+    expect(hit.x).toBeCloseTo(path.x, 3);
+    expect(hit.y).toBeCloseTo(path.y, 3);
+    expect(hit.y).toBeGreaterThan(50); // moved with the cell, not stuck at origin
+  });
+});
