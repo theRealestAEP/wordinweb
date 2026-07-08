@@ -309,6 +309,41 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   paragraph whose only role is carrying `pPr/sectPr` renders no mark line
   (columns start exactly one line-advance below the intro). Same family as
   the trailing-page-break rule.
+- **Header/footer references inherit per-type from the previous section**
+  (ECMA-376 §17.10.1): a section that omits a `headerReference`/
+  `footerReference` of a given type (default/first/even) uses the previous
+  section's reference of that type — Word only blanks a header by pointing
+  at an EMPTY header part, never by omitting the reference. wild-athabasca's
+  body section carries only a footer, yet Word keeps the previous section's
+  running header on all 19 pages (and the earlier TOC section keeps the
+  roman-numeral footer it likewise inherits). Missing this dropped the
+  header on p13–31, freeing ~1 line/page and losing the 31st page. Fix:
+  `inheritHeaderFooterRefs` pass in `parse/document.ts` after section
+  assembly (forward, so inheritance chains section→section).
+- **keepNext binds transitively — the whole CHAIN moves as a unit**: a run
+  of consecutive keepNext paragraphs (heading + sub-headings, or a document
+  that styles body paragraphs as headings — heading styles carry keepNext/
+  keepLines in styles.xml, not inline) must all land on one page together
+  with the first line(s) of the terminating non-keepNext block. Each hop can
+  individually fit while the accumulated chain does not, so a single-hop
+  check under-breaks (wild-athabasca: a 7-paragraph Heading2/3 chain leaves
+  ~12 blank lines at a page bottom in Word; packing it lost a page). The
+  engine walks the whole forward keepNext run in `placeParagraph`, sums the
+  full heights of the keepNext members plus the terminator's first (+orphan)
+  line, and moves the lot when it won't fit but fits on a fresh page.
+- **w:beforeAutospacing / afterAutospacing insert one blank line, ignoring
+  the literal before/after** (HTML/web-pasted content, `NormalWeb`): Word
+  discards the 5pt `w:before`/`w:after` and uses ~one SINGLE line height of
+  space (wild-athabasca title page: NormalWeb blocks sit a full line apart,
+  27.8pt gaps = single line 13.8 + ~14pt auto). Use the line's
+  `naturalHeight` (the line-spacing multiple, e.g. line=480 double, must NOT
+  inflate the auto gap). **A trailing EMPTY autospacing paragraph's
+  after does not carry across a section break** into the next section's first
+  paragraph — else it eats the following Heading1's spacing-before (athabasca
+  p6: section-1 Tadulobo needs its full before=24pt, not before−prevAuto).
+  The cross-section spacing carry (`lastParaSpacingAfter` across the break)
+  zeroes when the previous section's last laid-out paragraph was empty
+  (`lastParaWasEmpty`); non-empty content still carries (parity2-sections).
 - **The OMML n-ary element is `m:nary`, all lowercase** — `m:nAry` does not
   exist and Word hard-rejects the whole file ("Word experienced an error
   trying to open the file"), unlike most schema slips which it repairs.

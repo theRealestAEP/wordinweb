@@ -69,7 +69,34 @@ export function parseBody(body: XmlElement, ctx: DocParseContext): Section[] {
   if (blocks.length > 0) {
     sections.push({ props: defaultSectionProps(), blocks });
   }
+
+  inheritHeaderFooterRefs(sections);
   return sections;
+}
+
+/**
+ * Header/footer references are inherited per-type from the previous section
+ * (ECMA-376 §17.10.1): a section that omits a headerReference/footerReference
+ * of a given type (default/first/even) uses the previous section's reference
+ * of that type. Word only blanks a header by pointing at an empty header part,
+ * never by omitting the reference. Missing this makes late sections drop the
+ * running header/footer entirely — e.g. wild-athabasca's body section carries
+ * only a footer, yet Word keeps the previous section's running header on every
+ * page (and the earlier section keeps the roman-numeral footer it inherits).
+ */
+function inheritHeaderFooterRefs(sections: Section[]): void {
+  for (let i = 1; i < sections.length; i++) {
+    const prev = sections[i - 1].props;
+    const cur = sections[i].props;
+    for (const type of ["default", "first", "even"] as const) {
+      if (cur.headerRefs[type] === undefined && prev.headerRefs[type] !== undefined) {
+        cur.headerRefs[type] = prev.headerRefs[type];
+      }
+      if (cur.footerRefs[type] === undefined && prev.footerRefs[type] !== undefined) {
+        cur.footerRefs[type] = prev.footerRefs[type];
+      }
+    }
+  }
 }
 
 /** Parse block-level content of a header/footer/table-cell container. */

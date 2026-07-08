@@ -89,6 +89,12 @@ class Engine {
   /** Previous paragraph's spacing-after: Word collapses it against the next
    * paragraph's spacing-before (larger wins), verified against Word PDFs. */
   private lastParaSpacingAfter = 0;
+  /** Whether the last laid-out paragraph was empty (no text/inline content).
+   * A trailing empty paragraph's spacing-after does not carry into the first
+   * paragraph of the next section (wild-athabasca p6: an empty NormalWeb
+   * paragraph closing a section must not swallow the next section heading's
+   * spacing-before). */
+  private lastParaWasEmpty = false;
   /** Bookmark name -> formatted display page number (PAGEREF rewrite). */
   private bookmarkPages = new Map<string, string>();
   /** List counters per numId. */
@@ -147,7 +153,7 @@ class Engine {
       // spacing-after (parity2-sections: Heading1 before=12pt after a
       // Normal after=8pt paragraph starts 4pt below the margin on section
       // pages, but the full 12pt at the document start).
-      const carryAfter = this.lastParaSpacingAfter;
+      const carryAfter = this.lastParaWasEmpty ? 0 : this.lastParaSpacingAfter;
       if (canContinue) this.newBand();
       else this.newPage(true);
       if (prevSp !== null) this.lastParaSpacingAfter = carryAfter;
@@ -570,7 +576,7 @@ class Engine {
         // vertical space in Word (parity-colbalance: the columns start
         // exactly one line-advance below the intro, no mark line).
         if (block.sectionBreak && !paragraphHasContent(block)) continue;
-        this.placeParagraph(block, blocks[i - 1], blocks[i + 1]);
+        this.placeParagraph(block, blocks[i - 1], blocks[i + 1], blocks, i);
       } else {
         this.placeTable(block);
       }
@@ -700,7 +706,7 @@ class Engine {
     };
   }
 
-  private placeParagraph(para: Paragraph, prev?: Block, next?: Block): void {
+  private placeParagraph(para: Paragraph, prev?: Block, next?: Block, siblings?: Block[], index?: number): void {
     const props = this.doc.effectiveParaProps(para);
     // Word merges identical borders of consecutive paragraphs: the shared
     // boundary is not drawn (or draws the "between" border when given), so
@@ -821,6 +827,20 @@ class Engine {
     spacingAfter += this.borderPadImpl(props.borders?.bottom);
 
     let lines = broken.lines;
+
+    // HTML-style automatic paragraph spacing (w:beforeAutospacing /
+    // afterAutospacing, produced by web/HTML-pasted content): Word discards
+    // the literal before/after and inserts one blank line's worth of space
+    // above/below the paragraph (wild-athabasca title page: NormalWeb blocks
+    // sit a full line apart, not the 5pt the raw before/after would give).
+    if ((props.beforeAutospacing || props.afterAutospacing) && lines.length > 0) {
+      // One blank line at the paragraph's SINGLE line height — the line-spacing
+      // multiple (e.g. line=480 double) must not inflate the auto gap.
+      const autoSpace = lines[0].naturalHeight;
+      if (props.beforeAutospacing && !dropSpaceBefore) spacingBefore = borderPadTop + autoSpace;
+      if (props.afterAutospacing) spacingAfter = this.borderPadImpl(props.borders?.bottom) + autoSpace;
+    }
+
     const totalHeight = spacingBefore + lines.reduce((a, l) => a + l.height, 0);
     const bodyHeight = this.bodyBottom - this.cur.bodyTop;
 
@@ -852,32 +872,58 @@ class Engine {
     // move it - and, like any paragraph pushed to a page top by an automatic
     // break, its spacing-before is dropped (parity2-toc p6: the keepNext-
     // moved Conclusion heading sits at margin + ascent exactly).
-    // TODO: chains of keepNext paragraphs (H1+H2) move one at a time here;
-    // Word moves the whole chain.
+    //
+    // keepNext CHAINS: a run of consecutive keepNext paragraphs (heading +
+    // sub-headings, or Word documents that style body paragraphs as headings)
+    // all bind to their successor, so the whole run must land on one page
+    // together with the first line(s) of the terminating (non-keepNext) block.
+    // Each individual hop may fit while the accumulated chain does not, so the
+    // whole unit is measured and moved as one (wild-athabasca: a 7-paragraph
+    // Heading2/3 chain leaves ~12 blank lines at a page bottom in Word).
     if (props.keepNext && next !== undefined && !this.pageIsEmptyAtCursor()) {
       const effBefore = Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
-      let nextFirst = 18; // conservative: one body line (tables etc.)
-      if (next.type === "paragraph") {
-        const np = this.doc.effectiveParaProps(next);
+      // Height needed AFTER this paragraph's own lines to satisfy the chain.
+      let tail = 0;
+      let prevAfter = spacingAfter;
+      let idx = (index ?? -1) + 1;
+      // Guard against pathological documents (every paragraph keepNext-styled).
+      let hops = 0;
+      while (siblings && idx < siblings.length && hops < 100) {
+        hops++;
+        const blk = siblings[idx];
+        if (blk.type !== "paragraph") {
+          // A non-paragraph follower (e.g. a table) terminates the chain; it
+          // can paginate itself, so only its gap plus a conservative first row
+          // needs to stay.
+          tail += prevAfter + 18;
+          break;
+        }
+        const np = this.doc.effectiveParaProps(blk);
         const nb = breakParagraph(
           this.doc,
           this.measurer,
-          next,
+          blk,
           this.colWidth,
           this.fieldCtx(),
-          this.numberingLabel(np, next),
+          this.numberingLabel(np, blk),
         );
-        const gap = Math.max(spacingAfter, np.spacingBefore ?? 0) - spacingAfter;
-        nextFirst = gap + (nb.lines[0]?.height ?? 18);
-        // Widow/orphan control never leaves a multi-line paragraph's first
-        // line alone at a page bottom, so the heading effectively needs TWO
-        // of its lines to fit (parity2-toc p5/p6: heading + one fitting
-        // line still moves because orphan control drags the line away).
-        if (nb.lines.length > 1 && np.widowControl !== false) {
-          nextFirst += nb.lines[1].height;
+        // Collapsed gap from the end of the previous member's lines.
+        const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
+        if (np.keepNext) {
+          // A keepNext member must itself sit fully with its own successor.
+          tail += gap + nb.lines.reduce((a, l) => a + l.height, 0);
+          prevAfter = np.spacingAfter ?? 0;
+          idx++;
+          continue;
         }
+        // Terminator: only its first line (and the orphan-dragged second line
+        // when it has more than one) needs to stay with the chain.
+        let need = gap + (nb.lines[0]?.height ?? 18);
+        if (nb.lines.length > 1 && np.widowControl !== false) need += nb.lines[1].height;
+        tail += need;
+        break;
       }
-      const needed = effBefore + lines.reduce((a, l) => a + l.height, 0) + spacingAfter + nextFirst;
+      const needed = effBefore + lines.reduce((a, l) => a + l.height, 0) + tail;
       if (this.y + needed > this.bodyBottom && needed <= bodyHeight) {
         spacingBefore = borderPadTop; // plain before drops at the page top; the border reserve stays
         if (anchors.length > 0) restartOnNextColumn(borderPadTop);
@@ -1035,6 +1081,7 @@ class Engine {
     closeFragment(lines.length, true);
     this.y += spacingAfter;
     this.lastParaSpacingAfter = spacingAfter;
+    this.lastParaWasEmpty = !paragraphHasContent(para);
   }
 
   /** w:lnNumType: a right-aligned number in the left margin for body lines. */
@@ -1924,6 +1971,7 @@ class Engine {
 
   private placeTable(tbl: Table): void {
     this.lastParaSpacingAfter = 0;
+    this.lastParaWasEmpty = false;
     this.ensureTableBorders(tbl);
     const colWidth = this.colWidth;
     const widths = this.resolveGridWidths(tbl, colWidth);

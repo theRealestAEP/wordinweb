@@ -113,6 +113,11 @@ export interface ParaProps {
   indentHanging?: number;
   spacingBefore?: number;
   spacingAfter?: number;
+  /** w:beforeAutospacing/afterAutospacing: HTML-style automatic paragraph
+   * spacing — Word ignores the literal before/after and inserts one blank
+   * line's worth of space. */
+  beforeAutospacing?: boolean;
+  afterAutospacing?: boolean;
   /** Word's default when absent is auto/1.0 via docDefaults. */
   lineSpacing?: LineSpacing;
   contextualSpacing?: boolean;
