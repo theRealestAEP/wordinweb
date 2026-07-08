@@ -1168,15 +1168,20 @@ class Engine {
             page.items.push({ kind: "edge", x1: bx + w, y1: by, x2: bx + w, y2: by + h, border: b });
           }
           const ins = tb.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
-          const inner = this.layoutFrame(tb.blocks, Math.max(w - ins.l - ins.r, 1), this.fieldCtx(), {
-            x: bx + ins.l,
-            y: by + ins.t,
+          // Text is inset from the INNER edge of the border, so the stroke
+          // narrows the usable text width (a 3pt border eats ~4px per side,
+          // enough to pull the wild-gatech callouts' final word to a new line
+          // like Word).
+          const bw = tb.stroke ? tb.stroke.weight : 0;
+          const inner = this.layoutFrame(tb.blocks, Math.max(w - ins.l - ins.r - 2 * bw, 1), this.fieldCtx(), {
+            x: bx + ins.l + bw,
+            y: by + ins.t + bw,
           });
-          let innerTop = by + ins.t;
+          let innerTop = by + ins.t + bw;
           if (tb.textAnchor === "middle") innerTop = by + (h - inner.height) / 2;
           else if (tb.textAnchor === "bottom") innerTop = by + h - ins.b - inner.height;
           for (const it of inner.items) {
-            offsetItem(it, bx + ins.l, innerTop);
+            offsetItem(it, bx + ins.l + bw, innerTop);
             page.items.push(it);
           }
           if (span.drawing.srcDrawing) {

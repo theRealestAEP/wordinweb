@@ -337,6 +337,20 @@ function flushField(field: FieldState): void {
  * the field content is emitted on the run carrying fldChar begin when the
  * field closes.
  */
+/** Wingdings/Webdings/Symbol codepoints (already de-offset from 0xF000) mapped
+ * to their Unicode equivalents, so a w:sym renders the right glyph at roughly
+ * the right width instead of its raw Latin-1 byte. */
+const SYMBOL_CHAR_MAP: Record<number, string> = {
+  0xe0: "→", // Wingdings right arrow
+  0xdf: "←", // Wingdings left arrow
+  0xe1: "↑", // Wingdings up arrow
+  0xe2: "↓", // Wingdings down arrow
+  0xfc: "✓", // Wingdings check
+  0xfd: "✗", // Wingdings x
+  0xa7: "▪", // Wingdings small black square (bullet)
+  0xb7: "•", // Symbol bullet
+};
+
 function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run | null {
   const run: Run = {
     type: "run",
@@ -449,7 +463,13 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
         if (charHex) {
           let code = parseInt(charHex, 16);
           if (code >= 0xf000) code -= 0xf000; // private-use offset Word applies
-          run.content.push({ kind: "text", text: String.fromCharCode(code) });
+          const font = attr(el, "font") ?? "";
+          // Symbol-font codepoints (Wingdings/Symbol/Webdings) aren't Unicode:
+          // map the common ones so they don't render as their Latin-1 byte
+          // (Wingdings F0E0 is a right arrow, not "a-grave"). Getting the glyph
+          // right also keeps its width close to Word's, so lines don't reflow.
+          const mapped = /wingdings|webdings|symbol/i.test(font) ? SYMBOL_CHAR_MAP[code] : undefined;
+          run.content.push({ kind: "text", text: mapped ?? String.fromCharCode(code) });
         }
         break;
       }
