@@ -758,6 +758,7 @@ function finishLine(
   let maxImage = 0;
   let maxImageFontDesc = 0;
   let maxNaturalText = 0;
+  let mathDisplayBase = 0;
 
   const consider = (font: FontSpec, imageHeight?: number) => {
     if (imageHeight !== undefined) {
@@ -796,6 +797,20 @@ function finishLine(
         maxDescent = Math.max(maxDescent, s.math.descent);
         maxRawDescent = Math.max(maxRawDescent, s.math.descent);
         maxNatural = Math.max(maxNatural, s.math.ascent + s.math.descent);
+        if (s.math.display) {
+          // A display equation (m:oMathPara) sits on its own line, and Word
+          // gives that line the paragraph's line-spacing: the multiple applies
+          // to the MATH FONT's single-line height at the base size, not to the
+          // (often tall) glyph cluster. Cambria Math shares Cambria's hhea
+          // metrics; the measurer maps Cambria Math -> STIX for glyph boxes,
+          // so read Cambria for the true line pitch. (wild-hamburg p12: the
+          // A2+B2=C2 line ran ~9pt short below the baseline because the cluster
+          // extent, not the 1.5x-scaled font line, drove the height.)
+          mathDisplayBase = Math.max(
+            mathDisplayBase,
+            measurer.metrics({ family: "Cambria", size: s.math.baseSize ?? s.math.ascent + s.math.descent, bold: false, italic: false }).lineHeight,
+          );
+        }
       } else consider(s.metricsFont ?? s.font);
     }
   }
@@ -808,12 +823,17 @@ function finishLine(
   // emitting items.
   let height = natural;
   let baselineH: number | undefined;
-  const hasDisplayMath = spans.some((s) => s.math?.display);
   const ls = props.lineSpacing;
-  if (ls && !hasDisplayMath) {
+  if (ls) {
     if (ls.rule === "auto") {
       height = natural * ls.value;
-      if (maxImage > 0) {
+      if (mathDisplayBase > 0) {
+        // Display math: the multiple scales the math font's line height, never
+        // the equation cluster - so a tall equation (fraction/summation) keeps
+        // its own height (parity2-equations) while a short one (superscripts)
+        // still gets the full 1.5x line box (wild-hamburg p12).
+        height = Math.max(natural, mathDisplayBase * ls.value);
+      } else if (maxImage > 0) {
         // Word does NOT scale an inline image with the auto multiplier: an
         // image-dominated line measures image + k x text-descent, with the
         // image top at the line top (baseline = top + image height). The
