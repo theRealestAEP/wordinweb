@@ -750,6 +750,14 @@ function buildAtoms(
     const props = doc.effectiveRunProps(para, run.props);
     if (props.vanish) return;
     const font = fontOf(props, fallbackFamily);
+    // Superscript/subscript runs paint at 65% size but Word keys LINE
+    // METRICS to the unscaled run size: a wrapped line holding only a
+    // footnote marker still advances a full base-size line (parity2-notes:
+    // 37pt paragraph pitch = 2 x 14.5 + spacing-after, not 31.75).
+    const vertMetricsFont =
+      props.verticalAlign === "superscript" || props.verticalAlign === "subscript"
+        ? { ...font, size: props.size ?? 14.666 }
+        : undefined;
     for (const content of run.content) {
       switch (content.kind) {
         case "text":
@@ -757,12 +765,12 @@ function buildAtoms(
             run,
             t: (content.srcT as TextSource["t"]) ?? null,
             offset: 0,
-          });
+          }, vertMetricsFont);
           break;
         case "field": {
           const text = resolveField(content.instruction, content.cachedResult, fields);
           // Fields are atomic: src.t === null means "format the whole run".
-          if (text) pushStyled(displayText(text, props), props, font, href, { run, t: null, offset: 0 });
+          if (text) pushStyled(displayText(text, props), props, font, href, { run, t: null, offset: 0 }, vertMetricsFont);
           break;
         }
         case "ptab":
@@ -813,6 +821,7 @@ function buildAtoms(
             width: measurer.width(text, markFont, markProps.letterSpacing),
             href,
             noteId: content.noteType === "footnote" && !content.self ? content.id : undefined,
+            metricsFont: { ...markFont, size: markProps.size ?? 14.666 },
           });
           break;
         }
@@ -823,9 +832,16 @@ function buildAtoms(
   /** Routes small-caps runs through per-segment sizing; plain runs go
    * straight to pushText. caps wins over smallCaps (text is already
    * uppercased by displayText, every char classifies full-size). */
-  const pushStyled = (text: string, props: RunProps, font: FontSpec, href?: string, srcBase?: TextSource) => {
+  const pushStyled = (
+    text: string,
+    props: RunProps,
+    font: FontSpec,
+    href?: string,
+    srcBase?: TextSource,
+    metricsFont?: FontSpec,
+  ) => {
     if (!props.smallCaps || props.caps) {
-      pushText(text, props, font, href, srcBase);
+      pushText(text, props, font, href, srcBase, metricsFont);
       return;
     }
     const reduced = smallCapsFontOf(font);
@@ -837,7 +853,7 @@ function buildAtoms(
       const seg = text.slice(i, j);
       const src = srcBase ? { ...srcBase, offset: srcBase.offset + i } : undefined;
       if (lower) pushText(seg.toUpperCase(), props, reduced, href, src, font);
-      else pushText(seg, props, font, href, src);
+      else pushText(seg, props, font, href, src, metricsFont);
       i = j;
     }
   };

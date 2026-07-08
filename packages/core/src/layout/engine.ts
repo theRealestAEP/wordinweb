@@ -1129,7 +1129,12 @@ class Engine {
       // smaller fonts sharing a line with a taller one. Small-caps reduced
       // segments anchor their base font's box - the outer span carries that
       // strut and the shrunk text baseline-aligns inside it.
-      const gm = this.measurer.metrics(span.metricsFont ?? span.font);
+      // vertAlign glyph boxes stay at the PAINT (scaled) size - their
+      // metricsFont only inflates line metrics. Small-caps strut spans keep
+      // the base-font box the renderer's outer strut expects.
+      const gm = this.measurer.metrics(
+        span.props.verticalAlign ? span.font : (span.metricsFont ?? span.font),
+      );
       const glyphTop = b - gm.ascent;
       const glyphBoxH = gm.ascent + gm.descent;
 
@@ -1179,7 +1184,9 @@ class Engine {
         lineHeight: line.height,
         glyphTop,
         glyphBoxH,
-        strutFont: span.metricsFont,
+        // vertAlign spans anchor via glyphTop; their metricsFont only feeds
+        // line metrics, not the renderer's small-caps strut mechanism.
+        strutFont: span.props.verticalAlign ? undefined : span.metricsFont,
         href: span.href,
         src: span.src,
       });
