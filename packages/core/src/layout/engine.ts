@@ -1800,8 +1800,16 @@ class Engine {
       if (cell.props.verticalAlign === "center") dy = Math.max(0, (rowHeight - cellLay.height) / 2);
       else if (cell.props.verticalAlign === "bottom") dy = Math.max(0, rowHeight - cellLay.height);
 
+      // Exact-height rows CLIP overflowing content (Word: content past the
+      // fixed row height is hidden, not spilled onto the page - e.g. the
+      // For Sale flyer's full-page fixed cell). Drop items whose top starts
+      // below the row bottom.
+      const clip = row.props.heightRule === "exact";
+      const rowBottom = y + rowHeight;
       for (const it of cellLay.items) {
         offsetItem(it, cx, y + dy);
+        if (clip && it.kind === "text" && it.lineTop !== undefined && it.lineTop >= rowBottom - 0.5) continue;
+        if (clip && it.kind === "text" && it.baseline > rowBottom + 1) continue;
         // Cell footnotes bind to the page painting this partition (split
         // rows carry their references to the continuation page).
         if (it.kind === "text" && it.noteId !== undefined) this.registerFootnote(it.noteId, page);
