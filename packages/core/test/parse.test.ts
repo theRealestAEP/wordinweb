@@ -358,4 +358,39 @@ describe("OMML math", () => {
     const rule = items.find((i) => i.kind === "rect" && i.fill === "#000000" && i.height < 2);
     expect(rule).toBeTruthy();
   });
+
+  it("marks m:oMathPara as a display equation and honors noBar", () => {
+    const XML_DISPLAY = `<w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+      <m:oMathPara><m:oMath>
+        <m:f><m:fPr><m:type m:val="noBar"/></m:fPr>
+          <m:num><m:r><m:t>n</m:t></m:r></m:num><m:den><m:r><m:t>k</m:t></m:r></m:den></m:f>
+      </m:oMath></m:oMathPara></w:p>`;
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(XML_DISPLAY) }));
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error();
+    const math = para.children.flatMap((c) => (c.type === "run" ? c.content : [])).find((c) => c.kind === "math");
+    if (!math || math.kind !== "math") throw new Error("no math content");
+    expect(math.display).toBe(true);
+    const frac = math.nodes[0];
+    if (frac.t !== "frac") throw new Error("expected frac");
+    expect(frac.bar).toBe(false);
+  });
+
+  it("display fractions use full-size num/den and center the equation", () => {
+    const XML_DISPLAY = `<w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+      <m:oMathPara><m:oMath>
+        <m:f><m:num><m:r><m:t>x</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f>
+      </m:oMath></m:oMathPara></w:p>`;
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(XML_DISPLAY) }));
+    const result = layoutDocument(doc, { measurer: new ApproxMeasurer() });
+    const texts = result.pages[0].items.filter((i) => i.kind === "text");
+    const numX = texts.find((i) => i.kind === "text" && i.text === "𝑥");
+    const denN = texts.find((i) => i.kind === "text" && i.text === "2");
+    if (!numX || numX.kind !== "text" || !denN || denN.kind !== "text") throw new Error("missing pieces");
+    // Full base size (not the 8/11 inline-fraction script scale).
+    expect(numX.font.size).toBeCloseTo(denN.font.size, 5);
+    expect(numX.font.size).toBeGreaterThan(14); // ~11pt in px
+    // Centered on the content column: left edge well past the left margin.
+    expect(numX.x).toBeGreaterThan(150);
+  });
 });
