@@ -352,3 +352,10 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   until double-click), but a whitespace click near a page edge whose nearest
   text is an hf span retries the nearest BODY text. Keyed on whether
   caretFromPoint (a real glyph hit) returned a result.
+- **Databound content controls render from their CACHED text**, which Word
+  keeps in sync with the binding — so real documents render RECIPIENT NAME /
+  the author name correctly with no special handling. The cover-letter
+  divergence was only in the SANITIZED fixture: scrambling the cached SDT
+  text while Word re-resolves the w:dataBinding xpath against the scrubbed
+  core.xml. Live xpath resolution (core.xml / customXml) is a future
+  robustness nicety for stale-cache documents, not a real-doc bug.
