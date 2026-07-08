@@ -743,7 +743,8 @@ class Engine {
     // A paragraph border reserves vertical room for its rule + space, so the
     // rule sits in the gap instead of overlapping the neighbor (pleading
     // footer: the caption's top border must clear the page number above).
-    spacingBefore += this.borderPadImpl(props.borders?.top);
+    const borderPadTop = this.borderPadImpl(props.borders?.top);
+    spacingBefore += borderPadTop;
     spacingAfter += this.borderPadImpl(props.borders?.bottom);
 
     let lines = broken.lines;
@@ -798,8 +799,8 @@ class Engine {
       }
       const needed = effBefore + lines.reduce((a, l) => a + l.height, 0) + spacingAfter + nextFirst;
       if (this.y + needed > this.bodyBottom && needed <= bodyHeight) {
-        spacingBefore = 0;
-        if (anchors.length > 0) restartOnNextColumn(0);
+        spacingBefore = borderPadTop; // plain before drops at the page top; the border reserve stays
+        if (anchors.length > 0) restartOnNextColumn(borderPadTop);
         else this.nextColumn();
       }
     }
@@ -911,9 +912,15 @@ class Engine {
         startFragment(li);
       } else if ((planned && li === 0) || (breaks.has(0) && li === 0 && !this.pageIsEmptyAtCursor())) {
         this.nextColumn();
+        // A paragraph moved whole to a page top drops its spacing-before
+        // but KEEPS the border reserve - the rule + gap still paint above
+        // line 1 (parity2-dropcap: the boxed paragraph's first baseline on
+        // its new page = margin + border space/width + ascent).
+        this.y += borderPadTop;
         startFragment(0);
       } else if (overflow) {
         this.nextColumn();
+        if (li === 0) this.y += borderPadTop;
         startFragment(li);
       }
 
