@@ -7,6 +7,7 @@ import {
   Paragraph,
   ParaProps,
   RunProps,
+  Section,
   SectionProps,
   Shape,
   Table,
@@ -53,6 +54,37 @@ interface InternalPage {
   /** Footnote content bound to this page, emitted above bodyBottom at the end. */
   footnotes: { items: PageItem[]; height: number }[];
   footnoteH: number;
+}
+
+/** Layout state captured at a section boundary for the two-pass column
+ * balancer (see Engine.snapshot / restore / layoutSection). */
+interface LayoutSnapshot {
+  pagesLen: number;
+  page: InternalPage;
+  itemsLen: number;
+  bandTop: number;
+  colXs: number[];
+  colWidths: number[];
+  pageSp: SectionProps;
+  footnotes: { items: PageItem[]; height: number }[];
+  footnoteH: number;
+  bodyTop: number;
+  bodyBottom: number;
+  hfStart: number | undefined;
+  floats: { x0: number; x1: number; y0: number; y1: number; mode: "square" | "topAndBottom" }[];
+  col: number;
+  y: number;
+  sp: SectionProps;
+  lastParaSpacingAfter: number;
+  sectionFirstPagePhys: number;
+  suppressNextSpaceBefore: boolean;
+  counters: Map<number, number[]>;
+  bookmarkPages: Map<string, string>;
+  placedFootnotes: Set<number>;
+  lnCounter: number;
+  lnLastPage: InternalPage | undefined;
+  lnResetEpoch: number;
+  lastRealPage: InternalPage | null;
 }
 
 const PAGE_FMT: Record<string, string> = {
@@ -151,8 +183,7 @@ class Engine {
       if (canContinue) this.newBand();
       else this.newPage(true);
       if (prevSp !== null) this.lastParaSpacingAfter = carryAfter;
-      this.armColumnBalancing(section, sections[sections.indexOf(section) + 1]);
-      this.layoutBlocks(section.blocks);
+      this.layoutSection(section, sections[sections.indexOf(section) + 1]);
       this.prevBandBalanced = this.balanceBottom !== undefined;
       if (this.balanceBottom !== undefined) {
         // Resume below the tallest column; reset to the first column so the
@@ -280,6 +311,22 @@ class Engine {
     this.col = 0;
     this.y = page.bodyTop;
     this.lastParaSpacingAfter = 0;
+    // Balancing pass 1: this becomes the (currently) final page - start
+    // measuring its columns afresh. Pass 2: arm the balance target when the
+    // recorded final page is reached; keep earlier pages full-flow.
+    if (this.balMeasuring) {
+      this.balColEnds = [];
+      this.balFinalPhys = page.physIndex;
+      this.balFinalBandTop = page.bandTop;
+    }
+    if (this.balanceFinalPagePhys !== undefined) {
+      if (page.physIndex === this.balanceFinalPagePhys) {
+        this.balanceBottom = this.balanceFinalTarget;
+        this.balanceMaxY = page.bandTop;
+      } else {
+        this.balanceBottom = undefined;
+      }
+    }
   }
 
   /** Restart columns mid-page for a continuous section break. */
@@ -296,24 +343,173 @@ class Engine {
     this.lastParaSpacingAfter = 0;
   }
 
-  /** See balanceBottom. Dry-measures the section stacked at column width;
-   * arms only when the balanced band fits above the true body bottom. */
-  private armColumnBalancing(section: { blocks: Block[] }, next?: { props: SectionProps }): void {
+  /** Word balances the columns of a multi-column section that is followed by a
+   * continuous break so the successor resumes on the same page. A section that
+   * fits ONE band balances that band; a section that OVERFLOWS several pages
+   * flows full columns page by page and balances only its FINAL band. Both are
+   * handled with a real (paginating, break-aware) measuring pass:
+   *
+   *   Measure pass: lay the section with ordinary full-column flow and RECORD
+   *   where every column of the final page ends (balColEnds) - real content
+   *   heights, not a gapless stacked-height estimate.
+   *   Final pass: restore the pre-section state and re-lay, arming the balance
+   *   target (finalBandTop + stackedHeight/nCols) on the final page only.
+   *
+   * The target height per column never exceeds a full column (stacked <= what
+   * one page held unbalanced), so the final page stays the final page and the
+   * layout converges in a single balanced pass - Word's target is exactly
+   * stacked/nCols measured on the real final-page content.
+   *
+   * When such a section is sharing a partial page (a continuous break landed
+   * mid-page) and OVERFLOWS, Word does not fill the remaining band: it moves
+   * the whole section to a fresh page and balances there (wild-multicolumn's
+   * degenerate 2-col body sections leave the intro page empty below the intro).
+   * A section that fits the remaining band stays put and balances in place
+   * (parity-colbalance). */
+  private layoutSection(section: Section, next?: Section): void {
+    if (!this.balanceEligible(next)) {
+      this.balanceBottom = undefined;
+      this.balanceFinalPagePhys = undefined;
+      this.layoutBlocks(section.blocks);
+      return;
+    }
+
+    const snap = this.snapshot();
+    const sharedPartialPage = this.y > this.cur.bodyTop + 0.01;
+    // Measure pass from the current (possibly shared) position.
+    this.beginMeasure();
+    this.layoutBlocks(section.blocks);
+    let plan = this.finishMeasure();
+    const overflowed = this.cur.physIndex !== snap.page.physIndex;
+
+    let base = snap;
+    if (overflowed && sharedPartialPage) {
+      // Re-measure from a fresh page: the section does not share the band.
+      // Its first paragraph lands at the page top, so - like any paragraph
+      // reached by an automatic page break - its spacing-before is dropped.
+      this.restore(snap);
+      this.newPage(false);
+      this.suppressNextSpaceBefore = true;
+      base = this.snapshot();
+      this.beginMeasure();
+      this.layoutBlocks(section.blocks);
+      plan = this.finishMeasure();
+    }
+
+    // Final pass: re-lay, balancing the final band only.
+    this.restore(base);
+    this.balanceFinalPagePhys = plan.finalPhys;
+    this.balanceFinalTarget = plan.target;
+    if (this.cur.physIndex === plan.finalPhys) {
+      this.balanceBottom = plan.target;
+      this.balanceMaxY = this.cur.bandTop;
+    } else {
+      this.balanceBottom = undefined;
+    }
+    this.layoutBlocks(section.blocks);
+    this.balanceFinalPagePhys = undefined;
+  }
+
+  /** Begin a measuring pass: record where each column of the final page ends. */
+  private beginMeasure(): void {
     this.balanceBottom = undefined;
-    if (this.cur.colXs.length < 2) return;
+    this.balanceFinalPagePhys = undefined;
+    this.balMeasuring = true;
+    this.balColEnds = [];
+    this.balFinalPhys = this.cur.physIndex;
+    this.balFinalBandTop = this.cur.bandTop;
+  }
+
+  /** End a measuring pass and return the final page and its balance target. */
+  private finishMeasure(): { finalPhys: number; target: number } {
+    this.balColEnds[this.col] = this.y; // final column's content end
+    this.balMeasuring = false;
+    const nCols = this.cur.colXs.length;
+    let stacked = 0;
+    for (const end of this.balColEnds) if (end !== undefined) stacked += end - this.balFinalBandTop;
+    return { finalPhys: this.balFinalPhys, target: this.balFinalBandTop + quantizeQuarterPt(stacked / nCols) };
+  }
+
+  /** A multi-column section whose successor is a continuous break of matching
+   * page geometry balances (parity-colbalance). A section at document end or
+   * before a next-page break does not (parity-columns fills column 1 first). */
+  private balanceEligible(next?: Section): boolean {
+    if (this.cur.colXs.length < 2) return false;
     const np = next?.props;
-    if (!np || np.type !== "continuous") return;
-    if (np.pageWidth !== this.sp.pageWidth || np.pageHeight !== this.sp.pageHeight) return;
-    const { height } = this.layoutFrame(section.blocks, this.cur.colWidths[0], this.fieldCtx());
-    const target = this.y + quantizeQuarterPt(height / this.cur.colXs.length);
-    const realBottom = this.cur.bodyBottom - this.footnoteReserve(this.cur);
-    if (target > realBottom) return; // does not fit balanced in this band - normal flow
-    this.balanceBottom = target;
-    this.balanceMaxY = this.y;
+    if (!np || np.type !== "continuous") return false;
+    if (np.pageWidth !== this.sp.pageWidth || np.pageHeight !== this.sp.pageHeight) return false;
+    return true;
+  }
+
+  /** Capture the layout state at a section boundary so pass 1's real flow can
+   * be rolled back before pass 2. Only state mutated during block layout is
+   * saved; note numbering is assigned pre-layout and is not touched here. */
+  private snapshot(): LayoutSnapshot {
+    const p = this.cur;
+    return {
+      pagesLen: this.pages.length,
+      page: p,
+      itemsLen: p.items.length,
+      bandTop: p.bandTop,
+      colXs: [...p.colXs],
+      colWidths: [...p.colWidths],
+      pageSp: p.sp,
+      footnotes: [...p.footnotes],
+      footnoteH: p.footnoteH,
+      bodyTop: p.bodyTop,
+      bodyBottom: p.bodyBottom,
+      hfStart: p.hfStart,
+      floats: [...(this.floats.get(p) ?? [])],
+      col: this.col,
+      y: this.y,
+      sp: this.sp,
+      lastParaSpacingAfter: this.lastParaSpacingAfter,
+      sectionFirstPagePhys: this.sectionFirstPagePhys,
+      suppressNextSpaceBefore: this.suppressNextSpaceBefore,
+      counters: new Map(Array.from(this.counters, ([k, v]) => [k, [...v]])),
+      bookmarkPages: new Map(this.bookmarkPages),
+      placedFootnotes: new Set(this.placedFootnotes),
+      lnCounter: this.lnCounter,
+      lnLastPage: this.lnLastPage,
+      lnResetEpoch: this.lnResetEpoch,
+      lastRealPage: this.lastRealPage,
+    };
+  }
+
+  private restore(s: LayoutSnapshot): void {
+    const removed = this.pages.splice(s.pagesLen);
+    for (const rp of removed) this.floats.delete(rp);
+    const p = s.page;
+    p.items.length = s.itemsLen;
+    p.bandTop = s.bandTop;
+    p.colXs = s.colXs;
+    p.colWidths = s.colWidths;
+    p.sp = s.pageSp;
+    p.footnotes = s.footnotes;
+    p.footnoteH = s.footnoteH;
+    p.bodyTop = s.bodyTop;
+    p.bodyBottom = s.bodyBottom;
+    p.hfStart = s.hfStart;
+    this.floats.set(p, s.floats);
+    this.cur = p;
+    this.col = s.col;
+    this.y = s.y;
+    this.sp = s.sp;
+    this.lastParaSpacingAfter = s.lastParaSpacingAfter;
+    this.sectionFirstPagePhys = s.sectionFirstPagePhys;
+    this.suppressNextSpaceBefore = s.suppressNextSpaceBefore;
+    this.counters = s.counters;
+    this.bookmarkPages = s.bookmarkPages;
+    this.placedFootnotes = s.placedFootnotes;
+    this.lnCounter = s.lnCounter;
+    this.lnLastPage = s.lnLastPage;
+    this.lnResetEpoch = s.lnResetEpoch;
+    this.lastRealPage = s.lastRealPage;
   }
 
   private nextColumn(): void {
     if (this.balanceBottom !== undefined) this.balanceMaxY = Math.max(this.balanceMaxY, this.y);
+    if (this.balMeasuring) this.balColEnds[this.col] = this.y;
     if (this.col + 1 < this.cur.colXs.length) {
       this.col++;
       this.y = this.cur.bandTop;
@@ -353,6 +549,19 @@ class Engine {
    * successor may share the page even though the cursor sits in a later
    * column. */
   private prevBandBalanced = false;
+
+  // ---- Two-pass multi-page column balancing (see layoutSection) ----
+  /** Pass 1 is running: record where each column of the (currently) final
+   * page ends so we can measure the last band's real stacked height. */
+  private balMeasuring = false;
+  /** Content-end Y of each used column on the current final page (pass 1). */
+  private balColEnds: number[] = [];
+  /** Physical index / band top of the final page reached in pass 1. */
+  private balFinalPhys = 0;
+  private balFinalBandTop = 0;
+  /** Pass 2 is armed for this physical page: balance its band to the target. */
+  private balanceFinalPagePhys: number | undefined;
+  private balanceFinalTarget = 0;
   private pageIsEmptyAtCursor(): boolean {
     return this.y <= this.cur.bodyTop + 0.01;
   }
