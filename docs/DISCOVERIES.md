@@ -61,6 +61,29 @@ reject-at-19.7%). Mapped empirically by `scripts/make-justify-probe*.py`:
 sweeps of the needed compression across final words of different widths,
 decisions read back from Word's export.
 
+### A degenerate (ultra-narrow) column gives every inter-word space its own line
+When a section's `w:cols/@space` is larger than the text width (e.g.
+`w:space="360000"` on a 6-inch column: `sample-files.com-multi-column`), the
+computed column width goes negative and Word clamps it to a sliver that holds
+one glyph. In that regime Word does NOT let trailing whitespace hang for free —
+each inter-word space wraps to **its own line** (measured: a 42-line body
+column is ~37 letters + 5 space-lines). We normally trim trailing spaces away
+in `flush`, which packs ~one extra letter-line per word onto the page and loses
+~12% of the pages (`wild-multicolumn` rendered 41 pages vs Word's 46). Fix
+(`layout/inline.ts`): when `availFor(line) < spaceWidth` (column can't hold even
+a space) and a space would overflow the current non-empty line, flush the glyph
+line and emit the space as its own line (kept, not trimmed). Guarded so normal
+columns are untouched (a normal column's `availFor` dwarfs a space width). Still
+open: multi-page column **balancing** of such sections — Word starts each
+overflowing 2-col body section on a fresh page and balances its final band so
+the following 1-col section resumes on it; our engine only balances a section
+that fits ONE band. Content is correct (raw pixel diff 0.54%) but shifted ~½
+column per page; the page COUNT now matches. A dynamic single-pass last-band
+estimate fails (the gapless stacked-height dry measure ≠ real column heights
+once keepNext/widow gaps intervene); a true fix needs two-pass section layout
+plus a per-column bottom in the widow planner (`planBreaks` hard-codes one
+`bodyHeight`).
+
 ### Words never split at formatting-run boundaries
 A word split across `w:r` runs ("(" + "“Cobbery”") is one breaking unit in
 Word. The already-placed head backtracks to the next line on break
