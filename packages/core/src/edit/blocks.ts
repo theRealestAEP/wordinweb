@@ -236,6 +236,46 @@ export function mergeParagraphBackward(doc: DocxDocument, pEl: XmlElement): bool
   if (idx <= 0) return false;
   const prev = parent.children[idx - 1];
   if (localName(prev.name) !== "p") return false;
+
+  // Word treats page/column breaks as characters: Backspace at the start of
+  // the paragraph after a break deletes the BREAK, bumping the text up while
+  // keeping its own style - never merging a heading into the break
+  // paragraph. A break-only paragraph disappears entirely.
+  const visible: { el: XmlElement; parent: XmlElement }[] = [];
+  const collect = (el: XmlElement) => {
+    for (const c of el.children) {
+      const ln = localName(c.name);
+      if (ln === "pPr" || ln === "rPr") continue;
+      if (ln === "t" && c.text.length > 0) visible.push({ el: c, parent: el });
+      else if (ln === "br" || ln === "drawing" || ln === "pict" || ln === "tab") visible.push({ el: c, parent: el });
+      else collect(c);
+    }
+  };
+  collect(prev);
+  const last = visible[visible.length - 1];
+  if (last && localName(last.el.name) === "br") {
+    const type = Object.entries(last.el.attrs).find(([k]) => localName(k) === "type")?.[1];
+    if (type === "page" || type === "column") {
+      if (visible.length === 1) {
+        // Break-only paragraph: remove it whole.
+        parent.children.splice(idx - 1, 1);
+      } else {
+        last.parent.children.splice(last.parent.children.indexOf(last.el), 1);
+      }
+      doc.refresh();
+      return true;
+    }
+  }
+
+  // Word's backspace-merge keeps the SURVIVING text's style when the
+  // previous paragraph is empty: drop the empty paragraph instead of
+  // pulling the current one into it.
+  if (visible.length === 0) {
+    parent.children.splice(idx - 1, 1);
+    doc.refresh();
+    return true;
+  }
+
   const moved = pEl.children.filter((c) => localName(c.name) !== "pPr");
   prev.children.push(...moved);
   parent.children.splice(idx, 1);
