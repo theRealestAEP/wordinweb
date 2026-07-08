@@ -240,6 +240,7 @@ export interface ShapeTextbox {
 
 export interface ShapeArt {
   type: "art";
+  srcDrawing?: XmlElement;
   x: number;
   y: number;
   /** Percent-of-page offsets (wp14:pctPos*Offset), 0..1. */
@@ -326,6 +327,8 @@ export interface DrawingContent {
   images: DrawingImage[];
   /** Freeform vector shapes (a:custGeom), as SVG path data. */
   paths?: DrawingPath[];
+  /** Source w:drawing element (select/move as a group). */
+  srcDrawing?: XmlElement;
 }
 
 export interface DrawingPath {
