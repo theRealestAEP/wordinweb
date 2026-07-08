@@ -796,6 +796,13 @@ class Engine {
         );
         const gap = Math.max(spacingAfter, np.spacingBefore ?? 0) - spacingAfter;
         nextFirst = gap + (nb.lines[0]?.height ?? 18);
+        // Widow/orphan control never leaves a multi-line paragraph's first
+        // line alone at a page bottom, so the heading effectively needs TWO
+        // of its lines to fit (parity2-toc p5/p6: heading + one fitting
+        // line still moves because orphan control drags the line away).
+        if (nb.lines.length > 1 && np.widowControl !== false) {
+          nextFirst += nb.lines[1].height;
+        }
       }
       const needed = effBefore + lines.reduce((a, l) => a + l.height, 0) + spacingAfter + nextFirst;
       if (this.y + needed > this.bodyBottom && needed <= bodyHeight) {
