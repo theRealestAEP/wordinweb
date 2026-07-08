@@ -264,6 +264,12 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
     if (before !== undefined) props.spacingBefore = twipsToPx(before);
     const after = intAttr(spacing, "after");
     if (after !== undefined) props.spacingAfter = twipsToPx(after);
+    const onOffVal = (v: string | undefined): boolean | undefined =>
+      v === undefined ? undefined : !(v === "0" || v === "false" || v === "off");
+    const beforeAuto = onOffVal(attr(spacing, "beforeAutospacing"));
+    if (beforeAuto !== undefined) props.beforeAutospacing = beforeAuto;
+    const afterAuto = onOffVal(attr(spacing, "afterAutospacing"));
+    if (afterAuto !== undefined) props.afterAutospacing = afterAuto;
     const line = intAttr(spacing, "line");
     const lineRule = attr(spacing, "lineRule") ?? "auto";
     if (line !== undefined) {
