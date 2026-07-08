@@ -476,18 +476,29 @@ export function resizeDrawing(
   const cx = String(Math.max(Math.round(widthPx * EMU), EMU));
   const cy = String(Math.max(Math.round(heightPx * EMU), EMU));
   let touched = false;
-  const walk = (el: XmlElement) => {
-    const ln = localName(el.name);
-    if (ln === "extent" || ln === "ext") {
-      const cxKey = Object.keys(el.attrs).find((k) => localName(k) === "cx") ?? "cx";
-      const cyKey = Object.keys(el.attrs).find((k) => localName(k) === "cy") ?? "cy";
-      el.attrs[cxKey] = cx;
-      el.attrs[cyKey] = cy;
-      touched = true;
-    }
-    for (const c of el.children) walk(c);
+  const setExt = (el: XmlElement) => {
+    const cxKey = Object.keys(el.attrs).find((k) => localName(k) === "cx") ?? "cx";
+    const cyKey = Object.keys(el.attrs).find((k) => localName(k) === "cy") ?? "cy";
+    el.attrs[cxKey] = cx;
+    el.attrs[cyKey] = cy;
+    touched = true;
   };
-  walk(drawingEl);
+  // Vector groups scale through their group transform: update the outer
+  // extents and the group's own a:ext, but leave child shapes' a:ext alone
+  // (they are in child-coordinate space; overwriting them with the absolute
+  // size corrupts the geometry).
+  const walk = (el: XmlElement, insideGroup: boolean) => {
+    const ln = localName(el.name);
+    if (ln === "extent" || (ln === "ext" && !insideGroup)) setExt(el);
+    if (ln === "wgp" || ln === "grpSp") {
+      const xfrm = el.children.find((c) => localName(c.name) === "grpSpPr")?.children.find((c) => localName(c.name) === "xfrm");
+      const ext = xfrm?.children.find((c) => localName(c.name) === "ext");
+      if (ext) setExt(ext);
+      return; // children keep their own coordinate space
+    }
+    for (const c of el.children) walk(c, insideGroup);
+  };
+  walk(drawingEl, false);
   if (touched) doc.refresh();
   return touched;
 }

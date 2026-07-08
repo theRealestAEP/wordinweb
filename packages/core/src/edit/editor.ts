@@ -976,9 +976,9 @@ export class DocxEditor {
     return setImageWrap(this.host.doc, drawingEl, "square", { x, y: 0 });
   }
 
-  // ---------- images: select, corner-resize, drag-move ----------
+  // ---------- images: select, resize, drag-move ----------
 
-  private selectedImage: { el: HTMLElement; src: XmlElement } | null = null;
+  private selectedImage: { el: HTMLElement; src: XmlElement; kind: "image" | "drawing" } | null = null;
   private imageOverlay: HTMLDivElement | null = null;
 
   private deselectImage(): void {
@@ -987,31 +987,68 @@ export class DocxEditor {
     this.selectedImage = null;
   }
 
-  private selectImage(el: HTMLElement, src: XmlElement, item?: { x: number; y: number }): void {
+  /** Re-select the same drawing after a re-render replaced its element. */
+  private reselectImage(src: XmlElement): void {
+    const handle = this.host.getHandle();
+    if (!handle) return;
+    const img = handle.images.find((b) => b.item.src === src);
+    if (img) {
+      this.selectImage(img.el, src, img.item);
+      return;
+    }
+    const drw = handle.drawings.find((b) => b.item.src === src);
+    if (drw) this.selectImage(drw.el, src, undefined, "drawing");
+  }
+
+  /** Word-style handle set: corners resize aspect-locked, edges stretch. */
+  private static readonly HANDLE_DIRS: [string, number, number][] = [
+    ["nw", 0, 0],
+    ["n", 0.5, 0],
+    ["ne", 1, 0],
+    ["e", 1, 0.5],
+    ["se", 1, 1],
+    ["s", 0.5, 1],
+    ["sw", 0, 1],
+    ["w", 0, 0.5],
+  ];
+
+  private static handleCursor(dir: string): string {
+    if (dir === "nw" || dir === "se") return "nwse-resize";
+    if (dir === "ne" || dir === "sw") return "nesw-resize";
+    if (dir === "n" || dir === "s") return "ns-resize";
+    return "ew-resize";
+  }
+
+  private selectImage(
+    el: HTMLElement,
+    src: XmlElement,
+    item?: { x: number; y: number },
+    kind: "image" | "drawing" = "image",
+  ): void {
     this.deselectImage();
     this.hideCaret();
-    this.selectedImage = { el, src };
+    this.selectedImage = { el, src, kind };
     const overlay = document.createElement("div");
     overlay.style.position = "absolute";
     overlay.style.left = el.style.left;
     overlay.style.top = el.style.top;
     overlay.style.width = el.style.width;
     overlay.style.height = el.style.height;
-    overlay.style.border = "2px solid #1a73e8";
+    overlay.style.border = "1.5px solid #1a73e8";
+    overlay.style.boxSizing = "border-box";
     overlay.style.pointerEvents = "none";
     overlay.style.zIndex = "9";
-    const handleEl = document.createElement("div");
-    handleEl.style.position = "absolute";
-    handleEl.style.right = "-6px";
-    handleEl.style.bottom = "-6px";
-    handleEl.style.width = "10px";
-    handleEl.style.height = "10px";
-    handleEl.style.background = "#1a73e8";
-    handleEl.style.borderRadius = "50%";
-    handleEl.style.cursor = "nwse-resize";
-    handleEl.style.pointerEvents = "auto";
-    handleEl.dataset.dxwImgHandle = "1";
-    overlay.appendChild(handleEl);
+    for (const [dir, fx, fy] of DocxEditor.HANDLE_DIRS) {
+      const h = document.createElement("div");
+      const corner = dir.length === 2;
+      h.style.cssText =
+        `position:absolute;width:9px;height:9px;background:#fff;border:1.5px solid #1a73e8;` +
+        `box-sizing:border-box;border-radius:${corner ? "50%" : "2px"};pointer-events:auto;` +
+        `left:calc(${fx * 100}% - 5px);top:calc(${fy * 100}% - 5px);cursor:${DocxEditor.handleCursor(dir)};` +
+        `box-shadow:0 1px 2px rgba(0,0,0,.25);`;
+      h.dataset.dxwImgHandle = dir;
+      overlay.appendChild(h);
+    }
 
     // Wrap-mode mini toolbar (Word: Inline / Square / Top and bottom).
     const bar = document.createElement("div");
@@ -1088,24 +1125,26 @@ export class DocxEditor {
       if (resizeDrawing(this.host.doc, src, parseInt(m[1], 10), parseInt(m[2], 10))) this.host.rerender();
       this.deselectImage();
     });
-    extra("Replace", "Replace image\u2026", () => {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = "image/png,image/jpeg,image/gif,image/webp";
-      input.addEventListener("change", () => {
-        const f = input.files?.[0];
-        if (!f) return;
-        void f.arrayBuffer().then((buf) => {
-          const bytes = new Uint8Array(buf);
-          const ext = (f.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
-          this.host.history?.checkpoint();
-          const relId = this.host.doc.addImageResource(bytes, ext === "jpg" ? "jpeg" : ext);
-          if (replaceImageBlip(this.host.doc, src, relId)) this.host.rerender();
+    if (kind === "image") {
+      extra("Replace", "Replace image\u2026", () => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "image/png,image/jpeg,image/gif,image/webp";
+        input.addEventListener("change", () => {
+          const f = input.files?.[0];
+          if (!f) return;
+          void f.arrayBuffer().then((buf) => {
+            const bytes = new Uint8Array(buf);
+            const ext = (f.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
+            this.host.history?.checkpoint();
+            const relId = this.host.doc.addImageResource(bytes, ext === "jpg" ? "jpeg" : ext);
+            if (replaceImageBlip(this.host.doc, src, relId)) this.host.rerender();
+          });
         });
+        input.click();
+        this.deselectImage();
       });
-      input.click();
-      this.deselectImage();
-    });
+    }
     overlay.appendChild(bar);
 
     el.parentElement!.appendChild(overlay);
@@ -1142,38 +1181,71 @@ export class DocxEditor {
   private startImageInteraction(e: MouseEvent, target: HTMLElement): boolean {
     const zoom = this.host.zoom ?? 1;
 
-    // Corner handle: aspect-locked resize
+    // Resize handles: corners aspect-locked, edges free-stretch (Word).
+    // The element previews live; the model updates once on release, and the
+    // selection chrome survives the re-render.
     if (target.dataset.dxwImgHandle && this.selectedImage) {
       e.preventDefault();
       e.stopPropagation();
+      const dir = target.dataset.dxwImgHandle;
       const { el, src } = this.selectedImage;
       const w0 = parseFloat(el.style.width);
       const h0 = parseFloat(el.style.height);
+      const left0 = parseFloat(el.style.left) || 0;
+      const top0 = parseFloat(el.style.top) || 0;
       const startX = e.clientX;
-      let scale = 1;
+      const startY = e.clientY;
+      let w = w0;
+      let h = h0;
+      const apply = (tgt: HTMLElement) => {
+        tgt.style.width = `${w}px`;
+        tgt.style.height = `${h}px`;
+        // Keep the opposite edge fixed while dragging a west/north handle.
+        tgt.style.left = `${dir.includes("w") ? left0 + (w0 - w) : left0}px`;
+        tgt.style.top = `${dir.includes("n") ? top0 + (h0 - h) : top0}px`;
+      };
       const onMove = (me: MouseEvent) => {
-        scale = Math.max(0.05, (w0 + (me.clientX - startX) / zoom) / w0);
-        el.style.width = `${w0 * scale}px`;
-        el.style.height = `${h0 * scale}px`;
-        if (this.imageOverlay) {
-          this.imageOverlay.style.width = `${w0 * scale}px`;
-          this.imageOverlay.style.height = `${h0 * scale}px`;
+        const dx = (me.clientX - startX) / zoom;
+        const dy = (me.clientY - startY) / zoom;
+        w = dir.includes("e") ? w0 + dx : dir.includes("w") ? w0 - dx : w0;
+        h = dir.includes("s") ? h0 + dy : dir.includes("n") ? h0 - dy : h0;
+        if (dir.length === 2) {
+          // Corner: aspect-locked, driven by the dominant cursor axis.
+          const scale = Math.max(0.05, Math.abs(dx) > Math.abs(dy) ? w / w0 : h / h0);
+          w = w0 * scale;
+          h = h0 * scale;
         }
+        w = Math.max(8, w);
+        h = Math.max(8, h);
+        apply(el);
+        if (this.imageOverlay) apply(this.imageOverlay);
       };
       const onUp = () => {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
         this.suppressNextMouseUp = true;
-        if (Math.abs(scale - 1) > 0.01) {
+        if (Math.abs(w - w0) > 0.5 || Math.abs(h - h0) > 0.5) {
           this.host.history?.checkpoint();
-          if (resizeDrawing(this.host.doc, src, w0 * scale, h0 * scale)) {
-            if (!isFloatingDrawing(src)) {
-              this.floatIfClipped(src, src, h0 * scale, parseFloat(el.style.left) || null);
+          if (resizeDrawing(this.host.doc, src, w, h)) {
+            const floating = isFloatingDrawing(src);
+            if (floating && (dir.includes("w") || dir.includes("n"))) {
+              // Keep the fixed edge fixed in the document too.
+              adjustFloatingPosition(this.host.doc, src, dir.includes("w") ? w0 - w : 0, dir.includes("n") ? h0 - h : 0);
+            }
+            if (!floating) {
+              this.floatIfClipped(src, src, h, parseFloat(el.style.left) || null);
             }
             this.host.rerender();
+            this.reselectImage(src);
+            return;
           }
         }
-        this.deselectImage();
+        // No effective change: restore the preview geometry.
+        el.style.width = `${w0}px`;
+        el.style.height = `${h0}px`;
+        el.style.left = `${left0}px`;
+        el.style.top = `${top0}px`;
+        this.reselectImage(src);
       };
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
@@ -1213,8 +1285,8 @@ export class DocxEditor {
       }
     }
 
-    // Click/drag on a vector drawing group (icon/logo overlay): re-anchor to
-    // the drop position, same as an inline image.
+    // Click selects a vector drawing group (icon/logo overlay); drag
+    // re-anchors it to the drop position, same as an inline image.
     if (target.dataset.dxwDrawing) {
       const handle = this.host.getHandle();
       const binding = handle?.drawings.find((b) => b.el === target);
@@ -1233,7 +1305,10 @@ export class DocxEditor {
         document.removeEventListener("mouseup", onUp);
         this.hideDropIndicator();
         this.suppressNextMouseUp = true;
-        if (!moved) return;
+        if (!moved) {
+          this.selectImage(target, binding.item.src, undefined, "drawing");
+          return;
+        }
         const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
         if (dest) {
           this.host.history?.checkpoint();
@@ -1245,33 +1320,55 @@ export class DocxEditor {
       return true;
     }
 
-    // Click/drag on an image
+    // Click/drag on an image (the img may be nested in a crop viewport).
     if (target.tagName === "IMG") {
       const handle = this.host.getHandle();
-      const binding = handle?.images.find((b) => b.el === target);
+      const binding = handle?.images.find((b) => b.el === target || b.el.contains(target));
       if (!binding?.item.src) return false;
       e.preventDefault();
       e.stopPropagation();
       const startX = e.clientX;
       const startY = e.clientY;
       const floating = isFloatingDrawing(binding.item.src!);
+      const el = binding.el;
+      const left0 = parseFloat(el.style.left) || 0;
+      const top0 = parseFloat(el.style.top) || 0;
       let moved = false;
       let ghost: HTMLElement | null = null;
+      const grabX = e.clientX - el.getBoundingClientRect().left;
+      const grabY = e.clientY - el.getBoundingClientRect().top;
       const onMove = (me: MouseEvent) => {
         if (!moved && Math.hypot(me.clientX - startX, me.clientY - startY) > 5) {
           moved = true;
-          ghost = target.cloneNode() as HTMLElement;
-          ghost.style.position = "fixed";
-          ghost.style.opacity = "0.5";
-          ghost.style.pointerEvents = "none";
-          ghost.style.zIndex = "1000";
-          document.body.appendChild(ghost);
+          if (!floating) {
+            // Inline images re-anchor into text: a translucent ghost travels
+            // with the cursor while the insertion point marks the drop.
+            ghost = el.cloneNode(true) as HTMLElement;
+            ghost.style.position = "fixed";
+            ghost.style.opacity = "0.5";
+            ghost.style.pointerEvents = "none";
+            ghost.style.zIndex = "1000";
+            document.body.appendChild(ghost);
+          } else if (this.imageOverlay === null) {
+            // Floating images move live: show the box while dragging.
+            this.selectImage(el, binding.item.src!, binding.item);
+          }
         }
-        if (ghost) {
-          ghost.style.left = `${me.clientX + 4}px`;
-          ghost.style.top = `${me.clientY + 4}px`;
-          // Inline images re-anchor into text: show the insertion point.
-          if (!floating) this.showDropIndicator(me.clientX, me.clientY);
+        if (!moved) return;
+        if (floating) {
+          // Live move: the element (and its selection chrome) follows.
+          const nl = left0 + (me.clientX - startX) / zoom;
+          const nt = top0 + (me.clientY - startY) / zoom;
+          el.style.left = `${nl}px`;
+          el.style.top = `${nt}px`;
+          if (this.imageOverlay) {
+            this.imageOverlay.style.left = `${nl}px`;
+            this.imageOverlay.style.top = `${nt}px`;
+          }
+        } else if (ghost) {
+          ghost.style.left = `${me.clientX - grabX}px`;
+          ghost.style.top = `${me.clientY - grabY}px`;
+          this.showDropIndicator(me.clientX, me.clientY);
         }
       };
       const onUp = (me: MouseEvent) => {
@@ -1281,14 +1378,40 @@ export class DocxEditor {
         this.hideDropIndicator();
         this.suppressNextMouseUp = true;
         if (!moved) {
-          this.selectImage(target, binding.item.src!, binding.item);
+          this.selectImage(el, binding.item.src!, binding.item);
           return;
         }
-        const zoom = this.host.zoom ?? 1;
         this.host.history?.checkpoint();
         if (floating) {
+          const src = binding.item.src!;
+          const startPageNum = (el.closest(".dxw-page") as HTMLElement | null)?.dataset.page;
+          const wantLeft = left0 + (me.clientX - startX) / zoom;
+          const wantTop = top0 + (me.clientY - startY) / zoom;
+          // moveFloatingImage reads the element's CURRENT rect - restore the
+          // pre-drag position first so the client delta isn't applied twice.
+          el.style.left = `${left0}px`;
+          el.style.top = `${top0}px`;
           if (this.moveFloatingImage(binding, me.clientX - startX, me.clientY - startY)) {
             this.host.rerender();
+            // Re-anchoring resolves offsets from the NEW anchor's column
+            // origin (a table cell's text area, not the page margin), which
+            // moveFloatingImage cannot know. Measure the landing spot and
+            // correct the residual once - exact for any anchor container.
+            const landed = this.host.getHandle()?.images.find((b) => b.item.src === src);
+            const landedPageNum = (landed?.el.closest(".dxw-page") as HTMLElement | null)?.dataset.page;
+            if (landed && landedPageNum === startPageNum) {
+              const errX = wantLeft - (parseFloat(landed.el.style.left) || 0);
+              const errY = wantTop - (parseFloat(landed.el.style.top) || 0);
+              if (Math.hypot(errX, errY) > 1 && adjustFloatingPosition(this.host.doc, src, errX, errY)) {
+                this.host.rerender();
+              }
+            }
+            this.reselectImage(src);
+          } else {
+            // Drop rejected: snap the preview back.
+            el.style.left = `${left0}px`;
+            el.style.top = `${top0}px`;
+            this.reselectImage(src);
           }
         } else {
           const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
@@ -1301,9 +1424,11 @@ export class DocxEditor {
               dropX !== null ? dropX - binding.item.width / 2 : null,
             );
             this.host.rerender();
+            this.reselectImage(binding.item.src!);
+          } else {
+            this.deselectImage();
           }
         }
-        this.deselectImage();
       };
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
@@ -1721,6 +1846,25 @@ export class DocxEditor {
     if ((e.key === "Backspace" || e.key === "Delete") && this.selectedImage) {
       e.preventDefault();
       this.deleteSelectedImage();
+      return;
+    }
+    if (this.selectedImage && e.key === "Escape") {
+      e.preventDefault();
+      this.deselectImage();
+      return;
+    }
+    // Arrow keys nudge a selected floating image (Word: 1px, Shift: 10px).
+    if (this.selectedImage && e.key.startsWith("Arrow") && isFloatingDrawing(this.selectedImage.src)) {
+      e.preventDefault();
+      const step = e.shiftKey ? 10 : 1;
+      const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+      const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+      const src = this.selectedImage.src;
+      this.host.history?.checkpoint();
+      if (adjustFloatingPosition(this.host.doc, src, dx, dy)) {
+        this.host.rerender();
+        this.reselectImage(src);
+      }
       return;
     }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && this.caret) {
