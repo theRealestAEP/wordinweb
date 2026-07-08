@@ -1,5 +1,5 @@
 import { DocxDocument } from "../docx.js";
-import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem } from "../layout/types.js";
+import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem } from "../layout/types.js";
 import { cssFont } from "../layout/measure.js";
 import { Border } from "../model.js";
 
@@ -37,6 +37,11 @@ export interface ImageBinding {
   item: ImageItem;
 }
 
+export interface DrawingBinding {
+  el: HTMLElement;
+  item: DrawingHitItem;
+}
+
 export interface RenderHandle {
   /** Root element containing all pages. */
   root: HTMLElement;
@@ -46,6 +51,8 @@ export interface RenderHandle {
   grips: GripBinding[];
   /** Rendered images, for interactive select/resize/move. */
   images: ImageBinding[];
+  /** Transparent hit targets over vector drawings/icons (select/move). */
+  drawings: DrawingBinding[];
   /** Revoke object URLs etc. */
   destroy: () => void;
 }
@@ -79,6 +86,7 @@ export function renderToDom(
   const bindings: TextBinding[] = [];
   const grips: GripBinding[] = [];
   const images: ImageBinding[] = [];
+  const drawings: DrawingBinding[] = [];
 
   ensureStylesheet();
   const root = document.createElement("div");
@@ -90,7 +98,7 @@ export function renderToDom(
   root.style.padding = `${gap}px 0`;
 
   for (const page of layout.pages) {
-    root.appendChild(renderPage(doc, page, zoom, urls, options, bindings, grips, images));
+    root.appendChild(renderPage(doc, page, zoom, urls, options, bindings, grips, images, drawings));
   }
 
   container.appendChild(root);
@@ -102,6 +110,7 @@ export function renderToDom(
     bindings,
     grips,
     images,
+    drawings,
     destroy: () => {
       for (const u of urls) URL.revokeObjectURL(u);
       root.remove();
@@ -162,6 +171,7 @@ function renderPage(
   bindings: TextBinding[],
   grips: GripBinding[],
   images: ImageBinding[],
+  drawings: DrawingBinding[],
 ): HTMLElement {
   const el = document.createElement("div");
   el.className = "dxw-page";
@@ -225,6 +235,8 @@ function renderPage(
       grips.push({ el: g, item });
       continue;
     }
+    // Drawing hit overlays only exist in the editor; skip in read-only.
+    if (item.kind === "drawingHit" && !options.interactive) continue;
     const node = renderItem(doc, item, urls);
     if (node) {
       if (isHf) node.dataset.dxwHf = "1";
@@ -235,6 +247,7 @@ function renderPage(
         (node as HTMLImageElement).style.cursor = "move";
         images.push({ el: node, item });
       }
+      if (item.kind === "drawingHit") drawings.push({ el: node, item });
     }
   }
   return el;
@@ -581,6 +594,18 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       }
       svg.appendChild(path);
       return svg as unknown as HTMLElement;
+    }
+    case "drawingHit": {
+      const hit = document.createElement("div");
+      hit.style.position = "absolute";
+      hit.style.left = `${item.x}px`;
+      hit.style.top = `${item.y}px`;
+      hit.style.width = `${item.width}px`;
+      hit.style.height = `${item.height}px`;
+      hit.style.cursor = "move";
+      hit.style.zIndex = "6";
+      hit.dataset.dxwDrawing = "1";
+      return hit;
     }
     case "edge":
       return renderEdge(item.x1, item.y1, item.x2, item.y2, item.border);

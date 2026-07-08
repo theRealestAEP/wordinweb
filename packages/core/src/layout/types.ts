@@ -103,6 +103,18 @@ export interface ImageItem {
 }
 
 /** Interactive resize zone over a table boundary (column or row). */
+export interface DrawingHitItem {
+  kind: "drawingHit";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Source w:drawing element (select/move the whole drawing). */
+  src: XmlElement;
+  /** Anchored drawings drag by offset; inline ones re-anchor into text. */
+  anchored: boolean;
+}
+
 export interface GripItem {
   kind: "grip";
   /** "col": vertical zone at x spanning y1..y2. "row": horizontal zone at y1
@@ -123,7 +135,7 @@ export interface GripItem {
   renderedWidths?: number[];
 }
 
-export type PageItem = TextItem | PathItem | RectItem | LineEdgeItem | ImageItem | GripItem;
+export type PageItem = TextItem | PathItem | RectItem | LineEdgeItem | ImageItem | DrawingHitItem | GripItem;
 
 export interface LaidOutPage {
   width: number;
