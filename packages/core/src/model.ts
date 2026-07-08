@@ -170,7 +170,7 @@ export interface ImageContent {
 export type MathNode =
   | { t: "run"; text: string }
   | { t: "sup" | "sub"; base: MathNode[]; script: MathNode[] }
-  | { t: "frac"; num: MathNode[]; den: MathNode[] }
+  | { t: "frac"; num: MathNode[]; den: MathNode[]; bar?: boolean }
   | { t: "rad"; e: MathNode[] }
   /** n-ary operator (sum/integral); chr defaults to the integral sign. */
   | { t: "nary"; chr: string; sub: MathNode[]; sup: MathNode[]; e: MathNode[] }
@@ -184,6 +184,10 @@ export interface MathContent {
   nodes: MathNode[];
   /** Source m:oMath element (math editing). */
   src?: XmlElement;
+  /** Display equation (wrapped in m:oMathPara): centered on its own line with
+   * display-style layout - larger n-ary operators with limits stacked
+   * above/below, and full-size fraction numerators/denominators. */
+  display?: boolean;
 }
 
 export interface FieldContent {
