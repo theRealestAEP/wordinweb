@@ -287,6 +287,17 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
   if (pageBreakBefore !== undefined) props.pageBreakBefore = pageBreakBefore;
   const widowControl = onOff(child(pPr, "widowControl"));
   if (widowControl !== undefined) props.widowControl = widowControl;
+  const frame = child(pPr, "framePr");
+  if (frame) {
+    const dc = attr(frame, "dropCap");
+    if (dc === "drop" || dc === "margin") {
+      props.dropCap = {
+        mode: dc,
+        lines: intAttr(frame, "lines") ?? 3,
+        hSpace: twipsToPx(intAttr(frame, "hSpace") ?? 0),
+      };
+    }
+  }
 
   const borders = parseParagraphBorders(child(pPr, "pBdr"), ctx);
   if (borders) props.borders = borders;

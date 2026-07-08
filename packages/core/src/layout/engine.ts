@@ -641,6 +641,31 @@ class Engine {
       breakBeforeForced = true;
     }
 
+    // Drop cap (w:framePr w:dropCap): the letter paints as ONE line at the
+    // paragraph top - Word's PDF puts its baseline at top + ascent, the
+    // standard leading-below rule - and the following paragraph wraps
+    // beside its GLYPH BOX (a lowered 48pt letter indents FIVE 11pt lines,
+    // not w:lines=3: wrap holds while a line's top is above the box
+    // bottom; text resumes at exactly the letter's advance). The cursor
+    // does not advance; the next paragraph flows at the same y.
+    if (props.dropCap) {
+      const dropBroken = breakParagraph(this.doc, this.measurer, para, this.colWidth, this.fieldCtx());
+      const dropLine = dropBroken.lines[0];
+      if (dropLine) {
+        this.emitLine(dropLine, this.cur, this.colX, this.y);
+        const list = this.floats.get(this.cur) ?? [];
+        list.push({
+          x0: this.colX,
+          x1: this.colX + dropLine.width + props.dropCap.hSpace,
+          y0: this.y,
+          y1: this.y + dropLine.naturalHeight,
+          mode: "square",
+        });
+        this.floats.set(this.cur, list);
+      }
+      return;
+    }
+
     // Floats anchored here must exclude this paragraph's own text: emit them
     // (registering exclusion rects) before breaking. If the paragraph later
     // turns out to start on another page/column, they are retracted and

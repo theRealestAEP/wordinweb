@@ -117,6 +117,8 @@ export interface ParaProps {
   lineSpacing?: LineSpacing;
   contextualSpacing?: boolean;
   keepNext?: boolean;
+  /** w:framePr w:dropCap: the paragraph is a drop-cap letter frame. */
+  dropCap?: { mode: "drop" | "margin"; lines: number; hSpace: number };
   keepLines?: boolean;
   pageBreakBefore?: boolean;
   widowControl?: boolean;
