@@ -46,6 +46,14 @@ interface SelPoint {
   offset: number;
 }
 
+/** First text node under a binding element - small-caps reduced segments
+ * nest theirs inside an inner sizing span. */
+function deepTextNode(el: HTMLElement): Node | null {
+  let n: Node | null = el.firstChild;
+  while (n && n.nodeType !== Node.TEXT_NODE) n = n.firstChild;
+  return n;
+}
+
 export class DocxEditor {
   private caret: Caret | null = null;
   /** Header/footer editing is gated behind double-click, like Word. */
@@ -416,10 +424,10 @@ export class DocxEditor {
       let x1 = item.x + item.width;
       const surface = b.el.parentElement;
       if (!surface) continue;
-      const textNode = b.el.firstChild;
+      const textNode = deepTextNode(b.el);
       // Partial-offset edges need real glyph positions — only ever the two
       // boundary bindings, so the DOM measurement cost stays constant.
-      if ((i === startIdx || i === endIdx) && textNode && textNode.nodeType === Node.TEXT_NODE) {
+      if ((i === startIdx || i === endIdx) && textNode) {
         const surfaceRect = surface.getBoundingClientRect();
         const localX = (client: number) => (client - surfaceRect.left) / zoom;
         try {
@@ -793,8 +801,8 @@ export class DocxEditor {
     }
     const surface = binding.el.parentElement!;
     let px = binding.item.x;
-    const textNode = binding.el.firstChild;
-    if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+    const textNode = deepTextNode(binding.el);
+    if (textNode) {
       try {
         const rg = document.createRange();
         rg.setStart(textNode, Math.min(dest.offset - binding.item.src!.offset, binding.item.text.length));
@@ -1663,7 +1671,11 @@ export class DocxEditor {
     }
     if (!node) return null;
     const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as HTMLElement);
-    const binding = this.host.getHandle()?.bindings.find((b) => b.el === el);
+    // Small-caps reduced segments nest their text in an inner sizing span;
+    // the binding element is its parent.
+    const binding = this.host
+      .getHandle()
+      ?.bindings.find((b) => b.el === el || (el !== null && b.el === el.parentElement));
     if (!binding?.item.src?.t) return null;
     // caretRangeFromPoint snaps to the nearest TEXT node, which jumps to a
     // different cell when the click lands in an empty cell (its zero-width

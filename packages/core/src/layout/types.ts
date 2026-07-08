@@ -60,6 +60,11 @@ export interface TextItem {
    * the renderer anchors these instead of bottoming on the line box. */
   glyphTop?: number;
   glyphBoxH?: number;
+  /** Small-caps reduced segment: the base run font that must supply the
+   * strut so the painted baseline matches neighboring full-size spans (the
+   * renderer sizes the outer span with this font and shrinks the text via
+   * a baseline-aligned inner span). */
+  strutFont?: FontSpec;
   /** Source m:oMath element when this text is a piece of an equation. */
   mathSrc?: XmlElement;
   href?: string;

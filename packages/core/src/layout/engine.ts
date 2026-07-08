@@ -845,7 +845,7 @@ class Engine {
   private emitLine(line: LineBox, page: InternalPage, originX: number, topY: number): void {
     // Word quantizes painted baseline positions to quarter-points (error-
     // diffused: the cursor accumulates raw heights, each baseline snaps).
-    const baseline = quantizeQuarterPt(topY + line.height - line.maxDescent);
+    const baseline = quantizeQuarterPt(topY + line.baselineH - line.maxDescent);
     for (const span of line.spans) {
       // Frame-laid lines (table cells) register at PAINT time instead: the
       // partition that ends up on the next page after a row split must bind
@@ -976,20 +976,22 @@ class Engine {
       if (span.text === undefined) continue;
 
       let b = baseline;
-      let glyphTop: number | undefined;
-      let glyphBoxH: number | undefined;
       if (span.props.verticalAlign === "superscript" || span.props.verticalAlign === "subscript") {
         // Word shifts the baseline by a fraction of the UNSCALED font size:
         // superscript up 7/22, subscript down 1/11 (measured from Word's own
         // PDF export at 11pt and 22pt; see scripts/make-vertalign-probe.py).
         const baseSize = span.props.size ?? 14.666;
         b += span.props.verticalAlign === "superscript" ? -baseSize * (7 / 22) : baseSize / 11;
-        // The renderer bottoms glyph boxes on the line box, which would undo
-        // the shift - hand it an exact glyph box anchored to this baseline.
-        const m = this.measurer.metrics(span.font);
-        glyphTop = b - m.ascent;
-        glyphBoxH = m.ascent + m.descent;
       }
+      // Anchor every span's glyph box to the engine baseline. Bottoming on
+      // the line box (the old default) painted spaced lines a half-leading
+      // low (auto leading hangs BELOW the baseline in Word) and misaligned
+      // smaller fonts sharing a line with a taller one. Small-caps reduced
+      // segments anchor their base font's box - the outer span carries that
+      // strut and the shrunk text baseline-aligns inside it.
+      const gm = this.measurer.metrics(span.metricsFont ?? span.font);
+      const glyphTop = b - gm.ascent;
+      const glyphBoxH = gm.ascent + gm.descent;
 
       // Word draws strikethrough centered 0.216em above the baseline with a
       // ~0.75pt rule (measured from the benchmark reference); CSS
@@ -1037,6 +1039,7 @@ class Engine {
         lineHeight: line.height,
         glyphTop,
         glyphBoxH,
+        strutFont: span.metricsFont,
         href: span.href,
         src: span.src,
       });

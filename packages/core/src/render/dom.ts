@@ -661,7 +661,6 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
 function renderText(item: TextItem): HTMLElement {
   const tag = item.href ? "a" : "span";
   const el = document.createElement(tag) as HTMLElement;
-  el.textContent = item.text;
   el.style.position = "absolute";
   el.style.left = `${item.x}px`;
   // Position by line top with glyphs bottomed on the line box. Baseline-
@@ -678,10 +677,26 @@ function renderText(item: TextItem): HTMLElement {
     el.style.transform = `scaleY(${item.mathScaleY})`;
     el.style.transformOrigin = `50% ${originY}px`;
   }
-  el.style.display = "flex";
-  el.style.alignItems = "flex-end";
-  el.style.whiteSpace = "pre";
-  el.style.font = cssFont(item.font);
+  if (item.strutFont) {
+    // Small-caps reduced segment: the outer span carries the BASE font so
+    // its strut (and therefore the painted baseline) is pixel-identical to
+    // neighboring full-size spans; the inner span shrinks the glyphs and
+    // baseline-aligns to that strut. Anchoring the reduced font box with
+    // glyphTop instead would drift by Chrome-vs-engine metric rounding.
+    el.textContent = "";
+    const inner = document.createElement("span");
+    inner.textContent = item.text;
+    inner.style.fontSize = `${item.font.size}px`;
+    el.appendChild(inner);
+    el.style.whiteSpace = "pre";
+    el.style.font = cssFont(item.strutFont);
+  } else {
+    el.textContent = item.text;
+    el.style.display = "flex";
+    el.style.alignItems = "flex-end";
+    el.style.whiteSpace = "pre";
+    el.style.font = cssFont(item.font);
+  }
   el.style.lineHeight = `${boxH}px`;
   // Word (mac) rasterizes between Chrome's two smoothing modes: grayscale AA
   // alone reads too thin, subpixel too thick. Grayscale plus a hairline
@@ -707,7 +722,9 @@ function renderText(item: TextItem): HTMLElement {
   }
   // Strikethrough rules are painted by the engine at Word's position
   // (0.216em above baseline); CSS line-through would double-draw too high.
-  if (props.smallCaps) el.style.fontVariant = "small-caps";
+  // Small caps are realized by the layout engine (per-segment uppercase +
+  // reduced font size); CSS font-variant would be a no-op on the emitted
+  // uppercase text and must not double-apply.
   if (props.letterSpacing) el.style.letterSpacing = `${props.letterSpacing}px`;
 
   if (item.mathSrc) {

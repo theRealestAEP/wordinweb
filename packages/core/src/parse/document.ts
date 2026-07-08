@@ -1043,10 +1043,10 @@ function parseRow(tr: XmlElement, ctx: DocParseContext): TableRow {
       const val = intAttr(height, "val");
       if (val !== undefined) props.height = twipsToPx(val);
       const rule = attr(height, "hRule");
-      // Missing hRule defaults to AUTO (val ignored) - Word content-sizes
-      // the "Right side layout table" row (trHeight 10512, no hRule) in the
-      // cover-letter template; treating it as atLeast overflows the page.
-      props.heightRule = rule === "exact" ? "exact" : rule === "atLeast" ? "atLeast" : "auto";
+      // Missing hRule defaults to atLeast (ECMA-376) - the cover-letter
+      // template's "Right side layout table" row (trHeight 10512, no hRule)
+      // stretches to push its teal bottom border near the page bottom.
+      props.heightRule = rule === "exact" ? "exact" : rule === "auto" ? "auto" : "atLeast";
     }
     props.cantSplit = onOff(child(trPr, "cantSplit"));
     props.tblHeader = onOff(child(trPr, "tblHeader"));

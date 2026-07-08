@@ -626,10 +626,11 @@ describe("superscript / subscript", () => {
     expect(sup.font.size).toBeCloseTo(9.3333, 3);
     expect(base.baseline - sup.baseline).toBeCloseTo(14.666 * (7 / 22), 2);
     expect(sub.baseline - base.baseline).toBeCloseTo(14.666 / 11, 2);
-    // Renderer anchor: explicit glyph box, baseline-aligned.
+    // Renderer anchor: explicit glyph box, baseline-aligned. Every span
+    // anchors to the engine baseline (spaced-line leading hangs below).
     expect(sup.glyphTop).toBeCloseTo(sup.baseline - 0.9 * sup.font.size, 2);
     expect(sup.glyphBoxH).toBeCloseTo(1.15 * sup.font.size, 2);
-    expect(base.glyphTop).toBeUndefined();
+    expect(base.glyphTop).toBeCloseTo(base.baseline - 0.9 * base.font.size, 2);
   });
 });
 

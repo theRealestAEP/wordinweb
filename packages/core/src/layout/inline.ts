@@ -36,6 +36,10 @@ interface FragAtom {
   src?: TextSource;
   /** Footnote id when this fragment is a footnote reference mark. */
   noteId?: number;
+  /** Font whose metrics set the line height when it differs from the paint
+   * font (small-caps reduced segments still key line metrics to the base
+   * run size, like Word). */
+  metricsFont?: FontSpec;
 }
 interface SpaceAtom {
   kind: "space";
@@ -43,6 +47,7 @@ interface SpaceAtom {
   font: FontSpec;
   width: number;
   src?: TextSource;
+  metricsFont?: FontSpec;
 }
 interface TabAtom {
   kind: "tab";
@@ -97,8 +102,20 @@ export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
 
 function displayText(text: string, props: RunProps): string {
   if (props.caps) return text.toUpperCase();
-  if (props.smallCaps) return text.toUpperCase(); // approximated at render with font-variant
   return text;
+}
+
+/** Word small caps: lowercase letters (and all spaces, even between real
+ * capitals) render as capitals at 80% of the size rounded to half-points;
+ * uppercase letters, digits and punctuation stay full size. Measured from
+ * the cover-letter PDF: 16pt runs pair with 13pt caps (16x0.8=12.8->13),
+ * 12pt with 9.5pt (9.6->9.5); "ST ZIP"'s space renders at 9.5pt. */
+export function smallCapsFontOf(font: FontSpec): FontSpec {
+  return { ...font, size: Math.round(font.size * 1.5 * 0.8) / 1.5 };
+}
+
+function isSmallCapsReduced(c: string): boolean {
+  return c === " " || c !== c.toUpperCase();
 }
 
 // ---------- line model ----------
@@ -124,6 +141,8 @@ export interface LineSpan {
   /** Spans produced from expandable spaces (for justification). */
   isSpace?: boolean;
   src?: TextSource;
+  /** Line-metrics font when it differs from the paint font (small caps). */
+  metricsFont?: FontSpec;
   /** Tab leader character style (dot/hyphen/underscore/middleDot). */
   leader?: "dot" | "hyphen" | "underscore" | "middleDot";
   /** Footnote id whose content must land on the page carrying this line. */
@@ -140,6 +159,13 @@ export interface LineBox {
   naturalHeight: number;
   /** Final line height after spacing rules. */
   height: number;
+  /** Height whose bottom minus maxDescent gives the painted baseline. For
+   * auto (multiplier) spacing Word hangs the extra leading BELOW the
+   * baseline (pickett Heading1 at 1.15: baseline = top + ascent exactly),
+   * so the baseline anchors to the NATURAL height; exact/atLeast lines
+   * bottom-anchor to the forced height (pleading's 24pt exact rows sit
+   * low, ascenders clip on undersized exact). */
+  baselineH: number;
   /** Extent that must fit above the body bottom: the font box (baseline +
    * raw descent). Line-spacing leading below the baseline may overhang the
    * bottom margin in Word (msa p2: a 1.15-spaced line whose full box crosses
@@ -410,7 +436,7 @@ export function breakParagraph(
     if (atom.kind === "space") {
       // Never start a (non-first) line with a space.
       if (cur.length === 0 && lineIndex > 0) continue;
-      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src });
+      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src, metricsFont: atom.metricsFont });
       curLineWidth += atom.width;
       curSpaceWidth += atom.width;
       x += atom.width;
@@ -518,6 +544,7 @@ export function breakParagraph(
           font: atom.font,
           href: atom.href,
           src: atom.src ? { ...atom.src, offset: atom.src.offset + sliceOff } : undefined,
+          metricsFont: atom.metricsFont,
         });
         curLineWidth += w;
         x += w;
@@ -526,7 +553,7 @@ export function breakParagraph(
       }
       continue;
     }
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont });
     curLineWidth += atom.width;
     x += atom.width;
   }
@@ -618,11 +645,16 @@ function finishLine(
   let maxDescent = 0;
   let maxRawDescent = 0;
   let maxNatural = 0;
+  let maxImage = 0;
+  let maxImageFontDesc = 0;
+  let maxNaturalText = 0;
 
   const consider = (font: FontSpec, imageHeight?: number) => {
     if (imageHeight !== undefined) {
       maxAscent = Math.max(maxAscent, imageHeight);
       maxNatural = Math.max(maxNatural, imageHeight + measurer.metrics(font).descent * 0.3);
+      maxImage = Math.max(maxImage, imageHeight);
+      maxImageFontDesc = Math.max(maxImageFontDesc, measurer.metrics(font).descent);
       return;
     }
     const m = measurer.metrics(font);
@@ -630,6 +662,7 @@ function finishLine(
     maxDescent = Math.max(maxDescent, m.lineDescent ?? m.descent);
     maxRawDescent = Math.max(maxRawDescent, m.descent);
     maxNatural = Math.max(maxNatural, m.lineHeight);
+    maxNaturalText = Math.max(maxNaturalText, m.lineHeight);
   };
 
   if (spans.length === 0) {
@@ -645,7 +678,7 @@ function finishLine(
         maxDescent = Math.max(maxDescent, s.math.descent);
         maxRawDescent = Math.max(maxRawDescent, s.math.descent);
         maxNatural = Math.max(maxNatural, s.math.ascent + s.math.descent);
-      } else consider(s.font);
+      } else consider(s.metricsFont ?? s.font);
     }
   }
 
@@ -656,10 +689,26 @@ function finishLine(
   // diffusion, not per-line rounding). The engine snaps baselines when
   // emitting items.
   let height = natural;
+  let baselineH: number | undefined;
   const ls = props.lineSpacing;
   if (ls) {
-    if (ls.rule === "auto") height = natural * ls.value;
-    else if (ls.rule === "exact") height = ls.value;
+    if (ls.rule === "auto") {
+      height = natural * ls.value;
+      if (maxImage > 0) {
+        // Word does NOT scale an inline image with the auto multiplier: an
+        // image-dominated line measures image + k x text-descent, with the
+        // image top at the line top (baseline = top + image height). The
+        // pickett icon rows (25.92pt icons, 1.15 spacing, 12pt Gill Sans)
+        // measure 29.2 +/- 0.2pt in Word's PDF, and the icon tops sit
+        // exactly at the paragraph top.
+        const descSide = Math.max(maxDescent, maxImageFontDesc) * ls.value;
+        const imageH = maxImage + descSide;
+        if (imageH > maxNaturalText * ls.value) {
+          height = imageH;
+          baselineH = height - descSide + maxDescent;
+        }
+      }
+    } else if (ls.rule === "exact") height = ls.value;
     else height = Math.max(natural, ls.value);
   }
 
@@ -670,6 +719,7 @@ function finishLine(
     maxDescent,
     naturalHeight: natural,
     height,
+    baselineH: baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height),
     fitHeight: Math.min(height, natural - maxDescent + maxRawDescent),
     isLast,
     endsWithBreak,
@@ -695,7 +745,7 @@ function buildAtoms(
     for (const content of run.content) {
       switch (content.kind) {
         case "text":
-          pushText(displayText(content.text, props), props, font, href, {
+          pushStyled(displayText(content.text, props), props, font, href, {
             run,
             t: (content.srcT as TextSource["t"]) ?? null,
             offset: 0,
@@ -704,7 +754,7 @@ function buildAtoms(
         case "field": {
           const text = resolveField(content.instruction, content.cachedResult, fields);
           // Fields are atomic: src.t === null means "format the whole run".
-          if (text) pushText(displayText(text, props), props, font, href, { run, t: null, offset: 0 });
+          if (text) pushStyled(displayText(text, props), props, font, href, { run, t: null, offset: 0 });
           break;
         }
         case "ptab":
@@ -762,7 +812,36 @@ function buildAtoms(
     }
   };
 
-  const pushText = (text: string, props: RunProps, font: FontSpec, href?: string, srcBase?: TextSource) => {
+  /** Routes small-caps runs through per-segment sizing; plain runs go
+   * straight to pushText. caps wins over smallCaps (text is already
+   * uppercased by displayText, every char classifies full-size). */
+  const pushStyled = (text: string, props: RunProps, font: FontSpec, href?: string, srcBase?: TextSource) => {
+    if (!props.smallCaps || props.caps) {
+      pushText(text, props, font, href, srcBase);
+      return;
+    }
+    const reduced = smallCapsFontOf(font);
+    let i = 0;
+    while (i < text.length) {
+      const lower = isSmallCapsReduced(text[i]);
+      let j = i + 1;
+      while (j < text.length && isSmallCapsReduced(text[j]) === lower) j++;
+      const seg = text.slice(i, j);
+      const src = srcBase ? { ...srcBase, offset: srcBase.offset + i } : undefined;
+      if (lower) pushText(seg.toUpperCase(), props, reduced, href, src, font);
+      else pushText(seg, props, font, href, src);
+      i = j;
+    }
+  };
+
+  const pushText = (
+    text: string,
+    props: RunProps,
+    font: FontSpec,
+    href?: string,
+    srcBase?: TextSource,
+    metricsFont?: FontSpec,
+  ) => {
     const parts = text.split(/( +)/);
     let offset = 0;
     // Measure by cumulative prefix differences: atom widths then sum exactly
@@ -785,6 +864,7 @@ function buildAtoms(
             font,
             width: w,
             src: src ? { ...src, offset: src.offset + i } : undefined,
+            metricsFont,
           });
         }
       } else {
@@ -796,6 +876,7 @@ function buildAtoms(
           width: partWidth,
           href,
           src,
+          metricsFont,
         });
       }
       prevCum = cum;
