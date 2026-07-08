@@ -809,14 +809,12 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     el.style.transformOrigin = `${rotate.ox}px ${rotate.oy}px`;
   }
   const horizontal = Math.abs(y2 - y1) < 0.01;
-  const cssStyle = borderCss(border);
   // Hairline borders (Word default 0.5pt = 0.67px) land on fractional device
   // pixels and antialias to light gray — noticeably fainter than Word. Snap
-  // the width up to whole device pixels and the position onto the device
-  // grid so the ink covers full pixels.
+  // the width up to whole device pixels, but keep fractional positions because
+  // Word's own PDF rectangles are not device-pixel aligned.
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
   const w = Math.max(1 / dpr, Math.round(border.width * dpr) / dpr);
-  const snap = (v: number) => Math.round(v * dpr) / dpr;
   // Word's dash pattern is [3 1] x line width (read from its own PDF
   // export) - noticeably longer than CSS `dashed`. Paint dashes/dots as a
   // repeating gradient so the rhythm matches.
@@ -828,48 +826,42 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
         : null;
   if (horizontal) {
     el.style.left = `${Math.min(x1, x2)}px`;
-    el.style.top = `${snap(y1 - w / 2)}px`;
+    el.style.top = `${y1 - w / 2}px`;
     el.style.width = `${Math.abs(x2 - x1)}px`;
-    if (dashPattern) {
+    if (border.style === "double") {
+      el.style.height = `${w * 3}px`;
+      el.style.background = `linear-gradient(180deg, ${border.color} 0 ${w}px, transparent ${w}px ${w * 2}px, ${border.color} ${w * 2}px ${w * 3}px)`;
+    } else if (dashPattern) {
       const on = Math.max(dashPattern[0] * border.width, 2);
       const period = on + Math.max(dashPattern[1] * border.width, 1);
       el.style.height = `${w}px`;
       el.style.background = `repeating-linear-gradient(90deg, ${border.color} 0 ${on}px, transparent ${on}px ${period}px)`;
-    } else {
+    } else if (border.style === "triple") {
       el.style.height = "0";
-      el.style.borderTop = `${w}px ${cssStyle} ${border.color}`;
+      el.style.borderTop = `${w}px double ${border.color}`;
+    } else {
+      el.style.height = `${w}px`;
+      el.style.background = border.color;
     }
   } else {
-    el.style.left = `${snap(x1 - w / 2)}px`;
+    el.style.left = `${x1 - w / 2}px`;
     el.style.top = `${Math.min(y1, y2)}px`;
     el.style.height = `${Math.abs(y2 - y1)}px`;
-    if (dashPattern) {
+    if (border.style === "double") {
+      el.style.width = `${w * 3}px`;
+      el.style.background = `linear-gradient(90deg, ${border.color} 0 ${w}px, transparent ${w}px ${w * 2}px, ${border.color} ${w * 2}px ${w * 3}px)`;
+    } else if (dashPattern) {
       const on = Math.max(dashPattern[0] * border.width, 2);
       const period = on + Math.max(dashPattern[1] * border.width, 1);
       el.style.width = `${w}px`;
       el.style.background = `repeating-linear-gradient(180deg, ${border.color} 0 ${on}px, transparent ${on}px ${period}px)`;
-    } else {
+    } else if (border.style === "triple") {
       el.style.width = "0";
-      el.style.borderLeft = `${w}px ${cssStyle} ${border.color}`;
+      el.style.borderLeft = `${w}px double ${border.color}`;
+    } else {
+      el.style.width = `${w}px`;
+      el.style.background = border.color;
     }
   }
   return el;
-}
-
-function borderCss(border: Border): string {
-  switch (border.style) {
-    case "double":
-    case "triple":
-      return "double";
-    case "dotted":
-    case "dotDash":
-    case "dotDotDash":
-      return "dotted";
-    case "dashed":
-      return "dashed";
-    case "wave":
-      return "solid";
-    default:
-      return "solid";
-  }
 }
