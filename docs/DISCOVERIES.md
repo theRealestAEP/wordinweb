@@ -958,6 +958,63 @@ sub-pixel accumulation:
   plateau pending an unlocked Word box, same family as the wild2-math construct-
   height backlog above.
 
+### NIH row-height probe: the deficit is NOT per-row — it is a discrete ~0.79pt per PARAGRAPH→TABLE boundary (2026-07, unlocked Word)
+The plateau above was finally probed on an unlocked box.
+`scripts/make-nih-rowheight-probe.py` reproduces the fixture's exact guidance-
+table style (docDefault Calibri, Normal sz=24; number-paragraph = keepNext +
+`before=100` bold-red; guidance table = tblW auto, tblInd 500, ALL borders
+single **sz6** (0.75pt) space0, shd F3F3F3, single gridCol 9700, cantSplit rows,
+cells inherit TableNormal cellMar top/bottom=0 L/R=108, cell paras
+`before=15`/`after=25`) in five blocks: P 50 single-line rows, Q 20 three-para
+rows, R 40 `[number-para][1-line table]` units, S 20 `[number-para][3-line
+table]` units, T 40 underline-fill rows. Exported to
+`parity/probe-nih-rowheight-word.pdf`; Word pitches read with
+`read-nih-rowheight-probe.py`, ours with `read-nih-ours.mjs` (DOM, :5317, px×0.75).
+Both regress baseline/top-y vs index so the constant baseline-vs-lineboxtop
+offset cancels and the pitch deltas are reference-independent.
+
+| construct | Word | Ours | Δ (Word−Ours) |
+|---|---|---|---|
+| P single-line row pitch | 17.403 | 17.398 | +0.005 |
+| Q 3-para row pitch | 49.209 | 49.195 | +0.014 |
+| T underline-fill row pitch | 17.402 | 17.398 | +0.003 |
+| Q intra-cell line pitch | 15.906 | ~15.875 | +0.03 |
+| **R unit pitch (numpara→numpara)** | 37.803 | 37.047 | **+0.757** |
+| **S unit pitch (tall table)** | 69.612 | 68.843 | **+0.769** |
+| **R para→table boundary gap** | 16.256 | 15.466 | **+0.790** |
+
+- **Intra-table row pitch is CORRECT** (Δ ≤ 0.014pt across single-line,
+  3-paragraph, and underline-fill rows). Underline-fill runs add **zero** height
+  (T === P). The "diffuse ~0.1–0.3pt/row" hypothesis in the entry above is
+  therefore **wrong** — there is no per-row deficit.
+- **The entire drift is a discrete ~0.79pt shortfall at each PARAGRAPH→TABLE top
+  boundary** (numpara baseline → first cell line). Over the fixture's 728
+  one-block tables that is ~575pt ≈ 1.4 pages — the dominant part of the
+  observed −2p (417 vs 419) drift, direction confirmed (we pack tables too
+  tight ⇒ run short). The table→following-paragraph (bottom) boundary is ~right
+  (R/S unit deficit ≈ the top-boundary deficit alone).
+- **Decomposition (two opposing sub-pixel effects, matching the prior note's
+  hunch, now measured):** From the PDF, Word's table top border sits **1.0pt
+  below** the preceding numpara baseline (705.47→704.47) — i.e. it OVERLAPS the
+  paragraph's descent. Our engine drops the border to the numpara's full
+  line-box bottom (~3.2pt below baseline), so **our border is ~2.2pt too LOW**.
+  Independently, Word seats the first cell line **15.25pt below the top border**
+  (identical in block P which has no preceding paragraph, so it is a pure
+  cell-internal rule), whereas ours seats it ~2.5pt higher, so **our first-cell
+  line is ~2.5pt too HIGH relative to the border**. The two nearly cancel, net
+  +0.79pt in Word.
+- **No fix shipped — deliberately.** A correct fix must change TWO things at
+  once (table-to-preceding-paragraph attachment must overlap the paragraph
+  descent; the first line inside a cell must reserve ~a full line's top leading
+  below the top border, not just the glyph ascent) and net exactly +0.79pt.
+  Getting only one right over/under-corrects, and both touch every table, so it
+  must be gated on staging-longtable/parity-rowsplit/parity-tables/
+  parity2-nestedtables + benchmark/sample before landing. A bare +0.79pt nudge
+  on para→table boundaries would be a fitted constant (the anti-fitting rule
+  forbids it). The probe + both readers are committed so the two-part rule can
+  be built and validated safely; this is now a *characterised* task, not a
+  blind plateau.
+
 ## Word template rendering (2026-07, header/footer designs + cover letters)
 
 - **Word's built-in h/f templates decode to five constructs**: inline SDTs
