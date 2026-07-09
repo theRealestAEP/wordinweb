@@ -51,6 +51,10 @@ interface InternalPage {
   /** Top of the current column band (continuous sections restart columns
    * mid-page; equals bodyTop for the first band). */
   bandTop: number;
+  /** Page reached by soft overflow / hard break (newPage(false)) rather than
+   * a document/section start — space-before drops at its top; section-start
+   * pages keep the carry-remainder rule and the doc start keeps full before. */
+  softTop: boolean;
   colXs: number[];
   colWidths: number[];
   hfStart?: number;
@@ -298,6 +302,7 @@ class Engine {
       displayNumber,
       bodyTop: Math.abs(sp.marginTop),
       bandTop: Math.abs(sp.marginTop),
+      softTop: !sectionStart,
       bodyBottom: sp.pageHeight - Math.abs(sp.marginBottom),
       colXs,
       colWidths,
@@ -1313,9 +1318,15 @@ class Engine {
     // partway down a page (a 1-col section starting below the balanced columns
     // of the previous section) is NOT a page top - its leading Heading1 keeps
     // its space-before to separate it from the columns above (p30/p31).
+    // ...and only on pages reached by SOFT overflow (or a hard break, whose
+    // breaking paragraph already dropped its before): a document-start or
+    // section-start page keeps its full/carry-remainder space-before (Word
+    // keeps the full 12pt at the document start; parity2-* fixtures all open
+    // with a spacing-before heading and sat 13px high under the broad rule).
     const atPageOrColumnTop =
       this.y <= this.cur.bandTop + 0.01 &&
-      (this.col > 0 || this.cur.bandTop <= this.cur.bodyTop + 0.01);
+      (this.col > 0 ||
+        (this.cur.softTop && this.cur.bandTop <= this.cur.bodyTop + 0.01));
     if (atPageOrColumnTop) spacingBefore = borderPadTop;
 
     // Adjacent before/after collapse: the larger of the previous paragraph's
@@ -1871,6 +1882,7 @@ class Engine {
       displayNumber: -1,
       bodyTop: 0,
       bandTop: 0,
+      softTop: false,
       bodyBottom: Number.POSITIVE_INFINITY,
       colXs: [0],
       colWidths: [width],
