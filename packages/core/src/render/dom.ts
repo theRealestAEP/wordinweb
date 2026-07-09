@@ -816,11 +816,14 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
   }
   const horizontal = Math.abs(y2 - y1) < 0.01;
   // Hairline borders (Word default 0.5pt = 0.67px) land on fractional device
-  // pixels and antialias to light gray — noticeably fainter than Word. Snap
-  // the width up to whole device pixels, but keep fractional positions because
-  // Word's own PDF rectangles are not device-pixel aligned.
+  // pixels and antialias to light gray - noticeably fainter than Word. Snap
+  // the width up to whole device pixels. For placement, keep paragraph borders
+  // with w:space on Word's fractional rectangle positions; zero-space table/page
+  // rules match Word better on the device grid.
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
   const w = Math.max(1 / dpr, Math.round(border.width * dpr) / dpr);
+  const snap = (v: number) => Math.round(v * dpr) / dpr;
+  const place = border.space === 0 ? snap : (v: number) => v;
   // Word's dash pattern is [3 1] x line width (read from its own PDF
   // export) - noticeably longer than CSS `dashed`. Paint dashes/dots as a
   // repeating gradient so the rhythm matches.
@@ -832,7 +835,7 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
         : null;
   if (horizontal) {
     el.style.left = `${Math.min(x1, x2)}px`;
-    el.style.top = `${y1 - w / 2}px`;
+    el.style.top = `${place(y1 - w / 2)}px`;
     el.style.width = `${Math.abs(x2 - x1)}px`;
     if (border.style === "double") {
       el.style.height = `${w * 3}px`;
@@ -850,7 +853,7 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
       el.style.background = border.color;
     }
   } else {
-    el.style.left = `${x1 - w / 2}px`;
+    el.style.left = `${place(x1 - w / 2)}px`;
     el.style.top = `${Math.min(y1, y2)}px`;
     el.style.height = `${Math.abs(y2 - y1)}px`;
     if (border.style === "double") {
