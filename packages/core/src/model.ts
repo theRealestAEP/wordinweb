@@ -522,6 +522,15 @@ export interface TableProps {
   /** Preferred total width as a fraction of available width (tblW pct). */
   widthPct?: number;
   layout?: "fixed" | "autofit";
+  /** w:tblLook flags controlling which conditional formats apply. */
+  tblLook?: {
+    firstRow: boolean;
+    lastRow: boolean;
+    firstColumn: boolean;
+    lastColumn: boolean;
+    noHBand: boolean;
+    noVBand: boolean;
+  };
 }
 
 export interface Table {
@@ -620,6 +629,38 @@ export interface HeaderFooter {
 
 // ---------- styles ----------
 
+/** One w:tblStylePr conditional-formatting block (firstRow, band1Horz, …). */
+export interface TableCondFormat {
+  /** Cell shading fill as CSS color. */
+  shd?: string;
+  /** Conditional cell borders. */
+  borders?: {
+    top?: Border;
+    bottom?: Border;
+    left?: Border;
+    right?: Border;
+    insideH?: Border;
+    insideV?: Border;
+  };
+  /** Conditional run bold (firstRow/firstCol headers). */
+  bold?: boolean;
+}
+
+export type TableCondType =
+  | "wholeTable"
+  | "band1Vert"
+  | "band2Vert"
+  | "band1Horz"
+  | "band2Horz"
+  | "firstRow"
+  | "lastRow"
+  | "firstCol"
+  | "lastCol"
+  | "nwCell"
+  | "neCell"
+  | "swCell"
+  | "seCell";
+
 export interface Style {
   id: string;
   type: "paragraph" | "character" | "table" | "numbering";
@@ -629,6 +670,11 @@ export interface Style {
   pPr?: ParaProps;
   rPr?: RunProps;
   tblPr?: TableProps;
+  /** w:tblStylePr conditional formats, by type (table styles only). */
+  condFormats?: Map<TableCondType, TableCondFormat>;
+  /** w:tblStyleRowBandSize / ColBandSize (default 1). */
+  rowBandSize?: number;
+  colBandSize?: number;
 }
 
 export interface Styles {

@@ -1277,6 +1277,26 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
     }
     const layout = attr(child(tblPr, "tblLayout"), "type");
     props.layout = layout === "fixed" ? "fixed" : "autofit";
+    const look = child(tblPr, "tblLook");
+    if (look) {
+      // Attributes (firstRow=…) take precedence; fall back to the legacy hex
+      // w:val bitmask (0x0020 firstRow, 0x0040 lastRow, 0x0080 firstColumn,
+      // 0x0100 lastColumn, 0x0200 noHBand, 0x0400 noVBand).
+      const val = parseInt(attr(look, "val") ?? "0", 16) || 0;
+      const flag = (name: string, bit: number): boolean => {
+        const a = attr(look, name);
+        if (a !== undefined) return a === "1" || a === "true";
+        return (val & bit) !== 0;
+      };
+      props.tblLook = {
+        firstRow: flag("firstRow", 0x0020),
+        lastRow: flag("lastRow", 0x0040),
+        firstColumn: flag("firstColumn", 0x0080),
+        lastColumn: flag("lastColumn", 0x0100),
+        noHBand: flag("noHBand", 0x0200),
+        noVBand: flag("noVBand", 0x0400),
+      };
+    }
   }
 
   const grid: number[] = [];

@@ -177,6 +177,32 @@ equation, and Word renders it very differently (the fixture dropped from
 
 ## Tables
 
+### Table-style banding is CONDITIONAL formatting resolved per cell (w:tblStylePr + tblLook)
+A styled table (`LightGrid-Accent1` in wild-multicolumn) carries NO direct cell
+`shd` — its blue row-banding, bold header/first-column, and thick header
+underline all live in the table STYLE's `w:tblStylePr` blocks (`firstRow`,
+`band1Horz`/`band2Horz`, `firstCol`, …), gated by the table's `w:tblLook`
+(firstRow/firstColumn/noHBand/noVBand flags, either as attributes or the legacy
+hex `w:val` bitmask). Parsed into `Style.condFormats` (`parse/styles.ts`),
+resolved per cell in `engine.condFor` against tblLook + row/grid-column position
+in ECMA-376 precedence (banding < first/last col < first/last row < corners),
+and merged UNDER a direct cell shd/border. Banding row index excludes the header
+(`rowIdx − (firstRow?1:0)`); even→band1, odd→band2 at `tblStyleRowBandSize`.
+Missing this rendered the section-2 table with white rows and no header rule.
+
+### A table row overflowing the body bottom by a bounded amount stays put
+Word's page-fit for a table row lets the row's trailing line-leading and its
+bottom rule overhang the bottom margin before it moves/splits the row - the same
+font-box overhang the body-line fit allows. wild-multicolumn's 5th data row
+missed by ~2.4px (an upstream sub-pixel spacing drift left the table ~5px low)
+and Word kept it on the page. A small bounded allowance (`ROW_OVERHANG_TOL`,
+~3px) in the row-fit check, SUPPRESSED whenever footnotes reserve the bottom
+band (the reserve already accounts for it - wild-doerfp), keeps it. Bounded well
+under the ~one-line gap that makes Word move a whole row (parity2-nestedtables
+moves a 56pt row with 31pt left), so real page breaks are unaffected. NB: the
+reference PDFs show no row actually crossing the margin, so this is calibrated
+to reclaim our own drift, not a large measured Word tolerance.
+
 ### Word ignores authored grids unless cells carry tcW
 A `tblGrid` with no `tcW` on any cell is discarded even when it looks
 realistic: probe-tablegrid gave an "x" column 5.75pt against its 4680-twip
@@ -301,6 +327,20 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   body top (sample/benchmark p2 headings at exactly 72pt). Only content
   after the break moves. We used to emit the paragraph's empty final line
   at the top of the new page — one full line of phantom capacity loss.
+- **…and its spacing-AFTER stays on the old page too**: the pilcrow-on-the-
+  old-page rule means a break-terminated paragraph's `w:after` must NOT push
+  the fresh page's first content down (`placeParagraph`: skip `y += spacingAfter`
+  and zero `lastParaSpacingAfter` when the last line has a `forcedBreakAfter`).
+  wild-multicolumn's section 2 ends with an empty `<w:p><w:br type="page"/></w:p>`;
+  its ~13px spacing-after was landing at the TOP of the next page, which the
+  following continuous multi-column section then misread as a shared partial
+  page (`this.y > bodyTop`) and skipped to a blank next page — one spurious page
+  (47 vs Word's 46). Two guards make this robust: `layoutSection`'s
+  `sharedPartialPage` now also requires the page to actually hold content
+  (`this.cur.items.length > 0`), and `newPage`'s empty-page COALESCE (pop the
+  blank fresh page and start the section on it) now covers `continuous`
+  sections, not just nextPage — a continuous section reached over a hard page
+  break starts ON that fresh page.
 - **Widow pull-back cascades into the orphan rule**: 3-line paragraph,
   2 fit — widow control pulls line 2 back, which leaves a lone first line,
   which the orphan rule then pushes too: the whole paragraph moves. An
