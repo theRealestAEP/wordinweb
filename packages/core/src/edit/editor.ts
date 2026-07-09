@@ -1057,10 +1057,11 @@ export class DocxEditor {
       "border:1px solid #dadce0;border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,.18);" +
       "padding:2px;pointer-events:auto;font:11px system-ui,sans-serif;white-space:nowrap;";
     const isFloating = isFloatingDrawing(src);
-    const modes: ["inline" | "square" | "topAndBottom" | "behind", string][] = [
+    const modes: ["inline" | "square" | "topAndBottom" | "none" | "behind", string][] = [
       ["inline", "Inline"],
       ["square", "Wrap"],
       ["topAndBottom", "Top+Bottom"],
+      ["none", "In front"],
       ["behind", "Behind"],
     ];
     for (const [mode, label] of modes) {
@@ -1083,8 +1084,10 @@ export class DocxEditor {
         const pos = item ? { x: item.x - (sp?.marginLeft ?? 96), y: 0 } : undefined;
         if (setImageWrap(this.host.doc, src, mode, pos)) {
           this.host.rerender();
+          this.reselectImage(src);
+        } else {
+          this.deselectImage();
         }
-        this.deselectImage();
       });
       bar.appendChild(b);
     }
@@ -1321,9 +1324,28 @@ export class DocxEditor {
     }
 
     // Click/drag on an image (the img may be nested in a crop viewport).
+    // Behind-text images never receive the click directly — the text layer
+    // paints above them — so when the click isn't on an actual glyph,
+    // hit-test behind images by point (Word keeps them selectable this way).
+    let imageBinding: ImageBinding | undefined;
     if (target.tagName === "IMG") {
       const handle = this.host.getHandle();
-      const binding = handle?.images.find((b) => b.el === target || b.el.contains(target));
+      imageBinding = handle?.images.find((b) => b.el === target || b.el.contains(target));
+    } else if (
+      !target.closest("button") &&
+      !target.dataset.dxwImgHandle &&
+      !this.imageOverlay?.contains(target) &&
+      !this.caretFromPoint(e.clientX, e.clientY)
+    ) {
+      const handle = this.host.getHandle();
+      imageBinding = handle?.images.find((b) => {
+        if (!b.item.behind) return false;
+        const r = b.el.getBoundingClientRect();
+        return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+      });
+    }
+    if (imageBinding) {
+      const binding = imageBinding;
       if (!binding?.item.src) return false;
       e.preventDefault();
       e.stopPropagation();
@@ -1333,6 +1355,7 @@ export class DocxEditor {
       const el = binding.el;
       const left0 = parseFloat(el.style.left) || 0;
       const top0 = parseFloat(el.style.top) || 0;
+      const rect0 = el.getBoundingClientRect();
       let moved = false;
       let ghost: HTMLElement | null = null;
       const grabX = e.clientX - el.getBoundingClientRect().left;
@@ -1384,9 +1407,10 @@ export class DocxEditor {
         this.host.history?.checkpoint();
         if (floating) {
           const src = binding.item.src!;
-          const startPageNum = (el.closest(".dxw-page") as HTMLElement | null)?.dataset.page;
-          const wantLeft = left0 + (me.clientX - startX) / zoom;
-          const wantTop = top0 + (me.clientY - startY) / zoom;
+          // Desired landing spot in CLIENT space (valid across pages; the
+          // scroll position survives re-renders).
+          const wantClientLeft = rect0.left + (me.clientX - startX);
+          const wantClientTop = rect0.top + (me.clientY - startY);
           // moveFloatingImage reads the element's CURRENT rect - restore the
           // pre-drag position first so the client delta isn't applied twice.
           el.style.left = `${left0}px`;
@@ -1396,12 +1420,13 @@ export class DocxEditor {
             // Re-anchoring resolves offsets from the NEW anchor's column
             // origin (a table cell's text area, not the page margin), which
             // moveFloatingImage cannot know. Measure the landing spot and
-            // correct the residual once - exact for any anchor container.
+            // correct the residual once - exact for any anchor container,
+            // including a drop on a DIFFERENT page.
             const landed = this.host.getHandle()?.images.find((b) => b.item.src === src);
-            const landedPageNum = (landed?.el.closest(".dxw-page") as HTMLElement | null)?.dataset.page;
-            if (landed && landedPageNum === startPageNum) {
-              const errX = wantLeft - (parseFloat(landed.el.style.left) || 0);
-              const errY = wantTop - (parseFloat(landed.el.style.top) || 0);
+            if (landed) {
+              const lr = landed.el.getBoundingClientRect();
+              const errX = (wantClientLeft - lr.left) / zoom;
+              const errY = (wantClientTop - lr.top) / zoom;
               if (Math.hypot(errX, errY) > 1 && adjustFloatingPosition(this.host.doc, src, errX, errY)) {
                 this.host.rerender();
               }
@@ -1451,6 +1476,11 @@ export class DocxEditor {
       this.focusText();
       return;
     }
+    // A mouseup inside the selection chrome (wrap bar, resize handles) must
+    // not deselect: removing the bar between mousedown and mouseup detaches
+    // the button and the browser never composes its click (the second wrap
+    // change in a row silently did nothing).
+    if (this.imageOverlay?.contains(e.target as Node)) return;
     this.deselectImage();
     // A click on an equation opens the inline math editor (Word: math zone).
     const mathEl = (e.target as HTMLElement | null)?.closest?.("[data-dxw-math]") as HTMLElement | null;
