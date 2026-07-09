@@ -444,6 +444,21 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   which the orphan rule then pushes too: the whole paragraph moves. An
   if/else widow-orphan implementation misses the cascade (benchmark p2,
   chronology p1).
+- **A first line that physically won't fit moves the WHOLE paragraph — even
+  with widowControl OFF**: pushing a paragraph down when its first line doesn't
+  clear the body bottom is a PHYSICAL fit, not the aesthetic orphan rule, so it
+  applies regardless of `w:widowControl="0"`. `planBreaks` couldn't record a
+  break at the very first line (its `li > segStart` guard blocks `0 > 0`), so it
+  planned the break AFTER line 0; the emit loop's own overflow test then moved
+  line 0 to a fresh page, but the STALE post-line-0 break still fired there,
+  orphaning a lone first line on an otherwise blank page and spilling the rest
+  onto the next. Word's default widowControl=on masked this (the orphan cascade
+  set the break to 0), but `Default`-styled bodies with widowControl=0
+  (nccih-protocol's SOM/eligibility notes) tripped it: 3 spurious near-blank
+  pages (26→23), mean 64.3%→24.3%. Fix: `planBreaks` detects the
+  first-line-overflow-on-a-partial-page case and breaks at 0 (whole paragraph to
+  the next column/page) independent of widowControl, so plan and emit agree.
+  Guarded off during column balancing (that path is authoritative there).
 - **trHeight is a CONTENT-box height** (probe-trheight): Word renders an
   `hRule=atLeast` row at trHeight + top&bottom cell margins + the row's
   border share (~half of each adjoining sz8 border), and an `hRule=exact`
