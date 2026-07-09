@@ -1622,13 +1622,19 @@ class Engine {
             page.items.push({ kind: "edge", x1: bx + w, y1: by, x2: bx + w, y2: by + h, border: b });
           }
           const ins = tb.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
-          // Text is inset from the INNER edge of the border, so the stroke
-          // narrows the usable text width (a 3pt border eats ~4px per side,
-          // enough to pull the wild-gatech callouts' final word to a new line
-          // like Word).
+          // Horizontally the shape stroke STRADDLES the shape edge (half in, half
+          // out), so only HALF the border eats into the text on each side — the
+          // usable WIDTH shrinks by bw (not 2*bw) and the left origin sits at
+          // lIns + bw/2. Measured on wild-gatech's callouts: Word's box text spans
+          // 552px inside a 576px 3pt-bordered shape (576 - 2*9.6 - 4). Subtracting
+          // the full stroke twice made the box 3.6px too narrow, which drifted the
+          // justified spacing and broke lines a word too early. Vertically, though,
+          // Word insets the first line by the FULL border below the top inset
+          // (by + tIns + bw) — using bw/2 there floats page-bottom callouts ~2px
+          // high (wild-gatech p7 bottom box).
           const bw = tb.stroke ? tb.stroke.weight : 0;
-          const inner = this.layoutFrame(tb.blocks, Math.max(w - ins.l - ins.r - 2 * bw, 1), this.fieldCtx(), {
-            x: bx + ins.l + bw,
+          const inner = this.layoutFrame(tb.blocks, Math.max(w - ins.l - ins.r - bw, 1), this.fieldCtx(), {
+            x: bx + ins.l + bw / 2,
             y: by + ins.t + bw,
           });
           let innerTop = by + ins.t + bw;
@@ -1698,6 +1704,12 @@ class Engine {
           const chW = this.measurer.width(ch, span.font);
           const count = Math.max(0, Math.floor((span.width - 4) / chW));
           if (count > 0) {
+            // Anchor the leader glyphs to the baseline exactly like regular
+            // text (glyphTop/glyphBoxH). Without them the renderer flex-end-
+            // bottoms the dots on the FULL line box, painting them a leading's
+            // worth below the baseline (~9px on an 11pt TOC line) where Word
+            // draws them on the baseline — decorrelating every dot tile.
+            const gm = this.measurer.metrics(span.font);
             page.items.push({
               kind: "text",
               x: originX + span.x + 2,
@@ -1708,6 +1720,8 @@ class Engine {
               font: span.font,
               lineTop: topY,
               lineHeight: line.height,
+              glyphTop: baseline - gm.ascent,
+              glyphBoxH: gm.ascent + gm.descent,
             });
           }
         }

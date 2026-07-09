@@ -880,10 +880,21 @@ function finishLine(
         // Word's PDF); for double-spaced boxes it is a full text line so the
         // text below clears the box like Word (wild-gatech "SOPITA" callouts
         // at 2.0 spacing - the following line sits ~a text line below the box).
-        const descSide = Math.max(
-          Math.max(maxDescent, maxImageFontDesc) * ls.value,
-          (ls.value - 1) * maxImageFontLine,
-        );
+        // The multiplier's inter-line leading below the object is (k-1) text
+        // lines PLUS the line's own font descent: an object-only line carries no
+        // text span, so maxDescent is 0 and the raw (k-1)*line term stops one
+        // descent short of where Word puts the NEXT baseline (wild-gatech p7's
+        // double-spaced callout wraps its trailing text to a second line that
+        // landed ~5px high). This is inter-line leading, so it only applies when
+        // a line follows in the same paragraph (!isLast): a lone object line
+        // (a title-page logo in its own paragraph - wild-hamburg p2) gets no
+        // below-leading and its paragraph height stays object-tall. Genuine
+        // multi-line spacing (>=1.5) adds the descent; the sub-line 1.15 case
+        // (pickett icon rows, measured at descent*1.15) stays on the descent
+        // term, so the boost is gated above it.
+        let lineTerm = (ls.value - 1) * maxImageFontLine;
+        if (ls.value >= 1.5 && !isLast) lineTerm += Math.max(maxDescent, maxImageFontDesc);
+        const descSide = Math.max(Math.max(maxDescent, maxImageFontDesc) * ls.value, lineTerm);
         const imageH = maxImage + descSide;
         if (imageH > maxNaturalText * ls.value) {
           height = imageH;
