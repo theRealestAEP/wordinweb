@@ -97,6 +97,14 @@ const PAGE_FMT: Record<string, string> = {
 
 /** Height of the footnote separator strip (one small line, like Word). */
 const NOTE_SEP_H = 14;
+/** Body-fill reserve above a page's footnotes. Word does not butt body text
+ * against the separator rule: the separator is a full Normal paragraph, so
+ * Word leaves its line box plus the gap down to the first footnote line. That
+ * band is bigger than the 14px rule strip we PAINT (NOTE_SEP_H), so the
+ * body-fill limit must reserve it or we pack ~2 extra lines per footnoted page
+ * (doerfp p3 fit a 4-line paragraph Word split 2/2). Only body-fill math uses
+ * this; footnotes stay bottom-anchored via NOTE_SEP_H. */
+const NOTE_SEP_RESERVE = 40;
 /** Word's separator rule is a short line, 2in max. */
 const NOTE_SEP_LEN = 192;
 
@@ -667,7 +675,7 @@ class Engine {
    * Capped so a pathological footnote can't push bodyBottom above bodyTop. */
   private footnoteReserve(page: InternalPage): number {
     if (page.footnotes.length === 0) return 0;
-    const full = NOTE_SEP_H + page.footnoteH;
+    const full = NOTE_SEP_RESERVE + page.footnoteH;
     return Math.min(full, (page.bodyBottom - page.bodyTop) * 0.9);
   }
 
@@ -697,7 +705,7 @@ class Engine {
       if (!this.doc.footnotes.has(span.noteId)) continue;
       h += this.measureFootnote(span.noteId).height;
     }
-    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_H;
+    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_RESERVE;
     return h;
   }
 
@@ -716,7 +724,7 @@ class Engine {
         h += this.measureFootnote(it.noteId).height;
       }
     }
-    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_H;
+    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_RESERVE;
     return h;
   }
 
@@ -790,8 +798,19 @@ class Engine {
       if (block.type === "paragraph") {
         // An empty paragraph that only carries a section break takes no
         // vertical space in Word (parity-colbalance: the columns start
-        // exactly one line-advance below the intro, no mark line).
-        if (block.sectionBreak && !paragraphHasContent(block)) continue;
+        // exactly one line-advance below the intro, no mark line). It still
+        // feeds the spacing-collapse chain: its spacing-after carries into the
+        // next section's first paragraph, so an empty Heading1 sectPr para
+        // (before=after=18pt) fully absorbs the next Heading1's 18pt before and
+        // the section title lands at the margin (doerfp p27, not 10px below).
+        if (block.sectionBreak && !paragraphHasContent(block)) {
+          const sbAfter = this.doc.effectiveParaProps(block).spacingAfter ?? 0;
+          if (sbAfter > this.lastParaSpacingAfter) {
+            this.lastParaSpacingAfter = sbAfter;
+            this.lastParaWasEmpty = false;
+          }
+          continue;
+        }
         this.placeParagraph(block, blocks[i - 1], blocks[i + 1], blocks, i);
       } else {
         this.placeTable(block);
