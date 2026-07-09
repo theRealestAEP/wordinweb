@@ -952,6 +952,24 @@ function buildAtoms(
     for (const content of run.content) {
       switch (content.kind) {
         case "text":
+          // Literal TAB characters inside w:t (generator files; Word
+          // normalizes them to w:tab on save but renders them as tab stops).
+          if (content.text.includes("\t")) {
+            const pieces = content.text.split("\t");
+            let off = 0;
+            for (let pi = 0; pi < pieces.length; pi++) {
+              if (pi > 0) atoms.push({ kind: "tab", props, font });
+              if (pieces[pi]) {
+                pushStyled(displayText(pieces[pi], props), props, font, href, {
+                  run,
+                  t: (content.srcT as TextSource["t"]) ?? null,
+                  offset: off,
+                }, vertMetricsFont);
+              }
+              off += pieces[pi].length + 1;
+            }
+            break;
+          }
           pushStyled(displayText(content.text, props), props, font, href, {
             run,
             t: (content.srcT as TextSource["t"]) ?? null,
