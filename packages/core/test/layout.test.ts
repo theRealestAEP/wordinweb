@@ -61,6 +61,36 @@ describe("layout engine", () => {
     expect(pageText(result, 1)).toContain("second page");
   });
 
+  it("drops space-before when a keepLines paragraph is moved to a column top", () => {
+    // A multi-line keepLines paragraph with a large space-before that cannot fit
+    // in the remaining space at the bottom of a filled column is moved whole to
+    // the top of the next column. Word collapses its space-before against the
+    // column top, so its first line must sit AT the band top - not one
+    // before-height (400 twips = 20pt ~ 27px) lower. Regression guard for the
+    // wild-multicolumn sliver-heading drift: the keepLines/keepNext move used to
+    // keep the before and shifted the whole one-glyph column down.
+    const longHeading =
+      "Heading text long enough to wrap across two lines so keepLines keeps them " +
+      "together when it moves to the next column top of this section body";
+    const filler = Array.from({ length: 48 }, (_, i) => p(`Filler line number ${i} here`)).join("");
+    const headingPara =
+      `<w:p><w:pPr><w:keepLines/><w:spacing w:before="400"/></w:pPr>` +
+      `<w:r><w:t xml:space="preserve">${longHeading}</w:t></w:r></w:p>`;
+    const twoCol =
+      `<w:p><w:pPr><w:sectPr><w:cols w:num="2" w:space="720"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:pPr></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(filler + headingPara + twoCol) });
+    const heading = result.pages[0].items.find(
+      (i) => i.kind === "text" && i.text.includes("Heading"),
+    );
+    expect(heading?.kind).toBe("text");
+    if (heading?.kind !== "text") return;
+    // Landed in the SECOND column (x well past the left margin), at its top.
+    expect(heading.x).toBeGreaterThan(300);
+    expect(heading.lineTop).toBeCloseTo(96, 0); // band top, before collapsed
+  });
+
   it("resolves PAGE and NUMPAGES fields in footers per page", () => {
     const paras = Array.from({ length: 120 }, (_, i) => p(`Paragraph ${i}`)).join("");
     const { result } = layout({

@@ -99,16 +99,47 @@ and it converges in one balanced pass. This fixed page 2 (63%→24%) and pages
 2-12 / 24-29 (≈45%→≈21%, the single-glyph rasterization floor); parity-colbalance
 1.24% and parity-columns 2.30% are unaffected.
 
-Still open (NOT a balancing bug): in the accurate CanvasMeasurer render
-wild-multicolumn is 46 pages like Word, but section 1's full-column flow drifts
-~one page late by page ~30 — the ultra-narrow off-page column packs a couple of
-lines per page differently from Word (the divergence localizes to the keepNext
-Heading2 regions, `dy` jumps on the parity pages right after each heading). That
-one-page drift cascades misalignment onto the section-2/3/4 pages. This is the
-degenerate-column **vertical packing** problem (per-line/per-column advance in a
-sliver column + keepNext gap placement), independent of balancing; closing it
-needs the off-page column's line capacity and heading keepNext-gap to match
-Word's, verified against a Word export of an isolated overflow probe.
+### Space-before collapses at a page/column top even for SOFT (non-break) flow
+This was the "degenerate-column vertical packing" mystery. The sliver column's
+per-line advances are NOT wrong — measured against Word's PDF they match to the
+quarter-point (13pt Calibri-Bold Heading2 = 18.25pt/line, 11pt body = 15.50pt/
+line, 14pt Heading1 = 19.75pt/line). What drifted was the column's *starting*
+offset: a `Heading2` (`before=200` twips = 10pt) landing at the TOP of a sliver
+column sat its whole 10pt too low, shifting the entire one-glyph column down and
+reading as ~65-70% structural on the metric (whose global-offset search caps at
+±4px, so a uniform 10pt/13px shift can't register and scores as residual). Word
+p23 heading-top = 74.78pt (= the body content top, no space-before); ours was
+82.11pt. Rule: **Word suppresses a paragraph's space-before whenever its first
+line comes to rest at the top of a page or text column, whether it arrived there
+by a hard break OR by ordinary soft flow.** The engine already dropped it on the
+explicit-move paths (hard/section breaks via `suppressNextSpaceBefore`, and the
+line-0 overflow path which resets `y`), but a heading relocated to a fresh column
+top by the **keepLines/keepNext move** (`placeParagraph`, engine.ts) kept its
+before — only the keepNext branch had zeroed it. Fix: re-evaluate against the
+FINAL cursor just before the before/after collapse — if `y <= bandTop` (empty
+column) collapse the before to just the border reserve. Restricted to a GENUINE
+top: a later column of the band (`col > 0`) OR a band that itself begins at the
+page body top (`bandTop === bodyTop`). A NEW section band that resumes partway
+down a page (a 1-col section under the previous section's balanced columns) is
+NOT a page top — its leading heading keeps its before (else p30/p31 regress
+22%→78%). Net: wild-multicolumn doc mean 15.39% → 2.76%; p23 64.9→0.9, p39
+66.1→0.9, and the entire p13-45 ~14-22% band → <1%; parity-colbalance 1.24 and
+parity-columns 2.30 unchanged. (Font note: the demo needs Carlito/Caladea — the
+metric-compatible Calibri/Cambria substitutes — actually served; a strict Vite
+`server.fs` allow-list silently dropped them, substituting a wider fallback that
+inflated EVERY page's width-drift and masked this offset as generic noise.)
+
+Still open (section-boundary pagination, NOT the sliver packing above and NOT
+touched here — it lives in the protected two-pass balancing machinery): the
+section-2 (1-col table) → section-3 (2-col sliver) → section-4 boundary
+desyncs by ~one column. Our sec2 `LightGrid` table paginates across p30-p31
+where Word fits it differently, so web p31 shows the table body where Word shows
+a sliver column; sec3's `Jade 4:` Heading1 then lands on a fresh page (p32) that
+Word populates differently. Residual: p30 22%, p31 12%, p32 38%, p46 19% (p46's
+column top now matches Word — the fix removed its former one-extra-glyph drift;
+its residual is lower on the page). Closing these needs the sec2 table height /
+section-band resume position to match Word, verified against an isolated
+table+continuous-section probe — distinct from the space-before rule.
 
 ### Words never split at formatting-run boundaries
 A word split across `w:r` runs ("(" + "“Cobbery”") is one breaking unit in
