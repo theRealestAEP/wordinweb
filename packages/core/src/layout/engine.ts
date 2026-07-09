@@ -11,9 +11,12 @@ import {
   SectionProps,
   Shape,
   Table,
+  TableCondFormat,
+  TableCondType,
   TableRow,
 } from "../model.js";
 import { formatLevelText, formatNumber } from "../parse/numbering.js";
+import { resolveTableConditional } from "../parse/styles.js";
 import { mergeRunProps } from "../parse/properties.js";
 import { ptToPx } from "../units.js";
 import {
@@ -107,6 +110,10 @@ const NOTE_SEP_H = 14;
 const NOTE_SEP_RESERVE = 40;
 /** Word's separator rule is a short line, 2in max. */
 const NOTE_SEP_LEN = 192;
+/** Bounded overhang (px, ~2.25pt) a table row's trailing leading + bottom rule
+ * may cross the body bottom before Word moves/splits the row. Well under the
+ * ~one-line gap that triggers a genuine row move; suppressed under footnotes. */
+const ROW_OVERHANG_TOL = 3;
 
 const CHICAGO = ["*", "†", "‡", "§"];
 
@@ -147,6 +154,8 @@ class Engine {
   private placedFootnotes = new Set<number>();
   /** Laid-out footnote content cache (id@width → frame). */
   private noteCache = new Map<string, { items: PageItem[]; height: number }>();
+  /** Resolved conditional table formats per style id (w:tblStylePr chain). */
+  private condCache = new Map<string, ReturnType<typeof resolveTableConditional>>();
   /** Mark text for the note body currently being laid out. */
   private selfNoteMark: string | undefined;
   /** w:lnNumType margin line numbering: running count + restart tracking. */
@@ -254,17 +263,19 @@ class Engine {
     const sp = this.sp;
     // Coalesce a section break with a preceding page break: if the previous
     // content already broke to a fresh, empty page (nothing laid out on it),
-    // a nextPage section starts ON that page rather than leaving it blank —
-    // Word's rule (athabasca: a page-break paragraph immediately followed by
-    // an empty section-break paragraph must not insert a blank page). Parity
-    // breaks (odd/even page) still force their own page.
+    // a nextPage/continuous section starts ON that page rather than leaving it
+    // blank — Word's rule (athabasca: a page-break paragraph immediately
+    // followed by an empty section-break paragraph must not insert a blank
+    // page; wild-multicolumn: a hard page break before a continuous multi-col
+    // section starts that section on the fresh page). Parity breaks (odd/even
+    // page) still force their own page.
     if (
       sectionStart &&
       this.pages.length > 0 &&
       this.cur &&
       this.cur.items.length === 0 &&
       this.pageIsEmptyAtCursor() &&
-      (sp.type === undefined || sp.type === "nextPage")
+      (sp.type === undefined || sp.type === "nextPage" || sp.type === "continuous")
     ) {
       this.pages.pop();
     }
@@ -396,7 +407,11 @@ class Engine {
     }
 
     const snap = this.snapshot();
-    const sharedPartialPage = this.y > this.cur.bodyTop + 0.01;
+    // A partial page is only "shared" when it actually holds content. When the
+    // section boundary landed on a fresh page (e.g. a preceding hard page break
+    // emptied the cursor to the page top), the multi-column section starts on
+    // THAT page rather than moving to yet another fresh page.
+    const sharedPartialPage = this.y > this.cur.bodyTop + 0.01 && this.cur.items.length > 0;
     // Measure pass from the current (possibly shared) position.
     this.beginMeasure();
     this.layoutBlocks(section.blocks);
@@ -1367,8 +1382,18 @@ class Engine {
     }
 
     closeFragment(lines.length, true);
-    this.y += spacingAfter;
-    this.lastParaSpacingAfter = spacingAfter;
+    // A paragraph whose last content is a forced page/column break puts its
+    // paragraph mark on the SAME line as the break on the OLD page (the
+    // "trailing break leaves no line" rule), so its spacing-after belongs to
+    // the old page too - it must not push the fresh page's first content down.
+    // Without this a hard page break before a continuous section break left the
+    // new page carrying a phantom spacing-after band, which the following
+    // multi-column section then read as a shared partial page and skipped to a
+    // blank next page (wild-multicolumn: an empty <w:br type="page"/> paragraph
+    // between the section-2 table and the section-3 columns forced a blank page).
+    const endedWithBreak = lines.length > 0 && lines[lines.length - 1].forcedBreakAfter !== undefined;
+    if (!endedWithBreak) this.y += spacingAfter;
+    this.lastParaSpacingAfter = endedWithBreak ? 0 : spacingAfter;
     this.lastParaWasEmpty = !paragraphHasContent(para);
   }
 
@@ -2383,7 +2408,18 @@ class Engine {
       // multi-page row splits). w:cantSplit, exact-height, header, and
       // vertically merged rows never split.
       let guard = 0;
-      while (this.y + rowHeight > this.bodyBottom - this.rowNoteHeight(laid) + 0.01 && guard++ < 50) {
+      // Word's page-fit test for a table row allows a small bounded overhang
+      // past the body bottom before it moves/splits the row - the row's trailing
+      // line-leading and its bottom rule sit in the margin band the same way a
+      // body line's leading may overhang (DISCOVERIES: fit uses the font box, not
+      // the full line box). Only when nothing reserves the bottom band: a page
+      // with footnotes already accounts for that space (wild-doerfp), so the
+      // allowance is suppressed there. Bounded well under the ~one-line gap that
+      // makes Word move a whole row (parity2-nestedtables moves a 56pt row with
+      // 31pt left), so genuine page breaks are unaffected.
+      const noteReserve = this.rowNoteHeight(laid) + this.footnoteReserve(this.cur);
+      const overhang = noteReserve > 0 ? 0 : ROW_OVERHANG_TOL;
+      while (this.y + rowHeight > this.bodyBottom - this.rowNoteHeight(laid) + overhang + 0.01 && guard++ < 50) {
         const freshBody = this.cur.bodyBottom - this.cur.bodyTop;
         const canSplit =
           rowHeight > freshBody &&
@@ -2661,6 +2697,77 @@ class Engine {
     return { cells, height: maxH };
   }
 
+  /**
+   * Effective conditional table-style format for a cell, layering the
+   * applicable w:tblStylePr blocks (banding, first/last row & column, corners)
+   * in ECMA-376 precedence against the table's tblLook. A direct cell shd/border
+   * still wins over this (resolved by the caller). Returns undefined when the
+   * table has no style-driven conditional formatting.
+   */
+  private condFor(
+    tbl: Table,
+    rowIdx: number,
+    colStart: number,
+    colSpan: number,
+    nRows: number,
+    nCols: number,
+  ): TableCondFormat | undefined {
+    const styleId = tbl.props.styleId;
+    if (!styleId) return undefined;
+    let resolved = this.condCache.get(styleId);
+    if (!resolved) {
+      resolved = resolveTableConditional(this.doc.styles, styleId);
+      this.condCache.set(styleId, resolved);
+    }
+    if (resolved.formats.size === 0) return undefined;
+    const look = tbl.props.tblLook ?? {
+      firstRow: true,
+      lastRow: false,
+      firstColumn: true,
+      lastColumn: false,
+      noHBand: false,
+      noVBand: false,
+    };
+    const isFirstRow = look.firstRow && rowIdx === 0;
+    const isLastRow = look.lastRow && rowIdx === nRows - 1;
+    const isFirstCol = look.firstColumn && colStart === 0;
+    const isLastCol = look.lastColumn && colStart + colSpan === nCols;
+
+    // Precedence low→high: banding < first/last col < first/last row < corners.
+    const order: TableCondType[] = ["wholeTable"];
+    if (!look.noVBand && !isFirstCol && !isLastCol) {
+      const bandCol = colStart - (look.firstColumn ? 1 : 0);
+      if (bandCol >= 0) {
+        order.push(Math.floor(bandCol / resolved.colBandSize) % 2 === 0 ? "band1Vert" : "band2Vert");
+      }
+    }
+    if (!look.noHBand && !isFirstRow && !isLastRow) {
+      const bandRow = rowIdx - (look.firstRow ? 1 : 0);
+      if (bandRow >= 0) {
+        order.push(Math.floor(bandRow / resolved.rowBandSize) % 2 === 0 ? "band1Horz" : "band2Horz");
+      }
+    }
+    if (isFirstCol) order.push("firstCol");
+    if (isLastCol) order.push("lastCol");
+    if (isFirstRow) order.push("firstRow");
+    if (isLastRow) order.push("lastRow");
+    if (isFirstRow && isFirstCol) order.push("nwCell");
+    if (isFirstRow && isLastCol) order.push("neCell");
+    if (isLastRow && isFirstCol) order.push("swCell");
+    if (isLastRow && isLastCol) order.push("seCell");
+
+    let out: TableCondFormat | undefined;
+    for (const type of order) {
+      const cf = resolved.formats.get(type);
+      if (!cf) continue;
+      if (!out) out = {};
+      if (cf.shd !== undefined) out.shd = cf.shd;
+      if (cf.bold !== undefined) out.bold = cf.bold;
+      if (cf.borders) out.borders = { ...out.borders, ...cf.borders };
+    }
+    return out;
+  }
+
   private paintRow(
     tbl: Table,
     row: TableRow,
@@ -2674,16 +2781,27 @@ class Engine {
     const y = this.y;
     const isFirstRow = rowIdx === 0;
     const isLastRow = rowIdx === tbl.rows.length - 1;
+    const nCols = widths.length;
+    const nRows = tbl.rows.length;
+    // Grid column start per cell (gridSpan-aware), for conditional banding.
+    const colStartByIdx = new Map<number, number>();
+    let gp = 0;
+    for (const c of row.cells) {
+      colStartByIdx.set(row.cells.indexOf(c), gp);
+      gp += c.props.gridSpan;
+    }
 
     for (const cellLay of laid.cells) {
       const cell = row.cells[cellLay.cellIdx];
       const cx = x0 + cellLay.x;
       const isFirstCol = cellLay.x === 0;
       const isLastCol = Math.abs(cellLay.x + cellLay.width - widths.reduce((a, b) => a + b, 0)) < 0.5;
+      const colStart = colStartByIdx.get(cellLay.cellIdx) ?? 0;
+      const cond = this.condFor(tbl, rowIdx, colStart, cell.props.gridSpan, nRows, nCols);
 
       if (cell.props.vMerge === "continue") {
         // Only vertical borders continue through merged cells.
-        this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, rowHeight, isFirstRow, isLastRow, isFirstCol, isLastCol, true);
+        this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, rowHeight, isFirstRow, isLastRow, isFirstCol, isLastCol, true, cond?.borders);
         continue;
       }
 
@@ -2691,8 +2809,10 @@ class Engine {
       // not just its starting row.
       const cellH = cellLay.spanHeight ?? rowHeight;
 
-      if (cell.props.shading) {
-        page.items.push({ kind: "rect", x: cx, y, width: cellLay.width, height: cellH, fill: cell.props.shading });
+      // Direct cell shd wins; otherwise the table style's conditional banding.
+      const fill = cell.props.shading ?? cond?.shd;
+      if (fill) {
+        page.items.push({ kind: "rect", x: cx, y, width: cellLay.width, height: cellH, fill });
       }
 
       // Vertical alignment offset.
@@ -2716,7 +2836,7 @@ class Engine {
         page.items.push(it);
       }
 
-      this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, cellH, isFirstRow, isLastRow, isFirstCol, isLastCol, false);
+      this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, cellH, isFirstRow, isLastRow, isFirstCol, isLastCol, false, cond?.borders);
     }
   }
 
@@ -2733,23 +2853,35 @@ class Engine {
     firstCol: boolean,
     lastCol: boolean,
     mergedContinue: boolean,
+    condBorders?: { top?: Border; bottom?: Border; left?: Border; right?: Border; insideH?: Border; insideV?: Border },
   ): void {
     const tb = tbl.props.borders;
     const cb = cell.props.borders;
-    const pick = (own: Border | undefined, outer: Border | undefined, inner: Border | undefined, isOuter: boolean): Border | undefined => {
+    // Precedence per physical edge: direct cell border > conditional style
+    // border (same-named side, e.g. firstRow's thick bottom underline) > table
+    // grid (outer side / insideH|V). The conditional's same-named side maps
+    // directly to the cell edge for single-row/column bands (the common case).
+    const pick = (
+      own: Border | undefined,
+      cond: Border | undefined,
+      outer: Border | undefined,
+      inner: Border | undefined,
+      isOuter: boolean,
+    ): Border | undefined => {
       if (own) return own.style === "none" ? undefined : own;
+      if (cond !== undefined) return cond.style === "none" ? undefined : cond;
       const fallback = isOuter ? outer : inner;
       return fallback && fallback.style !== "none" ? fallback : undefined;
     };
 
     const top = mergedContinue || cell.props.vMerge === "continue"
       ? undefined
-      : pick(cb?.top, tb?.top, tb?.insideH, firstRow);
+      : pick(cb?.top, condBorders?.top, tb?.top, tb?.insideH, firstRow);
     const bottom = cell.props.vMerge === "restart" && !lastRow
       ? undefined
-      : pick(cb?.bottom, tb?.bottom, tb?.insideH, lastRow);
-    const left = pick(cb?.left, tb?.left, tb?.insideV, firstCol);
-    const right = pick(cb?.right, tb?.right, tb?.insideV, lastCol);
+      : pick(cb?.bottom, condBorders?.bottom, tb?.bottom, tb?.insideH, lastRow);
+    const left = pick(cb?.left, condBorders?.left, tb?.left, tb?.insideV, firstCol);
+    const right = pick(cb?.right, condBorders?.right, tb?.right, tb?.insideV, lastCol);
 
     if (top) page.items.push({ kind: "edge", x1: x, y1: y, x2: x + w, y2: y, border: top });
     if (bottom) page.items.push({ kind: "edge", x1: x, y1: y + h, x2: x + w, y2: y + h, border: bottom });

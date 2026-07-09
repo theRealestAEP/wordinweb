@@ -1,7 +1,15 @@
 import { XmlElement, attr, child, children, childVal, intAttr, onOff } from "../xml.js";
-import { ParaProps, RunProps, Style, Styles, TableProps } from "../model.js";
+import { ParaProps, RunProps, Style, Styles, TableProps, TableCondFormat, TableCondType } from "../model.js";
 import { twipsToPx } from "../units.js";
-import { ParseContext, mergeParaProps, mergeRunProps, parseBorder, parseParaProps, parseRunProps } from "./properties.js";
+import {
+  ParseContext,
+  mergeParaProps,
+  mergeRunProps,
+  parseBorder,
+  parseParaProps,
+  parseRunProps,
+  parseShading,
+} from "./properties.js";
 
 export function parseStyles(root: XmlElement | undefined, ctx: ParseContext): Styles {
   const styles: Styles = {
@@ -69,6 +77,38 @@ export function parseStyles(root: XmlElement | undefined, ctx: ParseContext): St
         };
       }
       style.tblPr = tp;
+      const rbs = intAttr(child(tblPr, "tblStyleRowBandSize"), "val");
+      if (rbs !== undefined) style.rowBandSize = rbs;
+      const cbs = intAttr(child(tblPr, "tblStyleColBandSize"), "val");
+      if (cbs !== undefined) style.colBandSize = cbs;
+      // Conditional formatting (w:tblStylePr): banding fills, header/last-row
+      // borders and bold — resolved per cell against tblLook at paint time.
+      const cond = new Map<TableCondType, TableCondFormat>();
+      for (const cp of children(s, "tblStylePr")) {
+        const type = attr(cp, "type") as TableCondType | undefined;
+        if (!type) continue;
+        const cf: TableCondFormat = {};
+        const tcPr = child(cp, "tcPr");
+        if (tcPr) {
+          const shd = parseShading(child(tcPr, "shd"), ctx);
+          if (shd) cf.shd = shd;
+          const b = child(tcPr, "tcBorders");
+          if (b) {
+            cf.borders = {
+              top: parseBorder(child(b, "top"), ctx),
+              bottom: parseBorder(child(b, "bottom"), ctx),
+              left: parseBorder(child(b, "left"), ctx),
+              right: parseBorder(child(b, "right"), ctx),
+              insideH: parseBorder(child(b, "insideH"), ctx),
+              insideV: parseBorder(child(b, "insideV"), ctx),
+            };
+          }
+        }
+        const rp = child(cp, "rPr");
+        if (rp && onOff(child(rp, "b"))) cf.bold = true;
+        cond.set(type, cf);
+      }
+      if (cond.size > 0) style.condFormats = cond;
     }
     styles.byId.set(id, style);
     if (style.isDefault && type === "paragraph") styles.defaultParagraphStyle = id;
@@ -128,6 +168,41 @@ export function resolveTableStyleProps(styles: Styles, styleId: string): { pPr?:
     if (s.rPr) rPr = rPr ? mergeRunProps(rPr, s.rPr) : { ...s.rPr };
   }
   return { pPr, rPr };
+}
+
+/**
+ * Conditional table formats (w:tblStylePr) and band sizes resolved through a
+ * table style's basedOn chain (derived style wins over its base). Returns a map
+ * keyed by conditional type; each entry is used per cell against the table's
+ * tblLook + row/column position at paint time.
+ */
+export function resolveTableConditional(
+  styles: Styles,
+  styleId: string | undefined,
+): { formats: Map<TableCondType, TableCondFormat>; rowBandSize: number; colBandSize: number } {
+  const chain: Style[] = [];
+  let cur = styleId;
+  let guard = 0;
+  while (cur && guard++ < MAX_CHAIN) {
+    const st = styles.byId.get(cur);
+    if (!st) break;
+    chain.unshift(st);
+    cur = st.basedOn;
+  }
+  const formats = new Map<TableCondType, TableCondFormat>();
+  let rowBandSize = 1;
+  let colBandSize = 1;
+  for (const st of chain) {
+    if (st.rowBandSize !== undefined) rowBandSize = st.rowBandSize;
+    if (st.colBandSize !== undefined) colBandSize = st.colBandSize;
+    if (st.condFormats) {
+      for (const [type, cf] of st.condFormats) {
+        const prev = formats.get(type);
+        formats.set(type, prev ? { ...prev, ...cf } : { ...cf });
+      }
+    }
+  }
+  return { formats, rowBandSize, colBandSize };
 }
 
 /** Effective run props contributed by a character style chain. */
