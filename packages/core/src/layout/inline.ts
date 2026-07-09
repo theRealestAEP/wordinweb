@@ -1064,11 +1064,14 @@ function buildAtoms(
     // to the whole string's measure. Summing independently measured words +
     // spaces overshoots by ~1px per space (side bearings/kerning), which
     // accumulates enough to move line breaks off Word's.
+    // w:w character scaling multiplies every advance (the renderer stretches
+    // the painted glyphs by the same factor via scaleX).
+    const tScale = props.textScale ?? 1;
     let prevCum = 0;
     for (const part of parts) {
       if (part.length === 0) continue;
       const end = offset + part.length;
-      const cum = measurer.width(text.slice(0, end), font, props.letterSpacing);
+      const cum = measurer.width(text.slice(0, end), font, props.letterSpacing) * tScale;
       const partWidth = Math.max(cum - prevCum, 0);
       const src = srcBase ? { run: srcBase.run, t: srcBase.t, offset: srcBase.offset + offset } : undefined;
       if (part[0] === " ") {

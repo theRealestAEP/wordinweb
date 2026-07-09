@@ -101,10 +101,21 @@ export function parseShading(el: XmlElement | undefined, ctx: ParseContext): str
     const mapped = ctx.theme.colors.get(themeFill);
     if (mapped) return applyTintShade(mapped, attr(el, "themeFillTint"), attr(el, "themeFillShade"));
   }
-  if (fill && fill !== "auto") return "#" + fill;
-  // val="pct.." patterns with a color are rare in body text; treat solid val
   const val = attr(el, "val");
   const color = attr(el, "color");
+  // val="pctNN": blend NN% of the pattern color over the fill (white when
+  // auto). Word renders pct25 blue as a light blue tint, not solid navy.
+  const pct = val ? /^pct(\d+)$/.exec(val) : null;
+  if (pct && color && color !== "auto") {
+    const frac = Math.min(parseInt(pct[1], 10), 100) / 100;
+    const base = fill && fill !== "auto" && fill.length === 6 ? fill : "FFFFFF";
+    const hex = (s: string) => [0, 2, 4].map((i) => parseInt(s.slice(i, i + 2), 16));
+    const [br, bg, bb] = hex(base);
+    const [cr, cg, cb] = hex(color.length === 6 ? color : "000000");
+    const mix = (b: number, c: number) => Math.round(b + (c - b) * frac);
+    return "#" + [mix(br, cr), mix(bg, cg), mix(bb, cb)].map((n) => n.toString(16).padStart(2, "0")).join("");
+  }
+  if (fill && fill !== "auto") return "#" + fill;
   if (val === "solid" && color && color !== "auto") return "#" + color;
   return undefined;
 }
@@ -214,6 +225,11 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
 
   const spacing = intAttr(child(rPr, "spacing"), "val");
   if (spacing !== undefined) props.letterSpacing = twipsToPx(spacing);
+
+  // w:w: horizontal character scaling in percent (Text scale 150% stretches
+  // glyph advances and painted glyphs; 66% condenses).
+  const wScale = intAttr(child(rPr, "w"), "val");
+  if (wScale !== undefined && wScale > 0 && wScale !== 100) props.textScale = wScale / 100;
 
   const rStyle = childVal(rPr, "rStyle");
   if (rStyle) props.styleId = rStyle;

@@ -88,6 +88,8 @@ export interface RunProps {
   smallCaps?: boolean;
   /** Letter spacing px (w:spacing, twips in OOXML). */
   letterSpacing?: number;
+  /** w:w horizontal character scaling as a fraction (1.5 = 150%). */
+  textScale?: number;
   vanish?: boolean;
   /** Character style id (w:rStyle). */
   styleId?: string;

@@ -787,6 +787,12 @@ function renderText(item: TextItem): HTMLElement {
   // reduced font size); CSS font-variant would be a no-op on the emitted
   // uppercase text and must not double-apply.
   if (props.letterSpacing) el.style.letterSpacing = `${props.letterSpacing}px`;
+  // w:w character scaling: the engine already scaled the advances; stretch
+  // the painted glyphs to match. Math items own their transform (scaleY).
+  if (props.textScale && props.textScale !== 1 && !item.mathScaleY) {
+    el.style.transform = `scaleX(${props.textScale})`;
+    el.style.transformOrigin = "0 50%";
+  }
 
   if (item.mathSrc) {
     el.dataset.dxwMath = "1";
