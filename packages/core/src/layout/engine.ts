@@ -97,6 +97,14 @@ const PAGE_FMT: Record<string, string> = {
 
 /** Height of the footnote separator strip (one small line, like Word). */
 const NOTE_SEP_H = 14;
+/** Body-fill reserve above a page's footnotes. Word does not butt body text
+ * against the separator rule: the separator is a full Normal paragraph, so
+ * Word leaves its line box plus the gap down to the first footnote line. That
+ * band is bigger than the 14px rule strip we PAINT (NOTE_SEP_H), so the
+ * body-fill limit must reserve it or we pack ~2 extra lines per footnoted page
+ * (doerfp p3 fit a 4-line paragraph Word split 2/2). Only body-fill math uses
+ * this; footnotes stay bottom-anchored via NOTE_SEP_H. */
+const NOTE_SEP_RESERVE = 40;
 /** Word's separator rule is a short line, 2in max. */
 const NOTE_SEP_LEN = 192;
 
@@ -667,7 +675,7 @@ class Engine {
    * Capped so a pathological footnote can't push bodyBottom above bodyTop. */
   private footnoteReserve(page: InternalPage): number {
     if (page.footnotes.length === 0) return 0;
-    const full = NOTE_SEP_H + page.footnoteH;
+    const full = NOTE_SEP_RESERVE + page.footnoteH;
     return Math.min(full, (page.bodyBottom - page.bodyTop) * 0.9);
   }
 
@@ -697,7 +705,7 @@ class Engine {
       if (!this.doc.footnotes.has(span.noteId)) continue;
       h += this.measureFootnote(span.noteId).height;
     }
-    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_H;
+    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_RESERVE;
     return h;
   }
 
@@ -716,7 +724,7 @@ class Engine {
         h += this.measureFootnote(it.noteId).height;
       }
     }
-    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_H;
+    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_RESERVE;
     return h;
   }
 
@@ -790,8 +798,19 @@ class Engine {
       if (block.type === "paragraph") {
         // An empty paragraph that only carries a section break takes no
         // vertical space in Word (parity-colbalance: the columns start
-        // exactly one line-advance below the intro, no mark line).
-        if (block.sectionBreak && !paragraphHasContent(block)) continue;
+        // exactly one line-advance below the intro, no mark line). It still
+        // feeds the spacing-collapse chain: its spacing-after carries into the
+        // next section's first paragraph, so an empty Heading1 sectPr para
+        // (before=after=18pt) fully absorbs the next Heading1's 18pt before and
+        // the section title lands at the margin (doerfp p27, not 10px below).
+        if (block.sectionBreak && !paragraphHasContent(block)) {
+          const sbAfter = this.doc.effectiveParaProps(block).spacingAfter ?? 0;
+          if (sbAfter > this.lastParaSpacingAfter) {
+            this.lastParaSpacingAfter = sbAfter;
+            this.lastParaWasEmpty = false;
+          }
+          continue;
+        }
         this.placeParagraph(block, blocks[i - 1], blocks[i + 1], blocks, i);
       } else {
         this.placeTable(block);
@@ -1693,6 +1712,10 @@ class Engine {
     fields: FieldContext,
     /** Page coordinates where this frame will be placed (for anchored shapes). */
     origin?: { x: number; y: number },
+    /** Drop a trailing empty paragraph's height (bottom-aligned cells: Word
+     * does not extend the row for a final blank line - doerfp's FUNODURES box
+     * row is "heading + empty", rendered one line tall, not two). */
+    dropTrailingEmpty?: boolean,
   ): { items: PageItem[]; height: number } {
     const items: PageItem[] = [];
     let y = 0;
@@ -1734,6 +1757,19 @@ class Engine {
           blocks[i - 1].type === "table" &&
           !block.sectionBreak &&
           isEmptyParagraph(block)
+        ) {
+          framePrevAfter = 0;
+          continue;
+        }
+        // A final blank line in a bottom-aligned cell adds no height in Word -
+        // but only when it trails real content. A cell that is ONLY a blank
+        // line (doerfp's box uses lone-empty rows as spacers) still renders it.
+        if (
+          dropTrailingEmpty &&
+          i === blocks.length - 1 &&
+          !block.sectionBreak &&
+          isEmptyParagraph(block) &&
+          blocks.slice(0, i).some((b) => b.type === "table" || (b.type === "paragraph" && !isEmptyParagraph(b)))
         ) {
           framePrevAfter = 0;
           continue;
@@ -2187,11 +2223,25 @@ class Engine {
    * advance includes it for content-sized rows too, not just trHeight rows
    * (parity2-nestedtables: 56.0pt rows = 3 lines + spacing-after + 4pt
    * cell margins + 0.5pt of sz-4 borders; without the share, rows run
-   * 0.39pt short and the grid drifts up the page). */
+   * 0.39pt short and the grid drifts up the page). A boundary can be defined
+   * table-wide (tblBorders insideH/top/bottom) OR only per cell (tcBorders):
+   * doerfp's roster tables draw sz-4 rules purely via cell bottom borders and
+   * no tblBorders, so the share must also see the adjacent cells' borders or
+   * every row runs 0.5pt short and the 22-row grid drifts ~15px. */
   private rowBorderShare(tbl: Table, ri: number): number {
     const tb = tbl.props.borders;
     const bw = (b?: Border) => (b && b.style !== "none" ? b.width : 0);
-    return (bw(ri === 0 ? tb?.top : tb?.insideH) + bw(ri === tbl.rows.length - 1 ? tb?.bottom : tb?.insideH)) / 2;
+    const rows = tbl.rows;
+    const cellTop = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.top)));
+    const cellBot = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.bottom)));
+    // Effective horizontal rule at boundary k (0 = table top .. nRows = bottom):
+    // the thickest border declared for it, whether table-wide or per cell.
+    const boundary = (k: number): number => {
+      if (k === 0) return Math.max(bw(tb?.top), cellTop(0));
+      if (k === rows.length) return Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
+      return Math.max(bw(tb?.insideH), cellBot(k - 1), cellTop(k));
+    };
+    return (boundary(ri) + boundary(ri + 1)) / 2;
   }
 
   private cellMarginsOf(tbl: Table): { top?: number; right?: number; bottom?: number; left?: number } {
@@ -2578,7 +2628,13 @@ class Engine {
       }
       const m = { ...defaults, ...cell.props.margins };
       const innerWidth = Math.max(4, w - (m.left ?? 0) - (m.right ?? 0));
-      const { items, height } = this.layoutFrame(cell.blocks, innerWidth, fields ?? this.fieldCtx());
+      const { items, height } = this.layoutFrame(
+        cell.blocks,
+        innerWidth,
+        fields ?? this.fieldCtx(),
+        undefined,
+        cell.props.verticalAlign === "bottom",
+      );
       for (const it of items) offsetItem(it, (m.left ?? 0), (m.top ?? 0));
       cells.push({ items, height: height + (m.top ?? 0) + (m.bottom ?? 0), x, width: w, cellIdx: ci });
       maxH = Math.max(maxH, height + (m.top ?? 0) + (m.bottom ?? 0));
