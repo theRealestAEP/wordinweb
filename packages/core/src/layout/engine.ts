@@ -992,6 +992,10 @@ class Engine {
    * lines move below it). */
   private consumedAnchors = new WeakSet<Shape>();
 
+  /** Frame paragraphs already placed by a preceding paragraph's lookahead
+   * (page/margin-anchored frames reflow earlier content around them). */
+  private consumedFrames = new WeakSet<object>();
+
   /** Line bounds callback honoring this page's floating-image exclusions. */
   private makeBoundsAt(paraTop: number) {
     const page = this.cur;
@@ -1198,6 +1202,7 @@ class Engine {
     // A positioned text frame (w:framePr with a width) is lifted out of normal
     // flow: it paints at an absolute anchor position and body text wraps around
     // it. It does NOT advance the cursor or the spacing chain (staging-frames).
+    if (this.consumedFrames.has(para)) return; // placed by the previous paragraph's lookahead
     if (props.frame && !props.dropCap && this.cur.physIndex !== -1) {
       const fr = this.resolveFrame(props.frame);
       // A frame needs a width to be lifted out of flow. A widthless
@@ -1312,6 +1317,10 @@ class Engine {
     };
     const retractParaAnchors = (): void => {
       if (lookMark) {
+        if (lookFrame) {
+          this.consumedFrames.delete(lookFrame);
+          lookFrame = null;
+        }
         // Lookahead floats retract with the paragraph; the anchor paragraph
         // emits them normally on the new page/column instead.
         lookMark.page.items.length = Math.min(lookMark.page.items.length, lookMark.items);
@@ -1381,6 +1390,7 @@ class Engine {
     // contributes no height — measured: body resumes exactly one heading
     // height below the displaced heading).
     let lookMark: { page: InternalPage; items: number; floats: number; shapes: Shape[] } | null = null;
+    let lookFrame: object | null = null;
     if (next?.type === "paragraph" && broken.lines.length > 0) {
       const linesH = broken.lines.reduce((a, l) => a + l.height, 0);
       // Predict from the COLLAPSED paragraph top (paraTopEstimate carries the
@@ -1411,6 +1421,37 @@ class Engine {
         this.emitAnchors(hits, this.cur, this.fieldCtx(), this.colX, predictedNextTop);
         for (const s of hits) this.consumedAnchors.add(s);
         broken = breakNow(paraTopEstimate);
+      }
+      // Same reflow for a PAGE/MARGIN-anchored framePr paragraph that follows:
+      // its position is ABSOLUTE (no prediction needed), and Word flows the
+      // preceding content around it (staging-frames p1: a page-anchored box
+      // over the opening heading — the heading wraps beside/below the frame).
+      if (!lookMark && !this.consumedFrames.has(next)) {
+        const nextProps = this.doc.effectiveParaProps(next);
+        if (nextProps.frame && !nextProps.dropCap) {
+          const fr = this.resolveFrame(nextProps.frame);
+          if (
+            fr.w !== undefined &&
+            fr.wrap !== "none" &&
+            (fr.vAnchor === "page" || fr.vAnchor === "margin") &&
+            !(fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1)
+          ) {
+            const top = fr.vAnchor === "page" ? fr.y : this.sp.marginTop + fr.y;
+            const paraBottom = effTop + linesH;
+            if (top <= paraBottom + 0.25) {
+              lookMark = {
+                page: this.cur,
+                items: this.cur.items.length,
+                floats: (this.floats.get(this.cur) ?? []).length,
+                shapes: [],
+              };
+              this.placeFrameParagraph(next, fr);
+              this.consumedFrames.add(next);
+              lookFrame = next;
+              broken = breakNow(paraTopEstimate);
+            }
+          }
+        }
       }
     }
 
