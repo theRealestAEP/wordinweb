@@ -833,6 +833,7 @@ function renderText(item: TextItem): HTMLElement {
 
 function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Border, rotate?: { deg: number; ox: number; oy: number }): HTMLElement {
   const el = document.createElement("div");
+  el.dataset.dxwEdge = "1";
   el.style.position = "absolute";
   if (rotate) {
     el.style.transform = `rotate(${rotate.deg}deg)`;
