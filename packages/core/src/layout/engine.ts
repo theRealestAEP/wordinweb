@@ -1372,7 +1372,26 @@ class Engine {
       for (let li = 0; li < lines.length; li++) {
         simY += lines[li].floatYOffset ?? 0;
         const simBalancing = this.balanceBottom !== undefined && this.col + 1 < this.cur.colXs.length;
-        if ((simBalancing ? simY > bottom + 0.01 : simY + lines[li].fitHeight > bottom + 0.01) && li > segStart) {
+        const overflowsHere = simBalancing ? simY > bottom + 0.01 : simY + lines[li].fitHeight > bottom + 0.01;
+        // The paragraph's VERY FIRST line does not fit on the current partial
+        // page: the whole paragraph moves to the next column/page. This is a
+        // PHYSICAL fit, independent of widowControl — the emit loop moves line 0
+        // down anyway (its overflow test fires at li===0), so the plan must agree
+        // and NOT carry a stale post-line-0 break onto the fresh page. Missing
+        // this orphaned a lone first line onto a spurious blank page for
+        // widowControl=0 paragraphs whose line 0 landed just past the body bottom
+        // (nccih-protocol Default/widowControl=0 notes: 3 spurious blank pages,
+        // 26→23, mean 64.3→24.3).
+        if (overflowsHere && li === segStart && segStart === 0 && onPartialPage && !simBalancing) {
+          breaks.add(0);
+          segStart = 0;
+          simY = this.cur.bandTop;
+          bottom = this.cur.bandTop + bodyHeight;
+          onPartialPage = false;
+          li = -1;
+          continue;
+        }
+        if (overflowsHere && li > segStart) {
           let breakAt = li;
           if (widow) {
             // Orphan: a lone first line at the bottom → push whole paragraph.
