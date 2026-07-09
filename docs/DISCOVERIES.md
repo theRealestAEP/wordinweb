@@ -783,6 +783,58 @@ prior "+254pt at figures" jump), pushing one extra page.
   Cambria Math glyph substitution shifting every math glyph horizontally, which
   the structural comparator scores heavily. That is a font-rendering gap, not a
   height rule, and is out of scope for pagination parity.
+### wild2-legal-nih-contract severity is diffuse cumulative TABLE-ROW drift, not one wrong rule (2026-07)
+The 419-page NIH contract (we render 417, baseline mean ~48% over the first 286
+pages before a Playwright screenshot timeout, 62% of pages ≥50%) was suspected of
+a specific long-table row-pagination bug. Direct measurement from the reference
+PDF **falsified** the single-bug hypothesis and pinned the mechanism as a broad,
+sub-pixel accumulation:
+- **The severity mass IS a cumulative page offset.** Aligning our body-line
+  stream to Word's (difflib on sanitized text, tracking each matched line's page
+  number) shows our pages progressively run AHEAD of Word — content on the same
+  index page drifts from 0 → −1 (by ~p29) → −2 (by ~p238) → −3 (by ~p290), ending
+  −2 (417 vs 419). Because parity-compare scores SAME-INDEX pages, a sustained
+  −2/−3 offset makes essentially every back-half page ~100% mismatched. The
+  baseline bands confirm it: p1–240 mean ~43%, **p241–280 70.7%, p281–320 81%** —
+  the severity tracks the drift magnitude, not any local content, so "our pages
+  265–274 all 100%" is the accumulated offset surfacing, not a local table bug.
+- **The doc is 728 content-sized tables / 2095 rows, ZERO `w:trHeight`.** So every
+  row height = cell content + cell margins (this table style: top/bottom = 0,
+  L/R = 108tw) + `rowBorderShare` (sz6 = 0.75pt all sides). 56% of paragraphs live
+  in cells; the body is a lattice of one-block tables carrying "RUH MUKOR"
+  (`****(USE MODEL…)`) bracketed-guidance rows, bold-red number paragraphs, and
+  lettered clause items.
+- **Every construct, measured individually, matches Word to sub-pixel.** Clean
+  single-row schedule tables (p15) match Word's row rules within ~0.05pt/row. The
+  12pt Calibri body pitch: Word's dominant 14.75/14.50 gap alternation averages
+  **14.652pt = ours (14.648)** — the 14.726 overall mean is inflated by
+  legitimately taller content lines (fill-in-blank underlines, tab leaders,
+  sub/superscript), NOT a pitch error (do NOT tweak the Calibri metric; it would
+  regress benchmark/sample). Multi-line guidance rows resolve `before=15tw`/
+  `after=25tw` correctly (engine probe: 3-line frame 61.26px ⇒ 46.7pt row vs
+  Word 46.75). The only single-line guidance rows that render short (15.00 vs
+  Word 15.50) are the ~10 rare spacing-less variants, not the 920 normal ones.
+- **The residual is a diffuse ~0.1–0.3pt/row deficit** spread over content-heavy
+  lines Word sizes slightly taller and over body-paragraph→table boundaries (the
+  number-para→guidance-table gap is Word 16.25pt vs ours 15.36 = −0.85, but it
+  decomposes into two LARGER opposing sub-pixel effects — Word's table top border
+  sits ~2.2pt higher AND its cell text ~0.5pt lower — so it is not a clean
+  row-height error). ~3–4pt/page × 419 pages ≈ 2–3 lines lost per ~4 pages ⇒ the
+  ~2-page shortfall and the −3-page mid-document drift. No single row rule
+  (`rowHeightFromTrHeight` is unused here, `rowBorderShare`/`cellMarginsOf` are
+  correct for the clean rows, `ROW_OVERHANG_TOL` reclaims our own drift) is wrong.
+- **Method / plateau.** Measured entirely from `parity/wild2-legal-nih-contract-
+  word.pdf` (pdfminer row-rule + baseline geometry) vs DOM probes on :5315 and a
+  temporary `layoutRow` instrumentation (removed). Pinning and safely correcting
+  the per-construct ~0.1–0.3pt deltas needs a Word-export probe sweeping this
+  doc's cell-margin/border/fill-underline line heights — which the overnight
+  screen-lock (−1712, no window) forbids. No engine change is committed: any
+  row-height nudge that "fixes" this doc's page count without a Word reference
+  would be fitted to our own measurements and risks the five calibrated table
+  fixtures (staging-longtable, parity-rowsplit, parity-tables, parity2-
+  nestedtables, and the row rules' benchmark/sample anchors). This is a genuine
+  plateau pending an unlocked Word box, same family as the wild2-math construct-
+  height backlog above.
 
 ## Word template rendering (2026-07, header/footer designs + cover letters)
 
