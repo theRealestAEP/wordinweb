@@ -1712,6 +1712,10 @@ class Engine {
     fields: FieldContext,
     /** Page coordinates where this frame will be placed (for anchored shapes). */
     origin?: { x: number; y: number },
+    /** Drop a trailing empty paragraph's height (bottom-aligned cells: Word
+     * does not extend the row for a final blank line - doerfp's FUNODURES box
+     * row is "heading + empty", rendered one line tall, not two). */
+    dropTrailingEmpty?: boolean,
   ): { items: PageItem[]; height: number } {
     const items: PageItem[] = [];
     let y = 0;
@@ -1753,6 +1757,19 @@ class Engine {
           blocks[i - 1].type === "table" &&
           !block.sectionBreak &&
           isEmptyParagraph(block)
+        ) {
+          framePrevAfter = 0;
+          continue;
+        }
+        // A final blank line in a bottom-aligned cell adds no height in Word -
+        // but only when it trails real content. A cell that is ONLY a blank
+        // line (doerfp's box uses lone-empty rows as spacers) still renders it.
+        if (
+          dropTrailingEmpty &&
+          i === blocks.length - 1 &&
+          !block.sectionBreak &&
+          isEmptyParagraph(block) &&
+          blocks.slice(0, i).some((b) => b.type === "table" || (b.type === "paragraph" && !isEmptyParagraph(b)))
         ) {
           framePrevAfter = 0;
           continue;
@@ -2206,11 +2223,25 @@ class Engine {
    * advance includes it for content-sized rows too, not just trHeight rows
    * (parity2-nestedtables: 56.0pt rows = 3 lines + spacing-after + 4pt
    * cell margins + 0.5pt of sz-4 borders; without the share, rows run
-   * 0.39pt short and the grid drifts up the page). */
+   * 0.39pt short and the grid drifts up the page). A boundary can be defined
+   * table-wide (tblBorders insideH/top/bottom) OR only per cell (tcBorders):
+   * doerfp's roster tables draw sz-4 rules purely via cell bottom borders and
+   * no tblBorders, so the share must also see the adjacent cells' borders or
+   * every row runs 0.5pt short and the 22-row grid drifts ~15px. */
   private rowBorderShare(tbl: Table, ri: number): number {
     const tb = tbl.props.borders;
     const bw = (b?: Border) => (b && b.style !== "none" ? b.width : 0);
-    return (bw(ri === 0 ? tb?.top : tb?.insideH) + bw(ri === tbl.rows.length - 1 ? tb?.bottom : tb?.insideH)) / 2;
+    const rows = tbl.rows;
+    const cellTop = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.top)));
+    const cellBot = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.bottom)));
+    // Effective horizontal rule at boundary k (0 = table top .. nRows = bottom):
+    // the thickest border declared for it, whether table-wide or per cell.
+    const boundary = (k: number): number => {
+      if (k === 0) return Math.max(bw(tb?.top), cellTop(0));
+      if (k === rows.length) return Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
+      return Math.max(bw(tb?.insideH), cellBot(k - 1), cellTop(k));
+    };
+    return (boundary(ri) + boundary(ri + 1)) / 2;
   }
 
   private cellMarginsOf(tbl: Table): { top?: number; right?: number; bottom?: number; left?: number } {
@@ -2597,7 +2628,13 @@ class Engine {
       }
       const m = { ...defaults, ...cell.props.margins };
       const innerWidth = Math.max(4, w - (m.left ?? 0) - (m.right ?? 0));
-      const { items, height } = this.layoutFrame(cell.blocks, innerWidth, fields ?? this.fieldCtx());
+      const { items, height } = this.layoutFrame(
+        cell.blocks,
+        innerWidth,
+        fields ?? this.fieldCtx(),
+        undefined,
+        cell.props.verticalAlign === "bottom",
+      );
       for (const it of items) offsetItem(it, (m.left ?? 0), (m.top ?? 0));
       cells.push({ items, height: height + (m.top ?? 0) + (m.bottom ?? 0), x, width: w, cellIdx: ci });
       maxH = Math.max(maxH, height + (m.top ?? 0) + (m.bottom ?? 0));
