@@ -274,6 +274,36 @@ section. Two independent gaps, both distinct from the balance resume:
    confined to the single wild-multicolumn table (benchmark/sample/
    parity-columns/parity-colbalance have no tables), so out of the resume scope.
 
+**PROBED 2026-07 (`scripts/make-lightgrid-probe.py`, LightGrid-Accent1, tblLook
+04A0, 8×4, faithful reuse of the fixture's styles.xml + theme1.xml):**
+- **Bold bands = firstRow ∪ firstCol, EXACTLY — the naive read was right.** In
+  `parity/probe-lightgrid-word.pdf` every row-0 cell AND every col-0 cell renders
+  `Calibri-Bold` (glyph width 49.51 vs 48.76 for regular); all interior cells are
+  regular. (This theme is inverted — major latin = Calibri, minor = Cambria — and
+  Normal pins Calibri, so header = Calibri-Bold not a serif.) Our engine paints
+  **nothing** bold (DOM fontWeight 400 everywhere). So the p30 regression from
+  post-painting was NOT a wrong band set; it was that bold widens the glyph
+  advance and must feed **line-breaking**. Fix: thread the resolved conditional
+  `bold` (and its rPr) into `layoutRow`→`layoutFrame` so cell text is measured
+  bold, then painted bold — not flipped onto already-laid glyphs.
+- **Header pitch deficit = a missing CONDITIONAL border in `rowBorderShare`.**
+  Word row heights (border-to-border, from the PDF rules): header row = **15.50pt**
+  (top rule 1.0pt sz8 at y693.47 → header/row1 rule **2.25pt sz18** at y677.97),
+  body rows = 14.43–14.5pt (sz8 1.0pt boundaries). Ours is a UNIFORM 14.43pt
+  (= single 11pt Calibri 13.43 + sz8 share 1.0) — body matches, header is
+  ~1.07pt short. The firstRow tblStylePr gives the header a **sz18 (2.25pt)
+  bottom border**; `rowBorderShare` only reads `tbl.props.borders` /
+  `cell.props.borders`, never the tblStylePr conditional borders, so the header
+  boundary is counted as sz8 not sz18. Counting it adds (2.25−1.0)/2 = 0.625pt
+  (14.43→15.06); the residual ~0.44pt is secondary (thick-border row rounding /
+  bold line box). Fix: `rowBorderShare` (and the boundary() helper) must fold in
+  `condFor`'s conditional borders per boundary.
+- **Neither fix shipped** — both thread conditional formatting into the layout /
+  row-height path and touch every style-conditional table, so they need the table
+  fixture gate (staging-*/parity-tables/parity2-nestedtables) + line-break suite
+  before landing. The probe pins the targets precisely (bold set confirmed; header
+  = +0.625pt conditional-border share) so the wiring can be done and validated.
+
 ### firstLine and hanging share ONE mutually-exclusive slot across the style cascade
 `w:ind/@firstLine` and `@hanging` are the same first-line-indent property (they
 can't both apply). When a derived style's `w:ind` specifies one, it must CLEAR an
