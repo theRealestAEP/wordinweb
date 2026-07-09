@@ -63,22 +63,10 @@ const METRIC_SUBSTITUTES: Record<string, string> = {
   // privately; macOS renders CJK with Hiragino / PingFang / Songti. CJK glyphs
   // are full-width (1em) in every one, so widths match regardless of substitute
   // — only the per-family vertical metrics (below) matter for line pitch.
-  "ms mincho": "Hiragino Mincho ProN",
-  "ms pmincho": "Hiragino Mincho ProN",
-  mincho: "Hiragino Mincho ProN",
-  "ms gothic": "Hiragino Sans",
-  "ms pgothic": "Hiragino Sans",
-  gothic: "Hiragino Sans",
-  meiryo: "Hiragino Sans",
-  "yu gothic": "Hiragino Sans",
-  "yu mincho": "Hiragino Mincho ProN",
-  "microsoft jhenghei": "PingFang TC",
-  "microsoft yahei": "PingFang SC",
-  simsun: "Songti SC",
-  nsimsun: "Songti SC",
-  simhei: "Heiti SC",
-  pmingliu: "PingFang TC",
-  mingliu: "PingFang TC",
+  // (CJK faces are NOT substituted here: pushCJK resolves East Asian
+  // CHARACTERS to the macOS faces below directly. A Latin/symbol run merely
+  // DECLARING ascii="MS Gothic" must keep the pre-CJK canvas fallback so its
+  // line height stays normal — wild-athabasca's header "\u2264" run.)
 };
 
 /**
@@ -118,16 +106,12 @@ const WORD_FONT_METRICS: Record<string, { asc: number; desc: number; gap: number
   // (single 18.07pt = 1.643em, baseline 1.364em below the line top). Simplified
   // Chinese isn't covered by MS Mincho, so Word falls back to Microsoft JhengHei
   // whose line box is far taller: 36pt/line (single 33.36pt = 3.033em).
-  "ms mincho": { asc: 1.3636, desc: 0.2794, gap: 0 },
-  "ms pmincho": { asc: 1.3636, desc: 0.2794, gap: 0 },
-  "yu mincho": { asc: 1.3636, desc: 0.2794, gap: 0 },
-  "ms gothic": { asc: 1.3636, desc: 0.2794, gap: 0 },
-  "ms pgothic": { asc: 1.3636, desc: 0.2794, gap: 0 },
-  meiryo: { asc: 1.3636, desc: 0.2794, gap: 0 },
-  "yu gothic": { asc: 1.3636, desc: 0.2794, gap: 0 },
-  "microsoft jhenghei": { asc: 2.2700, desc: 0.7627, gap: 0 },
-  "microsoft yahei": { asc: 2.2700, desc: 0.7627, gap: 0 },
-  simsun: { asc: 2.2700, desc: 0.7627, gap: 0 },
+  "hiragino mincho pron": { asc: 1.3636, desc: 0.2794, gap: 0 },
+  "hiragino sans": { asc: 1.3636, desc: 0.2794, gap: 0 },
+  "pingfang tc": { asc: 2.2700, desc: 0.7627, gap: 0 },
+  "pingfang sc": { asc: 2.2700, desc: 0.7627, gap: 0 },
+  "songti sc": { asc: 2.2700, desc: 0.7627, gap: 0 },
+  "heiti sc": { asc: 2.2700, desc: 0.7627, gap: 0 },
 };
 
 /** Quarter-point in px (0.25pt at 96dpi). */

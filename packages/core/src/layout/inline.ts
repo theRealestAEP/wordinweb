@@ -1266,6 +1266,17 @@ function buildAtoms(
     const japaneseEA = /mincho|gothic|meiryo|^yu|\byu /i.test(family);
     const hasKana = /[぀-ヿ]/.test(seg);
     if (japaneseEA && !hasKana) family = "Microsoft JhengHei";
+    // Resolve directly to the macOS face whose measured profile lives in
+    // WORD_FONT_METRICS. The Windows names deliberately have NO general
+    // substitute/profile so a Latin run that merely DECLARES one keeps a
+    // normal line height (wild-athabasca's header \u2264 in "MS Gothic").
+    const fl = family.toLowerCase();
+    if (/mincho/.test(fl)) family = "Hiragino Mincho ProN";
+    else if (/gothic|meiryo/.test(fl)) family = "Hiragino Sans";
+    else if (/jhenghei|mingliu/.test(fl)) family = "PingFang TC";
+    else if (/yahei/.test(fl)) family = "PingFang SC";
+    else if (/simsun/.test(fl)) family = "Songti SC";
+    else if (/simhei/.test(fl)) family = "Heiti SC";
     const cjkFont: FontSpec = { ...font, family };
     const tScale = props.textScale ?? 1;
     for (let k = 0; k < seg.length; k++) {
