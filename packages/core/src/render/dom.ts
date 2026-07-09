@@ -1,6 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem } from "../layout/types.js";
-import { cssFont } from "../layout/measure.js";
+import { cssFont, cambriaMathDescentShare } from "../layout/measure.js";
 import { Border } from "../model.js";
 import { decodeTiff } from "./tiff.js";
 
@@ -757,7 +757,7 @@ function renderText(item: TextItem): HTMLElement {
   if (item.mathScaleY) {
     // Tall delimiter approximation: stretch the natural glyph vertically
     // around the math axis (Word swaps in a taller glyph variant instead).
-    const descent = boxH * 0.238; // STIX Two Math hhea share
+    const descent = boxH * cambriaMathDescentShare(); // math face hhea share (real Cambria Math or STIX)
     const originY = boxH - descent - (item.mathScaleAnchor ?? 0);
     el.style.transform = `scaleY(${item.mathScaleY})`;
     el.style.transformOrigin = `50% ${originY}px`;
@@ -800,6 +800,9 @@ function renderText(item: TextItem): HTMLElement {
     el.style.setProperty("-webkit-font-smoothing", "auto");
   } else {
     el.style.setProperty("-webkit-font-smoothing", "antialiased");
+    // Hairline stroke tuned to Word's apparent weight. Re-swept (0.15/0.10/0.05/
+    // none) after the real-font flip: 0.15 stays best on benchmark/sample and the
+    // structural residual is not weight-bound, so the original value is kept.
     el.style.setProperty("-webkit-text-stroke", "0.15px currentColor");
   }
 

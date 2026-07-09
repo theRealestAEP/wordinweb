@@ -21,6 +21,11 @@ export interface FontSpec {
   size: number;
   bold: boolean;
   italic: boolean;
+  /** Optional PAINT-only family tried before `family` in the CSS stack, without
+   * affecting metrics or width lookups (keyed by `family`). Used for CJK: the
+   * line-pitch profile stays keyed by the macOS substitute face while the real
+   * Windows glyphs (MS Mincho, Microsoft JhengHei, …) paint when available. */
+  paintFamily?: string;
 }
 
 export interface PathItem {

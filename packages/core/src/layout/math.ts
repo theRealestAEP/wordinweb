@@ -1,6 +1,6 @@
 import { MathNode } from "../model.js";
 import { FontSpec } from "./types.js";
-import { TextMeasurer } from "./measure.js";
+import { TextMeasurer, hasCambriaMath } from "./measure.js";
 
 /**
  * 2D OMML layout, calibrated against Word's own export of parity-math
@@ -34,8 +34,17 @@ const INT_SUP_STAGGER = 2.2 / 11;
 const NARY_E_GAP = 2.5 / 11;
 const MAT_ROW_PITCH = 12.75 / 11;
 const MAT_CENTER_DROP = 0.62 / 11; // row-baseline centroid sits this far BELOW the baseline
-const MAT_COL_GAP = 12.2 / 11;
-const DLM_PAD = 1.2 / 11; // content inset from a delimiter glyph
+// Width-additive matrix/delimiter gaps. The STIX values were calibrated so a
+// STIX-rendered matrix hit Word's total width; real Cambria Math carries Word's
+// true (wider) glyph advances, so the same gaps over-pad and drift the trailing
+// inline text right (parity-math2). Tightened for the real face, verified
+// against the parity-math2 Word PDF; the STIX fallback keeps the originals.
+const MAT_COL_GAP_STIX = 12.2 / 11;
+const MAT_COL_GAP_REAL = 10.0 / 11;
+const DLM_PAD_STIX = 1.2 / 11; // content inset from a delimiter glyph
+const DLM_PAD_REAL = 0.8 / 11;
+const matColGap = (): number => (hasCambriaMath() ? MAT_COL_GAP_REAL : MAT_COL_GAP_STIX);
+const dlmPad = (): number => (hasCambriaMath() ? DLM_PAD_REAL : DLM_PAD_STIX);
 
 // Display-mode geometry (m:oMathPara), measured from Word's own export of
 // parity2-equations at 11pt (baseline offsets are size-11 y0 deltas from the
@@ -287,14 +296,14 @@ function flow(nodes: MathNode[], size: number, dy: number, box: MathBox, measure
         const grow = Math.max(1, innerH / (bm.ascent + bm.descent));
         const put = (ch: string) => {
           box.pieces.push({ text: ch, x: box.width, dy, font: baseFont, scaleY: grow > 1.05 ? grow : undefined, scaleAnchor: axis - dy });
-          box.width += measurer.width(ch, baseFont) + size * DLM_PAD;
+          box.width += measurer.width(ch, baseFont) + size * dlmPad();
         };
         put(node.beg);
         parts.forEach((b, i) => {
           if (i > 0) put("|");
           for (const pc of b.pieces) box.pieces.push({ ...pc, x: box.width + pc.x, dy: dy + pc.dy });
           for (const r of b.rules) box.rules.push({ ...r, x1: box.width + r.x1, x2: box.width + r.x2, dy: dy + r.dy });
-          box.width += b.width + size * DLM_PAD;
+          box.width += b.width + size * dlmPad();
         });
         put(node.end);
         prevOperand = true;
@@ -329,11 +338,11 @@ function flow(nodes: MathNode[], size: number, dy: number, box: MathBox, measure
             const cellX = cx + (colW[ci] - b.width) / 2;
             for (const pc of b.pieces) box.pieces.push({ ...pc, x: cellX + pc.x, dy: rowBase + pc.dy });
             for (const r of b.rules) box.rules.push({ ...r, x1: cellX + r.x1, x2: cellX + r.x2, dy: rowBase + r.dy });
-            cx += colW[ci] + size * MAT_COL_GAP;
+            cx += colW[ci] + size * matColGap();
           });
           if (ri + 1 < cells.length) rowBase -= pitch;
         });
-        box.width = x0 + colW.reduce((a, b) => a + b, 0) + size * MAT_COL_GAP * (nCols - 1);
+        box.width = x0 + colW.reduce((a, b) => a + b, 0) + size * matColGap() * (nCols - 1);
         prevOperand = true;
         break;
       }
