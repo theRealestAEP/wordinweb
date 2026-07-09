@@ -2,6 +2,7 @@ import { DocxDocument } from "../docx.js";
 import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem } from "../layout/types.js";
 import { cssFont } from "../layout/measure.js";
 import { Border } from "../model.js";
+import { decodeTiff } from "./tiff.js";
 
 export interface RenderOptions {
   /** Zoom factor (1 = 100%). */
@@ -618,13 +619,36 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       const bytes = doc.media(item.part);
       if (!bytes) return null;
       const ext = item.part.slice(item.part.lastIndexOf(".") + 1).toLowerCase();
-      const mime = MIME_BY_EXT[ext] ?? "application/octet-stream";
-      const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-      const blob = new Blob([buf], { type: mime });
-      const url = URL.createObjectURL(blob);
-      urls.push(url);
       const img = document.createElement("img");
-      img.src = url;
+      // TIFF is not a web-renderable format; decode it to canvas pixels and
+      // hand the <img> a PNG data URL so scientific TIFF figures (SEM images,
+      // charts pasted from lab tools) aren't a broken box.
+      let decoded: string | null = null;
+      if (ext === "tiff" || ext === "tif") {
+        const dec = decodeTiff(bytes);
+        if (dec) {
+          const canvas = document.createElement("canvas");
+          canvas.width = dec.width;
+          canvas.height = dec.height;
+          const cx = canvas.getContext("2d");
+          if (cx) {
+            const imgData = cx.createImageData(dec.width, dec.height);
+            imgData.data.set(dec.rgba);
+            cx.putImageData(imgData, 0, 0);
+            decoded = canvas.toDataURL("image/png");
+          }
+        }
+      }
+      if (decoded) {
+        img.src = decoded;
+      } else {
+        const mime = MIME_BY_EXT[ext] ?? "application/octet-stream";
+        const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        const blob = new Blob([buf], { type: mime });
+        const url = URL.createObjectURL(blob);
+        urls.push(url);
+        img.src = url;
+      }
       img.style.position = "absolute";
       let node: HTMLElement = img;
       const c = item.crop;
