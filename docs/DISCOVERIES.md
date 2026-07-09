@@ -547,3 +547,35 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   text while Word re-resolves the w:dataBinding xpath against the scrubbed
   core.xml. Live xpath resolution (core.xml / customXml) is a future
   robustness nicety for stale-cache documents, not a real-doc bug.
+- **w:position (raised/lowered text) grows the line box by the FULL shift,
+  additively after the line-spacing multiplier**: a +6pt raise on a Multiple
+  1.08 / after-8pt line advances the pitch by exactly 6.00pt (charstyles
+  probe, pdfminer baselines: 22.5pt normal pitch → 28.5pt), not 6×1.08. The
+  raised run's extension goes above the baseline (baseline moves down within
+  the line); a lowered run's goes below. Line-rule "exact" suppresses it.
+- **Word's PDF export triple-draws emboss/imprint runs** (three offset
+  copies per glyph — pdfminer shows "TTThhheee"); the visible ghost is a
+  gray copy offset down-right (emboss) or up-left (imprint). Approximated
+  with a 1px gray text-shadow. w:outline paints hairline-stroked hollow
+  glyphs (transparent fill, ~0.75pt stroke).
+- **VML textpath (WordArt watermark) fitshape geometry**: Word fills the
+  shape box HEIGHT with the em (~0.86× box height; the glyph band sits
+  slightly above the box's vertical center) and squashes/stretches the
+  glyphs horizontally to the box width — not width-fit-at-natural-aspect.
+  Also: every PageItem kind must be handled in offsetItem — the wordart
+  case was missing, so header watermarks lost the frame's page offset and
+  painted exactly marginLeft/headerDistance up-left of Word on every page.
+- **Literal TAB characters inside w:t render as real tab stops** (generator
+  files; Word normalizes them to w:tab on save). Split into tab atoms at
+  atom-build time, keeping the model text (and editing offsets) intact.
+- **Word pushes a paragraph below a following paragraph's topAndBottom
+  float** (parity2-textboxes): the box anchored at para N's top (posOffset
+  0) is positioned from para N's UNDISPLACED position, then earlier lines
+  that overlap the band (the section heading, para N−1) reflow below the
+  box while the box keeps its first-pass position. Needs iterative/lookahead
+  anchor placement — open problem, parked (~8pp on one fixture page).
+- **Word's autofit column widths don't fit content+constant-margin**
+  (parity-tables): measured slack over PDF glyph advances varies per column
+  (10.4px vs 15.9px on sibling columns, no tblCellMar). tblW w:w="100%"
+  (invalid per ST_TblWidth) is ignored by Word → table autofits to ~601px,
+  not the 624px content width. Open calibration problem, parked.
