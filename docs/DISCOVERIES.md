@@ -10,6 +10,54 @@ Rule of thumb from these: **never calibrate against our own measurements or
 against pdfminer word extents — build a probe doc, export it through Word,
 and read the geometry back out of the PDF.**
 
+### The Times probe VALIDATES `WORD_FONT_METRICS['times new roman']` — the wild2 drifts are NOT TNR pitch (2026-07)
+`scripts/make-times-probe.py` (TNR + bare "Times" at 10/10.5/11/12pt ×
+single/double/1.08×/atLeast, each block 50 forced-break lines in one paragraph)
+was finally exported through an unlocked Word (`parity/probe-times-word.pdf`)
+and regressed (`scripts/read-times-probe.py`, now recursing into pdfminer's
+nested `LTTextBox` containers — it previously only saw top-level lines and
+found none). A linear fit of baseline-y vs line-index nails the raw per-line
+advance immune to Word's quarter-point cumulative-baseline quantization:
+
+| block | config | advance | per-em |
+|---|---|---|---|
+| A | TNR 12pt single | 13.8029pt | 1.150240 |
+| B | TNR 11pt single | 12.6523pt | 1.150211 |
+| C | TNR 10pt single | 11.5035pt | 1.150346 |
+| D | TNR 10.5pt single | 12.0774pt | 1.150229 |
+| E | **Times** 12pt single | 13.8029pt | 1.150240 |
+| F | **Times** 11pt single | 12.6523pt | 1.150211 |
+| G/H | TNR 11/12pt double(480) | — | 2.30048 (= 2×single, exact) |
+| I | TNR 12pt ×1.079(259) | 14.8956pt | 1.241300 (pred 1.15025×1.079167 = 1.241318 ✓) |
+| J | TNR 10.5pt atLeast348 | 17.405pt | pins at 17.40pt (= 348tw) ✓ |
+
+- **Word's true single-spaced TNR/Times per-em is ~1.15025** (mean of the six
+  50-line fits 1.150246, spread ±0.00007). Our baked total is
+  `0.891113+0.216309+0.04248 = 1.149902`. **Delta = +0.000344 em = 0.0041pt/line
+  at 12pt.** That is BELOW Word's own quarter-point quantization floor (~60
+  lines of TNR-12 to accumulate a single 0.25pt tick), so it cannot flip
+  pagination on any TNR-body doc; the earlier "body pitch is correct, do not
+  tweak the hhea value" note (below) stands — my 13.803pt merely lands at the
+  top of that note's measured 13.78–13.80 band. **No source change made:** a
+  global-metric churn for a sub-quantization 0.03 % delta with zero demonstrable
+  fixture benefit is exactly the regression risk to avoid. Recorded here so a
+  future session with a *demonstrated* TNR-pagination-drift fixture can apply
+  gap `0.04248 → 0.042828` (total 1.15025) with confidence.
+- **Bare "Times" === Times New Roman EXACTLY** (E/F advances identical to A/B to
+  the milli-point). Confirms the `times → Times New Roman` entry now in both
+  `METRIC_SUBSTITUTES` and `WORD_FONT_METRICS` (measure.ts) is the correct
+  resolution, not merely a good-enough stand-in.
+- **The wild2 "Times-family drift" fixtures do not actually hinge on TNR pitch.**
+  `wild2-legal-nih-contract` is **Calibri-only** (0 "Times" occurrences in
+  document.xml; its −2p drift is the schedule-table row-height deficit, a
+  separate probe). `wild2-lit-yiddish-rtl` is **Tahoma-cs-dominant** (Hebrew
+  runs inherit docDefault `w:cs="Tahoma"`; a single style declares TNR) — its
+  73.9 severity is RTL/Tahoma-line-box driven, not TNR advance. So item 1 could
+  never have moved either by touching the Times metric.
+- **Reader fix kept:** `read-times-probe.py` now recurses containers and skips
+  pages with <3 lines (double/1.08×/atLeast blocks legitimately spill a sparse
+  tail line onto a 2nd page).
+
 ---
 
 ## Fonts & text measurement
@@ -225,6 +273,36 @@ section. Two independent gaps, both distinct from the balance resume:
    row-height detail, unvalidatable without Word. Both are table-styling issues
    confined to the single wild-multicolumn table (benchmark/sample/
    parity-columns/parity-colbalance have no tables), so out of the resume scope.
+
+**PROBED 2026-07 (`scripts/make-lightgrid-probe.py`, LightGrid-Accent1, tblLook
+04A0, 8×4, faithful reuse of the fixture's styles.xml + theme1.xml):**
+- **Bold bands = firstRow ∪ firstCol, EXACTLY — the naive read was right.** In
+  `parity/probe-lightgrid-word.pdf` every row-0 cell AND every col-0 cell renders
+  `Calibri-Bold` (glyph width 49.51 vs 48.76 for regular); all interior cells are
+  regular. (This theme is inverted — major latin = Calibri, minor = Cambria — and
+  Normal pins Calibri, so header = Calibri-Bold not a serif.) Our engine paints
+  **nothing** bold (DOM fontWeight 400 everywhere). So the p30 regression from
+  post-painting was NOT a wrong band set; it was that bold widens the glyph
+  advance and must feed **line-breaking**. Fix: thread the resolved conditional
+  `bold` (and its rPr) into `layoutRow`→`layoutFrame` so cell text is measured
+  bold, then painted bold — not flipped onto already-laid glyphs.
+- **Header pitch deficit = a missing CONDITIONAL border in `rowBorderShare`.**
+  Word row heights (border-to-border, from the PDF rules): header row = **15.50pt**
+  (top rule 1.0pt sz8 at y693.47 → header/row1 rule **2.25pt sz18** at y677.97),
+  body rows = 14.43–14.5pt (sz8 1.0pt boundaries). Ours is a UNIFORM 14.43pt
+  (= single 11pt Calibri 13.43 + sz8 share 1.0) — body matches, header is
+  ~1.07pt short. The firstRow tblStylePr gives the header a **sz18 (2.25pt)
+  bottom border**; `rowBorderShare` only reads `tbl.props.borders` /
+  `cell.props.borders`, never the tblStylePr conditional borders, so the header
+  boundary is counted as sz8 not sz18. Counting it adds (2.25−1.0)/2 = 0.625pt
+  (14.43→15.06); the residual ~0.44pt is secondary (thick-border row rounding /
+  bold line box). Fix: `rowBorderShare` (and the boundary() helper) must fold in
+  `condFor`'s conditional borders per boundary.
+- **Neither fix shipped** — both thread conditional formatting into the layout /
+  row-height path and touch every style-conditional table, so they need the table
+  fixture gate (staging-*/parity-tables/parity2-nestedtables) + line-break suite
+  before landing. The probe pins the targets precisely (bold set confirmed; header
+  = +0.625pt conditional-border share) so the wiring can be done and validated.
 
 ### firstLine and hanging share ONE mutually-exclusive slot across the style cascade
 `w:ind/@firstLine` and `@hanging` are the same first-line-indent property (they
@@ -492,6 +570,31 @@ column widths we emit vs Word's cached TOC — every body page is then offset by
 front-matter delta. Cracking it needs a Word-export probe of the TOC field
 geometry (entry wrapping, PAGEREF page-number widths, tab-leader fill), which the
 screen-locked session forbids. Left untouched.
+
+**PROBED 2026-07 (`scripts/make-toc-probe.py`): the TOC layout PRIMITIVES are
+correct — the phase23 residual is fixture-specific, not a TOC-rendering bug.**
+A 40-entry probe reusing phase23's real styles.xml + theme1.xml (TOC1/2/3 with
+their `right dot-leader @9350tw` tab, Hyperlink, docDefaults, docGrid
+linePitch=360) exported to `parity/probe-toc-word.pdf`. Word laid it out in
+**43 visual lines on 1 page** with exactly two entries wrapping (the two >70-char
+titles); pitch alternates ~13.0pt (TOC1, `line=240` single) / ~15.5pt (TOC2/3,
+inherited `line=276` ×1.15). Our engine on the same probe (DOM, :5317) produces
+**the identical 43 lines, the SAME two wrap points, and the same pitch
+alternation** — the dot-leader fills one span to the page number (NOT wrapping
+to extra dot rows, an earlier grouping-artifact worry), TOC1's single-spacing
+override is honored, and wrap columns match. So dot leaders / entry wrapping /
+per-style pitch are all correct.
+- The real fixture (90 TOC entries: 12 TOC1 / 35 TOC2 / 43 TOC3) still renders
+  its TOC over OUR pages 7-9 (42+39+11 lines, 72 total pages) as before. Because
+  the faithful probe matches Word line-for-line, the ~1-page TOC over-production
+  is NOT in the primitives — it is real-entry-specific: candidates are extra
+  wraps on the 6 real titles >55 chars (ALL-CAPS TOC1 headings measure wider) or
+  the cached `PAGEREF` field's page-number-column width vs a literal number
+  (the probe used literals). Pinning it needs the REAL fixture exported through
+  Word, which is currently blocked NOT by a locked session but by the fixture
+  FAILING validation (numId=0 undefined + `<w:shadow>` out of order in `<w:rPr>`)
+  — opening it risks a repair dialog that taints refs. Sanitize the fixture
+  (fix numId/rPr order) first, then export and diff the real TOC's wrap columns.
 
 ### allowOverlap="0" slides an anchored shape clear of earlier overlapping floats
 `wp:anchor @allowOverlap="0"` means Word shifts the shape so it does NOT overlap
@@ -910,6 +1013,63 @@ sub-pixel accumulation:
   plateau pending an unlocked Word box, same family as the wild2-math construct-
   height backlog above.
 
+### NIH row-height probe: the deficit is NOT per-row — it is a discrete ~0.79pt per PARAGRAPH→TABLE boundary (2026-07, unlocked Word)
+The plateau above was finally probed on an unlocked box.
+`scripts/make-nih-rowheight-probe.py` reproduces the fixture's exact guidance-
+table style (docDefault Calibri, Normal sz=24; number-paragraph = keepNext +
+`before=100` bold-red; guidance table = tblW auto, tblInd 500, ALL borders
+single **sz6** (0.75pt) space0, shd F3F3F3, single gridCol 9700, cantSplit rows,
+cells inherit TableNormal cellMar top/bottom=0 L/R=108, cell paras
+`before=15`/`after=25`) in five blocks: P 50 single-line rows, Q 20 three-para
+rows, R 40 `[number-para][1-line table]` units, S 20 `[number-para][3-line
+table]` units, T 40 underline-fill rows. Exported to
+`parity/probe-nih-rowheight-word.pdf`; Word pitches read with
+`read-nih-rowheight-probe.py`, ours with `read-nih-ours.mjs` (DOM, :5317, px×0.75).
+Both regress baseline/top-y vs index so the constant baseline-vs-lineboxtop
+offset cancels and the pitch deltas are reference-independent.
+
+| construct | Word | Ours | Δ (Word−Ours) |
+|---|---|---|---|
+| P single-line row pitch | 17.403 | 17.398 | +0.005 |
+| Q 3-para row pitch | 49.209 | 49.195 | +0.014 |
+| T underline-fill row pitch | 17.402 | 17.398 | +0.003 |
+| Q intra-cell line pitch | 15.906 | ~15.875 | +0.03 |
+| **R unit pitch (numpara→numpara)** | 37.803 | 37.047 | **+0.757** |
+| **S unit pitch (tall table)** | 69.612 | 68.843 | **+0.769** |
+| **R para→table boundary gap** | 16.256 | 15.466 | **+0.790** |
+
+- **Intra-table row pitch is CORRECT** (Δ ≤ 0.014pt across single-line,
+  3-paragraph, and underline-fill rows). Underline-fill runs add **zero** height
+  (T === P). The "diffuse ~0.1–0.3pt/row" hypothesis in the entry above is
+  therefore **wrong** — there is no per-row deficit.
+- **The entire drift is a discrete ~0.79pt shortfall at each PARAGRAPH→TABLE top
+  boundary** (numpara baseline → first cell line). Over the fixture's 728
+  one-block tables that is ~575pt ≈ 1.4 pages — the dominant part of the
+  observed −2p (417 vs 419) drift, direction confirmed (we pack tables too
+  tight ⇒ run short). The table→following-paragraph (bottom) boundary is ~right
+  (R/S unit deficit ≈ the top-boundary deficit alone).
+- **Decomposition (two opposing sub-pixel effects, matching the prior note's
+  hunch, now measured):** From the PDF, Word's table top border sits **1.0pt
+  below** the preceding numpara baseline (705.47→704.47) — i.e. it OVERLAPS the
+  paragraph's descent. Our engine drops the border to the numpara's full
+  line-box bottom (~3.2pt below baseline), so **our border is ~2.2pt too LOW**.
+  Independently, Word seats the first cell line **15.25pt below the top border**
+  (identical in block P which has no preceding paragraph, so it is a pure
+  cell-internal rule), whereas ours seats it ~2.5pt higher, so **our first-cell
+  line is ~2.5pt too HIGH relative to the border**. The two nearly cancel, net
+  +0.79pt in Word.
+- **No fix shipped — deliberately.** A correct fix must change TWO things at
+  once (table-to-preceding-paragraph attachment must overlap the paragraph
+  descent; the first line inside a cell must reserve ~a full line's top leading
+  below the top border, not just the glyph ascent) and net exactly +0.79pt.
+  Getting only one right over/under-corrects, and both touch every table, so it
+  must be gated on staging-longtable/parity-rowsplit/parity-tables/
+  parity2-nestedtables + benchmark/sample before landing. A bare +0.79pt nudge
+  on para→table boundaries would be a fitted constant (the anti-fitting rule
+  forbids it). The probe + both readers are committed so the two-part rule can
+  be built and validated safely; this is now a *characterised* task, not a
+  blind plateau.
+
 ## Word template rendering (2026-07, header/footer designs + cover letters)
 
 - **Word's built-in h/f templates decode to five constructs**: inline SDTs
@@ -1053,6 +1213,36 @@ sub-pixel accumulation:
   table 601px, between our content-min (~445px) and full width (624px). The 601
   derivation stays uncracked without a Word-export probe sweeping content ×
   margins × the flexible-column share.
+- **CRACKED (2026-07, probe-autofit): Word autofit is simply
+  PROPORTIONAL-TO-PREFERRED-WIDTH; there is no per-column "slack".** A 10-block
+  sweep (`scripts/make-autofit-probe.py`: 2–4 cols, single non-breaking tokens
+  of known width, cell margins 0/108/300tw, borders on/off, tblW pct=5000 vs
+  auto) exported to `parity/probe-autofit-word.pdf`; column boundaries read from
+  the vertical rules (`read-autofit-probe.py`) vs our DOM (`read-autofit-ours.mjs`).
+  Modelling `col_i = prefᵢ · T / Σpref`, with `prefᵢ = (content advance) +
+  (cell L+R margins) − ~2.4pt` (the ~2.4pt is the glyph SIDE-BEARING my
+  pdfminer glyph-extent over-counts vs Word's advance width), reproduces EVERY
+  block to <0.7pt — e.g. 4-col F predicted 41.4/84.4/142.1/199.8 vs Word
+  41.2/84.3/142.3/199.9; custom-300tw-margin G 107.4/360.2 vs 107.5/360.2;
+  zero-margin E 46.0/116.7/305.0 vs 46.7/116.8/304.2. Equal-content tables (A,J)
+  always split T equally regardless of content size. So the parity-tables
+  "non-constant slack (10.4 vs 15.9px)" was an ARTIFACT of diffing against raw
+  content under a proportional (not additive) distribution plus side-bearing
+  measurement error — not a real per-column rule.
+- **Our engine already distributes proportional-to-pref** (`resolveGridWidths`:
+  `prefW[i]*want/sumPref`), so the DISTRIBUTION is correct. The residual is that
+  our `columnMinPref` `pad = margins.L + margins.R + 2` adds a FLAT `+2px` and
+  our content measure (Carlito advance) INCLUDES the side bearings Word drops, so
+  our `prefᵢ` over-weights narrow columns; on the probe our narrow columns run
+  ~1–5px wide and the wide column ~equally narrow (worst: zero-margin block C
+  67.5 vs Word 63.0; E 49.5 vs 46.7). Direction is uniform (narrow-too-wide).
+  A fix = shrink narrow-column pref bias (drop the `+2`, and/or subtract a
+  side-bearing estimate from measured content) — but it perturbs EVERY autofit
+  column width and thus line wrapping, so it is gated on the full line-break
+  suite (compare-linebreaks 6×0) + parity-tables/staging-grid4/staging-tblextreme
+  + benchmark/sample and was NOT shipped blind here. parity-tables' remaining gap
+  is separately the invalid-`w:w="100%"`-pct (Word ignores → content-fit ~601px);
+  valid `type="pct"` fills 100% correctly in both engines (probe totals both 467.7).
 
 ## Sparse-page metric floor (near-blank pages score high on the structural NCC)
 On pages with very little ink (parity-dividers 8.4%, pleading p4 9.0%, gatech p10
