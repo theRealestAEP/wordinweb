@@ -133,6 +133,20 @@ export interface ParaProps {
   keepNext?: boolean;
   /** w:framePr w:dropCap: the paragraph is a drop-cap letter frame. */
   dropCap?: { mode: "drop" | "margin"; lines: number; hSpace: number };
+  /** w:framePr positioned text frame (absolute-positioned paragraph the body
+   * text wraps around). Geometry in px. */
+  frame?: {
+    w: number;
+    h?: number;
+    hRule: "auto" | "atLeast" | "exact";
+    x: number;
+    y: number;
+    hAnchor: "page" | "margin" | "text" | "column";
+    vAnchor: "page" | "margin" | "text" | "paragraph";
+    xAlign?: "left" | "center" | "right" | "inside" | "outside";
+    yAlign?: "top" | "center" | "bottom" | "inside" | "outside" | "inline";
+    wrap: "around" | "auto" | "notBeside" | "through" | "tight" | "none";
+  };
   keepLines?: boolean;
   pageBreakBefore?: boolean;
   widowControl?: boolean;
@@ -273,6 +287,9 @@ export interface ShapeTextbox {
   wrap?: WrapMode;
   /** behindDoc: paint under the body text, never displace it. */
   behind?: boolean;
+  /** wp:anchor @allowOverlap="0": Word shifts this shape clear of earlier
+   * overlapping floats rather than letting them overlap. Default true. */
+  allowOverlap?: boolean;
   /** Wrap distances px (wp:anchor distT/B/L/R). */
   dist?: { t: number; b: number; l: number; r: number };
   /** a:xfrm rotation, degrees clockwise (rotates the whole box). */

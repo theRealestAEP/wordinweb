@@ -939,6 +939,7 @@ function parseDrawing(
         insets: { l: insetOf("lIns", 9.6), t: insetOf("tIns", 4.8), r: insetOf("rIns", 9.6), b: insetOf("bIns", 4.8) },
         wrap,
         ...(behind ? { behind: true } : {}),
+        ...(attr(anchor, "allowOverlap") === "0" ? { allowOverlap: false } : {}),
         dist: { t: distPx("distT"), b: distPx("distB"), l: distPx("distL"), r: distPx("distR") },
         ...(rot ? { rotation: rot / 60000 } : {}),
       },

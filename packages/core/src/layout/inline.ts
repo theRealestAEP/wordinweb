@@ -433,6 +433,7 @@ export function breakParagraph(
   };
 
   let flushedTrailingBreak = false;
+  let consumedLeadingBreak = false;
   for (let ai = 0; ai < atoms.length; ai++) {
     const atom = atoms[ai];
     if (atom.kind !== "frag") packUntilSpace = false;
@@ -451,10 +452,33 @@ export function breakParagraph(
       // nearly-full preceding page and spuriously double-break (wild-gatech
       // title page -> phantom blank p3).
       if (atom.breakType !== "line" && cur.length === 0 && lines.length === 0 && !trailing) {
+        // Only the FIRST leading break is a break-BEFORE consumed by
+        // placeParagraph (which does the block-level page/column move). A SECOND
+        // (or later) consecutive break at the paragraph start creates a BLANK
+        // page/column: Word treats the empty region between two breaks as its
+        // own page, so we flush an empty break line to advance past it
+        // (staging-breaks: two <w:br type="page"/> in one paragraph => a blank
+        // page between "Before the breaks." and "After two...").
+        if (!consumedLeadingBreak) {
+          consumedLeadingBreak = true;
+          continue;
+        }
+        flush(false, true, atom.breakType);
         continue;
       }
       if (atom.breakType === "line") flush(false, true);
-      else flush(trailing, true, atom.breakType);
+      else if (trailing && atom.breakType === "column") {
+        // A TRAILING COLUMN break leaves the paragraph mark on the NEW column,
+        // NOT on the old one (unlike a trailing PAGE break, which keeps the
+        // pilcrow on the old page and starts the next page clean). Word renders
+        // an empty pilcrow line + this paragraph's spacing-after at the top of
+        // the new column/page, then the following paragraph (staging-breaks:
+        // "Forced into column two" lands 22.5pt = one empty Normal line + 8pt
+        // after below the body top, vs a page break's clean body-top start).
+        flush(false, true, "column"); // text line, break to the next column
+        flush(true, false); // empty pilcrow line on the new column (keeps after)
+        flushedTrailingBreak = true;
+      } else flush(trailing, true, atom.breakType);
       if (trailing) flushedTrailingBreak = true;
       continue;
     }
