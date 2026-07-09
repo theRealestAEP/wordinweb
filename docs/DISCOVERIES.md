@@ -10,6 +10,54 @@ Rule of thumb from these: **never calibrate against our own measurements or
 against pdfminer word extents — build a probe doc, export it through Word,
 and read the geometry back out of the PDF.**
 
+### The Times probe VALIDATES `WORD_FONT_METRICS['times new roman']` — the wild2 drifts are NOT TNR pitch (2026-07)
+`scripts/make-times-probe.py` (TNR + bare "Times" at 10/10.5/11/12pt ×
+single/double/1.08×/atLeast, each block 50 forced-break lines in one paragraph)
+was finally exported through an unlocked Word (`parity/probe-times-word.pdf`)
+and regressed (`scripts/read-times-probe.py`, now recursing into pdfminer's
+nested `LTTextBox` containers — it previously only saw top-level lines and
+found none). A linear fit of baseline-y vs line-index nails the raw per-line
+advance immune to Word's quarter-point cumulative-baseline quantization:
+
+| block | config | advance | per-em |
+|---|---|---|---|
+| A | TNR 12pt single | 13.8029pt | 1.150240 |
+| B | TNR 11pt single | 12.6523pt | 1.150211 |
+| C | TNR 10pt single | 11.5035pt | 1.150346 |
+| D | TNR 10.5pt single | 12.0774pt | 1.150229 |
+| E | **Times** 12pt single | 13.8029pt | 1.150240 |
+| F | **Times** 11pt single | 12.6523pt | 1.150211 |
+| G/H | TNR 11/12pt double(480) | — | 2.30048 (= 2×single, exact) |
+| I | TNR 12pt ×1.079(259) | 14.8956pt | 1.241300 (pred 1.15025×1.079167 = 1.241318 ✓) |
+| J | TNR 10.5pt atLeast348 | 17.405pt | pins at 17.40pt (= 348tw) ✓ |
+
+- **Word's true single-spaced TNR/Times per-em is ~1.15025** (mean of the six
+  50-line fits 1.150246, spread ±0.00007). Our baked total is
+  `0.891113+0.216309+0.04248 = 1.149902`. **Delta = +0.000344 em = 0.0041pt/line
+  at 12pt.** That is BELOW Word's own quarter-point quantization floor (~60
+  lines of TNR-12 to accumulate a single 0.25pt tick), so it cannot flip
+  pagination on any TNR-body doc; the earlier "body pitch is correct, do not
+  tweak the hhea value" note (below) stands — my 13.803pt merely lands at the
+  top of that note's measured 13.78–13.80 band. **No source change made:** a
+  global-metric churn for a sub-quantization 0.03 % delta with zero demonstrable
+  fixture benefit is exactly the regression risk to avoid. Recorded here so a
+  future session with a *demonstrated* TNR-pagination-drift fixture can apply
+  gap `0.04248 → 0.042828` (total 1.15025) with confidence.
+- **Bare "Times" === Times New Roman EXACTLY** (E/F advances identical to A/B to
+  the milli-point). Confirms the `times → Times New Roman` entry now in both
+  `METRIC_SUBSTITUTES` and `WORD_FONT_METRICS` (measure.ts) is the correct
+  resolution, not merely a good-enough stand-in.
+- **The wild2 "Times-family drift" fixtures do not actually hinge on TNR pitch.**
+  `wild2-legal-nih-contract` is **Calibri-only** (0 "Times" occurrences in
+  document.xml; its −2p drift is the schedule-table row-height deficit, a
+  separate probe). `wild2-lit-yiddish-rtl` is **Tahoma-cs-dominant** (Hebrew
+  runs inherit docDefault `w:cs="Tahoma"`; a single style declares TNR) — its
+  73.9 severity is RTL/Tahoma-line-box driven, not TNR advance. So item 1 could
+  never have moved either by touching the Times metric.
+- **Reader fix kept:** `read-times-probe.py` now recurses containers and skips
+  pages with <3 lines (double/1.08×/atLeast blocks legitimately spill a sparse
+  tail line onto a 2nd page).
+
 ---
 
 ## Fonts & text measurement
