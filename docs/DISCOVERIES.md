@@ -1158,6 +1158,36 @@ offset cancels and the pitch deltas are reference-independent.
   table 601px, between our content-min (~445px) and full width (624px). The 601
   derivation stays uncracked without a Word-export probe sweeping content ×
   margins × the flexible-column share.
+- **CRACKED (2026-07, probe-autofit): Word autofit is simply
+  PROPORTIONAL-TO-PREFERRED-WIDTH; there is no per-column "slack".** A 10-block
+  sweep (`scripts/make-autofit-probe.py`: 2–4 cols, single non-breaking tokens
+  of known width, cell margins 0/108/300tw, borders on/off, tblW pct=5000 vs
+  auto) exported to `parity/probe-autofit-word.pdf`; column boundaries read from
+  the vertical rules (`read-autofit-probe.py`) vs our DOM (`read-autofit-ours.mjs`).
+  Modelling `col_i = prefᵢ · T / Σpref`, with `prefᵢ = (content advance) +
+  (cell L+R margins) − ~2.4pt` (the ~2.4pt is the glyph SIDE-BEARING my
+  pdfminer glyph-extent over-counts vs Word's advance width), reproduces EVERY
+  block to <0.7pt — e.g. 4-col F predicted 41.4/84.4/142.1/199.8 vs Word
+  41.2/84.3/142.3/199.9; custom-300tw-margin G 107.4/360.2 vs 107.5/360.2;
+  zero-margin E 46.0/116.7/305.0 vs 46.7/116.8/304.2. Equal-content tables (A,J)
+  always split T equally regardless of content size. So the parity-tables
+  "non-constant slack (10.4 vs 15.9px)" was an ARTIFACT of diffing against raw
+  content under a proportional (not additive) distribution plus side-bearing
+  measurement error — not a real per-column rule.
+- **Our engine already distributes proportional-to-pref** (`resolveGridWidths`:
+  `prefW[i]*want/sumPref`), so the DISTRIBUTION is correct. The residual is that
+  our `columnMinPref` `pad = margins.L + margins.R + 2` adds a FLAT `+2px` and
+  our content measure (Carlito advance) INCLUDES the side bearings Word drops, so
+  our `prefᵢ` over-weights narrow columns; on the probe our narrow columns run
+  ~1–5px wide and the wide column ~equally narrow (worst: zero-margin block C
+  67.5 vs Word 63.0; E 49.5 vs 46.7). Direction is uniform (narrow-too-wide).
+  A fix = shrink narrow-column pref bias (drop the `+2`, and/or subtract a
+  side-bearing estimate from measured content) — but it perturbs EVERY autofit
+  column width and thus line wrapping, so it is gated on the full line-break
+  suite (compare-linebreaks 6×0) + parity-tables/staging-grid4/staging-tblextreme
+  + benchmark/sample and was NOT shipped blind here. parity-tables' remaining gap
+  is separately the invalid-`w:w="100%"`-pct (Word ignores → content-fit ~601px);
+  valid `type="pct"` fills 100% correctly in both engines (probe totals both 467.7).
 
 ## Sparse-page metric floor (near-blank pages score high on the structural NCC)
 On pages with very little ink (parity-dividers 8.4%, pleading p4 9.0%, gatech p10
