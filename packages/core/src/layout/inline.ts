@@ -770,6 +770,7 @@ function finishLine(
   let maxImageFontLine = 0;
   let maxNaturalText = 0;
   let mathDisplayBase = 0;
+  let maxInlineMath = 0;
 
   const consider = (font: FontSpec, imageHeight?: number) => {
     if (imageHeight !== undefined) {
@@ -822,6 +823,8 @@ function finishLine(
             mathDisplayBase,
             measurer.metrics({ family: "Cambria", size: s.math.baseSize ?? s.math.ascent + s.math.descent, bold: false, italic: false }).lineHeight,
           );
+        } else {
+          maxInlineMath = Math.max(maxInlineMath, s.math.ascent + s.math.descent);
         }
       } else consider(s.metricsFont ?? s.font);
     }
@@ -843,8 +846,18 @@ function finishLine(
         // Display math: the multiple scales the math font's line height, never
         // the equation cluster - so a tall equation (fraction/summation) keeps
         // its own height (parity2-equations) while a short one (superscripts)
-        // still gets the full 1.5x line box (wild-hamburg p12).
-        height = Math.max(natural, mathDisplayBase * ls.value);
+        // still gets the full 1.5x line box (wild-hamburg p12). Under GENUINE
+        // multi-line spacing (1.5 lines / Double) Word also lays (multiplier-1)
+        // TEXT lines of leading BELOW the equation, like an ordinary line's
+        // inter-line lead, so a tall equation clears the following block by a
+        // full text line (wild-gatech p14: the VAC=need/t_VAC display at 2.0
+        // ran ~1 text line too compact, pulling the next heading up). Word's
+        // ubiquitous "Multiple 1.08" default (parity2-equations) is a sub-line
+        // typographic nudge and adds no such lead, so gate on a real multiple.
+        const markFont = fontOf(doc.effectiveRunProps(para, props.markRunProps ?? {}), fallbackFamily);
+        const bodyLine = measurer.metrics(markFont).lineHeight;
+        const lead = ls.value >= 1.15 ? (ls.value - 1) * bodyLine : 0;
+        height = Math.max(natural + lead, mathDisplayBase * ls.value);
       } else if (maxImage > 0) {
         // Word does NOT scale an inline image with the auto multiplier: an
         // image-dominated line measures image + leading below, with the image
@@ -865,6 +878,18 @@ function finishLine(
           height = imageH;
           baselineH = height - descSide + maxDescent;
         }
+      } else if (maxInlineMath > 0 && maxNaturalText > 0) {
+        // Inline (non-display) math under a line-spacing multiplier: Word
+        // scales the TEXT font's line height by the multiple and treats the
+        // math cluster's extent only as a FLOOR - it does not multiply the
+        // cluster's ascent/descent the way it does a plain text line. Same
+        // family as the inline-image rule above: a tall inline fraction or
+        // sub/superscript cluster otherwise inflates the doubled leading and
+        // drifts the rest of the page (wild-gatech p14, VAC_need/t_VAC under
+        // 2.0 spacing ran ~1 line too tall). The intra-line baseline is left
+        // to the cluster (baselineH defaults to natural), so only the pitch
+        // to the next line changes.
+        height = Math.max(maxNaturalText * ls.value, maxInlineMath);
       }
     } else if (ls.rule === "exact") height = ls.value;
     else height = Math.max(natural, ls.value);
