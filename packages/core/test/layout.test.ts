@@ -662,6 +662,48 @@ describe("superscript / subscript", () => {
     expect(sup.glyphBoxH).toBeCloseTo(1.15 * sup.font.size, 2);
     expect(base.glyphTop).toBeCloseTo(base.baseline - 0.9 * base.font.size, 2);
   });
+
+  it("a raised label beside a tall inline image does not inflate the line", () => {
+    // dense figure: a small "V1" label raised +160pt (w:position 320) shares
+    // the line with a ~248px inline picture. The raised label stays inside the
+    // image extent, so the figure line must keep the image's own height, not
+    // image + raise (which doubled the block and desynced pagination).
+    const rels = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>
+</Relationships>`;
+    const inlineImg =
+      `<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="2700000" cy="2361681"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2700000" cy="2361681"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>`;
+    const figPara = (label: string) =>
+      `<w:p><w:r>${inlineImg}</w:r>${label}</w:p>`;
+    const raisedLabel = `<w:r><w:rPr><w:position w:val="320"/><w:sz w:val="32"/></w:rPr><w:t>V1</w:t></w:r>`;
+    const parts = (label: string) => ({
+      "word/document.xml": wrapDocument(figPara(label) + p("MARKER")),
+      "word/_rels/document.xml.rels": rels,
+      "word/media/x.png": "PNGDATA",
+    });
+    const withRaise = layout(parts(raisedLabel)).result;
+    const noRaise = layout(parts(`<w:r><w:t>V1</w:t></w:r>`)).result;
+    const markerTop = (r: ReturnType<typeof layoutDocument>) => {
+      const it = r.pages[0].items.find((i) => i.kind === "text" && i.text === "MARKER");
+      if (it?.kind !== "text") throw new Error("missing MARKER");
+      return it.lineTop;
+    };
+    // The +160pt (213px) raise must not push the MARKER paragraph down by
+    // anything like the full shift: the figure line keeps the ~248px image
+    // height (the label sits inside it), so the delta is at most a few px of
+    // genuine protrusion, never the ~213px the old additive rule added.
+    expect(markerTop(withRaise) - markerTop(noRaise)).toBeLessThan(5);
+    // And it fits on one page (image ~248px << body), not two.
+    expect(withRaise.totalPages).toBe(1);
+  });
 });
 
 describe("sections & page borders", () => {

@@ -897,6 +897,11 @@ function finishLine(
   // runs push the bottom down.
   let raiseAsc = 0;
   let raiseDesc = 0;
+  // Ascent/descent of NON-object content (text + inline math) only, used to
+  // resolve how much a w:position raise grows the line: the raise lifts the
+  // text line, and the result is maxed against any co-line object height.
+  let maxNonObjAscent = 0;
+  let maxNonObjDescent = 0;
 
   const consider = (font: FontSpec, imageHeight?: number) => {
     if (imageHeight !== undefined) {
@@ -921,6 +926,8 @@ function finishLine(
     maxRawDescent = Math.max(maxRawDescent, m.descent);
     maxNatural = Math.max(maxNatural, m.lineHeight);
     maxNaturalText = Math.max(maxNaturalText, m.lineHeight);
+    maxNonObjAscent = Math.max(maxNonObjAscent, m.ascent);
+    maxNonObjDescent = Math.max(maxNonObjDescent, m.descent);
   };
 
   if (spans.length === 0) {
@@ -936,6 +943,8 @@ function finishLine(
         maxDescent = Math.max(maxDescent, s.math.descent);
         maxRawDescent = Math.max(maxRawDescent, s.math.descent);
         maxNatural = Math.max(maxNatural, s.math.ascent + s.math.descent);
+        maxNonObjAscent = Math.max(maxNonObjAscent, s.math.ascent);
+        maxNonObjDescent = Math.max(maxNonObjDescent, s.math.descent);
         if (s.math.display) {
           // A display equation (m:oMathPara) sits on its own line, and Word
           // gives that line the paragraph's line-spacing: the multiple applies
@@ -955,11 +964,24 @@ function finishLine(
       } else consider(s.metricsFont ?? s.font);
       const r = s.props.raise;
       if (r) {
+        // Raise is the full shift for the TEXT line (see below).
         if (r > 0) raiseAsc = Math.max(raiseAsc, r);
         else raiseDesc = Math.max(raiseDesc, -r);
       }
     }
   }
+  // w:position extends the line box by the FULL shift for a text line (the
+  // charstyles probe: +6pt raise = +6pt pitch), but the raised text still
+  // shares its line with any co-line object (an inline image/drawing), and the
+  // final line ascent is the MAX of {object height, raised text top} - it is
+  // NOT the object height PLUS the raise. A small figure label raised high
+  // beside a tall picture (dense figure "V1" at +160pt beside a 186pt image)
+  // stays within the image extent and must add nothing, else the figure line
+  // doubles. Resolve the raise as the amount the raised/lowered text protrudes
+  // past the line's overall ascent/descent (which already includes the object);
+  // for a text-only line maxAscent == maxNonObjAscent so this is the full shift.
+  raiseAsc = Math.max(0, maxNonObjAscent + raiseAsc - maxAscent);
+  raiseDesc = Math.max(0, maxNonObjDescent + raiseDesc - maxDescent);
 
   // w:docGrid (type=lines): Word snaps each line's single-line font height up
   // to the grid pitch before the line-spacing multiplier. The extra space sits
