@@ -428,13 +428,23 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   engine walks the whole forward keepNext run in `placeParagraph`, sums the
   full heights of the keepNext members plus the terminator's first (+orphan)
   line, and moves the lot when it won't fit but fits on a fresh page.
-- **w:beforeAutospacing / afterAutospacing insert one blank line, ignoring
-  the literal before/after** (HTML/web-pasted content, `NormalWeb`): Word
-  discards the 5pt `w:before`/`w:after` and uses ~one SINGLE line height of
-  space (wild-athabasca title page: NormalWeb blocks sit a full line apart,
-  27.8pt gaps = single line 13.8 + ~14pt auto). Use the line's
-  `naturalHeight` (the line-spacing multiple, e.g. line=480 double, must NOT
-  inflate the auto gap). **A trailing EMPTY autospacing paragraph's
+- **w:beforeAutospacing / afterAutospacing = a FIXED 14pt margin, ignoring
+  the literal before/after AND the font size** (HTML/web-pasted content,
+  `NormalWeb`, FEMP RFP bracketed guidance blocks): Word discards the
+  `w:before`/`w:after` and inserts a constant 14pt (CSS px `14 * 96/72`)
+  above/below the paragraph, NOT the paragraph's own line height. Measured
+  across wild-doerfp's 10.5pt guidance blocks (three baseline boundaries:
+  afterAuto = 14.03 / 13.75 / 14.00pt) and wild-athabasca's NormalWeb title
+  page (27.8pt gaps = 13.8pt line + 14pt auto). The earlier `naturalHeight`
+  rule only worked because athabasca's font gave a ~13.8pt line ≈ 14pt; for
+  sub-12pt paragraphs it undershot ~2.3px per boundary (doerfp section pages
+  stacked TWO such boundaries — title→guidance + guidance→body — into a
+  ~6.6px whole-body shift → p31 15.1%→5.2%, p32 14.0%→3.5%). The fixed value
+  self-satisfies the "double spacing (line=480) must NOT inflate the auto
+  gap" rule since it ignores the line-spacing multiple entirely. Floored at
+  `naturalHeight` so a rare large-font autospacing paragraph never gets less
+  than one line (`AUTO_PARA_SPACING_PX` in engine.ts). **A trailing EMPTY
+  autospacing paragraph's
   after does not carry across a section break** into the next section's first
   paragraph — else it eats the following Heading1's spacing-before (athabasca
   p6: section-1 Tadulobo needs its full before=24pt, not before−prevAuto).

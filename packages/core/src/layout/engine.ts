@@ -121,6 +121,10 @@ const ROW_OVERHANG_TOL = 3;
 
 const CHICAGO = ["*", "†", "‡", "§"];
 
+/** Word's fixed HTML "Auto" paragraph before/after margin (w:beforeAutospacing /
+ * afterAutospacing): 14pt in CSS px. Empirically constant across font sizes. */
+const AUTO_PARA_SPACING_PX = 14 * (96 / 72);
+
 /** Note marks share numbering formats with page numbers, plus chicago. */
 function formatNoteMark(n: number, fmt: string): string {
   if (fmt === "chicago") {
@@ -1194,9 +1198,18 @@ class Engine {
     // above/below the paragraph (wild-athabasca title page: NormalWeb blocks
     // sit a full line apart, not the 5pt the raw before/after would give).
     if ((props.beforeAutospacing || props.afterAutospacing) && lines.length > 0) {
-      // One blank line at the paragraph's SINGLE line height — the line-spacing
-      // multiple (e.g. line=480 double) must not inflate the auto gap.
-      const autoSpace = lines[0].naturalHeight;
+      // Word's HTML "Auto" before/after (w:beforeAutospacing / afterAutospacing,
+      // from web/HTML-pasted content) is a FIXED 14pt margin, independent of the
+      // paragraph's font size and line-spacing multiple — NOT the paragraph's own
+      // line height. Measured across wild-doerfp's bracketed guidance blocks (three
+      // 10.5pt boundaries: afterAuto = 14.03 / 13.75 / 14.00pt) and wild-athabasca's
+      // NormalWeb title page (27.8pt gaps = 13.8pt line + 14pt auto). Using the line
+      // height undershot ~2.3px per boundary for sub-12pt paragraphs (doerfp section
+      // pages accumulated a ~6.6px body shift). The fixed value also self-satisfies
+      // the "double spacing (line=480) must not inflate the auto gap" rule since it
+      // ignores the multiple entirely. Floor at the natural line height so a rare
+      // large-font autospacing paragraph never gets LESS than one line.
+      const autoSpace = Math.max(lines[0].naturalHeight, AUTO_PARA_SPACING_PX);
       if (props.beforeAutospacing && !dropSpaceBefore) spacingBefore = borderPadTop + autoSpace;
       if (props.afterAutospacing) spacingAfter = this.borderPadImpl(props.borders?.bottom) + autoSpace;
     }
