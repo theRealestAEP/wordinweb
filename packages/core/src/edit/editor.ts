@@ -2338,10 +2338,20 @@ export class DocxEditor {
       range.setStart(textNode, Math.min(local, textNode.textContent?.length ?? 0));
       range.collapse(true);
       const rect = range.getBoundingClientRect();
-      const surface = best.el.parentElement!;
-      const surfaceRect = surface.getBoundingClientRect();
-      const zoom = this.host.zoom ?? 1;
-      xPx = (rect.left - surfaceRect.left) / zoom;
+      if (rect.height > 0) {
+        const surface = best.el.parentElement!;
+        const surfaceRect = surface.getBoundingClientRect();
+        const zoom = this.host.zoom ?? 1;
+        xPx = (rect.left - surfaceRect.left) / zoom;
+      } else {
+        // Degenerate rect: justified SPACE spans paint zero-width (their
+        // advance lives in the next span's x), so a collapsed range inside
+        // one measures 0x0 at the viewport origin and the caret flew to the
+        // page's left edge (typing space after a period). Use the layout
+        // item's own geometry instead.
+        const len = best.item.text.length || 1;
+        xPx = best.item.x + (local >= len ? best.item.width : (best.item.width * local) / len);
+      }
     }
     const surface = best.el.parentElement!;
     if (this.caretEl.parentElement !== surface) surface.appendChild(this.caretEl);
