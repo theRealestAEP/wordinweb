@@ -1294,6 +1294,30 @@ class Engine {
       }
     }
 
+    // Word suppresses a paragraph's space-before when it comes to rest at the
+    // very top of a page or column, whether it arrived there by a hard break
+    // (handled above via suppressNextSpaceBefore) or by ordinary soft flow -
+    // the leading space collapses against the top margin. The keepLines and
+    // keepNext moves above (and the line-0 overflow path in the emit loop)
+    // relocate the paragraph to a fresh column top but only keepNext dropped
+    // the before; a keepLines-moved or a naturally-column-topping heading kept
+    // it. Re-evaluate against the FINAL cursor: if we now begin exactly at the
+    // band top (empty column), collapse the before to just the border reserve.
+    // In wild-multicolumn's sliver sections a Heading2 landing at a column top
+    // sat its 200-twip (10pt) before too low, shifting the whole one-glyph
+    // column down and reading as ~70% structural drift (p23/p39).
+    //
+    // Restricted to a GENUINE page or column top: either a later column of the
+    // band (col > 0), or the first column of a band that itself begins at the
+    // page body top (bandTop === bodyTop). A NEW section band that resumes
+    // partway down a page (a 1-col section starting below the balanced columns
+    // of the previous section) is NOT a page top - its leading Heading1 keeps
+    // its space-before to separate it from the columns above (p30/p31).
+    const atPageOrColumnTop =
+      this.y <= this.cur.bandTop + 0.01 &&
+      (this.col > 0 || this.cur.bandTop <= this.cur.bodyTop + 0.01);
+    if (atPageOrColumnTop) spacingBefore = borderPadTop;
+
     // Adjacent before/after collapse: the larger of the previous paragraph's
     // spacing-after (already advanced) and this spacing-before wins.
     this.y += Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
