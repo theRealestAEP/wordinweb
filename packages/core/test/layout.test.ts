@@ -770,3 +770,85 @@ describe("inline drawing groups", () => {
     expect(hit.y).toBeGreaterThan(50); // moved with the cell, not stuck at origin
   });
 });
+
+describe("East Asian (CJK) layout", () => {
+  // A run whose eastAsia font is set; ideographs are laid one em wide and
+  // every inter-character boundary is a break opportunity.
+  const cjk = (text: string) =>
+    `<w:p><w:pPr><w:jc w:val="both"/></w:pPr>` +
+    `<w:r><w:rPr><w:rFonts w:eastAsia="MS Mincho" w:ascii="Calibri"/></w:rPr>` +
+    `<w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+
+  it("emits one text item per CJK character (inter-character breaking)", () => {
+    const { result } = layout({ "word/document.xml": wrapDocument(cjk("水は方円")) });
+    const texts = result.pages[0].items.filter((i) => i.kind === "text");
+    // Every ideograph/kana is its own breakable item.
+    expect(texts.length).toBe(4);
+    for (const t of texts) if (t.kind === "text") expect(t.text.length).toBe(1);
+  });
+
+  it("lays CJK glyphs one em (font size) wide and wraps between characters", () => {
+    // 40 CJK chars at 11pt = 40em; the default text column is far narrower, so
+    // the line must wrap between characters into multiple rows.
+    const { result } = layout({ "word/document.xml": wrapDocument(cjk("水".repeat(90))) });
+    const texts = result.pages[0].items.filter((i) => i.kind === "text");
+    if (texts[0].kind !== "text") throw new Error();
+    // 11pt -> 14.667px; one em wide.
+    expect(texts[0].width).toBeCloseTo(texts[0].font.size, 1);
+    const rows = new Set(texts.map((t) => (t.kind === "text" ? Math.round(t.baseline) : 0)));
+    expect(rows.size).toBeGreaterThan(1);
+  });
+});
+
+describe("RTL / bidi paragraphs", () => {
+  const bidiP = (inner: string, jc = "right") =>
+    `<w:p><w:pPr><w:bidi/><w:jc w:val="${jc}"/></w:pPr>${inner}</w:p>`;
+  const rtlRun = (t: string) =>
+    `<w:r><w:rPr><w:rFonts w:cs="Arial"/><w:rtl/></w:rPr><w:t xml:space="preserve">${t}</w:t></w:r>`;
+  const ltrRun = (t: string) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+
+  it("marks RTL runs so the renderer sets direction:rtl", () => {
+    const { result } = layout({ "word/document.xml": wrapDocument(bidiP(rtlRun("שלום"))) });
+    const t = result.pages[0].items.find((i) => i.kind === "text");
+    if (t?.kind !== "text") throw new Error();
+    expect(t.rtl).toBe(true);
+  });
+
+  it("aligns a bidi jc=right paragraph to the physical left (Word swaps end->left)", () => {
+    const { result } = layout({ "word/document.xml": wrapDocument(bidiP(rtlRun("שלום"))) });
+    const t = result.pages[0].items.find((i) => i.kind === "text");
+    if (t?.kind !== "text") throw new Error();
+    // Flush left: the single word sits at the left margin, not the right edge.
+    expect(t.x).toBeLessThan(200); // near the left margin, not the right edge
+  });
+
+  it("reorders a mixed run visually: the LTR run sits left of the RTL run", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(bidiP(rtlRun("אב") + ltrRun("12"))),
+    });
+    const texts = result.pages[0].items.filter((i) => i.kind === "text");
+    const rtl = texts.find((i) => i.kind === "text" && i.rtl);
+    const ltr = texts.find((i) => i.kind === "text" && !i.rtl && i.text.trim());
+    if (rtl?.kind !== "text" || ltr?.kind !== "text") throw new Error();
+    // Logical order is RTL-run then LTR-run; visually the LTR run moves left of
+    // the RTL run (base RTL: first logical run is rightmost).
+    expect(ltr.x).toBeLessThan(rtl.x);
+  });
+
+  it("mirrors columns of a bidiVisual table (source col 0 lands on the right)", () => {
+    const tbl =
+      `<w:tbl><w:tblPr><w:bidiVisual/><w:tblW w:w="0" w:type="auto"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>` +
+      `<w:tr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${p("AAA")}</w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${p("BBB")}</w:tc>` +
+      `</w:tr></w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl) });
+    const texts = result.pages[0].items.filter((i) => i.kind === "text");
+    const a = texts.find((i) => i.kind === "text" && i.text === "AAA");
+    const b = texts.find((i) => i.kind === "text" && i.text === "BBB");
+    if (a?.kind !== "text" || b?.kind !== "text") throw new Error();
+    // Source order A,B -> visual order B,A (A on the right).
+    expect(a.x).toBeGreaterThan(b.x);
+  });
+});

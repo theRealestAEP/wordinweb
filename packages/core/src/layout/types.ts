@@ -78,6 +78,9 @@ export interface TextItem {
   rotate?: { deg: number; ox: number; oy: number };
   /** Paint under the body text (behindDoc textbox content). */
   behind?: boolean;
+  /** Right-to-left run: renderer sets direction:rtl so the browser shapes and
+   * orders the (Arabic/Hebrew) glyphs within the span box. */
+  rtl?: boolean;
 }
 
 export interface RectItem {

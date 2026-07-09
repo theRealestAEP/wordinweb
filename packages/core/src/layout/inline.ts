@@ -48,6 +48,8 @@ interface FragAtom {
    * font (small-caps reduced segments still key line metrics to the base
    * run size, like Word). */
   metricsFont?: FontSpec;
+  /** Render right-to-left (Arabic/Hebrew run). */
+  rtl?: boolean;
 }
 interface SpaceAtom {
   kind: "space";
@@ -56,6 +58,7 @@ interface SpaceAtom {
   width: number;
   src?: TextSource;
   metricsFont?: FontSpec;
+  rtl?: boolean;
 }
 interface TabAtom {
   kind: "tab";
@@ -101,8 +104,12 @@ export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
     // 11pt -> 7pt, 22pt -> 14.5pt). px -> half-points is x1.5.
     size = Math.round(size * 1.5 * 0.65) / 1.5;
   }
+  // A w:rtl run paints in the complex-script font (rFonts w:cs) — Word embeds
+  // that face (Arial for the bidi fixtures), so using it keeps Arabic/Hebrew
+  // shaping and advances aligned with Word's PDF.
+  const family = (props.rtl && props.fontComplex) || props.font || fallbackFamily;
   return {
-    family: props.font ?? fallbackFamily,
+    family,
     size,
     bold: props.bold ?? false,
     italic: props.italic ?? false,
@@ -149,6 +156,37 @@ function isSmallCapsReduced(c: string): boolean {
   return c === " " || c !== c.toUpperCase();
 }
 
+// ---------- East Asian (CJK) ----------
+
+/** Ideographs, kana, Hangul and full-width CJK punctuation. These are laid out
+ * one em (= font size) wide and every inter-character boundary is a line-break
+ * opportunity (CJK text has no spaces). */
+const CJK_RE =
+  /[ᄀ-ᇿ⺀-⿟　-〿぀-ヿ㄰-㆏㐀-䶿一-鿿ꥠ-꥿가-퟿豈-﫿＀-￯]/;
+function isCJK(ch: string): boolean {
+  return CJK_RE.test(ch);
+}
+/** Full-width Latin/kana that Word packs half-width don't apply here; the
+ * fixtures use ideographs, kana and full-width punctuation (all 1em). */
+function isWideCJK(ch: string): boolean {
+  const c = ch.codePointAt(0) ?? 0;
+  // Half-width katakana / half-width forms (U+FF61-FFEF) are 0.5em.
+  if (c >= 0xff61 && c <= 0xffef) return false;
+  return isCJK(ch);
+}
+
+// Kinsoku: characters forbidden at the START of a line (closing punctuation,
+// small kana) — Word keeps them with the preceding character. And characters
+// forbidden at the END of a line (opening brackets) — kept with the following.
+const KINSOKU_NO_START = "、。，．・：；？！‼⁇⁈⁉）〕〉》」』】｝〗〙»›々ー‐–—―）］｝，．：；？！ゝゞ々ぁぃぅぇぉっゃゅょゎ゛゜ァィゥェォッャュョヮ";
+const KINSOKU_NO_END = "（〔〈《「『【｛〖〘«‹（［｛";
+function isNoStart(ch: string): boolean {
+  return KINSOKU_NO_START.includes(ch);
+}
+function isNoEnd(ch: string): boolean {
+  return KINSOKU_NO_END.includes(ch);
+}
+
 // ---------- line model ----------
 
 export interface LineSpan {
@@ -183,6 +221,10 @@ export interface LineSpan {
   breakAfter?: boolean;
   /** PAGEREF bookmark name (final-pass page-number rewrite). */
   pageRef?: string;
+  /** Bidi embedding level for visual reordering (0 = LTR, odd = RTL). */
+  rtlLevel?: number;
+  /** Render this span right-to-left (browser shapes/orders within the box). */
+  rtl?: boolean;
 }
 
 export interface LineBox {
@@ -266,9 +308,25 @@ export function breakParagraph(
   numberingLabel?: { text: string; props: RunProps; suffix: "tab" | "space" | "nothing" },
   /** Float-aware bounds per line (yOffset is paragraph-relative line top). */
   boundsAt?: (yOffset: number, estHeight: number) => LineBounds,
+  /** w:docGrid line pitch (px): minimum single-line height each line's font
+   * height is snapped up to before the line-spacing multiplier. */
+  minLineHeight?: number,
 ): BrokenParagraph {
   const props = doc.effectiveParaProps(para);
   const fallbackFamily = doc.styles.defaultRPr.font ?? "Calibri";
+
+  // Bidi paragraph: lines assemble in logical order, then reorder to visual
+  // (RTL). Physical alignment flips: OOXML jc "right" means "end", which in an
+  // RTL paragraph is the LEFT margin (measured from Word: bidi + jc=right lays
+  // the text flush LEFT); jc "left" -> right; absent -> right (RTL start).
+  const bidiPara = props.bidi === true;
+  const levelOf = (rtl?: boolean): number => (bidiPara ? (rtl ? 1 : 2) : 0);
+  let physAlign: typeof props.alignment = props.alignment;
+  if (bidiPara) {
+    if (physAlign === "right") physAlign = "left";
+    else if (physAlign === "left") physAlign = "right";
+    else if (physAlign === undefined) physAlign = "right";
+  }
 
   const indentLeft = props.indentLeft ?? 0;
   const indentRight = props.indentRight ?? 0;
@@ -407,19 +465,22 @@ export function breakParagraph(
         src: { run: anchorSrc.run, t: anchorSrc.t, offset: 0 },
       });
     }
-    const line = finishLine(cur, curLineWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak);
+    const line = finishLine(cur, curLineWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak, minLineHeight);
     line.forcedBreakAfter = forced;
     line.floatYOffset = lineFloatOffset;
     // Alignment
     const avail = availFor(lineIndex);
     const startX = lineStartX(lineIndex);
+    // Bidi paragraph: reorder the line's spans into visual (RTL) order and
+    // re-lay them flush at the line start before aligning.
+    if (bidiPara) reorderVisual(line.spans, startX);
     // A display equation (m:oMathPara) centers on its line regardless of the
     // host paragraph's alignment (Word's m:oMathParaPr jc default = centerGroup).
     if (line.spans.some((s) => s.math?.display)) {
       const slack = avail - line.width;
       if (slack > 0) for (const s of line.spans) s.x += slack / 2;
     } else {
-      applyAlignment(line, props, avail, startX, isLast || endsWithBreak);
+      applyAlignment(line, physAlign ?? "left", avail, startX, isLast || endsWithBreak);
     }
     lines.push(line);
     cur = [];
@@ -560,7 +621,7 @@ export function breakParagraph(
       }
       // Never start a (non-first) line with a space.
       if (cur.length === 0 && lineIndex > 0) continue;
-      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src, metricsFont: atom.metricsFont });
+      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src, metricsFont: atom.metricsFont, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
       curLineWidth += atom.width;
       curSpaceWidth += atom.width;
       x += atom.width;
@@ -691,6 +752,8 @@ export function breakParagraph(
           href: atom.href,
           src: atom.src ? { ...atom.src, offset: atom.src.offset + sliceOff } : undefined,
           metricsFont: atom.metricsFont,
+          rtl: atom.rtl,
+          rtlLevel: levelOf(atom.rtl),
         });
         curLineWidth += w;
         x += w;
@@ -699,7 +762,7 @@ export function breakParagraph(
       }
       continue;
     }
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter, pageRef: atom.pageRef });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
     curLineWidth += atom.width;
     x += atom.width;
   }
@@ -728,14 +791,44 @@ function nextTabStop(
   return { pos: next < rightEdge ? next : x + 4, align: "left" };
 }
 
+/** Reorder a bidi line's spans into visual order (UAX#9 rule L2): from the
+ * highest embedding level down to 1, reverse each maximal contiguous run of
+ * spans at that level or above, then re-lay the spans flush at startX. RTL
+ * spans (odd level) keep their glyph shaping to the browser (span.rtl). */
+function reorderVisual(spans: LineSpan[], startX: number): void {
+  if (spans.length === 0) return;
+  const lvl = spans.map((s) => s.rtlLevel ?? 1);
+  let maxL = 0;
+  for (const l of lvl) if (l > maxL) maxL = l;
+  for (let L = maxL; L >= 1; L--) {
+    let i = 0;
+    while (i < spans.length) {
+      if (lvl[i] >= L) {
+        let j = i;
+        while (j < spans.length && lvl[j] >= L) j++;
+        for (let a = i, b = j - 1; a < b; a++, b--) {
+          [spans[a], spans[b]] = [spans[b], spans[a]];
+          [lvl[a], lvl[b]] = [lvl[b], lvl[a]];
+        }
+        i = j;
+      } else i++;
+    }
+  }
+  let cx = startX;
+  for (const s of spans) {
+    s.x = cx;
+    cx += s.width;
+    if ((s.rtlLevel ?? 1) % 2 === 1 && s.text) s.rtl = true;
+  }
+}
+
 function applyAlignment(
   line: LineBox,
-  props: ParaProps,
+  align: "left" | "center" | "right" | "justify",
   avail: number,
   startX: number,
   suppressJustify: boolean,
 ): void {
-  const align = props.alignment ?? "left";
   const slack = avail - line.width;
   if (align === "justify" && !suppressJustify && slack < 0) {
     // Line was packed beyond natural width: compress spaces (Word allows
@@ -786,6 +879,7 @@ function finishLine(
   doc: DocxDocument,
   isLast: boolean,
   endsWithBreak: boolean,
+  minLineHeight?: number,
 ): LineBox {
   let maxAscent = 0;
   let maxDescent = 0;
@@ -867,7 +961,12 @@ function finishLine(
     }
   }
 
-  const natural = Math.max(maxNatural, maxAscent + maxDescent);
+  // w:docGrid (type=lines): Word snaps each line's single-line font height up
+  // to the grid pitch before the line-spacing multiplier. The extra space sits
+  // above the baseline (glyph bottoms toward the grid line), so the baseline
+  // moves down by the grid delta. CJK fonts (already >= pitch) are unaffected;
+  // Latin/heading lines in a CJK section grow to the grid.
+  const natural = Math.max(maxNatural, maxAscent + maxDescent, minLineHeight ?? 0);
   // Heights stay RAW: Word accumulates raw line heights and quantizes the
   // CUMULATIVE baseline positions to quarter-points at paint time (sample
   // p2: gaps alternate 13.50/13.25pt around the raw 13.428 - error
@@ -1122,8 +1221,49 @@ function buildAtoms(
     }
   };
 
-  const pushText = (
+  // East Asian text is broken between every character (no spaces): each CJK
+  // codepoint becomes a full-em (= font size) frag whose boundary is a break
+  // opportunity, honouring kinsoku (don't start a line with closing
+  // punctuation, don't end one with an opening bracket). CJK glyphs paint with
+  // the run's eastAsia font.
+  const pushCJK = (
+    seg: string,
+    baseOffset: number,
+    props: RunProps,
+    font: FontSpec,
+    href?: string,
+    srcBase?: TextSource,
+  ) => {
+    // Word picks the CJK face by glyph coverage: a Japanese eastAsia font (MS
+    // Mincho/Gothic, Meiryo, Yu) doesn't cover simplified Chinese, so Word falls
+    // back to a Chinese face (its PDF embeds Microsoft JhengHei) with a much
+    // taller line box. Proxy the coverage test with kana presence: a CJK segment
+    // with no kana under a Japanese eastAsia font is treated as the Chinese
+    // fallback so its line pitch matches.
+    let family = props.fontEastAsia ?? font.family;
+    const japaneseEA = /mincho|gothic|meiryo|^yu|\byu /i.test(family);
+    const hasKana = /[぀-ヿ]/.test(seg);
+    if (japaneseEA && !hasKana) family = "Microsoft JhengHei";
+    const cjkFont: FontSpec = { ...font, family };
+    const tScale = props.textScale ?? 1;
+    for (let k = 0; k < seg.length; k++) {
+      const ch = seg[k];
+      const next = seg[k + 1];
+      const w = (isWideCJK(ch) ? cjkFont.size : measurer.width(ch, cjkFont, props.letterSpacing)) * tScale;
+      // Break after this char unless kinsoku binds it to a neighbour.
+      let breakAfter = true;
+      if (isNoEnd(ch)) breakAfter = false;
+      else if (next && isNoStart(next)) breakAfter = false;
+      const src = srcBase
+        ? { run: srcBase.run, t: srcBase.t, offset: srcBase.offset + baseOffset + k }
+        : undefined;
+      atoms.push({ kind: "frag", text: ch, props, font: cjkFont, width: w, href, src, breakAfter, rtl: props.rtl });
+    }
+  };
+
+  const pushLatin = (
     text: string,
+    baseOffset: number,
     props: RunProps,
     font: FontSpec,
     href?: string,
@@ -1145,7 +1285,7 @@ function buildAtoms(
       const end = offset + part.length;
       const cum = measurer.width(text.slice(0, end), font, props.letterSpacing) * tScale;
       const partWidth = Math.max(cum - prevCum, 0);
-      const src = srcBase ? { run: srcBase.run, t: srcBase.t, offset: srcBase.offset + offset } : undefined;
+      const src = srcBase ? { run: srcBase.run, t: srcBase.t, offset: srcBase.offset + baseOffset + offset } : undefined;
       if (part[0] === " ") {
         const w = partWidth / part.length;
         for (let i = 0; i < part.length; i++) {
@@ -1156,6 +1296,7 @@ function buildAtoms(
             width: w,
             src: src ? { ...src, offset: src.offset + i } : undefined,
             metricsFont,
+            rtl: props.rtl,
           });
         }
       } else {
@@ -1165,7 +1306,7 @@ function buildAtoms(
         // and marking it breakAfter. Widths stay cumulative-exact.
         const breaks = hyphenBreaks(part);
         if (breaks.length === 0) {
-          atoms.push({ kind: "frag", text: part, props, font, width: partWidth, href, src, metricsFont });
+          atoms.push({ kind: "frag", text: part, props, font, width: partWidth, href, src, metricsFont, rtl: props.rtl });
         } else {
           let segStart = 0;
           let segPrevCum = prevCum;
@@ -1184,6 +1325,7 @@ function buildAtoms(
               src: src ? { run: src.run, t: src.t, offset: src.offset + segStart } : undefined,
               metricsFont,
               breakAfter: segEnd < part.length,
+              rtl: props.rtl,
             });
             segPrevCum = segCum;
             segStart = segEnd;
@@ -1192,6 +1334,32 @@ function buildAtoms(
       }
       prevCum = cum;
       offset = end;
+    }
+  };
+
+  const pushText = (
+    text: string,
+    props: RunProps,
+    font: FontSpec,
+    href?: string,
+    srcBase?: TextSource,
+    metricsFont?: FontSpec,
+  ) => {
+    if (!CJK_RE.test(text)) {
+      pushLatin(text, 0, props, font, href, srcBase, metricsFont);
+      return;
+    }
+    // Split into maximal CJK / non-CJK chunks so each uses the right font and
+    // break rules while keeping source offsets exact.
+    let i = 0;
+    while (i < text.length) {
+      const cjk = isCJK(text[i]);
+      let j = i + 1;
+      while (j < text.length && isCJK(text[j]) === cjk) j++;
+      const seg = text.slice(i, j);
+      if (cjk) pushCJK(seg, i, props, font, href, srcBase);
+      else pushLatin(seg, i, props, font, href, srcBase, metricsFont);
+      i = j;
     }
   };
 

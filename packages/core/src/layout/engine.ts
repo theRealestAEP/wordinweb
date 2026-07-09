@@ -175,6 +175,9 @@ class Engine {
    * top of a page reached by a hard page break. Set by the break, consumed by
    * the next paragraph. */
   private suppressNextSpaceBefore = false;
+  /** Set when a docGrid section's top reserve was applied; the first paragraph
+   * drops its spacing-before (Word folds it into the grid reserve). */
+  private docGridDropBefore = false;
 
   constructor(
     private doc: DocxDocument,
@@ -350,6 +353,15 @@ class Engine {
     if (sp.marginTop >= 0) {
       page.bodyTop = Math.max(sp.marginTop, headerH > 0 ? sp.headerDistance + headerH : 0);
       page.bandTop = page.bodyTop;
+    }
+    // w:docGrid: Word drops the first line of a section a fixed number of grid
+    // rows below the top margin (measured from staging-eastasian: the first
+    // heading baseline sits 4 line-pitches below the margin, with the normal
+    // spacing-before suppressed). Reproduced as a top reserve of 4x linePitch
+    // that also swallows the first paragraph's spacing-before.
+    if (sp.docGridLinePitch && isFirstOfSection) {
+      page.bodyTop += 4 * sp.docGridLinePitch;
+      this.docGridDropBefore = true;
     }
     if (sp.marginBottom >= 0) {
       page.bodyBottom = Math.min(
@@ -1202,6 +1214,7 @@ class Engine {
         this.fieldCtx(),
         label,
         this.floats.get(this.cur)?.length ? this.makeBoundsAt(paraTop) : undefined,
+        this.sp.docGridLinePitch,
       );
 
     // The first paragraph on a page reached by a hard page break lands at the
@@ -1217,6 +1230,10 @@ class Engine {
     // w:pageBreakBefore is the same rule (parity2-toc: Heading1 before=12pt
     // sits at margin + ascent exactly on its forced page).
     if (breakBeforeForced) dropSpaceBefore = true;
+    if (this.docGridDropBefore) {
+      this.docGridDropBefore = false;
+      dropSpaceBefore = true;
+    }
     const rawSpacingBefore = dropSpaceBefore ? 0 : (props.spacingBefore ?? 0);
 
     let paraTopEstimate = this.y + rawSpacingBefore;
@@ -1379,6 +1396,8 @@ class Engine {
           this.colWidth,
           this.fieldCtx(),
           this.numberingLabel(np, blk),
+          undefined,
+          this.sp.docGridLinePitch,
         );
         // Collapsed gap from the end of the previous member's lines.
         const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
@@ -1936,6 +1955,7 @@ class Engine {
         pageRef: span.pageRef,
         href: span.href,
         src: span.src,
+        rtl: span.rtl,
       });
     }
   }
@@ -2075,7 +2095,7 @@ class Engine {
         }
         const props = this.doc.effectiveParaProps(block);
         const label = this.numberingLabel(props, block);
-        const broken = breakParagraph(this.doc, this.measurer, block, width, fields, label);
+        const broken = breakParagraph(this.doc, this.measurer, block, width, fields, label, undefined, this.sp?.docGridLinePitch);
         let spacingBefore = props.spacingBefore ?? 0;
         let spacingAfter = props.spacingAfter ?? 0;
         // Contextual spacing between same-style neighbors applies inside
@@ -2707,6 +2727,8 @@ class Engine {
     let x0 = this.colX + (tbl.props.indent ?? 0);
     if (tbl.props.alignment === "center") x0 = this.colX + (colWidth - tableWidth) / 2;
     else if (tbl.props.alignment === "right") x0 = this.colX + colWidth - tableWidth;
+    // w:bidiVisual (RTL table) hugs the right margin unless explicitly aligned.
+    else if (tbl.props.bidiVisual) x0 = this.colX + colWidth - tableWidth;
 
     const headerRows: TableRow[] = [];
     for (const row of tbl.rows) {
@@ -3021,13 +3043,17 @@ class Engine {
   ): { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number }[]; height: number } {
     const defaults = this.cellMarginsOf(tbl);
     const cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[] = [];
+    const totalW = sum(widths, 0, widths.length);
+    const bidi = tbl.props.bidiVisual === true;
     let gridPos = 0;
     let maxH = 0;
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
       const span = cell.props.gridSpan;
-      const x = sum(widths, 0, gridPos);
       const w = sum(widths, gridPos, gridPos + span);
+      // w:bidiVisual: mirror each cell's horizontal position so column order
+      // reverses (source col 1 lands at the right edge).
+      const x = bidi ? totalW - sum(widths, 0, gridPos) - w : sum(widths, 0, gridPos);
       gridPos += span;
       if (cell.props.vMerge === "continue") {
         cells.push({ items: [], height: 0, x, width: w, cellIdx: ci });

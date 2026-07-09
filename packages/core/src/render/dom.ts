@@ -782,6 +782,14 @@ function renderText(item: TextItem): HTMLElement {
     el.style.whiteSpace = "pre";
     el.style.font = cssFont(item.font);
   }
+  if (item.rtl) {
+    // RTL run: let the browser shape (Arabic contextual forms) and order the
+    // glyphs within the span box. The engine already placed the box at its
+    // visual x; isolate keeps neighbouring spans from re-ordering it.
+    el.style.direction = "rtl";
+    el.style.unicodeBidi = "isolate";
+    el.style.justifyContent = "flex-end";
+  }
   el.style.lineHeight = `${boxH}px`;
   // Word (mac) rasterizes between Chrome's two smoothing modes: grayscale AA
   // alone reads too thin, subpixel too thick. Grayscale plus a hairline

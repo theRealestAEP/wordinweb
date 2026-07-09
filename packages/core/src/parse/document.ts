@@ -1349,6 +1349,7 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
     }
     const jc = attr(child(tblPr, "jc"), "val");
     if (jc === "center" || jc === "right") props.alignment = jc;
+    if (child(tblPr, "bidiVisual")) props.bidiVisual = true;
     const borders = child(tblPr, "tblBorders");
     if (borders) {
       props.borders = {
