@@ -75,6 +75,7 @@ interface ImageAtom {
   height: number;
   crop?: { l: number; t: number; r: number; b: number };
   rotation?: number;
+  border?: { color: string; width: number };
   srcDrawing?: XmlElement;
 }
 interface DrawingAtom {
@@ -160,6 +161,7 @@ export interface LineSpan {
     height: number;
     crop?: { l: number; t: number; r: number; b: number };
     rotation?: number;
+    border?: { color: string; width: number };
     srcDrawing?: XmlElement;
   };
   drawing?: DrawingContent;
@@ -561,7 +563,7 @@ export function breakParagraph(
         width: w,
         image:
           atom.kind === "image"
-            ? { part: atom.part, width: w, height: h, crop: atom.crop, rotation: atom.rotation, srcDrawing: atom.srcDrawing }
+            ? { part: atom.part, width: w, height: h, crop: atom.crop, rotation: atom.rotation, border: atom.border, srcDrawing: atom.srcDrawing }
             : undefined,
         drawing: atom.kind === "drawing" ? atom.drawing : undefined,
         props: {},
@@ -1027,6 +1029,7 @@ function buildAtoms(
             height: content.height,
             crop: content.crop,
             rotation: content.rotation,
+            border: content.border,
             srcDrawing: content.srcDrawing,
           });
           break;

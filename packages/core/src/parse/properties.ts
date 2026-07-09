@@ -279,10 +279,21 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
     if (left !== undefined) props.indentLeft = twipsToPx(left);
     const right = intAttr(ind, "right") ?? intAttr(ind, "end");
     if (right !== undefined) props.indentRight = twipsToPx(right);
+    // firstLine and hanging share ONE mutually-exclusive slot in a w:ind. When a
+    // level specifies EITHER, it must clear an inherited value of the other, or a
+    // parent style's hanging leaks past a child's firstLine="0" — half the hanging
+    // then shifts a centered line left (gatech cover headings: CoverPageSingleSpace
+    // hanging=360 under MainBodyHeadings firstLine=0 pushed the title 9pt left).
+    // hanging wins when both are (invalidly) present, matching Word.
     const firstLine = intAttr(ind, "firstLine");
-    if (firstLine !== undefined) props.indentFirstLine = twipsToPx(firstLine);
     const hanging = intAttr(ind, "hanging");
-    if (hanging !== undefined) props.indentHanging = twipsToPx(hanging);
+    if (hanging !== undefined) {
+      props.indentHanging = twipsToPx(hanging);
+      props.indentFirstLine = 0;
+    } else if (firstLine !== undefined) {
+      props.indentFirstLine = twipsToPx(firstLine);
+      props.indentHanging = 0;
+    }
   }
 
   const spacing = child(pPr, "spacing");

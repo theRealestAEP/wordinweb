@@ -141,6 +141,19 @@ its residual is lower on the page). Closing these needs the sec2 table height /
 section-band resume position to match Word, verified against an isolated
 table+continuous-section probe — distinct from the space-before rule.
 
+### firstLine and hanging share ONE mutually-exclusive slot across the style cascade
+`w:ind/@firstLine` and `@hanging` are the same first-line-indent property (they
+can't both apply). When a derived style's `w:ind` specifies one, it must CLEAR an
+inherited value of the other — otherwise a parent style's `hanging` leaks past a
+child's `firstLine="0"`. On a CENTERED paragraph the leaked hanging shifts the
+line left by HALF the hanging (a `hanging=360`tw=18pt centered heading landed 9pt
+left of its own body lines: gatech `MainBodyHeadings` firstLine=0 under
+`CoverPageSingleSpace` hanging=360). Fix (`parse/properties.ts`, in
+`parseParaProps`): when a `w:ind` sets `hanging`, also emit `indentFirstLine=0`,
+and vice-versa, so the shallow style merge overrides the sibling attribute.
+`hanging` wins when both are (invalidly) present. Left/right indents still merge
+attribute-by-attribute (unchanged). Fixed gatech p2 14.5→2.7, p5 5.5→1.9.
+
 ### Words never split at formatting-run boundaries
 A word split across `w:r` runs ("(" + "“Cobbery”") is one breaking unit in
 Word. The already-placed head backtracks to the next line on break
@@ -242,6 +255,30 @@ effectively Word's cached layout — trust it; otherwise autofit
 (`resolveGridWidths` in `layout/engine.ts`). Corollary: our column drag
 must *create* `tcPr/tcW` (as Word does) or the dragged widths get autofit
 away on the next layout.
+
+### A trusted fixed-unit grid that overflows the column is NOT scaled down
+Word honors a Word-authored grid (every cell carries `tcW`) even when the table's
+authored width exceeds the content column — it keeps the column widths and lets
+the table HANG into the right margin, rather than shrinking to fit. Our
+`resolveGrid` used to scale any `total > available` grid down to the column, which
+shifted every row left by a fraction of the overflow (gatech TOC 2-col table,
+grid 9129tw in an 8640tw column, shifted ~4.6pt/92tw left; the right-aligned
+marker cell AND the text cell both slid). Fix (`resolveGridWidths`): in the
+trusted-grid branch, a non-percentage (`dxa`/absent) grid whose `gridTotal >
+available` returns the raw `tbl.grid` unscaled. Percentage widths are relative to
+the column, so they still fit. Fixed gatech p11 14.1→3.2, p10 7.3→5.4.
+
+### A picture's `a:ln` outline paints just OUTSIDE the image, even widthless
+`<pic:spPr><a:ln>` with a solid fill (no `noFill`) is a picture border Word draws
+as a line straddling the image edge — a widthless `a:ln` (no `@w`) still paints at
+a ~0.8pt hairline (hamburg "Marketing" figure: black `tx1` outline, rule bbox
+sits half its width beyond the image box). The pic parse ignored it. Fix: parse
+`a:ln` (guard `!noFill` + a resolved fill color; `tx1`→`dk1` via theme aliasing)
+into `DrawingImage.border`/`ImageContent.border`, thread it through the inline
+atom (`layout/inline.ts` — it must be copied at BOTH the atom builder AND the span
+repack, plus the `ImageAtom` type) into `ImageItem`, and render it as a CSS
+`outline` (draws outside the box without shifting the image or its layout). Fixed
+hamburg p10 5.1→1.1.
 
 ### Hairline borders antialias to gray on retina displays
 Word's default 0.5pt table border is 0.67 CSS px; placed at fractional
@@ -609,4 +646,24 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   (parity-tables): measured slack over PDF glyph advances varies per column
   (10.4px vs 15.9px on sibling columns, no tblCellMar). tblW w:w="100%"
   (invalid per ST_TblWidth) is ignored by Word → table autofits to ~601px,
-  not the 624px content width. Open calibration problem, parked.
+  not the 624px content width. Open calibration problem, parked. Re-measured
+  2026-07: Word's 601px is NOT plain content-fit either — the two content
+  columns (Key 24.5pt, Status 40.6pt, both content+slack) match if our autofit
+  `pad` shrinks ~2.1pt/column, but the flexible description column then makes the
+  table 601px, between our content-min (~445px) and full width (624px). The 601
+  derivation stays uncracked without a Word-export probe sweeping content ×
+  margins × the flexible-column share.
+
+## Sparse-page metric floor (near-blank pages score high on the structural NCC)
+On pages with very little ink (parity-dividers 8.4%, pleading p4 9.0%, gatech p10
+5.4%), the structural severity is dominated by Chrome's ~1.1-1.2x heavier text
+rasterization and sub-pixel rule antialiasing, NOT by geometry: every element
+(line numbers, rules, headings, body) verified to match Word within ~0.5px, yet
+the tile-weighted NCC has little other ink to dilute the weight residual (raw
+mismatch stays ~0.6-1.3%). These are a plateau, not a bug — moving them needs a
+global `-webkit-text-stroke`/baseline recalibration that the tuned
+benchmark/sample/pickett fixtures forbid (and the per-page weight ratio VARIES:
+dividers 0.96x, pleading p4 0.98x, gatech p10 1.18x, so no single global constant
+fixes them). gatech p10 also carries a genuine REF/SEQ field-value divergence
+("Bavoqe 0" cached in Word vs our live-evaluated "1") — a field-resolution gap,
+distinct from the weight floor.
