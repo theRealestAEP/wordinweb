@@ -571,6 +571,31 @@ front-matter delta. Cracking it needs a Word-export probe of the TOC field
 geometry (entry wrapping, PAGEREF page-number widths, tab-leader fill), which the
 screen-locked session forbids. Left untouched.
 
+**PROBED 2026-07 (`scripts/make-toc-probe.py`): the TOC layout PRIMITIVES are
+correct — the phase23 residual is fixture-specific, not a TOC-rendering bug.**
+A 40-entry probe reusing phase23's real styles.xml + theme1.xml (TOC1/2/3 with
+their `right dot-leader @9350tw` tab, Hyperlink, docDefaults, docGrid
+linePitch=360) exported to `parity/probe-toc-word.pdf`. Word laid it out in
+**43 visual lines on 1 page** with exactly two entries wrapping (the two >70-char
+titles); pitch alternates ~13.0pt (TOC1, `line=240` single) / ~15.5pt (TOC2/3,
+inherited `line=276` ×1.15). Our engine on the same probe (DOM, :5317) produces
+**the identical 43 lines, the SAME two wrap points, and the same pitch
+alternation** — the dot-leader fills one span to the page number (NOT wrapping
+to extra dot rows, an earlier grouping-artifact worry), TOC1's single-spacing
+override is honored, and wrap columns match. So dot leaders / entry wrapping /
+per-style pitch are all correct.
+- The real fixture (90 TOC entries: 12 TOC1 / 35 TOC2 / 43 TOC3) still renders
+  its TOC over OUR pages 7-9 (42+39+11 lines, 72 total pages) as before. Because
+  the faithful probe matches Word line-for-line, the ~1-page TOC over-production
+  is NOT in the primitives — it is real-entry-specific: candidates are extra
+  wraps on the 6 real titles >55 chars (ALL-CAPS TOC1 headings measure wider) or
+  the cached `PAGEREF` field's page-number-column width vs a literal number
+  (the probe used literals). Pinning it needs the REAL fixture exported through
+  Word, which is currently blocked NOT by a locked session but by the fixture
+  FAILING validation (numId=0 undefined + `<w:shadow>` out of order in `<w:rPr>`)
+  — opening it risks a repair dialog that taints refs. Sanitize the fixture
+  (fix numId/rPr order) first, then export and diff the real TOC's wrap columns.
+
 ### allowOverlap="0" slides an anchored shape clear of earlier overlapping floats
 `wp:anchor @allowOverlap="0"` means Word shifts the shape so it does NOT overlap
 any earlier-placed (lower z-order) float, rather than stacking on top
