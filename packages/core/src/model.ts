@@ -476,6 +476,9 @@ export interface Paragraph {
   sectionBreak?: SectionProps;
   /** w:bookmarkStart names in this paragraph (PAGEREF targets). */
   bookmarks?: string[];
+  /** Final revision view: the paragraph mark AND all content are tracked
+   * deletions — the paragraph does not exist (no line, no numbering). */
+  revisionHidden?: boolean;
   /** Source w:p element. */
   src?: XmlElement;
 }

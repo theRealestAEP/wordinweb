@@ -47,13 +47,20 @@ export function parseBody(body: XmlElement, ctx: DocParseContext): Section[] {
       const ln = localName(el.name);
       if (ln === "p") {
         const para = parseParagraph(el, ctx);
-        blocks.push(para);
-        if (para.sectionBreak) {
-          sections.push({ props: para.sectionBreak, blocks });
-          blocks = [];
+        // A revision-hidden paragraph takes its section break with it: the
+        // deleted mark's sectPr is gone in the final view, so the preceding
+        // content merges into the FOLLOWING section (real.docx: a deleted
+        // sectPr paragraph otherwise leaves a phantom blank page).
+        if (!para.revisionHidden) {
+          blocks.push(para);
+          if (para.sectionBreak) {
+            sections.push({ props: para.sectionBreak, blocks });
+            blocks = [];
+          }
         }
       } else if (ln === "tbl") {
-        blocks.push(parseTable(el, ctx));
+        const t = parseTable(el, ctx);
+        if (t.rows.length > 0) blocks.push(t); // all rows revision-deleted
       } else if (ln === "sectPr") {
         sections.push({ props: parseSectionProps(el), blocks });
         blocks = [];
@@ -104,8 +111,13 @@ export function parseBlocks(container: XmlElement, ctx: DocParseContext): Block[
   const blocks: Block[] = [];
   for (const el of container.children) {
     const ln = localName(el.name);
-    if (ln === "p") blocks.push(parseParagraph(el, ctx));
-    else if (ln === "tbl") blocks.push(parseTable(el, ctx));
+    if (ln === "p") {
+      const para = parseParagraph(el, ctx);
+      if (!para.revisionHidden) blocks.push(para);
+    } else if (ln === "tbl") {
+      const t = parseTable(el, ctx);
+      if (t.rows.length > 0) blocks.push(t); // all rows revision-deleted
+    }
     else if (ln === "sdt") {
       const content = child(el, "sdtContent");
       if (content) blocks.push(...parseBlocks(content, ctx));
@@ -143,8 +155,27 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
   // Unterminated field (shouldn't happen in valid files): flush as text
   flushField(field);
   suppressTocHyperlinkFormatting(para);
+  // Final view: a paragraph whose MARK is a tracked deletion (pPr/rPr/w:del)
+  // and whose content was all deleted does not exist — Word removes the line
+  // and its numbering entirely (real.docx: pages of ghost "c. d. e." list
+  // items with no text, unclickable). Markup view still shows it.
+  if (ctx.revisionView !== "markup" && pPr) {
+    const markRPr = child(pPr, "rPr");
+    if (markRPr && child(markRPr, "del") && !para.children.some(hasVisibleContent)) {
+      para.revisionHidden = true;
+      return para;
+    }
+  }
   ensureCaretAnchor(p, para);
   return para;
+}
+
+/** Any run content that would render (text, image, math, field, break…). */
+function hasVisibleContent(c: Paragraph["children"][number]): boolean {
+  const runs = c.type === "run" ? [c] : c.runs;
+  return runs.some((r) =>
+    r.content.some((rc) => rc.kind !== "text" || rc.text.length > 0),
+  );
 }
 
 /**
@@ -1363,6 +1394,10 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
 
   const rows: TableRow[] = [];
   for (const tr of children(tbl, "tr")) {
+    // Final revision view: a row whose trPr carries w:del is a tracked row
+    // deletion — Word removes it entirely (real.docx: a fully-deleted caption
+    // table otherwise leaves a 200px border/grip skeleton with no text).
+    if (ctx.revisionView !== "markup" && child(child(tr, "trPr"), "del")) continue;
     rows.push(parseRow(tr, ctx));
   }
 
