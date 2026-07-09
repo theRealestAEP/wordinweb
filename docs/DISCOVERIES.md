@@ -155,21 +155,76 @@ opener's before exceeded the carried after. Net: **p32 38.2% → 1.0%**, doc mea
 2.30 / parity-colbalance 1.24 unchanged. Verified by ink-row measurement of the
 Word PDF vs our element screenshots at matched 192 dpi.
 
-Still open (p30 22%, p31 12%, p46 19% — the balanced-band RESUME offset, which
-lives in the protected two-pass balancing machinery and was NOT safe to touch
-here): on the FINAL page of a degenerate 2-col sliver section, the following
-1-col section resumes ~4pt too low. The sliver's last line matches Word to the
-sub-pixel (sec2's last glyph `e` ink-top 537.6pt in both), but our sec3 `Jade 7:`
-Heading1 lands ~3.8pt low (ink-to-ink) and cascades to the whole table; p46's
-sec5 body is the same ~4pt low after sec4's balanced band. The inter-section gap
-is 24pt for us (sliver after 10 + heading before-remainder 14) vs Word's ~20pt —
-and no after/before-collapse configuration nets anything but 24pt, so the excess
-is in `balanceMaxY` (the resume = tallest balanced column bottom), i.e. a
-balance-TARGET calibration, not a spacing rule. Because the target protects the
-24+ clean balanced pages (p2-29/p33-45, all <1%), closing this needs an isolated
-2-col-balanced → 1-col-section probe exported through Word to pin the exact
-resume height before touching the target — distinct from, and riskier than, the
-space-before rule fixed above.
+### A balanced band resumes at the balance TARGET, not the final column's raw cursor (the trailing spacing-after must not double-count)
+The balanced-band RESUME offset (wild-multicolumn p30/p31/p46, ~5pt too low on
+the FINAL page of a degenerate 2-col sliver section). The sliver's last line
+matches Word to the sub-pixel, but the following 1-col section resumed ~5pt low
+and cascaded into whatever followed (p30/p31 a LightGrid table; p46 an
+empty-para + body). The fix lives in the resume line of `run()` (engine.ts),
+which was `this.y = Math.max(this.y, this.balanceMaxY)`.
+
+Instrumented, the three cases (px; ÷1.3333 = pt) were:
+
+| case | this.y (final col, incl. trailing after) | balanceMaxY (tallest NON-final col) | target = bandTop + Σ(colEnds−bandTop)/nCols | Word resumes at |
+| --- | --- | --- | --- | --- |
+| wild p30 | 747.60 | 734.26 | **741.00** | 741 (target) |
+| wild p46 | 438.76 | 425.43 | **432.00** | 432 (target) |
+| parity-colbalance | 310.47 | **356.94** | 333.57 | 356.94 (balanceMaxY) |
+
+`max(this.y, balanceMaxY)` gives 747.60/438.76 for wild (≈5pt low) yet the
+correct 356.94 for colbalance. The final column's raw cursor `this.y` carries
+the SECTION's trailing paragraph spacing-after (10pt here), which Word does NOT
+bake into the band height — it applies that after via the section-boundary
+before/after collapse against the next paragraph's before. Baked into `this.y`
+AND distributed once into the target, the after is counted ~1.5×; the visible
+excess is `after − after/nCols` = 5pt (10 − 10/2). Word instead resumes at the
+balance TARGET (the even column height), which spreads the trailing after by
+1/nCols. Rule (`run()`):
+
+    this.y = Math.max(this.balanceMaxY, this.balanceBottom /*=target*/,
+                      this.y - this.lastParaSpacingAfter);
+
+- **target** wins for wild (even columns: the balanced columns fell one glyph
+  short of the target, the raw cursor overshot by the after);
+- **balanceMaxY** wins for parity-colbalance (uneven 5/4 split: the taller
+  column's internal after is genuine column height because content follows it in
+  the next column — that after Word DOES keep);
+- **this.y − trailingAfter** guards the case where the final column overran the
+  target with real content (its content bottom then governs).
+
+Net: p46 19.45%→1.53% (exact — the resume Body ink went 356.80pt→351.9pt vs
+Word 351.87); p30 22.36%→19.17%, p31 12.08% (the resume/heading is now correct,
+p30 align 4px→1px, our `Jade 7:` Heading1 ink 572.7pt vs Word 572.92 — see next
+note for their remaining table residual). parity-colbalance 1.24% and
+parity-columns 2.30% unchanged; every wild p1-29/p32-45 unmoved (max 1.84%).
+Derived with `scripts/make-colresume-probe.py` (2-col-balanced → 1-col-section,
+uniform 11pt so line-pitch cancels the leading offset; sliver + normal-column +
+after/before-sweep variants) plus the pre-existing `parity-colbalance` Word PDF
+as the uneven-column ground truth (local Word could not export a fresh
+reference this session, so the wild-multicolumn and parity-colbalance Word PDFs
+were the arbiters, cross-checked against the engine's own instrumented values).
+
+### wild-multicolumn p30/p31 have a SECOND residual — the LightGrid-Accent1 table, not the resume
+With the resume corrected, p30's 19% / p31's 12% (raw only 3.5% / 1.2%) are the
+one LightGrid-Accent1 table (spanning p30→p31), NOT vertical drift of the
+section. Two independent gaps, both distinct from the balance resume:
+1. **Conditional bold is resolved but never painted.** `condFor` correctly
+   layers the `firstRow`/`firstCol` bands' `<w:b/>` into `TableCondFormat.bold`,
+   but `paintRow` consumes only `cond.shd`/`cond.borders` — the bold never
+   reaches the cell text (which is laid out in `layoutRow`→`layoutFrame` with the
+   base run props, before `condFor` runs). Post-painting the weight onto the laid
+   glyphs (flip `it.font.bold`) actually REGRESSED the metric (p30 19.17→19.74),
+   so Word's rendered weight / which bands bold differs from the naive
+   firstRow+firstCol read — needs a fresh Word reference to pin before wiring the
+   conditional rPr into cell layout (bold changes glyph advance, so it must feed
+   line-breaking, not just paint).
+2. **Header row height.** Word's header row pitch is 15.50pt vs our uniform
+   14.43pt (~1pt short); the body-row pitches match (~14.5). That ~1pt plus a
+   ~1pt table-start gap cascades every data row ~2pt high — a systematic
+   misalignment the NCC structural metric amplifies. A LightGrid header
+   row-height detail, unvalidatable without Word. Both are table-styling issues
+   confined to the single wild-multicolumn table (benchmark/sample/
+   parity-columns/parity-colbalance have no tables), so out of the resume scope.
 
 ### firstLine and hanging share ONE mutually-exclusive slot across the style cascade
 `w:ind/@firstLine` and `@hanging` are the same first-line-indent property (they

@@ -239,9 +239,23 @@ class Engine {
       this.layoutSection(section, sections[sections.indexOf(section) + 1]);
       this.prevBandBalanced = this.balanceBottom !== undefined;
       if (this.balanceBottom !== undefined) {
-        // Resume below the tallest column; reset to the first column so the
-        // next band spans the full width from a clean cursor.
-        this.y = Math.max(this.y, this.balanceMaxY);
+        // Resume below the balanced band, reset to the first column so the next
+        // band spans the full width from a clean cursor. The band's bottom is
+        // the balance TARGET (the even column height Word aims for), NOT the
+        // final column's raw cursor: that cursor was advanced by the section's
+        // trailing paragraph spacing-after, which Word does not bake into the
+        // band height - it applies that after via the section-boundary before/
+        // after collapse against the next paragraph's before. So take the
+        // greatest of: the balance target; the tallest NON-final column
+        // (balanceMaxY, whose internal after is genuine column height because
+        // content follows it in the next column - parity-colbalance's uneven
+        // 5/4 split resumes here); and the final column's CONTENT bottom
+        // (this.y minus its trailing after, in case the final column overran
+        // the target with real content). Using the raw this.y instead left the
+        // 1-col successor of a degenerate 2-col sliver ~5pt low on
+        // wild-multicolumn p30/p31/p46 (the trailing after double-counted:
+        // once in the cursor, once distributed into the target).
+        this.y = Math.max(this.balanceMaxY, this.balanceBottom, this.y - this.lastParaSpacingAfter);
         this.col = 0;
         this.balanceBottom = undefined;
       }
