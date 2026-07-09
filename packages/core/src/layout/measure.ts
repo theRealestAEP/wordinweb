@@ -47,6 +47,11 @@ const METRIC_SUBSTITUTES: Record<string, string> = {
   "franklin gothic medium": "Avenir Next Medium",
   "century gothic": "Avenir Next",
   candara: "Optima",
+  // Word resolves a bare "Times" ascii family to Times New Roman (the wild2
+  // math fixtures docDefault it); prefer TNR's advances so bare-Times runs
+  // wrap and paginate like Word rather than the OS "Times" (~subtly different
+  // advances) or a sans fallback.
+  times: "Times New Roman",
   corbel: "Gill Sans",
   constantia: "Hoefler Text",
   "lucida sans": "Lucida Grande",
@@ -95,6 +100,10 @@ const WORD_FONT_METRICS: Record<string, { asc: number; desc: number; gap: number
   arial: { asc: 0.905273, desc: 0.211914, gap: 0.032715 },
   helvetica: { asc: 0.905273, desc: 0.211914, gap: 0.032715 }, // Arial-alike
   "times new roman": { asc: 0.891113, desc: 0.216309, gap: 0.04248 },
+  // Bare "Times" (docDefault of the wild2 math fixtures) resolves to Times
+  // New Roman in Word; without this it fell through to canvas
+  // fontBoundingBox (integer-rounded) and mis-paginated ~27% of runs.
+  times: { asc: 0.891113, desc: 0.216309, gap: 0.04248 },
   "courier new": { asc: 0.83252, desc: 0.300293, gap: 0 },
   // The rendering stack resolves to STIX Two Math (Cambria Math is
   // Office-private); these are ITS hhea values so the CSS glyph box centers

@@ -644,6 +644,55 @@ empty run lazily (`hfCaretForBand` in `edit/editor.ts`).
   not geometry (positions verified within ~1pt; the ∑ advance differs
   because STIX Two Math substitutes for Cambria Math).
 
+### The Times-family "cumulative drift" in the wild2 math fixtures is NOT a font-metric error — it is localized math/equation/image construct height (2026-07)
+The three math-heavy wild2 fixtures were suspected of a uniform Times/TNR
+per-line vertical drift (~+0.2pt/line) compounding to a full page of pagination
+desync (web 18 vs Word 17 on `wild2-math-omml-dense`; 7 vs Word 8 on
+`wild2-math-eq-as-images`; `wild2-sci-chem-omml` 13 = 13 but pages 3-13 badly
+misaligned). Direct measurement of Word's own reference PDFs **falsified** the
+uniform-metric hypothesis:
+- **Pure body-text TNR pitch matches ours to ~0.015pt/line.** Char-baseline
+  clustering of Word's PDFs gives a dominant 12pt single-spaced pitch of
+  **13.75pt** (raw ≈ 13.78-13.80) vs our raw `1.149902×12 = 13.799`; the
+  chem doc's double-spaced (`line=480 auto`) 12pt pitch is **~27.6pt**
+  (= 2×13.80). On a clean 72-line double-spaced body stretch the ourY−wordY
+  drift moves only −1.1pt (−0.015pt/line). The larger 14.0/14.5pt deltas in the
+  histograms are inline-math/subscript lines whose line box legitimately grows,
+  not the font pitch. `WORD_FONT_METRICS['times new roman']` is correct — do
+  NOT tweak the hhea value (it would regress the verified-correct body pitch;
+  msa/chronology are Arial so they wouldn't catch it).
+- **The drift is localized and per-construct, in OPPOSITE directions per doc.**
+  Matching identical (sanitized) text lines between our render and Word's PDF
+  and plotting cumulative ourY−wordY: `dense` holds a flat ~−28pt offset through
+  the text pages then takes discrete positive JUMPS at display equations/figures
+  (+99, +254 at single blocks) totalling +790pt ≈ one extra page — OUR tall
+  constructs over-size Word's. `eq-as-images` plunges NEGATIVE at each equation-
+  image block (−162, −259, −356 …, ending −394pt ≈ half a page short) — OUR
+  equation images UNDER-size Word's, so we pack one page fewer (7 vs 8). `chem`
+  nets ~0 (13 = 13). A single font metric cannot move pagination in two
+  directions at once; the real fixes live in the math-cluster / display-equation
+  / drawing-image height code and need Word-probe calibration per construct.
+- **Real latent bug fixed on the way: bare "Times" was un-mapped.** The dense
+  fixture's `docDefaults` ascii family is bare `"Times"` (not "Times New
+  Roman"); ~27% of its text runs (957 of 3531) inherit it. `"times"` had no
+  entry in `WORD_FONT_METRICS` **or** `METRIC_SUBSTITUTES`, so those runs fell
+  through to canvas `fontBoundingBox` (integer-rounded — the same failure mode
+  as the Arial 16-vs-16.87 note above) for BOTH advances and line height. Word
+  resolves "Times"→"Times New Roman"; adding `times` to both maps (→ TNR metric
+  + TNR substitute) flattened the dense front-matter drift from a growing
+  −42pt to a constant −28pt (the residual is the localized-construct offset).
+  Page counts and doc means are unchanged because they are dominated by the
+  construct-height desync, but the geometry is materially more correct and the
+  mapping is the right resolution regardless.
+- **Method note:** measured entirely from the EXISTING Word reference PDFs —
+  a fresh Times probe (`scripts/make-times-probe.py` / `read-times-probe.py`,
+  covering TNR + bare "Times" at 10/10.5/11/12pt × single/double/1.08/atLeast)
+  was generated and validated but could NOT be exported through Word: past
+  midnight the session was screen-locked, so every `open`/save-as AppleEvent
+  timed out with −1712 and no window ever appeared (the documented
+  "exports need an unlocked session, full stop" failure). The probe is ready to
+  export and regress once the construct-height work resumes on an unlocked box.
+
 ## Word template rendering (2026-07, header/footer designs + cover letters)
 
 - **Word's built-in h/f templates decode to five constructs**: inline SDTs
