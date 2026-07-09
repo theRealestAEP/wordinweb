@@ -92,6 +92,18 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     props.columns = spec;
   }
 
+  // w:docGrid type=lines/linesAndChars: Word snaps each line's single-line
+  // font height up to linePitch (twips) before applying the line-spacing
+  // multiplier. type=default/snapToChars don't affect vertical line pitch.
+  const docGrid = child(sectPr, "docGrid");
+  if (docGrid) {
+    const gtype = attr(docGrid, "type") ?? "default";
+    const linePitch = intAttr(docGrid, "linePitch");
+    if ((gtype === "lines" || gtype === "linesAndChars" || gtype === "snapToChars") && linePitch) {
+      props.docGridLinePitch = twipsToPx(linePitch);
+    }
+  }
+
   const pgBorders = child(sectPr, "pgBorders");
   if (pgBorders) {
     const side = (name: string): Border | undefined => {

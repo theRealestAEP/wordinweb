@@ -707,3 +707,61 @@ dividers 0.96x, pleading p4 0.98x, gatech p10 1.18x, so no single global constan
 fixes them). gatech p10 also carries a genuine REF/SEQ field-value divergence
 ("Bavoqe 0" cached in Word vs our live-evaluated "1") — a field-resolution gap,
 distinct from the weight floor.
+
+## International text: RTL/bidi + East Asian (CJK) + docGrid
+
+Added for the staging-bidi (1p), staging-eastasian (1p) and wild2-lit-yiddish-rtl
+(215p) fixtures. Parse: rFonts w:eastAsia -> RunProps.fontEastAsia, w:cs ->
+fontComplex, w:rtl -> RunProps.rtl, w:bidi (pPr) -> ParaProps.bidi, w:bidiVisual
+(tblPr) -> TableProps.bidiVisual, w:docGrid -> SectionProps.docGridLinePitch.
+
+- **CJK line breaking**: East Asian text has no spaces — every ideograph/kana is
+  laid one em (= font size) wide and each inter-character boundary is a break
+  opportunity (inline.ts pushCJK, breakAfter per char). Verified against Word's
+  PDF: 42 CJK chars per line, x1=534pt = 72 + 42x11. Kinsoku: chars forbidden at
+  line start (closing punctuation/small kana) or line end (opening brackets) are
+  bound to their neighbour via breakAfter=false. jc=both does NOT stretch a
+  CJK-only line (no spaces to distribute) — Word leaves it at natural width.
+- **CJK font substitution & line pitch**: Word picks the CJK face by glyph
+  coverage. A Japanese eastAsia font (MS Mincho) doesn't cover simplified
+  Chinese, so Word falls back to Microsoft JhengHei (its PDF embeds it) with a
+  much taller line box. Proxied with kana presence: a CJK run with no kana under
+  a Japanese eastAsia font uses the Chinese profile. Measured 11pt line pitch
+  (docDefaults line=259 -> x1.0792): MS Mincho 19.5pt/line (single 1.643em,
+  ascent 1.364em); JhengHei 36pt/line (single 3.033em, ascent 2.27em). macOS
+  substitutes: MS Mincho->Hiragino Mincho ProN, JhengHei->PingFang TC. Glyph
+  WIDTH is 1em regardless of substitute; only the vertical metrics matter.
+- **docGrid (type=lines/linesAndChars)**: sets a MINIMUM single-line font height
+  = linePitch that the line-spacing multiplier is applied over (Latin lines in a
+  CJK section grow to the grid; CJK fonts already exceed it). type="default"
+  (grid defined but unused) does NOT snap — the yiddish book's docGrid is
+  type=default, correctly ignored. FIRST-LINE reserve: Word drops the first line
+  of a docGrid section ~4x linePitch below the top margin and suppresses that
+  paragraph's spacing-before (measured: staging-eastasian's first heading
+  baseline sits 4 pitches below the margin). This single reserve was the biggest
+  eastasian win (85% -> 21% structural).
+- **Bidi paragraph alignment**: w:bidi lines assemble logically then reorder to
+  visual order (UAX#9 rule L2: reverse contiguous runs from the highest
+  embedding level down; RTL runs get span.rtl so the renderer sets
+  direction:rtl and the browser shapes Arabic/Hebrew within the box). Physical
+  alignment FLIPS: OOXML jc="right" means "end", which in an RTL paragraph is the
+  LEFT margin (measured: Word lays a bidi jc=right paragraph flush LEFT);
+  jc="left"->right; absent->right (RTL start).
+- **bidiVisual (RTL) table**: column order reverses (source col 0 lands at the
+  right edge) AND the table hugs the right margin. Cell RTL text still uses the
+  bidi paragraph swap (flush left within the cell) — right-aligning cell text
+  measured WORSE.
+- **Complex-script font**: a w:rtl run paints in the rFonts w:cs face (Arial for
+  the bidi fixtures). Using it (vs the Latin fallback) dropped staging-bidi from
+  12% -> 5% by matching Word's Arabic/Hebrew shaping/advances.
+
+Results: staging-bidi 66.05% -> 5.24%, staging-eastasian 83.90% -> 20.90%
+structural. Eastasian's residual is dominated by CJK glyph-shape decorrelation
+(Hiragino/PingFang vs Word's embedded MS Mincho/JhengHei — unavailable on macOS;
+raw pixel diff is only 4.6%) plus a few-pt vertical drift at Latin/heading
+paragraph boundaries. wild2-lit-yiddish-rtl baselined at mean 76.65% over 215
+pages: the RTL implementation renders it structurally correct (right-aligned,
+justified, correct line breaks early), but per-glyph Times New Roman
+decorrelation (mac vs Windows) plus sub-pt line-pitch drift diverge the
+pagination over book length — the per-font line-advance calibration backlog,
+compounded across hundreds of pages.

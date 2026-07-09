@@ -205,13 +205,20 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
   const rFonts = child(rPr, "rFonts");
   if (rFonts) {
     const theme = ctx.theme;
-    const asciiTheme = attr(rFonts, "asciiTheme");
-    let font = attr(rFonts, "ascii") ?? attr(rFonts, "hAnsi");
-    if (!font && asciiTheme && theme) {
-      font = asciiTheme.startsWith("major") ? theme.majorFont : theme.minorFont;
-    }
+    const themeFont = (kind: string | undefined) =>
+      kind && theme ? (kind.startsWith("major") ? theme.majorFont : theme.minorFont) : undefined;
+    let font = attr(rFonts, "ascii") ?? attr(rFonts, "hAnsi") ?? themeFont(attr(rFonts, "asciiTheme"));
     if (font) props.font = font;
+    // East Asian font channel (used for CJK codepoints) and complex-script
+    // channel (used for w:rtl runs). Word picks the channel per character.
+    const ea = attr(rFonts, "eastAsia") ?? themeFont(attr(rFonts, "eastAsiaTheme"));
+    if (ea) props.fontEastAsia = ea;
+    const cs = attr(rFonts, "cs") ?? themeFont(attr(rFonts, "cstheme") ?? attr(rFonts, "csTheme"));
+    if (cs) props.fontComplex = cs;
   }
+
+  const rtl = onOff(child(rPr, "rtl"));
+  if (rtl !== undefined) props.rtl = rtl;
 
   const sz = childVal(rPr, "sz");
   if (sz !== undefined) props.size = halfPtToPx(parseFloat(sz));
@@ -269,6 +276,9 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
 
   const styleId = childVal(pPr, "pStyle");
   if (styleId) props.styleId = styleId;
+
+  const bidi = onOff(child(pPr, "bidi"));
+  if (bidi !== undefined) props.bidi = bidi;
 
   const jc = childVal(pPr, "jc");
   if (jc && ALIGN_MAP[jc]) props.alignment = ALIGN_MAP[jc];

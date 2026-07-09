@@ -76,6 +76,12 @@ export interface RunProps {
   doubleStrike?: boolean;
   /** Resolved primary font family name (ascii/hAnsi, theme-resolved). */
   font?: string;
+  /** East Asian font (rFonts w:eastAsia): used for CJK codepoints. */
+  fontEastAsia?: string;
+  /** Complex-script font (rFonts w:cs): used for RTL/complex runs. */
+  fontComplex?: string;
+  /** w:rtl — this run's text is right-to-left (Arabic/Hebrew). */
+  rtl?: boolean;
   /** Font size in px. */
   size?: number;
   /** CSS color; "auto" resolved to inherit/black by renderer. */
@@ -113,6 +119,9 @@ export interface NumberingRef {
 export interface ParaProps {
   styleId?: string;
   alignment?: Alignment;
+  /** w:bidi — right-to-left paragraph: lines assemble RTL and default
+   * alignment flips to the right edge. */
+  bidi?: boolean;
   /** px */
   indentLeft?: number;
   indentRight?: number;
@@ -523,6 +532,9 @@ export interface TableProps {
   /** px table indent from left margin. */
   indent?: number;
   alignment?: Alignment;
+  /** w:bidiVisual — RTL table: column order reverses and the table hugs the
+   * right margin. */
+  bidiVisual?: boolean;
   borders?: {
     top?: Border;
     bottom?: Border;
@@ -596,6 +608,10 @@ export interface SectionProps {
   pageNumberStart?: number;
   pageNumberFormat?: string;
   columns: ColumnSpec;
+  /** w:docGrid type=lines/linesAndChars: minimum single-line height (px) that
+   * the line-spacing multiplier is applied over. Word snaps every line's font
+   * height up to this grid pitch (CJK documents). */
+  docGridLinePitch?: number;
   type?: "nextPage" | "continuous" | "evenPage" | "oddPage" | "nextColumn";
   /** Vertical alignment of page content. */
   vAlign?: "top" | "center" | "both" | "bottom";
