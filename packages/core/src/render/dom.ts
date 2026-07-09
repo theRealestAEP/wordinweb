@@ -651,6 +651,10 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       node.style.width = `${item.width}px`;
       node.style.height = `${item.height}px`;
       if (item.rotation) node.style.transform = `rotate(${item.rotation}deg)`;
+      // a:ln picture outline: Word paints the line just OUTSIDE the image box
+      // (the rule bbox sits ~half its width beyond the image edge). `outline`
+      // draws outside the border edge without shifting the image or its layout.
+      if (item.border) node.style.outline = `${item.border.width}px solid ${item.border.color}`;
       // behindDoc: under the text layer (the surface isolates stacking so a
       // negative z-index stays above the page background).
       if (item.behind) node.style.zIndex = "-1";

@@ -114,6 +114,8 @@ export interface ImageItem {
   /** a:srcRect crop (fractions) and a:xfrm rotation (degrees). */
   crop?: { l: number; t: number; r: number; b: number };
   rotation?: number;
+  /** a:ln picture outline, drawn just outside the image (Word hairline). */
+  border?: { color: string; width: number };
   /** behindDoc: paint under the text layer. */
   behind?: boolean;
   /** Source w:drawing element (for interactive resize/move). */

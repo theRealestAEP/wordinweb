@@ -190,6 +190,8 @@ export interface ImageContent {
   crop?: { l: number; t: number; r: number; b: number };
   /** a:xfrm rotation, degrees clockwise. */
   rotation?: number;
+  /** a:ln picture outline (Word draws it just outside the image). */
+  border?: { color: string; width: number };
   /** Source w:drawing (or pict) element, for resize/move editing. */
   srcDrawing?: XmlElement;
 }
@@ -379,6 +381,8 @@ export interface DrawingImage {
   height: number;
   crop?: { l: number; t: number; r: number; b: number };
   rotation?: number;
+  /** a:ln picture outline (Word draws it just outside the image). */
+  border?: { color: string; width: number };
 }
 
 /**

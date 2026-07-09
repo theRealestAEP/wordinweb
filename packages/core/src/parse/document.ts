@@ -689,6 +689,16 @@ function parseDrawing(
         const cropOf = (name: string) => (srcRect ? (intAttr(srcRect, name) ?? 0) / 100000 : 0);
         const crop = srcRect ? { l: cropOf("l"), t: cropOf("t"), r: cropOf("r"), b: cropOf("b") } : undefined;
         const rot = intAttr(xfrm, "rot");
+        // a:ln picture outline: Word draws a line just outside the image when
+        // the shape carries an <a:ln> with a fill (no noFill). A widthless
+        // a:ln still paints — Word uses a hairline (~0.8pt); floor to 1px
+        // (hamburg figure: black tx1 outline round the "Marketing" image).
+        const picLn = child(child(el, "spPr"), "ln");
+        let border: { color: string; width: number } | undefined;
+        if (picLn && !child(picLn, "noFill")) {
+          const lnColor = fillColorOf(picLn);
+          if (lnColor) border = { color: lnColor, width: Math.max(emuToPx(intAttr(picLn, "w") ?? 0), 1) };
+        }
         images.push({
           part: rel.target,
           x: emuToPx(x),
@@ -697,6 +707,7 @@ function parseDrawing(
           height: emuToPx(h),
           ...(crop && (crop.l || crop.t || crop.r || crop.b) ? { crop } : {}),
           ...(rot ? { rotation: rot / 60000 } : {}),
+          ...(border ? { border } : {}),
         });
       }
       return;
@@ -1075,6 +1086,7 @@ function parseDrawing(
       anchored: false,
       ...(images[0].crop ? { crop: images[0].crop } : {}),
       ...(images[0].rotation ? { rotation: images[0].rotation } : {}),
+      ...(images[0].border ? { border: images[0].border } : {}),
     };
   }
   if (lines.length === 0 && images.length === 0 && paths.length === 0) return null;

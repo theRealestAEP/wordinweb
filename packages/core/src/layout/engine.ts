@@ -1625,6 +1625,7 @@ class Engine {
           part: span.image.part,
           crop: span.image.crop,
           rotation: span.image.rotation,
+          border: span.image.border,
           src: span.image.srcDrawing,
         });
         continue;
@@ -1682,6 +1683,9 @@ class Engine {
             width: img.width,
             height: img.height,
             part: img.part,
+            crop: img.crop,
+            rotation: img.rotation,
+            border: img.border,
           });
         }
         for (const l of span.drawing.lines) {
@@ -2338,7 +2342,16 @@ class Engine {
     // plausible-looking grid with no tcW anywhere - Word ignores it and
     // autofits, so must we.
     const cellsDeclareWidths = tbl.rows.some((r) => r.cells.some((c) => c.props.width !== undefined));
-    if (tbl.grid.length > 0 && gridTotal >= target * 0.5 && cellsDeclareWidths) return base;
+    if (tbl.grid.length > 0 && gridTotal >= target * 0.5 && cellsDeclareWidths) {
+      // A trusted, fixed-unit (dxa/absent) grid that overruns the content
+      // column is NOT scaled down: Word honors the authored column widths and
+      // lets the table hang into the right margin (gatech TOC 2-col table,
+      // grid 9129tw in an 8640tw column - scaling it shifted every row ~4.6pt
+      // left). Percentage widths ARE relative to the column, so base (already
+      // fit to it) stands.
+      if (tbl.props.widthPct === undefined && gridTotal > available) return [...tbl.grid];
+      return base;
+    }
 
     const nCols = base.length;
     const margins = this.cellMarginsOf(tbl);
