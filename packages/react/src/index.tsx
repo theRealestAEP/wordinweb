@@ -230,7 +230,7 @@ export function DocxView({
           // Latin faces measured on canvas (widths must be real before layout).
           const latin = [
             "Carlito", "Caladea", "Cambria", "Times New Roman", "Arial",
-            "Calibri", "Calibri Light",
+            "Calibri", "Calibri Light", "Tahoma",
           ];
           for (const fam of latin) {
             for (const variant of ["", "italic ", "bold ", "bold italic "]) {
