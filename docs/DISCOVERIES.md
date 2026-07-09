@@ -298,6 +298,85 @@ trusted-grid branch, a non-percentage (`dxa`/absent) grid whose `gridTotal >
 available` returns the raw `tbl.grid` unscaled. Percentage widths are relative to
 the column, so they still fit. Fixed gatech p11 14.1→3.2, p10 7.3→5.4.
 
+### A nested table that overruns its host CELL is autofit (confined), not hung
+The "trusted overflow hangs" rule above is a BODY-level rule. A nested table
+(one laid inside a table cell) that overruns its host cell is instead confined
+by autofit — Word never lets a nested table hang past its parent cell border
+(staging-grid4: L1>L2>L3>L4>L5, each level's authored grid overruns its host
+cell yet Word keeps every level inside the 200pt middle column). Two bugs
+compounded here: (1) nested tables went through `resolveGrid` (uniform down-
+scale) not `resolveGridWidths`, and each level re-scaled its ALREADY-scaled
+parent cell, so L5 collapsed to a ~6pt sliver stacking one glyph per line;
+(2) autofit's per-column min/pref width ignored nested-table cells (only
+paragraphs were measured), so a cell hosting a table contributed no width demand.
+Fix (`layout/engine.ts`): `layoutTableInFrame` calls `resolveGridWidths(tbl,
+width, nested=true)`; the trusted-overflow branch, when `nested`, falls through
+to autofit instead of returning the raw grid; and a new `columnMinPref` /
+`measureTableWidths` pair recurses so a cell's nested table contributes its own
+min/pref total (the innermost L5's min-width bubbles up and widens every
+enclosing "holds L…" column). staging-grid4 p1 43.5→27, tblextreme p1 improved;
+parity2-nestedtables unchanged (3.1). Residual is Word's proprietary autofit
+DISTRIBUTION between columns (same uncracked calibration as parity-tables) — our
+share over-weights the deep-nest column vs the "side A/B" column.
+
+### A trailing COLUMN break leaves the pilcrow on the NEW column (page breaks don't)
+The "trailing page/column break leaves no line" rule is TRUE for page breaks but
+NOT for column breaks. A paragraph ending in `w:br type="column"` puts its
+paragraph mark + spacing-after at the TOP of the next column/page, so the
+FOLLOWING paragraph starts one empty line + after lower — whereas a trailing
+page break keeps the pilcrow on the old page and the next page starts clean at
+the body top (staging-breaks: "Forced into column two" lands at ink-top 96.78pt
+= body-top 74.28pt + one empty Normal line 14.5pt + after 8pt = 22.5pt below a
+page-break paragraph's clean top). Fix (`layout/inline.ts`): a trailing column
+break flushes the text line with `forcedBreakAfter="column"` then an empty
+pilcrow line on the new column; a page break keeps the old single-line flush.
+Only staging-breaks uses explicit `w:br type="column"` (column BALANCING is a
+different path), so parity-columns/colbalance/wild-multicolumn are untouched.
+Fixed staging-breaks p5 98.5→0.7, p6 100→0.6.
+
+### Consecutive page/column breaks in one paragraph make a BLANK page between
+`<w:p>{break}{break}text</w:p>` = the empty region between the two breaks is its
+own blank page (staging-breaks: two `w:br type="page"` produce a blank page 2
+between "Before the breaks." and "After two…", matching Word's 7-page count vs
+our old 6). The FIRST leading break is a break-BEFORE consumed by `placeParagraph`
+at the block level (drops spacing-before, emits no mark line); a SECOND/later
+consecutive leading break must emit an empty break line to advance past the blank
+page. Fix (`layout/inline.ts`): the leading-break skip only fires once
+(`consumedLeadingBreak`); subsequent leading breaks flush an empty break line.
+This single page-count fix took staging-breaks mean 71.8→~6.
+
+### w:framePr positioned text frames are absolute-positioned floats
+A `w:framePr` with a width (not a dropCap) lifts the paragraph out of normal flow
+and paints it at an absolute anchor position while body text wraps around it
+(staging-frames). Parsed into `ParagraphProps.frame` (`parse/properties.ts`);
+`placeFrameParagraph` (`layout/engine.ts`) resolves the origin from hAnchor/
+vAnchor + x/y (page→x, margin→marginLeft/Top+x, text/column→colX/cursor+x;
+measured exact against Word), lays the paragraph at the frame width, and registers
+a wrap float (wrap=around→square bothSides). It does NOT advance the cursor or the
+spacing chain. Numeric x wins over a named xAlign. Fixed staging-frames p2
+7.2→2.1. OPEN: a frame anchored BELOW earlier body content reflows that PRECEDING
+content around itself (staging-frames' page-anchored top-right box overlaps the
+document's opening Heading1, forcing it to wrap to 2 lines and pushing the whole
+body down ~23pt) — this is the same parked "lookahead anchor placement" problem
+as parity2-textboxes; without it staging-frames p1 stays ~87% (a pure vertical
+cascade from the 1-line-vs-2-line heading). NB: "Calibri Light" (Heading fonts)
+has no metric-compatible substitute — it maps to Carlito (= Calibri REGULAR), so
+long headings that Word wraps via the wider Calibri-Light advances may fit one
+line for us even absent the anchor issue.
+
+### allowOverlap="0" slides an anchored shape clear of earlier overlapping floats
+`wp:anchor @allowOverlap="0"` means Word shifts the shape so it does NOT overlap
+any earlier-placed (lower z-order) float, rather than stacking on top
+(staging-anchors2: the locked, no-overlap z=30 box is authored at page-x 144pt but
+Word slides it right to ink-x 292pt — its left edge lands at the z=20 box's right
+edge ~273.6pt). Parsed onto `ShapeTextbox.allowOverlap`; `emitAnchors`
+(`layout/engine.ts`) tracks placed rects in z-order and, for an `allowOverlap===
+false` shape, shifts `ox` right past any vertically-overlapping earlier rect.
+Fixed the z=30 box position exactly. anchors2 p1 residual is now the
+relH="character"/relV="line" anchor (Word resolves it to the inline character's
+x/y; we still treat character-relative as column-relative), an unimplemented
+anchor coordinate system.
+
 ### A picture's `a:ln` outline paints just OUTSIDE the image, even widthless
 `<pic:spPr><a:ln>` with a solid fill (no `noFill`) is a picture border Word draws
 as a line straddling the image edge — a widthless `a:ln` (no `@w`) still paints at

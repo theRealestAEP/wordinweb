@@ -340,6 +340,38 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
         lines: intAttr(frame, "lines") ?? 3,
         hSpace: twipsToPx(intAttr(frame, "hSpace") ?? 0),
       };
+    } else {
+      // A general positioned text frame (w:framePr with a width and anchors):
+      // the paragraph is lifted out of normal flow, placed at an absolute
+      // location, and body text wraps around it (staging-frames).
+      const w = intAttr(frame, "w");
+      if (w !== undefined && w > 0) {
+        const hRuleRaw = attr(frame, "hRule");
+        const hAnchorRaw = attr(frame, "hAnchor");
+        const vAnchorRaw = attr(frame, "vAnchor");
+        const wrapRaw = attr(frame, "wrap");
+        const xAlignRaw = attr(frame, "xAlign");
+        const yAlignRaw = attr(frame, "yAlign");
+        const h = intAttr(frame, "h");
+        props.frame = {
+          w: twipsToPx(w),
+          ...(h !== undefined ? { h: twipsToPx(h) } : {}),
+          hRule: (hRuleRaw === "atLeast" || hRuleRaw === "exact" ? hRuleRaw : "auto"),
+          x: twipsToPx(intAttr(frame, "x") ?? 0),
+          y: twipsToPx(intAttr(frame, "y") ?? 0),
+          hAnchor:
+            hAnchorRaw === "page" || hAnchorRaw === "margin" || hAnchorRaw === "column"
+              ? hAnchorRaw
+              : "text",
+          vAnchor:
+            vAnchorRaw === "page" || vAnchorRaw === "margin" || vAnchorRaw === "paragraph"
+              ? vAnchorRaw
+              : "text",
+          ...(xAlignRaw ? { xAlign: xAlignRaw as never } : {}),
+          ...(yAlignRaw ? { yAlign: yAlignRaw as never } : {}),
+          wrap: (wrapRaw as never) ?? "around",
+        };
+      }
     }
   }
 

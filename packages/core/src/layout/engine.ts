@@ -1001,8 +1001,89 @@ class Engine {
     };
   }
 
+  /**
+   * A w:framePr positioned text frame: the paragraph is placed at an absolute
+   * anchor position (hAnchor/vAnchor + x/y), its content laid out at the frame
+   * width, and a wrap float registered so surrounding body text flows around it
+   * (staging-frames: page/margin/text-anchored callout boxes with wrap=around).
+   */
+  private placeFrameParagraph(para: Paragraph, fr: NonNullable<ParaProps["frame"]>): void {
+    const sp = this.sp;
+    const contentW = Math.max(8, fr.w);
+    // Horizontal origin (frame content-box left) from the anchor. A named
+    // xAlign only takes effect when there is no meaningful numeric x offset.
+    let ox: number;
+    switch (fr.hAnchor) {
+      case "page":
+        ox = fr.x;
+        break;
+      case "margin":
+        ox = sp.marginLeft + fr.x;
+        break;
+      default:
+        ox = this.colX + fr.x; // text / column travel with the paragraph column
+        break;
+    }
+    if (fr.x === 0 && fr.xAlign) {
+      const base = fr.hAnchor === "page" ? 0 : fr.hAnchor === "margin" ? sp.marginLeft : this.colX;
+      const span =
+        fr.hAnchor === "page"
+          ? sp.pageWidth
+          : fr.hAnchor === "margin"
+            ? sp.pageWidth - sp.marginLeft - sp.marginRight
+            : this.colWidth;
+      if (fr.xAlign === "center") ox = base + (span - contentW) / 2;
+      else if (fr.xAlign === "right" || fr.xAlign === "outside") ox = base + span - contentW;
+      else ox = base;
+    }
+    // Vertical origin (frame top) from the anchor.
+    let oy: number;
+    switch (fr.vAnchor) {
+      case "page":
+        oy = fr.y;
+        break;
+      case "margin":
+        oy = sp.marginTop + fr.y;
+        break;
+      default:
+        oy = this.y + fr.y; // text / paragraph travel with the current cursor
+        break;
+    }
+    const laid = this.layoutFrame([para], contentW, this.fieldCtx(), { x: ox, y: oy });
+    for (const it of laid.items) {
+      offsetItem(it, ox, oy);
+      this.cur.items.push(it);
+    }
+    const height =
+      fr.hRule === "exact" && fr.h !== undefined
+        ? fr.h
+        : fr.hRule === "atLeast" && fr.h !== undefined
+          ? Math.max(fr.h, laid.height)
+          : laid.height;
+    // wrap=around/auto/tight/through -> body wraps both sides (square);
+    // notBeside -> body clears the frame vertically (topAndBottom); none -> no float.
+    if (fr.wrap !== "none") {
+      const list = this.floats.get(this.cur) ?? [];
+      list.push({
+        x0: ox,
+        x1: ox + fr.w,
+        y0: oy,
+        y1: oy + height,
+        mode: fr.wrap === "notBeside" ? "topAndBottom" : "square",
+      });
+      this.floats.set(this.cur, list);
+    }
+  }
+
   private placeParagraph(para: Paragraph, prev?: Block, next?: Block, siblings?: Block[], index?: number): void {
     const props = this.doc.effectiveParaProps(para);
+    // A positioned text frame (w:framePr with a width) is lifted out of normal
+    // flow: it paints at an absolute anchor position and body text wraps around
+    // it. It does NOT advance the cursor or the spacing chain (staging-frames).
+    if (props.frame && !props.dropCap && this.cur.physIndex !== -1) {
+      this.placeFrameParagraph(para, props.frame);
+      return;
+    }
     // Word merges identical borders of consecutive paragraphs: the shared
     // boundary is not drawn (or draws the "between" border when given), so
     // a run of bordered paragraphs reads as one box (Alex Pickett cover
@@ -2061,6 +2142,12 @@ class Engine {
     const originY = (rel: Shape["vRel"]) =>
       rel === "page" ? 0 : rel === "margin" ? sp.marginTop : textPageY;
 
+    // Rects of shapes already positioned this call, in z-order, so a later
+    // allowOverlap="0" shape can be shifted clear of them (Word's overlap
+    // avoidance: staging-anchors2's locked, no-overlap z=30 box slides right
+    // past the z=10/z=20 boxes instead of sitting on top of them).
+    const placedRects: { x0: number; x1: number; y0: number; y1: number }[] = [];
+
     for (const shape of shapes) {
       if (shape.type === "image") {
         let ox = originX(shape.hRel);
@@ -2188,6 +2275,22 @@ class Engine {
         let oy = originY(shape.vRel) + shape.y;
         if (shape.pctY !== undefined) oy = originY(shape.vRel) + shape.pctY * pageH;
         if (shape.vAlign) oy = alignV(originY(shape.vRel), shape.vRel === "page" ? pageH : pageH - sp.marginTop - sp.marginBottom, height, shape.vAlign);
+
+        // allowOverlap="0": slide the box right past any earlier overlapping
+        // box so they don't overlap (Word's overlap avoidance).
+        if (shape.allowOverlap === false) {
+          for (let guard = 0; guard < placedRects.length + 1; guard++) {
+            let moved = false;
+            for (const r of placedRects) {
+              if (oy < r.y1 && oy + height > r.y0 && ox < r.x1 && ox + width > r.x0) {
+                ox = r.x1;
+                moved = true;
+              }
+            }
+            if (!moved) break;
+          }
+        }
+        placedRects.push({ x0: ox, x1: ox + width, y0: oy, y1: oy + height });
 
         // Rotate the whole box (fill + border + text) about its center.
         const cxc = ox - fx + width / 2;
@@ -2351,7 +2454,7 @@ class Engine {
    * the same: measure each column's preferred (unwrapped) and minimum
    * (widest atom) content width and fit them to the table width.
    */
-  private resolveGridWidths(tbl: Table, available: number): number[] {
+  private resolveGridWidths(tbl: Table, available: number, nested = false): number[] {
     const base = resolveGrid(tbl, available);
     if (tbl.props.layout === "fixed") return base;
     const gridTotal = tbl.grid.reduce((a, b) => a + b, 0);
@@ -2363,36 +2466,25 @@ class Engine {
     const cellsDeclareWidths = tbl.rows.some((r) => r.cells.some((c) => c.props.width !== undefined));
     if (tbl.grid.length > 0 && gridTotal >= target * 0.5 && cellsDeclareWidths) {
       // A trusted, fixed-unit (dxa/absent) grid that overruns the content
-      // column is NOT scaled down: Word honors the authored column widths and
-      // lets the table hang into the right margin (gatech TOC 2-col table,
-      // grid 9129tw in an 8640tw column - scaling it shifted every row ~4.6pt
-      // left). Percentage widths ARE relative to the column, so base (already
-      // fit to it) stands.
-      if (tbl.props.widthPct === undefined && gridTotal > available) return [...tbl.grid];
-      return base;
+      // column is NOT scaled down at the BODY level: Word honors the authored
+      // column widths and lets the table hang into the right margin (gatech TOC
+      // 2-col table, grid 9129tw in an 8640tw column - scaling it shifted every
+      // row ~4.6pt left). But a NESTED table that overruns its host CELL is
+      // instead autofit (min-content) to CONFINE it inside the cell - Word does
+      // not let a nested table hang past its parent cell (staging-grid4:
+      // L2/L3/L4/L5 each overrun their host cell yet Word keeps every level
+      // inside the 200pt middle column). Percentage widths ARE relative to the
+      // column, so base (already fit to it) stands.
+      if (tbl.props.widthPct === undefined && gridTotal > available) {
+        if (!nested) return [...tbl.grid];
+        // fall through to the autofit branch to confine the nested table
+      } else {
+        return base;
+      }
     }
 
     const nCols = base.length;
-    const margins = this.cellMarginsOf(tbl);
-    const pad = (margins.left ?? 0) + (margins.right ?? 0) + 2;
-    const minW = new Array<number>(nCols).fill(pad + 8);
-    const prefW = new Array<number>(nCols).fill(pad + 8);
-    for (const row of tbl.rows) {
-      let gridPos = 0;
-      for (const cell of row.cells) {
-        const span = cell.props.gridSpan;
-        if (span === 1 && gridPos < nCols && cell.props.vMerge !== "continue") {
-          for (const block of cell.blocks) {
-            if (block.type !== "paragraph") continue;
-            const wide = breakParagraph(this.doc, this.measurer, block, 1e6, this.fieldCtx());
-            for (const ln of wide.lines) prefW[gridPos] = Math.max(prefW[gridPos], ln.width + pad);
-            const narrow = breakParagraph(this.doc, this.measurer, block, 1, this.fieldCtx());
-            for (const ln of narrow.lines) minW[gridPos] = Math.max(minW[gridPos], ln.width + pad);
-          }
-        }
-        gridPos += span;
-      }
-    }
+    const { minW, prefW } = this.columnMinPref(tbl, nCols);
 
     const sumPref = prefW.reduce((a, b) => a + b, 0);
     if (sumPref <= 0) return base;
@@ -2419,6 +2511,76 @@ class Engine {
       }
     }
     return widths;
+  }
+
+  /**
+   * Per-column minimum (min-content) and preferred (max-content) widths for a
+   * table's autofit, INCLUDING nested tables: a cell hosting a nested table
+   * contributes that table's own min/pref total to its grid column, so the
+   * deepest nest's width bubbles up and the parent column is sized to hold it
+   * (staging-grid4: the innermost L5 establishes the min-width that widens every
+   * enclosing "holds L…" column). Spanned cells distribute their demand evenly
+   * across the covered columns.
+   */
+  private columnMinPref(tbl: Table, nCols: number): { minW: number[]; prefW: number[] } {
+    const margins = this.cellMarginsOf(tbl);
+    const pad = (margins.left ?? 0) + (margins.right ?? 0) + 2;
+    const minW = new Array<number>(nCols).fill(pad + 8);
+    const prefW = new Array<number>(nCols).fill(pad + 8);
+    for (const row of tbl.rows) {
+      let gridPos = 0;
+      for (const cell of row.cells) {
+        const span = cell.props.gridSpan;
+        if (gridPos < nCols && cell.props.vMerge !== "continue") {
+          const cm = { ...margins, ...cell.props.margins };
+          const cpad = (cm.left ?? 0) + (cm.right ?? 0) + 2;
+          let cellMin = 0;
+          let cellPref = 0;
+          for (const block of cell.blocks) {
+            if (block.type === "paragraph") {
+              const wide = breakParagraph(this.doc, this.measurer, block, 1e6, this.fieldCtx());
+              for (const ln of wide.lines) cellPref = Math.max(cellPref, ln.width);
+              const narrow = breakParagraph(this.doc, this.measurer, block, 1, this.fieldCtx());
+              for (const ln of narrow.lines) cellMin = Math.max(cellMin, ln.width);
+            } else {
+              const t = this.measureTableWidths(block);
+              cellPref = Math.max(cellPref, t.pref);
+              cellMin = Math.max(cellMin, t.min);
+            }
+          }
+          cellMin += cpad;
+          cellPref += cpad;
+          const span2 = Math.min(span, nCols - gridPos);
+          for (let k = 0; k < span2; k++) {
+            minW[gridPos + k] = Math.max(minW[gridPos + k], cellMin / span2);
+            prefW[gridPos + k] = Math.max(prefW[gridPos + k], cellPref / span2);
+          }
+        }
+        gridPos += span;
+      }
+    }
+    return { minW, prefW };
+  }
+
+  /**
+   * A nested table's min-content and preferred total widths. Preferred is at
+   * least its trusted authored grid total (Word's own cached layout width);
+   * min-content is the sum of its columns' min widths (recursing into deeper
+   * nests via columnMinPref).
+   */
+  private measureTableWidths(tbl: Table): { min: number; pref: number } {
+    const nCols = Math.max(
+      tbl.grid.length,
+      ...tbl.rows.map((r) => r.cells.reduce((a, c) => a + c.props.gridSpan, 0)),
+    );
+    const { minW, prefW } = this.columnMinPref(tbl, Math.max(1, nCols));
+    const min = minW.reduce((a, b) => a + b, 0);
+    let pref = prefW.reduce((a, b) => a + b, 0);
+    const gridTotal = tbl.grid.reduce((a, b) => a + b, 0);
+    const cellsDeclareWidths = tbl.rows.some((r) => r.cells.some((c) => c.props.width !== undefined));
+    if (cellsDeclareWidths && gridTotal > 0) pref = Math.max(pref, gridTotal);
+    if (tbl.props.width !== undefined) pref = Math.max(pref, tbl.props.width);
+    return { min, pref };
   }
 
   /** Effective default cell margins: direct tblCellMar, else the table
@@ -2679,7 +2841,14 @@ class Engine {
     fields: FieldContext,
   ): number {
     this.ensureTableBorders(tbl);
-    const widths = resolveGrid(tbl, width);
+    // Nested tables use the SAME width resolution as body tables: a trusted
+    // fixed-unit grid that overruns the host cell is honored unscaled (Word lets
+    // it hang / grows the cell rather than shrinking columns), and an untrusted
+    // grid autofits to content. Uniform down-scaling here COMPOUNDS across
+    // nesting levels and collapses the innermost columns to a sliver
+    // (staging-grid4: L2>L3>L4>L5 each re-scaled its already-scaled parent until
+    // L5 was ~6pt and its text stacked one glyph per line).
+    const widths = this.resolveGridWidths(tbl, width, true);
     const saveY = this.y;
     const saveCur = this.cur;
     const saveCol = this.col;
