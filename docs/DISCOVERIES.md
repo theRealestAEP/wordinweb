@@ -129,17 +129,47 @@ metric-compatible Calibri/Cambria substitutes — actually served; a strict Vite
 `server.fs` allow-list silently dropped them, substituting a wider fallback that
 inflated EVERY page's width-drift and masked this offset as generic noise.)
 
-Still open (section-boundary pagination, NOT the sliver packing above and NOT
-touched here — it lives in the protected two-pass balancing machinery): the
-section-2 (1-col table) → section-3 (2-col sliver) → section-4 boundary
-desyncs by ~one column. Our sec2 `LightGrid` table paginates across p30-p31
-where Word fits it differently, so web p31 shows the table body where Word shows
-a sliver column; sec3's `Jade 4:` Heading1 then lands on a fresh page (p32) that
-Word populates differently. Residual: p30 22%, p31 12%, p32 38%, p46 19% (p46's
-column top now matches Word — the fix removed its former one-extra-glyph drift;
-its residual is lower on the page). Closing these needs the sec2 table height /
-section-band resume position to match Word, verified against an isolated
-table+continuous-section probe — distinct from the space-before rule.
+### A stale page-break space-before drop must NOT leak past a section boundary — the new section's opener uses carry-remainder
+The prior diagnosis of the wild-multicolumn p30-32/p46 residuals as a "table
+pagination desync" was wrong: the sec2 `LightGrid` table paginates across p30-31
+EXACTLY like Word (same 5+2 row split), and every page's CONTENT matches Word.
+The residuals are pure vertical drift. The largest, p32 (38%), was a `w:br
+type="page"` interaction. wild-multicolumn's sec3 ends with an empty
+`<w:p><w:r><w:br type="page"/></w:r></w:p>` (the trailing-break-leaves-no-line
+paragraph) and then an empty `sectPr` paragraph that opens sec4 (a 2-col sliver).
+The page break armed `suppressNextSpaceBefore`, and `newPage(true)`'s coalesce
+started sec4's `Jade 4:` Heading1 on that fresh page WITHOUT clearing the flag —
+so its 24pt space-before was fully dropped and the whole one-glyph column sat
+~15pt high (measured: our heading ink-top 75.75pt vs Word 90.75pt; pitch matched
+to the quarter-point). Word does NOT drop it: a new section's opener follows the
+cross-section **carry-remainder** rule (`max(before, carriedAfter) - carriedAfter`
+= 24pt − the intro's 10pt after = **14pt**, landing at Word's 90.75pt). The
+page-break drop is meant for ordinary post-break flow WITHIN a section, not for a
+following section's first paragraph. Fix (`run()` in engine.ts): clear
+`suppressNextSpaceBefore` at every section transition (`prevSp !== null`) so the
+carry-remainder governs. This is why the old blanket drop looked right at the
+sec1→sec2 boundary (p2): there the opener is a Heading2 (before=10pt) after a
+10pt-after paragraph, so the remainder is 0 anyway — it only diverged where the
+opener's before exceeded the carried after. Net: **p32 38.2% → 1.0%**, doc mean
+2.76 → 1.95; no page of p1-29/p33-45 moved (all still <1%), and parity-columns
+2.30 / parity-colbalance 1.24 unchanged. Verified by ink-row measurement of the
+Word PDF vs our element screenshots at matched 192 dpi.
+
+Still open (p30 22%, p31 12%, p46 19% — the balanced-band RESUME offset, which
+lives in the protected two-pass balancing machinery and was NOT safe to touch
+here): on the FINAL page of a degenerate 2-col sliver section, the following
+1-col section resumes ~4pt too low. The sliver's last line matches Word to the
+sub-pixel (sec2's last glyph `e` ink-top 537.6pt in both), but our sec3 `Jade 7:`
+Heading1 lands ~3.8pt low (ink-to-ink) and cascades to the whole table; p46's
+sec5 body is the same ~4pt low after sec4's balanced band. The inter-section gap
+is 24pt for us (sliver after 10 + heading before-remainder 14) vs Word's ~20pt —
+and no after/before-collapse configuration nets anything but 24pt, so the excess
+is in `balanceMaxY` (the resume = tallest balanced column bottom), i.e. a
+balance-TARGET calibration, not a spacing rule. Because the target protects the
+24+ clean balanced pages (p2-29/p33-45, all <1%), closing this needs an isolated
+2-col-balanced → 1-col-section probe exported through Word to pin the exact
+resume height before touching the target — distinct from, and riskier than, the
+space-before rule fixed above.
 
 ### Words never split at formatting-run boundaries
 A word split across `w:r` runs ("(" + "“Cobbery”") is one breaking unit in

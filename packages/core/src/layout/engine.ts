@@ -214,6 +214,18 @@ class Engine {
       // Normal after=8pt paragraph starts 4pt below the margin on section
       // pages, but the full 12pt at the document start).
       const carryAfter = this.lastParaWasEmpty ? 0 : this.lastParaSpacingAfter;
+      // A new section's first paragraph governs its own spacing-before through
+      // the cross-section carry-remainder rule (max(before, carriedAfter) -
+      // carriedAfter), NOT the page-break drop. When the previous section ended
+      // with a hard page break (w:br type="page"), it left suppressNextSpaceBefore
+      // armed to drop the NEXT paragraph's before - but that drop is meant for
+      // ordinary post-break flow within a section, not for a following section's
+      // opener. Left armed it zeroed wild-multicolumn sec4's Heading1 before, so
+      // its whole one-glyph column sat ~15pt high (38% structural on p32); Word
+      // actually keeps before-carry = 24pt - 10pt = 14pt. Clear it so the
+      // carry-remainder rule applies (sec2's Heading2 before=10pt still nets 0
+      // because its carried after is also 10pt, matching the old blanket drop).
+      if (prevSp !== null) this.suppressNextSpaceBefore = false;
       if (canContinue) this.newBand();
       else this.newPage(true);
       if (prevSp !== null) this.lastParaSpacingAfter = carryAfter;
