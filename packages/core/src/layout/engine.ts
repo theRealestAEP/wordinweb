@@ -1295,14 +1295,30 @@ class Engine {
 
     for (let li = 0; li < lines.length; li++) {
       const line = lines[li];
-      const planned = breaks.has(li) && li > 0;
+      // On the balanced final band of a multi-page column section the break
+      // plan (computed up-front against FULL columns) is stale: the band caps
+      // its non-final columns at the balance target, so honouring a pre-planned
+      // break would drop a spurious column/page break into the band and spill
+      // it onto a later page. There the per-column overflow test (which reads
+      // the live balance-aware bottom) is authoritative, so ignore the plan
+      // (wild-multicolumn: section 1's giant sliver paragraph ended one page
+      // late because a stale break fired in the balanced final column).
+      const planned = breaks.has(li) && li > 0 && this.balanceBottom === undefined;
       // A line referencing footnotes must fit above the space its own
       // footnotes will claim, so line and note land on the same page.
       const pendingNotes = this.pendingNoteHeight(line);
       const balancing = this.balanceBottom !== undefined && this.col + 1 < this.cur.colXs.length;
+      // A balanced non-final column keeps a line straddling the target (Word's
+      // rule: a line stays while its TOP is above the target - parity-colbalance)
+      // so it fills to just past the balance point. In a DEGENERATE one-glyph
+      // sliver column that overshoot is a whole extra body line that then pushes
+      // the following continuous section down a line and spills its content to a
+      // late page (wild-multicolumn); there the column can hold at most a glyph,
+      // so cap it at the target by the line BOTTOM instead.
+      const balBottomBased = balancing && this.colWidth < 40;
       const overflow =
         (balancing
-          ? this.y > this.bodyBottom + 0.01
+          ? (balBottomBased ? this.y + line.fitHeight : this.y) > this.bodyBottom + 0.01
           : this.y + line.fitHeight > this.bodyBottom - pendingNotes + 0.01) && !this.pageIsEmptyAtCursor();
       if ((planned || overflow) && li > fragStartLine) {
         closeFragment(li, false);
