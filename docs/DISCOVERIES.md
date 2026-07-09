@@ -693,6 +693,42 @@ uniform-metric hypothesis:
   "exports need an unlocked session, full stop" failure). The probe is ready to
   export and regress once the construct-height work resumes on an unlocked box.
 
+### The dense-math pagination desync was a `w:position` raise inflating a figure line beside its inline image (2026-07)
+Following the construct-height diagnosis above, the dominant erring rule in
+`wild2-math-omml-dense` (web 18 vs Word 17) was found and fixed. The doc's
+figures are laid out as an INLINE picture followed by a same-line label run
+(`h_0-05.jpg` + "V1"/"R1"/"J1"), where the label carries `w:position w:val="320"`
+(**160pt = 213px raise**) at `sz 32` (16pt). Word's line box for that paragraph
+is the **image height** (~248px): the raised 16pt label's top (raise +
+glyphAscent ≈ 228px) stays INSIDE the 248px image extent, so it adds nothing.
+`finishLine` (`layout/inline.ts`) instead added the FULL raise ON TOP of the
+line's natural height — and that natural was the image height, not a text line —
+so each figure block rendered **465px instead of 252px** (+160pt each × 3 = the
+prior "+254pt at figures" jump), pushing one extra page.
+- **The `w:position` line-box rule is `max(objectHeight, textAscent+raise)`, not
+  `objectHeight + raise`.** The old model added the shift as pure extra leading
+  above the natural line — correct for a text-only line (the charstyles probe:
+  +6pt raise = +6pt pitch, because there natural IS the text line), but wrong
+  when a taller co-line object (inline image/drawing) already covers the raised
+  glyph. Fix: track `maxNonObjAscent/Descent` (text + inline-math only) and
+  resolve the raise as the amount the raised/lowered TEXT protrudes past the
+  line's overall ascent/descent — `raiseAsc = max(0, maxNonObjAscent + raise −
+  maxAscent)`. For a text-only line `maxAscent === maxNonObjAscent`, so it is
+  still the exact full shift (0 mismatches on the 6 line-break fixtures, all
+  math/display parity fixtures unchanged: parity-math 5.03, parity-math2 4.16,
+  parity2-equations 8.50, benchmark 2.83, gatech 1.99, hamburg 1.46). For the
+  figure line the image ascent wins and the raise contributes 0.
+- **Result:** all three math wild2 page counts now MATCH Word — dense 18→**17**,
+  chem 13=**13**, eq-as-images already 8=**8** (a prior fix; the memory's "7"
+  was stale). Dense's figure pages went from 88/90/99% structural severity to
+  **9/4/17%** and its doc mean dropped **69→55**. The residual dense/chem/
+  eq-as-images means (55/69/77) are NOT construct height — the display-equation
+  block heights measure within Word's own tall-equation line gaps (ours ~21–31pt
+  vs Word ~23–35pt for the ∫/∑ blocks on p8) — they are the STIX-Two-Math ↔
+  Cambria Math glyph substitution shifting every math glyph horizontally, which
+  the structural comparator scores heavily. That is a font-rendering gap, not a
+  height rule, and is out of scope for pagination parity.
+
 ## Word template rendering (2026-07, header/footer designs + cover letters)
 
 - **Word's built-in h/f templates decode to five constructs**: inline SDTs
