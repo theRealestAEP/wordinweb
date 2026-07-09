@@ -687,26 +687,28 @@ function renderWordArt(item: WordArtItem): HTMLElement {
   span.style.opacity = String(item.opacity);
   const weight = item.bold ? "bold " : "";
   const style = item.italic ? "italic " : "";
-  // Fill the height with the glyphs, then stretch horizontally to the width.
-  const fontPx = item.height * 0.82;
-  span.style.font = `${style}${weight}${fontPx}px "${item.fontFamily}", sans-serif`;
-  span.style.lineHeight = `${item.height}px`;
-  span.style.left = "0";
-  span.style.top = "0";
-  // Measure natural width so the horizontal scale fills the box.
-  let natural = item.text.length * fontPx * 0.5;
+  // Word fills the shape height with the glyphs (measured from the watermark
+  // reference: cap-height ink ~= 0.59 x box height, i.e. em ~= 0.92 x box)
+  // and squashes/stretches horizontally to the shape width.
+  const fontPx = item.height * 0.86;
+  let perPx = item.text.length * 0.5; // natural width per font px (estimate)
   try {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
     if (ctx) {
-      ctx.font = `${style}${weight}${fontPx}px "${item.fontFamily}", sans-serif`;
+      ctx.font = `${style}${weight}100px "${item.fontFamily}", sans-serif`;
       const m = ctx.measureText(item.text);
-      if (m.width > 0) natural = m.width;
+      if (m.width > 0) perPx = m.width / 100;
     }
   } catch {
     /* canvas unavailable (SSR): keep the estimate */
   }
-  const scaleX = item.width / natural;
+  span.style.font = `${style}${weight}${fontPx}px "${item.fontFamily}", sans-serif`;
+  span.style.lineHeight = `${item.height}px`;
+  span.style.left = "0";
+  // Word's glyph band sits slightly above the box's vertical center.
+  span.style.top = `-${(item.height * 0.035).toFixed(2)}px`;
+  const scaleX = item.width / (fontPx * perPx);
   span.style.transformOrigin = "0 0";
   span.style.transform = `scaleX(${scaleX})`;
   box.appendChild(span);

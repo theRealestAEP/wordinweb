@@ -3010,6 +3010,7 @@ function offsetItem(item: PageItem, dx: number, dy: number): void {
     case "image":
     case "path":
     case "drawingHit":
+    case "wordart":
       item.x += dx;
       item.y += dy;
       break;
