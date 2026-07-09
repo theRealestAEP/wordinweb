@@ -19,7 +19,8 @@ export interface TextMeasurer {
 }
 
 export function fontKey(font: FontSpec): string {
-  return `${font.bold ? "bold " : ""}${font.italic ? "italic " : ""}${font.size}px ${font.family}`;
+  const paint = font.paintFamily && font.paintFamily !== font.family ? `${font.paintFamily}>` : "";
+  return `${font.bold ? "bold " : ""}${font.italic ? "italic " : ""}${font.size}px ${paint}${font.family}`;
 }
 
 /**
@@ -93,9 +94,10 @@ const WORD_FONT_METRICS: Record<string, { asc: number; desc: number; gap: number
   // fontBoundingBox (integer-rounded) and mis-paginated ~27% of runs.
   times: { asc: 0.891113, desc: 0.216309, gap: 0.04248 },
   "courier new": { asc: 0.83252, desc: 0.300293, gap: 0 },
-  // The rendering stack resolves to STIX Two Math (Cambria Math is
-  // Office-private); these are ITS hhea values so the CSS glyph box centers
-  // exactly where the engine expects the baseline.
+  // Math line metrics follow whichever face actually paints (real Cambria Math
+  // from fonts-local, else STIX Two Math): metrics() feature-detects and
+  // substitutes CAMBRIA_MATH_REAL/STIX for this entry. Value here is the STIX
+  // default for the no-DFonts machine.
   "cambria math": { asc: 0.762, desc: 0.238, gap: 0 },
   georgia: { asc: 0.916992, desc: 0.217678, gap: 0 }, // fitted total 1.13467
   verdana: { asc: 1.005371, desc: 0.209039, gap: 0 }, // fitted total 1.21441
@@ -149,8 +151,47 @@ export function cssFont(font: FontSpec): string {
   const weight = n.bold ? "700 " : "400 ";
   const quote = (f: string) => (/[ "']/.test(f) ? `"${f}"` : f);
   const substitute = METRIC_SUBSTITUTES[n.family.toLowerCase()];
-  const stack = [quote(n.family), ...(substitute ? [quote(substitute)] : []), "sans-serif"].join(", ");
+  // paintFamily (CJK real Windows glyphs) is tried first but is metrics-neutral:
+  // the family that owns the vertical profile stays in the stack right after it.
+  const pref = font.paintFamily && font.paintFamily.toLowerCase() !== n.family.toLowerCase()
+    ? [quote(font.paintFamily)]
+    : [];
+  const stack = [...pref, quote(n.family), ...(substitute ? [quote(substitute)] : []), "sans-serif"].join(", ");
   return `${style}${weight}${font.size}px ${stack}`;
+}
+
+let _cambriaMath: boolean | undefined;
+/** True when the real "Cambria Math" face is available (dev fonts-local). The
+ * math pipeline paints real glyphs whenever present (the CSS stack lists it
+ * before STIX); this flag additionally selects the width-additive matrix /
+ * delimiter gaps that were originally calibrated against STIX's narrower ink
+ * (real Cambria Math carries Word's true, wider advances). False on machines
+ * without the font, where the STIX-tuned constants remain correct. */
+export function hasCambriaMath(): boolean {
+  if (_cambriaMath === undefined) {
+    try {
+      _cambriaMath =
+        typeof document !== "undefined" &&
+        !!document.fonts?.check &&
+        document.fonts.check('16px "Cambria Math"');
+    } catch {
+      _cambriaMath = false;
+    }
+  }
+  return _cambriaMath;
+}
+
+/** Below-baseline share of the math glyph box, used by the delimiter
+ * vertical-stretch anchor in the DOM renderer. The math LINE metric stays the
+ * STIX Two Math hhea share (0.238) even when real Cambria Math paints the
+ * glyphs: real Cambria Math's own hhea (sum 1.17em) over-inflates the display-
+ * equation line box and drifts the body text below it (verified against the
+ * parity2-equations Word PDF — the equations line up glyph-for-glyph but each
+ * taller line pushed the following paragraphs down cumulatively), whereas the
+ * STIX-calibrated share matches Word's line pitch. The real face only changes
+ * the painted glyph SHAPES (that is the parity win), not the line geometry. */
+export function cambriaMathDescentShare(): number {
+  return 0.238;
 }
 
 /**

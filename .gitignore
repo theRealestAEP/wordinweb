@@ -2,6 +2,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 apps/demo/public/fixtures/*.docx
+# Licensed Office fonts extracted from a local Word install for dev only —
+# NEVER commit the binaries. Regenerate via scripts/extract-dfonts.py.
+apps/demo/public/fonts-local/*.ttf
+apps/demo/public/fonts-local/*.otf
 .DS_Store
 parity/
 

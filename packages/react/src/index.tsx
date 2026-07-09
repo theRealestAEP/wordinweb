@@ -222,10 +222,33 @@ export function DocxView({
         try {
           // Canvas measurement doesn't trigger webfont loads; request the
           // metric-compatible substitutes explicitly if the host provides them.
+          // Real Office faces (Cambria Math, real Calibri/Times/Arial, the CJK
+          // families) are registered dev-only via @font-face over /fonts-local/;
+          // load() 404s fast (and .catch swallows it) when they're absent, so
+          // machines without the fonts fall back to the substitutes seamlessly.
           const loads: Promise<unknown>[] = [];
-          for (const fam of ["Carlito", "Caladea"]) {
+          // Latin faces measured on canvas (widths must be real before layout).
+          const latin = [
+            "Carlito", "Caladea", "Cambria", "Times New Roman", "Arial",
+            "Calibri", "Calibri Light",
+          ];
+          for (const fam of latin) {
             for (const variant of ["", "italic ", "bold ", "bold italic "]) {
-              loads.push(document.fonts.load(`${variant}16px ${fam}`).catch(() => []));
+              loads.push(document.fonts.load(`${variant}16px "${fam}"`).catch(() => []));
+            }
+          }
+          loads.push(document.fonts.load('16px "Cambria Math"').catch(() => []));
+          // CJK faces only affect PAINT (widths are em-based, line pitch comes
+          // from a metrics table), so they don't gate layout — but load them so
+          // the screenshot/paint uses the real glyphs when available.
+          const cjk = [
+            "MS Mincho", "MS Gothic", "Meiryo", "Yu Gothic", "Yu Mincho",
+            "SimSun", "SimHei", "Microsoft JhengHei", "Microsoft YaHei",
+            "Malgun Gothic",
+          ];
+          for (const fam of cjk) {
+            for (const variant of ["", "bold "]) {
+              loads.push(document.fonts.load(`${variant}16px "${fam}"`).catch(() => []));
             }
           }
           await Promise.all(loads);

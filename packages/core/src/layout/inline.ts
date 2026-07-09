@@ -1266,6 +1266,12 @@ function buildAtoms(
     const japaneseEA = /mincho|gothic|meiryo|^yu|\byu /i.test(family);
     const hasKana = /[぀-ヿ]/.test(seg);
     if (japaneseEA && !hasKana) family = "Microsoft JhengHei";
+    // The real Windows CJK family (before the macOS collapse below) paints the
+    // actual glyphs when it's available (dev fonts-local); it is PAINT-ONLY, so
+    // it never reaches WORD_FONT_METRICS / width lookups and the wild-athabasca
+    // guard (a Latin run merely DECLARING a CJK ascii font stays normal height)
+    // is untouched.
+    const realFamily = family;
     // Resolve directly to the macOS face whose measured profile lives in
     // WORD_FONT_METRICS. The Windows names deliberately have NO general
     // substitute/profile so a Latin run that merely DECLARES one keeps a
@@ -1277,7 +1283,7 @@ function buildAtoms(
     else if (/yahei/.test(fl)) family = "PingFang SC";
     else if (/simsun/.test(fl)) family = "Songti SC";
     else if (/simhei/.test(fl)) family = "Heiti SC";
-    const cjkFont: FontSpec = { ...font, family };
+    const cjkFont: FontSpec = { ...font, family, paintFamily: realFamily };
     const tScale = props.textScale ?? 1;
     for (let k = 0; k < seg.length; k++) {
       const ch = seg[k];
