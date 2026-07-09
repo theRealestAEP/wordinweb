@@ -63,6 +63,10 @@ function mathItalic(text: string): string {
   for (const ch of text) {
     const c = ch.codePointAt(0)!;
     if (ch === "h") out = out + "ℎ";
+    // Word renders an OMML hyphen-minus as U+2212 MINUS SIGN, which is a full
+    // math-width glyph (as wide as + / =); the ASCII hyphen is ~half that and
+    // left the quadratic's b²−4ac and −∞ short. Map it so the advance matches.
+    else if (ch === "-") out += "−";
     else if (c >= 0x61 && c <= 0x7a) out += String.fromCodePoint(0x1d44e + c - 0x61);
     else if (c >= 0x41 && c <= 0x5a) out += String.fromCodePoint(0x1d434 + c - 0x41);
     else out += ch;
@@ -71,6 +75,11 @@ function mathItalic(text: string): string {
 }
 
 const BIN_OPS = new Set(["=", "+", "−", "-", "×", "÷", "<", ">", "≤", "≥", "±", "≠"]);
+// Relations always take a left operand (they are never prefix); the sign-like
+// operators +/−/± are binary only when something precedes them and otherwise
+// render as a tight unary prefix (Word: −b, −∞ have no space before or after).
+const RELATION_OPS = new Set(["=", "<", ">", "≤", "≥", "≠"]);
+const SIGN_OPS = new Set(["+", "−", "-", "±"]);
 
 export interface MathPiece {
   text: string;
@@ -129,24 +138,48 @@ export function layoutMath(nodes: MathNode[], baseSize: number, measurer: TextMe
 }
 
 /** Append nodes at the current box width on baseline offset `dy`.
- * `tight` suppresses binary-operator spacing - Word only spaces operators in
- * full-size content; scripts, fraction parts and n-ary limits set tight
- * (parity-math2: "i=1" under the sum advances glyph-to-glyph). */
+ * `tight` suppresses ALL operator spacing - Word only spaces operators in
+ * limit positions glyph-to-glyph, so n-ary sub/sup limits set tight
+ * (parity-math2: "i=1" under the sum advances glyph-to-glyph). Fraction parts,
+ * radicands and delimiter content are NOT tight: Word spaces the operators
+ * inside them (quadratic numerator −b ± √(b²−4ac) has medium spacing around ±
+ * and the binary −). A sign operator (+/−/±) only gets that medium spacing when
+ * an operand precedes it; as a prefix (start of a sub-formula, or right after
+ * another operator) it is a tight unary sign. `prevOperand` carries that
+ * left-operand context across the node list. */
 function flow(nodes: MathNode[], size: number, dy: number, box: MathBox, measurer: TextMeasurer, tight: boolean, display = false): void {
+  let prevOperand = false;
   for (const node of nodes) {
     switch (node.t) {
       case "run": {
         // Split on binary operators so Word's medium spacing appears
         // around them (and text extraction sees the gaps).
         const font = fontAt(size);
-        const gap = tight ? 0 : size * 0.25;
+        // Word spaces binary operators with a medium space (~0.25em) and
+        // relations with a slightly wider thick space (5/18 em), measured from
+        // the = gaps in parity-math.
+        const medGap = size * 0.25;
+        // Inline relations take Word's wider thick space (5/18 em, measured from
+        // parity-math's = gaps); display equations keep the medium space around
+        // relations (parity2-equations f(x)=, e^x=).
+        const relGap = display ? medGap : size * (5 / 18);
         for (const tok of node.text.split(/([=+−×÷<>≤≥±≠-])/).filter((s) => s.length > 0)) {
           const isOp = BIN_OPS.has(tok);
-          if (isOp) box.width += gap;
+          const isRel = RELATION_OPS.has(tok);
+          // A relation is always binary; a sign (+/−/±) is binary only with an
+          // operand to its left, else a tight unary prefix.
+          const binary = isOp && (isRel || (SIGN_OPS.has(tok) && prevOperand));
+          const spaced = binary && !tight;
+          const gap = isRel ? relGap : medGap;
+          if (spaced) box.width += gap;
           const text = mathItalic(tok);
           box.pieces.push({ text, x: box.width, dy, font });
           box.width += measurer.width(text, font);
-          if (isOp) box.width += gap;
+          if (spaced) box.width += gap;
+          // Operators (unary or binary) are not a left operand for the next
+          // token; visible non-operator glyphs are.
+          if (isOp) prevOperand = false;
+          else if (tok.trim().length) prevOperand = true;
         }
         break;
       }
@@ -157,6 +190,7 @@ function flow(nodes: MathNode[], size: number, dy: number, box: MathBox, measure
         flow(node.base, size, dy, box, measurer, tight, display);
         const scriptDy = dy + (node.t === "sup" ? size * SUP_RAISE : -size * SUB_DROP);
         flow(node.script, size * SCRIPT_SCALE, scriptDy, box, measurer, true, false);
+        prevOperand = true;
         break;
       }
       case "frac": {
@@ -165,24 +199,31 @@ function flow(nodes: MathNode[], size: number, dy: number, box: MathBox, measure
         const scale = display ? size : size * SCRIPT_SCALE;
         const numRaise = display ? size * FRAC_NUM_RAISE_D : size * FRAC_NUM_RAISE;
         const denDrop = display ? size * FRAC_DEN_DROP_D : size * FRAC_DEN_DROP;
-        const numW = widthOf(node.num, scale, measurer, display);
-        const denW = widthOf(node.den, scale, measurer, display);
+        // Display fractions (full size) space their operators like Word's
+        // quadratic numerator −b ± √…; inline fractions shrink to 8/11 script
+        // style where Word keeps the numerator tight ((x+1)/x advances nearly
+        // glyph-to-glyph), so only display fraction parts inherit the ambient
+        // (spaced) context.
+        const fracTight = display ? tight : true;
+        const numW = widthOf(node.num, scale, measurer, display, fracTight);
+        const denW = widthOf(node.den, scale, measurer, display, fracTight);
         const pad = size * FRAC_PAD;
         const barW = Math.max(numW, denW) + 2 * pad;
         const x0 = box.width;
         // numerator centered over the bar
         const numBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-        flow(node.num, scale, 0, numBox, measurer, true, display);
+        flow(node.num, scale, 0, numBox, measurer, fracTight, display);
         for (const p of numBox.pieces) box.pieces.push({ ...p, x: x0 + (barW - numW) / 2 + p.x, dy: dy + numRaise + p.dy });
         for (const r of numBox.rules) box.rules.push({ ...r, x1: x0 + (barW - numW) / 2 + r.x1, x2: x0 + (barW - numW) / 2 + r.x2, dy: dy + numRaise + r.dy });
         const denBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-        flow(node.den, scale, 0, denBox, measurer, true, display);
+        flow(node.den, scale, 0, denBox, measurer, fracTight, display);
         for (const p of denBox.pieces) box.pieces.push({ ...p, x: x0 + (barW - denW) / 2 + p.x, dy: dy - denDrop + p.dy });
         for (const r of denBox.rules) box.rules.push({ ...r, x1: x0 + (barW - denW) / 2 + r.x1, x2: x0 + (barW - denW) / 2 + r.x2, dy: dy - denDrop + r.dy });
         if (node.bar !== false) {
           box.rules.push({ x1: x0, x2: x0 + barW, dy: dy + size * RULE_CENTER, thick: Math.max(size * RULE_THICK, 0.75) });
         }
         box.width = x0 + barW;
+        prevOperand = true;
         break;
       }
       case "nary": {
@@ -193,6 +234,7 @@ function flow(nodes: MathNode[], size: number, dy: number, box: MathBox, measure
         // above/below; integral-class keep their limits beside even in display.
         if (display && !isInt) {
           naryDisplay(node, size, dy, box, measurer);
+          prevOperand = true;
           break;
         }
         const opDy = dy + size * (isInt ? -NARY_INT_DROP : NARY_SUM_RAISE);
@@ -216,6 +258,7 @@ function flow(nodes: MathNode[], size: number, dy: number, box: MathBox, measure
         for (const r of subBox.rules) box.rules.push({ ...r, x1: x0 + r.x1, x2: x0 + r.x2, dy: subDy + r.dy });
         box.width = x0 + Math.max(supW, subW) + size * NARY_E_GAP;
         flow(node.e, size, dy, box, measurer, tight, display);
+        prevOperand = true;
         break;
       }
       case "dlm": {
@@ -254,6 +297,7 @@ function flow(nodes: MathNode[], size: number, dy: number, box: MathBox, measure
           box.width += b.width + size * DLM_PAD;
         });
         put(node.end);
+        prevOperand = true;
         break;
       }
       case "mat": {
@@ -290,6 +334,7 @@ function flow(nodes: MathNode[], size: number, dy: number, box: MathBox, measure
           if (ri + 1 < cells.length) rowBase -= pitch;
         });
         box.width = x0 + colW.reduce((a, b) => a + b, 0) + size * MAT_COL_GAP * (nCols - 1);
+        prevOperand = true;
         break;
       }
       case "rad": {
@@ -304,6 +349,7 @@ function flow(nodes: MathNode[], size: number, dy: number, box: MathBox, measure
         // vinculum over the radicand
         const m = measurer.metrics(font);
         box.rules.push({ x1: w0 + signW * 0.85, x2: box.width, dy: dy + m.ascent * 0.72, thick: Math.max(size * RULE_THICK, 0.75) });
+        prevOperand = true;
         break;
       }
     }
@@ -352,8 +398,8 @@ function naryDisplay(
   flow(node.e, size, dy, box, measurer, false, true);
 }
 
-function widthOf(nodes: MathNode[], size: number, measurer: TextMeasurer, display = false): number {
+function widthOf(nodes: MathNode[], size: number, measurer: TextMeasurer, display = false, tight = true): number {
   const tmp: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-  flow(nodes, size, 0, tmp, measurer, true, display);
+  flow(nodes, size, 0, tmp, measurer, tight, display);
   return tmp.width;
 }
