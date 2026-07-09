@@ -1587,6 +1587,9 @@ class Engine {
         const baseSize = span.props.size ?? 14.666;
         b += span.props.verticalAlign === "superscript" ? -baseSize * (7 / 22) : baseSize / 11;
       }
+      // w:position baseline shift (positive = raised). The line box already
+      // grew by the shift in computeLineBox, so the glyphs stay inside it.
+      if (span.props.raise) b -= span.props.raise;
       // Anchor every span's glyph box to the engine baseline. Bottoming on
       // the line box (the old default) painted spaced lines a half-leading
       // low (auto leading hangs BELOW the baseline in Word) and misaligned

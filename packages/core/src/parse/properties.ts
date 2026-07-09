@@ -192,6 +192,12 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
   if (smallCaps !== undefined) props.smallCaps = smallCaps;
   const vanish = onOff(child(rPr, "vanish"));
   if (vanish !== undefined) props.vanish = vanish;
+  const outline = onOff(child(rPr, "outline"));
+  if (outline !== undefined) props.outline = outline;
+  const emboss = onOff(child(rPr, "emboss"));
+  if (emboss !== undefined) props.emboss = emboss;
+  const imprint = onOff(child(rPr, "imprint"));
+  if (imprint !== undefined) props.imprint = imprint;
 
   const u = childVal(rPr, "u");
   if (u !== undefined) props.underline = u;
@@ -230,6 +236,11 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
   // glyph advances and painted glyphs; 66% condenses).
   const wScale = intAttr(child(rPr, "w"), "val");
   if (wScale !== undefined && wScale > 0 && wScale !== 100) props.textScale = wScale / 100;
+
+  // w:position: baseline shift in half-points, positive = raised. Word grows
+  // the line box by the full shift (a +6pt raise adds exactly 6pt of pitch).
+  const position = intAttr(child(rPr, "position"), "val");
+  if (position !== undefined && position !== 0) props.raise = (position / 2) * (4 / 3);
 
   const rStyle = childVal(rPr, "rStyle");
   if (rStyle) props.styleId = rStyle;

@@ -771,6 +771,12 @@ function finishLine(
   let maxNaturalText = 0;
   let mathDisplayBase = 0;
   let maxInlineMath = 0;
+  // w:position: Word extends the line box by the FULL shift, additively after
+  // the line-spacing multiplier (+6pt raise = exactly +6pt pitch on the
+  // charstyles probe, not 6pt x 1.08). Raised runs push the top up; lowered
+  // runs push the bottom down.
+  let raiseAsc = 0;
+  let raiseDesc = 0;
 
   const consider = (font: FontSpec, imageHeight?: number) => {
     if (imageHeight !== undefined) {
@@ -827,6 +833,11 @@ function finishLine(
           maxInlineMath = Math.max(maxInlineMath, s.math.ascent + s.math.descent);
         }
       } else consider(s.metricsFont ?? s.font);
+      const r = s.props.raise;
+      if (r) {
+        if (r > 0) raiseAsc = Math.max(raiseAsc, r);
+        else raiseDesc = Math.max(raiseDesc, -r);
+      }
     }
   }
 
@@ -893,6 +904,11 @@ function finishLine(
       }
     } else if (ls.rule === "exact") height = ls.value;
     else height = Math.max(natural, ls.value);
+  }
+
+  if ((raiseAsc || raiseDesc) && ls?.rule !== "exact") {
+    baselineH = (baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height)) + raiseAsc;
+    height += raiseAsc + raiseDesc;
   }
 
   return {

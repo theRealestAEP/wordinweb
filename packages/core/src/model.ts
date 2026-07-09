@@ -90,6 +90,13 @@ export interface RunProps {
   letterSpacing?: number;
   /** w:w horizontal character scaling as a fraction (1.5 = 150%). */
   textScale?: number;
+  /** w:position baseline shift in px, positive = raised. */
+  raise?: number;
+  /** w:outline — hollow stroked glyphs. */
+  outline?: boolean;
+  /** w:emboss / w:imprint — Word triple-draws offset copies. */
+  emboss?: boolean;
+  imprint?: boolean;
   vanish?: boolean;
   /** Character style id (w:rStyle). */
   styleId?: string;

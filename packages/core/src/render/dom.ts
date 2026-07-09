@@ -793,6 +793,18 @@ function renderText(item: TextItem): HTMLElement {
     el.style.transform = `scaleX(${props.textScale})`;
     el.style.transformOrigin = "0 50%";
   }
+  // w:outline: hollow glyphs — Word strokes a hairline (~0.75pt) and leaves
+  // the fill empty. w:emboss/w:imprint: Word triple-draws offset copies; the
+  // visible ghost is a gray copy down-right (emboss) or up-left (imprint).
+  if (props.outline) {
+    const stroke = props.color && props.color !== "auto" ? props.color : "#000000";
+    el.style.webkitTextStroke = `1px ${stroke}`;
+    el.style.webkitTextFillColor = "transparent";
+  } else if (props.emboss) {
+    el.style.textShadow = "1px 1px 0 #a6a6a6";
+  } else if (props.imprint) {
+    el.style.textShadow = "-1px -1px 0 #a6a6a6";
+  }
 
   if (item.mathSrc) {
     el.dataset.dxwMath = "1";
