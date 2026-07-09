@@ -1071,6 +1071,25 @@ function svgPathOf(pathEl: XmlElement): string {
 
 // ---------- VML (legacy drawing markup: textboxes, lines, pictures) ----------
 
+/**
+ * VML v:textbox `inset="l,t,r,b"` (internal text margins). When the attribute
+ * is absent Word uses 0.1in/0.05in (= the engine's 9.6/4.8 default), so we
+ * return undefined and let that default stand. When present we must honour it -
+ * pleading paper's line-number box uses inset="0,0,0,0"; ignoring it applied a
+ * spurious 4.8px top margin that dropped every margin number off Word's grid.
+ * Missing trailing components fall back to their per-side default.
+ */
+function parseVmlInset(raw: string | undefined): { l: number; t: number; r: number; b: number } | undefined {
+  if (raw === undefined) return undefined;
+  const parts = raw.split(",");
+  const dflt = [9.6, 4.8, 9.6, 4.8];
+  const val = (i: number): number => {
+    const p = parts[i]?.trim();
+    return p ? vmlLength(p) : dflt[i];
+  };
+  return { l: val(0), t: val(1), r: val(2), b: val(3) };
+}
+
 /** Parse a VML length ("36pt", "1in", "669.6pt", "12px", bare number = px). */
 function vmlLength(raw: string | undefined): number {
   if (!raw) return 0;
@@ -1201,6 +1220,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
         const strokeColor = el.attrs["strokecolor"];
         const stroked = el.attrs["stroked"] !== "f" && strokeColor !== undefined;
         const ta = style.get("v-text-anchor");
+        const vmlInsets = parseVmlInset(findDescendant(el, "textbox")?.attrs["inset"]);
         out.push({
           kind: "anchor",
           shape: {
@@ -1223,6 +1243,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
             pctWidthRel: relOf(style.get("mso-width-relative")),
             pctHeightRel: relOf(style.get("mso-height-relative")),
             textAnchor: ta === "middle" ? "middle" : ta === "bottom" ? "bottom" : undefined,
+            ...(vmlInsets ? { insets: vmlInsets } : {}),
           },
         });
         return;
