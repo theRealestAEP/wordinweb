@@ -142,8 +142,37 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
   if (bookmarks.length > 0) para.bookmarks = bookmarks;
   // Unterminated field (shouldn't happen in valid files): flush as text
   flushField(field);
+  suppressTocHyperlinkFormatting(para);
   ensureCaretAnchor(p, para);
   return para;
+}
+
+/**
+ * Word renders TOC field-result hyperlinks WITHOUT hyperlink formatting: the
+ * entries appear in the TOC paragraph style's own color (black), never the blue
+ * underlined "Hyperlink" look — even though the runs carry rStyle="Hyperlink"
+ * and Word's TOC field wraps every entry (title + leader tab + PAGEREF page
+ * number) in a w:hyperlink to an internal anchor. Two blue sources have to be
+ * neutralized: the Hyperlink character style (color/underline) on the title
+ * runs, and the renderer's default "unvisited link" blue applied to any run
+ * that carries an href but no explicit color (the leader/page-number runs).
+ *
+ * Detected paragraph-locally by the TOC1..TOC9 paragraph style (field state
+ * does not persist across the entry paragraphs). We fill color:"auto" and
+ * underline:"none" only where the run has no direct value, so any real author
+ * formatting is preserved while the style/href-derived blue is overridden.
+ * href is left intact so the entries stay navigable.
+ */
+function suppressTocHyperlinkFormatting(para: Paragraph): void {
+  const styleId = para.props.styleId;
+  if (!styleId || !/^TOC[1-9]$/i.test(styleId)) return;
+  for (const child of para.children) {
+    if (child.type !== "hyperlink") continue;
+    for (const run of child.runs) {
+      if (run.props.color === undefined) run.props.color = "auto";
+      if (run.props.underline === undefined) run.props.underline = "none";
+    }
+  }
 }
 
 /**
@@ -704,7 +733,11 @@ function parseDrawing(
       // Freeform template art (icons, decorative bands) is a:custGeom -
       // convert its pathLst to SVG path data at the shape's placement.
       const custGeom = child(spPr, "custGeom");
-      const fill = fillColorOf(spPr) ?? styleFillOf(el);
+      // An explicit <a:noFill/> means the shape has NO fill: the theme style's
+      // fillRef is only a FALLBACK for shapes that specify no fill at all, so it
+      // must not override noFill (wild-gatech knot: noFill + black stroke was
+      // painting accent1 blue because styleFillOf won when solidFill was absent).
+      const fill = child(spPr, "noFill") ? undefined : (fillColorOf(spPr) ?? styleFillOf(el));
       // Image-filled shapes (a:blipFill): the fill picture is stretched over
       // the shape box - render it as a placed image (Facet cover divider).
       const blipFill = child(spPr, "blipFill");
@@ -737,7 +770,7 @@ function parseDrawing(
           stroke = { color: lnColor, width: Math.max(emuToPx(wEmu), 1) };
         }
       }
-      if (custGeom && fill) {
+      if (custGeom && (fill || stroke)) {
         const xfrm = child(spPr, "xfrm");
         const off = child(xfrm, "off");
         const ext = child(xfrm, "ext");
