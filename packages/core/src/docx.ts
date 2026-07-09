@@ -1,5 +1,5 @@
 import { Package } from "./zip.js";
-import { XmlElement, parseXml, serializeXml, child, intAttr, onOff, attr, localName } from "./xml.js";
+import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName } from "./xml.js";
 import { strToU8, zipSync } from "fflate";
 import { twipsToPx } from "./units.js";
 import {
@@ -70,6 +70,12 @@ export class DocxDocument {
   readonly evenAndOddHeaders: boolean = false;
   /** settings.xml w:defaultTabStop in px (Word default 0.5"). */
   readonly defaultTabStop: number = 48;
+  /** settings.xml w:compat compatibilityMode (12=Word2007, 14=Word2010,
+   * 15=Word2013+). Word 2013 (mode 15) introduced suppressing a paragraph's
+   * space-before when it lands at the top of a page; mode 14 and earlier keep
+   * it (nccih: a Heading1/2 after a page break sits at margin + its before).
+   * Absent → treated as current (15). */
+  readonly compatibilityMode: number = 15;
   /** Review comments from word/comments.xml (empty when the part is absent).
    * Re-derived from the retained comments XML on every refresh(). */
   comments: DocComment[] = [];
@@ -145,6 +151,13 @@ export class DocxDocument {
       this.evenAndOddHeaders = onOff(child(settings, "evenAndOddHeaders")) ?? false;
       const tabStop = intAttr(child(settings, "defaultTabStop"), "val");
       if (tabStop !== undefined && tabStop > 0) this.defaultTabStop = twipsToPx(tabStop);
+      const compat = child(settings, "compat");
+      for (const cs of children(compat, "compatSetting")) {
+        if (attr(cs, "name") === "compatibilityMode") {
+          const v = Number(attr(cs, "val"));
+          if (Number.isFinite(v)) (this as { compatibilityMode: number }).compatibilityMode = v;
+        }
+      }
     }
 
     // Review comments (optional part). The XML tree is retained so comments

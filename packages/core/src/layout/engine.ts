@@ -39,6 +39,18 @@ export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): 
 
 // ---------- internal page ----------
 
+/** A framePr with cascade defaults filled in (see Engine.resolveFrame). `w` is
+ * still optional: a widthless non-notBeside framePr carries no positionable
+ * width and falls through to normal flow. */
+type ResolvedFrame = NonNullable<ParaProps["frame"]> & {
+  hRule: "auto" | "atLeast" | "exact";
+  x: number;
+  y: number;
+  hAnchor: "page" | "margin" | "text" | "column";
+  vAnchor: "page" | "margin" | "text" | "paragraph";
+  wrap: "around" | "auto" | "notBeside" | "through" | "tight" | "none";
+};
+
 interface InternalPage {
   items: PageItem[];
   sp: SectionProps;
@@ -178,6 +190,13 @@ class Engine {
   /** Set when a docGrid section's top reserve was applied; the first paragraph
    * drops its spacing-before (Word folds it into the grid reserve). */
   private docGridDropBefore = false;
+  /** A run of consecutive full-width `wrap="notBeside"` frame paragraphs forms a
+   * banner band at the top of a (multi-)column section: the frames stack full
+   * width and the column band starts BELOW them (IEEE title/authors). Tracks the
+   * previous banner frame's signature (to group consecutive same-frame lines)
+   * and the trailing vSpace owed below the band before body content resumes. */
+  private lastBannerKey: string | undefined = undefined;
+  private lastBannerVSpace = 0;
 
   constructor(
     private doc: DocxDocument,
@@ -205,12 +224,15 @@ class Engine {
         sp.pageHeight === prevSp.pageHeight &&
         sp.marginLeft === prevSp.marginLeft &&
         sp.marginRight === prevSp.marginRight &&
-        // A continuous break that RESTARTS or reformats page numbering can't
-        // stay on the shared page - two different page numbers can't coexist
-        // on one sheet, so Word promotes it to a page break (wild-gatech: the
-        // roman "start=4" front-matter section begins a fresh page, numbered
-        // iv, even though it is authored as continuous).
-        sp.pageNumberStart === undefined &&
+        // A continuous break that changes the page-number FORMAT can't stay on
+        // the shared page - two different formats (e.g. decimal vs roman) can't
+        // coexist on one sheet, so Word promotes it to a page break (wild-gatech:
+        // the lowerRoman "start=4" front-matter section begins a fresh page).
+        // A restart of the count alone (same format) does NOT promote: the shared
+        // page keeps its own number and the restart takes effect on the section's
+        // next full page (ca-agreement's schedule sections: a continuous
+        // `pgNumType start=1` decimal section flows onto the shared page, it does
+        // not start a spurious blank/extra page).
         (sp.pageNumberFormat ?? "decimal") === (prevSp.pageNumberFormat ?? "decimal");
       this.sp = sp;
       this.lnSectionEpoch++;
@@ -855,6 +877,8 @@ class Engine {
   // ---------- block flow ----------
 
   private layoutBlocks(blocks: Block[]): void {
+    this.lastBannerKey = undefined;
+    this.lastBannerVSpace = 0;
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (block.type === "paragraph") {
@@ -1033,35 +1057,10 @@ class Engine {
    * width, and a wrap float registered so surrounding body text flows around it
    * (staging-frames: page/margin/text-anchored callout boxes with wrap=around).
    */
-  private placeFrameParagraph(para: Paragraph, fr: NonNullable<ParaProps["frame"]>): void {
+  private placeFrameParagraph(para: Paragraph, fr: ResolvedFrame): void {
     const sp = this.sp;
-    const contentW = Math.max(8, fr.w);
-    // Horizontal origin (frame content-box left) from the anchor. A named
-    // xAlign only takes effect when there is no meaningful numeric x offset.
-    let ox: number;
-    switch (fr.hAnchor) {
-      case "page":
-        ox = fr.x;
-        break;
-      case "margin":
-        ox = sp.marginLeft + fr.x;
-        break;
-      default:
-        ox = this.colX + fr.x; // text / column travel with the paragraph column
-        break;
-    }
-    if (fr.x === 0 && fr.xAlign) {
-      const base = fr.hAnchor === "page" ? 0 : fr.hAnchor === "margin" ? sp.marginLeft : this.colX;
-      const span =
-        fr.hAnchor === "page"
-          ? sp.pageWidth
-          : fr.hAnchor === "margin"
-            ? sp.pageWidth - sp.marginLeft - sp.marginRight
-            : this.colWidth;
-      if (fr.xAlign === "center") ox = base + (span - contentW) / 2;
-      else if (fr.xAlign === "right" || fr.xAlign === "outside") ox = base + span - contentW;
-      else ox = base;
-    }
+    const contentW = Math.max(8, fr.w ?? 0);
+    const ox = this.frameOriginX(fr, contentW);
     // Vertical origin (frame top) from the anchor.
     let oy: number;
     switch (fr.vAnchor) {
@@ -1092,7 +1091,7 @@ class Engine {
       const list = this.floats.get(this.cur) ?? [];
       list.push({
         x0: ox,
-        x1: ox + fr.w,
+        x1: ox + contentW,
         y0: oy,
         y1: oy + height,
         mode: fr.wrap === "notBeside" ? "topAndBottom" : "square",
@@ -1101,15 +1100,124 @@ class Engine {
     }
   }
 
+  /** Fill framePr defaults after the (now attribute-wise) style cascade. A
+   * widthless `wrap="notBeside"` frame spans the full section text width. */
+  private resolveFrame(fr: NonNullable<ParaProps["frame"]>): ResolvedFrame {
+    const sp = this.sp;
+    const wrap = fr.wrap ?? "around";
+    let w = fr.w;
+    if (w === undefined && wrap === "notBeside") {
+      w = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
+    }
+    return {
+      ...fr,
+      w,
+      hRule: fr.hRule ?? "auto",
+      x: fr.x ?? 0,
+      y: fr.y ?? 0,
+      hAnchor: fr.hAnchor ?? "text",
+      vAnchor: fr.vAnchor ?? "text",
+      wrap,
+    };
+  }
+
+  /** Resolve the horizontal content-box origin of a frame from its anchor +
+   * x/xAlign (shared by float and banner placement). */
+  private frameOriginX(fr: ResolvedFrame, contentW: number): number {
+    const sp = this.sp;
+    let ox: number;
+    switch (fr.hAnchor) {
+      case "page":
+        ox = fr.x;
+        break;
+      case "margin":
+        ox = sp.marginLeft + fr.x;
+        break;
+      default:
+        ox = this.colX + fr.x;
+        break;
+    }
+    if (fr.x === 0 && fr.xAlign) {
+      const base = fr.hAnchor === "page" ? 0 : fr.hAnchor === "margin" ? sp.marginLeft : this.colX;
+      const span =
+        fr.hAnchor === "page"
+          ? sp.pageWidth
+          : fr.hAnchor === "margin"
+            ? sp.pageWidth - sp.marginLeft - sp.marginRight
+            : this.colWidth;
+      if (fr.xAlign === "center") ox = base + (span - contentW) / 2;
+      else if (fr.xAlign === "right" || fr.xAlign === "outside") ox = base + span - contentW;
+      else ox = base;
+    }
+    return ox;
+  }
+
+  /** A full-width `wrap="notBeside"` frame banner at the top of a multi-column
+   * section (IEEE title/authors): it spans all columns, stacks with adjacent
+   * banner frames, and pushes the column band (bandTop) below itself so both
+   * columns start beneath it. Consecutive frames sharing a signature (same
+   * width/anchor — i.e. one logical Word frame split across paragraphs) do not
+   * re-insert the frame's vSpace gap between their lines; a signature change or
+   * the first body paragraph pays the trailing/leading vSpace once. */
+  private placeBannerFrame(para: Paragraph, fr: ResolvedFrame): void {
+    const contentW = Math.max(8, fr.w ?? 0);
+    const ox = this.frameOriginX(fr, contentW);
+    const vSpace = fr.vSpace ?? 0;
+    const key = `${Math.round(contentW)}|${fr.hAnchor}|${fr.xAlign ?? ""}`;
+    const leadingGap = key !== this.lastBannerKey ? vSpace : 0;
+    const oy = this.y + leadingGap + Math.max(0, fr.y);
+    const laid = this.layoutFrame([para], contentW, this.fieldCtx(), { x: ox, y: oy });
+    for (const it of laid.items) {
+      offsetItem(it, ox, oy);
+      this.cur.items.push(it);
+    }
+    const height =
+      fr.hRule === "exact" && fr.h !== undefined
+        ? fr.h
+        : fr.hRule === "atLeast" && fr.h !== undefined
+          ? Math.max(fr.h, laid.height)
+          : laid.height;
+    this.y = oy + height;
+    this.cur.bandTop = this.y;
+    this.lastBannerKey = key;
+    this.lastBannerVSpace = vSpace;
+  }
+
+  /** Close an open banner band before body content resumes: pay the band's
+   * trailing vSpace once and lock the column band top to below it. */
+  private flushBannerBand(): void {
+    if (this.lastBannerKey === undefined) return;
+    this.y += this.lastBannerVSpace;
+    this.cur.bandTop = this.y;
+    this.lastBannerKey = undefined;
+    this.lastBannerVSpace = 0;
+  }
+
   private placeParagraph(para: Paragraph, prev?: Block, next?: Block, siblings?: Block[], index?: number): void {
     const props = this.doc.effectiveParaProps(para);
     // A positioned text frame (w:framePr with a width) is lifted out of normal
     // flow: it paints at an absolute anchor position and body text wraps around
     // it. It does NOT advance the cursor or the spacing chain (staging-frames).
     if (props.frame && !props.dropCap && this.cur.physIndex !== -1) {
-      this.placeFrameParagraph(para, props.frame);
-      return;
+      const fr = this.resolveFrame(props.frame);
+      // A frame needs a width to be lifted out of flow. A widthless
+      // `wrap="notBeside"` frame defaults to the full section text width (a
+      // full-width banner); any other widthless framePr falls through to normal
+      // flow (it carries no geometry to position against).
+      if (fr.w !== undefined) {
+        // A full-width `wrap="notBeside"` frame in a multi-column section is a
+        // banner (IEEE title/authors): it spans ALL columns at the section top
+        // and the column band begins below it. Otherwise it is an ordinary float.
+        if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) {
+          this.placeBannerFrame(para, fr);
+          return;
+        }
+        this.flushBannerBand();
+        this.placeFrameParagraph(para, fr);
+        return;
+      }
     }
+    this.flushBannerBand();
     // Word merges identical borders of consecutive paragraphs: the shared
     // boundary is not drawn (or draws the "between" border when given), so
     // a run of bordered paragraphs reads as one box (Alex Pickett cover
@@ -1234,16 +1342,25 @@ class Engine {
     // The first paragraph on a page reached by a hard page break lands at the
     // page top: Word (compat 15) drops both the break paragraph's trailing
     // space-after and this paragraph's space-before.
+    // Word 2013 (compatibilityMode 15) suppresses a paragraph's space-before
+    // when it lands at the top of a page after a page break; Word 2010 and
+    // earlier (mode <= 14) keep it. nccih (mode 14): a Heading1/Heading2 reached
+    // by a page break sits at margin + its full before, not at the margin.
+    const keepSpBeforeAtPageTop = this.doc.compatibilityMode < 15;
     let dropSpaceBefore = false;
     if (this.suppressNextSpaceBefore) {
       this.suppressNextSpaceBefore = false;
       this.y = this.cur.bandTop;
       this.lastParaSpacingAfter = 0;
-      dropSpaceBefore = true;
+      if (!keepSpBeforeAtPageTop) dropSpaceBefore = true;
     }
-    // w:pageBreakBefore is the same rule (parity2-toc: Heading1 before=12pt
-    // sits at margin + ascent exactly on its forced page).
-    if (breakBeforeForced) dropSpaceBefore = true;
+    // w:pageBreakBefore drops space-before (parity2-toc: Heading1 before=12pt
+    // sits at margin + ascent on its forced page). An inline LEADING `w:br
+    // type="page"` (the break is the paragraph's first content, text follows)
+    // carries the WHOLE paragraph — including its before — to the new page in
+    // mode <= 14 (nccih WORA: Heading1 before=18pt lands 18pt below the margin).
+    const isLeadingPageBreak = leadBreak === "page" && !props.pageBreakBefore;
+    if (breakBeforeForced && !(isLeadingPageBreak && keepSpBeforeAtPageTop)) dropSpaceBefore = true;
     if (this.docGridDropBefore) {
       this.docGridDropBefore = false;
       dropSpaceBefore = true;
@@ -1462,7 +1579,12 @@ class Engine {
     // section-start page keeps its full/carry-remainder space-before (Word
     // keeps the full 12pt at the document start; parity2-* fixtures all open
     // with a spacing-before heading and sat 13px high under the broad rule).
+    // A leading inline page break keeps its space-before (see above): it is not
+    // treated as having merely "arrived" at the page top by overflow. Pure soft
+    // overflow to a page/column top still collapses in ALL modes (the mode-14
+    // "keep" applies only to explicit page breaks, handled above).
     const atPageOrColumnTop =
+      !isLeadingPageBreak &&
       this.y <= this.cur.bandTop + 0.01 &&
       (this.col > 0 ||
         (this.cur.softTop && this.cur.bandTop <= this.cur.bodyTop + 0.01));

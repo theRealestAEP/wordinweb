@@ -419,6 +419,80 @@ has no metric-compatible substitute — it maps to Carlito (= Calibri REGULAR), 
 long headings that Word wraps via the wider Calibri-Light advances may fit one
 line for us even absent the anchor issue.
 
+### A full-width `wrap="notBeside"` frame in a multi-column section is a banner that spans ALL columns
+IEEE two-column papers put the title/authors in `w:framePr wrap="notBeside"`
+paragraphs (styled `Title`/`Authors`) whose width (from the STYLE: `w:w=9360`,
+`hAnchor=page`, `xAlign=center`) is the full page text width, wider than one
+column. Word lays these ACROSS both columns at the top of the section and starts
+the two-column body BELOW them; the engine was flowing them as ordinary column-0
+paragraphs, so the title overlapped the body. Fix: `placeBannerFrame`
+(`layout/engine.ts`) — a `notBeside` frame whose `w > colWidth` in a >1-column
+section lays full width, stacks with adjacent banner frames (consecutive
+same-signature frames = one logical Word frame, no vSpace between their lines),
+and pushes the column band (`bandTop`) below itself via `flushBannerBand`.
+- **framePr merges attribute-by-attribute across the style cascade.** The IEEE
+  Authors paragraph's DIRECT framePr is `<w:framePr w:h="781" w:hRule="exact"
+  w:x="1569" w:y="-213" w:wrap="notBeside"/>` — it has NO width, so it must
+  inherit the Authors STYLE's width/anchor/xAlign while overriding h/hRule/x/y.
+  The parser now emits only the attributes actually present (all frame fields
+  optional in the model) and `mergeParaProps` deep-merges `frame`
+  (`{...base.frame, ...over.frame}`); `Engine.resolveFrame` fills defaults at
+  layout time (a widthless notBeside frame defaults to the full text width). The
+  exact `w:h=781` (~52px) reserve is what lands the column band at Word's height.
+- OPEN (IEEE p2-4, still ~72%): the body columns' line pitch matches Word to
+  ~0.02pt and the banner now spans correctly, but the 2-col body still drifts —
+  the figures (e.g. a magnetization chart anchored in the right column) are not
+  positioned like Word, and the authors frame's `w:y=-213` raise vs Word's cached
+  position needs a Word-export probe. Banner fix alone leaves the doc mean ~flat
+  (the 4 pages are dominated by figure/column drift, not the title band).
+
+### Space-before at a page top after a page break is a compatibilityMode-15 behavior
+Word 2013 (`w:compat` `compatibilityMode="15"`) suppresses a paragraph's
+space-before when it lands at the top of a page after a page break; Word 2010 and
+earlier (mode <= 14) KEEP it. `wild2-med-nccih-protocol` is mode 14: a `Heading1`
+opening with a leading `w:br type="page"` (before=18pt) sits 18pt below the top
+margin, and a `Heading2` reached by a trailing page break sits at margin+before —
+NOT flush at the margin. The engine hard-dropped both. Fix: parse
+`compatibilityMode` (`docx.ts`); gate the leading-break drop and the
+`suppressNextSpaceBefore` (trailing-break) drop on `compatibilityMode >= 15`
+(`layout/engine.ts`, `placeParagraph`). Two subtleties held it together:
+- **The mode-14 "keep" applies ONLY to explicit page breaks, not pure soft
+  overflow.** A heading that soft-overflows to a page top still collapses its
+  before in all modes (`atPageOrColumnTop` unchanged for the soft path). And a
+  COLUMN top (col > 0) still collapses in all modes — `wild-multicolumn` is ALSO
+  mode 14 yet its sliver-column Heading2 drops its before; that path is untouched.
+- Fixed nccih p3 81%→1.5% and lowered p2/p5/p8; doc mean 24.3→20.8. Residual:
+  the title page (p1) and a section-boundary case where Word adds ~21pt above a
+  continuous-section Heading2 that we don't reproduce (p4/p9 — the empty
+  page-break section-break paragraph's contribution; needs a Word probe). A
+  side effect is a pagination micro-shift on p9 (3%→67%) that resynchronises by
+  p10 — the doc's vertical model is now correct at p3 but not yet at that section
+  boundary, so the accumulated content lands one band off for one page.
+
+### A continuous section that RESTARTS the page count (same format) still shares the page — only a FORMAT change forces a new page
+`wild2-legal-ca-agreement`'s schedule sections are `type="continuous"` with
+`<w:pgNumType w:start="1"/>` (restart the decimal count) and a different footer.
+Word flows them onto the SAME page as the preceding section's content (the shared
+page keeps its own number; the restart takes effect on the section's next full
+page). The engine promoted ANY continuous section that set `pageNumberStart` to a
+page break (`layout/engine.ts`, `canContinue`), inserting a spurious extra page
+after section 3's `5.2` and pushing every downstream page off by one (24 pages vs
+Word's 23). The rule that motivated the promotion (wild-gatech) is really a
+FORMAT change: gatech's front-matter section is `pgNumType fmt="lowerRoman"
+start="4"` — decimal→roman can't coexist on one sheet. Fix: promote only when the
+page-number FORMAT differs, not when the count alone restarts. ca-agreement 24→23
+pages, mean 55.3→33.5; gatech unchanged (1.99). Residual p11-20 drift is a
+separate schedule-content density issue.
+
+### PARKED without Word exports (2026-07): wild2-med-phase23-protocol TOC line count
+The 70-page phase23 protocol renders 72 pages because its `TOC` field content
+occupies ~2 more pages than Word's (our TOC spans p7-9; Word's is p7 only, p8 is
+already body "9.6.4"). The divergence is in how many TOC entry lines / page-number
+column widths we emit vs Word's cached TOC — every body page is then offset by the
+front-matter delta. Cracking it needs a Word-export probe of the TOC field
+geometry (entry wrapping, PAGEREF page-number widths, tab-leader fill), which the
+screen-locked session forbids. Left untouched.
+
 ### allowOverlap="0" slides an anchored shape clear of earlier overlapping floats
 `wp:anchor @allowOverlap="0"` means Word shifts the shape so it does NOT overlap
 any earlier-placed (lower z-order) float, rather than stacking on top

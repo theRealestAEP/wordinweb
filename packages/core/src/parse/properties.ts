@@ -353,35 +353,43 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
     } else {
       // A general positioned text frame (w:framePr with a width and anchors):
       // the paragraph is lifted out of normal flow, placed at an absolute
-      // location, and body text wraps around it (staging-frames).
+      // location, and body text wraps around it (staging-frames). Only the
+      // attributes actually present are emitted so the frame merges
+      // attribute-by-attribute across the style cascade (ECMA-376: a framePr is
+      // not a toggle, but a direct framePr specifying only h/x/y must keep the
+      // style's width/anchor — IEEE authors' `w:h w:hRule=exact` over the
+      // Authors style's centered full-width frame). The engine defaults the rest.
       const w = intAttr(frame, "w");
-      if (w !== undefined && w > 0) {
-        const hRuleRaw = attr(frame, "hRule");
-        const hAnchorRaw = attr(frame, "hAnchor");
-        const vAnchorRaw = attr(frame, "vAnchor");
-        const wrapRaw = attr(frame, "wrap");
-        const xAlignRaw = attr(frame, "xAlign");
-        const yAlignRaw = attr(frame, "yAlign");
-        const h = intAttr(frame, "h");
-        props.frame = {
-          w: twipsToPx(w),
-          ...(h !== undefined ? { h: twipsToPx(h) } : {}),
-          hRule: (hRuleRaw === "atLeast" || hRuleRaw === "exact" ? hRuleRaw : "auto"),
-          x: twipsToPx(intAttr(frame, "x") ?? 0),
-          y: twipsToPx(intAttr(frame, "y") ?? 0),
-          hAnchor:
-            hAnchorRaw === "page" || hAnchorRaw === "margin" || hAnchorRaw === "column"
-              ? hAnchorRaw
-              : "text",
-          vAnchor:
-            vAnchorRaw === "page" || vAnchorRaw === "margin" || vAnchorRaw === "paragraph"
-              ? vAnchorRaw
-              : "text",
-          ...(xAlignRaw ? { xAlign: xAlignRaw as never } : {}),
-          ...(yAlignRaw ? { yAlign: yAlignRaw as never } : {}),
-          wrap: (wrapRaw as never) ?? "around",
-        };
-      }
+      const h = intAttr(frame, "h");
+      const hRuleRaw = attr(frame, "hRule");
+      const hAnchorRaw = attr(frame, "hAnchor");
+      const vAnchorRaw = attr(frame, "vAnchor");
+      const wrapRaw = attr(frame, "wrap");
+      const xAlignRaw = attr(frame, "xAlign");
+      const yAlignRaw = attr(frame, "yAlign");
+      const xRaw = intAttr(frame, "x");
+      const yRaw = intAttr(frame, "y");
+      const hSpaceRaw = intAttr(frame, "hSpace");
+      const vSpaceRaw = intAttr(frame, "vSpace");
+      const f: NonNullable<ParaProps["frame"]> = {
+        ...(w !== undefined && w > 0 ? { w: twipsToPx(w) } : {}),
+        ...(h !== undefined ? { h: twipsToPx(h) } : {}),
+        ...(hRuleRaw === "atLeast" || hRuleRaw === "exact" || hRuleRaw === "auto" ? { hRule: hRuleRaw } : {}),
+        ...(xRaw !== undefined ? { x: twipsToPx(xRaw) } : {}),
+        ...(yRaw !== undefined ? { y: twipsToPx(yRaw) } : {}),
+        ...(hAnchorRaw === "page" || hAnchorRaw === "margin" || hAnchorRaw === "column" || hAnchorRaw === "text"
+          ? { hAnchor: hAnchorRaw }
+          : {}),
+        ...(vAnchorRaw === "page" || vAnchorRaw === "margin" || vAnchorRaw === "paragraph" || vAnchorRaw === "text"
+          ? { vAnchor: vAnchorRaw }
+          : {}),
+        ...(xAlignRaw ? { xAlign: xAlignRaw as never } : {}),
+        ...(yAlignRaw ? { yAlign: yAlignRaw as never } : {}),
+        ...(wrapRaw ? { wrap: wrapRaw as never } : {}),
+        ...(hSpaceRaw !== undefined ? { hSpace: twipsToPx(hSpaceRaw) } : {}),
+        ...(vSpaceRaw !== undefined ? { vSpace: twipsToPx(vSpaceRaw) } : {}),
+      };
+      if (Object.keys(f).length > 0) props.frame = f;
     }
   }
 
@@ -451,6 +459,11 @@ export function mergeParaProps(base: ParaProps, over: ParaProps): ParaProps {
   }
   if (base.markRunProps && over.markRunProps) {
     out.markRunProps = mergeRunProps(base.markRunProps, over.markRunProps);
+  }
+  // framePr merges attribute-by-attribute: a direct framePr that specifies only
+  // some geometry inherits the rest from the style's framePr (IEEE authors).
+  if (base.frame && over.frame) {
+    out.frame = { ...base.frame, ...over.frame };
   }
   // Apply a level-only numPr override to the inherited numbering (keeping its
   // numId). Consume it once applied; keep it pending if numbering isn't set

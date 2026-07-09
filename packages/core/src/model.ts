@@ -143,18 +143,24 @@ export interface ParaProps {
   /** w:framePr w:dropCap: the paragraph is a drop-cap letter frame. */
   dropCap?: { mode: "drop" | "margin"; lines: number; hSpace: number };
   /** w:framePr positioned text frame (absolute-positioned paragraph the body
-   * text wraps around). Geometry in px. */
+   * text wraps around). Geometry in px. Individual attributes are optional so a
+   * framePr merges attribute-by-attribute across the style cascade (a direct
+   * framePr that sets only h/x/y keeps the style framePr's width/anchor — IEEE
+   * authors); the engine normalizes defaults at layout time. */
   frame?: {
-    w: number;
+    w?: number;
     h?: number;
-    hRule: "auto" | "atLeast" | "exact";
-    x: number;
-    y: number;
-    hAnchor: "page" | "margin" | "text" | "column";
-    vAnchor: "page" | "margin" | "text" | "paragraph";
+    hRule?: "auto" | "atLeast" | "exact";
+    x?: number;
+    y?: number;
+    hAnchor?: "page" | "margin" | "text" | "column";
+    vAnchor?: "page" | "margin" | "text" | "paragraph";
     xAlign?: "left" | "center" | "right" | "inside" | "outside";
     yAlign?: "top" | "center" | "bottom" | "inside" | "outside" | "inline";
-    wrap: "around" | "auto" | "notBeside" | "through" | "tight" | "none";
+    wrap?: "around" | "auto" | "notBeside" | "through" | "tight" | "none";
+    /** w:hSpace / w:vSpace: horizontal/vertical margin around the frame (px). */
+    hSpace?: number;
+    vSpace?: number;
   };
   keepLines?: boolean;
   pageBreakBefore?: boolean;
