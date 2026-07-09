@@ -707,3 +707,11 @@ dividers 0.96x, pleading p4 0.98x, gatech p10 1.18x, so no single global constan
 fixes them). gatech p10 also carries a genuine REF/SEQ field-value divergence
 ("Bavoqe 0" cached in Word vs our live-evaluated "1") — a field-resolution gap,
 distinct from the weight floor.
+- **The text-ink weight floor is NOT tunable via stroke calibration** (swept
+  2026-07-09 over 48 diverse pages: regular antialiased+0.15px/bold subpixel
+  = 133.6 total severity; 0.05px = 134.9; no stroke = 135.8; bold-as-stroke
+  0.3px = 134.3). The current calibration is the optimum; the residual ~2-4%
+  "clean floor" on sparse pages is Chrome-glyph-rasterizer vs Word-PDF-
+  rasterizer AA physics at identical glyph positions (both sides already
+  compare at 2x scale). Do not chase it with paint tweaks; it caps the
+  achievable suite mean around ~2.2-2.5% under the current severity metric.
