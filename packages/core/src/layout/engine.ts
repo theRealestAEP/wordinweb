@@ -1133,11 +1133,13 @@ class Engine {
     let lookMark: { page: InternalPage; items: number; floats: number; shapes: Shape[] } | null = null;
     if (next?.type === "paragraph" && broken.lines.length > 0) {
       const linesH = broken.lines.reduce((a, l) => a + l.height, 0);
-      const paraBottom = paraTopEstimate + linesH;
-      // Word anchors the box at the next paragraph's undisplaced top measured
-      // WITHOUT inter-paragraph spacing (the reference box top sits 1.3px
-      // ABOVE this heading's line bottom, not after+below it).
-      const predictedNextTop = paraBottom;
+      // Predict from the COLLAPSED paragraph top (paraTopEstimate carries the
+      // raw spacing-before; the real placement subtracts the previous
+      // spacing-after overlap) — Word anchors the box at this paragraph's
+      // line bottom exactly, with no inter-paragraph spacing added.
+      const effTop = this.y + Math.max(rawSpacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
+      const predictedNextTop = effTop + linesH;
+      const paraBottom = predictedNextTop;
       const hits = this.collectAnchors(next).filter((s) => {
         if (!("wrap" in s) || s.wrap !== "topAndBottom") return false;
         if ("vAlign" in s && s.vAlign) return false;
