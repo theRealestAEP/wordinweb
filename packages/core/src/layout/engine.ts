@@ -913,8 +913,13 @@ class Engine {
         for (const rc of r.content) if (rc.kind === "anchor") out.push(rc.shape);
       }
     }
-    return out;
+    return out.filter((s) => !this.consumedAnchors.has(s));
   }
+
+  /** Shapes already emitted by a preceding paragraph's lookahead (Word's
+   * anchor reflow: the float keeps its first-pass position while earlier
+   * lines move below it). */
+  private consumedAnchors = new WeakSet<Shape>();
 
   /** Line bounds callback honoring this page's floating-image exclusions. */
   private makeBoundsAt(paraTop: number) {
@@ -1039,6 +1044,25 @@ class Engine {
     // turns out to start on another page/column, they are retracted and
     // re-emitted there (see restartOnNextColumn).
     const anchors = this.collectAnchors(para);
+    // A paragraph whose only content is anchored drawings that a preceding
+    // paragraph's lookahead already emitted takes NO vertical space (Word:
+    // body text resumes exactly one heading height below the displaced
+    // heading — no empty anchor line, no spacing).
+    if (anchors.length === 0) {
+      let consumedHere = false;
+      let visible = false;
+      for (const c of para.children) {
+        const runs = c.type === "run" ? [c] : c.runs;
+        for (const r of runs) {
+          for (const rc of r.content) {
+            if (rc.kind === "anchor") {
+              if (this.consumedAnchors.has(rc.shape)) consumedHere = true;
+            } else if (rc.kind !== "text" || rc.text.length > 0) visible = true;
+          }
+        }
+      }
+      if (consumedHere && !visible) return;
+    }
     const label = this.numberingLabel(props, para);
     let anchorMark: { page: InternalPage; items: number; floats: number } | null = null;
     const emitParaAnchors = (paraTop: number): void => {
@@ -1051,6 +1075,15 @@ class Engine {
       this.emitAnchors(anchors, this.cur, this.fieldCtx(), this.colX, paraTop);
     };
     const retractParaAnchors = (): void => {
+      if (lookMark) {
+        // Lookahead floats retract with the paragraph; the anchor paragraph
+        // emits them normally on the new page/column instead.
+        lookMark.page.items.length = Math.min(lookMark.page.items.length, lookMark.items);
+        const lf = this.floats.get(lookMark.page);
+        if (lf) lf.length = Math.min(lf.length, lookMark.floats);
+        for (const s of lookMark.shapes) this.consumedAnchors.delete(s);
+        lookMark = null;
+      }
       if (!anchorMark) return;
       // Anchor items were appended last and nothing has been emitted since.
       anchorMark.page.items.length = anchorMark.items;
@@ -1087,6 +1120,47 @@ class Engine {
     let paraTopEstimate = this.y + rawSpacingBefore;
     emitParaAnchors(paraTopEstimate);
     let broken = breakNow(paraTopEstimate);
+
+    // Word anchor reflow (parity2-textboxes): a topAndBottom float anchored
+    // at the top of the NEXT paragraph is positioned from that paragraph's
+    // UNDISPLACED spot — immediately below this paragraph — and this
+    // paragraph's lines, when they graze the band, reflow BELOW the box while
+    // the box keeps its first-pass position. Pre-emit such floats frozen
+    // there so this paragraph's line bounds push it down; the anchor
+    // paragraph skips them (and, when left with no visible content,
+    // contributes no height — measured: body resumes exactly one heading
+    // height below the displaced heading).
+    let lookMark: { page: InternalPage; items: number; floats: number; shapes: Shape[] } | null = null;
+    if (next?.type === "paragraph" && broken.lines.length > 0) {
+      const linesH = broken.lines.reduce((a, l) => a + l.height, 0);
+      const paraBottom = paraTopEstimate + linesH;
+      // Word anchors the box at the next paragraph's undisplaced top measured
+      // WITHOUT inter-paragraph spacing (the reference box top sits 1.3px
+      // ABOVE this heading's line bottom, not after+below it).
+      const predictedNextTop = paraBottom;
+      const hits = this.collectAnchors(next).filter((s) => {
+        if (!("wrap" in s) || s.wrap !== "topAndBottom") return false;
+        if ("vAlign" in s && s.vAlign) return false;
+        const h = "height" in s ? (s.height ?? 0) : 0;
+        if (h <= 0) return false;
+        const top =
+          s.vRel === "page" ? s.y :
+          s.vRel === "margin" ? this.sp.marginTop + s.y :
+          predictedNextTop + s.y;
+        return top <= paraBottom + 0.25 && top + h >= paraTopEstimate - 0.25;
+      });
+      if (hits.length > 0) {
+        lookMark = {
+          page: this.cur,
+          items: this.cur.items.length,
+          floats: (this.floats.get(this.cur) ?? []).length,
+          shapes: hits,
+        };
+        this.emitAnchors(hits, this.cur, this.fieldCtx(), this.colX, predictedNextTop);
+        for (const s of hits) this.consumedAnchors.add(s);
+        broken = breakNow(paraTopEstimate);
+      }
+    }
 
     // Contextual spacing: suppress before/after between same-style neighbors.
     let spacingBefore = rawSpacingBefore;
