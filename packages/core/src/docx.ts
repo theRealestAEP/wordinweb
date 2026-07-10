@@ -15,7 +15,15 @@ import {
   Theme,
 } from "./model.js";
 import { parseTheme } from "./parse/theme.js";
-import { parseStyles, resolveCharacterStyleChain, resolveParagraphStyleChain, resolveTableStyleProps } from "./parse/styles.js";
+import {
+  DEFAULT_TBL_LOOK,
+  parseStyles,
+  resolveCharacterStyleChain,
+  resolveParagraphStyleChain,
+  resolveTableConditional,
+  resolveTableStyleProps,
+  tableCondOrder,
+} from "./parse/styles.js";
 import { parseNumbering } from "./parse/numbering.js";
 import { parseBody, parseBlocks, DocParseContext } from "./parse/document.js";
 import { parseNotesPart } from "./parse/notes.js";
@@ -86,6 +94,9 @@ export class DocxDocument {
   private commentsExtPart: string | null = null;
   private commentsExtRoot: XmlElement | null = null;
   private commentsExtDirty = false;
+  /** Conditional table formats per table style id, keyed by the Styles object
+   * so re-parsing styles.xml (edits) naturally invalidates the cache. */
+  private tableCondCache = new WeakMap<Styles, Map<string, ReturnType<typeof resolveTableConditional>>>();
   /** Retained styles.xml tree (built-in style injection + save). */
   private stylesPart: string | null = null;
   private stylesRoot: XmlElement | null = null;
@@ -906,6 +917,44 @@ export class DocxDocument {
     return merged;
   }
 
+  /**
+   * Run props contributed by the enclosing table style's conditional
+   * w:tblStylePr blocks for this paragraph's cell (undefined when the
+   * paragraph isn't in a styled table cell or nothing applies).
+   */
+  private tableCondRPr(para: Paragraph): RunProps | undefined {
+    const cond = para.props.tableCellCond;
+    const styleId = para.props.tableStyleId;
+    if (!cond || !styleId) return undefined;
+    let cache = this.tableCondCache.get(this.styles);
+    if (!cache) {
+      cache = new Map();
+      this.tableCondCache.set(this.styles, cache);
+    }
+    let resolved = cache.get(styleId);
+    if (!resolved) {
+      resolved = resolveTableConditional(this.styles, styleId);
+      cache.set(styleId, resolved);
+    }
+    if (resolved.formats.size === 0) return undefined;
+    const order = tableCondOrder(
+      cond.look ?? DEFAULT_TBL_LOOK,
+      cond.rowIdx,
+      cond.nRows,
+      cond.colStart,
+      cond.colSpan,
+      cond.nCols,
+      resolved.rowBandSize,
+      resolved.colBandSize,
+    );
+    let out: RunProps | undefined;
+    for (const type of order) {
+      const rPr = resolved.formats.get(type)?.rPr;
+      if (rPr) out = out ? mergeRunProps(out, rPr) : { ...rPr };
+    }
+    return out;
+  }
+
   /** Effective run properties for a run inside a paragraph. */
   effectiveRunProps(para: Paragraph, runProps: RunProps): RunProps {
     let props: RunProps;
@@ -916,6 +965,11 @@ export class DocxDocument {
       const tbl = resolveTableStyleProps(this.styles, tableStyleId);
       let base: RunProps = { ...this.styles.defaultRPr };
       if (tbl.rPr) base = mergeRunProps(base, tbl.rPr);
+      // Conditional w:tblStylePr run formats (firstRow bold/white, firstCol
+      // bold, banding, …) layer above the table style's own rPr but below the
+      // paragraph style chain and direct formatting.
+      const condRPr = this.tableCondRPr(para);
+      if (condRPr) base = mergeRunProps(base, condRPr);
       const contrib = resolveParagraphStyleChain(this.styles, para.props.styleId, false);
       props = mergeRunProps(base, contrib.rPr);
     } else {

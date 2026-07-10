@@ -861,6 +861,42 @@ describe("layout engine", () => {
     expect(edges.filter((edge) => edge.role === undefined)).toHaveLength(1);
   });
 
+  it("paints style banding only when the style chain declares tblStyleRowBandSize", () => {
+    // Word skips band1Horz/band2Horz shading when no style in the chain
+    // declares an explicit w:tblStyleRowBandSize (every built-in banded style
+    // writes w:val="1"), despite ECMA-376's nominal default of 1 — verified
+    // against Word's output for staging-styles' CondGrid.
+    const stylesXml = (tblPrExtra: string) => `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="table" w:styleId="Banded">
+    <w:tblPr>${tblPrExtra}</w:tblPr>
+    <w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:val="clear" w:fill="D9E2F3"/></w:tcPr></w:tblStylePr>
+  </w:style>
+</w:styles>`;
+    const row = (t: string) => `<w:tr><w:tc><w:p><w:r><w:t>${t}</w:t></w:r></w:p></w:tc></w:tr>`;
+    const documentXml = wrapDocument(
+      `<w:tbl><w:tblPr><w:tblStyle w:val="Banded"/>` +
+        `<w:tblLook w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr>` +
+        `<w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>` +
+        row("head") + row("r1") + row("r2") + row("r3") +
+        `</w:tbl><w:p/>`,
+    );
+    const bandFills = (tblPrExtra: string) => {
+      const { result } = layout({
+        "word/document.xml": documentXml,
+        "word/styles.xml": stylesXml(tblPrExtra),
+      });
+      return result.pages[0].items.filter(
+        (item) => item.kind === "rect" && item.fill.toUpperCase() === "#D9E2F3",
+      );
+    };
+    // No band size declared anywhere in the chain: no banding at all.
+    expect(bandFills("")).toHaveLength(0);
+    // Explicit band size 1: band1Horz hits body rows 1 and 3 (row 0 is the
+    // header per tblLook firstRow, so band counting starts at row 1).
+    expect(bandFills(`<w:tblStyleRowBandSize w:val="1"/>`)).toHaveLength(2);
+  });
+
   it("rotates btLr cell text against declared and measured row heights", () => {
     const table = (rowHeight: string, ordinary: string) =>
       `<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/><w:tblBorders>

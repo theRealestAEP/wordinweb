@@ -270,6 +270,113 @@ describe("document parsing", () => {
     expect(props.color).toBe("#0000FF"); // overridden by Child
   });
 
+  it("keeps re-declared toggles ON through a basedOn chain (Word does not XOR within one chain)", () => {
+    // S0 sets b; S1 re-declares b and adds i; S2 re-declares i. Word renders
+    // S1 and S2 bold+italic (verified against Word PDF output for
+    // staging-styles): re-asserting a toggle in a derived style of the SAME
+    // chain is a no-op, not an XOR flip.
+    const styles = `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="S0"><w:rPr><w:b/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="S1"><w:basedOn w:val="S0"/><w:rPr><w:b/><w:i/></w:rPr></w:style>
+  <w:style w:type="paragraph" w:styleId="S2"><w:basedOn w:val="S1"/><w:rPr><w:i/><w:caps/></w:rPr></w:style>
+</w:styles>`;
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:pPr><w:pStyle w:val="S1"/></w:pPr><w:r><w:t>s1</w:t></w:r></w:p>` +
+            `<w:p><w:pPr><w:pStyle w:val="S2"/></w:pPr><w:r><w:t>s2</w:t></w:r></w:p>`,
+        ),
+        "word/styles.xml": styles,
+      }),
+    );
+    const [p1, p2] = doc.sections[0].blocks;
+    if (p1.type !== "paragraph" || p2.type !== "paragraph") throw new Error("expected paragraphs");
+    const r1 = p1.children[0];
+    const r2 = p2.children[0];
+    if (r1.type !== "run" || r2.type !== "run") throw new Error("expected runs");
+    const s1 = doc.effectiveRunProps(p1, r1.props);
+    expect(s1.bold).toBe(true);
+    expect(s1.italic).toBe(true);
+    const s2 = doc.effectiveRunProps(p2, r2.props);
+    expect(s2.bold).toBe(true);
+    expect(s2.italic).toBe(true); // i re-declared: stays on
+    expect(s2.caps).toBe(true);
+  });
+
+  it("layers a basedOn character style chain under direct formatting with explicit toggles off", () => {
+    // CEmph basedOn CStrong: chain gives b + color C00000 + i + u. Direct
+    // w:b w:val="0" turns bold OFF (explicit false, not a toggle) and a direct
+    // color wins; the chain's underline/italic survive.
+    const styles = `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="character" w:styleId="CStrong"><w:rPr><w:b/><w:color w:val="C00000"/></w:rPr></w:style>
+  <w:style w:type="character" w:styleId="CEmph"><w:basedOn w:val="CStrong"/><w:rPr><w:i/><w:u w:val="single"/></w:rPr></w:style>
+</w:styles>`;
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:r><w:rPr><w:rStyle w:val="CEmph"/></w:rPr><w:t>styled</w:t></w:r>` +
+            `<w:r><w:rPr><w:rStyle w:val="CEmph"/><w:b w:val="0"/><w:color w:val="2E7D32"/></w:rPr><w:t>direct</w:t></w:r></w:p>`,
+        ),
+        "word/styles.xml": styles,
+      }),
+    );
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const [rA, rB] = para.children;
+    if (rA.type !== "run" || rB.type !== "run") throw new Error("expected runs");
+    const a = doc.effectiveRunProps(para, rA.props);
+    expect(a.bold).toBe(true);
+    expect(a.italic).toBe(true);
+    expect(a.underline).toBe("single");
+    expect(a.color).toBe("#C00000");
+    const b = doc.effectiveRunProps(para, rB.props);
+    expect(b.bold).toBe(false);
+    expect(b.italic).toBe(true);
+    expect(b.underline).toBe("single");
+    expect(b.color).toBe("#2E7D32");
+  });
+
+  it("applies conditional table-style run formats (firstRow/firstCol) gated by tblLook", () => {
+    const styles = `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="table" w:styleId="CondGrid">
+    <w:tblPr/>
+    <w:tblStylePr w:type="firstRow"><w:rPr><w:b/><w:color w:val="FFFFFF"/></w:rPr></w:tblStylePr>
+    <w:tblStylePr w:type="firstCol"><w:rPr><w:b/></w:rPr></w:tblStylePr>
+  </w:style>
+</w:styles>`;
+    const cell = (t: string) => `<w:tc><w:p><w:r><w:t>${t}</w:t></w:r></w:p></w:tc>`;
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:tbl><w:tblPr><w:tblStyle w:val="CondGrid"/>` +
+            `<w:tblLook w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/></w:tblPr>` +
+            `<w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>` +
+            `<w:tr>${cell("h1")}${cell("h2")}</w:tr>` +
+            `<w:tr>${cell("a1")}${cell("a2")}</w:tr>` +
+            `</w:tbl><w:p/>`,
+        ),
+        "word/styles.xml": styles,
+      }),
+    );
+    const tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error("expected table");
+    const runProps = (row: number, col: number) => {
+      const block = tbl.rows[row].cells[col].blocks[0];
+      if (block.type !== "paragraph") throw new Error("expected paragraph");
+      const run = block.children[0];
+      if (run.type !== "run") throw new Error("expected run");
+      return doc.effectiveRunProps(block, run.props);
+    };
+    expect(runProps(0, 0).bold).toBe(true); // header: firstRow rPr
+    expect(runProps(0, 0).color).toBe("#FFFFFF");
+    expect(runProps(0, 1).bold).toBe(true);
+    expect(runProps(1, 0).bold).toBe(true); // firstCol rPr
+    expect(runProps(1, 1).bold).toBeUndefined(); // plain body cell
+  });
+
   it("resolves bidi theme fonts without changing the Latin or East Asian channels", () => {
     const doc = DocxDocument.load(
       makeDocx({
