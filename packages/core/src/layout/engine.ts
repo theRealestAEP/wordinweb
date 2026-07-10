@@ -143,6 +143,14 @@ const NOTE_SEP_RESERVE = 40;
 const MULTI_COL_NOTE_SEP_RESERVE = 26;
 /** Word's separator rule is a short line, 2in max. */
 const NOTE_SEP_LEN = 192;
+/** Extra leading between the ENDNOTE separator rule and the first endnote line.
+ * Word's endnote separator sits in its own paragraph and the first endnote
+ * carries a space-before, so Word leaves ~17pt from the rule down to the first
+ * endnote baseline where our 14px strip alone left ~13.7pt: the whole endnote
+ * block started ~3.3pt too high under its rule (parity2-notes p2). Footnotes do
+ * NOT need this - their bottom-anchored block already matches Word to the
+ * device row (parity2-notes p1 stays 0.00), so the gap is endnote-only. */
+const NOTE_SEP_GAP = 4.4;
 /** Bounded overhang (px, ~2.25pt) a table row's trailing leading + bottom rule
  * may cross the body bottom before Word moves/splits the row. Well under the
  * ~one-line gap that triggers a genuine row move; suppressed under footnotes. */
@@ -1053,7 +1061,7 @@ class Engine {
       y2: sepY,
       border: { style: "single", width: 0.75, color: "#000000", space: 0 },
     });
-    this.y += NOTE_SEP_H;
+    this.y += NOTE_SEP_H + NOTE_SEP_GAP;
     this.lastParaSpacingAfter = 0;
     for (const id of ids) {
       this.selfNoteMark = this.endnoteMark(id);
