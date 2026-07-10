@@ -669,6 +669,31 @@ p2/p3 from 10.7/16.0 to 2.9/3.0.
 
 ## Editing UX
 
+### Trailing spaces hang past the line end (never start the next line)
+Word absorbs every space at a line boundary into the END of the wrapping
+line: the spaces hang invisibly past the margin with real advances, they
+never affect alignment/justification or line metrics, and the next line
+never begins with a space. An earlier fix carried "extra" wrap-boundary
+spaces to the next line's start — that pushed the next word right and made
+the caret leap backwards to the lower-left when typing a space at a wrap
+boundary (the user-visible "backwards space" bug). A trailing space at a
+paragraph end likewise must emit a span, or the caret loses its binding
+after the re-render and vanishes. Implementation: `flush()` in
+`layout/inline.ts` detaches trailing space spans before
+`finishLine`/`applyAlignment` and re-attaches them sequentially past the
+line's visual end (bidi paragraphs keep the old drop). Pixel-parity neutral
+by construction: the spans paint no ink and alignment math never sees them.
+
+### Caret affinity at wrap boundaries (Caret.bias / SelPoint.bias)
+A caret offset at a span boundary is ambiguous when the two spans sit on
+different lines (soft wrap). Word resolves it by HOW the caret got there:
+typing/Backspace/ArrowRight/End/clicking past a span's right edge show the
+caret at the end of the UPPER line; clicking at a lower line's start shows
+it there. `positionCaret`'s binding pick honors `bias: "end"` (prefer the
+span ENDING at the offset). Also: Range rects inside whitespace-only spans
+lie (the DOM collapses trailing-space widths to zero), so the caret x for
+any whitespace-only span comes from the layout item's own geometry.
+
 ### Pleading paper headers have no typeable text
 The entire header part is one anchored VML textbox (line numbers + rules);
 its host paragraph owns no `w:t`, so no caret target exists and a real page
