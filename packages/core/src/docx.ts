@@ -910,8 +910,24 @@ export class DocxDocument {
     if (num) {
       const lvl = this.numberingLevel(num.numId, num.ilvl);
       if (lvl?.pPr) {
-        const withLvl = mergeParaProps(pPr, lvl.pPr);
-        merged = mergeParaProps(withLvl, para.props);
+        if (para.props.numbering) {
+          // Direct numPr: the level's pPr acts as direct-level formatting -
+          // it beats the style chain's ind (classic ListParagraph left=720
+          // replaced by the level's ind) but stays below the paragraph's own
+          // direct pPr.
+          const withLvl = mergeParaProps(pPr, lvl.pPr);
+          merged = mergeParaProps(withLvl, para.props);
+        } else {
+          // Style-sourced numbering (pStyle -> numPr): the level's pPr slots
+          // in BELOW the style chain, so a style's own w:ind beats the
+          // level's, attribute by attribute. phase23's Heading3 carries
+          // ind left=720 while its abs lvl says left=4410 hanging=720: Word
+          // paints the number at the margin with text at 720 (style left
+          // wins, level hanging survives because the style sets none).
+          const contrib = resolveParagraphStyleChain(this.styles, para.props.styleId, false);
+          const withLvl = mergeParaProps(pPr, mergeParaProps(lvl.pPr, contrib.pPr));
+          merged = mergeParaProps(withLvl, para.props);
+        }
       }
     }
     return merged;
