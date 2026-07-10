@@ -138,34 +138,40 @@ function displayText(text: string, props: RunProps): string {
   return text;
 }
 
-/** Letter test for hyphen break context (word-internal only). */
-function isWordLetter(ch: string | undefined): boolean {
-  return ch !== undefined && /[^\s\d\-‐-―]/.test(ch) && /\p{L}/u.test(ch);
+/** Alphanumeric test for hyphen break context (word-internal only). */
+function isWordAlnum(ch: string | undefined): boolean {
+  return ch !== undefined && /[\p{L}\p{Nd}]/u.test(ch);
 }
 
 /**
  * Offsets *after* each word-internal hyphen where Word allows a line break.
- * A hyphen-minus (or U+2010 hyphen) between two letters is a break-after
- * opportunity ("multi-part" -> "multi-" | "part"); leading/numeric hyphens
- * (a minus sign, "3-4") are not.
+ * A hyphen-minus (or U+2010 hyphen) between two alphanumerics is a
+ * break-after opportunity ("multi-part" -> "multi-" | "part"). Digits count
+ * on both sides — the NIH contract's Word PDF breaks identifier hyphens
+ * ".../GUF-JE-" | "04-332.qigu" (letter-digit) and ".../h44-" | "40.aki"
+ * (digit-digit). A leading hyphen (a minus sign, "-4") is not a break.
  */
 function hyphenBreaks(word: string): number[] {
   const out: number[] = [];
   for (let i = 1; i < word.length - 1; i++) {
     const ch = word[i];
-    if ((ch === "-" || ch === "‐") && isWordLetter(word[i - 1]) && isWordLetter(word[i + 1])) {
+    if ((ch === "-" || ch === "‐") && isWordAlnum(word[i - 1]) && isWordAlnum(word[i + 1])) {
       out.push(i + 1);
     }
   }
   return out;
 }
-// NB (wild2-legal-nih-contract p154, tried and reverted): Word wraps long
-// hyperlink URLs at path separators ("…/Caceti/Corinazib_↵Ewizo…"), which our
-// char-granularity long-word wrap does not reproduce. Adding "/" and "_"
-// break opportunities — both globally and restricted to hyperlink runs —
-// scored WORSE across the URL-dense schedule band (mean 25.3 vs 21.7 over
-// 15 sampled pages) because it shifts other borderline wraps; Word's exact
-// URL-break rule (which separators, minimum segment) needs its own probe.
+// Word's URL/long-token break rule, measured against every mid-token line
+// break on pp116-260 of wild2-legal-nih-contract's Word PDF (22 breaks):
+// the ONLY in-token break opportunity is the hyphen rule above. '/', '_',
+// '.', ':', '?', '=', '&' are NOT break opportunities ("…Corinazib/Ha" |
+// "rujipaguduh.loh" and "…BOB_HUG_Kudifup" | "a_Sucumo.idi" both char-wrap
+// PAST a separator). When no opportunity exists on the line, Word breaks at
+// the exact character where the token overflows the line edge — even when
+// glued content ("at:" + NBSP) precedes the token on the line (it does NOT
+// move the unit to a fresh line first). An earlier experiment adding '/'
+// and '_' as eager break opportunities scored WORSE; the corpus shows why:
+// those separators are never break points in Word.
 
 /** Word small caps: lowercase letters (and all spaces, even between real
  * capitals) render as capitals at 80% of the size rounded to half-points;
@@ -396,7 +402,13 @@ export function breakParagraph(
   para: Paragraph,
   contentWidth: number,
   fields: FieldContext,
-  numberingLabel?: { text: string; props: RunProps; suffix: "tab" | "space" | "nothing"; metricsProps?: RunProps },
+  numberingLabel?: {
+    text: string;
+    props: RunProps;
+    suffix: "tab" | "space" | "nothing";
+    metricsProps?: RunProps;
+    alignment?: "left" | "center" | "right";
+  },
   /** Float-aware bounds per line (yOffset is paragraph-relative line top). */
   boundsAt?: (yOffset: number, estHeight: number) => LineBounds,
   /** w:docGrid line pitch (px): minimum single-line height each line's font
@@ -537,7 +549,14 @@ export function breakParagraph(
     // the suffix tab then advances to the next default stop). For bidi the
     // firstLine indent applies from the RIGHT edge, so only hanging moves the
     // physically-left label.
-    const labelX = indentLeft + (bidiPara ? (hanging > 0 ? -hanging : 0) : firstLineExtra);
+    // w:lvlJc places the label AT that number position: left-aligned labels
+    // start there; right-aligned labels END there and grow leftward (the NIH
+    // contract's lowerRoman levels: "i."…"viii." right edges all sit at
+    // ind.left - hanging, so the suffix-tab text never moves even for wide
+    // labels — Word PDF p177 keeps text at ind.left for every item).
+    let labelX = indentLeft + (bidiPara ? (hanging > 0 ? -hanging : 0) : firstLineExtra);
+    if (!bidiPara && numberingLabel.alignment === "right") labelX -= labelWidth;
+    else if (!bidiPara && numberingLabel.alignment === "center") labelX -= labelWidth / 2;
     cur.push({
       x: labelX,
       width: labelWidth,
@@ -676,6 +695,50 @@ export function breakParagraph(
     yOff += line.height;
     beginLine(lineIndex);
     x = lineStartX(lineIndex);
+  };
+
+  // Emergency character wrap. When a fragment overflows and no break
+  // opportunity exists on the line (everything back to the line start is one
+  // glued unit), Word breaks the token at the exact character where it
+  // crosses the line edge and fills the following lines the same way. This
+  // happens IN PLACE — glued content already on the line ("at:" + NBSP
+  // before a hyperlink) stays put and the token fills the remaining width
+  // (wild2-legal-nih-contract p154: "at:  wamuv://…BOB_HUG_Kudifup" |
+  // "a_Sucumo.idi"; p142/p153 char-wrap past '/' and '_' separators).
+  const hardWrapFrag = (atom: FragAtom) => {
+    let rest = atom.text;
+    while (rest.length > 0) {
+      const capacity = lineStartX(lineIndex) + availFor(lineIndex) - x;
+      let take = rest.length;
+      while (take > 1 && measurer.width(rest.slice(0, take), atom.font, atom.props.letterSpacing) > capacity) {
+        take--;
+      }
+      const piece = rest.slice(0, take);
+      const w = measurer.width(piece, atom.font, atom.props.letterSpacing);
+      if (w > capacity + 0.01 && curLineWidth > 0) {
+        // Not even one character fits after the existing content: break the
+        // line here and fill from the next line's start.
+        flush(false, false);
+        continue;
+      }
+      const sliceOff = atom.text.length - rest.length;
+      cur.push({
+        x,
+        width: w,
+        text: piece,
+        props: atom.props,
+        font: atom.font,
+        href: atom.href,
+        src: atom.src ? { ...atom.src, offset: atom.src.offset + sliceOff } : undefined,
+        metricsFont: atom.metricsFont,
+        rtl: atom.rtl,
+        rtlLevel: levelOf(atom.rtl),
+      });
+      curLineWidth += w;
+      x += w;
+      rest = rest.slice(take);
+      if (rest.length > 0) flush(false, false);
+    }
   };
 
   let flushedTrailingBreak = false;
@@ -1036,6 +1099,14 @@ export function breakParagraph(
         }
       }
       if (!fits) {
+        // No break opportunity anywhere on the line: the whole line back to
+        // its start is one glued unit. Word does not move it — it breaks the
+        // token at the exact character where it crosses the line edge
+        // (emergency break), never beside a float.
+        if (hi === minSpans && curClearY === undefined) {
+          hardWrapFrag(atom);
+          continue;
+        }
         // Word never breaks a word at a run boundary: the head (if any, and
         // if it isn't the whole line) moves down with the rest of the word.
         const head = hi > minSpans && hi < cur.length && cur[hi - 1].isSpace && !cur[hi - 1].noBreak ? cur.splice(hi) : [];
@@ -1066,6 +1137,17 @@ export function breakParagraph(
           cur.push(h);
           curLineWidth += h.width;
         }
+        // The moved head is glued to this fragment at the fresh line's start;
+        // if the fragment still cannot fit, no break opportunity can ever
+        // appear before it — emergency-break at the line edge like Word.
+        if (
+          head.length > 0 &&
+          curClearY === undefined &&
+          x + atom.width > lineStartX(lineIndex) + availFor(lineIndex) + 0.01
+        ) {
+          hardWrapFrag(atom);
+          continue;
+        }
       }
     }
     if (atom.width > availFor(lineIndex) && curLineWidth === 0 && curClearY !== undefined) {
@@ -1090,32 +1172,7 @@ export function breakParagraph(
     }
     if (atom.width > availFor(lineIndex) && curLineWidth === 0) {
       // Single fragment wider than the line: hard character wrap.
-      let rest = atom.text;
-      while (rest.length > 0) {
-        let take = rest.length;
-        while (take > 1 && measurer.width(rest.slice(0, take), atom.font, atom.props.letterSpacing) > availFor(lineIndex)) {
-          take--;
-        }
-        const piece = rest.slice(0, take);
-        const w = measurer.width(piece, atom.font, atom.props.letterSpacing);
-        const sliceOff = atom.text.length - rest.length;
-        cur.push({
-          x,
-          width: w,
-          text: piece,
-          props: atom.props,
-          font: atom.font,
-          href: atom.href,
-          src: atom.src ? { ...atom.src, offset: atom.src.offset + sliceOff } : undefined,
-          metricsFont: atom.metricsFont,
-          rtl: atom.rtl,
-          rtlLevel: levelOf(atom.rtl),
-        });
-        curLineWidth += w;
-        x += w;
-        rest = rest.slice(take);
-        if (rest.length > 0) flush(false, false);
-      }
+      hardWrapFrag(atom);
       continue;
     }
     cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
