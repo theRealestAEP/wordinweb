@@ -825,15 +825,27 @@ describe("layout engine", () => {
       if (item?.kind !== "text") throw new Error(`missing page ${page} label`);
       return item;
     };
-    // The frame is out of flow and the ptab/label lines clear its centered
-    // extent, so every page's footer has identical geometry — digit count is
-    // irrelevant (Word PDF evidence: dense p14 "302" shares the band; the
-    // number paints at the frame's xAlign, not the paragraph's own jc).
-    for (let page = 2; page <= 10; page++) {
+    // The frame is out of flow: the empty ptab follower shares its band and
+    // the label lays one line below the number on EVERY page. But the frame
+    // still reserves its own line in the footer HEIGHT once its painted text
+    // is wider than its glyph box (two or more digits) — measured from the
+    // NIH reference PDF over all 419 pages: footer top = pageBottom −
+    // footerDist − 3 lines on the single-digit pages 1-9 and − 4 lines from
+    // page 10 on, while the painted stack (number, admin line directly
+    // below) never changes shape.
+    for (let page = 2; page <= 9; page++) {
       expect(result.pages[page - 1].bodyBottom).toBeCloseTo(result.pages[0].bodyBottom, 3);
       expect(pageNumber(page).lineTop).toBeCloseTo(pageNumber(1).lineTop, 3);
       expect(footerLabel(page).lineTop).toBeCloseTo(footerLabel(1).lineTop, 3);
     }
+    // Page 10 ("10" is wider than the glyph box): one extra line of footer
+    // height — the whole footer (and the body bottom) moves up by one line,
+    // but the label stays exactly one line below the number.
+    const lineH = footerLabel(1).lineTop - pageNumber(1).lineTop;
+    expect(lineH).toBeGreaterThan(8);
+    expect(result.pages[9].bodyBottom).toBeCloseTo(result.pages[0].bodyBottom - lineH, 3);
+    expect(pageNumber(10).lineTop).toBeCloseTo(pageNumber(1).lineTop - lineH, 3);
+    expect(footerLabel(10).lineTop - pageNumber(10).lineTop).toBeCloseTo(lineH, 3);
     // xAlign=center positions the number at the margin-box center.
     const n1 = pageNumber(1);
     const contentWidth = (12240 - 1440 - 1440) / 15;
@@ -871,6 +883,64 @@ describe("layout engine", () => {
     const admin = hf.find((it) => it.kind === "text" && it.text.includes("Centered"));
     if (num?.kind !== "text" || admin?.kind !== "text") throw new Error("missing footer items");
     expect(admin.lineTop).toBeGreaterThan(num.lineTop + 1);
+  });
+
+  it("glues multi-space runs and NBSP-flanked spaces into one wrap unit", () => {
+    // Word does not break inside a whitespace cluster of 2+ spaces (or one
+    // touching an NBSP): the flanking words wrap together (NIH p106
+    // 'Hunogigu."  Durirone' and p383 'nuqagajote' + double space +
+    // 80 underlined fill-in spaces, both measured against the Word PDF).
+    const narrow =
+      `<w:sectPr><w:pgSz w:w="4000" w:h="15840"/>` +
+      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
+    const lineTexts = (xml: string): string[][] => {
+      const { result } = layout({ "word/document.xml": wrapDocument(xml + narrow) });
+      const byLine = new Map<number, string[]>();
+      for (const it of result.pages[0].items) {
+        if (it.kind !== "text" || !it.text.trim()) continue;
+        const key = Math.round(it.baseline);
+        byLine.set(key, [...(byLine.get(key) ?? []), it.text]);
+      }
+      return [...byLine.entries()].sort((a, b) => a[0] - b[0]).map(([, t]) => t);
+    };
+    // Double plain space: "zz." must move down WITH the long word.
+    const plain = lineTexts(
+      `<w:p><w:r><w:t xml:space="preserve">aa bb cc dd ee ff gg hh iii." Xxxx yy zz.  Qqqqqqqqqqqqqq rr</w:t></w:r></w:p>`,
+    );
+    const zzLine = plain.find((l) => l.some((t) => t.includes("zz.")));
+    expect(zzLine ?? []).toContain("Qqqqqqqqqqqqqq");
+    // NBSP at the end of a word glues the following plain space too.
+    const nbsp = lineTexts(
+      `<w:p><w:r><w:t xml:space="preserve">aa bb cc dd ee ff gg hh iii." Xxxx yy zz.  Qqqqqqqqqqqqqq rr</w:t></w:r></w:p>`,
+    );
+    const zzNbsp = nbsp.find((l) => l.some((t) => t.includes("zz.")));
+    expect(zzNbsp ?? []).toContain("Qqqqqqqqqqqqqq");
+  });
+
+  it("moves a keepNext chain whole when its 3-line terminator cannot split", () => {
+    // widow+orphan make a 2-3 line terminator unsplittable, so a keepNext
+    // heading whose successor must move wholesale moves with it (NIH
+    // p416/417: '537' keepNext + heading + 3-line URL paragraph relocate
+    // together although the first two terminator lines would fit).
+    const filler = Array.from({ length: 47 }, (_, i) => p(`filler line ${i + 1}`)).join("");
+    const term = Array.from({ length: 19 }, () => "wordy content").join(" ");
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        filler +
+          `<w:p><w:pPr><w:keepNext/></w:pPr><w:r><w:t>537</w:t></w:r></w:p>` +
+          `<w:p><w:pPr><w:keepNext/></w:pPr><w:r><w:t>Heading line</w:t></w:r></w:p>` +
+          `<w:p><w:r><w:t xml:space="preserve">${term}</w:t></w:r></w:p>` +
+          `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+          `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`,
+      ),
+    });
+    const pageOf = (needle: string): number =>
+      result.pages.findIndex((pg) => pg.items.some((it) => it.kind === "text" && it.text.includes(needle)));
+    const termPage = pageOf("wordy");
+    expect(termPage).toBe(1); // the terminator itself moved wholesale
+    // The chain head must sit on the same page as the terminator paragraph.
+    expect(pageOf("537")).toBe(termPage);
+    expect(pageOf("Heading")).toBe(termPage);
   });
 
   it("computes numbering labels with restarts", () => {

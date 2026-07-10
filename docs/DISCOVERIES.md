@@ -1203,6 +1203,54 @@ benchmark/sample/charstyles 0.00, ca-agreement 0.16 mean, longtable and
 doerfp byte-identical to the pre-change baseline on every page,
 compare-linebreaks sample/chronology/msa 0/0/0.
 
+### NIH residual mass CRACKED: footer-frame phantom line, pct-table re-autofit, multi-space/NBSP wrap glue, unsplittable keep terminators (2026-07)
+Four independent rules, all measured from the wild2-legal-nih-contract Word
+PDF, took the fixture from mean 9.89 to ~0.3 (see run history):
+- **Widthless PAGE-frame footer: the empty ptab follower SHARES the frame band,
+  and the frame adds a HEIGHT-ONLY phantom line once its text is wider than
+  its glyph box.** Word footer tops across all 419 pages: pageBottom −
+  footerDist − 3 lines on pages 1-9 (one digit), − 4 lines from page 10 on
+  (two digits) — while the PAINTED stack (number, admin line exactly one line
+  below) never changes. The phantom moves the footer anchor AND the body
+  bottom (bodyBottom = pageH − footerDist − footerH), which was both the TOC
+  drift (p2-6: one missing body line per page ≈ 3 entries behind by p5) and
+  the near-blank landscape pages' 90% scores. Our glyph box is win-metrics
+  (~1.22em) so the width test is 0.7×boxH: one digit 8.1px stays under, two
+  digits 16.2px clear it. Do NOT test `boxH − 3`: it silently excludes
+  2-digit pages and hands every p10-99 page an extra body line (5-page
+  pagination landslide by p285).
+- **A pct-width table with a trusted grid is re-autofit: columns rise to
+  min-content, funded by slack columns (col = raised − (raised−min)·k).**
+  The FUZ clause matrix (tblW 4800 pct, grid [1394,1193,7435]tw) renders
+  [76.02, 59.28, 365.82]pt in Word — col1 = the NBSP-glued " FETOWO GO. "
+  header min — not the grid's [69.7, 59.65, 371.75]. Use Word-exact mins
+  (subtract columnMinPref's +2px fudge) or col2's NBSP-glued "Wej 7426"
+  (59.25pt) gets a raise Word doesn't do. The raised col1 also makes the
+  repeated header row THREE lines (leading space + NBSP-glued chunk no longer
+  fit one line — see next item), which Word shows too.
+- **Word treats any whitespace cluster containing 2+ spaces (or an NBSP
+  touching a space) as NON-BREAKING: the flanking words wrap as one unit.**
+  Measured twice: 'Hunogigu."\xa0 Durirone' moves to the next line as a
+  108.6pt unit though 'Hunogigu."' alone fits the 99pt remainder (p106), and
+  'nuqagajote␣␣' + 80 underlined fill-in spaces wraps before "nuqagajote" as
+  a 279pt unit into a 275.6pt remainder (p383). Implemented as noBreak glue
+  on space spans adjacent to spaces, plus the mirror of the existing
+  "next word starts with NBSP" pass for words ENDING in NBSP. Also: a space
+  directly after an explicit <w:br/> is REAL line-initial content (it
+  consumes width; NIH header " FUZ <br> FETOWO GO. " wraps into a space-only
+  middle line) — cleared p143-146. compare-linebreaks sample/chronology/msa
+  stay 0/0/0.
+- **A 2-3 line keepNext TERMINATOR is unsplittable under widow control
+  (2+1 widows, 1+2 orphans), so the chain must reserve ALL of it.** NIH
+  p416/417: '537' (keepNext) + Heading4 + 3-line URL paragraph move to p417
+  as one 79pt block leaving 90pt unused; reserving only first+widow lines
+  strands the headings at the page bottom (p416-418 at 47/30%).
+Remaining known-off: p343/344 flip rides ~1.4pt of accumulated sub-point
+list spacing (the documented deferred para spacing class; +0.25-0.3pt per
+bullet item through p342's Qizunuroqufa list), and the footer admin line
+paints 5pt right of Word (our trailing-tab + jc=right resolution vs Word's
+333.40 — ~9.8% floor on the six near-blank pages, invisible elsewhere).
+
 ## Word template rendering (2026-07, header/footer designs + cover letters)
 
 - **Word's built-in h/f templates decode to five constructs**: inline SDTs

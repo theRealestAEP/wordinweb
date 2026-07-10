@@ -743,6 +743,9 @@ export function breakParagraph(
 
   let flushedTrailingBreak = false;
   let consumedLeadingBreak = false;
+  // Line ordinal that may keep a line-initial space (the line right after an
+  // explicit <w:br/>); -1 = none.
+  let keepLeadingSpaceLine = -1;
   for (let ai = 0; ai < atoms.length; ai++) {
     const atom = atoms[ai];
     if (atom.kind === "anchorPoint") {
@@ -781,7 +784,15 @@ export function breakParagraph(
         flush(false, true, atom.breakType);
         continue;
       }
-      if (atom.breakType === "line") flush(false, true);
+      if (atom.breakType === "line") {
+        flush(false, true);
+        // A space directly after an explicit line break is REAL line-initial
+        // content, not a wrap remnant: Word keeps it and it consumes width
+        // (NIH clause-matrix header " FUZ <br> FETOWO GO. ": the kept space
+        // pushes the NBSP-glued "FETOWO GO." past the cell width, making the
+        // repeated header THREE lines tall — space-only middle line).
+        keepLeadingSpaceLine = lineIndex;
+      }
       else if (trailing && atom.breakType === "column") {
         // A TRAILING COLUMN break leaves the paragraph mark on the NEW column,
         // NOT on the old one (unlike a trailing PAGE break, which keeps the
@@ -916,15 +927,23 @@ export function breakParagraph(
         flush(false, false, undefined, true); // keep the space so it costs a line
         continue;
       }
-      // Never start a (non-first) line with a space.
-      if (cur.length === 0 && lineIndex > 0) continue;
+      // Never start a (non-first) line with a space — unless the line was
+      // opened by an explicit line break (see the break handler above).
+      if (cur.length === 0 && lineIndex > 0 && lineIndex !== keepLeadingSpaceLine) continue;
       // Only an ISOLATED single space is a compressible inter-word gap:
       // typed padding runs ("to        the ketoje...", "(h,q,g)    to")
       // give the East Asian fitter no budget, or the line packs words Word
       // wraps.
       const prevIsSpace = cur.length > 0 && cur[cur.length - 1].isSpace;
       const nextIsSpace = atoms[ai + 1]?.kind === "space";
-      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, noBreak: atom.noBreak, src: atom.src, metricsFont: atom.metricsFont, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
+      // A space in a RUN of two or more is NOT a break opportunity in Word —
+      // the run and its flanking words wrap as one glued unit. Measured twice
+      // in the NIH reference: 'Hunogigu."␣␣Durirone' (plain double sentence
+      // space) moves to the next line as a 108.6pt unit although Hunogigu
+      // alone fits the 99pt remainder (p106), and '(z) ... nuqagajote␣␣' +
+      // 80 underlined fill-in spaces wraps before "nuqagajote" as a 279pt
+      // unit into a 275.6pt remainder (p383). Same glue flag as NBSP.
+      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, noBreak: atom.noBreak || prevIsSpace || nextIsSpace, src: atom.src, metricsFont: atom.metricsFont, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
       curLineWidth += atom.width;
       curSpaceWidth += atom.width;
       if (!prevIsSpace && !nextIsSpace && EA_FAMILY_RE.test(atom.font.family)) curEaSpaceWidth += atom.width;
@@ -2003,6 +2022,17 @@ function buildAtoms(
     else if (a.kind === "space") {
       if (nextNbsp) a.noBreak = true;
     } else nextNbsp = false;
+  }
+  // Mirror rule: spaces directly after a word that ENDS with an NBSP glue
+  // rightward too ('Hunogigu."\xa0 Durirone' on NIH p106 moves to the next
+  // line as one 108.6pt unit even though 'Hunogigu."' alone fits the 99pt
+  // remainder — the whitespace cluster containing an NBSP is unbreakable).
+  for (let i = 0, prevNbsp = false; i < atoms.length; i++) {
+    const a = atoms[i];
+    if (a.kind === "frag") prevNbsp = a.text.charCodeAt(a.text.length - 1) === 0xa0;
+    else if (a.kind === "space") {
+      if (prevNbsp) a.noBreak = true;
+    } else prevNbsp = false;
   }
   return { atoms, anchors };
 }
