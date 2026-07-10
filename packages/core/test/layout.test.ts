@@ -833,6 +833,118 @@ describe("layout engine", () => {
     expect(c1.x - c0.x).toBeLessThan(90);
   });
 
+  it("expands an autofit column to hold a tab layout (tabs are not shrink points)", () => {
+    // staging-tblextreme: Word widens the L...R column from its authored
+    // 2800tw to the full tab run (right stop 3200tw + end-of-cell mark);
+    // treating the tab as a break opportunity instead left the column at
+    // 2800tw and dropped "R" to its own line.
+    const table = `<w:tbl>
+      <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2800"/><w:gridCol w:w="2800"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="2800" w:type="dxa"/></w:tcPr>
+          <w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="3200"/></w:tabs></w:pPr>
+            <w:r><w:t>L</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>R</w:t></w:r></w:p>
+        </w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="2800" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>C2</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(table) });
+    const items = result.pages[0].items;
+    const l = items.find((it) => it.kind === "text" && it.text === "L");
+    const r = items.find((it) => it.kind === "text" && it.text === "R");
+    const c2 = items.find((it) => it.kind === "text" && it.text === "C2");
+    if (l?.kind !== "text" || r?.kind !== "text" || c2?.kind !== "text") throw new Error("missing spans");
+    // R stays on the same line as L, right-aligned at the 3200tw stop.
+    expect(Math.abs(r.lineTop - l.lineTop)).toBeLessThan(0.5);
+    // Column 1 grew past its authored 2800tw (186.7px) to hold the tab run:
+    // C2 starts at ~3200tw + mark, not at 186.7px.
+    expect(c2.x - l.x).toBeGreaterThan(205);
+    expect(c2.x - l.x).toBeLessThan(230);
+  });
+
+  it("skips decimal tab stops for explicit tabs inside table cells", () => {
+    // Measured in staging-tblextreme: tab + "12.5" with a decimal stop at
+    // 2600tw lands LEFT-aligned on the next default stop (2880tw = 192px),
+    // not decimal-aligned at 2600 - Word reserves in-cell decimal stops for
+    // its automatic numeric alignment.
+    const cellPara = `<w:p><w:pPr><w:tabs><w:tab w:val="decimal" w:pos="2600"/></w:tabs></w:pPr>
+      <w:r><w:tab/></w:r><w:r><w:t>12.5</w:t></w:r></w:p>`;
+    const table = `<w:tbl>
+      <w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="6000"/></w:tblGrid>
+      <w:tr><w:tc><w:tcPr><w:tcW w:w="6000" w:type="dxa"/></w:tcPr>${cellPara}</w:tc></w:tr>
+    </w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(table) });
+    const num = result.pages[0].items.find((it) => it.kind === "text" && it.text === "12.5");
+    if (num?.kind !== "text") throw new Error("missing 12.5");
+    // Page margin 96 + default stop 2880tw (192px) = 288, left-aligned.
+    expect(num.x).toBeGreaterThan(286);
+    expect(num.x).toBeLessThan(291);
+  });
+
+  it("confines an overrunning nested grid to its host cell at the grid's own ratio", () => {
+    // staging-tblextreme's footnote table: a trusted [1400,1400] nested grid
+    // in a narrower cell renders at the CELL width split 50/50 (Word scales
+    // the authored grid), not autofit to each column's content.
+    const nested = `<w:tbl>
+      <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2100"/><w:gridCol w:w="2100"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="2100" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>aa</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="2100" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>bb</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>`;
+    const outer = `<w:tbl>
+      <w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>
+      <w:tr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${nested}<w:p/></w:tc></w:tr>
+    </w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(outer) });
+    const items = result.pages[0].items;
+    const a = items.find((it) => it.kind === "text" && it.text === "aa");
+    const b = items.find((it) => it.kind === "text" && it.text === "bb");
+    if (a?.kind !== "text" || b?.kind !== "text") throw new Error("missing nested cells");
+    // Host cell is 3000tw = 200px; the 4200tw grid is clamped to it and the
+    // two equal grid columns stay equal: boundary at ~100px, not at "aa"'s
+    // content width.
+    expect(b.x - a.x).toBeGreaterThan(95);
+    expect(b.x - a.x).toBeLessThan(105);
+  });
+
+  it("keeps a doubly-nested table's minimum when confining its parent (hard min)", () => {
+    // staging-grid4 L2: the column holding the deeper table is pinned at that
+    // table's minimum and the flexible text column absorbs the whole loss.
+    const inner2 = `<w:tbl>
+      <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="1500"/></w:tblGrid>
+      <w:tr><w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>
+        <w:p><w:r><w:t>mmmmmmmmmm</w:t></w:r></w:p></w:tc></w:tr>
+    </w:tbl>`;
+    const inner1 = `<w:tbl>
+      <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="1800"/><w:gridCol w:w="1800"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="1800" w:type="dxa"/></w:tcPr>${inner2}<w:p/></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="1800" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>side text here</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>`;
+    const outer = `<w:tbl>
+      <w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>
+      <w:tr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${inner1}<w:p/></w:tc></w:tr>
+    </w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(outer) });
+    const items = result.pages[0].items;
+    const deep = items.find((it) => it.kind === "text" && it.text.startsWith("mmmm"));
+    const side = items.find((it) => it.kind === "text" && it.text.startsWith("side"));
+    if (deep?.kind !== "text" || side?.kind !== "text") throw new Error("missing cells");
+    // Proportional confinement alone would put the boundary at 100px; the
+    // wide unbreakable word (10 x 0.85em x 14.67px ~= 125px) pins col1 at the
+    // deep table's minimum instead.
+    expect(side.x - deep.x).toBeGreaterThan(115);
+  });
+
   it("marks only table fills and rules with table paint roles", () => {
     const table = `<w:tbl>
       <w:tblPr><w:tblBorders>

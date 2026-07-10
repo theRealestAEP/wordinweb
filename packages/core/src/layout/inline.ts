@@ -324,6 +324,11 @@ export interface LineBounds {
    * length > 1 the breaker fills each interval in turn at the same y before
    * advancing to the next line band. */
   segments?: { x: number; width: number }[];
+  /** Paragraph-relative y where the current floats end: when a word is too
+   * wide for every free interval of a narrowed band, the breaker jumps here
+   * (below the float) instead of character-splitting the word (Word drops
+   * "around" under Box 202 in staging-tblextreme, it never hyphenates). */
+  clearY?: number;
 }
 
 const DEFAULT_TAB = 48; // 0.5in
@@ -356,6 +361,14 @@ export function breakParagraph(
   /** w:docGrid line pitch (px): minimum single-line height each line's font
    * height is snapped up to before the line-spacing multiplier. */
   minLineHeight?: number,
+  opts?: {
+    /** Layout inside a table cell: an explicit tab character SKIPS decimal
+     * tab stops there (Word reserves them for its automatic numeric cell
+     * alignment) and advances to the next remaining/default stop.
+     * Measured in staging-tblextreme: tab + "12.5" with a decimal stop at
+     * 2600tw lands left-aligned on the 2880tw default stop, not at 2600. */
+    inTableCell?: boolean;
+  },
 ): BrokenParagraph {
   const props = doc.effectiveParaProps(para);
   if (props.snapToGrid === false) minLineHeight = undefined;
@@ -403,6 +416,8 @@ export function breakParagraph(
   // splits the band and Word wraps text on both of its sides.
   let curSegments: { x: number; width: number }[] = [{ x: 0, width: contentWidth }];
   let curSegIdx = 0;
+  // Paragraph-relative y just below the floats narrowing the current band.
+  let curClearY: number | undefined;
   // Estimated line height for float-exclusion checks. Fixed-height rules
   // (exact/atLeast) are known before the line is built — use them, or a
   // too-short estimate misses floats overlapping the lower band of the line.
@@ -414,6 +429,7 @@ export function breakParagraph(
     curWidth = contentWidth;
     curSegments = [{ x: 0, width: contentWidth }];
     curSegIdx = 0;
+    curClearY = undefined;
     if (boundsAt) {
       let guard = 0;
       let b = boundsAt(yOff, EST_LINE);
@@ -426,6 +442,7 @@ export function breakParagraph(
       curWidth = b.width;
       curSegments = b.segments && b.segments.length > 0 ? b.segments : [{ x: b.x, width: b.width }];
       curSegIdx = 0;
+      curClearY = b.clearY;
     }
     void idx;
   };
@@ -677,7 +694,18 @@ export function breakParagraph(
     }
     if (atom.kind === "tab") {
       const offset = bidiTabOffset(lineIndex);
-      const rawStop = nextTabStop(x + offset, props.tabs, contentWidth - indentRight);
+      let rawStop = nextTabStop(x + offset, props.tabs, contentWidth - indentRight);
+      if (opts?.inTableCell) {
+        // In a table cell an explicit tab passes THROUGH decimal stops (Word
+        // reserves them for automatic numeric alignment) and lands on the
+        // next stop after them: staging-tblextreme's tab + "12.5" with a
+        // decimal stop at 2600tw paints left-aligned on the 2880tw default
+        // stop in Word's own render.
+        let guard = 0;
+        while (rawStop.align === "decimal" && guard++ < 8) {
+          rawStop = nextTabStop(rawStop.pos, props.tabs, contentWidth - indentRight);
+        }
+      }
       const stop = { ...rawStop, pos: rawStop.pos - offset };
       const leader = stop.leader && stop.leader !== "none" ? stop.leader : undefined;
       let target = stop.pos;
@@ -776,6 +804,14 @@ export function breakParagraph(
     const lineEnd = lineStartX(lineIndex) + availFor(lineIndex);
     let fits = x + atom.width <= lineEnd + 0.01;
     if (!fits && packUntilSpace) fits = true; // continuation of a packed word
+    // A tab is not a break opportunity: the word right after a tab stays
+    // glued to it and overflows the cell/column edge instead of wrapping
+    // (staging-tblextreme: "12.5" on the 2880tw default stop paints ~1px past
+    // the cell's text edge in Word's own render).
+    if (!fits && cur.length > 0 && cur[cur.length - 1].text === "\t") {
+      fits = true;
+      packUntilSpace = true;
+    }
     if (!fits && curLineWidth > 0) {
       let hi = cur.length;
       let headW = 0;
@@ -850,6 +886,26 @@ export function breakParagraph(
           curLineWidth += h.width;
         }
       }
+    }
+    if (atom.width > availFor(lineIndex) && curLineWidth === 0 && curClearY !== undefined) {
+      // The word is too wide for THIS float-narrowed band: try the remaining
+      // free intervals of the band, then drop below the float entirely (Word
+      // never character-splits beside a float).
+      let moved = false;
+      while (advanceSegment()) {
+        if (atom.width <= availFor(lineIndex) + 0.01) {
+          moved = true;
+          break;
+        }
+      }
+      let guard = 0;
+      while (!moved && curClearY !== undefined && curClearY > yOff && atom.width > availFor(lineIndex) && guard++ < 20) {
+        const jump = curClearY - yOff;
+        yOff = curClearY;
+        beginLine(lineIndex); // resets lineFloatOffset - add the jump AFTER
+        lineFloatOffset += jump;
+      }
+      x = lineStartX(lineIndex);
     }
     if (atom.width > availFor(lineIndex) && curLineWidth === 0) {
       // Single fragment wider than the line: hard character wrap.
