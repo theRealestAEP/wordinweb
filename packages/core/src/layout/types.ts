@@ -137,6 +137,10 @@ export interface ImageItem {
   border?: { color: string; width: number };
   /** behindDoc: paint under the text layer. */
   behind?: boolean;
+  /** wrapNone + !behindDoc ("in front of text"): paint ABOVE the text layer
+   * (Word's z-order; without this, later-emitted text spans cover the image
+   * and it neither shows in front nor receives clicks/drags). */
+  front?: boolean;
   /** Source w:drawing element (for interactive resize/move). */
   src?: XmlElement;
 }

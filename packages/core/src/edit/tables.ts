@@ -520,6 +520,17 @@ export function moveDrawingTo(
   const destParent = doc.findParentOf(destRun);
   if (!destParent) return false;
   if (destRun === imgRun) return false;
+  // Never move a run to a DIFFERENT part (body <-> header/footer): the
+  // drawing's r:embed relationship is part-scoped, so the image would render
+  // nowhere in the destination part — a drop on the footer silently
+  // destroyed the image. Cross-part drops must be rejected so the caller can
+  // re-target (or snap back).
+  const rootOf = (n: XmlElement): XmlElement => {
+    let cur: XmlElement = n;
+    for (let p = doc.findParentOf(cur); p; p = doc.findParentOf(p)) cur = p;
+    return cur;
+  };
+  if (rootOf(imgRun) !== rootOf(destRun)) return false;
   imgParent.children.splice(imgParent.children.indexOf(imgRun), 1);
   destParent.children.splice(destParent.children.indexOf(destRun) + 1, 0, imgRun);
   doc.refresh();

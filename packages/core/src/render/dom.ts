@@ -704,8 +704,12 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       // draws outside the border edge without shifting the image or its layout.
       if (item.border) node.style.outline = `${item.border.width}px solid ${item.border.color}`;
       // behindDoc: under the text layer (the surface isolates stacking so a
-      // negative z-index stays above the page background).
+      // negative z-index stays above the page background). "In front of
+      // text" (wrapNone, not behind): above the text layer — anchored image
+      // items emit before their paragraph's spans, so without a z-index the
+      // text paints over the image and steals its clicks/drags.
       if (item.behind) node.style.zIndex = "-1";
+      else if (item.front) node.style.zIndex = "2";
       node.dataset.dxwImageFormat = ext;
       return node;
     }

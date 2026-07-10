@@ -3078,6 +3078,7 @@ class Engine {
           crop: shape.crop,
           rotation: shape.rotation,
           behind: shape.behind,
+          front: shape.wrap === "none" && !shape.behind,
           src: shape.srcDrawing,
         });
         // Frames (physIndex -1, e.g. table cells) register floats too so the

@@ -912,25 +912,53 @@ export class DocxEditor {
     const r = binding.el.getBoundingClientRect();
     const newLeftClient = r.left + dxClient;
     const newTopClient = r.top + dyClient;
-    const pageEl = (document.elementFromPoint(newLeftClient + r.width / 2, newTopClient + r.height / 2) as HTMLElement | null)
+    let pageEl = (document.elementFromPoint(newLeftClient + r.width / 2, newTopClient + r.height / 2) as HTMLElement | null)
       ?.closest(".dxw-page") as HTMLElement | null;
+    if (!pageEl) {
+      // Center released in the page gap / past a page edge: use the nearest
+      // page so the drop still lands somewhere reachable (Word clamps drags
+      // to the page — an image parked past the edge would render clipped or
+      // fully invisible and become undraggable).
+      let bestD = Infinity;
+      for (const p of Array.from(this.host.getHandle()?.root.querySelectorAll<HTMLElement>(".dxw-page") ?? [])) {
+        const pr = p.getBoundingClientRect();
+        const cx = newLeftClient + r.width / 2;
+        const cy = newTopClient + r.height / 2;
+        const dx = cx < pr.left ? pr.left - cx : cx > pr.right ? cx - pr.right : 0;
+        const dy = cy < pr.top ? pr.top - cy : cy > pr.bottom ? cy - pr.bottom : 0;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) {
+          bestD = d;
+          pageEl = p;
+        }
+      }
+    }
     const surface = pageEl?.firstElementChild as HTMLElement | null;
     const handle = this.host.getHandle();
     if (surface && handle) {
       const srect = surface.getBoundingClientRect();
-      const x = (newLeftClient - srect.left) / zoom;
-      const y = (newTopClient - srect.top) / zoom;
+      const pw = srect.width / zoom;
+      const ph = srect.height / zoom;
       const h = binding.item.height;
+      const w = binding.item.width;
+      // Clamp fully onto the page (Word never lets a drag strand an object
+      // outside the sheet).
+      const x = Math.max(0, Math.min((newLeftClient - srect.left) / zoom, pw - w));
+      const y = Math.max(0, Math.min((newTopClient - srect.top) / zoom, ph - h));
       // Anchor to the first line the image now overlaps; when it lands in
       // empty space, to the nearest line above (or below, at a page top) so
-      // the anchor still lives on the drop page.
+      // the anchor still lives on the drop page. Candidates come only from
+      // the image's OWN region: a body float dropped over the footer stays
+      // anchored in the body, an hf-anchored float stays in its part —
+      // crossing parts dangles the picture's part-scoped r:embed rel.
+      const imgRegion = this.regionOf(src);
       let first: TextBinding | null = null;
       let above: TextBinding | null = null;
       let below: TextBinding | null = null;
       for (const b of handle.bindings) {
         if (!b.item.src?.t) continue;
         if (b.el.closest(".dxw-page") !== pageEl) continue;
-        if (this.regionOf(b.item.src.t as XmlElement) !== "body") continue;
+        if (this.regionOf(b.item.src.t as XmlElement) !== imgRegion) continue;
         if (b.item.lineTop + b.item.lineHeight > y && b.item.lineTop < y + h) {
           if (!first || b.item.lineTop < first.item.lineTop) first = b;
         } else if (b.item.lineTop + b.item.lineHeight <= y) {
@@ -1321,7 +1349,11 @@ export class DocxEditor {
           this.selectImage(target, binding.item.src, undefined, "drawing");
           return;
         }
-        const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
+        const dwRegion = this.regionOf(binding.item.src);
+        let dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
+        if (dest && this.regionOf(dest.t) !== dwRegion) {
+          dest = this.nearestCaret(me.clientX, me.clientY, dwRegion);
+        }
         if (dest) {
           this.host.history?.checkpoint();
           if (moveDrawingTo(this.host.doc, binding.item.src, dest.t)) this.host.rerender();
@@ -1417,14 +1449,41 @@ export class DocxEditor {
         if (floating) {
           const src = binding.item.src!;
           // Desired landing spot in CLIENT space (valid across pages; the
-          // scroll position survives re-renders).
-          const wantClientLeft = rect0.left + (me.clientX - startX);
-          const wantClientTop = rect0.top + (me.clientY - startY);
+          // scroll position survives re-renders). Clamp it fully onto the
+          // drop page (nearest page when released in the gap/past an edge):
+          // Word never lets a drag strand an object off the sheet, and the
+          // closed-loop residual correction would otherwise faithfully drag
+          // the image back to the off-page point.
+          let wantClientLeft = rect0.left + (me.clientX - startX);
+          let wantClientTop = rect0.top + (me.clientY - startY);
+          {
+            const cx = wantClientLeft + rect0.width / 2;
+            const cy = wantClientTop + rect0.height / 2;
+            let dropPage = (document.elementFromPoint(cx, cy) as HTMLElement | null)?.closest(".dxw-page") as HTMLElement | null;
+            if (!dropPage) {
+              let bestD = Infinity;
+              for (const p of Array.from(this.host.getHandle()?.root.querySelectorAll<HTMLElement>(".dxw-page") ?? [])) {
+                const pr = p.getBoundingClientRect();
+                const ddx = cx < pr.left ? pr.left - cx : cx > pr.right ? cx - pr.right : 0;
+                const ddy = cy < pr.top ? pr.top - cy : cy > pr.bottom ? cy - pr.bottom : 0;
+                const d = ddx * ddx + ddy * ddy;
+                if (d < bestD) {
+                  bestD = d;
+                  dropPage = p;
+                }
+              }
+            }
+            if (dropPage) {
+              const pr = dropPage.getBoundingClientRect();
+              wantClientLeft = Math.max(pr.left, Math.min(wantClientLeft, pr.right - rect0.width));
+              wantClientTop = Math.max(pr.top, Math.min(wantClientTop, pr.bottom - rect0.height));
+            }
+          }
           // moveFloatingImage reads the element's CURRENT rect - restore the
           // pre-drag position first so the client delta isn't applied twice.
           el.style.left = `${left0}px`;
           el.style.top = `${top0}px`;
-          if (this.moveFloatingImage(binding, me.clientX - startX, me.clientY - startY)) {
+          if (this.moveFloatingImage(binding, wantClientLeft - rect0.left, wantClientTop - rect0.top)) {
             this.host.rerender();
             // Re-anchoring resolves offsets from the NEW anchor's column
             // origin (a table cell's text area, not the page margin), which
@@ -1448,7 +1507,15 @@ export class DocxEditor {
             this.reselectImage(src);
           }
         } else {
-          const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
+          // Keep the drop in the image's own region: a body image dropped on
+          // footer text must land at the nearest BODY position, not move into
+          // the footer part (part-scoped r:embed rels dangle there — the
+          // image would silently vanish).
+          const imgRegion = this.regionOf(binding.item.src!);
+          let dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
+          if (dest && this.regionOf(dest.t) !== imgRegion) {
+            dest = this.nearestCaret(me.clientX, me.clientY, imgRegion);
+          }
           if (dest && moveDrawingTo(this.host.doc, binding.item.src!, dest.t)) {
             const dropX = this.surfaceX(me.clientX, me.clientY);
             this.floatIfClipped(
