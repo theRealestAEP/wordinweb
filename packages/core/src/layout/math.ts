@@ -22,7 +22,10 @@ const FRAC_NUM_RAISE = 1200 / 2048;
 const FRAC_DEN_DROP = 1030 / 2048;
 const RULE_CENTER = 3.125 / 11;
 const RULE_THICK = 0.75 / 11;
-const BIN_OP_SPACE = 0.25 / 11 * 11; // em fraction (0.25em per side)
+// Medium (binary-operator) space: measured 3.21-3.52px at 14.67px em across
+// parity-math's 1 + x + x/2 with the real Cambria Math advances (the old
+// 0.25em was calibrated against STIX's narrower glyphs).
+const BIN_OP_SPACE = 0.25;
 const FRAC_PAD = 0.06; // em: rule sticks out past the wider part
 // n-ary/matrix/delimiter geometry measured from Word's parity-math2 export
 // at 11pt: the operator keeps the SURROUNDING font size (math fonts carry a
@@ -80,6 +83,16 @@ const NARY_UNDER_DROP_D = 14 / 11;
 // match the adjacent inline control and must stay unchanged.
 const INT_SUP_RAISE_D = 11.6625 / 11;
 const INT_SUB_DROP_D = 11.255 / 11;
+// Display integral operator = Cambria Math MATH variant glyph03505, read from
+// the font tables: advance 0.8066em, ink spans -0.7925..+1.3584em about the
+// baseline (2.1509em total vs the text glyph's 1.0825em).
+const INT_TEXT_INK = 0.877 + 0.2056;
+const INT_D_INK = 1.3584 + 0.7925;
+const INT_D_ASC = 1.3584;
+const INT_D_DESC = 0.7925;
+const INT_D_ADV = 0.8066;
+// Stretch anchor A solves A + (0.877 - A) * k = 1.3584 for k = ink ratio.
+const INT_D_ANCHOR = (1.3584 - 0.877 * (INT_D_INK / INT_TEXT_INK)) / (1 - INT_D_INK / INT_TEXT_INK);
 
 /** Word renders math variables in math-italic codepoints; browsers pick
  * them out of any installed math font. */
@@ -199,6 +212,15 @@ function rebase(pc: MathPiece, dx: number, dyShift: number, script?: boolean): M
 // Bracket glyphs whose ink rises past the digit cap (Cambria Math parens:
 // 8.47pt asc at 12pt vs the 7.79pt cap) - the tall-den fraction test below.
 const BRACKET_RE = /[()[\]{}]/;
+// Regular Cambria Math paren ink ascent (glyf bbox 0.7056em) and the MATH
+// table SuperscriptBaselineDropMax (460/2048em) for exponents on tall bases.
+const PAREN_INK_ASC = 0.7056;
+const SUP_DLM_DROP = 460 / 2048;
+// Math-italic alphabet range (mathText maps a-z/A-Z here): these carry the
+// italic correction / cut-in kern that Word applies before a superscript.
+const ITALIC_MATH_RE = /[\u{1D434}-\u{1D467}ℎ]/u;
+const SUP_KERN_IN = 0.0; // em (parity-math: e^x sup lands at base+0.568em vs 0.4961 hmtx)
+const SCRIPT_TRAIL = 0.0; // em after a sup/sub cluster (parity-math '=', dense t^{h-1}( )
 
 /** Does this subtree lay a delimiter (m:d or literal bracket glyphs) outside
  * sup/sub script arguments and n-ary limits? (Script protrusions never drive
@@ -224,6 +246,31 @@ function containsDlm(nodes: MathNode[]): boolean {
         break;
       case "mat":
         if (n.rows.some((r) => r.some((c) => containsDlm(c)))) return true;
+        break;
+    }
+  }
+  return false;
+}
+
+/** Does this subtree contain a fraction anywhere (for the tall-den push)? */
+function containsFrac(nodes: MathNode[]): boolean {
+  for (const n of nodes) {
+    switch (n.t) {
+      case "frac":
+        return true;
+      case "sup":
+      case "sub":
+        if (containsFrac(n.base) || containsFrac(n.script)) return true;
+        break;
+      case "dlm":
+        if (n.e.some((p) => containsFrac(p))) return true;
+        break;
+      case "nary":
+      case "rad":
+        if (containsFrac(n.e)) return true;
+        break;
+      case "mat":
+        if (n.rows.some((r) => r.some((c) => containsFrac(c)))) return true;
         break;
     }
   }
@@ -297,7 +344,7 @@ function flow(
         // Word spaces binary operators with a medium space (~0.25em) and
         // relations with a slightly wider thick space (5/18 em), measured from
         // the = gaps in parity-math.
-        const medGap = size * 0.25;
+        const medGap = size * BIN_OP_SPACE;
         // Inline relations take Word's wider thick space (5/18 em, measured from
         // parity-math's = gaps); display equations keep the medium space around
         // relations (parity2-equations f(x)=, e^x=).
@@ -332,11 +379,46 @@ function flow(
       case "sub": {
         // Scripts render at 8/11 in text (non-display) style even inside a
         // display equation (Word: b², xᵏ stay script-size).
+        const beforeBase = box.pieces.length;
         flow(node.base, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor);
-        const scriptDy = dy + (node.t === "sup" ? size * SUP_RAISE : -size * SUB_DROP);
+        // A superscript on a TALL base (a delimiter group, possibly holding
+        // its own scripts) rides near the base's ink top: OpenType shiftUp =
+        // max(SuperscriptShiftUp, baseInkTop - SuperscriptBaselineDropMax),
+        // Cambria Math drop = 460/2048em. Dense p7 (1.1): the (…e^{iθ})^{-1/2}
+        // exponents measure 0.675em up vs 0.36em for the plain t^{h-1} on the
+        // same row. Plain run bases (x², b²) keep the standard raise: their
+        // lowercase/digit ink never beats shiftUp after the drop, so only
+        // bracket ink, grown-delimiter ink and the base's own script
+        // protrusions are counted.
+        let baseInkAsc = 0;
+        if (node.t === "sup") {
+          for (let i = beforeBase; i < box.pieces.length; i++) {
+            const p = box.pieces[i];
+            if (p.ownAscent !== undefined) baseInkAsc = Math.max(baseInkAsc, p.ownAscent - dy);
+            else if (p.script) baseInkAsc = Math.max(baseInkAsc, p.dy - dy + measurer.metrics(p.font).ascent);
+          }
+        }
+        const supRaise = Math.max(size * SUP_RAISE, baseInkAsc - size * SUP_DLM_DROP);
+        const scriptDy = dy + (node.t === "sup" ? supRaise : -size * SUB_DROP);
+        // Word attaches a superscript past the base's nominal advance
+        // (italic correction + MATH cut-in kern): parity-math's e^x places
+        // the x at base + 0.568em where the 𝑒 hmtx advance is 0.4961em.
+        // Subscripts tuck under the base with no such kern.
+        if (
+          node.t === "sup" &&
+          box.pieces.length > beforeBase &&
+          ITALIC_MATH_RE.test(box.pieces[box.pieces.length - 1].text)
+        ) {
+          box.width += size * SUP_KERN_IN;
+        }
         const beforeScript = box.pieces.length;
         flow(node.script, scriptSize(size, scriptFloor), scriptDy, box, measurer, true, false, breakDepth + 2, scriptFloor);
         for (let i = beforeScript; i < box.pieces.length; i++) box.pieces[i].script = true;
+        // Word also leaves a small trail after the script cluster before the
+        // next atom (parity-math: '=' lands 0.12em past sup-end + the thick
+        // relation space; dense p7 row3: t^{h-1}( gap 0.17em vs the bare
+        // delimiter pad).
+        box.width += size * SCRIPT_TRAIL;
         prevOperand = true;
         break;
       }
@@ -366,8 +448,31 @@ function flow(
         for (const r of numBox.rules) box.rules.push({ ...r, x1: x0 + (barW - numW) / 2 + r.x1, x2: x0 + (barW - numW) / 2 + r.x2, dy: dy + numRaise + r.dy });
         const denBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
         flow(node.den, scale, 0, denBox, measurer, fracTight, display, breakDepth + 2, scriptFloor);
-        for (const p of denBox.pieces) box.pieces.push(rebase(p, x0 + (barW - denW) / 2, dy - denDrop));
-        for (const r of denBox.rules) box.rules.push({ ...r, x1: x0 + (barW - denW) / 2 + r.x1, x2: x0 + (barW - denW) / 2 + r.x2, dy: dy - denDrop + r.dy });
+        // A denominator holding a NESTED FRACTION (dense p7's (...+t²r²)^{1/2}
+        // with the ½ drawn as a stacked mini-fraction) drops further: Word
+        // keeps the bar-to-denominator clearance, so the shift grows 1:1 with
+        // the denominator's ascent EXCESS over a plain one-line den (measured
+        // on dense p7: the (1.1) row den baseline sits ~14.6px below the main
+        // baseline vs (4.7)'s 7.9px for a plain den, same 12pt base). Ordinary
+        // superscript ink does NOT trigger the push - (4.7)'s den carries
+        // t²r² sups yet keeps the constant drop exactly - so the rule is
+        // gated on a nested fraction. Grown delimiter ink (ownAscent) is
+        // excluded: dens holding stretched parens are covered by the
+        // calibrated FRAC_DEN_DLM_EXTRA below.
+        let denDropFinal = denDrop;
+        if (containsFrac(node.den)) {
+          let denAsc = 0;
+          for (const p of denBox.pieces) {
+            if (p.ownAscent !== undefined) continue;
+            const m = measurer.metrics(p.font);
+            denAsc = Math.max(denAsc, p.dy + m.ascent);
+          }
+          for (const r of denBox.rules) denAsc = Math.max(denAsc, r.dy + r.thick / 2);
+          const plainDenAsc = measurer.metrics(fontAt(scale)).ascent;
+          denDropFinal = denDrop + Math.max(0, denAsc - plainDenAsc);
+        }
+        for (const p of denBox.pieces) box.pieces.push(rebase(p, x0 + (barW - denW) / 2, dy - denDropFinal));
+        for (const r of denBox.rules) box.rules.push({ ...r, x1: x0 + (barW - denW) / 2 + r.x1, x2: x0 + (barW - denW) / 2 + r.x2, dy: dy - denDropFinal + r.dy });
         if (node.bar !== false) {
           box.rules.push({ x1: x0, x2: x0 + barW, dy: dy + size * RULE_CENTER, thick: Math.max(size * RULE_THICK, 0.75) });
         }
@@ -388,8 +493,33 @@ function flow(
         }
         const opDy = dy + size * (isInt ? -NARY_INT_DROP : NARY_SUM_RAISE);
         const opFont = fontAt(size);
-        box.pieces.push({ text: node.chr, x: box.width, dy: opDy, font: opFont });
-        box.width += measurer.width(node.chr, opFont);
+        if (display && isInt) {
+          // Display integral: Word swaps in Cambria Math's 2.1514em MATH
+          // variant (glyph03505: advance 0.8066em, ink -0.7925..+1.3584 on
+          // the shared baseline - read from the font's MATH/glyf tables).
+          // Paint approximates it by stretching the text glyph (ink
+          // 1.0825em) about the anchor that reproduces the variant's ink.
+          // Keep the operator on the same baseline (opDy) the inline integral
+          // uses: the limits below anchor on `dy`, so a display-only baseline
+          // shift would desync the operator-to-limit gaps from Word's measured
+          // spread (parse test: display limits extend the SAME reference stack
+          // as inline). The variant's height comes purely from the scaleY
+          // stretch about its ink anchor, not from moving the baseline.
+          box.pieces.push({
+            text: node.chr,
+            x: box.width,
+            dy: opDy,
+            font: opFont,
+            scaleY: INT_D_INK / INT_TEXT_INK,
+            scaleAnchor: INT_D_ANCHOR * size,
+            ownAscent: opDy + INT_D_ASC * size,
+            ownDescent: -opDy + INT_D_DESC * size,
+          });
+          box.width += INT_D_ADV * size;
+        } else {
+          box.pieces.push({ text: node.chr, x: box.width, dy: opDy, font: opFont });
+          box.width += measurer.width(node.chr, opFont);
+        }
         const scale = scriptSize(size, scriptFloor);
         // A generator may serialize an absent limit as a whitespace-only
         // m:r. Word leaves that side empty; do not give an invisible limit the
