@@ -1404,11 +1404,18 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
         const rel = rid ? ctx.rels.get(rid) : undefined;
         if (rel && !rel.external) {
           const style = parseVmlStyle(el.attrs["style"]);
+          // Word draws a VML pict at its style extent rounded to WHOLE POINTS
+          // (both axes). Measured in wild2-math-eq-as-images-word.pdf: every
+          // equation raster lands on integer pt (31.45->31, 49.65->50,
+          // 57.4->57, 120.75->121, 290.75->291, 382.8->383). The height side
+          // decides docGrid rows (31.45pt would take 3 x 15.6pt pitches, the
+          // rounded 31pt takes Word's observed 2), so round at parse time.
+          const wholePt = (px: number) => Math.round((px * 3) / 4) * (4 / 3);
           out.push({
             kind: "image",
             part: rel.target,
-            width: vmlLength(style.get("width")) || 100,
-            height: vmlLength(style.get("height")) || 100,
+            width: wholePt(vmlLength(style.get("width")) || 100),
+            height: wholePt(vmlLength(style.get("height")) || 100),
           });
         }
         return;

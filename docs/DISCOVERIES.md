@@ -1292,6 +1292,71 @@ distinct from the weight floor.
   achievable suite mean around ~2.2-2.5% under the current severity metric.
 
 
+## Legacy CJK docGrid layout: grid-snapped object/text lines, EA space fitting (wild2-math-eq-as-images, 2026-07)
+
+The 8-page Chinese physics paper (compat mode 12, docGrid type=lines
+linePitch=312 = 15.6pt, SimSun body 10.5pt, HTML-Preformatted paragraphs at
+before/after 156 + line 348 atLeast, every display equation an inline VML/OLE
+image on a `w:position`-lowered run) went mean 40.3% -> **0.38%** (worst page
+74.4% -> 0.67%) from rules measured directly in its Word PDF (paragraph
+shading rects + baselines + image bboxes agree to ~0.1pt):
+
+- **Grid OBJECT lines snap to whole pitches, centered.** A line whose inline
+  object extent (ascent+descent split by the run's w:position) exceeds the
+  GRID PITCH - not the paragraph's spacing height - lays
+  `ceil(extent/pitch) x pitch` with the extent centered: img 31pt -> 31.2
+  (2 pitches), 36 -> 46.8, 48-57 -> 62.4. eq48's image top sits exactly
+  (62.4-57)/2 = 2.7pt below the line top (shading rect 643.44, image 640.75).
+  A 15pt image lowered 3pt (extent exactly 15 <= pitch) keeps the plain
+  atLeast line; the same image at position 0 (extent 16.5 via text descent)
+  snaps to 2 pitches. `w:position` moves the image across the baseline but
+  the snapped height is unchanged while the image dominates both sides.
+- **Legacy (compat < 15) grid TEXT lines snap too** when the font line
+  (with gap) exceeds the pitch: the sz28 headings (SimSun 14pt = 15.97pt
+  line) lay 2 pitches = 31.2 under atLeast 348 AND under plain auto
+  multipliers (CSO- 1.25, Normal 1.0) - the snap REPLACES the multiplier.
+  staging-eastasian (compat 15, same grid type) does NOT snap its oversized
+  faces, so the text snap is gated to compatibilityMode < 15 (and never
+  fires for oversized East Asian faces, which keep multiplier x natural).
+- **VML pict extents round to whole points** (31.45->31, 49.65->50,
+  120.75->121, 290.75->291; both axes) - the PDF draws every equation raster
+  on integer pt, and the rounding decides 2 vs 3 grid pitches for the
+  31.45pt images.
+- **A word binds to a directly attached VML/OLE object** (no space): Word
+  wraps "as:<eq>" as one unit even though "as:" fits (line1 ends at x=326 of
+  505). DrawingML pictures do NOT glue (chem p3 keeps its "[06]" marker on
+  the line and wraps the chart alone).
+- **East Asian line fitting compresses inter-word spaces** (docGrid docs,
+  any alignment): left-aligned SimSun lines draw every space at
+  5.00/4.25/3.75/2.75pt against the natural 5.25 - up to 47.6% - to pull the
+  next word on, ending flush at the text edge. Only ISOLATED single spaces
+  set in an East Asian face compress (Times spaces and typed multi-space
+  padding runs never do; cap modeled at 0.48). Trailing punctuation may hang
+  past the edge (w:overflowPunct; the ":" of "zebeqo:" ends at 510.7 against
+  a 505.35 edge).
+- **Runs of >= 2 consecutive typed spaces lay at the EAST ASIAN space
+  width** (5.25pt for SimSun) while isolated word spaces keep the Latin
+  width - the 8-space padding run and ")  to  (" pairs in the p7 CSO-
+  paragraph measure exactly so, ending the line at Word's x=472.5.
+- **A uniformly lowered paragraph paints like unshifted text**: CSO- body
+  runs all carry position -14 (-7pt) yet keep the 19.5pt pitch and the
+  unlowered baselines - the common lowering is absorbed (mirror of the
+  all-raised descent-reuse rule), both in plain lines and inside snapped
+  lines.
+- **Fit at the page bottom hangs grid leading**: an ordinary grid text
+  line's fit extent is the raw font box (the last reference line's glyphs
+  end 769.6 of 770 while its 15.6pt grid line overruns), and a grid-snapped
+  object box does NOT reserve its paragraph spacing-after (Word keeps the
+  (04) equation at bottom 766.6 of 770 with after=7.8 pending).
+- Also: images/drawings on positioned runs now paint lowered/raised
+  (`baseline - height - raise`), and the compat-15 justify pack extends to
+  grid sections regardless of the document's compat mode.
+
+Verification: all 8 pages <= 0.67% (mean 0.38), line counts 183 = Word's 183.
+Gates: dense 12.63 (12.4 baseline, within run tolerance), chem 0.59 -> 0.31,
+staging-eastasian 11.19 -> 7.95, parity-pictures/benchmark/sample/charstyles
+0.00, compare-linebreaks canaries 6 x 0 mismatches.
+
 ## International text: RTL/bidi + East Asian (CJK) + docGrid
 
 Added for the staging-bidi (1p), staging-eastasian (1p) and wild2-lit-yiddish-rtl

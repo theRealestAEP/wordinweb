@@ -336,6 +336,19 @@ const DEFAULT_TAB = 48; // 0.5in
  * more than 25%. The stretch comparison is what a flat threshold can't model:
  * a wide word (whose break leaves a gaping line) packs at 24% compression
  * while a narrow one is rejected at 12%. */
+// Word-final punctuation that w:overflowPunct lets hang past the text extent
+// (ASCII + fullwidth closers; matches Word's hanging-punctuation set).
+const OVERFLOW_PUNCT = /[.,:;!?)\]}、。，．：；？！）］｝」』】〉》]/;
+
+// East Asian (docGrid) line fitting compresses inter-word spaces up to about
+// half their width to avoid a wrap (measured 47.6% in eq-as-images). Only
+// spaces set in an East Asian face compress: the same document's Times New
+// Roman spaces stay at their natural width and those paragraphs wrap
+// normally (para "In jubusep": line ends 7pt short, "macen," wraps).
+const CJK_SPACE_COMPRESS = 0.47;
+const EA_FAMILY_RE =
+  /simsun|nsimsun|宋体|新宋体|songti|simhei|黑体|heiti|kaiti|楷体|fangsong|仿宋|yahei|雅黑|mingliu|细明|新細明|pmingliu|jhenghei|正黑|pingfang|dengxian|等线|ms (?:p?)(?:mincho|gothic)|mincho|meiryo|yu gothic|yu mincho|batang|gulim|dotum|malgun/i;
+
 const JUSTIFY_MAX_COMPRESS = 0.25;
 const JUSTIFY_STRETCH_FACTOR = 0.5;
 
@@ -379,7 +392,7 @@ export function breakParagraph(
   const hanging = props.indentHanging ?? 0;
   const firstLineExtra = hanging > 0 ? -hanging : (props.indentFirstLine ?? 0);
 
-  const { atoms, anchors } = buildAtoms(doc, para, measurer, fields, fallbackFamily);
+  const { atoms, anchors } = buildAtoms(doc, para, measurer, fields, fallbackFamily, minLineHeight);
 
   const lines: LineBox[] = [];
   let cur: LineSpan[] = [];
@@ -389,6 +402,12 @@ export function breakParagraph(
   // Set when the justify rule commits to packing a word: its remaining frag
   // atoms (a word can be split across formatting runs) must follow suit.
   let packUntilSpace = false;
+  // Set when the East Asian space-compression rule packed this line: its
+  // spaces must paint compressed even on a non-justified line.
+  let curPacked = false;
+  // Width of spaces set in an East Asian face - the only ones the East Asian
+  // fitter may compress.
+  let curEaSpaceWidth = 0;
   // Spans at the line start that word-head backtracking must not consume
   // (the numbering label on a list paragraph's first line).
   let minSpans = 0;
@@ -569,7 +588,7 @@ export function breakParagraph(
         bidiPara && physAlign === "justify" && (isLast || endsWithBreak)
           ? "right"
           : (physAlign ?? "left");
-      applyAlignment(line, align, avail, startX, isLast || endsWithBreak);
+      applyAlignment(line, align, avail, startX, isLast || endsWithBreak, curPacked);
     }
     // Re-attach hanging trailing spaces at the line's visual end (after
     // alignment so they never shift it). Bidi lines keep the old drop
@@ -587,6 +606,8 @@ export function breakParagraph(
     cur = [];
     curLineWidth = 0;
     curSpaceWidth = 0;
+    curEaSpaceWidth = 0;
+    curPacked = false;
     minSpans = 0;
     lineIndex++;
     yOff += line.height;
@@ -724,9 +745,16 @@ export function breakParagraph(
       }
       // Never start a (non-first) line with a space.
       if (cur.length === 0 && lineIndex > 0) continue;
+      // Only an ISOLATED single space is a compressible inter-word gap:
+      // typed padding runs ("to        the ketoje...", "(h,q,g)    to")
+      // give the East Asian fitter no budget, or the line packs words Word
+      // wraps.
+      const prevIsSpace = cur.length > 0 && cur[cur.length - 1].isSpace;
+      const nextIsSpace = atoms[ai + 1]?.kind === "space";
       cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src, metricsFont: atom.metricsFont, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
       curLineWidth += atom.width;
       curSpaceWidth += atom.width;
+      if (!prevIsSpace && !nextIsSpace && EA_FAMILY_RE.test(atom.font.family)) curEaSpaceWidth += atom.width;
       x += atom.width;
       continue;
     }
@@ -749,7 +777,31 @@ export function breakParagraph(
       const w = atom.kind === "image" ? atom.width : atom.drawing.width;
       const h = atom.kind === "image" ? atom.height : atom.drawing.height;
       if (curLineWidth > 0 && x + w > lineStartX(lineIndex) + availFor(lineIndex)) {
+        // There is no break opportunity between text and a directly attached
+        // legacy VML/OLE object - Word treats the embedded equation like a
+        // glyph of the word: "as:<eq image>" wraps as one unit, leaving line
+        // 1 at "zuwilekon" (x=326 of 505pt) even though "as:" alone fits
+        // (eq-as-images p6). A DrawingML inline picture is NOT glued: chem
+        // p3 keeps its "[06]" reference at the end of the line and wraps the
+        // chart alone. Carry the attached word head down with a VML image.
+        const glued = atom.kind === "image" && !atom.srcDrawing;
+        let hi = cur.length;
+        let headW = 0;
+        while (glued && hi > minSpans) {
+          const s = cur[hi - 1];
+          if (s.isSpace || !s.text || s.text === "\t" || s.image || s.drawing || s.breakAfter) break;
+          headW += s.width;
+          hi--;
+        }
+        const head = hi > minSpans && hi < cur.length && cur[hi - 1].isSpace ? cur.splice(hi) : [];
+        for (const h2 of head) curLineWidth -= h2.width;
         flush(false, false);
+        for (const h2 of head) {
+          h2.x = x;
+          x += h2.width;
+          cur.push(h2);
+          curLineWidth += h2.width;
+        }
       }
       cur.push({
         x,
@@ -776,6 +828,23 @@ export function breakParagraph(
     const lineEnd = lineStartX(lineIndex) + availFor(lineIndex);
     let fits = x + atom.width <= lineEnd + 0.01;
     if (!fits && packUntilSpace) fits = true; // continuation of a packed word
+    if (!fits && minLineHeight) {
+      // w:overflowPunct (East Asian layout, default on): a word-final
+      // punctuation mark may hang past the text extent instead of wrapping
+      // the word. wild2-math-eq-as-images p2: "...by Hemaruf zebeqo:" ends at
+      // x = 510.7pt against a 505.35pt right edge - exactly the trailing
+      // colon's width past the margin; Word keeps it on the line. Scoped to
+      // docGrid sections (the CJK typography context that engages it).
+      const last = atom.text[atom.text.length - 1];
+      if (last && OVERFLOW_PUNCT.test(last)) {
+        const nxt = atoms[ai + 1];
+        const wordEnd = !nxt || nxt.kind !== "frag" || /^\s/.test((nxt as FragAtom).text);
+        if (wordEnd) {
+          const pw = measurer.width(last, atom.font, atom.props.letterSpacing);
+          if (x + atom.width - pw <= lineEnd + 0.01) fits = true;
+        }
+      }
+    }
     if (!fits && curLineWidth > 0) {
       let hi = cur.length;
       let headW = 0;
@@ -796,8 +865,28 @@ export function breakParagraph(
         }
       }
       const wordW = headW + atom.width + tailW;
+      if (!fits && minLineHeight !== undefined && curEaSpaceWidth > 0) {
+        // East Asian line fitting (docGrid sections) compresses inter-word
+        // spaces to pull the next word onto the line REGARDLESS of paragraph
+        // alignment, far beyond the Latin justify tolerance. Word's
+        // eq-as-images PDF draws left-aligned SimSun lines with every space
+        // advanced 5.00/4.25/3.75/2.75pt against the natural 5.25pt - up to
+        // 47.6% compression, always ending exactly at the text edge; lines
+        // that would need more wrap normally.
+        const compress = (x - headW + wordW - lineEnd) / curEaSpaceWidth;
+        if (compress <= CJK_SPACE_COMPRESS + 1e-6) {
+          fits = true;
+          packUntilSpace = true;
+          curPacked = true;
+        }
+      }
       if (
-        doc.compatibilityMode >= 15 &&
+        // Word 2007-mode CJK documents compress too: wild2-math-eq-as-images
+        // (compat 12, docGrid lines) p2 draws the justified "...zebeqo:" line
+        // with every inter-word space at 4.25pt against SimSun's natural
+        // 5.25pt (19% compression) to avoid the wrap Word 15+ would also
+        // avoid. Scoped to grid sections rather than all legacy docs.
+        (doc.compatibilityMode >= 15 || minLineHeight !== undefined) &&
         !bidiPara &&
         props.alignment === "justify" &&
         curSpaceWidth > 0
@@ -947,18 +1036,25 @@ function applyAlignment(
   avail: number,
   startX: number,
   suppressJustify: boolean,
+  packed = false,
 ): void {
   const slack = avail - line.width;
-  if (align === "justify" && !suppressJustify && slack < 0) {
+  if (((align === "justify" && !suppressJustify) || packed) && slack < 0) {
     // Line was packed beyond natural width: compress spaces (Word allows
-    // roughly a third of the space width before breaking earlier).
-    const spaces = line.spans.filter((s) => s.isSpace);
+    // roughly a third of the space width before breaking earlier). An East
+    // Asian pack compresses only the East Asian-face spaces.
+    let spaces = line.spans.filter((s) => s.isSpace);
+    if (packed && align !== "justify") {
+      const ea = spaces.filter((s) => EA_FAMILY_RE.test(s.font.family));
+      if (ea.length > 0) spaces = ea;
+    }
     if (spaces.length > 0) {
+      const shrinkSet = new Set(spaces);
       const shrink = slack / spaces.length; // negative
       let shift = 0;
       for (const s of line.spans) {
         s.x += shift;
-        if (s.isSpace) {
+        if (shrinkSet.has(s)) {
           s.width += shrink;
           shift += shrink;
         }
@@ -1018,10 +1114,27 @@ function finishLine(
   // lines whose small limits sit beside a tall integral.
   let shiftedAscent = 0;
   let shiftedDescent = 0;
+  // Inline object (image/drawing) extents split around the baseline: a
+  // w:position on the object's run moves the object itself, so a lowered
+  // equation image contributes real DESCENT (its bottom hangs |position|
+  // below the baseline), not pure ascent. Text ascent/descent are kept
+  // separately for the docGrid object-line rule below.
+  let maxObjAscent = 0;
+  let maxObjDescent = 0;
+  let maxTextAscent = 0;
+  let maxTextDescent = 0;
+  // Whether the tallest text span uses an East Asian face: their oversized
+  // line profiles (substituted CJK faces) do NOT grid-snap under auto
+  // spacing (staging-eastasian), while Latin faces do.
+  let tallestTextIsEa = false;
 
-  const consider = (font: FontSpec, imageHeight?: number) => {
+  const consider = (font: FontSpec, imageHeight?: number, objRaise = 0) => {
     if (imageHeight !== undefined) {
-      maxAscent = Math.max(maxAscent, imageHeight);
+      maxAscent = Math.max(maxAscent, imageHeight + objRaise);
+      if (objRaise < 0) {
+        maxDescent = Math.max(maxDescent, -objRaise);
+        maxRawDescent = Math.max(maxRawDescent, -objRaise);
+      }
       maxNatural = Math.max(maxNatural, imageHeight + measurer.metrics(font).descent * 0.3);
       maxImage = Math.max(maxImage, imageHeight);
       maxImageFontDesc = Math.max(maxImageFontDesc, measurer.metrics(font).descent);
@@ -1058,9 +1171,12 @@ function finishLine(
       if (s.image || s.drawing) {
         const objectMetrics = measurer.metrics(s.metricsFont ?? s.font);
         const objectHeight = s.image?.height ?? s.drawing!.height;
+        const objRaise = s.props.raise ?? 0;
         maxGridObjectGlyph = Math.max(maxGridObjectGlyph, objectMetrics.ascent + objectMetrics.descent);
         maxGridObjectDesc = Math.max(maxGridObjectDesc, objectMetrics.descent);
-        consider(s.font, objectHeight);
+        maxObjAscent = Math.max(maxObjAscent, objectHeight + objRaise);
+        maxObjDescent = Math.max(maxObjDescent, Math.max(0, -objRaise));
+        consider(s.font, objectHeight, objRaise);
       } else if (s.math) {
         maxAscent = Math.max(maxAscent, s.math.ascent);
         maxDescent = Math.max(maxDescent, s.math.descent);
@@ -1085,6 +1201,11 @@ function finishLine(
       } else {
         textMetrics = consider(s.metricsFont ?? s.font)!;
         maxGridTextGlyph = Math.max(maxGridTextGlyph, textMetrics.ascent + textMetrics.descent);
+        maxTextAscent = Math.max(maxTextAscent, textMetrics.ascent);
+        maxTextDescent = Math.max(maxTextDescent, textMetrics.descent);
+        if (textMetrics.lineHeight >= maxNaturalText) {
+          tallestTextIsEa = EA_FAMILY_RE.test((s.metricsFont ?? s.font).family);
+        }
       }
       const r = s.props.raise;
       if (r && textMetrics) {
@@ -1111,6 +1232,18 @@ function finishLine(
     )
       ? Math.min(...metricSpans.map((s) => s.props.raise!))
       : 0;
+  // Symmetric all-LOWERED case: a paragraph whose every run carries the same
+  // negative w:position (eq-as-images CSO- body: -14hp on all runs) lays and
+  // paints EXACTLY like unshifted text in Word - 19.5pt pitch, baselines
+  // matching the unlowered neighbours. The common lowering is absorbed: only
+  // the residual beyond it can extend the descent side.
+  const commonLower =
+    metricSpans.length > 0 &&
+    metricSpans.every(
+      (s) => !s.image && !s.drawing && !s.math && (s.props.raise ?? 0) < 0,
+    )
+      ? Math.min(...metricSpans.map((s) => -s.props.raise!))
+      : 0;
 
   // w:docGrid (type=lines): Word snaps each line's single-line font height up
   // to the grid pitch before the line-spacing multiplier. The extra space sits
@@ -1127,7 +1260,64 @@ function finishLine(
   let baselineH: number | undefined;
   let gridImageFit = false;
   const ls = props.lineSpacing;
-  if (ls) {
+  // w:docGrid(lines) OBJECT lines: a line whose inline-object extent exceeds
+  // the text line height snaps UP to a whole number of grid pitches, with the
+  // content extent CENTERED in that band. Measured from Word's
+  // wild2-math-eq-as-images PDF (pitch 312tw = 15.6pt, spacing 348tw atLeast
+  // = 17.4pt): a 31pt equation image lays a 31.2pt (2-pitch) line, 36pt ->
+  // 46.8 (3 pitches), 48..57pt -> 62.4 (4 pitches); the paragraph-shading
+  // rects put the image top exactly (H - extent)/2 below the line top
+  // (eq48: img top 640.75, line top 643.44/45 = +2.7 = (62.4-57)/2), and the
+  // same rule reproduces the auto-1.25 CSO- style's equation lines (46.8 /
+  // 62.4). The object's w:position is part of the extent split, not extra
+  // height: the 57pt image at position -47hp spans 33.5 above / 23.5 below
+  // the baseline and still lays 4 pitches.
+  let gridObjSnap = false;
+  if ((minLineHeight ?? 0) > 0 && ls?.rule !== "exact") {
+    const pitch = minLineHeight!;
+    // A uniform lowering of every run (commonLower) is absorbed: it neither
+    // extends the extent nor moves the painted glyphs (the CSO- sz28
+    // acknowledgment lines carry -14hp yet lay/paint like unshifted text).
+    const cAsc = Math.max(maxObjAscent, maxTextAscent, shiftedAscent);
+    const cDesc = Math.max(maxObjDescent, maxTextDescent, shiftedDescent - commonLower);
+    const extent = cAsc + cDesc;
+    // The snap threshold is the GRID PITCH, not the paragraph's spacing
+    // height: Word snapped a 15pt image + 1.48pt text descent (16.5pt extent,
+    // still under the 17.4pt atLeast) to 2 pitches = 31.2pt (p2 "Gajihij
+    // m(h)" line, baseline chain 44.0/37.03pt), while the same image lowered
+    // 3pt (extent exactly 15pt <= pitch) kept the plain 17.4pt line (p5
+    // eq70). A TEXT line also snaps - under any spacing rule - when its FONT
+    // line (with line gap) exceeds the pitch: the sz28 "0.Kej" heading
+    // (SimSun 14pt line = 15.97, atLeast 17.4) lays 2 pitches; the sz28 CSO-
+    // acknowledgment block (auto 1.25) and the plain-Normal "Bpohaladuh"
+    // heading (auto 1.0) both advance 31.2pt/line in the PDF - the snap
+    // REPLACES the multiplier. The 2% tolerance keeps staging-eastasian's
+    // MS Mincho substitute (1.643em = 18.07pt against its 18pt pitch, a
+    // modeling artifact of the substituted face) on its measured
+    // multiplier x natural pitch.
+    const objSnap = maxImage > 0 && extent > pitch + 0.01;
+    // TEXT-line snapping is a LEGACY-mode behavior: eq-as-images (compat 12)
+    // snaps its oversized text lines, while staging-eastasian (compat 15,
+    // same docGrid type=lines) lays multiplier x natural for faces well
+    // above its pitch. Oversized East Asian faces keep multiplier x natural
+    // in either mode.
+    const textSnap =
+      doc.compatibilityMode < 15 &&
+      maxNaturalText > pitch * 1.02 &&
+      (ls?.rule === "atLeast" || !tallestTextIsEa);
+    if (objSnap || textSnap) {
+      const basis = Math.max(extent, textSnap ? maxNaturalText : 0);
+      height = Math.ceil(basis / pitch - 1e-4) * pitch;
+      // emitLine subtracts maxDescent from baselineH: place the baseline so
+      // the glyph extent sits centered, cAsc + (height - extent)/2 below the
+      // top (eq48: img top = line top + (62.4-57)/2 = 2.7pt, shading rect
+      // 643.44 vs img 640.75 in the PDF).
+      baselineH = cAsc + (height - extent) / 2 + maxDescent - commonLower;
+      gridObjSnap = true;
+      gridImageFit = true;
+    }
+  }
+  if (!gridObjSnap && ls) {
     if (ls.rule === "auto") {
       height = natural * ls.value;
       if (mathDisplayBase > 0) {
@@ -1146,43 +1336,23 @@ function finishLine(
         const bodyLine = measurer.metrics(markFont).lineHeight;
         const lead = ls.value >= 1.15 ? (ls.value - 1) * bodyLine : 0;
         height = Math.max(natural + lead, mathDisplayBase * ls.value);
-      } else if (maxImage > 0) {
-        const gridGlyph = Math.max(maxGridObjectGlyph, maxGridTextGlyph);
-        const gridLead = Math.max(0, (minLineHeight ?? 0) - gridGlyph);
-        const gridImageH =
-          gridLead > 0
-            ? gridLead + (maxImage + Math.max(maxDescent, maxGridObjectDesc)) * ls.value
-            : 0;
-        if (gridImageH > maxNaturalText * ls.value) {
-          // A snap-to-grid image line keeps the grid's text reserve ABOVE the
-          // object and applies the auto multiple to the full image-dominated
-          // box. This reserve is lost if docGrid is treated only as a minimum:
-          // once the image is taller than the pitch, max(image, pitch) drops it.
-          // wild2-math-eq-as-images p2 measures 6.7px above a 44.93px image;
-          // 6.8 + (44.93 + 1.97) * 1.15 predicts the following line to 0.23px.
-          height = gridImageH;
-          // emitLine subtracts maxDescent from baselineH. Add it here so
-          // the image baseline remains gridLead + image height from the top.
-          baselineH = gridLead + maxImage + maxDescent;
-          // This is physical grid/object extent, not typographic leading
-          // that Word permits to hang into the bottom margin.
-          gridImageFit = true;
-        } else {
-          // Word does NOT scale a non-grid inline image with the auto
-          // multiplier: an image-dominated line measures image + leading below,
-          // with the image top at the line top. The leading is the larger of
-          // the descent share (k x descent) and the multiplier's normal
-          // inter-line leading, (k-1) x one text line. For modest multipliers
-          // the descent term wins (pickett icon rows); double-spaced boxes use
-          // a full text line (wild-gatech SOPITA callouts).
-          let lineTerm = (ls.value - 1) * maxImageFontLine;
-          if (ls.value >= 1.5 && !isLast) lineTerm += Math.max(maxDescent, maxImageFontDesc);
-          const descSide = Math.max(Math.max(maxDescent, maxImageFontDesc) * ls.value, lineTerm);
-          const imageH = maxImage + descSide;
-          if (imageH > maxNaturalText * ls.value) {
-            height = imageH;
-            baselineH = height - descSide + maxDescent;
-          }
+      } else if (maxImage > 0 && !minLineHeight) {
+        // Word does NOT scale a non-grid inline image with the auto
+        // multiplier: an image-dominated line measures image + leading below,
+        // with the image top at the line top. The leading is the larger of
+        // the descent share (k x descent) and the multiplier's normal
+        // inter-line leading, (k-1) x one text line. For modest multipliers
+        // the descent term wins (pickett icon rows); double-spaced boxes use
+        // a full text line (wild-gatech SOPITA callouts). Grid sections never
+        // reach here: an object taller than the text line snapped to the grid
+        // above, and one that fits inside it keeps the grid text line.
+        let lineTerm = (ls.value - 1) * maxImageFontLine;
+        if (ls.value >= 1.5 && !isLast) lineTerm += Math.max(maxDescent, maxImageFontDesc);
+        const descSide = Math.max(Math.max(maxDescent, maxImageFontDesc) * ls.value, lineTerm);
+        const imageH = maxImage + descSide;
+        if (imageH > maxNaturalText * ls.value) {
+          height = imageH;
+          baselineH = height - descSide + maxDescent;
         }
       } else if (maxInlineMath > 0 && maxNaturalText > 0) {
         // Inline (non-display) math under a line-spacing multiplier: Word
@@ -1196,16 +1366,33 @@ function finishLine(
     else height = Math.max(natural, ls.value);
   }
 
-  if ((raiseAsc || raiseDesc) && ls?.rule !== "exact") {
+  // docGrid atLeast TEXT lines: the glyph box centers in the grid pitch and
+  // the atLeast excess over the pitch stacks above it. Measured (eq-as-images,
+  // SimSun 10.5pt in a 15.6pt grid with atLeast 17.4): baseline sits
+  // 13.37-13.53pt below the line top = ascent 9.02 + (15.6-10.5)/2 +
+  // (17.4-15.6), not the bottom-anchored 15.92 a plain atLeast line uses.
+  if (!gridObjSnap && (minLineHeight ?? 0) > 0 && ls?.rule === "atLeast" && baselineH === undefined) {
+    const glyph = maxAscent + maxDescent;
+    if (minLineHeight! > glyph) {
+      baselineH = maxAscent + (minLineHeight! - glyph) / 2 + Math.max(0, height - minLineHeight!) + maxDescent;
+    }
+  }
+
+  if ((raiseAsc || raiseDesc) && ls?.rule !== "exact" && !gridObjSnap) {
     // When every baseline-bearing run is raised, the bottom of the original
     // descent band is empty. Word reuses up to that common raise (dense legacy
     // equations); a mixed baseline line or an object line cannot reuse it.
     const descentReuse = Math.min(commonRaise, maxDescent, maxRawDescent);
+    // All-lowered lines: shift the layout baseline UP by the common lowering
+    // (the paint-time w:position shift adds it back), so painted glyphs and
+    // the line advance both match unshifted text.
+    const effRaiseDesc = Math.max(0, shiftedDescent - maxDescent - commonLower);
     baselineH =
       (baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height)) +
       raiseAsc -
-      descentReuse;
-    height += raiseAsc + raiseDesc - descentReuse;
+      descentReuse -
+      commonLower;
+    height += raiseAsc + effRaiseDesc - descentReuse;
     // Moving both values by the reclaimed amount keeps the painted baseline
     // and the font-box fit extent unchanged while shortening the line advance.
     maxDescent -= descentReuse;
@@ -1220,12 +1407,17 @@ function finishLine(
     naturalHeight: natural,
     height,
     baselineH: baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height),
-    // A grid-scaled object line is a physical paragraph box: when it is the
-    // final line, Word also reserves the paragraph's trailing space before
-    // deciding whether the box fits at the page bottom.
+    // A grid-snapped object line is a physical box: it must fit whole, but
+    // its trailing paragraph space is NOT reserved in the fit decision
+    // (eq-as-images p2: Word keeps the (04) equation at bottom 766.6 of 770
+    // even though its 7.8pt spacing-after would overflow). An ordinary grid
+    // TEXT line hangs its grid-min leading into the bottom margin like any
+    // other leading: the fit extent is the RAW font box, not the pitch
+    // (eq-as-images p7: the last reference line's glyph box ends 769.6 of
+    // 770 while its 15.6pt grid line overruns).
     fitHeight: gridImageFit
-      ? height + (isLast ? (props.spacingAfter ?? 0) : 0)
-      : Math.min(height, natural - maxDescent + maxRawDescent),
+      ? height
+      : Math.min(height, Math.max(maxNatural, maxAscent + maxDescent) - maxDescent + maxRawDescent),
     isLast,
     endsWithBreak,
   };
@@ -1239,6 +1431,7 @@ function buildAtoms(
   measurer: TextMeasurer,
   fields: FieldContext,
   fallbackFamily: string,
+  gridPitch?: number,
 ): { atoms: Atom[]; anchors: Shape[] } {
   const atoms: Atom[] = [];
   const anchors: Shape[] = [];
@@ -1476,12 +1669,23 @@ function buildAtoms(
       const partWidth = Math.max(cum - prevCum, 0);
       const src = srcBase ? { run: srcBase.run, t: srcBase.t, offset: srcBase.offset + baseOffset + offset } : undefined;
       if (part[0] === " ") {
-        const w = partWidth / part.length;
+        // docGrid (East Asian) sections lay RUNS of >= 2 consecutive typed
+        // spaces at the EAST ASIAN space width while isolated single spaces
+        // keep the Latin width. Measured in eq-as-images p7: the 8-space
+        // padding run and the ")  to  (" pairs advance 5.25pt/space
+        // (SimSun) between 2.62pt Times word spaces, ending the line at
+        // x=472.5 exactly as Word draws it.
+        let w = partWidth / part.length;
+        let spaceFont = font;
+        if (gridPitch && part.length >= 2 && props.fontEastAsia && !EA_FAMILY_RE.test(font.family)) {
+          spaceFont = { ...font, family: props.fontEastAsia };
+          w = measurer.width(" ", spaceFont, props.letterSpacing) * tScale;
+        }
         for (let i = 0; i < part.length; i++) {
           atoms.push({
             kind: "space",
             props,
-            font,
+            font: spaceFont,
             width: w,
             src: src ? { ...src, offset: src.offset + i } : undefined,
             metricsFont,
