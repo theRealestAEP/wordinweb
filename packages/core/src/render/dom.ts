@@ -590,6 +590,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
         el.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
       }
       if (item.behind) el.style.zIndex = "-1";
+      else if (item.front) el.style.zIndex = "1";
       return el;
     }
     case "path": {
@@ -626,8 +627,11 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       hit.dataset.dxwDrawing = "1";
       return hit;
     }
-    case "edge":
-      return renderEdge(item.x1, item.y1, item.x2, item.y2, item.border, item.rotate);
+    case "edge": {
+      const el = renderEdge(item.x1, item.y1, item.x2, item.y2, item.border, item.rotate);
+      if (item.front) el.style.zIndex = "1";
+      return el;
+    }
     case "image": {
       const bytes = doc.media(item.part);
       if (!bytes) return null;
@@ -878,6 +882,7 @@ function renderText(item: TextItem): HTMLElement {
     el.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
   }
   if (item.behind) el.style.zIndex = "-1";
+  else if (item.front) el.style.zIndex = "1";
   return el;
 }
 

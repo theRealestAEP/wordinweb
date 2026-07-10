@@ -2127,3 +2127,161 @@ describe("RTL / bidi paragraphs", () => {
     expect(a.x).toBeGreaterThan(b.x);
   });
 });
+
+describe("anchored drawing position variants", () => {
+  const WP = 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"';
+  const A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
+  const WPS = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"';
+  const WP14 = 'xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"';
+
+  /** Anchored wps textbox run (mirrors scripts/make-staging-fixtures.py). */
+  const anchorBox = (opts: {
+    x: number; // EMU
+    y: number; // EMU
+    w: number; // EMU
+    h: number; // EMU
+    relH?: string;
+    relV?: string;
+    wrap?: "none" | "square";
+    fill?: string;
+    behind?: boolean;
+    allowOverlap?: boolean;
+    sizeRel?: { rel: string; pctW: number; pctH: number };
+  }): string => {
+    const wrap = opts.wrap === "square" ? '<wp:wrapSquare wrapText="bothSides"/>' : "<wp:wrapNone/>";
+    const sizeRel = opts.sizeRel
+      ? `<wp14:sizeRelH ${WP14} relativeFrom="${opts.sizeRel.rel}"><wp14:pctWidth>${opts.sizeRel.pctW}</wp14:pctWidth></wp14:sizeRelH>` +
+        `<wp14:sizeRelV ${WP14} relativeFrom="${opts.sizeRel.rel}"><wp14:pctHeight>${opts.sizeRel.pctH}</wp14:pctHeight></wp14:sizeRelV>`
+      : "";
+    return (
+      `<w:r><w:drawing><wp:anchor ${WP} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="2" ` +
+      `behindDoc="${opts.behind ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="${opts.allowOverlap === false ? 0 : 1}">` +
+      `<wp:simplePos x="0" y="0"/>` +
+      `<wp:positionH relativeFrom="${opts.relH ?? "column"}"><wp:posOffset>${opts.x}</wp:posOffset></wp:positionH>` +
+      `<wp:positionV relativeFrom="${opts.relV ?? "paragraph"}"><wp:posOffset>${opts.y}</wp:posOffset></wp:positionV>` +
+      `<wp:extent cx="${opts.w}" cy="${opts.h}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+      wrap +
+      `<wp:docPr id="9" name="Box"/><wp:cNvGraphicFramePr/>` +
+      `<a:graphic ${A}><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">` +
+      `<wps:wsp ${WPS}><wps:cNvSpPr/><wps:spPr>` +
+      `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${opts.w}" cy="${opts.h}"/></a:xfrm>` +
+      `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+      `<a:solidFill><a:srgbClr val="${opts.fill ?? "DDEEFF"}"/></a:solidFill>` +
+      `</wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>B</w:t></w:r></w:p></w:txbxContent></wps:txbx>` +
+      `<wps:bodyPr rot="0" anchor="t"><a:noAutofit/></wps:bodyPr>` +
+      `</wps:wsp></a:graphicData></a:graphic>` +
+      sizeRel +
+      `</wp:anchor></w:drawing></w:r>`
+    );
+  };
+  const boxRect = (result: ReturnType<typeof layoutDocument>, fill: string) => {
+    const r = result.pages[0].items.find((i) => i.kind === "rect" && i.fill === fill);
+    if (r?.kind !== "rect") throw new Error(`missing box rect ${fill}`);
+    return r;
+  };
+
+  it("resolves relH=character/relV=line from the anchor run's pen position and line top", () => {
+    // wrapNone box: the paragraph's layout is identical with and without the
+    // box, so its position must equal the following run's start exactly.
+    const para =
+      `<w:p><w:r><w:t xml:space="preserve">AB CD </w:t></w:r>` +
+      anchorBox({ x: 0, y: 0, w: 914400, h: 457200, relH: "character", relV: "line", wrap: "none", fill: "AA0001" }) +
+      `<w:r><w:t xml:space="preserve">ZZZ tail</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para) });
+    const rect = boxRect(result, "#aa0001");
+    const zzz = result.pages[0].items.find((i) => i.kind === "text" && i.text.startsWith("ZZZ"));
+    if (zzz?.kind !== "text") throw new Error("missing tail run");
+    expect(rect.x).toBeCloseTo(zzz.x, 3);
+    expect(rect.y).toBeCloseTo(zzz.lineTop, 3);
+    // Sanity: the pen position is past the margin (not the column origin).
+    expect(rect.x).toBeGreaterThan(100);
+  });
+
+  it("resolves relV=line against the anchor's own (wrapped) line, not the paragraph top", () => {
+    // Force the anchor onto line 2 with a leading line break.
+    const para =
+      `<w:p><w:r><w:t>first line</w:t><w:br/><w:t xml:space="preserve">go </w:t></w:r>` +
+      anchorBox({ x: 0, y: 0, w: 914400, h: 457200, relH: "character", relV: "line", wrap: "none", fill: "AA0002" }) +
+      `<w:r><w:t>ZZZ</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para) });
+    const rect = boxRect(result, "#aa0002");
+    const zzz = result.pages[0].items.find((i) => i.kind === "text" && i.text === "ZZZ");
+    if (zzz?.kind !== "text") throw new Error("missing ZZZ");
+    const first = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes("first"));
+    if (first?.kind !== "text") throw new Error("missing first line");
+    expect(rect.y).toBeCloseTo(zzz.lineTop, 3);
+    expect(rect.y).toBeGreaterThan(first.lineTop + 5);
+  });
+
+  it("sizes a wp14 pct box from the page and keeps its declared offsets", () => {
+    const para =
+      `<w:p>` +
+      anchorBox({
+        x: 914400, y: 0, w: 1645920, h: 731520, relH: "column", relV: "paragraph",
+        wrap: "none", fill: "AA0003", sizeRel: { rel: "page", pctW: 20000, pctH: 8000 },
+      }) +
+      `<w:r><w:t>host</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para) });
+    const rect = boxRect(result, "#aa0003");
+    const page = result.pages[0];
+    // 20% of page width x 8% of page height override the extent.
+    expect(rect.width).toBeCloseTo(0.2 * page.width, 1);
+    expect(rect.height).toBeCloseTo(0.08 * page.height, 1);
+    expect(rect.x).toBeCloseTo(96 + 96, 1); // margin + 1in posOffset
+  });
+
+  it("slides an allowOverlap=0 box right past earlier overlapping boxes", () => {
+    const boxes =
+      anchorBox({ x: 457200, y: 457200, w: 914400, h: 914400, relH: "page", relV: "page", wrap: "none", fill: "AA0004" }) +
+      anchorBox({ x: 685800, y: 685800, w: 914400, h: 914400, relH: "page", relV: "page", wrap: "none", fill: "AA0005" }) +
+      anchorBox({ x: 914400, y: 914400, w: 914400, h: 914400, relH: "page", relV: "page", wrap: "none", fill: "AA0006", allowOverlap: false });
+    const { result } = layout({
+      "word/document.xml": wrapDocument(`<w:p>${boxes}<w:r><w:t>text</w:t></w:r></w:p>`),
+    });
+    const b2 = boxRect(result, "#aa0005");
+    const b3 = boxRect(result, "#aa0006");
+    // Declared at 1in; slides right to the second box's right edge (Word:
+    // staging-anchors2's z=30 locked no-overlap box lands at x=3.8in).
+    expect(b3.x).toBeCloseTo(b2.x + b2.width, 1);
+    expect(b3.y).toBeCloseTo(96, 1); // vertical position unchanged
+  });
+
+  it("wraps an earlier paragraph around an absolutely positioned float anchored later", () => {
+    // Margin-anchored square box, anchored two paragraphs later: the FIRST
+    // paragraph's lines must already flow beside it (Word reflows earlier
+    // page content around page/margin-anchored floats).
+    const host =
+      `<w:p>` +
+      anchorBox({ x: 0, y: 0, w: 914400, h: 914400, relH: "margin", relV: "margin", wrap: "square", fill: "AA0007" }) +
+      `<w:r><w:t>host paragraph</w:t></w:r></w:p>`;
+    const long = `<w:p><w:r><w:t xml:space="preserve">${"wrap me around the box ".repeat(20)}</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(long + p("middle") + host) });
+    const rect = boxRect(result, "#aa0007");
+    expect(rect.x).toBeCloseTo(96, 1);
+    expect(rect.y).toBeCloseTo(96, 1);
+    const items = result.pages[0].items;
+    const beside = items.filter(
+      (i) => i.kind === "text" && i.text.includes("wrap") && i.lineTop < rect.y + rect.height,
+    );
+    expect(beside.length).toBeGreaterThan(0);
+    for (const t of beside) {
+      if (t.kind !== "text") continue;
+      expect(t.x).toBeGreaterThanOrEqual(rect.x + rect.width - 0.01);
+    }
+  });
+
+  it("paints non-behind anchored boxes above body text and behindDoc boxes below", () => {
+    const para =
+      `<w:p>` +
+      anchorBox({ x: 0, y: 0, w: 914400, h: 457200, relH: "page", relV: "page", wrap: "none", fill: "AA0008" }) +
+      anchorBox({ x: 1828800, y: 0, w: 914400, h: 457200, relH: "page", relV: "page", wrap: "none", fill: "AA0009", behind: true }) +
+      `<w:r><w:t>text</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para) });
+    const front = boxRect(result, "#aa0008");
+    const behind = boxRect(result, "#aa0009");
+    expect(front.front).toBe(true);
+    expect(front.behind).toBeUndefined();
+    expect(behind.behind).toBe(true);
+    expect(behind.front).toBeUndefined();
+  });
+});

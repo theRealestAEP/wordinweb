@@ -258,8 +258,11 @@ export interface FieldContent {
   cachedResult: string;
 }
 
-/** What an anchored shape's coordinates are measured from. */
-export type AnchorRel = "page" | "margin" | "text" | "column";
+/** What an anchored shape's coordinates are measured from. "char" (relH=
+ * "character") measures from the anchor run's pen position; "line" (relV=
+ * "line") from the top of the line holding the anchor — both resolved from
+ * the anchor paragraph's first-pass layout. */
+export type AnchorRel = "page" | "margin" | "text" | "column" | "char" | "line";
 
 export interface ShapeLine {
   type: "line";
