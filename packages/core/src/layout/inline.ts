@@ -59,6 +59,12 @@ interface SpaceAtom {
   src?: TextSource;
   metricsFont?: FontSpec;
   rtl?: boolean;
+  /** Word does NOT break a line at a space whose next word starts with a
+   * non-breaking space: the NBSP glues leftward ACROSS the ordinary space
+   * (wild2-legal-nih-contract fill-in blanks: "of $ [12×nbsp] (lohirol)"
+   * wraps as one unit — Word moves "$" down with the underlined NBSP run
+   * instead of ending the line "…of $"). */
+  noBreak?: boolean;
 }
 interface TabAtom {
   kind: "tab";
@@ -146,6 +152,13 @@ function hyphenBreaks(word: string): number[] {
   }
   return out;
 }
+// NB (wild2-legal-nih-contract p154, tried and reverted): Word wraps long
+// hyperlink URLs at path separators ("…/Caceti/Corinazib_↵Ewizo…"), which our
+// char-granularity long-word wrap does not reproduce. Adding "/" and "_"
+// break opportunities — both globally and restricted to hyperlink runs —
+// scored WORSE across the URL-dense schedule band (mean 25.3 vs 21.7 over
+// 15 sampled pages) because it shifts other borderline wraps; Word's exact
+// URL-break rule (which separators, minimum segment) needs its own probe.
 
 /** Word small caps: lowercase letters (and all spaces, even between real
  * capitals) render as capitals at 80% of the size rounded to half-points;
@@ -214,6 +227,9 @@ export interface LineSpan {
   href?: string;
   /** Spans produced from expandable spaces (for justification). */
   isSpace?: boolean;
+  /** A space that is NOT a break opportunity (the following word begins with
+   * a non-breaking space, which glues leftward across it — see SpaceAtom). */
+  noBreak?: boolean;
   src?: TextSource;
   /** Line-metrics font when it differs from the paint font (small caps). */
   metricsFont?: FontSpec;
@@ -692,7 +708,29 @@ export function breakParagraph(
         }
         target = stop.align === "center" ? stop.pos - w / 2 : stop.pos - w;
       }
-      const width = Math.max(target - x, 2);
+      // A right/decimal tab whose ALIGNED text cannot reach its stop (the
+      // cursor is already past stop − textWidth) WRAPS to a fresh line and
+      // re-evaluates from the line start — full-width leader dots with the
+      // number right-aligned at the stop — measured from the
+      // wild2-legal-nih-contract TOC (advance-exact, 12pt Calibri, stop
+      // 10430tw): an entry 1.31pt past the target wraps ("…KIPULAMURA" +
+      // "……… 220" on the next line) while entries −0.32pt/+0.11pt from the
+      // target stay as ordinary right tabs whose number lands AT the text
+      // end ("…CUQIKAPUBAK126"). The 0.75pt tolerance splits those cases;
+      // Word never renders a bare number at the left margin.
+      const aligned = stop.align === "right" || stop.align === "decimal";
+      if (aligned && curLineWidth > 0 && x > target + 0.75) {
+        flush(false, false);
+        ai--; // re-evaluate the tab from the fresh line's start
+        continue;
+      }
+      // An aligned tab POSITIONS its run at the stop: no 2px minimum (the
+      // run must end exactly at the stop — a forced 2px push made a TOC
+      // number whose stop sits 0.5pt inside the line end overflow and wrap
+      // bare), and the run is never re-wrapped by the line-fit check (Word
+      // lets it overhang the content edge: the NIH TOC number ink ends
+      // 2.9pt past the column).
+      const width = Math.max(target - x, aligned ? 0 : 2);
       cur.push({
         x,
         width,
@@ -704,6 +742,7 @@ export function breakParagraph(
       });
       curLineWidth += width;
       x += width;
+      if (aligned) packUntilSpace = true;
       continue;
     }
     if (atom.kind === "space") {
@@ -724,7 +763,7 @@ export function breakParagraph(
       }
       // Never start a (non-first) line with a space.
       if (cur.length === 0 && lineIndex > 0) continue;
-      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, src: atom.src, metricsFont: atom.metricsFont, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
+      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, noBreak: atom.noBreak, src: atom.src, metricsFont: atom.metricsFont, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
       curLineWidth += atom.width;
       curSpaceWidth += atom.width;
       x += atom.width;
@@ -781,7 +820,9 @@ export function breakParagraph(
       let headW = 0;
       while (hi > minSpans) {
         const s = cur[hi - 1];
-        if (s.isSpace || !s.text || s.text === "\t" || s.image || s.drawing) break;
+        // A noBreak space (word glued to a following NBSP) is not a break
+        // opportunity: keep walking so the whole glued unit moves together.
+        if ((s.isSpace && !s.noBreak) || !s.text || s.text === "\t" || s.image || s.drawing) break;
         // A hyphen break opportunity ends the head: the hyphenated left part
         // stays on this line, only the current segment (+tail) moves down.
         if (s.breakAfter) break;
@@ -790,9 +831,17 @@ export function breakParagraph(
       }
       let tailW = 0;
       if (!atom.breakAfter) {
-        for (let j = ai + 1; j < atoms.length && atoms[j].kind === "frag"; j++) {
-          tailW += (atoms[j] as { width: number }).width;
-          if ((atoms[j] as FragAtom).breakAfter) break;
+        for (let j = ai + 1; j < atoms.length; j++) {
+          const t = atoms[j];
+          // The word may continue across noBreak spaces (NBSP glue).
+          if (t.kind === "space") {
+            if (!t.noBreak) break;
+            tailW += t.width;
+            continue;
+          }
+          if (t.kind !== "frag") break;
+          tailW += t.width;
+          if (t.breakAfter) break;
         }
       }
       const wordW = headW + atom.width + tailW;
@@ -821,7 +870,7 @@ export function breakParagraph(
       if (!fits) {
         // Word never breaks a word at a run boundary: the head (if any, and
         // if it isn't the whole line) moves down with the rest of the word.
-        const head = hi > minSpans && hi < cur.length && cur[hi - 1].isSpace ? cur.splice(hi) : [];
+        const head = hi > minSpans && hi < cur.length && cur[hi - 1].isSpace && !cur[hi - 1].noBreak ? cur.splice(hi) : [];
         for (const h of head) curLineWidth -= h.width;
         // A float in the MIDDLE of the column leaves free space on both sides;
         // Word fills the near side, then the far side of the SAME line band,
@@ -1555,6 +1604,17 @@ function buildAtoms(
   for (const childEl of para.children) {
     if (childEl.type === "run") pushRun(childEl);
     else for (const r of childEl.runs) pushRun(r, childEl.href ?? (childEl.anchor ? "#" + childEl.anchor : undefined));
+  }
+  // Word does not break at a space run whose next word begins with an NBSP:
+  // the NBSP glues leftward across the ordinary spaces (fill-in blanks like
+  // "of $ [nbsp×12] \xa0(lohirol)" move as ONE unit — measured against
+  // wild2-legal-nih-contract's Word PDF, p26).
+  for (let i = atoms.length - 1, nextNbsp = false; i >= 0; i--) {
+    const a = atoms[i];
+    if (a.kind === "frag") nextNbsp = a.text.charCodeAt(0) === 0xa0;
+    else if (a.kind === "space") {
+      if (nextNbsp) a.noBreak = true;
+    } else nextNbsp = false;
   }
   return { atoms, anchors };
 }

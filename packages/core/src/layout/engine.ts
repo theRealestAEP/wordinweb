@@ -1740,6 +1740,11 @@ class Engine {
     // Each individual hop may fit while the accumulated chain does not, so the
     // whole unit is measured and moved as one (wild-athabasca: a 7-paragraph
     // Heading2/3 chain leaves ~12 blank lines at a page bottom in Word).
+    // Vertical room a long keepNext paragraph must reserve BELOW its final
+    // line for the successor block (see the split note below); consumed by
+    // planBreaks so the break lands before the final line instead of moving
+    // the whole paragraph.
+    let keepNextTail = 0;
     if (!postTablePageBreak && !legacyBreakChain && props.keepNext && next !== undefined && !this.pageIsEmptyAtCursor()) {
       const effBefore = Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
       // The chain walk below is a MEASUREMENT, not placement: numberingLabel()
@@ -1758,10 +1763,20 @@ class Engine {
       while (siblings && idx < siblings.length && hops < 100) {
         hops++;
         const blk = siblings[idx];
+        if (blk.type === "table") {
+          // A table terminates the chain: the keepNext paragraph must stay
+          // with the table's LEAD block — its first row, or, when the table
+          // opens with tblHeader rows, the header block PLUS the first data
+          // row (a repeated header never sits alone at a column bottom).
+          // wild2-legal-nih-contract p29/30: a keepNext caption + 4-row
+          // HANEGABE table moves WHOLE to p30 in Word because caption +
+          // 2-line header row + first 30pt data row overflow the ~14pt left.
+          tail += prevAfter + this.tableLeadHeight(blk);
+          break;
+        }
         if (blk.type !== "paragraph") {
-          // A non-paragraph follower (e.g. a table) terminates the chain; it
-          // can paginate itself, so only its gap plus a conservative first row
-          // needs to stay.
+          // Any other non-paragraph follower terminates the chain; a
+          // conservative first-line reserve keeps with it.
           tail += prevAfter + 18;
           break;
         }
@@ -1779,6 +1794,17 @@ class Engine {
         // Collapsed gap from the end of the previous member's lines.
         const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
         if (np.keepNext) {
+          // A LONG keepNext member (4+ lines) may SPLIT internally — only its
+          // first line(s) bind backward, so it terminates the chain like a
+          // non-keepNext block (wild2 p34/35: two empty keepNext paragraphs
+          // stay at the page bottom because the following 4-line "58"
+          // paragraph splits; they only need ITS first line with them).
+          if (nb.lines.length >= 4 && np.keepLines !== true && !np.dropCap) {
+            let need = gap + nb.lines[0].height;
+            if (np.widowControl !== false) need += nb.lines[1].height;
+            tail += need;
+            break;
+          }
           // A keepNext member must itself sit fully with its own successor.
           // A drop cap paints as a float without advancing the body cursor, so
           // its glyph height is not part of the chain's required vertical room.
@@ -1797,9 +1823,20 @@ class Engine {
       this.counters = counterSnapshot;
       const needed = effBefore + lines.reduce((a, l) => a + l.height, 0) + tail;
       if (this.y + needed > this.bodyBottom && needed <= bodyHeight) {
-        spacingBefore = borderPadTop; // plain before drops at the page top; the border reserve stays
-        if (anchors.length > 0) restartOnNextColumn(borderPadTop);
-        else this.nextColumn();
+        if (lines.length >= 4 && props.keepLines !== true) {
+          // A LONG keepNext paragraph does not move whole: Word splits it like
+          // any other paragraph and binds only its FINAL line (plus the widow
+          // companion) to the successor block (wild2-legal-nih-contract
+          // p34/35: [3×w:br + "58"] + guidance table — Word leaves the first
+          // two break lines at the p34 bottom and moves [br]["58"]+table).
+          // planBreaks reserves the tail below the last line, so the break
+          // lands there and the widow rule pulls one companion line along.
+          keepNextTail = tail;
+        } else {
+          spacingBefore = borderPadTop; // plain before drops at the page top; the border reserve stays
+          if (anchors.length > 0) restartOnNextColumn(borderPadTop);
+          else this.nextColumn();
+        }
       }
     }
 
@@ -1889,7 +1926,10 @@ class Engine {
           simOnCurrentPage && this.balanceBottom !== undefined && simCol + 1 < this.cur.colXs.length;
         const overflowsHere =
           !postTablePageBreak &&
-          (simBalancing ? simY > bottom + 0.01 : simY + lines[li].fitHeight > bottom + 0.01);
+          (simBalancing
+            ? simY > bottom + 0.01
+            : simY + lines[li].fitHeight + (li === lines.length - 1 ? keepNextTail : 0) >
+              bottom + 0.01);
         // The paragraph's VERY FIRST line does not fit on the current partial
         // page: the whole paragraph moves to the next column/page. This is a
         // PHYSICAL fit, independent of widowControl — the emit loop moves line 0
@@ -2948,18 +2988,32 @@ class Engine {
     // autofits, so must we.
     const cellsDeclareWidths = tbl.rows.some((r) => r.cells.some((c) => c.props.width !== undefined));
     if (tbl.grid.length > 0 && gridTotal >= target * 0.5 && cellsDeclareWidths) {
-      // A trusted, fixed-unit (dxa/absent) grid that overruns the content
-      // column is NOT scaled down at the BODY level: Word honors the authored
-      // column widths and lets the table hang into the right margin (gatech TOC
-      // 2-col table, grid 9129tw in an 8640tw column - scaling it shifted every
-      // row ~4.6pt left). But a NESTED table that overruns its host CELL is
-      // instead autofit (min-content) to CONFINE it inside the cell - Word does
+      // A trusted grid that overruns the content column is NOT scaled down at
+      // the BODY level when the table declares an EXPLICIT fixed width (tblW
+      // dxa): Word honors the authored column widths and lets the table hang
+      // into the right margin (gatech TOC 2-col table, tblW 9129 dxa in an
+      // 8640tw column - scaling it shifted every row ~4.6pt left). A tblW AUTO
+      // table is instead CLAMPED to the space between its indent and the right
+      // text edge, the grid scaled proportionally (probe-nih-rowheight /
+      // wild2-legal-nih-contract guidance tables: gridCol+tcW 9700tw, tblInd
+      // 500tw, 9360tw column - Word's rules span 443pt = 9360-500tw, not the
+      // authored 485pt; measured from the probe PDF, left border centerline
+      // x=97.425, right 539.575). And a NESTED table that overruns its host
+      // CELL is autofit (min-content) to CONFINE it inside the cell - Word does
       // not let a nested table hang past its parent cell (staging-grid4:
       // L2/L3/L4/L5 each overrun their host cell yet Word keeps every level
       // inside the 200pt middle column). Percentage widths ARE relative to the
       // column, so base (already fit to it) stands.
+      if (!nested) {
+        const shrunk = this.shrinkToTargetWidth(tbl, base.length, available);
+        if (shrunk) return shrunk;
+      }
       if (tbl.props.widthPct === undefined && gridTotal > available) {
-        if (!nested) return [...tbl.grid];
+        if (!nested && tbl.props.width !== undefined) return [...tbl.grid];
+        if (!nested) {
+          const fit = Math.max(24, available - (tbl.props.indent ?? 0));
+          return gridTotal > fit ? tbl.grid.map((w) => (w * fit) / gridTotal) : [...tbl.grid];
+        }
         // fall through to the autofit branch to confine the nested table
       } else {
         // An auto-width table may grow beyond its authored grid when a
@@ -3006,6 +3060,64 @@ class Engine {
   }
 
   /**
+   * Word's column-shrink rule for a table whose authored per-cell preferred
+   * widths (tcW) total MORE than the table's target width: each column gives
+   * up width proportionally to its slack above its min-content width,
+   *
+   *     col_i = pref_i − (pref_i − min_i) · k,   k = (Σpref − T) / Σ(pref − min)
+   *
+   * where pref_i = the column's tcW and min_i = its min-content (widest
+   * unbreakable chunk + paragraph indents + cell margins). Word re-runs this
+   * even when the file carries a cached tblGrid, so a STALE grid (cells edited
+   * after the last full relayout) must not be trusted. Measured from
+   * wild2-legal-nih-contract's financial tables against its Word PDF:
+   *   - 5-col tcW [5280,1800,1800,1920,2300]tw, pct target 448.92pt, word-mins
+   *     [67.5,69.8,45.3,44.2,69.8]pt -> predicted [151.0,78.4,64.3,66.2,89.0]
+   *     vs Word's rendered rules [150.83,78.52,64.28,66.02,89.03]pt (p16),
+   *     while the cached grid says [156.1,74.6,62.0,69.4,86.3] (5.3pt off);
+   *   - 6-col (p17) predicted [103.5,77.8,68.9,72.7,73.2,73.6] vs measured
+   *     [103.3,77.8,68.8,72.8,73.3,73.5], cached grid 10pt off;
+   *   - the paragraph left-indent counts toward min-content (p19 4-col:
+   *     ind=720tw headers raise the money-column mins by 36pt, prediction
+   *     lands within ~2-4pt where word-only mins are 12-14pt off).
+   * Targets: pct -> pct × column width; auto -> column − table indent (the
+   * probe-nih-rowheight guidance table: tcW 9700tw in a 8860tw slot renders
+   * 443pt, not the authored 485). An EXPLICIT dxa width is honored as-is
+   * (gatech's 9129tw table hangs into the margin) — no shrink.
+   * Returns null when the rule does not apply (no overflow / dxa / no tcW).
+   */
+  private shrinkToTargetWidth(tbl: Table, nCols: number, available: number): number[] | null {
+    if (tbl.props.width !== undefined) return null;
+    const target =
+      tbl.props.widthPct !== undefined
+        ? tbl.props.widthPct * available
+        : available - (tbl.props.indent ?? 0);
+    if (target <= 0) return null;
+    const pref = new Array<number>(nCols).fill(0);
+    for (const row of tbl.rows) {
+      let g = 0;
+      for (const cell of row.cells) {
+        if (cell.props.gridSpan === 1 && g < nCols && cell.props.width !== undefined) {
+          pref[g] = Math.max(pref[g], cell.props.width);
+        }
+        g += cell.props.gridSpan;
+      }
+    }
+    for (let i = 0; i < nCols; i++) {
+      if (pref[i] <= 0) pref[i] = tbl.grid[i] ?? 0;
+      if (pref[i] <= 0) return null;
+    }
+    const sumPref = pref.reduce((a, b) => a + b, 0);
+    if (sumPref <= target + 1) return null;
+    const { minW } = this.columnMinPref(tbl, nCols);
+    const slack = pref.map((p, i) => Math.max(0, p - (minW[i] ?? 0)));
+    const sumSlack = slack.reduce((a, b) => a + b, 0);
+    if (sumSlack <= 0) return pref;
+    const k = Math.min(1, (sumPref - target) / sumSlack);
+    return pref.map((p, i) => p - slack[i] * k);
+  }
+
+  /**
    * Per-column minimum (min-content) and preferred (max-content) widths for a
    * table's autofit, INCLUDING nested tables: a cell hosting a nested table
    * contributes that table's own min/pref total to its grid column, so the
@@ -3037,7 +3149,9 @@ class Engine {
                 cellPref = Math.max(cellPref, inset + line.width);
                 let atomWidth = 0;
                 for (const span of line.spans) {
-                  if (span.isSpace || span.text === "\t") {
+                  // A noBreak space (NBSP glue) is not a break opportunity, so
+                  // it does not end the min-content chunk either.
+                  if ((span.isSpace && !span.noBreak) || span.text === "\t") {
                     cellMin = Math.max(cellMin, inset + atomWidth);
                     atomWidth = 0;
                     continue;
@@ -3211,6 +3325,29 @@ class Engine {
     if (b) tbl.props.borders = b;
   }
 
+  /** Height of a table's LEAD block for keep/orphan checks: the top border
+   * half, any leading tblHeader rows, and the first non-header row. Word
+   * never leaves the header block at a column bottom without the first data
+   * row, and a keepNext paragraph binding to a table must fit this much of
+   * it (wild2-legal-nih-contract p29/30). Measurement only — counters are
+   * snapshot/restored by the caller when numbering side effects matter. */
+  private tableLeadHeight(tbl: Table): number {
+    this.ensureTableBorders(tbl);
+    const widths = this.resolveGridWidths(tbl, this.colWidth);
+    let lead = tbl.rows.length > 0 ? this.rowBorderWidths(tbl, 0).top / 2 : 0;
+    for (let ri = 0; ri < tbl.rows.length; ri++) {
+      const laid = this.layoutRow(tbl, tbl.rows[ri], ri, widths);
+      let h = laid.height + this.rowBorderShare(tbl, ri);
+      const row = tbl.rows[ri];
+      if (row.props.height !== undefined && row.props.heightRule !== "auto") {
+        h = this.rowHeightFromTrHeight(tbl, row, ri, h);
+      }
+      lead += h;
+      if (!row.props.tblHeader) break; // header block + first data row
+    }
+    return lead;
+  }
+
   private placeTable(tbl: Table): void {
     this.clearBannerSlot();
     this.lastParaSpacingAfter = 0;
@@ -3231,6 +3368,22 @@ class Engine {
       else break;
     }
 
+    // Lay out all rows up front so vertically-merged cells can be sized across
+    // their spanned rows rather than inflating their starting row.
+    const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
+    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+
+    // tblHeader rows never sit alone at a column bottom: Word keeps the
+    // header block together with the FIRST data row, so when they don't fit
+    // jointly the whole table start moves to the next column/page
+    // (wild2-legal-nih-contract p29/30: only the 2-line header row of the
+    // HANEGABE table fit at the page bottom — Word moves the entire table).
+    if (headerRows.length > 0 && headerRows.length < tbl.rows.length && !this.pageIsEmptyAtCursor()) {
+      let lead = this.rowBorderWidths(tbl, 0).top / 2;
+      for (let ri = 0; ri <= headerRows.length; ri++) lead += rowHeights[ri];
+      if (this.y + lead > this.bodyBottom + 0.01) this.nextColumn();
+    }
+
     let segTop = this.y;
     let segPage = this.cur;
 
@@ -3238,11 +3391,6 @@ class Engine {
     // the table's outer edges, so advance half the top rule before painting
     // the first row. The matching bottom half is added after the final row.
     if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, 0).top / 2;
-
-    // Lay out all rows up front so vertically-merged cells can be sized across
-    // their spanned rows rather than inflating their starting row.
-    const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
-    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
       const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
@@ -3290,8 +3438,22 @@ class Engine {
       const noteReserve = this.rowNoteHeight(laid) + this.footnoteReserve(this.cur, this.col);
       const overhang = noteReserve > 0 || row.props.cantSplit ? 0 : ROW_OVERHANG_TOL;
       while (this.y + rowHeight > this.bodyBottom - this.rowNoteHeight(laid) + overhang + 0.01 && guard++ < 50) {
+        // w:cantSplit is honored only while the row CAN fit on one page:
+        // a row taller than the page body must split regardless (Word does —
+        // wild2-legal-nih-contract p115/116: a full-page cantSplit guidance
+        // row breaks mid-row; refusing left the row overflowing past the
+        // page edge and desynchronized pages 115-123). Word still moves such
+        // a row to a FRESH page before splitting it (its p115 starts the row
+        // at the page top), so mid-page the cantSplit is kept for one more
+        // advance() and the split happens from the page top.
+        const atColumnTop =
+          this.pageIsEmptyAtCursor() ||
+          this.y <= this.cur.bodyTop + this.rowBorderWidths(tbl, ri).top / 2 + 0.01;
+        const cantSplitHolds =
+          row.props.cantSplit === true &&
+          (rowHeight <= this.cur.bodyBottom - this.cur.bodyTop + 0.01 || !atColumnTop);
         const canSplit =
-          !row.props.cantSplit &&
+          !cantSplitHolds &&
           row.props.heightRule !== "exact" &&
           !row.props.tblHeader &&
           !row.cells.some((c) => c.props.vMerge) &&
