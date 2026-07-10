@@ -905,7 +905,10 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
   // with w:space on Word's fractional rectangle positions; zero-space table/page
   // rules match Word better on the device grid.
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
-  const w = Math.max(1 / dpr, Math.round(border.width * dpr) / dpr);
+  // Paint-only hairline floor: the model keeps the true metric width (a sz-4
+  // rule is 0.6667px) so layout math stays exact; painting below 0.75px would
+  // antialias fainter than Word, so floor here.
+  const w = Math.max(1 / dpr, Math.round(Math.max(border.width, 0.75) * dpr) / dpr);
   const snap = (v: number) => Math.round(v * dpr) / dpr;
   const place = border.space === 0 ? snap : (v: number) => v;
   // Word's dash pattern is [3 1] x line width (read from its own PDF

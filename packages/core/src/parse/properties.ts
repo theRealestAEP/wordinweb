@@ -151,9 +151,15 @@ export function parseBorder(el: XmlElement | undefined, ctx: ParseContext): Bord
     const colorAttr = attr(el, "color");
     if (colorAttr && colorAttr !== "auto") color = "#" + colorAttr;
   }
+  // Width is the TRUE metric width (sz eighth-points). Word's row advance
+  // reserves exactly this much border share: a sz-4 rule is 0.5pt, and the
+  // old 0.75px paint floor here inflated every bordered row by 0.0625pt,
+  // drifting long grids down the page (~1.5pt over doerfp p36's 24 rows,
+  // one full row over staging-longtable's 200). The hairline paint floor
+  // lives in the renderer (renderEdge), not the model.
   return {
     style,
-    width: Math.max(eighthPtToPx(sz), 0.75),
+    width: eighthPtToPx(sz),
     color,
     space: ptToPx(space),
   };

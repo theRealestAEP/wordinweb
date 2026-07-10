@@ -9,7 +9,7 @@ import {
   TabStop,
 } from "../model.js";
 import { FontSpec, TextSource } from "./types.js";
-import { TextMeasurer } from "./measure.js";
+import { TextMeasurer, quantizeQuarterPt } from "./measure.js";
 import { MathBox, layoutMath } from "./math.js";
 import { XmlElement } from "../xml.js";
 
@@ -879,6 +879,22 @@ export function breakParagraph(
     if (atom.kind === "tab") {
       const offset = bidiTabOffset(lineIndex);
       let rawStop = nextTabStop(x + offset, props.tabs, contentWidth - indentRight);
+      // TRAILING tabs on a right-aligned LTR line claim the full advance to
+      // their next default stop even PAST the right edge: the over-full line
+      // then gets no alignment shift, leaving the tab-pinned content at its
+      // absolute stops (NIH footer "…-7428<tab><tab>": Word paints the lead
+      // tabs at the unshifted 117..261pt stops and no shift occurs; the old
+      // 4px min-advance fallback left 15pt of slack that shifted the whole
+      // line 5pt right of Word's 333.4pt).
+      if (
+        physAlign === "right" &&
+        !bidiPara &&
+        rawStop.align === "left" &&
+        rawStop.pos <= x + offset + 4.01 &&
+        atoms.slice(ai + 1).every((a) => a.kind === "tab" || a.kind === "break")
+      ) {
+        rawStop = { pos: nextDefaultTab(x + offset), align: "left" };
+      }
       if (opts?.inTableCell) {
         // In a table cell an explicit tab passes THROUGH decimal stops (Word
         // reserves them for automatic numeric alignment) and lands on the
@@ -1068,6 +1084,32 @@ export function breakParagraph(
     // several frag atoms when formatting runs divide it: the "head" is the
     // part already placed on this line, the "tail" the frag atoms after this
     // one with no space between.
+    // RIGHT-aligned tabbed lead-in: when a right-aligned LTR line has flowed
+    // ONLY tabs + spaces so far, Word starts the first real content at the
+    // NEXT TAB STOP after the whitespace — the tabs stay pinned at their
+    // absolute stops and the alignment shift never happens (the trailing
+    // tabs then fill the line). Measured from the NIH contract footer
+    // ("5 tabs + 23 spaces + Dojubihe ... + 2 tabs", jc=right): Word paints
+    // the lead tabs at the unshifted 117..261pt stops and the text at
+    // 333.4pt — the 333pt default stop — where the natural flow reaches only
+    // 323.3pt; our old whole-line shift landed the text 5pt right of Word.
+    if (
+      physAlign === "right" &&
+      !bidiPara &&
+      cur.length > 0 &&
+      cur[cur.length - 1].isSpace &&
+      cur.every((s) => s.isSpace || s.text === "\t") &&
+      cur.some((s) => s.text === "\t")
+    ) {
+      const stop = nextTabStop(x, props.tabs, contentWidth - indentRight);
+      const end = lineStartX(lineIndex) + availFor(lineIndex);
+      if (stop.align === "left" && stop.pos > x + 0.5 && stop.pos + atom.width <= end + 0.01) {
+        const delta = stop.pos - x;
+        cur[cur.length - 1].width += delta;
+        curLineWidth += delta;
+        x = stop.pos;
+      }
+    }
     const lineEnd = lineStartX(lineIndex) + availFor(lineIndex);
     let fits = x + atom.width <= lineEnd + 0.01;
     if (!fits && packUntilSpace) fits = true; // continuation of a packed word

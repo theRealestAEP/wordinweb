@@ -3637,22 +3637,31 @@ class Engine {
     const want = hasExplicit ? target : Math.min(sumPref, available);
     // Scale preferred widths to the target, clamping at each column's
     // minimum and redistributing the deficit over still-flexible columns.
+    // For an EXPLICIT-width (dxa/pct) table the clamp uses Word-exact mins:
+    // columnMinPref's +2px border fudge (kept for the width-less autofit
+    // paths it calibrates) must not hold a column above Word's true
+    // min-content or it steals the difference from every other column
+    // (NIH p359 status table, tblW 4200 pct: Word clamps "Vozoruze" at
+    // 57.27pt = word + margins + rule, and col1 keeps 187.8pt so
+    // " Mimociv doluguseqesu qapabipe" stays on one line; the fudged
+    // 58.58pt min squeezed col1 to 187.3 and wrapped all three rows).
+    const clampW = hasExplicit ? minW.map((m) => Math.max(0, m - 2)) : minW;
     const widths = prefW.map((w) => (w * want) / sumPref);
     for (let pass = 0; pass < 3; pass++) {
       let deficit = 0;
       let flexible = 0;
       for (let i = 0; i < nCols; i++) {
-        if (widths[i] < minW[i]) {
-          deficit += minW[i] - widths[i];
-          widths[i] = minW[i];
+        if (widths[i] < clampW[i]) {
+          deficit += clampW[i] - widths[i];
+          widths[i] = clampW[i];
         } else {
-          flexible += widths[i] - minW[i];
+          flexible += widths[i] - clampW[i];
         }
       }
       if (deficit <= 0.5 || flexible <= 0) break;
       const k = Math.max(0, 1 - deficit / flexible);
       for (let i = 0; i < nCols; i++) {
-        if (widths[i] > minW[i]) widths[i] = minW[i] + (widths[i] - minW[i]) * k;
+        if (widths[i] > clampW[i]) widths[i] = clampW[i] + (widths[i] - clampW[i]) * k;
       }
     }
     return widths;
@@ -4117,6 +4126,14 @@ class Engine {
       if (cl) cl.spanHeight = ph;
     }
 
+    // Painted row boundaries sit on Word's quarter-point grid, FLOORED,
+    // anchored at the table segment top: parity-tables' content rows are raw
+    // 13.93pt tall, yet Word paints their rules at +13.75/+27.75 from the
+    // table top (PDF 160.55/174.30/188.30) and anchors the row TEXT to the
+    // same snapped tops (baseline gap exactly 14.00 = 27.75 - 13.75). The
+    // flow cursor stays RAW so no error accumulates (staging-longtable's
+    // quarter-exact 25.0pt rows are untouched by the snap).
+    const snapRowY = (v: number) => segTop + Math.floor((v - segTop) * 3 + 1e-6) / 3;
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const row = tbl.rows[ri];
       let laid = laidRows[ri];
@@ -4129,13 +4146,19 @@ class Engine {
         segPage = this.cur;
         const firstRowIdx = !row.props.tblHeader && headerRows.length > 0 ? 0 : ri;
         this.y += this.rowBorderWidths(tbl, firstRowIdx).top / 2;
-        // Repeat header rows at the top of the continuation page.
+        // Repeat header rows at the top of the continuation page. A repeated
+        // header advances by its FULL row height — content + border share +
+        // any trHeight floor — exactly like its first-page instance (Word's
+        // longtable header repeats at the same 25.0pt pitch on every page;
+        // advancing by the bare content height ran each continuation page
+        // 0.5pt high and drifted the 200-row grid a full row by page 9).
         if (!row.props.tblHeader) {
           for (const hr of headerRows) {
             const hIdx = tbl.rows.indexOf(hr);
             const hLaid = this.layoutRow(tbl, hr, hIdx, widths);
-            this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hLaid.height);
-            this.y += hLaid.height;
+            const hH = rowHeights[hIdx];
+            this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hH);
+            this.y += hH;
           }
         }
       };
@@ -4156,7 +4179,15 @@ class Engine {
       // makes Word move a whole row (parity2-nestedtables moves a 56pt row with
       // 31pt left), so genuine page breaks are unaffected.
       const noteReserve = this.rowNoteHeight(laid) + this.footnoteReserve(this.cur, this.col);
-      const overhang = noteReserve > 0 || row.props.cantSplit ? 0 : ROW_OVERHANG_TOL;
+      // The overhang allowance exists because a content row's trailing
+      // line-leading and bottom rule may sit in the margin band. An
+      // EXACT-height row has no leading — its box bottom is hard content —
+      // so it gets no allowance (staging-longtable p8/p9: Word moves the
+      // 240-exact row #195 that would overhang the body bottom by 1pt).
+      const overhang =
+        noteReserve > 0 || row.props.cantSplit || row.props.heightRule === "exact"
+          ? 0
+          : ROW_OVERHANG_TOL;
       while (this.y + rowHeight > this.bodyBottom - this.rowNoteHeight(laid) + overhang + 0.01 && guard++ < 50) {
         // w:cantSplit is honored only while the row CAN fit on one page:
         // a row taller than the page body must split regardless (Word does —
