@@ -2721,22 +2721,39 @@ class Engine {
           }
         } else if (pendingPageFrame) {
           // First paragraph after a PAGE frame: it was laid in the frame's
-          // band. If its first line's natural extent touches the frame box,
-          // Word wraps it BELOW the frame instead (stack).
+          // band. The line's LAID interval - from its start (leading
+          // whitespace included: NIH's admin line is pushed right by 23
+          // spaces, its ink sits right of the centered number, and Word
+          // still stacks it) to its last ink (trailing whitespace/tabs are
+          // free: dense's trailing tabs don't collide with its right-aligned
+          // number) - decides: touch the frame box, wrap BELOW; clear it,
+          // share the band.
           const pf = pendingPageFrame;
           pendingPageFrame = null;
           const first = broken.lines[0];
-          const spans = first ? first.spans.filter((s) => s.text && s.text.trim().length > 0) : [];
-          const collides =
-            spans.length > 0 &&
-            Math.min(...spans.map((s) => s.x)) < pf.x1 + 4 &&
-            Math.max(...spans.map((s) => s.x + s.width)) > pf.x0 - 4;
-          if (collides) {
+          const laid = first
+            ? first.spans.filter((s) => (s.text && s.text.length > 0 && s.text !== "\t") || s.image || s.drawing)
+            : [];
+          const ink = laid.filter((s) => s.image || s.drawing || (s.text && s.text.trim().length > 0));
+          // Share the band ONLY when the follower has ink whose laid interval
+          // (line start through last ink; leading whitespace counts, trailing
+          // whitespace/tabs are free) clears the frame box — dense's left
+          // footer text beside its right-aligned "302", every page. An empty
+          // or colliding follower keeps sequential flow: the frame consumes
+          // its own line (NIH: number line above the centered admin line and
+          // its surrounding empties, PDF-verified at 419 Word pages).
+          const shares =
+            ink.length > 0 &&
+            !(
+              Math.min(...laid.map((s) => s.x)) < pf.x1 + 4 &&
+              Math.max(...ink.map((s) => s.x + s.width)) > pf.x0 - 4
+            );
+          if (shares) {
+            y = Math.max(y, pf.bottom);
+          } else {
             const dy = pf.bottom - pf.top;
             for (const it of items.slice(paraItemsStart)) offsetItem(it, 0, dy);
             y += dy;
-          } else {
-            y = Math.max(y, pf.bottom);
           }
         }
       } else {
