@@ -1110,11 +1110,13 @@ class Engine {
    * (page/margin-anchored frames reflow earlier content around them). */
   private consumedFrames = new WeakSet<object>();
 
-  /** Line bounds callback honoring this page's floating-image exclusions. */
-  private makeBoundsAt(paraTop: number) {
-    const page = this.cur;
-    const colX = this.colX;
-    const colW = this.colWidth;
+  /** Line bounds callback honoring this page's floating-image exclusions.
+   * `frame` overrides the target page and column box (table-cell frames:
+   * floats live in frame coordinates on the cell's fake page). */
+  private makeBoundsAt(paraTop: number, frame?: { page: InternalPage; colX: number; colW: number }) {
+    const page = frame?.page ?? this.cur;
+    const colX = frame?.colX ?? this.colX;
+    const colW = frame?.colW ?? this.colWidth;
     return (yOffset: number, estHeight: number) => {
       const y0 = paraTop + yOffset;
       const y1 = y0 + estHeight;
@@ -1165,7 +1167,11 @@ class Engine {
         if (bottom > y0) return { x: 0, width: colW, skipTo: bottom - paraTop + 2 };
         return { x: 0, width: colW };
       }
-      return { x: segs[0].x, width: segs[0].width, segments: segs };
+      let clearY: number | undefined;
+      for (const f of floats) {
+        if (f.mode === "square" && overlaps(f)) clearY = Math.max(clearY ?? 0, f.y1 - paraTop + 2);
+      }
+      return { x: segs[0].x, width: segs[0].width, segments: segs, clearY };
     };
   }
 
@@ -2592,6 +2598,10 @@ class Engine {
      * paragraph shares its band unless the text's natural extent collides
      * with the frame box (then it stacks below). */
     overlayPageFrame?: boolean,
+    /** Table-cell content: anchored shapes wrap the cell's own text (Word
+     * floats a cell-anchored text box and flows the paragraph around it -
+     * staging-tblextreme "Box 202"), and explicit tabs skip decimal stops. */
+    inCell?: boolean,
   ): { items: PageItem[]; height: number } {
     const items: PageItem[] = [];
     let y = 0;
@@ -2660,7 +2670,6 @@ class Engine {
         const flowPrevAfter = framePrevAfter;
         const paraItemsStart = items.length;
         const label = this.numberingLabel(props, block);
-        const broken = breakParagraph(this.doc, this.measurer, block, width, fields, label, undefined, this.sp?.docGridLinePitch);
         let spacingBefore = props.spacingBefore ?? 0;
         let spacingAfter = props.spacingAfter ?? 0;
         // Contextual spacing between same-style neighbors applies inside
@@ -2677,10 +2686,36 @@ class Engine {
         y += Math.max(spacingBefore, framePrevAfter) - framePrevAfter;
         framePrevAfter = spacingAfter;
         const top = y;
-        if (broken.anchors.length > 0) {
+        // Cell-anchored floats are emitted BEFORE the paragraph breaks so the
+        // paragraph's own lines wrap around them (Box 202 in
+        // staging-tblextreme). Other frames keep the emit-after order.
+        const preAnchors = inCell ? this.collectAnchors(block) : [];
+        if (preAnchors.length > 0) {
+          this.emitAnchors(preAnchors, fake, fields, 0, top, origin);
+        }
+        const cellBounds =
+          inCell && (this.floats.get(fake)?.length ?? 0) > 0
+            ? this.makeBoundsAt(top, { page: fake, colX: 0, colW: width })
+            : undefined;
+        const broken = breakParagraph(
+          this.doc,
+          this.measurer,
+          block,
+          width,
+          fields,
+          label,
+          cellBounds,
+          this.sp?.docGridLinePitch,
+          inCell ? { inTableCell: true } : undefined,
+        );
+        if (!inCell && broken.anchors.length > 0) {
           this.emitAnchors(broken.anchors, fake, fields, 0, top, origin);
         }
         for (const line of broken.lines) {
+          // A line pushed down by a cell-anchored float (skipTo/clearY in the
+          // breaker) carries the jump as floatYOffset — apply it here like the
+          // body flow does, or the line paints back inside the float band.
+          y += line.floatYOffset ?? 0;
           this.emitLine(line, fake, 0, y);
           y += line.height;
         }
@@ -2766,6 +2801,7 @@ class Engine {
       }
     }
     if (pendingPageFrame) y = Math.max(y, pendingPageFrame.bottom);
+    this.floats.delete(fake);
     return { items, height: y };
   }
 
@@ -2826,7 +2862,9 @@ class Engine {
           behind: shape.behind,
           src: shape.srcDrawing,
         });
-        if (shape.wrap !== "none" && page.physIndex !== -1) {
+        // Frames (physIndex -1, e.g. table cells) register floats too so the
+        // frame's own text wraps; layoutFrame clears the entry when done.
+        if (shape.wrap !== "none") {
           const list = this.floats.get(page) ?? [];
           const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
           list.push({
@@ -3008,7 +3046,7 @@ class Engine {
         }
 
         // Body text flows around a wrapping text box (square / tight / topAndBottom).
-        if (shape.wrap && shape.wrap !== "none" && !shape.behind && page.physIndex !== -1) {
+        if (shape.wrap && shape.wrap !== "none" && !shape.behind) {
           const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
           const list = this.floats.get(page) ?? [];
           list.push({
@@ -3141,14 +3179,14 @@ class Engine {
       // column widths and lets the table hang into the right margin (gatech TOC
       // 2-col table, grid 9129tw in an 8640tw column - scaling it shifted every
       // row ~4.6pt left). But a NESTED table that overruns its host CELL is
-      // instead autofit (min-content) to CONFINE it inside the cell - Word does
-      // not let a nested table hang past its parent cell (staging-grid4:
-      // L2/L3/L4/L5 each overrun their host cell yet Word keeps every level
-      // inside the 200pt middle column). Percentage widths ARE relative to the
-      // column, so base (already fit to it) stands.
+      // instead CONFINED inside the cell - Word does not let a nested table
+      // hang past its parent cell (staging-grid4: L2/L3/L4/L5 each overrun
+      // their host cell yet Word keeps every level inside the 200pt middle
+      // column). Percentage widths ARE relative to the column, so base
+      // (already fit to it) stands.
       if (tbl.props.widthPct === undefined && gridTotal > available) {
         if (!nested) return [...tbl.grid];
-        // fall through to the autofit branch to confine the nested table
+        return this.confineNestedGrid(tbl, base, available);
       } else {
         // An auto-width table may grow beyond its authored grid when a
         // column's minimum content width is larger. In staging-tblextreme the
@@ -3194,6 +3232,67 @@ class Engine {
   }
 
   /**
+   * Confine a trusted-grid nested table that overruns its host cell. Word
+   * clamps the table's PAINTED border box to the cell content width and
+   * scales the authored grid proportionally (staging-tblextreme: the [1400,
+   * 1400] footnote table in a 2584tw cell renders 85.4/85.0px — the grid
+   * ratio, not the content ratio). Columns whose content is itself a nested
+   * table cannot shrink below that table's own minimum: they are raised to
+   * it and the excess comes out of the columns that still have slack over
+   * their text minimum (staging-grid4: L2 keeps col1 at the L3 minimum,
+   * 175.7px, and "side A/B" absorbs the whole loss, 123.9 -> 71.4px).
+   */
+  private confineNestedGrid(tbl: Table, base: number[], available: number): number[] {
+    const half = (b?: { style: string; width: number }) =>
+      b && b.style !== "none" ? this.borderPaintWidth(b) / 2 : 0;
+    const want = Math.max(8, available - half(tbl.props.borders?.left) - half(tbl.props.borders?.right));
+    const total = base.reduce((a, b) => a + b, 0);
+    if (total <= 0) return base;
+    const widths = base.map((w) => (w * want) / total);
+    const { minW, hardMinW } = this.columnMinPref(tbl, widths.length);
+    for (let pass = 0; pass < 3; pass++) {
+      let deficit = 0;
+      for (let i = 0; i < widths.length; i++) {
+        if (widths[i] < hardMinW[i] - 0.5) {
+          deficit += hardMinW[i] - widths[i];
+          widths[i] = hardMinW[i];
+        }
+      }
+      if (deficit <= 0.5) break;
+      // Fund the raise from columns above their text minimum, proportionally
+      // to their slack; text columns may end up narrower than their longest
+      // word (Word lets the word overhang the rule: grid4 L3 "consectetur").
+      let flex = 0;
+      for (let i = 0; i < widths.length; i++) {
+        if (widths[i] > hardMinW[i]) flex += Math.max(0, widths[i] - Math.min(minW[i], widths[i]));
+      }
+      if (flex <= 0) break;
+      const k = Math.min(1, deficit / flex);
+      for (let i = 0; i < widths.length; i++) {
+        if (widths[i] > hardMinW[i]) {
+          const slack = Math.max(0, widths[i] - Math.min(minW[i], widths[i]));
+          widths[i] -= slack * k;
+          deficit -= slack * k;
+        }
+      }
+      if (deficit <= 0.5) break;
+      // Still short: shrink every non-hard column toward a bare floor.
+      const floor = 12;
+      let flex2 = 0;
+      for (let i = 0; i < widths.length; i++) {
+        if (widths[i] > hardMinW[i]) flex2 += Math.max(0, widths[i] - floor);
+      }
+      if (flex2 <= 0) break;
+      const k2 = Math.min(1, deficit / flex2);
+      for (let i = 0; i < widths.length; i++) {
+        if (widths[i] > hardMinW[i]) widths[i] -= Math.max(0, widths[i] - floor) * k2;
+      }
+      break;
+    }
+    return widths;
+  }
+
+  /**
    * Per-column minimum (min-content) and preferred (max-content) widths for a
    * table's autofit, INCLUDING nested tables: a cell hosting a nested table
    * contributes that table's own min/pref total to its grid column, so the
@@ -3202,11 +3301,15 @@ class Engine {
    * enclosing "holds L…" column). Spanned cells distribute their demand evenly
    * across the covered columns.
    */
-  private columnMinPref(tbl: Table, nCols: number): { minW: number[]; prefW: number[] } {
+  private columnMinPref(tbl: Table, nCols: number): { minW: number[]; prefW: number[]; hardMinW: number[] } {
     const margins = this.cellMarginsOf(tbl);
     const pad = (margins.left ?? 0) + (margins.right ?? 0) + 2;
     const minW = new Array<number>(nCols).fill(pad + 8);
     const prefW = new Array<number>(nCols).fill(pad + 8);
+    // Hard (non-negotiable) minimum: the demand of nested tables only. Word
+    // squeezes TEXT below its longest word when a cell must shrink, but never
+    // squeezes a nested table below its own minimum (grid4 L2/L3).
+    const hardMinW = new Array<number>(nCols).fill(0);
     for (const row of tbl.rows) {
       let gridPos = 0;
       for (const cell of row.cells) {
@@ -3216,6 +3319,8 @@ class Engine {
           const cpad = (cm.left ?? 0) + (cm.right ?? 0) + 2;
           let cellMin = 0;
           let cellPref = 0;
+          let cellHard = 0;
+          let cellMinTabExact = 0;
           for (const block of cell.blocks) {
             if (block.type === "paragraph") {
               const props = this.doc.effectiveParaProps(block);
@@ -3224,8 +3329,19 @@ class Engine {
               for (const line of wide.lines) {
                 cellPref = Math.max(cellPref, inset + line.width);
                 let atomWidth = 0;
+                let hasTab = false;
                 for (const span of line.spans) {
-                  if (span.isSpace || span.text === "\t") {
+                  // A tab is NOT a shrink opportunity: Word keeps the whole
+                  // tabbed segment intact when autofitting, so a cell with a
+                  // right tab at 3200tw demands the full 3200tw run
+                  // (staging-tblextreme: Word widens the L/C...R column to
+                  // the tab layout, 2800 -> ~3486tw).
+                  if (span.text === "\t") {
+                    atomWidth += span.width;
+                    hasTab = true;
+                    continue;
+                  }
+                  if (span.isSpace) {
                     cellMin = Math.max(cellMin, inset + atomWidth);
                     atomWidth = 0;
                     continue;
@@ -3236,26 +3352,44 @@ class Engine {
                     atomWidth = 0;
                   }
                 }
+                if (hasTab && line.spans.length > 0) {
+                  // Word's tab-line demand includes the end-of-cell mark (one
+                  // space glyph): the staging-tblextreme grid's col1 content
+                  // width measures 3250tw = 3200 (right tab) + 50 (mark).
+                  // Track it separately: this demand is content-exact (no +2
+                  // border fudge) so the resulting content width matches
+                  // Word's to the pixel - the wrap strip beside Box 202 and
+                  // the R/12.5 tab lines are all razor-margin fits.
+                  const last = line.spans[line.spans.length - 1];
+                  const tabLine = inset + atomWidth + this.measurer.width(" ", last.font);
+                  cellMinTabExact = Math.max(cellMinTabExact, tabLine);
+                }
                 cellMin = Math.max(cellMin, inset + atomWidth);
               }
             } else {
               const t = this.measureTableWidths(block);
               cellPref = Math.max(cellPref, t.pref);
               cellMin = Math.max(cellMin, t.min);
+              cellHard = Math.max(cellHard, t.min);
             }
           }
           cellMin += cpad;
           cellPref += cpad;
+          if (cellHard > 0) cellHard += cpad;
+          if (cellMinTabExact > 0) {
+            cellMin = Math.max(cellMin, cellMinTabExact + (cm.left ?? 0) + (cm.right ?? 0));
+          }
           const span2 = Math.min(span, nCols - gridPos);
           for (let k = 0; k < span2; k++) {
             minW[gridPos + k] = Math.max(minW[gridPos + k], cellMin / span2);
             prefW[gridPos + k] = Math.max(prefW[gridPos + k], cellPref / span2);
+            hardMinW[gridPos + k] = Math.max(hardMinW[gridPos + k], cellHard / span2);
           }
         }
         gridPos += span;
       }
     }
-    return { minW, prefW };
+    return { minW, prefW, hardMinW };
   }
 
   /**
@@ -3651,15 +3785,47 @@ class Engine {
       it.kind === "rect" || it.kind === "image" ? it.y :
       it.kind === "edge" ? Math.min(it.y1, it.y2) : 0;
 
+    // Word cuts every cell of the row at the same y - the page cut where the
+    // split row's bottom rule is drawn - and keeps a text line while MOST of
+    // it sits above that cut, letting the rest overhang the rule into the
+    // margin band (staging-tblextreme: Word keeps "dolor sit" whose 19px line
+    // box crosses the drawn rule by 8px, carrying only "amet,"/"consectetur"
+    // - but a nested deep row overhanging by 15 of 21px moves whole,
+    // staging-grid4 p2/p3). Non-text items (fills, nested-table rules,
+    // images) still need to fit fully to stay.
     const partitions = laid.cells.map((cell) => {
       const contentBottom = cell.items.length > 0 ? Math.max(...cell.items.map(bottomOf)) : 0;
       const trailing = Math.max(0, cell.height - contentBottom);
-      const cutoff = avail - trailing;
+      // A text line inside a NESTED table is atomic with its nested row: the
+      // cut must fall on a nested-row rule, so the whole band (text + rules)
+      // moves together (staging-grid4: "deep row 32" moves whole to page 3;
+      // its bare line would have fit). The nested rows are recognizable by
+      // their horizontal rules.
+      const hRules = cell.items
+        .filter(
+          (it): it is Extract<PageItem, { kind: "edge" }> =>
+            it.kind === "edge" && Math.abs(it.y1 - it.y2) < 0.01 && Math.abs(it.x2 - it.x1) > 4,
+        )
+        .map((it) => it.y1)
+        .sort((a, b) => a - b);
+      const bandBottom = (top: number, bottom: number): number | undefined => {
+        if (hRules.length < 2 || top < hRules[0] - 0.5 || bottom > hRules[hRules.length - 1] + 0.5) {
+          return undefined;
+        }
+        for (const r of hRules) if (r >= bottom - 0.5) return r;
+        return undefined;
+      };
+      const keeps = (it: PageItem) => {
+        if (it.kind !== "text") return bottomOf(it) <= avail + 0.5;
+        const bb = bandBottom(topOf(it), bottomOf(it));
+        if (bb !== undefined) return bb <= avail + 0.5;
+        return (topOf(it) + bottomOf(it)) / 2 <= avail;
+      };
       return {
         cell,
         trailing,
-        keep: cell.items.filter((it) => bottomOf(it) <= cutoff + 0.5),
-        rest: cell.items.filter((it) => bottomOf(it) > cutoff + 0.5),
+        keep: cell.items.filter((it) => keeps(it)),
+        rest: cell.items.filter((it) => !keeps(it)),
       };
     });
 
@@ -3858,6 +4024,8 @@ class Engine {
         fields ?? this.fieldCtx(),
         undefined,
         cell.props.verticalAlign === "bottom",
+        undefined,
+        true,
       );
       for (const it of items) offsetItem(it, (m.left ?? 0), (m.top ?? 0));
       const cellHeight = height + (m.top ?? 0) + (m.bottom ?? 0);
@@ -3880,6 +4048,10 @@ class Engine {
         cell.blocks,
         frameWidth,
         fields ?? this.fieldCtx(),
+        undefined,
+        undefined,
+        undefined,
+        true,
       );
       const innerCellWidth = Math.max(4, w - (m.left ?? 0) - (m.right ?? 0));
       let crossOffset = 0;
