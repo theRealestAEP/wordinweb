@@ -35,6 +35,11 @@ export interface Border {
   color: string;
   /** Gap between border and content in px (w:space, points in OOXML). */
   space: number;
+  /** Declared stroke width in px BEFORE the 0.75px paint floor (w:sz/8 pt).
+   * Word's LAYOUT math (table row border share) uses this true width — a
+   * sz-4 rule contributes 0.5pt, not the floored 0.5625pt (phase23 p66:
+   * 45 rows drift 2.5px down without it). */
+  rawWidth?: number;
 }
 
 export interface ParagraphBorders {
@@ -64,6 +69,9 @@ export interface TabStop {
   pos: number;
   align: "left" | "center" | "right" | "decimal" | "bar";
   leader: "none" | "dot" | "hyphen" | "underscore" | "middleDot";
+  /** w:val="clear": removes the inherited stop at this pos when tab lists
+   * merge down the style chain (never a live stop itself). */
+  clear?: boolean;
 }
 
 // ---------- run properties ----------
@@ -329,8 +337,17 @@ export interface ShapeTextbox {
   dist?: { t: number; b: number; l: number; r: number };
   /** a:xfrm rotation, degrees clockwise (rotates the whole box). */
   rotation?: number;
-  /** Text insets px (bodyPr lIns/tIns/rIns/bIns); default 9.6/4.8. */
+  /** Text insets px (bodyPr lIns/tIns/rIns/bIns); default 9.6/4.8. For
+   * non-rect preset geometries these INCLUDE the geometry's text-rectangle
+   * insets (ellipse: inscribed rect; diamond: middle-half rect). */
   insets?: { l: number; t: number; r: number; b: number };
+  /** Non-rect preset geometry: paint this outline (in a viewW x viewH space
+   * scaled to the shape box) instead of a rectangle. */
+  geom?: { d: string; viewW: number; viewH: number };
+  /** bodyPr a:noAutofit: the box does NOT grow with its text — Word hides
+   * whole lines that stick out past the shape bottom (phase23 p12 ovals:
+   * "Was 0 / B" visible, the wrapped tail rows hidden). */
+  clipText?: boolean;
 }
 
 /** WordArt (VML v:textpath, e.g. a "CONFIDENTIAL" watermark): text scaled to

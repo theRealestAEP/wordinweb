@@ -3303,3 +3303,29 @@ describe("line metric rules (doerfp p8 / NIH p342)", () => {
     expect(nextLine.lineTop - itemLine.lineTop).toBeCloseTo(itemLine.font.size * 1.15, 1);
   });
 });
+
+describe("table row border share", () => {
+  it("advances rows by the DECLARED sz-4 rule width (0.5pt), not the paint floor", () => {
+    // phase23 p66: 45 single-line rows with sz-4 rules drift 2.5px down when
+    // the 0.75px hairline paint floor leaks into the row advance.
+    const rows = Array.from(
+      { length: 2 },
+      (_, i) => `<w:tr><w:tc><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:t>row${i}</w:t></w:r></w:p></w:tc></w:tr>`,
+    ).join("");
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:tbl><w:tblPr><w:tblBorders>
+           <w:top w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/>
+           <w:left w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>
+           <w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/>
+         </w:tblBorders></w:tblPr>
+         <w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>${rows}</w:tbl>` + p("after"),
+      ),
+    });
+    const texts = result.pages[0].items.filter((it) => it.kind === "text" && /^row/.test(it.text));
+    if (texts.length !== 2 || texts[0].kind !== "text" || texts[1].kind !== "text") throw new Error("rows not found");
+    const lineH = texts[0].font.size * 1.15; // ApproxMeasurer single line
+    // Row pitch = content line + the sz-4 rule's TRUE width (0.5pt = 2/3px).
+    expect(texts[1].lineTop - texts[0].lineTop).toBeCloseTo(lineH + 2 / 3, 2);
+  });
+});
