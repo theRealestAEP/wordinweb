@@ -585,6 +585,35 @@ describe("layout engine", () => {
     expect(pageText(result, 2)).toContain("third page");
   });
 
+  it("flows a table's continuation row into the next column at that column's x", () => {
+    // staging-breaks p4: a 2-row table in a multi-column section whose second
+    // row does not fit in column 1 flows into column 2. The continuation row
+    // must paint at COLUMN 2's x, not the original column's - a table split
+    // across columns used to keep the first column's x0 and overlap row 1 on
+    // top of row 0.
+    const filler = Array.from({ length: 9 }, (_, i) => p(`Filler line ${i}`)).join("");
+    const table =
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="1400"/><w:gridCol w:w="1400"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="2800" w:type="dxa"/><w:gridSpan w:val="2"/></w:tcPr>` +
+      `<w:p><w:r><w:t>ROWZERO</w:t></w:r></w:p></w:tc></w:tr>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="1400" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>AA</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="1400" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>BB</w:t></w:r></w:p></w:tc></w:tr>` +
+      `</w:tbl>`;
+    const section =
+      `<w:p><w:pPr><w:sectPr><w:cols w:num="2" w:space="720"/>` +
+      `<w:pgSz w:w="12240" w:h="4000"/>` +
+      `<w:pgMar w:top="720" w:right="1440" w:bottom="720" w:left="1440"/></w:sectPr></w:pPr></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(filler + table + section) });
+    const rowZero = result.pages[0].items.find((i) => i.kind === "text" && i.text === "ROWZERO");
+    const aa = result.pages[0].items.find((i) => i.kind === "text" && i.text === "AA");
+    expect(rowZero?.kind).toBe("text");
+    expect(aa?.kind).toBe("text");
+    if (rowZero?.kind !== "text" || aa?.kind !== "text") return;
+    // Row 1 ("AA") lands in a later column, well to the right of row 0.
+    expect(aa.x).toBeGreaterThan(rowZero.x + 200);
+  });
+
   it("drops space-before when a keepLines paragraph is moved to a column top", () => {
     // A multi-line keepLines paragraph with a large space-before that cannot fit
     // in the remaining space at the bottom of a filled column is moved whole to

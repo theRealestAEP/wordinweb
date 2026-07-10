@@ -4201,11 +4201,20 @@ class Engine {
     const colWidth = this.colWidth;
     const widths = this.resolveGridWidths(tbl, colWidth);
     const tableWidth = widths.reduce((a, b) => a + b, 0);
-    let x0 = this.colX + (tbl.props.indent ?? 0);
-    if (tbl.props.alignment === "center") x0 = this.colX + (colWidth - tableWidth) / 2;
-    else if (tbl.props.alignment === "right") x0 = this.colX + colWidth - tableWidth;
-    // w:bidiVisual (RTL table) hugs the right margin unless explicitly aligned.
-    else if (tbl.props.bidiVisual) x0 = this.colX + colWidth - tableWidth;
+    // x0 must follow the CURRENT column: when a table splits across the columns
+    // of a multi-column section, the continuation rows paint in the next column,
+    // so recompute from this.colX after every advance() (staging-breaks p4: a
+    // 2-row table whose second row flows into column 2 - without this the
+    // continuation row painted at column 1's x, overlapping the first row). A
+    // page split keeps the same colX, so single-column tables are unaffected.
+    const computeX0 = () => {
+      const cw = this.colWidth;
+      if (tbl.props.alignment === "center") return this.colX + (cw - tableWidth) / 2;
+      // w:bidiVisual (RTL table) hugs the right margin unless explicitly aligned.
+      if (tbl.props.alignment === "right" || tbl.props.bidiVisual) return this.colX + cw - tableWidth;
+      return this.colX + (tbl.props.indent ?? 0);
+    };
+    let x0 = computeX0();
 
     const headerRows: TableRow[] = [];
     for (const row of tbl.rows) {
@@ -4250,6 +4259,7 @@ class Engine {
         this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
         this.nextColumn();
         this.clearBannerSlot();
+        x0 = computeX0();
         segTop = this.y;
         segPage = this.cur;
         const firstRowIdx = !row.props.tblHeader && headerRows.length > 0 ? 0 : ri;
