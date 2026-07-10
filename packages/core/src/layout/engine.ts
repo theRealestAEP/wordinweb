@@ -1445,6 +1445,13 @@ class Engine {
       if (consumedHere && !visible) return;
     }
     const label = this.numberingLabel(props, para);
+    // relH="character"/relV="line" anchors resolve against the anchor run's
+    // pen position / line box, known only after the paragraph's first-pass
+    // break — they are emitted separately (see emitCharLineAnchors below).
+    const isCharLine = (s: Shape): boolean =>
+      ("hRel" in s && s.hRel === "char") || ("vRel" in s && s.vRel === "line");
+    const charLineAnchors = anchors.filter(isCharLine);
+    const immediateAnchors = anchors.filter((s) => !isCharLine(s));
     let anchorMark: { page: InternalPage; items: number; floats: number } | null = null;
     const emitParaAnchors = (paraTop: number): void => {
       if (anchors.length === 0) return;
@@ -1453,7 +1460,7 @@ class Engine {
         items: this.cur.items.length,
         floats: (this.floats.get(this.cur) ?? []).length,
       };
-      this.emitAnchors(anchors, this.cur, this.fieldCtx(), this.colX, paraTop);
+      this.emitAnchors(immediateAnchors, this.cur, this.fieldCtx(), this.colX, paraTop);
     };
     const retractParaAnchors = (): void => {
       if (lookMark) {
@@ -1530,6 +1537,41 @@ class Engine {
     emitParaAnchors(paraTopEstimate);
     let broken = breakNow(paraTopEstimate);
 
+    // relH="character"/relV="line" shapes: Word places them from the
+    // paragraph's FIRST-PASS layout — the anchor run's pen x and its line's
+    // top — then reflows the paragraph around the frozen box. The final
+    // anchor-run position may differ; the box does not follow it
+    // (staging-anchors2: the purple box sits at the pass-1 "…page. " end on
+    // line 2 while the reflowed anchor run lands far right of it).
+    const emitCharLineAnchors = (paraTop: number): void => {
+      if (charLineAnchors.length === 0) return;
+      // Line tops of the current (pre-charLine) pass.
+      const tops: number[] = [];
+      let t = paraTop;
+      for (const ln of broken.lines) {
+        t += ln.floatYOffset ?? 0;
+        tops.push(t);
+        t += ln.height;
+      }
+      let reBreak = false;
+      for (const s of charLineAnchors) {
+        const pt = broken.anchorPoints.get(s);
+        const li = Math.min(pt?.line ?? 0, Math.max(tops.length - 1, 0));
+        const charX = this.colX + (pt?.x ?? 0);
+        const lineY = tops[li] ?? paraTop;
+        this.emitAnchors(
+          [s],
+          this.cur,
+          this.fieldCtx(),
+          "hRel" in s && s.hRel === "char" ? charX : this.colX,
+          "vRel" in s && s.vRel === "line" ? lineY : paraTop,
+        );
+        if ("wrap" in s && s.wrap && s.wrap !== "none" && !("behind" in s && s.behind)) reBreak = true;
+      }
+      // The new floats narrow this paragraph's own lines.
+      if (reBreak) broken = breakNow(paraTop);
+    };
+
     // Word anchor reflow (parity2-textboxes): a topAndBottom float anchored
     // at the top of the NEXT paragraph is positioned from that paragraph's
     // UNDISPLACED spot — immediately below this paragraph — and this
@@ -1541,33 +1583,47 @@ class Engine {
     // height below the displaced heading).
     let lookMark: { page: InternalPage; items: number; floats: number; shapes: Shape[] } | null = null;
     let lookFrame: object | null = null;
+    const linesH = broken.lines.reduce((a, l) => a + l.height, 0);
+    // Predict from the COLLAPSED paragraph top (paraTopEstimate carries the
+    // raw spacing-before; the real placement subtracts the previous
+    // spacing-after overlap) — Word anchors the box at this paragraph's
+    // line bottom exactly, with no inter-paragraph spacing added.
+    const effTop = this.y + Math.max(rawSpacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
+    const paraBottom = effTop + linesH;
+    const ensureLookMark = (): void => {
+      if (lookMark) return;
+      lookMark = {
+        page: this.cur,
+        items: this.cur.items.length,
+        floats: (this.floats.get(this.cur) ?? []).length,
+        shapes: [],
+      };
+    };
     if (next?.type === "paragraph" && broken.lines.length > 0) {
-      const linesH = broken.lines.reduce((a, l) => a + l.height, 0);
-      // Predict from the COLLAPSED paragraph top (paraTopEstimate carries the
-      // raw spacing-before; the real placement subtracts the previous
-      // spacing-after overlap) — Word anchors the box at this paragraph's
-      // line bottom exactly, with no inter-paragraph spacing added.
-      const effTop = this.y + Math.max(rawSpacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
-      const predictedNextTop = effTop + linesH;
-      const paraBottom = predictedNextTop;
+      const predictedNextTop = paraBottom;
       const hits = this.collectAnchors(next).filter((s) => {
-        if (!("wrap" in s) || s.wrap !== "topAndBottom") return false;
+        if (!("wrap" in s) || (s.wrap !== "topAndBottom" && s.wrap !== "square")) return false;
         if ("vAlign" in s && s.vAlign) return false;
         const h = "height" in s ? (s.height ?? 0) : 0;
         if (h <= 0) return false;
+        // Square floats keep the original topAndBottom semantics PLUS: they
+        // also wrap this paragraph when their band (including wrap distance)
+        // merely grazes its last line (staging-anchors2: the heading splits
+        // around the pct-sized box anchored at the next paragraph's top).
+        if (s.wrap === "square") {
+          if ("behind" in s && s.behind) return false;
+          if (("hRel" in s && s.hRel === "char") || s.vRel === "line") return false;
+        }
         const top =
           s.vRel === "page" ? s.y :
           s.vRel === "margin" ? this.sp.marginTop + s.y :
           predictedNextTop + s.y;
-        return top <= paraBottom + 0.25 && top + h >= paraTopEstimate - 0.25;
+        const d = s.wrap === "square" && "dist" in s && s.dist ? s.dist : { t: 0, b: 0 };
+        return top - d.t <= paraBottom + 0.25 && top + h + d.b >= paraTopEstimate - 0.25;
       });
       if (hits.length > 0) {
-        lookMark = {
-          page: this.cur,
-          items: this.cur.items.length,
-          floats: (this.floats.get(this.cur) ?? []).length,
-          shapes: hits,
-        };
+        ensureLookMark();
+        lookMark!.shapes.push(...hits);
         this.emitAnchors(hits, this.cur, this.fieldCtx(), this.colX, predictedNextTop);
         for (const s of hits) this.consumedAnchors.add(s);
         broken = breakNow(paraTopEstimate);
@@ -1604,6 +1660,65 @@ class Engine {
         }
       }
     }
+
+    // Absolutely positioned wrapping floats anchored FURTHER down the page
+    // wrap this paragraph's lines too: Word reflows earlier page content
+    // around a page/margin-anchored float once its anchor paragraph lands on
+    // the same page (staging-anchors2: the relH/V=margin box carves Body 3/4
+    // into wrapped lines although it is anchored five paragraphs later).
+    if (broken.lines.length > 0 && siblings && index !== undefined) {
+      const farHits: Shape[] = [];
+      let lastIdx = index;
+      for (let idx = index + 1, hops = 0; idx < siblings.length && hops < 40; idx++, hops++) {
+        const blk = siblings[idx];
+        if (blk.type !== "paragraph") break;
+        for (const s of this.collectAnchors(blk)) {
+          if (!("wrap" in s) || (s.wrap !== "square" && s.wrap !== "topAndBottom")) continue;
+          if ("behind" in s && s.behind) continue;
+          if (("vAlign" in s && s.vAlign) || ("hAlign" in s && s.hAlign)) continue;
+          if (!(s.hRel === "page" || s.hRel === "margin") || !(s.vRel === "page" || s.vRel === "margin")) continue;
+          const h = "height" in s ? (s.height ?? 0) : 0;
+          if (h <= 0) continue;
+          const top = s.vRel === "page" ? s.y : this.sp.marginTop + s.y;
+          const d = "dist" in s && s.dist ? s.dist : { t: 0, b: 0 };
+          if (top - d.t <= paraBottom + 0.25 && top + h + d.b >= paraTopEstimate - 0.25) {
+            farHits.push(s);
+            lastIdx = idx;
+          }
+        }
+      }
+      if (farHits.length > 0) {
+        // Pre-emit only when the anchor paragraph itself still lands on this
+        // page: estimate the intervening flow height (spacing collapse + line
+        // heights, no float narrowing). Snapshot numbering counters — these
+        // breaks are measurement only.
+        const counterSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+        let simY = paraBottom;
+        let prevAfter = props.spacingAfter ?? 0;
+        for (let idx = index + 1; idx <= lastIdx; idx++) {
+          const blk = siblings[idx];
+          if (blk.type !== "paragraph") break;
+          const np = this.doc.effectiveParaProps(blk);
+          simY += Math.max(prevAfter, np.spacingBefore ?? 0);
+          if (idx === lastIdx) break; // reached the anchor paragraph's top
+          const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch);
+          simY += nb.lines.reduce((a, l) => a + l.height, 0);
+          prevAfter = np.spacingAfter ?? 0;
+        }
+        this.counters = counterSnapshot;
+        if (simY <= this.bodyBottom + 0.25) {
+          ensureLookMark();
+          lookMark!.shapes.push(...farHits);
+          this.emitAnchors(farHits, this.cur, this.fieldCtx(), this.colX, paraTopEstimate);
+          for (const s of farHits) this.consumedAnchors.add(s);
+          broken = breakNow(paraTopEstimate);
+        }
+      }
+    }
+
+    // Character/line-relative shapes resolve from the (now final pre-charLine)
+    // pass and reflow the paragraph around themselves.
+    emitCharLineAnchors(paraTopEstimate);
 
     // Contextual spacing: suppress before/after between same-style neighbors.
     let spacingBefore = rawSpacingBefore;
@@ -1710,6 +1825,7 @@ class Engine {
       paraTopEstimate = this.y + extraSpacing;
       emitParaAnchors(paraTopEstimate);
       broken = breakNow(paraTopEstimate);
+      emitCharLineAnchors(paraTopEstimate);
       lines = broken.lines;
     };
 
@@ -2766,6 +2882,10 @@ class Engine {
           ? (itemX: number, itemY: number) => ({ deg: shape.rotation!, ox: cxc - itemX, oy: cyc - itemY })
           : undefined;
         const behind = shape.behind;
+        // Word layers anchored shapes ABOVE the body text unless behindDoc
+        // (staging-anchors2: the wrapNone z-stack covers the paragraph text
+        // that flows underneath it).
+        const front = !behind;
 
         if (shape.fill) {
           page.items.push({
@@ -2777,6 +2897,7 @@ class Engine {
             fill: shape.fill,
             ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
             ...(behind ? { behind: true } : {}),
+            ...(front ? { front: true } : {}),
           });
         }
         if (shape.stroke) {
@@ -2792,6 +2913,7 @@ class Engine {
               y2,
               border: b,
               ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}),
+              ...(front ? { front: true } : {}),
             });
           edge(x0, y0, x0 + width, y0);
           edge(x0, y0 + height, x0 + width, y0 + height);
@@ -2813,6 +2935,7 @@ class Engine {
             it.rotate = rotate(Math.min(it.x1, it.x2), Math.min(it.y1, it.y2));
           }
           if (behind && (it.kind === "text" || it.kind === "rect")) it.behind = true;
+          if (front && (it.kind === "text" || it.kind === "rect" || it.kind === "edge")) it.front = true;
           page.items.push(it);
         }
 

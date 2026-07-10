@@ -83,6 +83,9 @@ export interface TextItem {
   rotate?: { deg: number; ox: number; oy: number };
   /** Paint under the body text (behindDoc textbox content). */
   behind?: boolean;
+  /** Paint over the body text (non-behindDoc anchored shape content: Word
+   * layers in-front shapes above the text layer). */
+  front?: boolean;
   /** Right-to-left run: renderer sets direction:rtl so the browser shapes and
    * orders the (Arabic/Hebrew) glyphs within the span box. */
   rtl?: boolean;
@@ -100,6 +103,8 @@ export interface RectItem {
   /** Rotate about a point (px, relative to this item's top-left). */
   rotate?: { deg: number; ox: number; oy: number };
   behind?: boolean;
+  /** Paint over the body text (non-behindDoc anchored shape fill). */
+  front?: boolean;
 }
 
 export interface LineEdgeItem {
@@ -113,6 +118,8 @@ export interface LineEdgeItem {
   role?: "table-rule";
   /** Rotate about a point (px, relative to this item's top-left). */
   rotate?: { deg: number; ox: number; oy: number };
+  /** Paint over the body text (non-behindDoc anchored shape border). */
+  front?: boolean;
 }
 
 export interface ImageItem {

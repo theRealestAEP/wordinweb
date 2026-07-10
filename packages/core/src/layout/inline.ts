@@ -98,8 +98,15 @@ interface BreakAtom {
   kind: "break";
   breakType: "line" | "page" | "column";
 }
+/** Zero-width marker recording where an anchored shape sits in the text
+ * flow: relH="character"/relV="line" anchors resolve against the pen
+ * position and line of this point. */
+interface AnchorPointAtom {
+  kind: "anchorPoint";
+  shape: Shape;
+}
 type Atom = FragAtom | SpaceAtom | TabAtom
-  | PTabAtom | ImageAtom | DrawingAtom | MathAtom | BreakAtom;
+  | PTabAtom | ImageAtom | DrawingAtom | MathAtom | BreakAtom | AnchorPointAtom;
 
 export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
   let size = props.size ?? 14.666;
@@ -267,6 +274,11 @@ export interface BrokenParagraph {
   props: ParaProps;
   /** Floating shapes anchored to this paragraph (don't occupy inline space). */
   anchors: Shape[];
+  /** Where each anchor's run sits in the flow: pen x (column-relative) and
+   * line index at the anchor point. relH="character"/relV="line" shapes
+   * resolve their position from this (Word: first-pass position, before the
+   * shape's own wrap reflows the paragraph). */
+  anchorPoints: Map<Shape, { x: number; line: number }>;
 }
 
 /** Split an oversized display equation only at breakpoints exposed by its
@@ -380,6 +392,7 @@ export function breakParagraph(
   const firstLineExtra = hanging > 0 ? -hanging : (props.indentFirstLine ?? 0);
 
   const { atoms, anchors } = buildAtoms(doc, para, measurer, fields, fallbackFamily);
+  const anchorPoints = new Map<Shape, { x: number; line: number }>();
 
   const lines: LineBox[] = [];
   let cur: LineSpan[] = [];
@@ -406,8 +419,14 @@ export function breakParagraph(
   // Estimated line height for float-exclusion checks. Fixed-height rules
   // (exact/atLeast) are known before the line is built — use them, or a
   // too-short estimate misses floats overlapping the lower band of the line.
+  // For auto spacing, key the estimate to the paragraph's leading font so a
+  // large-type line (e.g. a 16pt heading) still sees a float that grazes its
+  // bottom (staging-anchors2: the heading's last line wraps around a square
+  // box anchored at the FOLLOWING paragraph's top).
   const ls = props.lineSpacing;
-  const EST_LINE = ls && ls.rule !== "auto" ? Math.max(20, ls.value) : 20;
+  const firstFont = (atoms.find((a) => a.kind === "frag" || a.kind === "space") as FragAtom | SpaceAtom | undefined)?.font;
+  const natural = firstFont ? measurer.metrics(firstFont).lineHeight * (ls?.rule === "auto" ? ls.value : 1) : 0;
+  const EST_LINE = ls && ls.rule !== "auto" ? Math.max(20, ls.value) : Math.max(20, natural);
   const beginLine = (idx: number) => {
     lineFloatOffset = 0;
     curBase = 0;
@@ -598,6 +617,12 @@ export function breakParagraph(
   let consumedLeadingBreak = false;
   for (let ai = 0; ai < atoms.length; ai++) {
     const atom = atoms[ai];
+    if (atom.kind === "anchorPoint") {
+      // Zero-width: record the pen position/line for character/line-relative
+      // anchor resolution and move on.
+      anchorPoints.set(atom.shape, { x, line: lineIndex });
+      continue;
+    }
     if (atom.kind !== "frag") packUntilSpace = false;
     if (atom.kind === "break") {
       // A page/column break with nothing after it in the paragraph keeps the
@@ -887,7 +912,7 @@ export function breakParagraph(
   }
 
   if (!flushedTrailingBreak) flush(true, false);
-  return { lines, props, anchors };
+  return { lines, props, anchors, anchorPoints };
 }
 
 function nextDefaultTab(x: number): number {
@@ -1330,6 +1355,7 @@ function buildAtoms(
           break;
         case "anchor":
           anchors.push(content.shape);
+          atoms.push({ kind: "anchorPoint", shape: content.shape });
           break;
         case "drawing":
           atoms.push({ kind: "drawing", props, font, drawing: content });

@@ -1006,7 +1006,12 @@ function parseDrawing(
   if (anchor && textboxEl) {
     const relOf = (el: XmlElement | undefined): AnchorRel => {
       const v = el ? attr(el, "relativeFrom") : undefined;
-      return v === "page" ? "page" : v === "margin" ? "margin" : v === "column" ? "column" : "text";
+      return v === "page" ? "page"
+        : v === "margin" ? "margin"
+        : v === "column" ? "column"
+        : v === "character" ? "char"
+        : v === "line" ? "line"
+        : "text";
     };
     const posH = findDescendant(anchor, "positionH");
     const posV = findDescendant(anchor, "positionV");
