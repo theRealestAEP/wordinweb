@@ -4226,14 +4226,6 @@ class Engine {
       if (cl) cl.spanHeight = ph;
     }
 
-    // Painted row boundaries sit on Word's quarter-point grid, FLOORED,
-    // anchored at the table segment top: parity-tables' content rows are raw
-    // 13.93pt tall, yet Word paints their rules at +13.75/+27.75 from the
-    // table top (PDF 160.55/174.30/188.30) and anchors the row TEXT to the
-    // same snapped tops (baseline gap exactly 14.00 = 27.75 - 13.75). The
-    // flow cursor stays RAW so no error accumulates (staging-longtable's
-    // quarter-exact 25.0pt rows are untouched by the snap).
-    const snapRowY = (v: number) => segTop + Math.floor((v - segTop) * 3 + 1e-6) / 3;
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const row = tbl.rows[ri];
       let laid = laidRows[ri];
