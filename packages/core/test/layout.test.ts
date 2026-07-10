@@ -3,7 +3,7 @@ import { DocxDocument } from "../src/docx.js";
 import { layoutDocument } from "../src/layout/engine.js";
 import { ApproxMeasurer, type TextMeasurer } from "../src/layout/measure.js";
 import { formatNumber } from "../src/parse/numbering.js";
-import { makeDocx, wrapDocument, p } from "./helpers.js";
+import { makeDocx, wrapDocument, p, W_NS } from "./helpers.js";
 
 const measurer = new ApproxMeasurer();
 
@@ -2125,5 +2125,138 @@ describe("RTL / bidi paragraphs", () => {
     if (a?.kind !== "text" || b?.kind !== "text") throw new Error();
     // Source order A,B -> visual order B,A (A on the right).
     expect(a.x).toBeGreaterThan(b.x);
+  });
+});
+
+describe("wild2 legal agreement rules", () => {
+  const SECT =
+    `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+  const textItem = (result: ReturnType<typeof layoutDocument>, text: string) => {
+    const found = result.pages[0].items.find((i) => i.kind === "text" && i.text === text);
+    if (found?.kind !== "text") throw new Error(`missing item ${JSON.stringify(text)}`);
+    return found;
+  };
+
+  it("places the numbering label at a positive firstLine indent (direct ind overrides the level's hanging)", () => {
+    // wild2-legal: numbered lvl ind left=2520 hanging=360 overridden by direct
+    // ind left=0 firstLine=1530 puts "A." at 1530tw and the suffix tab runs to
+    // the next default stop.
+    const numbering =
+      `<?xml version="1.0"?><w:numbering ${W_NS}>` +
+      `<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/>` +
+      `<w:numFmt w:val="upperLetter"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/>` +
+      `<w:pPr><w:ind w:left="2520" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>` +
+      `<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+    const para =
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>` +
+      `<w:ind w:left="0" w:firstLine="1530"/></w:pPr>` +
+      `<w:r><w:t>Body</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(para + SECT),
+      "word/numbering.xml": numbering,
+    });
+    const label = textItem(result, "A.");
+    // margin 96px + firstLine 102px
+    expect(label.x).toBeCloseTo(198, 1);
+    // suffix tab from the label end to the next 0.5in default stop (144px rel)
+    expect(textItem(result, "Body").x).toBeCloseTo(240, 1);
+  });
+
+  it("ignores whitespace-only runs when sizing a line with solid content", () => {
+    // A lone oversized space run between normal words must not grow the line
+    // (Word measured: 12pt space inside a 10pt body keeps the 10pt pitch).
+    const bigSpace =
+      `<w:p><w:r><w:t>aa</w:t></w:r>` +
+      `<w:r><w:rPr><w:sz w:val="96"/></w:rPr><w:t xml:space="preserve"> </w:t></w:r>` +
+      `<w:r><w:t>bb</w:t></w:r></w:p>`;
+    const plain = `<w:p><w:r><w:t xml:space="preserve">aa bb</w:t></w:r></w:p>`;
+    const next = `<w:p><w:r><w:t>next</w:t></w:r></w:p>`;
+    const grown = layout({ "word/document.xml": wrapDocument(bigSpace + next + SECT) }).result;
+    const control = layout({ "word/document.xml": wrapDocument(plain + next + SECT) }).result;
+    expect(textItem(grown, "next").lineTop).toBeCloseTo(textItem(control, "next").lineTop, 2);
+  });
+
+  it("keeps the Symbol font's metrics for a substituted bullet label", () => {
+    // The bullet paints via Unicode substitution in the body font but the
+    // line is sized by the symbol font (Word: Symbol 10pt bullet -> 12.25pt
+    // line where the body is 11.5pt).
+    const symbolMeasurer: TextMeasurer = {
+      width: (text, font, ls) => measurer.width(text, font, ls),
+      metrics: (font) =>
+        /symbol/i.test(font.family)
+          ? { ascent: font.size * 1.1, descent: font.size * 0.3, lineHeight: font.size * 1.4 }
+          : measurer.metrics(font),
+    };
+    const numbering =
+      `<?xml version="1.0"?><w:numbering ${W_NS}>` +
+      `<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/>` +
+      `<w:numFmt w:val="bullet"/><w:lvlText w:val="&#xF0B7;"/><w:lvlJc w:val="left"/>` +
+      `<w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>` +
+      `<w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/></w:rPr></w:lvl></w:abstractNum>` +
+      `<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+    const bullet =
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>` +
+      `<w:r><w:t xml:space="preserve"> </w:t></w:r></w:p>`;
+    const next = `<w:p><w:r><w:t>next</w:t></w:r></w:p>`;
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(bullet + next + SECT),
+        "word/numbering.xml": numbering,
+      }),
+    );
+    const result = layoutDocument(doc, { measurer: symbolMeasurer });
+    const bulletItem = textItem(result, "•");
+    const nextItem = textItem(result, "next");
+    // the label inherits the default size; the SYMBOL metrics (1.4x) size the
+    // line, not the painted body font's 1.15x
+    expect(nextItem.lineTop - bulletItem.lineTop).toBeCloseTo(bulletItem.font.size * 1.4, 1);
+  });
+
+  it("reserves the full painted width of double table borders in row heights", () => {
+    // A double rule paints two lines plus the gap = 3x the declared width.
+    const table = (style: string) =>
+      `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/>` +
+      `<w:tblBorders>` +
+      ["top", "left", "bottom", "right", "insideH", "insideV"]
+        .map((s) => `<w:${s} w:val="${style}" w:sz="6" w:space="0" w:color="auto"/>`)
+        .join("") +
+      `</w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>R1</w:t></w:r></w:p></w:tc></w:tr>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>R2</w:t></w:r></w:p></w:tc></w:tr>` +
+      `</w:tbl><w:p/>`;
+    const dbl = layout({ "word/document.xml": wrapDocument(table("double") + SECT) }).result;
+    const sgl = layout({ "word/document.xml": wrapDocument(table("single") + SECT) }).result;
+    const advance = (r: ReturnType<typeof layoutDocument>) =>
+      textItem(r, "R2").lineTop - textItem(r, "R1").lineTop;
+    // sz=6 -> 0.75pt = 1px painted single; double paints 3px. Row share grows
+    // by (3-1)/2 at each of the row's two boundaries = 2px.
+    expect(advance(dbl) - advance(sgl)).toBeCloseTo(2, 1);
+  });
+
+  it("tabs to the implicit stop at the left indent of a hanging-indent paragraph", () => {
+    // Literal "4.<tab>" head with ind left=-450 hanging=270: the tab stops at
+    // the left indent (-22.5pt), not at the margin's default grid.
+    const para =
+      `<w:p><w:pPr><w:ind w:left="-450" w:hanging="270"/></w:pPr>` +
+      `<w:r><w:t>4.</w:t></w:r><w:r><w:tab/><w:t>Body</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para + SECT) });
+    // margin 96px + left indent (-30px) = 66px
+    expect(textItem(result, "Body").x).toBeCloseTo(66, 1);
+  });
+
+  it("gives a document-opening empty paragraph before a table two mark lines", () => {
+    // PDF-measured on wild2-legal p1: the top table's grid sits at margin +
+    // two mark line heights; the same construct mid-flow takes one line.
+    const emptyPara = `<w:p><w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:pPr></w:p>`;
+    const table =
+      `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>CELL</w:t></w:r></w:p></w:tc></w:tr>` +
+      `</w:tbl><w:p/>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(emptyPara + table + SECT) });
+    // margin 96px + 2 x (12pt = 16px x 1.15 = 18.4px) = 132.8px
+    expect(textItem(result, "CELL").lineTop).toBeCloseTo(96 + 2 * 18.4, 1);
   });
 });

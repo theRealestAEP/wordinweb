@@ -350,7 +350,7 @@ export function breakParagraph(
   para: Paragraph,
   contentWidth: number,
   fields: FieldContext,
-  numberingLabel?: { text: string; props: RunProps; suffix: "tab" | "space" | "nothing" },
+  numberingLabel?: { text: string; props: RunProps; suffix: "tab" | "space" | "nothing"; metricsProps?: RunProps },
   /** Float-aware bounds per line (yOffset is paragraph-relative line top). */
   boundsAt?: (yOffset: number, estHeight: number) => LineBounds,
   /** w:docGrid line pitch (px): minimum single-line height each line's font
@@ -460,13 +460,24 @@ export function breakParagraph(
   if (numberingLabel && numberingLabel.text.length > 0) {
     const labelFont = fontOf(numberingLabel.props, fallbackFamily);
     const labelWidth = measurer.width(numberingLabel.text, labelFont, numberingLabel.props.letterSpacing);
-    const labelX = indentLeft - (hanging > 0 ? hanging : 0);
+    // The label sits at the first-line indent position: left - hanging, or
+    // left + firstLine when the paragraph carries a positive firstLine instead
+    // (legal-numbered bodies: ind left=0 firstLine=1530 puts "A." at 1530tw and
+    // the suffix tab then advances to the next default stop). For bidi the
+    // firstLine indent applies from the RIGHT edge, so only hanging moves the
+    // physically-left label.
+    const labelX = indentLeft + (bidiPara ? (hanging > 0 ? -hanging : 0) : firstLineExtra);
     cur.push({
       x: labelX,
       width: labelWidth,
       text: numberingLabel.text,
       props: numberingLabel.props,
       font: labelFont,
+      // A Symbol-font bullet paints via Unicode substitution in the body font
+      // but keeps the symbol font's vertical metrics for line sizing.
+      metricsFont: numberingLabel.metricsProps
+        ? fontOf(numberingLabel.metricsProps, fallbackFamily)
+        : undefined,
     });
     if (numberingLabel.suffix === "tab") {
       if (bidiTabOffset(0) > 0) {
@@ -677,7 +688,14 @@ export function breakParagraph(
     }
     if (atom.kind === "tab") {
       const offset = bidiTabOffset(lineIndex);
-      const rawStop = nextTabStop(x + offset, props.tabs, contentWidth - indentRight);
+      let rawStop = nextTabStop(x + offset, props.tabs, contentWidth - indentRight);
+      // Word adds an implicit tab stop at the LEFT INDENT of a hanging-indent
+      // paragraph: a literal "4.<tab>" list head with ind left=-450 hanging=270
+      // tabs to the -22.5pt indent, not onward to the margin's default grid
+      // (wild2 legal p1 items). Explicit stops before the indent still win.
+      if (hanging > 0 && x + offset < indentLeft - 0.5 && rawStop.pos > indentLeft) {
+        rawStop = { pos: indentLeft, align: "left" };
+      }
       const stop = { ...rawStop, pos: rawStop.pos - offset };
       const leader = stop.leader && stop.leader !== "none" ? stop.leader : undefined;
       let target = stop.pos;
@@ -1047,7 +1065,15 @@ function finishLine(
 
   // An invisible tab advances horizontally but does not enlarge Word's line
   // box. A leader tab paints glyphs, so its font still contributes metrics.
-  const metricSpans = spans.filter((s) => !(s.text === "\t" && !s.leader));
+  let metricSpans = spans.filter((s) => !(s.text === "\t" && !s.leader));
+  // Word also ignores whitespace-only runs when sizing a line that has any
+  // solid content: a lone 12pt space run between 10pt words (wild2 legal
+  // p17) leaves the line at the 10pt pitch. Whitespace metrics count only
+  // when the line holds nothing else.
+  const solidSpans = metricSpans.filter(
+    (s) => s.image || s.drawing || s.math || s.leader || s.text === undefined || !/^[ \t]*$/.test(s.text),
+  );
+  if (solidSpans.length > 0) metricSpans = solidSpans;
   if (metricSpans.length === 0) {
     // Empty line/paragraph: sized by the paragraph mark's run props.
     const markProps = doc.effectiveRunProps(para, props.markRunProps ?? {});

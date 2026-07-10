@@ -1012,7 +1012,33 @@ class Engine {
           }
           continue;
         }
+        // PDF-measured (wild2-legal p1): the empty paragraph that OPENS the
+        // document immediately before a table takes TWO line heights in Word -
+        // the top table's border grid sits at margin + 27.6pt for a 12pt
+        // Normal mark (2 x 13.8), where a single mark line (us, LibreOffice)
+        // puts it 13.8pt higher. The same construct mid-flow takes ONE line
+        // (this doc's p15/p23 signature tables match at a single mark line),
+        // so gate on the true document start: first page, nothing placed yet.
+        // TODO: generalize via parity/probe-paratbl.docx once Word export is
+        // available (console was locked); the probe isolates empty-para+table
+        // at page top with/without the CA doc's ind/rStyle quirks.
+        const docStartEmptyBeforeTable =
+          this.pages.length === 1 &&
+          this.cur.items.length === 0 &&
+          i === 0 &&
+          blocks[i + 1]?.type === "table" &&
+          !block.sectionBreak &&
+          !paragraphHasContent(block);
         this.placeParagraph(block, blocks[i - 1], blocks[i + 1], blocks, i);
+        if (docStartEmptyBeforeTable) {
+          const markProps = this.doc.effectiveRunProps(
+            block,
+            this.doc.effectiveParaProps(block).markRunProps ?? {},
+          );
+          this.y += this.measurer.metrics(
+            fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"),
+          ).lineHeight;
+        }
       } else {
         this.placeTable(block);
       }
@@ -1022,7 +1048,7 @@ class Engine {
   // ---------- numbering ----------
 
   private numberingLabel(props: ParaProps, para: Paragraph):
-    | { text: string; props: RunProps; suffix: "tab" | "space" | "nothing" }
+    | { text: string; props: RunProps; suffix: "tab" | "space" | "nothing"; metricsProps?: RunProps }
     | undefined {
     const num = props.numbering;
     if (!num) return undefined;
@@ -1082,8 +1108,13 @@ class Engine {
     let labelProps = markProps;
     if (lvl.rPr) labelProps = mergeRunProps(markProps, lvl.rPr);
     if (lvl.format === "bullet" && lvl.rPr?.font && isSymbolFont(lvl.rPr.font)) {
-      // Symbol fonts map through Unicode substitution; use the body font.
+      // Symbol fonts map through Unicode substitution; use the body font for
+      // the painted glyph but keep the symbol font's vertical metrics - Word
+      // sizes the line from the label's real font (wild2 legal p3: a Symbol
+      // 10pt bullet line is 12.25pt tall, not the body TNR's 11.5pt).
+      const metricsProps = labelProps;
       labelProps = { ...labelProps, font: markProps.font };
+      return { text, props: labelProps, suffix: lvl.suffix, metricsProps };
     }
     return { text, props: labelProps, suffix: lvl.suffix };
   }
@@ -3120,7 +3151,11 @@ class Engine {
    * (tcBorders), so use the thickest declaration at each boundary. */
   private rowBorderWidths(tbl: Table, ri: number): { top: number; bottom: number } {
     const tb = tbl.props.borders;
-    const bw = (b?: Border) => (b && b.style !== "none" ? b.width : 0);
+    // A double rule paints two lines plus the gap (3x the declared width) -
+    // wild2 legal p23's sz-6 double-bordered signature rows measure 2.25pt of
+    // border share per boundary, not 0.75pt (rows ran 1.5pt short each).
+    const bw = (b?: Border) =>
+      b && b.style !== "none" ? (b.style === "double" ? b.width * 3 : b.width) : 0;
     const rows = tbl.rows;
     const cellTop = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.top)));
     const cellBot = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.bottom)));
