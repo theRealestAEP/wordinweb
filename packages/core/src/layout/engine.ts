@@ -4069,7 +4069,18 @@ class Engine {
           !row.props.tblHeader &&
           !row.cells.some((c) => c.props.vMerge) &&
           !row.cells.some((c) => c.props.textDirection === "btLr");
-        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y) : null;
+        // On a footnote page the split cut is drawn at the note FILL reserve
+        // (bodyBottom subtracts noteSeparatorReserve = 40px), but Word's KEEP
+        // decision lets the cut line's glyphs reach into that band - the same
+        // fill-vs-placement decoupling as body lines. staging-tblextreme
+        // bounds the reach empirically: Word keeps the line overshooting the
+        // fill cut by 6.5px and moves the next at 25.8px; NOTE_SEP_H (the
+        // painted separator strip) sits centrally in that window. Refine with
+        // a Word probe when available. Pages without a note band keep the
+        // strict cut (parity-rowsplit: a 2.4px overshoot moves).
+        const keepSlack =
+          this.rowNoteHeight(laid) > 0 || (this.cur.footnoteH[this.col] ?? 0) > 0 ? NOTE_SEP_H : 0;
+        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y, keepSlack) : null;
         if (parts) {
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
           this.y += parts.top.height;
@@ -4202,6 +4213,8 @@ class Engine {
   private splitLaidRow(
     laid: { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[]; height: number },
     avail: number,
+    /** Extra depth text glyphs may reach past the drawn cut (note fill band). */
+    keepSlack = 0,
   ): { top: typeof laid; rest: typeof laid } | null {
     if (avail < 12) return null;
     const bottomOf = (it: PageItem): number =>
@@ -4247,7 +4260,15 @@ class Engine {
         if (it.kind !== "text") return bottomOf(it) <= avail + 0.5;
         const bb = bandBottom(topOf(it), bottomOf(it));
         if (bb !== undefined) return bb <= avail + 0.5;
-        return (topOf(it) + bottomOf(it)) / 2 <= avail;
+        // Word's split-fit test is the same as the body page-fit test: the
+        // GLYPH/FONT box must sit above the cut; line-spacing leading below
+        // it may overhang the rule (parity-rowsplit: pitch 28.4px, glyph box
+        // 17.9px — Word moves the line whose glyph bottom lands 2.4px past
+        // the cut, which the old line-box-midpoint rule kept, packing one
+        // extra line per split page).
+        const gTop = it.glyphTop ?? it.lineTop;
+        const gBox = it.glyphBoxH ?? it.lineHeight;
+        return gTop + gBox <= avail + keepSlack + 0.5;
       };
       return {
         cell,
