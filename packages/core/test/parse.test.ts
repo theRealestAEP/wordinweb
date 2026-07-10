@@ -1023,3 +1023,113 @@ describe("OMML math", () => {
     expect(numX.x).toBeGreaterThan(150);
   });
 });
+
+describe("SmartArt cached drawing", () => {
+  const DGM_DRAWING = `<w:p><w:r><w:drawing>
+    <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+      <wp:extent cx="5905500" cy="5076825"/>
+      <wp:effectExtent l="38100" t="38100" r="57150" b="0"/>
+      <wp:docPr id="100" name="Diagram 100"/>
+      <a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+        <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram">
+          <dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:dm="rId61" r:lo="rId62" r:qs="rId63" r:cs="rId64"/>
+        </a:graphicData>
+      </a:graphic>
+    </wp:inline>
+  </w:drawing></w:r></w:p>`;
+
+  const DATA1 = `<?xml version="1.0"?>
+<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <dgm:ptLst/><dgm:cxnLst/><dgm:bg/><dgm:whole/>
+  <dgm:extLst><a:ext uri="http://schemas.microsoft.com/office/drawing/2008/diagram">
+    <dsp:dataModelExt xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" relId="rId65"/>
+  </a:ext></dgm:extLst>
+</dgm:dataModel>`;
+
+  // A pill (round2SameRect, blue fill, centered white 11pt text), an
+  // underline (a:prstGeom line) and a plain text label - the three shape
+  // species of the phase23 "tab list" SmartArt.
+  const DRAWING1 = `<?xml version="1.0"?>
+<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dsp:spTree>
+  <dsp:nvGrpSpPr><dsp:cNvPr id="0" name=""/><dsp:cNvGrpSpPr/></dsp:nvGrpSpPr><dsp:grpSpPr/>
+  <dsp:sp><dsp:spPr>
+    <a:xfrm><a:off x="0" y="223136"/><a:ext cx="5905500" cy="0"/></a:xfrm>
+    <a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:noFill/>
+    <a:ln w="12700"><a:solidFill><a:srgbClr val="5B9BD5"/></a:solidFill></a:ln>
+  </dsp:spPr></dsp:sp>
+  <dsp:sp><dsp:spPr>
+    <a:xfrm><a:off x="0" y="3361"/><a:ext cx="1535430" cy="219775"/></a:xfrm>
+    <a:prstGeom prst="round2SameRect"><a:avLst><a:gd name="adj1" fmla="val 16670"/><a:gd name="adj2" fmla="val 0"/></a:avLst></a:prstGeom>
+    <a:solidFill><a:srgbClr val="5B9BD5"/></a:solidFill>
+    <a:ln w="12700"><a:solidFill><a:srgbClr val="5B9BD5"/></a:solidFill></a:ln>
+  </dsp:spPr>
+  <dsp:txBody>
+    <a:bodyPr lIns="20955" tIns="20955" rIns="20955" bIns="20955" anchor="ctr"/><a:lstStyle/>
+    <a:p><a:pPr algn="ctr"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc></a:pPr>
+      <a:r><a:rPr lang="en-US" sz="1100"><a:solidFill><a:sysClr val="window" lastClr="FFFFFF"/></a:solidFill><a:latin typeface="Calibri"/></a:rPr><a:t>Week/Day</a:t></a:r>
+    </a:p>
+  </dsp:txBody>
+  <dsp:txXfrm><a:off x="10730" y="14091"/><a:ext cx="1513970" cy="209045"/></dsp:txXfrm>
+  </dsp:sp>
+</dsp:spTree></dsp:drawing>`;
+
+  const RELS = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId61" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="diagrams/data1.xml"/>
+  <Relationship Id="rId65" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="diagrams/drawing1.xml"/>
+</Relationships>`;
+
+  it("resolves the dsp drawing part via the data part's dataModelExt and renders its shapes", () => {
+    const doc = DocxDocument.load(makeDocx({
+      "word/document.xml": wrapDocument(DGM_DRAWING),
+      "word/_rels/document.xml.rels": RELS,
+      "word/diagrams/data1.xml": DATA1,
+      "word/diagrams/drawing1.xml": DRAWING1,
+    }));
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const run = para.children[0];
+    if (run.type !== "run") throw new Error("expected run");
+    const drawing = run.content[0];
+    if (drawing.kind !== "drawing") throw new Error("expected drawing, got " + drawing.kind);
+
+    // Extent + effectExtent (l=38100 t=38100 r=57150 -> 4px/4px/6px @96dpi).
+    expect(drawing.width).toBeCloseTo(5905500 / 9525 + 4 + 6, 1);
+    expect(drawing.height).toBeCloseTo(5076825 / 9525 + 4, 1);
+
+    // The blue divider line, shifted right/down by the effectExtent origin.
+    expect(drawing.lines).toHaveLength(1);
+    expect(drawing.lines[0]).toMatchObject({ color: "#5b9bd5" });
+    expect(drawing.lines[0].x1).toBeCloseTo(4, 1);
+    expect(drawing.lines[0].y1).toBeCloseTo(4 + 223136 / 9525, 1);
+
+    // The pill: a filled round2SameRect path with rounded TOP corners only.
+    expect(drawing.paths).toHaveLength(1);
+    const pill = drawing.paths![0];
+    expect(pill.fill).toBe("#5b9bd5");
+    expect(pill.width).toBeCloseTo(1535430 / 9525, 1);
+    const r = Math.min(1535430, 219775) * 0.1667;
+    expect(pill.d).toContain(`A ${r} ${r}`);
+
+    // The pill's text: white 11pt Calibri, centered, box from dsp:txXfrm.
+    expect(drawing.texts).toHaveLength(1);
+    const ts = drawing.texts![0];
+    expect(ts.textAnchor).toBe("middle");
+    expect(ts.x).toBeCloseTo(4 + 10730 / 9525, 1);
+    expect(ts.width).toBeCloseTo(1513970 / 9525, 1);
+    const tpara = ts.blocks[0];
+    if (tpara.type !== "paragraph") throw new Error("expected paragraph");
+    expect(tpara.props.alignment).toBe("center");
+    expect(tpara.props.lineSpacing).toMatchObject({ rule: "auto", value: 0.9 });
+    const trun = tpara.children[0];
+    if (trun.type !== "run") throw new Error("expected run");
+    expect(trun.props).toMatchObject({ font: "Calibri", color: "#ffffff" });
+    expect(trun.props.size).toBeCloseTo(11 * (4 / 3), 3);
+    expect(trun.content[0]).toMatchObject({ kind: "text", text: "Week/Day" });
+
+    // End to end: the pill text reaches the page.
+    const result = layoutDocument(doc, { measurer: new ApproxMeasurer() });
+    const text = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes("Week/Day"));
+    expect(text).toBeDefined();
+  });
+});

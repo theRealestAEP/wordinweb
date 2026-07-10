@@ -232,12 +232,15 @@ export class DocxDocument {
   refresh(): void {
     const body = child(this.docRoot, "body");
     if (!body) throw new Error("document.xml has no w:body");
-    const ctx: DocParseContext = { ...this.ctxBase, rels: this.documentRels };
+    // Some content (SmartArt cached drawings) lives in parts reachable only
+    // through relationship indirection at parse time.
+    const readPart = (part: string) => this.readXmlOptional(part);
+    const ctx: DocParseContext = { ...this.ctxBase, rels: this.documentRels, readPart };
     this.sections = parseBody(body, ctx);
     this.headers.clear();
     this.footers.clear();
     for (const part of this.hfParts) {
-      const partCtx: DocParseContext = { ...this.ctxBase, rels: part.rels };
+      const partCtx: DocParseContext = { ...this.ctxBase, rels: part.rels, readPart };
       const hf: HeaderFooter = { blocks: parseBlocks(part.root, partCtx) };
       (part.isHeader ? this.headers : this.footers).set(part.relId, hf);
     }

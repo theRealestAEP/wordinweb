@@ -375,6 +375,8 @@ export interface ShapeArt {
   lines: DrawingLine[];
   images: DrawingImage[];
   paths: DrawingPath[];
+  /** Positioned text bodies inside the group (wps textboxes, dsp:sp txBody). */
+  texts?: DrawingTextShape[];
 }
 
 /** How text interacts with a floating image. */
@@ -462,6 +464,27 @@ export interface DrawingContent {
   };
   /** Source w:drawing element (select/move as a group). */
   srcDrawing?: XmlElement;
+  /** Positioned text bodies inside the drawing (multi-textbox groups and
+   * SmartArt cached-drawing shapes). Painted above lines/paths. */
+  texts?: DrawingTextShape[];
+}
+
+/** A text body positioned inside a composite drawing (a wps textbox in a
+ * group, or a SmartArt dsp:sp txBody), px relative to the drawing's box. */
+export interface DrawingTextShape {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  blocks: Block[];
+  /** Background fill painted behind the text box. */
+  fill?: string;
+  /** Outline. */
+  stroke?: { color: string; weight: number };
+  /** Text insets px (bodyPr lIns/tIns/rIns/bIns). */
+  insets: { l: number; t: number; r: number; b: number };
+  /** Vertical anchoring of the text inside the box (bodyPr anchor). */
+  textAnchor?: "top" | "middle" | "bottom";
 }
 
 export interface DrawingPath {

@@ -8,12 +8,15 @@ import {
   DrawingImage,
   DrawingPath,
   DrawingLine,
+  DrawingTextShape,
   Hyperlink,
   ImageContent,
   ParaChild,
   Paragraph,
+  ParaProps,
   Run,
   RunContent,
+  RunProps,
   Section,
   Table,
   TableCell,
@@ -22,15 +25,19 @@ import {
   TableRow,
   TableRowProps,
   MathNode,
+  Theme,
   WrapMode,
 } from "../model.js";
-import { emuToPx, twipsToPx } from "../units.js";
+import { emuToPx, ptToPx, twipsToPx } from "../units.js";
 import { ParseContext, parseBorder, parseParaProps, parseRunProps, parseShading } from "./properties.js";
 import { parseSectionProps, defaultSectionProps } from "./section.js";
-import { Relationships } from "./rels.js";
+import { Relationships, parseRelationships, relsPathFor } from "./rels.js";
 
 export interface DocParseContext extends ParseContext {
   rels: Relationships;
+  /** Read another package part's XML (SmartArt cached drawings live in
+   * word/diagrams/drawing*.xml, reachable only through the data part). */
+  readPart?: (part: string) => XmlElement | undefined;
 }
 
 /** Parse w:body into sections (the body's trailing sectPr closes the last one). */
@@ -769,6 +776,7 @@ function parseDrawing(
   const images: DrawingImage[] = [];
   const lines: DrawingLine[] = [];
   const paths: DrawingPath[] = [];
+  const texts: DrawingTextShape[] = [];
   // First wps shape carrying a text box (DrawingML wps:txbx). Resolved after
   // the walk into a floating ShapeTextbox honoring the anchor's wrap mode.
   let textboxEl: XmlElement | undefined;
@@ -777,18 +785,8 @@ function parseDrawing(
   // lumMod/lumOff/shade/tint transforms (template art is built from theme
   // colors + luminance tweaks: white bg1 at lumMod 85% = the light gray of
   // Word's decorative bands).
-  const fillColorOf = (container: XmlElement | undefined): string | undefined => {
-    if (!container) return undefined;
-    const solid = child(container, "solidFill");
-    if (!solid) return undefined;
-    const clrEl = child(solid, "srgbClr") ?? child(solid, "schemeClr");
-    if (!clrEl) return undefined;
-    let hex: string | undefined;
-    if (localName(clrEl.name) === "srgbClr") hex = "#" + (attr(clrEl, "val") ?? "000000");
-    else hex = ctx.theme?.colors.get(attr(clrEl, "val") ?? "");
-    if (!hex) return undefined;
-    return applyClrTransforms(hex, clrEl);
-  };
+  const fillColorOf = (container: XmlElement | undefined): string | undefined =>
+    solidFillColor(container, ctx.theme);
 
   // Word template shapes carry no explicit fill; the color comes from the
   // theme format scheme via <wps:style><a:fillRef><a:schemeClr>. Resolve that
@@ -875,10 +873,38 @@ function parseDrawing(
     if (ln === "wsp") {
       const spPr = child(el, "spPr");
       // Text box: defer to a floating ShapeTextbox (resolved post-walk). A
-      // text box shape contributes no lines/paths/images of its own.
+      // text box shape contributes no lines/paths/images of its own. Groups
+      // with SEVERAL text boxes (flowchart figures) can't be modeled by the
+      // single-ShapeTextbox path — collect each as a positioned DrawingText-
+      // Shape so the whole group renders in place.
       const txbxEl = child(el, "txbx");
       if (txbxEl && findDescendant(txbxEl, "txbxContent")) {
         if (!textboxEl) textboxEl = el;
+        const xfrm = child(spPr, "xfrm");
+        const off = child(xfrm, "off");
+        const ext = child(xfrm, "ext");
+        const bodyPr = child(el, "bodyPr");
+        const insetOf = (name: string, dflt: number): number => {
+          const v = bodyPr ? intAttr(bodyPr, name) : undefined;
+          return v !== undefined ? emuToPx(v) : dflt;
+        };
+        const anchorAttr = bodyPr ? attr(bodyPr, "anchor") : undefined;
+        const lnEl2 = child(spPr, "ln");
+        const strokeColor = lnEl2 && !child(lnEl2, "noFill") ? fillColorOf(lnEl2) : undefined;
+        const fill = child(spPr, "noFill") ? undefined : (fillColorOf(spPr) ?? styleFillOf(el));
+        texts.push({
+          x: emuToPx(ox + (intAttr(off, "x") ?? 0) * sx),
+          y: emuToPx(oy + (intAttr(off, "y") ?? 0) * sy),
+          width: emuToPx((intAttr(ext, "cx") ?? 0) * sx),
+          height: emuToPx((intAttr(ext, "cy") ?? 0) * sy),
+          blocks: parseBlocks(findDescendant(txbxEl, "txbxContent")!, ctx),
+          ...(fill ? { fill } : {}),
+          ...(strokeColor
+            ? { stroke: { color: strokeColor, weight: Math.max(emuToPx(intAttr(lnEl2, "w") ?? 0), 0.75) } }
+            : {}),
+          insets: { l: insetOf("lIns", 9.6), t: insetOf("tIns", 4.8), r: insetOf("rIns", 9.6), b: insetOf("bIns", 4.8) },
+          textAnchor: anchorAttr === "ctr" ? "middle" : anchorAttr === "b" ? "bottom" : "top",
+        });
         return;
       }
       const prst = attr(child(spPr, "prstGeom"), "prst") ?? "";
@@ -974,6 +1000,30 @@ function parseDrawing(
           });
         }
       }
+      // Preset-geometry shapes with a visible fill or stroke (rounded rects,
+      // brackets in flowchart groups): convert the preset outline to SVG path
+      // data. Lines took the connector branch above; textboxes returned early.
+      if (!custGeom && !isLine && child(spPr, "prstGeom") && (fill || stroke)) {
+        const xfrm = child(spPr, "xfrm");
+        const off = child(xfrm, "off");
+        const ext = child(xfrm, "ext");
+        const w = (intAttr(ext, "cx") ?? 0) * sx;
+        const h = (intAttr(ext, "cy") ?? 0) * sy;
+        const d = presetPathD(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
+        if (d && w > 0 && h > 0) {
+          paths.push({
+            x: emuToPx(ox + (intAttr(off, "x") ?? 0) * sx),
+            y: emuToPx(oy + (intAttr(off, "y") ?? 0) * sy),
+            width: emuToPx(w),
+            height: emuToPx(h),
+            d,
+            viewW: w,
+            viewH: h,
+            fill,
+            stroke,
+          });
+        }
+      }
       // Textboxes inside shapes are handled by the VML fallback or the
       // pict path when present; recurse for nested pics.
       for (const c of el.children) walk(c, ox, oy, sx, sy);
@@ -1000,10 +1050,36 @@ function parseDrawing(
   };
   walk(holder, 0, 0, 1, 1);
 
+  // SmartArt: the a:graphicData uri=".../diagram" payload is only a set of
+  // relationship ids (dgm:relIds) — the LAYOUT of the diagram is not stored
+  // there. Word persists a pre-computed rendering of every SmartArt in a
+  // dsp:drawing part (word/diagrams/drawing*.xml): plain shapes with absolute
+  // EMU geometry, fills and text bodies. Render that cached drawing.
+  // Padding: Word places an inline diagram's box at effectExtent (l,t) inside
+  // the reserved line box (extent + effectExtent), e.g. phase23's diagram
+  // starts 3pt right/below of the extent origin.
+  let padL = 0;
+  let padT = 0;
+  let padR = 0;
+  let padB = 0;
+  const dgmRelIds = child(child(child(holder, "graphic"), "graphicData"), "relIds");
+  if (dgmRelIds && ctx.readPart) {
+    const dspRoot = resolveDiagramDrawing(dgmRelIds, ctx);
+    if (dspRoot) {
+      const fxEl = child(holder, "effectExtent");
+      padL = emuToPx(intAttr(fxEl, "l") ?? 0);
+      padT = emuToPx(intAttr(fxEl, "t") ?? 0);
+      padR = emuToPx(intAttr(fxEl, "r") ?? 0);
+      padB = emuToPx(intAttr(fxEl, "b") ?? 0);
+      collectDiagramShapes(dspRoot, ctx, { lines, paths, texts }, padL, padT);
+    }
+  }
+
   // DrawingML text box (wps:txbx): a floating shape with fill/stroke, text
   // content, wrap mode and (optionally) rotation - the modern equivalent of a
-  // VML v:shape text box.
-  if (anchor && textboxEl) {
+  // VML v:shape text box. Groups with SEVERAL text boxes fall through to the
+  // composite-art paths below, which keep every box in place.
+  if (anchor && textboxEl && texts.length <= 1) {
     const relOf = (el: XmlElement | undefined): AnchorRel => {
       const v = el ? attr(el, "relativeFrom") : undefined;
       return v === "page" ? "page"
@@ -1094,7 +1170,7 @@ function parseDrawing(
   // callout boxes in the wild-gatech thesis). Word reserves the extent's
   // vertical space in the flow; rendering it off-page (the VML fallback path)
   // loses that space and collapses front-matter pages.
-  if (!anchor && textboxEl) {
+  if (!anchor && textboxEl && texts.length <= 1) {
     const spPr = child(textboxEl, "spPr");
     const txbxContent = findDescendant(child(textboxEl, "txbx")!, "txbxContent");
     const lnEl = child(spPr, "ln");
@@ -1126,7 +1202,7 @@ function parseDrawing(
 
   // Anchored template art (multi-shape groups, freeform paths): absolute
   // placement via the anchor, no text-flow participation.
-  if (anchor && (paths.length > 0 || lines.length + images.length > 1)) {
+  if (anchor && (paths.length > 0 || lines.length + images.length > 1 || texts.length > 0)) {
     const rel = (el: XmlElement | undefined): AnchorRel => {
       const v = el ? attr(el, "relativeFrom") : undefined;
       return v === "page" ? "page" : v === "margin" ? "margin" : v === "column" ? "column" : "text";
@@ -1173,12 +1249,13 @@ function parseDrawing(
         lines,
         images,
         paths,
+        ...(texts.length ? { texts } : {}),
       },
     };
   }
 
   // Plain single image covering the extent: keep the simple content kind.
-  if (lines.length === 0 && images.length === 1) {
+  if (lines.length === 0 && images.length === 1 && texts.length === 0) {
     if (anchor) {
       // Floating image: position + wrap mode.
       const rel = (el: XmlElement | undefined): AnchorRel => {
@@ -1232,14 +1309,15 @@ function parseDrawing(
       ...(images[0].border ? { border: images[0].border } : {}),
     };
   }
-  if (lines.length === 0 && images.length === 0 && paths.length === 0) return null;
+  if (lines.length === 0 && images.length === 0 && paths.length === 0 && texts.length === 0) return null;
   return {
     kind: "drawing",
-    width: emuToPx(cx),
-    height: emuToPx(cy),
+    width: emuToPx(cx) + padL + padR,
+    height: emuToPx(cy) + padT + padB,
     lines,
     images,
     ...(paths.length ? { paths } : {}),
+    ...(texts.length ? { texts } : {}),
   };
 }
 
@@ -1267,6 +1345,342 @@ function applyClrTransforms(hex: string, clrEl: XmlElement): string {
   }
   const c = (x: number) => Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16).padStart(2, "0");
   return `#${c(r)}${c(g)}${c(b)}`;
+}
+
+/** Resolve the a:solidFill inside `container` to a CSS color: srgbClr, theme
+ * schemeClr, or sysClr (whose lastClr carries the rendered color), with
+ * lumMod/lumOff/shade/tint transforms applied. */
+function solidFillColor(container: XmlElement | undefined, theme: Theme | undefined): string | undefined {
+  if (!container) return undefined;
+  const solid = child(container, "solidFill");
+  if (!solid) return undefined;
+  return solidColorOf(solid, theme);
+}
+
+/** Resolve the color child (srgbClr/schemeClr/sysClr) of a fill element. */
+function solidColorOf(solid: XmlElement, theme: Theme | undefined): string | undefined {
+  const clrEl = child(solid, "srgbClr") ?? child(solid, "schemeClr") ?? child(solid, "sysClr");
+  if (!clrEl) return undefined;
+  const local = localName(clrEl.name);
+  let hex: string | undefined;
+  if (local === "srgbClr") hex = "#" + (attr(clrEl, "val") ?? "000000");
+  else if (local === "sysClr") hex = "#" + (attr(clrEl, "lastClr") ?? "000000");
+  else hex = theme?.colors.get(attr(clrEl, "val") ?? "");
+  if (!hex) return undefined;
+  return applyClrTransforms(hex, clrEl);
+}
+
+/** Rounded rectangle path with per-corner radii (clockwise from top-left). */
+function roundedRectD(w: number, h: number, tl: number, tr: number, br: number, bl: number): string {
+  return (
+    `M ${tl} 0 L ${w - tr} 0 ` +
+    (tr ? `A ${tr} ${tr} 0 0 1 ${w} ${tr} ` : "") +
+    `L ${w} ${h - br} ` +
+    (br ? `A ${br} ${br} 0 0 1 ${w - br} ${h} ` : "") +
+    `L ${bl} ${h} ` +
+    (bl ? `A ${bl} ${bl} 0 0 1 0 ${h - bl} ` : "") +
+    `L 0 ${tl} ` +
+    (tl ? `A ${tl} ${tl} 0 0 1 ${tl} 0 ` : "") +
+    "Z"
+  );
+}
+
+/**
+ * SVG path data for an a:prstGeom outline, in a `w x h` coordinate space.
+ * Covers the presets that appear in SmartArt cached drawings and flowchart
+ * groups; anything unrecognized renders as its bounding rectangle.
+ */
+function presetPathD(prst: string, w: number, h: number, avLst: XmlElement | undefined): string | undefined {
+  const adj = (name: string, dflt: number): number => {
+    const gd = children(avLst, "gd").find((g) => attr(g, "name") === name);
+    const m = gd ? /^val (-?\d+)/.exec(attr(gd, "fmla") ?? "") : null;
+    return m ? parseInt(m[1], 10) : dflt;
+  };
+  const min = Math.min(w, h);
+  switch (prst) {
+    case "rect":
+    case "flowChartProcess":
+      return `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`;
+    case "roundRect": {
+      const r = (min * adj("adj", 16667)) / 100000;
+      return roundedRectD(w, h, r, r, r, r);
+    }
+    case "round2SameRect": {
+      // adj1: top corner radius, adj2: bottom corner radius (fraction of the
+      // smaller side, val/100000) — the SmartArt "tab" pill.
+      const r1 = (min * adj("adj1", 16667)) / 100000;
+      const r2 = (min * adj("adj2", 0)) / 100000;
+      return roundedRectD(w, h, r1, r1, r2, r2);
+    }
+    case "ellipse":
+      return `M 0 ${h / 2} A ${w / 2} ${h / 2} 0 1 0 ${w} ${h / 2} A ${w / 2} ${h / 2} 0 1 0 0 ${h / 2} Z`;
+    case "leftBracket": {
+      const r = Math.min((h * adj("adj", 8333)) / 100000, h / 2);
+      return `M ${w} 0 A ${w} ${r} 0 0 0 0 ${r} L 0 ${h - r} A ${w} ${r} 0 0 0 ${w} ${h}`;
+    }
+    case "rightBracket": {
+      const r = Math.min((h * adj("adj", 8333)) / 100000, h / 2);
+      return `M 0 0 A ${w} ${r} 0 0 1 ${w} ${r} L ${w} ${h - r} A ${w} ${r} 0 0 1 0 ${h}`;
+    }
+    default:
+      return `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`;
+  }
+}
+
+/**
+ * Resolve a SmartArt reference (dgm:relIds) to the root of its CACHED DRAWING
+ * part. Word stores a pre-computed rendering of every diagram in a dsp:drawing
+ * part (word/diagrams/drawing*.xml, MS-ODRAWXML): the diagram data part named
+ * by r:dm carries a dsp:dataModelExt extension whose relId names the drawing
+ * part. Producers emit that relationship on the HOST part (document.xml.rels);
+ * fall back to the data part's own rels, then to any diagramDrawing-typed
+ * relationship of the host.
+ */
+function resolveDiagramDrawing(relIds: XmlElement, ctx: DocParseContext): XmlElement | undefined {
+  if (!ctx.readPart) return undefined;
+  let drawingTarget: string | undefined;
+  const dmRelId = attr(relIds, "dm");
+  const dataRel = dmRelId ? ctx.rels.get(dmRelId) : undefined;
+  if (dataRel && !dataRel.external) {
+    const dataRoot = ctx.readPart(dataRel.target);
+    const modelExt = dataRoot ? findDescendant(dataRoot, "dataModelExt") : undefined;
+    const dspRelId = modelExt ? attr(modelExt, "relId") : undefined;
+    if (dspRelId) {
+      const hostRel = ctx.rels.get(dspRelId);
+      if (hostRel && !hostRel.external) drawingTarget = hostRel.target;
+      else {
+        const dataRels = parseRelationships(ctx.readPart(relsPathFor(dataRel.target)), dataRel.target);
+        const r = dataRels.get(dspRelId);
+        if (r && !r.external) drawingTarget = r.target;
+      }
+    }
+  }
+  if (!drawingTarget) {
+    for (const r of ctx.rels.values()) {
+      if (!r.external && r.type.endsWith("/diagramDrawing")) {
+        drawingTarget = r.target;
+        break;
+      }
+    }
+  }
+  return drawingTarget ? ctx.readPart(drawingTarget) : undefined;
+}
+
+/**
+ * Walk a dsp:drawing's shape tree (the SmartArt cached rendering) into the
+ * composite-drawing primitives. Geometry is absolute EMU in the diagram's
+ * coordinate space, which maps 1:1 onto the host drawing's wp:extent;
+ * (dx,dy) px shift everything by the host's effectExtent.
+ */
+function collectDiagramShapes(
+  dspRoot: XmlElement,
+  ctx: DocParseContext,
+  out: { lines: DrawingLine[]; paths: DrawingPath[]; texts: DrawingTextShape[] },
+  dx: number,
+  dy: number,
+): void {
+  const spTree = findDescendant(dspRoot, "spTree");
+  if (!spTree) return;
+
+  const emitShape = (sp: XmlElement, ox: number, oy: number, sx: number, sy: number): void => {
+    const spPr = child(sp, "spPr");
+    if (!spPr) return;
+    const xfrm = child(spPr, "xfrm");
+    const off = child(xfrm, "off");
+    const ext = child(xfrm, "ext");
+    const x = ox + (intAttr(off, "x") ?? 0) * sx;
+    const y = oy + (intAttr(off, "y") ?? 0) * sy;
+    const w = (intAttr(ext, "cx") ?? 0) * sx;
+    const h = (intAttr(ext, "cy") ?? 0) * sy;
+    const prst = attr(child(spPr, "prstGeom"), "prst") ?? "rect";
+    const lnEl = child(spPr, "ln");
+    let stroke: { color: string; width: number } | undefined;
+    if (lnEl && !child(lnEl, "noFill")) {
+      const lnColor = solidFillColor(lnEl, ctx.theme);
+      if (lnColor) stroke = { color: lnColor, width: Math.max(emuToPx(intAttr(lnEl, "w") ?? 0), 1) };
+    }
+    const isLine = prst === "line" || prst.startsWith("straightConnector") || prst.startsWith("bentConnector");
+    if (isLine) {
+      if (stroke) {
+        const flipH = attr(xfrm, "flipH") === "1";
+        const flipV = attr(xfrm, "flipV") === "1";
+        let [x1, y1, x2, y2] = [x, y, x + w, y + h];
+        if (flipH) [x1, x2] = [x2, x1];
+        if (flipV) [y1, y2] = [y2, y1];
+        out.lines.push({
+          x1: dx + emuToPx(x1),
+          y1: dy + emuToPx(y1),
+          x2: dx + emuToPx(x2),
+          y2: dy + emuToPx(y2),
+          color: stroke.color,
+          weight: Math.max(stroke.width, 0.75),
+        });
+      }
+    } else {
+      const fill = child(spPr, "noFill") ? undefined : solidFillColor(spPr, ctx.theme);
+      if ((fill || stroke) && w > 0 && h > 0) {
+        const d = presetPathD(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
+        if (d) {
+          out.paths.push({
+            x: dx + emuToPx(x),
+            y: dy + emuToPx(y),
+            width: emuToPx(w),
+            height: emuToPx(h),
+            d,
+            viewW: w,
+            viewH: h,
+            fill,
+            stroke,
+          });
+        }
+      }
+    }
+    // Text body: prefer the dsp:txXfrm rect (the exact text frame Word used,
+    // absolute in diagram space) over the shape rect.
+    const txBody = child(sp, "txBody");
+    if (txBody) {
+      const blocks = parseDrawingMLTextBody(txBody, ctx);
+      if (blocks.length > 0) {
+        const txXfrm = child(sp, "txXfrm");
+        const tOff = child(txXfrm, "off");
+        const tExt = child(txXfrm, "ext");
+        const tx = txXfrm ? ox + (intAttr(tOff, "x") ?? 0) * sx : x;
+        const ty = txXfrm ? oy + (intAttr(tOff, "y") ?? 0) * sy : y;
+        const tw = txXfrm ? (intAttr(tExt, "cx") ?? 0) * sx : w;
+        const th = txXfrm ? (intAttr(tExt, "cy") ?? 0) * sy : h;
+        const bodyPr = child(txBody, "bodyPr");
+        const insetOf = (name: string, dflt: number): number => {
+          const v = bodyPr ? intAttr(bodyPr, name) : undefined;
+          return v !== undefined ? emuToPx(v) : dflt;
+        };
+        const anchorAttr = bodyPr ? attr(bodyPr, "anchor") : undefined;
+        out.texts.push({
+          x: dx + emuToPx(tx),
+          y: dy + emuToPx(ty),
+          width: emuToPx(tw),
+          height: emuToPx(th),
+          blocks,
+          insets: { l: insetOf("lIns", 9.6), t: insetOf("tIns", 4.8), r: insetOf("rIns", 9.6), b: insetOf("bIns", 4.8) },
+          textAnchor: anchorAttr === "ctr" ? "middle" : anchorAttr === "b" ? "bottom" : "top",
+        });
+      }
+    }
+  };
+
+  const walkTree = (el: XmlElement, ox: number, oy: number, sx: number, sy: number): void => {
+    for (const c of el.children) {
+      const ln = localName(c.name);
+      if (ln === "sp") emitShape(c, ox, oy, sx, sy);
+      else if (ln === "grpSp") {
+        const xfrm = path(c, "grpSpPr", "xfrm");
+        const off = child(xfrm, "off");
+        const chOff = child(xfrm, "chOff");
+        const ext = child(xfrm, "ext");
+        const chExt = child(xfrm, "chExt");
+        const extX = intAttr(ext, "cx") ?? 1;
+        const extY = intAttr(ext, "cy") ?? 1;
+        const chX = intAttr(chExt, "cx") ?? extX;
+        const chY = intAttr(chExt, "cy") ?? extY;
+        const nsx = sx * (chX ? extX / chX : 1);
+        const nsy = sy * (chY ? extY / chY : 1);
+        const nox = ox + (intAttr(off, "x") ?? 0) * sx - (intAttr(chOff, "x") ?? 0) * nsx;
+        const noy = oy + (intAttr(off, "y") ?? 0) * sy - (intAttr(chOff, "y") ?? 0) * nsy;
+        walkTree(c, nox, noy, nsx, nsy);
+      }
+    }
+  };
+  walkTree(spTree, 0, 0, 1, 1);
+}
+
+/**
+ * Convert a DrawingML a:txBody (a:p / a:r, attribute-encoded properties) to
+ * model paragraphs. Everything Word derives from the diagram's style chain is
+ * baked into the cached drawing as direct formatting, so all resolved values
+ * are set explicitly (the doc's Normal style must not leak in via the layout
+ * cascade).
+ */
+function parseDrawingMLTextBody(txBody: XmlElement, ctx: DocParseContext): Block[] {
+  const blocks: Block[] = [];
+  let sawText = false;
+  for (const p of children(txBody, "p")) {
+    const pPr = child(p, "pPr");
+    const algn = pPr ? attr(pPr, "algn") : undefined;
+    const marL = pPr ? (intAttr(pPr, "marL") ?? 0) : 0;
+    const indent = pPr ? (intAttr(pPr, "indent") ?? 0) : 0;
+    const runs: Run[] = [];
+    for (const el of p.children) {
+      const ln = localName(el.name);
+      if (ln === "r") {
+        const run = drawingMLRun(el, ctx);
+        if (run) runs.push(run);
+      } else if (ln === "br") {
+        runs.push({ type: "run", props: runs[runs.length - 1]?.props ?? {}, content: [{ kind: "break", breakType: "line" }] });
+      }
+    }
+    // a:buChar bullets: hanging-indent paragraphs with the bullet glyph as a
+    // leading run (Word butts the text right up against the bullet).
+    const buChar = pPr ? attr(child(pPr, "buChar"), "char") : undefined;
+    if (buChar && runs.length > 0) {
+      const glyph = [...buChar][0] ?? "•";
+      runs.unshift({ type: "run", props: { ...runs[0].props }, content: [{ kind: "text", text: glyph }] });
+    }
+    // Percent spacing (spcPct) is relative to a single line of the paragraph's
+    // largest text; point spacing (spcPts) is hundredths of a point.
+    const sizePx = Math.max(...runs.map((r) => r.props.size ?? 0), 0) || ptToPx(9);
+    const spcPx = (holder: XmlElement | undefined): number | undefined => {
+      if (!holder) return undefined;
+      const pct = intAttr(child(holder, "spcPct"), "val");
+      if (pct !== undefined) return (pct / 100000) * sizePx * 1.2;
+      const pts = intAttr(child(holder, "spcPts"), "val");
+      if (pts !== undefined) return ptToPx(pts / 100);
+      return undefined;
+    };
+    const lnSpc = pPr ? child(pPr, "lnSpc") : undefined;
+    const lnPct = lnSpc ? intAttr(child(lnSpc, "spcPct"), "val") : undefined;
+    const lnPts = lnSpc ? intAttr(child(lnSpc, "spcPts"), "val") : undefined;
+    const props: ParaProps = {
+      alignment: algn === "ctr" ? "center" : algn === "r" ? "right" : algn === "just" ? "justify" : "left",
+      spacingBefore: spcPx(pPr ? child(pPr, "spcBef") : undefined) ?? 0,
+      spacingAfter: spcPx(pPr ? child(pPr, "spcAft") : undefined) ?? 0,
+      lineSpacing:
+        lnPct !== undefined
+          ? { rule: "auto", value: lnPct / 100000 }
+          : lnPts !== undefined
+            ? { rule: "exact", value: ptToPx(lnPts / 100) }
+            : { rule: "auto", value: 1 },
+      indentLeft: emuToPx(marL),
+      ...(indent < 0 ? { indentHanging: emuToPx(-indent) } : indent > 0 ? { indentFirstLine: emuToPx(indent) } : {}),
+      snapToGrid: false,
+      contextualSpacing: false,
+    };
+    if (runs.some((r) => r.content.some((c) => c.kind === "text" && c.text.length > 0))) sawText = true;
+    blocks.push({ type: "paragraph", props, children: runs });
+  }
+  return sawText ? blocks : [];
+}
+
+/** a:r → model run: attribute-encoded rPr (sz hundredths-pt, b/i/u) plus
+ * latin typeface (theme +mn-lt/+mj-lt resolved) and solidFill color. */
+function drawingMLRun(r: XmlElement, ctx: DocParseContext): Run | null {
+  const t = child(r, "t");
+  const text = t?.text ?? "";
+  const rPr = child(r, "rPr");
+  const props: RunProps = {};
+  const sz = rPr ? intAttr(rPr, "sz") : undefined;
+  props.size = ptToPx((sz ?? 1800) / 100);
+  if (rPr && attr(rPr, "b") === "1") props.bold = true;
+  if (rPr && attr(rPr, "i") === "1") props.italic = true;
+  const u = rPr ? attr(rPr, "u") : undefined;
+  if (u && u !== "none") props.underline = "single";
+  const typeface = rPr ? attr(child(rPr, "latin"), "typeface") : undefined;
+  props.font =
+    typeface === undefined || typeface.startsWith("+mn")
+      ? (ctx.theme?.minorFont ?? "Calibri")
+      : typeface.startsWith("+mj")
+        ? (ctx.theme?.majorFont ?? "Calibri Light")
+        : typeface;
+  props.color = (rPr ? solidFillColor(rPr, ctx.theme) : undefined) ?? "#000000";
+  return { type: "run", props, content: [{ kind: "text", text }] };
 }
 
 /** a:path -> SVG path data (moveTo/lnTo/cubicBezTo/quadBezTo/arcTo-as-line/close). */

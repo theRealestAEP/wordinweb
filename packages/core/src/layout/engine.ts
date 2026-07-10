@@ -2,6 +2,7 @@ import { DocxDocument } from "../docx.js";
 import {
   Block,
   Border,
+  DrawingTextShape,
   HeaderFooter,
   NumberingLevel,
   Paragraph,
@@ -2569,6 +2570,11 @@ class Engine {
             stroke: pth.stroke,
           });
         }
+        // Positioned text bodies (SmartArt cached-drawing shapes, multi-
+        // textbox groups): each is a mini text frame laid out inside its box.
+        for (const ts of span.drawing.texts ?? []) {
+          this.emitDrawingText(ts, bx, by, page, this.fieldCtx());
+        }
         // A transparent hit target over the group makes the whole drawing
         // (icon, logo) selectable and draggable as one unit.
         if (span.drawing.srcDrawing) {
@@ -3115,6 +3121,9 @@ class Engine {
         for (const img of shape.images) {
           page.items.push({ kind: "image", x: ox + img.x - fx, y: oy + img.y - fy, width: img.width, height: img.height, part: img.part, behind: shape.behind });
         }
+        for (const ts of shape.texts ?? []) {
+          this.emitDrawingText(ts, ox - fx, oy - fy, page, fields);
+        }
         continue;
       }
       if (shape.type === "line") {
@@ -3278,6 +3287,45 @@ class Engine {
           this.floats.set(page, list);
         }
       }
+    }
+  }
+
+  /**
+   * Paint one positioned text body of a composite drawing (SmartArt cached
+   * shape, group textbox): optional fill/outline, then its blocks laid out as
+   * a mini frame inside the box honoring insets and vertical anchoring.
+   * (ox,oy) is the drawing's page origin in px.
+   */
+  private emitDrawingText(
+    ts: DrawingTextShape,
+    ox: number,
+    oy: number,
+    page: InternalPage,
+    fields: FieldContext,
+  ): void {
+    const tx = ox + ts.x;
+    const ty = oy + ts.y;
+    if (ts.fill) {
+      page.items.push({ kind: "rect", x: tx, y: ty, width: ts.width, height: ts.height, fill: ts.fill });
+    }
+    if (ts.stroke) {
+      const b = { style: "single" as const, width: ts.stroke.weight, color: ts.stroke.color, space: 0 };
+      page.items.push({ kind: "edge", x1: tx, y1: ty, x2: tx + ts.width, y2: ty, border: b });
+      page.items.push({ kind: "edge", x1: tx, y1: ty + ts.height, x2: tx + ts.width, y2: ty + ts.height, border: b });
+      page.items.push({ kind: "edge", x1: tx, y1: ty, x2: tx, y2: ty + ts.height, border: b });
+      page.items.push({ kind: "edge", x1: tx + ts.width, y1: ty, x2: tx + ts.width, y2: ty + ts.height, border: b });
+    }
+    const ins = ts.insets;
+    const inner = this.layoutFrame(ts.blocks, Math.max(ts.width - ins.l - ins.r, 1), fields, {
+      x: tx + ins.l,
+      y: ty + ins.t,
+    });
+    let innerTop = ty + ins.t;
+    if (ts.textAnchor === "middle") innerTop = ty + (ts.height - inner.height) / 2;
+    else if (ts.textAnchor === "bottom") innerTop = ty + ts.height - ins.b - inner.height;
+    for (const it of inner.items) {
+      offsetItem(it, tx + ins.l, innerTop);
+      page.items.push(it);
     }
   }
 
