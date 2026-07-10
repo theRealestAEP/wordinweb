@@ -2024,9 +2024,18 @@ class Engine {
           continue;
         }
         // Terminator: only its first line (and the orphan-dragged second line
-        // when it has more than one) needs to stay with the chain.
+        // when it has more than one) needs to stay with the chain. A 2- or
+        // 3-line terminator under widow control is UNSPLITTABLE (2+1 strands
+        // a widow, 1+2 an orphan) — if its head can't stay, the whole
+        // paragraph moves and drags the chain: reserve all of it (NIH
+        // p416/417: '537' keepNext + Heading4 + a 3-line URL paragraph — Word
+        // moves the whole 79pt block to p417 leaving 90pt unused).
         let need = gap + (nb.lines[0]?.height ?? 18);
-        if (nb.lines.length > 1 && np.widowControl !== false) need += nb.lines[1].height;
+        if (np.widowControl !== false && (nb.lines.length === 2 || nb.lines.length === 3)) {
+          need = gap + nb.lines.reduce((a, l) => a + l.height, 0);
+        } else if (nb.lines.length > 1 && np.widowControl !== false) {
+          need += nb.lines[1].height;
+        }
         tail += need;
         break;
       }
@@ -2783,8 +2792,17 @@ class Engine {
     const items: PageItem[] = [];
     let y = 0;
     // An unconsumed PAGE frame awaiting its collision test with the next
-    // paragraph (top/bottom = the frame's band, x0/x1 = its painted extent).
-    let pendingPageFrame: { top: number; bottom: number; x0: number; x1: number } | null = null;
+    // paragraph (top/bottom = the frame's band, x0/x1 = its painted extent,
+    // boxH = the frame text's glyph box height for the phantom-line rule).
+    let pendingPageFrame: { top: number; bottom: number; x0: number; x1: number; boxH: number } | null = null;
+    // Height reserve added when an extracted PAGE frame overlays an empty
+    // follower: Word still counts the frame's own line in the FOOTER HEIGHT
+    // when the frame is wider than its glyph box (NIH contract, measured over
+    // all 419 reference pages: footer top = pageBottom − footerDist − 3 lines
+    // on pages 1-9 where the number is one digit, but − 4 lines from page 10
+    // on — the painted stack is identical, number and admin line one line
+    // apart, so the extra line is height-only).
+    let pageFramePhantomH = 0;
     // Frame flow reuses a fake page so emitLine/decorations can target it.
     const fake: InternalPage = {
       items,
@@ -2913,9 +2931,9 @@ class Engine {
           // paints at the frame's xAlign, and the NEXT paragraph is laid as
           // if this one did not exist, then tested for collision (below).
           // PDF-verified both ways: dense's right-aligned "302" shares the
-          // line with left-aligned footer text; NIH's centered number stacks
-          // above its centered admin line. The rule is extent collision, not
-          // page-number digit count.
+          // line with left-aligned footer text; NIH's centered number is
+          // overlaid on its empty ptab follower with the admin line exactly
+          // one line below on all 419 reference pages.
           const frameTexts = items
             .slice(paraItemsStart)
             .filter((it): it is TextItem => it.kind === "text" && it.text.trim().length > 0);
@@ -2928,7 +2946,13 @@ class Engine {
               props.frame?.xAlign === "left" ? 0 : (width - w) / 2;
             const dx = targetX0 - x0;
             if (dx !== 0) for (const it of items.slice(paraItemsStart)) offsetItem(it, dx, 0);
-            pendingPageFrame = { top: flowY, bottom: y, x0: targetX0, x1: targetX0 + w };
+            const boxH = Math.max(
+              ...frameTexts.map((it) => {
+                const m = this.measurer.metrics(it.font);
+                return m.ascent + m.descent;
+              }),
+            );
+            pendingPageFrame = { top: flowY, bottom: y, x0: targetX0, x1: targetX0 + w, boxH };
             y = flowY;
             framePrevAfter = flowPrevAfter;
           }
@@ -2948,21 +2972,37 @@ class Engine {
             ? first.spans.filter((s) => (s.text && s.text.length > 0 && s.text !== "\t") || s.image || s.drawing)
             : [];
           const ink = laid.filter((s) => s.image || s.drawing || (s.text && s.text.trim().length > 0));
-          // Share the band ONLY when the follower has ink whose laid interval
+          // Share the band when the follower has NO ink (an empty line has
+          // nothing to wrap: NIH footer2's ptab-only paragraph overlaps the
+          // centered number — Word's PDF puts the admin line exactly ONE line
+          // below the number on all 419 pages) or when its laid interval
           // (line start through last ink; leading whitespace counts, trailing
           // whitespace/tabs are free) clears the frame box — dense's left
-          // footer text beside its right-aligned "302", every page. An empty
-          // or colliding follower keeps sequential flow: the frame consumes
-          // its own line (NIH: number line above the centered admin line and
-          // its surrounding empties, PDF-verified at 419 Word pages).
+          // footer text beside its right-aligned "302", every page. Only a
+          // COLLIDING inked follower keeps sequential flow.
           const shares =
-            ink.length > 0 &&
+            ink.length === 0 ||
             !(
               Math.min(...laid.map((s) => s.x)) < pf.x1 + 4 &&
               Math.max(...ink.map((s) => s.x + s.width)) > pf.x0 - 4
             );
           if (shares) {
             y = Math.max(y, pf.bottom);
+            // A frame overlaid on an EMPTY follower still counts its own line
+            // in the flow HEIGHT when its painted text is wider than its glyph
+            // box (measured from the NIH reference: footer top sits one full
+            // line higher from page 10 on — two-digit numbers, Word width
+            // 14.96pt against the 12pt em box — than on the single-digit
+            // pages 1-9 at 8.71pt, while the painted stack never changes;
+            // dense's inked sharing follower gets no such reserve). Our
+            // metrics-derived box is the win box (~1.22em for Calibri), so
+            // compare against 0.7×boxH: one digit (8.1px) stays under it,
+            // two digits (16.2px) clear it, mirroring Word's 1→2 digit flip.
+            // The reserve is height-only: it moves the footer anchor and the
+            // body bottom, not any painted item.
+            if (ink.length === 0 && pf.x1 - pf.x0 > pf.boxH * 0.7) {
+              pageFramePhantomH += pf.bottom - pf.top;
+            }
           } else {
             const dy = pf.bottom - pf.top;
             for (const it of items.slice(paraItemsStart)) offsetItem(it, 0, dy);
@@ -2980,7 +3020,7 @@ class Engine {
     }
     if (pendingPageFrame) y = Math.max(y, pendingPageFrame.bottom);
     this.floats.delete(fake);
-    return { items, height: y };
+    return { items, height: y + pageFramePhantomH };
   }
 
   /**
@@ -3396,6 +3436,35 @@ class Engine {
           const { minW } = this.columnMinPref(tbl, base.length);
           const expanded = base.map((w, i) => Math.max(w, minW[i] ?? 0));
           if (expanded.reduce((a, b) => a + b, 0) <= available) return expanded;
+        } else if (tbl.props.widthPct !== undefined && !nested) {
+          // A pct-width table is re-autofit the same way, but its TOTAL stays
+          // pinned at the pct target: columns whose min-content exceeds the
+          // authored grid are raised to it and the raise is funded by the
+          // columns still above their own minimum, proportionally to that
+          // slack (col = raised − (raised − min)·k). Measured from the NIH
+          // clause-matrix (tblW 4800 pct, grid [1394,1193,7435]tw): the NBSP-
+          // glued " FETOWO GO. " header raises col1 to 76.02pt where the grid
+          // says 69.7, col2 gives up 0.4pt and the wide title column the
+          // rest — Word renders [76.02, 59.28, 365.82]pt, the raised model
+          // predicts [75.8, 59.2, 366.2].
+          // Word-exact mins here: columnMinPref's +2px border fudge (kept for
+          // the other autofit paths it calibrates) must not count toward the
+          // raise test, or col2's NBSP-glued "Wej 7426" (59.25pt min vs its
+          // 59.65pt grid column) gets a spurious raise Word does not do.
+          const { minW } = this.columnMinPref(tbl, base.length);
+          const mins = minW.map((m) => Math.max(0, m - 2));
+          const target = base.reduce((a, b) => a + b, 0);
+          const raised = base.map((w, i) => Math.max(w, mins[i]));
+          const over = raised.reduce((a, b) => a + b, 0) - target;
+          if (over > 0.5) {
+            const slack = raised.map((w, i) => Math.max(0, w - mins[i]));
+            const sumSlack = slack.reduce((a, b) => a + b, 0);
+            if (sumSlack > 0) {
+              const k = Math.min(1, over / sumSlack);
+              return raised.map((w, i) => w - slack[i] * k);
+            }
+          }
+          return raised;
         }
         return base;
       }
