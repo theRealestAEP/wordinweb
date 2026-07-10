@@ -1521,6 +1521,7 @@ function buildAtoms(
     // with no kana under a Japanese eastAsia font is treated as the Chinese
     // fallback so its line pitch matches.
     let family = props.fontEastAsia ?? font.family;
+    const declaredFamily = family;
     const japaneseEA = /mincho|gothic|meiryo|^yu|\byu /i.test(family);
     const hasKana = /[぀-ヿ]/.test(seg);
     if (japaneseEA && !hasKana) family = "Microsoft JhengHei";
@@ -1542,11 +1543,29 @@ function buildAtoms(
     else if (/simsun/.test(fl)) family = "Songti SC";
     else if (/simhei/.test(fl)) family = "Heiti SC";
     const cjkFont: FontSpec = { ...font, family, paintFamily: realFamily };
+    // Word's fallback is per GLYPH COVERAGE, not per segment: a Japanese font
+    // keeps every character it covers (kana, fullwidth punctuation, shared
+    // ideographs) and only simplified-only forms fall to the Chinese face
+    // (staging-eastasian PDF: MS Mincho paints 学而之，不亦 while JhengHei
+    // paints 时习说远乐 on the same line). Full per-glyph coverage needs font
+    // tables; fullwidth PUNCTUATION is covered by every CJK face, so at least
+    // route it to the declared font — a JhengHei-styled U+FF0C paints as a
+    // CENTERED dot where Word shows MS Mincho's low corner comma.
+    const punctFont: FontSpec =
+      family === declaredFamily
+        ? cjkFont
+        : {
+            ...font,
+            family: /gothic|meiryo/i.test(declaredFamily) ? "Hiragino Sans" : "Hiragino Mincho ProN",
+            paintFamily: declaredFamily,
+          };
+    const isFwPunct = (ch: string) => /[　-〿！-｠・]/.test(ch);
     const tScale = props.textScale ?? 1;
     for (let k = 0; k < seg.length; k++) {
       const ch = seg[k];
       const next = seg[k + 1];
-      const w = (isWideCJK(ch) ? cjkFont.size : measurer.width(ch, cjkFont, props.letterSpacing)) * tScale;
+      const chFont = isFwPunct(ch) ? punctFont : cjkFont;
+      const w = (isWideCJK(ch) ? chFont.size : measurer.width(ch, chFont, props.letterSpacing)) * tScale;
       // Break after this char unless kinsoku binds it to a neighbour.
       let breakAfter = true;
       if (isNoEnd(ch)) breakAfter = false;
@@ -1554,7 +1573,7 @@ function buildAtoms(
       const src = srcBase
         ? { run: srcBase.run, t: srcBase.t, offset: srcBase.offset + baseOffset + k }
         : undefined;
-      atoms.push({ kind: "frag", text: ch, props, font: cjkFont, width: w, href, src, breakAfter, rtl: props.rtl });
+      atoms.push({ kind: "frag", text: ch, props, font: chFont, width: w, href, src, breakAfter, rtl: props.rtl });
     }
   };
 
