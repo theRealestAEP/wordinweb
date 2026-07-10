@@ -28,7 +28,7 @@ import {
   fontOf,
 } from "./inline.js";
 import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
-import { FontSpec, LaidOutPage, LayoutResult, PageItem } from "./types.js";
+import { FontSpec, LaidOutPage, LayoutResult, PageItem, TextItem } from "./types.js";
 
 export interface LayoutOptions {
   measurer?: TextMeasurer;
@@ -1667,6 +1667,14 @@ class Engine {
     };
     if (next?.type === "paragraph" && broken.lines.length > 0) {
       const predictedNextTop = paraBottom;
+      // topAndBottom boxes anchor at this paragraph's line bottom EXACTLY
+      // (parity2-textboxes), but a SQUARE box anchors at the next paragraph's
+      // TRUE top - inter-paragraph spacing included (staging-tblextreme: the
+      // 1.6in text box sits at intro-bottom + 10.67px spacing in Word, and
+      // does NOT narrow the intro's own single line).
+      const nextProps2 = this.doc.effectiveParaProps(next);
+      const predictedSquareTop =
+        paraBottom + Math.max(props.spacingAfter ?? 0, nextProps2.spacingBefore ?? 0);
       const hits = this.collectAnchors(next).filter((s) => {
         if (!("wrap" in s) || (s.wrap !== "topAndBottom" && s.wrap !== "square")) return false;
         if ("vAlign" in s && s.vAlign) return false;
@@ -1680,17 +1688,21 @@ class Engine {
           if ("behind" in s && s.behind) return false;
           if (("hRel" in s && s.hRel === "char") || s.vRel === "line") return false;
         }
+        const anchorTop = s.wrap === "square" ? predictedSquareTop : predictedNextTop;
         const top =
           s.vRel === "page" ? s.y :
           s.vRel === "margin" ? this.sp.marginTop + s.y :
-          predictedNextTop + s.y;
+          anchorTop + s.y;
         const d = s.wrap === "square" && "dist" in s && s.dist ? s.dist : { t: 0, b: 0 };
         return top - d.t <= paraBottom + 0.25 && top + h + d.b >= paraTopEstimate - 0.25;
       });
       if (hits.length > 0) {
         ensureLookMark();
         lookMark!.shapes.push(...hits);
-        this.emitAnchors(hits, this.cur, this.fieldCtx(), this.colX, predictedNextTop);
+        const sq = hits.filter((s) => "wrap" in s && s.wrap === "square");
+        const tb = hits.filter((s) => !("wrap" in s) || s.wrap !== "square");
+        if (tb.length > 0) this.emitAnchors(tb, this.cur, this.fieldCtx(), this.colX, predictedNextTop);
+        if (sq.length > 0) this.emitAnchors(sq, this.cur, this.fieldCtx(), this.colX, predictedSquareTop);
         for (const s of hits) this.consumedAnchors.add(s);
         broken = breakNow(paraTopEstimate);
       }
