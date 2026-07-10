@@ -37,6 +37,60 @@ describe("layout engine", () => {
     expect(pageText(result, 0)).toContain("Hello");
   });
 
+  it("run spaces give the justify packer no compression budget (typed spaces re-wrap the line)", () => {
+    // Typing spaces mid-line in a justified paragraph must eventually push
+    // the following words to a wrap. Pre-fix, every typed space ADDED
+    // compression budget (compress = overflow / ALL spaces), so the line
+    // never re-wrapped and every other space squeezed — the "space grows
+    // backwards" editing bug. Run spaces (2+ adjacent) are excluded from the
+    // budget and from alignment compression.
+    const section =
+      `<w:sectPr><w:pgSz w:w="6000" w:h="15840"/>` +
+      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
+    const wordsOnFirstLine = (mid: string): string[] => {
+      const para =
+        `<w:p><w:pPr><w:jc w:val="both"/></w:pPr><w:r><w:t xml:space="preserve">` +
+        `alpha bravo charlie delta echo${mid}foxtrot golf hotel india juliet kilo lima mike november oscar` +
+        `</w:t></w:r></w:p>`;
+      const { result } = layout({ "word/document.xml": wrapDocument(para + section) });
+      const first = Math.min(
+        ...result.pages[0].items.filter((i) => i.kind === "text").map((i) => (i.kind === "text" ? i.lineTop : 1e9)),
+      );
+      return result.pages[0].items
+        .filter((i) => i.kind === "text" && Math.abs(i.lineTop - first) < 0.5 && i.text.trim())
+        .map((i) => (i.kind === "text" ? i.text : ""));
+    };
+    const base = wordsOnFirstLine(" ");
+    const spaced = wordsOnFirstLine(" ".repeat(30));
+    // 30 typed spaces (~90px) must displace words to the next line — the
+    // pre-fix behavior kept the identical word set by compressing.
+    expect(spaced.length).toBeLessThan(base.length);
+    // And the run spaces themselves paint at natural width (uncompressed):
+    // consecutive space items advance by a full space width each.
+    const para =
+      `<w:p><w:pPr><w:jc w:val="both"/></w:pPr><w:r><w:t xml:space="preserve">` +
+      `alpha bravo charlie delta echo${" ".repeat(6)}foxtrot golf hotel india juliet kilo lima mike november oscar` +
+      `</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para + section) });
+    const first = Math.min(
+      ...result.pages[0].items.filter((i) => i.kind === "text").map((i) => (i.kind === "text" ? i.lineTop : 1e9)),
+    );
+    const spaces = result.pages[0].items
+      .filter((i) => i.kind === "text" && i.text === " " && Math.abs(i.lineTop - first) < 0.5)
+      .map((i) => (i.kind === "text" ? { x: i.x, w: i.width } : { x: 0, w: 0 }))
+      .sort((a, b) => a.x - b.x);
+    // Find the run: 6 consecutive spaces with equal advances.
+    let runStart = -1;
+    for (let i = 0; i + 5 < spaces.length; i++) {
+      if (spaces[i + 5].x - spaces[i].x < 6 * spaces[i].w + 1) { runStart = i; break; }
+    }
+    expect(runStart).toBeGreaterThanOrEqual(0);
+    const runW = spaces[runStart].w;
+    for (let i = runStart; i < runStart + 6; i++) {
+      expect(spaces[i].w).toBeCloseTo(runW, 1); // uniform, uncompressed
+    }
+  });
+
   it("hangs wrap-boundary spaces at the end of the wrapping line with source bindings", () => {
     const section =
       `<w:sectPr><w:pgSz w:w="3600" w:h="15840"/>` +

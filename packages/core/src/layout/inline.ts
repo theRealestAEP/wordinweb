@@ -243,6 +243,13 @@ export interface LineSpan {
   /** A space that is NOT a break opportunity (the following word begins with
    * a non-breaking space, which glues leftward across it — see SpaceAtom). */
   noBreak?: boolean;
+  /** A space inside a consecutive run (2+ adjacent spaces). Run spaces are
+   * authored/typed gaps, not inter-word gaps: justification neither
+   * compresses them nor counts them as pack budget (typing spaces mid-line
+   * in a justified paragraph must push the following words to a wrap, not
+   * squeeze every other space on the line — the "space grows backwards"
+   * editing bug). */
+  runSpace?: boolean;
   src?: TextSource;
   /** Line-metrics font when it differs from the paint font (small caps). */
   metricsFont?: FontSpec;
@@ -483,6 +490,9 @@ export function breakParagraph(
   // Width of spaces set in an East Asian face - the only ones the East Asian
   // fitter may compress.
   let curEaSpaceWidth = 0;
+  // Width of spaces inside consecutive runs (2+ adjacent): excluded from the
+  // justify pack budget and from alignment compression.
+  let curRunSpaceWidth = 0;
   // Spans at the line start that word-head backtracking must not consume
   // (the numbering label on a list paragraph's first line).
   let minSpans = 0;
@@ -659,6 +669,7 @@ export function breakParagraph(
     while (!keepTrailingSpace && cur.length > 0 && cur[cur.length - 1].isSpace) {
       curLineWidth -= cur[cur.length - 1].width;
       curSpaceWidth -= cur[cur.length - 1].width;
+      if (cur[cur.length - 1].runSpace) curRunSpaceWidth -= cur[cur.length - 1].width;
       hanging.unshift(cur.pop()!);
     }
     if (cur.length === 0 && isLast && anchorSrc) {
@@ -710,6 +721,7 @@ export function breakParagraph(
     curLineWidth = 0;
     curSpaceWidth = 0;
     curEaSpaceWidth = 0;
+    curRunSpaceWidth = 0;
     curPacked = false;
     minSpans = 0;
     lineIndex++;
@@ -965,9 +977,17 @@ export function breakParagraph(
       // regressed interactive typing: a space typed at a wrap boundary formed
       // an unbreakable word-space-space-word unit that dragged the previous
       // word (and the caret) to the next line.
-      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, noBreak: atom.noBreak, src: atom.src, metricsFont: atom.metricsFont, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
+      const runSpace = prevIsSpace || nextIsSpace;
+      if (runSpace && prevIsSpace && !cur[cur.length - 1].runSpace) {
+        // Retroactively mark the run's first space (its next-neighbor is
+        // only known now) and move its width to the run bucket.
+        cur[cur.length - 1].runSpace = true;
+        curRunSpaceWidth += cur[cur.length - 1].width;
+      }
+      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, noBreak: atom.noBreak, runSpace, src: atom.src, metricsFont: atom.metricsFont, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
       curLineWidth += atom.width;
       curSpaceWidth += atom.width;
+      if (runSpace) curRunSpaceWidth += atom.width;
       if (!prevIsSpace && !nextIsSpace && EA_FAMILY_RE.test(atom.font.family)) curEaSpaceWidth += atom.width;
       x += atom.width;
       continue;
@@ -1125,13 +1145,18 @@ export function breakParagraph(
       ) {
         // Word packs justified lines beyond the natural width by compressing
         // spaces (applyAlignment shrinks them back to fit) when the
-        // pack-vs-break comparison favors it. Compression counts all spaces
-        // on the line; the stretch alternative loses the trailing space.
+        // pack-vs-break comparison favors it. Compression counts the SINGLE
+        // inter-word spaces on the line — consecutive-run spaces (typed or
+        // authored gaps) are not compressible and give no budget, else every
+        // space typed mid-line makes packing easier and the line never
+        // re-wraps (the "space grows backwards" editing bug). The stretch
+        // alternative loses the trailing space.
         let trail = 0;
         for (let j = hi - 1; j >= 0 && cur[j].isSpace; j--) trail += cur[j].width;
         const spacesAfterBreak = curSpaceWidth - trail;
-        const compress = (x - headW + wordW - lineEnd) / curSpaceWidth;
-        if (spacesAfterBreak > 1e-6) {
+        const compressible = curSpaceWidth - curRunSpaceWidth;
+        const compress = (x - headW + wordW - lineEnd) / compressible;
+        if (spacesAfterBreak > 1e-6 && compressible > 1e-6) {
           const stretch = (lineEnd - (x - headW - trail)) / spacesAfterBreak;
           if (compress <= Math.min(JUSTIFY_MAX_COMPRESS, stretch * JUSTIFY_STRETCH_FACTOR)) {
             fits = true;
@@ -1287,9 +1312,12 @@ function applyAlignment(
   const slack = avail - line.width;
   if (((align === "justify" && !suppressJustify) || packed) && slack < 0) {
     // Line was packed beyond natural width: compress spaces (Word allows
-    // roughly a third of the space width before breaking earlier). An East
-    // Asian pack compresses only the East Asian-face spaces.
-    let spaces = line.spans.filter((s) => s.isSpace);
+    // roughly a third of the space width before breaking earlier).
+    // Consecutive-run spaces are typed/authored gaps, not inter-word gaps —
+    // they keep their natural width (the pack decision gave them no budget).
+    // An East Asian pack compresses only the East Asian-face spaces.
+    let spaces = line.spans.filter((s) => s.isSpace && !s.runSpace);
+    if (spaces.length === 0) spaces = line.spans.filter((s) => s.isSpace);
     if (packed && align !== "justify") {
       const ea = spaces.filter((s) => EA_FAMILY_RE.test(s.font.family));
       if (ea.length > 0) spaces = ea;
