@@ -27,6 +27,7 @@ import {
   LineBox,
   breakParagraph,
   fontOf,
+  resolveField,
 } from "./inline.js";
 import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
 import { FontSpec, LaidOutPage, LayoutResult, PageItem, TextItem } from "./types.js";
@@ -239,6 +240,7 @@ class Engine {
 
   run(): LayoutResult {
     this.assignNoteNumbers();
+    this.assignSeqNumbers();
     const sections = this.doc.sections;
     let prevSp: SectionProps | null = null;
     for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
@@ -800,7 +802,61 @@ class Engine {
       noteMark: (type, id) => (type === "footnote" ? engine.footnoteMark(id) : engine.endnoteMark(id)),
       selfNoteMark: () => engine.selfNoteMark ?? "",
       seq: (ident, key, instr) => engine.resolveSeq(ident, key, instr),
+      refText: (bookmark) => engine.refBookmarkText(bookmark),
     };
+  }
+
+  /** Current text of a `_Ref` cross-reference bookmark range (REF fields).
+   * SEQ fields inside the range resolve to their document-order value (the
+   * pre-pass in run() assigns them before any REF is laid out). */
+  private refResolving = new Set<string>();
+  private refBookmarkText(name: string): string | undefined {
+    const runs = this.doc.refBookmarks?.get(name);
+    if (!runs || runs.length === 0) return undefined;
+    if (this.refResolving.has(name)) return undefined; // circular REF chain
+    this.refResolving.add(name);
+    try {
+      let out = "";
+      for (const run of runs) {
+        for (const rc of run.content) {
+          if (rc.kind === "text") out += rc.text;
+          else if (rc.kind === "field") out += resolveField(rc.instruction, rc.cachedResult, this.fieldCtx(), rc);
+          else if (rc.kind === "tab") out += "\t";
+        }
+      }
+      return out;
+    } finally {
+      this.refResolving.delete(name);
+    }
+  }
+
+  /** Pre-assign SEQ values in document order. A REF to a caption's `_Ref`
+   * bookmark can be laid out pages BEFORE the caption itself (gatech's
+   * table of figures on p10 references the body caption): resolving the
+   * bookmark's SEQ lazily at REF time would consume the counter out of
+   * order, so walk the document up front and pin every occurrence. */
+  private assignSeqNumbers(): void {
+    const visit = (blocks: Block[]) => {
+      for (const b of blocks) {
+        if (b.type === "paragraph") {
+          for (const c of b.children) {
+            const runs = c.type === "run" ? [c] : c.runs;
+            for (const r of runs) {
+              for (const rc of r.content) {
+                if (rc.kind !== "field") continue;
+                const parts = rc.instruction.trim().split(/\s+/);
+                if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
+                  this.resolveSeq(parts[1], rc, rc.instruction.trim());
+                }
+              }
+            }
+          }
+        } else {
+          for (const row of b.rows) for (const cell of row.cells) visit(cell.blocks);
+        }
+      }
+    };
+    for (const s of this.doc.sections) visit(s.blocks);
   }
 
   /** SEQ counters keyed by identifier; each field occurrence keeps its
@@ -3104,8 +3160,17 @@ class Engine {
             // compare against 0.7×boxH: one digit (8.1px) stays under it,
             // two digits (16.2px) clear it, mirroring Word's 1→2 digit flip.
             // The reserve is height-only: it moves the footer anchor and the
-            // body bottom, not any painted item.
-            if (ink.length === 0 && pf.x1 - pf.x0 > pf.boxH * 0.7) {
+            // body bottom, not any painted item. It only exists when painted
+            // content FOLLOWS the overlaid follower (NIH's admin line one
+            // line below the number): a frame overlaying a trailing empty
+            // paragraph reserves nothing — gatech's roman-numeral footer
+            // (frame + final empty para) bottom-aligns its single line at
+            // footerDistance in Word, phantom-free, though "vii" is wider
+            // than the 0.7×boxH cutoff.
+            const laterInk = blocks
+              .slice(i + 1)
+              .some((b) => b.type === "table" || (b.type === "paragraph" && !isEmptyParagraph(b)));
+            if (ink.length === 0 && laterInk && pf.x1 - pf.x0 > pf.boxH * 0.7) {
               pageFramePhantomH += pf.bottom - pf.top;
             }
           } else {
@@ -3326,7 +3391,26 @@ class Engine {
         // that flows underneath it).
         const front = !behind;
 
-        if (shape.fill) {
+        // Non-rect preset geometry (oval / diamond / flowchart): paint the
+        // real outline+fill as a path; the rect fill/edges below stay for
+        // plain text boxes.
+        if (shape.geom && (shape.fill || shape.stroke)) {
+          page.items.push({
+            kind: "path",
+            x: ox - fx,
+            y: oy - fy,
+            width,
+            height,
+            d: shape.geom.d,
+            viewW: shape.geom.viewW,
+            viewH: shape.geom.viewH,
+            fill: shape.fill,
+            ...(shape.stroke ? { stroke: { color: shape.stroke.color, width: shape.stroke.weight } } : {}),
+            ...(behind ? { behind: true } : {}),
+            ...(front ? { front: true } : {}),
+          });
+        }
+        if (shape.fill && !shape.geom) {
           page.items.push({
             kind: "rect",
             x: ox - fx,
@@ -3339,7 +3423,7 @@ class Engine {
             ...(front ? { front: true } : {}),
           });
         }
-        if (shape.stroke) {
+        if (shape.stroke && !shape.geom) {
           const b = { style: "single" as const, width: shape.stroke.weight, color: shape.stroke.color, space: 0 };
           const x0 = ox - fx;
           const y0 = oy - fy;
@@ -3366,6 +3450,16 @@ class Engine {
         if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
         else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
         for (const it of inner.items) {
+          // noAutofit boxes never grow: Word hides WHOLE lines that stick out
+          // past the shape bottom (phase23 p12 oval — "Was 0 / B" show, the
+          // wrapped tail lines vanish under the box edge).
+          if (
+            shape.clipText &&
+            it.kind === "text" &&
+            innerTop - oy + it.lineTop + it.lineHeight > height + 0.5
+          ) {
+            continue;
+          }
           offsetItem(it, ox + ins.l - fx, innerTop - fy);
           if (rotate && (it.kind === "text" || it.kind === "rect")) {
             const iy = it.kind === "text" ? (it.glyphTop ?? it.lineTop) : it.y;
@@ -3549,7 +3643,7 @@ class Engine {
    * (widest atom) content width and fit them to the table width.
    */
   private resolveGridWidths(tbl: Table, available: number, nested = false): number[] {
-    const base = resolveGrid(tbl, available);
+    const base = resolveGrid(tbl, available, !nested);
     if (tbl.props.layout === "fixed") return base;
     const gridTotal = tbl.grid.reduce((a, b) => a + b, 0);
     const target = base.reduce((a, b) => a + b, 0);
@@ -3943,7 +4037,13 @@ class Engine {
     // lines plus the gap = 3x its declared width in Word (staging-styles'
     // Total row; wild2 legal p23's sz-6 double-bordered signature rows
     // measure 2.25pt of border share per boundary, not 0.75pt).
-    const bw = (b?: Border) => (b && b.style !== "none" ? this.borderPaintWidth(b) : 0);
+    // Use the DECLARED width (rawWidth), not the 0.75px hairline paint floor:
+    // Word advances sz-4 rows by their true 0.5pt rule (phase23 p66's 45-row
+    // table accumulates a 2.5px drift on the floored width).
+    const bw = (b?: Border) =>
+      b && b.style !== "none"
+        ? this.borderPaintWidth({ style: b.style, width: b.rawWidth ?? b.width })
+        : 0;
     const rows = tbl.rows;
     const nRows = rows.length;
     const nCols =
@@ -4494,6 +4594,16 @@ class Engine {
       return null;
     }
 
+    // Word cuts every cell at the same y: a cell whose content has not begun
+    // by the cut would paint nothing on the top fragment while its neighbours
+    // show their first lines. Word moves the row whole instead
+    // (parity2-nestedtables p2: the three one-line cells fit above the cut
+    // but the Q3 cell's first line misses it — Word pushes the entire
+    // "Metric 14" row to page 3 rather than strand an empty Q3 cell).
+    if (partitions.some(({ keep, rest }) => keep.length === 0 && hasVisibleContent(rest))) {
+      return null;
+    }
+
     // Keep a two-line boundary when text in the same cell continues. This is
     // why parity2-nestedtables moves its three-line rows whole instead of
     // leaving one line on the next page.
@@ -4967,9 +5077,16 @@ function computeColumns(sp: SectionProps, contentWidth: number): { colXs: number
   return { colXs, colWidths };
 }
 
-function resolveGrid(tbl: Table, available: number): number[] {
+function resolveGrid(tbl: Table, available: number, overflowAllowed = false): number[] {
+  // A body-level tblLayout=fixed table renders at its declared grid width
+  // even when that exceeds the text column: Word lets it run into the right
+  // margin (ca-agreement p1: tblW 10170tw against a 9360tw column, shifted
+  // left by tblInd -612 — the Word PDF paints the last column 10.5pt past
+  // the right margin, not shrunk to fit).
+  const fixedOverflow = overflowAllowed && tbl.props.layout === "fixed";
+  const cap = fixedOverflow ? Number.POSITIVE_INFINITY : available;
   const target = Math.min(
-    available,
+    cap,
     tbl.props.width ?? (tbl.props.widthPct !== undefined ? tbl.props.widthPct * available : available),
   );
   let widths = tbl.grid.length > 0 ? [...tbl.grid] : [];
@@ -4980,11 +5097,11 @@ function resolveGrid(tbl: Table, available: number): number[] {
       widths.length > 0
         ? widths.length
         : Math.max(1, ...tbl.rows.map((r) => r.cells.reduce((a, c) => a + c.props.gridSpan, 0)));
-    return new Array(cols).fill(target / cols);
+    return new Array(cols).fill(Math.min(target, available) / cols);
   }
   // Scale the grid to an explicit table width, or shrink to fit the column.
   const wantsExplicit = tbl.props.width !== undefined || tbl.props.widthPct !== undefined;
-  if ((wantsExplicit && Math.abs(total - target) > 1) || total > available) {
+  if ((wantsExplicit && Math.abs(total - target) > 1) || total > cap) {
     const scale = target / total;
     widths = widths.map((w) => w * scale);
   }

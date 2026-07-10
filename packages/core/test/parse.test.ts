@@ -1133,3 +1133,175 @@ describe("SmartArt cached drawing", () => {
     expect(text).toBeDefined();
   });
 });
+
+describe("phase23 fidelity rules", () => {
+  it("tints theme-colored borders (themeTint) instead of using the raw accent", () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:pPr><w:pBdr>
+             <w:top w:val="single" w:sz="24" w:space="0" w:color="DBE5F1" w:themeColor="accent1" w:themeTint="33"/>
+           </w:pBdr></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>`,
+        ),
+        "word/theme/theme1.xml": `<?xml version="1.0"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <a:themeElements><a:clrScheme name="Test">
+    <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+    <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+    <a:dk2><a:srgbClr val="1F497D"/></a:dk2>
+    <a:lt2><a:srgbClr val="EEECE1"/></a:lt2>
+    <a:accent1><a:srgbClr val="4F81BD"/></a:accent1>
+    <a:accent2><a:srgbClr val="C0504D"/></a:accent2>
+    <a:accent3><a:srgbClr val="9BBB59"/></a:accent3>
+    <a:accent4><a:srgbClr val="8064A2"/></a:accent4>
+    <a:accent5><a:srgbClr val="4BACC6"/></a:accent5>
+    <a:accent6><a:srgbClr val="F79646"/></a:accent6>
+    <a:hlink><a:srgbClr val="0000FF"/></a:hlink>
+    <a:folHlink><a:srgbClr val="800080"/></a:folHlink>
+  </a:clrScheme></a:themeElements>
+</a:theme>`,
+      }),
+    );
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const pp = doc.effectiveParaProps(para);
+    // accent1 #4F81BD at tint 0x33 -> a light wash (~#dce6f2), not the raw accent.
+    expect(pp.borders?.top?.color).toBe("#dce6f2");
+  });
+
+  it("merges tab stops down the style chain and honors w:val=clear", () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:pPr><w:pStyle w:val="Footer"/><w:tabs>
+             <w:tab w:val="clear" w:pos="4680"/>
+             <w:tab w:val="center" w:pos="5670"/>
+           </w:tabs></w:pPr><w:r><w:t>text</w:t><w:tab/><w:tab/><w:t>61</w:t></w:r></w:p>`,
+        ),
+        "word/styles.xml": `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Footer"><w:name w:val="footer"/>
+    <w:pPr><w:tabs>
+      <w:tab w:val="center" w:pos="4680"/>
+      <w:tab w:val="right" w:pos="9360"/>
+    </w:tabs></w:pPr>
+  </w:style>
+</w:styles>`,
+      }),
+    );
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const tabs = doc.effectiveParaProps(para).tabs!;
+    const live = tabs.filter((t) => !t.clear);
+    // The style's right stop SURVIVES the paragraph's clear-of-4680:
+    // Word merges tab lists, it never replaces them wholesale.
+    expect(live.map((t) => [Math.round(t.pos), t.align])).toEqual([
+      [378, "center"],
+      [624, "right"],
+    ]);
+    // The cleared position is dropped from the live set.
+    expect(live.some((t) => Math.round(t.pos) === 312)).toBe(false);
+  });
+
+  it("renders HYPERLINK complex-field results with the result runs' own formatting", () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p>
+             <w:r><w:rPr><w:i/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>
+             <w:r><w:rPr><w:i/></w:rPr><w:instrText xml:space="preserve"> HYPERLINK "https://example.com/" </w:instrText></w:r>
+             <w:r><w:rPr><w:i/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>
+             <w:r><w:rPr><w:i w:val="0"/><w:color w:val="0000FF"/></w:rPr><w:t>Blue upright link</w:t></w:r>
+             <w:r><w:fldChar w:fldCharType="end"/></w:r>
+           </w:p>`,
+        ),
+      }),
+    );
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const runs = para.children.filter((c) => c.type === "run");
+    // No opaque field content is emitted - the result run itself renders.
+    const fieldContents = runs.flatMap((r) => (r.type === "run" ? r.content : [])).filter((c) => c.kind === "field");
+    expect(fieldContents).toEqual([]);
+    const textRun = runs.find(
+      (r) => r.type === "run" && r.content.some((c) => c.kind === "text" && c.text === "Blue upright link"),
+    );
+    if (!textRun || textRun.type !== "run") throw new Error("expected result run");
+    expect(textRun.props.color).toBe("#0000FF");
+    expect(textRun.props.italic).toBe(false);
+  });
+
+  it("keeps computed fields (PAGE) as field content", () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p>
+             <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+             <w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
+             <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+             <w:r><w:t>99</w:t></w:r>
+             <w:r><w:fldChar w:fldCharType="end"/></w:r>
+           </w:p>`,
+        ),
+      }),
+    );
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const contents = para.children.flatMap((c) => (c.type === "run" ? c.content : []));
+    expect(contents.some((c) => c.kind === "field" && /PAGE/.test(c.instruction))).toBe(true);
+    expect(contents.some((c) => c.kind === "text" && c.text === "99")).toBe(false);
+  });
+
+  it("parses an anchored oval textbox with its geometry, text-rect insets and clipping", () => {
+    // Oval 37 from phase23 p12: white ellipse, black 0.75pt stroke, noAutofit.
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:r><w:drawing>
+            <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" behindDoc="0" allowOverlap="1">
+              <wp:positionH relativeFrom="column"><wp:posOffset>876300</wp:posOffset></wp:positionH>
+              <wp:positionV relativeFrom="paragraph"><wp:posOffset>123190</wp:posOffset></wp:positionV>
+              <wp:extent cx="1343025" cy="590550"/><wp:wrapNone/>
+              <wp:docPr id="37" name="Oval 37"/>
+              <a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                <a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                  <wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                    <wps:spPr>
+                      <a:xfrm><a:off x="0" y="0"/><a:ext cx="1343025" cy="590550"/></a:xfrm>
+                      <a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>
+                      <a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>
+                      <a:ln w="9525"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>
+                    </wps:spPr>
+                    <wps:txbx><w:txbxContent>
+                      <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>Was 0</w:t></w:r></w:p>
+                    </w:txbxContent></wps:txbx>
+                    <wps:bodyPr lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="t"><a:noAutofit/></wps:bodyPr>
+                  </wps:wsp>
+                </a:graphicData>
+              </a:graphic>
+            </wp:anchor>
+          </w:drawing></w:r></w:p>`,
+        ),
+      }),
+    );
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const run = para.children[0];
+    if (run.type !== "run") throw new Error("expected run");
+    const anchor = run.content.find((c) => c.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("expected textbox anchor");
+    const shape = anchor.shape;
+    // Real ellipse outline (arc commands), white fill + black stroke.
+    expect(shape.geom?.d).toContain("A");
+    expect(shape.fill?.toLowerCase()).toBe("#ffffff");
+    expect(shape.stroke?.color).toBe("#000000");
+    // Insets = bodyPr insets + the ellipse's inscribed text rectangle
+    // (0.146447 x each dimension) - the wrap that puts "B" alone on line 2.
+    const w = 1343025 / 9525;
+    const h = 590550 / 9525;
+    expect(shape.insets!.l).toBeCloseTo(9.6 + 0.146447 * w, 2);
+    expect(shape.insets!.t).toBeCloseTo(4.8 + 0.146447 * h, 2);
+    // noAutofit: lines past the shape bottom are hidden, whole-line.
+    expect(shape.clipText).toBe(true);
+  });
+});

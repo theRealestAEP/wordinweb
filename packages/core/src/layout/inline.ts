@@ -26,6 +26,10 @@ export interface FieldContext {
    * fieldKey identifies THIS field occurrence so re-breaking a paragraph
    * reuses its first-assigned value instead of double-counting. */
   seq?: (identifier: string, fieldKey: object, instr: string) => string;
+  /** REF cross-references: the current text of a `_Ref` bookmark range
+   * (Word recomputes REF on open; cached results are stale). undefined when
+   * the bookmark is unknown — the caller then keeps the cache. */
+  refText?: (bookmark: string) => string | undefined;
 }
 
 // ---------- atoms ----------
@@ -1312,13 +1316,18 @@ function nextTabStop(
 ): { pos: number; align: TabStop["align"]; leader?: TabStop["leader"] } {
   if (tabs) {
     for (const t of tabs) {
-      if (t.pos > x + 0.5 && t.align !== "bar") {
+      if (t.pos > x + 0.5 && t.align !== "bar" && !t.clear) {
         return { pos: t.pos, align: t.align, leader: t.leader };
       }
     }
   }
   const next = nextDefaultTab(x);
-  return { pos: next < rightEdge ? next : x + 4, align: "left" };
+  // Past the last default stop, Word advances a tab 306tw (15.3pt = 20.4px)
+  // - probe-tabalign2/3 vs the NIH footer: its two trailing tabs past the
+  // right edge span exactly 30.6pt, and the flush-right line puts the ink
+  // 30.6pt inside the margin (Word D at 333.4pt; a 4px min painted the line
+  // 5pt right of Word on every near-blank NIH page).
+  return { pos: next < rightEdge ? next : x + 10.7, align: "left" };
 }
 
 /** Reorder a bidi line's spans into visual order (UAX#9 rule L2): from the
@@ -2195,6 +2204,20 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       // repo's sanitizer remaps cached digits). Compute per-identifier.
       const ident = instr.split(/\s+/)[1];
       if (ident && ctx.seq && fieldKey) return ctx.seq(ident, fieldKey, instr);
+      return cachedResult || "";
+    }
+    case "REF": {
+      // Word recomputes REF on open — the docx cache is stale (and this
+      // repo's sanitizer remaps cached digits: gatech's table-of-figures
+      // "Bavoqe 0" caches for a caption whose SEQ renders 1). Re-render the
+      // bookmark range's text for plain references; switches that change the
+      // output shape (\d\f\n\p\r\t\w — numbers, positions, separators) keep
+      // the cache. \h (hyperlink) and \* formatting are text-preserving.
+      const bookmark = instr.split(/\s+/)[1];
+      if (bookmark && ctx.refText && !/\\[dfnprtw](\s|$)/i.test(instr)) {
+        const text = ctx.refText(bookmark);
+        if (text !== undefined) return text;
+      }
       return cachedResult || "";
     }
     case "DATE":

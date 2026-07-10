@@ -9,6 +9,7 @@ import {
   Numbering,
   ParaProps,
   Paragraph,
+  Run,
   RunProps,
   Section,
   Styles,
@@ -73,6 +74,10 @@ export class DocxDocument {
   /** Note content by note id (render-only; sources stripped). */
   readonly footnotes: Map<number, Block[]> = new Map();
   readonly endnotes: Map<number, Block[]> = new Map();
+  /** `_Ref` cross-reference bookmark ranges (name → captured runs). REF
+   * fields re-render the referenced text from these — Word recomputes REF on
+   * open, so the cached field result in the file is stale. */
+  refBookmarks: Map<string, Run[]> = new Map();
   readonly documentRels: Relationships;
   /** settings.xml w:evenAndOddHeaders — enables the "even" header/footer variants. */
   readonly evenAndOddHeaders: boolean = false;
@@ -235,8 +240,10 @@ export class DocxDocument {
     // Some content (SmartArt cached drawings) lives in parts reachable only
     // through relationship indirection at parse time.
     const readPart = (part: string) => this.readXmlOptional(part);
-    const ctx: DocParseContext = { ...this.ctxBase, rels: this.documentRels, readPart };
+    const refBookmarks = { open: new Map<string, Run[]>(), byName: new Map<string, Run[]>() };
+    const ctx: DocParseContext = { ...this.ctxBase, rels: this.documentRels, readPart, refBookmarks };
     this.sections = parseBody(body, ctx);
+    this.refBookmarks = refBookmarks.byName;
     this.headers.clear();
     this.footers.clear();
     for (const part of this.hfParts) {

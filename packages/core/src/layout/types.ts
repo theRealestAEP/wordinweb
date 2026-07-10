@@ -40,6 +40,9 @@ export interface PathItem {
   viewH: number;
   fill?: string;
   stroke?: { color: string; width: number };
+  /** Paint under / over the body text (anchored-shape layering). */
+  behind?: boolean;
+  front?: boolean;
 }
 
 export interface TextItem {

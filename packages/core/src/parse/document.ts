@@ -38,6 +38,15 @@ export interface DocParseContext extends ParseContext {
   /** Read another package part's XML (SmartArt cached drawings live in
    * word/diagrams/drawing*.xml, reachable only through the data part). */
   readPart?: (part: string) => XmlElement | undefined;
+  /** Cross-reference bookmark capture: Word's Insert-Cross-Reference targets
+   * are `_RefNNN` bookmarks whose range delimits the referenced text (e.g. a
+   * caption's "Figure " + SEQ field). REF fields re-render that text at
+   * layout time — the docx cache is stale. `open` is keyed by bookmark id
+   * while the range is unclosed; `byName` keeps the finished run lists. */
+  refBookmarks?: {
+    open: Map<string, Run[]>;
+    byName: Map<string, Run[]>;
+  };
 }
 
 /** Parse w:body into sections (the body's trailing sectPr closes the last one). */
@@ -142,6 +151,12 @@ interface FieldState {
   cachedResult: string;
   /** Run that will carry the resulting field content. */
   carrier: Run | null;
+  /** HYPERLINK (and other verbatim) fields: the result runs render LIVE with
+   * their own formatting (rStyle Hyperlink blue, i=0 …) instead of being
+   * swallowed into cachedResult and repainted with the CARRIER run's props —
+   * phase23 p5's field-hyperlink bullets carry italic on the fldChar runs
+   * but paint blue upright in Word. No field content is emitted at end. */
+  live?: boolean;
 }
 
 export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
@@ -394,17 +409,32 @@ function parseParaChildren(
   const suppressedObjects = duplicateQuoteObjectPreviews(parent);
   for (const el of parent.children) {
     const ln = localName(el.name);
-    if (ln === "bookmarkStart" && bookmarks) {
-      // PAGEREF targets: record the name so layout can map it to a page.
+    if (ln === "bookmarkStart") {
       const bm = attr(el, "name");
-      if (bm && !bm.startsWith("_GoBack")) bookmarks.push(bm);
+      // PAGEREF targets: record the name so layout can map it to a page.
+      if (bookmarks && bm && !bm.startsWith("_GoBack")) bookmarks.push(bm);
+      // Cross-reference targets: open a run capture for the `_Ref` range so
+      // REF fields can re-render the referenced text (stale docx cache).
+      const rb = ctx.refBookmarks;
+      const id = attr(el, "id");
+      if (rb && id && bm && bm.startsWith("_Ref")) {
+        const runs: Run[] = [];
+        rb.open.set(id, runs);
+        rb.byName.set(bm, runs);
+      }
+    } else if (ln === "bookmarkEnd") {
+      const id = attr(el, "id");
+      if (id) ctx.refBookmarks?.open.delete(id);
     }
     if (ln === "r") {
       const run = parseRun(el, ctx, field, suppressedObjects);
       if (run) run.srcParent = parent;
       // Keep empty runs that carry an open complex field: the field content
       // is appended to the carrier when fldChar end arrives.
-      if (run && (run.content.length > 0 || field.carrier === run)) out.push(run);
+      if (run && (run.content.length > 0 || field.carrier === run)) {
+        out.push(run);
+        captureRefBookmarkRun(ctx, run);
+      }
     } else if (ln === "ins" || ln === "del") {
       // Tracked changes. Final view: insertions read as normal text,
       // deletions disappear. Markup view: both render, author-colored,
@@ -471,7 +501,19 @@ function parseParaChildren(
       const instruction = attr(el, "instr") ?? "";
       const inner: ParaChild[] = [];
       const innerField: FieldState = { mode: null, instruction: "", cachedResult: "", carrier: null };
+      // The field's cached-result runs must not leak into open `_Ref`
+      // bookmark captures — the synthesized field run below represents the
+      // whole fldSimple (otherwise a caption's "Basas " + SEQ bookmark
+      // captures the stale "0" AND the field, rendering "Basas 01").
+      const rb = ctx.refBookmarks;
+      const openLens = rb ? Array.from(rb.open.values(), (runs) => [runs, runs.length] as const) : [];
       parseParaChildren(el, ctx, inner, innerField, bookmarks);
+      if (rb) {
+        for (const runs of rb.open.values()) {
+          const before = openLens.find(([r]) => r === runs);
+          runs.length = before ? before[1] : 0;
+        }
+      }
       let cached = "";
       let props = {};
       for (const c of inner) {
@@ -481,11 +523,13 @@ function parseParaChildren(
           for (const rc of r.content) if (rc.kind === "text") cached += rc.text;
         }
       }
-      out.push({
+      const fieldRun: Run = {
         type: "run",
         props,
         content: [{ kind: "field", instruction, cachedResult: cached }],
-      });
+      };
+      out.push(fieldRun);
+      captureRefBookmarkRun(ctx, fieldRun);
     } else if (ln === "smartTag" || ln === "sdt") {
       const content = ln === "sdt" ? child(el, "sdtContent") : el;
       if (content) parseParaChildren(content, ctx, out, field, bookmarks);
@@ -494,8 +538,15 @@ function parseParaChildren(
   }
 }
 
+/** Append a parsed run to every open `_Ref` bookmark range (REF re-render). */
+function captureRefBookmarkRun(ctx: DocParseContext, run: Run): void {
+  const open = ctx.refBookmarks?.open;
+  if (!open || open.size === 0) return;
+  for (const runs of open.values()) runs.push(run);
+}
+
 function flushField(field: FieldState): void {
-  if (field.mode !== null && field.carrier) {
+  if (field.mode !== null && field.carrier && !field.live) {
     field.carrier.content.push({
       kind: "field",
       instruction: field.instruction,
@@ -506,6 +557,7 @@ function flushField(field: FieldState): void {
   field.instruction = "";
   field.cachedResult = "";
   field.carrier = null;
+  field.live = false;
 }
 
 /**
@@ -586,7 +638,7 @@ function parseRun(
     switch (ln) {
       case "t": {
         const text = decodeSymbolText(el.text, run.props.font);
-        if (field.mode === "result") field.cachedResult += text;
+        if (field.mode === "result" && !field.live) field.cachedResult += text;
         else if (field.mode !== "instr") run.content.push({ kind: "text", text, srcT: el });
         break;
       }
@@ -606,19 +658,26 @@ function parseRun(
           field.carrier = run;
         } else if (type === "separate") {
           field.mode = "result";
+          // HYPERLINK results are verbatim styled content: let the result
+          // runs render themselves (their own rPr wins in Word, not the
+          // field carrier's).
+          field.live = /^\s*HYPERLINK\b/i.test(field.instruction);
         } else if (type === "end") {
-          const carrier = field.carrier ?? run;
-          const content: RunContent = {
-            kind: "field",
-            instruction: field.instruction,
-            cachedResult: field.cachedResult,
-          };
-          if (carrier === run) run.content.push(content);
-          else carrier.content.push(content);
+          if (!field.live) {
+            const carrier = field.carrier ?? run;
+            const content: RunContent = {
+              kind: "field",
+              instruction: field.instruction,
+              cachedResult: field.cachedResult,
+            };
+            if (carrier === run) run.content.push(content);
+            else carrier.content.push(content);
+          }
           field.mode = null;
           field.instruction = "";
           field.cachedResult = "";
           field.carrier = null;
+          field.live = false;
         }
         break;
       }
@@ -1125,6 +1184,19 @@ function parseDrawing(
       return v !== undefined ? emuToPx(v) : dflt;
     };
     const anchorAttr = bodyPr ? attr(bodyPr, "anchor") : undefined;
+    // Non-rect preset geometry (oval, diamond, flowchart shapes): paint the
+    // real outline and lay the text inside the geometry's text rectangle.
+    const prstA = attr(child(spPr, "prstGeom"), "prst") ?? "rect";
+    const geomD =
+      prstA !== "rect" && cx > 0 && cy > 0
+        ? presetPathD(prstA, cx, cy, child(child(spPr, "prstGeom"), "avLst"))
+        : undefined;
+    const gIns = presetTextRectInsets(prstA);
+    const gL = gIns ? gIns.l * emuToPx(cx) : 0;
+    const gT = gIns ? gIns.t * emuToPx(cy) : 0;
+    const gR = gIns ? gIns.r * emuToPx(cx) : 0;
+    const gB = gIns ? gIns.b * emuToPx(cy) : 0;
+    const noAutofit = bodyPr ? !!child(bodyPr, "noAutofit") : false;
 
     let wrap: WrapMode = "square";
     if (child(anchor, "wrapNone")) wrap = "none";
@@ -1154,7 +1226,14 @@ function parseDrawing(
         ...(fillColorOf(spPr) ? { fill: fillColorOf(spPr)! } : {}),
         ...(strokeColor ? { stroke: { color: strokeColor, weight: Math.max(emuToPx(intAttr(lnEl, "w") ?? 0), 0.75) } } : {}),
         textAnchor: anchorAttr === "ctr" ? "middle" : anchorAttr === "b" ? "bottom" : anchorAttr === "t" ? "top" : undefined,
-        insets: { l: insetOf("lIns", 9.6), t: insetOf("tIns", 4.8), r: insetOf("rIns", 9.6), b: insetOf("bIns", 4.8) },
+        insets: {
+          l: insetOf("lIns", 9.6) + gL,
+          t: insetOf("tIns", 4.8) + gT,
+          r: insetOf("rIns", 9.6) + gR,
+          b: insetOf("bIns", 4.8) + gB,
+        },
+        ...(geomD ? { geom: { d: geomD, viewW: cx, viewH: cy } } : {}),
+        ...(noAutofit ? { clipText: true } : {}),
         wrap,
         ...(behind ? { behind: true } : {}),
         ...(attr(anchor, "allowOverlap") === "0" ? { allowOverlap: false } : {}),
@@ -1414,6 +1493,35 @@ function presetPathD(prst: string, w: number, h: number, avLst: XmlElement | und
     }
     case "ellipse":
       return `M 0 ${h / 2} A ${w / 2} ${h / 2} 0 1 0 ${w} ${h / 2} A ${w / 2} ${h / 2} 0 1 0 0 ${h / 2} Z`;
+    case "triangle": {
+      // Isosceles triangle; adj = apex x as a fraction of the width.
+      const ax = (w * adj("adj", 50000)) / 100000;
+      return `M 0 ${h} L ${ax} 0 L ${w} ${h} Z`;
+    }
+    case "diamond":
+    case "flowChartDecision":
+      return `M 0 ${h / 2} L ${w / 2} 0 L ${w} ${h / 2} L ${w / 2} ${h} Z`;
+    case "downArrow": {
+      // adj1: shaft width / w, adj2: arrowhead height / min(w,h).
+      const a1 = Math.max(0, Math.min(adj("adj1", 50000), 100000));
+      const maxA2 = min > 0 ? (100000 * h) / min : 100000;
+      const a2 = Math.max(0, Math.min(adj("adj2", 50000), maxA2));
+      const headTop = h - (min * a2) / 100000;
+      const half = (w * a1) / 200000;
+      const x1 = w / 2 - half;
+      const x2 = w / 2 + half;
+      return `M ${x1} 0 L ${x2} 0 L ${x2} ${headTop} L ${w} ${headTop} L ${w / 2} ${h} L 0 ${headTop} L ${x1} ${headTop} Z`;
+    }
+    case "upArrow": {
+      const a1 = Math.max(0, Math.min(adj("adj1", 50000), 100000));
+      const maxA2 = min > 0 ? (100000 * h) / min : 100000;
+      const a2 = Math.max(0, Math.min(adj("adj2", 50000), maxA2));
+      const headBot = (min * a2) / 100000;
+      const half = (w * a1) / 200000;
+      const x1 = w / 2 - half;
+      const x2 = w / 2 + half;
+      return `M ${w / 2} 0 L ${w} ${headBot} L ${x2} ${headBot} L ${x2} ${h} L ${x1} ${h} L ${x1} ${headBot} L 0 ${headBot} Z`;
+    }
     case "leftBracket": {
       const r = Math.min((h * adj("adj", 8333)) / 100000, h / 2);
       return `M ${w} 0 A ${w} ${r} 0 0 0 0 ${r} L 0 ${h - r} A ${w} ${r} 0 0 0 ${w} ${h}`;
@@ -1424,6 +1532,31 @@ function presetPathD(prst: string, w: number, h: number, avLst: XmlElement | und
     }
     default:
       return `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`;
+  }
+}
+
+/**
+ * A preset geometry's TEXT RECTANGLE insets, as fractions of the shape's
+ * width/height. Word wraps and anchors shape text inside the geometry's rect
+ * (presetShapeDefinitions), not the bounding box — an ellipse's text lives in
+ * the inscribed rectangle, a diamond's in the middle-half rect. Verified
+ * against phase23 p12's Word PDF: oval "Was 0 / B" first line top = shape top
+ * + 0.1464*h + tIns; flowChartDecision text top = apex + h/4 + tIns; both
+ * wrap at the inset width (the oval breaks after "B").
+ */
+function presetTextRectInsets(prst: string): { l: number; t: number; r: number; b: number } | undefined {
+  switch (prst) {
+    case "ellipse": {
+      const k = 0.146447; // (1 - cos45)/2
+      return { l: k, t: k, r: k, b: k };
+    }
+    case "diamond":
+    case "flowChartDecision":
+      return { l: 0.25, t: 0.25, r: 0.25, b: 0.25 };
+    case "triangle":
+      return { l: 0.25, t: 0.5, r: 0.25, b: 0 };
+    default:
+      return undefined;
   }
 }
 
