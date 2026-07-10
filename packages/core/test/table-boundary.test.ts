@@ -62,4 +62,42 @@ describe("table boundary geometry", () => {
     expect(result.pages[0].items.some((item) => item.kind === "text" && item.text === "cell")).toBe(false);
     expect(result.pages[1].items.some((item) => item.kind === "text" && item.text === "cell")).toBe(true);
   });
+
+  it("moves a row whole when its continuation fragment holds only decoration", () => {
+    // msa signature row: the second cell's overflow is a bare rule (paragraph
+    // border edge) plus empty-text caret anchors - no visible text. Splitting
+    // would strand the rule alone at the top of the next page; Word moves the
+    // whole row instead.
+    const lead = `<w:p><w:pPr><w:spacing w:line="1000" w:lineRule="exact"/></w:pPr>` +
+      `<w:r><w:t>lead</w:t></w:r></w:p>`;
+    const sig = `<w:p><w:pPr><w:spacing w:line="800" w:lineRule="exact"/>` +
+      `<w:pBdr><w:bottom w:val="single" w:sz="12" w:color="000000"/></w:pBdr></w:pPr>` +
+      `<w:r><w:t xml:space="preserve"></w:t></w:r></w:p>`;
+    const table = `<w:tbl>
+      <w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:type="dxa" w:w="3000"/></w:tcPr>${p("Tizo")}</w:tc>
+        <w:tc><w:tcPr><w:tcW w:type="dxa" w:w="3000"/></w:tcPr>${sig}</w:tc>
+      </w:tr>
+    </w:tbl>`;
+    const section = `<w:sectPr><w:pgSz w:w="12240" w:h="3000"/>` +
+      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
+    const doc = DocxDocument.load(
+      makeDocx({ "word/document.xml": wrapDocument(lead + table + section) }),
+    );
+    const result = layoutDocument(doc, { measurer: new ApproxMeasurer() });
+
+    expect(result.totalPages).toBe(2);
+    // The label must not be left behind on page 1 with the rule split off.
+    expect(result.pages[0].items.some((item) => item.kind === "text" && item.text === "Tizo")).toBe(false);
+    expect(result.pages[1].items.some((item) => item.kind === "text" && item.text === "Tizo")).toBe(true);
+    // The paragraph-border rule travels with its row (below the label's line
+    // top, not jammed at the body top).
+    const label = result.pages[1].items.find((item) => item.kind === "text" && item.text === "Tizo");
+    const rule = result.pages[1].items.find(
+      (item) => item.kind === "edge" && item.border.width >= 1 && Math.abs(item.y1 - item.y2) < 0.01,
+    );
+    if (label?.kind !== "text" || rule?.kind !== "edge") throw new Error("missing label or rule");
+    expect(rule.y1).toBeGreaterThan(label.lineTop);
+  });
 });

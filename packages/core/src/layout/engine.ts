@@ -3471,6 +3471,31 @@ class Engine {
     const anyRest = partitions.some(({ rest }) => rest.length > 0);
     if (!anyKept || !anyRest) return null;
 
+    // A non-empty fragment must hold usable content: a text line with visible
+    // characters, an image, or a drawing. Empty-text spans are caret anchors
+    // and edges/rects are paragraph decorations (borders, shading) - a
+    // fragment made only of those is not content Word would strand on its own
+    // page, so the row moves whole instead (msa: the signature row's
+    // continuation held only the paragraph-border rule, which split off and
+    // painted as a bare black bar at the top of the next page).
+    const hasVisibleContent = (items: PageItem[]) =>
+      items.some(
+        (it) =>
+          (it.kind === "text" && it.text.trim().length > 0) ||
+          it.kind === "image" ||
+          it.kind === "path" ||
+          it.kind === "wordart",
+      );
+    if (
+      partitions.some(
+        ({ keep, rest }) =>
+          (keep.length > 0 && !hasVisibleContent(keep)) ||
+          (rest.length > 0 && !hasVisibleContent(rest)),
+      )
+    ) {
+      return null;
+    }
+
     // Keep a two-line boundary when text in the same cell continues. This is
     // why parity2-nestedtables moves its three-line rows whole instead of
     // leaving one line on the next page.
