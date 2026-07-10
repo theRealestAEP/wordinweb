@@ -15,8 +15,11 @@ const SCRIPT_SCALE = 8 / 11;
 const scriptSize = (size: number, floor: number): number => Math.max(size * SCRIPT_SCALE, floor);
 const SUP_RAISE = 4 / 11;
 const SUB_DROP = 2.5 / 11;
-const FRAC_NUM_RAISE = 6.5 / 11;
-const FRAC_DEN_DROP = 5.5 / 11;
+// Text-style fraction shifts = Cambria Math MATH constants
+// FractionNumeratorShiftUp 1200 / FractionDenominatorShiftDown 1030 (em 2048):
+// dense (0.1e) measures num +7.0 / den -6.0 at 12pt exactly.
+const FRAC_NUM_RAISE = 1200 / 2048;
+const FRAC_DEN_DROP = 1030 / 2048;
 const RULE_CENTER = 3.125 / 11;
 const RULE_THICK = 0.75 / 11;
 const BIN_OP_SPACE = 0.25 / 11 * 11; // em fraction (0.25em per side)
@@ -59,8 +62,15 @@ const dlmPad = (): number => (hasCambriaMath() ? DLM_PAD_REAL : DLM_PAD_STIX);
 //     from the operator baseline (both at 8/11 script size), and the operator
 //     glyph itself is enlarged ~1.55x (Word's grow variant is 14.6pt wide vs
 //     the ~9.4pt text glyph).
-const FRAC_NUM_RAISE_D = 8.25 / 11;
-const FRAC_DEN_DROP_D = 7.25 / 11;
+// Display-style fraction shifts = MATH constants
+// FractionNumeratorDisplayStyleShiftUp 1550 / DenominatorDisplayStyleShiftDown
+// 1370: the dense (6-2) rows measure num -9.0 / den +8.0 at 12pt.
+const FRAC_NUM_RAISE_D = 1550 / 2048;
+const FRAC_DEN_DROP_D = 1370 / 2048;
+// A display denominator holding a stretched delimiter sits one extra rule
+// step lower (dense row 5: den baseline +8.8 vs the standard +8.03; the
+// paren's ink ascends past the digit cap and Word preserves the bar gap).
+const FRAC_DEN_DLM_EXTRA = 133 / 2048;
 const NARY_OP_SCALE_D = 1.55;
 const NARY_OVER_RAISE_D = 16.5 / 11;
 const NARY_UNDER_DROP_D = 14 / 11;
@@ -109,6 +119,19 @@ export interface MathPiece {
   scaleY?: number;
   /** Stretch anchor above the piece baseline, px (the math axis). */
   scaleAnchor?: number;
+  /** Extents relative to the MAIN baseline for a stretched delimiter variant
+   * (its ink box, centered on the math axis) - overrides the font metrics
+   * when computing line extents. */
+  ownAscent?: number;
+  ownDescent?: number;
+  /** Piece belongs to a sup/sub script or an n-ary limit: script protrusions
+   * do not grow enclosing delimiters (Word keeps regular parens around
+   * A_l p^l sums, dense (0.8)). */
+  script?: boolean;
+  /** Cached line extents (main-baseline relative), filled by layoutMath so
+   * wrapDisplayMath can re-derive per-segment ascent/descent. */
+  effAscent?: number;
+  effDescent?: number;
 }
 export interface MathRule {
   x1: number;
@@ -132,20 +155,106 @@ export interface MathBox {
   baseSize?: number;
   /** Legal Word equation-wrap positions, measured from the box's left edge. */
   breaks?: number[];
+  /** Largest stretched-delimiter variant index laid directly in this box
+   * (undefined: none). A delimiter wrapping another delimiter renders at
+   * least one size up when both would otherwise be regular (dense (0.1a):
+   * the outer (n(n+1)) paren is the 1.21em variant around a regular pair). */
+  dlmIdx?: number;
 }
+
+// Cambria Math vertical delimiter VARIANT ladder (MATH table
+// MathVariants/parenleft advances, em units at upem 2048): Word stretches a
+// delimiter by swapping in the smallest of these discrete glyphs that covers
+// ~80% of the enclosed core (non-script) extent, and the chosen glyph's ink -
+// centered on the math axis - defines the delimiter's contribution to the
+// LINE box. Measured in wild2-math-omml-dense's Word PDF: the (6-2) rows'
+// fraction/argument parens are exactly 23.71pt of ink at 12pt (idx 3), the
+// rows whose fraction denominator holds a nested (1+h) paren take 30.60
+// (idx 4), and inline (0.7)'s parens take 19.80 (idx 2).
+const DLM_VARIANTS_EM = [1898 / 2048, 2475 / 2048, 3379 / 2048, 4047 / 2048, 5223 / 2048, 6053 / 2048, 7613 / 2048, 8881 / 2048];
+// MATH constants AxisHeight = 585/2048 em: every variant's ink is designed
+// symmetric about the axis ((asc - desc)/2 = axis for all eight glyphs).
+const DLM_AXIS_EM = 585 / 2048;
+// Fraction of the core content extent a variant must cover (calibrated on
+// the dense PDF: 23.71pt parens around a 28.9pt font-box core).
+const DLM_COVER = 0.8;
 
 function fontAt(size: number): FontSpec {
   return { family: MATH_FONT, size, bold: false, italic: false };
+}
+
+/** Copy a piece into a new frame shifted right by dx and up by dyShift,
+ * keeping its variant ink extents (which are baseline-relative) coherent. */
+function rebase(pc: MathPiece, dx: number, dyShift: number, script?: boolean): MathPiece {
+  return {
+    ...pc,
+    x: dx + pc.x,
+    dy: dyShift + pc.dy,
+    ownAscent: pc.ownAscent === undefined ? undefined : pc.ownAscent + dyShift,
+    ownDescent: pc.ownDescent === undefined ? undefined : pc.ownDescent - dyShift,
+    script: script || pc.script,
+  };
+}
+
+// Bracket glyphs whose ink rises past the digit cap (Cambria Math parens:
+// 8.47pt asc at 12pt vs the 7.79pt cap) - the tall-den fraction test below.
+const BRACKET_RE = /[()[\]{}]/;
+
+/** Does this subtree lay a delimiter (m:d or literal bracket glyphs) outside
+ * sup/sub script arguments and n-ary limits? (Script protrusions never drive
+ * Word's stretch/shift decisions.) */
+function containsDlm(nodes: MathNode[]): boolean {
+  for (const n of nodes) {
+    switch (n.t) {
+      case "run":
+        if (BRACKET_RE.test(n.text)) return true;
+        break;
+      case "dlm":
+        return true;
+      case "sup":
+      case "sub":
+        if (containsDlm(n.base)) return true;
+        break;
+      case "frac":
+        if (containsDlm(n.num) || containsDlm(n.den)) return true;
+        break;
+      case "nary":
+      case "rad":
+        if (containsDlm(n.e)) return true;
+        break;
+      case "mat":
+        if (n.rows.some((r) => r.some((c) => containsDlm(c)))) return true;
+        break;
+    }
+  }
+  return false;
+}
+
+/** Any matrix or n-ary operator directly in the delimiter content? Those
+ * keep the legacy continuous stretch (matrix parens calibrated against
+ * parity-math2). */
+function containsBlocky(nodes: MathNode[]): boolean {
+  for (const n of nodes) {
+    if (n.t === "mat" || n.t === "nary") return true;
+    if (n.t === "dlm" && n.e.some((p) => containsBlocky(p))) return true;
+    if (n.t === "frac" && (containsBlocky(n.num) || containsBlocky(n.den))) return true;
+    if ((n.t === "sup" || n.t === "sub") && containsBlocky(n.base)) return true;
+    if (n.t === "rad" && containsBlocky(n.e)) return true;
+  }
+  return false;
 }
 
 export function layoutMath(nodes: MathNode[], baseSize: number, measurer: TextMeasurer, display = false): MathBox {
   const box: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [], display, baseSize };
   flow(nodes, baseSize, 0, box, measurer, false, display, 0, baseSize * SCRIPT_SCALE ** 2);
   // Line metrics: at least the math font's own box at each piece's offset.
+  // A stretched delimiter variant carries its own (larger) ink extents.
   for (const p of box.pieces) {
     const m = measurer.metrics(p.font);
-    box.ascent = Math.max(box.ascent, p.dy + m.ascent);
-    box.descent = Math.max(box.descent, -p.dy + m.descent);
+    p.effAscent = p.ownAscent ?? p.dy + m.ascent;
+    p.effDescent = p.ownDescent ?? -p.dy + m.descent;
+    box.ascent = Math.max(box.ascent, p.effAscent);
+    box.descent = Math.max(box.descent, p.effDescent);
   }
   // Rules (fraction bars, radical vinculums) are painted ink too: a display
   // radical's vinculum is the equation's topmost ink and must claim its
@@ -225,7 +334,9 @@ function flow(
         // display equation (Word: b², xᵏ stay script-size).
         flow(node.base, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor);
         const scriptDy = dy + (node.t === "sup" ? size * SUP_RAISE : -size * SUB_DROP);
+        const beforeScript = box.pieces.length;
         flow(node.script, scriptSize(size, scriptFloor), scriptDy, box, measurer, true, false, breakDepth + 2, scriptFloor);
+        for (let i = beforeScript; i < box.pieces.length; i++) box.pieces[i].script = true;
         prevOperand = true;
         break;
       }
@@ -234,7 +345,9 @@ function flow(
         // (measured); inline fractions shrink them to 8/11.
         const scale = display ? size : scriptSize(size, scriptFloor);
         const numRaise = display ? size * FRAC_NUM_RAISE_D : size * FRAC_NUM_RAISE;
-        const denDrop = display ? size * FRAC_DEN_DROP_D : size * FRAC_DEN_DROP;
+        const denDrop =
+          (display ? size * FRAC_DEN_DROP_D : size * FRAC_DEN_DROP) +
+          (display && containsDlm(node.den) ? size * FRAC_DEN_DLM_EXTRA : 0);
         // Display fractions (full size) space their operators like Word's
         // quadratic numerator −b ± √…; inline fractions shrink to 8/11 script
         // style where Word keeps the numerator tight ((x+1)/x advances nearly
@@ -249,11 +362,11 @@ function flow(
         // numerator centered over the bar
         const numBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
         flow(node.num, scale, 0, numBox, measurer, fracTight, display, breakDepth + 2, scriptFloor);
-        for (const p of numBox.pieces) box.pieces.push({ ...p, x: x0 + (barW - numW) / 2 + p.x, dy: dy + numRaise + p.dy });
+        for (const p of numBox.pieces) box.pieces.push(rebase(p, x0 + (barW - numW) / 2, dy + numRaise));
         for (const r of numBox.rules) box.rules.push({ ...r, x1: x0 + (barW - numW) / 2 + r.x1, x2: x0 + (barW - numW) / 2 + r.x2, dy: dy + numRaise + r.dy });
         const denBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
         flow(node.den, scale, 0, denBox, measurer, fracTight, display, breakDepth + 2, scriptFloor);
-        for (const p of denBox.pieces) box.pieces.push({ ...p, x: x0 + (barW - denW) / 2 + p.x, dy: dy - denDrop + p.dy });
+        for (const p of denBox.pieces) box.pieces.push(rebase(p, x0 + (barW - denW) / 2, dy - denDrop));
         for (const r of denBox.rules) box.rules.push({ ...r, x1: x0 + (barW - denW) / 2 + r.x1, x2: x0 + (barW - denW) / 2 + r.x2, dy: dy - denDrop + r.dy });
         if (node.bar !== false) {
           box.rules.push({ x1: x0, x2: x0 + barW, dy: dy + size * RULE_CENTER, thick: Math.max(size * RULE_THICK, 0.75) });
@@ -293,11 +406,11 @@ function flow(
         const x0 = box.width;
         const supBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
         flow(node.sup, scale, 0, supBox, measurer, true, false, breakDepth + 2, scriptFloor);
-        for (const pc of supBox.pieces) box.pieces.push({ ...pc, x: x0 + supStagger + pc.x, dy: supDy + pc.dy });
+        for (const pc of supBox.pieces) box.pieces.push(rebase(pc, x0 + supStagger, supDy, true));
         for (const r of supBox.rules) box.rules.push({ ...r, x1: x0 + supStagger + r.x1, x2: x0 + supStagger + r.x2, dy: supDy + r.dy });
         const subBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
         flow(node.sub, scale, 0, subBox, measurer, true, false, breakDepth + 2, scriptFloor);
-        for (const pc of subBox.pieces) box.pieces.push({ ...pc, x: x0 + pc.x, dy: subDy + pc.dy });
+        for (const pc of subBox.pieces) box.pieces.push(rebase(pc, x0, subDy, true));
         for (const r of subBox.rules) box.rules.push({ ...r, x1: x0 + r.x1, x2: x0 + r.x2, dy: subDy + r.dy });
         box.width = x0 + Math.max(supW, subW) + size * NARY_E_GAP;
         flow(node.e, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor);
@@ -308,13 +421,24 @@ function flow(
         // Measure the content first; parens grow to cover its extents,
         // centered on the math axis.
         const axis = dy + size * RULE_CENTER;
+        // Core (non-script) extents drive the stretch decision: Word keeps
+        // regular parens around script-heavy content (dense (0.8)'s
+        // A_l p^(l+0) sum) while a fraction forces a tall variant.
+        let coreAsc = 0;
+        let coreDesc = 0;
         const parts: MathBox[] = node.e.map((part) => {
           const b: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
           flow(part, size, 0, b, measurer, tight, display, breakDepth + 1, scriptFloor);
           for (const pc of b.pieces) {
             const m = measurer.metrics(pc.font);
-            b.ascent = Math.max(b.ascent, pc.dy + m.ascent);
-            b.descent = Math.max(b.descent, -pc.dy + m.descent);
+            const asc = pc.ownAscent ?? pc.dy + m.ascent;
+            const desc = pc.ownDescent ?? -pc.dy + m.descent;
+            b.ascent = Math.max(b.ascent, asc);
+            b.descent = Math.max(b.descent, desc);
+            if (!pc.script) {
+              coreAsc = Math.max(coreAsc, asc);
+              coreDesc = Math.max(coreDesc, desc);
+            }
           }
           return b;
         });
@@ -322,14 +446,56 @@ function flow(
         const innerDesc = Math.max(0, ...parts.map((b) => b.descent - dy));
         const baseFont = fontAt(size);
         const bm = measurer.metrics(baseFont);
-        // Word keeps the delimiter's FONT SIZE and picks a taller glyph
-        // variant (the PDF shows "(" at 11pt spanning a 2x2 matrix), so the
-        // advance stays natural; we approximate the tall variant by
-        // stretching the glyph vertically at paint time.
-        const innerH = Math.max(innerAsc - axis, innerDesc + axis) * 2;
-        const grow = Math.max(1, innerH / (bm.ascent + bm.descent));
+        // Word keeps the delimiter's FONT SIZE and swaps in one of Cambria
+        // Math's DISCRETE tall variants (MATH table ladder), whose ink -
+        // centered on the math axis - then defines the delimiter's line
+        // extents. Measured across the dense PDF: a variant covers >= ~80%
+        // of the content's core (non-script) extent, a delimiter directly
+        // wrapping another delimiter takes at least the second size, and
+        // matrix/n-ary contents keep the legacy continuous stretch
+        // (calibrated against parity-math2's 2x2 matrices).
+        let grow: number;
+        let varAsc: number | undefined;
+        let varDesc: number | undefined;
+        if (node.e.some((p) => containsBlocky(p))) {
+          const innerH = Math.max(innerAsc - axis, innerDesc + axis) * 2;
+          grow = Math.max(1, innerH / (bm.ascent + bm.descent));
+        } else {
+          const req = DLM_COVER * (coreAsc + coreDesc);
+          let idx = DLM_VARIANTS_EM.findIndex((h) => h * size >= req);
+          if (idx < 0) idx = DLM_VARIANTS_EM.length - 1;
+          const innerIdx = parts.reduce((a, b) => Math.max(a, b.dlmIdx ?? -1), -1);
+          // A delimiter whose DIRECT content mixes a nested delimiter with a
+          // fraction jumps two sizes past its coverage requirement: dense
+          // (0.1e)'s d/dζ( (1-ζ²) dG/dζ ) paren is the 30.60pt variant around
+          // ~21pt of content, while the structurally-equal (0.7) paren
+          // (sSup + fraction, no nested delimiter) keeps the 19.80pt size.
+          const directFrac = node.e.some((part) => part.some((n) => n.t === "frac"));
+          const directDlm = node.e.some((part) => part.some((n) => n.t === "dlm"));
+          if (directFrac && directDlm) idx = Math.min(idx + 2, DLM_VARIANTS_EM.length - 1);
+          if (innerIdx === 0 && idx === 0) idx = 1;
+          else if (innerIdx > 0) idx = Math.max(idx, innerIdx);
+          box.dlmIdx = box.dlmIdx === undefined ? idx : Math.max(box.dlmIdx, idx);
+          if (idx > 0) {
+            const variantH = DLM_VARIANTS_EM[idx] * size;
+            grow = variantH / (bm.ascent + bm.descent);
+            varAsc = axis - dy + variantH / 2;
+            varDesc = variantH / 2 - (axis - dy);
+          } else {
+            grow = 1;
+          }
+        }
         const put = (ch: string) => {
-          box.pieces.push({ text: ch, x: box.width, dy, font: baseFont, scaleY: grow > 1.05 ? grow : undefined, scaleAnchor: axis - dy });
+          box.pieces.push({
+            text: ch,
+            x: box.width,
+            dy,
+            font: baseFont,
+            scaleY: grow > 1.05 ? grow : undefined,
+            scaleAnchor: axis - dy,
+            ownAscent: varAsc !== undefined ? dy + varAsc : undefined,
+            ownDescent: varDesc !== undefined ? -dy + varDesc : undefined,
+          });
           box.width += measurer.width(ch, baseFont) + size * dlmPad();
         };
         put(node.beg);
@@ -338,7 +504,7 @@ function flow(
           if (b.breaks) {
             for (const at of b.breaks) (box.breaks ??= []).push(box.width + at);
           }
-          for (const pc of b.pieces) box.pieces.push({ ...pc, x: box.width + pc.x, dy: dy + pc.dy });
+          for (const pc of b.pieces) box.pieces.push(rebase(pc, box.width, dy));
           for (const r of b.rules) box.rules.push({ ...r, x1: box.width + r.x1, x2: box.width + r.x2, dy: dy + r.dy });
           box.width += b.width + size * dlmPad();
         });
@@ -373,7 +539,7 @@ function flow(
           let cx = x0;
           row.forEach((b, ci) => {
             const cellX = cx + (colW[ci] - b.width) / 2;
-            for (const pc of b.pieces) box.pieces.push({ ...pc, x: cellX + pc.x, dy: rowBase + pc.dy });
+            for (const pc of b.pieces) box.pieces.push(rebase(pc, cellX, rowBase));
             for (const r of b.rules) box.rules.push({ ...r, x1: cellX + r.x1, x2: cellX + r.x2, dy: rowBase + r.dy });
             cx += colW[ci] + size * matColGap();
           });
@@ -429,7 +595,7 @@ function naryDisplay(
     flow(node.sup, scale, 0, supBox, measurer, true, false, 2, scriptFloor);
     const ox = cx - supW / 2;
     const oy = dy + size * NARY_OVER_RAISE_D;
-    for (const pc of supBox.pieces) box.pieces.push({ ...pc, x: ox + pc.x, dy: oy + pc.dy });
+    for (const pc of supBox.pieces) box.pieces.push(rebase(pc, ox, oy, true));
     for (const r of supBox.rules) box.rules.push({ ...r, x1: ox + r.x1, x2: ox + r.x2, dy: oy + r.dy });
   }
   // lower limit
@@ -438,7 +604,7 @@ function naryDisplay(
     flow(node.sub, scale, 0, subBox, measurer, true, false, 2, scriptFloor);
     const ux = cx - subW / 2;
     const uy = dy - size * NARY_UNDER_DROP_D;
-    for (const pc of subBox.pieces) box.pieces.push({ ...pc, x: ux + pc.x, dy: uy + pc.dy });
+    for (const pc of subBox.pieces) box.pieces.push(rebase(pc, ux, uy, true));
     for (const r of subBox.rules) box.rules.push({ ...r, x1: ux + r.x1, x2: ux + r.x2, dy: uy + r.dy });
   }
   box.width = x0 + stackW + size * NARY_E_GAP;

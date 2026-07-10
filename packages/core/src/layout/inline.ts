@@ -319,23 +319,44 @@ function wrapDisplayMath(box: MathBox, maxWidth: number): MathBox[] {
   }
   ranges.push({ start, end: box.width });
 
-  return ranges.map((range) => ({
-    width: range.end - range.start,
-    ascent: box.ascent,
-    descent: box.descent,
-    pieces: box.pieces
+  return ranges.map((range) => {
+    const pieces = box.pieces
       .filter((piece) => piece.x >= range.start && piece.x < range.end)
-      .map((piece) => ({ ...piece, x: piece.x - range.start })),
-    rules: box.rules
+      .map((piece) => ({ ...piece, x: piece.x - range.start }));
+    const rules = box.rules
       .filter((rule) => rule.x2 > range.start && rule.x1 < range.end)
       .map((rule) => ({
         ...rule,
         x1: Math.max(rule.x1, range.start) - range.start,
         x2: Math.min(rule.x2, range.end) - range.start,
-      })),
-    display: box.display,
-    baseSize: box.baseSize,
-  }));
+      }));
+    // Per-SEGMENT line extents: Word sizes each wrapped equation row by its
+    // own content (the dense (6-2) rows pitch 29.5..31.3pt as their paren
+    // variants and denominators differ), not by the whole equation's box.
+    let ascent = 0;
+    let descent = 0;
+    for (const p of pieces) {
+      ascent = Math.max(ascent, p.effAscent ?? box.ascent);
+      descent = Math.max(descent, p.effDescent ?? box.descent);
+    }
+    for (const r of rules) {
+      ascent = Math.max(ascent, r.dy + r.thick / 2);
+      descent = Math.max(descent, -r.dy + r.thick / 2);
+    }
+    if (pieces.length === 0 && rules.length === 0) {
+      ascent = box.ascent;
+      descent = box.descent;
+    }
+    return {
+      width: range.end - range.start,
+      ascent,
+      descent,
+      pieces,
+      rules,
+      display: box.display,
+      baseSize: box.baseSize,
+    };
+  });
 }
 
 /** Column-relative horizontal bounds for a line, supplied by the engine when
@@ -1334,10 +1355,16 @@ function finishLine(
         maxObjDescent = Math.max(maxObjDescent, Math.max(0, -objRaise));
         consider(s.font, objectHeight, objRaise);
       } else if (s.math) {
-        maxAscent = Math.max(maxAscent, s.math.ascent);
+        // A display equation row carries a thin leading strip ABOVE its
+        // cluster (~0.042em of the base size): measured on dense p13, every
+        // baseline gap runs cluster-desc + next-cluster-asc + ~0.5pt at 12pt,
+        // the block's first row sits 0.5pt lower than its cluster ascent
+        // suggests, while the LAST row's descent side is exactly the cluster.
+        const mathLead = s.math.display ? 0.042 * (s.math.baseSize ?? s.math.ascent + s.math.descent) : 0;
+        maxAscent = Math.max(maxAscent, s.math.ascent + mathLead);
         maxDescent = Math.max(maxDescent, s.math.descent);
         maxRawDescent = Math.max(maxRawDescent, s.math.descent);
-        maxNatural = Math.max(maxNatural, s.math.ascent + s.math.descent);
+        maxNatural = Math.max(maxNatural, s.math.ascent + mathLead + s.math.descent);
         if (s.math.display) {
           // A display equation (m:oMathPara) sits on its own line, and Word
           // gives that line the paragraph's line-spacing: the multiple applies
