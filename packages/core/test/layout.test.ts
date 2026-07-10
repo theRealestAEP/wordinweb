@@ -2369,6 +2369,55 @@ describe("sections & page borders", () => {
   });
 });
 
+describe("table autofit + tblInd (wild2-sci-chem-omml p9 Word PDF)", () => {
+  // Word's rendered autofit columns for a table that paints NO vertical
+  // rules are content + cell margins EXACTLY (chem p9: 31.8pt = "3.81" at
+  // 21pt + 10.8pt margins), and in compatibilityMode <= 14 w:tblInd measures
+  // to the first cell's TEXT edge (the grid begins a cell left-margin
+  // further left; mode 15 measures to the border).
+  const SECT =
+    `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+  const tblXml =
+    `<w:tbl><w:tblPr>` +
+    `<w:tblW w:w="0" w:type="auto"/><w:tblInd w:w="240" w:type="dxa"/>` +
+    `<w:tblBorders><w:top w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/></w:tblBorders>` +
+    `<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar>` +
+    `</w:tblPr><w:tblGrid><w:gridCol w:w="600"/><w:gridCol w:w="700"/></w:tblGrid>` +
+    `<w:tr>` +
+    `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr><w:p><w:r><w:t>3.81</w:t></w:r></w:p></w:tc>` +
+    `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr><w:p><w:r><w:t>3.529</w:t></w:r></w:p></w:tc>` +
+    `</w:tr></w:tbl>`;
+  const settingsXml = (mode: number) =>
+    `<?xml version="1.0"?><w:settings ${W_NS}><w:compat>` +
+    `<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${mode}"/>` +
+    `</w:compat></w:settings>`;
+  const textX = (result: ReturnType<typeof layoutDocument>, text: string): number => {
+    const it = result.pages[0].items.find((i) => i.kind === "text" && i.text === text);
+    if (it?.kind !== "text") throw new Error(`missing ${text}`);
+    return it.x;
+  };
+
+  it("no-vertical-rules autofit column = content + margins, and the sizing token never char-wraps", () => {
+    const { result } = layout({ "word/document.xml": wrapDocument(tblXml + SECT) });
+    // The token stays whole (an exact-fit column must not hard-wrap "3.81").
+    const x1 = textX(result, "3.81");
+    const x2 = textX(result, "3.529");
+    const col1 = measurer.width("3.81", { family: "Calibri", size: 44 / 3, bold: false, italic: false }) + 14.4;
+    // cell2 text = cell1 text + col1 width (content + 7.2 + 7.2, no +2 rule fudge)
+    expect(x2 - x1).toBeCloseTo(col1, 1);
+  });
+
+  it("compatibilityMode 14 shifts a tblInd table left by the first cell margin", () => {
+    const parts15 = { "word/document.xml": wrapDocument(tblXml + SECT), "word/settings.xml": settingsXml(15) };
+    const parts14 = { "word/document.xml": wrapDocument(tblXml + SECT), "word/settings.xml": settingsXml(14) };
+    const x15 = textX(layout(parts15).result, "3.81");
+    const x14 = textX(layout(parts14).result, "3.81");
+    expect(x15).toBeCloseTo(96 + 16 + 7.2, 1); // margin + tblInd + cellMarLeft
+    expect(x14).toBeCloseTo(x15 - 7.2, 1);
+  });
+});
+
 describe("table row splitting", () => {
   const bigRow = (n: number, extra = "") => {
     const paras = Array.from({ length: n }, (_, i) => `<w:p><w:r><w:t>cell line ${i}</w:t></w:r></w:p>`).join("");

@@ -1258,7 +1258,11 @@ export function breakParagraph(
       }
       x = lineStartX(lineIndex);
     }
-    if (atom.width > availFor(lineIndex) && curLineWidth === 0) {
+    // Same 0.01px tolerance as the fits check above: an autofit table column
+    // sized to its exact min-content (content + margins, no rule allowance —
+    // chem p9's borderless-vertical table) must not character-wrap its own
+    // sizing token over float noise between the measure and layout passes.
+    if (atom.width > availFor(lineIndex) + 0.01 && curLineWidth === 0) {
       // Single fragment wider than the line: hard character wrap.
       hardWrapFrag(atom);
       continue;

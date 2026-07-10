@@ -3703,8 +3703,8 @@ class Engine {
           // the other autofit paths it calibrates) must not count toward the
           // raise test, or col2's NBSP-glued "Wej 7426" (59.25pt min vs its
           // 59.65pt grid column) gets a spurious raise Word does not do.
-          const { minW } = this.columnMinPref(tbl, base.length);
-          const mins = minW.map((m) => Math.max(0, m - 2));
+          const { minW, fudge } = this.columnMinPref(tbl, base.length);
+          const mins = minW.map((m) => Math.max(0, m - fudge));
           const target = base.reduce((a, b) => a + b, 0);
           const raised = base.map((w, i) => Math.max(w, mins[i]));
           const over = raised.reduce((a, b) => a + b, 0) - target;
@@ -3723,7 +3723,7 @@ class Engine {
     }
 
     const nCols = base.length;
-    const { minW, prefW } = this.columnMinPref(tbl, nCols);
+    const { minW, prefW, fudge } = this.columnMinPref(tbl, nCols);
 
     const sumPref = prefW.reduce((a, b) => a + b, 0);
     if (sumPref <= 0) return base;
@@ -3739,7 +3739,7 @@ class Engine {
     // 57.27pt = word + margins + rule, and col1 keeps 187.8pt so
     // " Mimociv doluguseqesu qapabipe" stays on one line; the fudged
     // 58.58pt min squeezed col1 to 187.3 and wrapped all three rows).
-    const clampW = hasExplicit ? minW.map((m) => Math.max(0, m - 2)) : minW;
+    const clampW = hasExplicit ? minW.map((m) => Math.max(0, m - fudge)) : minW;
     const widths = prefW.map((w) => (w * want) / sumPref);
     for (let pass = 0; pass < 3; pass++) {
       let deficit = 0;
@@ -3890,9 +3890,28 @@ class Engine {
    * enclosing "holds L…" column). Spanned cells distribute their demand evenly
    * across the covered columns.
    */
-  private columnMinPref(tbl: Table, nCols: number): { minW: number[]; prefW: number[]; hardMinW: number[] } {
+  private columnMinPref(tbl: Table, nCols: number): { minW: number[]; prefW: number[]; hardMinW: number[]; fudge: number } {
     const margins = this.cellMarginsOf(tbl);
-    const pad = (margins.left ?? 0) + (margins.right ?? 0) + 2;
+    // Vertical-rule allowance. The +2px covers the vertical rules a column's
+    // cells paint (calibrated on the autofit corpus, all full-grid tables).
+    // A table that paints NO vertical rules gets none: Word's rendered
+    // autofit columns for chem p9's horizontal-rules-only table are content
+    // + cell margins EXACTLY (rendered 31.8/37.8pt = text 21/27 + 10.8pt
+    // margins; the flat +2px made every column ~1.5pt wide and the drift
+    // accumulated to +20px at the last rule). Only a table whose EXPLICIT
+    // borders lack left/right/insideV (and whose cells declare no vertical
+    // tcBorders) drops the allowance — style-resolved borders may not be
+    // filled in yet for nested tables, so undefined keeps the old fudge.
+    const paints = (b?: Border) => b !== undefined && b.style !== "none" && b.width > 0;
+    const tb = tbl.props.borders;
+    const noVRules =
+      tb !== undefined &&
+      !paints(tb.left) && !paints(tb.right) && !paints(tb.insideV) &&
+      !tbl.rows.some((r) =>
+        r.cells.some((c) => paints(c.props.borders?.left) || paints(c.props.borders?.right)),
+      );
+    const fudge = noVRules ? 0 : 2;
+    const pad = (margins.left ?? 0) + (margins.right ?? 0) + fudge;
     const minW = new Array<number>(nCols).fill(pad + 8);
     const prefW = new Array<number>(nCols).fill(pad + 8);
     // Hard (non-negotiable) minimum: the demand of nested tables only. Word
@@ -3905,7 +3924,7 @@ class Engine {
         const span = cell.props.gridSpan;
         if (gridPos < nCols && cell.props.vMerge !== "continue") {
           const cm = { ...margins, ...cell.props.margins };
-          const cpad = (cm.left ?? 0) + (cm.right ?? 0) + 2;
+          const cpad = (cm.left ?? 0) + (cm.right ?? 0) + fudge;
           let cellMin = 0;
           let cellPref = 0;
           let cellHard = 0;
@@ -3980,7 +3999,7 @@ class Engine {
         gridPos += span;
       }
     }
-    return { minW, prefW, hardMinW };
+    return { minW, prefW, hardMinW, fudge };
   }
 
   /**
@@ -4186,6 +4205,14 @@ class Engine {
     const widths = this.resolveGridWidths(tbl, colWidth);
     const tableWidth = widths.reduce((a, b) => a + b, 0);
     let x0 = this.colX + (tbl.props.indent ?? 0);
+    // compatibilityMode <= 14 (Word 2010 and earlier): w:tblInd measures to
+    // the first cell's TEXT edge, so the table grid/border begins a cell
+    // left-margin further left. Word 2013+ (mode 15) measures to the border.
+    // Measured in wild2-sci-chem-omml (compat 14) p9: tblInd 531tw with the
+    // default 108tw cell margin - Word's first column text sits at margin +
+    // 26.55pt exactly and the cell rules start at margin + 21.2pt; the NIH
+    // probe (compat 15, tblInd 500tw) starts its rules at margin + 25pt.
+    if (this.doc.compatibilityMode < 15) x0 -= this.cellMarginsOf(tbl).left ?? 0;
     if (tbl.props.alignment === "center") x0 = this.colX + (colWidth - tableWidth) / 2;
     else if (tbl.props.alignment === "right") x0 = this.colX + colWidth - tableWidth;
     // w:bidiVisual (RTL table) hugs the right margin unless explicitly aligned.
