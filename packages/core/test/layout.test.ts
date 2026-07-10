@@ -3326,6 +3326,125 @@ describe("table row border share", () => {
     if (texts.length !== 2 || texts[0].kind !== "text" || texts[1].kind !== "text") throw new Error("rows not found");
     const lineH = texts[0].font.size * 1.15; // ApproxMeasurer single line
     // Row pitch = content line + the sz-4 rule's TRUE width (0.5pt = 2/3px).
-    expect(texts[1].lineTop - texts[0].lineTop).toBeCloseTo(lineH + 2 / 3, 2);
+    expect(texts[1].lineTop - texts[0].lineTop).toBeCloseTo(lineH + 2 / 3, 2);  });
+});
+
+describe("cross-references and over-wide tables", () => {
+  const FOOTER_RELS = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+</Relationships>`;
+
+  it("re-renders REF fields from the bookmark range with document-order SEQ values", () => {
+    // gatech's table of figures: a REF to a caption's _Ref bookmark is laid
+    // out PAGES before the caption. Word recomputes both on open — the
+    // cached "Bavoqe 0" (sanitizer-remapped digits) renders as the caption's
+    // real "… 1". The REF must not consume the SEQ counter out of order.
+    const refPara =
+      `<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> REF _Ref123 \\h  \\* MERGEFORMAT </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      `<w:r><w:t>Figure 9</w:t></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`;
+    const caption =
+      `<w:p><w:bookmarkStart w:id="7" w:name="_Ref123"/>` +
+      `<w:r><w:t xml:space="preserve">Figure </w:t></w:r>` +
+      `<w:fldSimple w:instr=" SEQ Figure \\* ARABIC "><w:r><w:t>0</w:t></w:r></w:fldSimple>` +
+      `<w:bookmarkEnd w:id="7"/>` +
+      `<w:r><w:t xml:space="preserve"> caption tail</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(refPara + caption) });
+    const text = pageText(result, 0);
+    expect(text).toContain("Figure 1 caption tail"); // caption SEQ recomputed
+    expect(text).not.toContain("Figure 9"); // stale REF cache replaced
+    expect(text).not.toContain("Figure 0"); // fldSimple cache not doubled in
+    // The REF occurrence itself renders the bookmark text.
+    expect(text.indexOf("Figure 1")).toBeLessThan(text.indexOf("Figure 1 caption tail") + 1);
+  });
+
+  it("keeps a frame+trailing-empty footer bottom-anchored at footerDistance (no phantom line)", () => {
+    // gatech footer2: widthless centered PAGE frame + final empty paragraph.
+    // The frame overlays the empty follower and reserves NO extra height —
+    // Word bottom-aligns the single line at footerDistance on the two-digit
+    // pages too (the NIH phantom reserve only exists when painted content
+    // FOLLOWS the overlaid follower).
+    const body = Array.from({ length: 10 }, (_, i) =>
+      `<w:p><w:r><w:t>Body ${i + 1}</w:t>${i < 9 ? '<w:br w:type="page"/>' : ""}</w:r></w:p>`,
+    ).join("");
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        body +
+          `<w:sectPr>
+            <w:footerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdF"/>
+            <w:pgSz w:w="12240" w:h="15840"/>
+            <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:footer="720"/>
+          </w:sectPr>`,
+      ),
+      "word/_rels/document.xml.rels": FOOTER_RELS,
+      "word/footer1.xml": `<?xml version="1.0"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:pPr><w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="margin" w:xAlign="center" w:y="1"/></w:pPr>
+    <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r>
+    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  </w:p>
+  <w:p></w:p>
+</w:ftr>`,
+    });
+    expect(result.totalPages).toBe(10);
+    const pageNumber = (page: number) => {
+      const laidPage = result.pages[page - 1];
+      const item = laidPage.items.slice(laidPage.hfStart).find(
+        (candidate) => candidate.kind === "text" && candidate.text === String(page),
+      );
+      if (item?.kind !== "text") throw new Error(`missing page ${page} footer`);
+      return item;
+    };
+    // Two-digit page 10 sits exactly where page 1 does: no phantom reserve.
+    expect(pageNumber(10).lineTop).toBeCloseTo(pageNumber(1).lineTop, 3);
+    // Bottom-anchored: the single footer line ends at pageHeight - footerDistance.
+    const n1 = pageNumber(1);
+    expect(n1.lineTop + n1.lineHeight).toBeCloseTo(15840 / 15 - 720 / 15, 0);
+  });
+
+  it("lets a body-level fixed-layout table keep its over-wide grid (Word overflows the margin)", () => {
+    // ca-agreement p1: tblLayout=fixed with tblW/grid wider than the text
+    // column renders at full grid width into the right margin, not shrunk.
+    const tbl =
+      `<w:tbl><w:tblPr><w:tblW w:w="10170" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="4770"/><w:gridCol w:w="5400"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="4770" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>left</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="5400" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>right</w:t></w:r></w:p></w:tc></w:tr></w:tbl>` +
+      `<w:p/>`;
+    const sect =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + sect) });
+    const right = result.pages[0].items.find((i) => i.kind === "text" && i.text === "right");
+    if (right?.kind !== "text") throw new Error("missing cell text");
+    // Second column starts at marginLeft + 4770tw, NOT scaled into the
+    // 9360tw content box (which would land it at 96 + 293.8px).
+    expect(right.x).toBeGreaterThan(96 + 4770 / 15 - 1);
+  });
+
+  it("moves a row whole when a cell's first line would miss the split cut", () => {
+    // parity2-nestedtables p2: three one-line cells fit above the cut but the
+    // taller cell's first line does not — Word pushes the ENTIRE row to the
+    // next page instead of stranding an empty cell beside painted neighbours.
+    const filler =
+      `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:trHeight w:hRule="exact" w:val="13900"/></w:trPr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="9360" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>spacer</w:t></w:r></w:p></w:tc></w:tr>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Alpha</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr>` +
+      `<w:p><w:pPr><w:rPr><w:sz w:val="48"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t>Bravo big</w:t></w:r></w:p>` +
+      `<w:p><w:r><w:t>Bravo two</w:t></w:r></w:p><w:p><w:r><w:t>Bravo three</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>`;
+    const sect =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="720" w:right="1440" w:bottom="720" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(filler + sect) });
+    expect(result.totalPages).toBeGreaterThan(1);
+    expect(pageText(result, 0)).not.toContain("Alpha"); // not stranded beside an empty cell
+    expect(pageText(result, 1)).toContain("Alpha");
+    expect(pageText(result, 1)).toContain("Bravo big");
   });
 });
