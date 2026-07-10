@@ -111,6 +111,16 @@ const WORD_FONT_METRICS: Record<string, { asc: number; desc: number; gap: number
   "hiragino mincho pron": { asc: 1.3636, desc: 0.2794, gap: 0 },
   "hiragino sans": { asc: 1.3636, desc: 0.2794, gap: 0 },
   "pingfang tc": { asc: 2.2700, desc: 0.7627, gap: 0 },
+  // Word's glyph-fallback face for symbol characters a symbol-encoded font
+  // can't cover (numberingLabel routes literal-Unicode bullets here). Real MS
+  // JhengHei hhea: asc 2178, desc 763, lineGap 227 / upem 2048 = 1.5469em -
+  // measured 17.0pt bullet lines at 11pt in phase23's Word PDF.
+  "microsoft jhenghei": { asc: 1.063477, desc: 0.372559, gap: 0.11084 },
+  // Symbol bullets keep Symbol's own line box: hhea asc 2059, desc 450,
+  // lineGap 99 / upem 2048 = 1.2734em (14.0pt at 11pt - phase23's sub-bullet
+  // lists run 14.0pt/line among 13.5pt Calibri text).
+  symbol: { asc: 1.005371, desc: 0.219727, gap: 0.04834 },
+  symbolmt: { asc: 1.005371, desc: 0.219727, gap: 0.04834 },
   "pingfang sc": { asc: 2.2700, desc: 0.7627, gap: 0 },
   "songti sc": { asc: 2.2700, desc: 0.7627, gap: 0 },
   "heiti sc": { asc: 2.2700, desc: 0.7627, gap: 0 },

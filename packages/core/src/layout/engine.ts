@@ -107,6 +107,7 @@ interface LayoutSnapshot {
   docGridDropBefore: boolean;
   bannerSlotUsed: number;
   counters: Map<number, number[]>;
+  seenNumIds: Set<number>;
   bookmarkPages: Map<string, string>;
   placedFootnotes: Set<number>;
   lnCounter: number;
@@ -181,8 +182,10 @@ class Engine {
   private trailingSectionBreakMarkGap = 0;
   /** Bookmark name -> formatted display page number (PAGEREF rewrite). */
   private bookmarkPages = new Map<string, string>();
-  /** List counters per numId. */
+  /** List counters per abstractNumId. */
   private counters = new Map<number, number[]>();
+  /** numIds already referenced once (their startOverride restart has fired). */
+  private seenNumIds = new Set<number>();
   /** Floating-image exclusion rects per page (page coords). */
   private floats = new Map<InternalPage, { x0: number; x1: number; y0: number; y1: number; mode: "square" | "topAndBottom" }[]>();
   /** Note id → sequential display number, assigned in document order pre-layout. */
@@ -636,6 +639,7 @@ class Engine {
       docGridDropBefore: this.docGridDropBefore,
       bannerSlotUsed: this.bannerSlotUsed,
       counters: new Map(Array.from(this.counters, ([k, v]) => [k, [...v]])),
+      seenNumIds: new Set(this.seenNumIds),
       bookmarkPages: new Map(this.bookmarkPages),
       placedFootnotes: new Set(this.placedFootnotes),
       lnCounter: this.lnCounter,
@@ -671,6 +675,7 @@ class Engine {
     this.docGridDropBefore = s.docGridDropBefore;
     this.bannerSlotUsed = s.bannerSlotUsed;
     this.counters = s.counters;
+    this.seenNumIds = s.seenNumIds;
     this.bookmarkPages = s.bookmarkPages;
     this.placedFootnotes = s.placedFootnotes;
     this.lnCounter = s.lnCounter;
@@ -878,8 +883,10 @@ class Engine {
       const prevSelf = this.selfNoteMark;
       this.selfNoteMark = this.footnoteMark(id);
       const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+      const seenSnapshot = new Set(this.seenNumIds);
       laid = this.layoutFrame(blocks, width, this.fieldCtx());
       this.counters = snapshot;
+      this.seenNumIds = seenSnapshot;
       this.selfNoteMark = prevSelf;
       this.noteCache.set(key, laid);
     }
@@ -1039,17 +1046,23 @@ class Engine {
     if (para.sectionBreak && !paragraphHasContent(para)) return undefined;
 
     // Word maintains numbering counter state per ABSTRACT numbering definition,
-    // not per w:num instance: all w:num that reference the same abstractNum with
-    // no lvlOverride share one running counter. wild-doerfp drives its section
-    // headings this way - Heading1 numbers via style numId=4 ilvl=0 (SECTION A/B/
-    // ...) while Heading2 carries a direct numId=3 ilvl=1 (%1.%2); both resolve to
-    // abstractNum 8, so numId=4's letter increments feed numId=3's %1 and the
-    // subsection counter runs continuously across the two instances (H.1 via the
-    // style, H.2 via the direct numId). parity2-lists confirms it: num1 -> 1,2,3
-    // then num2 (same abstract, no override) continues 4,5 - Word does not restart.
-    // An instance WITH overrides keeps an independent counter (its own key), which
-    // both matches Word's restart intent and preserves prior behavior.
-    const cKey = inst.overrides.size > 0 ? 1_000_000 + num.numId : inst.abstractNumId;
+    // not per w:num instance: ALL w:num that reference the same abstractNum
+    // share one running counter, lvlOverride or not. wild-doerfp drives its
+    // section headings this way - Heading1 numbers via style numId=4 ilvl=0
+    // (SECTION A/B/...) while Heading2 carries a direct numId=3 ilvl=1 (%1.%2);
+    // both resolve to abstractNum 8, so numId=4's letter increments feed
+    // numId=3's %1. parity2-lists confirms it: num1 -> 1,2,3 then num2 (same
+    // abstract, no override) continues 4,5 - Word does not restart. A pure
+    // level redefinition does not fork the sequence either: phase23's Heading1
+    // chain hops numId 71 -> 77 -> 74 where num 74 lvlOverride-redefines every
+    // level (no startOverride) and Word numbers straight through 1..11, giving
+    // "10.3" where a per-instance counter would say "3.3". Only a
+    // w:startOverride restarts the shared counter, and the restart fires ONCE -
+    // the first time that w:num instance is referenced in the document
+    // (ECMA-376 17.9.16; Word's "Restart numbering" UI emits exactly such an
+    // instance). On later re-inits of the level (after a parent increment
+    // cleared it) the override still supplies the level's start value.
+    const cKey = inst.abstractNumId;
     let counters = this.counters.get(cKey);
     if (!counters) {
       counters = [];
@@ -1059,6 +1072,10 @@ class Engine {
     if (!lvl) return undefined;
 
     const startOverride = inst.overrides.get(num.ilvl)?.startOverride;
+    if (!this.seenNumIds.has(num.numId)) {
+      this.seenNumIds.add(num.numId);
+      if (startOverride !== undefined) counters[num.ilvl] = startOverride - 1;
+    }
     if (counters[num.ilvl] === undefined) {
       counters[num.ilvl] = (startOverride ?? lvl.start) - 1;
     }
@@ -1082,8 +1099,27 @@ class Engine {
     let labelProps = markProps;
     if (lvl.rPr) labelProps = mergeRunProps(markProps, lvl.rPr);
     if (lvl.format === "bullet" && lvl.rPr?.font && isSymbolFont(lvl.rPr.font)) {
-      // Symbol fonts map through Unicode substitution; use the body font.
-      labelProps = { ...labelProps, font: markProps.font };
+      const code = lvl.text.codePointAt(0) ?? 0;
+      if (code >= 0x100 && !(code >= 0xf000 && code <= 0xf0ff)) {
+        // A literal Unicode bullet (e.g. U+2022) declared in a symbol-encoded
+        // face: Symbol/Wingdings cmaps only cover the F0xx PUA, so Word's font
+        // fallback resolves the glyph elsewhere - its PDFs embed Microsoft
+        // JhengHei - and the bullet's line inherits that face's much taller
+        // box (phase23: 17.0pt bullet-start lines among 13.5pt Calibri text).
+        labelProps = { ...labelProps, font: "Microsoft JhengHei" };
+      } else if (/^symbol/i.test(lvl.rPr.font)) {
+        // A Symbol-encoded bullet in the Symbol face keeps Symbol's line
+        // metrics in Word (hhea (2059+450+99)/2048 = 1.2734em -> 14.0pt
+        // bullet lines among 13.5pt Calibri text, phase23 pp32-35;
+        // parity2-lists' Symbol bullet line is likewise 0.6pt taller than
+        // its Wingdings/Arial siblings). The glyph still maps to Unicode -
+        // only the family (metrics) is kept.
+        labelProps = { ...labelProps, font: "SymbolMT" };
+      } else {
+        // Other symbol-encoded faces (Wingdings/Webdings) measure normal
+        // line height in Word; map through Unicode and use the body font.
+        labelProps = { ...labelProps, font: markProps.font };
+      }
     }
     return { text, props: labelProps, suffix: lvl.suffix };
   }
@@ -1365,7 +1401,8 @@ class Engine {
       const np = this.doc.effectiveParaProps(nb);
       return (
         JSON.stringify(np.borders ?? null) === JSON.stringify(props.borders ?? null) &&
-        (np.indentLeft ?? 0) === (props.indentLeft ?? 0) &&
+        (np.indentLeft ?? 0) - (np.indentHanging ?? 0) ===
+          (props.indentLeft ?? 0) - (props.indentHanging ?? 0) &&
         (np.indentRight ?? 0) === (props.indentRight ?? 0)
       );
     };
@@ -1859,8 +1896,36 @@ class Engine {
             : this.cur.bodyBottom -
               (simOnCurrentPage ? this.footnoteReserve(this.cur, simCol) + simBannerUsed : 0);
       };
+      // Footnote reserve the simulated lines themselves create: a line whose
+      // spans reference footnotes shrinks the page bottom for every LATER
+      // line (registerFootnote grows footnoteH as lines emit). The live
+      // footnoteReserve above only sees notes already placed, so without this
+      // the plan can declare a paragraph tail fit that emission then breaks
+      // WITHOUT widow control (phase23 p57: a 9-line paragraph with four
+      // footnote refs split 8/1, stranding "MOJA." as a widow where Word
+      // pulls a second line along, 7/2).
+      let simNotes = 0;
+      const simNoted = new Set<number>();
+      const lineNoteHeights = (line: LineBox): number => {
+        let h = 0;
+        for (const span of line.spans) {
+          if (span.noteId === undefined) continue;
+          if (this.placedFootnotes.has(span.noteId) || simNoted.has(span.noteId)) continue;
+          if (!this.doc.footnotes.has(span.noteId)) continue;
+          h += this.measureFootnote(span.noteId).height;
+        }
+        return h;
+      };
+      const markLineNotes = (line: LineBox) => {
+        for (const span of line.spans) {
+          if (span.noteId === undefined || this.placedFootnotes.has(span.noteId)) continue;
+          if (this.doc.footnotes.has(span.noteId)) simNoted.add(span.noteId);
+        }
+      };
       const nextSimColumn = () => {
         simBannerUsed = 0;
+        simNotes = 0;
+        simNoted.clear();
         if (simCol + 1 < this.cur.colXs.length) {
           simCol++;
           simY = simOnCurrentPage ? this.columnStartY(simCol) : this.cur.bodyTop;
@@ -1887,9 +1952,18 @@ class Engine {
         }
         const simBalancing =
           simOnCurrentPage && this.balanceBottom !== undefined && simCol + 1 < this.cur.colXs.length;
+        // Mirror emitLine's test: the line must clear the notes ALREADY
+        // claimed by earlier simulated lines (simNotes) plus its own
+        // (noteAdd), with the separator once the page gains its first note.
+        const noteAdd = lineNoteHeights(lines[li]);
+        const baseNotes = simOnCurrentPage ? (this.cur.footnoteH[simCol] ?? 0) : 0;
+        const simSep =
+          simNotes + noteAdd > 0 && baseNotes === 0 ? this.noteSeparatorReserve(this.cur) : 0;
         const overflowsHere =
           !postTablePageBreak &&
-          (simBalancing ? simY > bottom + 0.01 : simY + lines[li].fitHeight > bottom + 0.01);
+          (simBalancing
+            ? simY > bottom + 0.01
+            : simY + lines[li].fitHeight > bottom - simNotes - noteAdd - simSep + 0.01);
         // The paragraph's VERY FIRST line does not fit on the current partial
         // page: the whole paragraph moves to the next column/page. This is a
         // PHYSICAL fit, independent of widowControl — the emit loop moves line 0
@@ -1941,6 +2015,8 @@ class Engine {
           continue;
         }
         simY += lines[li].height;
+        simNotes += noteAdd;
+        markLineNotes(lines[li]);
       }
       return breaks;
     };
@@ -2422,7 +2498,14 @@ class Engine {
     isFirstFrag: boolean,
     isLastFrag: boolean,
   ): void {
-    const left = colX + (props.indentLeft ?? 0);
+    // Word anchors paragraph borders/shading at the paragraph's leftmost text
+    // extent: a hanging indent pulls the box left so the outdented first line
+    // - which is where a numbering label lives - sits INSIDE the decoration.
+    // phase23's Heading1 (ind left=432 hanging=432) paints "4<tab>TITLE" inside
+    // the full-width blue banner; boxing only [indentLeft, right] leaves the
+    // white-on-white label stranded outside it. A positive first-line indent
+    // does not move the box.
+    const left = colX + (props.indentLeft ?? 0) - (props.indentHanging ?? 0);
     const right = colX + colWidth - (props.indentRight ?? 0);
     if (props.shading) {
       page.items.unshift({
@@ -2500,7 +2583,8 @@ class Engine {
       const np = this.doc.effectiveParaProps(nb);
       return (
         JSON.stringify(np.borders ?? null) === JSON.stringify(a.borders ?? null) &&
-        (np.indentLeft ?? 0) === (a.indentLeft ?? 0) &&
+        (np.indentLeft ?? 0) - (np.indentHanging ?? 0) ===
+          (a.indentLeft ?? 0) - (a.indentHanging ?? 0) &&
         (np.indentRight ?? 0) === (a.indentRight ?? 0)
       );
     };

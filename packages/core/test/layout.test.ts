@@ -804,6 +804,121 @@ describe("layout engine", () => {
     expect(text.slice(idxThree)).toContain("a)");
   });
 
+  it("shares one counter per abstractNum across instances; startOverride restarts once", () => {
+    // Word keys numbering state by ABSTRACT definition: an instance whose
+    // lvlOverride merely redefines the level (no startOverride) continues the
+    // running counter (phase23: Heading1 hops numId 71 -> 77 -> 74 and Word
+    // numbers straight through 1..11). Only a startOverride restarts, the
+    // first time that instance is referenced.
+    const numberingXml = `<?xml version="1.0"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="0"/>
+    <w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>
+  </w:num>
+  <w:num w:numId="3"><w:abstractNumId w:val="0"/>
+    <w:lvlOverride w:ilvl="0">
+      <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl>
+    </w:lvlOverride>
+  </w:num>
+</w:numbering>`;
+    const numPara = (text: string, numId: number) =>
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="${numId}"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        numPara("a", 1) + // 1.
+          numPara("b", 1) + // 2.
+          numPara("c", 2) + // startOverride: restart -> 1.
+          numPara("d", 1) + // shared counter continues -> 2.
+          numPara("e", 3) + // lvl redefinition, NO startOverride -> 3.
+          numPara("f", 2), // numId 2 already referenced: no second restart -> 4.
+      ),
+      "word/numbering.xml": numberingXml,
+    });
+    const labels = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+\.$/.test(i.text))
+      .map((i) => (i.kind === "text" ? i.text : ""));
+    expect(labels).toEqual(["1.", "2.", "1.", "2.", "3.", "4."]);
+  });
+
+  it("extends paragraph shading/borders over the hanging-indent numbering label", () => {
+    // Word anchors paragraph decoration at the paragraph's leftmost text
+    // extent: with ind left=432 hanging=432 the numbering label sits at the
+    // margin INSIDE the shaded box (phase23 Heading1's blue banner shows
+    // "4<tab>TITLE" inside the full-width fill).
+    const numberingXml = `<?xml version="1.0"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1"/><w:lvlJc w:val="left"/>
+      <w:pPr><w:ind w:left="432" w:hanging="432"/></w:pPr>
+    </w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>`;
+    const heading =
+      `<w:p><w:pPr>` +
+      `<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>` +
+      `<w:shd w:val="clear" w:fill="4F81BD"/>` +
+      `</w:pPr><w:r><w:t>BANNER</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(heading + p("body")),
+      "word/numbering.xml": numberingXml,
+    });
+    const items = result.pages[0].items;
+    const rect = items.find((i) => i.kind === "rect" && i.fill.toUpperCase() === "#4F81BD");
+    const label = items.find((i) => i.kind === "text" && i.text === "1");
+    const body = items.find((i) => i.kind === "text" && i.text === "body");
+    if (rect?.kind !== "rect" || label?.kind !== "text" || body?.kind !== "text") {
+      throw new Error("items not found");
+    }
+    // The label starts at the hanging outdent = the plain body margin, and
+    // the shading box reaches back to enclose it.
+    expect(label.x).toBeCloseTo(body.x, 1);
+    expect(rect.x).toBeLessThanOrEqual(label.x + 0.01);
+  });
+
+  it("lets a style's own ind beat the numbering level's for style-sourced numbering", () => {
+    // phase23 Heading3: the style carries ind left=720 while the linked
+    // numbering level says left=4410 hanging=720. Word paints the number at
+    // the margin (style left wins attribute-wise; the level's hanging
+    // survives because the style sets none). A DIRECT numPr keeps the
+    // opposite precedence (level ind beats the style chain).
+    const numberingXml = `<?xml version="1.0"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1"/><w:lvlJc w:val="left"/>
+      <w:pPr><w:ind w:left="4410" w:hanging="720"/></w:pPr>
+    </w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>`;
+    const stylesXml = `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="H3">
+    <w:name w:val="H3"/>
+    <w:pPr>
+      <w:numPr><w:numId w:val="1"/></w:numPr>
+      <w:ind w:left="720"/>
+    </w:pPr>
+  </w:style>
+</w:styles>`;
+    const heading = `<w:p><w:pPr><w:pStyle w:val="H3"/></w:pPr><w:r><w:t>TITLE</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(heading + p("body")),
+      "word/numbering.xml": numberingXml,
+      "word/styles.xml": stylesXml,
+    });
+    const items = result.pages[0].items;
+    const label = items.find((i) => i.kind === "text" && i.text === "1");
+    const body = items.find((i) => i.kind === "text" && i.text === "body");
+    if (label?.kind !== "text" || body?.kind !== "text") throw new Error("items not found");
+    // left=720 (style) with hanging=720 (level): the number sits at the margin.
+    expect(label.x).toBeCloseTo(body.x, 1);
+  });
+
   it("lays out table rows and repeats content within page", () => {
     const rows = Array.from(
       { length: 3 },
