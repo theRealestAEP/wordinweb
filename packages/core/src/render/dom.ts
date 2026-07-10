@@ -73,6 +73,89 @@ const MIME_BY_EXT: Record<string, string> = {
 };
 
 /**
+ * Drop color-management metadata (ICC profile / gamma) from a JPEG or PNG so
+ * the browser displays the literal pixel samples. Word's PDF export embeds
+ * these images as raw DeviceRGB streams (no ICC transform applied): the
+ * reference render shows the untransformed values, but Chrome color-manages a
+ * profiled image visibly lighter/darker. Unknown/other formats pass through.
+ */
+function stripColorProfile(bytes: Uint8Array, ext: string): Uint8Array {
+  try {
+    if (ext === "jpg" || ext === "jpeg") return stripJpegIcc(bytes);
+    if (ext === "png") return stripPngColorChunks(bytes);
+  } catch {
+    // Malformed container: show the original bytes untouched.
+  }
+  return bytes;
+}
+
+/** Remove APP2 ICC_PROFILE segments from a JPEG stream. */
+function stripJpegIcc(bytes: Uint8Array): Uint8Array {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return bytes;
+  const keep: Array<[number, number]> = [[0, 2]]; // SOI
+  let i = 2;
+  let stripped = false;
+  while (i + 4 <= bytes.length && bytes[i] === 0xff) {
+    const marker = bytes[i + 1];
+    if (marker === 0xda) {
+      // SOS: entropy-coded data follows to EOF - keep the rest verbatim.
+      keep.push([i, bytes.length]);
+      i = bytes.length;
+      break;
+    }
+    const len = (bytes[i + 2] << 8) | bytes[i + 3];
+    const segEnd = i + 2 + len;
+    if (segEnd > bytes.length) return bytes;
+    const isIcc =
+      marker === 0xe2 &&
+      len >= 14 &&
+      String.fromCharCode(...bytes.subarray(i + 4, i + 15)) === "ICC_PROFILE";
+    if (isIcc) stripped = true;
+    else keep.push([i, segEnd]);
+    i = segEnd;
+  }
+  if (!stripped) return bytes;
+  if (i < bytes.length) keep.push([i, bytes.length]);
+  const total = keep.reduce((a, [s, e]) => a + (e - s), 0);
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const [s, e] of keep) {
+    out.set(bytes.subarray(s, e), o);
+    o += e - s;
+  }
+  return out;
+}
+
+/** Remove iCCP/gAMA/cHRM/sRGB chunks from a PNG stream. */
+function stripPngColorChunks(bytes: Uint8Array): Uint8Array {
+  const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (bytes.length < 8 || !SIG.every((b, k) => bytes[k] === b)) return bytes;
+  const drop = new Set(["iCCP", "gAMA", "cHRM", "sRGB"]);
+  const keep: Array<[number, number]> = [[0, 8]];
+  let i = 8;
+  let stripped = false;
+  while (i + 12 <= bytes.length) {
+    const len = (bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3];
+    const type = String.fromCharCode(bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]);
+    const end = i + 12 + len;
+    if (len < 0 || end > bytes.length) return bytes;
+    if (drop.has(type)) stripped = true;
+    else keep.push([i, end]);
+    if (type === "IEND") break;
+    i = end;
+  }
+  if (!stripped) return bytes;
+  const total = keep.reduce((a, [s, e]) => a + (e - s), 0);
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const [s, e] of keep) {
+    out.set(bytes.subarray(s, e), o);
+    o += e - s;
+  }
+  return out;
+}
+
+/**
  * Render a layout result to absolutely-positioned DOM. Every PageItem maps
  * 1:1 to an element; no browser reflow participates in positioning, so what
  * the layout engine computed is exactly what you see.
@@ -669,11 +752,84 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
         img.src = decoded;
       } else {
         const mime = MIME_BY_EXT[ext] ?? "application/octet-stream";
-        const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        // Word's PDF export embeds raster streams as raw DeviceRGB samples -
+        // the source's embedded ICC profile / gamma is NOT applied (athabasca's
+        // chart JPEG renders its literal pixel values in the reference PDF,
+        // while Chrome color-manages them ~20 luminance lighter). Strip the
+        // profile chunks so the browser shows the same raw values Word prints.
+        const display = stripColorProfile(bytes, ext);
+        const buf = display.buffer.slice(display.byteOffset, display.byteOffset + display.byteLength) as ArrayBuffer;
         const blob = new Blob([buf], { type: mime });
         const url = URL.createObjectURL(blob);
         urls.push(url);
         img.src = url;
+        // At exactly 2x device scale (CSS size == natural size on a 2x
+        // display) pre-upscale with pdftoppm/Splash's kernel instead of
+        // Chrome's: Splash keeps every other device row/column a PURE copy of
+        // the source row (out[2k] = s[k], out[2k+1] = avg(s[k], s[k+1])) with
+        // the origin FLOORED to a device pixel, while Chrome's half-texel
+        // bilinear blurs every row 25/75 and lands ~1.5 device px lower.
+        // Verified against wild-athabasca p23's bar chart: the reference
+        // gradient rows reproduce exactly (196 -> 187.5 -> 179...). Without
+        // this, the periodic bars register one bar off.
+        const cropped = item.crop && (item.crop.l || item.crop.t || item.crop.r || item.crop.b);
+        if (
+          !cropped &&
+          !item.rotation &&
+          typeof window !== "undefined" &&
+          (window.devicePixelRatio || 1) === 2
+        ) {
+          const probe = new Image();
+          probe.onload = () => {
+            const nw = probe.naturalWidth;
+            const nh = probe.naturalHeight;
+            if (Math.abs(item.width - nw) > 0.01 || Math.abs(item.height - nh) > 0.01) return;
+            try {
+              const srcCv = document.createElement("canvas");
+              srcCv.width = nw;
+              srcCv.height = nh;
+              const sctx = srcCv.getContext("2d", { willReadFrequently: true });
+              if (!sctx) return;
+              sctx.drawImage(probe, 0, 0);
+              const s = sctx.getImageData(0, 0, nw, nh).data;
+              const ow = nw * 2;
+              const oh = nh * 2;
+              const outCv = document.createElement("canvas");
+              outCv.width = ow;
+              outCv.height = oh;
+              const octx = outCv.getContext("2d");
+              if (!octx) return;
+              const out = octx.createImageData(ow, oh);
+              const d = out.data;
+              for (let y = 0; y < oh; y++) {
+                const k = y >> 1;
+                const k2 = y & 1 ? Math.min(k + 1, nh - 1) : k;
+                for (let x = 0; x < ow; x++) {
+                  const j = x >> 1;
+                  const j2 = x & 1 ? Math.min(j + 1, nw - 1) : j;
+                  const o = (y * ow + x) * 4;
+                  const p00 = (k * nw + j) * 4;
+                  const p01 = (k * nw + j2) * 4;
+                  const p10 = (k2 * nw + j) * 4;
+                  const p11 = (k2 * nw + j2) * 4;
+                  for (let ch = 0; ch < 4; ch++) {
+                    d[o + ch] = (s[p00 + ch] + s[p01 + ch] + s[p10 + ch] + s[p11 + ch] + 2) >> 2;
+                  }
+                }
+              }
+              octx.putImageData(out, 0, 0);
+              img.src = outCv.toDataURL("image/png");
+              // Splash floors the image origin to the device grid; our layout
+              // lands half a device px lower. Shift the PURE rows onto
+              // poppler's.
+              node.style.top = `${item.y - 0.5}px`;
+              node.style.left = `${item.x - 0.5}px`;
+            } catch {
+              // Canvas unavailable (or tainted): keep the plain <img>.
+            }
+          };
+          probe.src = url;
+        }
       }
       img.style.position = "absolute";
       let node: HTMLElement = img;

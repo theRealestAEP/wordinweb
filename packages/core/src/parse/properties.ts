@@ -217,6 +217,12 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
     };
     let font = attr(rFonts, "ascii") ?? attr(rFonts, "hAnsi") ?? themeFont(attr(rFonts, "asciiTheme"));
     if (font) props.font = font;
+    // hAnsi channel: Word uses it for non-ASCII/non-CJK/non-complex chars.
+    // Kept separately from `font` so a run declaring only w:ascii (e.g.
+    // wild-athabasca's header "≤" run: ascii="MS Gothic", no hAnsi) inherits
+    // hAnsi from the style chain / theme like Word does.
+    const hansi = attr(rFonts, "hAnsi") ?? themeFont(attr(rFonts, "hAnsiTheme"));
+    if (hansi) props.fontHAnsi = hansi;
     // East Asian font channel (used for CJK codepoints) and complex-script
     // channel (used for w:rtl runs). Word picks the channel per character.
     const ea = attr(rFonts, "eastAsia") ?? themeFont(attr(rFonts, "eastAsiaTheme"));

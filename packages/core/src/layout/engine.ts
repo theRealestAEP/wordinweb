@@ -143,6 +143,14 @@ const NOTE_SEP_RESERVE = 40;
 const MULTI_COL_NOTE_SEP_RESERVE = 26;
 /** Word's separator rule is a short line, 2in max. */
 const NOTE_SEP_LEN = 192;
+/** Extra leading between the ENDNOTE separator rule and the first endnote line.
+ * Word's endnote separator sits in its own paragraph and the first endnote
+ * carries a space-before, so Word leaves ~17pt from the rule down to the first
+ * endnote baseline where our 14px strip alone left ~13.7pt: the whole endnote
+ * block started ~3.3pt too high under its rule (parity2-notes p2). Footnotes do
+ * NOT need this - their bottom-anchored block already matches Word to the
+ * device row (parity2-notes p1 stays 0.00), so the gap is endnote-only. */
+const NOTE_SEP_GAP = 4.4;
 /** Bounded overhang (px, ~2.25pt) a table row's trailing leading + bottom rule
  * may cross the body bottom before Word moves/splits the row. Well under the
  * ~one-line gap that triggers a genuine row move; suppressed under footnotes. */
@@ -1053,7 +1061,7 @@ class Engine {
       y2: sepY,
       border: { style: "single", width: 0.75, color: "#000000", space: 0 },
     });
-    this.y += NOTE_SEP_H;
+    this.y += NOTE_SEP_H + NOTE_SEP_GAP;
     this.lastParaSpacingAfter = 0;
     for (const id of ids) {
       this.selfNoteMark = this.endnoteMark(id);
@@ -3013,6 +3021,23 @@ class Engine {
           continue;
         }
         const props = this.doc.effectiveParaProps(block);
+        // An EMPTY paragraph extracted into a widthless text-anchored floating
+        // frame contributes NO flow height in a header/footer: Word's page-
+        // number template leaves the framePr on a now-empty paragraph when
+        // the PAGE field was moved to a plain sibling (wild-athabasca
+        // footer4: [PAGE para, framed empty para, empty para] stacks as TWO
+        // lines — "11" baseline 738.98 = pageBottom − footerDist − 2×14.65 +
+        // asc, identical to the 2-paragraph footer2 — not three).
+        if (
+          props.frame &&
+          props.frame.w === undefined &&
+          props.frame.hAnchor === "margin" &&
+          props.frame.vAnchor === "text" &&
+          props.frame.xAlign !== undefined &&
+          isEmptyParagraph(block)
+        ) {
+          continue;
+        }
         const isPageFrame = !!overlayPageFrame && pendingPageFrame === null && isPageFieldFrame(block, props);
         const flowY = y;
         const flowPrevAfter = framePrevAfter;
@@ -4185,11 +4210,20 @@ class Engine {
     const colWidth = this.colWidth;
     const widths = this.resolveGridWidths(tbl, colWidth);
     const tableWidth = widths.reduce((a, b) => a + b, 0);
-    let x0 = this.colX + (tbl.props.indent ?? 0);
-    if (tbl.props.alignment === "center") x0 = this.colX + (colWidth - tableWidth) / 2;
-    else if (tbl.props.alignment === "right") x0 = this.colX + colWidth - tableWidth;
-    // w:bidiVisual (RTL table) hugs the right margin unless explicitly aligned.
-    else if (tbl.props.bidiVisual) x0 = this.colX + colWidth - tableWidth;
+    // x0 must follow the CURRENT column: when a table splits across the columns
+    // of a multi-column section, the continuation rows paint in the next column,
+    // so recompute from this.colX after every advance() (staging-breaks p4: a
+    // 2-row table whose second row flows into column 2 - without this the
+    // continuation row painted at column 1's x, overlapping the first row). A
+    // page split keeps the same colX, so single-column tables are unaffected.
+    const computeX0 = () => {
+      const cw = this.colWidth;
+      if (tbl.props.alignment === "center") return this.colX + (cw - tableWidth) / 2;
+      // w:bidiVisual (RTL table) hugs the right margin unless explicitly aligned.
+      if (tbl.props.alignment === "right" || tbl.props.bidiVisual) return this.colX + cw - tableWidth;
+      return this.colX + (tbl.props.indent ?? 0);
+    };
+    let x0 = computeX0();
 
     const headerRows: TableRow[] = [];
     for (const row of tbl.rows) {
@@ -4234,6 +4268,7 @@ class Engine {
         this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
         this.nextColumn();
         this.clearBannerSlot();
+        x0 = computeX0();
         segTop = this.y;
         segPage = this.cur;
         const firstRowIdx = !row.props.tblHeader && headerRows.length > 0 ? 0 : ri;

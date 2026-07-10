@@ -585,6 +585,35 @@ describe("layout engine", () => {
     expect(pageText(result, 2)).toContain("third page");
   });
 
+  it("flows a table's continuation row into the next column at that column's x", () => {
+    // staging-breaks p4: a 2-row table in a multi-column section whose second
+    // row does not fit in column 1 flows into column 2. The continuation row
+    // must paint at COLUMN 2's x, not the original column's - a table split
+    // across columns used to keep the first column's x0 and overlap row 1 on
+    // top of row 0.
+    const filler = Array.from({ length: 9 }, (_, i) => p(`Filler line ${i}`)).join("");
+    const table =
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="1400"/><w:gridCol w:w="1400"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="2800" w:type="dxa"/><w:gridSpan w:val="2"/></w:tcPr>` +
+      `<w:p><w:r><w:t>ROWZERO</w:t></w:r></w:p></w:tc></w:tr>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="1400" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>AA</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="1400" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>BB</w:t></w:r></w:p></w:tc></w:tr>` +
+      `</w:tbl>`;
+    const section =
+      `<w:p><w:pPr><w:sectPr><w:cols w:num="2" w:space="720"/>` +
+      `<w:pgSz w:w="12240" w:h="4000"/>` +
+      `<w:pgMar w:top="720" w:right="1440" w:bottom="720" w:left="1440"/></w:sectPr></w:pPr></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(filler + table + section) });
+    const rowZero = result.pages[0].items.find((i) => i.kind === "text" && i.text === "ROWZERO");
+    const aa = result.pages[0].items.find((i) => i.kind === "text" && i.text === "AA");
+    expect(rowZero?.kind).toBe("text");
+    expect(aa?.kind).toBe("text");
+    if (rowZero?.kind !== "text" || aa?.kind !== "text") return;
+    // Row 1 ("AA") lands in a later column, well to the right of row 0.
+    expect(aa.x).toBeGreaterThan(rowZero.x + 200);
+  });
+
   it("drops space-before when a keepLines paragraph is moved to a column top", () => {
     // A multi-line keepLines paragraph with a large space-before that cannot fit
     // in the remaining space at the bottom of a filled column is moved whole to
@@ -2330,6 +2359,46 @@ describe("superscript / subscript", () => {
     expect(markerTop(withRaise) - markerTop(noRaise)).toBeLessThan(5);
     // And it fits on one page (image ~248px << body), not two.
     expect(withRaise.totalPages).toBe(1);
+  });
+
+  it("an image-only line under a multiple lays only the spacing leading below it, no glyph descent", () => {
+    // msa's signature rows: a lone inline group (no text run) in a paragraph
+    // with a line multiple. Word clears such a text-less image line with only
+    // the (k-1)x line-spacing leading below it - there is no glyph descent to
+    // reserve. A trailing text run DOES add its below-share, so the same line
+    // with a "." at the end must sit taller (pushing MARKER lower). Pinning
+    // the two apart guards the image-only descent rule.
+    const rels = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>
+</Relationships>`;
+    const inlineImg =
+      `<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="2095500" cy="400050"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2095500" cy="400050"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>`;
+    const imgPara = (tail: string) =>
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="276" w:lineRule="auto"/></w:pPr>` +
+      `<w:r>${inlineImg}</w:r>${tail}</w:p>`;
+    const parts = (tail: string) => ({
+      "word/document.xml": wrapDocument(imgPara(tail) + p("MARKER")),
+      "word/_rels/document.xml.rels": rels,
+      "word/media/x.png": "PNGDATA",
+    });
+    const imageOnly = layout(parts("")).result;
+    const withText = layout(parts(`<w:r><w:t>.</w:t></w:r>`)).result;
+    const markerTop = (r: ReturnType<typeof layoutDocument>) => {
+      const it = r.pages[0].items.find((i) => i.kind === "text" && i.text === "MARKER");
+      if (it?.kind !== "text") throw new Error("missing MARKER");
+      return it.lineTop;
+    };
+    // The text glyph's below-share (its quantized descent, ~2-3px) lifts MARKER
+    // strictly lower than the image-only line does.
+    expect(markerTop(withText)).toBeGreaterThan(markerTop(imageOnly) + 0.5);
   });
 });
 
