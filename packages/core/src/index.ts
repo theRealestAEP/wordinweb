@@ -1,6 +1,7 @@
 export * from "./model.js";
 export * from "./units.js";
 export { parseXml, localName, child, children, attr } from "./xml.js";
+export type { XmlElement } from "./xml.js";
 export { Package, resolvePartPath } from "./zip.js";
 export { DocxDocument } from "./docx.js";
 export { layoutDocument } from "./layout/engine.js";

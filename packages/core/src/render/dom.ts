@@ -2,7 +2,9 @@ import { DocxDocument } from "../docx.js";
 import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem } from "../layout/types.js";
 import { cssFont, cambriaMathDescentShare } from "../layout/measure.js";
 import { Border } from "../model.js";
+import { convertEmfToDataUrl } from "emf-converter";
 import { decodeTiff } from "./tiff.js";
+import { renderWmf } from "./wmf.js";
 
 export interface RenderOptions {
   /** Zoom factor (1 = 100%). */
@@ -638,6 +640,13 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
             decoded = canvas.toDataURL("image/png");
           }
         }
+      } else if (ext === "wmf") {
+        decoded = renderWmf(bytes, item.width, item.height);
+      } else if (ext === "emf") {
+        const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        void convertEmfToDataUrl(buf).then((url) => {
+          if (url) img.src = url;
+        });
       }
       if (decoded) {
         img.src = decoded;

@@ -205,8 +205,12 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
   const rFonts = child(rPr, "rFonts");
   if (rFonts) {
     const theme = ctx.theme;
-    const themeFont = (kind: string | undefined) =>
-      kind && theme ? (kind.startsWith("major") ? theme.majorFont : theme.minorFont) : undefined;
+    const themeFont = (kind: string | undefined) => {
+      if (!kind || !theme) return undefined;
+      if (kind === "majorBidi") return theme.majorBidiFont ?? theme.majorFont;
+      if (kind === "minorBidi") return theme.minorBidiFont ?? theme.minorFont;
+      return kind.startsWith("major") ? theme.majorFont : theme.minorFont;
+    };
     let font = attr(rFonts, "ascii") ?? attr(rFonts, "hAnsi") ?? themeFont(attr(rFonts, "asciiTheme"));
     if (font) props.font = font;
     // East Asian font channel (used for CJK codepoints) and complex-script
@@ -333,6 +337,8 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
 
   const contextual = onOff(child(pPr, "contextualSpacing"));
   if (contextual !== undefined) props.contextualSpacing = contextual;
+  const snapToGrid = onOff(child(pPr, "snapToGrid"));
+  if (snapToGrid !== undefined) props.snapToGrid = snapToGrid;
   const keepNext = onOff(child(pPr, "keepNext"));
   if (keepNext !== undefined) props.keepNext = keepNext;
   const keepLines = onOff(child(pPr, "keepLines"));

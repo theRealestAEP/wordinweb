@@ -6,6 +6,7 @@ import {
   NumberingLevel,
   Paragraph,
   ParaProps,
+  Run,
   RunProps,
   Section,
   SectionProps,
@@ -19,6 +20,7 @@ import { formatLevelText, formatNumber } from "../parse/numbering.js";
 import { resolveTableConditional } from "../parse/styles.js";
 import { mergeRunProps } from "../parse/properties.js";
 import { ptToPx } from "../units.js";
+import { child } from "../xml.js";
 import {
   BrokenParagraph,
   FieldContext,
@@ -63,6 +65,10 @@ interface InternalPage {
   /** Top of the current column band (continuous sections restart columns
    * mid-page; equals bodyTop for the first band). */
   bandTop: number;
+  /** Top of the first full-width notBeside banner in this band. Later columns
+   * may use whole lines that fit between bodyTop and this obstacle, then resume
+   * at bandTop below it. */
+  bannerTop?: number;
   /** Page reached by soft overflow / hard break (newPage(false)) rather than
    * a document/section start — space-before drops at its top; section-start
    * pages keep the carry-remainder rule and the doc start keeps full before. */
@@ -70,9 +76,9 @@ interface InternalPage {
   colXs: number[];
   colWidths: number[];
   hfStart?: number;
-  /** Footnote content bound to this page, emitted above bodyBottom at the end. */
-  footnotes: { items: PageItem[]; height: number }[];
-  footnoteH: number;
+  /** Footnote content bound to each column, emitted above bodyBottom at the end. */
+  footnotes: { items: PageItem[]; height: number; column: number }[];
+  footnoteH: number[];
 }
 
 /** Layout state captured at a section boundary for the two-pass column
@@ -82,11 +88,12 @@ interface LayoutSnapshot {
   page: InternalPage;
   itemsLen: number;
   bandTop: number;
+  bannerTop: number | undefined;
   colXs: number[];
   colWidths: number[];
   pageSp: SectionProps;
-  footnotes: { items: PageItem[]; height: number }[];
-  footnoteH: number;
+  footnotes: { items: PageItem[]; height: number; column: number }[];
+  footnoteH: number[];
   bodyTop: number;
   bodyBottom: number;
   hfStart: number | undefined;
@@ -97,6 +104,8 @@ interface LayoutSnapshot {
   lastParaSpacingAfter: number;
   sectionFirstPagePhys: number;
   suppressNextSpaceBefore: boolean;
+  docGridDropBefore: boolean;
+  bannerSlotUsed: number;
   counters: Map<number, number[]>;
   bookmarkPages: Map<string, string>;
   placedFootnotes: Set<number>;
@@ -124,6 +133,10 @@ const NOTE_SEP_H = 14;
  * (doerfp p3 fit a 4-line paragraph Word split 2/2). Only body-fill math uses
  * this; footnotes stay bottom-anchored via NOTE_SEP_H. */
 const NOTE_SEP_RESERVE = 40;
+/** Multi-column notes reserve only their own column. IEEE's Word PDF places
+ * the separator at 573.75pt and the final body glyph at 559.58pt; 26px puts
+ * the web line-fit boundary at 558.45pt while keeping the note itself fixed. */
+const MULTI_COL_NOTE_SEP_RESERVE = 26;
 /** Word's separator rule is a short line, 2in max. */
 const NOTE_SEP_LEN = 192;
 /** Bounded overhang (px, ~2.25pt) a table row's trailing leading + bottom rule
@@ -162,6 +175,10 @@ class Engine {
    * paragraph closing a section must not swallow the next section heading's
    * spacing-before). */
   private lastParaWasEmpty = false;
+  /** A legacy section-closing paragraph whose only line ends in a page break
+   * leaves its paragraph-mark line and spacing-after on the fresh page when
+   * the following section is continuous (NCCIH p4). */
+  private trailingSectionBreakMarkGap = 0;
   /** Bookmark name -> formatted display page number (PAGEREF rewrite). */
   private bookmarkPages = new Map<string, string>();
   /** List counters per numId. */
@@ -197,6 +214,10 @@ class Engine {
    * and the trailing vSpace owed below the band before body content resumes. */
   private lastBannerKey: string | undefined = undefined;
   private lastBannerVSpace = 0;
+  private lastBannerSpacingAfter = 0;
+  /** Vertical flow already consumed in the current later-column pre-banner
+   * slot. It reduces the below-banner capacity by the same amount. */
+  private bannerSlotUsed = 0;
 
   constructor(
     private doc: DocxDocument,
@@ -207,7 +228,8 @@ class Engine {
     this.assignNoteNumbers();
     const sections = this.doc.sections;
     let prevSp: SectionProps | null = null;
-    for (const section of sections) {
+    for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+      const section = sections[sectionIndex];
       const sp = section.props;
       // A continuous section shares the page: restart the column band at the
       // current cursor. (Requires matching page geometry, and the previous
@@ -242,7 +264,35 @@ class Engine {
       // spacing-after (parity2-sections: Heading1 before=12pt after a
       // Normal after=8pt paragraph starts 4pt below the margin on section
       // pages, but the full 12pt at the document start).
-      const carryAfter = this.lastParaWasEmpty ? 0 : this.lastParaSpacingAfter;
+      const previousBlocks = sections[sectionIndex - 1]?.blocks;
+      const closer = previousBlocks?.[previousBlocks.length - 1];
+      const emptyCloserAfter =
+        closer?.type === "paragraph" &&
+        closer.sectionBreak !== undefined &&
+        !paragraphHasContent(closer)
+          ? (this.doc.effectiveParaProps(closer).spacingAfter ?? 0)
+          : undefined;
+      const opener = section.blocks[0]?.type === "paragraph" ? section.blocks[0] : undefined;
+      const trailingSectionBreakMarkGap =
+        prevSp !== null &&
+        sp.type === "continuous" &&
+        this.doc.compatibilityMode < 15
+          ? this.trailingSectionBreakMarkGap
+          : 0;
+      this.trailingSectionBreakMarkGap = 0;
+      const keepEmptyAfter =
+        prevSp !== null &&
+        emptyCloserAfter !== undefined &&
+        this.doc.compatibilityMode < 15 &&
+        opener !== undefined &&
+        leadingBreakOf(opener)?.type === "page";
+      // A legacy leading break keeps the empty section closer's after in the
+      // collapse chain (NCCIH: 24px before - 8px carried after = 16px).
+      const carryAfter = keepEmptyAfter
+        ? (emptyCloserAfter ?? 0)
+        : this.lastParaWasEmpty
+          ? 0
+          : this.lastParaSpacingAfter;
       // A new section's first paragraph governs its own spacing-before through
       // the cross-section carry-remainder rule (max(before, carriedAfter) -
       // carriedAfter), NOT the page-break drop. When the previous section ended
@@ -255,10 +305,15 @@ class Engine {
       // carry-remainder rule applies (sec2's Heading2 before=10pt still nets 0
       // because its carried after is also 10pt, matching the old blanket drop).
       if (prevSp !== null) this.suppressNextSpaceBefore = false;
-      if (canContinue) this.newBand();
-      else this.newPage(true);
+      if (canContinue) {
+        // This leading break will start a page. Create it before restoring the
+        // carried after so placeParagraph does not clear the carry itself.
+        if (keepEmptyAfter) this.newPage(false);
+        else this.newBand();
+      } else this.newPage(true);
+      if (trailingSectionBreakMarkGap > 0) this.y += trailingSectionBreakMarkGap;
       if (prevSp !== null) this.lastParaSpacingAfter = carryAfter;
-      this.layoutSection(section, sections[sections.indexOf(section) + 1]);
+      this.layoutSection(section, sections[sectionIndex + 1]);
       this.prevBandBalanced = this.balanceBottom !== undefined;
       if (this.balanceBottom !== undefined) {
         // Resume below the balanced band, reset to the first column so the next
@@ -362,7 +417,7 @@ class Engine {
       colXs,
       colWidths,
       footnotes: [],
-      footnoteH: 0,
+      footnoteH: colXs.map(() => 0),
     };
 
     // Header/footer variant selection.
@@ -411,6 +466,7 @@ class Engine {
     this.lastRealPage = page;
     this.col = 0;
     this.y = page.bodyTop;
+    this.bannerSlotUsed = 0;
     this.lastParaSpacingAfter = 0;
     // Balancing pass 1: this becomes the (currently) final page - start
     // measuring its columns afresh. Pass 2: arm the balance target when the
@@ -440,7 +496,9 @@ class Engine {
     page.colXs = colXs;
     page.colWidths = colWidths;
     page.bandTop = this.y;
+    page.bannerTop = undefined;
     this.col = 0;
+    this.bannerSlotUsed = 0;
     this.lastParaSpacingAfter = 0;
   }
 
@@ -556,11 +614,12 @@ class Engine {
       page: p,
       itemsLen: p.items.length,
       bandTop: p.bandTop,
+      bannerTop: p.bannerTop,
       colXs: [...p.colXs],
       colWidths: [...p.colWidths],
       pageSp: p.sp,
       footnotes: [...p.footnotes],
-      footnoteH: p.footnoteH,
+      footnoteH: [...p.footnoteH],
       bodyTop: p.bodyTop,
       bodyBottom: p.bodyBottom,
       hfStart: p.hfStart,
@@ -571,6 +630,8 @@ class Engine {
       lastParaSpacingAfter: this.lastParaSpacingAfter,
       sectionFirstPagePhys: this.sectionFirstPagePhys,
       suppressNextSpaceBefore: this.suppressNextSpaceBefore,
+      docGridDropBefore: this.docGridDropBefore,
+      bannerSlotUsed: this.bannerSlotUsed,
       counters: new Map(Array.from(this.counters, ([k, v]) => [k, [...v]])),
       bookmarkPages: new Map(this.bookmarkPages),
       placedFootnotes: new Set(this.placedFootnotes),
@@ -587,11 +648,12 @@ class Engine {
     const p = s.page;
     p.items.length = s.itemsLen;
     p.bandTop = s.bandTop;
+    p.bannerTop = s.bannerTop;
     p.colXs = s.colXs;
     p.colWidths = s.colWidths;
     p.sp = s.pageSp;
-    p.footnotes = s.footnotes;
-    p.footnoteH = s.footnoteH;
+    p.footnotes = [...s.footnotes];
+    p.footnoteH = [...s.footnoteH];
     p.bodyTop = s.bodyTop;
     p.bodyBottom = s.bodyBottom;
     p.hfStart = s.hfStart;
@@ -603,6 +665,8 @@ class Engine {
     this.lastParaSpacingAfter = s.lastParaSpacingAfter;
     this.sectionFirstPagePhys = s.sectionFirstPagePhys;
     this.suppressNextSpaceBefore = s.suppressNextSpaceBefore;
+    this.docGridDropBefore = s.docGridDropBefore;
+    this.bannerSlotUsed = s.bannerSlotUsed;
     this.counters = s.counters;
     this.bookmarkPages = s.bookmarkPages;
     this.placedFootnotes = s.placedFootnotes;
@@ -617,10 +681,42 @@ class Engine {
     if (this.balMeasuring) this.balColEnds[this.col] = this.y;
     if (this.col + 1 < this.cur.colXs.length) {
       this.col++;
-      this.y = this.cur.bandTop;
+      this.y = this.columnStartY(this.col);
+      this.bannerSlotUsed = 0;
       this.lastParaSpacingAfter = 0;
     } else {
       this.newPage(false);
+    }
+  }
+
+  /** A top banner can leave usable body space above its first frame. Word lets
+   * later columns consume complete text lines there; the first column still
+   * begins below the banner and its final paragraph spacing. */
+  private columnStartY(column: number): number {
+    const top = this.cur.bannerTop;
+    return column > 0 && top !== undefined && top > this.cur.bodyTop + 0.01
+      ? this.cur.bodyTop
+      : this.cur.bandTop;
+  }
+
+  /** Keep a whole line in the pre-banner slot or jump it below the banner. */
+  private bannerLineY(y: number, fitHeight: number, column = this.col): number {
+    const top = this.cur.bannerTop;
+    if (column === 0 || top === undefined || y >= this.cur.bandTop - 0.01) return y;
+    return y < top - 0.01 && y + fitHeight <= top + 0.01 ? y : this.cur.bandTop;
+  }
+
+  private consumeBannerSlot(y: number): void {
+    if (this.col > 0 && this.cur.bannerTop !== undefined && y < this.cur.bandTop - 0.01) {
+      this.bannerSlotUsed = Math.max(this.bannerSlotUsed, y - this.cur.bodyTop);
+    }
+  }
+
+  /** Non-line blocks do not use the pre-banner text slot. */
+  private clearBannerSlot(): void {
+    if (this.col > 0 && this.cur.bannerTop !== undefined && this.y < this.cur.bandTop - 0.01) {
+      this.consumeBannerSlot(this.y);
+      this.y = this.cur.bandTop;
     }
   }
 
@@ -631,12 +727,13 @@ class Engine {
     return this.cur.colWidths[this.col];
   }
   private get bodyBottom(): number {
+    const bannerReserve = this.y >= this.cur.bandTop - 0.01 ? this.bannerSlotUsed : 0;
     // Balanced band: non-final columns stop at the balance target so the
     // columns even out; the final column falls back to the true bottom.
     if (this.balanceBottom !== undefined && this.col + 1 < this.cur.colXs.length) {
-      return this.balanceBottom;
+      return this.balanceBottom - bannerReserve;
     }
-    return this.cur.bodyBottom - this.footnoteReserve(this.cur);
+    return this.cur.bodyBottom - this.footnoteReserve(this.cur, this.col) - bannerReserve;
   }
 
   /** Word balances the columns of a multi-column section that is followed by
@@ -755,11 +852,16 @@ class Engine {
     return formatNoteMark(n, this.sp.endnoteNumFmt ?? "lowerRoman");
   }
 
-  /** Bottom-of-body space held by this page's footnotes (separator included).
+  /** Bottom-of-body space held by this column's footnotes (separator included).
    * Capped so a pathological footnote can't push bodyBottom above bodyTop. */
-  private footnoteReserve(page: InternalPage): number {
-    if (page.footnotes.length === 0) return 0;
-    const full = NOTE_SEP_RESERVE + page.footnoteH;
+  private noteSeparatorReserve(page: InternalPage): number {
+    return page.colXs.length > 1 ? MULTI_COL_NOTE_SEP_RESERVE : NOTE_SEP_RESERVE;
+  }
+
+  private footnoteReserve(page: InternalPage, column: number): number {
+    const height = page.footnoteH[column] ?? 0;
+    if (height === 0) return 0;
+    const full = this.noteSeparatorReserve(page) + height;
     return Math.min(full, (page.bodyBottom - page.bodyTop) * 0.9);
   }
 
@@ -789,7 +891,9 @@ class Engine {
       if (!this.doc.footnotes.has(span.noteId)) continue;
       h += this.measureFootnote(span.noteId).height;
     }
-    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_RESERVE;
+    if (h > 0 && (this.cur.footnoteH[this.col] ?? 0) === 0) {
+      h += this.noteSeparatorReserve(this.cur);
+    }
     return h;
   }
 
@@ -808,7 +912,9 @@ class Engine {
         h += this.measureFootnote(it.noteId).height;
       }
     }
-    if (h > 0 && this.cur.footnotes.length === 0) h += NOTE_SEP_RESERVE;
+    if (h > 0 && (this.cur.footnoteH[this.col] ?? 0) === 0) {
+      h += this.noteSeparatorReserve(this.cur);
+    }
     return h;
   }
 
@@ -821,31 +927,36 @@ class Engine {
     if (!target) return;
     this.placedFootnotes.add(id);
     const laid = this.measureFootnote(id);
-    target.footnotes.push(laid);
-    target.footnoteH += laid.height;
+    const column = Math.min(this.col, target.colXs.length - 1);
+    target.footnotes.push({ ...laid, column });
+    target.footnoteH[column] = (target.footnoteH[column] ?? 0) + laid.height;
   }
 
-  /** Stack each page's footnotes upward from bodyBottom, under a short rule. */
+  /** Stack each column's footnotes upward from bodyBottom, under a short rule. */
   private emitFootnoteAreas(): void {
     for (const page of this.pages) {
       if (page.footnotes.length === 0) continue;
-      const x0 = page.colXs[0];
-      let y = page.bodyBottom - page.footnoteH - NOTE_SEP_H;
-      page.items.push({
-        kind: "edge",
-        x1: x0,
-        y1: y + NOTE_SEP_H * 0.6,
-        x2: x0 + Math.min(NOTE_SEP_LEN, page.colWidths[0]),
-        y2: y + NOTE_SEP_H * 0.6,
-        border: { style: "single", width: 0.75, color: "#000000", space: 0 },
-      });
-      y += NOTE_SEP_H;
-      for (const note of page.footnotes) {
-        for (const it of note.items) {
-          offsetItem(it, x0, y);
-          page.items.push(it);
+      for (let column = 0; column < page.colXs.length; column++) {
+        const notes = page.footnotes.filter((note) => note.column === column);
+        if (notes.length === 0) continue;
+        const x0 = page.colXs[column];
+        let y = page.bodyBottom - (page.footnoteH[column] ?? 0) - NOTE_SEP_H;
+        page.items.push({
+          kind: "edge",
+          x1: x0,
+          y1: y + NOTE_SEP_H * 0.6,
+          x2: x0 + Math.min(NOTE_SEP_LEN, page.colWidths[column]),
+          y2: y + NOTE_SEP_H * 0.6,
+          border: { style: "single", width: 0.75, color: "#000000", space: 0 },
+        });
+        y += NOTE_SEP_H;
+        for (const note of notes) {
+          for (const it of note.items) {
+            offsetItem(it, x0, y);
+            page.items.push(it);
+          }
+          y += note.height;
         }
-        y += note.height;
       }
     }
   }
@@ -879,6 +990,7 @@ class Engine {
   private layoutBlocks(blocks: Block[]): void {
     this.lastBannerKey = undefined;
     this.lastBannerVSpace = 0;
+    this.lastBannerSpacingAfter = 0;
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (block.type === "paragraph") {
@@ -1163,28 +1275,39 @@ class Engine {
    * width/anchor — i.e. one logical Word frame split across paragraphs) do not
    * re-insert the frame's vSpace gap between their lines; a signature change or
    * the first body paragraph pays the trailing/leading vSpace once. */
-  private placeBannerFrame(para: Paragraph, fr: ResolvedFrame): void {
+  private placeBannerFrame(para: Paragraph, fr: ResolvedFrame, spacingAfter: number): void {
     const contentW = Math.max(8, fr.w ?? 0);
     const ox = this.frameOriginX(fr, contentW);
     const vSpace = fr.vSpace ?? 0;
     const key = `${Math.round(contentW)}|${fr.hAnchor}|${fr.xAlign ?? ""}`;
     const leadingGap = key !== this.lastBannerKey ? vSpace : 0;
     const oy = this.y + leadingGap + Math.max(0, fr.y);
+    // Only the first banner at the top of a column band creates a reusable
+    // pre-frame slot for later columns. A full-width frame encountered farther
+    // down the band keeps the existing ordinary banner behavior.
+    if (this.cur.bannerTop === undefined && this.cur.bandTop <= this.cur.bodyTop + 0.01) {
+      this.cur.bannerTop = oy;
+    }
     const laid = this.layoutFrame([para], contentW, this.fieldCtx(), { x: ox, y: oy });
     for (const it of laid.items) {
       offsetItem(it, ox, oy);
       this.cur.items.push(it);
     }
+    // layoutFrame includes the paragraph's trailing after-spacing in its
+    // reported height. A banner keeps that spacing outside the frame so only
+    // the final paragraph's value separates the completed band from body flow.
+    const contentHeight = laid.height - spacingAfter;
     const height =
       fr.hRule === "exact" && fr.h !== undefined
         ? fr.h
         : fr.hRule === "atLeast" && fr.h !== undefined
-          ? Math.max(fr.h, laid.height)
-          : laid.height;
+          ? Math.max(fr.h, contentHeight)
+          : contentHeight;
     this.y = oy + height;
     this.cur.bandTop = this.y;
     this.lastBannerKey = key;
     this.lastBannerVSpace = vSpace;
+    this.lastBannerSpacingAfter = spacingAfter;
   }
 
   /** Close an open banner band before body content resumes: pay the band's
@@ -1193,8 +1316,14 @@ class Engine {
     if (this.lastBannerKey === undefined) return;
     this.y += this.lastBannerVSpace;
     this.cur.bandTop = this.y;
+    // Paragraph spacing separates the banner from the first body cursor; it
+    // does not reduce every column's usable height. A later column restarts at
+    // bandTop and therefore must not pay this spacing again.
+    this.y += this.lastBannerSpacingAfter;
+    this.lastParaSpacingAfter = this.lastBannerSpacingAfter;
     this.lastBannerKey = undefined;
     this.lastBannerVSpace = 0;
+    this.lastBannerSpacingAfter = 0;
   }
 
   private placeParagraph(para: Paragraph, prev?: Block, next?: Block, siblings?: Block[], index?: number): void {
@@ -1214,10 +1343,11 @@ class Engine {
         // banner (IEEE title/authors): it spans ALL columns at the section top
         // and the column band begins below it. Otherwise it is an ordinary float.
         if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) {
-          this.placeBannerFrame(para, fr);
+          this.placeBannerFrame(para, fr, props.spacingAfter ?? 0);
           return;
         }
         this.flushBannerBand();
+        this.clearBannerSlot();
         this.placeFrameParagraph(para, fr);
         return;
       }
@@ -1247,10 +1377,17 @@ class Engine {
     // consumed here (wild-gatech: the approval/dedication/List-of-Tables
     // headings each open with a leading break).
     const leadBreak = leadingBreakOf(para);
-    if ((props.pageBreakBefore || leadBreak === "page") && !this.pageIsEmptyAtCursor()) {
+    const previousSpacingAfter = this.lastParaSpacingAfter;
+    if ((props.pageBreakBefore || leadBreak?.type === "page") && !this.pageIsEmptyAtCursor()) {
       this.newPage(false);
+      // Legacy Word keeps the preceding paragraph's after-spacing in the
+      // collapse chain across a leading inline page break. The opener gets
+      // only the remainder of its before-spacing over that carried after.
+      if (leadBreak?.type === "page" && !props.pageBreakBefore && this.doc.compatibilityMode < 15) {
+        this.lastParaSpacingAfter = previousSpacingAfter;
+      }
       breakBeforeForced = true;
-    } else if (leadBreak === "column" && !this.pageIsEmptyAtCursor()) {
+    } else if (leadBreak?.type === "column" && !this.pageIsEmptyAtCursor()) {
       this.nextColumn();
       breakBeforeForced = true;
     }
@@ -1263,6 +1400,7 @@ class Engine {
     // bottom; text resumes at exactly the letter's advance). The cursor
     // does not advance; the next paragraph flows at the same y.
     if (props.dropCap) {
+      this.clearBannerSlot();
       const dropBroken = breakParagraph(this.doc, this.measurer, para, this.colWidth, this.fieldCtx());
       const dropLine = dropBroken.lines[0];
       if (dropLine) {
@@ -1368,9 +1506,19 @@ class Engine {
     // type="page"` (the break is the paragraph's first content, text follows)
     // carries the WHOLE paragraph — including its before — to the new page in
     // mode <= 14 (nccih WORA: Heading1 before=18pt lands 18pt below the margin).
-    const isLeadingPageBreak = leadBreak === "page" && !props.pageBreakBefore;
+    const isLeadingPageBreak = leadBreak?.type === "page" && !props.pageBreakBefore;
     if (breakBeforeForced && !(isLeadingPageBreak && keepSpBeforeAtPageTop)) dropSpaceBefore = true;
     if (this.docGridDropBefore) {
+      // An explicit w:snapToGrid="0" opts the opening paragraph out of half
+      // of the section's four-row top reserve. Measured controls: the inherited
+      // grid staging-eastasian title uses all four rows, while wild2-math's
+      // opted-out title starts two rows higher. Keep bodyTop aligned with the
+      // actual cursor so page-top fit checks use the reduced reserve too.
+      if (props.snapToGrid === false && this.sp.docGridLinePitch) {
+        const reduction = 2 * this.sp.docGridLinePitch;
+        this.cur.bodyTop -= reduction;
+        this.y -= reduction;
+      }
       this.docGridDropBefore = false;
       dropSpaceBefore = true;
     }
@@ -1473,6 +1621,20 @@ class Engine {
     spacingAfter += this.borderPadImpl(props.borders?.bottom);
 
     let lines = broken.lines;
+    // A structurally bare paragraph after a table supplies the table's final
+    // mark line. A following break-only paragraph applies its hard break from
+    // there without first soft-overflowing another empty line. An authored
+    // empty paragraph with pPr is a real spacer and does not qualify: its own
+    // mark can leave the break line to overflow onto an intentional blank page.
+    const postTablePageBreak =
+      lines.length === 1 &&
+      lines[0].forcedBreakAfter === "page" &&
+      lines[0].width === 0 &&
+      prev?.type === "paragraph" &&
+      isEmptyParagraph(prev) &&
+      child(prev.src, "pPr") === undefined &&
+      index !== undefined &&
+      siblings?.[index - 2]?.type === "table";
 
     // HTML-style automatic paragraph spacing (w:beforeAutospacing /
     // afterAutospacing, produced by web/HTML-pasted content): Word discards
@@ -1496,6 +1658,45 @@ class Engine {
       if (props.afterAutospacing) spacingAfter = this.borderPadImpl(props.borders?.bottom) + autoSpace;
     }
 
+    // Word 2010's default document-grid pagination keeps a leading manual
+    // page-break line on the old page when it belongs to a keepNext chain.
+    // On an otherwise empty page it places that chain against the bottom: the
+    // visible paragraph, its collapsed gap, then the invisible break line.
+    // nccih's cover title is 285.85pt lower in Word with both keepNext values
+    // enabled; disabling either one, removing docGrid, or using compat 15 puts
+    // it back at margin + spacingBefore.
+    const nextPara = next?.type === "paragraph" ? next : undefined;
+    const nextProps = nextPara ? this.doc.effectiveParaProps(nextPara) : undefined;
+    const nextLeadBreak = nextPara ? leadingBreakOf(nextPara) : undefined;
+    let legacyBreakChain = false;
+    if (
+      lines.length > 0 &&
+      this.pageIsEmptyAtCursor() &&
+      this.doc.compatibilityMode < 15 &&
+      this.sp.docGridType === "default" &&
+      props.keepNext &&
+      nextPara &&
+      nextProps?.keepNext &&
+      nextLeadBreak?.type === "page"
+    ) {
+      const breakProps = this.doc.effectiveRunProps(nextPara, nextLeadBreak.run.props);
+      const breakFont = fontOf(breakProps, this.doc.styles.defaultRPr.font ?? "Calibri");
+      let breakHeight = this.measurer.metrics(breakFont).lineHeight;
+      const lineSpacing = nextProps.lineSpacing;
+      if (lineSpacing?.rule === "auto") breakHeight *= lineSpacing.value;
+      else if (lineSpacing?.rule === "exact") breakHeight = lineSpacing.value;
+      else if (lineSpacing?.rule === "atLeast") breakHeight = Math.max(breakHeight, lineSpacing.value);
+
+      const beforeAdvance = Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
+      const linesHeight = lines.reduce((height, line) => height + line.height, 0);
+      const gap = Math.max(spacingAfter, nextProps.spacingBefore ?? 0);
+      const bottomAlignedY = this.bodyBottom - beforeAdvance - linesHeight - gap - breakHeight;
+      if (bottomAlignedY > this.y) {
+        this.y = bottomAlignedY;
+        legacyBreakChain = true;
+      }
+    }
+
     const totalHeight = spacingBefore + lines.reduce((a, l) => a + l.height, 0);
     const bodyHeight = this.bodyBottom - this.cur.bodyTop;
 
@@ -1512,6 +1713,7 @@ class Engine {
 
     // keepLines: move the whole paragraph if it would split but fits on a page.
     if (
+      !postTablePageBreak &&
       props.keepLines &&
       this.y + totalHeight > this.bodyBottom &&
       totalHeight <= bodyHeight &&
@@ -1535,7 +1737,7 @@ class Engine {
     // Each individual hop may fit while the accumulated chain does not, so the
     // whole unit is measured and moved as one (wild-athabasca: a 7-paragraph
     // Heading2/3 chain leaves ~12 blank lines at a page bottom in Word).
-    if (props.keepNext && next !== undefined && !this.pageIsEmptyAtCursor()) {
+    if (!postTablePageBreak && !legacyBreakChain && props.keepNext && next !== undefined && !this.pageIsEmptyAtCursor()) {
       const effBefore = Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
       // The chain walk below is a MEASUREMENT, not placement: numberingLabel()
       // advances the shared list counter as a side effect, so snapshot the
@@ -1575,7 +1777,9 @@ class Engine {
         const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
         if (np.keepNext) {
           // A keepNext member must itself sit fully with its own successor.
-          tail += gap + nb.lines.reduce((a, l) => a + l.height, 0);
+          // A drop cap paints as a float without advancing the body cursor, so
+          // its glyph height is not part of the chain's required vertical room.
+          tail += gap + (np.dropCap ? 0 : nb.lines.reduce((a, l) => a + l.height, 0));
           prevAfter = np.spacingAfter ?? 0;
           idx++;
           continue;
@@ -1626,7 +1830,7 @@ class Engine {
     // "keep" applies only to explicit page breaks, handled above).
     const atPageOrColumnTop =
       !isLeadingPageBreak &&
-      this.y <= this.cur.bandTop + 0.01 &&
+      this.y <= this.columnStartY(this.col) + 0.01 &&
       (this.col > 0 ||
         (this.cur.softTop && this.cur.bandTop <= this.cur.bodyTop + 0.01));
     if (atPageOrColumnTop) spacingBefore = borderPadTop;
@@ -1642,14 +1846,47 @@ class Engine {
       let simY = this.y;
       let segStart = 0;
       let bottom = this.bodyBottom;
+      let simCol = this.col;
+      let simOnCurrentPage = true;
+      let simBannerUsed = this.bannerSlotUsed;
+      const updateBottom = () => {
+        bottom =
+          simOnCurrentPage && this.balanceBottom !== undefined && simCol + 1 < this.cur.colXs.length
+            ? this.balanceBottom - simBannerUsed
+            : this.cur.bodyBottom -
+              (simOnCurrentPage ? this.footnoteReserve(this.cur, simCol) + simBannerUsed : 0);
+      };
+      const nextSimColumn = () => {
+        simBannerUsed = 0;
+        if (simCol + 1 < this.cur.colXs.length) {
+          simCol++;
+          simY = simOnCurrentPage ? this.columnStartY(simCol) : this.cur.bodyTop;
+        } else {
+          simCol = 0;
+          simOnCurrentPage = false;
+          simY = this.cur.bodyTop;
+        }
+        updateBottom();
+      };
       // Whether the current segment starts on an already-partial page. Must be
       // simulated (not read from the live cursor) — after a planned break the
       // next segment starts a fresh page by construction.
       let onPartialPage = !this.pageIsEmptyAtCursor();
       for (let li = 0; li < lines.length; li++) {
         simY += lines[li].floatYOffset ?? 0;
-        const simBalancing = this.balanceBottom !== undefined && this.col + 1 < this.cur.colXs.length;
-        const overflowsHere = simBalancing ? simY > bottom + 0.01 : simY + lines[li].fitHeight > bottom + 0.01;
+        if (simOnCurrentPage) {
+          const targetY = this.bannerLineY(simY, lines[li].fitHeight, simCol);
+          if (targetY > simY + 0.01) {
+            simBannerUsed = Math.max(simBannerUsed, simY - this.cur.bodyTop);
+            simY = targetY;
+            updateBottom();
+          }
+        }
+        const simBalancing =
+          simOnCurrentPage && this.balanceBottom !== undefined && simCol + 1 < this.cur.colXs.length;
+        const overflowsHere =
+          !postTablePageBreak &&
+          (simBalancing ? simY > bottom + 0.01 : simY + lines[li].fitHeight > bottom + 0.01);
         // The paragraph's VERY FIRST line does not fit on the current partial
         // page: the whole paragraph moves to the next column/page. This is a
         // PHYSICAL fit, independent of widowControl — the emit loop moves line 0
@@ -1662,8 +1899,7 @@ class Engine {
         if (overflowsHere && li === segStart && segStart === 0 && onPartialPage && !simBalancing) {
           breaks.add(0);
           segStart = 0;
-          simY = this.cur.bandTop;
-          bottom = this.cur.bandTop + bodyHeight;
+          nextSimColumn();
           onPartialPage = false;
           li = -1;
           continue;
@@ -1695,8 +1931,7 @@ class Engine {
           }
           breaks.add(breakAt);
           segStart = breakAt;
-          simY = this.cur.bandTop;
-          bottom = this.cur.bandTop + bodyHeight;
+          nextSimColumn();
           onPartialPage = false;
           // Re-simulate from the break line.
           li = breakAt - 1;
@@ -1739,9 +1974,21 @@ class Engine {
       fragPage = this.cur;
       fragCol = this.col;
     };
+    const clearBannerForLine = (line: LineBox, lineIndex: number, floatOffset: number): number => {
+      const lineY = this.y + floatOffset;
+      const targetY = this.bannerLineY(lineY, line.fitHeight);
+      if (targetY <= lineY + 0.01) return floatOffset;
+      if (lineIndex > fragStartLine) closeFragment(lineIndex, false);
+      this.consumeBannerSlot(lineY);
+      this.y = targetY;
+      startFragment(lineIndex);
+      return 0; // the jump replaces, rather than compounds with, floatYOffset
+    };
 
     for (let li = 0; li < lines.length; li++) {
       const line = lines[li];
+      let floatOffset = line.floatYOffset ?? 0;
+      floatOffset = clearBannerForLine(line, li, floatOffset);
       // On the balanced final band of a multi-page column section the break
       // plan (computed up-front against FULL columns) is stale: the band caps
       // its non-final columns at the balance target, so honouring a pre-planned
@@ -1764,6 +2011,7 @@ class Engine {
       // so cap it at the target by the line BOTTOM instead.
       const balBottomBased = balancing && this.colWidth < 40;
       const overflow =
+        !postTablePageBreak &&
         (balancing
           ? (balBottomBased ? this.y + line.fitHeight : this.y) > this.bodyBottom + 0.01
           : this.y + line.fitHeight > this.bodyBottom - pendingNotes + 0.01) && !this.pageIsEmptyAtCursor();
@@ -1784,8 +2032,11 @@ class Engine {
         if (li === 0) this.y += borderPadTop;
         startFragment(li);
       }
+      // A planned/live column transition can open the pre-banner slot after
+      // the first check above. Keep the line there only when it fits whole.
+      floatOffset = clearBannerForLine(line, li, floatOffset);
 
-      this.y += line.floatYOffset ?? 0;
+      this.y += floatOffset;
       this.emitLine(line, this.cur, this.colX, this.y);
       this.emitLineNumber(line, this.cur, this.colX, this.y);
       // Bookmark targets resolve to the page carrying the paragraph's first
@@ -1807,7 +2058,7 @@ class Engine {
         closeFragment(li + 1, li === lines.length - 1);
         if (line.forcedBreakAfter === "page") {
           this.newPage(false);
-          this.suppressNextSpaceBefore = true;
+          this.suppressNextSpaceBefore = li === lines.length - 1;
         } else this.nextColumn();
         startFragment(li + 1);
       }
@@ -1824,6 +2075,13 @@ class Engine {
     // blank next page (wild-multicolumn: an empty <w:br type="page"/> paragraph
     // between the section-2 table and the section-3 columns forced a blank page).
     const endedWithBreak = lines.length > 0 && lines[lines.length - 1].forcedBreakAfter !== undefined;
+    this.trailingSectionBreakMarkGap =
+      para.sectionBreak !== undefined &&
+      lines.length === 1 &&
+      lines[0].forcedBreakAfter === "page" &&
+      lines[0].width === 0
+        ? lines[0].height + spacingAfter
+        : 0;
     if (!endedWithBreak) this.y += spacingAfter;
     this.lastParaSpacingAfter = endedWithBreak ? 0 : spacingAfter;
     this.lastParaWasEmpty = !paragraphHasContent(para);
@@ -2227,7 +2485,7 @@ class Engine {
       colXs: [0],
       colWidths: [width],
       footnotes: [],
-      footnoteH: 0,
+      footnoteH: [0],
     };
 
     let framePrevAfter = 0;
@@ -2676,6 +2934,15 @@ class Engine {
         if (!nested) return [...tbl.grid];
         // fall through to the autofit branch to confine the nested table
       } else {
+        // An auto-width table may grow beyond its authored grid when a
+        // column's minimum content width is larger. In staging-tblextreme the
+        // first 100px column contains an indented list, so Word expands it
+        // while keeping the second 100px column at its grid width.
+        if (tbl.props.width === undefined && tbl.props.widthPct === undefined) {
+          const { minW } = this.columnMinPref(tbl, base.length);
+          const expanded = base.map((w, i) => Math.max(w, minW[i] ?? 0));
+          if (expanded.reduce((a, b) => a + b, 0) <= available) return expanded;
+        }
         return base;
       }
     }
@@ -2735,10 +3002,26 @@ class Engine {
           let cellPref = 0;
           for (const block of cell.blocks) {
             if (block.type === "paragraph") {
+              const props = this.doc.effectiveParaProps(block);
+              const inset = Math.max(0, (props.indentLeft ?? 0) + (props.indentRight ?? 0));
               const wide = breakParagraph(this.doc, this.measurer, block, 1e6, this.fieldCtx());
-              for (const ln of wide.lines) cellPref = Math.max(cellPref, ln.width);
-              const narrow = breakParagraph(this.doc, this.measurer, block, 1, this.fieldCtx());
-              for (const ln of narrow.lines) cellMin = Math.max(cellMin, ln.width);
+              for (const line of wide.lines) {
+                cellPref = Math.max(cellPref, inset + line.width);
+                let atomWidth = 0;
+                for (const span of line.spans) {
+                  if (span.isSpace || span.text === "\t") {
+                    cellMin = Math.max(cellMin, inset + atomWidth);
+                    atomWidth = 0;
+                    continue;
+                  }
+                  atomWidth += span.width;
+                  if (span.breakAfter) {
+                    cellMin = Math.max(cellMin, inset + atomWidth);
+                    atomWidth = 0;
+                  }
+                }
+                cellMin = Math.max(cellMin, inset + atomWidth);
+              }
             } else {
               const t = this.measureTableWidths(block);
               cellPref = Math.max(cellPref, t.pref);
@@ -2804,6 +3087,23 @@ class Engine {
     return Math.max(contentHeight, trHeight + topPad + bottomPad + borderPad);
   }
 
+  /** Widths of the horizontal rules above and below a row. A rule can be
+   * defined table-wide (tblBorders insideH/top/bottom) OR only per cell
+   * (tcBorders), so use the thickest declaration at each boundary. */
+  private rowBorderWidths(tbl: Table, ri: number): { top: number; bottom: number } {
+    const tb = tbl.props.borders;
+    const bw = (b?: Border) => (b && b.style !== "none" ? b.width : 0);
+    const rows = tbl.rows;
+    const cellTop = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.top)));
+    const cellBot = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.bottom)));
+    const boundary = (k: number): number => {
+      if (k === 0) return Math.max(bw(tb?.top), cellTop(0));
+      if (k === rows.length) return Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
+      return Math.max(bw(tb?.insideH), cellBot(k - 1), cellTop(k));
+    };
+    return { top: boundary(ri), bottom: boundary(ri + 1) };
+  }
+
   /** Vertical space the row's horizontal rules occupy: half the boundary
    * width on each side (interior boundaries use insideH). Word's row
    * advance includes it for content-sized rows too, not just trHeight rows
@@ -2815,19 +3115,8 @@ class Engine {
    * no tblBorders, so the share must also see the adjacent cells' borders or
    * every row runs 0.5pt short and the 22-row grid drifts ~15px. */
   private rowBorderShare(tbl: Table, ri: number): number {
-    const tb = tbl.props.borders;
-    const bw = (b?: Border) => (b && b.style !== "none" ? b.width : 0);
-    const rows = tbl.rows;
-    const cellTop = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.top)));
-    const cellBot = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.bottom)));
-    // Effective horizontal rule at boundary k (0 = table top .. nRows = bottom):
-    // the thickest border declared for it, whether table-wide or per cell.
-    const boundary = (k: number): number => {
-      if (k === 0) return Math.max(bw(tb?.top), cellTop(0));
-      if (k === rows.length) return Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
-      return Math.max(bw(tb?.insideH), cellBot(k - 1), cellTop(k));
-    };
-    return (boundary(ri) + boundary(ri + 1)) / 2;
+    const { top, bottom } = this.rowBorderWidths(tbl, ri);
+    return (top + bottom) / 2;
   }
 
   private cellMarginsOf(tbl: Table): { top?: number; right?: number; bottom?: number; left?: number } {
@@ -2895,6 +3184,7 @@ class Engine {
   }
 
   private placeTable(tbl: Table): void {
+    this.clearBannerSlot();
     this.lastParaSpacingAfter = 0;
     this.lastParaWasEmpty = false;
     this.ensureTableBorders(tbl);
@@ -2916,6 +3206,11 @@ class Engine {
     let segTop = this.y;
     let segPage = this.cur;
 
+    // Row coordinates are horizontal-rule centerlines. Flow coordinates are
+    // the table's outer edges, so advance half the top rule before painting
+    // the first row. The matching bottom half is added after the final row.
+    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, 0).top / 2;
+
     // Lay out all rows up front so vertically-merged cells can be sized across
     // their spanned rows rather than inflating their starting row.
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
@@ -2933,8 +3228,11 @@ class Engine {
       const advance = () => {
         this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
         this.nextColumn();
+        this.clearBannerSlot();
         segTop = this.y;
         segPage = this.cur;
+        const firstRowIdx = !row.props.tblHeader && headerRows.length > 0 ? 0 : ri;
+        this.y += this.rowBorderWidths(tbl, firstRowIdx).top / 2;
         // Repeat header rows at the top of the continuation page.
         if (!row.props.tblHeader) {
           for (const hr of headerRows) {
@@ -2945,12 +3243,12 @@ class Engine {
           }
         }
       };
-      // Word default: a row that crosses the page boundary moves WHOLE to
-      // the next page when it fits on one; it only splits at the boundary
-      // when it cannot fit even on a fresh page (parity2-nestedtables:
-      // 56pt rows with 31pt remaining move whole; parity-rowsplit's
-      // multi-page row splits). w:cantSplit, exact-height, header, and
-      // vertically merged rows never split.
+      // Word splits an ordinary row at the page boundary when both fragments
+      // have usable content. splitLaidRow rejects one-line fragments, so
+      // short rows still move whole (parity2-nestedtables) while a row that
+      // has enough lines on both sides may split even when it would fit on a
+      // fresh page (staging-tblextreme). w:cantSplit, exact-height, header,
+      // and vertically merged rows never split.
       let guard = 0;
       // Word's page-fit test for a table row allows a small bounded overhang
       // past the body bottom before it moves/splits the row - the row's trailing
@@ -2961,16 +3259,15 @@ class Engine {
       // allowance is suppressed there. Bounded well under the ~one-line gap that
       // makes Word move a whole row (parity2-nestedtables moves a 56pt row with
       // 31pt left), so genuine page breaks are unaffected.
-      const noteReserve = this.rowNoteHeight(laid) + this.footnoteReserve(this.cur);
-      const overhang = noteReserve > 0 ? 0 : ROW_OVERHANG_TOL;
+      const noteReserve = this.rowNoteHeight(laid) + this.footnoteReserve(this.cur, this.col);
+      const overhang = noteReserve > 0 || row.props.cantSplit ? 0 : ROW_OVERHANG_TOL;
       while (this.y + rowHeight > this.bodyBottom - this.rowNoteHeight(laid) + overhang + 0.01 && guard++ < 50) {
-        const freshBody = this.cur.bodyBottom - this.cur.bodyTop;
         const canSplit =
-          rowHeight > freshBody &&
           !row.props.cantSplit &&
           row.props.heightRule !== "exact" &&
           !row.props.tblHeader &&
-          !row.cells.some((c) => c.props.vMerge);
+          !row.cells.some((c) => c.props.vMerge) &&
+          !row.cells.some((c) => c.props.textDirection === "btLr");
         const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y) : null;
         if (parts) {
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
@@ -2982,7 +3279,8 @@ class Engine {
         }
         // Nothing splittable: at the top of a page the row simply overflows
         // (old behavior); mid-page it moves whole and gets one more chance.
-        if (this.pageIsEmptyAtCursor()) break;
+        const topHalf = this.rowBorderWidths(tbl, ri).top / 2;
+        if (this.pageIsEmptyAtCursor() || this.y <= this.cur.bodyTop + topHalf + 0.01) break;
         advance();
       }
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
@@ -3002,6 +3300,7 @@ class Engine {
         });
       }
     }
+    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2;
     this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
   }
 
@@ -3055,6 +3354,7 @@ class Engine {
     this.col = 0;
     this.y = y;
     const frameTop = this.y;
+    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, 0).top / 2;
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths, fields));
     const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
     for (const [key, ph] of spanPaint) {
@@ -3082,6 +3382,7 @@ class Engine {
         });
       }
     }
+    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2;
     // Nested tables are resizable too (the cover-letter layout puts every
     // user table inside a layout cell).
     if (tbl.src) this.emitTableGrips(tbl, fake, x0 + (tbl.props.indent ?? 0), widths, frameTop, this.y);
@@ -3094,8 +3395,8 @@ class Engine {
 
   /**
    * Split a laid-out row at `avail`: line-granular partition of every cell's
-   * items. Returns null when nothing fits (or nothing overflows) so the
-   * caller falls back to moving/keeping the row whole.
+   * items. Returns null when nothing fits, nothing overflows, or the split
+   * would leave a one-line text fragment, so the caller moves the row whole.
    */
   private splitLaidRow(
     laid: { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[]; height: number },
@@ -3111,27 +3412,64 @@ class Engine {
       it.kind === "rect" || it.kind === "image" ? it.y :
       it.kind === "edge" ? Math.min(it.y1, it.y2) : 0;
 
-    let anyKept = false;
-    let anyRest = false;
+    const partitions = laid.cells.map((cell) => {
+      const contentBottom = cell.items.length > 0 ? Math.max(...cell.items.map(bottomOf)) : 0;
+      const trailing = Math.max(0, cell.height - contentBottom);
+      const cutoff = avail - trailing;
+      return {
+        cell,
+        trailing,
+        keep: cell.items.filter((it) => bottomOf(it) <= cutoff + 0.5),
+        rest: cell.items.filter((it) => bottomOf(it) > cutoff + 0.5),
+      };
+    });
+
+    // If the greedy fit would leave one text line in the continuation, move
+    // the last fitting line down with it. A five-line cell with room for four
+    // lines therefore splits 3/2 instead of moving the whole row; a three-line
+    // cell still cannot form two useful fragments and is rejected below.
+    const lineTops = (items: PageItem[]) =>
+      [...new Set(items.filter((it) => it.kind === "text").map((it) => it.lineTop))].sort((a, b) => a - b);
+    for (const part of partitions) {
+      const keptLines = lineTops(part.keep);
+      if (keptLines.length <= 2 || lineTops(part.rest).length !== 1) continue;
+      const moveTop = keptLines[keptLines.length - 1];
+      const moved = part.keep.filter((it) => topOf(it) >= moveTop - 0.01);
+      part.keep = part.keep.filter((it) => topOf(it) < moveTop - 0.01);
+      part.rest = [...moved, ...part.rest];
+    }
+
+    const anyKept = partitions.some(({ keep }) => keep.length > 0);
+    const anyRest = partitions.some(({ rest }) => rest.length > 0);
+    if (!anyKept || !anyRest) return null;
+
+    // Keep a two-line boundary when text in the same cell continues. This is
+    // why parity2-nestedtables moves its three-line rows whole instead of
+    // leaving one line on the next page.
+    if (
+      partitions.some(({ keep, rest }) => {
+        const keptLines = lineTops(keep).length;
+        const restLines = lineTops(rest).length;
+        return keptLines > 0 && restLines > 0 && (keptLines < 2 || restLines < 2);
+      })
+    ) {
+      return null;
+    }
+
     const topCells: typeof laid.cells = [];
     const restCells: typeof laid.cells = [];
     let topH = 0;
     let restH = 0;
-    for (const cell of laid.cells) {
-      const keep = cell.items.filter((it) => bottomOf(it) <= avail + 0.5);
-      const rest = cell.items.filter((it) => bottomOf(it) > avail + 0.5);
-      if (keep.length > 0 && cell.items.length > 0) anyKept = true;
-      if (rest.length > 0) anyRest = true;
+    for (const { cell, trailing, keep, rest } of partitions) {
       const keepTop = cell.items.length > 0 ? Math.min(...cell.items.map(topOf)) : 0;
       const shift = rest.length > 0 ? Math.min(...rest.map(topOf)) - keepTop : 0;
       for (const it of rest) offsetItem(it, 0, -shift);
       topCells.push({ ...cell, items: keep, height: Math.min(cell.height, avail) });
-      const cellRestH = rest.length > 0 ? Math.max(...rest.map(bottomOf)) + keepTop : 0;
+      const cellRestH = rest.length > 0 ? Math.max(...rest.map(bottomOf)) + keepTop + trailing : 0;
       restCells.push({ ...cell, items: rest, height: cellRestH });
       topH = Math.max(topH, keep.length > 0 ? Math.min(cell.height, avail) : 0);
       restH = Math.max(restH, cellRestH);
     }
-    if (!anyKept || !anyRest) return null;
     return {
       top: { cells: topCells, height: Math.min(avail, Math.max(topH, 12)) },
       rest: { cells: restCells, height: restH },
@@ -3217,13 +3555,14 @@ class Engine {
     rowIdx: number,
     widths: number[],
     fields?: FieldContext,
-  ): { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number }[]; height: number } {
+  ): { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number; rotated?: boolean }[]; height: number } {
     const defaults = this.cellMarginsOf(tbl);
-    const cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[] = [];
+    const cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; rotated?: boolean }[] =
+      new Array(row.cells.length);
     const totalW = sum(widths, 0, widths.length);
     const bidi = tbl.props.bidiVisual === true;
+    const geometry: { x: number; width: number; margins: typeof defaults }[] = [];
     let gridPos = 0;
-    let maxH = 0;
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
       const span = cell.props.gridSpan;
@@ -3232,11 +3571,22 @@ class Engine {
       // reverses (source col 1 lands at the right edge).
       const x = bidi ? totalW - sum(widths, 0, gridPos) - w : sum(widths, 0, gridPos);
       gridPos += span;
+      geometry.push({ x, width: w, margins: { ...defaults, ...cell.props.margins } });
+    }
+
+    // Measure ordinary cells first. A btLr cell lays out horizontally against
+    // the row's declared content height; an auto-height row uses the content
+    // height already established by its ordinary/nested cells.
+    let maxH = 0;
+    let measuredContentH = 0;
+    for (let ci = 0; ci < row.cells.length; ci++) {
+      const cell = row.cells[ci];
+      const { x, width: w, margins: m } = geometry[ci];
       if (cell.props.vMerge === "continue") {
-        cells.push({ items: [], height: 0, x, width: w, cellIdx: ci });
+        cells[ci] = { items: [], height: 0, x, width: w, cellIdx: ci };
         continue;
       }
-      const m = { ...defaults, ...cell.props.margins };
+      if (cell.props.textDirection === "btLr") continue;
       const innerWidth = Math.max(4, w - (m.left ?? 0) - (m.right ?? 0));
       const { items, height } = this.layoutFrame(
         cell.blocks,
@@ -3246,8 +3596,53 @@ class Engine {
         cell.props.verticalAlign === "bottom",
       );
       for (const it of items) offsetItem(it, (m.left ?? 0), (m.top ?? 0));
-      cells.push({ items, height: height + (m.top ?? 0) + (m.bottom ?? 0), x, width: w, cellIdx: ci });
-      maxH = Math.max(maxH, height + (m.top ?? 0) + (m.bottom ?? 0));
+      const cellHeight = height + (m.top ?? 0) + (m.bottom ?? 0);
+      cells[ci] = { items, height: cellHeight, x, width: w, cellIdx: ci };
+      measuredContentH = Math.max(measuredContentH, height);
+      maxH = Math.max(maxH, cellHeight);
+    }
+
+    for (let ci = 0; ci < row.cells.length; ci++) {
+      const cell = row.cells[ci];
+      if (cell.props.textDirection !== "btLr" || cell.props.vMerge === "continue") continue;
+      const { x, width: w, margins: m } = geometry[ci];
+      const frameWidth = Math.max(
+        4,
+        row.props.heightRule === "exact"
+          ? (row.props.height ?? measuredContentH)
+          : Math.max(row.props.heightRule === "auto" ? 0 : (row.props.height ?? 0), measuredContentH),
+      );
+      const { items, height: frameHeight } = this.layoutFrame(
+        cell.blocks,
+        frameWidth,
+        fields ?? this.fieldCtx(),
+      );
+      const innerCellWidth = Math.max(4, w - (m.left ?? 0) - (m.right ?? 0));
+      let crossOffset = 0;
+      if (cell.props.verticalAlign === "center") {
+        crossOffset = Math.max(0, (innerCellWidth - frameHeight) / 2);
+      } else if (cell.props.verticalAlign === "bottom") {
+        crossOffset = Math.max(0, innerCellWidth - frameHeight);
+      }
+
+      // Rotate the horizontal frame about its center. After -90deg its
+      // frame-width axis runs bottom-to-top and its line axis runs left-to-right.
+      const targetX = (m.left ?? 0) + crossOffset;
+      const targetY = m.top ?? 0;
+      const centerX = targetX + frameHeight / 2;
+      const centerY = targetY + frameWidth / 2;
+      const originX = centerX - frameWidth / 2;
+      const originY = centerY - frameHeight / 2;
+      for (const it of items) {
+        offsetItem(it, originX, originY);
+        if (it.kind === "text") {
+          const top = it.glyphTop ?? it.lineTop;
+          it.rotate = { deg: -90, ox: centerX - it.x, oy: centerY - top };
+        }
+      }
+      const cellHeight = frameWidth + (m.top ?? 0) + (m.bottom ?? 0);
+      cells[ci] = { items, height: cellHeight, x, width: w, cellIdx: ci, rotated: true };
+      maxH = Math.max(maxH, cellHeight);
     }
     return { cells, height: maxH };
   }
@@ -3327,7 +3722,7 @@ class Engine {
     tbl: Table,
     row: TableRow,
     rowIdx: number,
-    laid: { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number }[]; height: number },
+    laid: { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number; rotated?: boolean }[]; height: number },
     x0: number,
     widths: number[],
     rowHeight: number,
@@ -3370,10 +3765,20 @@ class Engine {
         page.items.push({ kind: "rect", x: cx, y, width: cellLay.width, height: cellH, fill });
       }
 
-      // Vertical alignment offset.
-      let dy = 0;
-      if (cell.props.verticalAlign === "center") dy = Math.max(0, (cellH - cellLay.height) / 2);
-      else if (cell.props.verticalAlign === "bottom") dy = Math.max(0, cellH - cellLay.height);
+      // Row height reserves half of each horizontal boundary rule. Place cell
+      // content inside those halves; previously it started on the top rule's
+      // centerline and left both shares below the content, making each table's
+      // paragraph-to-first-line boundary one border width too short.
+      const rowSpan = cell.props.vMerge === "restart" ? this.vMergeRowSpan(tbl, rowIdx, colStart) : 1;
+      const topInset = this.rowBorderWidths(tbl, rowIdx).top / 2;
+      const bottomInset = this.rowBorderWidths(tbl, rowIdx + rowSpan - 1).bottom / 2;
+      const contentH = Math.max(0, cellH - topInset - bottomInset);
+      let dy = topInset;
+      if (!cellLay.rotated && cell.props.verticalAlign === "center") {
+        dy += Math.max(0, (contentH - cellLay.height) / 2);
+      } else if (!cellLay.rotated && cell.props.verticalAlign === "bottom") {
+        dy += Math.max(0, contentH - cellLay.height);
+      }
 
       // Exact-height rows CLIP overflowing content (Word: content past the
       // fixed row height is hidden, not spilled onto the page - e.g. the
@@ -3521,11 +3926,11 @@ function sum(arr: number[], from: number, to: number): number {
 }
 
 /** A paragraph that OPENS with a page/column break (before any real content,
- * with content following) is a break-before: return the break type. A
+ * with content following) is a break-before: return its type and source run. A
  * break-only paragraph, or one whose first content is text/tab/image, returns
  * undefined (kept on the old flow). */
-function leadingBreakOf(para: Paragraph): "page" | "column" | undefined {
-  let br: "page" | "column" | undefined;
+function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run: Run } | undefined {
+  let br: { type: "page" | "column"; run: Run } | undefined;
   for (const child of para.children) {
     const runs = child.type === "run" ? [child] : child.runs;
     for (const r of runs) {
@@ -3533,7 +3938,7 @@ function leadingBreakOf(para: Paragraph): "page" | "column" | undefined {
         if (!br) {
           if (c.kind === "break") {
             if (c.breakType === "page" || c.breakType === "column") {
-              br = c.breakType;
+              br = { type: c.breakType, run: r };
               continue;
             }
             return undefined; // a line break opens the paragraph

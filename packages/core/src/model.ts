@@ -138,6 +138,8 @@ export interface ParaProps {
   afterAutospacing?: boolean;
   /** Word's default when absent is auto/1.0 via docDefaults. */
   lineSpacing?: LineSpacing;
+  /** w:snapToGrid: whether this paragraph's lines use the section docGrid. */
+  snapToGrid?: boolean;
   contextualSpacing?: boolean;
   keepNext?: boolean;
   /** w:framePr w:dropCap: the paragraph is a drop-cap letter frame. */
@@ -226,7 +228,7 @@ export interface ImageContent {
 }
 /** OMML equation node (subset: runs, scripts, fractions, radicals). */
 export type MathNode =
-  | { t: "run"; text: string }
+  | { t: "run"; text: string; normal?: boolean }
   | { t: "sup" | "sub"; base: MathNode[]; script: MathNode[] }
   | { t: "frac"; num: MathNode[]; den: MathNode[]; bar?: boolean }
   | { t: "rad"; e: MathNode[] }
@@ -529,6 +531,7 @@ export interface TableCellProps {
   /** Cell margins px. */
   margins?: { top?: number; right?: number; bottom?: number; left?: number };
   verticalAlign?: "top" | "center" | "bottom";
+  textDirection?: "btLr";
 }
 
 export interface TableCell {
@@ -635,6 +638,8 @@ export interface SectionProps {
    * the line-spacing multiplier is applied over. Word snaps every line's font
    * height up to this grid pitch (CJK documents). */
   docGridLinePitch?: number;
+  /** Present w:docGrid type; omitted w:type means "default". */
+  docGridType?: "default" | "lines" | "linesAndChars" | "snapToChars";
   type?: "nextPage" | "continuous" | "evenPage" | "oddPage" | "nextColumn";
   /** Vertical alignment of page content. */
   vAlign?: "top" | "center" | "both" | "bottom";
@@ -777,5 +782,7 @@ export interface Numbering {
 export interface Theme {
   majorFont: string;
   minorFont: string;
+  majorBidiFont?: string;
+  minorBidiFont?: string;
   colors: Map<string, string>;
 }

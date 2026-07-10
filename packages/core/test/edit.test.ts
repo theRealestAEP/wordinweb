@@ -98,6 +98,24 @@ describe("run formatting commands", () => {
     expect(runs[1].props.highlight).toBe("#ffff00");
   });
 
+  it("preserves Symbol-font source bytes when formatting decoded text", () => {
+    const source = "\uF067\uF020\uF071\uF02E";
+    const doc = loadDoc(
+      `<w:p><w:r><w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/></w:rPr><w:t>${source}</w:t></w:r></w:p>`,
+    );
+    const { run } = firstRun(doc);
+    expect(textOf(firstRun(doc).para)).toBe("γ θ.");
+
+    applyRunFormat(doc, [segFor(run, 0, 1)], { bold: true });
+
+    const saved = DocxDocument.load(doc.save());
+    const xml = saved.pkg.text("word/document.xml");
+    expect(xml).toContain(source.slice(0, 1));
+    expect(xml).toContain(source.slice(1));
+    expect(xml).not.toContain("γ θ.");
+    expect(textOf(firstRun(saved).para)).toBe("γ θ.");
+  });
+
   it("keeps unrelated parts byte-identical on save", () => {
     const styles = `<?xml version="1.0"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">

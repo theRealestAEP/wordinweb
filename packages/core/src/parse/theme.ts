@@ -6,7 +6,7 @@ import { Theme } from "../model.js";
  * Theme color keys used by w:themeColor: dk1/lt1/dk2/lt2/accent1..6/hlink/folHlink,
  * plus the aliases text1/background1/text2/background2 Word uses in documents.
  */
-export function parseTheme(root: XmlElement | undefined): Theme {
+export function parseTheme(root: XmlElement | undefined, bidiLanguage?: string): Theme {
   const theme: Theme = {
     majorFont: "Calibri Light",
     minorFont: "Calibri",
@@ -16,12 +16,25 @@ export function parseTheme(root: XmlElement | undefined): Theme {
 
   const themeElements = child(root, "themeElements");
   const fontScheme = child(themeElements, "fontScheme");
-  const majorLatin = child(child(fontScheme, "majorFont"), "latin");
-  const minorLatin = child(child(fontScheme, "minorFont"), "latin");
+  const majorFonts = child(fontScheme, "majorFont");
+  const minorFonts = child(fontScheme, "minorFont");
+  const majorLatin = child(majorFonts, "latin");
+  const minorLatin = child(minorFonts, "latin");
   const major = majorLatin ? attr(majorLatin, "typeface") : undefined;
   const minor = minorLatin ? attr(minorLatin, "typeface") : undefined;
   if (major) theme.majorFont = major;
   if (minor) theme.minorFont = minor;
+
+  const bidiScript = bidiLanguage ? new Intl.Locale(bidiLanguage).maximize().script : undefined;
+  const bidiFont = (fonts: XmlElement | undefined): string | undefined => {
+    const direct = attr(child(fonts, "cs"), "typeface");
+    if (direct) return direct;
+    if (!bidiScript) return undefined;
+    const supplemental = children(fonts, "font").find((font) => attr(font, "script") === bidiScript);
+    return supplemental ? attr(supplemental, "typeface") : undefined;
+  };
+  theme.majorBidiFont = bidiFont(majorFonts);
+  theme.minorBidiFont = bidiFont(minorFonts);
 
   const clrScheme = child(themeElements, "clrScheme");
   if (clrScheme) {

@@ -2363,15 +2363,22 @@ export class DocxEditor {
     const local = caret.offset - src.offset;
     const textNode = best.el.firstChild;
     let xPx = best.item.x;
+    let rotatedCaret: { top: number; width: number } | undefined;
     if (textNode && textNode.nodeType === Node.TEXT_NODE) {
       const range = document.createRange();
       range.setStart(textNode, Math.min(local, textNode.textContent?.length ?? 0));
       range.collapse(true);
       const rect = range.getBoundingClientRect();
-      if (rect.height > 0) {
-        const surface = best.el.parentElement!;
-        const surfaceRect = surface.getBoundingClientRect();
-        const zoom = this.host.zoom ?? 1;
+      const surface = best.el.parentElement!;
+      const surfaceRect = surface.getBoundingClientRect();
+      const zoom = this.host.zoom ?? 1;
+      if (best.item.rotate && Math.abs(best.item.rotate.deg) === 90 && rect.width > 0) {
+        xPx = (rect.left - surfaceRect.left) / zoom;
+        rotatedCaret = {
+          top: (rect.top - surfaceRect.top) / zoom,
+          width: rect.width / zoom,
+        };
+      } else if (rect.height > 0) {
         xPx = (rect.left - surfaceRect.left) / zoom;
       } else {
         // Degenerate rect: justified SPACE spans paint zero-width (their
@@ -2388,12 +2395,20 @@ export class DocxEditor {
     const fs = best.item.font.size;
     const s = this.caretEl.style;
     s.left = `${xPx}px`;
-    // Word's insertion bar hugs the font box (ascent..descent), clamped to
-    // the line so it never pokes into neighbors on tight/exact spacing.
-    const top = Math.max(best.item.lineTop, best.item.baseline - fs * 0.95);
-    const bottom = Math.min(best.item.lineTop + best.item.lineHeight, best.item.baseline + fs * 0.22);
+    let top: number;
+    if (rotatedCaret) {
+      top = rotatedCaret.top;
+      s.width = `${rotatedCaret.width}px`;
+      s.height = "1.5px";
+    } else {
+      // Word's insertion bar hugs the font box (ascent..descent), clamped to
+      // the line so it never pokes into neighbors on tight/exact spacing.
+      top = Math.max(best.item.lineTop, best.item.baseline - fs * 0.95);
+      const bottom = Math.min(best.item.lineTop + best.item.lineHeight, best.item.baseline + fs * 0.22);
+      s.width = "1.5px";
+      s.height = `${Math.max(8, bottom - top)}px`;
+    }
     s.top = `${top}px`;
-    s.height = `${Math.max(8, bottom - top)}px`;
     s.display = "block";
     // Park the hidden input at the caret so the IME candidate window opens
     // beside the text being composed (offset computed in container space -

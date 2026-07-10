@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import { layoutDocument } from "../src/layout/engine.js";
-import { ApproxMeasurer } from "../src/layout/measure.js";
+import { ApproxMeasurer, type TextMeasurer } from "../src/layout/measure.js";
 import { formatNumber } from "../src/parse/numbering.js";
 import { makeDocx, wrapDocument, p } from "./helpers.js";
 
@@ -35,6 +35,39 @@ describe("layout engine", () => {
     expect(pageText(result, 0)).toContain("Hello");
   });
 
+  it("carries extra spaces onto a wrapped line with source bindings", () => {
+    const section =
+      `<w:sectPr><w:pgSz w:w="3600" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const resultFor = (text: string) =>
+      layout({ "word/document.xml": wrapDocument(p(text) + section) }).result;
+    const item = (result: ReturnType<typeof layoutDocument>, text: string) => {
+      const found = result.pages[0].items.find(
+        (candidate) => candidate.kind === "text" && candidate.text === text,
+      );
+      if (found?.kind !== "text") throw new Error(`missing ${text}`);
+      return found;
+    };
+
+    const single = resultFor("AAAA BBBB");
+    const triple = resultFor("AAAA   BBBB");
+    const singleB = item(single, "BBBB");
+    const tripleB = item(triple, "BBBB");
+    const carried = triple.pages[0].items.filter(
+      (candidate) =>
+        candidate.kind === "text" &&
+        candidate.text === " " &&
+        candidate.lineTop === tripleB.lineTop,
+    );
+
+    expect(carried).toHaveLength(2);
+    expect(carried.map((space) => space.kind === "text" ? space.src?.offset : undefined)).toEqual([5, 6]);
+    expect(tripleB.x - singleB.x).toBeCloseTo(
+      carried.reduce((width, space) => width + (space.kind === "text" ? space.width : 0), 0),
+      3,
+    );
+  });
+
   it("paginates long content onto multiple pages", () => {
     const paras = Array.from({ length: 120 }, (_, i) => p(`Paragraph number ${i}`)).join("");
     const { result } = layout({ "word/document.xml": wrapDocument(paras) });
@@ -59,6 +92,365 @@ describe("layout engine", () => {
     expect(pageText(result, 0)).toContain("first page");
     expect(pageText(result, 0)).not.toContain("second page");
     expect(pageText(result, 1)).toContain("second page");
+  });
+
+  it("does not reset following content after internal page breaks", () => {
+    const body =
+      p("first page") +
+      `<w:p><w:r><w:br w:type="page"/><w:br w:type="page"/>` +
+      `<w:t>after breaks</w:t></w:r></w:p>` +
+      `<w:p><w:pPr><w:spacing w:before="240"/></w:pPr>` +
+      `<w:r><w:t>following</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    const page = result.pages[2];
+    const after = page.items.find((item) => item.kind === "text" && item.text === "after");
+    const following = page.items.find((item) => item.kind === "text" && item.text === "following");
+
+    expect(result.totalPages).toBe(3);
+    expect(after?.kind).toBe("text");
+    expect(following?.kind).toBe("text");
+    if (after?.kind !== "text" || following?.kind !== "text") return;
+    expect(following.lineTop).toBeGreaterThan(after.lineTop + after.lineHeight);
+  });
+
+  it("honors paragraph opt-out from a section line grid", () => {
+    const gridDocument = (snapToGrid = "") =>
+      wrapDocument(
+        `<w:p><w:pPr>${snapToGrid}</w:pPr><w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:t>Title</w:t></w:r></w:p>` +
+          `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+          `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+          `<w:docGrid w:type="lines" w:linePitch="360"/></w:sectPr>`,
+      );
+    const inherited = layout({ "word/document.xml": gridDocument() }).result;
+    const optedOut = layout({
+      "word/document.xml": gridDocument(`<w:snapToGrid w:val="0"/>`),
+    }).result;
+    const inheritedTitle = inherited.pages[0].items.find((item) => item.kind === "text" && item.text === "Title");
+    const optedOutTitle = optedOut.pages[0].items.find((item) => item.kind === "text" && item.text === "Title");
+
+    expect(inheritedTitle?.kind).toBe("text");
+    expect(optedOutTitle?.kind).toBe("text");
+    if (inheritedTitle?.kind !== "text" || optedOutTitle?.kind !== "text") return;
+    // Inherited grid paragraphs keep the measured four-pitch section reserve
+    // and a pitch-sized line. An explicit opt-out uses a two-pitch reserve and
+    // its natural line box.
+    expect(inherited.pages[0].bodyTop - optedOut.pages[0].bodyTop).toBeCloseTo(48, 3);
+    expect(inheritedTitle.lineTop - optedOutTitle.lineTop).toBeCloseTo(48, 3);
+    expect(inheritedTitle.lineHeight).toBeCloseTo(24, 3);
+    expect(optedOutTitle.lineHeight).toBeLessThan(24);
+  });
+
+  it("keeps a grid reserve above auto-spaced inline images", () => {
+    const rels = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>
+</Relationships>`;
+    const inlineImage =
+      `<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="769620" cy="427990"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="769620" cy="427990"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>`;
+    const documentXml = (snapToGrid = "") =>
+      wrapDocument(
+        `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="330" w:lineRule="exact"/></w:pPr>` +
+          `<w:r><w:t>filler</w:t></w:r></w:p>` +
+          `<w:p><w:pPr>${snapToGrid}<w:spacing w:before="0" w:after="156" w:line="276" w:lineRule="auto"/></w:pPr>` +
+          `<w:r><w:rPr><w:sz w:val="21"/></w:rPr>${inlineImage}</w:r>` +
+          `<w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>(0)</w:t></w:r></w:p>` +
+          `<w:sectPr><w:pgSz w:w="6000" w:h="4000"/>` +
+          `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>` +
+          `<w:docGrid w:type="lines" w:linePitch="312"/></w:sectPr>`,
+      );
+    const parts = (snapToGrid = "") => ({
+      "word/document.xml": documentXml(snapToGrid),
+      "word/_rels/document.xml.rels": rels,
+      "word/media/x.png": "PNGDATA",
+    });
+    const grid = layout(parts()).result;
+    const optedOut = layout(parts(`<w:snapToGrid w:val="0"/>`)).result;
+
+    expect(pageText(grid, 0)).not.toContain("(0)");
+    expect(pageText(grid, 1)).toContain("(0)");
+    expect(pageText(optedOut, 0)).toContain("(0)");
+
+    const gridLabel = grid.pages[1].items.find((item) => item.kind === "text" && item.text === "(0)");
+    const gridImage = grid.pages[1].items.find((item) => item.kind === "image");
+    const controlLabel = optedOut.pages[0].items.find((item) => item.kind === "text" && item.text === "(0)");
+    const controlImage = optedOut.pages[0].items.find((item) => item.kind === "image");
+    expect(gridLabel?.kind).toBe("text");
+    expect(gridImage?.kind).toBe("image");
+    expect(controlLabel?.kind).toBe("text");
+    expect(controlImage?.kind).toBe("image");
+    if (
+      gridLabel?.kind !== "text" ||
+      gridImage?.kind !== "image" ||
+      controlLabel?.kind !== "text" ||
+      controlImage?.kind !== "image"
+    ) return;
+
+    // ApproxMeasurer's 14px run has a 16.1px glyph box. Word keeps the
+    // remaining 4.7px of the 20.8px grid pitch above the object, then applies
+    // the 1.15 multiple to image + descent. The non-grid control retains the
+    // existing compact image-line rule and stays on page 1. The page leaves
+    // enough room for the grid line itself, but not its 10.4px trailing space.
+    const gridLead = 20.8 - 14 * (0.9 + 0.25);
+    const expectedGridHeight = gridLead + (44.93333333333333 + 14 * 0.25) * 1.15;
+    expect(gridLabel.lineHeight).toBeCloseTo(expectedGridHeight, 3);
+    expect(gridImage.y - gridLabel.lineTop).toBeCloseTo(gridLead, 1);
+    expect(Math.abs(controlImage.y - controlLabel.lineTop)).toBeLessThan(0.2);
+    expect(controlLabel.lineHeight).toBeLessThan(gridLabel.lineHeight);
+  });
+
+  it("preserves a section line-grid opt-out through column balancing", () => {
+    const firstSection =
+      `<w:p><w:pPr><w:snapToGrid w:val="0"/></w:pPr>` +
+      `<w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:t>Title</w:t></w:r></w:p>` +
+      `<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+      `<w:cols w:num="2" w:space="720"/>` +
+      `<w:docGrid w:type="lines" w:linePitch="360"/>` +
+      `</w:sectPr></w:pPr></w:p>`;
+    const nextSection =
+      p("Next") +
+      `<w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(firstSection + nextSection),
+    });
+    const title = result.pages[0].items.find(
+      (item) => item.kind === "text" && item.text === "Title",
+    );
+
+    expect(result.pages[0].bodyTop).toBeCloseTo(144, 3);
+    expect(title?.kind).toBe("text");
+    if (title?.kind !== "text") return;
+    expect(title.lineTop).toBeCloseTo(144, 3);
+  });
+
+  it("bottom-aligns a legacy doc-grid keepNext chain before a leading page break", () => {
+    // Word PDF control (wild2-med-nccih-protocol): the first title bbox starts
+    // at 614.92pt. Disabling keepNext on either heading, removing docGrid, or
+    // changing compatibilityMode 14 to 15 moves it to 329.07pt. Word 2010
+    // keeps the leading break line on page 1 and aligns the kept chain above it.
+    const body =
+      `<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:spacing w:before="5120"/>` +
+      `<w:jc w:val="center"/><w:rPr><w:sz w:val="52"/></w:rPr></w:pPr>` +
+      `<w:r><w:rPr><w:sz w:val="52"/></w:rPr><w:t>Cover</w:t></w:r>` +
+      `<w:r><w:rPr><w:sz w:val="52"/></w:rPr><w:br/></w:r>` +
+      `<w:r><w:rPr><w:sz w:val="52"/></w:rPr><w:t>Title</w:t></w:r></w:p>` +
+      `<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:jc w:val="center"/></w:pPr>` +
+      `<w:r><w:rPr><w:sz w:val="52"/></w:rPr><w:br w:type="page"/></w:r>` +
+      `<w:r><w:rPr><w:sz w:val="32"/></w:rPr><w:t>PAGE TWO</w:t></w:r></w:p>` +
+      p("body") +
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+      `<w:titlePg/><w:docGrid w:linePitch="360"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(body),
+      "word/styles.xml": `<?xml version="1.0"?>
+        <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+            <w:rPr><w:sz w:val="24"/></w:rPr>
+          </w:style>
+          <w:style w:type="paragraph" w:styleId="Heading1">
+            <w:basedOn w:val="Normal"/>
+            <w:pPr><w:keepNext/><w:spacing w:before="360" w:after="120" w:line="240" w:lineRule="atLeast"/></w:pPr>
+            <w:rPr><w:rFonts w:ascii="Arial Bold" w:hAnsi="Arial Bold"/><w:b/></w:rPr>
+          </w:style>
+        </w:styles>`,
+      "word/settings.xml": `<?xml version="1.0"?>
+        <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:compat><w:compatSetting w:name="compatibilityMode" w:val="14"/></w:compat>
+        </w:settings>`,
+    });
+
+    const title = result.pages[0].items.find((item) => item.kind === "text" && item.text === "Cover");
+    expect(title?.kind).toBe("text");
+    if (title?.kind !== "text") return;
+    expect(title.lineTop).toBeCloseTo(816.4, 1);
+    expect(pageText(result, 1)).toContain("PAGE TWO");
+  });
+
+  it("collapses preceding after-spacing across a legacy leading page break", () => {
+    const render = (mode: number, after: number) => {
+      const body =
+        `<w:p><w:pPr><w:spacing w:after="${after}"/></w:pPr>` +
+        `<w:r><w:t>OLD</w:t></w:r></w:p>` +
+        `<w:p><w:pPr><w:spacing w:before="240"/></w:pPr>` +
+        `<w:r><w:br w:type="page"/></w:r><w:r><w:t>OPEN</w:t></w:r></w:p>` +
+        `<w:sectPr><w:pgSz w:w="6000" w:h="6000"/>` +
+        `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
+      return layout({
+        "word/document.xml": wrapDocument(body),
+        "word/settings.xml": `<?xml version="1.0"?>
+          <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:compat><w:compatSetting w:name="compatibilityMode" w:val="${mode}"/></w:compat>
+          </w:settings>`,
+      }).result;
+    };
+    const openerOffset = (result: ReturnType<typeof layoutDocument>) => {
+      const page = result.pages[1];
+      const opener = page.items.find((item) => item.kind === "text" && item.text === "OPEN");
+      if (opener?.kind !== "text") throw new Error("opener missing");
+      return opener.lineTop - page.bodyTop;
+    };
+
+    expect(openerOffset(render(14, 120))).toBeCloseTo(8, 3);
+    expect(openerOffset(render(14, 0))).toBeCloseTo(16, 3);
+    expect(openerOffset(render(15, 120))).toBeCloseTo(0, 3);
+  });
+
+  it("collapses an empty section closer's after into a legacy leading-break opener", () => {
+    const pageGeometry =
+      `<w:pgSz w:w="6000" w:h="6000"/>` +
+      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>`;
+    const render = (mode: number, leadingBreak: boolean) => {
+      const closer =
+        `<w:p><w:pPr><w:spacing w:after="120"/></w:pPr></w:p>` +
+        `<w:p><w:pPr><w:spacing w:after="120"/><w:sectPr>` +
+        `<w:type w:val="continuous"/>${pageGeometry}</w:sectPr></w:pPr></w:p>`;
+      const opener =
+        `<w:p><w:pPr><w:spacing w:before="360"/></w:pPr>` +
+        (leadingBreak ? `<w:r><w:br w:type="page"/></w:r>` : "") +
+        `<w:r><w:t>OPEN</w:t></w:r></w:p>`;
+      return layout({
+        "word/document.xml": wrapDocument(
+          closer + opener + `<w:sectPr>${leadingBreak ? `<w:type w:val="continuous"/>` : ""}${pageGeometry}</w:sectPr>`,
+        ),
+        "word/settings.xml": `<?xml version="1.0"?>
+          <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:compat><w:compatSetting w:name="compatibilityMode" w:val="${mode}"/></w:compat>
+          </w:settings>`,
+      }).result;
+    };
+    const openerOffset = (result: ReturnType<typeof layoutDocument>) => {
+      const page = result.pages[1];
+      const opener = page.items.find((item) => item.kind === "text" && item.text === "OPEN");
+      if (opener?.kind !== "text") throw new Error("section opener missing");
+      return opener.lineTop - page.bodyTop;
+    };
+
+    expect(openerOffset(render(14, true))).toBeCloseTo(16, 3);
+    expect(openerOffset(render(14, false))).toBeCloseTo(24, 3);
+    expect(openerOffset(render(15, true))).toBeCloseTo(0, 3);
+  });
+
+  it("keeps a trailing-break section closer's mark before a continuous section", () => {
+    const pageGeometry =
+      `<w:pgSz w:w="6000" w:h="6000"/>` +
+      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>`;
+    const render = (type: "continuous" | "nextPage") => {
+      const closer =
+        `<w:p><w:pPr><w:pStyle w:val="Heading2"/><w:sectPr>${pageGeometry}</w:sectPr></w:pPr>` +
+        `<w:r><w:br w:type="page"/></w:r></w:p>`;
+      const opener =
+        `<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr>` +
+        `<w:r><w:t>OPEN</w:t></w:r></w:p>`;
+      return layout({
+        "word/document.xml": wrapDocument(
+          closer + opener + `<w:sectPr><w:type w:val="${type}"/>${pageGeometry}</w:sectPr>`,
+        ),
+        "word/styles.xml": `<?xml version="1.0"?>
+          <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+              <w:rPr><w:sz w:val="24"/></w:rPr>
+            </w:style>
+            <w:style w:type="paragraph" w:styleId="Heading2">
+              <w:basedOn w:val="Normal"/>
+              <w:pPr><w:spacing w:before="240" w:after="120" w:line="240" w:lineRule="atLeast"/></w:pPr>
+              <w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/></w:rPr>
+            </w:style>
+          </w:styles>`,
+        "word/settings.xml": `<?xml version="1.0"?>
+          <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:compat><w:compatSetting w:name="compatibilityMode" w:val="14"/></w:compat>
+          </w:settings>`,
+      }).result;
+    };
+    const opener = (result: ReturnType<typeof layoutDocument>) => {
+      const page = result.pages[1];
+      const item = page.items.find((candidate) => candidate.kind === "text" && candidate.text === "OPEN");
+      if (item?.kind !== "text") throw new Error("section opener missing");
+      return { page, item };
+    };
+
+    const continuousResult = render("continuous");
+    const nextPageResult = render("nextPage");
+    const continuous = opener(continuousResult);
+    const nextPage = opener(nextPageResult);
+    expect(continuousResult.totalPages).toBe(2);
+    expect(nextPageResult.totalPages).toBe(2);
+    // NCCIH's Word PDF measures this hidden line at 13.75pt; its 6pt after
+    // remains in addition to the visible Heading2's own 12pt before.
+    expect(continuous.item.lineTop - continuous.page.bodyTop).toBeCloseTo(
+      16 + continuous.item.lineHeight + 8,
+      3,
+    );
+    expect(nextPage.item.lineTop - nextPage.page.bodyTop).toBeCloseTo(16, 3);
+  });
+
+  it("lets an ordinary break-only paragraph overflow before applying its page break", () => {
+    const body =
+      `<w:p><w:pPr><w:spacing w:after="1200"/></w:pPr><w:r><w:t>first page</w:t></w:r></w:p>` +
+      `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` +
+      `<w:p><w:r><w:lastRenderedPageBreak/><w:t>second page</w:t></w:r></w:p>` +
+      `<w:sectPr><w:pgSz w:w="12240" w:h="3000"/>` +
+      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+
+    expect(result.totalPages).toBe(3);
+    expect(pageText(result, 0)).toContain("first page");
+    expect(pageText(result, 1)).toBe("");
+    expect(pageText(result, 2)).toContain("second page");
+  });
+
+  it("does not add another empty line after a table's mandatory empty paragraph", () => {
+    const table = `<w:tbl>
+      <w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr><w:trPr><w:trHeight w:val="900" w:hRule="exact"/></w:trPr>
+        <w:tc><w:p><w:r><w:t>table</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>`;
+    const body =
+      `<w:p><w:r><w:t>first page</w:t></w:r></w:p>` +
+      table +
+      `<w:p/>` +
+      `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` +
+      `<w:p><w:r><w:lastRenderedPageBreak/><w:t>second page</w:t></w:r></w:p>` +
+      `<w:sectPr><w:pgSz w:w="12240" w:h="3000"/>` +
+      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+
+    expect(result.totalPages).toBe(2);
+    expect(pageText(result, 0)).toContain("first page");
+    expect(pageText(result, 1)).toContain("second page");
+  });
+
+  it("lets an authored empty paragraph after a table leave a break on a blank page", () => {
+    const table = `<w:tbl>
+      <w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr><w:trPr><w:trHeight w:val="900" w:hRule="exact"/></w:trPr>
+        <w:tc><w:p><w:r><w:t>table</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>`;
+    const body =
+      `<w:p><w:r><w:t>first page</w:t></w:r></w:p>` +
+      table +
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:rPr><w:b/></w:rPr></w:pPr></w:p>` +
+      `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` +
+      `<w:p><w:r><w:lastRenderedPageBreak/><w:t>third page</w:t></w:r></w:p>` +
+      `<w:sectPr><w:pgSz w:w="12240" w:h="3000"/>` +
+      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+
+    expect(result.totalPages).toBe(3);
+    expect(pageText(result, 0)).toContain("first page");
+    expect(pageText(result, 1)).toBe("");
+    expect(pageText(result, 2)).toContain("third page");
   });
 
   it("drops space-before when a keepLines paragraph is moved to a column top", () => {
@@ -89,6 +481,190 @@ describe("layout engine", () => {
     // Landed in the SECOND column (x well past the left margin), at its top.
     expect(heading.x).toBeGreaterThan(300);
     expect(heading.lineTop).toBeCloseTo(96, 0); // band top, before collapsed
+  });
+
+  it("does not charge drop-cap height to a keepNext chain", () => {
+    const filler = Array.from(
+      { length: 14 },
+      (_, i) =>
+        `<w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr>` +
+        `<w:r><w:t>FILL${i}</w:t></w:r></w:p>`,
+    ).join("");
+    const heading =
+      `<w:p><w:pPr><w:keepNext/><w:spacing w:after="80"/></w:pPr>` +
+      `<w:r><w:t>HEADING</w:t></w:r></w:p>`;
+    const dropCap =
+      `<w:p><w:pPr><w:keepNext/>` +
+      `<w:framePr w:dropCap="drop" w:lines="2" w:wrap="auto"/>` +
+      `<w:spacing w:line="480" w:lineRule="exact"/>` +
+      `<w:rPr><w:sz w:val="56"/></w:rPr></w:pPr>` +
+      `<w:r><w:rPr><w:sz w:val="56"/></w:rPr><w:t>D</w:t></w:r></w:p>`;
+    const body =
+      `<w:p><w:r><w:t xml:space="preserve">BODY one two three four five six seven eight nine ten eleven twelve</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="6000" w:h="6000"/>` +
+      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>` +
+      `<w:cols w:num="2" w:space="240"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(filler + heading + dropCap + body + section),
+    });
+    const page = result.pages[0];
+    const headingText = page.items.find(
+      (item) => item.kind === "text" && item.text === "HEADING",
+    );
+    const bodyText = page.items.find(
+      (item) => item.kind === "text" && item.text.includes("BODY"),
+    );
+
+    expect(headingText?.kind).toBe("text");
+    expect(bodyText?.kind).toBe("text");
+    if (headingText?.kind !== "text" || bodyText?.kind !== "text") return;
+    expect(headingText.x).toBeLessThan(208);
+    expect(bodyText.x).toBeLessThan(208);
+  });
+
+  it("applies the final full-width banner's spacing-after before column body text", () => {
+    const render = (authorsAfter: number) => {
+      const frame = `<w:framePr w:w="9360" w:wrap="notBeside" w:hAnchor="text" w:vAnchor="text" w:xAlign="center"/>`;
+      const filler = Array.from({ length: 70 }, (_, i) => p(`Body line ${i}`)).join("");
+      const body =
+        `<w:p><w:pPr><w:pStyle w:val="Title"/><w:framePr w:h="360" w:hRule="exact"/></w:pPr>` +
+        `<w:r><w:t>Title</w:t></w:r></w:p>` +
+        `<w:p><w:pPr><w:pStyle w:val="Authors"/><w:framePr w:h="781" w:hRule="exact" w:y="-213"/></w:pPr>` +
+        `<w:r><w:t>Authors</w:t></w:r></w:p>` +
+        `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>` +
+        `<w:r><w:t>Abstract</w:t></w:r></w:p>` +
+        filler +
+        `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+        `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+        `<w:cols w:num="2" w:space="720"/></w:sectPr>`;
+      return layout({
+        "word/document.xml": wrapDocument(body),
+        "word/styles.xml": `<?xml version="1.0"?>
+          <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+              <w:rPr><w:sz w:val="24"/></w:rPr>
+            </w:style>
+            <w:style w:type="paragraph" w:styleId="Title">
+              <w:basedOn w:val="Normal"/>
+              <w:pPr>${frame}<w:spacing w:after="480"/></w:pPr>
+            </w:style>
+            <w:style w:type="paragraph" w:styleId="Authors">
+              <w:basedOn w:val="Normal"/>
+              <w:pPr>${frame}<w:spacing w:after="${authorsAfter}"/></w:pPr>
+            </w:style>
+          </w:styles>`,
+      }).result;
+    };
+    const item = (result: ReturnType<typeof layoutDocument>, text: string) => {
+      const found = result.pages[0].items.find(
+        (candidate) => candidate.kind === "text" && candidate.text === text,
+      );
+      if (found?.kind !== "text") throw new Error(`${text} missing`);
+      return found;
+    };
+
+    const withoutAfter = render(0);
+    const withAfter = render(320);
+    const titleWithout = item(withoutAfter, "Title");
+    const authorsWithout = item(withoutAfter, "Authors");
+    const secondColumnTop = (result: ReturnType<typeof layoutDocument>) =>
+      Math.min(
+        ...result.pages[0].items
+          .filter(
+            (candidate) =>
+              candidate.kind === "text" && candidate.x > 400,
+          )
+          .map((candidate) => (candidate.kind === "text" ? candidate.lineTop : Infinity)),
+      );
+
+    // Consecutive frames remain one stacked banner: the title's 480-twip
+    // spacing-after does not open a gap before Authors.
+    expect(authorsWithout.lineTop - titleWithout.lineTop).toBeCloseTo(360 / 15, 3);
+    expect(item(withAfter, "Title").lineTop).toBeCloseTo(titleWithout.lineTop, 3);
+    expect(item(withAfter, "Authors").lineTop).toBeCloseTo(authorsWithout.lineTop, 3);
+    // Only the final banner paragraph's 320-twip after-spacing advances the
+    // following normal-flow cursor, once.
+    expect(item(withAfter, "Abstract").lineTop - item(withoutAfter, "Abstract").lineTop).toBeCloseTo(
+      320 / 15,
+      3,
+    );
+    // The shared column band excludes paragraph spacing: column two restarts
+    // immediately below Authors and does not pay the first cursor's gap again.
+    expect(secondColumnTop(withAfter)).toBeCloseTo(secondColumnTop(withoutAfter), 3);
+    expect(secondColumnTop(withAfter) - authorsWithout.lineTop).toBeCloseTo(781 / 15, 3);
+  });
+
+  it("uses only whole-line space above a full-width banner in later columns", () => {
+    const render = (prefixHeight: number) => {
+      const line = (text: string) =>
+        `<w:r><w:t>${text}</w:t><w:br/></w:r>`;
+      const body =
+        `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="${prefixHeight}" w:lineRule="exact"/></w:pPr>` +
+        `<w:r><w:t>Prefix</w:t></w:r></w:p>` +
+        `<w:p><w:pPr><w:framePr w:w="3600" w:h="600" w:hRule="exact" w:wrap="notBeside" ` +
+        `w:hAnchor="text" w:vAnchor="text" w:xAlign="center"/></w:pPr>` +
+        `<w:r><w:t>Banner</w:t></w:r></w:p>` +
+        `<w:p><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr>` +
+        Array.from({ length: 14 }, (_, i) => line(`L${i + 1}`)).join("") +
+        `<w:r><w:t>L15</w:t></w:r></w:p>` +
+        `<w:sectPr><w:pgSz w:w="6000" w:h="4000"/>` +
+        `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>` +
+        `<w:cols w:num="2" w:space="240"/></w:sectPr>`;
+      return layout({ "word/document.xml": wrapDocument(body) }).result;
+    };
+    const item = (result: ReturnType<typeof layoutDocument>, text: string) => {
+      const found = result.pages[0].items.find(
+        (candidate) => candidate.kind === "text" && candidate.text === text,
+      );
+      if (found?.kind !== "text") throw new Error(`${text} missing`);
+      return found;
+    };
+
+    const oneLineGap = render(240);
+    const shortGap = render(180);
+    const oneLineL8 = item(oneLineGap, "L8");
+    const oneLineL9 = item(oneLineGap, "L9");
+    const shortL8 = item(shortGap, "L8");
+
+    expect(oneLineL8.x).toBeGreaterThan(200);
+    expect(oneLineL8.lineTop).toBeCloseTo(oneLineGap.pages[0].bodyTop, 3);
+    expect(oneLineL9.lineTop).toBeCloseTo(item(oneLineGap, "Banner").lineTop + 600 / 15, 3);
+    // The pre-banner line consumes column-flow capacity; it does not buy an
+    // extra line at the page bottom.
+    expect(pageText(oneLineGap, 0)).toContain("L14");
+    expect(pageText(oneLineGap, 0)).not.toContain("L15");
+    expect(pageText(oneLineGap, 1)).toContain("L15");
+    // Twelve pixels remain before the banner, less than one 16px line, so the
+    // first continuation line jumps directly below it.
+    expect(shortL8.x).toBeGreaterThan(200);
+    expect(shortL8.lineTop).toBeCloseTo(item(shortGap, "Banner").lineTop + 600 / 15, 3);
+    expect(pageText(shortGap, 0)).toContain("L14");
+    expect(pageText(shortGap, 0)).not.toContain("L15");
+    expect(pageText(shortGap, 1)).toContain("L15");
+  });
+
+  it("keeps ordinary positioned-frame spacing out of the normal spacing chain", () => {
+    const render = (after: number) => {
+      const body =
+        `<w:p><w:pPr><w:spacing w:after="${after}"/>` +
+        `<w:framePr w:w="3000" w:h="600" w:hRule="exact" w:wrap="notBeside"/></w:pPr>` +
+        `<w:r><w:t>Frame</w:t></w:r></w:p>` +
+        `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>` +
+        `<w:r><w:t>Body</w:t></w:r></w:p>` +
+        `<w:sectPr><w:pgSz w:w="6000" w:h="6000"/>` +
+        `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
+      return layout({ "word/document.xml": wrapDocument(body) }).result;
+    };
+    const bodyTop = (after: number) => {
+      const found = render(after).pages[0].items.find(
+        (candidate) => candidate.kind === "text" && candidate.text === "Body",
+      );
+      if (found?.kind !== "text") throw new Error("Body missing");
+      return found.lineTop;
+    };
+
+    expect(bodyTop(320)).toBeCloseTo(bodyTop(0), 3);
   });
 
   it("resolves PAGE and NUMPAGES fields in footers per page", () => {
@@ -185,6 +761,102 @@ describe("layout engine", () => {
     expect(c1.x - c0.x).toBeLessThan(90);
   });
 
+  it("rotates btLr cell text against declared and measured row heights", () => {
+    const table = (rowHeight: string, ordinary: string) =>
+      `<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/><w:tblBorders>
+          <w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/>
+          <w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>
+          <w:insideV w:val="single" w:sz="4"/>
+        </w:tblBorders></w:tblPr>
+        <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="300"/></w:tblGrid>
+        <w:tr>${rowHeight}
+          <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${ordinary}</w:tc>
+          <w:tc><w:tcPr><w:tcW w:w="300" w:type="dxa"/><w:textDirection w:val="btLr"/><w:vAlign w:val="center"/></w:tcPr>
+            <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:t>VERTICAL</w:t></w:r></w:p>
+          </w:tc>
+        </w:tr>
+      </w:tbl>`;
+    const render = (rowHeight: string, ordinary: string) =>
+      layout({
+        "word/document.xml": wrapDocument(table(rowHeight, ordinary) + p("AFTER")),
+      }).result;
+    const declared = render(
+      `<w:trPr><w:trHeight w:val="900"/></w:trPr>`,
+      p("ORDINARY"),
+    );
+    const measured = render("", p("A") + p("B") + p("C") + p("D"));
+    const textItem = (result: ReturnType<typeof layoutDocument>, text: string) => {
+      const item = result.pages[0].items.find(
+        (candidate) => candidate.kind === "text" && candidate.text === text,
+      );
+      if (item?.kind !== "text") throw new Error(`missing ${text}`);
+      return item;
+    };
+    const rotatedBounds = (item: ReturnType<typeof textItem>) => {
+      if (!item.rotate) throw new Error("missing rotation");
+      const top = item.glyphTop ?? item.lineTop;
+      const height = item.glyphBoxH ?? item.lineHeight;
+      const pivotX = item.x + item.rotate.ox;
+      const pivotY = top + item.rotate.oy;
+      const radians = item.rotate.deg * Math.PI / 180;
+      const points = [
+        [item.x, top],
+        [item.x + item.width, top],
+        [item.x, top + height],
+        [item.x + item.width, top + height],
+      ].map(([x, y]) => ({
+        x: pivotX + (x - pivotX) * Math.cos(radians) - (y - pivotY) * Math.sin(radians),
+        y: pivotY + (x - pivotX) * Math.sin(radians) + (y - pivotY) * Math.cos(radians),
+      }));
+      const xs = points.map((point) => point.x);
+      const ys = points.map((point) => point.y);
+      const left = Math.min(...xs);
+      const right = Math.max(...xs);
+      const minTop = Math.min(...ys);
+      const maxBottom = Math.max(...ys);
+      return {
+        left,
+        right,
+        top: minTop,
+        bottom: maxBottom,
+        width: right - left,
+        height: maxBottom - minTop,
+      };
+    };
+    const rowBounds = (result: ReturnType<typeof layoutDocument>) => {
+      const edges = result.pages[0].items.filter((item) => item.kind === "edge");
+      const xs = [...new Set(edges.filter((edge) => edge.x1 === edge.x2).map((edge) => edge.x1))].sort((a, b) => a - b);
+      const ys = [...new Set(edges.filter((edge) => edge.y1 === edge.y2).map((edge) => edge.y1))].sort((a, b) => a - b);
+      return { left: xs[xs.length - 2], right: xs[xs.length - 1], top: ys[0], bottom: ys[ys.length - 1] };
+    };
+
+    const declaredLabel = textItem(declared, "VERTICAL");
+    const measuredLabel = textItem(measured, "VERTICAL");
+    const declaredBox = rotatedBounds(declaredLabel);
+    const measuredBox = rotatedBounds(measuredLabel);
+    const declaredCell = rowBounds(declared);
+    const measuredCell = rowBounds(measured);
+    expect(declaredLabel.rotate?.deg).toBe(-90);
+    expect(measuredLabel.rotate?.deg).toBe(-90);
+    expect(declaredLabel.src?.t?.text).toBe("VERTICAL");
+    expect(measuredLabel.src?.t?.text).toBe("VERTICAL");
+    expect(textItem(declared, "ORDINARY").rotate).toBeUndefined();
+    expect(declaredBox.width).toBeCloseTo(declaredLabel.lineHeight, 3);
+    expect(declaredBox.height).toBeCloseTo(declaredLabel.width, 3);
+    expect(declaredBox.height).toBeLessThan(60);
+    expect(measuredBox.height).toBeCloseTo(measuredLabel.width, 3);
+    for (const [box, cell] of [[declaredBox, declaredCell], [measuredBox, measuredCell]] as const) {
+      expect(box.left).toBeGreaterThanOrEqual(cell.left);
+      expect(box.right).toBeLessThanOrEqual(cell.right);
+      expect(box.top).toBeGreaterThanOrEqual(cell.top);
+      expect(box.bottom).toBeLessThanOrEqual(cell.bottom);
+      expect(Math.abs((box.left + box.right - cell.left - cell.right) / 2)).toBeLessThan(0.5);
+      expect(Math.abs((box.top + box.bottom - cell.top - cell.bottom) / 2)).toBeLessThan(0.5);
+    }
+    expect(textItem(declared, "AFTER").lineTop).toBeGreaterThanOrEqual(declaredCell.bottom);
+    expect(textItem(measured, "AFTER").lineTop).toBeGreaterThanOrEqual(measuredCell.bottom);
+  });
+
   it("autofits columns to content when the grid is a placeholder", () => {
     // Junk grid (100 twips per column, like generator output) + 100% width:
     // Word ignores the grid and sizes columns by content.
@@ -249,6 +921,28 @@ describe("layout engine", () => {
     if (a?.kind !== "text" || b?.kind !== "text") throw new Error("cells not found");
     // Equal 4680-twip columns: the second cell starts at the halfway point.
     expect(b.x - a.x).toBeGreaterThan(280);
+  });
+
+  it("expands an auto-width grid column to an indented paragraph's minimum", () => {
+    const border = '<w:tblBorders><w:top w:val="single"/><w:left w:val="single"/>' +
+      '<w:bottom w:val="single"/><w:right w:val="single"/><w:insideV w:val="single"/></w:tblBorders>';
+    const tbl = `<w:tbl>
+      <w:tblPr><w:tblW w:type="auto" w:w="0"/>${border}</w:tblPr>
+      <w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:type="dxa" w:w="1500"/></w:tcPr>
+          <w:p><w:pPr><w:ind w:left="1440"/></w:pPr><w:r><w:t>inner</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:type="dxa" w:w="1500"/></w:tcPr><w:p><w:r><w:t>adjacent</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl) });
+    const verticalXs = [...new Set(result.pages[0].items.flatMap((item) =>
+      item.kind === "edge" && item.x1 === item.x2 ? [item.x1] : [],
+    ))].sort((a, b) => a - b);
+
+    expect(verticalXs).toHaveLength(3);
+    expect(verticalXs[1] - verticalXs[0]).toBeGreaterThan(130);
+    expect(verticalXs[2] - verticalXs[1]).toBeCloseTo(100, 1);
   });
 
   it("applies pgNumType start to display numbers", () => {
@@ -402,6 +1096,101 @@ describe("tab leaders", () => {
     if (num?.kind !== "text") throw new Error("page number missing");
     expect(dots.x + dots.width).toBeLessThanOrEqual(num.x + 4);
   });
+
+  it("uses unstyled TOC leader and page-number fonts for line metrics", () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:pPr><w:pStyle w:val="TOC1"/><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="5000"/></w:tabs></w:pPr>
+            <w:hyperlink w:anchor="_Toc1">
+              <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry</w:t></w:r>
+              <w:r><w:tab/></w:r>
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> PAGEREF _Toc1 \\h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>4</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            </w:hyperlink>
+          </w:p>`,
+        ),
+        "word/styles.xml": `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri"/><w:sz w:val="20"/></w:rPr></w:rPrDefault></w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>
+  <w:style w:type="paragraph" w:styleId="TOC1"><w:basedOn w:val="Normal"/></w:style>
+  <w:style w:type="character" w:styleId="Hyperlink"><w:rPr><w:rFonts w:ascii="Arial"/></w:rPr></w:style>
+</w:styles>`,
+      }),
+    );
+    const familyMeasurer: TextMeasurer = {
+      width: (text, font, letterSpacing) => measurer.width(text, font, letterSpacing),
+      metrics: (font) => {
+        const lineHeight = font.size * (font.family === "Calibri" ? 1.5 : 0.75);
+        return { ascent: lineHeight * 0.8, descent: lineHeight * 0.2, lineHeight };
+      },
+    };
+    const result = layoutDocument(doc, { measurer: familyMeasurer });
+    const textItem = (text: string) => {
+      const item = result.pages[0].items.find(
+        (candidate) => candidate.kind === "text" && candidate.text === text,
+      );
+      if (item?.kind !== "text") throw new Error(`missing ${text}`);
+      return item;
+    };
+    const title = textItem("Entry");
+    const pageNumber = textItem("4");
+    const leader = result.pages[0].items.find(
+      (candidate) => candidate.kind === "text" && /^\.{10,}$/.test(candidate.text),
+    );
+    if (leader?.kind !== "text") throw new Error("missing leader");
+
+    expect(title.font.family).toBe("Arial");
+    expect(leader.font.family).toBe("Calibri");
+    expect(pageNumber.font.family).toBe("Calibri");
+    expect(title.lineHeight).toBeCloseTo((10 * 4 / 3) * 1.5, 3);
+  });
+
+  it("ignores nonleader tabs for line metrics but retains leader and mark metrics", () => {
+    const paragraph = (leader = "", includeTab = true) =>
+      `<w:p><w:pPr><w:spacing w:line="276" w:lineRule="auto"/>` +
+      `<w:tabs><w:tab w:val="left" ${leader ? `w:leader="${leader}" ` : ""}w:pos="720"/></w:tabs>` +
+      `<w:rPr><w:sz w:val="22"/></w:rPr></w:pPr>` +
+      `<w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t>A</w:t></w:r>` +
+      (includeTab ? `<w:r><w:rPr><w:sz w:val="22"/></w:rPr><w:tab/></w:r>` : "") +
+      `<w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t>B</w:t></w:r></w:p>`;
+    const resultFor = (body: string) =>
+      layout({ "word/document.xml": wrapDocument(body) }).result;
+    const textItem = (result: ReturnType<typeof layoutDocument>, text: string) => {
+      const item = result.pages[0].items.find(
+        (candidate) => candidate.kind === "text" && candidate.text === text,
+      );
+      if (item?.kind !== "text") throw new Error(`missing ${text}`);
+      return item;
+    };
+
+    const control = resultFor(paragraph("", false));
+    const nonleader = resultFor(paragraph());
+    const leader = resultFor(paragraph("dot"));
+    const controlA = textItem(control, "A");
+    const nonleaderA = textItem(nonleader, "A");
+    const leaderA = textItem(leader, "A");
+
+    expect(nonleaderA.lineHeight).toBeCloseTo(controlA.lineHeight, 3);
+    expect(leaderA.lineHeight).toBeGreaterThan(nonleaderA.lineHeight);
+    expect(textItem(nonleader, "B").x).toBeCloseTo(textItem(leader, "B").x, 3);
+    expect(textItem(nonleader, "B").x).toBeGreaterThan(textItem(control, "B").x);
+
+    const markProps = `<w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:pPr>`;
+    const tabOnly = resultFor(
+      `<w:p>${markProps}<w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:tab/></w:r></w:p>` +
+      p("MARKER"),
+    );
+    const empty = resultFor(`<w:p>${markProps}</w:p>` + p("MARKER"));
+    expect(textItem(tabOnly, "MARKER").lineTop).toBeCloseTo(
+      textItem(empty, "MARKER").lineTop,
+      3,
+    );
+  });
 });
 
 describe("footnotes and endnotes", () => {
@@ -461,6 +1250,50 @@ describe("footnotes and endnotes", () => {
     expect(noteText.lineTop).toBeGreaterThan(sep.y1);
     expect(noteText.lineTop).toBeGreaterThan(880);
     expect(noteText.lineTop + noteText.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 0.5);
+  });
+
+  it("reserves footnote space only in the referencing column", () => {
+    const line = (text: string, footnote = false) =>
+      `<w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr>` +
+      `<w:r><w:t>${text}</w:t></w:r>` +
+      (footnote ? `<w:r><w:footnoteReference w:id="1"/></w:r>` : "") +
+      `</w:p>`;
+    const body =
+      line("FIRST", true) +
+      Array.from({ length: 34 }, (_, i) => line(`BODY${i + 1}`)).join("") +
+      `<w:sectPr><w:pgSz w:w="6000" w:h="6000"/>` +
+      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>` +
+      `<w:cols w:num="2" w:space="240"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(body),
+      "word/_rels/document.xml.rels": FN_RELS,
+      "word/footnotes.xml": footnotesXml(note("footnote", 1, "column note")),
+    });
+
+    expect(result.totalPages).toBe(1);
+    const page = result.pages[0];
+    const first = page.items.find((item) => item.kind === "text" && item.text === "FIRST");
+    const firstColumnLast = page.items.find(
+      (item) => item.kind === "text" && item.text === "BODY15",
+    );
+    const sentinel = page.items.find((item) => item.kind === "text" && item.text === "BODY34");
+    const noteText = page.items.find(
+      (item) => item.kind === "text" && item.text.includes("column"),
+    );
+    if (
+      first?.kind !== "text" ||
+      firstColumnLast?.kind !== "text" ||
+      sentinel?.kind !== "text" ||
+      noteText?.kind !== "text"
+    ) {
+      throw new Error("expected text is missing");
+    }
+    // Multi-column Word leaves a 26px body reserve above the note area; the
+    // sixteenth fixed-height line therefore remains in the noted column.
+    expect(firstColumnLast.x).toBe(first.x);
+    expect(sentinel.x).toBeGreaterThan(first.x);
+    expect(sentinel.lineTop).toBeGreaterThan(noteText.lineTop);
+    expect(noteText.x).toBeLessThan(sentinel.x);
   });
 
   it("binds a footnote in a split table row to the page painting its partition", () => {
@@ -590,8 +1423,8 @@ describe("justified line breaking (Word pack-vs-break rule)", () => {
   // ApproxMeasurer: n/o = 0.5em, i = 0.28em, m = 0.85em, space = 0.25em,
   // em = 14.666px. Ten "no" fillers + 9 spaces = 179.6585px of line.
   const fillers = Array(10).fill("no").join(" ");
-  const jp = (text: string) =>
-    `<w:p><w:pPr><w:jc w:val="both"/></w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+  const jp = (text: string, bidi = false) =>
+    `<w:p><w:pPr>${bidi ? "<w:bidi/>" : ""}<w:jc w:val="both"/></w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
   const sect = (pgW: number) =>
     `<w:sectPr><w:pgSz w:w="${pgW}" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
   const linesOf = (result: ReturnType<typeof layoutDocument>) => {
@@ -624,6 +1457,37 @@ describe("justified line breaking (Word pack-vs-break rule)", () => {
     const lines = linesOf(result);
     expect(lines[0].endsWith("no")).toBe(true);
     expect(lines[1]).toBe("in");
+  });
+
+  it("does not overpack a bidi paragraph at the LTR compression boundary", () => {
+    const text = `${fillers} mmmm`;
+    const { result: ltr } = layout({
+      "word/document.xml": wrapDocument(jp(text) + sect(6268)),
+    });
+    const { result: bidi } = layout({
+      "word/document.xml": wrapDocument(jp(text, true) + sect(6268)),
+    });
+
+    expect(linesOf(ltr)[0].endsWith("mmmm")).toBe(true);
+    expect(linesOf(bidi)[0].endsWith("no")).toBe(true);
+    expect(linesOf(bidi)[1]).toBe("mmmm");
+  });
+
+  it("only overpacks justified lines in compatibility mode 15", () => {
+    const text = `${fillers} mmmm`;
+    const settings = (mode: number) =>
+      `<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+      `<w:compat><w:compatSetting w:name="compatibilityMode" w:val="${mode}"/></w:compat>` +
+      `</w:settings>`;
+    const resultFor = (mode: number) =>
+      layout({
+        "word/document.xml": wrapDocument(jp(text) + sect(6268)),
+        "word/settings.xml": settings(mode),
+      }).result;
+
+    expect(linesOf(resultFor(15))[0].endsWith("mmmm")).toBe(true);
+    expect(linesOf(resultFor(14))[0].endsWith("no")).toBe(true);
+    expect(linesOf(resultFor(14))[1]).toBe("mmmm");
   });
 
   it("never splits a word at a formatting-run boundary", () => {
@@ -661,6 +1525,82 @@ describe("superscript / subscript", () => {
     expect(sup.glyphTop).toBeCloseTo(sup.baseline - 0.9 * sup.font.size, 2);
     expect(sup.glyphBoxH).toBeCloseTo(1.15 * sup.font.size, 2);
     expect(base.glyphTop).toBeCloseTo(base.baseline - 0.9 * base.font.size, 2);
+  });
+
+  it("keys positioned-run line growth to that run's own size", () => {
+    const body = (position = "") =>
+      `<w:p>` +
+      `<w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>TALL</w:t></w:r>` +
+      `<w:r><w:rPr><w:sz w:val="20"/><w:vertAlign w:val="superscript"/>${position}</w:rPr><w:t>sup</w:t></w:r>` +
+      `</w:p>` +
+      p("MARKER");
+    const control = layout({ "word/document.xml": wrapDocument(body()) }).result;
+    const positioned = layout({
+      "word/document.xml": wrapDocument(body(`<w:position w:val="20"/>`)),
+    }).result;
+    const text = (result: ReturnType<typeof layoutDocument>, value: string) => {
+      const item = result.pages[0].items.find((candidate) => candidate.kind === "text" && candidate.text === value);
+      if (item?.kind !== "text") throw new Error(`missing ${value}`);
+      return item;
+    };
+    const controlTall = text(control, "TALL");
+    const controlSup = text(control, "sup");
+    const positionedTall = text(positioned, "TALL");
+    const positionedSup = text(positioned, "sup");
+    const markerDelta = text(positioned, "MARKER").lineTop - text(control, "MARKER").lineTop;
+
+    // The small raised run barely protrudes past the 20pt neighbor; its 10pt
+    // position must not be charged against that unrelated tall run's ascent.
+    expect(markerDelta).toBeLessThan(2);
+    // Paint still applies the full 10pt baseline shift to the target run.
+    expect(
+      (positionedTall.baseline - positionedSup.baseline) -
+        (controlTall.baseline - controlSup.baseline),
+    ).toBeCloseTo(10 * (4 / 3), 3);
+  });
+
+  it("reuses the descent when every text run on a line is raised", () => {
+    const paragraph = (mixed = false, exact = false) =>
+      `<w:p><w:pPr>${exact ? '<w:spacing w:line="600" w:lineRule="exact"/>' : ""}</w:pPr>` +
+      `<w:r><w:rPr><w:sz w:val="40"/><w:position w:val="32"/></w:rPr><w:t>raised</w:t></w:r>` +
+      `<w:r><w:rPr><w:sz w:val="40"/>${mixed ? "" : '<w:position w:val="32"/>'}</w:rPr><w:t> peer</w:t></w:r>` +
+      `</w:p>` +
+      p("MARKER");
+    const line = (mixed = false, exact = false) => {
+      const result = layout({
+        "word/document.xml": wrapDocument(paragraph(mixed, exact)),
+      }).result;
+      const raised = result.pages[0].items.find(
+        (item) => item.kind === "text" && item.text === "raised",
+      );
+      const marker = result.pages[0].items.find(
+        (item) => item.kind === "text" && item.text === "MARKER",
+      );
+      if (raised?.kind !== "text" || marker?.kind !== "text") throw new Error();
+      return { raised, marker };
+    };
+
+    const uniform = line();
+    const mixed = line(true);
+    const exact = line(false, true);
+    const size = 20 * (4 / 3);
+    const natural = size * 1.15;
+    const raise = 16 * (4 / 3);
+    const descent = size * 0.25;
+
+    // The dense legacy-equation control has consecutive 20pt Times lines,
+    // all at +16pt. Word advances them by 34.78pt: natural height + raise,
+    // less the font descent. ApproxMeasurer uses a 0.25em descent. A baseline
+    // run prevents that descent reuse.
+    expect(uniform.marker.lineTop - uniform.raised.lineTop).toBeCloseTo(
+      natural + raise - descent,
+      3,
+    );
+    expect(mixed.marker.lineTop - mixed.raised.lineTop).toBeCloseTo(natural + raise, 3);
+    expect(uniform.raised.lineHeight).toBeCloseTo(natural + raise - descent, 3);
+    expect(mixed.raised.lineHeight).toBeCloseTo(natural + raise, 3);
+    // Exact line spacing already suppresses positioned-run growth entirely.
+    expect(exact.raised.lineHeight).toBeCloseTo(40, 3);
   });
 
   it("a raised label beside a tall inline image does not inflate the line", () => {
@@ -765,6 +1705,59 @@ describe("table row splitting", () => {
     }
   });
 
+  it("splits a row that fits a fresh page when useful content fits before the break", () => {
+    const filler = Array.from({ length: 7 }, (_, i) => p(`filler ${i}`)).join("");
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="3600"/>` +
+      `<w:pgMar w:top="360" w:right="720" w:bottom="360" w:left="720"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(filler + bigRow(8) + section),
+    });
+
+    const firstPage = pageText(result, 0);
+    const secondPage = pageText(result, 1);
+    expect(result.totalPages).toBe(2);
+    expect(firstPage).toContain("cell line 0");
+    expect(secondPage).toContain("cell line 7");
+  });
+
+  it("reserves trailing paragraph space when choosing the row split line", () => {
+    const filler = Array.from({ length: 7 }, (_, i) => p(`filler ${i}`)).join("");
+    const lines = Array.from({ length: 5 }, (_, i) =>
+      `<w:r><w:t>row line ${i}</w:t>${i < 4 ? "<w:br/>" : ""}</w:r>`,
+    ).join("");
+    const row = `<w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc>
+      <w:p><w:pPr><w:spacing w:after="400"/></w:pPr>${lines}</w:p>
+    </w:tc></w:tr></w:tbl>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="3600"/>` +
+      `<w:pgMar w:top="360" w:right="720" w:bottom="360" w:left="720"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(filler + row + section),
+    });
+
+    expect(pageText(result, 0)).toContain("row line 0");
+    expect(pageText(result, 1)).toContain("row line 3");
+    expect(pageText(result, 1)).toContain("row line 4");
+  });
+
+  it("moves a three-line row whole instead of leaving a one-line continuation", () => {
+    const filler = Array.from({ length: 10 }, (_, i) => p(`filler ${i}`)).join("");
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="3600"/>` +
+      `<w:pgMar w:top="360" w:right="720" w:bottom="360" w:left="720"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(filler + bigRow(3) + section),
+    });
+
+    expect(pageText(result, 0)).not.toContain("cell line");
+    expect(pageText(result, 1)).toContain("cell line 0");
+    const rowLineTops = result.pages[1].items.flatMap((item) =>
+      item.kind === "text" && item.text.startsWith("cell") ? [item.lineTop] : [],
+    );
+    expect(new Set(rowLineTops).size).toBe(3);
+  });
+
   it("honors cantSplit by moving the row whole", () => {
     const xml = wrapDocument(p("lead") + bigRow(20, '<w:trPr><w:cantSplit/></w:trPr>') );
     // Fill most of page 1 first so the row doesn't fit
@@ -811,6 +1804,7 @@ describe("inline drawing groups", () => {
     expect(hit.y).toBeCloseTo(path.y, 3);
     expect(hit.y).toBeGreaterThan(50); // moved with the cell, not stuck at origin
   });
+
 });
 
 describe("East Asian (CJK) layout", () => {
@@ -848,6 +1842,9 @@ describe("RTL / bidi paragraphs", () => {
   const rtlRun = (t: string) =>
     `<w:r><w:rPr><w:rFonts w:cs="Arial"/><w:rtl/></w:rPr><w:t xml:space="preserve">${t}</w:t></w:r>`;
   const ltrRun = (t: string) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+  const narrowSection =
+    `<w:sectPr><w:pgSz w:w="5880" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
 
   it("marks RTL runs so the renderer sets direction:rtl", () => {
     const { result } = layout({ "word/document.xml": wrapDocument(bidiP(rtlRun("שלום"))) });
@@ -875,6 +1872,142 @@ describe("RTL / bidi paragraphs", () => {
     // Logical order is RTL-run then LTR-run; visually the LTR run moves left of
     // the RTL run (base RTL: first logical run is rightmost).
     expect(ltr.x).toBeLessThan(rtl.x);
+  });
+
+  it("applies first-line indentation from the paragraph's logical start", () => {
+    const indentedP = (bidi: boolean, firstLine: number, inner: string) =>
+      `<w:p><w:pPr>${bidi ? "<w:bidi/>" : ""}` +
+      `<w:ind w:left="240" w:right="360" w:firstLine="${firstLine}"/></w:pPr>${inner}</w:p>`;
+    const itemOf = (bidi: boolean, firstLine: number) => {
+      const text = bidi ? "שלום" : "text";
+      const inner = bidi ? rtlRun(text) : ltrRun(text);
+      const { result } = layout({
+        "word/document.xml": wrapDocument(indentedP(bidi, firstLine, inner)),
+      });
+      const item = result.pages[0].items.find((i) => i.kind === "text" && i.text === text);
+      if (item?.kind !== "text") throw new Error();
+      return item;
+    };
+
+    const ltrBase = itemOf(false, 0);
+    const ltrIndented = itemOf(false, 720);
+    const bidiBase = itemOf(true, 0);
+    const bidiIndented = itemOf(true, 720);
+
+    expect(ltrBase.x).toBeCloseTo(112, 3); // 96px margin + 16px physical left indent
+    expect(bidiBase.x + bidiBase.width).toBeCloseTo(696, 3); // right edge - 24px physical right indent
+    expect(ltrIndented.x - ltrBase.x).toBeCloseTo(48, 3);
+    expect(
+      bidiBase.x + bidiBase.width - (bidiIndented.x + bidiIndented.width),
+    ).toBeCloseTo(48, 3);
+  });
+
+  it("resolves a first-line tab from the logical start without changing LTR tabs", () => {
+    const paragraph = (bidi: boolean) =>
+      `<w:p><w:pPr>${bidi ? "<w:bidi/>" : ""}` +
+      `<w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs>` +
+      `<w:ind w:firstLine="240"/></w:pPr>` +
+      ltrRun("2") +
+      `<w:r>${bidi ? "<w:rPr><w:rtl/></w:rPr>" : ""}<w:tab/></w:r>` +
+      (bidi ? rtlRun("נ".repeat(20)) : ltrRun("n".repeat(20))) +
+      `</w:p>`;
+    const resultFor = (bidi: boolean) =>
+      layout({ "word/document.xml": wrapDocument(paragraph(bidi) + narrowSection) }).result;
+    const lineCount = (result: ReturnType<typeof layoutDocument>) =>
+      new Set(
+        result.pages[0].items
+          .filter((item) => item.kind === "text" && item.text.trim())
+          .map((item) => (item.kind === "text" ? item.lineTop : 0)),
+      ).size;
+
+    const ltr = resultFor(false);
+    const bidi = resultFor(true);
+    expect(lineCount(ltr)).toBe(1);
+    expect(lineCount(bidi)).toBe(1);
+
+    const ltrText = ltr.pages[0].items.find(
+      (item) => item.kind === "text" && item.text === "n".repeat(20),
+    );
+    const bidiMark = bidi.pages[0].items.find(
+      (item) => item.kind === "text" && item.text === "2",
+    );
+    if (ltrText?.kind !== "text" || bidiMark?.kind !== "text") throw new Error();
+    expect(ltrText.x).toBeCloseTo(144, 3);
+    expect(bidiMark.x + bidiMark.width).toBeCloseTo(280, 3);
+  });
+
+  it("keeps a bidi numbering tab between the label and first-line text", () => {
+    const numbering = `<?xml version="1.0"?>
+      <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:abstractNum w:abstractNumId="0">
+          <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/>
+            <w:lvlText w:val="—"/><w:lvlJc w:val="left"/></w:lvl>
+        </w:abstractNum>
+        <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+      </w:numbering>`;
+    const paragraph = (bidi: boolean) =>
+      `<w:p><w:pPr>${bidi ? "<w:bidi/>" : ""}` +
+      `<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>` +
+      `<w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs>` +
+      `<w:ind w:firstLine="240"/></w:pPr>` +
+      (bidi ? rtlRun("נ".repeat(20)) : ltrRun("n".repeat(20))) +
+      `</w:p>`;
+    const resultFor = (bidi: boolean) =>
+      layout({
+        "word/document.xml": wrapDocument(paragraph(bidi) + narrowSection),
+        "word/numbering.xml": numbering,
+      }).result;
+    const lineCount = (result: ReturnType<typeof layoutDocument>) =>
+      new Set(
+        result.pages[0].items
+          .filter((item) => item.kind === "text" && item.text.trim())
+          .map((item) => (item.kind === "text" ? item.lineTop : 0)),
+      ).size;
+
+    const ltr = resultFor(false);
+    const bidi = resultFor(true);
+    expect(lineCount(ltr)).toBe(1);
+    expect(lineCount(bidi)).toBe(1);
+
+    const ltrText = ltr.pages[0].items.find(
+      (item) => item.kind === "text" && item.text === "n".repeat(20),
+    );
+    const bidiText = bidi.pages[0].items.find(
+      (item) => item.kind === "text" && item.text === "נ".repeat(20),
+    );
+    const bidiLabel = bidi.pages[0].items.find(
+      (item) => item.kind === "text" && item.text === "—",
+    );
+    if (
+      ltrText?.kind !== "text" ||
+      bidiText?.kind !== "text" ||
+      bidiLabel?.kind !== "text"
+    ) throw new Error();
+    expect(ltrText.x).toBeCloseTo(144, 3);
+    expect(bidiLabel.x - bidiText.x - bidiText.width).toBeCloseTo(24.667, 3);
+    expect(bidiLabel.x + bidiLabel.width).toBeCloseTo(280, 3);
+  });
+
+  it("aligns a final justified line to the paragraph's logical start", () => {
+    const resultFor = (bidi: boolean) =>
+      layout({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:pPr>${bidi ? "<w:bidi/>" : ""}<w:jc w:val="both"/></w:pPr>` +
+          (bidi ? rtlRun("נ".repeat(10)) : ltrRun("n".repeat(10))) +
+          `</w:p>` +
+          narrowSection,
+        ),
+      }).result;
+    const ltr = resultFor(false).pages[0].items.find(
+      (item) => item.kind === "text" && item.text === "n".repeat(10),
+    );
+    const bidi = resultFor(true).pages[0].items.find(
+      (item) => item.kind === "text" && item.text === "נ".repeat(10),
+    );
+    if (ltr?.kind !== "text" || bidi?.kind !== "text") throw new Error();
+
+    expect(ltr.x).toBeCloseTo(96, 3);
+    expect(bidi.x + bidi.width).toBeCloseTo(296, 3);
   });
 
   it("mirrors columns of a bidiVisual table (source col 0 lands on the right)", () => {

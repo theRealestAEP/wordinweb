@@ -122,8 +122,10 @@ export class DocxDocument {
     this.docPart = docPart;
     const docDir = docPart.slice(0, docPart.lastIndexOf("/") + 1);
 
+    const settings = this.readXmlOptional(docDir + "settings.xml");
+    const bidiThemeLanguage = attr(child(settings, "themeFontLang"), "bidi");
     const themeXml = this.readXmlOptional(docDir + "theme/theme1.xml");
-    this.theme = parseTheme(themeXml);
+    this.theme = parseTheme(themeXml, bidiThemeLanguage);
     this.ctxBase = { theme: this.theme };
     this.ctxBase.revisionView = this.revisionView;
 
@@ -146,7 +148,6 @@ export class DocxDocument {
     if (!docRoot) throw new Error(`Missing ${docPart} in package`);
     this.docRoot = docRoot;
 
-    const settings = this.readXmlOptional(docDir + "settings.xml");
     if (settings) {
       this.evenAndOddHeaders = onOff(child(settings, "evenAndOddHeaders")) ?? false;
       const tabStop = intAttr(child(settings, "defaultTabStop"), "val");
@@ -920,10 +921,52 @@ export class DocxDocument {
     } else {
       props = resolveParagraphStyleChain(this.styles, para.props.styleId).rPr;
     }
-    if (runProps.styleId) {
+    const tocHyperlink = /^TOC[1-9]$/i.test(para.props.styleId ?? "")
+      ? para.children.find(
+          (child) =>
+            child.type === "hyperlink" &&
+            child.runs.some((run) => run.props === runProps) &&
+            child.runs.some((run) =>
+              run.content.some(
+                (content) => content.kind === "field" && /^\s*PAGEREF\b/i.test(content.instruction),
+              ),
+            ),
+        )
+      : undefined;
+    if (tocHyperlink?.type === "hyperlink") {
+      // A styled run in a generated TOC hyperlink keeps its own character
+      // style's font family while Word suppresses the style's other formatting.
+      // Unstyled leader and PAGEREF runs keep the TOC paragraph's font; a style
+      // on a sibling title run does not leak into them. A plain hyperlink in a
+      // TOC-styled paragraph has no PAGEREF field and still uses the full style.
+      if (runProps.styleId) {
+        const linkProps = resolveCharacterStyleChain(this.styles, runProps.styleId);
+        props = mergeRunProps(props, {
+          font: linkProps.font,
+          fontEastAsia: linkProps.fontEastAsia,
+          fontComplex: linkProps.fontComplex,
+        });
+      }
+    } else if (runProps.styleId) {
       props = mergeRunProps(props, resolveCharacterStyleChain(this.styles, runProps.styleId));
     }
-    props = mergeRunProps(props, runProps);
+    // Generated TOC caches can put a direct size on the tab between the
+    // heading number and text. Word renders that separator at the paragraph
+    // mark size when one is present, otherwise at the TOC paragraph size. Keep
+    // direct sizes on text/field runs so editing a TOC entry remains effective.
+    const tocRun =
+      tocHyperlink?.type === "hyperlink"
+        ? tocHyperlink.runs.find((run) => run.props === runProps)
+        : undefined;
+    const cachedTocTab =
+      tocRun !== undefined &&
+      tocRun.content.length > 0 &&
+      tocRun.content.every((content) => content.kind === "tab");
+    const directProps =
+      cachedTocTab && runProps.size !== undefined
+        ? { ...runProps, size: para.props.markRunProps?.size }
+        : runProps;
+    props = mergeRunProps(props, directProps);
     return props;
   }
 

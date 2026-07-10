@@ -98,6 +98,9 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
   const docGrid = child(sectPr, "docGrid");
   if (docGrid) {
     const gtype = attr(docGrid, "type") ?? "default";
+    if (gtype === "default" || gtype === "lines" || gtype === "linesAndChars" || gtype === "snapToChars") {
+      props.docGridType = gtype;
+    }
     const linePitch = intAttr(docGrid, "linePitch");
     if ((gtype === "lines" || gtype === "linesAndChars" || gtype === "snapToChars") && linePitch) {
       props.docGridLinePitch = twipsToPx(linePitch);

@@ -21,6 +21,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "fflate": "^0.8.2"
+    "emf-converter": "^1.5.0",
+    "fflate": "^0.8.2",
+    "wmf": "^1.0.2"
   }
 }

@@ -135,6 +135,7 @@ export function normalizeFamily(
   bold: boolean,
   italic: boolean,
 ): { family: string; bold: boolean; italic: boolean } {
+  if (family === "宋体") family = "SimSun";
   const m = FACE_SUFFIX.exec(family);
   if (!m) return { family, bold, italic };
   const suffix = m[1].toLowerCase();
@@ -236,8 +237,12 @@ export class CanvasMeasurer implements TextMeasurer {
     const key = fontKey(font) + " " + text;
     let w = this.widthCache.get(key);
     if (w === undefined) {
-      this.setFont(font);
-      w = this.ctx.measureText(text).width;
+      // Word font sizes are stored in half-points, which become multiples of
+      // 2/3px at 96dpi. Canvas loses a small amount of precision at those
+      // fractional sizes; measuring at 3x makes every half-point size an
+      // integer number of pixels, then scales the nominal advance back down.
+      this.setFont({ ...font, size: font.size * 3 });
+      w = this.ctx.measureText(text).width / 3;
       if (this.widthCache.size > 20000) this.widthCache.clear();
       this.widthCache.set(key, w);
     }

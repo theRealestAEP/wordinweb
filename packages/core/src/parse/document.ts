@@ -260,21 +260,39 @@ function paragraphHasVisibleContent(para: Paragraph): boolean {
   return false;
 }
 
+type ParsedMathNode = MathNode | { t: "break" };
+
 /** OMML subset -> MathNode AST (runs, scripts, fractions, radicals). */
-function parseOmml(el: XmlElement): MathNode[] {
-  const out: MathNode[] = [];
+function parseOmml(el: XmlElement): ParsedMathNode[] {
+  const out: ParsedMathNode[] = [];
+  const mathOnly = (node: XmlElement): MathNode[] =>
+    parseOmml(node).filter((item): item is MathNode => item.t !== "break");
   const childrenOf = (name: string): MathNode[] => {
     const c = el.children.find((ch) => localName(ch.name) === name);
-    return c ? parseOmml(c) : [];
+    return c ? mathOnly(c) : [];
   };
   const ln = localName(el.name);
+  if (ln === "r") {
+    const normal = el.children.some(
+      (rPr) => localName(rPr.name) === "rPr" && rPr.children.some(
+        (prop) => localName(prop.name) === "nor" || (localName(prop.name) === "sty" && attr(prop, "val") === "p"),
+      ),
+    );
+    const runs = el.children.flatMap((ch) => (localName(ch.name) === "rPr" ? [] : parseOmml(ch)));
+    if (normal) for (const run of runs) if (run.t === "run") run.normal = true;
+    return runs;
+  }
+  if (ln === "br") return [{ t: "break" }];
   if (ln === "f") {
     // m:fPr/m:type val="noBar" is a stacked fraction with no rule (binomial
     // coefficients: (n over k) inside big parens).
     const fPr = el.children.find((ch) => localName(ch.name) === "fPr");
     const typeEl = fPr && child(fPr, "type");
-    const bar = !(typeEl && attr(typeEl, "val") === "noBar");
-    return [{ t: "frac", num: childrenOf("num"), den: childrenOf("den"), bar }];
+    const type = typeEl && attr(typeEl, "val");
+    const num = childrenOf("num");
+    const den = childrenOf("den");
+    if (type === "lin") return [...num, { t: "run", text: "/", normal: true }, ...den];
+    return [{ t: "frac", num, den, bar: type !== "noBar" }];
   }
   if (ln === "sSup") return [{ t: "sup", base: childrenOf("e"), script: childrenOf("sup") }];
   if (ln === "sSub") return [{ t: "sub", base: childrenOf("e"), script: childrenOf("sub") }];
@@ -289,25 +307,74 @@ function parseOmml(el: XmlElement): MathNode[] {
     const dPr = el.children.find((ch) => localName(ch.name) === "dPr");
     const beg = dPr && child(dPr, "begChr");
     const end = dPr && child(dPr, "endChr");
-    const parts = el.children.filter((ch) => localName(ch.name) === "e").map((ch) => parseOmml(ch));
+    const parts = el.children.filter((ch) => localName(ch.name) === "e").map(mathOnly);
     return [{ t: "dlm", beg: beg ? (attr(beg, "val") ?? "(") : "(", end: end ? (attr(end, "val") ?? ")") : ")", e: parts }];
   }
   if (ln === "m" && el.children.some((ch) => localName(ch.name) === "mr")) {
     const rows = el.children
       .filter((ch) => localName(ch.name) === "mr")
-      .map((mr) => mr.children.filter((ch) => localName(ch.name) === "e").map((ch) => parseOmml(ch)));
+      .map((mr) => mr.children.filter((ch) => localName(ch.name) === "e").map(mathOnly));
     return [{ t: "mat", rows }];
   }
   if (ln === "t") return el.text ? [{ t: "run", text: el.text }] : [];
   for (const c of el.children) out.push(...parseOmml(c));
   // merge adjacent runs
-  const merged: MathNode[] = [];
+  const merged: ParsedMathNode[] = [];
   for (const n of out) {
     const last = merged[merged.length - 1];
-    if (n.t === "run" && last && last.t === "run") last.text += n.text;
+    if (n.t === "run" && last && last.t === "run" && n.normal === last.normal) last.text += n.text;
     else merged.push(n);
   }
   return merged;
+}
+
+/**
+ * A legacy QUOTE field can follow an OLE object with its own raster result.
+ * In that exact form Word displays the post-separator picture and hides the
+ * immediately preceding object. Other forms use the object itself as the
+ * visible content, so record the specific duplicate object elements instead
+ * of suppressing every object in the paragraph.
+ */
+function duplicateQuoteObjectPreviews(parent: XmlElement): Set<XmlElement> {
+  const suppressed = new Set<XmlElement>();
+  let previousObjects: XmlElement[] = [];
+  let mode: "instr" | "result" | null = null;
+  let instruction = "";
+  let candidates: XmlElement[] = [];
+  let hasResultPict = false;
+
+  for (const run of parent.children.filter((el) => localName(el.name) === "r")) {
+    const outsideObjects: XmlElement[] = [];
+    let sawField = false;
+    for (const el of run.children) {
+      const ln = localName(el.name);
+      if (ln === "object" && mode === null) outsideObjects.push(el);
+      else if (ln === "instrText" && mode === "instr") instruction += el.text;
+      else if (ln === "pict" && mode === "result") hasResultPict = true;
+      else if (ln === "fldChar") {
+        sawField = true;
+        const type = attr(el, "fldCharType");
+        if (type === "begin") {
+          mode = "instr";
+          instruction = "";
+          candidates = outsideObjects.length > 0 ? [...outsideObjects] : [...previousObjects];
+          hasResultPict = false;
+        } else if (type === "separate") {
+          mode = "result";
+        } else if (type === "end") {
+          if (/^\s*QUOTE\s*$/i.test(instruction) && hasResultPict) {
+            for (const object of candidates) suppressed.add(object);
+          }
+          mode = null;
+          instruction = "";
+          candidates = [];
+          hasResultPict = false;
+        }
+      }
+    }
+    previousObjects = !sawField && mode === null ? outsideObjects : [];
+  }
+  return suppressed;
 }
 
 function parseParaChildren(
@@ -317,6 +384,7 @@ function parseParaChildren(
   field: FieldState,
   bookmarks?: string[],
 ): void {
+  const suppressedObjects = duplicateQuoteObjectPreviews(parent);
   for (const el of parent.children) {
     const ln = localName(el.name);
     if (ln === "bookmarkStart" && bookmarks) {
@@ -325,7 +393,7 @@ function parseParaChildren(
       if (bm && !bm.startsWith("_GoBack")) bookmarks.push(bm);
     }
     if (ln === "r") {
-      const run = parseRun(el, ctx, field);
+      const run = parseRun(el, ctx, field, suppressedObjects);
       if (run) run.srcParent = parent;
       // Keep empty runs that carry an open complex field: the field content
       // is appended to the carrier when fldChar end arrives.
@@ -360,7 +428,21 @@ function parseParaChildren(
         // m:oMathPara marks a display equation (centered, display-style
         // layout); a bare m:oMath flows inline.
         const display = ln === "oMathPara";
-        out.push({ type: "run", props: {}, content: [{ kind: "math", nodes, src: el, display }] });
+        const content: RunContent[] = [];
+        let segment: MathNode[] = [];
+        const flushMath = () => {
+          if (segment.length === 0) return;
+          content.push({ kind: "math", nodes: segment, src: el, display });
+          segment = [];
+        };
+        for (const node of nodes) {
+          if (node.t === "break") {
+            flushMath();
+            content.push({ kind: "break", breakType: "line" });
+          } else segment.push(node);
+        }
+        flushMath();
+        out.push({ type: "run", props: {}, content });
       }
     } else if (ln === "hyperlink") {
       const rid = attr(el, "id");
@@ -438,7 +520,53 @@ const SYMBOL_CHAR_MAP: Record<number, string> = {
   0xb7: "•", // Symbol bullet
 };
 
-function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run | null {
+/** Legacy Symbol-font text stores encoded bytes in the U+F000 private-use
+ * block. Decode the characters used by equation runs so browsers measure the
+ * actual glyphs instead of fixed-width missing-glyph placeholders. */
+const SYMBOL_TEXT_CHAR_MAP: Record<number, string> = {
+  0x20: " ",
+  0x28: "(",
+  0x29: ")",
+  0x2c: ",",
+  0x2d: "−",
+  0x2e: ".",
+  0x2f: "/",
+  0x31: "1",
+  0x33: "3",
+  0x34: "4",
+  0x36: "6",
+  0x37: "7",
+  0x3d: "=",
+  0x47: "Γ",
+  0x61: "α",
+  0x64: "δ",
+  0x65: "ε",
+  0x67: "γ",
+  0x68: "η",
+  0x6b: "κ",
+  0x6c: "λ",
+  0x71: "θ",
+  0x72: "ρ",
+  0x73: "σ",
+  0x7a: "ζ",
+};
+
+function decodeSymbolText(text: string, font?: string): string {
+  if (!font || !/^symbol$/i.test(font)) return text;
+  return [...text].map((char) => {
+    const code = char.codePointAt(0)!;
+    return code >= 0xf000 && code <= 0xf0ff
+      ? (SYMBOL_TEXT_CHAR_MAP[code - 0xf000] ?? char)
+      : char;
+  }).join("");
+}
+
+function parseRun(
+  r: XmlElement,
+  ctx: DocParseContext,
+  field: FieldState,
+  suppressedObjects: ReadonlySet<XmlElement>,
+): Run | null {
   const run: Run = {
     type: "run",
     props: parseRunProps(child(r, "rPr"), ctx),
@@ -449,14 +577,17 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
   for (const el of r.children) {
     const ln = localName(el.name);
     switch (ln) {
-      case "t":
-        if (field.mode === "result") field.cachedResult += el.text;
-        else if (field.mode !== "instr") run.content.push({ kind: "text", text: el.text, srcT: el });
+      case "t": {
+        const text = decodeSymbolText(el.text, run.props.font);
+        if (field.mode === "result") field.cachedResult += text;
+        else if (field.mode !== "instr") run.content.push({ kind: "text", text, srcT: el });
         break;
-      case "delText":
+      }
+      case "delText": {
         // Deleted text (inside w:del); reaches here only in markup view.
-        run.content.push({ kind: "text", text: el.text, srcT: el });
+        run.content.push({ kind: "text", text: decodeSymbolText(el.text, run.props.font), srcT: el });
         break;
+      }
       case "instrText":
         if (field.mode === "instr") field.instruction += el.text;
         break;
@@ -513,7 +644,13 @@ function parseRun(r: XmlElement, ctx: DocParseContext, field: FieldState): Run |
         break;
       }
       case "pict":
-        run.content.push(...parseVmlPict(el, ctx));
+        // A complex field can store an old picture in its instruction region
+        // before fldChar separate. Word hides that copy and displays only the
+        // field result after the separator.
+        if (field.mode !== "instr") run.content.push(...parseVmlPict(el, ctx));
+        break;
+      case "object":
+        if (!suppressedObjects.has(el)) run.content.push(...parseVmlPict(el, ctx));
         break;
       case "AlternateContent": {
         // Prefer the DrawingML choice when it's a plain picture. For choices
@@ -1497,6 +1634,7 @@ function parseCell(tc: XmlElement, ctx: DocParseContext): TableCell {
     if (mar) props.margins = parseCellMargins(mar);
     const vAlign = attr(child(tcPr, "vAlign"), "val");
     if (vAlign === "center" || vAlign === "bottom") props.verticalAlign = vAlign;
+    if (attr(child(tcPr, "textDirection"), "val") === "btLr") props.textDirection = "btLr";
   }
   return { props, blocks: parseBlocks(tc, ctx) };
 }

@@ -73,6 +73,8 @@ interface PTabAtom {
 }
 interface ImageAtom {
   kind: "image";
+  props: RunProps;
+  font: FontSpec;
   part: string;
   width: number;
   height: number;
@@ -83,6 +85,8 @@ interface ImageAtom {
 }
 interface DrawingAtom {
   kind: "drawing";
+  props: RunProps;
+  font: FontSpec;
   drawing: DrawingContent;
 }
 interface MathAtom {
@@ -265,6 +269,47 @@ export interface BrokenParagraph {
   anchors: Shape[];
 }
 
+/** Split an oversized display equation only at breakpoints exposed by its
+ * top-level OMML expression. Fractions, scripts, and other atomic constructs
+ * do not expose breakpoints and remain intact. */
+function wrapDisplayMath(box: MathBox, maxWidth: number): MathBox[] {
+  // Leave a 1% advance reserve: browser math fallback glyphs measure a few
+  // pixels narrower than Word's Cambria Math across a full equation line.
+  const fitWidth = maxWidth * 0.99;
+  if (!box.display || box.width <= fitWidth || !box.breaks?.length) return [box];
+  const breaks = [...new Set(box.breaks)]
+    .filter((at) => at > 0.01 && at < box.width - 0.01)
+    .sort((a, b) => a - b);
+  const ranges: { start: number; end: number }[] = [];
+  let start = 0;
+  while (box.width - start > fitWidth) {
+    const candidates = breaks.filter((at) => at > start + 0.01 && at <= start + fitWidth);
+    const end = candidates[candidates.length - 1];
+    if (end === undefined) return [box];
+    ranges.push({ start, end });
+    start = end;
+  }
+  ranges.push({ start, end: box.width });
+
+  return ranges.map((range) => ({
+    width: range.end - range.start,
+    ascent: box.ascent,
+    descent: box.descent,
+    pieces: box.pieces
+      .filter((piece) => piece.x >= range.start && piece.x < range.end)
+      .map((piece) => ({ ...piece, x: piece.x - range.start })),
+    rules: box.rules
+      .filter((rule) => rule.x2 > range.start && rule.x1 < range.end)
+      .map((rule) => ({
+        ...rule,
+        x1: Math.max(rule.x1, range.start) - range.start,
+        x2: Math.min(rule.x2, range.end) - range.start,
+      })),
+    display: box.display,
+    baseSize: box.baseSize,
+  }));
+}
+
 /** Column-relative horizontal bounds for a line, supplied by the engine when
  * floating images exclude regions. skipTo: move the line top to this
  * paragraph-relative y first (top-and-bottom wrap). */
@@ -313,6 +358,7 @@ export function breakParagraph(
   minLineHeight?: number,
 ): BrokenParagraph {
   const props = doc.effectiveParaProps(para);
+  if (props.snapToGrid === false) minLineHeight = undefined;
   const fallbackFamily = doc.styles.defaultRPr.font ?? "Calibri";
 
   // Bidi paragraph: lines assemble in logical order, then reorder to visual
@@ -394,11 +440,18 @@ export function breakParagraph(
     return true;
   };
   // Indents (and first-line indent) apply only to the first free interval of a
-  // band; a float's far-side interval starts flush at its own edge.
+  // band; a float's far-side interval starts flush at its own edge. left/right
+  // remain physical, while firstLine/hanging apply from the logical start.
   const lineStartX = (idx: number) =>
-    curSegIdx > 0 ? curBase : curBase + indentLeft + (idx === 0 ? firstLineExtra : 0);
+    curSegIdx > 0 ? curBase : curBase + indentLeft + (idx === 0 && !bidiPara ? firstLineExtra : 0);
   const availFor = (idx: number) =>
     curSegIdx > 0 ? curWidth : curWidth - indentLeft - (idx === 0 ? firstLineExtra : 0) - indentRight;
+  // Tab stops are measured from the paragraph edge. A bidi first-line indent
+  // moves that logical edge in from the RIGHT, while our assembly cursor still
+  // starts at the physical left. Compare stops in the logical coordinate, then
+  // translate the target back to the assembly coordinate.
+  const bidiTabOffset = (idx: number) =>
+    bidiPara && idx === 0 && firstLineExtra > 0 ? firstLineExtra : 0;
 
   beginLine(0);
   let x = lineStartX(0);
@@ -416,11 +469,37 @@ export function breakParagraph(
       font: labelFont,
     });
     if (numberingLabel.suffix === "tab") {
-      // Advance to the text indent position (Word: next tab stop or indentLeft).
-      const target = indentLeft;
-      x = Math.max(labelX + labelWidth + measurer.width(" ", labelFont) * 0.5, target);
-      if (labelX + labelWidth > indentLeft) {
-        x = nextDefaultTab(labelX + labelWidth);
+      if (bidiTabOffset(0) > 0) {
+        const offset = bidiTabOffset(0);
+        const stop = nextTabStop(
+          labelX + labelWidth + offset,
+          props.tabs,
+          contentWidth - indentRight,
+        );
+        x = Math.max(
+          labelX + labelWidth + measurer.width(" ", labelFont) * 0.5,
+          stop.pos - offset,
+        );
+        // Unlike LTR numbering, bidi reordering re-lays spans contiguously.
+        // Keep the suffix tab as a span so its gap remains between the label
+        // and the text after visual reordering.
+        const gap = x - labelX - labelWidth;
+        if (gap > 0) {
+          cur.push({
+            x: labelX + labelWidth,
+            width: gap,
+            text: "\t",
+            props: numberingLabel.props,
+            font: labelFont,
+          });
+        }
+      } else {
+        // Advance to the text indent position (Word: next tab stop or indentLeft).
+        const target = indentLeft;
+        x = Math.max(labelX + labelWidth + measurer.width(" ", labelFont) * 0.5, target);
+        if (labelX + labelWidth > indentLeft) {
+          x = nextDefaultTab(labelX + labelWidth);
+        }
       }
     } else if (numberingLabel.suffix === "space") {
       x = labelX + labelWidth + measurer.width(" ", labelFont);
@@ -480,7 +559,11 @@ export function breakParagraph(
       const slack = avail - line.width;
       if (slack > 0) for (const s of line.spans) s.x += slack / 2;
     } else {
-      applyAlignment(line, physAlign ?? "left", avail, startX, isLast || endsWithBreak);
+      const align =
+        bidiPara && physAlign === "justify" && (isLast || endsWithBreak)
+          ? "right"
+          : (physAlign ?? "left");
+      applyAlignment(line, align, avail, startX, isLast || endsWithBreak);
     }
     lines.push(line);
     cur = [];
@@ -575,7 +658,9 @@ export function breakParagraph(
       continue;
     }
     if (atom.kind === "tab") {
-      const stop = nextTabStop(x, props.tabs, contentWidth - indentRight);
+      const offset = bidiTabOffset(lineIndex);
+      const rawStop = nextTabStop(x + offset, props.tabs, contentWidth - indentRight);
+      const stop = { ...rawStop, pos: rawStop.pos - offset };
       const leader = stop.leader && stop.leader !== "none" ? stop.leader : undefined;
       let target = stop.pos;
       if (stop.align === "right" || stop.align === "center" || stop.align === "decimal") {
@@ -632,9 +717,14 @@ export function breakParagraph(
       if (curLineWidth > 0 && x + w > lineStartX(lineIndex) + availFor(lineIndex)) {
         flush(false, false);
       }
-      cur.push({ x, width: w, math: atom.box, mathSrc: atom.src, props: {}, font: fontOf({}, fallbackFamily) });
-      curLineWidth += w;
-      x += w;
+      const rows = wrapDisplayMath(atom.box, availFor(lineIndex));
+      for (let ri = 0; ri < rows.length; ri++) {
+        const row = rows[ri];
+        cur.push({ x, width: row.width, math: row, mathSrc: atom.src, props: {}, font: fontOf({}, fallbackFamily) });
+        curLineWidth += row.width;
+        x += row.width;
+        if (ri + 1 < rows.length) flush(false, false);
+      }
       continue;
     }
     if (atom.kind === "image" || atom.kind === "drawing") {
@@ -651,8 +741,11 @@ export function breakParagraph(
             ? { part: atom.part, width: w, height: h, crop: atom.crop, rotation: atom.rotation, border: atom.border, srcDrawing: atom.srcDrawing }
             : undefined,
         drawing: atom.kind === "drawing" ? atom.drawing : undefined,
-        props: {},
+        props: atom.props,
         font: fontOf({}, fallbackFamily),
+        // Keep the old fallback-font geometry for ordinary image lines, but
+        // retain the originating run font for document-grid calculations.
+        metricsFont: atom.font,
       });
       curLineWidth += w;
       x += w;
@@ -685,7 +778,12 @@ export function breakParagraph(
         }
       }
       const wordW = headW + atom.width + tailW;
-      if (props.alignment === "justify" && curSpaceWidth > 0) {
+      if (
+        doc.compatibilityMode >= 15 &&
+        !bidiPara &&
+        props.alignment === "justify" &&
+        curSpaceWidth > 0
+      ) {
         // Word packs justified lines beyond the natural width by compressing
         // spaces (applyAlignment shrinks them back to fit) when the
         // pack-vs-break comparison favors it. Compression counts all spaces
@@ -707,6 +805,10 @@ export function breakParagraph(
         // if it isn't the whole line) moves down with the rest of the word.
         const head = hi > minSpans && hi < cur.length && cur[hi - 1].isSpace ? cur.splice(hi) : [];
         for (const h of head) curLineWidth -= h.width;
+        const trailingSpaces: LineSpan[] = [];
+        for (let j = cur.length - 1; j >= minSpans && cur[j].isSpace; j--) {
+          trailingSpaces.unshift(cur[j]);
+        }
         // A float in the MIDDLE of the column leaves free space on both sides;
         // Word fills the near side, then the far side of the SAME line band,
         // then the next band. Try each remaining far-side interval (empty
@@ -723,6 +825,16 @@ export function breakParagraph(
           x = lineStartX(lineIndex);
         } else {
           flush(false, false);
+          // The first trailing space is the wrapping separator. Additional
+          // consecutive spaces are editable content at the start of the next
+          // visual line, so keep their source bindings and advances.
+          for (const space of trailingSpaces.slice(1)) {
+            space.x = x;
+            cur.push(space);
+            curLineWidth += space.width;
+            curSpaceWidth += space.width;
+            x += space.width;
+          }
         }
         for (const h of head) {
           h.x = x;
@@ -888,20 +1000,17 @@ function finishLine(
   let maxImage = 0;
   let maxImageFontDesc = 0;
   let maxImageFontLine = 0;
+  let maxGridObjectGlyph = 0;
+  let maxGridObjectDesc = 0;
+  let maxGridTextGlyph = 0;
   let maxNaturalText = 0;
   let mathDisplayBase = 0;
   let maxInlineMath = 0;
-  // w:position: Word extends the line box by the FULL shift, additively after
-  // the line-spacing multiplier (+6pt raise = exactly +6pt pitch on the
-  // charstyles probe, not 6pt x 1.08). Raised runs push the top up; lowered
-  // runs push the bottom down.
-  let raiseAsc = 0;
-  let raiseDesc = 0;
-  // Ascent/descent of NON-object content (text + inline math) only, used to
-  // resolve how much a w:position raise grows the line: the raise lifts the
-  // text line, and the result is maxed against any co-line object height.
-  let maxNonObjAscent = 0;
-  let maxNonObjDescent = 0;
+  // Furthest positioned text edge. A shift belongs to its own run: combining
+  // the largest raise with another run's larger font inflates legacy equation
+  // lines whose small limits sit beside a tall integral.
+  let shiftedAscent = 0;
+  let shiftedDescent = 0;
 
   const consider = (font: FontSpec, imageHeight?: number) => {
     if (imageHeight !== undefined) {
@@ -926,25 +1035,30 @@ function finishLine(
     maxRawDescent = Math.max(maxRawDescent, m.descent);
     maxNatural = Math.max(maxNatural, m.lineHeight);
     maxNaturalText = Math.max(maxNaturalText, m.lineHeight);
-    maxNonObjAscent = Math.max(maxNonObjAscent, m.ascent);
-    maxNonObjDescent = Math.max(maxNonObjDescent, m.descent);
+    return m;
   };
 
-  if (spans.length === 0) {
+  // An invisible tab advances horizontally but does not enlarge Word's line
+  // box. A leader tab paints glyphs, so its font still contributes metrics.
+  const metricSpans = spans.filter((s) => !(s.text === "\t" && !s.leader));
+  if (metricSpans.length === 0) {
     // Empty line/paragraph: sized by the paragraph mark's run props.
     const markProps = doc.effectiveRunProps(para, props.markRunProps ?? {});
     consider(fontOf(markProps, fallbackFamily));
   } else {
-    for (const s of spans) {
-      if (s.image) consider(s.font, s.image.height);
-      else if (s.drawing) consider(s.font, s.drawing.height);
-      else if (s.math) {
+    for (const s of metricSpans) {
+      let textMetrics: ReturnType<TextMeasurer["metrics"]> | undefined;
+      if (s.image || s.drawing) {
+        const objectMetrics = measurer.metrics(s.metricsFont ?? s.font);
+        const objectHeight = s.image?.height ?? s.drawing!.height;
+        maxGridObjectGlyph = Math.max(maxGridObjectGlyph, objectMetrics.ascent + objectMetrics.descent);
+        maxGridObjectDesc = Math.max(maxGridObjectDesc, objectMetrics.descent);
+        consider(s.font, objectHeight);
+      } else if (s.math) {
         maxAscent = Math.max(maxAscent, s.math.ascent);
         maxDescent = Math.max(maxDescent, s.math.descent);
         maxRawDescent = Math.max(maxRawDescent, s.math.descent);
         maxNatural = Math.max(maxNatural, s.math.ascent + s.math.descent);
-        maxNonObjAscent = Math.max(maxNonObjAscent, s.math.ascent);
-        maxNonObjDescent = Math.max(maxNonObjDescent, s.math.descent);
         if (s.math.display) {
           // A display equation (m:oMathPara) sits on its own line, and Word
           // gives that line the paragraph's line-spacing: the multiple applies
@@ -961,27 +1075,35 @@ function finishLine(
         } else {
           maxInlineMath = Math.max(maxInlineMath, s.math.ascent + s.math.descent);
         }
-      } else consider(s.metricsFont ?? s.font);
+      } else {
+        textMetrics = consider(s.metricsFont ?? s.font)!;
+        maxGridTextGlyph = Math.max(maxGridTextGlyph, textMetrics.ascent + textMetrics.descent);
+      }
       const r = s.props.raise;
-      if (r) {
-        // Raise is the full shift for the TEXT line (see below).
-        if (r > 0) raiseAsc = Math.max(raiseAsc, r);
-        else raiseDesc = Math.max(raiseDesc, -r);
+      if (r && textMetrics) {
+        if (r > 0) shiftedAscent = Math.max(shiftedAscent, textMetrics.ascent + r);
+        else shiftedDescent = Math.max(shiftedDescent, textMetrics.descent - r);
       }
     }
   }
   // w:position extends the line box by the FULL shift for a text line (the
   // charstyles probe: +6pt raise = +6pt pitch), but the raised text still
   // shares its line with any co-line object (an inline image/drawing), and the
-  // final line ascent is the MAX of {object height, raised text top} - it is
+  // final line ascent is the MAX of {other content, raised text top} - it is
   // NOT the object height PLUS the raise. A small figure label raised high
   // beside a tall picture (dense figure "V1" at +160pt beside a 186pt image)
   // stays within the image extent and must add nothing, else the figure line
-  // doubles. Resolve the raise as the amount the raised/lowered text protrudes
-  // past the line's overall ascent/descent (which already includes the object);
-  // for a text-only line maxAscent == maxNonObjAscent so this is the full shift.
-  raiseAsc = Math.max(0, maxNonObjAscent + raiseAsc - maxAscent);
-  raiseDesc = Math.max(0, maxNonObjDescent + raiseDesc - maxDescent);
+  // doubles. Only the positioned run's own edge can protrude past the line's
+  // unshifted ascent/descent.
+  const raiseAsc = Math.max(0, shiftedAscent - maxAscent);
+  const raiseDesc = Math.max(0, shiftedDescent - maxDescent);
+  const commonRaise =
+    metricSpans.length > 0 &&
+    metricSpans.every(
+      (s) => !s.image && !s.drawing && !s.math && (s.props.raise ?? 0) > 0,
+    )
+      ? Math.min(...metricSpans.map((s) => s.props.raise!))
+      : 0;
 
   // w:docGrid (type=lines): Word snaps each line's single-line font height up
   // to the grid pitch before the line-spacing multiplier. The extra space sits
@@ -996,6 +1118,7 @@ function finishLine(
   // emitting items.
   let height = natural;
   let baselineH: number | undefined;
+  let gridImageFit = false;
   const ls = props.lineSpacing;
   if (ls) {
     if (ls.rule === "auto") {
@@ -1017,56 +1140,69 @@ function finishLine(
         const lead = ls.value >= 1.15 ? (ls.value - 1) * bodyLine : 0;
         height = Math.max(natural + lead, mathDisplayBase * ls.value);
       } else if (maxImage > 0) {
-        // Word does NOT scale an inline image with the auto multiplier: an
-        // image-dominated line measures image + leading below, with the image
-        // top at the line top (baseline = top + image height). The leading is
-        // the larger of the descent share (k x descent) and the multiplier's
-        // normal inter-line leading, (k-1) x one text line. For modest
-        // multipliers the descent term wins (pickett icon rows: 25.92pt
-        // icons, 1.15 spacing, 12pt Gill Sans measure 29.2 +/- 0.2pt in
-        // Word's PDF); for double-spaced boxes it is a full text line so the
-        // text below clears the box like Word (wild-gatech "SOPITA" callouts
-        // at 2.0 spacing - the following line sits ~a text line below the box).
-        // The multiplier's inter-line leading below the object is (k-1) text
-        // lines PLUS the line's own font descent: an object-only line carries no
-        // text span, so maxDescent is 0 and the raw (k-1)*line term stops one
-        // descent short of where Word puts the NEXT baseline (wild-gatech p7's
-        // double-spaced callout wraps its trailing text to a second line that
-        // landed ~5px high). This is inter-line leading, so it only applies when
-        // a line follows in the same paragraph (!isLast): a lone object line
-        // (a title-page logo in its own paragraph - wild-hamburg p2) gets no
-        // below-leading and its paragraph height stays object-tall. Genuine
-        // multi-line spacing (>=1.5) adds the descent; the sub-line 1.15 case
-        // (pickett icon rows, measured at descent*1.15) stays on the descent
-        // term, so the boost is gated above it.
-        let lineTerm = (ls.value - 1) * maxImageFontLine;
-        if (ls.value >= 1.5 && !isLast) lineTerm += Math.max(maxDescent, maxImageFontDesc);
-        const descSide = Math.max(Math.max(maxDescent, maxImageFontDesc) * ls.value, lineTerm);
-        const imageH = maxImage + descSide;
-        if (imageH > maxNaturalText * ls.value) {
-          height = imageH;
-          baselineH = height - descSide + maxDescent;
+        const gridGlyph = Math.max(maxGridObjectGlyph, maxGridTextGlyph);
+        const gridLead = Math.max(0, (minLineHeight ?? 0) - gridGlyph);
+        const gridImageH =
+          gridLead > 0
+            ? gridLead + (maxImage + Math.max(maxDescent, maxGridObjectDesc)) * ls.value
+            : 0;
+        if (gridImageH > maxNaturalText * ls.value) {
+          // A snap-to-grid image line keeps the grid's text reserve ABOVE the
+          // object and applies the auto multiple to the full image-dominated
+          // box. This reserve is lost if docGrid is treated only as a minimum:
+          // once the image is taller than the pitch, max(image, pitch) drops it.
+          // wild2-math-eq-as-images p2 measures 6.7px above a 44.93px image;
+          // 6.8 + (44.93 + 1.97) * 1.15 predicts the following line to 0.23px.
+          height = gridImageH;
+          // emitLine subtracts maxDescent from baselineH. Add it here so
+          // the image baseline remains gridLead + image height from the top.
+          baselineH = gridLead + maxImage + maxDescent;
+          // This is physical grid/object extent, not typographic leading
+          // that Word permits to hang into the bottom margin.
+          gridImageFit = true;
+        } else {
+          // Word does NOT scale a non-grid inline image with the auto
+          // multiplier: an image-dominated line measures image + leading below,
+          // with the image top at the line top. The leading is the larger of
+          // the descent share (k x descent) and the multiplier's normal
+          // inter-line leading, (k-1) x one text line. For modest multipliers
+          // the descent term wins (pickett icon rows); double-spaced boxes use
+          // a full text line (wild-gatech SOPITA callouts).
+          let lineTerm = (ls.value - 1) * maxImageFontLine;
+          if (ls.value >= 1.5 && !isLast) lineTerm += Math.max(maxDescent, maxImageFontDesc);
+          const descSide = Math.max(Math.max(maxDescent, maxImageFontDesc) * ls.value, lineTerm);
+          const imageH = maxImage + descSide;
+          if (imageH > maxNaturalText * ls.value) {
+            height = imageH;
+            baselineH = height - descSide + maxDescent;
+          }
         }
       } else if (maxInlineMath > 0 && maxNaturalText > 0) {
         // Inline (non-display) math under a line-spacing multiplier: Word
-        // scales the TEXT font's line height by the multiple and treats the
-        // math cluster's extent only as a FLOOR - it does not multiply the
-        // cluster's ascent/descent the way it does a plain text line. Same
-        // family as the inline-image rule above: a tall inline fraction or
-        // sub/superscript cluster otherwise inflates the doubled leading and
-        // drifts the rest of the page (wild-gatech p14, VAC_need/t_VAC under
-        // 2.0 spacing ran ~1 line too tall). The intra-line baseline is left
-        // to the cluster (baselineH defaults to natural), so only the pitch
-        // to the next line changes.
-        height = Math.max(maxNaturalText * ls.value, maxInlineMath);
+        // does not multiply a tall math cluster. A genuine multi-line setting
+        // instead adds the ordinary text leading below that cluster, while a
+        // short equation still uses the normal multiplied text line.
+        const lead = ls.value >= 1.15 ? (ls.value - 1) * maxNaturalText : 0;
+        height = Math.max(maxNaturalText * ls.value, maxInlineMath + lead);
       }
     } else if (ls.rule === "exact") height = ls.value;
     else height = Math.max(natural, ls.value);
   }
 
   if ((raiseAsc || raiseDesc) && ls?.rule !== "exact") {
-    baselineH = (baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height)) + raiseAsc;
-    height += raiseAsc + raiseDesc;
+    // When every baseline-bearing run is raised, the bottom of the original
+    // descent band is empty. Word reuses up to that common raise (dense legacy
+    // equations); a mixed baseline line or an object line cannot reuse it.
+    const descentReuse = Math.min(commonRaise, maxDescent, maxRawDescent);
+    baselineH =
+      (baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height)) +
+      raiseAsc -
+      descentReuse;
+    height += raiseAsc + raiseDesc - descentReuse;
+    // Moving both values by the reclaimed amount keeps the painted baseline
+    // and the font-box fit extent unchanged while shortening the line advance.
+    maxDescent -= descentReuse;
+    maxRawDescent -= descentReuse;
   }
 
   return {
@@ -1077,7 +1213,12 @@ function finishLine(
     naturalHeight: natural,
     height,
     baselineH: baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height),
-    fitHeight: Math.min(height, natural - maxDescent + maxRawDescent),
+    // A grid-scaled object line is a physical paragraph box: when it is the
+    // final line, Word also reserves the paragraph's trailing space before
+    // deciding whether the box fits at the page bottom.
+    fitHeight: gridImageFit
+      ? height + (isLast ? (props.spacingAfter ?? 0) : 0)
+      : Math.min(height, natural - maxDescent + maxRawDescent),
     isLast,
     endsWithBreak,
   };
@@ -1169,6 +1310,8 @@ function buildAtoms(
         case "image":
           atoms.push({
             kind: "image",
+            props,
+            font,
             part: content.part,
             width: content.width,
             height: content.height,
@@ -1182,7 +1325,7 @@ function buildAtoms(
           anchors.push(content.shape);
           break;
         case "drawing":
-          atoms.push({ kind: "drawing", drawing: content });
+          atoms.push({ kind: "drawing", props, font, drawing: content });
           break;
         case "math": {
           const size = props.size ?? 14.666;
