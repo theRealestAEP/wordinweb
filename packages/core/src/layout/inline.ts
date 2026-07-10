@@ -1420,20 +1420,31 @@ function finishLine(
   // spacing (staging-eastasian), while Latin faces do.
   let tallestTextIsEa = false;
 
-  const consider = (font: FontSpec, imageHeight?: number, objRaise = 0) => {
+  const consider = (font: FontSpec, imageHeight?: number, objRaise = 0, descShift = 0) => {
     if (imageHeight !== undefined) {
       maxAscent = Math.max(maxAscent, imageHeight + objRaise);
       if (objRaise < 0) {
         maxDescent = Math.max(maxDescent, -objRaise);
         maxRawDescent = Math.max(maxRawDescent, -objRaise);
       }
-      maxNatural = Math.max(maxNatural, imageHeight + measurer.metrics(font).descent * 0.3);
+      // The object's own natural height is exactly its extent: Word's figure
+      // lines carry no leading of their own (dense p15: image top = line top,
+      // inter-figure gap = the para's after-spacing alone). Any below-baseline
+      // room comes from co-lined text descent via maxDescent.
+      maxNatural = Math.max(maxNatural, imageHeight + objRaise);
       maxImage = Math.max(maxImage, imageHeight);
       maxImageFontDesc = Math.max(maxImageFontDesc, measurer.metrics(font).descent);
       maxImageFontLine = Math.max(maxImageFontLine, measurer.metrics(font).lineHeight);
       return;
     }
     const m = measurer.metrics(font);
+    // A raised (w:position) run co-lined with an inline object carries its ink
+    // box UP with the raise: its descent contribution shrinks by the shift
+    // (dense p15's figure labels at +16pt beside 186pt plots leave Word's
+    // figure lines with ZERO descent - the inter-figure gap is exactly the
+    // 6pt after-spacing). Text-only lines keep the unshifted descent (the
+    // commonRaise descent-reuse below handles the all-raised case).
+    const effDescent = Math.max(0, m.descent - descShift);
     maxAscent = Math.max(maxAscent, m.ascent);
     // RAW descent, not the quantized lineDescent: the quantized below-share
     // inflates natural = ascent + descent past the raw line height whenever
@@ -1443,9 +1454,9 @@ function finishLine(
     // inflated-natural + quantized-descent pair cancelled in baseline
     // placement, which is why baselines looked right while every 11pt page
     // drifted ~0.05pt per line.
-    maxDescent = Math.max(maxDescent, m.descent);
-    maxRawDescent = Math.max(maxRawDescent, m.descent);
-    maxNatural = Math.max(maxNatural, m.lineHeight);
+    maxDescent = Math.max(maxDescent, effDescent);
+    maxRawDescent = Math.max(maxRawDescent, effDescent);
+    maxNatural = Math.max(maxNatural, m.lineHeight - (m.descent - effDescent));
     maxNaturalText = Math.max(maxNaturalText, m.lineHeight);
     return m;
   };
@@ -1501,6 +1512,7 @@ function finishLine(
     const markProps = doc.effectiveRunProps(para, props.markRunProps ?? {});
     consider(fontOf(markProps, fallbackFamily));
   } else {
+    const lineHasObject = metricSpans.some((s) => s.image || s.drawing);
     for (const s of metricSpans) {
       let textMetrics: ReturnType<TextMeasurer["metrics"]> | undefined;
       if (s.image || s.drawing) {
@@ -1540,7 +1552,8 @@ function finishLine(
           maxInlineMath = Math.max(maxInlineMath, s.math.ascent + s.math.descent);
         }
       } else {
-        textMetrics = consider(s.metricsFont ?? s.font)!;
+        const raiseUp = lineHasObject ? Math.max(0, s.props.raise ?? 0) : 0;
+        textMetrics = consider(s.metricsFont ?? s.font, undefined, 0, raiseUp)!;
         maxGridTextGlyph = Math.max(maxGridTextGlyph, textMetrics.ascent + textMetrics.descent);
         maxTextAscent = Math.max(maxTextAscent, textMetrics.ascent);
         maxTextDescent = Math.max(maxTextDescent, textMetrics.descent);
