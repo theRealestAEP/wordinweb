@@ -1095,6 +1095,64 @@ offset cancels and the pitch deltas are reference-independent.
   be built and validated safely; this is now a *characterised* task, not a
   blind plateau.
 
+### NIH row-height probe CLOSED: the residual was WIDTHS and KEEPS, not row heights (2026-07)
+With the para→table boundary rule already landed, probe-nih-rowheight still
+scored mean 3.10 and the wild2 doc kept a −2p drift. Rule-level measurement of
+the probe PDF (pdfminer rules vs our DOM rules) pinned five independent causes;
+fixing them took the probe to **0.00 on all 12 pages**, the wild2 page count to
+**419 = Word**, and the first 50 pages to ≤2.5% (TOC pages 3-8: 0.1-0.3%):
+- **A tblW=auto table whose trusted grid overruns its slot is CLAMPED, not
+  hung.** The probe's guidance table (gridCol+tcW 9700tw, tblInd 500tw, 9360tw
+  column) renders 443pt wide in Word (= column − indent; rules span x 97.4 →
+  539.6), not the authored 485pt. Only an EXPLICIT dxa tblW hangs (gatech's
+  9129tw table — that rule stands, now conditioned on `width !== undefined`).
+  In the real fixture the margins are 900tw so the 9700 grid FITS — the probe
+  had mis-reproduced the section and this clamp never fires there.
+- **CRACKED: Word's shrink rule for over-wide tables — col = tcW − (tcW −
+  minContent)·k, k = (ΣtcW − T)/Σ(tcW − min).** For a pct table whose per-cell
+  tcW total exceeds the pct target, Word IGNORES the cached tblGrid and shrinks
+  every column from its tcW preference toward its min-content width
+  proportionally to the slack. Verified against rendered rules to ≤0.2pt on
+  wild2's p16 5-col financial table (predicted [151.0,78.4,64.3,66.2,89.0] vs
+  measured [150.83,78.52,64.28,66.02,89.03]; the cached grid is 5.3pt off) and
+  p17's 6-col (model ≤0.2pt, grid 10pt off). Paragraph left-INDENTS count
+  toward min-content (p19's ind=720 headers). Fresh cached grids equal the
+  model's output — stale ones (cells edited after the last relayout) do not,
+  so the model, not the grid, is authoritative (`shrinkToTargetWidth`).
+  The wrap-critical consequence: our col0 was 5.3pt wide, so "[Koja Mugevu
+  and Nuhiha(n)]" fit on one line where Word wraps it — one lost line per
+  financial table, cascading into cantSplit/keepNext flips at page bottoms.
+- **A space run whose next word starts with an NBSP is NOT a break
+  opportunity.** Fill-in blanks ("of $ [12×nbsp] (lohirol)") wrap as ONE glued
+  unit in Word — it moves "$" down with the underlined NBSP run instead of
+  ending the line at "…of $" (SpaceAtom.noBreak; head/tail walks glue through).
+- **keepNext binds a paragraph to a following TABLE's lead block** (top border
+  half + leading tblHeader rows + first data row — `tableLeadHeight`), and
+  **tblHeader rows never sit alone at a column bottom** (header + first data
+  row move together). But a LONG keepNext paragraph (4+ lines) does NOT move
+  whole: Word splits it like any paragraph and only its final line (+ widow
+  companion) binds forward (p34/35: [3×w:br + "58"] leaves two break lines at
+  the page bottom). Implemented as a planBreaks tail reservation on the final
+  line (`keepNextTail`), with long chain members terminating the chain walk.
+- **cantSplit yields when the row is taller than one page** — Word moves it to
+  a fresh page first, THEN splits it mid-row (p115/116 giant guidance row; we
+  used to let it overflow past the page edge).
+- **A right/decimal tab whose aligned text cannot reach its stop wraps to a
+  fresh line and re-evaluates** (full leader + number at the stop), while text
+  ending within ~0.25pt of (stop − numberWidth) right-aligns normally — the
+  TOC's "…CUQIKAPUBAK126" pack vs "…KIPULAMURA" + "……… 220" wrap differ by
+  advance-exact +0.11pt vs +1.31pt past target (tolerance 0.75pt). The aligned
+  run is POSITIONED, never re-wrapped (no 2px minimum tab width, overhang past
+  the content edge allowed) — a forced 2px push made stop-adjacent numbers
+  wrap bare to the left margin and desynchronized every TOC page after p3.
+- Residual: pages ~116-260 keep a local ~25-35% band from borderline
+  cantSplit/keepNext flips in the URL-dense schedule region (Word breaks long
+  URLs at path separators; we char-wrap — see the hyphenBreaks note). Both
+  ends of the doc re-sync (p1-50 ≤2.5%, p270-419 ≈2-6%), PAGEREFs match, and
+  the suite gates are unchanged (doerfp 0.81, athabasca 0.89, longtable 1.68,
+  parity-tables/benchmark/sample/charstyles 0.00, nestedtables 0.17,
+  compare-linebreaks 6 fixtures unchanged).
+
 ## Word template rendering (2026-07, header/footer designs + cover letters)
 
 - **Word's built-in h/f templates decode to five constructs**: inline SDTs
