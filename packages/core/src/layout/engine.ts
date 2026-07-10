@@ -1054,7 +1054,13 @@ class Engine {
   // ---------- numbering ----------
 
   private numberingLabel(props: ParaProps, para: Paragraph):
-    | { text: string; props: RunProps; suffix: "tab" | "space" | "nothing"; metricsProps?: RunProps }
+    | {
+        text: string;
+        props: RunProps;
+        suffix: "tab" | "space" | "nothing";
+        metricsProps?: RunProps;
+        alignment?: "left" | "center" | "right";
+      }
     | undefined {
     const num = props.numbering;
     if (!num) return undefined;
@@ -1120,6 +1126,8 @@ class Engine {
         ? mapBulletChar(lvl.text)
         : formatLevelText(lvl.text, abs.levels, counters);
 
+    const labelAlign: "left" | "center" | "right" =
+      lvl.alignment === "center" || lvl.alignment === "right" ? lvl.alignment : "left";
     const markProps = this.doc.effectiveRunProps(para, para.props.markRunProps ?? {});
     let labelProps = markProps;
     if (lvl.rPr) labelProps = mergeRunProps(markProps, lvl.rPr);
@@ -1141,9 +1149,9 @@ class Engine {
       }
       const metricsProps = metricsFace ? { ...labelProps, font: metricsFace } : undefined;
       labelProps = { ...labelProps, font: markProps.font };
-      return { text, props: labelProps, suffix: lvl.suffix, metricsProps };
+      return { text, props: labelProps, suffix: lvl.suffix, metricsProps, alignment: labelAlign };
     }
-    return { text, props: labelProps, suffix: lvl.suffix };
+    return { text, props: labelProps, suffix: lvl.suffix, alignment: labelAlign };
   }
 
   // ---------- paragraphs ----------
@@ -1768,9 +1776,11 @@ class Engine {
       if (farHits.length > 0) {
         // Pre-emit only when the anchor paragraph itself still lands on this
         // page: estimate the intervening flow height (spacing collapse + line
-        // heights, no float narrowing). Snapshot numbering counters — these
-        // breaks are measurement only.
+        // heights, no float narrowing). Snapshot numbering counters (and the
+        // once-only startOverride bookkeeping) — these breaks are
+        // measurement only.
         const counterSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+        const seenSnapshot = new Set(this.seenNumIds);
         let simY = paraBottom;
         let prevAfter = props.spacingAfter ?? 0;
         for (let idx = index + 1; idx <= lastIdx; idx++) {
@@ -1784,6 +1794,7 @@ class Engine {
           prevAfter = np.spacingAfter ?? 0;
         }
         this.counters = counterSnapshot;
+        this.seenNumIds = seenSnapshot;
         if (simY <= this.bodyBottom + 0.25) {
           ensureLookMark();
           lookMark!.shapes.push(...farHits);
@@ -1946,7 +1957,13 @@ class Engine {
       // would number one step too high (wild-doerfp: F.1 shown as F.2,
       // G.4/H.2 skipped, because a keepNext paragraph preceding a numbered
       // heading consumed the heading's number during this look-ahead).
+      // seenNumIds must roll back with them: a numId's once-only
+      // startOverride restart otherwise fires during the walk and is LOST
+      // when the counters roll back, so the real placement never restarts
+      // (wild2-legal-nih-contract p177: numId 340 renders hh/ii/jj/kk where
+      // Word restarts at a/b/c/d).
       const counterSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+      const seenSnapshot = new Set(this.seenNumIds);
       // Height needed AFTER this paragraph's own lines to satisfy the chain.
       let tail = 0;
       let prevAfter = spacingAfter;
@@ -2014,6 +2031,7 @@ class Engine {
         break;
       }
       this.counters = counterSnapshot;
+      this.seenNumIds = seenSnapshot;
       const needed = effBefore + lines.reduce((a, l) => a + l.height, 0) + tail;
       if (this.y + needed > this.bodyBottom && needed <= bodyHeight) {
         if (lines.length >= 4 && props.keepLines !== true) {
@@ -3231,10 +3249,13 @@ class Engine {
       totalPages: () => Math.max(this.pages.length, 1),
       formatPageNumber: (n) => formatNumber(n, PAGE_FMT[page.sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
     };
-    // Numbering counters must not be consumed by measurement: snapshot.
+    // Numbering counters (and once-only startOverride bookkeeping) must not
+    // be consumed by measurement: snapshot.
     const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+    const seenSnapshot = new Set(this.seenNumIds);
     const { height } = this.layoutFrame(hf.blocks, contentWidth, fields, undefined, false, overlayPageFrame);
     this.counters = snapshot;
+    this.seenNumIds = seenSnapshot;
     return height;
   }
 
@@ -3281,11 +3302,13 @@ class Engine {
       const header = this.doc.headers.get(page.headerRel ?? "");
       if (header && header.blocks.length > 0) {
         const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+        const seenSnapshot = new Set(this.seenNumIds);
         const { items } = this.layoutFrame(header.blocks, contentWidth, fields, {
           x: sp.marginLeft,
           y: sp.headerDistance,
         }, false, this.pageFieldFrameOverlay(header));
         this.counters = snapshot;
+        this.seenNumIds = seenSnapshot;
         for (const it of items) offsetItem(it, sp.marginLeft, sp.headerDistance);
         page.items.push(...items);
       }
@@ -3295,15 +3318,19 @@ class Engine {
         // Two passes: the frame's page position depends on its own height,
         // which anchored-shape resolution needs up front.
         let snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+        let seenSnapshot = new Set(this.seenNumIds);
         const measured = this.layoutFrame(footer.blocks, contentWidth, fields, undefined, false, overlayPageFrame);
         this.counters = snapshot;
+        this.seenNumIds = seenSnapshot;
         const top = sp.pageHeight - sp.footerDistance - measured.height;
         snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+        seenSnapshot = new Set(this.seenNumIds);
         const { items } = this.layoutFrame(footer.blocks, contentWidth, fields, {
           x: sp.marginLeft,
           y: top,
         }, false, overlayPageFrame);
         this.counters = snapshot;
+        this.seenNumIds = seenSnapshot;
         for (const it of items) offsetItem(it, sp.marginLeft, top);
         page.items.push(...items);
       }

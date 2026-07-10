@@ -1153,6 +1153,56 @@ fixing them took the probe to **0.00 on all 12 pages**, the wild2 page count to
   parity-tables/benchmark/sample/charstyles 0.00, nestedtables 0.17,
   compare-linebreaks 6 fixtures unchanged).
 
+### NIH 116-260 band CRACKED: Word's URL-break rule measured from the PDF, plus two numbering root causes (2026-07)
+The reference PDF itself was the probe: every mid-token line break on pp116-260
+was extracted (pdfminer) and matched against the docx's unspaced tokens. 22
+genuine break decisions survived validation (12 apparent "break after '.'/':'"
+cases were w:br artifacts — the sanitized docx splits `word.</w:t><w:br/>
+<w:t>Word` and naive w:t concatenation invents unspaced tokens; ALWAYS check
+the raw XML for w:br before trusting a corpus pair). The measured rule:
+- **The ONLY soft break inside an unspaced token is after a hyphen with
+  alphanumerics on BOTH sides — digits included.** ".../GUF-JE-" | "04-332"
+  (letter-digit) and ".../h44-" | "40.aki" (digit-digit) break; the old
+  letters-only hyphenBreaks missed both. Leading minus ("-4") still excluded.
+- **'/', '_', '.', ':', '?', '=', '&' are NEVER break opportunities.** Word
+  char-wraps PAST them ("…Corinazib/Ha" | "rujipaguduh.loh",
+  "…BOB_HUG_Kudifup" | "a_Sucumo.idi"); the p157/p164 breaks that LOOK like
+  break-before-'&'/'=' are exact-edge char wraps (next char overflows by
+  width). This is why the earlier eager '/'+'_' experiment scored worse.
+- **Emergency break happens IN PLACE at the exact overflow character.** When
+  no opportunity exists on the line (the glued unit — NBSP glue included —
+  reaches back to line start), Word fills to the edge and continues on the
+  next line at char granularity. It does NOT flush the glued head ("at:" +
+  NBSP) to its own line first (p154: "at:  wamuv://…BOB_HUG_Kudifup" ends
+  75pt short of the page edge because the para carries ind right=1440 — the
+  wrap is at ITS line edge). Implemented as hardWrapFrag + a hi===minSpans
+  early exit in the head-walk (never beside a float).
+- 22/22 corpus breaks match the implemented rule (15 letter-hyphen already
+  handled, 2 digit-hyphen new, 5 emergency char wraps new).
+Two NON-URL root causes drove most of the band's page drift:
+- **A keepNext chain-walk measurement consumed once-only startOverride
+  restarts.** The walk snapshots counters but (before this fix) not
+  seenNumIds, so the restart fired during measurement, the counter rolled
+  back, and the real placement never restarted: numId 340 rendered hh/ii/jj/
+  kk where Word shows a/b/c/d, shifting label widths and wraps. All counter
+  snapshot sites now roll back seenNumIds too.
+- **w:lvlJc="right" was ignored.** Word right-aligns the label at the number
+  position (ind.left − hanging): the label's RIGHT edge sits there and grows
+  leftward ("i." → "viii." all end at the same x), so the suffix-tab text
+  NEVER moves off ind.left. Our left-aligned labels pushed text to the next
+  default stop for wide labels, wrapping "the kohi"-class words one line
+  early across the whole section (p177/178 cascade).
+Band after: spot set 30/50/80/120/135/150/165/177/180/185/193/200/210/225/230
+all ≤3.8% (was 25-36 at 165/180/200). Remaining pockets, characterised and
+NOT URL-related: p189-192 (one borderline keepNext flip at the p188/189
+boundary — the heading has ~53pt of room in Word vs our ~56pt need; hinges on
+the deferred para↔table boundary sub-point metrics) and p244-265 (the FUZ
+clause-matrix table's title column renders ~1 word wider than Word's — table
+width model, tracked separately). Gates: unit tests 184 green,
+benchmark/sample/charstyles 0.00, ca-agreement 0.16 mean, longtable and
+doerfp byte-identical to the pre-change baseline on every page,
+compare-linebreaks sample/chronology/msa 0/0/0.
+
 ## Word template rendering (2026-07, header/footer designs + cover letters)
 
 - **Word's built-in h/f templates decode to five constructs**: inline SDTs

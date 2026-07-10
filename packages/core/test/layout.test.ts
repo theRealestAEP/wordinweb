@@ -2721,3 +2721,128 @@ describe("wild2 legal agreement rules", () => {
     expect(textItem(result, "CELL").lineTop).toBeCloseTo(96 + 2 * 18.4, 1);
   });
 });
+
+describe("URL/long-token line breaking (wild2-legal-nih-contract corpus)", () => {
+  // Word's in-token break rule, measured against every mid-token line break
+  // on pp116-260 of the NIH contract's Word PDF: the ONLY soft break inside
+  // an unspaced token is after a hyphen with alphanumerics on both sides
+  // (digits included). '/', '_', '.', ':', '?', '=', '&' are never break
+  // opportunities; with no opportunity Word breaks at the exact character
+  // where the token crosses the line edge, even mid-line.
+  const lineTexts = (result: ReturnType<typeof layoutDocument>, pageIdx = 0): string[] => {
+    const rows = new Map<number, { x: number; text: string }[]>();
+    for (const it of result.pages[pageIdx].items) {
+      if (it.kind !== "text") continue;
+      const key = Math.round(it.lineTop * 10);
+      if (!rows.has(key)) rows.set(key, []);
+      rows.get(key)!.push({ x: it.x, text: it.text });
+    }
+    return [...rows.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, spans]) => spans.sort((a, b) => a.x - b.x).map((s) => s.text).join(""));
+  };
+  // 1000tw content column = 66.67px = 5.0em at sz 20 (10pt = 13.333px).
+  const sect =
+    `<w:sectPr><w:pgSz w:w="3880" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+
+  it("breaks after hyphens flanked by digits (identifier hyphens)", () => {
+    // "GUF-JE-" = 4.3em fits; adding "04-" (1.5em) overflows -> break at the
+    // hyphen op before the digit segment (NIH PDF p124 ".../GUF-JE-" |
+    // "04-332.qigu", p153 ".../h44-" | "40.aki").
+    const para =
+      `<w:p><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t>GUF-JE-04-33</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para + sect) });
+    const lines = lineTexts(result).filter((l) => l.trim().length > 0);
+    expect(lines).toEqual(["GUF-JE-", "04-33"]);
+  });
+
+  it("emergency-breaks an NBSP-glued long token at the line edge in place", () => {
+    // NIH PDF p154: "at:" + NBSP + a hyphen-free URL wider than a full line.
+    // Word keeps "at:" on its line and fills URL characters to the exact
+    // edge ("at:  wamuv://...BOB_HUG_Kudifup" | "a_Sucumo.idi"); it does NOT
+    // flush "at:" alone and restart the token on a fresh line.
+    const token = " " + "o".repeat(30); // 15.5em, line is 5em
+    const para =
+      `<w:p><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">at: ${token}</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para + sect) });
+    const lines = lineTexts(result).filter((l) => l.trim().length > 0);
+    // First line carries "at:" AND the head of the glued token.
+    expect(lines[0].startsWith("at:")).toBe(true);
+    expect(lines[0]).toMatch(/o+$/);
+    // No characters lost across the char-wrapped continuation lines.
+    expect(lines.join("").replace(/\s| /g, "")).toBe("at:" + "o".repeat(30));
+  });
+});
+
+describe("numbering fidelity (wild2-legal-nih-contract p177)", () => {
+  it("keeps a numId's one-shot startOverride restart when a keepNext walk measures it first", () => {
+    // The keepNext chain walk measures follower paragraphs via
+    // numberingLabel(); its counter snapshot must also roll back seenNumIds
+    // or the once-only startOverride restart fires during measurement and is
+    // lost for the real placement (NIH p177: numId 340 rendered hh/ii/jj/kk
+    // where Word restarts at a/b/c/d).
+    const numberingXml = `<?xml version="1.0"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="0"/>
+    <w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>
+  </w:num>
+</w:numbering>`;
+    const numPara = (text: string, numId: number) =>
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="${numId}"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const keeper = `<w:p><w:pPr><w:keepNext/></w:pPr><w:r><w:t>keeper</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        numPara("one", 1) + numPara("two", 1) + keeper + numPara("restart", 2),
+      ),
+      "word/numbering.xml": numberingXml,
+    });
+    const labels = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+\.$/.test(i.text))
+      .map((i) => (i.kind === "text" ? i.text : ""));
+    expect(labels).toEqual(["1.", "2.", "1."]);
+  });
+
+  it("right-aligns a lvlJc=right label at the number position, keeping text at ind.left", () => {
+    // NIH p177 lowerRoman levels (lvlJc=right, ind left=2160 hanging=180):
+    // every label's RIGHT edge sits at ind.left - hanging and the suffix-tab
+    // text stays at ind.left even for wide labels ("viii.").
+    const numberingXml = `<?xml version="1.0"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="lowerRoman"/><w:lvlText w:val="%1."/><w:lvlJc w:val="right"/>
+      <w:pPr><w:ind w:left="2160" w:hanging="180"/></w:pPr>
+    </w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>`;
+    const numPara = (text: string) =>
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const sect =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        numPara("alpha") + numPara("beta") + numPara("gamma") + sect,
+      ),
+      "word/numbering.xml": numberingXml,
+    });
+    const items = result.pages[0].items.filter((i) => i.kind === "text");
+    const labels = items.filter((i) => i.kind === "text" && /^[ivx]+\.$/.test(i.text));
+    expect(labels.length).toBe(3);
+    // Number position: margin 96px + (2160 - 180)/15 = 228px. Right edges of
+    // "i.", "ii.", "iii." all land there; text starts at ind.left = 240px.
+    for (const l of labels) {
+      if (l.kind !== "text") continue;
+      expect(l.x + l.width).toBeCloseTo(228, 1);
+    }
+    for (const t of ["alpha", "beta", "gamma"]) {
+      const item = items.find((i) => i.kind === "text" && i.text === t);
+      expect(item && item.kind === "text" ? item.x : NaN).toBeCloseTo(240, 1);
+    }
+  });
+});
