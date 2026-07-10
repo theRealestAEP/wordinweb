@@ -38,6 +38,15 @@ export interface DocParseContext extends ParseContext {
   /** Read another package part's XML (SmartArt cached drawings live in
    * word/diagrams/drawing*.xml, reachable only through the data part). */
   readPart?: (part: string) => XmlElement | undefined;
+  /** Cross-reference bookmark capture: Word's Insert-Cross-Reference targets
+   * are `_RefNNN` bookmarks whose range delimits the referenced text (e.g. a
+   * caption's "Figure " + SEQ field). REF fields re-render that text at
+   * layout time — the docx cache is stale. `open` is keyed by bookmark id
+   * while the range is unclosed; `byName` keeps the finished run lists. */
+  refBookmarks?: {
+    open: Map<string, Run[]>;
+    byName: Map<string, Run[]>;
+  };
 }
 
 /** Parse w:body into sections (the body's trailing sectPr closes the last one). */
@@ -394,17 +403,32 @@ function parseParaChildren(
   const suppressedObjects = duplicateQuoteObjectPreviews(parent);
   for (const el of parent.children) {
     const ln = localName(el.name);
-    if (ln === "bookmarkStart" && bookmarks) {
-      // PAGEREF targets: record the name so layout can map it to a page.
+    if (ln === "bookmarkStart") {
       const bm = attr(el, "name");
-      if (bm && !bm.startsWith("_GoBack")) bookmarks.push(bm);
+      // PAGEREF targets: record the name so layout can map it to a page.
+      if (bookmarks && bm && !bm.startsWith("_GoBack")) bookmarks.push(bm);
+      // Cross-reference targets: open a run capture for the `_Ref` range so
+      // REF fields can re-render the referenced text (stale docx cache).
+      const rb = ctx.refBookmarks;
+      const id = attr(el, "id");
+      if (rb && id && bm && bm.startsWith("_Ref")) {
+        const runs: Run[] = [];
+        rb.open.set(id, runs);
+        rb.byName.set(bm, runs);
+      }
+    } else if (ln === "bookmarkEnd") {
+      const id = attr(el, "id");
+      if (id) ctx.refBookmarks?.open.delete(id);
     }
     if (ln === "r") {
       const run = parseRun(el, ctx, field, suppressedObjects);
       if (run) run.srcParent = parent;
       // Keep empty runs that carry an open complex field: the field content
       // is appended to the carrier when fldChar end arrives.
-      if (run && (run.content.length > 0 || field.carrier === run)) out.push(run);
+      if (run && (run.content.length > 0 || field.carrier === run)) {
+        out.push(run);
+        captureRefBookmarkRun(ctx, run);
+      }
     } else if (ln === "ins" || ln === "del") {
       // Tracked changes. Final view: insertions read as normal text,
       // deletions disappear. Markup view: both render, author-colored,
@@ -471,7 +495,19 @@ function parseParaChildren(
       const instruction = attr(el, "instr") ?? "";
       const inner: ParaChild[] = [];
       const innerField: FieldState = { mode: null, instruction: "", cachedResult: "", carrier: null };
+      // The field's cached-result runs must not leak into open `_Ref`
+      // bookmark captures — the synthesized field run below represents the
+      // whole fldSimple (otherwise a caption's "Basas " + SEQ bookmark
+      // captures the stale "0" AND the field, rendering "Basas 01").
+      const rb = ctx.refBookmarks;
+      const openLens = rb ? Array.from(rb.open.values(), (runs) => [runs, runs.length] as const) : [];
       parseParaChildren(el, ctx, inner, innerField, bookmarks);
+      if (rb) {
+        for (const runs of rb.open.values()) {
+          const before = openLens.find(([r]) => r === runs);
+          runs.length = before ? before[1] : 0;
+        }
+      }
       let cached = "";
       let props = {};
       for (const c of inner) {
@@ -481,17 +517,26 @@ function parseParaChildren(
           for (const rc of r.content) if (rc.kind === "text") cached += rc.text;
         }
       }
-      out.push({
+      const fieldRun: Run = {
         type: "run",
         props,
         content: [{ kind: "field", instruction, cachedResult: cached }],
-      });
+      };
+      out.push(fieldRun);
+      captureRefBookmarkRun(ctx, fieldRun);
     } else if (ln === "smartTag" || ln === "sdt") {
       const content = ln === "sdt" ? child(el, "sdtContent") : el;
       if (content) parseParaChildren(content, ctx, out, field, bookmarks);
     }
     // bookmarkStart/bookmarkEnd/proofErr/commentRangeStart... ignored
   }
+}
+
+/** Append a parsed run to every open `_Ref` bookmark range (REF re-render). */
+function captureRefBookmarkRun(ctx: DocParseContext, run: Run): void {
+  const open = ctx.refBookmarks?.open;
+  if (!open || open.size === 0) return;
+  for (const runs of open.values()) runs.push(run);
 }
 
 function flushField(field: FieldState): void {

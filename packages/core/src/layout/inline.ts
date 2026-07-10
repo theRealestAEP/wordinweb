@@ -26,6 +26,10 @@ export interface FieldContext {
    * fieldKey identifies THIS field occurrence so re-breaking a paragraph
    * reuses its first-assigned value instead of double-counting. */
   seq?: (identifier: string, fieldKey: object, instr: string) => string;
+  /** REF cross-references: the current text of a `_Ref` bookmark range
+   * (Word recomputes REF on open; cached results are stale). undefined when
+   * the bookmark is unknown — the caller then keeps the cache. */
+  refText?: (bookmark: string) => string | undefined;
 }
 
 // ---------- atoms ----------
@@ -2153,6 +2157,20 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       // repo's sanitizer remaps cached digits). Compute per-identifier.
       const ident = instr.split(/\s+/)[1];
       if (ident && ctx.seq && fieldKey) return ctx.seq(ident, fieldKey, instr);
+      return cachedResult || "";
+    }
+    case "REF": {
+      // Word recomputes REF on open — the docx cache is stale (and this
+      // repo's sanitizer remaps cached digits: gatech's table-of-figures
+      // "Bavoqe 0" caches for a caption whose SEQ renders 1). Re-render the
+      // bookmark range's text for plain references; switches that change the
+      // output shape (\d\f\n\p\r\t\w — numbers, positions, separators) keep
+      // the cache. \h (hyperlink) and \* formatting are text-preserving.
+      const bookmark = instr.split(/\s+/)[1];
+      if (bookmark && ctx.refText && !/\\[dfnprtw](\s|$)/i.test(instr)) {
+        const text = ctx.refText(bookmark);
+        if (text !== undefined) return text;
+      }
       return cachedResult || "";
     }
     case "DATE":

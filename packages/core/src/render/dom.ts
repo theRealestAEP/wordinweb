@@ -744,28 +744,42 @@ function renderWordArt(item: WordArtItem): HTMLElement {
   span.style.opacity = String(item.opacity);
   const weight = item.bold ? "bold " : "";
   const style = item.italic ? "italic " : "";
-  // Word fills the shape height with the glyphs (measured from the watermark
-  // reference: cap-height ink ~= 0.59 x box height, i.e. em ~= 0.92 x box)
-  // and squashes/stretches horizontally to the shape width.
-  const fontPx = item.height * 0.86;
-  let perPx = item.text.length * 0.5; // natural width per font px (estimate)
+  // Word's VML textpath stretches the glyph INK to the shape box: side
+  // bearings vanish (the 'C' ink starts at the box's left edge) and the cap
+  // band fills most of the height. Fit by measured ink extents
+  // (actualBoundingBox*), not advance width — fitting advances leaves the
+  // band ~2% short and offset up-right along the rotation (parity2-watermark
+  // p4: the Word PDF's watermark ink is 555x536 CSS px, advance-fitting
+  // painted 545x526 shifted +8px).
+  const fontPx = item.height * 0.92;
+  let perPx = item.text.length * 0.5; // natural ink width per font px (estimate)
+  let inkLeftPer = 0; // ink start left of the pen origin, per font px
   try {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
     if (ctx) {
       ctx.font = `${style}${weight}100px "${item.fontFamily}", sans-serif`;
       const m = ctx.measureText(item.text);
-      if (m.width > 0) perPx = m.width / 100;
+      const inkL = m.actualBoundingBoxLeft !== undefined ? -m.actualBoundingBoxLeft : 0;
+      const inkR = m.actualBoundingBoxRight ?? m.width;
+      if (inkR - inkL > 0) {
+        perPx = (inkR - inkL) / 100;
+        inkLeftPer = inkL / 100;
+      } else if (m.width > 0) {
+        perPx = m.width / 100;
+      }
     }
   } catch {
     /* canvas unavailable (SSR): keep the estimate */
   }
   span.style.font = `${style}${weight}${fontPx}px "${item.fontFamily}", sans-serif`;
   span.style.lineHeight = `${item.height}px`;
-  span.style.left = "0";
-  // Word's glyph band sits slightly above the box's vertical center.
-  span.style.top = `-${(item.height * 0.035).toFixed(2)}px`;
   const scaleX = item.width / (fontPx * perPx);
+  // Calibrated against the parity2-watermark Word PDF (vector ink bbox
+  // 555x536 CSS px): the ink band starts a hair left of the box edge and
+  // sits well above the box's vertical center.
+  span.style.left = `${(-inkLeftPer * fontPx * scaleX - item.height * 0.015).toFixed(2)}px`;
+  span.style.top = `-${(item.height * 0.071).toFixed(2)}px`;
   span.style.transformOrigin = "0 0";
   span.style.transform = `scaleX(${scaleX})`;
   box.appendChild(span);
