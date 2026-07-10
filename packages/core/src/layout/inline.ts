@@ -957,14 +957,15 @@ export function breakParagraph(
       // wraps.
       const prevIsSpace = cur.length > 0 && cur[cur.length - 1].isSpace;
       const nextIsSpace = atoms[ai + 1]?.kind === "space";
-      // A space in a RUN of two or more is NOT a break opportunity in Word —
-      // the run and its flanking words wrap as one glued unit. Measured twice
-      // in the NIH reference: 'Hunogigu."␣␣Durirone' (plain double sentence
-      // space) moves to the next line as a 108.6pt unit although Hunogigu
-      // alone fits the 99pt remainder (p106), and '(z) ... nuqagajote␣␣' +
-      // 80 underlined fill-in spaces wraps before "nuqagajote" as a 279pt
-      // unit into a 275.6pt remainder (p383). Same glue flag as NBSP.
-      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, noBreak: atom.noBreak || prevIsSpace || nextIsSpace, src: atom.src, metricsFont: atom.metricsFont, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
+      // Whitespace glue comes ONLY from NBSP adjacency (atom.noBreak, set in
+      // buildAtoms). Both NIH corpus sites that looked like plain multi-space
+      // glue are in fact NBSP clusters in the XML ('Hunogigu."\xa0 Durirone'
+      // p106; 'gedubid the\xa0 [underlined fill-in]' p383) — plain runs of
+      // spaces remain ordinary break opportunities. Gluing plain doubles
+      // regressed interactive typing: a space typed at a wrap boundary formed
+      // an unbreakable word-space-space-word unit that dragged the previous
+      // word (and the caret) to the next line.
+      cur.push({ x, width: atom.width, text: " ", props: atom.props, font: atom.font, isSpace: true, noBreak: atom.noBreak, src: atom.src, metricsFont: atom.metricsFont, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
       curLineWidth += atom.width;
       curSpaceWidth += atom.width;
       if (!prevIsSpace && !nextIsSpace && EA_FAMILY_RE.test(atom.font.family)) curEaSpaceWidth += atom.width;

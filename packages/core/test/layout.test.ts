@@ -887,11 +887,14 @@ describe("layout engine", () => {
     expect(admin.lineTop).toBeGreaterThan(num.lineTop + 1);
   });
 
-  it("glues multi-space runs and NBSP-flanked spaces into one wrap unit", () => {
-    // Word does not break inside a whitespace cluster of 2+ spaces (or one
-    // touching an NBSP): the flanking words wrap together (NIH p106
-    // 'Hunogigu."  Durirone' and p383 'nuqagajote' + double space +
-    // 80 underlined fill-in spaces, both measured against the Word PDF).
+  it("glues NBSP-flanked spaces into one wrap unit; plain multi-spaces still break", () => {
+    // Word does not break inside a whitespace cluster that TOUCHES an NBSP:
+    // the flanking words wrap together (NIH p106 Hunogigu+NBSP+space+Durirone,
+    // p383 "gedubid the"+NBSP+space+[underlined fill-in] -- both NBSP+space in
+    // the XML, measured against the Word PDF). PLAIN runs of spaces remain
+    // ordinary break opportunities -- gluing them regressed interactive
+    // typing (a space typed at a wrap boundary dragged the previous word and
+    // the caret to the next line).
     const narrow =
       `<w:sectPr><w:pgSz w:w="4000" w:h="15840"/>` +
       `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
@@ -905,13 +908,15 @@ describe("layout engine", () => {
       }
       return [...byLine.entries()].sort((a, b) => a[0] - b[0]).map(([, t]) => t);
     };
-    // Double plain space: "zz." must move down WITH the long word.
+    // Plain double space: an ordinary break opportunity -- "zz." stays on the
+    // upper line while the long word wraps alone.
     const plain = lineTexts(
       `<w:p><w:r><w:t xml:space="preserve">aa bb cc dd ee ff gg hh iii." Xxxx yy zz.  Qqqqqqqqqqqqqq rr</w:t></w:r></w:p>`,
     );
     const zzLine = plain.find((l) => l.some((t) => t.includes("zz.")));
-    expect(zzLine ?? []).toContain("Qqqqqqqqqqqqqq");
-    // NBSP at the end of a word glues the following plain space too.
+    expect(zzLine ?? []).not.toContain("Qqqqqqqqqqqqqq");
+    // NBSP at the end of the word glues the following plain space too: "zz."
+    // moves down WITH the long word as one unit.
     const nbsp = lineTexts(
       `<w:p><w:r><w:t xml:space="preserve">aa bb cc dd ee ff gg hh iii." Xxxx yy zz.  Qqqqqqqqqqqqqq rr</w:t></w:r></w:p>`,
     );
