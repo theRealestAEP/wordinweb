@@ -1522,3 +1522,53 @@ justified, correct line breaks early), but per-glyph Times New Roman
 decorrelation (mac vs Windows) plus sub-pt line-pitch drift diverge the
 pagination over book length — the per-font line-advance calibration backlog,
 compounded across hundreds of pages.
+
+## OMML math line boxes: MATH-constant shifts, discrete delimiter variants, display lead (wild2-math-omml-dense, 2026-07)
+
+The 17-page Chinese physics paper (compat 15, NO docGrid, TNR 12pt, OMML text
+math everywhere, the (6-2) equation an m:oMathPara of 6 oMath rows split by
+w:br that wrap to 9 visual lines) went mean 12.11 -> 5.46 (p13 49 -> 2.8,
+p14 64 -> 0.0) from rules measured in its Word PDF (pdfminer baselines +
+8x-raster ink extents + fontTools on the real CambriaMath.ttf MATH table):
+
+- **Fraction shifts are the Cambria Math MATH constants**, em 2048: display
+  num +1550 / den -1370 (9.08/-8.03pt at 12), text-style +1200 / -1030
+  (7.03/-6.04). The dense PDF hits all four to 0.03pt.
+- **A display denominator holding bracket glyphs sits one rule step (133
+  units = 0.78pt at 12) lower**: row 5's den "2(1+h)" baseline is +8.8 where
+  row 2's "2h" is +8.03 (the paren ink ascends past the digit cap).
+- **Stretched delimiters swap in Cambria Math's DISCRETE variant glyphs**
+  (MathVariants ladder: 1898/2475/3379/4047/5223/6053/7613/8881 units =
+  11.12/14.50/19.80/23.71/30.60/35.47/44.61/52.04pt at 12), each designed
+  symmetric about the math axis (585 units), and the CHOSEN VARIANT'S INK
+  defines the delimiter's line-box contribution. Selection: smallest variant
+  covering ~80% of the content's core extent, where SCRIPT protrusions never
+  count ((0.8)'s parens stay regular around A_l p^(l+0) sums); a delimiter
+  directly wrapping another delimiter takes at least the SECOND size when
+  both would be regular ((0.1a)'s (n(n+1))); a delimiter whose direct
+  content mixes a nested delimiter with a fraction jumps TWO sizes
+  ((0.1e)'s 30.60pt paren around ~21pt of content, vs (0.7)'s 19.80 for the
+  same extent without the nested pair). Matrix/n-ary contents keep the
+  legacy continuous stretch (parity-math2 calibration).
+- **Each display row lays its OWN extents** (wrapDisplayMath now recomputes
+  per-segment ascent/descent from the segment's pieces): Word's (6-2) rows
+  pitch 29.5..31.3pt as paren variants and den drops differ per row; a
+  shared whole-equation box overshoots the block by ~7pt.
+- **Display math rows carry ~0.042em of leading ABOVE the cluster** (0.5pt
+  at 12): every p13 gap = prev cluster desc + next cluster asc + 0.5, the
+  block enters at text-desc 2.65 + asc 18.35 + 0.5 = 21.7 below the last
+  text baseline, and exits with NO extra lead below (desc side = cluster).
+- With all rules, the whole 11-gap p13 block reproduces within 0.66pt
+  end-to-end (Word 295.8pt vs ours 296.25pt) and per-gap within 0.6.
+- **wild2-math-omml-dense's reference PDF is STALE**: its tagged structure
+  (StructElem/MCID 0) contains an empty bold-centered 14pt paragraph BEFORE
+  the title that the current fixture XML does not have, shifting Word's p1
+  a full 16pt line and cascading a 2-line offset through p4 (p1 32.4,
+  p2 10.8, p3 12.6, p4 19.4 are ~all this skew). A fixture copy with that
+  paragraph restored scores 0.01/0.03/0.58/0.26 on p1-p4 (dense mean 1.09)
+  against the same reference. Re-export the reference from the current
+  fixture to clear it.
+
+Gates after: eq-as-images 0.37 (held), chem 0.31 (held), parity-math 5.7 ->
+5.55, parity-math2 0.00, parity2-equations 0.56, staging-eastasian 6.34,
+benchmark/sample/charstyles 0.00.

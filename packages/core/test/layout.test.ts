@@ -4,6 +4,8 @@ import { layoutDocument } from "../src/layout/engine.js";
 import { ApproxMeasurer, type TextMeasurer } from "../src/layout/measure.js";
 import { formatNumber } from "../src/parse/numbering.js";
 import { makeDocx, wrapDocument, p, W_NS } from "./helpers.js";
+import { layoutMath } from "../src/layout/math.js";
+import type { MathNode } from "../src/model.js";
 
 const measurer = new ApproxMeasurer();
 
@@ -2900,6 +2902,97 @@ describe("numbering fidelity (wild2-legal-nih-contract p177)", () => {
     for (const t of ["alpha", "beta", "gamma"]) {
       const item = items.find((i) => i.kind === "text" && i.text === t);
       expect(item && item.kind === "text" ? item.x : NaN).toBeCloseTo(240, 1);
-    }
+    }  });
+});
+
+describe("OMML math line extents (wild2-math-omml-dense Word PDF rules)", () => {
+  // Measured in parity/wild2-math-omml-dense-word.pdf at 12pt Cambria Math:
+  //   - display fractions: numerator baseline +9.08pt / denominator -8.03pt
+  //     (MATH constants 1550/2048, 1370/2048); text-style +7.03 / -6.04.
+  //   - a display denominator holding bracket glyphs sits 0.78pt lower
+  //     (row 5 den "2(1+h)" baseline +8.8 vs row 2 "2h" +8.03).
+  //   - stretched delimiters swap in DISCRETE Cambria Math variants
+  //     (11.12/14.50/19.80/23.71/30.60/35.47pt of ink at 12pt), centered on
+  //     the math axis (585/2048 em), covering >= ~80% of the core extent;
+  //     the variant ink defines the LINE box (rows pitch 29.5..31.3pt).
+  //   - script protrusions never stretch delimiters ((0.8)'s parens stay
+  //     regular around A_l p^(l+0)).
+  const measurer = new ApproxMeasurer();
+  const SIZE = 16; // 12pt in px
+  const frac = (num: string, den: string): MathNode =>
+    ({ t: "frac", num: [{ t: "run", text: num }], den: [{ t: "run", text: den }] });
+
+  it("display fraction shifts follow the MATH constants", () => {
+    const box = layoutMath([frac("1-2h", "2h")], SIZE, measurer, true);
+    const num = box.pieces.find((p) => p.text.includes("1"))!;
+    const den = box.pieces.find((p) => p.dy < 0)!;
+    expect(num.dy).toBeCloseTo((SIZE * 1550) / 2048, 3); // +9.08pt @12
+    expect(den.dy).toBeCloseTo((-SIZE * 1370) / 2048, 3); // -8.03pt @12
+  });
+
+  it("a bracketed display denominator drops one rule step lower", () => {
+    const plain = layoutMath([frac("1-2h", "2h")], SIZE, measurer, true);
+    const brack = layoutMath([frac("1-2h", "2(1+h)")], SIZE, measurer, true);
+    const plainDen = plain.pieces.find((p) => p.dy < 0)!;
+    const brackDen = brack.pieces.find((p) => p.dy < 0)!;
+    expect(plainDen.dy - brackDen.dy).toBeCloseTo((SIZE * 133) / 2048, 3); // 0.78pt @12
+  });
+
+  it("a delimiter around a display fraction takes a discrete variant sized to ~80% coverage", () => {
+    const box = layoutMath([{ t: "dlm", beg: "(", end: ")", e: [[frac("1-2h", "2h")]] }], SIZE, measurer, true);
+    const paren = box.pieces.find((p) => p.text === "(")!;
+    // ApproxMeasurer core: num 12.11+14.4 / den 10.70+4.0 -> H 41.21px,
+    // 0.8H = 32.97 -> smallest variant >= that is 5223/2048 em = 40.80px.
+    const variantH = (SIZE * 5223) / 2048;
+    const axis = SIZE * (3.125 / 11);
+    expect(paren.ownAscent).toBeCloseTo(axis + variantH / 2, 2);
+    expect(paren.ownDescent).toBeCloseTo(variantH / 2 - axis, 2);
+    // The variant ink drives the line DESCENT past the denominator box.
+    expect(box.descent).toBeCloseTo(variantH / 2 - axis, 2);
+  });
+
+  it("script protrusions do not stretch delimiters", () => {
+    const box = layoutMath(
+      [{
+        t: "dlm", beg: "(", end: ")",
+        e: [[{ t: "sup", base: [{ t: "run", text: "p" }], script: [{ t: "run", text: "l+0" }] }]],
+      }],
+      SIZE, measurer, false,
+    );
+    const paren = box.pieces.find((p) => p.text === "(")!;
+    expect(paren.ownAscent).toBeUndefined();
+    expect(paren.scaleY).toBeUndefined();
+  });
+
+  it("a delimiter directly wrapping another regular delimiter takes the second size", () => {
+    const box = layoutMath(
+      [{ t: "dlm", beg: "(", end: ")", e: [[
+        { t: "run", text: "n" },
+        { t: "dlm", beg: "(", end: ")", e: [[{ t: "run", text: "n+1" }]] },
+      ]] }],
+      SIZE, measurer, false,
+    );
+    const outer = box.pieces.filter((p) => p.text === "(")[0];
+    const variantH = (SIZE * 2475) / 2048; // 14.50pt @12: dense (0.1a)'s outer pair
+    const axis = SIZE * (3.125 / 11);
+    expect(outer.ownAscent).toBeCloseTo(axis + variantH / 2, 2);
+  });
+
+  it("display math rows carry a thin leading strip above the cluster", () => {
+    // dense p13: every (6-2) row gap = prev desc + next asc + ~0.042em @12pt
+    // (0.5pt), and the block's first baseline sits 21.7pt under the body
+    // text line (2.65 text desc + 18.35 cluster asc + the strip).
+    const M = `xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"`;
+    const doc =
+      p("before") +
+      `<w:p><m:oMathPara ${M}><m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath></m:oMathPara></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(doc) });
+    const items = result.pages[0].items.filter((i) => i.kind === "text");
+    const before = items.find((i) => i.text === "before")!;
+    const piece = items.find((i) => (i as { mathSrc?: unknown }).mathSrc)!;
+    // ApproxMeasurer: prev text desc 0.25em + math cluster asc 0.9em +
+    // the display lead 0.042em, quarter-pt snapped (all at the default size).
+    const sz = before.font.size;
+    expect(piece.baseline - before.baseline).toBeCloseTo(sz * (0.25 + 0.9 + 0.042), 0);
   });
 });
