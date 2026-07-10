@@ -2060,6 +2060,79 @@ class Engine {
       }
     }
 
+    // An EMPTY paragraph never strands as the last item above a page's
+    // FOOTNOTE area: when the following block's first line cannot fit after
+    // it, the empty paragraph(s) move forward with it (phase23-protocol
+    // p60/61: Word sends [empty]["<Rjehug dagu>"][empty][Heading3] to p61 as
+    // one group - the invisible empty never sits alone above the separator -
+    // while its footnote-free pages keep trailing empties at the bottom).
+    // Only a follower that moves for pure SPACE drags the empty: a KEEPNEXT
+    // follower relocates itself and leaves the empty behind (wild-doerfp
+    // p13/14: [empty][keepNext Heading3 "F.3.4"] - Word keeps the empty at
+    // the p13 bottom above footnote 6 and moves only the heading chain).
+    if (
+      !postTablePageBreak &&
+      !legacyBreakChain &&
+      !props.keepNext &&
+      next !== undefined &&
+      !this.pageIsEmptyAtCursor() &&
+      (this.cur.footnoteH[this.col] ?? 0) > 0 &&
+      !paragraphHasContent(para)
+    ) {
+      const counterSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+      const seenSnapshot = new Set(this.seenNumIds);
+      const effBefore = Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
+      let need = effBefore + lines.reduce((a, l) => a + l.height, 0);
+      let prevAfter = spacingAfter;
+      let idx = (index ?? -1) + 1;
+      let hops = 0;
+      while (siblings && idx < siblings.length && hops < 20) {
+        hops++;
+        const blk = siblings[idx];
+        if (blk.type === "table") {
+          need += prevAfter + this.tableLeadHeight(blk);
+          break;
+        }
+        if (blk.type !== "paragraph") {
+          need += prevAfter + 18;
+          break;
+        }
+        const np = this.doc.effectiveParaProps(blk);
+        if (np.keepNext) {
+          // The keepNext machinery owns this follower's move; the empty stays.
+          need = 0;
+          break;
+        }
+        const nb = breakParagraph(
+          this.doc,
+          this.measurer,
+          blk,
+          this.colWidth,
+          this.fieldCtx(),
+          this.numberingLabel(np, blk),
+          undefined,
+          this.sp.docGridLinePitch,
+        );
+        const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
+        if (!paragraphHasContent(blk)) {
+          // A run of empties binds as one group.
+          need += gap + nb.lines.reduce((a, l) => a + l.height, 0);
+          prevAfter = np.spacingAfter ?? 0;
+          idx++;
+          continue;
+        }
+        need += gap + (nb.lines[0]?.height ?? 18);
+        break;
+      }
+      this.counters = counterSnapshot;
+      this.seenNumIds = seenSnapshot;
+      if (need > 0 && this.y + need > this.bodyBottom && need <= bodyHeight) {
+        spacingBefore = borderPadTop;
+        if (anchors.length > 0) restartOnNextColumn(borderPadTop);
+        else this.nextColumn();
+      }
+    }
+
     // Word suppresses a paragraph's space-before when it comes to rest at the
     // very top of a page or column, whether it arrived there by a hard break
     // (handled above via suppressNextSpaceBefore) or by ordinary soft flow -
@@ -2914,6 +2987,15 @@ class Engine {
           y += line.floatYOffset ?? 0;
           this.emitLine(line, fake, 0, y);
           y += line.height;
+        }
+        // Tag this paragraph's text items so a row split can scope Word's
+        // widow/orphan control to the paragraph straddling the cut (NIH
+        // contract p115/116: a 4-line bullet item in a multi-page row splits
+        // 2/2 in Word, not 3/1). widowControl=off paragraphs stay untagged.
+        if (props.widowControl !== false) {
+          for (const it of items.slice(paraItemsStart)) {
+            if (it.kind === "text") it.paraSeq = i;
+          }
         }
         this.emitParagraphDecorations(
           props,
@@ -4219,6 +4301,38 @@ class Engine {
       const keptLines = lineTops(part.keep);
       if (keptLines.length <= 2 || lineTops(part.rest).length !== 1) continue;
       const moveTop = keptLines[keptLines.length - 1];
+      const moved = part.keep.filter((it) => topOf(it) >= moveTop - 0.01);
+      part.keep = part.keep.filter((it) => topOf(it) < moveTop - 0.01);
+      part.rest = [...moved, ...part.rest];
+    }
+
+    // Word's widow control also applies per PARAGRAPH at the cut, not just to
+    // the cell as a whole: a paragraph split leaving its lone last line below
+    // the cut pulls one companion line down (NIH contract p115/116: the
+    // 4-line "▪ Jubu the Sobomisuku…heqakiqit." item in a multi-page row
+    // splits 2/2 in Word where the greedy fit gives 3/1). If the pull would
+    // strand a lone first line above (a 3-line paragraph), the whole
+    // paragraph moves. Only widow-controlled paragraphs carry paraSeq.
+    const paraOfTop = (items: PageItem[], top: number): number | undefined => {
+      for (const it of items) {
+        if (it.kind === "text" && Math.abs(it.lineTop - top) < 0.01 && it.paraSeq !== undefined) {
+          return it.paraSeq;
+        }
+      }
+      return undefined;
+    };
+    for (const part of partitions) {
+      const keptTops = lineTops(part.keep);
+      const restTops = lineTops(part.rest);
+      if (keptTops.length === 0 || restTops.length === 0) continue;
+      const boundaryPara = paraOfTop(part.rest, restTops[0]);
+      if (boundaryPara === undefined) continue;
+      const above = keptTops.filter((t) => paraOfTop(part.keep, t) === boundaryPara);
+      const below = restTops.filter((t) => paraOfTop(part.rest, t) === boundaryPara);
+      if (below.length !== 1 || above.length === 0) continue;
+      // ≥3 lines above: pull one (2+/2). 1-2 above: the paragraph cannot
+      // split legally (widow or orphan either way) — move it whole.
+      const moveTop = above.length >= 3 ? above[above.length - 1] : above[0];
       const moved = part.keep.filter((it) => topOf(it) >= moveTop - 0.01);
       part.keep = part.keep.filter((it) => topOf(it) < moveTop - 0.01);
       part.rest = [...moved, ...part.rest];

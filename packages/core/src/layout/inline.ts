@@ -253,6 +253,9 @@ export interface LineSpan {
   src?: TextSource;
   /** Line-metrics font when it differs from the paint font (small caps). */
   metricsFont?: FontSpec;
+  /** Numbering/bullet label glyph (sizes the line only when taller than the
+   * text content — see finishLine). */
+  numLabel?: boolean;
   /** Tab leader character style (dot/hyphen/underscore/middleDot). */
   leader?: "dot" | "hyphen" | "underscore" | "middleDot";
   /** Footnote id whose content must land on the page carrying this line. */
@@ -599,6 +602,7 @@ export function breakParagraph(
       metricsFont: numberingLabel.metricsProps
         ? fontOf(numberingLabel.metricsProps, fallbackFamily)
         : undefined,
+      numLabel: true,
     });
     if (numberingLabel.suffix === "tab") {
       if (bidiTabOffset(0) > 0) {
@@ -1432,8 +1436,10 @@ function finishLine(
     return m;
   };
 
-  // An invisible tab advances horizontally but does not enlarge Word's line
-  // box. A leader tab paints glyphs, so its font still contributes metrics.
+  // A tab's run props DO size the line (wild-doerfp p8: four default-12pt
+  // trailing tabs hold a 10.5pt paragraph's line at the 12pt pitch), except
+  // an interior invisible tab, which advances horizontally without enlarging
+  // Word's line box. A leader tab paints glyphs, so it always contributes.
   let metricSpans = spans.filter((s) => !(s.text === "\t" && !s.leader));
   // Word also ignores whitespace-only runs when sizing a line that has any
   // solid content: a lone 12pt space run between 10pt words (wild2 legal
@@ -1443,6 +1449,39 @@ function finishLine(
     (s) => s.image || s.drawing || s.math || s.leader || s.text === undefined || !/^[ \t]*$/.test(s.text),
   );
   if (solidSpans.length > 0) metricSpans = solidSpans;
+  // A numbering label sizes its line only when the label's own single-line
+  // height exceeds the text content's (phase23: Symbol/JhengHei bullets
+  // grow the line). A label whose face is SHORTER than the body leaves the
+  // line at the body pitch entirely — Word ignores even its larger descent
+  // (NIH contract p342: Courier New "o" bullets among Calibri 12pt keep the
+  // 14.65pt Calibri pitch; Courier's 0.30em win-descent never registers).
+  // A label alone on its line still sizes it (parity2-lists' 10pt Symbol
+  // bullet = 12.25pt line).
+  if (metricSpans.some((s) => s.numLabel) && metricSpans.some((s) => !s.numLabel)) {
+    let textLine = 0;
+    for (const s of metricSpans) {
+      if (s.numLabel || s.image || s.drawing || s.math) continue;
+      textLine = Math.max(textLine, measurer.metrics(s.metricsFont ?? s.font).lineHeight);
+    }
+    const kept = metricSpans.filter(
+      (s) => !s.numLabel || measurer.metrics(s.metricsFont ?? s.font).lineHeight > textLine,
+    );
+    if (kept.length > 0) metricSpans = kept;
+  }
+  // Trailing tabs (after the last solid content) count like glyphs: see the
+  // wild-doerfp p8 note above.
+  const lastSolid = (() => {
+    for (let i = spans.length - 1; i >= 0; i--) {
+      const s = spans[i];
+      if (s.image || s.drawing || s.math || s.leader || s.text === undefined || !/^[ \t]*$/.test(s.text)) return i;
+    }
+    return -1;
+  })();
+  if (lastSolid >= 0) {
+    for (let i = lastSolid + 1; i < spans.length; i++) {
+      if (spans[i].text === "\t" && !spans[i].leader) metricSpans.push(spans[i]);
+    }
+  }
   if (metricSpans.length === 0) {
     // Empty line/paragraph: sized by the paragraph mark's run props.
     const markProps = doc.effectiveRunProps(para, props.markRunProps ?? {});

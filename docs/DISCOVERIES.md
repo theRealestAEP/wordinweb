@@ -1620,3 +1620,48 @@ p14 64 -> 0.0) from rules measured in its Word PDF (pdfminer baselines +
 Gates after: eq-as-images 0.37 (held), chem 0.31 (held), parity-math 5.7 ->
 5.55, parity-math2 0.00, parity2-equations 0.56, staging-eastasian 6.34,
 benchmark/sample/charstyles 0.00.
+
+## Pagination flips: doerfp p8, NIH bullet clusters, phase23 p61 (2026-07-10)
+
+- **Trailing tabs size the line by their own run props.** wild-doerfp p8: a
+  single-line 10.5pt paragraph ending in " " + four default-12pt tabs is 12pt
+  tall in Word (its 2-line successor then misses the page and moves whole -
+  Word's p8 ends at the "3453" line). Interior invisible tabs still
+  contribute nothing (pre-existing rule holds); only tabs AFTER the last
+  solid content count. The whitespace-only-run exclusion (wild2-legal
+  ca-agreement p17) stays: the trailing 12pt SPACE there is still ignored,
+  the tabs carry the metrics. Bisect: the doerfp p8/p9 regression (37%) came
+  from ca-agreement's ws-run exclusion (ef5dcd6) removing what those tab
+  runs used to provide.
+- **A numbering label sizes its line only when the label face's single-line
+  height EXCEEDS the text content's.** NIH contract p342 (and echoes p108,
+  p146, p27-29, p392-413): Courier New "o" bullets (hhea 1.133em) among
+  Calibri 12pt leave the line at the 14.65pt Calibri pitch - Word ignores
+  even Courier's larger 0.30em win-descent. Symbol/JhengHei bullets (taller
+  line) still grow the line via max-win-ascent (Symbol 12pt bullet line =
+  Symbol asc 12.06 + Calibri desc 3.22 = 15.28pt, same value as Symbol hhea
+  1.2734em - the phase23 numbers were a numeric coincidence). A label alone
+  on its line keeps its full metrics (parity2-lists 12.25pt). This ~0.4pt/
+  bullet-line drift was the whole p343/344 flip (one mid-paragraph line).
+- **Row splits apply widow/orphan control per PARAGRAPH, not per cell.**
+  NIH p115/116: a 4-line bullet item inside a multi-page row splits 2/2 in
+  Word where the greedy cut gave 3/1. Cell text items now carry paraSeq
+  (tagged in layoutFrame for widowControl paragraphs) and splitLaidRow pulls
+  a companion line down when the cut strands a paragraph's lone last line
+  (whole paragraph when it has <=2 lines above).
+- **An empty paragraph never strands above a page's footnote area when its
+  follower moves for SPACE** - it travels with the follower group
+  (phase23-protocol p60/61: [empty][<Rjehug dagu>][empty][Heading3] all move
+  to p61; Word's p61 body starts one 11pt line below bodyTop). A KEEPNEXT
+  follower moves alone and leaves the empty behind (wild-doerfp p13/14:
+  [empty][keepNext Heading3 F.3.4] - the empty stays above footnote 6).
+  Note: Heading3 in phase23 has NO keepNext; the earlier "keepNext flip"
+  diagnosis was wrong, and a measured-separator-footnote reserve (which also
+  fits p60's geometry) breaks p57-59, so the reserve constant stays.
+
+Verification: NIH full 419 pages mean 2.58 -> 0.238 (all target clusters
+0.01-0.05; remaining hot pages 110/239/265/269/274/281/359/413 verified
+byte-identical on unmodified main). doerfp mean back to 0.751 (p8 0.93,
+p9 0.08). phase23 mean 4.34 -> 3.90 (p61 30.5 -> 0.07; p1/p13/p14 owned
+elsewhere). Gates: ca-agreement 0.170, staging-longtable 1.680, parity-lists
+/benchmark/sample/parity2-charstyles 0.000. Unit tests 197 (3 new pins).

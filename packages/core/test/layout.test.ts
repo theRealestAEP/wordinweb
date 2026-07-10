@@ -3125,3 +3125,85 @@ describe("OMML math line extents (wild2-math-omml-dense Word PDF rules)", () => 
     expect(piece.baseline - before.baseline).toBeCloseTo(sz * (0.25 + 0.9 + 0.042), 0);
   });
 });
+
+describe("line metric rules (doerfp p8 / NIH p342)", () => {
+  const SECT =
+    `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+  const topOf = (result: ReturnType<typeof layoutDocument>, text: string): number => {
+    const found = result.pages[0].items.find((i) => i.kind === "text" && i.text === text);
+    if (found?.kind !== "text") throw new Error(`missing item ${JSON.stringify(text)}`);
+    return found.lineTop;
+  };
+
+  it("trailing tabs size the line by their own run props", () => {
+    // wild-doerfp p8: a 10.5pt paragraph ending in four default-12pt tabs
+    // keeps Word's 12pt line pitch; the trailing tabs' run props count.
+    const body = `<w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>body text here</w:t></w:r>`;
+    const bigTab = `<w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:tab/></w:r>`;
+    const next = `<w:p><w:r><w:t>next</w:t></w:r></w:p>`;
+    const withTab = layout({
+      "word/document.xml": wrapDocument(`<w:p>${body}${bigTab}</w:p>` + next + SECT),
+    }).result;
+    const control = layout({
+      "word/document.xml": wrapDocument(`<w:p>${body}</w:p>` + next + SECT),
+    }).result;
+    const grew =
+      topOf(withTab, "next") - topOf(control, "next");
+    const delta = measurer.metrics({ family: "Calibri", size: (40 / 2) * (96 / 72), bold: false, italic: false }).lineHeight -
+      measurer.metrics({ family: "Calibri", size: (21 / 2) * (96 / 72), bold: false, italic: false }).lineHeight;
+    expect(grew).toBeCloseTo(delta, 1);
+  });
+
+  it("an interior invisible tab still does not enlarge the line", () => {
+    const next = `<w:p><w:r><w:t>next</w:t></w:r></w:p>`;
+    const mid =
+      `<w:p><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>alpha</w:t></w:r>` +
+      `<w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:tab/></w:r>` +
+      `<w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>omega</w:t></w:r></w:p>`;
+    const plain =
+      `<w:p><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>alpha omega</w:t></w:r></w:p>`;
+    const a = layout({ "word/document.xml": wrapDocument(mid + next + SECT) }).result;
+    const b = layout({ "word/document.xml": wrapDocument(plain + next + SECT) }).result;
+    expect(topOf(a, "next")).toBeCloseTo(topOf(b, "next"), 2);
+  });
+
+  it("a numbering label shorter than the text leaves the line at the text pitch", () => {
+    // NIH contract p342: Courier New "o" bullets among Calibri 12pt do not
+    // register even Courier's larger descent - the line stays at the Calibri
+    // pitch. Only a label TALLER than the text sizes the line (see the
+    // Symbol-bullet test above).
+    const courierMeasurer: TextMeasurer = {
+      width: (text, font, ls) => measurer.width(text, font, ls),
+      metrics: (font) =>
+        /courier/i.test(font.family)
+          ? { ascent: font.size * 0.9, descent: font.size * 0.45, lineHeight: font.size * 1.14 }
+          : { ascent: font.size * 0.95, descent: font.size * 0.2, lineHeight: font.size * 1.15 },
+    };
+    const numbering =
+      `<?xml version="1.0"?><w:numbering ${W_NS}>` +
+      `<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/>` +
+      `<w:numFmt w:val="bullet"/><w:lvlText w:val="o"/><w:lvlJc w:val="left"/>` +
+      `<w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>` +
+      `<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr></w:lvl></w:abstractNum>` +
+      `<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+    const bullet =
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>` +
+      `<w:r><w:t>itemtext</w:t></w:r></w:p>`;
+    const next = `<w:p><w:r><w:t>next</w:t></w:r></w:p>`;
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(bullet + next + SECT),
+        "word/numbering.xml": numbering,
+      }),
+    );
+    const result = layoutDocument(doc, { measurer: courierMeasurer });
+    const items = result.pages[0].items.filter((i) => i.kind === "text");
+    const itemLine = items.find((i) => i.kind === "text" && i.text === "itemtext");
+    const nextLine = items.find((i) => i.kind === "text" && i.text === "next");
+    if (itemLine?.kind !== "text" || nextLine?.kind !== "text") throw new Error("missing items");
+    // Courier's 0.45em descent must NOT stretch the bullet line: the gap to
+    // the next paragraph stays at the body font's 1.15em pitch.
+    expect(nextLine.lineTop - itemLine.lineTop).toBeCloseTo(itemLine.font.size * 1.15, 1);
+  });
+});

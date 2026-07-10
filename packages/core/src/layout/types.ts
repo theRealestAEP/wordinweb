@@ -89,6 +89,10 @@ export interface TextItem {
   /** Right-to-left run: renderer sets direction:rtl so the browser shapes and
    * orders the (Arabic/Hebrew) glyphs within the span box. */
   rtl?: boolean;
+  /** Ordinal of the source paragraph within its cell/frame. Set only for
+   * widow-controlled paragraphs; row splitting uses it to scope Word's
+   * widow/orphan rules to the paragraph straddling the cut. */
+  paraSeq?: number;
 }
 
 export interface RectItem {
