@@ -2331,6 +2331,46 @@ describe("superscript / subscript", () => {
     // And it fits on one page (image ~248px << body), not two.
     expect(withRaise.totalPages).toBe(1);
   });
+
+  it("an image-only line under a multiple lays only the spacing leading below it, no glyph descent", () => {
+    // msa's signature rows: a lone inline group (no text run) in a paragraph
+    // with a line multiple. Word clears such a text-less image line with only
+    // the (k-1)x line-spacing leading below it - there is no glyph descent to
+    // reserve. A trailing text run DOES add its below-share, so the same line
+    // with a "." at the end must sit taller (pushing MARKER lower). Pinning
+    // the two apart guards the image-only descent rule.
+    const rels = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>
+</Relationships>`;
+    const inlineImg =
+      `<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="2095500" cy="400050"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2095500" cy="400050"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>`;
+    const imgPara = (tail: string) =>
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="276" w:lineRule="auto"/></w:pPr>` +
+      `<w:r>${inlineImg}</w:r>${tail}</w:p>`;
+    const parts = (tail: string) => ({
+      "word/document.xml": wrapDocument(imgPara(tail) + p("MARKER")),
+      "word/_rels/document.xml.rels": rels,
+      "word/media/x.png": "PNGDATA",
+    });
+    const imageOnly = layout(parts("")).result;
+    const withText = layout(parts(`<w:r><w:t>.</w:t></w:r>`)).result;
+    const markerTop = (r: ReturnType<typeof layoutDocument>) => {
+      const it = r.pages[0].items.find((i) => i.kind === "text" && i.text === "MARKER");
+      if (it?.kind !== "text") throw new Error("missing MARKER");
+      return it.lineTop;
+    };
+    // The text glyph's below-share (its quantized descent, ~2-3px) lifts MARKER
+    // strictly lower than the image-only line does.
+    expect(markerTop(withText)).toBeGreaterThan(markerTop(imageOnly) + 0.5);
+  });
 });
 
 describe("sections & page borders", () => {

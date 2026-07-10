@@ -1394,6 +1394,7 @@ function finishLine(
   let maxNatural = 0;
   let maxImage = 0;
   let maxImageFontDesc = 0;
+  let maxImageFontLineDesc = 0;
   let maxImageFontLine = 0;
   let maxGridObjectGlyph = 0;
   let maxGridObjectDesc = 0;
@@ -1430,6 +1431,8 @@ function finishLine(
       maxNatural = Math.max(maxNatural, imageHeight + measurer.metrics(font).descent * 0.3);
       maxImage = Math.max(maxImage, imageHeight);
       maxImageFontDesc = Math.max(maxImageFontDesc, measurer.metrics(font).descent);
+      const im = measurer.metrics(font);
+      maxImageFontLineDesc = Math.max(maxImageFontLineDesc, im.lineDescent ?? im.descent);
       maxImageFontLine = Math.max(maxImageFontLine, measurer.metrics(font).lineHeight);
       return;
     }
@@ -1511,7 +1514,13 @@ function finishLine(
         maxGridObjectDesc = Math.max(maxGridObjectDesc, objectMetrics.descent);
         maxObjAscent = Math.max(maxObjAscent, objectHeight + objRaise);
         maxObjDescent = Math.max(maxObjDescent, Math.max(0, -objRaise));
-        consider(s.font, objectHeight, objRaise);
+        // The image line's descent-side leading keys to the RUN's actual
+        // font+size (metricsFont), like the grid path above: wild-athabasca
+        // p23's chart run is Calibri 12pt, and Word lays image bottom +
+        // 14.65pt (one Calibri-12 line) before the caption — the 11pt default
+        // font undershot it by 1.2pt and pulled the caption (and the page's
+        // whole tail) up.
+        consider(s.metricsFont ?? s.font, objectHeight, objRaise);
       } else if (s.math) {
         // A display equation row carries a thin leading strip ABOVE its
         // cluster (~0.042em of the base size): measured on dense p13, every
@@ -1689,7 +1698,22 @@ function finishLine(
         // above, and one that fits inside it keeps the grid text line.
         let lineTerm = (ls.value - 1) * maxImageFontLine;
         if (ls.value >= 1.5 && !isLast) lineTerm += Math.max(maxDescent, maxImageFontDesc);
-        const descSide = Math.max(Math.max(maxDescent, maxImageFontDesc) * ls.value, lineTerm);
+        // The descent term is the run font's QUANTIZED single-spacing
+        // below-share, NOT raw descent x multiplier: msa's signature rows
+        // (Arial 11, inherited 1.15 multiple) measure image bottom + 2.5pt
+        // (= Arial's quantized lineDescent) to the next line in Word's PDF -
+        // 2.33 x 1.15 = 2.68 overshot every row by ~0.2pt and pushed the
+        // whole signature table's bottom rule off Word's device row.
+        // The descent-side leading below an image line keys to the text
+        // glyphs' below-share (quantized single-spacing descent) when the line
+        // carries text, but an IMAGE-ONLY line (no text run - msa's signature
+        // rows are a lone inline group in an otherwise empty paragraph) has no
+        // glyph descent to clear: Word lays only the line-spacing leading
+        // (k-1)x below it. Using the empty run's font descent there overshot
+        // every signature row ~0.6pt and spread the whole table's rules off
+        // Word's device rows.
+        const descFloor = maxDescent > 0 ? Math.max(maxDescent * ls.value, maxImageFontLineDesc) : 0;
+        const descSide = Math.max(descFloor, lineTerm);
         const imageH = maxImage + descSide;
         if (imageH > maxNaturalText * ls.value) {
           height = imageH;
@@ -2092,6 +2116,48 @@ function buildAtoms(
   };
 
   const pushText = (
+    text: string,
+    props: RunProps,
+    font: FontSpec,
+    href?: string,
+    srcBase?: TextSource,
+    metricsFont?: FontSpec,
+  ) => {
+    // Word resolves fonts per CHARACTER CLASS: ASCII (U+0000-007F) uses
+    // w:ascii, CJK uses w:eastAsia (pushCJK below), and other non-complex
+    // characters (curly quotes, dashes, math signs like ≤) use w:hAnsi. A
+    // run that declares only w:ascii leaves hAnsi INHERITED: wild-athabasca's
+    // header "≤" run (ascii="MS Gothic", no hAnsi) paints and measures as the
+    // theme's Calibri in Word's PDF — its taller line box (14.65pt vs TNR's
+    // 13.80) is what sets that page's header stack and body top. Symbol-
+    // encoded ascii fonts keep every char (they map text into their own PUA),
+    // and PUA codepoints stay with the ascii font.
+    const hansi = !props.rtl && props.fontHAnsi;
+    if (hansi && hansi.toLowerCase() !== font.family.toLowerCase() && !/symbol|wingdings|webdings/i.test(font.family)) {
+      const isHA = (ch: string) => {
+        const c = ch.codePointAt(0) ?? 0;
+        return c > 0x7f && !(c >= 0xe000 && c <= 0xf8ff) && !isCJK(ch);
+      };
+      if (Array.from(text).some(isHA)) {
+        const haFont = { ...font, family: hansi };
+        const haMetrics = metricsFont ? { ...metricsFont, family: hansi } : undefined;
+        let i = 0;
+        while (i < text.length) {
+          const ha = isHA(text[i]);
+          let j = i + 1;
+          while (j < text.length && isHA(text[j]) === ha) j++;
+          const seg = text.slice(i, j);
+          const src = srcBase ? { ...srcBase, offset: srcBase.offset + i } : undefined;
+          pushTextClassed(seg, props, ha ? haFont : font, href, src, ha ? haMetrics : metricsFont);
+          i = j;
+        }
+        return;
+      }
+    }
+    pushTextClassed(text, props, font, href, srcBase, metricsFont);
+  };
+
+  const pushTextClassed = (
     text: string,
     props: RunProps,
     font: FontSpec,

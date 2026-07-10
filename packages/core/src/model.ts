@@ -86,6 +86,10 @@ export interface RunProps {
   font?: string;
   /** East Asian font (rFonts w:eastAsia): used for CJK codepoints. */
   fontEastAsia?: string;
+  /** hAnsi font (rFonts w:hAnsi, theme-resolved): Word uses this channel for
+   * non-ASCII, non-CJK, non-complex characters (curly quotes, ≤, dashes). A
+   * run that declares only w:ascii leaves it inherited from the style chain. */
+  fontHAnsi?: string;
   /** Complex-script font (rFonts w:cs): used for RTL/complex runs. */
   fontComplex?: string;
   /** w:rtl — this run's text is right-to-left (Arabic/Hebrew). */

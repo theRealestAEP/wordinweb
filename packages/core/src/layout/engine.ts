@@ -3013,6 +3013,23 @@ class Engine {
           continue;
         }
         const props = this.doc.effectiveParaProps(block);
+        // An EMPTY paragraph extracted into a widthless text-anchored floating
+        // frame contributes NO flow height in a header/footer: Word's page-
+        // number template leaves the framePr on a now-empty paragraph when
+        // the PAGE field was moved to a plain sibling (wild-athabasca
+        // footer4: [PAGE para, framed empty para, empty para] stacks as TWO
+        // lines — "11" baseline 738.98 = pageBottom − footerDist − 2×14.65 +
+        // asc, identical to the 2-paragraph footer2 — not three).
+        if (
+          props.frame &&
+          props.frame.w === undefined &&
+          props.frame.hAnchor === "margin" &&
+          props.frame.vAnchor === "text" &&
+          props.frame.xAlign !== undefined &&
+          isEmptyParagraph(block)
+        ) {
+          continue;
+        }
         const isPageFrame = !!overlayPageFrame && pendingPageFrame === null && isPageFieldFrame(block, props);
         const flowY = y;
         const flowPrevAfter = framePrevAfter;
