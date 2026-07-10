@@ -1,5 +1,5 @@
-import { XmlElement, attr, child, children, childVal, intAttr, onOff } from "../xml.js";
-import { ParaProps, RunProps, Style, Styles, TableProps, TableCondFormat, TableCondType } from "../model.js";
+import { XmlElement, attr, child, children, childVal, intAttr } from "../xml.js";
+import { ParaProps, RunProps, Style, Styles, TableLook, TableProps, TableCondFormat, TableCondType } from "../model.js";
 import { twipsToPx } from "../units.js";
 import {
   ParseContext,
@@ -105,7 +105,10 @@ export function parseStyles(root: XmlElement | undefined, ctx: ParseContext): St
           }
         }
         const rp = child(cp, "rPr");
-        if (rp && onOff(child(rp, "b"))) cf.bold = true;
+        if (rp) {
+          cf.rPr = parseRunProps(rp, ctx);
+          if (cf.rPr.bold) cf.bold = true;
+        }
         cond.set(type, cf);
       }
       if (cond.size > 0) style.condFormats = cond;
@@ -190,19 +193,81 @@ export function resolveTableConditional(
     cur = st.basedOn;
   }
   const formats = new Map<TableCondType, TableCondFormat>();
-  let rowBandSize = 1;
-  let colBandSize = 1;
+  // Word only applies banded conditional formats when the style chain declares
+  // an explicit w:tblStyleRowBandSize / ColBandSize (every built-in banded
+  // style writes w:val="1"). A chain that never declares one gets NO banding,
+  // despite ECMA-376's "default 1" — verified against Word output for a custom
+  // style with band1Horz but no band size. 0 means "banding disabled" here.
+  let rowBandSize = 0;
+  let colBandSize = 0;
   for (const st of chain) {
     if (st.rowBandSize !== undefined) rowBandSize = st.rowBandSize;
     if (st.colBandSize !== undefined) colBandSize = st.colBandSize;
     if (st.condFormats) {
       for (const [type, cf] of st.condFormats) {
         const prev = formats.get(type);
-        formats.set(type, prev ? { ...prev, ...cf } : { ...cf });
+        const merged = prev ? { ...prev, ...cf } : { ...cf };
+        if (prev?.rPr && cf.rPr) merged.rPr = mergeRunProps(prev.rPr, cf.rPr);
+        formats.set(type, merged);
       }
     }
   }
   return { formats, rowBandSize, colBandSize };
+}
+
+/** tblLook Word assumes when a table carries no w:tblLook element. */
+export const DEFAULT_TBL_LOOK: TableLook = {
+  firstRow: true,
+  lastRow: false,
+  firstColumn: true,
+  lastColumn: false,
+  noHBand: false,
+  noVBand: false,
+};
+
+/**
+ * The w:tblStylePr conditional types that apply to a cell, in layering order
+ * (low→high precedence: wholeTable < banding < first/last col < first/last row
+ * < corners), gated by the table's tblLook. Band sizes of 0 mean the style
+ * chain never declared w:tblStyleRow/ColBandSize — Word skips banding then.
+ */
+export function tableCondOrder(
+  look: TableLook,
+  rowIdx: number,
+  nRows: number,
+  colStart: number,
+  colSpan: number,
+  nCols: number,
+  rowBandSize: number,
+  colBandSize: number,
+): TableCondType[] {
+  const isFirstRow = look.firstRow && rowIdx === 0;
+  const isLastRow = look.lastRow && rowIdx === nRows - 1;
+  const isFirstCol = look.firstColumn && colStart === 0;
+  const isLastCol = look.lastColumn && colStart + colSpan === nCols;
+
+  const order: TableCondType[] = ["wholeTable"];
+  if (!look.noVBand && !isFirstCol && !isLastCol && colBandSize > 0) {
+    const bandCol = colStart - (look.firstColumn ? 1 : 0);
+    if (bandCol >= 0) {
+      order.push(Math.floor(bandCol / colBandSize) % 2 === 0 ? "band1Vert" : "band2Vert");
+    }
+  }
+  if (!look.noHBand && !isFirstRow && !isLastRow && rowBandSize > 0) {
+    const bandRow = rowIdx - (look.firstRow ? 1 : 0);
+    if (bandRow >= 0) {
+      order.push(Math.floor(bandRow / rowBandSize) % 2 === 0 ? "band1Horz" : "band2Horz");
+    }
+  }
+  if (isFirstCol) order.push("firstCol");
+  if (isLastCol) order.push("lastCol");
+  if (isFirstRow) order.push("firstRow");
+  if (isLastRow) order.push("lastRow");
+  if (isFirstRow && isFirstCol) order.push("nwCell");
+  if (isFirstRow && isLastCol) order.push("neCell");
+  if (isLastRow && isFirstCol) order.push("swCell");
+  if (isLastRow && isLastCol) order.push("seCell");
+  return order;
 }
 
 /** Effective run props contributed by a character style chain. */

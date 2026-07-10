@@ -1553,16 +1553,34 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
   }
 
   // Tag each cell's own paragraphs with this table's style so its pPr layers
-  // beneath the paragraph style. Paragraphs already tagged belong to a nested
-  // table (parsed first, deeper in) — leave them to their own table.
+  // beneath the paragraph style, plus the cell's grid position + tblLook so
+  // conditional w:tblStylePr run formats (firstRow bold/white, …) resolve per
+  // cell. Paragraphs already tagged belong to a nested table (parsed first,
+  // deeper in) — leave them to their own table.
   if (props.styleId) {
-    for (const row of rows) {
+    const nRows = rows.length;
+    const nCols =
+      grid.length ||
+      rows.reduce((m, r) => Math.max(m, r.cells.reduce((a, c) => a + c.props.gridSpan, 0)), 0);
+    for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+      const row = rows[rowIdx];
+      let colStart = 0;
       for (const cell of row.cells) {
+        const colSpan = cell.props.gridSpan;
         for (const block of cell.blocks) {
           if (block.type === "paragraph" && block.props.tableStyleId === undefined) {
             block.props.tableStyleId = props.styleId;
+            block.props.tableCellCond = {
+              look: props.tblLook,
+              rowIdx,
+              nRows,
+              colStart,
+              colSpan,
+              nCols,
+            };
           }
         }
+        colStart += colSpan;
       }
     }
   }

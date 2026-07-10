@@ -13,11 +13,10 @@ import {
   Shape,
   Table,
   TableCondFormat,
-  TableCondType,
   TableRow,
 } from "../model.js";
 import { formatLevelText, formatNumber } from "../parse/numbering.js";
-import { resolveTableConditional } from "../parse/styles.js";
+import { DEFAULT_TBL_LOOK, resolveTableConditional, tableCondOrder } from "../parse/styles.js";
 import { mergeRunProps } from "../parse/properties.js";
 import { ptToPx } from "../units.js";
 import { child } from "../xml.js";
@@ -3120,10 +3119,33 @@ class Engine {
    * (tcBorders), so use the thickest declaration at each boundary. */
   private rowBorderWidths(tbl: Table, ri: number): { top: number; bottom: number } {
     const tb = tbl.props.borders;
-    const bw = (b?: Border) => (b && b.style !== "none" ? b.width : 0);
+    // Row height reserves the PAINTED rule width: a double rule spans 3x its
+    // line width in Word (staging-styles' Total row sits ~1.75pt lower than
+    // the naive width predicts).
+    const bw = (b?: Border) => (b && b.style !== "none" ? this.borderPaintWidth(b) : 0);
     const rows = tbl.rows;
-    const cellTop = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.top)));
-    const cellBot = (r: number) => Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.bottom)));
+    const nRows = rows.length;
+    const nCols =
+      tbl.grid.length ||
+      rows.reduce((m, r) => Math.max(m, r.cells.reduce((a, c) => a + c.props.gridSpan, 0)), 0);
+    // Conditional table-style borders participate in the boundary width too:
+    // LightGrid's firstRow bottom rule is sz-18 (2.25pt) against a sz-8
+    // insideH, and Word makes the header and first body row each taller by
+    // half the difference (wild-multicolumn p30).
+    const condEdge = (r: number, edge: "top" | "bottom"): number => {
+      let w = 0;
+      let colStart = 0;
+      for (const c of rows[r].cells) {
+        const cond = this.condFor(tbl, r, colStart, c.props.gridSpan, nRows, nCols);
+        w = Math.max(w, bw(cond?.borders?.[edge]));
+        colStart += c.props.gridSpan;
+      }
+      return w;
+    };
+    const cellTop = (r: number) =>
+      Math.max(0, condEdge(r, "top"), ...rows[r].cells.map((c) => bw(c.props.borders?.top)));
+    const cellBot = (r: number) =>
+      Math.max(0, condEdge(r, "bottom"), ...rows[r].cells.map((c) => bw(c.props.borders?.bottom)));
     const boundary = (k: number): number => {
       if (k === 0) return Math.max(bw(tb?.top), cellTop(0));
       if (k === rows.length) return Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
@@ -3698,41 +3720,18 @@ class Engine {
       this.condCache.set(styleId, resolved);
     }
     if (resolved.formats.size === 0) return undefined;
-    const look = tbl.props.tblLook ?? {
-      firstRow: true,
-      lastRow: false,
-      firstColumn: true,
-      lastColumn: false,
-      noHBand: false,
-      noVBand: false,
-    };
-    const isFirstRow = look.firstRow && rowIdx === 0;
-    const isLastRow = look.lastRow && rowIdx === nRows - 1;
-    const isFirstCol = look.firstColumn && colStart === 0;
-    const isLastCol = look.lastColumn && colStart + colSpan === nCols;
-
+    const look = tbl.props.tblLook ?? DEFAULT_TBL_LOOK;
     // Precedence low→high: banding < first/last col < first/last row < corners.
-    const order: TableCondType[] = ["wholeTable"];
-    if (!look.noVBand && !isFirstCol && !isLastCol) {
-      const bandCol = colStart - (look.firstColumn ? 1 : 0);
-      if (bandCol >= 0) {
-        order.push(Math.floor(bandCol / resolved.colBandSize) % 2 === 0 ? "band1Vert" : "band2Vert");
-      }
-    }
-    if (!look.noHBand && !isFirstRow && !isLastRow) {
-      const bandRow = rowIdx - (look.firstRow ? 1 : 0);
-      if (bandRow >= 0) {
-        order.push(Math.floor(bandRow / resolved.rowBandSize) % 2 === 0 ? "band1Horz" : "band2Horz");
-      }
-    }
-    if (isFirstCol) order.push("firstCol");
-    if (isLastCol) order.push("lastCol");
-    if (isFirstRow) order.push("firstRow");
-    if (isLastRow) order.push("lastRow");
-    if (isFirstRow && isFirstCol) order.push("nwCell");
-    if (isFirstRow && isLastCol) order.push("neCell");
-    if (isLastRow && isFirstCol) order.push("swCell");
-    if (isLastRow && isLastCol) order.push("seCell");
+    const order = tableCondOrder(
+      look,
+      rowIdx,
+      nRows,
+      colStart,
+      colSpan,
+      nCols,
+      resolved.rowBandSize,
+      resolved.colBandSize,
+    );
 
     let out: TableCondFormat | undefined;
     for (const type of order) {

@@ -186,6 +186,21 @@ export interface ParaProps {
    * `after=200 line=276` so list cells lay out compactly.
    */
   tableStyleId?: string;
+  /**
+   * Grid position of the enclosing cell plus the table's tblLook (set on cell
+   * paragraphs at parse time, like tableStyleId). Lets run/paragraph
+   * resolution layer the applicable w:tblStylePr conditional formats (e.g.
+   * firstRow bold + white) between the table style's own rPr and the
+   * paragraph style chain.
+   */
+  tableCellCond?: {
+    look?: TableLook;
+    rowIdx: number;
+    nRows: number;
+    colStart: number;
+    colSpan: number;
+    nCols: number;
+  };
 }
 
 // ---------- run content ----------
@@ -577,14 +592,17 @@ export interface TableProps {
   widthPct?: number;
   layout?: "fixed" | "autofit";
   /** w:tblLook flags controlling which conditional formats apply. */
-  tblLook?: {
-    firstRow: boolean;
-    lastRow: boolean;
-    firstColumn: boolean;
-    lastColumn: boolean;
-    noHBand: boolean;
-    noVBand: boolean;
-  };
+  tblLook?: TableLook;
+}
+
+/** w:tblLook flags controlling which conditional table-style formats apply. */
+export interface TableLook {
+  firstRow: boolean;
+  lastRow: boolean;
+  firstColumn: boolean;
+  lastColumn: boolean;
+  noHBand: boolean;
+  noVBand: boolean;
 }
 
 export interface Table {
@@ -704,6 +722,8 @@ export interface TableCondFormat {
   };
   /** Conditional run bold (firstRow/firstCol headers). */
   bold?: boolean;
+  /** Full conditional run props (w:tblStylePr > w:rPr). */
+  rPr?: RunProps;
 }
 
 export type TableCondType =
