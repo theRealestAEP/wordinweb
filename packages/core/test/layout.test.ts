@@ -1583,6 +1583,102 @@ describe("layout engine", () => {
     expect(headerItem.lineTop).toBeLessThan(96);
     expect(bodyItem.lineTop).toBeGreaterThanOrEqual(95);
   });
+
+  it("resolves margin-relative header anchors from the grown body top", () => {
+    // wild2-med-phase23 (PDF-pinned): the tall logo header grows past the
+    // 72pt top margin, and Word resolves the anchor's vRel="margin"
+    // posOffset from the EFFECTIVE body top (header bottom, 129.77pt), not
+    // the nominal margin — logo top 20.21pt = 129.77 - 109.5, on every page.
+    const headerParas = ["H1", "H2", "H3", "H4"].map((t) => p(t)).join("");
+    const anchor = `<w:p><w:r><w:drawing>
+      <wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" behindDoc="0">
+        <wp:positionH relativeFrom="margin"><wp:posOffset>-457200</wp:posOffset></wp:positionH>
+        <wp:positionV relativeFrom="margin"><wp:posOffset>-457200</wp:posOffset></wp:positionV>
+        <wp:extent cx="914400" cy="457200"/>
+        <wp:wrapNone/>
+        <a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+            <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>
+              <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm></pic:spPr>
+            </pic:pic>
+          </a:graphicData>
+        </a:graphic>
+      </wp:anchor>
+    </w:drawing></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        p("body text") +
+          `<w:sectPr>
+            <w:headerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdH"/>
+            <w:pgSz w:w="12240" w:h="15840"/>
+            <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>
+          </w:sectPr>`,
+      ),
+      "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+</Relationships>`,
+      "word/header1.xml": `<?xml version="1.0"?>
+<w:hdr ${W_NS}>${anchor}${headerParas}</w:hdr>`,
+      "word/_rels/header1.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>
+</Relationships>`,
+      "word/media/x.png": "PNGDATA",
+    });
+    const items = result.pages[0].items;
+    const bodyItem = items.find((i) => i.kind === "text" && i.text.includes("body"));
+    const img = items.find((i) => i.kind === "image");
+    if (bodyItem?.kind !== "text" || img?.kind !== "image") throw new Error("items missing");
+    // The 5-paragraph header grows the body top well past the 96px margin...
+    expect(bodyItem.lineTop).toBeGreaterThan(110);
+    // ...and the anchor's -36pt (-48px) margin offset resolves from THAT
+    // grown top, not from the nominal 96px margin (which would put it at 48).
+    expect(img.y).toBeCloseTo(bodyItem.lineTop - 48, 1);
+  });
+
+  it("gives the document-opening empty paragraph two slots under a grown header", () => {
+    // PDF-pinned: wild2-med-phase23 p1 - under a header that outgrew the top
+    // margin, the empty opener before a paragraph takes 2 x (line + after)
+    // (first body baseline 179.05 = grown bodyTop 129.77 + 2 x 19.4 +
+    // ascent), while every continuation page starts exactly at bodyTop.
+    // Under a NORMAL header the same construct takes ONE slot
+    // (wild-athabasca p1). wild2-legal p1 pins the sibling before-a-table
+    // case (two mark lines, no after).
+    const spacing = `<w:spacing w:before="0" w:after="120" w:line="240" w:lineRule="auto"/>`;
+    const emptyOpener = `<w:p><w:pPr>${spacing}<w:rPr><w:sz w:val="22"/></w:rPr></w:pPr></w:p>`;
+    const marker = `<w:p><w:pPr>${spacing}</w:pPr><w:r><w:rPr><w:sz w:val="22"/></w:rPr><w:t>MARKER</w:t></w:r></w:p>`;
+    const sect = `<w:sectPr>
+        <w:headerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdH"/>
+        <w:pgSz w:w="12240" w:h="15840"/>
+        <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>
+      </w:sectPr>`;
+    const tallHeader = {
+      "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+</Relationships>`,
+      "word/header1.xml": `<?xml version="1.0"?>
+<w:hdr ${W_NS}>${["H1", "H2", "H3", "H4"].map((t) => p(t)).join("")}</w:hdr>`,
+    };
+    const find = (result: ReturnType<typeof layoutDocument>) => {
+      const item = result.pages[0].items.find((i) => i.kind === "text" && i.text === "MARKER");
+      if (item?.kind !== "text") throw new Error("missing MARKER");
+      return item;
+    };
+    const withOpener = find(
+      layout({ "word/document.xml": wrapDocument(emptyOpener + marker + sect), ...tallHeader }).result,
+    );
+    const bare = find(layout({ "word/document.xml": wrapDocument(marker + sect), ...tallHeader }).result);
+    // after=120tw = 6pt = 8px; the empty opener contributes (line + after) TWICE.
+    const slot = withOpener.lineHeight + 8;
+    expect(withOpener.lineTop - bare.lineTop).toBeCloseTo(2 * slot, 1);
+    // Without the grown header the opener takes a single slot (athabasca).
+    const plainOpener = find(layout({ "word/document.xml": wrapDocument(emptyOpener + marker) }).result);
+    const plainBare = find(layout({ "word/document.xml": wrapDocument(marker) }).result);
+    expect(plainOpener.lineTop - plainBare.lineTop).toBeCloseTo(slot, 1);
+  });
 });
 
 describe("pagination robustness", () => {

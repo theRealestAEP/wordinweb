@@ -73,6 +73,8 @@ interface InternalPage {
    * a document/section start — space-before drops at its top; section-start
    * pages keep the carry-remainder rule and the doc start keeps full before. */
   softTop: boolean;
+  /** The header outgrew the nominal top margin and pushed bodyTop below it. */
+  headerGrown?: boolean;
   colXs: number[];
   colWidths: number[];
   hfStart?: number;
@@ -210,6 +212,14 @@ class Engine {
   /** Set when a docGrid section's top reserve was applied; the first paragraph
    * drops its spacing-before (Word folds it into the grid reserve). */
   private docGridDropBefore = false;
+  /** While emitting a header/footer frame in the final pass: the page's
+   * effective body top. Word resolves vRel="margin" anchors in headers against
+   * the ACTUAL margin rectangle, whose top the header itself pushes down when
+   * it grows past the nominal top margin (wild2-med-phase23: posOffset
+   * -109.5pt from "margin" paints the logo at 20.21pt = grown body top
+   * 129.77 - 109.5, on every page; a raw marginTop origin would put it at
+   * -37.5, off the page). Null outside header/footer emission. */
+  private hfMarginVTop: number | null = null;
   /** A run of consecutive full-width `wrap="notBeside"` frame paragraphs forms a
    * banner band at the top of a (multi-)column section: the frames stack full
    * width and the column band starts BELOW them (IEEE title/authors). Tracks the
@@ -450,6 +460,7 @@ class Engine {
     if (sp.marginTop >= 0) {
       page.bodyTop = Math.max(sp.marginTop, headerH > 0 ? sp.headerDistance + headerH : 0);
       page.bandTop = page.bodyTop;
+      page.headerGrown = page.bodyTop > sp.marginTop;
     }
     // w:docGrid: Word drops the first line of a section a fixed number of grid
     // rows below the top margin (measured from staging-eastasian: the first
@@ -1019,32 +1030,38 @@ class Engine {
           }
           continue;
         }
-        // PDF-measured (wild2-legal p1): the empty paragraph that OPENS the
-        // document immediately before a table takes TWO line heights in Word -
-        // the top table's border grid sits at margin + 27.6pt for a 12pt
-        // Normal mark (2 x 13.8), where a single mark line (us, LibreOffice)
-        // puts it 13.8pt higher. The same construct mid-flow takes ONE line
-        // (this doc's p15/p23 signature tables match at a single mark line),
-        // so gate on the true document start: first page, nothing placed yet.
-        // TODO: generalize via parity/probe-paratbl.docx once Word export is
-        // available (console was locked); the probe isolates empty-para+table
-        // at page top with/without the CA doc's ind/rStyle quirks.
-        const docStartEmptyBeforeTable =
+        // PDF-measured (wild2-legal p1, wild2-med-phase23 p1): the empty
+        // paragraph that OPENS the document can take TWO slots in Word.
+        // Before a table (wild2-legal) the top table's border grid sits at
+        // margin + 27.6pt for a 12pt Normal mark (2 x 13.8), where a single
+        // mark line (us, LibreOffice) puts it 13.8pt higher. Before a
+        // paragraph the doubling only happens when the HEADER OUTGREW the
+        // top margin, and then includes the mark's spacing-after too:
+        // phase23's first body baseline is at grown bodyTop + 2 x (13.4 line
+        // + 6 after) + ascent (179.05), while its continuation pages start
+        // exactly at bodyTop (140.30). An empty opener before a paragraph
+        // under a NORMAL header takes ONE slot (wild-athabasca p1), and the
+        // same construct mid-flow takes ONE line (wild2-legal's p15/p23
+        // signature tables match at a single mark line) - gate on the true
+        // document start: first page, nothing placed yet.
+        const docStartEmpty =
           this.pages.length === 1 &&
           this.cur.items.length === 0 &&
           i === 0 &&
-          blocks[i + 1]?.type === "table" &&
           !block.sectionBreak &&
           !paragraphHasContent(block);
+        const beforeTable = blocks[i + 1]?.type === "table";
+        const doubled = docStartEmpty && (beforeTable || this.cur.headerGrown === true);
         this.placeParagraph(block, blocks[i - 1], blocks[i + 1], blocks, i);
-        if (docStartEmptyBeforeTable) {
-          const markProps = this.doc.effectiveRunProps(
-            block,
-            this.doc.effectiveParaProps(block).markRunProps ?? {},
-          );
+        if (doubled) {
+          const paraProps = this.doc.effectiveParaProps(block);
+          const markProps = this.doc.effectiveRunProps(block, paraProps.markRunProps ?? {});
           this.y += this.measurer.metrics(
             fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"),
           ).lineHeight;
+          // The table case is pinned WITHOUT the after (wild2-legal's 2 x 13.8
+          // exactly); the paragraph case needs it (phase23's 2 x 19.4).
+          if (!beforeTable) this.y += paraProps.spacingAfter ?? 0;
         }
       } else {
         this.placeTable(block);
@@ -3050,8 +3067,14 @@ class Engine {
     const textPageY = fy + textY;
     const originX = (rel: Shape["hRel"]) =>
       rel === "page" ? 0 : rel === "margin" ? sp.marginLeft : textPageX;
+    // Inside a header/footer frame the "margin" rectangle's top is the page's
+    // EFFECTIVE body top: a header that grows past the nominal top margin
+    // drags margin-anchored art down with it (wild2-med-phase23: posOffset
+    // -109.5pt resolves to 20.2pt from the grown 129.8pt body top, not to
+    // -37.5pt from the 72pt margin). Equal to marginTop whenever the header
+    // fits inside the margin, so ordinary headers are unaffected.
     const originY = (rel: Shape["vRel"]) =>
-      rel === "page" ? 0 : rel === "margin" ? sp.marginTop : textPageY;
+      rel === "page" ? 0 : rel === "margin" ? (this.hfMarginVTop ?? sp.marginTop) : textPageY;
 
     // Rects of shapes already positioned this call, in z-order, so a later
     // allowOverlap="0" shape can be shifted clear of them (Word's overlap
@@ -3395,10 +3418,12 @@ class Engine {
       if (header && header.blocks.length > 0) {
         const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
         const seenSnapshot = new Set(this.seenNumIds);
+        this.hfMarginVTop = page.bodyTop;
         const { items } = this.layoutFrame(header.blocks, contentWidth, fields, {
           x: sp.marginLeft,
           y: sp.headerDistance,
         }, false, this.pageFieldFrameOverlay(header));
+        this.hfMarginVTop = null;
         this.counters = snapshot;
         this.seenNumIds = seenSnapshot;
         for (const it of items) offsetItem(it, sp.marginLeft, sp.headerDistance);
@@ -3417,10 +3442,12 @@ class Engine {
         const top = sp.pageHeight - sp.footerDistance - measured.height;
         snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
         seenSnapshot = new Set(this.seenNumIds);
+        this.hfMarginVTop = page.bodyTop;
         const { items } = this.layoutFrame(footer.blocks, contentWidth, fields, {
           x: sp.marginLeft,
           y: top,
         }, false, overlayPageFrame);
+        this.hfMarginVTop = null;
         this.counters = snapshot;
         this.seenNumIds = seenSnapshot;
         for (const it of items) offsetItem(it, sp.marginLeft, top);
