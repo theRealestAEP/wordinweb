@@ -180,7 +180,7 @@ describe("layout engine", () => {
           `<w:p><w:pPr>${snapToGrid}<w:spacing w:before="0" w:after="156" w:line="276" w:lineRule="auto"/></w:pPr>` +
           `<w:r><w:rPr><w:sz w:val="21"/></w:rPr>${inlineImage}</w:r>` +
           `<w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>(0)</w:t></w:r></w:p>` +
-          `<w:sectPr><w:pgSz w:w="6000" w:h="4000"/>` +
+          `<w:sectPr><w:pgSz w:w="6000" w:h="3800"/>` +
           `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>` +
           `<w:docGrid w:type="lines" w:linePitch="312"/></w:sectPr>`,
       );
@@ -211,17 +211,74 @@ describe("layout engine", () => {
       controlImage?.kind !== "image"
     ) return;
 
-    // ApproxMeasurer's 14px run has a 16.1px glyph box. Word keeps the
-    // remaining 4.7px of the 20.8px grid pitch above the object, then applies
-    // the 1.15 multiple to image + descent. The non-grid control retains the
-    // existing compact image-line rule and stays on page 1. The page leaves
-    // enough room for the grid line itself, but not its 10.4px trailing space.
-    const gridLead = 20.8 - 14 * (0.9 + 0.25);
-    const expectedGridHeight = gridLead + (44.93333333333333 + 14 * 0.25) * 1.15;
+    // A grid object line snaps to whole grid pitches with the content extent
+    // centered (measured in wild2-math-eq-as-images-word.pdf): the 44.93px
+    // image + 3.5px text descent = 48.43px extent exceeds the 23.92px text
+    // line, so the line takes ceil(48.43/20.8) = 3 pitches = 62.4px and the
+    // image top sits (62.4 - 48.43)/2 below the line top. The non-grid
+    // control retains the compact image-line rule (~48.9px) and stays on
+    // page 1; the 62.4px grid box does not fit and breaks to page 2.
+    const extent = 44.93333333333333 + 14 * 0.25;
+    const expectedGridHeight = 3 * 20.8;
     expect(gridLabel.lineHeight).toBeCloseTo(expectedGridHeight, 3);
-    expect(gridImage.y - gridLabel.lineTop).toBeCloseTo(gridLead, 1);
+    // (paint baselines quantize to quarter-points, so allow 0.5px)
+    expect(gridImage.y - gridLabel.lineTop).toBeCloseTo((expectedGridHeight - extent) / 2, 0);
     expect(Math.abs(controlImage.y - controlLabel.lineTop)).toBeLessThan(0.2);
     expect(controlLabel.lineHeight).toBeLessThan(gridLabel.lineHeight);
+  });
+
+  it("lays a docGrid equation-image line as whole grid pitches, centered, with w:position lowering the image", () => {
+    // wild2-math-eq-as-images eq(48): a 290.75x57.4pt VML pict (rounds to
+    // 291x57pt) on run position -47hp (-23.5pt) in a linePitch=312 (15.6pt)
+    // grid with spacing 348 atLeast. Word's PDF: the line takes 4 pitches
+    // (62.4pt = 83.2px), the image spans 33.5pt above / 23.5pt below the
+    // baseline, and the image top sits (62.4-57)/2 = 2.7pt below the line
+    // top (shading rect 643.44 vs image top 640.75). A 50.6x31.45pt pict at
+    // position -22hp rounds to 31pt and takes exactly 2 pitches (31.2pt) -
+    // unrounded 31.45pt would wrongly take 3.
+    const rels = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/eq.png"/>
+</Relationships>`;
+    const pict = (w: string, h: string) =>
+      `<w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" style="width:${w}pt;height:${h}pt">` +
+      `<v:imagedata xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdImg"/>` +
+      `</v:shape></w:pict>`;
+    const eqPara = (pos: number, w: string, h: string, label: string) =>
+      `<w:p><w:pPr><w:spacing w:before="156" w:after="156" w:line="348" w:lineRule="atLeast"/></w:pPr>` +
+      `<w:r><w:rPr><w:position w:val="${pos}"/><w:sz w:val="21"/></w:rPr>${pict(w, h)}</w:r>` +
+      `<w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>${label}</w:t></w:r></w:p>`;
+    const parts = {
+      "word/document.xml": wrapDocument(
+        eqPara(-47, "290.75", "57.4", "(48)") +
+          eqPara(-22, "50.6", "31.45", "(76)") +
+          `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>` +
+          `<w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800"/>` +
+          `<w:docGrid w:type="lines" w:linePitch="312"/></w:sectPr>`,
+      ),
+      "word/_rels/document.xml.rels": rels,
+      "word/media/eq.png": "PNGDATA",
+    };
+    const { result } = layout(parts);
+    const page = result.pages[0];
+    const labels = page.items.filter((it) => it.kind === "text" && (it.text === "(48)" || it.text === "(76)"));
+    const images = page.items.filter((it) => it.kind === "image");
+    expect(labels).toHaveLength(2);
+    expect(images).toHaveLength(2);
+    if (labels[0].kind !== "text" || labels[1].kind !== "text" || images[0].kind !== "image" || images[1].kind !== "image") return;
+    const pitch = 20.8; // 312tw in px
+    // eq48: extent = rounded 57pt image (76px) -> 4 pitches.
+    expect(images[0].height).toBeCloseTo(76, 3);
+    expect(labels[0].lineHeight).toBeCloseTo(4 * pitch, 3);
+    // Centered: image top = line top + (H - extent)/2 (paint baselines
+    // quantize to quarter-points, so allow 0.5px).
+    expect(images[0].y - labels[0].lineTop).toBeCloseTo((4 * pitch - 76) / 2, 0);
+    // The lowered image hangs 23.5pt (31.33px) below the label baseline.
+    const baseline48 = labels[0].baseline;
+    expect(images[0].y + images[0].height - baseline48).toBeCloseTo(23.5 * (4 / 3), 1);
+    // eq76: 31.45pt rounds to 31pt (41.33px) -> exactly 2 pitches.
+    expect(images[1].height).toBeCloseTo(31 * (4 / 3), 3);
+    expect(labels[1].lineHeight).toBeCloseTo(2 * pitch, 3);
   });
 
   it("preserves a section line-grid opt-out through column balancing", () => {

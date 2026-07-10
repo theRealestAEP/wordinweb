@@ -2446,7 +2446,10 @@ class Engine {
         page.items.push({
           kind: "image",
           x: originX + span.x,
-          y: baseline - span.image.height,
+          // w:position on the run moves the OBJECT itself: a lowered equation
+          // image hangs |position| below the baseline (eq-as-images: img
+          // bottom = baseline + 23.5pt at position -47hp, exact in the PDF).
+          y: baseline - span.image.height - (span.props.raise ?? 0),
           width: span.image.width,
           height: span.image.height,
           part: span.image.part,
@@ -2459,7 +2462,7 @@ class Engine {
       }
       if (span.drawing) {
         const bx = originX + span.x;
-        const by = baseline - span.drawing.height;
+        const by = baseline - span.drawing.height - (span.props.raise ?? 0);
         const tb = span.drawing.textbox;
         if (tb) {
           const w = span.drawing.width;
