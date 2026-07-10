@@ -917,7 +917,12 @@ export function breakParagraph(
       // target stay as ordinary right tabs whose number lands AT the text
       // end ("…CUQIKAPUBAK126"). The 0.75pt tolerance splits those cases;
       // Word never renders a bare number at the left margin.
-      const aligned = stop.align === "right" || stop.align === "decimal";
+      // Scoped to LTR paragraphs: the rule was measured on an LTR TOC, and in
+      // a bidi paragraph the wrapped tab line reorders through reorderVisual
+      // (the tab span carries no bidi level), reversing the leader/number and
+      // shifting every entry (yiddish TOC p214: digits painted reversed,
+      // 112 -> 211, one-entry page drift).
+      const aligned = (stop.align === "right" || stop.align === "decimal") && !bidiPara;
       if (aligned && curLineWidth > 0 && x > target + 0.75) {
         flush(false, false);
         ai--; // re-evaluate the tab from the fresh line's start
