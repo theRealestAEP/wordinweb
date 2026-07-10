@@ -933,6 +933,7 @@ export class DocxDocument {
             ),
         )
       : undefined;
+    let generatedTocStyleColor: string | undefined;
     if (tocHyperlink?.type === "hyperlink") {
       // A styled run in a generated TOC hyperlink keeps its own character
       // style's font family while Word suppresses the style's other formatting.
@@ -941,11 +942,19 @@ export class DocxDocument {
       // TOC-styled paragraph has no PAGEREF field and still uses the full style.
       if (runProps.styleId) {
         const linkProps = resolveCharacterStyleChain(this.styles, runProps.styleId);
-        props = mergeRunProps(props, {
+        const tocLinkStyle = this.styles.byId.get(runProps.styleId);
+        const keepTocLinkColor = /^Hyperlink-toc$/i.test(runProps.styleId) ||
+          /^Hyperlink-toc$/i.test(tocLinkStyle?.name ?? "");
+        const keptProps: RunProps = {
           font: linkProps.font,
           fontEastAsia: linkProps.fontEastAsia,
           fontComplex: linkProps.fontComplex,
-        });
+        };
+        if (keepTocLinkColor) {
+          keptProps.color = linkProps.color;
+          generatedTocStyleColor = linkProps.color;
+        }
+        props = mergeRunProps(props, keptProps);
       }
     } else if (runProps.styleId) {
       props = mergeRunProps(props, resolveCharacterStyleChain(this.styles, runProps.styleId));
@@ -962,10 +971,16 @@ export class DocxDocument {
       tocRun !== undefined &&
       tocRun.content.length > 0 &&
       tocRun.content.every((content) => content.kind === "tab");
-    const directProps =
+    let directProps =
       cachedTocTab && runProps.size !== undefined
         ? { ...runProps, size: para.props.markRunProps?.size }
         : runProps;
+    // TOC parsing writes synthetic color=auto to suppress the standard
+    // Hyperlink style. A custom Hyperlink-toc color is the exception Word
+    // retains, so replace only that synthetic value; a real direct color wins.
+    if (generatedTocStyleColor !== undefined && directProps.color === "auto") {
+      directProps = { ...directProps, color: generatedTocStyleColor };
+    }
     props = mergeRunProps(props, directProps);
     return props;
   }

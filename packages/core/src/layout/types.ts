@@ -95,6 +95,8 @@ export interface RectItem {
   width: number;
   height: number;
   fill: string;
+  /** Semantic paint provenance used by render-layer comparison. */
+  role?: "table-fill";
   /** Rotate about a point (px, relative to this item's top-left). */
   rotate?: { deg: number; ox: number; oy: number };
   behind?: boolean;
@@ -107,6 +109,8 @@ export interface LineEdgeItem {
   x2: number;
   y2: number;
   border: Border;
+  /** Semantic paint provenance used by render-layer comparison. */
+  role?: "table-rule";
   /** Rotate about a point (px, relative to this item's top-left). */
   rotate?: { deg: number; ox: number; oy: number };
 }

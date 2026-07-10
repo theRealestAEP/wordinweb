@@ -233,6 +233,7 @@ function renderPage(
         g.style.cursor = "row-resize";
       }
       g.style.zIndex = "5";
+      g.dataset.dxwItemKind = item.kind;
       g.dataset.dxwGrip = String(grips.length);
       surface.appendChild(g);
       grips.push({ el: g, item });
@@ -242,6 +243,16 @@ function renderPage(
     if (item.kind === "drawingHit" && !options.interactive) continue;
     const node = renderItem(doc, item, urls);
     if (node) {
+      node.dataset.dxwItemKind = item.kind;
+      if ((item.kind === "rect" || item.kind === "edge") && item.role) {
+        node.dataset.dxwRole = item.role;
+      }
+      if (item.kind === "text") {
+        node.dataset.dxwFontFamily = item.font.paintFamily ?? item.font.family;
+        node.dataset.dxwFontSize = String(item.font.size);
+        node.dataset.dxwFontWeight = item.font.bold ? "700" : "400";
+        node.dataset.dxwFontStyle = item.font.italic ? "italic" : "normal";
+      }
       if (isHf) node.dataset.dxwHf = "1";
       surface.appendChild(node);
       if (item.kind === "text") bindings.push({ el: node, item });
@@ -691,6 +702,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       // behindDoc: under the text layer (the surface isolates stacking so a
       // negative z-index stays above the page background).
       if (item.behind) node.style.zIndex = "-1";
+      node.dataset.dxwImageFormat = ext;
       return node;
     }
     case "text":
@@ -800,19 +812,13 @@ function renderText(item: TextItem): HTMLElement {
     el.style.justifyContent = "flex-end";
   }
   el.style.lineHeight = `${boxH}px`;
-  // Word (mac) rasterizes between Chrome's two smoothing modes: grayscale AA
-  // alone reads too thin, subpixel too thick. Grayscale plus a hairline
-  // stroke lands on Word's apparent weight; bold keeps subpixel (Word bold
-  // is heavier still). The stroke doesn't affect glyph advances, so measured
-  // layout is untouched.
+  // Word (mac) normal text matches Chrome's grayscale antialiasing; subpixel
+  // smoothing is too heavy. Bold keeps Chrome's default smoothing because Word
+  // bold is heavier too. Smoothing changes paint only, never glyph advances.
   if (item.font.bold) {
     el.style.setProperty("-webkit-font-smoothing", "auto");
   } else {
     el.style.setProperty("-webkit-font-smoothing", "antialiased");
-    // Hairline stroke tuned to Word's apparent weight. Re-swept (0.15/0.10/0.05/
-    // none) after the real-font flip: 0.15 stays best on benchmark/sample and the
-    // structural residual is not weight-bound, so the original value is kept.
-    el.style.setProperty("-webkit-text-stroke", "0.15px currentColor");
   }
 
   const props = item.props;

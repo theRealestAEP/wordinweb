@@ -35,7 +35,7 @@ describe("layout engine", () => {
     expect(pageText(result, 0)).toContain("Hello");
   });
 
-  it("carries extra spaces onto a wrapped line with source bindings", () => {
+  it("hangs wrap-boundary spaces at the end of the wrapping line with source bindings", () => {
     const section =
       `<w:sectPr><w:pgSz w:w="3600" w:h="15840"/>` +
       `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
@@ -51,21 +51,40 @@ describe("layout engine", () => {
 
     const single = resultFor("AAAA BBBB");
     const triple = resultFor("AAAA   BBBB");
+    const singleA = item(single, "AAAA");
     const singleB = item(single, "BBBB");
+    const tripleA = item(triple, "AAAA");
     const tripleB = item(triple, "BBBB");
-    const carried = triple.pages[0].items.filter(
+
+    // Word never starts a wrapped line with a space: extra spaces at the
+    // wrap boundary hang past the end of the upper line (zero ink, real
+    // advances, caret-addressable) and the next line's first word does not
+    // move.
+    expect(tripleB.x).toBeCloseTo(singleB.x, 3);
+    expect(tripleB.lineTop).toBeCloseTo(singleB.lineTop, 3);
+    const hanging = triple.pages[0].items.filter(
       (candidate) =>
         candidate.kind === "text" &&
         candidate.text === " " &&
-        candidate.lineTop === tripleB.lineTop,
+        candidate.lineTop === tripleA.lineTop,
     );
-
-    expect(carried).toHaveLength(2);
-    expect(carried.map((space) => space.kind === "text" ? space.src?.offset : undefined)).toEqual([5, 6]);
-    expect(tripleB.x - singleB.x).toBeCloseTo(
-      carried.reduce((width, space) => width + (space.kind === "text" ? space.width : 0), 0),
-      3,
+    expect(hanging).toHaveLength(3);
+    expect(hanging.map((space) => (space.kind === "text" ? space.src?.offset : undefined))).toEqual([4, 5, 6]);
+    // Sequential advances starting at the end of the wrapping word.
+    let edge = tripleA.x + tripleA.width;
+    for (const space of hanging) {
+      if (space.kind !== "text") continue;
+      expect(space.x).toBeCloseTo(edge, 3);
+      edge += space.width;
+    }
+    // The single-space layout hangs its separator space too.
+    const separator = single.pages[0].items.filter(
+      (candidate) =>
+        candidate.kind === "text" &&
+        candidate.text === " " &&
+        candidate.lineTop === singleA.lineTop,
     );
+    expect(separator).toHaveLength(1);
   });
 
   it("paginates long content onto multiple pages", () => {
@@ -704,6 +723,59 @@ describe("layout engine", () => {
     }
   });
 
+  it("overlays a widthless centered PAGE footer frame only for single-digit pages", () => {
+    const body = Array.from({ length: 10 }, (_, i) =>
+      `<w:p><w:r><w:t>Body ${i + 1}</w:t>${i < 9 ? '<w:br w:type="page"/>' : ""}</w:r></w:p>`,
+    ).join("");
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        body +
+          `<w:sectPr>
+            <w:footerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdF"/>
+            <w:pgSz w:w="12240" w:h="15840"/>
+            <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:footer="720"/>
+          </w:sectPr>`,
+      ),
+      "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+</Relationships>`,
+      "word/footer1.xml": `<?xml version="1.0"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:pPr><w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="margin" w:xAlign="center" w:y="1"/></w:pPr>
+    <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r>
+    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  </w:p>
+  <w:p><w:r><w:ptab w:relativeTo="margin" w:alignment="left" w:leader="none"/></w:r></w:p>
+  <w:p><w:r><w:t>Footer label</w:t></w:r></w:p>
+  <w:p><w:r><w:tab/></w:r></w:p>
+</w:ftr>`,
+    });
+    expect(result.totalPages).toBe(10);
+    const pageNumber = (page: number) => {
+      const laidPage = result.pages[page - 1];
+      const item = laidPage.items.slice(laidPage.hfStart).find(
+        (candidate) => candidate.kind === "text" && candidate.text === String(page),
+      );
+      if (item?.kind !== "text") throw new Error(`missing page ${page} footer`);
+      return item;
+    };
+    const footerLabel = (page: number) => {
+      const laidPage = result.pages[page - 1];
+      const item = laidPage.items.slice(laidPage.hfStart).find(
+        (candidate) => candidate.kind === "text" && candidate.text === "Footer",
+      );
+      if (item?.kind !== "text") throw new Error(`missing page ${page} label`);
+      return item;
+    };
+    const line = pageNumber(10).lineHeight;
+    for (let page = 1; page <= 9; page++) {
+      expect(result.pages[page - 1].bodyBottom).toBeCloseTo(result.pages[9].bodyBottom + line, 3);
+      expect(pageNumber(page).lineTop).toBeCloseTo(pageNumber(10).lineTop + line, 3);
+      expect(footerLabel(page).lineTop).toBeCloseTo(footerLabel(10).lineTop, 3);
+    }
+  });
+
   it("computes numbering labels with restarts", () => {
     const numberingXml = `<?xml version="1.0"?>
 <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -759,6 +831,34 @@ describe("layout engine", () => {
     // to content (probe-tablegrid), so the second column hugs the first.
     expect(c1.x - c0.x).toBeGreaterThan(20);
     expect(c1.x - c0.x).toBeLessThan(90);
+  });
+
+  it("marks only table fills and rules with table paint roles", () => {
+    const table = `<w:tbl>
+      <w:tblPr><w:tblBorders>
+        <w:top w:val="single"/><w:left w:val="single"/>
+        <w:bottom w:val="single"/><w:right w:val="single"/>
+      </w:tblBorders></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr><w:tc><w:tcPr><w:shd w:val="clear" w:fill="D9E2F3"/></w:tcPr>
+        <w:p><w:r><w:t>cell</w:t></w:r></w:p>
+      </w:tc></w:tr>
+    </w:tbl>`;
+    const paragraphBorder =
+      `<w:p><w:pPr><w:pBdr><w:bottom w:val="single"/></w:pBdr></w:pPr>` +
+      `<w:r><w:t>paragraph</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(table + paragraphBorder),
+    });
+    const fills = result.pages[0].items.filter(
+      (item) => item.kind === "rect" && item.fill.toUpperCase() === "#D9E2F3",
+    );
+    const edges = result.pages[0].items.filter((item) => item.kind === "edge");
+
+    expect(fills).toHaveLength(1);
+    expect(fills[0]?.kind === "rect" ? fills[0].role : undefined).toBe("table-fill");
+    expect(edges.filter((edge) => edge.role === "table-rule")).toHaveLength(4);
+    expect(edges.filter((edge) => edge.role === undefined)).toHaveLength(1);
   });
 
   it("rotates btLr cell text against declared and measured row heights", () => {

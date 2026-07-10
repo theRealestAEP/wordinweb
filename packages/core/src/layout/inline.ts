@@ -525,13 +525,19 @@ export function breakParagraph(
   }
 
   const flush = (isLast: boolean, endsWithBreak: boolean, forced?: "page" | "column", keepTrailingSpace = false) => {
-    // Trim trailing space spans (they don't affect alignment). In a degenerate
-    // ultra-narrow column Word keeps an inter-word space on its own line
-    // (keepTrailingSpace) so it still costs a line of height.
+    // Trailing spaces hang invisibly past the line end in Word: they never
+    // affect alignment, justification, or line metrics, but they remain real,
+    // caret-addressable content (typing a space at a wrap boundary must not
+    // move the caret to the next line, and a space typed at a paragraph end
+    // must keep a caret anchor). Detach them for measurement/alignment and
+    // re-attach after. In a degenerate ultra-narrow column Word keeps an
+    // inter-word space on its own line (keepTrailingSpace) so it still costs
+    // a line of height.
+    const hanging: LineSpan[] = [];
     while (!keepTrailingSpace && cur.length > 0 && cur[cur.length - 1].isSpace) {
       curLineWidth -= cur[cur.length - 1].width;
       curSpaceWidth -= cur[cur.length - 1].width;
-      cur.pop();
+      hanging.unshift(cur.pop()!);
     }
     if (cur.length === 0 && isLast && anchorSrc) {
       const anchorProps = doc.effectiveRunProps(para, anchorSrc.run.props);
@@ -564,6 +570,18 @@ export function breakParagraph(
           ? "right"
           : (physAlign ?? "left");
       applyAlignment(line, align, avail, startX, isLast || endsWithBreak);
+    }
+    // Re-attach hanging trailing spaces at the line's visual end (after
+    // alignment so they never shift it). Bidi lines keep the old drop
+    // behavior: visual reordering has no stable "end" for them.
+    if (hanging.length > 0 && !bidiPara) {
+      let hx = startX;
+      for (const s of line.spans) hx = Math.max(hx, s.x + s.width);
+      for (const s of hanging) {
+        s.x = hx;
+        hx += s.width;
+        line.spans.push(s);
+      }
     }
     lines.push(line);
     cur = [];
@@ -805,10 +823,6 @@ export function breakParagraph(
         // if it isn't the whole line) moves down with the rest of the word.
         const head = hi > minSpans && hi < cur.length && cur[hi - 1].isSpace ? cur.splice(hi) : [];
         for (const h of head) curLineWidth -= h.width;
-        const trailingSpaces: LineSpan[] = [];
-        for (let j = cur.length - 1; j >= minSpans && cur[j].isSpace; j--) {
-          trailingSpaces.unshift(cur[j]);
-        }
         // A float in the MIDDLE of the column leaves free space on both sides;
         // Word fills the near side, then the far side of the SAME line band,
         // then the next band. Try each remaining far-side interval (empty
@@ -824,17 +838,10 @@ export function breakParagraph(
         if (moved) {
           x = lineStartX(lineIndex);
         } else {
+          // Any trailing spaces (the wrap separator and consecutive typed
+          // spaces) hang at the end of the flushed line - Word never starts
+          // a wrapped line with a space.
           flush(false, false);
-          // The first trailing space is the wrapping separator. Additional
-          // consecutive spaces are editable content at the start of the next
-          // visual line, so keep their source bindings and advances.
-          for (const space of trailingSpaces.slice(1)) {
-            space.x = x;
-            cur.push(space);
-            curLineWidth += space.width;
-            curSpaceWidth += space.width;
-            x += space.width;
-          }
         }
         for (const h of head) {
           h.x = x;

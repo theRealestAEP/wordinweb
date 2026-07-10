@@ -345,6 +345,17 @@ describe("document parsing", () => {
             <w:hyperlink w:anchor="manual">
               <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Manual link</w:t></w:r>
             </w:hyperlink>
+          </w:p>
+          <w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>
+            <w:hyperlink w:anchor="_Toc3">
+              <w:r><w:rPr><w:rStyle w:val="Hyperlink-toc"/></w:rPr><w:t>Custom blue entry</w:t></w:r>
+              <w:r><w:tab/></w:r>
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText xml:space="preserve"> PAGEREF _Toc3 \\h </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>6</w:t></w:r>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            </w:hyperlink>
           </w:p>`,
         ),
         "word/styles.xml": `<?xml version="1.0"?>
@@ -355,19 +366,34 @@ describe("document parsing", () => {
   <w:style w:type="character" w:styleId="Hyperlink">
     <w:rPr><w:rFonts w:ascii="Arial"/><w:i/><w:color w:val="0000FF"/><w:sz w:val="24"/><w:u w:val="single"/></w:rPr>
   </w:style>
+  <w:style w:type="character" w:styleId="Hyperlink-toc">
+    <w:name w:val="Hyperlink-toc"/><w:rPr><w:color w:val="0000FF"/></w:rPr>
+  </w:style>
 </w:styles>`,
       }),
     );
     const generated = doc.sections[0].blocks[0];
     const marked = doc.sections[0].blocks[1];
     const manual = doc.sections[0].blocks[2];
-    if (generated.type !== "paragraph" || marked.type !== "paragraph" || manual.type !== "paragraph") {
+    const custom = doc.sections[0].blocks[3];
+    if (
+      generated.type !== "paragraph" ||
+      marked.type !== "paragraph" ||
+      manual.type !== "paragraph" ||
+      custom.type !== "paragraph"
+    ) {
       throw new Error("expected paragraphs");
     }
     const generatedLink = generated.children[0];
     const markedLink = marked.children[0];
     const manualLink = manual.children[0];
-    if (generatedLink.type !== "hyperlink" || markedLink.type !== "hyperlink" || manualLink.type !== "hyperlink") {
+    const customLink = custom.children[0];
+    if (
+      generatedLink.type !== "hyperlink" ||
+      markedLink.type !== "hyperlink" ||
+      manualLink.type !== "hyperlink" ||
+      customLink.type !== "hyperlink"
+    ) {
       throw new Error("expected hyperlinks");
     }
 
@@ -386,6 +412,11 @@ describe("document parsing", () => {
 
     const manualProps = doc.effectiveRunProps(manual, manualLink.runs[0].props);
     expect(manualProps).toMatchObject({ font: "Arial", size: 16, italic: true });
+
+    const customProps = doc.effectiveRunProps(custom, customLink.runs[0].props);
+    const customPageProps = doc.effectiveRunProps(custom, customLink.runs.at(-1)!.props);
+    expect(customProps).toMatchObject({ color: "#0000FF", underline: "none" });
+    expect(customPageProps).toMatchObject({ color: "auto" });
   });
 
   it("parses headers and footers", () => {

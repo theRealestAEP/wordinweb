@@ -438,8 +438,11 @@ class Engine {
     // Measure header/footer to establish the body box. Items are emitted in
     // the final pass (when NUMPAGES is known); heights are stable because
     // only field text width changes.
-    const headerH = this.measureHeaderFooter(this.doc.headers.get(page.headerRel ?? ""), page, contentWidth);
-    const footerH = this.measureHeaderFooter(this.doc.footers.get(page.footerRel ?? ""), page, contentWidth);
+    const header = this.doc.headers.get(page.headerRel ?? "");
+    const footer = this.doc.footers.get(page.footerRel ?? "");
+    const headerH = this.measureHeaderFooter(header, page, contentWidth);
+    const footerOverlay = this.singleDigitPageFrameOverlay(footer, page);
+    const footerH = this.measureHeaderFooter(footer, page, contentWidth, footerOverlay);
 
     if (sp.marginTop >= 0) {
       page.bodyTop = Math.max(sp.marginTop, headerH > 0 ? sp.headerDistance + headerH : 0);
@@ -2469,6 +2472,9 @@ class Engine {
      * does not extend the row for a final blank line - doerfp's FUNODURES box
      * row is "heading + empty", rendered one line tall, not two). */
     dropTrailingEmpty?: boolean,
+    /** A single-digit PAGE field in Word's widthless centered footer frame
+     * overlays the following footer line instead of consuming its own line. */
+    overlayPageFrame?: boolean,
   ): { items: PageItem[]; height: number } {
     const items: PageItem[] = [];
     let y = 0;
@@ -2529,6 +2535,9 @@ class Engine {
           continue;
         }
         const props = this.doc.effectiveParaProps(block);
+        const overlaysFlow = !!overlayPageFrame && isCenteredPageFieldFrame(block, props);
+        const flowY = y;
+        const flowPrevAfter = framePrevAfter;
         const label = this.numberingLabel(props, block);
         const broken = breakParagraph(this.doc, this.measurer, block, width, fields, label, undefined, this.sp?.docGridLinePitch);
         let spacingBefore = props.spacingBefore ?? 0;
@@ -2565,6 +2574,10 @@ class Engine {
           !(props.borders && frameSameBorders(props, blocks[i + 1])),
         );
         y += spacingAfter;
+        if (overlaysFlow) {
+          y = flowY;
+          framePrevAfter = flowPrevAfter;
+        }
       } else {
         y = this.layoutTableInFrame(block, fake, 0, y, width, fields);
         framePrevAfter = 0;
@@ -2821,7 +2834,12 @@ class Engine {
     }
   }
 
-  private measureHeaderFooter(hf: HeaderFooter | undefined, page: InternalPage, contentWidth: number): number {
+  private measureHeaderFooter(
+    hf: HeaderFooter | undefined,
+    page: InternalPage,
+    contentWidth: number,
+    overlayPageFrame = false,
+  ): number {
     if (!hf || hf.blocks.length === 0) return 0;
     const fields: FieldContext = {
       pageNumber: () => page.displayNumber,
@@ -2830,9 +2848,18 @@ class Engine {
     };
     // Numbering counters must not be consumed by measurement: snapshot.
     const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-    const { height } = this.layoutFrame(hf.blocks, contentWidth, fields);
+    const { height } = this.layoutFrame(hf.blocks, contentWidth, fields, undefined, false, overlayPageFrame);
     this.counters = snapshot;
     return height;
+  }
+
+  private singleDigitPageFrameOverlay(hf: HeaderFooter | undefined, page: InternalPage): boolean {
+    if (!hf || formatNumber(page.displayNumber, PAGE_FMT[page.sp.pageNumberFormat ?? "decimal"] ?? "decimal").length !== 1) {
+      return false;
+    }
+    return hf.blocks.some(
+      (block) => block.type === "paragraph" && isCenteredPageFieldFrame(block, this.doc.effectiveParaProps(block)),
+    );
   }
 
   /** w:pgBorders: a rectangle inset from the page or text edges. */
@@ -2881,17 +2908,18 @@ class Engine {
       }
       const footer = this.doc.footers.get(page.footerRel ?? "");
       if (footer && footer.blocks.length > 0) {
+        const overlayPageFrame = this.singleDigitPageFrameOverlay(footer, page);
         // Two passes: the frame's page position depends on its own height,
         // which anchored-shape resolution needs up front.
         let snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-        const measured = this.layoutFrame(footer.blocks, contentWidth, fields);
+        const measured = this.layoutFrame(footer.blocks, contentWidth, fields, undefined, false, overlayPageFrame);
         this.counters = snapshot;
         const top = sp.pageHeight - sp.footerDistance - measured.height;
         snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
         const { items } = this.layoutFrame(footer.blocks, contentWidth, fields, {
           x: sp.marginLeft,
           y: top,
-        });
+        }, false, overlayPageFrame);
         this.counters = snapshot;
         for (const it of items) offsetItem(it, sp.marginLeft, top);
         page.items.push(...items);
@@ -3762,7 +3790,15 @@ class Engine {
       // Direct cell shd wins; otherwise the table style's conditional banding.
       const fill = cell.props.shading ?? cond?.shd;
       if (fill) {
-        page.items.push({ kind: "rect", x: cx, y, width: cellLay.width, height: cellH, fill });
+        page.items.push({
+          kind: "rect",
+          x: cx,
+          y,
+          width: cellLay.width,
+          height: cellH,
+          fill,
+          role: "table-fill",
+        });
       }
 
       // Row height reserves half of each horizontal boundary rule. Place cell
@@ -3843,10 +3879,18 @@ class Engine {
     const left = pick(cb?.left, condBorders?.left, tb?.left, tb?.insideV, firstCol);
     const right = pick(cb?.right, condBorders?.right, tb?.right, tb?.insideV, lastCol);
 
-    if (top) page.items.push({ kind: "edge", x1: x, y1: y, x2: x + w, y2: y, border: top });
-    if (bottom) page.items.push({ kind: "edge", x1: x, y1: y + h, x2: x + w, y2: y + h, border: bottom });
-    if (left) page.items.push({ kind: "edge", x1: x, y1: y, x2: x, y2: y + h, border: left });
-    if (right) page.items.push({ kind: "edge", x1: x + w, y1: y, x2: x + w, y2: y + h, border: right });
+    if (top) {
+      page.items.push({ kind: "edge", x1: x, y1: y, x2: x + w, y2: y, border: top, role: "table-rule" });
+    }
+    if (bottom) {
+      page.items.push({ kind: "edge", x1: x, y1: y + h, x2: x + w, y2: y + h, border: bottom, role: "table-rule" });
+    }
+    if (left) {
+      page.items.push({ kind: "edge", x1: x, y1: y, x2: x, y2: y + h, border: left, role: "table-rule" });
+    }
+    if (right) {
+      page.items.push({ kind: "edge", x1: x + w, y1: y, x2: x + w, y2: y + h, border: right, role: "table-rule" });
+    }
   }
 }
 
@@ -3870,6 +3914,28 @@ function isEmptyParagraph(p: Paragraph): boolean {
     }
   }
   return true;
+}
+
+function isCenteredPageFieldFrame(p: Paragraph, props: ParaProps): boolean {
+  const frame = props.frame;
+  if (
+    !frame ||
+    frame.w !== undefined ||
+    frame.hAnchor !== "margin" ||
+    frame.vAnchor !== "text" ||
+    frame.xAlign !== "center"
+  ) {
+    return false;
+  }
+  for (const child of p.children) {
+    const runs = child.type === "run" ? [child] : child.runs;
+    for (const run of runs) {
+      if (run.content.some((content) => content.kind === "field" && /^\s*PAGE\b/i.test(content.instruction))) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function computeColumns(sp: SectionProps, contentWidth: number): { colXs: number[]; colWidths: number[] } {

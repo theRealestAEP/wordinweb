@@ -39,11 +39,18 @@ interface Caret {
   run: Run;
   /** Char offset within t.text. */
   offset: number;
+  /** Wrap-boundary affinity. "end" binds the caret to the span ENDING at the
+   * offset (set after typing/deleting, so the caret stays at the end of the
+   * upper line - Word's behavior); undefined keeps the default binding to the
+   * following span (clicking the start of a wrapped line). */
+  bias?: "end";
 }
 
 interface SelPoint {
   t: XmlElement;
   offset: number;
+  /** Wrap-boundary affinity carried into the caret (see Caret.bias). */
+  bias?: "end";
 }
 
 /** First text node under a binding element - small-caps reduced segments
@@ -319,13 +326,15 @@ export class DocxEditor {
     }
     while (onSameLine(i + 1)) i++;
     const src = bindings[i].item.src!;
-    return { t: src.t as XmlElement, offset: src.offset + bindings[i].item.text.length };
+    // End of a wrapped line: bind to the span ending here, not the next
+    // line's first span (which shares the same offset).
+    return { t: src.t as XmlElement, offset: src.offset + bindings[i].item.text.length, bias: "end" };
   }
 
   private setSelectionOrCaret(anchor: SelPoint, focus: SelPoint): void {
     if (anchor.t === focus.t && anchor.offset === focus.offset) {
       this.clearSelection();
-      this.caret = { t: focus.t, run: this.caret?.run ?? ({} as Caret["run"]), offset: focus.offset };
+      this.caret = { t: focus.t, run: this.caret?.run ?? ({} as Caret["run"]), offset: focus.offset, bias: focus.bias };
       this.positionCaret();
       return;
     }
@@ -346,7 +355,7 @@ export class DocxEditor {
       this.setSelectionOrCaret(anchor, next);
     } else {
       this.clearSelection();
-      this.caret = { t: next.t, run: this.caret?.run ?? ({} as Caret["run"]), offset: next.offset };
+      this.caret = { t: next.t, run: this.caret?.run ?? ({} as Caret["run"]), offset: next.offset, bias: next.bias };
       this.positionCaret();
     }
   }
@@ -1820,6 +1829,9 @@ export class DocxEditor {
       t: src.t as XmlElement,
       run: src.run,
       offset: src.offset + (best.after ? best.binding.item.text.length : 0),
+      // Clicking past a span's right edge means "after its last char" — keep
+      // the caret on this line even when the next span starts the line below.
+      bias: best.after && best.binding.item.text.length > 0 ? "end" : undefined,
     };
   }
 
@@ -1858,10 +1870,14 @@ export class DocxEditor {
     // the correct cell/column.
     const r = binding.el.getBoundingClientRect();
     if (y < r.top - 4 || y > r.bottom + 4) return null;
+    const local = Math.min(offset, binding.item.text.length);
     return {
       t: binding.item.src.t,
       run: binding.item.src.run,
-      offset: binding.item.src.offset + Math.min(offset, binding.item.text.length),
+      offset: binding.item.src.offset + local,
+      // A click resolving to this span's END means "after its last char":
+      // stay on this line (matters when the next span sits on the next line).
+      bias: local === binding.item.text.length && binding.item.text.length > 0 ? "end" : undefined,
     };
   }
 
@@ -2101,8 +2117,14 @@ export class DocxEditor {
     }
     if (!best?.item.src) return;
     const within = Math.max(0, Math.min(1, (caretXIn - best.item.x) / Math.max(best.item.width, 1)));
-    const offset = best.item.src.offset + Math.round(within * best.item.text.length);
-    this.caret = { t: best.item.src.t as XmlElement, run: best.item.src.run, offset };
+    const local = Math.round(within * best.item.text.length);
+    const offset = best.item.src.offset + local;
+    this.caret = {
+      t: best.item.src.t as XmlElement,
+      run: best.item.src.run,
+      offset,
+      bias: local === best.item.text.length && best.item.text.length > 0 ? "end" : undefined,
+    };
     this.positionCaret();
   }
 
@@ -2130,6 +2152,7 @@ export class DocxEditor {
     const t = caret.t;
     t.text = t.text.slice(0, caret.offset) + text + t.text.slice(caret.offset);
     caret.offset += text.length;
+    caret.bias = "end";
     this.commit();
   }
 
@@ -2164,6 +2187,7 @@ export class DocxEditor {
       }
       caret.t.text = caret.t.text.slice(0, caret.offset - 1) + caret.t.text.slice(caret.offset);
       caret.offset -= 1;
+      caret.bias = "end";
     } else {
       if (caret.offset >= caret.t.text.length) {
         const pEl = paragraphOf(this.host.doc, caret.t);
@@ -2214,6 +2238,10 @@ export class DocxEditor {
     const next = caret.offset + delta;
     if (next >= 0 && next <= caret.t.text.length) {
       caret.offset = next;
+      // Arrow affinity: moving RIGHT onto a boundary reads as "after the char
+      // just passed" (upper line at a wrap); moving LEFT reads as "before the
+      // char" (lower line).
+      caret.bias = delta > 0 ? "end" : undefined;
     } else {
       this.stepToNeighbor(delta);
     }
@@ -2342,6 +2370,10 @@ export class DocxEditor {
         if (caret.offset >= start && caret.offset <= end) {
           found = b;
           if (caret.offset < end) break; // fully inside — done
+          // "end" affinity: a caret set by typing stays with the span that
+          // ends exactly here (the end of the upper line at a wrap boundary),
+          // instead of jumping to the next span's start on the line below.
+          if (caret.bias === "end" && end > start) break;
         }
       }
       return found;
@@ -2378,14 +2410,15 @@ export class DocxEditor {
           top: (rect.top - surfaceRect.top) / zoom,
           width: rect.width / zoom,
         };
-      } else if (rect.height > 0) {
+      } else if (rect.height > 0 && best.item.text.trim().length > 0) {
         xPx = (rect.left - surfaceRect.left) / zoom;
       } else {
-        // Degenerate rect: justified SPACE spans paint zero-width (their
-        // advance lives in the next span's x), so a collapsed range inside
-        // one measures 0x0 at the viewport origin and the caret flew to the
-        // page's left edge (typing space after a period). Use the layout
-        // item's own geometry instead.
+        // Degenerate rect or whitespace-only span: space spans paint
+        // zero-width in the DOM (their advance lives in layout geometry, and
+        // trailing spaces collapse entirely), so a collapsed Range inside one
+        // measures 0x0 / at the span's left edge and the caret flew to the
+        // page's left edge (typing space after a period) or lagged one space
+        // behind. Use the layout item's own geometry instead.
         const len = best.item.text.length || 1;
         xPx = best.item.x + (local >= len ? best.item.width : (best.item.width * local) / len);
       }
