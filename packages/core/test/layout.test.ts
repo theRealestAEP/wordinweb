@@ -3222,6 +3222,70 @@ describe("OMML math line extents (wild2-math-omml-dense Word PDF rules)", () => 
   });
 });
 
+describe("m:oMathPara group justification (dense p7/p13 Word PDF)", () => {
+  // Word lays a display equation broken into rows (w:br inside the math, or
+  // auto-wrap) as one GROUP: rows left-align to each other; under the default
+  // jc=centerGroup the group is centered on its widest row measured WITH its
+  // trailing space runs (dense p13's group left is exactly colLeft +
+  // (colW - widestRowWithSpaces)/2), and an auto-wrapped continuation row
+  // indents a further wrapIndent (1440tw default) from the group's left edge.
+  const M = `xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"`;
+  const SECT =
+    `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+  const COL_LEFT = 96; // 1440tw margin
+  const mathRowLefts = (result: ReturnType<typeof layoutDocument>): number[] => {
+    const rows = new Map<number, number>();
+    for (const i of result.pages[0].items) {
+      if (i.kind !== "text" || !(i as { mathSrc?: unknown }).mathSrc) continue;
+      rows.set(i.lineTop, Math.min(rows.get(i.lineTop) ?? Infinity, i.x));
+    }
+    return [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, x]) => x);
+  };
+  const eqPara = (paraPr: string, segments: string[]): string =>
+    `<w:p><m:oMathPara ${M}>${paraPr}<m:oMath>` +
+    segments
+      .map((t, i) => `<m:r>${i > 0 ? "<w:br/>" : ""}<m:t xml:space="preserve">${t}</m:t></m:r>`)
+      .join("") +
+    `</m:oMath></m:oMathPara></w:p>`;
+
+  it("centerGroup left-aligns explicit-break rows and counts trailing spaces in the group width", () => {
+    const run = (tail: string) =>
+      layout({ "word/document.xml": wrapDocument(eqPara("", ["x=aaaaaaaa", `+bb${tail}`]) + SECT) }).result;
+    const tight = mathRowLefts(run(""));
+    expect(tight).toHaveLength(2);
+    // Rows align at one left edge, centered inside the column (not per-line).
+    expect(tight[1]).toBeCloseTo(tight[0], 1);
+    expect(tight[0]).toBeGreaterThan(COL_LEFT + 10);
+    // 40 trailing spaces on the short row widen the GROUP: everything moves
+    // left by half the added width, and the rows still share one edge.
+    const spaced = mathRowLefts(run(" ".repeat(40)));
+    expect(spaced[1]).toBeCloseTo(spaced[0], 1);
+    expect(spaced[0]).toBeLessThan(tight[0] - 10);
+  });
+
+  it("m:oMathParaPr jc=left pins the group flush left", () => {
+    const paraPr = `<m:oMathParaPr><m:jc m:val="left"/></m:oMathParaPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(eqPara(paraPr, ["x=aaaaaaaa", "+bb"]) + SECT),
+    });
+    const lefts = mathRowLefts(result);
+    expect(lefts).toHaveLength(2);
+    expect(lefts[0]).toBeCloseTo(COL_LEFT, 1);
+    expect(lefts[1]).toBeCloseTo(COL_LEFT, 1);
+  });
+
+  it("an auto-wrapped continuation row indents by wrapIndent from the group left", () => {
+    // One long segment with top-level +'s: wider than the 624px column, so
+    // wrapDisplayMath splits it; the continuation indents 96px (1440tw).
+    const long = `${"a".repeat(40)}+${"b".repeat(40)}+${"c".repeat(40)}`;
+    const { result } = layout({ "word/document.xml": wrapDocument(eqPara("", [long]) + SECT) });
+    const lefts = mathRowLefts(result);
+    expect(lefts.length).toBeGreaterThan(1);
+    expect(lefts[1] - lefts[0]).toBeCloseTo(96, 1);
+  });
+});
+
 describe("line metric rules (doerfp p8 / NIH p342)", () => {
   const SECT =
     `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +

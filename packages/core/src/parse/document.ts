@@ -465,11 +465,18 @@ function parseParaChildren(
         // m:oMathPara marks a display equation (centered, display-style
         // layout); a bare m:oMath flows inline.
         const display = ln === "oMathPara";
+        // m:oMathParaPr/m:jc: explicit display-equation justification
+        // (dense's F1 definition is jc=left and Word paints it flush left).
+        const jcVal = display ? attr(child(child(el, "oMathParaPr"), "jc"), "val") : undefined;
+        const jc =
+          jcVal === "left" || jcVal === "right" || jcVal === "center" || jcVal === "centerGroup"
+            ? jcVal
+            : undefined;
         const content: RunContent[] = [];
         let segment: MathNode[] = [];
         const flushMath = () => {
           if (segment.length === 0) return;
-          content.push({ kind: "math", nodes: segment, src: el, display });
+          content.push({ kind: "math", nodes: segment, src: el, display, jc });
           segment = [];
         };
         for (const node of nodes) {

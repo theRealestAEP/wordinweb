@@ -89,6 +89,16 @@ export class DocxDocument {
    * it (nccih: a Heading1/2 after a page break sits at margin + its before).
    * Absent → treated as current (15). */
   readonly compatibilityMode: number = 15;
+  /** settings.xml m:mathPr/m:defJc — default justification for display
+   * equations whose m:oMathParaPr carries no explicit m:jc (Word default:
+   * centerGroup — the rows of a broken equation left-align to each other and
+   * the group is centered in the column). */
+  readonly mathDefJc: "left" | "right" | "center" | "centerGroup" = "centerGroup";
+  /** settings.xml m:mathPr/m:wrapIndent in px (Word default 1440tw = 1"):
+   * indent of auto-wrapped display-equation continuation rows from the
+   * equation group's left edge (dense p13: the "+Dc(...)" continuations sit
+   * exactly 72pt right of the explicit rows). */
+  readonly mathWrapIndent: number = 96;
   /** Review comments from word/comments.xml (empty when the part is absent).
    * Re-derived from the retained comments XML on every refresh(). */
   comments: DocComment[] = [];
@@ -174,6 +184,15 @@ export class DocxDocument {
           const v = Number(attr(cs, "val"));
           if (Number.isFinite(v)) (this as { compatibilityMode: number }).compatibilityMode = v;
         }
+      }
+      const mathPr = child(settings, "mathPr");
+      const defJc = attr(child(mathPr, "defJc"), "val");
+      if (defJc === "left" || defJc === "right" || defJc === "center" || defJc === "centerGroup") {
+        (this as { mathDefJc: string }).mathDefJc = defJc;
+      }
+      const wrapIndent = intAttr(child(mathPr, "wrapIndent"), "val");
+      if (wrapIndent !== undefined && wrapIndent >= 0) {
+        (this as { mathWrapIndent: number }).mathWrapIndent = twipsToPx(wrapIndent);
       }
     }
 

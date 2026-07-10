@@ -168,6 +168,13 @@ export interface MathBox {
   baseSize?: number;
   /** Legal Word equation-wrap positions, measured from the box's left edge. */
   breaks?: number[];
+  /** m:oMathPara justification carried from the parse (explicit m:jc;
+   * undefined = document default). Only meaningful on display boxes. */
+  jc?: "left" | "right" | "center" | "centerGroup";
+  /** This row is an auto-wrapped CONTINUATION of an oversized display row
+   * (2nd+ range from wrapDisplayMath): Word indents it by the document's
+   * math wrapIndent from the equation group's left edge. */
+  wrapRow?: boolean;
   /** Largest stretched-delimiter variant index laid directly in this box
    * (undefined: none). A delimiter wrapping another delimiter renders at
    * least one size up when both would otherwise be regular (dense (0.1a):
