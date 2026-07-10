@@ -1276,7 +1276,12 @@ function nextTabStop(
     }
   }
   const next = nextDefaultTab(x);
-  return { pos: next < rightEdge ? next : x + 4, align: "left" };
+  // Past the last default stop, Word advances a tab 306tw (15.3pt = 20.4px)
+  // - probe-tabalign2/3 vs the NIH footer: its two trailing tabs past the
+  // right edge span exactly 30.6pt, and the flush-right line puts the ink
+  // 30.6pt inside the margin (Word D at 333.4pt; a 4px min painted the line
+  // 5pt right of Word on every near-blank NIH page).
+  return { pos: next < rightEdge ? next : x + 10.7, align: "left" };
 }
 
 /** Reorder a bidi line's spans into visual order (UAX#9 rule L2): from the
