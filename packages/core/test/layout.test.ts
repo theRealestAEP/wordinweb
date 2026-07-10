@@ -768,12 +768,52 @@ describe("layout engine", () => {
       if (item?.kind !== "text") throw new Error(`missing page ${page} label`);
       return item;
     };
-    const line = pageNumber(10).lineHeight;
-    for (let page = 1; page <= 9; page++) {
-      expect(result.pages[page - 1].bodyBottom).toBeCloseTo(result.pages[9].bodyBottom + line, 3);
-      expect(pageNumber(page).lineTop).toBeCloseTo(pageNumber(10).lineTop + line, 3);
-      expect(footerLabel(page).lineTop).toBeCloseTo(footerLabel(10).lineTop, 3);
+    // The frame is out of flow and the ptab/label lines clear its centered
+    // extent, so every page's footer has identical geometry — digit count is
+    // irrelevant (Word PDF evidence: dense p14 "302" shares the band; the
+    // number paints at the frame's xAlign, not the paragraph's own jc).
+    for (let page = 2; page <= 10; page++) {
+      expect(result.pages[page - 1].bodyBottom).toBeCloseTo(result.pages[0].bodyBottom, 3);
+      expect(pageNumber(page).lineTop).toBeCloseTo(pageNumber(1).lineTop, 3);
+      expect(footerLabel(page).lineTop).toBeCloseTo(footerLabel(1).lineTop, 3);
     }
+    // xAlign=center positions the number at the margin-box center.
+    const n1 = pageNumber(1);
+    const contentWidth = (12240 - 1440 - 1440) / 15;
+    expect(n1.x + n1.width / 2).toBeCloseTo(96 + contentWidth / 2, 0);
+  });
+
+  it("stacks a PAGE footer frame above a following line whose extent collides", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:r><w:t>Body</w:t></w:r></w:p>` +
+          `<w:sectPr>
+            <w:footerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdF"/>
+            <w:pgSz w:w="12240" w:h="15840"/>
+            <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:footer="720"/>
+          </w:sectPr>`,
+      ),
+      "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+</Relationships>`,
+      // NIH pattern: centered PAGE frame + centered admin line — the text's
+      // natural extent crosses the frame box, so it wraps BELOW the number.
+      "word/footer1.xml": `<?xml version="1.0"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:pPr><w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="margin" w:xAlign="center" w:y="1"/></w:pPr>
+    <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r>
+    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+  </w:p>
+  <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>Centered admin footer line 01-23-4567</w:t></w:r></w:p>
+</w:ftr>`,
+    });
+    const page = result.pages[0];
+    const hf = page.items.slice(page.hfStart);
+    const num = hf.find((it) => it.kind === "text" && it.text === "1");
+    const admin = hf.find((it) => it.kind === "text" && it.text.includes("Centered"));
+    if (num?.kind !== "text" || admin?.kind !== "text") throw new Error("missing footer items");
+    expect(admin.lineTop).toBeGreaterThan(num.lineTop + 1);
   });
 
   it("computes numbering labels with restarts", () => {

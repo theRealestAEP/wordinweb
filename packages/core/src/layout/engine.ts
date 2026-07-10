@@ -439,8 +439,8 @@ class Engine {
     // only field text width changes.
     const header = this.doc.headers.get(page.headerRel ?? "");
     const footer = this.doc.footers.get(page.footerRel ?? "");
-    const headerH = this.measureHeaderFooter(header, page, contentWidth);
-    const footerOverlay = this.singleDigitPageFrameOverlay(footer, page);
+    const headerH = this.measureHeaderFooter(header, page, contentWidth, this.pageFieldFrameOverlay(header));
+    const footerOverlay = this.pageFieldFrameOverlay(footer);
     const footerH = this.measureHeaderFooter(footer, page, contentWidth, footerOverlay);
 
     if (sp.marginTop >= 0) {
@@ -2587,12 +2587,17 @@ class Engine {
      * does not extend the row for a final blank line - doerfp's FUNODURES box
      * row is "heading + empty", rendered one line tall, not two). */
     dropTrailingEmpty?: boolean,
-    /** A single-digit PAGE field in Word's widthless centered footer frame
-     * overlays the following footer line instead of consuming its own line. */
+    /** Word's header/footer page-number template: a widthless margin-anchored
+     * PAGE-field frame paragraph is extracted from the flow; the following
+     * paragraph shares its band unless the text's natural extent collides
+     * with the frame box (then it stacks below). */
     overlayPageFrame?: boolean,
   ): { items: PageItem[]; height: number } {
     const items: PageItem[] = [];
     let y = 0;
+    // An unconsumed PAGE frame awaiting its collision test with the next
+    // paragraph (top/bottom = the frame's band, x0/x1 = its painted extent).
+    let pendingPageFrame: { top: number; bottom: number; x0: number; x1: number } | null = null;
     // Frame flow reuses a fake page so emitLine/decorations can target it.
     const fake: InternalPage = {
       items,
@@ -2650,9 +2655,10 @@ class Engine {
           continue;
         }
         const props = this.doc.effectiveParaProps(block);
-        const overlaysFlow = !!overlayPageFrame && isCenteredPageFieldFrame(block, props);
+        const isPageFrame = !!overlayPageFrame && pendingPageFrame === null && isPageFieldFrame(block, props);
         const flowY = y;
         const flowPrevAfter = framePrevAfter;
+        const paraItemsStart = items.length;
         const label = this.numberingLabel(props, block);
         const broken = breakParagraph(this.doc, this.measurer, block, width, fields, label, undefined, this.sp?.docGridLinePitch);
         let spacingBefore = props.spacingBefore ?? 0;
@@ -2689,15 +2695,60 @@ class Engine {
           !(props.borders && frameSameBorders(props, blocks[i + 1])),
         );
         y += spacingAfter;
-        if (overlaysFlow) {
-          y = flowY;
-          framePrevAfter = flowPrevAfter;
+        if (isPageFrame) {
+          // Word extracts the widthless PAGE frame from the flow: its content
+          // paints at the frame's xAlign, and the NEXT paragraph is laid as
+          // if this one did not exist, then tested for collision (below).
+          // PDF-verified both ways: dense's right-aligned "302" shares the
+          // line with left-aligned footer text; NIH's centered number stacks
+          // above its centered admin line. The rule is extent collision, not
+          // page-number digit count.
+          const frameTexts = items
+            .slice(paraItemsStart)
+            .filter((it): it is TextItem => it.kind === "text" && it.text.trim().length > 0);
+          if (frameTexts.length > 0) {
+            const x0 = Math.min(...frameTexts.map((it) => it.x));
+            const x1 = Math.max(...frameTexts.map((it) => it.x + it.width));
+            const w = x1 - x0;
+            const targetX0 =
+              props.frame?.xAlign === "right" ? width - w :
+              props.frame?.xAlign === "left" ? 0 : (width - w) / 2;
+            const dx = targetX0 - x0;
+            if (dx !== 0) for (const it of items.slice(paraItemsStart)) offsetItem(it, dx, 0);
+            pendingPageFrame = { top: flowY, bottom: y, x0: targetX0, x1: targetX0 + w };
+            y = flowY;
+            framePrevAfter = flowPrevAfter;
+          }
+        } else if (pendingPageFrame) {
+          // First paragraph after a PAGE frame: it was laid in the frame's
+          // band. If its first line's natural extent touches the frame box,
+          // Word wraps it BELOW the frame instead (stack).
+          const pf = pendingPageFrame;
+          pendingPageFrame = null;
+          const first = broken.lines[0];
+          const spans = first ? first.spans.filter((s) => s.text && s.text.trim().length > 0) : [];
+          const collides =
+            spans.length > 0 &&
+            Math.min(...spans.map((s) => s.x)) < pf.x1 + 4 &&
+            Math.max(...spans.map((s) => s.x + s.width)) > pf.x0 - 4;
+          if (collides) {
+            const dy = pf.bottom - pf.top;
+            for (const it of items.slice(paraItemsStart)) offsetItem(it, 0, dy);
+            y += dy;
+          } else {
+            y = Math.max(y, pf.bottom);
+          }
         }
       } else {
+        if (pendingPageFrame) {
+          y = Math.max(y, pendingPageFrame.bottom);
+          pendingPageFrame = null;
+        }
         y = this.layoutTableInFrame(block, fake, 0, y, width, fields);
         framePrevAfter = 0;
       }
     }
+    if (pendingPageFrame) y = Math.max(y, pendingPageFrame.bottom);
     return { items, height: y };
   }
 
@@ -2975,12 +3026,10 @@ class Engine {
     return height;
   }
 
-  private singleDigitPageFrameOverlay(hf: HeaderFooter | undefined, page: InternalPage): boolean {
-    if (!hf || formatNumber(page.displayNumber, PAGE_FMT[page.sp.pageNumberFormat ?? "decimal"] ?? "decimal").length !== 1) {
-      return false;
-    }
+  private pageFieldFrameOverlay(hf: HeaderFooter | undefined): boolean {
+    if (!hf) return false;
     return hf.blocks.some(
-      (block) => block.type === "paragraph" && isCenteredPageFieldFrame(block, this.doc.effectiveParaProps(block)),
+      (block) => block.type === "paragraph" && isPageFieldFrame(block, this.doc.effectiveParaProps(block)),
     );
   }
 
@@ -3023,14 +3072,14 @@ class Engine {
         const { items } = this.layoutFrame(header.blocks, contentWidth, fields, {
           x: sp.marginLeft,
           y: sp.headerDistance,
-        });
+        }, false, this.pageFieldFrameOverlay(header));
         this.counters = snapshot;
         for (const it of items) offsetItem(it, sp.marginLeft, sp.headerDistance);
         page.items.push(...items);
       }
       const footer = this.doc.footers.get(page.footerRel ?? "");
       if (footer && footer.blocks.length > 0) {
-        const overlayPageFrame = this.singleDigitPageFrameOverlay(footer, page);
+        const overlayPageFrame = this.pageFieldFrameOverlay(footer);
         // Two passes: the frame's page position depends on its own height,
         // which anchored-shape resolution needs up front.
         let snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
@@ -4063,14 +4112,14 @@ function isEmptyParagraph(p: Paragraph): boolean {
   return true;
 }
 
-function isCenteredPageFieldFrame(p: Paragraph, props: ParaProps): boolean {
+function isPageFieldFrame(p: Paragraph, props: ParaProps): boolean {
   const frame = props.frame;
   if (
     !frame ||
     frame.w !== undefined ||
     frame.hAnchor !== "margin" ||
     frame.vAnchor !== "text" ||
-    frame.xAlign !== "center"
+    frame.xAlign === undefined
   ) {
     return false;
   }
