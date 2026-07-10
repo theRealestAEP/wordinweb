@@ -1,4 +1,5 @@
 import { DocxDocument } from "../docx.js";
+import { minchoCovers } from "./mincho-coverage.js";
 import {
   DrawingContent,
   Paragraph,
@@ -2000,11 +2001,19 @@ function buildAtoms(
             paintFamily: declaredFamily,
           };
     const isFwPunct = (ch: string) => /[　-〿！-｠・]/.test(ch);
+    // Word's Chinese fallback is per GLYPH: characters MS Mincho covers keep
+    // painting in the declared Japanese face even inside a no-kana segment
+    // (staging-eastasian's PDF mixes both faces on one line). PAINT-only:
+    // metrics stay keyed by the segment's fallback family so the line box
+    // (JhengHei's tall 36pt/11pt grid pitch) is unchanged.
+    const mixedPaint = japaneseEA && family !== declaredFamily;
+    const coveredFont: FontSpec | null = mixedPaint ? { ...cjkFont, paintFamily: declaredFamily } : null;
     const tScale = props.textScale ?? 1;
     for (let k = 0; k < seg.length; k++) {
       const ch = seg[k];
       const next = seg[k + 1];
-      const chFont = isFwPunct(ch) ? punctFont : cjkFont;
+      let chFont = isFwPunct(ch) ? punctFont : cjkFont;
+      if (coveredFont && chFont === cjkFont && minchoCovers(ch.codePointAt(0) ?? 0)) chFont = coveredFont;
       const w = (isWideCJK(ch) ? chFont.size : measurer.width(ch, chFont, props.letterSpacing)) * tScale;
       // Break after this char unless kinsoku binds it to a neighbour.
       let breakAfter = true;
