@@ -146,7 +146,10 @@ export function parseBorder(el: XmlElement | undefined, ctx: ParseContext): Bord
   let color = "#000000";
   const themeColor = attr(el, "themeColor");
   const mapped = themeColor ? ctx.theme?.colors.get(themeColor) : undefined;
-  if (mapped) color = mapped;
+  // themeTint/themeShade modify the mapped theme color (Heading borders like
+  // accent1 tint 33 are a LIGHT wash, not the saturated accent - phase23's
+  // 10.x heading band).
+  if (mapped) color = applyTintShade(mapped, attr(el, "themeTint"), attr(el, "themeShade"));
   else {
     const colorAttr = attr(el, "color");
     if (colorAttr && colorAttr !== "auto") color = "#" + colorAttr;
@@ -154,6 +157,7 @@ export function parseBorder(el: XmlElement | undefined, ctx: ParseContext): Bord
   return {
     style,
     width: Math.max(eighthPtToPx(sz), 0.75),
+    rawWidth: eighthPtToPx(sz),
     color,
     space: ptToPx(space),
   };
@@ -423,15 +427,20 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
     const tabs: TabStop[] = [];
     for (const t of children(tabsEl, "tab")) {
       const val = attr(t, "val") ?? "left";
-      if (val === "clear") continue;
       const pos = intAttr(t, "pos");
       if (pos === undefined) continue;
+      // w:val="clear" entries are kept (flagged) so mergeParaProps can drop
+      // the inherited stop at that position: Word MERGES tab lists down the
+      // style chain rather than replacing them (phase23 footer: paragraph
+      // clears the style's center 4680 and adds center 5670, but the style's
+      // right 9360 must survive for the page number).
       tabs.push({
         pos: twipsToPx(pos),
         align: (val === "center" || val === "right" || val === "decimal" || val === "bar"
           ? val
           : "left") as TabStop["align"],
         leader: (attr(t, "leader") as TabStop["leader"]) ?? "none",
+        ...(val === "clear" ? { clear: true } : {}),
       });
     }
     tabs.sort((a, b) => a.pos - b.pos);
@@ -462,6 +471,17 @@ export function mergeParaProps(base: ParaProps, over: ParaProps): ParaProps {
   for (const key of Object.keys(over) as (keyof ParaProps)[]) {
     const v = over[key];
     if (v !== undefined) (out as Record<string, unknown>)[key] = v;
+  }
+  // Tab stops MERGE across the chain (they never replace wholesale): an
+  // inherited stop survives unless the overriding list clears or redefines
+  // its position. Clear entries stay in the merged list so a further merge
+  // can still apply them; the layout skips them.
+  if (base.tabs && over.tabs) {
+    const near = (a: number, b: number) => Math.abs(a - b) < 0.01;
+    const merged = base.tabs.filter((t) => !over.tabs!.some((o) => near(o.pos, t.pos)));
+    merged.push(...over.tabs);
+    merged.sort((a, b) => a.pos - b.pos);
+    out.tabs = merged;
   }
   if (base.markRunProps && over.markRunProps) {
     out.markRunProps = mergeRunProps(base.markRunProps, over.markRunProps);

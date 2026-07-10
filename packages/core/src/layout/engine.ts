@@ -3326,7 +3326,26 @@ class Engine {
         // that flows underneath it).
         const front = !behind;
 
-        if (shape.fill) {
+        // Non-rect preset geometry (oval / diamond / flowchart): paint the
+        // real outline+fill as a path; the rect fill/edges below stay for
+        // plain text boxes.
+        if (shape.geom && (shape.fill || shape.stroke)) {
+          page.items.push({
+            kind: "path",
+            x: ox - fx,
+            y: oy - fy,
+            width,
+            height,
+            d: shape.geom.d,
+            viewW: shape.geom.viewW,
+            viewH: shape.geom.viewH,
+            fill: shape.fill,
+            ...(shape.stroke ? { stroke: { color: shape.stroke.color, width: shape.stroke.weight } } : {}),
+            ...(behind ? { behind: true } : {}),
+            ...(front ? { front: true } : {}),
+          });
+        }
+        if (shape.fill && !shape.geom) {
           page.items.push({
             kind: "rect",
             x: ox - fx,
@@ -3339,7 +3358,7 @@ class Engine {
             ...(front ? { front: true } : {}),
           });
         }
-        if (shape.stroke) {
+        if (shape.stroke && !shape.geom) {
           const b = { style: "single" as const, width: shape.stroke.weight, color: shape.stroke.color, space: 0 };
           const x0 = ox - fx;
           const y0 = oy - fy;
@@ -3366,6 +3385,16 @@ class Engine {
         if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
         else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
         for (const it of inner.items) {
+          // noAutofit boxes never grow: Word hides WHOLE lines that stick out
+          // past the shape bottom (phase23 p12 oval — "Was 0 / B" show, the
+          // wrapped tail lines vanish under the box edge).
+          if (
+            shape.clipText &&
+            it.kind === "text" &&
+            innerTop - oy + it.lineTop + it.lineHeight > height + 0.5
+          ) {
+            continue;
+          }
           offsetItem(it, ox + ins.l - fx, innerTop - fy);
           if (rotate && (it.kind === "text" || it.kind === "rect")) {
             const iy = it.kind === "text" ? (it.glyphTop ?? it.lineTop) : it.y;
@@ -3934,7 +3963,13 @@ class Engine {
     // lines plus the gap = 3x its declared width in Word (staging-styles'
     // Total row; wild2 legal p23's sz-6 double-bordered signature rows
     // measure 2.25pt of border share per boundary, not 0.75pt).
-    const bw = (b?: Border) => (b && b.style !== "none" ? this.borderPaintWidth(b) : 0);
+    // Use the DECLARED width (rawWidth), not the 0.75px hairline paint floor:
+    // Word advances sz-4 rows by their true 0.5pt rule (phase23 p66's 45-row
+    // table accumulates a 2.5px drift on the floored width).
+    const bw = (b?: Border) =>
+      b && b.style !== "none"
+        ? this.borderPaintWidth({ style: b.style, width: b.rawWidth ?? b.width })
+        : 0;
     const rows = tbl.rows;
     const nRows = rows.length;
     const nCols =

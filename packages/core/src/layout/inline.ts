@@ -1270,7 +1270,7 @@ function nextTabStop(
 ): { pos: number; align: TabStop["align"]; leader?: TabStop["leader"] } {
   if (tabs) {
     for (const t of tabs) {
-      if (t.pos > x + 0.5 && t.align !== "bar") {
+      if (t.pos > x + 0.5 && t.align !== "bar" && !t.clear) {
         return { pos: t.pos, align: t.align, leader: t.leader };
       }
     }

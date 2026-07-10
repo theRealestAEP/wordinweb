@@ -612,6 +612,8 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
         // Stroke width is meant in page px, not viewBox units.
         path.setAttribute("vector-effect", "non-scaling-stroke");
       }
+      if (item.behind) svg.style.zIndex = "-1";
+      else if (item.front) svg.style.zIndex = "1";
       svg.appendChild(path);
       return svg as unknown as HTMLElement;
     }
