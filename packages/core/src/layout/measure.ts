@@ -130,6 +130,15 @@ const WORD_FONT_METRICS: Record<string, { asc: number; desc: number; gap: number
   "pingfang sc": { asc: 2.2700, desc: 0.7627, gap: 0 },
   "songti sc": { asc: 2.2700, desc: 0.7627, gap: 0 },
   "heiti sc": { asc: 2.2700, desc: 0.7627, gap: 0 },
+  // Indic (probe3-indic: Word substitutes a Nirmala UI run per script to its
+  // DFonts and paints these faces). Line pitch measured from the Word PDF at
+  // 11pt (szCs 22): Mangal Devanagari lines advance 20.0pt/line (1.8182em,
+  // taller than Mangal's own 1.68em hhea — Word adds leading for the matra
+  // clearance); Latha Tamil lines advance 15.0pt/line (1.3636em, = Latha's
+  // OS/2 usWinAscent+Descent). asc/desc split by the face's hhea ratio for
+  // within-line baseline placement.
+  mangal: { asc: 1.3436, desc: 0.4746, gap: 0 },
+  latha: { asc: 1.0, desc: 0.3636, gap: 0 },
 };
 
 /** Quarter-point in px (0.25pt at 96dpi). */
