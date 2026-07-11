@@ -316,6 +316,14 @@ function parseOmml(el: XmlElement): ParsedMathNode[] {
     if (type === "lin") return [...num, { t: "run", text: "/", normal: true }, ...den];
     return [{ t: "frac", num, den, bar: type !== "noBar" }];
   }
+  if (ln === "func") {
+    // m:func: Word kerns a thin space (~0.18em) on both sides of the
+    // function name (dense p7 (4.6): '2𝑟·cos·𝜃' gaps 2.0/2.13px at 11.33px).
+    // Flatten to runs but mark the name so layout adds the gaps.
+    const name = childrenOf("fName");
+    for (const n of name) if (n.t === "run") n.fname = true;
+    return [...name, ...childrenOf("e")];
+  }
   if (ln === "sSup") return [{ t: "sup", base: childrenOf("e"), script: childrenOf("sup") }];
   if (ln === "sSub") return [{ t: "sub", base: childrenOf("e"), script: childrenOf("sub") }];
   if (ln === "rad") return [{ t: "rad", e: childrenOf("e") }];
@@ -344,7 +352,10 @@ function parseOmml(el: XmlElement): ParsedMathNode[] {
   const merged: ParsedMathNode[] = [];
   for (const n of out) {
     const last = merged[merged.length - 1];
-    if (n.t === "run" && last && last.t === "run" && n.normal === last.normal) last.text += n.text;
+    if (
+      n.t === "run" && last && last.t === "run" &&
+      n.normal === last.normal && !n.fname && !last.fname
+    ) last.text += n.text;
     else merged.push(n);
   }
   return merged;

@@ -10,9 +10,17 @@ import { TextMeasurer, hasCambriaMath } from "./measure.js";
  * around binary operators, and letters mapped to Unicode math italics.
  */
 
-const SCRIPT_SCALE = 8 / 11;
+// Cambria Math MATH constants: ScriptPercentScaleDown 73%, ScriptScript 60%.
+// Word computes the script size from the percent and FLOORS it to a half
+// point: 12pt -> 8.5pt (dense p7 (4.6)/(4.7) integrand fractions render
+// 8.5pt where 12x0.73 = 8.76) and its scriptscript -> 7pt (the t²r²
+// superscripts, 12x0.60 = 7.2); an 11pt base gives the long-calibrated 8pt.
+const SCRIPT_SCALE = 0.73;
+const SCRIPT_SCRIPT_SCALE = 0.6;
+const floorHalfPt = (px: number): number => Math.floor(px * 0.75 * 2 + 1e-6) / 2 / 0.75;
 // Math style stops at scriptscript: deeper structures reuse that size.
-const scriptSize = (size: number, floor: number): number => Math.max(size * SCRIPT_SCALE, floor);
+const scriptSize = (size: number, floor: number): number =>
+  Math.max(floorHalfPt(size * SCRIPT_SCALE), floor);
 const SUP_RAISE = 4 / 11;
 const SUB_DROP = 2.5 / 11;
 // Text-style fraction shifts = Cambria Math MATH constants
@@ -26,6 +34,8 @@ const RULE_THICK = 0.75 / 11;
 // parity-math's 1 + x + x/2 with the real Cambria Math advances (the old
 // 0.25em was calibrated against STIX's narrower glyphs).
 const BIN_OP_SPACE = 0.25;
+const FUNC_NAME_SPACE = 0.18; // em each side of an m:func name (dense p7 (4.6))
+const COMMA_SPACE = 0.17; // em after a math comma (dense p7 B(h, r, θ))
 const FRAC_PAD = 0.06; // em: rule sticks out past the wider part
 // n-ary/matrix/delimiter geometry measured from Word's parity-math2 export
 // at 11pt: the operator keeps the SURROUNDING font size (math fonts carry a
@@ -110,6 +120,9 @@ function mathText(text: string, normal = false): string {
     else if (ch === "-") out += "−";
     else if (c >= 0x61 && c <= 0x7a) out += String.fromCodePoint(0x1d44e + c - 0x61);
     else if (c >= 0x41 && c <= 0x5a) out += String.fromCodePoint(0x1d434 + c - 0x41);
+    // Lowercase Greek maps to math italic too: Word renders OMML θ as
+    // U+1D703 𝜃 (advance 7.17px at 8.5pt vs 6.37 upright — dense p7 (4.6)).
+    else if (c >= 0x3b1 && c <= 0x3c9) out += String.fromCodePoint(0x1d6fc + c - 0x3b1);
     else out += ch;
   }
   return out;
@@ -300,7 +313,7 @@ function containsBlocky(nodes: MathNode[]): boolean {
 
 export function layoutMath(nodes: MathNode[], baseSize: number, measurer: TextMeasurer, display = false): MathBox {
   const box: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [], display, baseSize };
-  flow(nodes, baseSize, 0, box, measurer, false, display, 0, baseSize * SCRIPT_SCALE ** 2);
+  flow(nodes, baseSize, 0, box, measurer, false, display, 0, floorHalfPt(baseSize * SCRIPT_SCRIPT_SCALE));
   // Line metrics: at least the math font's own box at each piece's offset.
   // A stretched delimiter variant carries its own (larger) ink extents.
   for (const p of box.pieces) {
@@ -348,6 +361,18 @@ function flow(
         // Split on binary operators so Word's medium spacing appears
         // around them (and text extraction sees the gaps).
         const font = fontAt(size);
+        // m:func name: Word kerns a thin space on both sides of the function
+        // name, even at script size inside otherwise-tight content (dense p7
+        // (4.6) denominator: '2𝑟 cos 𝜃' gaps 2.0/2.13px at 11.33px = ~0.18em).
+        if (node.fname) {
+          const gap = size * FUNC_NAME_SPACE;
+          if (prevOperand) box.width += gap;
+          const text = mathText(node.text, node.normal);
+          box.pieces.push({ text, x: box.width, dy, font });
+          box.width += measurer.width(text, font) + gap;
+          prevOperand = true;
+          break;
+        }
         // Word spaces binary operators with a medium space (~0.25em) and
         // relations with a slightly wider thick space (5/18 em), measured from
         // the = gaps in parity-math.
@@ -356,7 +381,18 @@ function flow(
         // parity-math's = gaps); display equations keep the medium space around
         // relations (parity2-equations f(x)=, e^x=).
         const relGap = display ? medGap : size * (5 / 18);
-        for (const tok of node.text.split(/([=+−×÷<>≤≥±≠-])/).filter((s) => s.length > 0)) {
+        for (const tok of node.text.split(/([=+−×÷<>≤≥±≠,-])/).filter((s) => s.length > 0)) {
+          // Punctuation: Word kerns a thin space AFTER a math comma even when
+          // the source has none (dense p7 'B(h,r,θ)' renders ℎ, 𝑟, 𝜃 with
+          // 2.72px gaps at 16px). The comma itself stays tight to its left.
+          if (tok === ",") {
+            const text = mathText(tok, node.normal);
+            box.pieces.push({ text, x: box.width, dy, font });
+            box.width += measurer.width(text, font);
+            if (!tight) box.width += size * COMMA_SPACE;
+            prevOperand = false;
+            continue;
+          }
           const isOp = BIN_OPS.has(tok);
           const isRel = RELATION_OPS.has(tok);
           // A relation is always binary; a sign (+/−/±) is binary only with an

@@ -2889,7 +2889,17 @@ class Engine {
         if (span.leader && span.width > 6) {
           const ch = span.leader === "dot" ? "." : span.leader === "hyphen" ? "-" : span.leader === "middleDot" ? "\u00b7" : "_";
           const chW = this.measurer.width(ch, span.font);
-          const count = Math.max(0, Math.floor((span.width - 4) / chW));
+          // Word aligns leader glyphs to a PAGE-GLOBAL grid of the glyph
+          // advance: every dotted line's leader sits at multiples of 4.00px
+          // (12pt TNR '.') from the page edge, so consecutive TOC lines form
+          // perfect dot columns (athabasca p8: 33 dotted lines, first dot
+          // x \u2261 0.07 mod 4.0014). The run fills toward the tab end, keeping
+          // ~1.7px clear before the following text (measured gaps 1.71-3.08
+          // across the page's right-tabbed page numbers).
+          const tabX = originX + span.x;
+          const tabEnd = tabX + span.width;
+          const firstX = Math.ceil(tabX / chW - 1e-4) * chW;
+          const count = Math.max(0, Math.floor((tabEnd - 1.7 - firstX) / chW));
           if (count > 0) {
             // Anchor the leader glyphs to the baseline exactly like regular
             // text (glyphTop/glyphBoxH). Without them the renderer flex-end-
@@ -2899,7 +2909,7 @@ class Engine {
             const gm = this.measurer.metrics(span.font);
             page.items.push({
               kind: "text",
-              x: originX + span.x + 2,
+              x: firstX,
               baseline,
               width: chW * count,
               text: ch.repeat(count),
@@ -4075,27 +4085,27 @@ class Engine {
    * across the covered columns.
    */
   private columnMinPref(tbl: Table, nCols: number): { minW: number[]; prefW: number[]; hardMinW: number[]; fudge: number } {
-    const margins = this.cellMarginsOf(tbl);
-    // Vertical-rule allowance. The +2px covers the vertical rules a column's
-    // cells paint (calibrated on the autofit corpus, all full-grid tables).
-    // A table that paints NO vertical rules gets none: Word's rendered
-    // autofit columns for chem p9's horizontal-rules-only table are content
-    // + cell margins EXACTLY (rendered 31.8/37.8pt = text 21/27 + 10.8pt
-    // margins; the flat +2px made every column ~1.5pt wide and the drift
-    // accumulated to +20px at the last rule). Only a table whose EXPLICIT
-    // borders lack left/right/insideV (and whose cells declare no vertical
-    // tcBorders) drops the allowance — style-resolved borders may not be
-    // filled in yet for nested tables, so undefined keeps the old fudge.
-    const paints = (b?: Border) => b !== undefined && b.style !== "none" && b.width > 0;
-    const tb = tbl.props.borders;
-    const noVRules =
-      tb !== undefined &&
-      !paints(tb.left) && !paints(tb.right) && !paints(tb.insideV) &&
-      !tbl.rows.some((r) =>
-        r.cells.some((c) => paints(c.props.borders?.left) || paints(c.props.borders?.right)),
-      );
-    const fudge = noVRules ? 0 : 2;
-    const pad = (margins.left ?? 0) + (margins.right ?? 0) + fudge;
+    const margins = this.cellMarginsOf(tbl, false);
+    // Vertical-rule allowance. Word sizes a content-fit column (rule center
+    // to rule center) at text + the DECLARED rule width + per-side insets,
+    // where each side's inset is the cell margin floored at 0.75pt measured
+    // from the rule's OUTER edge (i.e. max(margin, 1px − rule)). Measured:
+    //   - parity-tables (zero margins, sz-4 grid): Word renders content
+    //     columns at text + 1.33px = text + 2×0.667pt-rule exactly
+    //     ("Left 2in" col 46.04px vs text 44.71; pct table col3 514.58
+    //     back-solves to the same allowance);
+    //   - NIH p359 (108tw margins): Word clamps "Vozoruze" at 57.27pt =
+    //     word + margins + rule — the rule width, not a flat 2px;
+    //   - chem p9 (NO vertical rules): content + margins EXACTLY, so a
+    //     table that paints no left/right/insideV rule gets no allowance.
+    // Style-resolved borders may not be filled in yet for nested tables, so
+    // undefined keeps a default sz-4 (0.5pt) allowance.
+    const vRuleW = this.tableVRuleWidth(tbl);
+    // Kept for call-site compatibility: the rule-aware pad IS Word-exact, so
+    // there is no over-allowance left to subtract.
+    const fudge = 0;
+    const inset = (m: number | undefined) => Math.max(m ?? 0, 1 - vRuleW, 0);
+    const pad = inset(margins.left) + inset(margins.right) + vRuleW;
     const minW = new Array<number>(nCols).fill(pad + 8);
     const prefW = new Array<number>(nCols).fill(pad + 8);
     // Hard (non-negotiable) minimum: the demand of nested tables only. Word
@@ -4108,7 +4118,7 @@ class Engine {
         const span = cell.props.gridSpan;
         if (gridPos < nCols && cell.props.vMerge !== "continue") {
           const cm = { ...margins, ...cell.props.margins };
-          const cpad = (cm.left ?? 0) + (cm.right ?? 0) + fudge;
+          const cpad = inset(cm.left) + inset(cm.right) + vRuleW;
           let cellMin = 0;
           let cellPref = 0;
           let cellHard = 0;
@@ -4171,7 +4181,11 @@ class Engine {
           cellPref += cpad;
           if (cellHard > 0) cellHard += cpad;
           if (cellMinTabExact > 0) {
-            cellMin = Math.max(cellMin, cellMinTabExact + (cm.left ?? 0) + (cm.right ?? 0));
+            // Same 0.75pt paint-inset floor the tab layout itself sees.
+            cellMin = Math.max(
+              cellMin,
+              cellMinTabExact + Math.max(cm.left ?? 0, 1) + Math.max(cm.right ?? 0, 1),
+            );
           }
           const span2 = Math.min(span, nCols - gridPos);
           for (let k = 0; k < span2; k++) {
@@ -4205,6 +4219,35 @@ class Engine {
     if (cellsDeclareWidths && gridTotal > 0) pref = Math.max(pref, gridTotal);
     if (tbl.props.width !== undefined) pref = Math.max(pref, tbl.props.width);
     return { min, pref };
+  }
+
+  /**
+   * Representative DECLARED width of the vertical rules a table's columns
+   * paint (max of the explicit left/right/insideV table borders and any
+   * cell-level vertical tcBorders). 0 when the table paints no vertical
+   * rules at all; a table whose style-resolved borders are not filled in
+   * yet (nested) assumes the standard sz-4 (0.5pt) grid.
+   */
+  private tableVRuleWidth(tbl: Table): number {
+    const paints = (b?: Border) => b !== undefined && b.style !== "none" && b.width > 0;
+    const declared = (b?: Border) =>
+      paints(b) ? this.borderPaintWidth({ style: b!.style, width: b!.rawWidth ?? b!.width }) : 0;
+    const tb = tbl.props.borders;
+    const cellVWidth = tbl.rows.reduce(
+      (m, r) =>
+        r.cells.reduce(
+          (mm, c) => Math.max(mm, declared(c.props.borders?.left), declared(c.props.borders?.right)),
+          m,
+        ),
+      0,
+    );
+    const noVRules =
+      tb !== undefined &&
+      !paints(tb.left) && !paints(tb.right) && !paints(tb.insideV) &&
+      cellVWidth === 0;
+    if (noVRules) return 0;
+    if (tb === undefined) return ptToPx(0.5);
+    return Math.max(declared(tb.left), declared(tb.right), declared(tb.insideV), cellVWidth);
   }
 
   /** Effective default cell margins: direct tblCellMar, else the table
@@ -4293,15 +4336,23 @@ class Engine {
     return (top + bottom) / 2;
   }
 
-  private cellMarginsOf(tbl: Table): { top?: number; right?: number; bottom?: number; left?: number } {
+  private cellMarginsOf(
+    tbl: Table,
+    floorSides = true,
+  ): { top?: number; right?: number; bottom?: number; left?: number } {
     // Word insets cell content ~0.75pt (1px) from the rules even when the
     // effective cell margin is zero (measured: benchmark table, text x0
-    // exactly 0.75pt past the border). Floor the sides accordingly.
-    const floor = (m: { top?: number; right?: number; bottom?: number; left?: number }) => ({
-      ...m,
-      left: Math.max(m.left ?? 0, 1),
-      right: Math.max(m.right ?? 0, 1),
-    });
+    // exactly 0.75pt past the border). Floor the sides accordingly — except
+    // for width MEASUREMENT (columnMinPref), whose rule-aware insets need
+    // the raw margins (the 0.75pt floor is from the rule's OUTER edge).
+    const floor = (m: { top?: number; right?: number; bottom?: number; left?: number }) =>
+      floorSides
+        ? {
+            ...m,
+            left: Math.max(m.left ?? 0, 1),
+            right: Math.max(m.right ?? 0, 1),
+          }
+        : m;
     if (tbl.props.cellMargins) return floor(tbl.props.cellMargins);
     const byId = this.doc.styles.byId;
     const fromChain = (id: string | undefined) => {
@@ -4836,9 +4887,32 @@ class Engine {
     const restCells: typeof laid.cells = [];
     let topH = 0;
     let restH = 0;
+    const firstTextTop = (items: PageItem[]): number | undefined => {
+      let t: number | undefined;
+      for (const it of items) {
+        if (it.kind === "text") t = t === undefined ? it.lineTop : Math.min(t, it.lineTop);
+      }
+      return t;
+    };
     for (const { cell, trailing, keep, rest } of partitions) {
       const keepTop = cell.items.length > 0 ? Math.min(...cell.items.map(topOf)) : 0;
-      const shift = rest.length > 0 ? Math.min(...rest.map(topOf)) - keepTop : 0;
+      // Word re-applies the row's top inset when a row RESUMES on the next
+      // page: staging-grid4's continuation pages both place the first
+      // "deep row N" line at the same offset the row's ORIGINAL first line
+      // had (Word PDF p2/p3: text 11px below the fragment top — cell margin
+      // and nested-table margins re-applied), while the old rule-anchored
+      // resume packed the nested cut rule at the very top and left the text
+      // ~5px high. Anchor the continuation on the first TEXT line; leading
+      // nested rules keep their natural offsets above it. Fragments without
+      // text (image rows) keep the rule anchor, and the anchor never lifts
+      // an item above the fragment top (min with the old rule shift).
+      const ruleShift = rest.length > 0 ? Math.min(...rest.map(topOf)) - keepTop : 0;
+      const origText = firstTextTop(cell.items);
+      const restText = firstTextTop(rest);
+      const shift =
+        rest.length > 0 && origText !== undefined && restText !== undefined
+          ? Math.min(ruleShift, restText - origText)
+          : ruleShift;
       for (const it of rest) offsetItem(it, 0, -shift);
       topCells.push({ ...cell, items: keep, height: Math.min(cell.height, avail) });
       const cellRestH = rest.length > 0 ? Math.max(...rest.map(bottomOf)) + keepTop + trailing : 0;
@@ -4932,7 +5006,18 @@ class Engine {
     widths: number[],
     fields?: FieldContext,
   ): { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number; rotated?: boolean }[]; height: number } {
-    const defaults = this.cellMarginsOf(tbl);
+    const defaults = this.cellMarginsOf(tbl, false);
+    // Side INSETS from the cell's grid boundaries. Left: the cell's own
+    // vertical rule paints inside its LEFT edge and Word floors the text at
+    // 0.75pt (1px) past the rule's OUTER edge (benchmark; parity-tables text
+    // at rule + 1px exactly), so max(margin, 1). Right: the next rule is
+    // OUTSIDE this cell's box, so the floor is only what is left of that 1px
+    // after the rule — max(margin, 1px − rule): Word lets "Left 2in" end
+    // 0.33px before the next rule in the zero-margin parity-tables grid, and
+    // its content-fit column (text + 2×rule) only fits with this inset.
+    const vRuleW = this.tableVRuleWidth(tbl);
+    const rightInset = (m?: number) => Math.max(m ?? 0, 1 - vRuleW, 0);
+    const leftInset = (m?: number) => Math.max(m ?? 0, 1);
     const cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; rotated?: boolean }[] =
       new Array(row.cells.length);
     const totalW = sum(widths, 0, widths.length);
@@ -4947,7 +5032,12 @@ class Engine {
       // reverses (source col 1 lands at the right edge).
       const x = bidi ? totalW - sum(widths, 0, gridPos) - w : sum(widths, 0, gridPos);
       gridPos += span;
-      geometry.push({ x, width: w, margins: { ...defaults, ...cell.props.margins } });
+      const cm = { ...defaults, ...cell.props.margins };
+      geometry.push({
+        x,
+        width: w,
+        margins: { ...cm, left: leftInset(cm.left), right: rightInset(cm.right) },
+      });
     }
 
     // Measure ordinary cells first. A btLr cell lays out horizontally against

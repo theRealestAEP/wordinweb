@@ -813,13 +813,19 @@ describe("OMML math", () => {
     const nestedNumerator = piece(nested, "𝑋");
     const nestedDenominator = piece(nested, "𝑌");
 
-    // The simple p142-like denominator script keeps its calibrated 8/11
-    // reduction from the surrounding 8/11 fraction part.
-    expect(simpleScript.font.size).toBeCloseTo(simpleBase.font.size * (8 / 11), 5);
+    // Word computes script sizes from Cambria Math's MATH percents (73% /
+    // 60% scriptscript) and FLOORS to a half point (dense p7: 12pt base
+    // renders 8.5pt fractions with 7pt t²r² superscripts). At the default
+    // 11pt the fraction part is 8pt (11x0.73 = 8.03) and anything nested
+    // deeper sits on the scriptscript floor, 6.5pt (11x0.60 = 6.6).
+    const halfPt = (px: number) => Math.floor(px * 0.75 * 2 + 1e-6) / 2 / 0.75;
+    const scriptscript = halfPt((44 / 3) * 0.6);
+    expect(simpleBase.font.size).toBeCloseTo(halfPt((44 / 3) * 0.73), 5);
+    expect(simpleScript.font.size).toBeCloseTo(scriptscript, 5);
     // A fraction inside that script is already in scriptscript style. Its
-    // children stay at the same floor instead of shrinking by 8/11 again.
-    expect(nestedNumerator.font.size).toBeCloseTo(simpleScript.font.size, 5);
-    expect(nestedDenominator.font.size).toBeCloseTo(simpleScript.font.size, 5);
+    // children stay at the same floor instead of shrinking again.
+    expect(nestedNumerator.font.size).toBeCloseTo(scriptscript, 5);
+    expect(nestedDenominator.font.size).toBeCloseTo(scriptscript, 5);
   });
 
   it("spreads display integral limits without changing inline limits", () => {

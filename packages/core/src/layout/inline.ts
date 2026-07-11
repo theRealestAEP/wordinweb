@@ -467,6 +467,10 @@ export function breakParagraph(
   const props = doc.effectiveParaProps(para);
   if (props.snapToGrid === false) minLineHeight = undefined;
   const fallbackFamily = doc.styles.defaultRPr.font ?? "Calibri";
+  // settings.xml w:defaultTabStop (e.g. 708tw = 47.2px in cm-locale docs);
+  // wild2-math-omml-dense p7's 7-tab equation labels land a visible 9.5px
+  // right of Word on the hardcoded 48px grid.
+  const defaultTab = doc.defaultTabStop > 0 ? doc.defaultTabStop : DEFAULT_TAB;
 
   // Bidi paragraph: lines assemble in logical order, then reorder to visual
   // (RTL). Physical alignment flips: OOXML jc "right" means "end", which in an
