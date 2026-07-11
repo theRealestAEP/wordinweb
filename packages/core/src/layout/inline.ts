@@ -2041,8 +2041,20 @@ function buildAtoms(
     let family = props.fontEastAsia ?? font.family;
     const declaredFamily = family;
     const japaneseEA = /mincho|gothic|meiryo|^yu|\byu /i.test(family);
-    const hasKana = /[぀-ヿ]/.test(seg);
-    if (japaneseEA && !hasKana) family = "Microsoft JhengHei";
+    // Word picks the fallback by GLYPH COVERAGE of the declared face: only a
+    // segment containing a code point MS Mincho's cmap lacks (simplified-only
+    // forms) drops to the Chinese fallback line profile. A covered-only
+    // segment KEEPS the Japanese face and its line box even without kana
+    // (staging-eastasian 年号 run: Word lays that line at the 26px Mincho
+    // pitch; the old no-kana proxy re-classed it JhengHei and inflated the
+    // line to 48px).
+    const needsFallback =
+      japaneseEA &&
+      [...seg].some((c) => {
+        const cp = c.codePointAt(0) ?? 0;
+        return cp >= 0x3400 && !minchoCovers(cp);
+      });
+    if (needsFallback) family = "Microsoft JhengHei";
     // The real Windows CJK family (before the macOS collapse below) paints the
     // actual glyphs when it's available (dev fonts-local); it is PAINT-ONLY, so
     // it never reaches WORD_FONT_METRICS / width lookups and the wild-athabasca

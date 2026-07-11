@@ -2570,6 +2570,24 @@ describe("East Asian (CJK) layout", () => {
     const rows = new Set(texts.map((t) => (t.kind === "text" ? Math.round(t.baseline) : 0)));
     expect(rows.size).toBeGreaterThan(1);
   });
+
+  it("Chinese fallback is by MS Mincho cmap COVERAGE, not kana presence", () => {
+    // staging-eastasian 年号 run: a kana-less segment whose every code point
+    // MS Mincho covers KEEPS the Japanese face's line profile (Word lays that
+    // line at the 26px Mincho pitch); only a segment containing a
+    // simplified-only form (时) drops to the Chinese fallback profile.
+    const famsOf = (text: string) => {
+      const { result } = layout({ "word/document.xml": wrapDocument(cjk(text)) });
+      return new Set(
+        result.pages[0].items.filter((i) => i.kind === "text").map((i) => (i.kind === "text" ? i.font.family : "")),
+      );
+    };
+    const covered = famsOf("年号");
+    expect(covered.has("Hiragino Mincho ProN")).toBe(true);
+    expect(covered.has("PingFang TC")).toBe(false);
+    const fallback = famsOf("学时习");
+    expect(fallback.has("PingFang TC")).toBe(true);
+  });
 });
 
 describe("RTL / bidi paragraphs", () => {

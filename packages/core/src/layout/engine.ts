@@ -213,6 +213,9 @@ class Engine {
   /** Set when a docGrid section's top reserve was applied; the first paragraph
    * drops its spacing-before (Word folds it into the grid reserve). */
   private docGridDropBefore = false;
+  /** The previous paragraph (docGrid lines section) contained a line taller
+   * than the grid pitch: the next paragraph re-syncs to a grid-row boundary. */
+  private gridResyncPending = false;
   /** While emitting a header/footer frame in the final pass: the page's
    * effective body top. Word resolves vRel="margin" anchors in headers against
    * the ACTUAL margin rectangle, whose top the header itself pushes down when
@@ -2246,6 +2249,21 @@ class Engine {
     // spacing-after (already advanced) and this spacing-before wins.
     this.y += Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
 
+    // docGrid(lines) re-sync: after a paragraph containing a MULTI-ROW line
+    // (a line taller than the pitch: the JhengHei-fallback 2-row lines of
+    // staging-eastasian's simplified-Chinese block), Word starts the next
+    // paragraph on the next grid-row boundary. Measured: the Combined
+    // heading lands at bodyTop + 19 rows (648px) where plain spacing puts it
+    // at 631.4; the paragraphs after single-row-line paragraphs take no such
+    // rounding (the 水/学 tops sit off-grid).
+    if (this.sp.docGridLinePitch && this.gridResyncPending && props.snapToGrid !== false) {
+      const pitch = this.sp.docGridLinePitch;
+      const rel = this.y - this.cur.bodyTop;
+      const snapped = Math.ceil(rel / pitch - 1e-4) * pitch;
+      if (snapped > rel) this.y = this.cur.bodyTop + snapped;
+    }
+    this.gridResyncPending = false;
+
     // Plan natural page-break indices with widow/orphan control (Word default: on).
     const widow = props.widowControl !== false;
     const planBreaks = (): Set<number> => {
@@ -2531,6 +2549,25 @@ class Engine {
         : 0;
     if (!endedWithBreak) this.y += spacingAfter;
     this.lastParaSpacingAfter = endedWithBreak ? 0 : spacingAfter;
+    if (this.sp.docGridLinePitch) {
+      // Only a multi-row line whose height comes from the tall CHINESE
+      // FALLBACK profile (a Japanese eastAsia face lacking the glyphs -
+      // PingFang metrics, 3.03em) arms the re-sync; that is the measured
+      // case. Grid object lines (eq-as-images' equation images) already
+      // occupy whole grid rows via gridObjSnap and Word does not re-align
+      // after them, nor after tall native-face text lines (eq-as-images'
+      // CJK headings) - its pages exploded to 50%+ when either armed it.
+      const pitch = this.sp.docGridLinePitch;
+      const lsRule = props.lineSpacing?.rule;
+      this.gridResyncPending =
+        (lsRule === undefined || lsRule === "auto") &&
+        lines.some(
+          (l) =>
+            l.height > pitch * 1.5 &&
+            l.spans.some((s) => /^pingfang /i.test(s.font.family)) &&
+            !l.spans.some((s) => s.image || s.drawing || s.math),
+        );
+    }
     this.lastParaWasEmpty = !paragraphHasContent(para);
   }
 
