@@ -140,6 +140,12 @@ export interface ImageItem {
   /** a:srcRect crop (fractions) and a:xfrm rotation (degrees). */
   crop?: { l: number; t: number; r: number; b: number };
   rotation?: number;
+  /** Picture-watermark "washout" (VML v:imagedata gain/blacklevel, 0..1
+   * fractions). Per-channel linear recolor, measured against Word's PDF of
+   * probe2-picture-watermark (gain 0.3, blacklevel 0.35: source 32 -> 215,
+   * 74 -> 227, 135 -> 246, 210 -> clamped 255):
+   *   out = in * gain + 255 * (blacklevel * (1 + gain) + (1 - gain) / 2)  */
+  washout?: { gain: number; blacklevel: number };
   /** a:ln picture outline, drawn just outside the image (Word hairline). */
   border?: { color: string; width: number };
   /** behindDoc: paint under the text layer. */

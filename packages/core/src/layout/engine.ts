@@ -3431,7 +3431,16 @@ class Engine {
           else if (shape.hAlign === "right") x = ox + baseW - shape.width;
           else x = ox;
         }
-        const y = oy + shape.y;
+        let y = oy + shape.y;
+        if (shape.vAlign) {
+          // VML mso-position-vertical keyword (picture watermarks center on
+          // the page/margin box).
+          const baseH =
+            shape.vRel === "page" ? sp.pageHeight : sp.pageHeight - sp.marginTop - sp.marginBottom;
+          if (shape.vAlign === "center") y = oy + (baseH - shape.height) / 2;
+          else if (shape.vAlign === "bottom") y = oy + baseH - shape.height;
+          else y = oy;
+        }
         page.items.push({
           kind: "image",
           x: x - fx,
@@ -3441,6 +3450,7 @@ class Engine {
           part: shape.part,
           crop: shape.crop,
           rotation: shape.rotation,
+          washout: shape.washout,
           behind: shape.behind,
           front: shape.wrap === "none" && !shape.behind,
           src: shape.srcDrawing,

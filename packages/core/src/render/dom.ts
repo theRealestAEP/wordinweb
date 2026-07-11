@@ -831,6 +831,40 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
           probe.src = url;
         }
       }
+      if (item.washout && img.src) {
+        // Picture-watermark washout (VML v:imagedata gain/blacklevel): a
+        // per-channel linear recolor. Measured against the Word PDF of
+        // probe2-picture-watermark (gain=19661f=0.3, blacklevel=22938f=0.35):
+        // source 32 -> 215, 74 -> 227, 135 -> 246, 210 -> 255 (clamped), i.e.
+        // slope = gain and intercept = blacklevel*(1+gain) + (1-gain)/2
+        // (0.805*255 = 205.4). CSS filters can't add a flat intercept, so
+        // bake the recolor into the pixels via canvas.
+        const { gain, blacklevel } = item.washout;
+        const lift = 255 * (blacklevel * (1 + gain) + (1 - gain) / 2);
+        const probe = new Image();
+        probe.onload = () => {
+          try {
+            const cv = document.createElement("canvas");
+            cv.width = probe.naturalWidth;
+            cv.height = probe.naturalHeight;
+            const cx = cv.getContext("2d", { willReadFrequently: true });
+            if (!cx) return;
+            cx.drawImage(probe, 0, 0);
+            const data = cx.getImageData(0, 0, cv.width, cv.height);
+            const d = data.data;
+            for (let i = 0; i < d.length; i += 4) {
+              d[i] = Math.min(255, Math.round(d[i] * gain + lift));
+              d[i + 1] = Math.min(255, Math.round(d[i + 1] * gain + lift));
+              d[i + 2] = Math.min(255, Math.round(d[i + 2] * gain + lift));
+            }
+            cx.putImageData(data, 0, 0);
+            img.src = cv.toDataURL("image/png");
+          } catch {
+            // Canvas unavailable/tainted: keep the unwashed image.
+          }
+        };
+        probe.src = img.src;
+      }
       img.style.position = "absolute";
       let node: HTMLElement = img;
       const c = item.crop;

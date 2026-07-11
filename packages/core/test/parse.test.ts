@@ -1311,3 +1311,122 @@ describe("phase23 fidelity rules", () => {
     expect(shape.clipText).toBe(true);
   });
 });
+
+describe("VML picture watermark", () => {
+  const headerXml = (imagedataAttrs: string) => `<?xml version="1.0"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+       xmlns:v="urn:schemas-microsoft-com:vml"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:p><w:r><w:pict>
+    <v:shape id="PictureWatermark1" type="#_x0000_t75" style="position:absolute;margin-left:0;margin-top:0;width:300pt;height:300pt;z-index:-251658240;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin">
+      <v:imagedata r:id="rIdWm" ${imagedataAttrs}/>
+    </v:shape>
+  </w:pict></w:r><w:r><w:t>Header text</w:t></w:r></w:p>
+</w:hdr>`;
+  const load = (imagedataAttrs: string) =>
+    DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          p("body") +
+            `<w:sectPr>
+              <w:headerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rId5"/>
+              <w:pgSz w:w="12240" w:h="15840"/>
+            </w:sectPr>`,
+        ),
+        "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+</Relationships>`,
+        "word/header1.xml": headerXml(imagedataAttrs),
+        "word/_rels/header1.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdWm" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/watermark.png"/>
+</Relationships>`,
+      }),
+    );
+  const watermarkShape = (doc: DocxDocument) => {
+    const hdr = doc.headers.get("rId5")!;
+    const para = hdr.blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const run = para.children[0];
+    if (run.type !== "run") throw new Error("expected run");
+    const anchor = run.content.find((c) => c.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "image") throw new Error("expected image anchor");
+    return anchor.shape;
+  };
+
+  it("floats a position:absolute header picture (no height in header flow), page-centered behind text", () => {
+    // Word's picture watermark: the VML shape takes NO space in the header
+    // paragraph — it must parse as an anchor, not an inline image, or the
+    // 300pt picture inflates the header and spawns extra pages.
+    const shape = watermarkShape(load('o:title="watermark"'));
+    expect(shape).toMatchObject({
+      type: "image",
+      part: "word/media/watermark.png",
+      width: 400,
+      height: 400,
+      hRel: "margin",
+      vRel: "margin",
+      hAlign: "center",
+      vAlign: "center",
+      wrap: "none",
+      behind: true, // negative z-index: painted under the body text
+    });
+    expect(shape.washout).toBeUndefined(); // no gain/blacklevel: full strength
+  });
+
+  it("parses washout gain/blacklevel as 1/65536 'f' fractions", () => {
+    // Word's washout preset writes gain="19661f" blacklevel="22938f"
+    // (fractions of 65536): gain 0.3, blacklevel 0.35. The renderer maps
+    // out = in*gain + 255*(blacklevel*(1+gain) + (1-gain)/2), measured from
+    // the probe2-picture-watermark Word PDF (32->215, 74->227, 135->246).
+    const shape = watermarkShape(load('gain="19661f" blacklevel="22938f"'));
+    expect(shape.washout!.gain).toBeCloseTo(0.3, 3);
+    expect(shape.washout!.blacklevel).toBeCloseTo(0.35, 3);
+  });
+
+  it("keeps non-absolute VML pictures inline", () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:r><w:pict><v:shape style="width:170pt;height:25pt"><v:imagedata r:id="rId8"/></v:shape></w:pict></w:r></w:p>`,
+        ),
+        "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/inline.png"/>
+</Relationships>`,
+      }),
+    );
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const run = para.children[0];
+    if (run.type !== "run") throw new Error("expected run");
+    expect(run.content[0]).toMatchObject({ kind: "image", part: "word/media/inline.png" });
+  });
+
+  it("parses WordArt v:fill opacity in 'f' fraction form and keeps its rotation", () => {
+    // probe2-picture-watermark header3: rotation:-40 (not the -45 default),
+    // <v:fill opacity="40000f"/> = 40000/65536 = 0.6104.
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:r><w:pict>
+            <v:shape type="#_x0000_t136" style="position:absolute;margin-left:0;margin-top:0;width:420pt;height:180pt;rotation:-40;z-index:-251657216;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin" fillcolor="#c0c0c0" stroked="f">
+              <v:fill opacity="40000f"/>
+              <v:textpath style="font-family:&quot;Calibri&quot;" string="CONFIDENTIAL"/>
+            </v:shape>
+          </w:pict></w:r></w:p>`,
+        ),
+      }),
+    );
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const run = para.children[0];
+    if (run.type !== "run") throw new Error("expected run");
+    const anchor = run.content.find((c) => c.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "wordart") throw new Error("expected wordart anchor");
+    expect(anchor.shape.opacity).toBeCloseTo(40000 / 65536, 4);
+    expect(anchor.shape.rotation).toBe(-40);
+    expect(anchor.shape.behind).toBe(true);
+  });
+});

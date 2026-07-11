@@ -426,6 +426,8 @@ export interface ShapeImage {
   vRel: AnchorRel;
   /** Horizontal alignment when the file uses wp:align instead of an offset. */
   hAlign?: "left" | "center" | "right";
+  /** Vertical alignment keyword (VML mso-position-vertical; watermarks center). */
+  vAlign?: "top" | "center" | "bottom";
   wrap: WrapMode;
   /** behindDoc anchors render under the text and never displace it. */
   behind?: boolean;
@@ -433,6 +435,8 @@ export interface ShapeImage {
   dist?: { t: number; b: number; l: number; r: number };
   crop?: { l: number; t: number; r: number; b: number };
   rotation?: number;
+  /** Watermark "washout" recolor (VML v:imagedata gain/blacklevel, 0..1). */
+  washout?: { gain: number; blacklevel: number };
   /** Source w:drawing element (editing). */
   srcDrawing?: XmlElement;
 }

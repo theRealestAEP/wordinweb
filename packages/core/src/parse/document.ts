@@ -1893,6 +1893,14 @@ function vmlLength(raw: string | undefined): number {
   }
 }
 
+/** VML fraction: "40000f" means 40000/65536; plain ".5" is already 0..1. */
+function vmlFraction(raw: string | undefined, dflt: number): number {
+  if (raw === undefined) return dflt;
+  const v = parseFloat(raw);
+  if (!Number.isFinite(v)) return dflt;
+  return raw.trim().endsWith("f") ? v / 65536 : v;
+}
+
 function parseVmlStyle(style: string | undefined): Map<string, string> {
   const out = new Map<string, string>();
   if (!style) return out;
@@ -1942,7 +1950,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
         const tpStyle = parseVmlStyle(textpath.attrs["style"]);
         const fontFamily = (tpStyle.get("font-family") ?? "Arial").replace(/["']/g, "").split(",")[0].trim();
         const fillEl = findDescendant(el, "fill");
-        const opacity = fillEl && fillEl.attrs["opacity"] !== undefined ? parseFloat(fillEl.attrs["opacity"]) : 1;
+        const opacity = vmlFraction(fillEl?.attrs["opacity"], 1);
         const rotation = parseFloat(style.get("rotation") ?? "0") || 0;
         const zIndex = parseFloat(style.get("z-index") ?? "0") || 0;
         const hAlignRaw = style.get("mso-position-horizontal");
@@ -1956,7 +1964,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
             bold: (tpStyle.get("font-weight") ?? "").includes("bold"),
             italic: (tpStyle.get("font-style") ?? "").includes("italic"),
             fill: el.attrs["fillcolor"] ?? "#808080",
-            opacity: Number.isFinite(opacity) ? opacity : 1,
+            opacity,
             x: vmlLength(style.get("margin-left")),
             y: vmlLength(style.get("margin-top")),
             width: vmlLength(style.get("width")),
@@ -1984,11 +1992,45 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
           // decides docGrid rows (31.45pt would take 3 x 15.6pt pitches, the
           // rounded 31pt takes Word's observed 2), so round at parse time.
           const wholePt = (px: number) => Math.round((px * 3) / 4) * (4 / 3);
+          const width = wholePt(vmlLength(style.get("width")) || 100);
+          const height = wholePt(vmlLength(style.get("height")) || 100);
+          if (style.get("position") === "absolute") {
+            // Floating VML picture — Word's picture watermark (Design >
+            // Watermark > Picture). Takes NO height in the header/body flow;
+            // positioned by the mso-position-* keywords (page-centered for
+            // the built-in watermark) and painted behind the text every page
+            // that uses the header. v:imagedata gain/blacklevel carry the
+            // "washout" recolor (see ImageItem.washout for the math).
+            const hAlignRaw = style.get("mso-position-horizontal");
+            const vAlignRaw = style.get("mso-position-vertical");
+            const zIndex = parseFloat(style.get("z-index") ?? "0") || 0;
+            const gain = vmlFraction(attr(imagedata, "gain"), 1);
+            const blacklevel = vmlFraction(attr(imagedata, "blacklevel"), 0);
+            out.push({
+              kind: "anchor",
+              shape: {
+                type: "image",
+                part: rel.target,
+                x: vmlLength(style.get("margin-left")),
+                y: vmlLength(style.get("margin-top")),
+                width,
+                height,
+                hRel: anchorRel(style.get("mso-position-horizontal-relative")),
+                vRel: anchorRel(style.get("mso-position-vertical-relative")),
+                hAlign: hAlignRaw === "center" ? "center" : hAlignRaw === "right" ? "right" : hAlignRaw === "left" ? "left" : undefined,
+                vAlign: vAlignRaw === "center" ? "center" : vAlignRaw === "bottom" ? "bottom" : vAlignRaw === "top" ? "top" : undefined,
+                wrap: "none",
+                behind: zIndex < 0,
+                ...(gain !== 1 || blacklevel !== 0 ? { washout: { gain, blacklevel } } : {}),
+              },
+            });
+            return;
+          }
           out.push({
             kind: "image",
             part: rel.target,
-            width: wholePt(vmlLength(style.get("width")) || 100),
-            height: wholePt(vmlLength(style.get("height")) || 100),
+            width,
+            height,
           });
         }
         return;
