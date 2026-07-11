@@ -1574,6 +1574,91 @@ describe("layout engine", () => {
     expect(result.pages[0].number).toBe(5);
   });
 
+  it("adds a top border reserve OUTSIDE the before/after spacing collapse", () => {
+    // Word collapses plain before/after (larger wins) but the bordered
+    // paragraph's rule + space always push its text further down so the box
+    // top clears the gap (wild-doerfp p31: H1 after=360 -> boxed Heading1
+    // sits 18pt + 1.5pt below, not max(18pt, 1.5pt)).
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:pPr><w:spacing w:after="360"/></w:pPr><w:r><w:t>above</w:t></w:r></w:p>` +
+          `<w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="4" w:space="1"/></w:pBdr></w:pPr><w:r><w:t>boxed</w:t></w:r></w:p>`,
+      ),
+    });
+    const items = result.pages[0].items.filter((i) => i.kind === "text");
+    const a = items.find((i) => i.kind === "text" && i.text === "above");
+    const b = items.find((i) => i.kind === "text" && i.text === "boxed");
+    if (a?.kind !== "text" || b?.kind !== "text") throw new Error("items missing");
+    const gap = b.lineTop - (a.lineTop + a.lineHeight);
+    // 360tw = 24px after + border reserve (1pt space = 4/3px + 0.75px rule).
+    expect(gap).toBeCloseTo(24 + 4 / 3 + 0.75, 1);
+  });
+
+  it("adds a bottom border reserve outside the collapse against the next before", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:pPr><w:spacing w:after="240"/><w:pBdr><w:bottom w:val="single" w:sz="4" w:space="1"/></w:pBdr></w:pPr><w:r><w:t>boxed</w:t></w:r></w:p>` +
+          `<w:p><w:pPr><w:spacing w:before="300"/></w:pPr><w:r><w:t>below</w:t></w:r></w:p>`,
+      ),
+    });
+    const items = result.pages[0].items.filter((i) => i.kind === "text");
+    const a = items.find((i) => i.kind === "text" && i.text === "boxed");
+    const b = items.find((i) => i.kind === "text" && i.text === "below");
+    if (a?.kind !== "text" || b?.kind !== "text") throw new Error("items missing");
+    const gap = b.lineTop - (a.lineTop + a.lineHeight);
+    // max(after 16px, before 20px) collapsed + the box's bottom reserve.
+    expect(gap).toBeCloseTo(20 + 4 / 3 + 0.75, 1);
+  });
+
+  it("keeps the single collapsed reserve between merged identical-border paragraphs", () => {
+    const bordered = (t: string) =>
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:pBdr><w:top w:val="single" w:sz="4" w:space="1"/><w:bottom w:val="single" w:sz="4" w:space="1"/></w:pBdr></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(bordered("first") + bordered("second")),
+    });
+    const items = result.pages[0].items.filter((i) => i.kind === "text");
+    const a = items.find((i) => i.kind === "text" && i.text === "first");
+    const b = items.find((i) => i.kind === "text" && i.text === "second");
+    if (a?.kind !== "text" || b?.kind !== "text") throw new Error("items missing");
+    // Inside a merged box no rule paints between the paragraphs, but Word
+    // still keeps ONE space+rule reserve of room (the top and bottom pads
+    // collapse against each other, not add) — pre-existing calibrated
+    // behavior (Alex Pickett cover RECIPIENT/ADDRESS block), preserved by
+    // the outside-the-collapse reserve rule.
+    expect(b.lineTop - (a.lineTop + a.lineHeight)).toBeCloseTo(4 / 3 + 0.75, 1);
+  });
+
+  it("anchors paint-routed CJK glyph boxes by the browser strut box", () => {
+    // A measurer that reports the paint face's own (small) font box: the
+    // renderer centers glyphs by that strut, so glyphTop must compensate to
+    // land the baseline exactly (staging-eastasian: MS Mincho box is 1.0em
+    // while the Hiragino line profile is 1.643em).
+    const pb = { ascent: 10, descent: 2 };
+    const m: TextMeasurer = {
+      width: (t, f, ls) => measurer.width(t, f, ls),
+      metrics: (f) => measurer.metrics(f),
+      paintBox: () => pb,
+    };
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:r><w:rPr><w:rFonts w:eastAsia="MS Mincho"/></w:rPr><w:t>水は</w:t></w:r></w:p>`,
+        ),
+      }),
+    );
+    const result = layoutDocument(doc, { measurer: m });
+    const cjk = result.pages[0].items.find(
+      (i) => i.kind === "text" && i.text.includes("水") && i.font.paintFamily,
+    );
+    if (cjk?.kind !== "text") throw new Error("CJK item missing");
+    const boxH = cjk.glyphBoxH!;
+    // Browser centering: baseline = glyphTop + (boxH - pbBox)/2 + pbAsc = b.
+    expect(cjk.glyphTop! + (boxH - pb.ascent - pb.descent) / 2 + pb.ascent).toBeCloseTo(
+      cjk.baseline,
+      3,
+    );
+  });
+
   it("draws a paragraph bottom border as a divider line", () => {
     const { result } = layout({
       "word/document.xml": wrapDocument(

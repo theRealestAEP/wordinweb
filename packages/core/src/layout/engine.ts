@@ -111,6 +111,7 @@ interface LayoutSnapshot {
   y: number;
   sp: SectionProps;
   lastParaSpacingAfter: number;
+  lastParaAfterPad: number;
   sectionFirstPagePhys: number;
   suppressNextSpaceBefore: boolean;
   docGridDropBefore: boolean;
@@ -187,6 +188,13 @@ class Engine {
   /** Previous paragraph's spacing-after: Word collapses it against the next
    * paragraph's spacing-before (larger wins), verified against Word PDFs. */
   private lastParaSpacingAfter = 0;
+  /** Portion of lastParaSpacingAfter that is the previous paragraph's BOTTOM
+   * border reserve (rule + space). Word collapses only the plain spacing
+   * values against the next paragraph's before; the border reserve always
+   * survives below the rule (wild-doerfp p31: boxed Heading1 after=12pt +
+   * 1.5pt reserve vs a 14pt autospacing before -> 14pt + 1.5pt gap, not
+   * max(14, 13.5)). Zero when the border merges into the next paragraph. */
+  private lastParaAfterPad = 0;
   /** Whether the last laid-out paragraph was empty (no text/inline content).
    * A trailing empty paragraph's spacing-after does not carry into the first
    * paragraph of the next section (wild-athabasca p6: an empty NormalWeb
@@ -344,7 +352,10 @@ class Engine {
         else this.newBand();
       } else this.newPage(true);
       if (trailingSectionBreakMarkGap > 0) this.y += trailingSectionBreakMarkGap;
-      if (prevSp !== null) this.lastParaSpacingAfter = carryAfter;
+      if (prevSp !== null) {
+        if (carryAfter !== this.lastParaSpacingAfter) this.lastParaAfterPad = 0;
+        this.lastParaSpacingAfter = carryAfter;
+      }
       this.layoutSection(section, sections[sectionIndex + 1]);
       this.prevBandBalanced = this.balanceBottom !== undefined;
       if (this.balanceBottom !== undefined) {
@@ -504,6 +515,7 @@ class Engine {
     this.y = page.bodyTop;
     this.bannerSlotUsed = 0;
     this.lastParaSpacingAfter = 0;
+    this.lastParaAfterPad = 0;
     // Balancing pass 1: this becomes the (currently) final page - start
     // measuring its columns afresh. Pass 2: arm the balance target when the
     // recorded final page is reached; keep earlier pages full-flow.
@@ -536,6 +548,7 @@ class Engine {
     this.col = 0;
     this.bannerSlotUsed = 0;
     this.lastParaSpacingAfter = 0;
+    this.lastParaAfterPad = 0;
   }
 
   /** Word balances the columns of a multi-column section that is followed by a
@@ -664,6 +677,7 @@ class Engine {
       y: this.y,
       sp: this.sp,
       lastParaSpacingAfter: this.lastParaSpacingAfter,
+      lastParaAfterPad: this.lastParaAfterPad,
       sectionFirstPagePhys: this.sectionFirstPagePhys,
       suppressNextSpaceBefore: this.suppressNextSpaceBefore,
       docGridDropBefore: this.docGridDropBefore,
@@ -700,6 +714,7 @@ class Engine {
     this.y = s.y;
     this.sp = s.sp;
     this.lastParaSpacingAfter = s.lastParaSpacingAfter;
+    this.lastParaAfterPad = s.lastParaAfterPad;
     this.sectionFirstPagePhys = s.sectionFirstPagePhys;
     this.suppressNextSpaceBefore = s.suppressNextSpaceBefore;
     this.docGridDropBefore = s.docGridDropBefore;
@@ -722,6 +737,8 @@ class Engine {
       this.y = this.columnStartY(this.col);
       this.bannerSlotUsed = 0;
       this.lastParaSpacingAfter = 0;
+      this.lastParaAfterPad = 0;
+    this.lastParaAfterPad = 0;
     } else {
       this.newPage(false);
     }
@@ -1072,6 +1089,7 @@ class Engine {
     });
     this.y += NOTE_SEP_H + NOTE_SEP_GAP;
     this.lastParaSpacingAfter = 0;
+    this.lastParaAfterPad = 0;
     for (const id of ids) {
       this.selfNoteMark = this.endnoteMark(id);
       this.layoutBlocks(this.doc.endnotes.get(id) ?? []);
@@ -1099,6 +1117,7 @@ class Engine {
           const sbAfter = this.doc.effectiveParaProps(block).spacingAfter ?? 0;
           if (sbAfter > this.lastParaSpacingAfter) {
             this.lastParaSpacingAfter = sbAfter;
+            this.lastParaAfterPad = 0;
             this.lastParaWasEmpty = false;
           }
           continue;
@@ -1487,6 +1506,7 @@ class Engine {
     // bandTop and therefore must not pay this spacing again.
     this.y += this.lastBannerSpacingAfter;
     this.lastParaSpacingAfter = this.lastBannerSpacingAfter;
+    this.lastParaAfterPad = 0;
     this.lastBannerKey = undefined;
     this.lastBannerVSpace = 0;
     this.lastBannerSpacingAfter = 0;
@@ -1545,6 +1565,7 @@ class Engine {
     // headings each open with a leading break).
     const leadBreak = leadingBreakOf(para);
     const previousSpacingAfter = this.lastParaSpacingAfter;
+    const previousAfterPad = this.lastParaAfterPad;
     if ((props.pageBreakBefore || leadBreak?.type === "page") && !this.pageIsEmptyAtCursor()) {
       this.newPage(false);
       // Legacy Word keeps the preceding paragraph's after-spacing in the
@@ -1552,6 +1573,7 @@ class Engine {
       // only the remainder of its before-spacing over that carried after.
       if (leadBreak?.type === "page" && !props.pageBreakBefore && this.doc.compatibilityMode < 15) {
         this.lastParaSpacingAfter = previousSpacingAfter;
+        this.lastParaAfterPad = previousAfterPad;
       }
       breakBeforeForced = true;
     } else if (leadBreak?.type === "column" && !this.pageIsEmptyAtCursor()) {
@@ -1673,6 +1695,8 @@ class Engine {
       this.suppressNextSpaceBefore = false;
       this.y = this.cur.bandTop;
       this.lastParaSpacingAfter = 0;
+      this.lastParaAfterPad = 0;
+    this.lastParaAfterPad = 0;
       if (!keepSpBeforeAtPageTop) dropSpaceBefore = true;
     }
     // w:pageBreakBefore drops space-before (parity2-toc: Heading1 before=12pt
@@ -1914,8 +1938,26 @@ class Engine {
     // rule sits in the gap instead of overlapping the neighbor (pleading
     // footer: the caption's top border must clear the page number above).
     const borderPadTop = this.borderPadImpl(props.borders?.top);
+    const borderPadBottom = this.borderPadImpl(props.borders?.bottom);
     spacingBefore += borderPadTop;
-    spacingAfter += this.borderPadImpl(props.borders?.bottom);
+    spacingAfter += borderPadBottom;
+    // Border reserves sit OUTSIDE the before/after collapse: Word first
+    // collapses the plain spacing values, then adds rule + space so the box
+    // edges clear the gap (wild-doerfp p31/p27 section pages: H1 after=360
+    // -> boxed Heading1 with before=0 sits 18pt + 1.5pt below, not
+    // max(18, 1.5); below the box the 14pt autospacing gap gains the box's
+    // 1.5pt bottom reserve). Between MERGED identical-border paragraphs no
+    // rule paints and the pads stay in the max, where they cancel (Alex
+    // Pickett cover: the RECIPIENT/ADDRESS box rows stay abutted).
+    // lastParaAfterPad carries the previous paragraph's surviving bottom
+    // reserve: the collapse base is the PLAIN previous after, while the
+    // cursor has already advanced by the full amount (the pad cancels
+    // between target and cursor, so only the base changes here).
+    const collapseBefore = (sb: number): number => {
+      const base = this.lastParaSpacingAfter - this.lastParaAfterPad;
+      const pad = mergeTop ? 0 : borderPadTop;
+      return Math.max(sb - pad, base) - base + pad;
+    };
 
     let lines = broken.lines;
     // A structurally bare paragraph after a table supplies the table's final
@@ -1952,7 +1994,7 @@ class Engine {
       // large-font autospacing paragraph never gets LESS than one line.
       const autoSpace = Math.max(lines[0].naturalHeight, AUTO_PARA_SPACING_PX);
       if (props.beforeAutospacing && !dropSpaceBefore) spacingBefore = borderPadTop + autoSpace;
-      if (props.afterAutospacing) spacingAfter = this.borderPadImpl(props.borders?.bottom) + autoSpace;
+      if (props.afterAutospacing) spacingAfter = borderPadBottom + autoSpace;
     }
 
     // Word 2010's default document-grid pagination keeps a leading manual
@@ -1984,7 +2026,7 @@ class Engine {
       else if (lineSpacing?.rule === "exact") breakHeight = lineSpacing.value;
       else if (lineSpacing?.rule === "atLeast") breakHeight = Math.max(breakHeight, lineSpacing.value);
 
-      const beforeAdvance = Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
+      const beforeAdvance = collapseBefore(spacingBefore);
       const linesHeight = lines.reduce((height, line) => height + line.height, 0);
       const gap = Math.max(spacingAfter, nextProps.spacingBefore ?? 0);
       const bottomAlignedY = this.bodyBottom - beforeAdvance - linesHeight - gap - breakHeight;
@@ -2041,7 +2083,7 @@ class Engine {
     // the whole paragraph.
     let keepNextTail = 0;
     if (!postTablePageBreak && !legacyBreakChain && props.keepNext && next !== undefined && !this.pageIsEmptyAtCursor()) {
-      const effBefore = Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
+      const effBefore = collapseBefore(spacingBefore);
       // The chain walk below is a MEASUREMENT, not placement: numberingLabel()
       // advances the shared list counter as a side effect, so snapshot the
       // counters around the whole walk or the real placement of these blocks
@@ -2172,7 +2214,7 @@ class Engine {
     ) {
       const counterSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
       const seenSnapshot = new Set(this.seenNumIds);
-      const effBefore = Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
+      const effBefore = collapseBefore(spacingBefore);
       let need = effBefore + lines.reduce((a, l) => a + l.height, 0);
       let prevAfter = spacingAfter;
       let idx = (index ?? -1) + 1;
@@ -2260,8 +2302,9 @@ class Engine {
     if (atPageOrColumnTop) spacingBefore = borderPadTop;
 
     // Adjacent before/after collapse: the larger of the previous paragraph's
-    // spacing-after (already advanced) and this spacing-before wins.
-    this.y += Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
+    // spacing-after (already advanced) and this spacing-before wins; a top
+    // border reserve then adds on top (see collapseBefore above).
+    this.y += collapseBefore(spacingBefore);
 
     // docGrid(lines) re-sync: after a paragraph containing a MULTI-ROW line
     // (a line taller than the pitch: the JhengHei-fallback 2-row lines of
@@ -2563,6 +2606,7 @@ class Engine {
         : 0;
     if (!endedWithBreak) this.y += spacingAfter;
     this.lastParaSpacingAfter = endedWithBreak ? 0 : spacingAfter;
+    this.lastParaAfterPad = endedWithBreak || mergeBottom ? 0 : borderPadBottom;
     if (this.sp.docGridLinePitch) {
       // Only a multi-row line whose height comes from the tall CHINESE
       // FALLBACK profile (a Japanese eastAsia face lacking the glyphs -
@@ -2874,8 +2918,20 @@ class Engine {
       const gm = this.measurer.metrics(
         span.props.verticalAlign ? span.font : (span.metricsFont ?? span.font),
       );
-      const glyphTop = b - gm.ascent;
+      let glyphTop = b - gm.ascent;
       const glyphBoxH = gm.ascent + gm.descent;
+      // Paint-routed CJK spans (paintFamily): the DOM renderer centers glyphs
+      // by the BROWSER strut of the face that actually paints (real MS Mincho
+      // / Microsoft JhengHei), while gm carries the calibrated line profile
+      // (Hiragino/PingFang) whose box is far taller. Chrome's half-leading
+      // then lifts the painted baseline off `b` (staging-eastasian: every CJK
+      // line inked 3-6px above Word). Re-anchor the box so the browser's
+      // centering puts the baseline exactly at b. Identity when the strut
+      // face's box equals the profile box.
+      if (span.font.paintFamily && this.measurer.paintBox) {
+        const pb = this.measurer.paintBox(span.font);
+        if (pb) glyphTop = b - pb.ascent - (glyphBoxH - pb.ascent - pb.descent) / 2;
+      }
 
       // Word draws strikethrough centered 0.216em above the baseline with a
       // ~0.75pt rule (measured from the benchmark reference); CSS
@@ -4300,6 +4356,7 @@ class Engine {
   private placeTable(tbl: Table): void {
     this.clearBannerSlot();
     this.lastParaSpacingAfter = 0;
+    this.lastParaAfterPad = 0;
     this.lastParaWasEmpty = false;
     this.ensureTableBorders(tbl);
     const colWidth = this.colWidth;
