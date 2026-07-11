@@ -1569,7 +1569,33 @@ function finishLine(
       maxImageFontLine = Math.max(maxImageFontLine, measurer.metrics(font).lineHeight);
       return;
     }
-    const m = measurer.metrics(font);
+    let m = measurer.metrics(font);
+    // docGrid type="charsAndLines" (compat 15): East Asian glyphs keep their
+    // font's NATURAL grid line pitch, which the tall macOS substitute faces
+    // (Hiragino Mincho for MS Mincho, PingFang/Songti for the Chinese fallback)
+    // overstate. Scale the substitute metric to the Word-measured grid em so the
+    // block does not overflow (probe3-chargrid: Japanese 1.296em -> 15.4pt/line,
+    // Chinese fallback 1.733em -> 20.5pt/line after the auto 1.08 multiplier).
+    // Scoped to charsAndLines only (no gate uses it), so the snap-tuned CJK
+    // profiles that staging-eastasian / eq-as-images rely on are untouched.
+    if (doc.charGridEa && font.size > 0) {
+      const fam = font.family.toLowerCase();
+      const targetEm = /hiragino/.test(fam)
+        ? 1.296
+        : /pingfang|songti|heiti/.test(fam)
+          ? 1.733
+          : undefined;
+      if (targetEm !== undefined && m.lineHeight > 0) {
+        const scale = (targetEm * font.size) / m.lineHeight;
+        m = {
+          ...m,
+          ascent: m.ascent * scale,
+          descent: m.descent * scale,
+          lineHeight: targetEm * font.size,
+          lineDescent: (m.lineDescent ?? m.descent) * scale,
+        };
+      }
+    }
     // A raised (w:position) run co-lined with an inline object carries its ink
     // box UP with the raise: its descent contribution shrinks by the shift
     // (dense p15's figure labels at +16pt beside 186pt plots leave Word's

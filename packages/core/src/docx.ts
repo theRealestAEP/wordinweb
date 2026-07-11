@@ -146,6 +146,13 @@ export class DocxDocument {
   private contentTypesRoot: XmlElement | null = null;
   private nextDocPrId = 1000;
 
+  /** Transient layout state: set by the engine while laying out a docGrid
+   * type="charsAndLines" section so line measurement can give East-Asian
+   * glyphs their true (uninflated) grid line height. Off outside such a
+   * section. Safe as document-scoped mutable state because layout is
+   * single-threaded and sequential per section. */
+  charGridEa = false;
+
   private constructor(pkg: Package) {
     this.pkg = pkg;
 

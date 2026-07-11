@@ -363,6 +363,29 @@ describe("layout engine", () => {
     expect(title.lineTop).toBeCloseTo(144, 3);
   });
 
+  it("draws a vertical rule between columns for w:cols w:sep and honours per-column widths", () => {
+    // w:cols w:sep="1" paints a rule centered in each inter-column gap; explicit
+    // unequal w:col widths/spaces are honoured raw (probe3-columns-unequal).
+    const body =
+      p("Left column body text here") +
+      `<w:p><w:r><w:t>Second column body text</w:t></w:r><w:r><w:br w:type="column"/></w:r></w:p>` +
+      p("Tail") +
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+      `<w:cols w:num="2" w:sep="1" w:equalWidth="0">` +
+      `<w:col w:w="5040" w:space="360"/><w:col w:w="3960"/></w:cols></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    const edges = result.pages[0].items.filter(
+      (i) => i.kind === "edge" && i.x1 === i.x2,
+    );
+    expect(edges.length).toBeGreaterThanOrEqual(1);
+    // The rule sits in the gap between col 1 (left margin 1440tw = 96px, width
+    // 5040tw = 336px) and col 2 (starts after a 360tw = 24px space): centered at
+    // 96 + 336 + 24/2 = 444px.
+    const rule = edges.find((e) => e.kind === "edge" && Math.abs(e.x1 - 444) < 1);
+    expect(rule).toBeDefined();
+  });
+
   it("bottom-aligns a legacy doc-grid keepNext chain before a leading page break", () => {
     // Word PDF control (wild2-med-nccih-protocol): the first title bbox starts
     // at 614.92pt. Disabling keepNext on either heading, removing docGrid, or

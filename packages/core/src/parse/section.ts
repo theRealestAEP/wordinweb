@@ -88,7 +88,17 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     if (colEls.length > 0) {
       spec.count = colEls.length;
       spec.widths = colEls.map((c) => twipsToPx(intAttr(c, "w") ?? 0));
+      // Each w:col carries its OWN trailing space; the w:cols-level space is
+      // only the fallback (probe3-columns-unequal: w:col space=360tw entries
+      // under a w:cols with no space attribute — Word separates the columns
+      // by 18pt, not the 36pt default).
+      spec.spaces = colEls.map((c) => {
+        const s = intAttr(c, "space");
+        return s !== undefined ? twipsToPx(s) : spec.space;
+      });
     }
+    const sep = attr(cols, "sep");
+    if (sep === "1" || sep === "true" || sep === "on") spec.sep = true;
     props.columns = spec;
   }
 
@@ -104,6 +114,16 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     const linePitch = intAttr(docGrid, "linePitch");
     if ((gtype === "lines" || gtype === "linesAndChars" || gtype === "snapToChars") && linePitch) {
       props.docGridLinePitch = twipsToPx(linePitch);
+    }
+    // Word's real-world "charsAndLines" grid (both a character and a line grid).
+    // In compat 15 it does NOT snap line height up to linePitch - each East
+    // Asian line keeps its font's natural pitch (probe3-chargrid: MS Mincho
+    // 15.4pt, Chinese fallback 20.5pt, both under the 18pt linePitch). We do not
+    // set docGridLinePitch (no snap); instead flag the section so line
+    // measurement uses the glyphs' true grid line height rather than the tall
+    // macOS substitute box.
+    if (gtype === "charsAndLines") {
+      props.docGridCharGrid = true;
     }
   }
 

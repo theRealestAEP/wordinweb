@@ -730,6 +730,11 @@ export interface ColumnSpec {
   space: number;
   /** Explicit widths px when equalWidth=false. */
   widths?: number[];
+  /** Per-column trailing space px (w:col w:space), when explicit w:col
+   * entries are present. spaces[i] separates column i from column i+1. */
+  spaces?: number[];
+  /** w:cols w:sep: paint a vertical rule centered in each inter-column gap. */
+  sep?: boolean;
 }
 
 export interface SectionProps {
@@ -757,6 +762,10 @@ export interface SectionProps {
   docGridLinePitch?: number;
   /** Present w:docGrid type; omitted w:type means "default". */
   docGridType?: "default" | "lines" | "linesAndChars" | "snapToChars";
+  /** w:docGrid type="charsAndLines": a combined char+line grid that (in compat
+   * 15) keeps natural East-Asian line pitch. Drives the CJK line-height
+   * correction during measurement. */
+  docGridCharGrid?: boolean;
   type?: "nextPage" | "continuous" | "evenPage" | "oddPage" | "nextColumn";
   /** Vertical alignment of page content. */
   vAlign?: "top" | "center" | "both" | "bottom";
