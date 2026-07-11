@@ -567,10 +567,15 @@ export function breakParagraph(
     return true;
   };
   // Indents (and first-line indent) apply only to the first free interval of a
-  // band; a float's far-side interval starts flush at its own edge. left/right
-  // remain physical, while firstLine/hanging apply from the logical start.
+  // band; a float's far-side interval starts flush at its own edge. w:ind
+  // left/right are LOGICAL start/end indents: in a bidi paragraph the start
+  // side is the physical RIGHT, so the physical-left inset comes from
+  // indentRight and the right edge pulls in by indentLeft (yiddish p126's
+  // quote blocks, ind left 849-4956tw: Word insets them from the RIGHT).
+  // firstLine/hanging apply from the logical start as before.
+  const startInset = bidiPara ? indentRight : indentLeft;
   const lineStartX = (idx: number) =>
-    curSegIdx > 0 ? curBase : curBase + indentLeft + (idx === 0 && !bidiPara ? firstLineExtra : 0);
+    curSegIdx > 0 ? curBase : curBase + startInset + (idx === 0 && !bidiPara ? firstLineExtra : 0);
   const availFor = (idx: number) =>
     curSegIdx > 0 ? curWidth : curWidth - indentLeft - (idx === 0 ? firstLineExtra : 0) - indentRight;
   // Tab stops are measured from the paragraph edge. A bidi first-line indent

@@ -2718,7 +2718,12 @@ describe("RTL / bidi paragraphs", () => {
     const bidiIndented = itemOf(true, 720);
 
     expect(ltrBase.x).toBeCloseTo(112, 3); // 96px margin + 16px physical left indent
-    expect(bidiBase.x + bidiBase.width).toBeCloseTo(696, 3); // right edge - 24px physical right indent
+    // w:ind left/right are LOGICAL start/end: in a bidi paragraph the start
+    // (w:left, 16px) insets the physical RIGHT edge. Word-verified: with the
+    // logical model wild2-lit-yiddish-rtl p126 (quote blocks, ind left up to
+    // 4956tw) and staging-bidi both render 0.00 vs their PDFs; the physical
+    // model scored 4.56 / 1.34.
+    expect(bidiBase.x + bidiBase.width).toBeCloseTo(704, 3); // right edge - 16px logical start indent
     expect(ltrIndented.x - ltrBase.x).toBeCloseTo(48, 3);
     expect(
       bidiBase.x + bidiBase.width - (bidiIndented.x + bidiIndented.width),
