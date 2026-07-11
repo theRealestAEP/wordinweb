@@ -218,7 +218,9 @@ function hasVisibleContent(c: Paragraph["children"][number]): boolean {
  */
 function suppressTocHyperlinkFormatting(para: Paragraph): void {
   const styleId = para.props.styleId;
-  if (!styleId || !/^TOC[1-9]$/i.test(styleId)) return;
+  // TableofFigures is Word's other built-in TOC-result style (hamburg p5's
+  // "Basas 0:" list paints black in Word, not hyperlink blue).
+  if (!styleId || !/^(TOC[1-9]|TableofFigures)$/i.test(styleId)) return;
   for (const child of para.children) {
     if (child.type !== "hyperlink") continue;
     for (const run of child.runs) {
