@@ -59,6 +59,9 @@ export interface TextItem {
   noteId?: number;
   /** Vertical stretch for tall delimiter glyphs (Word's glyph variants). */
   mathScaleY?: number;
+  /** Horizontal stretch for wide brace glyphs (Word's over/under brace
+   * variants), applied about the glyph box's horizontal center. */
+  mathScaleX?: number;
   /** Stretch anchor above the baseline, px. */
   mathScaleAnchor?: number;
   /** Line box for selection/highlight backgrounds. */

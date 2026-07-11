@@ -955,13 +955,20 @@ function renderText(item: TextItem): HTMLElement {
   el.style.top = `${item.glyphTop ?? item.lineTop}px`;
   const boxH = item.glyphBoxH ?? item.lineHeight;
   el.style.height = `${boxH}px`;
-  if (item.mathScaleY) {
-    // Tall delimiter approximation: stretch the natural glyph vertically
-    // around the math axis (Word swaps in a taller glyph variant instead).
-    const descent = boxH * cambriaMathDescentShare(); // math face hhea share (real Cambria Math or STIX)
-    const originY = boxH - descent - (item.mathScaleAnchor ?? 0);
-    el.style.transform = `scaleY(${item.mathScaleY})`;
-    el.style.transformOrigin = `50% ${originY}px`;
+  if (item.mathScaleY || item.mathScaleX) {
+    // Tall delimiter / wide brace approximation: stretch the natural glyph
+    // vertically around the math axis and/or horizontally around its center
+    // (Word swaps in a taller/wider glyph variant instead).
+    const parts: string[] = [];
+    if (item.mathScaleX) parts.push(`scaleX(${item.mathScaleX})`);
+    let originY = "50%";
+    if (item.mathScaleY) {
+      const descent = boxH * cambriaMathDescentShare(); // math face hhea share (real Cambria Math or STIX)
+      originY = `${boxH - descent - (item.mathScaleAnchor ?? 0)}px`;
+      parts.push(`scaleY(${item.mathScaleY})`);
+    }
+    el.style.transform = parts.join(" ");
+    el.style.transformOrigin = `50% ${originY}`;
   }
   if (item.strutFont) {
     // Small-caps reduced segment: the outer span carries the BASE font so

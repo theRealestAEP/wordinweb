@@ -161,6 +161,10 @@ export interface MathPiece {
   font: FontSpec;
   /** Vertical stretch approximating Word's tall delimiter glyph variants. */
   scaleY?: number;
+  /** Horizontal stretch approximating Word's wide brace glyph variants /
+   * assembled group characters (over/under brace). Stretched about the piece's
+   * horizontal center. */
+  scaleX?: number;
   /** Stretch anchor above the piece baseline, px (the math axis). */
   scaleAnchor?: number;
   /** Extents relative to the MAIN baseline for a stretched delimiter variant
@@ -710,13 +714,28 @@ function flow(
         // centered on the math axis - then defines the delimiter's line
         // extents. Measured across the dense PDF: a variant covers >= ~80%
         // of the content's core (non-script) extent, a delimiter directly
-        // wrapping another delimiter takes at least the second size, and
-        // matrix/n-ary contents keep the legacy continuous stretch
-        // (calibrated against parity-math2's 2x2 matrices).
+        // wrapping another delimiter takes at least the second size, and an
+        // n-ary operand keeps the legacy continuous stretch.
+        // A delimiter whose direct content is a matrix or equation array hugs
+        // it (Word starts the content AT the bracket advance edge) and sizes
+        // by the discrete ladder against the block's own extent: matrices take
+        // one step DOWN (DLM_MAT_COVER), eqArr/piecewise braces keep the
+        // regular 0.8 coverage, and a block taller than the largest ladder
+        // glyph gets an ASSEMBLED delimiter covering DLM_ASSEMBLY_COVER of it.
+        const hasMat = node.e.some((part) => part.some((n) => n.t === "mat"));
+        const matLike = hasMat || node.e.some((part) => part.some((n) => n.t === "eqarr"));
         let grow: number;
         let varAsc: number | undefined;
         let varDesc: number | undefined;
-        if (node.e.some((p) => containsBlocky(p))) {
+        if (matLike) {
+          const cover = hasMat ? DLM_MAT_COVER : DLM_COVER;
+          const coreExtent = coreAsc + coreDesc;
+          const idx = DLM_VARIANTS_EM.findIndex((h) => h * size >= cover * coreExtent);
+          const variantH = idx < 0 ? DLM_ASSEMBLY_COVER * coreExtent : DLM_VARIANTS_EM[idx] * size;
+          grow = variantH / (bm.ascent + bm.descent);
+          varAsc = axis - dy + variantH / 2;
+          varDesc = variantH / 2 - (axis - dy);
+        } else if (node.e.some((p) => containsBlocky(p))) {
           const innerH = Math.max(innerAsc - axis, innerDesc + axis) * 2;
           grow = Math.max(1, innerH / (bm.ascent + bm.descent));
         } else {
@@ -744,7 +763,12 @@ function flow(
             grow = 1;
           }
         }
-        const put = (ch: string) => {
+        // A matrix/eqArr hugs its delimiter: no pad after the opener, only a
+        // hair before the closer. An empty beg/end (cases' one-sided brace)
+        // draws no glyph on that side.
+        const innerPad = size * (matLike ? DLM_MAT_END_PAD : dlmPad());
+        const drawDelim = (ch: string) => {
+          if (!ch) return;
           box.pieces.push({
             text: ch,
             x: box.width,
@@ -755,19 +779,25 @@ function flow(
             ownAscent: varAsc !== undefined ? dy + varAsc : undefined,
             ownDescent: varDesc !== undefined ? -dy + varDesc : undefined,
           });
-          box.width += measurer.width(ch, baseFont) + size * dlmPad();
+          box.width += measurer.width(ch, baseFont);
         };
-        put(node.beg);
+        drawDelim(node.beg);
+        box.width += matLike && node.beg ? 0 : node.beg ? size * dlmPad() : 0;
         parts.forEach((b, i) => {
-          if (i > 0) put("|");
+          if (i > 0) {
+            drawDelim("|");
+            box.width += size * dlmPad();
+          }
           if (b.breaks) {
             for (const at of b.breaks) (box.breaks ??= []).push(box.width + at);
           }
           for (const pc of b.pieces) box.pieces.push(rebase(pc, box.width, dy));
           for (const r of b.rules) box.rules.push({ ...r, x1: box.width + r.x1, x2: box.width + r.x2, dy: dy + r.dy });
-          box.width += b.width + size * dlmPad();
+          box.width += b.width;
+          box.width += i + 1 < parts.length ? size * dlmPad() : innerPad;
         });
-        put(node.end);
+        drawDelim(node.end);
+        box.width += size * dlmPad();
         prevOperand = true;
         break;
       }
@@ -789,10 +819,23 @@ function flow(
         const nCols = Math.max(...cells.map((r) => r.length));
         const colW: number[] = [];
         for (let c = 0; c < nCols; c++) colW.push(Math.max(...cells.map((r) => r[c]?.width ?? 0)));
-        const pitch = size * MAT_ROW_PITCH;
-        // Row baselines are evenly pitched, their centroid a hair below the
-        // main baseline (parity-math2: rows at -5.75/+7.0pt around 11pt).
-        let rowBase = dy - size * MAT_CENTER_DROP + (pitch * (cells.length - 1)) / 2;
+        // Baseline-to-baseline row pitch: plain single-line rows keep the
+        // minimum MAT_ROW_PITCH; a row whose entries carry their own extents
+        // (fraction cells) pushes the next baseline down by its descent plus
+        // the next row's ascent plus a small gap (probe2's 3x3 of fractions
+        // measures 26.75pt where MAT_ROW_PITCH alone gives 12.75).
+        const rowAsc = cells.map((r) => Math.max(0, ...r.map((b) => b.ascent)));
+        const rowDesc = cells.map((r) => Math.max(0, ...r.map((b) => b.descent)));
+        const minPitch = size * MAT_ROW_PITCH;
+        const pitches: number[] = [];
+        for (let ri = 0; ri + 1 < cells.length; ri++) {
+          pitches.push(Math.max(minPitch, rowDesc[ri] + rowAsc[ri + 1] + size * MAT_ROW_GAP));
+        }
+        const totalSpan = pitches.reduce((a, b) => a + b, 0);
+        // Row baselines centered so the centroid sits a hair below the main
+        // baseline (parity-math2: rows at -5.75/+7.0pt around 11pt).
+        let rowBase = dy - size * MAT_CENTER_DROP + totalSpan / 2;
+        const colGap = size * matColGap(display);
         const x0 = box.width;
         cells.forEach((row, ri) => {
           let cx = x0;
@@ -800,26 +843,179 @@ function flow(
             const cellX = cx + (colW[ci] - b.width) / 2;
             for (const pc of b.pieces) box.pieces.push(rebase(pc, cellX, rowBase));
             for (const r of b.rules) box.rules.push({ ...r, x1: cellX + r.x1, x2: cellX + r.x2, dy: rowBase + r.dy });
-            cx += colW[ci] + size * matColGap();
+            cx += colW[ci] + colGap;
           });
-          if (ri + 1 < cells.length) rowBase -= pitch;
+          if (ri + 1 < cells.length) rowBase -= pitches[ri];
         });
-        box.width = x0 + colW.reduce((a, b) => a + b, 0) + size * matColGap() * (nCols - 1);
+        box.width = x0 + colW.reduce((a, b) => a + b, 0) + colGap * (nCols - 1);
         prevOperand = true;
         break;
       }
       case "rad": {
         const font = fontAt(size);
-        const sign = "√";
-        box.pieces.push({ text: sign, x: box.width, dy, font });
-        const signW = measurer.width(sign, font);
-        const x0 = box.width + signW;
-        const w0 = box.width;
-        box.width = x0;
-        flow(node.e, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor);
-        // vinculum over the radicand
         const m = measurer.metrics(font);
-        box.rules.push({ x1: w0 + signW * 0.85, x2: box.width, dy: dy + m.ascent * 0.72, thick: Math.max(size * RULE_THICK, 0.75) });
+        const ruleThick = Math.max(size * RULE_THICK, 0.75);
+        // Radicand laid out first so its extents size the sign / rule.
+        const radBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
+        flow(node.e, size, 0, radBox, measurer, tight, display, breakDepth + 2, scriptFloor);
+        let radAsc = m.ascent * 0.5;
+        let radDesc = 0;
+        for (const pc of radBox.pieces) {
+          const pm = measurer.metrics(pc.font);
+          radAsc = Math.max(radAsc, pc.ownAscent ?? pc.dy + pm.ascent);
+          radDesc = Math.max(radDesc, pc.ownDescent ?? -pc.dy + pm.descent);
+        }
+        for (const r of radBox.rules) {
+          radAsc = Math.max(radAsc, r.dy + r.thick / 2);
+          radDesc = Math.max(radDesc, -r.dy + r.thick / 2);
+        }
+        // Rule (vinculum) sits a clearance above the radicand's top ink; the
+        // sign's ink top IS the rule. A large-slack variant rides further up.
+        const ruleTop = radAsc + size * RAD_GAP + ruleThick;
+        const signInkH = ruleTop + radDesc;
+        // Optional degree (∛): a script-size index tucked into the sign's kern,
+        // its baseline raised RAD_DEG_RAISE of the sign ink height above the
+        // sign's ink bottom.
+        if (node.deg && node.deg.length) {
+          const dScale = scriptSize(size, scriptFloor);
+          box.width += size * RAD_KERN_BEFORE_DEG;
+          const degBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
+          flow(node.deg, dScale, 0, degBox, measurer, true, false, breakDepth + 2, scriptFloor);
+          const degDy = dy - radDesc + RAD_DEG_RAISE * signInkH + size * RAD_DEG_ADJ;
+          for (const pc of degBox.pieces) box.pieces.push(rebase(pc, box.width, degDy, true));
+          for (const r of degBox.rules) box.rules.push({ ...r, x1: box.width + r.x1, x2: box.width + r.x2, dy: degDy + r.dy });
+          box.width += degBox.width + size * RAD_KERN_AFTER_DEG;
+        }
+        // Sign: the natural √ grown so its ink top reaches the rule while its
+        // bottom vertex stays at the radicand's descent (Word swaps in a taller
+        // MATH variant; scaleY approximates it about the bottom-vertex anchor).
+        const grow = Math.max(1, signInkH / (m.ascent + radDesc));
+        const signW = measurer.width("√", font);
+        box.pieces.push({
+          text: "√",
+          x: box.width,
+          dy,
+          font,
+          scaleY: grow > 1.05 ? grow : undefined,
+          scaleAnchor: -radDesc,
+          ownAscent: dy + ruleTop,
+          ownDescent: -dy + radDesc,
+        });
+        const radLeft = box.width + signW;
+        for (const pc of radBox.pieces) box.pieces.push(rebase(pc, radLeft, dy));
+        for (const r of radBox.rules) box.rules.push({ ...r, x1: radLeft + r.x1, x2: radLeft + r.x2, dy: dy + r.dy });
+        box.width = radLeft + radBox.width;
+        box.rules.push({ x1: radLeft, x2: box.width, dy: dy + ruleTop - ruleThick / 2, thick: ruleThick });
+        prevOperand = true;
+        break;
+      }
+      case "eqarr": {
+        // A stacked column of equation rows, left-aligned, its vertical extent
+        // centered on the math axis (cases / piecewise bodies).
+        const axis = dy + size * RULE_CENTER;
+        const rowBoxes = node.rows.map((row) => {
+          const b: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
+          flow(row, size, 0, b, measurer, tight, display, breakDepth + 2, scriptFloor);
+          for (const pc of b.pieces) {
+            const pm = measurer.metrics(pc.font);
+            b.ascent = Math.max(b.ascent, pc.ownAscent ?? pc.dy + pm.ascent);
+            b.descent = Math.max(b.descent, pc.ownDescent ?? -pc.dy + pm.descent);
+          }
+          return b;
+        });
+        const rAsc = rowBoxes.map((b) => Math.max(0, b.ascent));
+        const rDesc = rowBoxes.map((b) => Math.max(0, b.descent));
+        const pitches: number[] = [];
+        for (let ri = 0; ri + 1 < rowBoxes.length; ri++) {
+          pitches.push(Math.max(size * MAT_ROW_PITCH, rDesc[ri] + rAsc[ri + 1] + size * MAT_ROW_GAP));
+        }
+        const totalSpan = pitches.reduce((a, b) => a + b, 0);
+        // Top-row baseline so the block's ink extent centers on the axis.
+        let rowBase = axis + (totalSpan + (rDesc[rowBoxes.length - 1] ?? 0) - (rAsc[0] ?? 0)) / 2;
+        const x0 = box.width;
+        let maxW = 0;
+        rowBoxes.forEach((b, ri) => {
+          for (const pc of b.pieces) box.pieces.push(rebase(pc, x0, rowBase));
+          for (const r of b.rules) box.rules.push({ ...r, x1: x0 + r.x1, x2: x0 + r.x2, dy: rowBase + r.dy });
+          maxW = Math.max(maxW, b.width);
+          if (ri + 1 < rowBoxes.length) rowBase -= pitches[ri];
+        });
+        box.width = x0 + maxW;
+        prevOperand = true;
+        break;
+      }
+      case "acc": {
+        // Combining accent composed over the base by the font (Word emits the
+        // base glyph followed by the combining mark at the same origin).
+        const before = box.pieces.length;
+        flow(node.e, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor);
+        if (box.pieces.length > before) {
+          const last = box.pieces[box.pieces.length - 1];
+          last.text += node.chr;
+        }
+        prevOperand = true;
+        break;
+      }
+      case "grp": {
+        // Group character (over/under brace) horizontally stretched across the
+        // base. pos=top keeps the base full-size on the baseline with the brace
+        // above; pos=bot drops the base to script size raised above a brace on
+        // the baseline. The brace takes the largest discrete variant not
+        // exceeding the base, or a full-width assembled brace past the ladder.
+        const isTop = node.pos === "top";
+        const bScale = isTop ? size : scriptSize(size, scriptFloor);
+        const baseBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
+        flow(node.e, bScale, 0, baseBox, measurer, tight, display, breakDepth + 2, scriptFloor);
+        const baseW = baseBox.width;
+        const maxVariant = GRP_VARIANTS_EM[GRP_VARIANTS_EM.length - 1] * size;
+        let braceW = maxVariant;
+        if (baseW <= maxVariant) {
+          braceW = GRP_VARIANTS_EM[0] * size;
+          for (const v of GRP_VARIANTS_EM) if (v * size <= baseW) braceW = v * size;
+        } else {
+          braceW = baseW; // assembled to the full base width
+        }
+        const groupW = Math.max(baseW, braceW);
+        const x0 = box.width;
+        const baseDy = dy + (isTop ? 0 : size * GRP_BOT_BASE_RAISE);
+        const baseX = x0 + (groupW - baseW) / 2;
+        for (const pc of baseBox.pieces) box.pieces.push(rebase(pc, baseX, baseDy, !isTop));
+        for (const r of baseBox.rules) box.rules.push({ ...r, x1: baseX + r.x1, x2: baseX + r.x2, dy: baseDy + r.dy });
+        // Brace glyph centered under/over the group, stretched to braceW.
+        const braceFont = fontAt(size);
+        const natW = measurer.width(node.chr, braceFont);
+        const braceCenterX = x0 + groupW / 2;
+        const braceDy = dy + size * (isTop ? GRP_TOP_CHR_DY : GRP_BOT_CHR_DY);
+        box.pieces.push({
+          text: node.chr,
+          x: braceCenterX - natW / 2,
+          dy: braceDy,
+          font: braceFont,
+          scaleX: natW > 0 && braceW / natW > 1.02 ? braceW / natW : undefined,
+        });
+        box.width = x0 + groupW;
+        prevOperand = true;
+        break;
+      }
+      case "lim": {
+        // A limit stacked under (limLow) / over (limUpp) a text operator, both
+        // centered on the wider of the two.
+        const isLow = node.pos === "low";
+        const baseBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
+        flow(node.e, size, 0, baseBox, measurer, tight, display, breakDepth + 2, scriptFloor);
+        const lScale = scriptSize(size, scriptFloor);
+        const limBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
+        flow(node.lim, lScale, 0, limBox, measurer, true, false, breakDepth + 2, scriptFloor);
+        const w = Math.max(baseBox.width, limBox.width);
+        const x0 = box.width;
+        const baseX = x0 + (w - baseBox.width) / 2;
+        for (const pc of baseBox.pieces) box.pieces.push(rebase(pc, baseX, dy));
+        for (const r of baseBox.rules) box.rules.push({ ...r, x1: baseX + r.x1, x2: baseX + r.x2, dy: dy + r.dy });
+        const limX = x0 + (w - limBox.width) / 2;
+        const limDy = dy + (isLow ? -size * LIM_LOW_DROP : size * LIM_UPP_RAISE);
+        for (const pc of limBox.pieces) box.pieces.push(rebase(pc, limX, limDy, true));
+        for (const r of limBox.rules) box.rules.push({ ...r, x1: limX + r.x1, x2: limX + r.x2, dy: limDy + r.dy });
+        box.width = x0 + w;
         prevOperand = true;
         break;
       }

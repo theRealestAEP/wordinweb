@@ -133,8 +133,18 @@ function buildOmml(node: MathNode, m: string): XmlElement {
         el(`${m}num`, node.num.map((n) => buildOmml(n, m))),
         el(`${m}den`, node.den.map((n) => buildOmml(n, m))),
       ]);
-    case "rad":
-      return el(`${m}rad`, [el(`${m}e`, node.e.map((n) => buildOmml(n, m)))]);
+    case "rad": {
+      const kids: XmlElement[] = [];
+      if (node.deg && node.deg.length) {
+        kids.push(el(`${m}deg`, node.deg.map((n) => buildOmml(n, m))));
+      } else {
+        const hide = el(`${m}degHide`);
+        hide.attrs[`${m}val`] = "1";
+        kids.push(el(`${m}radPr`, [hide]), el(`${m}deg`));
+      }
+      kids.push(el(`${m}e`, node.e.map((n) => buildOmml(n, m))));
+      return el(`${m}rad`, kids);
+    }
     case "nary": {
       const pr = el(`${m}naryPr`, [el(`${m}chr`)]);
       pr.children[0].attrs[`${m}val`] = node.chr;
@@ -154,6 +164,27 @@ function buildOmml(node: MathNode, m: string): XmlElement {
     }
     case "mat":
       return el(`${m}m`, node.rows.map((row) => el(`${m}mr`, row.map((cell) => el(`${m}e`, cell.map((n) => buildOmml(n, m)))))));
+    case "eqarr":
+      return el(`${m}eqArr`, node.rows.map((row) => el(`${m}e`, row.map((n) => buildOmml(n, m)))));
+    case "acc": {
+      const chr = el(`${m}chr`);
+      chr.attrs[`${m}val`] = node.chr;
+      return el(`${m}acc`, [el(`${m}accPr`, [chr]), el(`${m}e`, node.e.map((n) => buildOmml(n, m)))]);
+    }
+    case "grp": {
+      const chr = el(`${m}chr`);
+      chr.attrs[`${m}val`] = node.chr;
+      const pos = el(`${m}pos`);
+      pos.attrs[`${m}val`] = node.pos;
+      const vjc = el(`${m}vertJc`);
+      vjc.attrs[`${m}val`] = node.vertJc;
+      return el(`${m}groupChr`, [el(`${m}groupChrPr`, [chr, pos, vjc]), el(`${m}e`, node.e.map((n) => buildOmml(n, m)))]);
+    }
+    case "lim":
+      return el(`${m}${node.pos === "low" ? "limLow" : "limUpp"}`, [
+        el(`${m}e`, node.e.map((n) => buildOmml(n, m))),
+        el(`${m}lim`, node.lim.map((n) => buildOmml(n, m))),
+      ]);
   }
 }
 
