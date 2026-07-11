@@ -626,6 +626,7 @@ export function breakParagraph(
           labelX + labelWidth + offset,
           props.tabs,
           contentWidth - indentRight,
+          doc.defaultTabStop,
         );
         x = Math.max(
           labelX + labelWidth + measurer.width(" ", labelFont) * 0.5,
@@ -646,10 +647,23 @@ export function breakParagraph(
         }
       } else {
         // Advance to the text indent position (Word: next tab stop or indentLeft).
-        const target = indentLeft;
-        x = Math.max(labelX + labelWidth + measurer.width(" ", labelFont) * 0.5, target);
-        if (labelX + labelWidth > indentLeft) {
-          x = nextDefaultTab(labelX + labelWidth);
+        // The number's follow-tab behaves like a real tab with the left indent
+        // as a final implicit stop, so an EXPLICIT stop between the label end
+        // and the left indent captures it (nccih p16: ind left=1800 hanging=720
+        // items override the level's 1800 num tab with one at 1440 — Word puts
+        // their single-line text at 1440, flush with the left=1440 siblings,
+        // while wrapped lines stay at the 1800 indent).
+        const labelEnd = labelX + labelWidth;
+        let target = indentLeft;
+        for (const t of props.tabs ?? []) {
+          if (!t.clear && t.align !== "bar" && t.pos > labelEnd + 0.5 && t.pos < target - 0.5) {
+            target = t.pos;
+            break;
+          }
+        }
+        x = Math.max(labelEnd + measurer.width(" ", labelFont) * 0.5, target);
+        if (labelEnd > indentLeft) {
+          x = nextDefaultTab(labelEnd, doc.defaultTabStop);
         }
       }
     } else if (numberingLabel.suffix === "space") {
@@ -896,7 +910,7 @@ export function breakParagraph(
     }
     if (atom.kind === "tab") {
       const offset = bidiTabOffset(lineIndex);
-      let rawStop = nextTabStop(x + offset, props.tabs, contentWidth - indentRight);
+      let rawStop = nextTabStop(x + offset, props.tabs, contentWidth - indentRight, doc.defaultTabStop);
       if (opts?.inTableCell) {
         // In a table cell an explicit tab passes THROUGH decimal stops (Word
         // reserves them for automatic numeric alignment) and lands on the
@@ -905,7 +919,7 @@ export function breakParagraph(
         // stop in Word's own render.
         let guard = 0;
         while (rawStop.align === "decimal" && guard++ < 8) {
-          rawStop = nextTabStop(rawStop.pos, props.tabs, contentWidth - indentRight);
+          rawStop = nextTabStop(rawStop.pos, props.tabs, contentWidth - indentRight, doc.defaultTabStop);
         }
       }
       // Word adds an implicit tab stop at the LEFT INDENT of a hanging-indent
@@ -1344,14 +1358,15 @@ function applyMathParaJustification(doc: DocxDocument, lines: LineBox[], bidiPar
   }
 }
 
-function nextDefaultTab(x: number): number {
-  return (Math.floor(x / DEFAULT_TAB) + 1) * DEFAULT_TAB;
+function nextDefaultTab(x: number, interval = DEFAULT_TAB): number {
+  return (Math.floor(x / interval) + 1) * interval;
 }
 
 function nextTabStop(
   x: number,
   tabs: TabStop[] | undefined,
   rightEdge: number,
+  defaultTab = DEFAULT_TAB,
 ): { pos: number; align: TabStop["align"]; leader?: TabStop["leader"] } {
   if (tabs) {
     for (const t of tabs) {
@@ -1360,7 +1375,11 @@ function nextTabStop(
       }
     }
   }
-  const next = nextDefaultTab(x);
+  // Past the explicit stops the grid uses settings.xml w:defaultTabStop
+  // (yiddish-rtl p214: 708tw — the hand-made TOC's trailing tab lands the
+  // page number's logical start at the 11th 35.4pt stop, one digit width
+  // off under the 720tw default).
+  const next = nextDefaultTab(x, defaultTab);
   // Past the last default stop, Word advances a tab 306tw (15.3pt = 20.4px)
   // - probe-tabalign2/3 vs the NIH footer: its two trailing tabs past the
   // right edge span exactly 30.6pt, and the flush-right line puts the ink
@@ -2212,8 +2231,14 @@ function buildAtoms(
         // Emit a frag per segment, keeping the hyphen with its left segment
         // and marking it breakAfter. Widths stay cumulative-exact.
         const breaks = hyphenBreaks(part);
+        // A pure-digit word is a European Number regardless of the run's
+        // w:rtl flag (UAX#9: EN takes an EVEN embedding level inside an RTL
+        // paragraph). Keeping it odd reverses the ORDER of split digit spans
+        // - Word caches a PAGEREF result as several w:r runs, and yiddish-rtl
+        // p214's TOC painted "101" (runs "1"+"01") as "011".
+        const fragRtl = props.rtl && !/^[0-9]+$/.test(part);
         if (breaks.length === 0) {
-          atoms.push({ kind: "frag", text: part, props, font, width: partWidth, href, src, metricsFont, rtl: props.rtl });
+          atoms.push({ kind: "frag", text: part, props, font, width: partWidth, href, src, metricsFont, rtl: fragRtl });
         } else {
           let segStart = 0;
           let segPrevCum = prevCum;
@@ -2232,7 +2257,7 @@ function buildAtoms(
               src: src ? { run: src.run, t: src.t, offset: src.offset + segStart } : undefined,
               metricsFont,
               breakAfter: segEnd < part.length,
-              rtl: props.rtl,
+              rtl: props.rtl && !/^[0-9]+$/.test(seg),
             });
             segPrevCum = segCum;
             segStart = segEnd;

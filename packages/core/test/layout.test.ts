@@ -3653,3 +3653,168 @@ describe("cross-references and over-wide tables", () => {
     expect(pageText(result, 1)).toContain("Bravo big");
   });
 });
+
+describe("tail parity rules (textboxes/nccih/hf2/yiddish)", () => {
+  const RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships";
+  const OD_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+  it("re-applies a displaced paragraph's space-before below a topAndBottom band (parity2-textboxes p1)", () => {
+    // Heading with spacing-before, then the anchor paragraph whose
+    // wrapTopAndBottom box is predicted at the heading's bottom: the heading
+    // reflows BELOW the band and Word re-applies its space-before there
+    // (measured: band bottom + 12pt, not the +2px mid-paragraph fudge).
+    const WP = 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"';
+    const A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
+    const WPS = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"';
+    const box =
+      `<w:r><w:drawing><wp:anchor ${WP} distT="91440" distB="91440" distL="114300" distR="114300" simplePos="0" relativeHeight="2" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">` +
+      `<wp:simplePos x="0" y="0"/>` +
+      `<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>` +
+      `<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>` +
+      `<wp:extent cx="3657600" cy="822960"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+      `<wp:wrapTopAndBottom/>` +
+      `<wp:docPr id="9" name="Box"/><wp:cNvGraphicFramePr/>` +
+      `<a:graphic ${A}><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">` +
+      `<wps:wsp ${WPS}><wps:cNvSpPr/><wps:spPr>` +
+      `<a:xfrm><a:off x="0" y="0"/><a:ext cx="3657600" cy="822960"/></a:xfrm>` +
+      `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+      `<a:solidFill><a:srgbClr val="DDEEFF"/></a:solidFill>` +
+      `</wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>B</w:t></w:r></w:p></w:txbxContent></wps:txbx>` +
+      `<wps:bodyPr rot="0" anchor="t"><a:noAutofit/></wps:bodyPr>` +
+      `</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
+    const render = (before: number) => {
+      const heading =
+        `<w:p><w:pPr><w:spacing w:before="${before}" w:after="0"/></w:pPr>` +
+        `<w:r><w:t>Displaced heading</w:t></w:r></w:p>`;
+      const anchorPara = `<w:p>${box}</w:p>`;
+      const { result } = layout({
+        "word/document.xml": wrapDocument(p("Intro text") + heading + anchorPara + p("Tail")),
+      });
+      const h = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes("Displaced"));
+      const rect = result.pages[0].items.find((i) => i.kind === "rect" && i.fill === "#ddeeff");
+      if (h?.kind !== "text" || rect?.kind !== "rect") throw new Error("missing heading/box");
+      // Gap between the band's box bottom and the displaced heading's line top
+      // (the box itself anchors at the heading's undisplaced bottom, so it
+      // moves with spacing-before; the GAP isolates the re-applied spacing).
+      return h.lineTop - (rect.y + rect.height);
+    };
+    // before=240tw (16px) vs before=0: gap grows by max(2, 16) - 2 = 14px.
+    expect(render(240) - render(0)).toBeCloseTo(14, 1);
+  });
+
+  it("spans a body-level fixed pct table over content width + edge cell margins (nccih p14)", () => {
+    // tblW 5000 pct with tblLayout fixed: Word measures 100% against the
+    // text column PLUS the table's left+right cell margins, rendering the
+    // authored grid (content + 216tw) raw — rules at margin -/+ 7.2px.
+    const content = 9360; // 12240 - 2*1440
+    const grid = `<w:gridCol w:w="${content / 2 + 108}"/><w:gridCol w:w="${content / 2 + 108}"/>`;
+    const cell = (w: number) =>
+      `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/>` +
+      `<w:tcBorders><w:left w:val="single" w:sz="4" w:color="000000"/><w:right w:val="single" w:sz="4" w:color="000000"/></w:tcBorders>` +
+      `</w:tcPr><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc>`;
+    const tbl =
+      `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblLayout w:type="fixed"/>` +
+      `<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr>` +
+      `<w:tblGrid>${grid}</w:tblGrid>` +
+      `<w:tr>${cell(content / 2 + 108)}${cell(content / 2 + 108)}</w:tr></w:tbl><w:p/>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl) });
+    const edges = result.pages[0].items.filter((i) => i.kind === "edge");
+    const xs = edges.flatMap((e) => (e.kind === "edge" ? [e.x1, e.x2] : []));
+    // The grid renders RAW: rules span content (624px) + 2 x 7.2px cell
+    // margins = 638.4px, not scaled down to the bare 624px column.
+    expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(624 + 14.4, 0);
+  });
+
+  it("lets an explicit tab stop before the left indent capture the numbering suffix tab (nccih p16)", () => {
+    // ind left=1800 hanging=720 with a num-tab override at 1440: the bullet
+    // sits at 1080tw and single-line TEXT at the 1440tw stop, not at the
+    // 1800tw indent.
+    const numbering = `<?xml version="1.0"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0">
+    <w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="-"/><w:lvlJc w:val="left"/>
+    <w:pPr><w:tabs><w:tab w:val="num" w:pos="1800"/></w:tabs><w:ind w:left="1800" w:hanging="360"/></w:pPr>
+  </w:lvl></w:abstractNum>
+  <w:num w:numId="8"><w:abstractNumId w:val="1"/></w:num>
+</w:numbering>`;
+    const rels = `<?xml version="1.0"?>
+<Relationships xmlns="${RELS_NS}">
+  <Relationship Id="rIdN" Type="${OD_REL}/numbering" Target="numbering.xml"/>
+</Relationships>`;
+    const item =
+      `<w:p><w:pPr>` +
+      `<w:numPr><w:ilvl w:val="0"/><w:numId w:val="8"/></w:numPr>` +
+      `<w:tabs><w:tab w:val="clear" w:pos="1800"/><w:tab w:val="num" w:pos="1440"/></w:tabs>` +
+      `<w:ind w:left="1800" w:hanging="720"/>` +
+      `</w:pPr><w:r><w:t>Item text</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(item),
+      "word/_rels/document.xml.rels": rels,
+      "word/numbering.xml": numbering,
+    });
+    const t = result.pages[0].items.find((i) => i.kind === "text" && i.text.includes("Item"));
+    if (t?.kind !== "text") throw new Error("missing item text");
+    // margin 96px + stop 1440tw (96px) — not the 1800tw (120px) indent.
+    expect(t.x).toBeCloseTo(96 + 96, 1);
+  });
+
+  it("leaves even pages blank when evenAndOddHeaders is on and no even footer exists (staging-hf2 p2)", () => {
+    const settings = `<?xml version="1.0"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:evenAndOddHeaders/>
+</w:settings>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:r><w:t>One</w:t><w:br w:type="page"/><w:t>Two</w:t></w:r></w:p>` +
+          `<w:sectPr>
+            <w:footerReference xmlns:r="${OD_REL.replace("/relationships", "/relationships")}" w:type="default" r:id="rIdF"/>
+            <w:pgSz w:w="12240" w:h="15840"/>
+            <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:footer="720"/>
+          </w:sectPr>`,
+      ),
+      "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="${RELS_NS}">
+  <Relationship Id="rIdF" Type="${OD_REL}/footer" Target="footer1.xml"/>
+</Relationships>`,
+      "word/footer1.xml": `<?xml version="1.0"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:r><w:t>Default footer</w:t></w:r></w:p>
+</w:ftr>`,
+      "word/settings.xml": settings,
+    });
+    expect(result.totalPages).toBe(2);
+    expect(pageText(result, 0)).toContain("Default footer"); // odd page keeps it
+    expect(pageText(result, 1)).not.toContain("Default footer"); // even page is BLANK
+  });
+
+  it("keeps split digit runs in logical order inside an RTL line (yiddish p214 TOC)", () => {
+    // "101" cached as runs "1" + "01": European Numbers take an EVEN bidi
+    // level, so the spans keep their order (pre-fix the line-level reversal
+    // painted "011").
+    const rtl = (t: string) => `<w:r><w:rPr><w:rtl/></w:rPr><w:t xml:space="preserve">${t}</w:t></w:r>`;
+    const para = `<w:p><w:pPr><w:bidi/></w:pPr>${rtl("שלום ")}${rtl("1")}${rtl("01")}</w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para) });
+    const one = result.pages[0].items.find((i) => i.kind === "text" && i.text === "1");
+    const oh = result.pages[0].items.find((i) => i.kind === "text" && i.text === "01");
+    if (one?.kind !== "text" || oh?.kind !== "text") throw new Error("missing digit spans");
+    // Visual order must read "101": the "1" span sits LEFT of the "01" span.
+    expect(one.x).toBeLessThan(oh.x);
+    expect(oh.x).toBeCloseTo(one.x + one.width, 1);
+  });
+
+  it("advances default tab stops on the settings.xml w:defaultTabStop grid (yiddish p214)", () => {
+    const settings = `<?xml version="1.0"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:defaultTabStop w:val="708"/>
+</w:settings>`;
+    const para = `<w:p><w:r><w:t>a</w:t><w:tab/><w:t>b</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(para),
+      "word/settings.xml": settings,
+    });
+    const b = result.pages[0].items.find((i) => i.kind === "text" && i.text === "b");
+    if (b?.kind !== "text") throw new Error("missing b");
+    // 708tw = 47.2px grid, not the built-in 48px.
+    expect(b.x).toBeCloseTo(96 + 47.2, 1);
+  });
+});
