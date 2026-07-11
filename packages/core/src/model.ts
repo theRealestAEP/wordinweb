@@ -255,7 +255,14 @@ export interface ImageContent {
 }
 /** OMML equation node (subset: runs, scripts, fractions, radicals). */
 export type MathNode =
-  | { t: "run"; text: string; normal?: boolean }
+  | {
+      t: "run";
+      text: string;
+      normal?: boolean;
+      /** m:func function name (cos, log, …): Word kerns a thin space on
+       * both sides of the name. */
+      fname?: boolean;
+    }
   | { t: "sup" | "sub"; base: MathNode[]; script: MathNode[] }
   | { t: "frac"; num: MathNode[]; den: MathNode[]; bar?: boolean }
   | { t: "rad"; e: MathNode[] }

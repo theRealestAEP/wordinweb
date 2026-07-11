@@ -467,6 +467,10 @@ export function breakParagraph(
   const props = doc.effectiveParaProps(para);
   if (props.snapToGrid === false) minLineHeight = undefined;
   const fallbackFamily = doc.styles.defaultRPr.font ?? "Calibri";
+  // settings.xml w:defaultTabStop (e.g. 708tw = 47.2px in cm-locale docs);
+  // wild2-math-omml-dense p7's 7-tab equation labels land a visible 9.5px
+  // right of Word on the hardcoded 48px grid.
+  const defaultTab = doc.defaultTabStop > 0 ? doc.defaultTabStop : DEFAULT_TAB;
 
   // Bidi paragraph: lines assemble in logical order, then reorder to visual
   // (RTL). Physical alignment flips: OOXML jc "right" means "end", which in an
@@ -626,6 +630,7 @@ export function breakParagraph(
           labelX + labelWidth + offset,
           props.tabs,
           contentWidth - indentRight,
+          defaultTab,
         );
         x = Math.max(
           labelX + labelWidth + measurer.width(" ", labelFont) * 0.5,
@@ -649,7 +654,7 @@ export function breakParagraph(
         const target = indentLeft;
         x = Math.max(labelX + labelWidth + measurer.width(" ", labelFont) * 0.5, target);
         if (labelX + labelWidth > indentLeft) {
-          x = nextDefaultTab(labelX + labelWidth);
+          x = nextDefaultTab(labelX + labelWidth, defaultTab);
         }
       }
     } else if (numberingLabel.suffix === "space") {
@@ -896,7 +901,7 @@ export function breakParagraph(
     }
     if (atom.kind === "tab") {
       const offset = bidiTabOffset(lineIndex);
-      let rawStop = nextTabStop(x + offset, props.tabs, contentWidth - indentRight);
+      let rawStop = nextTabStop(x + offset, props.tabs, contentWidth - indentRight, defaultTab);
       if (opts?.inTableCell) {
         // In a table cell an explicit tab passes THROUGH decimal stops (Word
         // reserves them for automatic numeric alignment) and lands on the
@@ -905,7 +910,7 @@ export function breakParagraph(
         // stop in Word's own render.
         let guard = 0;
         while (rawStop.align === "decimal" && guard++ < 8) {
-          rawStop = nextTabStop(rawStop.pos, props.tabs, contentWidth - indentRight);
+          rawStop = nextTabStop(rawStop.pos, props.tabs, contentWidth - indentRight, defaultTab);
         }
       }
       // Word adds an implicit tab stop at the LEFT INDENT of a hanging-indent
@@ -1344,14 +1349,15 @@ function applyMathParaJustification(doc: DocxDocument, lines: LineBox[], bidiPar
   }
 }
 
-function nextDefaultTab(x: number): number {
-  return (Math.floor(x / DEFAULT_TAB) + 1) * DEFAULT_TAB;
+function nextDefaultTab(x: number, interval: number = DEFAULT_TAB): number {
+  return (Math.floor(x / interval) + 1) * interval;
 }
 
 function nextTabStop(
   x: number,
   tabs: TabStop[] | undefined,
   rightEdge: number,
+  defaultTab: number = DEFAULT_TAB,
 ): { pos: number; align: TabStop["align"]; leader?: TabStop["leader"] } {
   if (tabs) {
     for (const t of tabs) {
@@ -1360,7 +1366,7 @@ function nextTabStop(
       }
     }
   }
-  const next = nextDefaultTab(x);
+  const next = nextDefaultTab(x, defaultTab);
   // Past the last default stop, Word advances a tab 306tw (15.3pt = 20.4px)
   // - probe-tabalign2/3 vs the NIH footer: its two trailing tabs past the
   // right edge span exactly 30.6pt, and the flush-right line puts the ink
