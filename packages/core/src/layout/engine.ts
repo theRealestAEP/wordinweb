@@ -471,8 +471,14 @@ class Engine {
       page.headerRel = sp.headerRefs.first;
       page.footerRel = sp.footerRefs.first;
     } else if (useEven) {
-      page.headerRel = sp.headerRefs.even ?? sp.headerRefs.default;
-      page.footerRel = sp.footerRefs.even ?? sp.footerRefs.default;
+      // With w:evenAndOddHeaders an even page uses ONLY the even variant.
+      // Section inheritance (per type, from the previous section) already
+      // happened at parse time, so a chain that never declares an even
+      // header/footer gets a BLANK one — never the default (staging-hf2 p2:
+      // section 1 declares only a default footer and Word paints no footer
+      // on its even pages).
+      page.headerRel = sp.headerRefs.even;
+      page.footerRel = sp.footerRefs.even;
     } else {
       page.headerRel = sp.headerRefs.default;
       page.footerRel = sp.footerRefs.default;
@@ -1290,7 +1296,11 @@ class Engine {
   /** Line bounds callback honoring this page's floating-image exclusions.
    * `frame` overrides the target page and column box (table-cell frames:
    * floats live in frame coordinates on the cell's fake page). */
-  private makeBoundsAt(paraTop: number, frame?: { page: InternalPage; colX: number; colW: number }) {
+  private makeBoundsAt(
+    paraTop: number,
+    frame?: { page: InternalPage; colX: number; colW: number },
+    spacingBefore = 0,
+  ) {
     const page = frame?.page ?? this.cur;
     const colX = frame?.colX ?? this.colX;
     const colW = frame?.colW ?? this.colWidth;
@@ -1302,10 +1312,19 @@ class Engine {
       // sits exactly at the float's bottom (parity-wrapmodes: a 72px image
       // over 18px lines wraps five rows, not four).
       const overlaps = (f: { y0: number; y1: number }) => f.y1 >= y0 - 0.25 && f.y0 <= y1 - 0.25;
-      // A top-and-bottom float pushes the whole line below it.
+      // A top-and-bottom float pushes the whole line below it. When the
+      // paragraph's FIRST line is displaced, Word re-applies the paragraph's
+      // space-before below the band (parity2-textboxes p1: the Heading1 after
+      // the top-and-bottom box sits at band bottom + its 12pt before, not
+      // flush under the band); mid-paragraph lines resume at the calibrated
+      // +2 (parity-wrapmodes).
       let skipTo: number | undefined;
       for (const f of floats) {
-        if (f.mode === "topAndBottom" && overlaps(f)) skipTo = Math.max(skipTo ?? 0, f.y1 - paraTop + 2);
+        if (f.mode === "topAndBottom" && overlaps(f))
+          skipTo = Math.max(
+            skipTo ?? 0,
+            f.y1 - paraTop + (yOffset === 0 ? Math.max(2, spacingBefore) : 2),
+          );
       }
       if (skipTo !== undefined) return { x: 0, width: colW, skipTo };
       // Square/tight floats carve free intervals out of the column band. A
@@ -1678,7 +1697,9 @@ class Engine {
         this.colWidth,
         this.fieldCtx(),
         label,
-        this.floats.get(this.cur)?.length ? this.makeBoundsAt(paraTop) : undefined,
+        this.floats.get(this.cur)?.length
+          ? this.makeBoundsAt(paraTop, undefined, rawSpacingBefore)
+          : undefined,
         this.sp.docGridLinePitch,
       );
 
@@ -3800,7 +3821,13 @@ class Engine {
    * (widest atom) content width and fit them to the table width.
    */
   private resolveGridWidths(tbl: Table, available: number, nested = false): number[] {
-    const base = resolveGrid(tbl, available, !nested);
+    const edgeMargins = this.cellMarginsOf(tbl);
+    const base = resolveGrid(
+      tbl,
+      available,
+      !nested,
+      (edgeMargins.left ?? 0) + (edgeMargins.right ?? 0),
+    );
     if (tbl.props.layout === "fixed") return base;
     const gridTotal = tbl.grid.reduce((a, b) => a + b, 0);
     const target = base.reduce((a, b) => a + b, 0);
@@ -5265,7 +5292,12 @@ function computeColumns(sp: SectionProps, contentWidth: number): { colXs: number
   return { colXs, colWidths };
 }
 
-function resolveGrid(tbl: Table, available: number, overflowAllowed = false): number[] {
+function resolveGrid(
+  tbl: Table,
+  available: number,
+  overflowAllowed = false,
+  edgeCellMargins = 0,
+): number[] {
   // A body-level tblLayout=fixed table renders at its declared grid width
   // even when that exceeds the text column: Word lets it run into the right
   // margin (ca-agreement p1: tblW 10170tw against a 9360tw column, shifted
@@ -5273,9 +5305,17 @@ function resolveGrid(tbl: Table, available: number, overflowAllowed = false): nu
   // the right margin, not shrunk to fit).
   const fixedOverflow = overflowAllowed && tbl.props.layout === "fixed";
   const cap = fixedOverflow ? Number.POSITIVE_INFINITY : available;
+  // Word measures a body-level FIXED-layout table's PCT width against the
+  // text column PLUS the table's own left+right cell margins: the table box
+  // starts a cell margin left of the text column so the first/last column
+  // TEXT aligns with the column edges while the borders overhang. Measured
+  // on nccih p14 (tblW 5000 pct, 12960tw landscape column, default 108tw
+  // margins): Word renders the authored 13176tw = 12960 + 216 grid raw,
+  // rules at margin - 7.2px and margin + 7.2px.
+  const pctBase = fixedOverflow ? available + edgeCellMargins : available;
   const target = Math.min(
     cap,
-    tbl.props.width ?? (tbl.props.widthPct !== undefined ? tbl.props.widthPct * available : available),
+    tbl.props.width ?? (tbl.props.widthPct !== undefined ? tbl.props.widthPct * pctBase : available),
   );
   let widths = tbl.grid.length > 0 ? [...tbl.grid] : [];
   let total = widths.reduce((a, b) => a + b, 0);
