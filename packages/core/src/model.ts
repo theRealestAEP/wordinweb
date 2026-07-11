@@ -363,6 +363,10 @@ export interface ShapeTextbox {
    * whole lines that stick out past the shape bottom (phase23 p12 ovals:
    * "Was 0 / B" visible, the wrapped tail rows hidden). */
   clipText?: boolean;
+  /** bodyPr a:spAutoFit: the box grows in height to exactly fit its laid text
+   * plus the top/bottom insets (the stored cy is only Word's last cached
+   * value). Width is fixed. */
+  autofitHeight?: boolean;
 }
 
 /** WordArt (VML v:textpath, e.g. a "CONFIDENTIAL" watermark): text scaled to

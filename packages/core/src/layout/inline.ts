@@ -2066,6 +2066,20 @@ function buildAtoms(
     srcBase?: TextSource,
     metricsFont?: FontSpec,
   ) => {
+    // Devanagari/Tamil are complex scripts: Word takes the glyphs from the
+    // run's w:cs font (here "Nirmala UI") and, on macOS export, substitutes
+    // its own DFonts — Mangal for Devanagari, Vijaya/Latha for Tamil — so the
+    // ascii-resolved family (Calibri) never actually paints the Indic text.
+    // Route a single-script Indic run to that real face so canvas measures and
+    // the DOM paints it with Word's advances and line pitch. (The gate corpus
+    // has no Devanagari/Tamil, so this is inert there.)
+    const hasDeva = /[ऀ-ॿ]/.test(text);
+    const hasTamil = /[஀-௿]/.test(text);
+    const indicFace = hasDeva && !hasTamil ? "Mangal" : hasTamil && !hasDeva ? "Latha" : null;
+    if (indicFace && font.family.toLowerCase() !== indicFace.toLowerCase()) {
+      font = { ...font, family: indicFace };
+      if (metricsFont) metricsFont = { ...metricsFont, family: indicFace };
+    }
     if (!props.smallCaps || props.caps) {
       pushText(text, props, font, href, srcBase, metricsFont);
       return;

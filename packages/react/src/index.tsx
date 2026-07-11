@@ -231,6 +231,9 @@ export function DocxView({
           const latin = [
             "Carlito", "Caladea", "Cambria", "Times New Roman", "Arial",
             "Calibri", "Calibri Light", "Tahoma", "Franklin Gothic Medium",
+            // Indic faces gate layout too (complex-script advances must be
+            // real before line breaking): Mangal (Devanagari), Latha (Tamil).
+            "Mangal", "Latha",
           ];
           for (const fam of latin) {
             for (const variant of ["", "italic ", "bold ", "bold italic "]) {
