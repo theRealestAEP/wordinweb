@@ -676,10 +676,11 @@ function parseRun(
           field.carrier = run;
         } else if (type === "separate") {
           field.mode = "result";
-          // HYPERLINK results are verbatim styled content: let the result
-          // runs render themselves (their own rPr wins in Word, not the
-          // field carrier's).
-          field.live = /^\s*HYPERLINK\b/i.test(field.instruction);
+          // HYPERLINK and TOC results are verbatim styled content: let the
+          // result runs render themselves (their own rPr wins in Word, not
+          // the field carrier's - nccih p5's TOC fldChar runs carry <w:i/>
+          // but Word paints the entries upright from the result runs' rPr).
+          field.live = /^\s*(HYPERLINK|TOC)\b/i.test(field.instruction);
         } else if (type === "end") {
           if (!field.live) {
             const carrier = field.carrier ?? run;
