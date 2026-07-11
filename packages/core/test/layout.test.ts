@@ -2562,6 +2562,98 @@ describe("table autofit + tblInd (wild2-sci-chem-omml p9 Word PDF)", () => {
     expect(x2 - x1).toBeCloseTo(col1, 1);
   });
 
+  it("bordered zero-margin autofit column = content + 2×declared rule width (parity-tables Word PDF)", () => {
+    // Word sizes a content-fit column of a BORDERED table at text + the
+    // declared vertical-rule width on each side — 1.33px for the sz-4 grid —
+    // not a flat 2px: parity-tables' "Left 2in" column renders 46.04px for
+    // 44.71px of text, and the text ends 0.33px before the next rule.
+    const tbl =
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>` +
+      `<w:tblBorders>` +
+      `<w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/>` +
+      `<w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>` +
+      `<w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/>` +
+      `</w:tblBorders></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="2880"/><w:gridCol w:w="5760"/></w:tblGrid>` +
+      `<w:tr>` +
+      `<w:tc><w:p><w:r><w:t>Left 2in</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:p><w:r><w:t>Right side content</w:t></w:r></w:p></w:tc>` +
+      `</w:tr></w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + SECT) });
+    const x1 = textX(result, "Left");
+    const x2 = textX(result, "Right");
+    const text1 = measurer.width("Left 2in", { family: "Calibri", size: 44 / 3, bold: false, italic: false });
+    // col1 = text + 2×(sz-4 rule = 0.5pt); both cells inset 1px from their
+    // left grid edge, so the text gap equals the column width.
+    expect(x2 - x1).toBeCloseTo(text1 + 2 * ((0.5 * 96) / 72), 1);
+    // And the exact-fit line must not wrap: "2in" stays on the first line.
+    const left = result.pages[0].items.find((i) => i.kind === "text" && i.text === "Left");
+    const tail = result.pages[0].items.find((i) => i.kind === "text" && i.text === "2in");
+    if (left?.kind !== "text" || tail?.kind !== "text") throw new Error("cells not found");
+    expect(tail.baseline).toBeCloseTo(left.baseline, 3);
+  });
+
+  it("BORDERLESS autofit column = content + margins exactly, no phantom rule allowance", () => {
+    // A table with no tblBorders anywhere in its style chain paints no
+    // vertical rules, so its measured column widths are content + margins
+    // EXACTLY — not content + margins + an assumed sz-4 rule. This is the
+    // NIH clause-matrix constraint (wild2-legal-nih-contract, tblW 4800 pct,
+    // TableNormal margins 108tw): Word's p228 columns are [76.02, 59.28,
+    // 365.82]pt and its one-line col3 title measures 357.61pt, so a 0.5pt
+    // phantom rule in the Word-exact mins re-runs the pct-raise
+    // redistribution, takes ~2px from col3 and wraps 195 pages (+3 total).
+    // Reconciled with parity-tables p1 (bordered, rule-aware pad, above):
+    // the allowance is the DECLARED rule width, and borderless means 0.
+    const tbl =
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>` +
+      `<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar>` +
+      `</w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="1394"/><w:gridCol w:w="7435"/></w:tblGrid>` +
+      `<w:tr>` +
+      `<w:tc><w:p><w:r><w:t>Vamom</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:p><w:r><w:t>Figican by Pikuhuzoke</w:t></w:r></w:p></w:tc>` +
+      `</w:tr></w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + SECT) });
+    const x1 = textX(result, "Vamom");
+    const x2 = textX(result, "Figican");
+    const text1 = measurer.width("Vamom", { family: "Calibri", size: 44 / 3, bold: false, italic: false });
+    // col1 = text + 7.2px + 7.2px (108tw sides), no rule term: both cells
+    // inset their text by the same 7.2px left margin, so the x gap equals
+    // the column width.
+    expect(x2 - x1).toBeCloseTo(text1 + 14.4, 1);
+  });
+
+  it("BORDERED margin-ful autofit column = content + margins + capped 2px allowance", () => {
+    // Same table WITH an sz-4 grid and 108tw margins: the rule allowance
+    // bridges from the declared rule width (zero-margin, parity-tables) up
+    // to the legacy 2px cap once the margins exceed it — min(2, rule +
+    // margin). NIH p358-360's status tables (tblW 4000/4200 pct, sz-4,
+    // 108tw) reproduce Word's scale-down columns ([187.83, 90.80, 57.27,
+    // 102.28]pt on p359) only at the 2px cap: their two-line " Rugehini
+    // doluguseqesu qapabipe" wrap sits 0.4px from col1's edge, and a
+    // rule-only allowance (0.667px) tips it the wrong way.
+    const tbl =
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>` +
+      `<w:tblBorders>` +
+      `<w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/>` +
+      `<w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>` +
+      `<w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/>` +
+      `</w:tblBorders>` +
+      `<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar>` +
+      `</w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="1394"/><w:gridCol w:w="7435"/></w:tblGrid>` +
+      `<w:tr>` +
+      `<w:tc><w:p><w:r><w:t>Vamom</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:p><w:r><w:t>Figican by Pikuhuzoke</w:t></w:r></w:p></w:tc>` +
+      `</w:tr></w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + SECT) });
+    const x1 = textX(result, "Vamom");
+    const x2 = textX(result, "Figican");
+    const text1 = measurer.width("Vamom", { family: "Calibri", size: 44 / 3, bold: false, italic: false });
+    // col1 = text + 7.2 + 7.2 margins + min(2, 0.667 + 7.2) = +2px.
+    expect(x2 - x1).toBeCloseTo(text1 + 14.4 + 2, 1);
+  });
+
   it("compatibilityMode 14 shifts a tblInd table left by the first cell margin", () => {
     const parts15 = { "word/document.xml": wrapDocument(tblXml + SECT), "word/settings.xml": settingsXml(15) };
     const parts14 = { "word/document.xml": wrapDocument(tblXml + SECT), "word/settings.xml": settingsXml(14) };
