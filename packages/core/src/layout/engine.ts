@@ -356,7 +356,8 @@ class Engine {
         if (carryAfter !== this.lastParaSpacingAfter) this.lastParaAfterPad = 0;
         this.lastParaSpacingAfter = carryAfter;
       }
-      this.layoutSection(section, sections[sectionIndex + 1]);
+      if (sp.textDirection === "tbRl") this.layoutVerticalSection(section);
+      else this.layoutSection(section, sections[sectionIndex + 1]);
       this.prevBandBalanced = this.balanceBottom !== undefined;
       if (this.balanceBottom !== undefined) {
         // Resume below the balanced band, reset to the first column so the next
@@ -401,6 +402,7 @@ class Engine {
         it.text = resolved;
       }
     }
+    this.applySectionVAlign();
     const pages: LaidOutPage[] = this.pages.map((p) => ({
       width: p.sp.pageWidth,
       height: p.sp.pageHeight,
@@ -412,6 +414,96 @@ class Engine {
       hfStart: p.hfStart ?? p.items.length,
     }));
     return { pages, totalPages: pages.length };
+  }
+
+  /**
+   * Section vertical alignment (w:vAlign center/bottom). Word centers or
+   * bottom-aligns each page's body block between the text margins. The block's
+   * natural top is bodyTop, so a page filled to the bottom nets ~0; a short
+   * section page (probe2-mixed-orientation p3) shifts down by the free space.
+   * "both" (justify) is left as top - it distributes inter-paragraph leading,
+   * a different mechanism. Header/footer bands (items from hfStart on) and
+   * footnote pages are never shifted.
+   */
+  private applySectionVAlign(): void {
+    const vExtent = (it: PageItem): { top: number; bottom: number } | null => {
+      switch (it.kind) {
+        case "text":
+          return { top: it.lineTop, bottom: it.lineTop + it.lineHeight };
+        case "rect":
+        case "image":
+        case "path":
+        case "wordart":
+          return { top: it.y, bottom: it.y + it.height };
+        case "edge":
+          return { top: Math.min(it.y1, it.y2), bottom: Math.max(it.y1, it.y2) };
+        default:
+          return null; // interactive hit/grip zones don't define content
+      }
+    };
+    for (const page of this.pages) {
+      const va = page.sp.vAlign;
+      if (va !== "center" && va !== "bottom") continue;
+      if (page.footnotes.length > 0) continue;
+      const end = page.hfStart ?? page.items.length;
+      let top = Infinity;
+      let bottom = -Infinity;
+      for (let i = 0; i < end; i++) {
+        const ext = vExtent(page.items[i]);
+        if (!ext) continue;
+        if (ext.top < top) top = ext.top;
+        if (ext.bottom > bottom) bottom = ext.bottom;
+      }
+      if (!Number.isFinite(top) || !Number.isFinite(bottom)) continue;
+      const free =
+        va === "center"
+          ? (page.bodyTop + page.bodyBottom - top - bottom) / 2
+          : page.bodyBottom - bottom;
+      if (free <= 0.5) continue;
+      for (let i = 0; i < end; i++) offsetItem(page.items[i], 0, free);
+    }
+  }
+
+  /**
+   * Section-level w:textDirection tbRl: East-Asian vertical writing for the
+   * whole section. The body flows as a horizontal frame whose width is the
+   * page's vertical text extent (one column's length), then the frame rotates
+   * +90° clockwise and fills from the body's right edge, so its stacked lines
+   * become columns running top-to-bottom, progressing right-to-left (like a
+   * tbRl table cell, but spanning the section body). Scoped to a single page:
+   * content taller than the body width overflows past the left margin rather
+   * than paginating — the fixture's short section fits.
+   */
+  private layoutVerticalSection(section: Section): void {
+    const sp = this.sp;
+    const page = this.cur;
+    // newPage drops the first line 4 grid rows below the top margin for
+    // docGrid sections (a horizontal-writing rule); vertical text starts at
+    // the top margin, so undo that bump for the column-length axis.
+    const gridBump = sp.docGridLinePitch ? 4 * sp.docGridLinePitch : 0;
+    const bodyTop = page.bodyTop - gridBump;
+    const frameWidth = Math.max(4, page.bodyBottom - bodyTop);
+    const bodyRight = sp.pageWidth - sp.marginRight;
+    const { items, height: frameHeight } = this.layoutFrame(section.blocks, frameWidth, this.fieldCtx());
+    const targetX = bodyRight - frameHeight;
+    const targetY = bodyTop;
+    const centerX = targetX + frameHeight / 2;
+    const centerY = targetY + frameWidth / 2;
+    const originX = centerX - frameWidth / 2;
+    const originY = centerY - frameHeight / 2;
+    for (const it of items) {
+      offsetItem(it, originX, originY);
+      if (it.kind === "text") {
+        const top = it.glyphTop ?? it.lineTop;
+        it.rotate = { deg: 90, ox: centerX - it.x, oy: centerY - top };
+      } else if (it.kind === "rect") {
+        it.rotate = { deg: 90, ox: centerX - it.x, oy: centerY - it.y };
+      } else if (it.kind === "edge") {
+        it.rotate = { deg: 90, ox: centerX - Math.min(it.x1, it.x2), oy: centerY - Math.min(it.y1, it.y2) };
+      }
+      page.items.push(it);
+    }
+    this.y = page.bodyBottom;
   }
 
   // ---------- page management ----------
@@ -2997,11 +3089,14 @@ class Engine {
         });
       }
 
+      // Ruby cluster: the base glyphs center within the (possibly wider)
+      // cluster box; the annotation paints centered above, raised.
+      const rubyBaseDX = span.ruby ? (span.width - span.ruby.baseWidth) / 2 : 0;
       page.items.push({
         kind: "text",
-        x: originX + span.x,
+        x: originX + span.x + rubyBaseDX,
         baseline: b,
-        width: span.width,
+        width: span.ruby ? span.ruby.baseWidth : span.width,
         text: span.text,
         props: span.props,
         font: span.font,
@@ -3018,6 +3113,28 @@ class Engine {
         src: span.src,
         rtl: span.rtl,
       });
+      if (span.ruby && span.ruby.rtText) {
+        const rt = span.ruby;
+        const rtm = this.measurer.metrics(rt.rtFont);
+        // Furigana rides just above the base ink: its box bottom sits at the
+        // base glyph top (base baseline minus base ascent), so its baseline is
+        // one base ascent plus its own descent above the base baseline.
+        const rtBaseline = b - gm.ascent - rtm.descent;
+        const rtDX = (span.width - rt.rtWidth) / 2;
+        page.items.push({
+          kind: "text",
+          x: originX + span.x + rtDX,
+          baseline: rtBaseline,
+          width: rt.rtWidth,
+          text: rt.rtText,
+          props: rt.rtProps,
+          font: rt.rtFont,
+          lineTop: topY,
+          lineHeight: line.height,
+          glyphTop: rtBaseline - rtm.ascent,
+          glyphBoxH: rtm.ascent + rtm.descent,
+        });
+      }
     }
   }
 
@@ -4597,7 +4714,7 @@ class Engine {
           row.props.heightRule !== "exact" &&
           !row.props.tblHeader &&
           !row.cells.some((c) => c.props.vMerge) &&
-          !row.cells.some((c) => c.props.textDirection === "btLr");
+          !row.cells.some((c) => c.props.textDirection);
         // On a footnote page the split cut is drawn at the note FILL reserve
         // (bodyBottom subtracts noteSeparatorReserve = 40px), but Word's KEEP
         // decision lets the cut line's glyphs reach into that band - the same
@@ -5075,7 +5192,7 @@ class Engine {
         cells[ci] = { items: [], height: 0, x, width: w, cellIdx: ci };
         continue;
       }
-      if (cell.props.textDirection === "btLr") continue;
+      if (cell.props.textDirection) continue;
       const innerWidth = Math.max(4, w - (m.left ?? 0) - (m.right ?? 0));
       const { items, height } = this.layoutFrame(
         cell.blocks,
@@ -5095,7 +5212,8 @@ class Engine {
 
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
-      if (cell.props.textDirection !== "btLr" || cell.props.vMerge === "continue") continue;
+      const dir = cell.props.textDirection;
+      if ((dir !== "btLr" && dir !== "tbRl") || cell.props.vMerge === "continue") continue;
       const { x, width: w, margins: m } = geometry[ci];
       const frameWidth = Math.max(
         4,
@@ -5113,15 +5231,20 @@ class Engine {
         true,
       );
       const innerCellWidth = Math.max(4, w - (m.left ?? 0) - (m.right ?? 0));
-      let crossOffset = 0;
+      // btLr stacks its lines left-to-right (line 1 at the cell's left);
+      // tbRl stacks them right-to-left (line 1 at the cell's right), so its
+      // block is right-aligned by default. w:vAlign re-centers either.
+      let crossOffset = dir === "tbRl" ? Math.max(0, innerCellWidth - frameHeight) : 0;
       if (cell.props.verticalAlign === "center") {
         crossOffset = Math.max(0, (innerCellWidth - frameHeight) / 2);
       } else if (cell.props.verticalAlign === "bottom") {
-        crossOffset = Math.max(0, innerCellWidth - frameHeight);
+        crossOffset = dir === "tbRl" ? 0 : Math.max(0, innerCellWidth - frameHeight);
       }
 
-      // Rotate the horizontal frame about its center. After -90deg its
-      // frame-width axis runs bottom-to-top and its line axis runs left-to-right.
+      // Rotate the horizontal frame about its center. btLr uses -90° (frame-
+      // width axis runs bottom-to-top, lines left-to-right); tbRl uses +90°
+      // (frame-width axis runs top-to-bottom, lines right-to-left).
+      const deg = dir === "tbRl" ? 90 : -90;
       const targetX = (m.left ?? 0) + crossOffset;
       const targetY = m.top ?? 0;
       const centerX = targetX + frameHeight / 2;
@@ -5132,7 +5255,7 @@ class Engine {
         offsetItem(it, originX, originY);
         if (it.kind === "text") {
           const top = it.glyphTop ?? it.lineTop;
-          it.rotate = { deg: -90, ox: centerX - it.x, oy: centerY - top };
+          it.rotate = { deg, ox: centerX - it.x, oy: centerY - top };
         }
       }
       const cellHeight = frameWidth + (m.top ?? 0) + (m.bottom ?? 0);

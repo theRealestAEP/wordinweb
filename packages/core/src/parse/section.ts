@@ -154,6 +154,9 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     props.vAlign = vAlign;
   }
 
+  const textDir = attr(child(sectPr, "textDirection"), "val");
+  if (textDir === "tbRl" || textDir === "tbRlV") props.textDirection = "tbRl";
+
   const fnPr = child(sectPr, "footnotePr");
   if (fnPr) {
     const fmt = attr(child(fnPr, "numFmt"), "val");
