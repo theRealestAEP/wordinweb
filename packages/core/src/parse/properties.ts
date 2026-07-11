@@ -246,6 +246,9 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
   const shd = parseShading(child(rPr, "shd"), ctx);
   if (shd !== undefined) props.shading = shd;
 
+  const bdr = parseBorder(child(rPr, "bdr"), ctx);
+  if (bdr !== undefined && bdr.style !== "none") props.border = bdr;
+
   const vertAlign = childVal(rPr, "vertAlign");
   if (vertAlign === "superscript" || vertAlign === "subscript") props.verticalAlign = vertAlign;
   else if (vertAlign === "baseline") props.verticalAlign = "baseline";

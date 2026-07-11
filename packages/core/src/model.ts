@@ -101,6 +101,10 @@ export interface RunProps {
   highlight?: string;
   /** Character shading fill (w:shd). */
   shading?: string;
+  /** Run border (w:bdr): a box painted around the run. Word merges adjacent
+   * runs with identical borders into one box; a run wrapping across lines
+   * closes the box on every line segment. */
+  border?: Border;
   verticalAlign?: "baseline" | "superscript" | "subscript";
   caps?: boolean;
   smallCaps?: boolean;
@@ -599,7 +603,7 @@ export interface TableCellProps {
   width?: number;
   gridSpan: number;
   vMerge?: "restart" | "continue";
-  borders?: { top?: Border; bottom?: Border; left?: Border; right?: Border };
+  borders?: { top?: Border; bottom?: Border; left?: Border; right?: Border; tl2br?: Border; tr2bl?: Border };
   shading?: string;
   /** Cell margins px. */
   margins?: { top?: number; right?: number; bottom?: number; left?: number };
@@ -644,6 +648,27 @@ export interface TableProps {
   };
   /** Default cell margins px. */
   cellMargins?: { top?: number; right?: number; bottom?: number; left?: number };
+  /** w:tblCellSpacing px — old-style separated cell borders: every cell gets
+   * its own border box inset by this much from the grid slot on all sides
+   * (adjacent cells end up 2x apart), and the table outline is a separate box
+   * around everything. */
+  cellSpacing?: number;
+  /** w:tblpPr — floating table: absolutely positioned against page/margin/
+   * column, painted over an opaque white sheet, with body text (including
+   * text EARLIER in the flow on the same page) wrapping square around it. */
+  floating?: {
+    hAnchor: "page" | "margin" | "text";
+    vAnchor: "page" | "margin" | "text";
+    /** tblpX/tblpY px (absent when an alignment keyword is used). */
+    x?: number;
+    y?: number;
+    xAlign?: "left" | "center" | "right";
+    yAlign?: "top" | "center" | "bottom";
+    /** Wrap distances px (leftFromText, …). */
+    dist: { l: number; r: number; t: number; b: number };
+    /** w:tblOverlap "never": shift clear of earlier floating tables. */
+    allowOverlap: boolean;
+  };
   /** Preferred total width px (tblW dxa) or undefined for auto. */
   width?: number;
   /** Preferred total width as a fraction of available width (tblW pct). */

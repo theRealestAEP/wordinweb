@@ -2080,6 +2080,40 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
     }
     const cellMar = child(tblPr, "tblCellMar");
     if (cellMar) props.cellMargins = parseCellMargins(cellMar);
+    // Old-style separated cell borders (w:tblCellSpacing). Word also allows a
+    // per-row override in trPr; the table-wide value covers the common case.
+    const cellSpacing = child(tblPr, "tblCellSpacing");
+    if (cellSpacing && attr(cellSpacing, "type") !== "nil") {
+      const w = intAttr(cellSpacing, "w");
+      if (w !== undefined && w > 0) props.cellSpacing = twipsToPx(w);
+    }
+    // Floating table (w:tblpPr): absolutely positioned, text wraps around it.
+    const tblpPr = child(tblPr, "tblpPr");
+    if (tblpPr) {
+      const anchorOf = (v: string | undefined): "page" | "margin" | "text" =>
+        v === "page" ? "page" : v === "margin" ? "margin" : "text";
+      const alignOf = <T extends string>(v: string | undefined, allowed: T[]): T | undefined =>
+        allowed.includes(v as T) ? (v as T) : undefined;
+      const px = (name: string): number | undefined => {
+        const v = intAttr(tblpPr, name);
+        return v !== undefined ? twipsToPx(v) : undefined;
+      };
+      props.floating = {
+        hAnchor: anchorOf(attr(tblpPr, "horzAnchor")),
+        vAnchor: anchorOf(attr(tblpPr, "vertAnchor")),
+        x: px("tblpX"),
+        y: px("tblpY"),
+        xAlign: alignOf(attr(tblpPr, "tblpXSpec"), ["left", "center", "right"]),
+        yAlign: alignOf(attr(tblpPr, "tblpYSpec"), ["top", "center", "bottom"]),
+        dist: {
+          l: px("leftFromText") ?? 0,
+          r: px("rightFromText") ?? 0,
+          t: px("topFromText") ?? 0,
+          b: px("bottomFromText") ?? 0,
+        },
+        allowOverlap: attr(child(tblPr, "tblOverlap"), "val") !== "never",
+      };
+    }
     const tblW = child(tblPr, "tblW");
     if (tblW) {
       const raw = attr(tblW, "w");
@@ -2224,6 +2258,9 @@ function parseCell(tc: XmlElement, ctx: DocParseContext): TableCell {
         bottom: parseBorder(child(borders, "bottom"), ctx),
         left: parseBorder(child(borders, "left"), ctx),
         right: parseBorder(child(borders, "right"), ctx),
+        // Diagonal borders: top-left→bottom-right and top-right→bottom-left.
+        tl2br: parseBorder(child(borders, "tl2br"), ctx),
+        tr2bl: parseBorder(child(borders, "tr2bl"), ctx),
       };
     }
     const shd = parseShading(child(tcPr, "shd"), ctx);

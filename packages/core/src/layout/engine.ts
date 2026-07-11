@@ -2721,6 +2721,66 @@ class Engine {
     });
   }
 
+  /** Run borders (w:bdr): Word draws a box around each maximal group of
+   * ADJACENT spans carrying an identical border, per visual line — a merged
+   * "AlphaBetaGamma" of three identical-bdr runs gets ONE box; differing
+   * borders sit in separate boxes side by side; a bordered run wrapping
+   * across lines closes the box on every line segment (probe2-run-borders:
+   * continuation lines paint a closed left edge). The box is the line box
+   * inflated by w:space on all sides; run shading fills the box interior
+   * (replacing the plain line-box shading rect). */
+  private emitRunBorders(line: LineBox, page: InternalPage, originX: number, topY: number): void {
+    const spans = line.spans;
+    const sameBorder = (a: Border, b: Border) =>
+      a.style === b.style && a.color === b.color && a.width === b.width && a.space === b.space;
+    let i = 0;
+    while (i < spans.length) {
+      const first = spans[i];
+      const bdr = first.props.border;
+      if (!bdr || bdr.style === "none" || first.text === undefined || first.math || first.image || first.drawing) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (
+        j + 1 < spans.length &&
+        spans[j + 1].props.border &&
+        sameBorder(spans[j + 1].props.border!, bdr) &&
+        spans[j + 1].text !== undefined &&
+        !spans[j + 1].math &&
+        !spans[j + 1].image &&
+        !spans[j + 1].drawing &&
+        // contiguous in x (spans of adjacent runs abut; a gap means an
+        // unbordered span was dropped between them)
+        spans[j + 1].x <= spans[j].x + spans[j].width + 0.51
+      ) {
+        j++;
+      }
+      // Trailing line-end whitespace stays OUTSIDE the box (Word ends the
+      // box after the last glyph).
+      let last = j;
+      if (j === spans.length - 1) while (last > i && spans[last].isSpace) last--;
+      const x0 = originX + spans[i].x - bdr.space;
+      const x1 = originX + spans[last].x + spans[last].width + bdr.space;
+      const y0 = topY - bdr.space;
+      const y1 = topY + line.height + bdr.space;
+      // Shading fills the (space-padded) box interior. Highlight keeps its
+      // plain line-box rect in the main span loop.
+      for (let k = i; k <= last; k++) {
+        const shd = spans[k].props.shading;
+        if (!shd) continue;
+        const sx0 = k === i ? x0 : originX + spans[k].x;
+        const sx1 = k === last ? x1 : originX + spans[k].x + spans[k].width;
+        page.items.push({ kind: "rect", x: sx0, y: y0, width: sx1 - sx0, height: y1 - y0, fill: shd });
+      }
+      page.items.push({ kind: "edge", x1: x0, y1: y0, x2: x1, y2: y0, border: bdr });
+      page.items.push({ kind: "edge", x1: x0, y1: y1, x2: x1, y2: y1, border: bdr });
+      page.items.push({ kind: "edge", x1: x0, y1: y0, x2: x0, y2: y1, border: bdr });
+      page.items.push({ kind: "edge", x1: x1, y1: y0, x2: x1, y2: y1, border: bdr });
+      i = j + 1;
+    }
+  }
+
   private emitLine(line: LineBox, page: InternalPage, originX: number, topY: number): void {
     // Word quantizes painted baseline positions to quarter-points (error-
     // diffused: the cursor accumulates raw heights, each baseline snaps).
@@ -2731,6 +2791,7 @@ class Engine {
       // its notes there, not to the page current during cell layout.
       if (span.noteId !== undefined && page.physIndex !== -1) this.registerFootnote(span.noteId, page);
     }
+    this.emitRunBorders(line, page, originX, topY);
     for (const span of line.spans) {
       if (span.math) {
         const bx = originX + span.x;
@@ -2984,8 +3045,9 @@ class Engine {
         }
       }
 
-      // Character highlight / shading backgrounds.
-      const bg = span.props.highlight ?? span.props.shading;
+      // Character highlight / shading backgrounds. Bordered runs paint their
+      // shading inside the border box in emitRunBorders instead.
+      const bg = span.props.border ? span.props.highlight : (span.props.highlight ?? span.props.shading);
       if (bg) {
         page.items.push({
           kind: "rect",
@@ -4455,6 +4517,13 @@ class Engine {
   }
 
   private placeTable(tbl: Table): void {
+    // Floating (tblpPr) tables leave the flow entirely: absolute position,
+    // body text wraps around the float rect. Page/margin-anchored ones were
+    // usually pre-placed by layoutBlocks so earlier text already wrapped.
+    if (tbl.props.floating) {
+      this.placeFloatingTable(tbl);
+      return;
+    }
     this.clearBannerSlot();
     this.lastParaSpacingAfter = 0;
     this.lastParaAfterPad = 0;
@@ -4462,7 +4531,11 @@ class Engine {
     this.ensureTableBorders(tbl);
     const colWidth = this.colWidth;
     const widths = this.resolveGridWidths(tbl, colWidth);
-    const tableWidth = widths.reduce((a, b) => a + b, 0);
+    // Separated cell borders (w:tblCellSpacing): 2*spacing of air around
+    // every cell box, so the table footprint grows by 2*spacing per boundary
+    // (nCols+1 of them horizontally, one above/below each row vertically).
+    const s2 = 2 * (tbl.props.cellSpacing ?? 0);
+    const tableWidth = widths.reduce((a, b) => a + b, 0) + s2 * (widths.length + 1);
     // x0 must follow the CURRENT column: when a table splits across the columns
     // of a multi-column section, the continuation rows paint in the next column,
     // so recompute from this.colX after every advance() (staging-breaks p4: a
@@ -4515,7 +4588,9 @@ class Engine {
     // Row coordinates are horizontal-rule centerlines. Flow coordinates are
     // the table's outer edges, so advance half the top rule before painting
     // the first row. The matching bottom half is added after the final row.
-    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, 0).top / 2;
+    // Separated-border tables advance 2*spacing instead (outline to first
+    // cell box).
+    if (tbl.rows.length > 0) this.y += s2 || this.rowBorderWidths(tbl, 0).top / 2;
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
       const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
@@ -5205,6 +5280,12 @@ class Engine {
     const isLastRow = rowIdx === tbl.rows.length - 1;
     const nCols = widths.length;
     const nRows = tbl.rows.length;
+    // Old-style separated cell borders (w:tblCellSpacing): every cell box is
+    // shifted right by 2*spacing per crossed boundary (adjacent cell borders
+    // end up 2*spacing apart, and the first box sits 2*spacing inside the
+    // table outline — measured on probe3-table-exotics: 60tw spacing = 3pt,
+    // every border-to-border gap exactly 6pt).
+    const s2 = 2 * (tbl.props.cellSpacing ?? 0);
     // Grid column start per cell (gridSpan-aware), for conditional banding.
     const colStartByIdx = new Map<number, number>();
     let gp = 0;
@@ -5215,7 +5296,7 @@ class Engine {
 
     for (const cellLay of laid.cells) {
       const cell = row.cells[cellLay.cellIdx];
-      const cx = x0 + cellLay.x;
+      const cx = x0 + cellLay.x + (s2 ? s2 * ((colStartByIdx.get(cellLay.cellIdx) ?? 0) + 1) : 0);
       const isFirstCol = cellLay.x === 0;
       const isLastCol = Math.abs(cellLay.x + cellLay.width - widths.reduce((a, b) => a + b, 0)) < 0.5;
       const colStart = colStartByIdx.get(cellLay.cellIdx) ?? 0;
@@ -5223,7 +5304,7 @@ class Engine {
 
       if (cell.props.vMerge === "continue") {
         // Only vertical borders continue through merged cells.
-        this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, rowHeight, isFirstRow, isLastRow, isFirstCol, isLastCol, true, cond?.borders);
+        this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, rowHeight, isFirstRow && !s2, isLastRow && !s2, isFirstCol && !s2, isLastCol && !s2, true, cond?.borders);
         continue;
       }
 
@@ -5276,14 +5357,14 @@ class Engine {
         page.items.push(it);
       }
 
-      this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, cellH, isFirstRow, isLastRow, isFirstCol, isLastCol, false, cond?.borders);
+      this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, cellH, isFirstRow && !s2, isLastRow && !s2, isFirstCol && !s2, isLastCol && !s2, false, cond?.borders);
     }
   }
 
   private paintCellEdges(
     page: InternalPage,
     tbl: Table,
-    cell: { props: { borders?: { top?: Border; bottom?: Border; left?: Border; right?: Border }; vMerge?: string } },
+    cell: { props: { borders?: { top?: Border; bottom?: Border; left?: Border; right?: Border; tl2br?: Border; tr2bl?: Border }; vMerge?: string } },
     x: number,
     y: number,
     w: number,
@@ -5334,6 +5415,27 @@ class Engine {
     }
     if (right) {
       page.items.push({ kind: "edge", x1: x + w, y1: y, x2: x + w, y2: y + h, border: right, role: "table-rule" });
+    }
+    // Diagonal cell borders (w:tcBorders tl2br / tr2bl): corner-to-corner
+    // strokes inside the cell box (probe3-table-exotics "diag" cell paints
+    // both, forming an X).
+    if (!mergedContinue && w > 0 && h > 0) {
+      const diag = (b: Border | undefined, d: string) => {
+        if (!b || b.style === "none") return;
+        page.items.push({
+          kind: "path",
+          x,
+          y,
+          width: w,
+          height: h,
+          d,
+          viewW: w,
+          viewH: h,
+          stroke: { color: b.color, width: b.width },
+        });
+      };
+      diag(cell.props.borders?.tl2br, `M0 0 L${w} ${h}`);
+      diag(cell.props.borders?.tr2bl, `M${w} 0 L0 ${h}`);
     }
   }
 }
