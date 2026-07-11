@@ -572,6 +572,20 @@ export interface NoteRefContent {
   self?: boolean;
 }
 
+/** w:ruby — an East-Asian ruby (furigana) cluster: an annotation run (w:rt)
+ * riding above a base run (w:rubyBase). Both sides render as their own runs;
+ * the annotation is centered over the base and raised above its baseline. */
+export interface RubyContent {
+  kind: "ruby";
+  base: Run;
+  rt: Run;
+  /** w:rubyPr/w:hpsRaise — annotation baseline raise above the base baseline,
+   * half-points. */
+  hpsRaise?: number;
+  /** w:rubyPr/w:rubyAlign — how the annotation distributes over the base. */
+  align?: "center" | "distributeLetter" | "distributeSpace" | "left" | "right" | "rightVertical";
+}
+
 export type RunContent =
   | MathContent
   | TextContent
@@ -582,7 +596,8 @@ export type RunContent =
   | FieldContent
   | AnchorContent
   | DrawingContent
-  | NoteRefContent;
+  | NoteRefContent
+  | RubyContent;
 
 export interface Run {
   type: "run";
@@ -630,7 +645,7 @@ export interface TableCellProps {
   /** Cell margins px. */
   margins?: { top?: number; right?: number; bottom?: number; left?: number };
   verticalAlign?: "top" | "center" | "bottom";
-  textDirection?: "btLr";
+  textDirection?: "btLr" | "tbRl";
 }
 
 export interface TableCell {
@@ -759,6 +774,9 @@ export interface SectionProps {
   footnoteNumStart?: number;
   endnoteNumFmt?: string;
   endnoteNumStart?: number;
+  /** w:textDirection tbRl: the whole section flows as East-Asian vertical
+   * writing — lines run top-to-bottom, progressing right-to-left. */
+  textDirection?: "tbRl";
 }
 
 export interface Section {

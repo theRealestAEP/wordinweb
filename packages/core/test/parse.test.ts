@@ -226,7 +226,7 @@ describe("document parsing", () => {
     expect(tbl.rows[1].cells.length).toBe(2);
   });
 
-  it("parses bottom-to-top table cell text direction", () => {
+  it("parses vertical table cell text directions (btLr and tbRl)", () => {
     const doc = DocxDocument.load(
       makeDocx({
         "word/document.xml": wrapDocument(
@@ -243,7 +243,42 @@ describe("document parsing", () => {
     if (table.type !== "table") throw new Error("expected table");
 
     expect(table.rows[0].cells[0].props.textDirection).toBe("btLr");
-    expect(table.rows[0].cells[1].props.textDirection).toBeUndefined();
+    expect(table.rows[0].cells[1].props.textDirection).toBe("tbRl");
+  });
+
+  it("parses a w:ruby cluster into base and annotation runs", () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:r><w:ruby>
+            <w:rubyPr><w:hpsRaise w:val="11"/><w:rubyAlign w:val="distributeSpace"/></w:rubyPr>
+            <w:rt><w:r><w:rPr><w:sz w:val="8"/></w:rPr><w:t>かんじ</w:t></w:r></w:rt>
+            <w:rubyBase><w:r><w:rPr><w:sz w:val="22"/></w:rPr><w:t>漢字</w:t></w:r></w:rubyBase>
+          </w:ruby></w:r></w:p>`,
+        ),
+      }),
+    );
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const ruby = para.children
+      .flatMap((c) => (c.type === "run" ? c.content : []))
+      .find((x) => x.kind === "ruby");
+    if (ruby?.kind !== "ruby") throw new Error("expected ruby content");
+    expect(ruby.base.content[0]).toMatchObject({ kind: "text", text: "漢字" });
+    expect(ruby.rt.content[0]).toMatchObject({ kind: "text", text: "かんじ" });
+    expect(ruby.hpsRaise).toBe(11);
+    expect(ruby.align).toBe("distributeSpace");
+  });
+
+  it("parses section-level vertical writing (textDirection tbRl)", () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `${p("vertical")}<w:sectPr><w:textDirection w:val="tbRl"/></w:sectPr>`,
+        ),
+      }),
+    );
+    expect(doc.sections[0].props.textDirection).toBe("tbRl");
   });
 
   it("resolves styles through basedOn chains", () => {

@@ -842,6 +842,36 @@ function parseRun(
           self: true,
         });
         break;
+      case "ruby": {
+        const rtEl = child(el, "rt");
+        const baseEl = child(el, "rubyBase");
+        const rtRun = rtEl ? child(rtEl, "r") : undefined;
+        const baseRun = baseEl ? child(baseEl, "r") : undefined;
+        if (!rtRun || !baseRun) break;
+        const fresh = (): FieldState => ({ mode: null, instruction: "", cachedResult: "", carrier: null });
+        const base = parseRun(baseRun, ctx, fresh(), suppressedObjects);
+        const rt = parseRun(rtRun, ctx, fresh(), suppressedObjects);
+        if (!base || !rt) break;
+        const rubyPr = child(el, "rubyPr");
+        const alignRaw = rubyPr ? attr(child(rubyPr, "rubyAlign"), "val") : undefined;
+        const raise = rubyPr ? intAttr(child(rubyPr, "hpsRaise"), "val") : undefined;
+        run.content.push({
+          kind: "ruby",
+          base,
+          rt,
+          hpsRaise: raise,
+          align:
+            alignRaw === "distributeLetter" ||
+            alignRaw === "distributeSpace" ||
+            alignRaw === "left" ||
+            alignRaw === "right" ||
+            alignRaw === "rightVertical" ||
+            alignRaw === "center"
+              ? alignRaw
+              : undefined,
+        });
+        break;
+      }
     }
   }
 
@@ -2348,7 +2378,12 @@ function parseCell(tc: XmlElement, ctx: DocParseContext): TableCell {
     if (mar) props.margins = parseCellMargins(mar);
     const vAlign = attr(child(tcPr, "vAlign"), "val");
     if (vAlign === "center" || vAlign === "bottom") props.verticalAlign = vAlign;
-    if (attr(child(tcPr, "textDirection"), "val") === "btLr") props.textDirection = "btLr";
+    const tdir = attr(child(tcPr, "textDirection"), "val");
+    // btLr: text rotated -90° reading bottom-to-top, lines left-to-right.
+    // tbRl (a.k.a. legacy tbRlV): rotated +90° reading top-to-bottom, lines
+    // right-to-left. Both are sideways rotations of the horizontal run.
+    if (tdir === "btLr") props.textDirection = "btLr";
+    else if (tdir === "tbRl" || tdir === "tbRlV") props.textDirection = "tbRl";
   }
   return { props, blocks: parseBlocks(tc, ctx) };
 }

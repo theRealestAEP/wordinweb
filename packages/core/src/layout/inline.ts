@@ -35,6 +35,17 @@ export interface FieldContext {
 
 // ---------- atoms ----------
 
+/** Ruby (furigana) payload carried by the base fragment: the annotation is
+ * painted centered over the base and raised above its baseline. */
+export interface RubyData {
+  rtText: string;
+  rtFont: FontSpec;
+  rtProps: RunProps;
+  rtWidth: number;
+  baseWidth: number;
+  hpsRaise?: number;
+  align?: string;
+}
 interface FragAtom {
   kind: "frag";
   text: string;
@@ -43,6 +54,8 @@ interface FragAtom {
   width: number;
   href?: string;
   src?: TextSource;
+  /** East-Asian ruby cluster: base glyphs in `text`, annotation in `ruby`. */
+  ruby?: RubyData;
   /** A word-internal hyphen ends this fragment: Word may break the line here. */
   breakAfter?: boolean;
   /** Footnote id when this fragment is a footnote reference mark. */
@@ -141,6 +154,14 @@ export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
 function displayText(text: string, props: RunProps): string {
   if (props.caps) return text.toUpperCase();
   return text;
+}
+
+/** Concatenate the plain-text content of a run (ruby base/annotation runs are
+ * plain text). caps applies before measuring so the width matches the paint. */
+function runPlainText(run: Run): string {
+  let out = "";
+  for (const c of run.content) if (c.kind === "text") out += c.text;
+  return displayText(out, run.props);
 }
 
 /** Alphanumeric test for hyphen break context (word-internal only). */
@@ -273,6 +294,9 @@ export interface LineSpan {
   rtlLevel?: number;
   /** Render this span right-to-left (browser shapes/orders within the box). */
   rtl?: boolean;
+  /** East-Asian ruby cluster: the base text rides in `text`; `ruby` carries
+   * the annotation the engine paints centered above the base. */
+  ruby?: RubyData;
 }
 
 export interface LineBox {
@@ -1290,7 +1314,7 @@ export function breakParagraph(
       hardWrapFrag(atom);
       continue;
     }
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl) });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
     curLineWidth += atom.width;
     x += atom.width;
   }
@@ -2048,6 +2072,40 @@ function buildAtoms(
             href,
             noteId: content.noteType === "footnote" && !content.self ? content.id : undefined,
             metricsFont: { ...markFont, size: markProps.size ?? 14.666 },
+          });
+          break;
+        }
+        case "ruby": {
+          // A ruby cluster is one unbreakable base fragment carrying its
+          // annotation. The base glyphs paint as an ordinary CJK run; the
+          // engine paints the (smaller) rt text centered above, raised.
+          const baseProps = doc.effectiveRunProps(para, content.base.props);
+          const rtProps = doc.effectiveRunProps(para, content.rt.props);
+          if (baseProps.vanish) break;
+          const baseFont = fontOf(baseProps, fallbackFamily);
+          const rtFont = fontOf(rtProps, fallbackFamily);
+          const baseText = runPlainText(content.base);
+          const rtText = runPlainText(content.rt);
+          if (!baseText) break;
+          const baseW = measurer.width(baseText, baseFont, baseProps.letterSpacing);
+          const rtW = measurer.width(rtText, rtFont, rtProps.letterSpacing);
+          atoms.push({
+            kind: "frag",
+            text: baseText,
+            props: baseProps,
+            font: baseFont,
+            width: Math.max(baseW, rtW),
+            href,
+            src: { run: content.base, t: null, offset: 0 },
+            ruby: {
+              rtText,
+              rtFont,
+              rtProps,
+              rtWidth: rtW,
+              baseWidth: baseW,
+              hpsRaise: content.hpsRaise,
+              align: content.align,
+            },
           });
           break;
         }
