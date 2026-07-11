@@ -88,6 +88,18 @@ interface InternalPage {
   /** Footnote content bound to each column, emitted above bodyBottom at the end. */
   footnotes: { items: PageItem[]; height: number; column: number }[];
   footnoteH: number[];
+  /** Column bands laid on this page, in order, for w:cols w:sep rules. A band
+   * opens at newPage/newBand; bottoms[i] tracks column i's deepest glyph
+   * bottom (baseline + descent) so the separator can span the band. */
+  bands: ColumnBand[];
+}
+
+interface ColumnBand {
+  top: number;
+  colXs: number[];
+  colWidths: number[];
+  sep: boolean;
+  bottoms: number[];
 }
 
 /** Layout state captured at a section boundary for the two-pass column
@@ -103,6 +115,7 @@ interface LayoutSnapshot {
   pageSp: SectionProps;
   footnotes: { items: PageItem[]; height: number; column: number }[];
   footnoteH: number[];
+  bands: ColumnBand[];
   bodyTop: number;
   bodyBottom: number;
   hfStart: number | undefined;
@@ -386,6 +399,7 @@ class Engine {
     }
     this.placeEndnotes();
     this.emitFootnoteAreas();
+    this.emitColumnSeparators();
     this.finalizeHeadersFooters();
     // PAGEREF rewrite: replace stale cached results with the bookmark's real
     // page (Word recomputes these on open). The right edge stays fixed so
@@ -461,6 +475,7 @@ class Engine {
       colWidths,
       footnotes: [],
       footnoteH: colXs.map(() => 0),
+      bands: [],
     };
 
     // Header/footer variant selection.
@@ -515,6 +530,13 @@ class Engine {
     }
 
     this.pages.push(page);
+    page.bands.push({
+      top: page.bodyTop,
+      colXs: [...colXs],
+      colWidths: [...colWidths],
+      sep: sp.columns.sep === true,
+      bottoms: colXs.map(() => 0),
+    });
     this.cur = page;
     this.lastRealPage = page;
     this.col = 0;
@@ -550,6 +572,13 @@ class Engine {
     page.colXs = colXs;
     page.colWidths = colWidths;
     page.bandTop = this.y;
+    page.bands.push({
+      top: this.y,
+      colXs: [...colXs],
+      colWidths: [...colWidths],
+      sep: sp.columns.sep === true,
+      bottoms: colXs.map(() => 0),
+    });
     page.bannerTop = undefined;
     this.col = 0;
     this.bannerSlotUsed = 0;
@@ -675,6 +704,7 @@ class Engine {
       pageSp: p.sp,
       footnotes: [...p.footnotes],
       footnoteH: [...p.footnoteH],
+      bands: p.bands.map((b) => ({ ...b, colXs: [...b.colXs], colWidths: [...b.colWidths], bottoms: [...b.bottoms] })),
       bodyTop: p.bodyTop,
       bodyBottom: p.bodyBottom,
       hfStart: p.hfStart,
@@ -711,6 +741,7 @@ class Engine {
     p.sp = s.pageSp;
     p.footnotes = [...s.footnotes];
     p.footnoteH = [...s.footnoteH];
+    p.bands = s.bands.map((b) => ({ ...b, colXs: [...b.colXs], colWidths: [...b.colWidths], bottoms: [...b.bottoms] }));
     p.bodyTop = s.bodyTop;
     p.bodyBottom = s.bodyBottom;
     p.hfStart = s.hfStart;
@@ -1073,6 +1104,37 @@ class Engine {
             page.items.push(it);
           }
           y += note.height;
+        }
+      }
+    }
+  }
+
+  /** w:cols w:sep: paint a vertical rule centered in each inter-column gap.
+   * Measured from probe3-columns-unequal's Word PDF: a 0.75pt black rule at
+   * the horizontal center of the gap, from the band top (the page's body top
+   * on a continuation page) down to the NEXT band's top when another band
+   * follows on the page, else to the band's deepest glyph bottom; a gap is
+   * ruled only when the column to its right received content (Word paints no
+   * rule beside a trailing empty column). */
+  private emitColumnSeparators(): void {
+    for (const page of this.pages) {
+      for (let bi = 0; bi < page.bands.length; bi++) {
+        const band = page.bands[bi];
+        if (!band.sep || band.colXs.length < 2) continue;
+        const contentBottom = Math.max(...band.bottoms);
+        const bottom = bi + 1 < page.bands.length ? page.bands[bi + 1].top : contentBottom;
+        if (bottom <= band.top + 0.01) continue;
+        for (let i = 0; i + 1 < band.colXs.length; i++) {
+          if (band.bottoms[i + 1] <= 0) continue;
+          const x = (band.colXs[i] + band.colWidths[i] + band.colXs[i + 1]) / 2;
+          page.items.push({
+            kind: "edge",
+            x1: x,
+            y1: band.top,
+            x2: x,
+            y2: bottom,
+            border: { style: "single", width: 1, color: "#000000", space: 0 },
+          });
         }
       }
     }
@@ -2725,6 +2787,15 @@ class Engine {
     // Word quantizes painted baseline positions to quarter-points (error-
     // diffused: the cursor accumulates raw heights, each baseline snaps).
     const baseline = quantizeQuarterPt(topY + line.baselineH - line.maxDescent);
+    // Track each column's deepest glyph bottom for the w:cols w:sep rule
+    // (probe3-columns-unequal: Word's separator ends at the deepest line's
+    // baseline + descent). Frame-laid lines pass arbitrary origins and are
+    // not column content; match originX against the band's column starts.
+    const band = page.bands?.[page.bands.length - 1];
+    if (band?.sep && band.colXs.length > 1) {
+      const ci = band.colXs.findIndex((x) => Math.abs(x - originX) < 0.5);
+      if (ci >= 0) band.bottoms[ci] = Math.max(band.bottoms[ci], baseline + line.maxDescent);
+    }
     for (const span of line.spans) {
       // Frame-laid lines (table cells) register at PAINT time instead: the
       // partition that ends up on the next page after a row split must bind
@@ -3140,6 +3211,7 @@ class Engine {
       colWidths: [width],
       footnotes: [],
       footnoteH: [0],
+      bands: [],
     };
 
     let framePrevAfter = 0;
@@ -5389,11 +5461,16 @@ function computeColumns(sp: SectionProps, contentWidth: number): { colXs: number
   const colXs: number[] = [];
   const colWidths: number[] = [];
   if (sp.columns.widths && sp.columns.widths.length === n) {
+    // Explicit w:col widths are honoured RAW: Word neither rescales nor clamps
+    // them to the content width (probe3-columns-unequal: 4320+360+2880+360+1800
+    // = 9720tw against a 9360tw content width — Word's PDF paints the last
+    // column 18pt past the right margin). Each column is followed by its OWN
+    // w:col space.
     let x = originX;
     for (let i = 0; i < n; i++) {
       colXs.push(x);
       colWidths.push(sp.columns.widths[i]);
-      x += sp.columns.widths[i] + sp.columns.space;
+      x += sp.columns.widths[i] + (sp.columns.spaces?.[i] ?? sp.columns.space);
     }
   } else {
     const w = (contentWidth - (n - 1) * sp.columns.space) / n;

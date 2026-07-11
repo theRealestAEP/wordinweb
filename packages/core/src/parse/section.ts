@@ -88,7 +88,17 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     if (colEls.length > 0) {
       spec.count = colEls.length;
       spec.widths = colEls.map((c) => twipsToPx(intAttr(c, "w") ?? 0));
+      // Each w:col carries its OWN trailing space; the w:cols-level space is
+      // only the fallback (probe3-columns-unequal: w:col space=360tw entries
+      // under a w:cols with no space attribute — Word separates the columns
+      // by 18pt, not the 36pt default).
+      spec.spaces = colEls.map((c) => {
+        const s = intAttr(c, "space");
+        return s !== undefined ? twipsToPx(s) : spec.space;
+      });
     }
+    const sep = attr(cols, "sep");
+    if (sep === "1" || sep === "true" || sep === "on") spec.sep = true;
     props.columns = spec;
   }
 

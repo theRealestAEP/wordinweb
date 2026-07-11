@@ -689,6 +689,11 @@ export interface ColumnSpec {
   space: number;
   /** Explicit widths px when equalWidth=false. */
   widths?: number[];
+  /** Per-column trailing space px (w:col w:space), when explicit w:col
+   * entries are present. spaces[i] separates column i from column i+1. */
+  spaces?: number[];
+  /** w:cols w:sep: paint a vertical rule centered in each inter-column gap. */
+  sep?: boolean;
 }
 
 export interface SectionProps {
