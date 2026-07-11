@@ -2785,7 +2785,17 @@ class Engine {
         if (span.leader && span.width > 6) {
           const ch = span.leader === "dot" ? "." : span.leader === "hyphen" ? "-" : span.leader === "middleDot" ? "\u00b7" : "_";
           const chW = this.measurer.width(ch, span.font);
-          const count = Math.max(0, Math.floor((span.width - 4) / chW));
+          // Word aligns leader glyphs to a PAGE-GLOBAL grid of the glyph
+          // advance: every dotted line's leader sits at multiples of 4.00px
+          // (12pt TNR '.') from the page edge, so consecutive TOC lines form
+          // perfect dot columns (athabasca p8: 33 dotted lines, first dot
+          // x \u2261 0.07 mod 4.0014). The run fills toward the tab end, keeping
+          // ~1.7px clear before the following text (measured gaps 1.71-3.08
+          // across the page's right-tabbed page numbers).
+          const tabX = originX + span.x;
+          const tabEnd = tabX + span.width;
+          const firstX = Math.ceil(tabX / chW - 1e-4) * chW;
+          const count = Math.max(0, Math.floor((tabEnd - 1.7 - firstX) / chW));
           if (count > 0) {
             // Anchor the leader glyphs to the baseline exactly like regular
             // text (glyphTop/glyphBoxH). Without them the renderer flex-end-
@@ -2795,7 +2805,7 @@ class Engine {
             const gm = this.measurer.metrics(span.font);
             page.items.push({
               kind: "text",
-              x: originX + span.x + 2,
+              x: firstX,
               baseline,
               width: chW * count,
               text: ch.repeat(count),
