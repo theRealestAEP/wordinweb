@@ -388,7 +388,19 @@ class Engine {
         // 1-col successor of a degenerate 2-col sliver ~5pt low on
         // wild-multicolumn p30/p31/p46 (the trailing after double-counted:
         // once in the cursor, once distributed into the target).
-        this.y = Math.max(this.balanceMaxY, this.balanceBottom, this.y - this.lastParaSpacingAfter);
+        //
+        // A COLUMN-PINNED section (explicit w:br type="column") is the
+        // exception: Word does not balance it - each column stays where its
+        // break put it - and resumes the next band below the deepest column
+        // INCLUDING that column's trailing spacing-after. Here the balance
+        // "target" is a meaningless average and the -after correction is wrong;
+        // the true resume is the deepest raw column cursor (max of the tallest
+        // non-final column and the final column's own cursor, both carrying
+        // their after). Stripping it left probe3-columns-unequal's balanced
+        // band 8pt/~11px high (line 49% -> 0.1%).
+        this.y = sectionHasColumnBreak(section)
+          ? Math.max(this.balanceMaxY, this.y)
+          : Math.max(this.balanceMaxY, this.balanceBottom, this.y - this.lastParaSpacingAfter);
         this.col = 0;
         this.balanceBottom = undefined;
       }
@@ -5530,6 +5542,23 @@ function sum(arr: number[], from: number, to: number): number {
   let s = 0;
   for (let i = from; i < Math.min(to, arr.length); i++) s += arr[i];
   return s;
+}
+
+/** True when any run in the section carries a manual column break (w:br
+ * type="column"). Such a section is column-pinned and must not be balanced. */
+function sectionHasColumnBreak(section: Section): boolean {
+  for (const block of section.blocks) {
+    if (block.type !== "paragraph") continue;
+    for (const child of block.children) {
+      const runs = child.type === "run" ? [child] : child.runs;
+      for (const r of runs) {
+        for (const c of r.content) {
+          if (c.kind === "break" && c.breakType === "column") return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 /** A paragraph that OPENS with a page/column break (before any real content,
