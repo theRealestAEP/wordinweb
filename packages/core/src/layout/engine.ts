@@ -3548,6 +3548,8 @@ class Engine {
             opacity: shape.opacity,
             rotation: shape.rotation,
             behind: shape.behind,
+            fontSize: shape.fontSize,
+            noFit: shape.noFit,
           });
           continue;
         }

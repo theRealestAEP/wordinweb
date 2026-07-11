@@ -936,6 +936,18 @@ function renderWordArt(item: WordArtItem): HTMLElement {
   span.style.opacity = String(item.opacity);
   const weight = item.bold ? "bold " : "";
   const style = item.italic ? "italic " : "";
+  if (item.noFit) {
+    // Degenerate shapetype guide path: Word could not fit the text to the box,
+    // so it draws the string at its nominal (tiny) font-size — a near-invisible
+    // mark. Render unstretched at fontSize; the exact spot is immaterial at
+    // ~1px, so anchor at the box origin.
+    const fs = item.fontSize && item.fontSize > 0 ? item.fontSize : 1.33;
+    span.style.font = `${style}${weight}${fs}px "${item.fontFamily}", sans-serif`;
+    span.style.left = "0px";
+    span.style.top = "0px";
+    box.appendChild(span);
+    return box;
+  }
   // Word's VML textpath stretches the glyph INK to the shape box: side
   // bearings vanish (the 'C' ink starts at the box's left edge) and the cap
   // band fills most of the height. Fit by measured ink extents

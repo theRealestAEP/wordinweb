@@ -1429,4 +1429,50 @@ describe("VML picture watermark", () => {
     expect(anchor.shape.rotation).toBe(-40);
     expect(anchor.shape.behind).toBe(true);
   });
+
+  const wordArtFromShapetype = (shapetypePath: string, textpathStyle: string) =>
+    DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:r><w:pict>
+            <v:shapetype id="_x0000_t136" o:spt="136" path="${shapetypePath}"></v:shapetype>
+            <v:shape type="#_x0000_t136" style="position:absolute;margin-left:0;margin-top:0;width:420pt;height:180pt;rotation:-40;z-index:-251657216;mso-position-horizontal:center;mso-position-vertical:center" fillcolor="#c0c0c0" stroked="f">
+              <v:fill opacity="40000f"/>
+              <v:textpath style="${textpathStyle}" string="CONFIDENTIAL"/>
+            </v:shape>
+          </w:pict></w:r></w:p>`,
+        ),
+      }),
+    );
+  const wordArtShape = (doc: DocxDocument) => {
+    const para = doc.sections[0].blocks[0];
+    if (para.type !== "paragraph") throw new Error("expected paragraph");
+    const run = para.children[0];
+    if (run.type !== "run") throw new Error("expected run");
+    const anchor = run.content.find((c) => c.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "wordart") throw new Error("expected wordart anchor");
+    return anchor.shape;
+  };
+
+  it("marks a malformed shapetype guide path noFit (Word draws nominal font-size, near-invisible)", () => {
+    // probe2-picture-watermark header3 shapetype: path="m@7,l@8,m@5,21600l@6,21600e"
+    // — the top guide line's y-coords are missing (",l"/",m" instead of ",0l").
+    // Word can't compute the fitshape scale, so it renders CONFIDENTIAL at its
+    // literal 1pt size (a faint mark) rather than a box-filling watermark.
+    const shape = wordArtShape(
+      wordArtFromShapetype("m@7,l@8,m@5,21600l@6,21600e", 'font-family:Calibri;font-size:1pt'),
+    );
+    expect(shape.noFit).toBe(true);
+    expect(shape.fontSize).toBeCloseTo((1 * 4) / 3, 3); // 1pt -> px
+  });
+
+  it("keeps a well-formed shapetype guide path fitted (box-filling watermark)", () => {
+    // parity2-watermark shapetype: path="m@7,0l@8,0m@5,21600l@6,21600e" — every
+    // coordinate present, so Word fits the text to the shape box. noFit stays off.
+    const shape = wordArtShape(
+      wordArtFromShapetype("m@7,0l@8,0m@5,21600l@6,21600e", 'font-family:Calibri;font-size:1pt'),
+    );
+    expect(shape.noFit).toBeUndefined();
+    expect(shape.fontSize).toBeUndefined();
+  });
 });

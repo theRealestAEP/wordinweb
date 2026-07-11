@@ -388,6 +388,14 @@ export interface ShapeWordArt {
   /** Clockwise degrees. */
   rotation: number;
   behind?: boolean;
+  /** The v:textpath font-size (px). Only used when the text is NOT fit to the
+   * shape (see noFit). */
+  fontSize?: number;
+  /** The referenced v:shapetype has a malformed text-guide path (missing
+   * coordinates), so Word cannot compute the fitshape scale and falls back to
+   * drawing the string at its nominal font-size — a near-invisible mark rather
+   * than a box-filling watermark. Render at fontSize, unstretched, to match. */
+  noFit?: boolean;
 }
 
 export interface ShapeArt {

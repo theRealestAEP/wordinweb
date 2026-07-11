@@ -208,6 +208,11 @@ export interface WordArtItem {
   /** Clockwise degrees. */
   rotation: number;
   behind?: boolean;
+  /** v:textpath font-size (px), used only when noFit is set. */
+  fontSize?: number;
+  /** Malformed shapetype guide path: render at nominal fontSize, unstretched
+   * (Word can't fitshape, so it draws a near-invisible mark). */
+  noFit?: boolean;
 }
 
 export type PageItem =

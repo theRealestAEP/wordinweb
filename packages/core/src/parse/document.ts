@@ -1915,8 +1915,33 @@ function anchorRel(v: string | undefined): "page" | "margin" | "text" | "column"
   return v === "page" || v === "margin" || v === "column" ? v : "text";
 }
 
+/** A VML text-guide path is well-formed only if every coordinate pair carries
+ * both values ("m@7,0l@8,0…"). Word's picture-/WordArt-watermark shapetype
+ * (_x0000_t136) needs the top and bottom guide lines to compute the fitshape
+ * scale; a path with a missing coordinate ("m@7,l@8,…", a comma immediately
+ * followed by the next command letter or another comma) leaves the guide
+ * undefined, so Word abandons fitshape and draws the string at its nominal
+ * font-size — a near-invisible mark. Detecting that lets us match Word. */
+function vmlPathDegenerate(path: string | undefined): boolean {
+  if (!path) return false;
+  return /,\s*[a-zA-Z,]/.test(path);
+}
+
 export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent[] {
   const out: RunContent[] = [];
+  // Shapetypes are template definitions referenced by shapes via type="#id".
+  // Collect their guide paths so a WordArt shape can tell whether Word could
+  // fit its text to the box (see vmlPathDegenerate).
+  const shapeTypePaths = new Map<string, string>();
+  const collectTypes = (el: XmlElement) => {
+    if (localName(el.name) === "shapetype") {
+      const id = el.attrs["id"];
+      const path = el.attrs["path"];
+      if (id && path) shapeTypePaths.set(id, path);
+    }
+    for (const c of el.children) collectTypes(c);
+  };
+  for (const c of pict.children) collectTypes(c);
   const walk = (el: XmlElement) => {
     const ln = localName(el.name);
     if (ln === "shapetype") return; // template definition, not an instance
@@ -1955,6 +1980,13 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
         const zIndex = parseFloat(style.get("z-index") ?? "0") || 0;
         const hAlignRaw = style.get("mso-position-horizontal");
         const vAlignRaw = style.get("mso-position-vertical");
+        // The shape's guide path comes from its shapetype (type="#id") or,
+        // rarely, an inline path attr. A degenerate guide means Word draws the
+        // text at its nominal font-size instead of filling the box.
+        const typeRef = (el.attrs["type"] ?? "").replace(/^#/, "");
+        const guidePath = el.attrs["path"] ?? shapeTypePaths.get(typeRef);
+        const noFit = vmlPathDegenerate(guidePath);
+        const fontSize = vmlLength(tpStyle.get("font-size")) || undefined;
         out.push({
           kind: "anchor",
           shape: {
@@ -1975,6 +2007,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
             vAlign: vAlignRaw === "center" ? "center" : vAlignRaw === "bottom" ? "bottom" : vAlignRaw === "top" ? "top" : undefined,
             rotation,
             behind: zIndex < 0,
+            ...(noFit ? { noFit: true, fontSize } : {}),
           },
         });
         return;
