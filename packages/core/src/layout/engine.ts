@@ -417,7 +417,7 @@ class Engine {
   // ---------- page management ----------
 
   private newPage(sectionStart: boolean): void {
-    const sp = this.sp;
+    const baseSp = this.sp;
     // Coalesce a section break with a preceding page break: if the previous
     // content already broke to a fresh, empty page (nothing laid out on it),
     // a nextPage/continuous section starts ON that page rather than leaving it
@@ -432,18 +432,32 @@ class Engine {
       this.cur &&
       this.cur.items.length === 0 &&
       this.pageIsEmptyAtCursor() &&
-      (sp.type === undefined || sp.type === "nextPage" || sp.type === "continuous")
+      (baseSp.type === undefined || baseSp.type === "nextPage" || baseSp.type === "continuous")
     ) {
       this.pages.pop();
     }
     const physIndex = this.pages.length + 1;
     let displayNumber: number;
-    if (sectionStart && sp.pageNumberStart !== undefined) {
-      displayNumber = sp.pageNumberStart;
+    if (sectionStart && baseSp.pageNumberStart !== undefined) {
+      displayNumber = baseSp.pageNumberStart;
     } else {
       displayNumber = this.pages.length > 0 ? this.pages[this.pages.length - 1].displayNumber + 1 : 1;
     }
     if (sectionStart) this.sectionFirstPagePhys = physIndex;
+
+    // w:mirrorMargins — on even (verso) pages the left/right margins swap and
+    // the gutter moves to the inside (physical right) edge. Absorb the gutter
+    // into the right margin and zero it so originX (= marginLeft + gutter) and
+    // the column geometry come out with the binding space on the inner side.
+    const sp =
+      this.doc.mirrorMargins && displayNumber % 2 === 0
+        ? {
+            ...baseSp,
+            marginLeft: baseSp.marginRight,
+            marginRight: baseSp.marginLeft + baseSp.gutter,
+            gutter: 0,
+          }
+        : baseSp;
 
     const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
     const { colXs, colWidths } = computeColumns(sp, contentWidth);
@@ -3543,7 +3557,19 @@ class Engine {
         }
 
         const width = shape.pctWidth ? shape.pctWidth * baseW(shape.pctWidthRel) : shape.width;
-        const height = shape.pctHeight ? shape.pctHeight * baseH(shape.pctHeightRel) : shape.height;
+        let height = shape.pctHeight ? shape.pctHeight * baseH(shape.pctHeightRel) : shape.height;
+        // a:spAutoFit — grow the box height to exactly fit the laid text plus
+        // the top/bottom insets (the stored cy is only Word's cached value and
+        // drifts from our text metrics; Word recomputes it to the content).
+        if (shape.autofitHeight) {
+          const aIns = shape.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
+          const countersSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+          const seenSnapshot = new Set(this.seenNumIds);
+          const measured = this.layoutFrame(shape.blocks, Math.max(width - aIns.l - aIns.r, 1), fields);
+          this.counters = countersSnapshot;
+          this.seenNumIds = seenSnapshot;
+          height = measured.height + aIns.t + aIns.b;
+        }
         let ox = originX(shape.hRel) + shape.x;
         if (shape.pctX !== undefined) ox = originX(shape.hRel) + shape.pctX * pageW;
         if (shape.hAlign) ox = alignH(originX(shape.hRel), shape.hRel === "page" ? pageW : marginW, width, shape.hAlign);

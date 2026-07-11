@@ -1217,7 +1217,13 @@ function parseDrawing(
     const gT = gIns ? gIns.t * emuToPx(cy) : 0;
     const gR = gIns ? gIns.r * emuToPx(cx) : 0;
     const gB = gIns ? gIns.b * emuToPx(cy) : 0;
-    const noAutofit = bodyPr ? !!child(bodyPr, "noAutofit") : false;
+    // a:spAutoFit grows the box height to its text. a:normAutofit stores a
+    // fontScale / lnSpcReduction that shrinks the text to fit the fixed box,
+    // but Word IGNORES those on import and renders at full size, clipping the
+    // overflow exactly like a:noAutofit. Treat both non-grow modes as clip.
+    const spAutoFit = bodyPr ? !!child(bodyPr, "spAutoFit") : false;
+    const normAutofit = bodyPr ? !!child(bodyPr, "normAutofit") : false;
+    const noAutofit = bodyPr ? (!!child(bodyPr, "noAutofit") || normAutofit) : false;
 
     let wrap: WrapMode = "square";
     if (child(anchor, "wrapNone")) wrap = "none";
@@ -1255,6 +1261,7 @@ function parseDrawing(
         },
         ...(geomD ? { geom: { d: geomD, viewW: cx, viewH: cy } } : {}),
         ...(noAutofit ? { clipText: true } : {}),
+        ...(spAutoFit ? { autofitHeight: true } : {}),
         wrap,
         ...(behind ? { behind: true } : {}),
         ...(attr(anchor, "allowOverlap") === "0" ? { allowOverlap: false } : {}),

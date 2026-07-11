@@ -81,6 +81,11 @@ export class DocxDocument {
   readonly documentRels: Relationships;
   /** settings.xml w:evenAndOddHeaders — enables the "even" header/footer variants. */
   readonly evenAndOddHeaders: boolean = false;
+  /** settings.xml w:mirrorMargins — facing-page (book fold) margins: even
+   * (verso) pages swap the left/right margins and place the gutter on the
+   * inside (right) edge so the binding margin stays on the inner side of
+   * each spread. */
+  readonly mirrorMargins: boolean = false;
   /** settings.xml w:defaultTabStop in px (Word default 0.5"). */
   readonly defaultTabStop: number = 48;
   /** settings.xml w:compat compatibilityMode (12=Word2007, 14=Word2010,
@@ -176,6 +181,7 @@ export class DocxDocument {
 
     if (settings) {
       this.evenAndOddHeaders = onOff(child(settings, "evenAndOddHeaders")) ?? false;
+      (this as { mirrorMargins: boolean }).mirrorMargins = onOff(child(settings, "mirrorMargins")) ?? false;
       const tabStop = intAttr(child(settings, "defaultTabStop"), "val");
       if (tabStop !== undefined && tabStop > 0) this.defaultTabStop = twipsToPx(tabStop);
       const compat = child(settings, "compat");
