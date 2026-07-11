@@ -992,14 +992,13 @@ function renderText(item: TextItem): HTMLElement {
     el.style.justifyContent = "flex-end";
   }
   el.style.lineHeight = `${boxH}px`;
-  // Word (mac) normal text matches Chrome's grayscale antialiasing; subpixel
-  // smoothing is too heavy. Bold keeps Chrome's default smoothing because Word
-  // bold is heavier too. Smoothing changes paint only, never glyph advances.
-  if (item.font.bold) {
-    el.style.setProperty("-webkit-font-smoothing", "auto");
-  } else {
-    el.style.setProperty("-webkit-font-smoothing", "antialiased");
-  }
+  // Word (pdftoppm-rasterized PDF) matches Chrome's grayscale antialiasing;
+  // subpixel smoothing is too heavy for regular AND bold alike. Bold formerly
+  // kept Chrome's default subpixel smoothing, but that paints ~12% more dark
+  // pixels than the reference (elsevier p2 bold TNR title: page-weight error
+  // 4.83% -> 0.03% grayscale; sample p1 3.28 -> 2.96, benchmark p1 2.89 ->
+  // 2.76). Smoothing changes paint only, never glyph advances.
+  el.style.setProperty("-webkit-font-smoothing", "antialiased");
 
   const props = item.props;
   let color = props.color && props.color !== "auto" ? props.color : "#000000";

@@ -3653,3 +3653,47 @@ describe("cross-references and over-wide tables", () => {
     expect(pageText(result, 1)).toContain("Bravo big");
   });
 });
+
+describe("margin line numbers (w:lnNumType)", () => {
+  // Word formats margin line numbers with the DEFAULT PARAGRAPH STYLE's
+  // resolved run properties (docDefaults + Normal chain) overlaid with the
+  // "line number" character style — NOT raw docDefaults. In the elsevier
+  // template docDefaults say Calibri 11pt but the PDF prints the numbers in
+  // Normal's Times New Roman 12pt, baseline-aligned with the body line
+  // ('117' and its 12pt body line share the glyph top exactly; on a 14pt
+  // heading line the 12pt number's top sits ~1.6pt lower — pure baseline
+  // alignment, not line-box bottoming).
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles ${W_NS}>
+<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="24"/></w:rPr></w:style>
+<w:style w:type="character" w:styleId="LineNumber"><w:name w:val="line number"/><w:basedOn w:val="DefaultParagraphFont"/></w:style>
+</w:styles>`;
+  const section =
+    `<w:sectPr><w:lnNumType w:countBy="1" w:distance="240"/>` +
+    `<w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+
+  it("uses the default paragraph style font and baseline-aligns the number", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("Hello world") + section),
+      "word/styles.xml": styles,
+    });
+    const items = result.pages[0].items.filter((i) => i.kind === "text");
+    const num = items.find((i) => i.kind === "text" && i.text === "1");
+    const body = items.find((i) => i.kind === "text" && i.text.startsWith("Hello"));
+    expect(num && num.kind === "text").toBeTruthy();
+    expect(body && body.kind === "text").toBeTruthy();
+    if (!num || num.kind !== "text" || !body || body.kind !== "text") return;
+    // Normal's rPr, not docDefaults: Times New Roman 12pt (24 half-points = 16px).
+    expect(num.font.family).toBe("Times New Roman");
+    expect(num.font.size).toBeCloseTo(16, 5);
+    // Baseline-aligned with the body line via the exact glyph box.
+    expect(num.baseline).toBeCloseTo(body.baseline, 3);
+    const m = measurer.metrics(num.font);
+    expect(num.glyphTop).toBeCloseTo(num.baseline - m.ascent, 3);
+    expect(num.glyphBoxH).toBeCloseTo(m.ascent + m.descent, 3);
+    // Number sits in the left margin, right-aligned against the distance gap.
+    expect(num.x + num.width).toBeLessThan(body.x);
+  });
+});

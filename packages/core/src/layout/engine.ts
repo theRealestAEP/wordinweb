@@ -17,7 +17,13 @@ import {
   TableRow,
 } from "../model.js";
 import { formatLevelText, formatNumber } from "../parse/numbering.js";
-import { DEFAULT_TBL_LOOK, resolveTableConditional, tableCondOrder } from "../parse/styles.js";
+import {
+  DEFAULT_TBL_LOOK,
+  resolveCharacterStyleChain,
+  resolveParagraphStyleChain,
+  resolveTableConditional,
+  tableCondOrder,
+} from "../parse/styles.js";
 import { mergeRunProps } from "../parse/properties.js";
 import { ptToPx } from "../units.js";
 import { child } from "../xml.js";
@@ -2579,6 +2585,36 @@ class Engine {
     this.lastParaWasEmpty = !paragraphHasContent(para);
   }
 
+  /**
+   * Margin line numbers use the DEFAULT PARAGRAPH STYLE's resolved run
+   * properties (docDefaults + Normal chain) overlaid with the "line number"
+   * character style — not raw docDefaults. Elsevier template: docDefaults say
+   * Calibri 11pt but Word prints the numbers in Normal's Times New Roman 12pt.
+   */
+  private lnFontCache?: FontSpec;
+  private lineNumberFont(): FontSpec {
+    if (this.lnFontCache) return this.lnFontCache;
+    const styles = this.doc.styles;
+    const base = resolveParagraphStyleChain(styles, undefined).rPr;
+    let lnStyleId: string | undefined;
+    for (const [id, s] of styles.byId) {
+      if (s.name?.toLowerCase() === "line number") {
+        lnStyleId = id;
+        break;
+      }
+    }
+    const rPr = lnStyleId
+      ? mergeRunProps(base, resolveCharacterStyleChain(styles, lnStyleId))
+      : base;
+    this.lnFontCache = {
+      family: rPr.font ?? styles.defaultRPr.font ?? "Calibri",
+      size: rPr.size ?? styles.defaultRPr.size ?? (10 * 4) / 3,
+      bold: rPr.bold ?? false,
+      italic: rPr.italic ?? false,
+    };
+    return this.lnFontCache;
+  }
+
   /** w:lnNumType: a right-aligned number in the left margin for body lines. */
   private emitLineNumber(line: LineBox, page: InternalPage, colX: number, topY: number): void {
     const ln = this.sp.lineNumbering;
@@ -2595,15 +2631,16 @@ class Engine {
     const n = ln.start - 1 + this.lnCounter;
     // countBy N prints only every Nth line (but every line is still counted).
     if (ln.countBy > 1 && n % ln.countBy !== 0) return;
-    const font: FontSpec = {
-      family: this.doc.styles.defaultRPr.font ?? "Calibri",
-      size: this.doc.styles.defaultRPr.size ?? (10 * 4) / 3,
-      bold: false,
-      italic: false,
-    };
+    const font = this.lineNumberFont();
     const text = String(n);
     const width = this.measurer.width(text, font);
     const baseline = quantizeQuarterPt(topY + line.baselineH - line.maxDescent);
+    // Word baseline-aligns the number to the line's text baseline (elsevier
+    // PDF: '117' and its 12pt body line share y1 exactly; on a 14pt heading
+    // line the 12pt number's top sits 1.6pt lower — pure baseline alignment).
+    // Anchor the exact glyph box; the bottomed line-box default would sink
+    // the number by the strut's half-leading on spaced lines.
+    const m = this.measurer.metrics(font);
     page.items.push({
       kind: "text",
       x: colX - ln.distance - width,
@@ -2614,6 +2651,8 @@ class Engine {
       font,
       lineTop: topY,
       lineHeight: line.height,
+      glyphTop: baseline - m.ascent,
+      glyphBoxH: m.ascent + m.descent,
     });
   }
 
