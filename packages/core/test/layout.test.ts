@@ -4038,3 +4038,40 @@ describe("tail parity rules (textboxes/nccih/hf2/yiddish)", () => {
     expect(b.x).toBeCloseTo(96 + 47.2, 1);
   });
 });
+
+describe("mirror margins", () => {
+  // settings.xml w:mirrorMargins: odd (recto) pages keep the gutter on the
+  // left (content origin = left margin + gutter); even (verso) pages swap the
+  // left/right margins and move the gutter to the inside (right) edge, so the
+  // content origin drops to the (swapped) left margin with no gutter. Measured
+  // from probe3-mirror-book's Word PDF: page 1 content x0 = 120px
+  // (1080tw margin + 720tw gutter), page 2 x0 = 72px (1080tw margin only).
+  const minTextX = (result: ReturnType<typeof layoutDocument>, pageIdx: number): number =>
+    Math.min(
+      ...result.pages[pageIdx].items
+        .filter((i): i is Extract<typeof i, { kind: "text" }> => i.kind === "text")
+        .map((i) => i.x),
+    );
+  const sectPr =
+    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +
+    '<w:pgMar w:top="1440" w:right="1080" w:bottom="1440" w:left="1080"' +
+    ' w:header="720" w:footer="720" w:gutter="720"/></w:sectPr>';
+  const body = Array.from({ length: 90 }, () => p("Line")).join("") + sectPr;
+
+  it("swaps the gutter to the inside edge on even pages", () => {
+    const result = layout({
+      "word/document.xml": wrapDocument(body),
+      "word/settings.xml": `<w:settings ${W_NS}><w:mirrorMargins/></w:settings>`,
+    }).result;
+    expect(result.pages.length).toBeGreaterThanOrEqual(2);
+    expect(minTextX(result, 0)).toBeCloseTo(120, 1); // recto: margin + gutter
+    expect(minTextX(result, 1)).toBeCloseTo(72, 1); // verso: margin only
+  });
+
+  it("without w:mirrorMargins the gutter stays left on every page", () => {
+    const result = layout({ "word/document.xml": wrapDocument(body) }).result;
+    expect(result.pages.length).toBeGreaterThanOrEqual(2);
+    expect(minTextX(result, 0)).toBeCloseTo(120, 1);
+    expect(minTextX(result, 1)).toBeCloseTo(120, 1);
+  });
+});
