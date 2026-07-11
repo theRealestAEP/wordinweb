@@ -304,6 +304,9 @@ export interface LineBox {
   forcedBreakAfter?: "page" | "column";
   /** Extra vertical offset before this line (float top-and-bottom wrap). */
   floatYOffset?: number;
+  /** Line start/available width recorded for display-math lines so the
+   * oMathPara group-justification post-pass can re-place the rows. */
+  mathBounds?: { x: number; avail: number };
 }
 
 export interface BrokenParagraph {
@@ -340,7 +343,7 @@ function wrapDisplayMath(box: MathBox, maxWidth: number): MathBox[] {
   }
   ranges.push({ start, end: box.width });
 
-  return ranges.map((range) => {
+  return ranges.map((range, rangeIndex) => {
     const pieces = box.pieces
       .filter((piece) => piece.x >= range.start && piece.x < range.end)
       .map((piece) => ({ ...piece, x: piece.x - range.start }));
@@ -376,6 +379,8 @@ function wrapDisplayMath(box: MathBox, maxWidth: number): MathBox[] {
       rules,
       display: box.display,
       baseSize: box.baseSize,
+      jc: box.jc,
+      wrapRow: rangeIndex > 0,
     };
   });
 }
@@ -703,7 +708,10 @@ export function breakParagraph(
     if (bidiPara) reorderVisual(line.spans, startX);
     // A display equation (m:oMathPara) centers on its line regardless of the
     // host paragraph's alignment (Word's m:oMathParaPr jc default = centerGroup).
+    // Provisional per-line placement; the oMathPara group post-pass below
+    // re-places multi-row groups and jc=left/right equations.
     if (line.spans.some((s) => s.math?.display)) {
+      line.mathBounds = { x: startX, avail };
       const slack = avail - line.width;
       if (slack > 0) for (const s of line.spans) s.x += slack / 2;
     } else {
@@ -1250,7 +1258,11 @@ export function breakParagraph(
       }
       x = lineStartX(lineIndex);
     }
-    if (atom.width > availFor(lineIndex) && curLineWidth === 0) {
+    // Same 0.01px tolerance as the fits check above: an autofit table column
+    // sized to its exact min-content (content + margins, no rule allowance —
+    // chem p9's borderless-vertical table) must not character-wrap its own
+    // sizing token over float noise between the measure and layout passes.
+    if (atom.width > availFor(lineIndex) + 0.01 && curLineWidth === 0) {
       // Single fragment wider than the line: hard character wrap.
       hardWrapFrag(atom);
       continue;
@@ -1261,7 +1273,70 @@ export function breakParagraph(
   }
 
   if (!flushedTrailingBreak) flush(true, false);
+  applyMathParaJustification(doc, lines, bidiPara);
   return { lines, props, anchors, anchorPoints };
+}
+
+/** m:oMathPara horizontal justification (Word, measured on dense p7/p13).
+ *
+ * A display equation broken into rows (explicit w:br inside the math, or
+ * auto-wrap) is one GROUP: the rows left-align to each other, and under the
+ * default jc=centerGroup the group as a whole is centered in the column.
+ * Word's group width is the widest row INCLUDING its trailing space runs
+ * (dense stores 30+ trailing spaces before each break; p13's group left is
+ * exactly colLeft + (colWidth - widestRowWithSpaces)/2 = 140.8pt), and an
+ * auto-wrapped continuation row indents a further wrapIndent (1440tw
+ * default) from the group's left edge (p13's "+Dc(...)" rows at 212.85pt =
+ * 140.8 + 72). A paragraph's firstLine indent does not move row 1: the whole
+ * group hangs at the base indent (p13 has w:ind firstLine=851 yet all
+ * explicit rows share one x). Explicit jc=left/right pins the group to the
+ * column edge instead (dense's F1 definition, jc=left, paints flush left);
+ * jc=center keeps Word's per-line centering, which is also the single-row
+ * centerGroup result, so single-row groups only move under left/right. */
+function applyMathParaJustification(doc: DocxDocument, lines: LineBox[], bidiPara: boolean): void {
+  if (bidiPara) return;
+  type Row = { line: LineBox; span: LineSpan };
+  const groups = new Map<XmlElement | MathBox, Row[]>();
+  for (const line of lines) {
+    if (!line.mathBounds) continue;
+    const span = line.spans.find((s) => s.math?.display);
+    if (!span) continue;
+    const key = span.mathSrc ?? span.math!;
+    const rows = groups.get(key) ?? [];
+    rows.push({ line, span });
+    groups.set(key, rows);
+  }
+  for (const rows of groups.values()) {
+    const jc = rows[0].span.math!.jc ?? doc.mathDefJc;
+    if (jc === "center") continue; // per-line centering already applied
+    if (rows.length === 1 && jc === "centerGroup") continue; // same as center
+    const wrapIndent = doc.mathWrapIndent;
+    // Group bounds: the smallest line start among the rows (drops a
+    // firstLine indent on row 1, keeps the paragraph's base indents).
+    let bx = Infinity;
+    let bAvail = 0;
+    for (const r of rows) {
+      if (r.line.mathBounds!.x < bx) {
+        bx = r.line.mathBounds!.x;
+        bAvail = r.line.mathBounds!.avail;
+      }
+    }
+    let maxW = 0;
+    for (const r of rows) {
+      maxW = Math.max(maxW, (r.span.math!.wrapRow ? wrapIndent : 0) + r.span.math!.width);
+    }
+    let groupLeft = bx;
+    if (jc === "centerGroup") groupLeft = bx + Math.max(0, (bAvail - maxW) / 2);
+    else if (jc === "right") groupLeft = bx + Math.max(0, bAvail - maxW);
+    for (const r of rows) {
+      const target = groupLeft + (r.span.math!.wrapRow ? wrapIndent : 0);
+      const delta = target - r.span.x;
+      if (Math.abs(delta) < 0.01) continue;
+      // Move the math and anything laid after it on the line (an equation
+      // label keeps its own alignment only when it precedes the math).
+      for (const s of r.line.spans) if (s.x >= r.span.x - 0.01) s.x += delta;
+    }
+  }
 }
 
 function nextDefaultTab(x: number): number {
@@ -1909,7 +1984,9 @@ function buildAtoms(
           break;
         case "math": {
           const size = props.size ?? 14.666;
-          atoms.push({ kind: "math", box: layoutMath(content.nodes, size, measurer, content.display), src: content.src });
+          const box = layoutMath(content.nodes, size, measurer, content.display);
+          if (content.display) box.jc = content.jc;
+          atoms.push({ kind: "math", box, src: content.src });
           break;
         }
         case "noteRef": {
@@ -1988,8 +2065,20 @@ function buildAtoms(
     let family = props.fontEastAsia ?? font.family;
     const declaredFamily = family;
     const japaneseEA = /mincho|gothic|meiryo|^yu|\byu /i.test(family);
-    const hasKana = /[぀-ヿ]/.test(seg);
-    if (japaneseEA && !hasKana) family = "Microsoft JhengHei";
+    // Word picks the fallback by GLYPH COVERAGE of the declared face: only a
+    // segment containing a code point MS Mincho's cmap lacks (simplified-only
+    // forms) drops to the Chinese fallback line profile. A covered-only
+    // segment KEEPS the Japanese face and its line box even without kana
+    // (staging-eastasian 年号 run: Word lays that line at the 26px Mincho
+    // pitch; the old no-kana proxy re-classed it JhengHei and inflated the
+    // line to 48px).
+    const needsFallback =
+      japaneseEA &&
+      [...seg].some((c) => {
+        const cp = c.codePointAt(0) ?? 0;
+        return cp >= 0x3400 && !minchoCovers(cp);
+      });
+    if (needsFallback) family = "Microsoft JhengHei";
     // The real Windows CJK family (before the macOS collapse below) paints the
     // actual glyphs when it's available (dev fonts-local); it is PAINT-ONLY, so
     // it never reaches WORD_FONT_METRICS / width lookups and the wild-athabasca

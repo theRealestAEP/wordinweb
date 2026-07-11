@@ -221,6 +221,9 @@ class Engine {
   /** Set when a docGrid section's top reserve was applied; the first paragraph
    * drops its spacing-before (Word folds it into the grid reserve). */
   private docGridDropBefore = false;
+  /** The previous paragraph (docGrid lines section) contained a line taller
+   * than the grid pitch: the next paragraph re-syncs to a grid-row boundary. */
+  private gridResyncPending = false;
   /** While emitting a header/footer frame in the final pass: the page's
    * effective body top. Word resolves vRel="margin" anchors in headers against
    * the ACTUAL margin rectangle, whose top the header itself pushes down when
@@ -2254,6 +2257,21 @@ class Engine {
     // spacing-after (already advanced) and this spacing-before wins.
     this.y += Math.max(spacingBefore, this.lastParaSpacingAfter) - this.lastParaSpacingAfter;
 
+    // docGrid(lines) re-sync: after a paragraph containing a MULTI-ROW line
+    // (a line taller than the pitch: the JhengHei-fallback 2-row lines of
+    // staging-eastasian's simplified-Chinese block), Word starts the next
+    // paragraph on the next grid-row boundary. Measured: the Combined
+    // heading lands at bodyTop + 19 rows (648px) where plain spacing puts it
+    // at 631.4; the paragraphs after single-row-line paragraphs take no such
+    // rounding (the 水/学 tops sit off-grid).
+    if (this.sp.docGridLinePitch && this.gridResyncPending && props.snapToGrid !== false) {
+      const pitch = this.sp.docGridLinePitch;
+      const rel = this.y - this.cur.bodyTop;
+      const snapped = Math.ceil(rel / pitch - 1e-4) * pitch;
+      if (snapped > rel) this.y = this.cur.bodyTop + snapped;
+    }
+    this.gridResyncPending = false;
+
     // Plan natural page-break indices with widow/orphan control (Word default: on).
     const widow = props.widowControl !== false;
     const planBreaks = (): Set<number> => {
@@ -2539,6 +2557,25 @@ class Engine {
         : 0;
     if (!endedWithBreak) this.y += spacingAfter;
     this.lastParaSpacingAfter = endedWithBreak ? 0 : spacingAfter;
+    if (this.sp.docGridLinePitch) {
+      // Only a multi-row line whose height comes from the tall CHINESE
+      // FALLBACK profile (a Japanese eastAsia face lacking the glyphs -
+      // PingFang metrics, 3.03em) arms the re-sync; that is the measured
+      // case. Grid object lines (eq-as-images' equation images) already
+      // occupy whole grid rows via gridObjSnap and Word does not re-align
+      // after them, nor after tall native-face text lines (eq-as-images'
+      // CJK headings) - its pages exploded to 50%+ when either armed it.
+      const pitch = this.sp.docGridLinePitch;
+      const lsRule = props.lineSpacing?.rule;
+      this.gridResyncPending =
+        (lsRule === undefined || lsRule === "auto") &&
+        lines.some(
+          (l) =>
+            l.height > pitch * 1.5 &&
+            l.spans.some((s) => /^pingfang /i.test(s.font.family)) &&
+            !l.spans.some((s) => s.image || s.drawing || s.math),
+        );
+    }
     this.lastParaWasEmpty = !paragraphHasContent(para);
   }
 
@@ -3728,8 +3765,8 @@ class Engine {
           // the other autofit paths it calibrates) must not count toward the
           // raise test, or col2's NBSP-glued "Wej 7426" (59.25pt min vs its
           // 59.65pt grid column) gets a spurious raise Word does not do.
-          const { minW } = this.columnMinPref(tbl, base.length);
-          const mins = minW.map((m) => Math.max(0, m - 2));
+          const { minW, fudge } = this.columnMinPref(tbl, base.length);
+          const mins = minW.map((m) => Math.max(0, m - fudge));
           const target = base.reduce((a, b) => a + b, 0);
           const raised = base.map((w, i) => Math.max(w, mins[i]));
           const over = raised.reduce((a, b) => a + b, 0) - target;
@@ -3748,7 +3785,7 @@ class Engine {
     }
 
     const nCols = base.length;
-    const { minW, prefW } = this.columnMinPref(tbl, nCols);
+    const { minW, prefW, fudge } = this.columnMinPref(tbl, nCols);
 
     const sumPref = prefW.reduce((a, b) => a + b, 0);
     if (sumPref <= 0) return base;
@@ -3764,7 +3801,7 @@ class Engine {
     // 57.27pt = word + margins + rule, and col1 keeps 187.8pt so
     // " Mimociv doluguseqesu qapabipe" stays on one line; the fudged
     // 58.58pt min squeezed col1 to 187.3 and wrapped all three rows).
-    const clampW = hasExplicit ? minW.map((m) => Math.max(0, m - 2)) : minW;
+    const clampW = hasExplicit ? minW.map((m) => Math.max(0, m - fudge)) : minW;
     const widths = prefW.map((w) => (w * want) / sumPref);
     for (let pass = 0; pass < 3; pass++) {
       let deficit = 0;
@@ -3915,9 +3952,28 @@ class Engine {
    * enclosing "holds L…" column). Spanned cells distribute their demand evenly
    * across the covered columns.
    */
-  private columnMinPref(tbl: Table, nCols: number): { minW: number[]; prefW: number[]; hardMinW: number[] } {
+  private columnMinPref(tbl: Table, nCols: number): { minW: number[]; prefW: number[]; hardMinW: number[]; fudge: number } {
     const margins = this.cellMarginsOf(tbl);
-    const pad = (margins.left ?? 0) + (margins.right ?? 0) + 2;
+    // Vertical-rule allowance. The +2px covers the vertical rules a column's
+    // cells paint (calibrated on the autofit corpus, all full-grid tables).
+    // A table that paints NO vertical rules gets none: Word's rendered
+    // autofit columns for chem p9's horizontal-rules-only table are content
+    // + cell margins EXACTLY (rendered 31.8/37.8pt = text 21/27 + 10.8pt
+    // margins; the flat +2px made every column ~1.5pt wide and the drift
+    // accumulated to +20px at the last rule). Only a table whose EXPLICIT
+    // borders lack left/right/insideV (and whose cells declare no vertical
+    // tcBorders) drops the allowance — style-resolved borders may not be
+    // filled in yet for nested tables, so undefined keeps the old fudge.
+    const paints = (b?: Border) => b !== undefined && b.style !== "none" && b.width > 0;
+    const tb = tbl.props.borders;
+    const noVRules =
+      tb !== undefined &&
+      !paints(tb.left) && !paints(tb.right) && !paints(tb.insideV) &&
+      !tbl.rows.some((r) =>
+        r.cells.some((c) => paints(c.props.borders?.left) || paints(c.props.borders?.right)),
+      );
+    const fudge = noVRules ? 0 : 2;
+    const pad = (margins.left ?? 0) + (margins.right ?? 0) + fudge;
     const minW = new Array<number>(nCols).fill(pad + 8);
     const prefW = new Array<number>(nCols).fill(pad + 8);
     // Hard (non-negotiable) minimum: the demand of nested tables only. Word
@@ -3930,7 +3986,7 @@ class Engine {
         const span = cell.props.gridSpan;
         if (gridPos < nCols && cell.props.vMerge !== "continue") {
           const cm = { ...margins, ...cell.props.margins };
-          const cpad = (cm.left ?? 0) + (cm.right ?? 0) + 2;
+          const cpad = (cm.left ?? 0) + (cm.right ?? 0) + fudge;
           let cellMin = 0;
           let cellPref = 0;
           let cellHard = 0;
@@ -4005,7 +4061,7 @@ class Engine {
         gridPos += span;
       }
     }
-    return { minW, prefW, hardMinW };
+    return { minW, prefW, hardMinW, fudge };
   }
 
   /**
@@ -4221,7 +4277,16 @@ class Engine {
       if (tbl.props.alignment === "center") return this.colX + (cw - tableWidth) / 2;
       // w:bidiVisual (RTL table) hugs the right margin unless explicitly aligned.
       if (tbl.props.alignment === "right" || tbl.props.bidiVisual) return this.colX + cw - tableWidth;
-      return this.colX + (tbl.props.indent ?? 0);
+      let x = this.colX + (tbl.props.indent ?? 0);
+      // compatibilityMode <= 14 (Word 2010 and earlier): w:tblInd measures to
+      // the first cell's TEXT edge, so the table grid/border begins a cell
+      // left-margin further left. Word 2013+ (mode 15) measures to the border.
+      // Measured in wild2-sci-chem-omml (compat 14) p9: tblInd 531tw with the
+      // default 108tw cell margin - Word's first column text sits at margin +
+      // 26.55pt exactly and the cell rules start at margin + 21.2pt; the NIH
+      // probe (compat 15, tblInd 500tw) starts its rules at margin + 25pt.
+      if (this.doc.compatibilityMode < 15) x -= this.cellMarginsOf(tbl).left ?? 0;
+      return x;
     };
     let x0 = computeX0();
 

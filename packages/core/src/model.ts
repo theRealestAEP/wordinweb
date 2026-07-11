@@ -275,6 +275,10 @@ export interface MathContent {
    * display-style layout - larger n-ary operators with limits stacked
    * above/below, and full-size fraction numerators/denominators. */
   display?: boolean;
+  /** m:oMathParaPr/m:jc - display-equation justification. Absent: the
+   * document default (settings m:mathPr/m:defJc, itself "centerGroup" when
+   * unset). */
+  jc?: "left" | "right" | "center" | "centerGroup";
 }
 
 export interface FieldContent {
