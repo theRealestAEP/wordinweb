@@ -4754,9 +4754,32 @@ class Engine {
     const restCells: typeof laid.cells = [];
     let topH = 0;
     let restH = 0;
+    const firstTextTop = (items: PageItem[]): number | undefined => {
+      let t: number | undefined;
+      for (const it of items) {
+        if (it.kind === "text") t = t === undefined ? it.lineTop : Math.min(t, it.lineTop);
+      }
+      return t;
+    };
     for (const { cell, trailing, keep, rest } of partitions) {
       const keepTop = cell.items.length > 0 ? Math.min(...cell.items.map(topOf)) : 0;
-      const shift = rest.length > 0 ? Math.min(...rest.map(topOf)) - keepTop : 0;
+      // Word re-applies the row's top inset when a row RESUMES on the next
+      // page: staging-grid4's continuation pages both place the first
+      // "deep row N" line at the same offset the row's ORIGINAL first line
+      // had (Word PDF p2/p3: text 11px below the fragment top — cell margin
+      // and nested-table margins re-applied), while the old rule-anchored
+      // resume packed the nested cut rule at the very top and left the text
+      // ~5px high. Anchor the continuation on the first TEXT line; leading
+      // nested rules keep their natural offsets above it. Fragments without
+      // text (image rows) keep the rule anchor, and the anchor never lifts
+      // an item above the fragment top (min with the old rule shift).
+      const ruleShift = rest.length > 0 ? Math.min(...rest.map(topOf)) - keepTop : 0;
+      const origText = firstTextTop(cell.items);
+      const restText = firstTextTop(rest);
+      const shift =
+        rest.length > 0 && origText !== undefined && restText !== undefined
+          ? Math.min(ruleShift, restText - origText)
+          : ruleShift;
       for (const it of rest) offsetItem(it, 0, -shift);
       topCells.push({ ...cell, items: keep, height: Math.min(cell.height, avail) });
       const cellRestH = rest.length > 0 ? Math.max(...rest.map(bottomOf)) + keepTop + trailing : 0;
