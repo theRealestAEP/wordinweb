@@ -52,17 +52,35 @@ const INT_SUP_STAGGER = 2.2 / 11;
 const NARY_E_GAP = 2.5 / 11;
 const MAT_ROW_PITCH = 12.75 / 11;
 const MAT_CENTER_DROP = 0.62 / 11; // row-baseline centroid sits this far BELOW the baseline
+// Tall matrix rows (fraction entries) pitch by their own extents instead of
+// the minimum: probe2-math-matrices' 3x3 of fractions rows at 26.75pt
+// baseline-to-baseline (11pt base) = rowDesc + nextRowAsc + this small gap.
+const MAT_ROW_GAP = 0.1 / 11;
 // Width-additive matrix/delimiter gaps. The STIX values were calibrated so a
 // STIX-rendered matrix hit Word's total width; real Cambria Math carries Word's
 // true (wider) glyph advances, so the same gaps over-pad and drift the trailing
 // inline text right (parity-math2). Tightened for the real face, verified
 // against the parity-math2 Word PDF; the STIX fallback keeps the originals.
 const MAT_COL_GAP_STIX = 12.2 / 11;
-const MAT_COL_GAP_REAL = 10.0 / 11;
+// Word's true matrix column gaps, measured from the reference PDFs: the
+// inline 2x2 in parity-math2 spaces its columns 11.41pt apart at 11pt; the
+// display matrices in probe2-math-matrices measure 11.13pt.
+const MAT_COL_GAP_REAL_INLINE = 11.4 / 11;
+const MAT_COL_GAP_REAL_DISPLAY = 11.13 / 11;
 const DLM_PAD_STIX = 1.2 / 11; // content inset from a delimiter glyph
 const DLM_PAD_REAL = 0.8 / 11;
-const matColGap = (): number => (hasCambriaMath() ? MAT_COL_GAP_REAL : MAT_COL_GAP_STIX);
+const matColGap = (display: boolean): number =>
+  hasCambriaMath()
+    ? display
+      ? MAT_COL_GAP_REAL_DISPLAY
+      : MAT_COL_GAP_REAL_INLINE
+    : MAT_COL_GAP_STIX;
 const dlmPad = (): number => (hasCambriaMath() ? DLM_PAD_REAL : DLM_PAD_STIX);
+// A delimiter whose sole content is a matrix / equation array hugs it: Word
+// starts the first column AT the bracket's advance edge (probe2 2x2: '[' x1
+// 294.14, 'a' x0 294.13) and leaves only a hair before the closer (0.37pt at
+// 11pt on both 2x2 matrices; 0.18 on the 3x3).
+const DLM_MAT_END_PAD = 0.3 / 11;
 
 // Display-mode geometry (m:oMathPara), measured from Word's own export of
 // parity2-equations at 11pt (baseline offsets are size-11 y0 deltas from the
@@ -211,6 +229,74 @@ const DLM_AXIS_EM = 585 / 2048;
 // Fraction of the core content extent a variant must cover (calibrated on
 // the dense PDF: 23.71pt parens around a 28.9pt font-box core).
 const DLM_COVER = 0.8;
+// Matrices take one size DOWN from regular content: probe2-math-matrices'
+// 2x2 draws 17.6pt bracket ink around a 23.75pt font-box core (74% coverage;
+// the same-extent piecewise eqArr brace next to it takes the 0.8-coverage
+// 21.4pt variant).
+const DLM_MAT_COVER = 0.72;
+// Content taller than the largest variant gets an ASSEMBLED delimiter whose
+// ink covers ~88% of the axis-centered content extent (probe2 3x3 fraction
+// matrix: 71.25pt paren ink around an 80.2pt core at 11pt).
+const DLM_ASSEMBLY_COVER = 0.88;
+
+// Radical geometry, from Cambria Math's MATH/glyf tables (em/2048): the
+// vertical variant ladder for U+221A with each glyph's advance and ink span
+// about the baseline. Word picks the smallest variant whose ink covers
+// content-font-box-ascent + clearance + rule (+ the content descent when the
+// radical is NOT nested inside another radicand), places the glyph so its
+// ink top IS the rule top, and draws the vinculum from the glyph's advance
+// edge to the radicand end. Verified against probe2-math-matrices at 11pt:
+// ∛(x+y) takes the 2543-unit variant at dy -0.75pt with rule center 9.4pt
+// above baseline; the nested inner √(1+x) keeps the base glyph; the outer
+// √(1+√(1+x)) jumps to the 4568-unit variant.
+const RAD_VARIANTS = [
+  { adv: 1345, top: 1886, bot: -85 },
+  { adv: 1521, top: 1973, bot: -570 },
+  { adv: 1537, top: 2933, bot: -1635 },
+  { adv: 1566, top: 4083, bot: -2745 },
+  { adv: 1572, top: 5233, bot: -3895 },
+  { adv: 1534, top: 6383, bot: -5045 },
+];
+// Clearance between the radicand's font-box top and the rule's bottom edge.
+// The MATH table says 166/2048; the probe2 PDF fits 130 (rule centers 9.38 /
+// 9.63pt above the baseline for the ∛ and nested-inner cases at 11pt).
+const RAD_GAP = 130 / 2048;
+// A variant with large slack (>1.3x the requirement — the nested-outer case)
+// rides UP: its rule top sits this far above the radicand's ascent
+// (probe2: outer rule top 18.0pt over a 9.83pt-ascent radicand).
+const RAD_GROWN_TOP = 8.17 / 11;
+const RAD_GROWN_RATIO = 1.3;
+const RAD_RULE_OVERHANG = 0.04; // em past the radicand (measured 0.4-0.6pt)
+// m:deg placement: MATH RadicalKernBeforeDegree / RadicalKernAfterDegree,
+// with the baseline raised 65% of the sign's ink height above its ink bottom
+// (RadicalDegreeBottomRaisePercent 65; -0.027em fits the measured 4.75pt).
+const RAD_KERN_BEFORE_DEG = 133 / 2048;
+const RAD_KERN_AFTER_DEG = -640 / 2048;
+const RAD_DEG_RAISE = 0.65;
+const RAD_DEG_ADJ = -0.027;
+
+// m:groupChr braces (U+23DE/U+23DF): horizontal variant widths from the
+// MATH table. Word takes the LARGEST variant not exceeding the base width
+// (probe2: 15.8pt x+y over the 2036-unit brace) and assembles a full-width
+// brace once the base outgrows the ladder (43.8pt a+b+c overbrace).
+const GRP_VARIANTS_EM = [1265 / 2048, 2036 / 2048, 3001 / 2048, 3546 / 2048, 4366 / 2048];
+// Overbrace baseline offset above the main baseline (ink centered on the
+// measured 9.4..12.4pt band at 11pt) and underbrace offset (ink -4.5..-1.5).
+const GRP_TOP_CHR_DY = 3.4 / 11;
+const GRP_BOT_CHR_DY = 0.66 / 11;
+// pos=bot vertJc=bot (underbrace aligned at the brace): the base shrinks to
+// script size and rides above the brace (probe2: x+y at 8pt, baseline 8.5pt
+// above the main baseline the 11pt brace sits on).
+const GRP_BOT_BASE_RAISE = 8.5 / 11;
+// ⏞ / ⏟ ink spans about their own baseline (glyf bbox, em/2048).
+const GRP_TOP_INK = { top: 1708 / 2048, bot: 1070 / 2048 };
+const GRP_BOT_INK = { top: -364 / 2048, bot: -1002 / 2048 };
+
+// m:limLow / m:limUpp: script-size limit stacked under/over the base, both
+// centered on the wider of the two. Measured at 11pt: lim baseline 6.75pt
+// below (limLow n→∞) / 7.75pt above (limUpp 0≤x≤1) the main baseline.
+const LIM_LOW_DROP = 6.75 / 11;
+const LIM_UPP_RAISE = 7.75 / 11;
 
 function fontAt(size: number): FontSpec {
   return { family: MATH_FONT, size, bold: false, italic: false };
