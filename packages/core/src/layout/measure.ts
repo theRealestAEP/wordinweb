@@ -16,6 +16,12 @@ export interface FontMetrics {
 export interface TextMeasurer {
   width(text: string, font: FontSpec, letterSpacing?: number): number;
   metrics(font: FontSpec): FontMetrics;
+  /** The browser's own font box (fontBoundingBoxAscent/Descent) for the
+   * resolved first face of this font's CSS stack, when the host can know it.
+   * Used to anchor paint-routed CJK spans: the DOM renderer centers glyphs
+   * by the browser strut, which differs from the engine's calibrated line
+   * profile (Hiragino/PingFang) whenever the real Windows face paints. */
+  paintBox?(font: FontSpec): { ascent: number; descent: number } | undefined;
 }
 
 export function fontKey(font: FontSpec): string {
@@ -215,6 +221,7 @@ export class CanvasMeasurer implements TextMeasurer {
   private ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   private widthCache = new Map<string, number>();
   private metricsCache = new Map<string, FontMetrics>();
+  private paintBoxCache = new Map<string, { ascent: number; descent: number } | null>();
   private currentFont = "";
 
   constructor() {
@@ -257,6 +264,23 @@ export class CanvasMeasurer implements TextMeasurer {
       this.widthCache.set(key, w);
     }
     return w + letterSpacing * text.length;
+  }
+
+  /** Browser font box of the resolved first face in the CSS stack. Measured
+   * at 3x like width() to avoid fractional-size precision loss. */
+  paintBox(font: FontSpec): { ascent: number; descent: number } | undefined {
+    const key = "pb " + fontKey(font);
+    let m = this.paintBoxCache.get(key);
+    if (m === undefined) {
+      this.setFont({ ...font, size: font.size * 3 });
+      const tm = this.ctx.measureText("\u6c34Mg");
+      m =
+        tm.fontBoundingBoxAscent !== undefined && tm.fontBoundingBoxDescent !== undefined
+          ? { ascent: tm.fontBoundingBoxAscent / 3, descent: tm.fontBoundingBoxDescent / 3 }
+          : null;
+      this.paintBoxCache.set(key, m);
+    }
+    return m ?? undefined;
   }
 
   metrics(font: FontSpec): FontMetrics {
