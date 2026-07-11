@@ -226,6 +226,12 @@ class Engine {
   private seenNumIds = new Set<number>();
   /** Floating-image exclusion rects per page (page coords). */
   private floats = new Map<InternalPage, { x0: number; x1: number; y0: number; y1: number; mode: "square" | "topAndBottom" }[]>();
+  /** Floating tables whose wrap rect has already been registered (by a
+   * look-ahead reflow pass or their own placement) — prevents double wrap. */
+  private floatWrapRegistered = new Map<Table, InternalPage>();
+  /** Linked text-box chains (wps:linkedTxbx): the seq-0 box records its story
+   * and the frame-local Y at which it overflowed, so later boxes continue it. */
+  private textboxChains = new Map<string, { blocks: Block[]; consumedY: number }>();
   /** Note id → sequential display number, assigned in document order pre-layout. */
   private footnoteNumbers = new Map<number, number>();
   private endnoteNumbers = new Map<number, number>();
@@ -1331,6 +1337,28 @@ class Engine {
           !paragraphHasContent(block);
         const beforeTable = blocks[i + 1]?.type === "table";
         const doubled = docStartEmpty && (beforeTable || this.cur.headerGrown === true);
+        // A page/margin-anchored floating table LATER in the flow reflows the
+        // content before it: register its wrap rect now so this paragraph (and
+        // following ones) flow around the absolute footprint (probe3-table-
+        // exotics: the intro heading wraps into the narrow channel beside the
+        // two page-anchored floats). Stop scanning at the first block that is
+        // not such a table — text-anchored floats and normal blocks position
+        // relative to the flow and are handled when reached.
+        if (paragraphHasContent(block)) {
+          for (let j = i + 1; j < blocks.length; j++) {
+            const nb = blocks[j];
+            if (
+              nb.type === "table" &&
+              nb.props.floating &&
+              (nb.props.floating.vAnchor === "page" || nb.props.floating.vAnchor === "margin") &&
+              !this.floatWrapRegistered.has(nb)
+            ) {
+              this.registerFloatingTableWrap(nb);
+            } else {
+              break;
+            }
+          }
+        }
         this.placeParagraph(block, blocks[i - 1], blocks[i + 1], blocks, i);
         if (doubled) {
           const paraProps = this.doc.effectiveParaProps(block);
@@ -2902,6 +2930,78 @@ class Engine {
     });
   }
 
+  /** Run borders (w:bdr): Word draws a box around each maximal group of
+   * ADJACENT spans carrying an identical border, per visual line — a merged
+   * "AlphaBetaGamma" of three identical-bdr runs gets ONE box; differing
+   * borders sit in separate boxes side by side; a bordered run wrapping
+   * across lines closes the box on every line segment (probe2-run-borders:
+   * continuation lines paint a closed left edge). The box hugs the run's GLYPH
+   * box (ascent+descent, not the full line box) inflated by w:space on all
+   * sides, so stacked wrapped lines show a w:space gap between boxes rather than
+   * touching; run shading fills the box interior (replacing the plain line-box
+   * shading rect). */
+  private emitRunBorders(line: LineBox, page: InternalPage, originX: number, topY: number, baseline: number): void {
+    const spans = line.spans;
+    const sameBorder = (a: Border, b: Border) =>
+      a.style === b.style && a.color === b.color && a.width === b.width && a.space === b.space;
+    let i = 0;
+    while (i < spans.length) {
+      const first = spans[i];
+      const bdr = first.props.border;
+      if (!bdr || bdr.style === "none" || first.text === undefined || first.math || first.image || first.drawing) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (
+        j + 1 < spans.length &&
+        spans[j + 1].props.border &&
+        sameBorder(spans[j + 1].props.border!, bdr) &&
+        spans[j + 1].text !== undefined &&
+        !spans[j + 1].math &&
+        !spans[j + 1].image &&
+        !spans[j + 1].drawing &&
+        // contiguous in x (spans of adjacent runs abut; a gap means an
+        // unbordered span was dropped between them)
+        spans[j + 1].x <= spans[j].x + spans[j].width + 0.51
+      ) {
+        j++;
+      }
+      // Trailing line-end whitespace stays OUTSIDE the box (Word ends the
+      // box after the last glyph).
+      let last = j;
+      if (j === spans.length - 1) while (last > i && spans[last].isSpace) last--;
+      const x0 = originX + spans[i].x - bdr.space;
+      const x1 = originX + spans[last].x + spans[last].width + bdr.space;
+      // Vertical box = the group's glyph box (max ascent/descent of its spans)
+      // padded by w:space, NOT the line box: consecutive wrapped-line boxes then
+      // sit a w:space apart instead of overlapping by the line leading.
+      let asc = 0;
+      let desc = 0;
+      for (let k = i; k <= last; k++) {
+        const m = this.measurer.metrics(spans[k].font);
+        if (m.ascent > asc) asc = m.ascent;
+        if (m.descent > desc) desc = m.descent;
+      }
+      const y0 = baseline - asc - bdr.space;
+      const y1 = baseline + desc + bdr.space;
+      // Shading fills the (space-padded) box interior. Highlight keeps its
+      // plain line-box rect in the main span loop.
+      for (let k = i; k <= last; k++) {
+        const shd = spans[k].props.shading;
+        if (!shd) continue;
+        const sx0 = k === i ? x0 : originX + spans[k].x;
+        const sx1 = k === last ? x1 : originX + spans[k].x + spans[k].width;
+        page.items.push({ kind: "rect", x: sx0, y: y0, width: sx1 - sx0, height: y1 - y0, fill: shd });
+      }
+      page.items.push({ kind: "edge", x1: x0, y1: y0, x2: x1, y2: y0, border: bdr });
+      page.items.push({ kind: "edge", x1: x0, y1: y1, x2: x1, y2: y1, border: bdr });
+      page.items.push({ kind: "edge", x1: x0, y1: y0, x2: x0, y2: y1, border: bdr });
+      page.items.push({ kind: "edge", x1: x1, y1: y0, x2: x1, y2: y1, border: bdr });
+      i = j + 1;
+    }
+  }
+
   private emitLine(line: LineBox, page: InternalPage, originX: number, topY: number): void {
     // Word quantizes painted baseline positions to quarter-points (error-
     // diffused: the cursor accumulates raw heights, each baseline snaps).
@@ -2921,6 +3021,7 @@ class Engine {
       // its notes there, not to the page current during cell layout.
       if (span.noteId !== undefined && page.physIndex !== -1) this.registerFootnote(span.noteId, page);
     }
+    this.emitRunBorders(line, page, originX, topY, baseline);
     for (const span of line.spans) {
       if (span.math) {
         const bx = originX + span.x;
@@ -3175,8 +3276,9 @@ class Engine {
         }
       }
 
-      // Character highlight / shading backgrounds.
-      const bg = span.props.highlight ?? span.props.shading;
+      // Character highlight / shading backgrounds. Bordered runs paint their
+      // shading inside the border box in emitRunBorders instead.
+      const bg = span.props.border ? span.props.highlight : (span.props.highlight ?? span.props.shading);
       if (bg) {
         page.items.push({
           kind: "rect",
@@ -3874,22 +3976,43 @@ class Engine {
         }
         // Text insets (bodyPr lIns/tIns/rIns/bIns), default 0.1in/0.05in.
         const ins = shape.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
-        const inner = this.layoutFrame(shape.blocks, Math.max(width - ins.l - ins.r, 1), fields, { x: ox + ins.l, y: oy + ins.t });
+        // Linked text-box chain: a continuation box (chainSeq>0) renders its
+        // chain's story starting where the previous box overflowed; the content
+        // box records that overflow point so the next box picks it up. Both
+        // boxes share a width, so one layout serves the whole chain.
+        const chain =
+          shape.chainId !== undefined ? this.textboxChains.get(shape.chainId) : undefined;
+        const isContinuation = shape.chainSeq !== undefined && shape.chainSeq > 0;
+        const storyBlocks = isContinuation && chain ? chain.blocks : shape.blocks;
+        // Content above skipTopY (frame-local) was shown by earlier boxes.
+        const skipTopY = isContinuation && chain ? chain.consumedY : 0;
+        // A chained box clips at its bottom (overflow flows to the next box)
+        // even without noAutofit.
+        const chained = shape.chainId !== undefined;
+        const capacity = height - ins.t - ins.b;
+        const inner = this.layoutFrame(storyBlocks, Math.max(width - ins.l - ins.r, 1), fields, { x: ox + ins.l, y: oy + ins.t });
         let innerTop = oy + ins.t;
         if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
         else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
-        for (const it of inner.items) {
-          // noAutofit boxes never grow: Word hides WHOLE lines that stick out
-          // past the shape bottom (phase23 p12 oval — "Was 0 / B" show, the
-          // wrapped tail lines vanish under the box edge).
-          if (
-            shape.clipText &&
-            it.kind === "text" &&
-            innerTop - oy + it.lineTop + it.lineHeight > height + 0.5
-          ) {
-            continue;
+        // Record the overflow point for the next box in the chain (seq-0 box).
+        if (shape.chainId !== undefined && !isContinuation) {
+          let cut = Infinity;
+          for (const it of inner.items) {
+            if (it.kind !== "text") continue;
+            if (it.lineTop + it.lineHeight > capacity + 0.5) cut = Math.min(cut, it.lineTop);
           }
-          offsetItem(it, ox + ins.l - fx, innerTop - fy);
+          this.textboxChains.set(shape.chainId, { blocks: storyBlocks, consumedY: cut });
+        }
+        for (const it of inner.items) {
+          if (it.kind === "text") {
+            // Chained boxes hide whole lines outside their own [skipTopY,
+            // content-bottom] window (overflow flows to the next box); a plain
+            // noAutofit box clips at the box bottom edge (unchanged).
+            if (chained && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) continue;
+            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) continue;
+            if (isContinuation && it.lineTop < skipTopY - 0.5) continue;
+          }
+          offsetItem(it, ox + ins.l - fx, innerTop - skipTopY - fy);
           if (rotate && (it.kind === "text" || it.kind === "rect")) {
             const iy = it.kind === "text" ? (it.glyphTop ?? it.lineTop) : it.y;
             it.rotate = rotate(it.x, iy);
@@ -4696,6 +4819,13 @@ class Engine {
   }
 
   private placeTable(tbl: Table): void {
+    // Floating (tblpPr) tables leave the flow entirely: absolute position,
+    // body text wraps around the float rect. Page/margin-anchored ones were
+    // usually pre-placed by layoutBlocks so earlier text already wrapped.
+    if (tbl.props.floating) {
+      this.placeFloatingTable(tbl);
+      return;
+    }
     this.clearBannerSlot();
     this.lastParaSpacingAfter = 0;
     this.lastParaAfterPad = 0;
@@ -4703,7 +4833,11 @@ class Engine {
     this.ensureTableBorders(tbl);
     const colWidth = this.colWidth;
     const widths = this.resolveGridWidths(tbl, colWidth);
-    const tableWidth = widths.reduce((a, b) => a + b, 0);
+    // Separated cell borders (w:tblCellSpacing): 2*spacing of air around
+    // every cell box, so the table footprint grows by 2*spacing per boundary
+    // (nCols+1 of them horizontally, one above/below each row vertically).
+    const s2 = 2 * (tbl.props.cellSpacing ?? 0);
+    const tableWidth = widths.reduce((a, b) => a + b, 0) + s2 * (widths.length + 1);
     // x0 must follow the CURRENT column: when a table splits across the columns
     // of a multi-column section, the continuation rows paint in the next column,
     // so recompute from this.colX after every advance() (staging-breaks p4: a
@@ -4756,7 +4890,9 @@ class Engine {
     // Row coordinates are horizontal-rule centerlines. Flow coordinates are
     // the table's outer edges, so advance half the top rule before painting
     // the first row. The matching bottom half is added after the final row.
-    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, 0).top / 2;
+    // Separated-border tables advance 2*spacing instead (outline to first
+    // cell box).
+    if (tbl.rows.length > 0) this.y += s2 || this.rowBorderWidths(tbl, 0).top / 2;
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
       const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
@@ -4867,6 +5003,10 @@ class Engine {
       }
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
       this.y += rowHeight;
+      // Separated cell borders: 2*spacing of vertical air between each row's
+      // cell boxes (matching the horizontal gap), so the row-to-row boundary
+      // shows two rules with a gap rather than one shared rule.
+      if (s2 && ri < tbl.rows.length - 1) this.y += s2;
       if (tbl.src) {
         const tw = widths.reduce((a, b) => a + b, 0);
         this.cur.items.push({
@@ -4882,8 +5022,163 @@ class Engine {
         });
       }
     }
-    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2;
+    // Separated-border tables close with a 2*spacing bottom inset then the outer
+    // table outline box; ordinary tables add the final half rule.
+    if (tbl.rows.length > 0) this.y += s2 || this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2;
+    if (s2) this.paintTableOutline(this.cur, tbl, x0, segTop, this.y, tableWidth);
     this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
+  }
+
+  /** Outer table outline box for a separated-cell-border table (w:tblCellSpacing):
+   * a single rectangle at the table footprint edges, drawn from the table's own
+   * borders (probe3-table-exotics: a thin rule surrounds the spaced cell grid). */
+  private paintTableOutline(
+    page: InternalPage,
+    tbl: Table,
+    x0: number,
+    y0: number,
+    y1: number,
+    tableWidth: number,
+  ): void {
+    const tb = tbl.props.borders;
+    const x1 = x0 + tableWidth;
+    const edge = (b: Border | undefined, ex1: number, ey1: number, ex2: number, ey2: number) => {
+      if (!b || b.style === "none") return;
+      page.items.push({ kind: "edge", x1: ex1, y1: ey1, x2: ex2, y2: ey2, border: b, role: "table-rule" });
+    };
+    edge(tb?.top, x0, y0, x1, y0);
+    edge(tb?.bottom, x0, y1, x1, y1);
+    edge(tb?.left, x0, y0, x0, y1);
+    edge(tb?.right, x1, y0, x1, y1);
+  }
+
+  /** Resolve a floating table's absolute footprint (x/y/size) and per-row
+   * layout on the current page. Pure geometry — no painting — so it can run in
+   * a look-ahead pass (to reflow earlier paragraphs) and again at paint time. */
+  private floatingTableGeom(tbl: Table): {
+    x: number;
+    y: number;
+    tableWidth: number;
+    tableHeight: number;
+    topLead: number;
+    widths: number[];
+    s2: number;
+    laidRows: ReturnType<Engine["layoutRow"]>[];
+    rowHeights: number[];
+  } {
+    const fl = tbl.props.floating!;
+    const sp = this.cur.sp;
+    const widths = this.resolveGridWidths(tbl, this.colWidth);
+    const s2 = 2 * (tbl.props.cellSpacing ?? 0);
+    const gridW = widths.reduce((a, b) => a + b, 0);
+    const tableWidth = gridW + s2 * (widths.length + 1);
+
+    const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
+    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+    for (const [key, ph] of spanPaint) {
+      const ri = Math.floor(key / 1000);
+      const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
+      if (cl) cl.spanHeight = ph;
+    }
+    const nRows = tbl.rows.length;
+    const topLead = nRows > 0 ? s2 || this.rowBorderWidths(tbl, 0).top / 2 : 0;
+    const botLead = nRows > 0 ? s2 || this.rowBorderWidths(tbl, nRows - 1).bottom / 2 : 0;
+    const tableHeight =
+      topLead + rowHeights.reduce((a, b) => a + b, 0) + Math.max(0, nRows - 1) * s2 + botLead;
+
+    // Horizontal: page origin is the sheet edge, margin origin the left margin,
+    // text origin the current column x. Alignment keywords span the anchor box.
+    const contentW = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
+    const hOriginX = fl.hAnchor === "page" ? 0 : fl.hAnchor === "margin" ? sp.marginLeft : this.colX;
+    const hRefW = fl.hAnchor === "page" ? sp.pageWidth : fl.hAnchor === "margin" ? contentW : this.colWidth;
+    let x: number;
+    if (fl.xAlign === "center") x = hOriginX + (hRefW - tableWidth) / 2;
+    else if (fl.xAlign === "right") x = hOriginX + hRefW - tableWidth;
+    else if (fl.xAlign === "left") x = hOriginX;
+    else x = hOriginX + (fl.x ?? 0);
+
+    const bodyH = sp.pageHeight - Math.abs(sp.marginTop) - Math.abs(sp.marginBottom);
+    const vOriginY = fl.vAnchor === "page" ? 0 : fl.vAnchor === "margin" ? Math.abs(sp.marginTop) : this.y;
+    const vRefH = fl.vAnchor === "page" ? sp.pageHeight : bodyH;
+    let y: number;
+    if (fl.yAlign === "center") y = vOriginY + (vRefH - tableHeight) / 2;
+    else if (fl.yAlign === "bottom") y = vOriginY + vRefH - tableHeight;
+    else if (fl.yAlign === "top") y = vOriginY;
+    else y = vOriginY + (fl.y ?? 0);
+
+    return { x, y, tableWidth, tableHeight, topLead, widths, s2, laidRows, rowHeights };
+  }
+
+  /** Register a floating table's square wrap rect on the current page so
+   * paragraphs (including ones EARLIER in the flow) reflow around it — Word
+   * reflows preceding content around a page/margin-anchored floating table. */
+  private registerFloatingTableWrap(tbl: Table): void {
+    if (this.floatWrapRegistered.has(tbl)) return;
+    this.ensureTableBorders(tbl);
+    const fl = tbl.props.floating!;
+    const g = this.floatingTableGeom(tbl);
+    const list = this.floats.get(this.cur) ?? [];
+    list.push({
+      x0: g.x - fl.dist.l,
+      x1: g.x + g.tableWidth + fl.dist.r,
+      y0: g.y - fl.dist.t,
+      y1: g.y + g.tableHeight + fl.dist.b,
+      mode: "square",
+    });
+    this.floats.set(this.cur, list);
+    this.floatWrapRegistered.set(tbl, this.cur);
+  }
+
+  /** Floating table (w:tblpPr): absolutely positioned against page/margin/
+   * column origin, painted over an opaque white sheet, with body text wrapping
+   * square around it (leftFromText/… distances). Word does not split a floating
+   * table across pages, and the flow cursor is untouched — the table leaves the
+   * flow entirely, so earlier/later paragraphs on the page reflow around it. */
+  private placeFloatingTable(tbl: Table): void {
+    const fl = tbl.props.floating!;
+    this.ensureTableBorders(tbl);
+    const page = this.cur;
+    const { x, y, tableWidth, tableHeight, topLead, widths, s2, laidRows, rowHeights } =
+      this.floatingTableGeom(tbl);
+    const nRows = tbl.rows.length;
+
+    // Opaque white sheet behind the footprint: Word hides flow text and any
+    // earlier floating table under a floating table's own rectangle (the two
+    // page-anchored floats in probe3-table-exotics overlap, and B paints over A
+    // without A's cells showing through B's gaps).
+    page.items.push({ kind: "rect", x, y, width: tableWidth, height: tableHeight, fill: "#ffffff" });
+
+    // Paint the rows at the absolute position by swapping the flow cursor, like
+    // a nested frame. paintRow reads this.cur / this.y.
+    const saveY = this.y;
+    const saveCur = this.cur;
+    const saveCol = this.col;
+    this.cur = page;
+    this.y = y + topLead;
+    for (let ri = 0; ri < nRows; ri++) {
+      this.paintRow(tbl, tbl.rows[ri], ri, laidRows[ri], x, widths, rowHeights[ri]);
+      this.y += rowHeights[ri];
+      if (s2 && ri < nRows - 1) this.y += s2;
+    }
+    if (s2) this.paintTableOutline(page, tbl, x, y, y + tableHeight, tableWidth);
+    this.y = saveY;
+    this.cur = saveCur;
+    this.col = saveCol;
+
+    // Register the wrap rect unless a look-ahead pass already did (so preceding
+    // paragraphs on the page reflowed around it).
+    if (!this.floatWrapRegistered.has(tbl)) {
+      const list = this.floats.get(page) ?? [];
+      list.push({
+        x0: x - fl.dist.l,
+        x1: x + tableWidth + fl.dist.r,
+        y0: y - fl.dist.t,
+        y1: y + tableHeight + fl.dist.b,
+        mode: "square",
+      });
+      this.floats.set(page, list);
+      this.floatWrapRegistered.set(tbl, page);
+    }
   }
 
   /** Interactive column-resize zones over each vertical table boundary. */
@@ -5452,6 +5747,12 @@ class Engine {
     const isLastRow = rowIdx === tbl.rows.length - 1;
     const nCols = widths.length;
     const nRows = tbl.rows.length;
+    // Old-style separated cell borders (w:tblCellSpacing): every cell box is
+    // shifted right by 2*spacing per crossed boundary (adjacent cell borders
+    // end up 2*spacing apart, and the first box sits 2*spacing inside the
+    // table outline — measured on probe3-table-exotics: 60tw spacing = 3pt,
+    // every border-to-border gap exactly 6pt).
+    const s2 = 2 * (tbl.props.cellSpacing ?? 0);
     // Grid column start per cell (gridSpan-aware), for conditional banding.
     const colStartByIdx = new Map<number, number>();
     let gp = 0;
@@ -5462,7 +5763,7 @@ class Engine {
 
     for (const cellLay of laid.cells) {
       const cell = row.cells[cellLay.cellIdx];
-      const cx = x0 + cellLay.x;
+      const cx = x0 + cellLay.x + (s2 ? s2 * ((colStartByIdx.get(cellLay.cellIdx) ?? 0) + 1) : 0);
       const isFirstCol = cellLay.x === 0;
       const isLastCol = Math.abs(cellLay.x + cellLay.width - widths.reduce((a, b) => a + b, 0)) < 0.5;
       const colStart = colStartByIdx.get(cellLay.cellIdx) ?? 0;
@@ -5470,7 +5771,7 @@ class Engine {
 
       if (cell.props.vMerge === "continue") {
         // Only vertical borders continue through merged cells.
-        this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, rowHeight, isFirstRow, isLastRow, isFirstCol, isLastCol, true, cond?.borders);
+        this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, rowHeight, isFirstRow && !s2, isLastRow && !s2, isFirstCol && !s2, isLastCol && !s2, true, cond?.borders);
         continue;
       }
 
@@ -5523,14 +5824,14 @@ class Engine {
         page.items.push(it);
       }
 
-      this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, cellH, isFirstRow, isLastRow, isFirstCol, isLastCol, false, cond?.borders);
+      this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, cellH, isFirstRow && !s2, isLastRow && !s2, isFirstCol && !s2, isLastCol && !s2, false, cond?.borders);
     }
   }
 
   private paintCellEdges(
     page: InternalPage,
     tbl: Table,
-    cell: { props: { borders?: { top?: Border; bottom?: Border; left?: Border; right?: Border }; vMerge?: string } },
+    cell: { props: { borders?: { top?: Border; bottom?: Border; left?: Border; right?: Border; tl2br?: Border; tr2bl?: Border }; vMerge?: string } },
     x: number,
     y: number,
     w: number,
@@ -5581,6 +5882,27 @@ class Engine {
     }
     if (right) {
       page.items.push({ kind: "edge", x1: x + w, y1: y, x2: x + w, y2: y + h, border: right, role: "table-rule" });
+    }
+    // Diagonal cell borders (w:tcBorders tl2br / tr2bl): corner-to-corner
+    // strokes inside the cell box (probe3-table-exotics "diag" cell paints
+    // both, forming an X).
+    if (!mergedContinue && w > 0 && h > 0) {
+      const diag = (b: Border | undefined, d: string) => {
+        if (!b || b.style === "none") return;
+        page.items.push({
+          kind: "path",
+          x,
+          y,
+          width: w,
+          height: h,
+          d,
+          viewW: w,
+          viewH: h,
+          stroke: { color: b.color, width: b.width },
+        });
+      };
+      diag(cell.props.borders?.tl2br, `M0 0 L${w} ${h}`);
+      diag(cell.props.borders?.tr2bl, `M${w} 0 L0 ${h}`);
     }
   }
 }

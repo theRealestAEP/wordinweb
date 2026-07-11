@@ -1545,6 +1545,12 @@ function finishLine(
   let maxObjDescent = 0;
   let maxTextAscent = 0;
   let maxTextDescent = 0;
+  // A run border (w:bdr) draws a box around the run's glyph box padded by
+  // w:space; Word reserves that padding plus the border stroke in the line
+  // height, so a bordered line pitches taller than a plain one (probe2-run-
+  // borders: the 1pt-bordered wrapping run lines pitch ~2pt over plain 11pt).
+  let maxBorderedAscent = 0;
+  let maxBorderedDescent = 0;
   // Whether the tallest text span uses an East Asian face: their oversized
   // line profiles (substituted CJK faces) do NOT grid-snap under auto
   // spacing (staging-eastasian), while Latin faces do.
@@ -1721,6 +1727,11 @@ function finishLine(
         maxGridTextGlyph = Math.max(maxGridTextGlyph, textMetrics.ascent + textMetrics.descent);
         maxTextAscent = Math.max(maxTextAscent, textMetrics.ascent);
         maxTextDescent = Math.max(maxTextDescent, textMetrics.descent);
+        if (s.props.border && s.props.border.style !== "none") {
+          const pad = (s.props.border.width ?? 0) + (s.props.border.space ?? 0);
+          maxBorderedAscent = Math.max(maxBorderedAscent, textMetrics.ascent + pad);
+          maxBorderedDescent = Math.max(maxBorderedDescent, textMetrics.descent + pad);
+        }
         if (textMetrics.lineHeight >= maxNaturalText) {
           tallestTextIsEa = EA_FAMILY_RE.test((s.metricsFont ?? s.font).family);
         }
@@ -1741,6 +1752,10 @@ function finishLine(
   // stays within the image extent and must add nothing, else the figure line
   // doubles. Only the positioned run's own edge can protrude past the line's
   // unshifted ascent/descent.
+  // Fold the bordered-run box extent into the line's ascent/descent so a line
+  // carrying a w:bdr run pitches tall enough to clear the box padding + stroke.
+  maxAscent = Math.max(maxAscent, maxBorderedAscent);
+  maxDescent = Math.max(maxDescent, maxBorderedDescent);
   const raiseAsc = Math.max(0, shiftedAscent - maxAscent);
   const raiseDesc = Math.max(0, shiftedDescent - maxDescent);
   const commonRaise =
