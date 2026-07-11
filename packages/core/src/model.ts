@@ -367,6 +367,13 @@ export interface ShapeTextbox {
    * whole lines that stick out past the shape bottom (phase23 p12 ovals:
    * "Was 0 / B" visible, the wrapped tail rows hidden). */
   clipText?: boolean;
+  /** Linked text-box chain id (wps:txbx/@id or wps:linkedTxbx/@id): boxes with
+   * the same id form one story. The seq-0 box (wps:txbx) holds the content;
+   * later boxes (wps:linkedTxbx, chainSeq>0) are empty sinks that continue the
+   * overflow. */
+  chainId?: string;
+  /** Position in the linked chain (0 = the content box). */
+  chainSeq?: number;
 }
 
 /** WordArt (VML v:textpath, e.g. a "CONFIDENTIAL" watermark): text scaled to

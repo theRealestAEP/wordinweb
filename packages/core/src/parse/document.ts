@@ -860,6 +860,11 @@ function parseDrawing(
   // First wps shape carrying a text box (DrawingML wps:txbx). Resolved after
   // the walk into a floating ShapeTextbox honoring the anchor's wrap mode.
   let textboxEl: XmlElement | undefined;
+  // Linked text-box chain (wps:txbx/@id or wps:linkedTxbx id/seq): the seq-0
+  // box holds the story, later boxes continue its overflow. Captured during the
+  // walk, applied when the ShapeTextbox is resolved.
+  let textboxChainId: string | undefined;
+  let textboxChainSeq: number | undefined;
 
   // Resolve a DrawingML fill color (srgbClr or theme schemeClr), applying
   // lumMod/lumOff/shade/tint transforms (template art is built from theme
@@ -958,6 +963,16 @@ function parseDrawing(
       // single-ShapeTextbox path — collect each as a positioned DrawingText-
       // Shape so the whole group renders in place.
       const txbxEl = child(el, "txbx");
+      const linkedEl = child(el, "linkedTxbx");
+      if (txbxEl && attr(txbxEl, "id") !== undefined) {
+        textboxChainId = attr(txbxEl, "id");
+        textboxChainSeq = 0;
+      } else if (linkedEl) {
+        // Continuation box: no content of its own, just a chain reference.
+        textboxChainId = attr(linkedEl, "id");
+        textboxChainSeq = intAttr(linkedEl, "seq") ?? 1;
+        if (!textboxEl) textboxEl = el;
+      }
       if (txbxEl && findDescendant(txbxEl, "txbxContent")) {
         if (!textboxEl) textboxEl = el;
         const xfrm = child(spPr, "xfrm");
@@ -1194,7 +1209,10 @@ function parseDrawing(
     };
 
     const spPr = child(textboxEl, "spPr");
-    const txbxContent = findDescendant(child(textboxEl, "txbx")!, "txbxContent")!;
+    // A linked continuation box (wps:linkedTxbx) carries no content of its own —
+    // it renders the overflow of its chain's seq-0 box.
+    const txbxOwn = child(textboxEl, "txbx");
+    const txbxContent = txbxOwn ? findDescendant(txbxOwn, "txbxContent") : undefined;
     const xfrm = child(spPr, "xfrm");
     const rot = intAttr(xfrm, "rot");
     const lnEl = child(spPr, "ln");
@@ -1243,7 +1261,8 @@ function parseDrawing(
         hRel: relOf(posH),
         vRel: relOf(posV),
         hAlign: alignOf(posH),
-        blocks: parseBlocks(txbxContent, ctx),
+        blocks: txbxContent ? parseBlocks(txbxContent, ctx) : [],
+        ...(textboxChainId !== undefined ? { chainId: textboxChainId, chainSeq: textboxChainSeq ?? 0 } : {}),
         ...(fillColorOf(spPr) ? { fill: fillColorOf(spPr)! } : {}),
         ...(strokeColor ? { stroke: { color: strokeColor, weight: Math.max(emuToPx(intAttr(lnEl, "w") ?? 0), 0.75) } } : {}),
         textAnchor: anchorAttr === "ctr" ? "middle" : anchorAttr === "b" ? "bottom" : anchorAttr === "t" ? "top" : undefined,
