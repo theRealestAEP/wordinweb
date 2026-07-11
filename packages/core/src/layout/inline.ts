@@ -702,7 +702,7 @@ export function breakParagraph(
         src: { run: anchorSrc.run, t: anchorSrc.t, offset: 0 },
       });
     }
-    const line = finishLine(cur, curLineWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak, minLineHeight);
+    const line = finishLine(cur, curLineWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak, minLineHeight, opts?.inTableCell === true);
     line.forcedBreakAfter = forced;
     line.floatYOffset = lineFloatOffset;
     // Alignment
@@ -1468,6 +1468,7 @@ function finishLine(
   isLast: boolean,
   endsWithBreak: boolean,
   minLineHeight?: number,
+  inCell = false,
 ): LineBox {
   let maxAscent = 0;
   let maxDescent = 0;
@@ -1806,7 +1807,19 @@ function finishLine(
         // (k-1)x below it. Using the empty run's font descent there overshot
         // every signature row ~0.6pt and spread the whole table's rules off
         // Word's device rows.
-        const descFloor = maxDescent > 0 ? Math.max(maxDescent * ls.value, maxImageFontLineDesc) : 0;
+        // ...unless the line sits in a TABLE CELL: body image lines keep the
+        // run font's QUANTIZED descent clearance below the image. Pinned by
+        // both fixtures: msa's signature rows (image-only lines in table
+        // cells) measure image bottom + (k-1) x line only - the descent floor
+        // overshoots every row - while ieee-2col's body equation images
+        // measure image bottom + the TNR quantized descent; zeroing that
+        // collapsed every equation line and shifted the page 46%.
+        const descFloor =
+          maxDescent > 0
+            ? Math.max(maxDescent * ls.value, maxImageFontLineDesc)
+            : inCell
+              ? 0
+              : maxImageFontLineDesc;
         const descSide = Math.max(descFloor, lineTerm);
         const imageH = maxImage + descSide;
         if (imageH > maxNaturalText * ls.value) {
