@@ -721,6 +721,10 @@ export interface SectionProps {
   docGridLinePitch?: number;
   /** Present w:docGrid type; omitted w:type means "default". */
   docGridType?: "default" | "lines" | "linesAndChars" | "snapToChars";
+  /** w:docGrid type="charsAndLines": a combined char+line grid that (in compat
+   * 15) keeps natural East-Asian line pitch. Drives the CJK line-height
+   * correction during measurement. */
+  docGridCharGrid?: boolean;
   type?: "nextPage" | "continuous" | "evenPage" | "oddPage" | "nextColumn";
   /** Vertical alignment of page content. */
   vAlign?: "top" | "center" | "both" | "bottom";

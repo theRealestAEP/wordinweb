@@ -553,6 +553,22 @@ describe("document parsing", () => {
     expect(hdr.blocks.length).toBe(1);
   });
 
+  it("flags a docGrid charsAndLines section without a line-snap pitch", () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          p("body") +
+            `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+            `<w:docGrid w:type="charsAndLines" w:linePitch="360" w:charSpace="3072"/></w:sectPr>`,
+        ),
+      }),
+    );
+    const sp = doc.sections[0].props;
+    expect(sp.docGridCharGrid).toBe(true);
+    // charsAndLines keeps natural East Asian line pitch (no snap-up to linePitch).
+    expect(sp.docGridLinePitch).toBeUndefined();
+  });
+
   it("parses review comments and maps their anchor ranges", () => {
     const doc = DocxDocument.load(
       makeDocx({

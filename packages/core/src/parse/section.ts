@@ -115,6 +115,16 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     if ((gtype === "lines" || gtype === "linesAndChars" || gtype === "snapToChars") && linePitch) {
       props.docGridLinePitch = twipsToPx(linePitch);
     }
+    // Word's real-world "charsAndLines" grid (both a character and a line grid).
+    // In compat 15 it does NOT snap line height up to linePitch - each East
+    // Asian line keeps its font's natural pitch (probe3-chargrid: MS Mincho
+    // 15.4pt, Chinese fallback 20.5pt, both under the 18pt linePitch). We do not
+    // set docGridLinePitch (no snap); instead flag the section so line
+    // measurement uses the glyphs' true grid line height rather than the tall
+    // macOS substitute box.
+    if (gtype === "charsAndLines") {
+      props.docGridCharGrid = true;
+    }
   }
 
   const pgBorders = child(sectPr, "pgBorders");

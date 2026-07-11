@@ -310,6 +310,7 @@ class Engine {
         // not start a spurious blank/extra page).
         (sp.pageNumberFormat ?? "decimal") === (prevSp.pageNumberFormat ?? "decimal");
       this.sp = sp;
+      this.doc.charGridEa = sp.docGridCharGrid === true;
       this.lnSectionEpoch++;
       // Word carries the paragraph spacing-collapse chain ACROSS section
       // breaks: the first paragraph of a new section page gets only the
