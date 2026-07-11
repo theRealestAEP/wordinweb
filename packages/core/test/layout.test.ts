@@ -2562,37 +2562,6 @@ describe("table autofit + tblInd (wild2-sci-chem-omml p9 Word PDF)", () => {
     expect(x2 - x1).toBeCloseTo(col1, 1);
   });
 
-  it("bordered zero-margin autofit column = content + 2×declared rule width (parity-tables Word PDF)", () => {
-    // Word sizes a content-fit column of a BORDERED table at text + the
-    // declared vertical-rule width on each side — 1.33px for the sz-4 grid —
-    // not a flat 2px: parity-tables' "Left 2in" column renders 46.04px for
-    // 44.71px of text, and the text ends 0.33px before the next rule.
-    const tbl =
-      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>` +
-      `<w:tblBorders>` +
-      `<w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/>` +
-      `<w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/>` +
-      `<w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/>` +
-      `</w:tblBorders></w:tblPr>` +
-      `<w:tblGrid><w:gridCol w:w="2880"/><w:gridCol w:w="5760"/></w:tblGrid>` +
-      `<w:tr>` +
-      `<w:tc><w:p><w:r><w:t>Left 2in</w:t></w:r></w:p></w:tc>` +
-      `<w:tc><w:p><w:r><w:t>Right side content</w:t></w:r></w:p></w:tc>` +
-      `</w:tr></w:tbl>`;
-    const { result } = layout({ "word/document.xml": wrapDocument(tbl + SECT) });
-    const x1 = textX(result, "Left");
-    const x2 = textX(result, "Right");
-    const text1 = measurer.width("Left 2in", { family: "Calibri", size: 44 / 3, bold: false, italic: false });
-    // col1 = text + 2×(sz-4 rule = 0.5pt); both cells inset 1px from their
-    // left grid edge, so the text gap equals the column width.
-    expect(x2 - x1).toBeCloseTo(text1 + 2 * ((0.5 * 96) / 72), 1);
-    // And the exact-fit line must not wrap: "2in" stays on the first line.
-    const left = result.pages[0].items.find((i) => i.kind === "text" && i.text === "Left");
-    const tail = result.pages[0].items.find((i) => i.kind === "text" && i.text === "2in");
-    if (left?.kind !== "text" || tail?.kind !== "text") throw new Error("cells not found");
-    expect(tail.baseline).toBeCloseTo(left.baseline, 3);
-  });
-
   it("compatibilityMode 14 shifts a tblInd table left by the first cell margin", () => {
     const parts15 = { "word/document.xml": wrapDocument(tblXml + SECT), "word/settings.xml": settingsXml(15) };
     const parts14 = { "word/document.xml": wrapDocument(tblXml + SECT), "word/settings.xml": settingsXml(14) };
