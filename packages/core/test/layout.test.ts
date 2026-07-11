@@ -3540,6 +3540,112 @@ describe("OMML math line extents (wild2-math-omml-dense Word PDF rules)", () => 
   });
 });
 
+describe("OMML matrices, arrays, accents, group chars, radicals, limits (probe2-math-matrices Word PDF)", () => {
+  // Positions measured in parity/probe2-math-matrices-word.pdf at 11pt Cambria
+  // Math. The unit metrics come from the deterministic ApproxMeasurer (the STIX
+  // gap path), so these pins guard the layout STRUCTURE; the Word-real px
+  // constants are calibrated by the parity harness.
+  const measurer = new ApproxMeasurer();
+  const S = 11;
+  const run = (t: string): MathNode => ({ t: "run", text: t });
+  const frac = (n: string, d: string): MathNode => ({ t: "frac", num: [run(n)], den: [run(d)] });
+
+  it("matrix rows pitch by MAT_ROW_PITCH and columns hug the bracket edge", () => {
+    const box = layoutMath(
+      [{ t: "dlm", beg: "[", end: "]", e: [[{ t: "mat", rows: [[[run("a")], [run("b")]], [[run("c")], [run("d")]]] }]] }],
+      S, measurer, true,
+    );
+    const open = box.pieces.find((p) => p.text === "[")!;
+    const cells = box.pieces.filter((p) => !"[]".includes(p.text));
+    const topDy = Math.max(...cells.map((p) => p.dy));
+    const botDy = Math.min(...cells.map((p) => p.dy));
+    const firstCol = cells.reduce((a, b) => (b.x < a.x ? b : a));
+    expect(topDy - botDy).toBeCloseTo((S * 12.75) / 11, 2); // 12.75pt baseline pitch
+    // First column starts AT the opening bracket's advance edge (hug, no pad).
+    expect(firstCol.x).toBeCloseTo(open.x + measurer.width("[", { family: open.font.family, size: S, bold: false, italic: false }), 2);
+    expect(open.scaleY).toBeGreaterThan(1); // grown bracket variant
+    expect(open.ownAscent).toBeDefined();
+  });
+
+  it("a fraction-entry matrix pitches rows wider than the plain minimum", () => {
+    const plain = layoutMath([{ t: "mat", rows: [[[run("a")]], [[run("b")]]] }], S, measurer, true);
+    const tall = layoutMath([{ t: "mat", rows: [[[frac("1", "2")]], [[frac("1", "3")]]] }], S, measurer, true);
+    const span = (b: typeof plain) => Math.abs(b.pieces[0].dy - b.pieces[b.pieces.length - 1].dy);
+    expect(span(tall)).toBeGreaterThan((S * 12.75) / 11 + 1); // tall rows exceed the minimum pitch
+  });
+
+  it("a matrix delimiter too tall for the ladder is assembled to ~88% coverage", () => {
+    const box = layoutMath(
+      [{ t: "dlm", beg: "(", end: ")", e: [[{ t: "mat", rows: [
+        [[frac("1", "2")]], [[frac("1", "5")]], [[frac("1", "8")]],
+      ] }]] }],
+      S, measurer, true,
+    );
+    const open = box.pieces.find((p) => p.text === "(")!;
+    expect(open.scaleY).toBeGreaterThan(3); // assembled, well beyond a discrete step
+  });
+
+  it("eqArr stacks rows and the one-sided brace draws no closer", () => {
+    const box = layoutMath(
+      [run("f(x)="), { t: "dlm", beg: "{", end: "", e: [[{ t: "eqarr", rows: [[run("x,x")], [run("-x")]] }]] }],
+      S, measurer, true,
+    );
+    const braces = box.pieces.filter((p) => p.text === "{" || p.text === "}");
+    expect(braces.length).toBe(1); // only the opening brace
+    expect(braces[0].text).toBe("{");
+    expect(braces[0].scaleY).toBeGreaterThan(1);
+  });
+
+  it("an accent composes onto its base glyph", () => {
+    const box = layoutMath([{ t: "acc", chr: "̂", e: [run("x")] }], S, measurer, false);
+    expect(box.pieces.length).toBe(1);
+    expect(box.pieces[0].text.endsWith("̂")).toBe(true);
+  });
+
+  it("overbrace keeps a full-size base with a stretched brace above", () => {
+    const box = layoutMath([{ t: "grp", chr: "⏞", pos: "top", vertJc: "bot", e: [run("a+b+c")] }], S, measurer, true);
+    const brace = box.pieces.find((p) => p.text === "⏞")!;
+    const base = box.pieces.find((p) => p.text !== "⏞")!;
+    expect(base.dy).toBeCloseTo(0, 3); // base on the baseline
+    expect(base.font.size).toBeCloseTo(S, 3); // full size
+    expect(brace.scaleX).toBeGreaterThan(1); // stretched horizontally
+    expect(brace.dy).toBeCloseTo((S * 3.4) / 11, 2); // brace raised above baseline
+  });
+
+  it("underbrace drops the base to script size raised over a brace on the baseline", () => {
+    const box = layoutMath([{ t: "grp", chr: "⏟", pos: "bot", vertJc: "bot", e: [run("x+y")] }], S, measurer, true);
+    const brace = box.pieces.find((p) => p.text === "⏟")!;
+    const base = box.pieces.find((p) => p.text !== "⏟")!;
+    expect(base.font.size).toBeLessThan(S); // script size
+    expect(base.dy).toBeCloseTo((S * 8.5) / 11, 2); // raised above the brace
+    expect(brace.dy).toBeCloseTo((S * 0.66) / 11, 2); // brace near the baseline
+  });
+
+  it("a degree index sits raised before the radical sign with a vinculum over the radicand", () => {
+    const box = layoutMath([{ t: "rad", deg: [run("3")], e: [run("x+y")] }], S, measurer, false);
+    const deg = box.pieces.find((p) => p.text === "3")!;
+    const sign = box.pieces.find((p) => p.text === "√")!;
+    expect(deg.dy).toBeGreaterThan(0); // degree raised
+    expect(deg.x).toBeLessThan(sign.x); // before the sign
+    expect(box.rules.length).toBe(1); // one vinculum
+    expect(sign.scaleY).toBeGreaterThan(1);
+  });
+
+  it("a nested radical raises the outer vinculum above the inner one", () => {
+    const box = layoutMath([{ t: "rad", e: [run("1+"), { t: "rad", e: [run("1+x")] }] }], S, measurer, false);
+    const rules = box.rules.map((r) => r.dy).sort((a, b) => a - b);
+    expect(rules.length).toBe(2);
+    expect(rules[1]).toBeGreaterThan(rules[0]); // outer vinculum higher than inner
+  });
+
+  it("limLow drops the limit below and limUpp raises it above the operator", () => {
+    const low = layoutMath([{ t: "lim", pos: "low", e: [run("lim")], lim: [run("n")] }], S, measurer, true);
+    const upp = layoutMath([{ t: "lim", pos: "upp", e: [run("max")], lim: [run("y")] }], S, measurer, true);
+    expect(low.pieces.find((p) => p.dy < 0)!.dy).toBeCloseTo((-S * 6.75) / 11, 2);
+    expect(upp.pieces.find((p) => p.dy > 0)!.dy).toBeCloseTo((S * 7.75) / 11, 2);
+  });
+});
+
 describe("m:oMathPara group justification (dense p7/p13 Word PDF)", () => {
   // Word lays a display equation broken into rows (w:br inside the math, or
   // auto-wrap) as one GROUP: rows left-align to each other; under the default

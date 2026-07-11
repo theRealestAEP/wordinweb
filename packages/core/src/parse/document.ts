@@ -328,7 +328,41 @@ function parseOmml(el: XmlElement): ParsedMathNode[] {
   }
   if (ln === "sSup") return [{ t: "sup", base: childrenOf("e"), script: childrenOf("sup") }];
   if (ln === "sSub") return [{ t: "sub", base: childrenOf("e"), script: childrenOf("sub") }];
-  if (ln === "rad") return [{ t: "rad", e: childrenOf("e") }];
+  if (ln === "rad") {
+    // m:radPr/m:degHide suppresses the degree even when an (empty) m:deg
+    // element is serialized (Word always writes one).
+    const radPr = el.children.find((ch) => localName(ch.name) === "radPr");
+    const hideEl = radPr && child(radPr, "degHide");
+    const hide = hideEl ? attr(hideEl, "val") !== "0" && attr(hideEl, "val") !== "false" && attr(hideEl, "val") !== "off" : false;
+    const deg = hide ? [] : childrenOf("deg");
+    return [{ t: "rad", e: childrenOf("e"), ...(deg.length ? { deg } : {}) }];
+  }
+  if (ln === "eqArr") {
+    const rows = el.children.filter((ch) => localName(ch.name) === "e").map(mathOnly);
+    return [{ t: "eqarr", rows }];
+  }
+  if (ln === "acc") {
+    // m:accPr/m:chr, default U+0302 combining circumflex (hat).
+    const accPr = el.children.find((ch) => localName(ch.name) === "accPr");
+    const chrEl = accPr && child(accPr, "chr");
+    const chr = (chrEl && attr(chrEl, "val")) || "̂";
+    return [{ t: "acc", chr, e: childrenOf("e") }];
+  }
+  if (ln === "groupChr") {
+    // m:groupChrPr: chr default U+23DF (bottom brace), pos default "bot",
+    // vertJc default "top".
+    const pr = el.children.find((ch) => localName(ch.name) === "groupChrPr");
+    const chrEl = pr && child(pr, "chr");
+    const chr = (chrEl && attr(chrEl, "val")) || "⏟";
+    const posEl = pr && child(pr, "pos");
+    const pos = (posEl && attr(posEl, "val")) === "top" ? "top" : "bot";
+    const vjEl = pr && child(pr, "vertJc");
+    const vertJc = (vjEl && attr(vjEl, "val")) === "bot" ? "bot" : "top";
+    return [{ t: "grp", chr, pos, vertJc, e: childrenOf("e") }];
+  }
+  if (ln === "limLow" || ln === "limUpp") {
+    return [{ t: "lim", pos: ln === "limLow" ? "low" : "upp", e: childrenOf("e"), lim: childrenOf("lim") }];
+  }
   if (ln === "nary") {
     const naryPr = el.children.find((ch) => localName(ch.name) === "naryPr");
     const chrEl = naryPr && child(naryPr, "chr");

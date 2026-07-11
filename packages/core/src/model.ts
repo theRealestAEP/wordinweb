@@ -265,13 +265,23 @@ export type MathNode =
     }
   | { t: "sup" | "sub"; base: MathNode[]; script: MathNode[] }
   | { t: "frac"; num: MathNode[]; den: MathNode[]; bar?: boolean }
-  | { t: "rad"; e: MathNode[] }
+  /** Radical; deg is the optional m:deg index (∛), absent when m:degHide. */
+  | { t: "rad"; e: MathNode[]; deg?: MathNode[] }
   /** n-ary operator (sum/integral); chr defaults to the integral sign. */
   | { t: "nary"; chr: string; sub: MathNode[]; sup: MathNode[]; e: MathNode[] }
-  /** Delimiters grown to the content height; beg/end default to parens. */
+  /** Delimiters grown to the content height; beg/end default to parens.
+   * An empty beg/end string means that side has no delimiter (cases "{"). */
   | { t: "dlm"; beg: string; end: string; e: MathNode[][] }
   /** Matrix: rows x cells. */
-  | { t: "mat"; rows: MathNode[][][] };
+  | { t: "mat"; rows: MathNode[][][] }
+  /** m:eqArr equation array (cases/piecewise rows). */
+  | { t: "eqarr"; rows: MathNode[][] }
+  /** m:acc combining accent (hat/bar/vector) over the base. */
+  | { t: "acc"; chr: string; e: MathNode[] }
+  /** m:groupChr horizontal group character (over/under brace). */
+  | { t: "grp"; chr: string; pos: "top" | "bot"; vertJc: "top" | "bot"; e: MathNode[] }
+  /** m:limLow / m:limUpp limit stacked under/over a text operator. */
+  | { t: "lim"; pos: "low" | "upp"; e: MathNode[]; lim: MathNode[] };
 
 export interface MathContent {
   kind: "math";

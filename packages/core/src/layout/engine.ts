@@ -2764,6 +2764,7 @@ class Engine {
             glyphBoxH: m.ascent + m.descent,
             mathSrc: span.mathSrc,
             mathScaleY: piece.scaleY,
+            mathScaleX: piece.scaleX,
             mathScaleAnchor: piece.scaleAnchor,
           });
         }
