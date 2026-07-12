@@ -265,6 +265,14 @@ const RAD_VARIANTS = [
 // The MATH table says 166/2048; the probe2 PDF fits 130 (rule centers 9.38 /
 // 9.63pt above the baseline for the ∛ and nested-inner cases at 11pt).
 const RAD_GAP = 130 / 2048;
+// A TOP-LEVEL display-line radical reserves line space beyond its ink:
+// Word's assembled radical variant carries a font box far taller than the
+// drawn sign (probe2-math-matrices: ~30pt line for ~14pt ink at 12pt base -
+// heading->eq / eq->next gaps measure +5.4pt above, +8.1pt below our
+// ink-based box). Scoped to display depth 0: a radical inside a fraction
+// numerator must NOT grow the frac stack (parity2-equations' quadratic).
+const RAD_LINE_ABOVE = 0.45;
+const RAD_LINE_BELOW = 0.675;
 // A variant with large slack (>1.3x the requirement — the nested-outer case)
 // rides UP: its rule top sits this far above the radicand's ascent
 // (probe2: outer rule top 18.0pt over a 9.83pt-ascent radicand).
@@ -356,6 +364,33 @@ function containsDlm(nodes: MathNode[]): boolean {
         break;
       case "mat":
         if (n.rows.some((r) => r.some((c) => containsDlm(c)))) return true;
+        break;
+    }
+  }
+  return false;
+}
+
+/** Does this subtree contain a radical anywhere (nested-radical detect)? */
+function containsRad(nodes: MathNode[]): boolean {
+  for (const n of nodes) {
+    switch (n.t) {
+      case "rad":
+        return true;
+      case "sup":
+      case "sub":
+        if (containsRad(n.base) || containsRad(n.script)) return true;
+        break;
+      case "dlm":
+        if (n.e.some((p) => containsRad(p))) return true;
+        break;
+      case "nary":
+        if (containsRad(n.e)) return true;
+        break;
+      case "frac":
+        if (containsRad(n.num) || containsRad(n.den)) return true;
+        break;
+      case "mat":
+        if (n.rows.some((r) => r.some((c) => containsRad(c)))) return true;
         break;
     }
   }
@@ -898,6 +933,15 @@ function flow(
         // bottom vertex stays at the radicand's descent (Word swaps in a taller
         // MATH variant; scaleY approximates it about the bottom-vertex anchor).
         const grow = Math.max(1, signInkH / (m.ascent + radDesc));
+        // Only the COMPLEX radical (a degree index or a nested radicand)
+        // swaps to Word's oversized assembled variant whose font box far
+        // exceeds its ink; growth alone cannot discriminate (probe2's nested
+        // outer sign grows 1.229 vs dense p8's plain 1.202 - measured, too
+        // close), but structure does: dense's plain top-level radical takes
+        // no extra reserve (p8 pinned), probe2's nested/degree line takes
+        // +0.45em/+0.675em (mat3's PDF gap measurements).
+        const complexRad = !!(node.deg && node.deg.length) || node.e.some((seg) => containsRad([seg]));
+        const topLevelDisplay = display && breakDepth === 0 && complexRad;
         const signW = measurer.width("√", font);
         box.pieces.push({
           text: "√",
@@ -906,8 +950,8 @@ function flow(
           font,
           scaleY: grow > 1.05 ? grow : undefined,
           scaleAnchor: -radDesc,
-          ownAscent: dy + ruleTop,
-          ownDescent: -dy + radDesc,
+          ownAscent: dy + ruleTop + (topLevelDisplay ? size * RAD_LINE_ABOVE : 0),
+          ownDescent: -dy + radDesc + (topLevelDisplay ? size * RAD_LINE_BELOW : 0),
         });
         const radLeft = box.width + signW;
         for (const pc of radBox.pieces) box.pieces.push(rebase(pc, radLeft, dy));
