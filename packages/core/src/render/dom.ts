@@ -45,6 +45,11 @@ export interface DrawingBinding {
   item: DrawingHitItem;
 }
 
+export interface WordArtBinding {
+  el: HTMLElement;
+  item: WordArtItem;
+}
+
 export interface RenderHandle {
   /** Root element containing all pages. */
   root: HTMLElement;
@@ -56,6 +61,8 @@ export interface RenderHandle {
   images: ImageBinding[];
   /** Transparent hit targets over vector drawings/icons (select/move). */
   drawings: DrawingBinding[];
+  /** WordArt / text watermarks, for interactive select/edit. */
+  wordarts: WordArtBinding[];
   /** Revoke object URLs etc. */
   destroy: () => void;
 }
@@ -173,6 +180,7 @@ export function renderToDom(
   const grips: GripBinding[] = [];
   const images: ImageBinding[] = [];
   const drawings: DrawingBinding[] = [];
+  const wordarts: WordArtBinding[] = [];
 
   ensureStylesheet();
   const root = document.createElement("div");
@@ -184,7 +192,7 @@ export function renderToDom(
   root.style.padding = `${gap}px 0`;
 
   for (const page of layout.pages) {
-    root.appendChild(renderPage(doc, page, zoom, urls, options, bindings, grips, images, drawings));
+    root.appendChild(renderPage(doc, page, zoom, urls, options, bindings, grips, images, drawings, wordarts));
   }
 
   container.appendChild(root);
@@ -197,6 +205,7 @@ export function renderToDom(
     grips,
     images,
     drawings,
+    wordarts,
     destroy: () => {
       for (const u of urls) URL.revokeObjectURL(u);
       root.remove();
@@ -258,6 +267,7 @@ function renderPage(
   grips: GripBinding[],
   images: ImageBinding[],
   drawings: DrawingBinding[],
+  wordarts: WordArtBinding[],
 ): HTMLElement {
   const el = document.createElement("div");
   el.className = "dxw-page";
@@ -345,6 +355,21 @@ function renderPage(
         images.push({ el: node, item });
       }
       if (item.kind === "drawingHit") drawings.push({ el: node, item });
+      if (item.kind === "wordart" && options.interactive) {
+        // Make the watermark an opaque hit target so a click selects it
+        // instead of dropping a caret in the text behind. Only the stretched
+        // ink (the inner span) captures — the box's empty corners stay
+        // click-through, so tapping just outside the art still edits the body.
+        node.dataset.dxwWordart = "1";
+        node.style.pointerEvents = "none";
+        const ink = node.firstElementChild as HTMLElement | null;
+        if (ink) {
+          ink.style.pointerEvents = "auto";
+          ink.style.cursor = "pointer";
+          ink.dataset.dxwWordartInk = "1";
+        }
+        wordarts.push({ el: node, item });
+      }
     }
   }
   return el;

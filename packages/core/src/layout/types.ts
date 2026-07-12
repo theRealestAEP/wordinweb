@@ -216,6 +216,8 @@ export interface WordArtItem {
   /** Malformed shapetype guide path: render at nominal fontSize, unstretched
    * (Word can't fitshape, so it draws a near-invisible mark). */
   noFit?: boolean;
+  /** Source VML shape element (v:shape / v:rect), for interactive select/edit. */
+  src?: XmlElement;
 }
 
 export type PageItem =

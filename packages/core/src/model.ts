@@ -421,6 +421,9 @@ export interface ShapeWordArt {
    * drawing the string at its nominal font-size — a near-invisible mark rather
    * than a box-filling watermark. Render at fontSize, unstretched, to match. */
   noFit?: boolean;
+  /** Source VML shape element (v:shape / v:rect) for interactive editing:
+   * the v:textpath string, fill/opacity, and rotation live under it. */
+  src?: XmlElement;
 }
 
 export interface ShapeArt {
