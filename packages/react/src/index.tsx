@@ -33,6 +33,8 @@ import {
   sectPrAt,
   type XmlElement,
   insertTableAfter,
+  createMeasurer,
+  type TextMeasurer,
   layoutDocument,
   listTypeAt,
   printPages,
@@ -194,24 +196,45 @@ export function DocxView({
     let applyStyleShortcut: ((styleId: string | null) => void) | undefined;
     setError(null);
 
+    // One measurer for the document's lifetime: its width/metrics caches survive
+    // across keystrokes so unchanged text is not re-measured on every relayout
+    // (the default path builds a fresh, cold measurer per layoutDocument call).
+    // Cache hits return the exact same values, so layout output is unchanged.
+    const measurer: TextMeasurer = createMeasurer();
+
     const rerender = (doc: DocxDocument): number => {
-      const layout = layoutDocument(doc);
+      const perf = (globalThis as { __dxwPerf?: { last?: Record<string, number> } }).__dxwPerf;
+      const t0 = perf ? performance.now() : 0;
+      const layout = layoutDocument(doc, { measurer });
+      const t1 = perf ? performance.now() : 0;
       const container = containerRef.current;
       if (!container) return 0;
       // Re-rendering replaces the page DOM; keep the user's scroll position
-      // (destroy-then-append clamps scrollTop to 0 otherwise).
+      // (destroy-then-append clamps scrollTop to 0 otherwise). The previous
+      // handle is handed to renderToDom so it can adopt the DOM of unchanged
+      // pages and tear down only what actually changed.
       const { scrollTop, scrollLeft } = container;
-      handle?.destroy();
+      const prev = handle;
+      const t2 = perf ? performance.now() : 0;
       handle = renderToDom(doc, layout, container, {
         zoom,
         interactive: editable,
         comments: showComments,
         onDeleteComment,
         onReplyComment,
-      });
+      }, prev ?? undefined);
       container.scrollTop = scrollTop;
       container.scrollLeft = scrollLeft;
+      const t3 = perf ? performance.now() : 0;
       editor?.afterRender();
+      if (perf) {
+        perf.last = {
+          layout: t1 - t0,
+          destroy: t2 - t1,
+          render: t3 - t2,
+          totalPages: layout.totalPages,
+        };
+      }
       return layout.totalPages;
     };
 
