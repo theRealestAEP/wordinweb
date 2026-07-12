@@ -81,9 +81,32 @@ export function formatNumber(value: number, format: string): string {
       return "";
     case "ordinal":
       return String(value) + ordinalSuffix(value);
+    case "arabicAbjad":
+      return toArabicLetter(value, ABJAD_LETTERS);
+    case "arabicAlpha":
+      return toArabicLetter(value, ALPHA_LETTERS);
     default:
       return String(value);
   }
+}
+
+// Arabic list numbering. arabicAbjad follows the classical abjadī order
+// (Word renders 1→أ, 2→ب, 3→ج); arabicAlpha follows the modern hijā'ī
+// (alphabetical) order (1→ا, 2→ب, 3→ت). Both cycle through 28 letters.
+const ABJAD_LETTERS = [
+  "أ", "ب", "ج", "د", "ه", "و", "ز", "ح", "ط", "ي",
+  "ك", "ل", "م", "ن", "س", "ع", "ف", "ص", "ق", "ر",
+  "ش", "ت", "ث", "خ", "ذ", "ض", "ظ", "غ",
+];
+const ALPHA_LETTERS = [
+  "ا", "ب", "ت", "ث", "ج", "ح", "خ", "د", "ذ", "ر",
+  "ز", "س", "ش", "ص", "ض", "ط", "ظ", "ع", "غ", "ف",
+  "ق", "ك", "ل", "م", "ن", "ه", "و", "ي",
+];
+
+function toArabicLetter(n: number, letters: string[]): string {
+  if (n <= 0) return String(n);
+  return letters[(n - 1) % letters.length] ?? String(n);
 }
 
 function toRoman(n: number): string {
