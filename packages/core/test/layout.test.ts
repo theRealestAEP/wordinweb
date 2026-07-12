@@ -1550,6 +1550,44 @@ describe("layout engine", () => {
     expect(b.x - a.x).toBeLessThan(40);
   });
 
+  it("vertical (tbRl) section starts a fresh column when East Asian text resumes after a Western run", () => {
+    // probe2-ruby-vertical p2: the body column ends right after the embedded
+    // Latin "textDirection=tbRl" and the following CJK opens a new column,
+    // even though the column is far from full. The short "日本ABC字" would
+    // otherwise sit in one column; the grid-resync break splits 字 off.
+    const body =
+      `<w:p><w:r><w:t>日本ABC字</w:t></w:r></w:p>` +
+      `<w:sectPr><w:textDirection w:val="tbRl"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    const nichi = result.pages[0].items.find((i) => i.kind === "text" && i.text === "日");
+    const ji = result.pages[0].items.find((i) => i.kind === "text" && i.text === "字");
+    if (nichi?.kind !== "text" || ji?.kind !== "text") throw new Error("vertical CJK not found");
+    // The section frame is laid horizontally then rotated +90° into columns, so
+    // each pre-rotation LINE becomes a vertical column. Both chars start their
+    // line (equal x); the resync put 字 on a second line, so it carries a
+    // distinct baseline — a fresh column after rotation. Without the resync the
+    // short run would share one line.
+    expect(nichi.rotate?.deg).toBe(90);
+    expect(Math.abs((ji.baseline ?? 0) - (nichi.baseline ?? 0))).toBeGreaterThan(10);
+  });
+
+  it("ruby distributeSpace spreads the annotation across the base width", () => {
+    const rubyRun =
+      `<w:r><w:ruby>` +
+      `<w:rubyPr><w:hpsRaise w:val="11"/><w:rubyAlign w:val="distributeSpace"/></w:rubyPr>` +
+      `<w:rt><w:r><w:rPr><w:sz w:val="8"/></w:rPr><w:t>かんじ</w:t></w:r></w:rt>` +
+      `<w:rubyBase><w:r><w:rPr><w:sz w:val="22"/></w:rPr><w:t>漢字</w:t></w:r></w:rubyBase>` +
+      `</w:ruby></w:r>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(`<w:p>${rubyRun}</w:p>`) });
+    const rt = result.pages[0].items.find((i) => i.kind === "text" && i.text === "かんじ");
+    if (rt?.kind !== "text") throw new Error("ruby annotation not found");
+    // The 3-glyph annotation is spread over the 2-glyph base with a positive
+    // inter-glyph gap (distributeSpace) rather than painted as a tight cluster.
+    expect(rt.props.letterSpacing ?? 0).toBeGreaterThan(0);
+  });
+
   it("honors a Word-authored grid (cells carry tcW)", () => {
     const tbl = `<w:tbl>
       <w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>

@@ -486,6 +486,14 @@ export function breakParagraph(
      * Measured in staging-tblextreme: tab + "12.5" with a decimal stop at
      * 2600tw lands left-aligned on the 2880tw default stop, not at 2600. */
     inTableCell?: boolean;
+    /** Section-level vertical (tbRl) docGrid flow: Word re-establishes the
+     * character grid after an embedded Western (Latin) run by breaking to a
+     * fresh vertical line when East Asian text resumes. probe2-ruby-vertical
+     * p2's body column breaks right after "textDirection=tbRl" though the
+     * column is far from full — the following CJK "を使用し…" starts a new
+     * column. Scoped to the rotated section flow so the horizontal docGrid
+     * gates (staging-eastasian) are untouched. */
+    verticalGridResync?: boolean;
   },
 ): BrokenParagraph {
   const props = doc.effectiveParaProps(para);
@@ -843,6 +851,9 @@ export function breakParagraph(
   // Line ordinal that may keep a line-initial space (the line right after an
   // explicit <w:br/>); -1 = none.
   let keepLeadingSpaceLine = -1;
+  // Script of the last non-space text fragment placed, for the vertical
+  // docGrid grid-resync break (null until the first fragment).
+  let prevContentCJK: boolean | null = null;
   for (let ai = 0; ai < atoms.length; ai++) {
     const atom = atoms[ai];
     if (atom.kind === "anchorPoint") {
@@ -1124,6 +1135,21 @@ export function breakParagraph(
       x += w;
       continue;
     }
+    // Vertical (tbRl) docGrid grid-resync: when East Asian text resumes after
+    // an embedded Western run, Word starts a fresh vertical line even though
+    // the current one is far from full (probe2-ruby-vertical p2: the body
+    // column "この節は textDirection=tbRl" ends there and "を使用し…" opens the
+    // next column). The intervening space hangs at the flushed line's end.
+    const fragIsCJK = isCJK(atom.text);
+    if (
+      opts?.verticalGridResync &&
+      fragIsCJK &&
+      prevContentCJK === false &&
+      curLineWidth > 0 &&
+      curClearY === undefined
+    ) {
+      flush(false, false);
+    }
     // frag. A word is the unit of breaking, and it may be split across
     // several frag atoms when formatting runs divide it: the "head" is the
     // part already placed on this line, the "tail" the frag atoms after this
@@ -1317,6 +1343,7 @@ export function breakParagraph(
     cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
     curLineWidth += atom.width;
     x += atom.width;
+    if (atom.text.trim().length > 0) prevContentCJK = fragIsCJK;
   }
 
   if (!flushedTrailingBreak) flush(true, false);
@@ -1576,15 +1603,21 @@ function finishLine(
       return;
     }
     let m = measurer.metrics(font);
-    // docGrid type="charsAndLines" (compat 15): East Asian glyphs keep their
-    // font's NATURAL grid line pitch, which the tall macOS substitute faces
-    // (Hiragino Mincho for MS Mincho, PingFang/Songti for the Chinese fallback)
-    // overstate. Scale the substitute metric to the Word-measured grid em so the
-    // block does not overflow (probe3-chargrid: Japanese 1.296em -> 15.4pt/line,
-    // Chinese fallback 1.733em -> 20.5pt/line after the auto 1.08 multiplier).
-    // Scoped to charsAndLines only (no gate uses it), so the snap-tuned CJK
-    // profiles that staging-eastasian / eq-as-images rely on are untouched.
-    if (doc.charGridEa && font.size > 0) {
+    // East Asian line pitch: the tall macOS substitute faces (Hiragino Mincho
+    // for MS Mincho, PingFang/Songti for the Chinese fallback) overstate the
+    // line height of Word's real faces. Scale the substitute metric to the
+    // Word-measured em in the two contexts that use the font's NATURAL pitch:
+    //   - docGrid type="charsAndLines" (compat 15) — probe3-chargrid.
+    //   - NO docGrid at all (minLineHeight undefined) — plain CJK paragraphs
+    //     and tbRl/btLr table cells (probe2-ruby-vertical p1: the vertical
+    //     cell columns pitch 20.5px like Word's MS Mincho, not Hiragino's
+    //     26px, and the ruby lines stop drifting the table down the page).
+    // A docGrid type="lines" section (staging-eastasian, this file's own p2
+    // vertical flow) keeps the snap-tuned raw profile — its line height is the
+    // grid pitch, not the natural em — so it is EXCLUDED here.
+    // 1.296em Japanese / 1.733em Chinese fallback, both x the auto 1.08
+    // multiplier give the Word-measured advances.
+    if ((doc.charGridEa || minLineHeight === undefined) && font.size > 0) {
       const fam = font.family.toLowerCase();
       const targetEm = /hiragino/.test(fam)
         ? 1.296
