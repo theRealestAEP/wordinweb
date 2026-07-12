@@ -482,20 +482,24 @@ function parseParaChildren(
         out.push(run);
         captureRefBookmarkRun(ctx, run);
       }
-    } else if (ln === "ins" || ln === "del") {
-      // Tracked changes. Final view: insertions read as normal text,
-      // deletions disappear. Markup view: both render, author-colored,
-      // insertions underlined and deletions struck through.
+    } else if (ln === "ins" || ln === "del" || ln === "moveTo" || ln === "moveFrom") {
+      // Tracked changes. w:moveTo/w:moveFrom are the move counterparts of
+      // w:ins/w:del (the same text, marked as relocated rather than added or
+      // removed). Final view: insertions and move destinations read as normal
+      // text, deletions and move origins disappear. Markup view: all render,
+      // author-colored, additions/destinations underlined and removals/origins
+      // struck through. Range markers (move*RangeStart/End) carry no content.
+      const isInsert = ln === "ins" || ln === "moveTo";
       const markup = ctx.revisionView === "markup";
-      if (ln === "del" && !markup) continue;
+      if (!isInsert && !markup) continue;
       const inner: ParaChild[] = [];
       parseParaChildren(el, ctx, inner, field, bookmarks);
       if (markup) {
         const style = (r: Run) => {
           r.props = {
             ...r.props,
-            color: ln === "ins" ? "#C00000" : "#B0261C",
-            ...(ln === "ins" ? { underline: "single" } : { strike: true }),
+            color: isInsert ? "#C00000" : "#B0261C",
+            ...(isInsert ? { underline: "single" } : { strike: true }),
           };
         };
         for (const c of inner) {
