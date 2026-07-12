@@ -2115,6 +2115,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
             vAlign: vAlignRaw === "center" ? "center" : vAlignRaw === "bottom" ? "bottom" : vAlignRaw === "top" ? "top" : undefined,
             rotation,
             behind: zIndex < 0,
+            src: el,
             ...(noFit ? { noFit: true, fontSize } : {}),
           },
         });
@@ -2162,6 +2163,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
                 vAlign: vAlignRaw === "center" ? "center" : vAlignRaw === "bottom" ? "bottom" : vAlignRaw === "top" ? "top" : undefined,
                 wrap: "none",
                 behind: zIndex < 0,
+                srcDrawing: el,
                 ...(gain !== 1 || blacklevel !== 0 ? { washout: { gain, blacklevel } } : {}),
               },
             });

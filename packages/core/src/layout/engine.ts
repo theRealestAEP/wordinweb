@@ -3904,6 +3904,7 @@ class Engine {
             behind: shape.behind,
             fontSize: shape.fontSize,
             noFit: shape.noFit,
+            src: shape.src,
           });
           continue;
         }
