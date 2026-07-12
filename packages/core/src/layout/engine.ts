@@ -276,6 +276,10 @@ class Engine {
   /** Vertical flow already consumed in the current later-column pre-banner
    * slot. It reduces the below-banner capacity by the same amount. */
   private bannerSlotUsed = 0;
+  /** True while a section-level tbRl vertical flow is being laid: paragraphs
+   * re-establish the vertical grid after embedded Western runs (see
+   * breakParagraph's verticalGridResync). */
+  private verticalGridFlow = false;
 
   constructor(
     private doc: DocxDocument,
@@ -517,7 +521,9 @@ class Engine {
     const bodyTop = page.bodyTop - gridBump;
     const frameWidth = Math.max(4, page.bodyBottom - bodyTop);
     const bodyRight = sp.pageWidth - sp.marginRight;
+    this.verticalGridFlow = true;
     const { items, height: frameHeight } = this.layoutFrame(section.blocks, frameWidth, this.fieldCtx());
+    this.verticalGridFlow = false;
     const targetX = bodyRight - frameHeight;
     const targetY = bodyTop;
     const centerX = targetX + frameHeight / 2;
@@ -3317,18 +3323,44 @@ class Engine {
       if (span.ruby && span.ruby.rtText) {
         const rt = span.ruby;
         const rtm = this.measurer.metrics(rt.rtFont);
-        // Furigana rides just above the base ink: its box bottom sits at the
-        // base glyph top (base baseline minus base ascent), so its baseline is
-        // one base ascent plus its own descent above the base baseline.
-        const rtBaseline = b - gm.ascent - rtm.descent;
-        const rtDX = (span.width - rt.rtWidth) / 2;
+        // Furigana rides at the base glyph's TOP: Word paints the rt box with
+        // its top level with the base em-box top (measured: small ruby rt top
+        // 173.5 vs base top 172.1; large 224.2 vs 222.5 — the annotation dips
+        // ~1.5px into the base box top). Anchoring to the base's rendered
+        // glyphTop (not the raw ascent) keeps the rt tight to the base even
+        // when the CJK line metric is scaled down for non-grid EA text.
+        const rtBaseline = glyphTop + rtm.ascent;
+        // rubyAlign: "distributeSpace" (Word's default for furigana) spreads
+        // the rt glyphs across the base cluster width with an equal slot per
+        // glyph — each character centered in a baseWidth/n cell, so the outer
+        // margins are half a cell (measured: にほんご over 日本語 spans the full
+        // 44px base at an 11px pitch, first glyph inset 2.6px). We realise the
+        // spread with letter-spacing = (baseWidth − rtWidth)/n and a leading
+        // offset of half that. When the annotation is WIDER than the base (rare
+        // here) it falls back to a plain centered cluster.
+        const rtChars = [...rt.rtText].length;
+        const distribute =
+          (rt.align === "distributeSpace" || rt.align === "distributeLetter") &&
+          rtChars > 0 &&
+          rt.baseWidth > rt.rtWidth + 0.01;
+        let rtProps = rt.rtProps;
+        let rtDX: number;
+        let rtWidth = rt.rtWidth;
+        if (distribute) {
+          const gap = (rt.baseWidth - rt.rtWidth) / rtChars;
+          rtProps = { ...rt.rtProps, letterSpacing: (rt.rtProps.letterSpacing ?? 0) + gap };
+          rtDX = (span.width - rt.baseWidth) / 2 + gap / 2;
+          rtWidth = rt.baseWidth;
+        } else {
+          rtDX = (span.width - rt.rtWidth) / 2;
+        }
         page.items.push({
           kind: "text",
           x: originX + span.x + rtDX,
           baseline: rtBaseline,
-          width: rt.rtWidth,
+          width: rtWidth,
           text: rt.rtText,
-          props: rt.rtProps,
+          props: rtProps,
           font: rt.rtFont,
           lineTop: topY,
           lineHeight: line.height,
@@ -3561,7 +3593,9 @@ class Engine {
           label,
           cellBounds,
           this.sp?.docGridLinePitch,
-          inCell ? { inTableCell: true } : undefined,
+          inCell || this.verticalGridFlow
+            ? { inTableCell: inCell === true, verticalGridResync: this.verticalGridFlow }
+            : undefined,
         );
         if (!inCell && broken.anchors.length > 0) {
           this.emitAnchors(broken.anchors, fake, fields, 0, top, origin);
