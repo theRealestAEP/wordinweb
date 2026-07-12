@@ -2217,6 +2217,23 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
 
 // ---------- tables ----------
 
+/** Table rows in document order, descending through w:sdt content controls.
+ * A repeating-section control (w15:repeatingSection) wraps its data rows in an
+ * outer w:sdt, and each row in its own w15:repeatingSectionItem w:sdt, so the
+ * w:tr elements are grandchildren of the table rather than direct children. */
+function collectTableRows(el: XmlElement): XmlElement[] {
+  const out: XmlElement[] = [];
+  for (const c of el.children) {
+    const ln = localName(c.name);
+    if (ln === "tr") out.push(c);
+    else if (ln === "sdt") {
+      const content = child(c, "sdtContent");
+      if (content) out.push(...collectTableRows(content));
+    }
+  }
+  return out;
+}
+
 export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
   const tblPr = child(tbl, "tblPr");
   const props: TableProps = {};
@@ -2323,7 +2340,7 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
   }
 
   const rows: TableRow[] = [];
-  for (const tr of children(tbl, "tr")) {
+  for (const tr of collectTableRows(tbl)) {
     // Final revision view: a row whose trPr carries w:del is a tracked row
     // deletion — Word removes it entirely (real.docx: a fully-deleted caption
     // table otherwise leaves a 200px border/grip skeleton with no text).
