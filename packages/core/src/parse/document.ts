@@ -714,6 +714,20 @@ function parseRun(
           flushField(field);
           field.mode = "instr";
           field.carrier = run;
+          // Legacy form fields carry their display in the fldChar begin's
+          // w:ffData, not a separate/result run. FORMCHECKBOX: a ballot box
+          // (U+2610) or ballot-box-with-X (U+2612) from w:checkBox/w:checked.
+          // FORMDROPDOWN: the w:ddList selection (w:result indexes w:listEntry).
+          const ffData = child(el, "ffData");
+          const checkBox = child(ffData, "checkBox");
+          const ddList = child(ffData, "ddList");
+          if (checkBox) {
+            field.cachedResult = onOff(child(checkBox, "checked")) ? "☒" : "☐";
+          } else if (ddList) {
+            const entries = children(ddList, "listEntry");
+            const sel = intAttr(child(ddList, "result"), "val") ?? 0;
+            field.cachedResult = attr(entries[sel], "val") ?? "";
+          }
         } else if (type === "separate") {
           field.mode = "result";
           // HYPERLINK and TOC results are verbatim styled content: let the
