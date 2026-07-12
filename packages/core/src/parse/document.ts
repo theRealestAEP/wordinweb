@@ -482,20 +482,24 @@ function parseParaChildren(
         out.push(run);
         captureRefBookmarkRun(ctx, run);
       }
-    } else if (ln === "ins" || ln === "del") {
-      // Tracked changes. Final view: insertions read as normal text,
-      // deletions disappear. Markup view: both render, author-colored,
-      // insertions underlined and deletions struck through.
+    } else if (ln === "ins" || ln === "del" || ln === "moveTo" || ln === "moveFrom") {
+      // Tracked changes. w:moveTo/w:moveFrom are the move counterparts of
+      // w:ins/w:del (the same text, marked as relocated rather than added or
+      // removed). Final view: insertions and move destinations read as normal
+      // text, deletions and move origins disappear. Markup view: all render,
+      // author-colored, additions/destinations underlined and removals/origins
+      // struck through. Range markers (move*RangeStart/End) carry no content.
+      const isInsert = ln === "ins" || ln === "moveTo";
       const markup = ctx.revisionView === "markup";
-      if (ln === "del" && !markup) continue;
+      if (!isInsert && !markup) continue;
       const inner: ParaChild[] = [];
       parseParaChildren(el, ctx, inner, field, bookmarks);
       if (markup) {
         const style = (r: Run) => {
           r.props = {
             ...r.props,
-            color: ln === "ins" ? "#C00000" : "#B0261C",
-            ...(ln === "ins" ? { underline: "single" } : { strike: true }),
+            color: isInsert ? "#C00000" : "#B0261C",
+            ...(isInsert ? { underline: "single" } : { strike: true }),
           };
         };
         for (const c of inner) {
@@ -710,6 +714,20 @@ function parseRun(
           flushField(field);
           field.mode = "instr";
           field.carrier = run;
+          // Legacy form fields carry their display in the fldChar begin's
+          // w:ffData, not a separate/result run. FORMCHECKBOX: a ballot box
+          // (U+2610) or ballot-box-with-X (U+2612) from w:checkBox/w:checked.
+          // FORMDROPDOWN: the w:ddList selection (w:result indexes w:listEntry).
+          const ffData = child(el, "ffData");
+          const checkBox = child(ffData, "checkBox");
+          const ddList = child(ffData, "ddList");
+          if (checkBox) {
+            field.cachedResult = onOff(child(checkBox, "checked")) ? "☒" : "☐";
+          } else if (ddList) {
+            const entries = children(ddList, "listEntry");
+            const sel = intAttr(child(ddList, "result"), "val") ?? 0;
+            field.cachedResult = attr(entries[sel], "val") ?? "";
+          }
         } else if (type === "separate") {
           field.mode = "result";
           // HYPERLINK and TOC results are verbatim styled content: let the
@@ -2217,6 +2235,23 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
 
 // ---------- tables ----------
 
+/** Table rows in document order, descending through w:sdt content controls.
+ * A repeating-section control (w15:repeatingSection) wraps its data rows in an
+ * outer w:sdt, and each row in its own w15:repeatingSectionItem w:sdt, so the
+ * w:tr elements are grandchildren of the table rather than direct children. */
+function collectTableRows(el: XmlElement): XmlElement[] {
+  const out: XmlElement[] = [];
+  for (const c of el.children) {
+    const ln = localName(c.name);
+    if (ln === "tr") out.push(c);
+    else if (ln === "sdt") {
+      const content = child(c, "sdtContent");
+      if (content) out.push(...collectTableRows(content));
+    }
+  }
+  return out;
+}
+
 export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
   const tblPr = child(tbl, "tblPr");
   const props: TableProps = {};
@@ -2323,7 +2358,7 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
   }
 
   const rows: TableRow[] = [];
-  for (const tr of children(tbl, "tr")) {
+  for (const tr of collectTableRows(tbl)) {
     // Final revision view: a row whose trPr carries w:del is a tracked row
     // deletion — Word removes it entirely (real.docx: a fully-deleted caption
     // table otherwise leaves a 200px border/grip skeleton with no text).

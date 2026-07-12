@@ -285,6 +285,14 @@ const ALIGN_MAP: Record<string, Alignment> = {
   end: "right",
   both: "justify",
   distribute: "justify",
+  // Arabic kashida justification (low/medium/high) fills every non-final line
+  // to the full column width, exactly like "both" — Word's PDF shows the
+  // stretch delivered mostly by inter-word spaces (plus progressively more
+  // tatweel elongation from low→high, which we approximate with space
+  // expansion). The last line stays ragged, matching "both".
+  lowKashida: "justify",
+  mediumKashida: "justify",
+  highKashida: "justify",
 };
 
 export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): ParaProps {
