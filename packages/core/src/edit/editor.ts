@@ -2490,6 +2490,9 @@ export class DocxEditor {
         xPx = best.item.x + (local >= len ? best.item.width : (best.item.width * local) / len);
       }
     }
+    // Cell/margin-confined hanging spaces: Word pins the caret at the
+    // line's content edge no matter how many trailing spaces are typed.
+    if (best.item.caretClampX !== undefined) xPx = Math.min(xPx, best.item.caretClampX);
     const surface = best.el.parentElement!;
     if (this.caretEl.parentElement !== surface) surface.appendChild(this.caretEl);
     const fs = best.item.font.size;

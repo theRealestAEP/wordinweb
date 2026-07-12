@@ -292,6 +292,8 @@ export interface LineSpan {
   pageRef?: string;
   /** Bidi embedding level for visual reordering (0 = LTR, odd = RTL). */
   rtlLevel?: number;
+  /** Editor-only: max caret x for this span (cell-confined hanging spaces). */
+  caretClampX?: number;
   /** Render this span right-to-left (browser shapes/orders within the box). */
   rtl?: boolean;
   /** East-Asian ruby cluster: the base text rides in `text`; `ruby` carries
@@ -782,9 +784,17 @@ export function breakParagraph(
     if (hanging.length > 0 && !bidiPara) {
       let hx = startX;
       for (const s of line.spans) hx = Math.max(hx, s.x + s.width);
+      // The caret must never escape its confinement while typing trailing
+      // spaces: Word pins it at the line's content edge - the cell edge
+      // inside tables (the repro walked the caret through the neighbor
+      // cell), the margin in body text - even as the spaces keep hanging
+      // invisibly. Spans keep their true layout x (hanging spaces paint no
+      // ink, so parity is untouched); the clamp is editor-only metadata.
+      const clamp = startX + availFor(lineIndex);
       for (const s of hanging) {
         s.x = hx;
         hx += s.width;
+        s.caretClampX = clamp;
         line.spans.push(s);
       }
     }

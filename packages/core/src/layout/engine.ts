@@ -3319,6 +3319,7 @@ class Engine {
         href: span.href,
         src: span.src,
         rtl: span.rtl,
+        caretClampX: span.caretClampX === undefined ? undefined : originX + span.caretClampX,
       });
       if (span.ruby && span.ruby.rtText) {
         const rt = span.ruby;

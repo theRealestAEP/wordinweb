@@ -99,6 +99,10 @@ export interface TextItem {
    * widow-controlled paragraphs; row splitting uses it to scope Word's
    * widow/orphan rules to the paragraph straddling the cut. */
   paraSeq?: number;
+  /** Editor-only: maximum caret x for this item — a trailing hanging space
+   * confined to its table cell pins the caret at the cell's content edge
+   * (Word behavior) while the span keeps its true hanging layout x. */
+  caretClampX?: number;
 }
 
 export interface RectItem {
