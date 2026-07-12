@@ -3657,6 +3657,19 @@ describe("OMML matrices, arrays, accents, group chars, radicals, limits (probe2-
     expect(braces[0].scaleY).toBeGreaterThan(1);
   });
 
+  it("suppresses the comma kern when the source already spells post-comma spaces", () => {
+    // probe2-math-matrices' piecewise arms carry literal spaces after the comma
+    // ('x², x ≥ 0'); Word draws just those spaces, so the synthetic COMMA_SPACE
+    // kern must not stack on top of a following space (it still applies when the
+    // comma is tight to the next atom, e.g. 'B(h,r,θ)').
+    const mfont = { family: "Cambria Math", size: S, bold: false, italic: false };
+    const w = (t: string) => measurer.width(t, mfont);
+    const kerned = layoutMath([run("1,1")], S, measurer, true);
+    const spaced = layoutMath([run("1, 1")], S, measurer, true);
+    // kerned adds 0.17em after the comma; spaced relies on its literal space.
+    expect(kerned.width - spaced.width).toBeCloseTo(S * 0.17 - w(" "), 1);
+  });
+
   it("an accent composes onto its base glyph", () => {
     const box = layoutMath([{ t: "acc", chr: "̂", e: [run("x")] }], S, measurer, false);
     expect(box.pieces.length).toBe(1);

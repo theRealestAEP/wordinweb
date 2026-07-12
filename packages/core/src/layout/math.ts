@@ -471,15 +471,23 @@ function flow(
         // parity-math's = gaps); display equations keep the medium space around
         // relations (parity2-equations f(x)=, e^x=).
         const relGap = display ? medGap : size * (5 / 18);
-        for (const tok of node.text.split(/([=+−×÷<>≤≥±≠,-])/).filter((s) => s.length > 0)) {
+        const toks = node.text.split(/([=+−×÷<>≤≥±≠,-])/).filter((s) => s.length > 0);
+        for (let ti = 0; ti < toks.length; ti++) {
+          const tok = toks[ti];
           // Punctuation: Word kerns a thin space AFTER a math comma even when
           // the source has none (dense p7 'B(h,r,θ)' renders ℎ, 𝑟, 𝜃 with
           // 2.72px gaps at 16px). The comma itself stays tight to its left.
+          // When the source ALREADY spells out spaces after the comma (the
+          // cases body 'x², x ≥ 0' carries literal U+0020s), those spaces are
+          // the gap Word draws — do not add the synthetic kern on top of them
+          // (probe2-math-matrices' piecewise arms measured the plain 3-space
+          // gap, not 3 spaces + the kern).
           if (tok === ",") {
             const text = mathText(tok, node.normal);
             box.pieces.push({ text, x: box.width, dy, font });
             box.width += measurer.width(text, font);
-            if (!tight) box.width += size * COMMA_SPACE;
+            const nextIsSpace = ti + 1 < toks.length && /^\s/.test(toks[ti + 1]);
+            if (!tight && !nextIsSpace) box.width += size * COMMA_SPACE;
             prevOperand = false;
             continue;
           }
