@@ -2407,6 +2407,12 @@ function buildAtoms(
     if (hansi && hansi.toLowerCase() !== font.family.toLowerCase() && !/symbol|wingdings|webdings/i.test(font.family)) {
       const isHA = (ch: string) => {
         const c = ch.codePointAt(0) ?? 0;
+        // Complex scripts (Devanagari, Tamil, Thai) belong to the w:cs font
+        // channel, never w:hAnsi - without this exclusion the hAnsi splitter
+        // re-routed Indic runs to the theme Calibri AFTER pushStyled had
+        // already routed them to Word's real face (probe3-indic: Mangal set,
+        // then clobbered; spans painted Calibri with browser-fallback glyphs).
+        if ((c >= 0x900 && c <= 0x97f) || (c >= 0xb80 && c <= 0xbff) || (c >= 0xe00 && c <= 0xe7f)) return false;
         return c > 0x7f && !(c >= 0xe000 && c <= 0xf8ff) && !isCJK(ch);
       };
       if (Array.from(text).some(isHA)) {
