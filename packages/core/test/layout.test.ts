@@ -893,6 +893,24 @@ describe("layout engine", () => {
     }
   });
 
+  it("renders U+00AD soft hyphens as visible non-breaking hyphens", () => {
+    // probe2-hyphenation p1: Word paints an optional hyphen as a hyphen glyph
+    // in EVERY position and never breaks a line at it — the soft-hyphenated
+    // word moves whole. Mapping to "-" (a hyphenBreaks opportunity) split the
+    // word where Word kept it together, reflowing the paragraph.
+    const para =
+      `<w:p><w:r><w:t xml:space="preserve">start super­cali­fragilistic end</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para + section) });
+    const texts = result.pages[0].items.filter((i) => i.kind === "text");
+    const joined = texts.map((t) => (t.kind === "text" ? t.text : "")).join("");
+    // Soft hyphens paint as visible U+2011 hyphens, not invisible U+00AD.
+    expect(joined).toContain("super‑cali‑fragilistic");
+    expect(joined).not.toContain("­");
+  });
+
   it("fits a w:fitText run into exactly its target width", () => {
     // probe3-text-effects: <w:fitText w:val="1440"/> compresses "SQUEEZE ME
     // INTO ONE INCH" so the run spans exactly 1in (Word PDF: glyph extent

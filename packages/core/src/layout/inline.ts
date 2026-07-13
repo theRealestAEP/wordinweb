@@ -152,6 +152,14 @@ export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
 }
 
 function displayText(text: string, props: RunProps): string {
+  // Word renders U+00AD (optional hyphen) as a VISIBLE hyphen glyph in every
+  // position, not just at line breaks — and does NOT break lines at it
+  // (probe2-hyphenation p1: the Word PDF draws "super-cali-fragilistic-
+  // expiali-docious" mid-line AND moves the whole word to the next line
+  // rather than splitting at any soft hyphen). Browsers hide the character,
+  // so map to U+2011 (non-breaking hyphen, same glyph, not a hyphenBreaks
+  // opportunity); same length keeps source offsets 1:1.
+  if (text.includes("­")) text = text.replace(/­/g, "‑");
   if (props.caps) return text.toUpperCase();
   return text;
 }
