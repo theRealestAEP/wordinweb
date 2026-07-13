@@ -951,6 +951,8 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       // charts pasted from lab tools) aren't a broken box.
       let decoded: string | null = null;
       if (ext === "tiff" || ext === "tif") {
+        const tiffCached = docDerivedSrc(doc, `tiff:${item.part}`);
+        if (tiffCached) { decoded = tiffCached; } else {
         const dec = decodeTiff(bytes);
         if (dec) {
           const canvas = document.createElement("canvas");
@@ -962,15 +964,28 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
             imgData.data.set(dec.rgba);
             cx.putImageData(imgData, 0, 0);
             decoded = canvas.toDataURL("image/png");
+            setDocDerivedSrc(doc, `tiff:${item.part}`, decoded);
+          }
           }
         }
       } else if (ext === "wmf") {
-        decoded = renderWmf(bytes, item.width, item.height);
+        const wmfKey = `wmf:${item.part}:${Math.round(item.width)}x${Math.round(item.height)}`;
+        decoded = docDerivedSrc(doc, wmfKey) ?? renderWmf(bytes, item.width, item.height);
+        if (decoded) setDocDerivedSrc(doc, wmfKey, decoded);
       } else if (ext === "emf") {
-        const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-        void convertEmfToDataUrl(buf).then((url) => {
-          if (url) img.src = url;
-        });
+        const emfKey = `emf:${item.part}`;
+        const cachedEmf = docDerivedSrc(doc, emfKey);
+        if (cachedEmf) {
+          decoded = cachedEmf;
+        } else {
+          const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+          void convertEmfToDataUrl(buf).then((url) => {
+            if (url) {
+              setDocDerivedSrc(doc, emfKey, url);
+              img.src = url;
+            }
+          });
+        }
       }
       if (decoded) {
         img.src = decoded;
@@ -1066,6 +1081,11 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
         }
       }
       if (item.washout && img.src) {
+        const woKey = `washout:${item.part}`;
+        const woCached = docDerivedSrc(doc, woKey);
+        if (woCached) {
+          img.src = woCached;
+        } else {
         // Picture-watermark washout (VML v:imagedata gain/blacklevel): a
         // per-channel linear recolor. Measured against the Word PDF of
         // probe2-picture-watermark (gain=19661f=0.3, blacklevel=22938f=0.35):
@@ -1092,12 +1112,16 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
               d[i + 2] = Math.min(255, Math.round(d[i + 2] * gain + lift));
             }
             cx.putImageData(data, 0, 0);
-            img.src = cv.toDataURL("image/png");
+            const woSrc = cv.toDataURL("image/png");
+              setDocDerivedSrc(doc, woKey, woSrc);
+              img.src = woSrc;
           } catch {
             // Canvas unavailable/tainted: keep the unwashed image.
           }
         };
         probe.src = img.src;
+      
+        }
       }
       img.style.position = "absolute";
       let node: HTMLElement = img;
