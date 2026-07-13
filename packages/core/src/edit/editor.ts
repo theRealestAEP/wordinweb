@@ -7,7 +7,7 @@ import { EditHistory } from "./history.js";
 import { advanceCell, moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
 import { listTypeAt, setListLevel } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
-import { mathLinearOf, moveMath, setMathLinear } from "./math.js";
+import { isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
 import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 import { SelectionSegment } from "./commands.js";
 import { adjustFloatingPosition, imageAltText, isFloatingDrawing, replaceImageBlip, setFloatingPosition, setImageAltText, setImageWrap } from "./images.js";
@@ -1521,6 +1521,18 @@ export class DocxEditor {
       const handle = this.host.getHandle();
       const binding = handle?.drawings.find((b) => b.el === target);
       if (!binding) return false;
+      // A shape-fill hit (under the shape's text) selects the shape only: a
+      // click on the fill selects it, a click on its text glyphs falls through
+      // to edit the text, and it never drag-moves. Select on mousedown (not a
+      // mouseup listener) so the suppression flag is consumed by THIS click's
+      // mouseup, leaving the next click free to deselect / enter text editing.
+      if (binding.item.belowText) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.suppressNextMouseUp = true;
+        this.selectImage(target, binding.item.src, undefined, "drawing");
+        return true;
+      }
       e.preventDefault();
       e.stopPropagation();
       const startX = e.clientX;
@@ -1915,45 +1927,105 @@ export class DocxEditor {
   /** Which part tree the element lives in: document body or header/footer. */
   private mathEditorEl: HTMLDivElement | null = null;
 
-  /** Inline equation editor: linear form in, OMML back out. */
+  /**
+   * Inline equation editor. One consistent popover for every equation: it
+   * shows the equation's linear form. Equations that round-trip losslessly
+   * through that form are editable (linear text in, OMML back out); equations
+   * whose structure the linear form can't represent (matrices, n-ary/limit
+   * over-under groups, accents, equation arrays) open read-only so a stray
+   * edit can never silently rewrite their OMML.
+   */
   private openMathEditor(oMathEl: XmlElement, clientX: number, clientY: number): void {
     this.closeMathEditor();
     this.hideCaret();
+    const original = mathLinearOf(this.host.doc, oMathEl);
+    const editable = isLinearSafe(oMathEl);
     const box = document.createElement("div");
     box.style.cssText =
       "position:fixed;z-index:1000;background:#fff;border:1px solid #dadce0;border-radius:8px;" +
-      "box-shadow:0 4px 16px rgba(0,0,0,.18);padding:8px;display:flex;gap:6px;align-items:center;" +
+      "box-shadow:0 4px 16px rgba(0,0,0,.18);padding:8px;display:flex;flex-direction:column;gap:6px;" +
       "font:13px system-ui,sans-serif;";
     box.style.left = `${Math.max(8, clientX - 140)}px`;
     box.style.top = `${clientY + 14}px`;
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;gap:6px;align-items:center;";
     const input = document.createElement("input");
-    input.value = mathLinearOf(this.host.doc, oMathEl);
+    input.value = original;
     input.title = "Linear math: x^2, x_i, {a+b}/{2}, √{x}";
     input.style.cssText =
       "width:260px;border:1px solid #dadce0;border-radius:6px;padding:5px 8px;outline:none;" +
-      "font:14px 'Cambria Math','STIX Two Math',serif;";
-    const apply = document.createElement("button");
-    apply.textContent = "Apply";
-    apply.style.cssText =
-      "border:1px solid #dadce0;border-radius:14px;padding:3px 12px;cursor:pointer;background:#1a73e8;color:#fff;";
-    const commitMath = () => {
-      this.host.history?.checkpoint();
-      if (setMathLinear(this.host.doc, oMathEl, input.value)) this.host.rerender();
-      this.closeMathEditor();
-      // Return keyboard focus to the document so undo works immediately.
-      this.focusText();
-    };
-    input.addEventListener("keydown", (ke) => {
-      ke.stopPropagation();
-      if (ke.key === "Enter") commitMath();
-      if (ke.key === "Escape") this.closeMathEditor();
-    });
-    apply.addEventListener("click", commitMath);
-    box.appendChild(input);
-    box.appendChild(apply);
+      "font:14px 'Cambria Math','STIX Two Math',serif;transition:border-color .12s,background .12s;";
+    const caption = document.createElement("div");
+    caption.style.cssText = "font:11px system-ui,sans-serif;color:#5f6368;max-width:300px;";
+    row.appendChild(input);
+    box.appendChild(row);
+    box.appendChild(caption);
     document.body.appendChild(box);
     this.mathEditorEl = box;
-    setTimeout(() => input.focus(), 0);
+
+    if (!editable) {
+      // Read-only: the structure can't be represented as linear text, so we
+      // never let it be rewritten. Show the approximation for reference only.
+      input.readOnly = true;
+      input.style.background = "#f1f3f4";
+      input.style.color = "#5f6368";
+      caption.textContent = "Structured equation — text editing is disabled to protect its formatting.";
+      setTimeout(() => input.select(), 0);
+      input.addEventListener("keydown", (ke) => {
+        ke.stopPropagation();
+        if (ke.key === "Escape" || ke.key === "Enter") {
+          this.closeMathEditor();
+          this.focusText();
+        }
+      });
+    } else {
+      caption.textContent = "Linear math: x^2, x_i, {a+b}/{2}, √{x}. Enter to apply.";
+      const apply = document.createElement("button");
+      apply.textContent = "Apply";
+      apply.style.cssText =
+        "border:1px solid #dadce0;border-radius:14px;padding:3px 12px;cursor:pointer;background:#1a73e8;color:#fff;";
+      row.appendChild(apply);
+      const reject = () => {
+        input.style.borderColor = "#d93025";
+        input.style.background = "#fce8e6";
+        caption.textContent = "That can't be turned into an equation — check the brackets and try again.";
+        setTimeout(() => {
+          input.style.borderColor = "#dadce0";
+          input.style.background = "#fff";
+        }, 900);
+      };
+      const commitMath = () => {
+        const val = input.value.trim();
+        // Unchanged text: never rewrite (an accidental Apply must be a no-op).
+        if (val === original.trim()) {
+          this.closeMathEditor();
+          this.focusText();
+          return;
+        }
+        // The text must be a representable equation before we touch the OMML.
+        const parsed = parseMathLinear(val);
+        if (parsed.length === 0 || !linearizeMath(parsed).trim()) {
+          reject();
+          return;
+        }
+        this.host.history?.checkpoint();
+        if (setMathLinear(this.host.doc, oMathEl, val)) this.host.rerender();
+        this.closeMathEditor();
+        // Return keyboard focus to the document so undo works immediately.
+        this.focusText();
+      };
+      input.addEventListener("keydown", (ke) => {
+        ke.stopPropagation();
+        if (ke.key === "Enter") commitMath();
+        if (ke.key === "Escape") {
+          this.closeMathEditor();
+          this.focusText();
+        }
+      });
+      apply.addEventListener("click", commitMath);
+      setTimeout(() => input.focus(), 0);
+    }
+
     const close = (me: MouseEvent) => {
       if (!box.contains(me.target as Node)) {
         this.closeMathEditor();

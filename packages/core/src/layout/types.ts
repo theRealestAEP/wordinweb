@@ -176,6 +176,10 @@ export interface DrawingHitItem {
   src: XmlElement;
   /** Anchored drawings drag by offset; inline ones re-anchor into text. */
   anchored: boolean;
+  /** A shape fill hit that sits UNDER the shape's own text spans (same z): a
+   * click on bare fill selects the shape, but clicks on the text glyphs still
+   * reach the text for editing. Such hits select only (never drag-move). */
+  belowText?: boolean;
 }
 
 export interface GripItem {

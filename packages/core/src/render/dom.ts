@@ -875,8 +875,11 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       hit.style.top = `${item.y}px`;
       hit.style.width = `${item.width}px`;
       hit.style.height = `${item.height}px`;
-      hit.style.cursor = "move";
-      hit.style.zIndex = "6";
+      // A fill hit sits at the shape's own z-layer, UNDER its text spans (which
+      // are emitted later, so they win equal-z hit-testing over their glyphs);
+      // a standalone drawing hit floats above everything.
+      hit.style.cursor = item.belowText ? "default" : "move";
+      hit.style.zIndex = item.belowText ? "1" : "6";
       hit.dataset.dxwDrawing = "1";
       return hit;
     }
