@@ -1,5 +1,5 @@
 import { DocxDocument } from "../docx.js";
-import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem } from "../layout/types.js";
+import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem, WarpTextItem } from "../layout/types.js";
 import { cssFont, cambriaMathDescentShare } from "../layout/measure.js";
 import { Border } from "../model.js";
 import { convertEmfToDataUrl } from "emf-converter";
@@ -1080,6 +1080,8 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       return renderText(item);
     case "wordart":
       return renderWordArt(item);
+    case "warptext":
+      return renderWarpText(item);
     case "grip":
       return null; // handled by renderPage when interactive
   }
@@ -1159,6 +1161,174 @@ function renderWordArt(item: WordArtItem): HTMLElement {
   span.style.transform = `scaleX(${scaleX})`;
   box.appendChild(span);
   return box;
+}
+
+let warpPathSeq = 0;
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+interface WarpGeo {
+  d: string;
+  /** Fixed font px, or 0 to derive it (see `natural`/`pour`). */
+  fontPx: number;
+  pathLen: number;
+  /** Where along the path the text starts, 0..1. */
+  startFrac: number;
+  /** Anchor the text at the path start ("start") or its midpoint ("middle"). */
+  anchor: "start" | "middle";
+  /** Stretch the text to span the whole baseline (fills the box width). */
+  fill: boolean;
+  /** Ride the text at its natural run font size instead of a box-derived one
+   * (textArchUp: Word keeps the glyphs small and only bows the baseline). */
+  natural?: boolean;
+  /** Size the glyphs so the natural-spaced string wraps most of the circle. */
+  pour?: boolean;
+}
+
+/** DrawingML a:prstTxWarp baseline geometry in the shape's `W x H` box.
+ * Calibrated against Word's probe3-wordart-warps PDF: arch keeps small
+ * top-centred text on a shallow bow; wave/chevron scale the text to fill the
+ * box; circle-pour wraps the string clockwise from the top of a circle. */
+function warpBaseline(warp: string, W: number, H: number): WarpGeo {
+  const mx = W * 0.02;
+  const bw = W - 2 * mx;
+  switch (warp) {
+    case "textArchUp":
+    case "textArchUpPour": {
+      // Word rides "ARCH UP" at its run size, centred, near the top, on a very
+      // shallow ∩ (text ink measured at x∈[0.34,0.64]·W, y∈[0.01,0.13]·H).
+      const yEnd = H * 0.16;
+      const yApex = H * 0.09;
+      const cy = 2 * yApex - yEnd;
+      const d = `M ${W * 0.12} ${yEnd} Q ${W / 2} ${cy} ${W * 0.88} ${yEnd}`;
+      return { d, fontPx: 0, pathLen: (bw + 2 * Math.hypot(bw * 0.38, yEnd - cy)) / 2, startFrac: 0.5, anchor: "middle", fill: false, natural: true };
+    }
+    case "textArchDown":
+    case "textArchDownPour": {
+      const yTop = H * 0.84;
+      const yApex = H * 0.91;
+      const cy = 2 * yApex - yTop;
+      const d = `M ${W * 0.12} ${yTop} Q ${W / 2} ${cy} ${W * 0.88} ${yTop}`;
+      return { d, fontPx: 0, pathLen: (bw + 2 * Math.hypot(bw * 0.38, cy - yTop)) / 2, startFrac: 0.5, anchor: "middle", fill: false, natural: true };
+    }
+    case "textWave1":
+    case "textWave2": {
+      // Text fills the box on one sine period tilted down to the right (Word's
+      // centreline slopes ~0.34·H → 0.55·H across the box with a wave).
+      // Word's WAVE ONE baseline slopes gently down to the right with one
+      // shallow trough (measured centreline 0.34·H → dip 0.60·H → 0.52·H).
+      const fontPx = H * 0.42;
+      const d =
+        `M ${mx} ${H * 0.36} ` +
+        `C ${W * 0.28} ${H * 0.36} ${W * 0.34} ${H * 0.62} ${W * 0.6} ${H * 0.62} ` +
+        `C ${W * 0.82} ${H * 0.62} ${W * 0.86} ${H * 0.5} ${W - mx} ${H * 0.5}`;
+      return { d, fontPx, pathLen: bw * 1.08, startFrac: 0, anchor: "start", fill: true };
+    }
+    case "textChevron": {
+      // Gentle downward chevron filling the box (ends high, middle low).
+      const fontPx = H * 0.46;
+      const yTop = H * 0.34;
+      const yBot = H * 0.66;
+      const d = `M ${mx} ${yTop} L ${W / 2} ${yBot} L ${W - mx} ${yTop}`;
+      return { d, fontPx, pathLen: 2 * Math.hypot(bw / 2, yBot - yTop), startFrac: 0, anchor: "start", fill: true };
+    }
+    case "textChevronInverted": {
+      const fontPx = H * 0.46;
+      const yBot = H * 0.66;
+      const yTop = H * 0.34;
+      const d = `M ${mx} ${yBot} L ${W / 2} ${yTop} L ${W - mx} ${yBot}`;
+      return { d, fontPx, pathLen: 2 * Math.hypot(bw / 2, yBot - yTop), startFrac: 0, anchor: "start", fill: true };
+    }
+    case "textCircle":
+    case "textCirclePour":
+    case "textButton":
+    case "textButtonPour":
+    default: {
+      // Text poured clockwise from the top of a circle inscribed in the box.
+      const r = Math.min(W, H) / 2 - Math.min(W, H) * 0.08;
+      const cx = W / 2;
+      const cy = H / 2;
+      const d = `M ${cx} ${cy - r} A ${r} ${r} 0 1 1 ${cx - 0.01} ${cy - r} Z`;
+      return { d, fontPx: 0, pathLen: 2 * Math.PI * r, startFrac: 0, anchor: "start", fill: false, pour: true };
+    }
+  }
+}
+
+/** a:prstTxWarp WordArt: ride the shape's text on the preset envelope via an
+ * SVG textPath, filling the box (arch/wave/chevron) or pouring around a circle. */
+function renderWarpText(item: WarpTextItem): HTMLElement {
+  const W = item.width;
+  const H = item.height;
+  const svg = document.createElementNS(SVG_NS, "svg") as unknown as HTMLElement;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.style.position = "absolute";
+  svg.style.left = `${item.x}px`;
+  svg.style.top = `${item.y}px`;
+  svg.style.width = `${W}px`;
+  svg.style.height = `${H}px`;
+  svg.style.overflow = "visible";
+  // The warp text is decorative (not editable); let clicks fall through to the
+  // shape's fill hit target beneath so the fill still selects the shape.
+  svg.style.pointerEvents = "none";
+  if (item.behind) svg.style.zIndex = "-1";
+  else if (item.front) svg.style.zIndex = "1";
+
+  const geo = warpBaseline(item.warp, W, H);
+  const weight = item.bold ? "bold" : "normal";
+  const style = item.italic ? "italic" : "normal";
+  const family = `"${item.fontFamily}", sans-serif`;
+
+  // Font size: presets that fill the box use their box-derived size; textArchUp
+  // rides the run's own size; circle-pour sizes glyphs to wrap ~82% of the
+  // circumference (Word leaves a small gap where the text meets its start).
+  let fontPx = geo.fontPx;
+  let startFrac = geo.startFrac;
+  if (geo.natural) {
+    fontPx = item.fontSize;
+  } else if (geo.pour) {
+    let perPx = item.text.length * 0.55;
+    try {
+      const ctx = document.createElement("canvas").getContext("2d");
+      if (ctx) {
+        ctx.font = `${style} ${weight} 100px ${family}`;
+        const w = ctx.measureText(item.text).width;
+        if (w > 0) perPx = w / 100;
+      }
+    } catch {
+      /* canvas unavailable (SSR): keep the estimate */
+    }
+    fontPx = Math.max(6, Math.min(H * 0.22, (geo.pathLen * 0.82) / perPx));
+  }
+
+  const id = `dxw-warp-${warpPathSeq++}`;
+  const defs = document.createElementNS(SVG_NS, "defs");
+  const path = document.createElementNS(SVG_NS, "path");
+  path.setAttribute("id", id);
+  path.setAttribute("d", geo.d);
+  defs.appendChild(path);
+  svg.appendChild(defs);
+
+  const text = document.createElementNS(SVG_NS, "text");
+  text.setAttribute("fill", item.fill);
+  text.setAttribute("font-family", family);
+  text.setAttribute("font-size", `${fontPx.toFixed(2)}`);
+  text.setAttribute("font-weight", weight);
+  text.setAttribute("font-style", style);
+  text.setAttribute("dominant-baseline", "alphabetic");
+  const tp = document.createElementNS(SVG_NS, "textPath");
+  tp.setAttribute("href", `#${id}`);
+  tp.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", `#${id}`);
+  tp.setAttribute("startOffset", `${(startFrac * 100).toFixed(2)}%`);
+  if (geo.fill) {
+    // Stretch the string to span the whole baseline (Word fills the box).
+    tp.setAttribute("textLength", `${(geo.pathLen * 0.98).toFixed(2)}`);
+    tp.setAttribute("lengthAdjust", "spacingAndGlyphs");
+  }
+  tp.setAttribute("text-anchor", geo.anchor);
+  tp.textContent = item.text;
+  text.appendChild(tp);
+  svg.appendChild(text);
+  return svg;
 }
 
 function renderText(item: TextItem): HTMLElement {

@@ -228,6 +228,30 @@ export interface WordArtItem {
   src?: XmlElement;
 }
 
+/** DrawingML a:prstTxWarp text: the shape's single text line bent onto a
+ * preset envelope (arch/wave/chevron/circle-pour), filling the shape box. */
+export interface WarpTextItem {
+  kind: "warptext";
+  /** Shape box top-left, px. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  text: string;
+  fontFamily: string;
+  /** Run font size px (the text's natural size; presets that don't fill the
+   * box — textArchUp — ride the text at this size). */
+  fontSize: number;
+  bold?: boolean;
+  italic?: boolean;
+  /** CSS text color. */
+  fill: string;
+  /** Preset name (textArchUp, textWave1, textChevron, textCirclePour, …). */
+  warp: string;
+  behind?: boolean;
+  front?: boolean;
+}
+
 export type PageItem =
   | TextItem
   | PathItem
@@ -236,7 +260,8 @@ export type PageItem =
   | ImageItem
   | DrawingHitItem
   | GripItem
-  | WordArtItem;
+  | WordArtItem
+  | WarpTextItem;
 
 export interface LaidOutPage {
   width: number;

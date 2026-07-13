@@ -4483,6 +4483,49 @@ class Engine {
         const chained = shape.chainId !== undefined;
         const capacity = height - ins.t - ins.b;
         const inner = this.layoutFrame(storyBlocks, Math.max(width - ins.l - ins.r, 1), fields, { x: ox + ins.l, y: oy + ins.t });
+        // a:prstTxWarp — the shape's text is bent onto a preset envelope filling
+        // the box, not flowed as ordinary lines. Reuse the frame's resolved font
+        // and color (theme/style resolution already applied), then hand the box
+        // geometry + string to the renderer's SVG text-on-path warp.
+        if (shape.warp) {
+          const texts = inner.items.filter((it): it is Extract<PageItem, { kind: "text" }> => it.kind === "text");
+          const str = texts.map((it) => it.text).join("").replace(/\s+/g, " ").trim();
+          if (str) {
+            // A visible fill stays a select target (the warp text is painted as a
+            // pointer-transparent SVG, so clicks on the shape reach this hit).
+            if (front && shape.srcDrawing && (shape.fill || shape.geom)) {
+              page.items.push({
+                kind: "drawingHit",
+                x: ox - fx,
+                y: oy - fy,
+                width,
+                height,
+                src: shape.srcDrawing,
+                anchored: true,
+                belowText: true,
+              });
+            }
+            const f = texts[0].font;
+            const col = texts[0].props.color;
+            page.items.push({
+              kind: "warptext",
+              x: ox - fx,
+              y: oy - fy,
+              width,
+              height,
+              text: str,
+              fontFamily: f.family,
+              fontSize: f.size,
+              bold: f.bold,
+              italic: f.italic,
+              fill: col && col !== "auto" ? col : "#000000",
+              warp: shape.warp,
+              ...(behind ? { behind: true } : {}),
+              ...(front ? { front: true } : {}),
+            });
+          }
+          continue;
+        }
         let innerTop = oy + ins.t;
         if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
         else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;

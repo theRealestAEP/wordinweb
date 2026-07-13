@@ -2421,8 +2421,27 @@ function buildAtoms(
     const hasTamil = /[஀-௿]/.test(text);
     const indicFace = hasDeva && !hasTamil ? "Mangal" : hasTamil && !hasDeva ? "Latha" : null;
     if (indicFace && font.family.toLowerCase() !== indicFace.toLowerCase()) {
-      font = { ...font, family: indicFace };
-      if (metricsFont) metricsFont = { ...metricsFont, family: indicFace };
+      const indicFont = { ...font, family: indicFace };
+      const indicMetrics = metricsFont ? { ...metricsFont, family: indicFace } : metricsFont;
+      // Word resolves fonts per CHARACTER CLASS: the ASCII space (U+0020)
+      // belongs to w:ascii (here Calibri), never the complex-script face. Mangal's
+      // space advance is 0.5em (5.5px@11) against Calibri's 0.226em (2.49px), so
+      // routing the whole run to Mangal doubles every inter-word gap and wraps
+      // each Devanagari line ~57px early (probe3-indic p1: 20 spaces x 2.75px =
+      // 55px overshoot per line, cascading a horizontal shift through the page).
+      // Keep the spaces in the ascii font; only the Indic clusters take Mangal/Latha.
+      let i = 0;
+      while (i < text.length) {
+        const isSpace = text[i] === " ";
+        let j = i + 1;
+        while (j < text.length && (text[j] === " ") === isSpace) j++;
+        const seg = text.slice(i, j);
+        const src = srcBase ? { ...srcBase, offset: srcBase.offset + i } : undefined;
+        if (isSpace) pushText(seg, props, font, href, src, metricsFont);
+        else pushText(seg, props, indicFont, href, src, indicMetrics);
+        i = j;
+      }
+      return;
     }
     if (!props.smallCaps || props.caps) {
       pushText(text, props, font, href, srcBase, metricsFont);

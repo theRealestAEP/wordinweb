@@ -1305,6 +1305,11 @@ function parseDrawing(
       return v !== undefined ? emuToPx(v) : dflt;
     };
     const anchorAttr = bodyPr ? attr(bodyPr, "anchor") : undefined;
+    // a:prstTxWarp — a WordArt preset text warp (arch/wave/chevron/circle):
+    // bend the shape's text onto the preset envelope instead of flowing it.
+    // "textNoShape" is the identity (no warp) and is treated as absent.
+    const warpRaw = bodyPr ? attr(child(bodyPr, "prstTxWarp"), "prst") : undefined;
+    const warp = warpRaw && warpRaw !== "textNoShape" ? warpRaw : undefined;
     // Non-rect preset geometry (oval, diamond, flowchart shapes): paint the
     // real outline and lay the text inside the geometry's text rectangle.
     const prstA = attr(child(spPr, "prstGeom"), "prst") ?? "rect";
@@ -1363,6 +1368,7 @@ function parseDrawing(
         ...(geomD ? { geom: { d: geomD, viewW: cx, viewH: cy } } : {}),
         ...(noAutofit ? { clipText: true } : {}),
         ...(spAutoFit ? { autofitHeight: true } : {}),
+        ...(warp ? { warp } : {}),
         wrap,
         ...(behind ? { behind: true } : {}),
         ...(attr(anchor, "allowOverlap") === "0" ? { allowOverlap: false } : {}),
