@@ -153,6 +153,50 @@ function pageEq(a: LaidOutPage, b: LaidOutPage): boolean {
   return true;
 }
 
+/** Doc-scoped media caches: an edited page's DOM is rebuilt every keystroke
+ * (incremental render), and minting a fresh object URL per render forced a
+ * full image re-decode — visible flicker while typing. Keyed by media part
+ * (+ display variant), so the <img> src string is IDENTICAL across renders
+ * and the browser paints from cache. Object URLs live for the document's
+ * lifetime; when a different document renders, the previous doc's URLs are
+ * revoked wholesale. */
+const mediaUrlCache = new WeakMap<DocxDocument, Map<string, string>>();
+const derivedSrcCache = new WeakMap<DocxDocument, Map<string, string>>();
+let lastCachedDoc: DocxDocument | null = null;
+let lastCachedUrls: Map<string, string> | null = null;
+
+function docMediaUrl(doc: DocxDocument, key: string, make: () => string): string {
+  let m = mediaUrlCache.get(doc);
+  if (!m) {
+    if (lastCachedDoc && lastCachedDoc !== doc && lastCachedUrls) {
+      for (const u of lastCachedUrls.values()) URL.revokeObjectURL(u);
+      lastCachedUrls.clear();
+    }
+    m = new Map();
+    mediaUrlCache.set(doc, m);
+    lastCachedDoc = doc;
+    lastCachedUrls = m;
+  }
+  let u = m.get(key);
+  if (u === undefined) {
+    u = make();
+    m.set(key, u);
+  }
+  return u;
+}
+
+function docDerivedSrc(doc: DocxDocument, key: string): string | undefined {
+  return derivedSrcCache.get(doc)?.get(key);
+}
+function setDocDerivedSrc(doc: DocxDocument, key: string, src: string): void {
+  let m = derivedSrcCache.get(doc);
+  if (!m) {
+    m = new Map();
+    derivedSrcCache.set(doc, m);
+  }
+  m.set(key, src);
+}
+
 const MIME_BY_EXT: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
@@ -901,6 +945,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       if (!bytes) return null;
       const ext = item.part.slice(item.part.lastIndexOf(".") + 1).toLowerCase();
       const img = document.createElement("img");
+      let splashOffset = false;
       // TIFF is not a web-renderable format; decode it to canvas pixels and
       // hand the <img> a PNG data URL so scientific TIFF figures (SEM images,
       // charts pasted from lab tools) aren't a broken box.
@@ -936,11 +981,12 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
         // chart JPEG renders its literal pixel values in the reference PDF,
         // while Chrome color-manages them ~20 luminance lighter). Strip the
         // profile chunks so the browser shows the same raw values Word prints.
-        const display = stripColorProfile(bytes, ext);
-        const buf = display.buffer.slice(display.byteOffset, display.byteOffset + display.byteLength) as ArrayBuffer;
-        const blob = new Blob([buf], { type: mime });
-        const url = URL.createObjectURL(blob);
-        urls.push(url);
+        const url = docMediaUrl(doc, item.part, () => {
+          const display = stripColorProfile(bytes, ext);
+          const buf = display.buffer.slice(display.byteOffset, display.byteOffset + display.byteLength) as ArrayBuffer;
+          const blob = new Blob([buf], { type: mime });
+          return URL.createObjectURL(blob);
+        });
         img.src = url;
         // At exactly 2x device scale (CSS size == natural size on a 2x
         // display) pre-upscale with pdftoppm/Splash's kernel instead of
@@ -958,6 +1004,12 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
           typeof window !== "undefined" &&
           (window.devicePixelRatio || 1) === 2
         ) {
+          const upKey = `up2x:${item.part}:${Math.round(item.width)}x${Math.round(item.height)}`;
+          const cachedUp = docDerivedSrc(doc, upKey);
+          if (cachedUp) {
+            img.src = cachedUp;
+            splashOffset = true;
+          } else {
           const probe = new Image();
           probe.onload = () => {
             const nw = probe.naturalWidth;
@@ -997,7 +1049,9 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
                 }
               }
               octx.putImageData(out, 0, 0);
-              img.src = outCv.toDataURL("image/png");
+              const upsrc = outCv.toDataURL("image/png");
+              setDocDerivedSrc(doc, upKey, upsrc);
+              img.src = upsrc;
               // Splash floors the image origin to the device grid; our layout
               // lands half a device px lower. Shift the PURE rows onto
               // poppler's.
@@ -1008,6 +1062,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
             }
           };
           probe.src = url;
+          }
         }
       }
       if (item.washout && img.src) {
@@ -1069,6 +1124,12 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       node.style.top = `${item.y}px`;
       node.style.width = `${item.width}px`;
       node.style.height = `${item.height}px`;
+      if (splashOffset) {
+        // Cached 2x Splash upscale: apply the same half-device-px registration
+        // the probe path sets on first render.
+        node.style.left = `${item.x - 0.5}px`;
+        node.style.top = `${item.y - 0.5}px`;
+      }
       if (item.rotation) node.style.transform = `rotate(${item.rotation}deg)`;
       // a:ln picture outline: Word paints the line just OUTSIDE the image box
       // (the rule bbox sits ~half its width beyond the image edge). `outline`
