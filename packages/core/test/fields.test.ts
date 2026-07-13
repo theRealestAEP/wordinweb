@@ -80,6 +80,25 @@ describe("REF recompute", () => {
   });
 });
 
+describe("STYLEREF recompute", () => {
+  it("plain STYLEREF resolves the first-on-page style text over the cache", () => {
+    expect(
+      resolveField('STYLEREF "Heading 1" \\* MERGEFORMAT', "Chapter One", ctx({ styleRef: (n, last) => (n === "Heading 1" && !last ? "Chapter Four" : undefined) })),
+    ).toBe("Chapter Four");
+  });
+  it("STYLEREF \\l asks for the last-on-page paragraph", () => {
+    expect(
+      resolveField('STYLEREF "Heading 1" \\l \\* MERGEFORMAT', "Chapter One", ctx({ styleRef: (_n, last) => (last ? "Chapter Five" : "Chapter Four") })),
+    ).toBe("Chapter Five");
+  });
+  it("STYLEREF keeps the cache when the resolver returns undefined (no match)", () => {
+    expect(resolveField('STYLEREF "Heading 1"', "cached", ctx({ styleRef: () => undefined }))).toBe("cached");
+  });
+  it("STYLEREF with no resolver (body field) keeps the cache", () => {
+    expect(resolveField('STYLEREF "Heading 1"', "cached", ctx())).toBe("cached");
+  });
+});
+
 describe("index-xrefs style REF fields end-to-end", () => {
   // A zero-length bookmark (start immediately followed by end) sitting before
   // an unnumbered caption, referenced later by \h / \r / \p. Word recomputes
