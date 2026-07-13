@@ -4,7 +4,7 @@ import { XmlElement, cloneXml, localName } from "../xml.js";
 import { ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
 import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
-import { moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
+import { advanceCell, moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
 import { listTypeAt, setListLevel } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
 import { mathLinearOf, moveMath, setMathLinear } from "./math.js";
@@ -2203,6 +2203,21 @@ export class DocxEditor {
         this.commit();
       }
       return;
+    }
+    // Tab inside a table moves to the next cell (Shift+Tab previous), wrapping
+    // across rows; Tab in the last cell appends a new row. This takes priority
+    // over list-indent and never inserts a literal tab character. Checked
+    // before the list handler because a list can live inside a table cell.
+    if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey && this.caret) {
+      const dest = advanceCell(this.host.doc, this.caret.t, e.shiftKey ? -1 : 1);
+      if (dest) {
+        e.preventDefault();
+        this.host.history?.checkpoint();
+        this.clearSelection();
+        this.caret = { t: dest.t, run: this.caret.run, offset: 0 };
+        this.commit();
+        return;
+      }
     }
     // Tab in a list item steps its level (Shift-Tab promotes) - Word UX.
     if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey && this.caret) {

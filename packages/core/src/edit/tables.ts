@@ -336,6 +336,80 @@ export function applyTableOp(doc: DocxDocument, target: XmlElement, op: TableOp)
   return true;
 }
 
+/** First w:t inside a cell (document order), creating an empty run in the
+ * cell's first paragraph when the cell has no typed text yet. */
+function firstTextOfCell(tc: XmlElement, w: string): XmlElement | null {
+  const walk = (el: XmlElement): XmlElement | null => {
+    for (const c of el.children) {
+      if (localName(c.name) === "t") return c;
+      const found = walk(c);
+      if (found) return found;
+    }
+    return null;
+  };
+  const existing = walk(tc);
+  if (existing) return existing;
+  const para = tc.children.find((c) => localName(c.name) === "p");
+  if (!para) return null;
+  const t: XmlElement = { name: `${w}t`, attrs: { "xml:space": "preserve" }, text: "", children: [] };
+  para.children.push({ name: `${w}r`, attrs: {}, text: "", children: [t] });
+  return t;
+}
+
+/**
+ * Tab-to-next-cell navigation. From the cell containing `target`, advance to
+ * the next cell (dir=1) or previous cell (dir=-1), wrapping across rows. Tab in
+ * the LAST cell of the table appends a new row and lands in its first cell
+ * (Word-familiar, and keeps the user from ever being stuck at the table end).
+ * Shift+Tab in the very first cell has nowhere to go and returns null.
+ *
+ * Returns the w:t the caret should move to (offset 0), or null when the target
+ * is not inside a table or navigation is a no-op — the caller then leaves the
+ * key to its normal handling.
+ */
+export function advanceCell(doc: DocxDocument, target: XmlElement, dir: 1 | -1): { t: XmlElement } | null {
+  const ctx = cellContextOf(doc, target);
+  if (!ctx) return null;
+  const { tbl, tr, w } = ctx;
+  const rows = rowsOf(tbl);
+  const cells = cellsOf(tr);
+  let destCell: XmlElement | null = null;
+
+  if (dir === 1) {
+    if (ctx.cellIdx < cells.length - 1) {
+      destCell = cells[ctx.cellIdx + 1];
+    } else if (ctx.rowIdx < rows.length - 1) {
+      destCell = cellsOf(rows[ctx.rowIdx + 1])[0] ?? null;
+    } else {
+      // Last cell of the last row: append a fresh row like Word does.
+      const newRow: XmlElement = {
+        name: `${w}tr`,
+        attrs: {},
+        text: "",
+        children: cells.map((c) => emptyCellLike(c, w)),
+      };
+      const trPr = tr.children.find((c) => localName(c.name) === "trPr");
+      if (trPr) newRow.children.unshift(cloneXml(trPr));
+      tbl.children.splice(tbl.children.indexOf(tr) + 1, 0, newRow);
+      destCell = cellsOf(newRow)[0] ?? null;
+    }
+  } else {
+    if (ctx.cellIdx > 0) {
+      destCell = cells[ctx.cellIdx - 1];
+    } else if (ctx.rowIdx > 0) {
+      const prevCells = cellsOf(rows[ctx.rowIdx - 1]);
+      destCell = prevCells[prevCells.length - 1] ?? null;
+    } else {
+      return null; // first cell of the table — nowhere earlier to go
+    }
+  }
+  if (!destCell) return null;
+  const t = firstTextOfCell(destCell, w);
+  if (!t) return null;
+  doc.refresh();
+  return { t };
+}
+
 const MIN_COL_TWIPS = 144; // 0.1"
 const MIN_COL_PX = 12;
 

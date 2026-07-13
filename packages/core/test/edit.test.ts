@@ -315,6 +315,47 @@ describe("table operations", () => {
     applyTableOp(doc, caretIn(doc, "A1"), "deleteRow");
     expect(doc.sections[0].blocks.every((b) => b.type !== "table")).toBe(true);
   });
+
+  it("Tab advances to the next cell, wrapping across rows", async () => {
+    const { advanceCell } = await import("../src/edit/tables.js");
+    const doc = tableDoc();
+    // A1 -> B1 (same row)
+    expect(advanceCell(doc, caretIn(doc, "A1"), 1)?.t.text).toBe("B1");
+    // B1 -> A2 (wrap to next row's first cell)
+    expect(advanceCell(doc, caretIn(doc, "B1"), 1)?.t.text).toBe("A2");
+  });
+
+  it("Shift+Tab retreats to the previous cell; no-op in the first cell", async () => {
+    const { advanceCell } = await import("../src/edit/tables.js");
+    const doc = tableDoc();
+    expect(advanceCell(doc, caretIn(doc, "B1"), -1)?.t.text).toBe("A1");
+    // A2 -> B1 (wrap back to previous row's last cell)
+    expect(advanceCell(doc, caretIn(doc, "A2"), -1)?.t.text).toBe("B1");
+    // First cell of the table has nowhere earlier to go.
+    expect(advanceCell(doc, caretIn(doc, "A1"), -1)).toBeNull();
+  });
+
+  it("Tab in the last cell appends a new row and lands in its first cell", async () => {
+    const { advanceCell } = await import("../src/edit/tables.js");
+    const doc = tableDoc();
+    const dest = advanceCell(doc, caretIn(doc, "B2"), 1);
+    const tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table") throw new Error("not a table");
+    expect(tbl.rows.length).toBe(3); // a fresh row was appended
+    expect(dest?.t.text).toBe(""); // caret in the new empty first cell
+    // The new cell's w:t is real and typeable.
+    dest!.t.text = "C1";
+    const reloaded = DocxDocument.load(doc.save());
+    const rt = reloaded.sections[0].blocks[0];
+    if (rt.type !== "table") throw new Error("not a table");
+    expect(rt.rows.length).toBe(3);
+  });
+
+  it("returns null outside any table", async () => {
+    const { advanceCell } = await import("../src/edit/tables.js");
+    const doc = tableDoc();
+    expect(advanceCell(doc, caretIn(doc, "after"), 1)).toBeNull();
+  });
 });
 
 describe("paragraph merge", () => {
