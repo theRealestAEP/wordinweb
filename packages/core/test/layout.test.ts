@@ -4255,3 +4255,48 @@ describe("mirror margins", () => {
     expect(minTextX(result, 1)).toBeCloseTo(120, 1);
   });
 });
+
+describe("prstTxWarp WordArt", () => {
+  const WP = 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"';
+  const A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
+  const WPS = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"';
+  const warpBox = (prst: string) =>
+    `<w:p><w:r><w:drawing><wp:anchor ${WP} distT="0" distB="0" distL="0" distR="0" simplePos="0" ` +
+    `relativeHeight="2" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">` +
+    `<wp:simplePos x="0" y="0"/>` +
+    `<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>` +
+    `<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>` +
+    `<wp:extent cx="2743200" cy="1463040"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>` +
+    `<wp:docPr id="9" name="WordArt"/><wp:cNvGraphicFramePr/>` +
+    `<a:graphic ${A}><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">` +
+    `<wps:wsp ${WPS}><wps:cNvSpPr/><wps:spPr>` +
+    `<a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1463040"/></a:xfrm>` +
+    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="2E74B5"/></a:solidFill>` +
+    `</wps:spPr><wps:txbx><w:txbxContent><w:p><w:pPr><w:jc w:val="center"/></w:pPr>` +
+    `<w:r><w:rPr><w:b/><w:color w:val="FFFFFF"/><w:sz w:val="40"/></w:rPr><w:t>ARCH UP</w:t></w:r>` +
+    `</w:p></w:txbxContent></wps:txbx>` +
+    `<wps:bodyPr rot="0" anchor="ctr"><a:prstTxWarp prst="${prst}"><a:avLst/></a:prstTxWarp></wps:bodyPr>` +
+    `</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>`;
+
+  it("bends the shape text onto a warptext item instead of flowing it", () => {
+    const { result } = layout({ "word/document.xml": wrapDocument(warpBox("textArchUp")) });
+    const items = result.pages[0].items;
+    const warp = items.find((i) => i.kind === "warptext");
+    if (warp?.kind !== "warptext") throw new Error("expected a warptext item");
+    expect(warp.warp).toBe("textArchUp");
+    expect(warp.text).toBe("ARCH UP");
+    expect(warp.fill.toLowerCase()).toBe("#ffffff");
+    expect(warp.bold).toBe(true);
+    expect(warp.fontSize).toBeGreaterThan(0);
+    // The box fill still paints; the flowed text lines do NOT (warp replaces them).
+    expect(items.some((i) => i.kind === "rect" && i.fill === "#2e74b5")).toBe(true);
+    expect(items.some((i) => i.kind === "text" && i.text.includes("ARCH"))).toBe(false);
+  });
+
+  it("treats textNoShape as no warp (text flows normally)", () => {
+    const { result } = layout({ "word/document.xml": wrapDocument(warpBox("textNoShape")) });
+    const items = result.pages[0].items;
+    expect(items.some((i) => i.kind === "warptext")).toBe(false);
+    expect(items.some((i) => i.kind === "text" && i.text.includes("ARCH"))).toBe(true);
+  });
+});

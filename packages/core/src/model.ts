@@ -400,6 +400,10 @@ export interface ShapeTextbox {
    * be an interactive hit target (select the shape instead of the body text
    * behind it). */
   srcDrawing?: XmlElement;
+  /** bodyPr a:prstTxWarp preset name (textArchUp, textWave1, textChevron,
+   * textCirclePour, …): the shape's text is bent onto the preset's envelope
+   * rather than flowed as ordinary lines. "textNoShape" (no warp) is dropped. */
+  warp?: string;
 }
 
 /** WordArt (VML v:textpath, e.g. a "CONFIDENTIAL" watermark): text scaled to
