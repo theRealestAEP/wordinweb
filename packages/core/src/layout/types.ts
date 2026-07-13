@@ -99,6 +99,10 @@ export interface TextItem {
    * widow-controlled paragraphs; row splitting uses it to scope Word's
    * widow/orphan rules to the paragraph straddling the cut. */
   paraSeq?: number;
+  /** Editor-only: maximum caret x for this item — a trailing hanging space
+   * confined to its table cell pins the caret at the cell's content edge
+   * (Word behavior) while the span keeps its true hanging layout x. */
+  caretClampX?: number;
 }
 
 export interface RectItem {
@@ -216,6 +220,8 @@ export interface WordArtItem {
   /** Malformed shapetype guide path: render at nominal fontSize, unstretched
    * (Word can't fitshape, so it draws a near-invisible mark). */
   noFit?: boolean;
+  /** Source VML shape element (v:shape / v:rect), for interactive select/edit. */
+  src?: XmlElement;
 }
 
 export type PageItem =

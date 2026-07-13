@@ -11,6 +11,7 @@ import { mathLinearOf, moveMath, setMathLinear } from "./math.js";
 import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
 import { SelectionSegment } from "./commands.js";
 import { adjustFloatingPosition, imageAltText, isFloatingDrawing, replaceImageBlip, setFloatingPosition, setImageAltText, setImageWrap } from "./images.js";
+import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
 
 /**
  * Interactive text editing: caret placement, typing, Backspace/Delete,
@@ -642,6 +643,7 @@ export class DocxEditor {
 
   private onGripMouseDown = (e: MouseEvent): void => {
     const target = e.target as HTMLElement;
+    if (this.startWordArtInteraction(e, target)) return;
     if (this.startImageInteraction(e, target)) return;
     const gripEl = target.closest?.("[data-dxw-grip]") as HTMLElement | null;
     if (!gripEl) {
@@ -1207,6 +1209,169 @@ export class DocxEditor {
     this.deselectImage();
   }
 
+  // ---------- watermarks / WordArt: select + edit ----------
+
+  private selectedWordArt: { el: HTMLElement; src: XmlElement } | null = null;
+  private wordArtOverlay: HTMLDivElement | null = null;
+
+  private deselectWordArt(): void {
+    this.wordArtOverlay?.remove();
+    this.wordArtOverlay = null;
+    this.selectedWordArt = null;
+  }
+
+  /** Re-select the same watermark after a re-render replaced its element. */
+  private reselectWordArt(src: XmlElement): void {
+    const handle = this.host.getHandle();
+    const b = handle?.wordarts.find((w) => w.item.src === src);
+    if (b?.item.src) this.selectWordArt(b.el, b.item.src);
+    else this.deselectWordArt();
+  }
+
+  /**
+   * Mousedown on a WordArt / text watermark. Front watermarks capture the
+   * click on their ink directly; behind ones sit under the text layer, so
+   * (mirroring behind-image selection) we hit-test by the ink's box only
+   * when the click didn't land on a glyph. Returns true if consumed.
+   */
+  private startWordArtInteraction(e: MouseEvent, target: HTMLElement): boolean {
+    if (this.wordArtOverlay?.contains(target)) return false; // let the toolbar work
+    const handle = this.host.getHandle();
+    if (!handle || handle.wordarts.length === 0) return false;
+    let binding = handle.wordarts.find((b) => b.el === target || b.el.contains(target));
+    if (
+      !binding &&
+      !target.closest("button") &&
+      !this.caretFromPoint(e.clientX, e.clientY)
+    ) {
+      binding = handle.wordarts.find((b) => {
+        const ink = (b.el.querySelector("[data-dxw-wordart-ink]") as HTMLElement | null) ?? b.el;
+        const r = ink.getBoundingClientRect();
+        return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+      });
+    }
+    if (!binding || !binding.item.src) return false;
+    e.preventDefault();
+    e.stopPropagation();
+    this.suppressNextMouseUp = true;
+    this.selectWordArt(binding.el, binding.item.src);
+    return true;
+  }
+
+  private selectWordArt(el: HTMLElement, src: XmlElement): void {
+    this.deselectImage();
+    this.deselectWordArt();
+    this.hideCaret();
+    this.selectedWordArt = { el, src };
+
+    const overlay = document.createElement("div");
+    overlay.style.position = "absolute";
+    overlay.style.left = el.style.left;
+    overlay.style.top = el.style.top;
+    overlay.style.width = el.style.width;
+    overlay.style.height = el.style.height;
+    // Match the art's rotation so the chrome hugs the rotated box.
+    overlay.style.transform = el.style.transform;
+    overlay.style.transformOrigin = el.style.transformOrigin || "50% 50%";
+    overlay.style.border = "1.5px dashed #1a73e8";
+    overlay.style.boxSizing = "border-box";
+    overlay.style.pointerEvents = "none";
+    overlay.style.zIndex = "9";
+
+    // Floating toolbar (kept upright: it does NOT inherit the box rotation
+    // because it's a child positioned by its own top/left, and we counter-
+    // rotate it so the buttons read normally).
+    const bar = document.createElement("div");
+    bar.style.cssText =
+      "position:absolute;top:-32px;left:0;display:flex;gap:2px;background:#fff;" +
+      "border:1px solid #dadce0;border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,.18);" +
+      "padding:2px;pointer-events:auto;font:11px system-ui,sans-serif;white-space:nowrap;";
+    const rot = wordArtRotation(src);
+    if (rot) bar.style.transform = `rotate(${-rot}deg)`;
+    bar.style.transformOrigin = "0 100%";
+
+    const button = (label: string, title: string, fn: () => void): void => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.title = title;
+      b.dataset.dxwWmBtn = title;
+      b.style.cssText =
+        "border:none;border-radius:3px;padding:3px 7px;cursor:pointer;color:#3c4043;background:transparent;";
+      b.addEventListener("mousedown", (me) => {
+        me.preventDefault();
+        me.stopPropagation();
+      });
+      b.addEventListener("click", (ce) => {
+        ce.stopPropagation();
+        fn();
+      });
+      bar.appendChild(b);
+    };
+
+    button("Edit text", "Edit watermark text", () => {
+      const cur = wordArtText(src);
+      const next = window.prompt("Watermark text", cur);
+      if (next === null || next === cur) return;
+      this.host.history?.checkpoint();
+      if (setWordArtText(this.host.doc, src, next)) {
+        this.host.rerender();
+        this.reselectWordArt(src);
+      }
+    });
+    const sep1 = document.createElement("span");
+    sep1.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
+    bar.appendChild(sep1);
+    button("−", "Less opaque", () => this.bumpWordArtOpacity(src, -0.1));
+    button("+", "More opaque", () => this.bumpWordArtOpacity(src, +0.1));
+    const sep2 = document.createElement("span");
+    sep2.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
+    bar.appendChild(sep2);
+    button("Rotate", "Set rotation (degrees)", () => {
+      const cur = wordArtRotation(src);
+      const next = window.prompt("Rotation (degrees clockwise)", String(cur));
+      if (next === null) return;
+      const deg = parseFloat(next);
+      if (!Number.isFinite(deg)) return;
+      this.host.history?.checkpoint();
+      if (setWordArtRotation(this.host.doc, src, deg)) {
+        this.host.rerender();
+        this.reselectWordArt(src);
+      }
+    });
+    const sep3 = document.createElement("span");
+    sep3.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
+    bar.appendChild(sep3);
+    button("Delete", "Delete watermark", () => {
+      this.host.history?.checkpoint();
+      if (deleteWatermark(this.host.doc, src)) this.host.rerender();
+      this.deselectWordArt();
+    });
+
+    overlay.appendChild(bar);
+    el.parentElement!.appendChild(overlay);
+    this.wordArtOverlay = overlay;
+    this.focusText();
+  }
+
+  private bumpWordArtOpacity(src: XmlElement, delta: number): void {
+    const cur = wordArtOpacity(src);
+    const next = Math.max(0.1, Math.min(1, Math.round((cur + delta) * 10) / 10));
+    if (next === cur) return;
+    this.host.history?.checkpoint();
+    if (setWordArtOpacity(this.host.doc, src, next)) {
+      this.host.rerender();
+      this.reselectWordArt(src);
+    }
+  }
+
+  private deleteSelectedWordArt(): void {
+    if (!this.selectedWordArt) return;
+    const src = this.selectedWordArt.src;
+    this.host.history?.checkpoint();
+    if (deleteWatermark(this.host.doc, src)) this.host.rerender();
+    this.deselectWordArt();
+  }
+
   private currentWrap(drawingEl: XmlElement): "square" | "topAndBottom" | "none" | "behind" {
     const anchor = drawingEl.children.find((c) => localName(c.name) === "anchor");
     if (!anchor) return "none";
@@ -1557,7 +1722,9 @@ export class DocxEditor {
     // the button and the browser never composes its click (the second wrap
     // change in a row silently did nothing).
     if (this.imageOverlay?.contains(e.target as Node)) return;
+    if (this.wordArtOverlay?.contains(e.target as Node)) return;
     this.deselectImage();
+    this.deselectWordArt();
     // A click on an equation opens the inline math editor (Word: math zone).
     const mathEl = (e.target as HTMLElement | null)?.closest?.("[data-dxw-math]") as HTMLElement | null;
     if (mathEl) {
@@ -1964,6 +2131,17 @@ export class DocxEditor {
     if (this.selectedImage && e.key === "Escape") {
       e.preventDefault();
       this.deselectImage();
+      return;
+    }
+    // A selected watermark: Backspace/Delete removes it, Escape deselects.
+    if ((e.key === "Backspace" || e.key === "Delete") && this.selectedWordArt) {
+      e.preventDefault();
+      this.deleteSelectedWordArt();
+      return;
+    }
+    if (this.selectedWordArt && e.key === "Escape") {
+      e.preventDefault();
+      this.deselectWordArt();
       return;
     }
     // Arrow keys nudge a selected floating image (Word: 1px, Shift: 10px).
@@ -2510,6 +2688,9 @@ export class DocxEditor {
         xPx = best.item.x + (local >= len ? best.item.width : (best.item.width * local) / len);
       }
     }
+    // Cell/margin-confined hanging spaces: Word pins the caret at the
+    // line's content edge no matter how many trailing spaces are typed.
+    if (best.item.caretClampX !== undefined) xPx = Math.min(xPx, best.item.caretClampX);
     const surface = best.el.parentElement!;
     if (this.caretEl.parentElement !== surface) surface.appendChild(this.caretEl);
     const fs = best.item.font.size;

@@ -3322,6 +3322,7 @@ class Engine {
         href: span.href,
         src: span.src,
         rtl: span.rtl,
+        caretClampX: span.caretClampX === undefined ? undefined : originX + span.caretClampX,
       });
       if (span.ruby && span.ruby.rtText) {
         const rt = span.ruby;
@@ -3906,6 +3907,7 @@ class Engine {
             behind: shape.behind,
             fontSize: shape.fontSize,
             noFit: shape.noFit,
+            src: shape.src,
           });
           continue;
         }
@@ -5192,12 +5194,31 @@ class Engine {
     const saveCol = this.col;
     this.cur = page;
     this.y = y + topLead;
+    const gridW = widths.reduce((a, b) => a + b, 0);
     for (let ri = 0; ri < nRows; ri++) {
       this.paintRow(tbl, tbl.rows[ri], ri, laidRows[ri], x, widths, rowHeights[ri]);
       this.y += rowHeights[ri];
       if (s2 && ri < nRows - 1) this.y += s2;
+      // Row-resize grip at each row's bottom boundary, matching inline tables
+      // so a floating table's rows can be dragged too (editor-only; grips are
+      // skipped in read-only/parity render).
+      if (tbl.src) {
+        page.items.push({
+          kind: "grip",
+          axis: "row",
+          x,
+          x2: x + gridW,
+          y1: this.y,
+          y2: this.y,
+          tbl: tbl.src,
+          boundary: ri,
+          rowHeightPx: rowHeights[ri],
+        });
+      }
     }
     if (s2) this.paintTableOutline(page, tbl, x, y, y + tableHeight, tableWidth);
+    // Column-resize grips over each vertical boundary of the floating table.
+    this.emitTableGrips(tbl, page, x, widths, y, y + tableHeight);
     this.y = saveY;
     this.cur = saveCur;
     this.col = saveCol;

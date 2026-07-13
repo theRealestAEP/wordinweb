@@ -45,6 +45,11 @@ export interface DrawingBinding {
   item: DrawingHitItem;
 }
 
+export interface WordArtBinding {
+  el: HTMLElement;
+  item: WordArtItem;
+}
+
 export interface RenderHandle {
   /** Root element containing all pages. */
   root: HTMLElement;
@@ -56,6 +61,8 @@ export interface RenderHandle {
   images: ImageBinding[];
   /** Transparent hit targets over vector drawings/icons (select/move). */
   drawings: DrawingBinding[];
+  /** WordArt / text watermarks, for interactive select/edit. */
+  wordarts: WordArtBinding[];
   /** Revoke object URLs etc. */
   destroy: () => void;
   /** Per-page render records, retained so the next render can reuse the DOM of
@@ -73,6 +80,7 @@ export interface PageRender {
   grips: GripBinding[];
   images: ImageBinding[];
   drawings: DrawingBinding[];
+  wordarts: WordArtBinding[];
   urls: string[];
 }
 
@@ -253,8 +261,9 @@ function renderPageRecord(
   const grips: GripBinding[] = [];
   const images: ImageBinding[] = [];
   const drawings: DrawingBinding[] = [];
-  const el = renderPage(doc, page, zoom, urls, options, bindings, grips, images, drawings);
-  return { el, page, bindings, grips, images, drawings, urls };
+  const wordarts: WordArtBinding[] = [];
+  const el = renderPage(doc, page, zoom, urls, options, bindings, grips, images, drawings, wordarts);
+  return { el, page, bindings, grips, images, drawings, wordarts, urls };
 }
 
 export function renderToDom(
@@ -335,6 +344,7 @@ export function renderToDom(
     grips: pages.flatMap((p) => p.grips),
     images: pages.flatMap((p) => p.images),
     drawings: pages.flatMap((p) => p.drawings),
+    wordarts: pages.flatMap((p) => p.wordarts),
     _pages: pages,
     destroy: () => {
       for (const pr of pages) for (const u of pr.urls) URL.revokeObjectURL(u);
@@ -397,6 +407,7 @@ function renderPage(
   grips: GripBinding[],
   images: ImageBinding[],
   drawings: DrawingBinding[],
+  wordarts: WordArtBinding[],
 ): HTMLElement {
   const el = document.createElement("div");
   el.className = "dxw-page";
@@ -484,6 +495,21 @@ function renderPage(
         images.push({ el: node, item });
       }
       if (item.kind === "drawingHit") drawings.push({ el: node, item });
+      if (item.kind === "wordart" && options.interactive) {
+        // Make the watermark an opaque hit target so a click selects it
+        // instead of dropping a caret in the text behind. Only the stretched
+        // ink (the inner span) captures — the box's empty corners stay
+        // click-through, so tapping just outside the art still edits the body.
+        node.dataset.dxwWordart = "1";
+        node.style.pointerEvents = "none";
+        const ink = node.firstElementChild as HTMLElement | null;
+        if (ink) {
+          ink.style.pointerEvents = "auto";
+          ink.style.cursor = "pointer";
+          ink.dataset.dxwWordartInk = "1";
+        }
+        wordarts.push({ el: node, item });
+      }
     }
   }
   return el;
