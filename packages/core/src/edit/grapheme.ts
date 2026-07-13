@@ -7,16 +7,25 @@
  * we step on grapheme boundaries rather than UTF-16 code units.
  */
 
-let segmenter: Intl.Segmenter | null = null;
+// Minimal local typing for Intl.Segmenter — the project targets the ES2020 lib
+// (no ES2022.Intl types), but every runtime we ship to (modern browsers,
+// Node 18+) has it. Absence is handled by the code-point fallback below.
+interface GraphemeSegmenter {
+  segment(input: string): Iterable<{ segment: string; index: number }>;
+}
+interface SegmenterCtor {
+  new (locales?: undefined, options?: { granularity: "grapheme" }): GraphemeSegmenter;
+}
+
+let segmenter: GraphemeSegmenter | null = null;
 let segmenterTried = false;
 
-function getSegmenter(): Intl.Segmenter | null {
+function getSegmenter(): GraphemeSegmenter | null {
   if (segmenterTried) return segmenter;
   segmenterTried = true;
   try {
-    if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
-      segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-    }
+    const ctor = (Intl as unknown as { Segmenter?: SegmenterCtor }).Segmenter;
+    if (typeof ctor === "function") segmenter = new ctor(undefined, { granularity: "grapheme" });
   } catch {
     segmenter = null;
   }

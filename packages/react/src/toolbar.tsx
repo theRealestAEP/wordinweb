@@ -620,6 +620,7 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
 function LayoutTab({ api }: { api: DocxViewApi | null }) {
   const [scope, setScope] = useState<"document" | "section">("document");
   const set = (patch: Parameters<NonNullable<typeof api>["setPageLayout"]>[0]) => api?.setPageLayout(patch, scope);
+  const setLn = (patch: Parameters<NonNullable<typeof api>["setLineNumbering"]>[0]) => api?.setLineNumbering(patch, scope);
   const sel = (title: string, entries: [string, string][], onPick: (v: string) => void, width = 96) => (
     <select
       title={title}
@@ -665,6 +666,21 @@ function LayoutTab({ api }: { api: DocxViewApi | null }) {
         else if (v === "thick") set({ pageBorders: { sz: 12 } });
         else set({ pageBorders: { sz: 8, color: "4472C4" } });
       }, 96)}
+      {sel("Line numbers", [
+        ["off", "None"],
+        ["continuous", "Continuous"],
+        ["eachPage", "Restart each page"],
+        ["eachSection", "Restart each section"],
+        ["by5", "Count by 5"],
+        ["by10", "Count by 10"],
+      ], (v) => {
+        if (v === "off") setLn({ enabled: false });
+        else if (v === "continuous") setLn({ enabled: true, countBy: 1, restart: "continuous" });
+        else if (v === "eachPage") setLn({ enabled: true, countBy: 1, restart: "newPage" });
+        else if (v === "eachSection") setLn({ enabled: true, countBy: 1, restart: "newSection" });
+        else if (v === "by5") setLn({ enabled: true, countBy: 5 });
+        else setLn({ enabled: true, countBy: 10 });
+      }, 118)}
     </>
   );
 }

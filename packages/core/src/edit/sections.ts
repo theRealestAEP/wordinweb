@@ -1,5 +1,5 @@
 import { DocxDocument } from "../docx.js";
-import { XmlElement, localName } from "../xml.js";
+import { XmlElement, attr, localName } from "../xml.js";
 
 /**
  * Section editing: resolve the sectPr governing a caret position, insert
@@ -127,6 +127,117 @@ export function insertSectionBreak(
 
   const breakPara = el(`${w}p`, {}, [el(`${w}pPr`, {}, [closing])]);
   body.children.splice(body.children.indexOf(host) + 1, 0, breakPara);
+  doc.refresh();
+  return true;
+}
+
+// ---------- line numbering (w:lnNumType) ----------
+
+function prefixOf(e: XmlElement): string {
+  return e.name.includes(":") ? e.name.slice(0, e.name.indexOf(":") + 1) : "";
+}
+
+/** Canonical CT_SectPr child order (subset we touch), for schema-correct
+ * insertion — Word repairs a sectPr whose children are out of order. */
+const SECTPR_ORDER = [
+  "headerReference", "footerReference", "footnotePr", "endnotePr", "type", "pgSz", "pgMar",
+  "paperSrc", "pgBorders", "lnNumType", "pgNumType", "cols", "formProt", "vAlign", "noEndnote",
+  "titlePg", "textDirection", "bidi", "rtlGutter", "docGrid", "printerSettings", "sectPrChange",
+];
+
+/** Insert `child` into `sectPr` at its schema-ordered position. */
+function insertInOrder(sectPr: XmlElement, childEl: XmlElement): void {
+  const rank = (e: XmlElement) => {
+    const i = SECTPR_ORDER.indexOf(localName(e.name));
+    return i === -1 ? SECTPR_ORDER.length : i;
+  };
+  const r = rank(childEl);
+  const at = sectPr.children.findIndex((c) => rank(c) > r);
+  if (at === -1) sectPr.children.push(childEl);
+  else sectPr.children.splice(at, 0, childEl);
+}
+
+function allSectPrs(doc: DocxDocument): XmlElement[] {
+  const out: XmlElement[] = [];
+  const root = doc.editableRoots()[0];
+  const walk = (e: XmlElement) => {
+    if (localName(e.name) === "sectPr") out.push(e);
+    for (const c of e.children) walk(c);
+  };
+  if (root) walk(root);
+  return out;
+}
+
+export interface LineNumberingPatch {
+  /** Turn margin line numbering on/off for the target section(s). */
+  enabled: boolean;
+  /** Number every Nth line (1/5/10). Default 1 when first enabled. */
+  countBy?: number;
+  /** When the count resets. Default newPage when first enabled. */
+  restart?: "continuous" | "newPage" | "newSection";
+  /** First line number. Default 1. */
+  start?: number;
+}
+
+/** Current line-numbering settings for the section governing `t`, or null when
+ * the section has none (line numbering off). */
+export function lineNumberingAt(
+  doc: DocxDocument,
+  t: XmlElement,
+): { countBy: number; restart: "continuous" | "newPage" | "newSection"; start: number } | null {
+  const sectPr = sectPrAt(doc, t);
+  const ln = sectPr?.children.find((c) => localName(c.name) === "lnNumType");
+  if (!ln) return null;
+  const restart = attr(ln, "restart");
+  return {
+    countBy: parseInt(attr(ln, "countBy") ?? "1", 10) || 1,
+    restart: restart === "continuous" || restart === "newSection" ? restart : "newPage",
+    start: parseInt(attr(ln, "start") ?? "1", 10) || 1,
+  };
+}
+
+/**
+ * Toggle/configure margin line numbering. With `target` (a sectPr), only that
+ * section changes; otherwise every section in the document updates. Disabling
+ * removes the w:lnNumType element entirely (Word's "None"). Enabling creates
+ * or updates it in schema-correct position and relayouts.
+ */
+export function setLineNumbering(doc: DocxDocument, patch: LineNumberingPatch, target?: XmlElement): boolean {
+  const sectPrs = target ? [target] : allSectPrs(doc);
+  if (sectPrs.length === 0) return false;
+  for (const sectPr of sectPrs) {
+    const w = prefixOf(sectPr) || "w:";
+    if (!patch.enabled) {
+      sectPr.children = sectPr.children.filter((c) => localName(c.name) !== "lnNumType");
+      continue;
+    }
+    let ln = sectPr.children.find((c) => localName(c.name) === "lnNumType");
+    const creating = !ln;
+    if (!ln) {
+      ln = el(`${w}lnNumType`, {});
+      insertInOrder(sectPr, ln);
+    }
+    const setA = (local: string, v: string) => {
+      const key = Object.keys(ln!.attrs).find((k) => localName(k) === local) ?? `${w}${local}`;
+      ln!.attrs[key] = v;
+    };
+    const delA = (local: string) => {
+      const key = Object.keys(ln!.attrs).find((k) => localName(k) === local);
+      if (key) delete ln!.attrs[key];
+    };
+    // countBy always present (a bare lnNumType already means "every line").
+    if (patch.countBy !== undefined) setA("countBy", String(patch.countBy));
+    else if (creating) setA("countBy", "1");
+    if (patch.restart !== undefined) {
+      // newPage is the OOXML default; keep the XML minimal by omitting it.
+      if (patch.restart === "newPage") delA("restart");
+      else setA("restart", patch.restart);
+    }
+    if (patch.start !== undefined) {
+      if (patch.start === 1) delA("start");
+      else setA("start", String(patch.start));
+    }
+  }
   doc.refresh();
   return true;
 }

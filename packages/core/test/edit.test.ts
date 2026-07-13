@@ -767,3 +767,59 @@ describe("math editing", () => {
     expect(math3 && math3.kind === "math" ? mathLinearOf(doc3, math3.src!) : "").toBe("a^2+b^2=c^2");
   });
 });
+
+describe("line numbering (w:lnNumType)", () => {
+  const SECT =
+    `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+  const lnDoc = () => loadDoc(p("body text") + SECT);
+  const firstT = (doc: DocxDocument) => {
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    return ((para.children[0] as Run).content[0] as TextContent).srcT!;
+  };
+
+  it("enables line numbering with countBy and restart, readable via lineNumberingAt", async () => {
+    const { setLineNumbering, lineNumberingAt } = await import("../src/edit/sections.js");
+    const doc = lnDoc();
+    expect(lineNumberingAt(doc, firstT(doc))).toBeNull();
+    expect(setLineNumbering(doc, { enabled: true, countBy: 5, restart: "continuous" })).toBe(true);
+    expect(doc.sections[0].props.lineNumbering?.countBy).toBe(5);
+    const ln = lineNumberingAt(doc, firstT(doc));
+    expect(ln).toEqual({ countBy: 5, restart: "continuous", start: 1 });
+  });
+
+  it("newPage restart and start=1 stay out of the XML (OOXML defaults)", async () => {
+    const { setLineNumbering } = await import("../src/edit/sections.js");
+    const doc = lnDoc();
+    setLineNumbering(doc, { enabled: true, countBy: 1, restart: "newPage", start: 1 });
+    const xml = serializeXml(doc.editableRoots()[0]);
+    expect(xml).toContain("lnNumType");
+    expect(xml).not.toContain('restart="newPage"');
+    expect(xml).not.toContain("start=");
+  });
+
+  it("round-trips through save and can be turned back off", async () => {
+    const { setLineNumbering, lineNumberingAt } = await import("../src/edit/sections.js");
+    const doc = lnDoc();
+    setLineNumbering(doc, { enabled: true, countBy: 10, restart: "newSection" });
+    const reloaded = DocxDocument.load(doc.save());
+    const rt = lineNumberingAt(reloaded, firstT(reloaded));
+    expect(rt).toEqual({ countBy: 10, restart: "newSection", start: 1 });
+    // Disabling removes the element entirely.
+    expect(setLineNumbering(reloaded, { enabled: false })).toBe(true);
+    expect(lineNumberingAt(reloaded, firstT(reloaded))).toBeNull();
+    const off = DocxDocument.load(reloaded.save());
+    expect(off.sections[0].props.lineNumbering).toBeUndefined();
+  });
+
+  it("inserts lnNumType in schema order (after pgMar, before cols)", async () => {
+    const { setLineNumbering } = await import("../src/edit/sections.js");
+    const { setPageLayout } = await import("../src/edit/blocks.js");
+    const doc = lnDoc();
+    setPageLayout(doc, { columns: 2 }); // adds <w:cols> after pgMar
+    setLineNumbering(doc, { enabled: true, countBy: 1 });
+    const xml = serializeXml(doc.editableRoots()[0]);
+    expect(xml.indexOf("pgMar")).toBeLessThan(xml.indexOf("lnNumType"));
+    expect(xml.indexOf("lnNumType")).toBeLessThan(xml.indexOf("<w:cols"));
+  });
+});

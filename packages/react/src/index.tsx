@@ -3,6 +3,7 @@ import {
   DocxDocument,
   DocxEditor,
   EditHistory,
+  LineNumberingPatch,
   PageLayoutPatch,
   ParagraphAlignment,
   RenderHandle,
@@ -31,6 +32,8 @@ import {
   insertBreakAt,
   insertSectionBreak,
   sectPrAt,
+  setLineNumbering,
+  lineNumberingAt,
   type XmlElement,
   insertTableAfter,
   createMeasurer,
@@ -104,6 +107,11 @@ export interface DocxViewApi {
   setPageLayout(patch: PageLayoutPatch, scope?: "document" | "section"): void;
   /** Insert a page/column break or a section break at the caret. */
   insertBreak(kind: "page" | "column" | "sectionNextPage" | "sectionContinuous"): boolean;
+  /** Toggle/configure margin line numbers (Word's Layout > Line Numbers).
+   * scope "section" targets the caret's section; "document" every section. */
+  setLineNumbering(patch: LineNumberingPatch, scope?: "document" | "section"): void;
+  /** Current line-numbering settings for the caret's section, or null (off). */
+  getLineNumbering(): { countBy: number; restart: "continuous" | "newPage" | "newSection"; start: number } | null;
   /** Leave header/footer editing mode. */
   closeHeaderFooter(): void;
   /** Effective formatting of the current selection (toolbar state), or null. */
@@ -519,6 +527,19 @@ export function DocxView({
             }
             if (setPageLayout(doc, patch, target)) pages = rerender(doc);
           },
+          setLineNumbering: (patch, scope) => {
+            history.checkpoint();
+            let target: XmlElement | undefined;
+            if (scope === "section") {
+              const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t;
+              if (t) target = sectPrAt(doc, t) ?? undefined;
+            }
+            if (setLineNumbering(doc, patch, target)) pages = rerender(doc);
+          },
+          getLineNumbering: () => {
+            const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t;
+            return t ? lineNumberingAt(doc, t) : null;
+          },
           setLink: (url) => {
             const segs = editor?.getSelectionSegments() ?? [];
             const t = segs.find((sg) => sg.t)?.t ?? editor?.getCaretTarget()?.t;
@@ -728,5 +749,5 @@ export function DocxView({
 }
 
 export { DocxDocument, layoutDocument, renderToDom, printPages } from "@docxinweb/core";
-export type { RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch } from "@docxinweb/core";
+export type { RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch } from "@docxinweb/core";
 export { DocxToolbar } from "./toolbar.js";
