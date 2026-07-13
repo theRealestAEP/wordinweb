@@ -40,10 +40,15 @@ import { FontSpec, LaidOutPage, LayoutResult, PageItem, TextItem } from "./types
 
 export interface LayoutOptions {
   measurer?: TextMeasurer;
+  /** Previous layout result (from an earlier layoutDocument call on the same
+   * document). Enables incremental relayout: pages whose input blocks and
+   * lead-in state are unchanged are reused instead of re-laid. The engine falls
+   * back to a full layout whenever it cannot prove reuse is byte-identical. */
+  prev?: LayoutResult;
 }
 
 export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): LayoutResult {
-  return new Engine(doc, options.measurer ?? createMeasurer()).run();
+  return new Engine(doc, options.measurer ?? createMeasurer()).run(options.prev);
 }
 
 // ---------- internal page ----------
@@ -286,7 +291,8 @@ class Engine {
     private measurer: TextMeasurer,
   ) {}
 
-  run(): LayoutResult {
+  run(prev?: LayoutResult): LayoutResult {
+    void prev; // incremental reuse wired in a later step; full layout for now
     this.assignNoteNumbers();
     this.assignSeqNumbers();
     const sections = this.doc.sections;
