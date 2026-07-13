@@ -112,6 +112,9 @@ export interface RunProps {
   letterSpacing?: number;
   /** w:w horizontal character scaling as a fraction (1.5 = 150%). */
   textScale?: number;
+  /** w:fitText target width in px: the run's advances scale so its text
+   * occupies exactly this width (resolved to textScale at layout time). */
+  fitText?: number;
   /** w:position baseline shift in px, positive = raised. */
   raise?: number;
   /** w:outline — hollow stroked glyphs. */

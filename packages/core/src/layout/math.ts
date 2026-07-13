@@ -56,6 +56,11 @@ const MAT_CENTER_DROP = 0.62 / 11; // row-baseline centroid sits this far BELOW 
 // the minimum: probe2-math-matrices' 3x3 of fractions rows at 26.75pt
 // baseline-to-baseline (11pt base) = rowDesc + nextRowAsc + this small gap.
 const MAT_ROW_GAP = 0.1 / 11;
+// Line-extent trim for fraction-cell (tall) matrices: Word's line box hugs
+// the grid ink ~0.7pt closer above and ~0.6pt closer below than the outer
+// rows' full font boxes at 11pt (probe2 3x3 vs its Word PDF).
+const MAT_FRAC_LINE_TRIM_ASC = 0.7 / 11;
+const MAT_FRAC_LINE_TRIM_DESC = 0.6 / 11;
 // Width-additive matrix/delimiter gaps. The STIX values were calibrated so a
 // STIX-rendered matrix hit Word's total width; real Cambria Math carries Word's
 // true (wider) glyph advances, so the same gaps over-pad and drift the trailing
@@ -242,6 +247,22 @@ const DLM_MAT_COVER = 0.72;
 // ink covers ~88% of the axis-centered content extent (probe2 3x3 fraction
 // matrix: 71.25pt paren ink around an 80.2pt core at 11pt).
 const DLM_ASSEMBLY_COVER = 0.88;
+// True assembly pieces for oversized parens (Cambria Math glyf, em/2048):
+// hook glyphs U+239B/239D (left) and U+239E/23A0 (right) are 4732 units of
+// ink with the full arc curvature packed into that span, joined by the
+// U+239C/239F extender (2500 units), all on a 1553-unit advance. A scaleY-
+// stretched base paren curves far too slowly: at probe2's 76.9pt 3x3 paren,
+// Word's hook already flares to its full ~7pt width within the top 8pt while
+// the stretched glyph is still near its tip (the last unmatched-ink cluster
+// on that page). Pieces sit ink-flush at y>=0 relative to their own baseline.
+const DLM_ASM_PIECES: Record<string, [string, string, string]> = {
+  "(": ["⎛", "⎜", "⎝"],
+  ")": ["⎞", "⎟", "⎠"],
+};
+const DLM_ASM_HOOK_EM = 4732 / 2048;
+const DLM_ASM_EXT_EM = 2500 / 2048;
+const DLM_ASM_ADV_EM = 1553 / 2048;
+const DLM_ASM_OVERLAP_EM = 0.02; // hairline weld between pieces
 
 // Radical geometry, from Cambria Math's MATH/glyf tables (em/2048): the
 // vertical variant ladder for U+221A with each glyph's advance and ink span
@@ -271,13 +292,18 @@ const RAD_GAP = 130 / 2048;
 // heading->eq / eq->next gaps measure +5.4pt above, +8.1pt below our
 // ink-based box). Scoped to display depth 0: a radical inside a fraction
 // numerator must NOT grow the frac stack (parity2-equations' quadratic).
-const RAD_LINE_ABOVE = 0.45;
-const RAD_LINE_BELOW = 0.675;
-// A variant with large slack (>1.3x the requirement — the nested-outer case)
-// rides UP: its rule top sits this far above the radicand's ascent
-// (probe2: outer rule top 18.0pt over a 9.83pt-ascent radicand).
+// Recalibrated against the probe2 Word PDF once the whole page's constructs
+// were measured together: the radical equation's baseline sat 3.1pt high and
+// the Limits section below it then 1.4pt low (above +3.1/11 em, below
+// -1.4/11 em from the first mat3 estimates).
+const RAD_LINE_ABOVE = 0.45 + 3.1 / 11;
+const RAD_LINE_BELOW = 0.675 - 1.4 / 11;
+// The nested-outer grown variant rides UP: its rule top sits this far above
+// the radicand's ascent (probe2 raster: outer rule 17.6pt above the baseline
+// over a ~9.4pt-ascent radicand at 11pt), and its foot descends below the
+// radicand descent (sign ink to 6.3pt below the baseline).
 const RAD_GROWN_TOP = 8.17 / 11;
-const RAD_GROWN_RATIO = 1.3;
+const RAD_GROWN_FOOT = 6.3 / 11;
 const RAD_RULE_OVERHANG = 0.04; // em past the radicand (measured 0.4-0.6pt)
 // m:deg placement: MATH RadicalKernBeforeDegree / RadicalKernAfterDegree,
 // with the baseline raised 65% of the sign's ink height above its ink bottom
@@ -303,6 +329,12 @@ const GRP_BOT_BASE_RAISE = 8.5 / 11;
 // ⏞ / ⏟ ink spans about their own baseline (glyf bbox, em/2048).
 const GRP_TOP_INK = { top: 1708 / 2048, bot: 1070 / 2048 };
 const GRP_BOT_INK = { top: -364 / 2048, bot: -1002 / 2048 };
+// A display underbrace's line box descends past its visible ink: Word reserves
+// the stretched brace's full font-box depth below the baseline so the next
+// paragraph clears it. Measured on probe2-math-matrices' 'x+y' underbrace: the
+// gap to the following heading is ~5pt larger than an ink-based box gives, and
+// that shortfall rode the whole lower half (radical, limits) up ~5pt.
+const GRP_BOT_LINE_BELOW = 6.8 / 11;
 
 // m:limLow / m:limUpp: script-size limit stacked under/over the base, both
 // centered on the wider of the two. Measured at 11pt: lim baseline 6.75pt
@@ -770,6 +802,7 @@ function flow(
         let grow: number;
         let varAsc: number | undefined;
         let varDesc: number | undefined;
+        let asmH: number | undefined;
         if (matLike) {
           const cover = hasMat ? DLM_MAT_COVER : DLM_COVER;
           const coreExtent = coreAsc + coreDesc;
@@ -778,6 +811,8 @@ function flow(
           grow = variantH / (bm.ascent + bm.descent);
           varAsc = axis - dy + variantH / 2;
           varDesc = variantH / 2 - (axis - dy);
+          // Past the ladder AND tall enough for two hooks: true piece assembly.
+          if (idx < 0 && variantH > 2 * size * DLM_ASM_HOOK_EM) asmH = variantH;
         } else if (node.e.some((p) => containsBlocky(p))) {
           const innerH = Math.max(innerAsc - axis, innerDesc + axis) * 2;
           grow = Math.max(1, innerH / (bm.ascent + bm.descent));
@@ -812,6 +847,38 @@ function flow(
         const innerPad = size * (matLike ? DLM_MAT_END_PAD : dlmPad());
         const drawDelim = (ch: string) => {
           if (!ch) return;
+          const asm = asmH !== undefined ? DLM_ASM_PIECES[ch] : undefined;
+          if (asm && asmH !== undefined) {
+            // Word-style assembly: hook + welded extender + hook, ink centered
+            // on the math axis spanning asmH. Each piece's ink starts at its
+            // own baseline (glyf yMin 0) and rises DLM_ASM_HOOK/EXT_EM.
+            const hookH = size * DLM_ASM_HOOK_EM;
+            const extNat = size * DLM_ASM_EXT_EM;
+            const eps = size * DLM_ASM_OVERLAP_EM;
+            const [top, ext, bot] = asm;
+            const own = {
+              ownAscent: varAsc !== undefined ? dy + varAsc : undefined,
+              ownDescent: varDesc !== undefined ? -dy + varDesc : undefined,
+            };
+            const botDy = axis - asmH / 2;
+            const topDy = axis + asmH / 2 - hookH;
+            box.pieces.push({ text: bot, x: box.width, dy: botDy, font: baseFont, ...own });
+            const gap = asmH - 2 * hookH;
+            if (gap > 0) {
+              box.pieces.push({
+                text: ext,
+                x: box.width,
+                dy: botDy + hookH - eps,
+                font: baseFont,
+                scaleY: (gap + 2 * eps) / extNat,
+                scaleAnchor: 0,
+                ...own,
+              });
+            }
+            box.pieces.push({ text: top, x: box.width, dy: topDy, font: baseFont, ...own });
+            box.width += size * DLM_ASM_ADV_EM;
+            return;
+          }
           box.pieces.push({
             text: ch,
             x: box.width,
@@ -847,6 +914,15 @@ function flow(
       case "mat": {
         // Full-size cells on a grid, block centered on the math axis.
         const axis = dy + size * RULE_CENTER;
+        // A tall (fraction-cell) matrix's LINE box in Word hugs the grid ink
+        // closer than our cells' full font boxes: the top numerator / bottom
+        // denominator rows carry the whole Cambria Math box (0.762/0.238em)
+        // above/below their baselines, overshooting Word's line by ~0.7pt up
+        // and ~0.6pt down (probe2 3x3: our matrix ink sat +0.6 low and pushed
+        // the next heading +1.7). Trim that padding from the LINE extents only
+        // — row pitch (b.ascent/b.descent, pinned at 26.75pt) is untouched, and
+        // plain single-line matrices (the pinned 2x2) keep the full box.
+        const tallMat = node.rows.some((r) => r.some((c) => c.some((n) => n.t === "frac")));
         const cells = node.rows.map((row) =>
           row.map((cell) => {
             const b: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
@@ -855,6 +931,10 @@ function flow(
               const m = measurer.metrics(pc.font);
               b.ascent = Math.max(b.ascent, pc.dy + m.ascent);
               b.descent = Math.max(b.descent, -pc.dy + m.descent);
+              if (tallMat && pc.ownAscent === undefined && pc.ownDescent === undefined) {
+                pc.ownAscent = pc.dy + m.ascent - size * MAT_FRAC_LINE_TRIM_ASC;
+                pc.ownDescent = -pc.dy + m.descent - size * MAT_FRAC_LINE_TRIM_DESC;
+              }
             }
             return b;
           }),
@@ -913,9 +993,21 @@ function flow(
           radDesc = Math.max(radDesc, -r.dy + r.thick / 2);
         }
         // Rule (vinculum) sits a clearance above the radicand's top ink; the
-        // sign's ink top IS the rule. A large-slack variant rides further up.
-        const ruleTop = radAsc + size * RAD_GAP + ruleThick;
-        const signInkH = ruleTop + radDesc;
+        // sign's ink top IS the rule. The OUTER radical of a nested pair on a
+        // top-level display line takes Word's large-slack assembled variant
+        // whose rule rides RAD_GROWN_TOP above the radicand ascent instead of
+        // hugging it (probe2: outer rule 17.6pt over the baseline vs the hug's
+        // 10.9; sign ink spans 24pt, matching the raster). Crucially this moves
+        // INK ONLY - the line extents keep the hug-based reserve below, or the
+        // taller box re-sinks the whole equation (measured: +3.6 severity).
+        const nestedGrown =
+          display && breakDepth === 0 && node.e.some((seg) => containsRad([seg]));
+        const hugTop = radAsc + size * RAD_GAP + ruleThick;
+        const ruleTop = nestedGrown ? radAsc + size * RAD_GROWN_TOP : hugTop;
+        // The grown variant's foot also descends past the radicand descent
+        // (probe2 raster: sign ink to 6.3pt below the baseline at 11pt).
+        const signDesc = nestedGrown ? Math.max(radDesc, size * RAD_GROWN_FOOT) : radDesc;
+        const signInkH = ruleTop + signDesc;
         // Optional degree (∛): a script-size index tucked into the sign's kern,
         // its baseline raised RAD_DEG_RAISE of the sign ink height above the
         // sign's ink bottom.
@@ -932,7 +1024,18 @@ function flow(
         // Sign: the natural √ grown so its ink top reaches the rule while its
         // bottom vertex stays at the radicand's descent (Word swaps in a taller
         // MATH variant; scaleY approximates it about the bottom-vertex anchor).
-        const grow = Math.max(1, signInkH / (m.ascent + radDesc));
+        // The grown nested-outer sign instead maps its natural ink EXACTLY onto
+        // Word's span (rule top down to the -RAD_GROWN_FOOT foot): scaling about
+        // a point below the ink bottom can only lift the foot, so solve the
+        // two-point mapping with the real U+221A ink extents (RAD_VARIANTS[0]).
+        let grow = Math.max(1, signInkH / (m.ascent + signDesc));
+        let signAnchor = -signDesc;
+        if (nestedGrown) {
+          const inkTopNat = (size * RAD_VARIANTS[0].top) / 2048;
+          const inkBotNat = (size * RAD_VARIANTS[0].bot) / 2048;
+          grow = (ruleTop + size * RAD_GROWN_FOOT) / (inkTopNat - inkBotNat);
+          signAnchor = (-size * RAD_GROWN_FOOT - inkBotNat * grow) / (1 - grow);
+        }
         // Only the COMPLEX radical (a degree index or a nested radicand)
         // swaps to Word's oversized assembled variant whose font box far
         // exceeds its ink; growth alone cannot discriminate (probe2's nested
@@ -949,8 +1052,12 @@ function flow(
           dy,
           font,
           scaleY: grow > 1.05 ? grow : undefined,
-          scaleAnchor: -radDesc,
-          ownAscent: dy + ruleTop + (topLevelDisplay ? size * RAD_LINE_ABOVE : 0),
+          scaleAnchor: signAnchor,
+          // Line extents from the HUG rule position even when the drawn rule
+          // rides up (nestedGrown): RAD_LINE_ABOVE already covers the grown
+          // ink (hug + 8.05pt > grown 17.6pt at 11pt), and growing the box
+          // with the ink would push the baseline off Word's.
+          ownAscent: dy + hugTop + (topLevelDisplay ? size * RAD_LINE_ABOVE : 0),
           ownDescent: -dy + radDesc + (topLevelDisplay ? size * RAD_LINE_BELOW : 0),
         });
         const radLeft = box.width + signW;
@@ -1044,6 +1151,9 @@ function flow(
           dy: braceDy,
           font: braceFont,
           scaleX: natW > 0 && braceW / natW > 1.02 ? braceW / natW : undefined,
+          // Reserve Word's full below-baseline font box for a display underbrace
+          // so the following paragraph clears it (probe2 lower-half ride-up).
+          ownDescent: !isTop && display ? size * GRP_BOT_LINE_BELOW : undefined,
         });
         box.width = x0 + groupW;
         prevOperand = true;

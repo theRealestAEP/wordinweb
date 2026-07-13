@@ -188,6 +188,14 @@ export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
 }
 
 function displayText(text: string, props: RunProps): string {
+  // Word renders U+00AD (optional hyphen) as a VISIBLE hyphen glyph in every
+  // position, not just at line breaks — and does NOT break lines at it
+  // (probe2-hyphenation p1: the Word PDF draws "super-cali-fragilistic-
+  // expiali-docious" mid-line AND moves the whole word to the next line
+  // rather than splitting at any soft hyphen). Browsers hide the character,
+  // so map to U+2011 (non-breaking hyphen, same glyph, not a hyphenBreaks
+  // opportunity); same length keeps source offsets 1:1.
+  if (text.includes("­")) text = text.replace(/­/g, "‑");
   if (props.caps) return text.toUpperCase();
   return text;
 }
@@ -1208,6 +1216,25 @@ function breakParagraphImpl(
   // Script of the last non-space text fragment placed, for the vertical
   // docGrid grid-resync break (null until the first fragment).
   let prevContentCJK: boolean | null = null;
+  // w:bdr horizontal reserve. Word insets a bordered run's glyphs by the
+  // painted rule width + w:space at each bordered-segment boundary AND at
+  // every wrapped line start (probe2-run-borders p1: each line of the sz=8
+  // wrapping run starts 1.00pt past the margin — 73.03 vs 72.03 — and "Word"
+  // wraps off line 1 only because of that inset; the label row's segment gaps
+  // measure paint-width + space exactly, with double counting 3x its rule).
+  const bdrPadOf = (a: Atom | undefined): number => {
+    if (!a || (a.kind !== "frag" && a.kind !== "space")) return 0;
+    const b = a.props.border;
+    if (!b || b.style === "none") return 0;
+    return (b.style === "double" ? b.width * 3 : b.width) + (b.space ?? 0);
+  };
+  const sameBdrAtom = (a: Atom | undefined, b: Atom | undefined): boolean => {
+    if (!a || !b || (a.kind !== "frag" && a.kind !== "space") || (b.kind !== "frag" && b.kind !== "space")) return false;
+    const ba = a.props.border;
+    const bb = b.props.border;
+    if (!ba || !bb) return false;
+    return ba.style === bb.style && ba.color === bb.color && ba.width === bb.width && ba.space === bb.space;
+  };
   for (let ai = 0; ai < atoms.length; ai++) {
     const atom = atoms[ai];
     if (atom.kind === "anchorPoint") {
@@ -1335,6 +1362,29 @@ function breakParagraphImpl(
           if (a.kind === "frag" || a.kind === "space" || a.kind === "image") w += a.width;
         }
         target = stop.align === "center" ? stop.pos - w / 2 : stop.pos - w;
+        // A decimal stop aligns the DECIMAL SEPARATOR at the stop: the
+        // pre-decimal digits right-align to it and ".xx" extends past
+        // (parity2-tabs: Word ends "1234" exactly at the 4320tw stop with
+        // ".56" to its right; right-aligning the whole token sat the value
+        // 13pt left of Word). Text with no separator right-aligns whole.
+        if (stop.align === "decimal") {
+          let pre = 0;
+          let found = false;
+          for (let j = ai + 1; j < atoms.length; j++) {
+            const a = atoms[j];
+            if (a.kind === "tab" || a.kind === "break") break;
+            if (a.kind === "frag") {
+              const di = a.text.indexOf(".");
+              if (di >= 0) {
+                pre += measurer.width(a.text.slice(0, di), a.font, a.props.letterSpacing) * (a.props.textScale ?? 1);
+                found = true;
+                break;
+              }
+            }
+            if (a.kind === "frag" || a.kind === "space" || a.kind === "image") pre += a.width;
+          }
+          if (found) target = stop.pos - pre;
+        }
       }
       // A right/decimal tab whose ALIGNED text cannot reach its stop (the
       // cursor is already past stop − textWidth) WRAPS to a fresh line and
@@ -1537,7 +1587,14 @@ function breakParagraphImpl(
     // part already placed on this line, the "tail" the frag atoms after this
     // one with no space between.
     const lineEnd = lineStartX(lineIndex) + availFor(lineIndex);
-    let fits = x + atom.width <= lineEnd + 0.01;
+    // Bordered-run horizontal reserve: leading inset when this atom opens a
+    // bordered segment (or continues one at a fresh line's start), trailing
+    // reserve when it closes one. Reserved in fitting and folded into the pen
+    // advance so the box's rule + w:space has real room, like Word.
+    const bdrPad = bdrPadOf(atom);
+    const bdrPadL = bdrPad && (!sameBdrAtom(atoms[ai - 1], atom) || curLineWidth === 0) ? bdrPad : 0;
+    const bdrPadR = bdrPad && !sameBdrAtom(atom, atoms[ai + 1]) ? bdrPad : 0;
+    let fits = x + bdrPadL + atom.width + bdrPadR <= lineEnd + 0.01;
     if (!fits && packUntilSpace) fits = true; // continuation of a packed word
     // A tab is not a break opportunity: the word right after a tab stays
     // glued to it and overflows the cell/column edge instead of wrapping
@@ -1603,7 +1660,7 @@ function breakParagraphImpl(
           if (t.breakAfter) break;
         }
       }
-      const wordW = headW + atom.width + tailW;
+      const wordW = headW + bdrPadL + atom.width + bdrPadR + tailW;
       if (!fits && minLineHeight !== undefined && curEaSpaceWidth > 0) {
         // East Asian line fitting (docGrid sections) compresses inter-word
         // spaces to pull the next word onto the line REGARDLESS of paragraph
@@ -1732,9 +1789,16 @@ function breakParagraphImpl(
       hardWrapFrag(atom);
       continue;
     }
+    // A bordered segment's leading inset shifts the glyphs right; the trailing
+    // reserve advances the pen past the closing rule. Both count as line width
+    // so justification slack and the fits checks above stay consistent.
+    // Recomputed here because a flush in the !fits path above may have moved
+    // this atom to a fresh line, where a mid-segment continuation re-insets.
+    const padL = bdrPad && (!sameBdrAtom(atoms[ai - 1], atom) || curLineWidth === 0) ? bdrPad : 0;
+    x += padL;
     cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
-    curLineWidth += atom.width;
-    x += atom.width;
+    curLineWidth += padL + atom.width + bdrPadR;
+    x += atom.width + bdrPadR;
     if (atom.text.trim().length > 0) prevContentCJK = fragIsCJK;
   }
 
@@ -2564,10 +2628,21 @@ function buildAtoms(
     // run's letterSpacing so both line-breaking (measurer.width) and painting
     // (renderer reads props.letterSpacing) spread the Arabic glyphs. Non-RTL
     // runs and non-kashida paragraphs are untouched.
-    const props =
+    let props =
       kashidaEm > 0 && baseProps.rtl
         ? { ...baseProps, letterSpacing: (baseProps.letterSpacing ?? 0) + kashidaEm * font.size }
         : baseProps;
+    // w:fitText: scale the run's advances so its text occupies exactly the
+    // target width (probe3-text-effects: "SQUEEZE ME INTO ONE INCH" fits
+    // 1440tw = 72pt; Word's PDF draws the group into that box exactly).
+    // Resolved into textScale so measuring and painting (renderer scaleX)
+    // both follow. Multi-run fitText groups (same w:id) are treated per run.
+    if (props.fitText !== undefined && props.fitText > 0) {
+      const natural = measurer.width(displayText(runPlainText(run), props), font, props.letterSpacing) * (props.textScale ?? 1);
+      if (natural > 0.1) {
+        props = { ...props, textScale: (props.textScale ?? 1) * (props.fitText / natural) };
+      }
+    }
     // Superscript/subscript runs paint at 65% size but Word keys LINE
     // METRICS to the unscaled run size: a wrapped line holding only a
     // footnote marker still advances a full base-size line (parity2-notes:

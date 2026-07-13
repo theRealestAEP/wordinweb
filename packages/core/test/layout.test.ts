@@ -809,6 +809,209 @@ describe("layout engine", () => {
     expect(bodyText.x).toBeGreaterThan(marginLeft + cap.width - 1);
   });
 
+  it("insets the wrap channel around a positioned frame by Word's default 6pt hSpace", () => {
+    // probe2-dropcaps-frames p1: body text wrapping beside a w:framePr callout
+    // starts 6pt (=8px) past the frame edge, not flush against it. Word applies
+    // this default horizontal wrap distance when w:hSpace is absent; getting it
+    // wrong widens the channel and lets a trailing word fit that Word wraps.
+    const marginLeft = 1440 / 15; // 96px
+    const frameWidthPx = 2000 / 15; // 2000 twips = 133.33px
+    const render = (hSpaceAttr: string) => {
+      const frame =
+        `<w:p><w:pPr>` +
+        `<w:framePr w:w="2000" w:h="1000" w:hRule="exact" w:wrap="around"` +
+        ` w:vAnchor="paragraph" w:hAnchor="margin" w:x="0" w:y="0"${hSpaceAttr}/>` +
+        `</w:pPr><w:r><w:t>Frame</w:t></w:r></w:p>`;
+      const body =
+        `<w:p><w:r><w:t xml:space="preserve">Body text that flows to the right of the positioned frame and keeps going for a while so it wraps onto several lines beside it.</w:t></w:r></w:p>`;
+      const section =
+        `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+        `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+      const { result } = layout({
+        "word/document.xml": wrapDocument(frame + body + section),
+      });
+      const bodyText = result.pages[0].items.find(
+        (i) => i.kind === "text" && i.text === "Body",
+      );
+      expect(bodyText?.kind).toBe("text");
+      return bodyText?.kind === "text" ? bodyText.x : NaN;
+    };
+    // Default (no hSpace): channel starts at frameRight + 6pt.
+    const defaultGapPx = 6 * (96 / 72); // 8px
+    expect(render("")).toBeCloseTo(marginLeft + frameWidthPx + defaultGapPx, 0);
+    // Explicit hSpace overrides the default (240 twips = 16px).
+    expect(render(` w:hSpace="240"`)).toBeCloseTo(marginLeft + frameWidthPx + 16, 0);
+  });
+
+  it("paints an exact-height frame's paragraph box to the frame height, not the content height", () => {
+    // probe2-dropcaps-frames p1: the pull-quote frame (w:h=1000 w:hRule=exact,
+    // two lines of text, pBdr box + shd fill) paints its fill and rules across
+    // the whole 1000-twip frame, leaving empty shaded space below the text.
+    // Web previously boxed only the laid content (~2 lines), losing the bottom
+    // third of the frame's ink.
+    const frameHPx = 1000 / 15; // 66.67px
+    const frame =
+      `<w:p><w:pPr>` +
+      `<w:framePr w:w="3000" w:h="1000" w:hRule="exact" w:wrap="around"` +
+      ` w:vAnchor="paragraph" w:hAnchor="margin" w:x="0" w:y="0"/>` +
+      `<w:pBdr>` +
+      `<w:top w:val="single" w:sz="6" w:space="4" w:color="BF8F00"/>` +
+      `<w:left w:val="single" w:sz="6" w:space="4" w:color="BF8F00"/>` +
+      `<w:bottom w:val="single" w:sz="6" w:space="4" w:color="BF8F00"/>` +
+      `<w:right w:val="single" w:sz="6" w:space="4" w:color="BF8F00"/>` +
+      `</w:pBdr>` +
+      `<w:shd w:val="clear" w:color="auto" w:fill="FFF2CC"/>` +
+      `<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>` +
+      `</w:pPr><w:r><w:t>Boxed frame</w:t></w:r></w:p>`;
+    const body = `<w:p><w:r><w:t>Body paragraph after the frame.</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(frame + body + section),
+    });
+    const items = result.pages[0].items;
+    const fill = items.find((i) => i.kind === "rect" && i.fill?.toUpperCase().includes("FFF2CC"));
+    expect(fill?.kind).toBe("rect");
+    if (fill?.kind !== "rect") return;
+    // The shading (border-box interior) grows far beyond one line (~19px):
+    // frame height minus the two border pads (space 4pt + rule ~= 6.33px each).
+    expect(fill.height).toBeGreaterThan(frameHPx - 16);
+    // Border-to-border the painted box spans the full frame height: the bottom
+    // rule sits ~frameH below the top rule, and the side rules span the fill.
+    const edges = items.filter((i) => i.kind === "edge" && i.border?.color?.toUpperCase().includes("BF8F00"));
+    expect(edges.length).toBe(4);
+    const rules = edges.filter((e) => e.kind === "edge" && Math.abs(e.y1 - e.y2) < 0.01);
+    expect(rules.length).toBe(2);
+    if (rules[0]?.kind === "edge" && rules[1]?.kind === "edge") {
+      expect(Math.abs(Math.abs(rules[1].y1 - rules[0].y1) - frameHPx)).toBeLessThan(3);
+    }
+    const sides = edges.filter((e) => e.kind === "edge" && Math.abs(e.x1 - e.x2) < 0.01);
+    expect(sides.length).toBe(2);
+    for (const s of sides) {
+      if (s.kind === "edge") expect(s.y2 - s.y1).toBeGreaterThan(frameHPx - 16);
+    }
+  });
+
+  it("insets a bordered run (w:bdr) by rule width + space at segment and line starts", () => {
+    // probe2-run-borders p1: Word reserves the painted rule width + w:space
+    // horizontally at each bordered-segment boundary and re-insets EVERY
+    // wrapped line of the run (each visual line starts 1.00pt past the margin
+    // for sz=8). Skipping the inset let one extra word fit per line, shifting
+    // every subsequent wrap point.
+    const bordered =
+      `<w:p><w:r><w:rPr><w:bdr w:val="single" w:sz="8" w:space="0" w:color="7030A0"/></w:rPr>` +
+      `<w:t xml:space="preserve">This is a single bordered run whose text is long enough that it must wrap across two or three lines and every line re-insets from the margin by the border pad.</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(bordered + section),
+    });
+    const items = result.pages[0].items.filter((i) => i.kind === "text" && i.text.trim().length > 0);
+    const marginLeft = 1440 / 15; // 96px
+    const padPx = (8 / 8) * (96 / 72); // sz=8 -> 1pt rule, space=0 -> 1.333px
+    // Rows by y: every line's first glyph is inset by the pad, not at the margin.
+    const rows = new Map<number, number>();
+    for (const it of items) {
+      if (it.kind !== "text") continue;
+      const y = Math.round(it.baseline);
+      rows.set(y, Math.min(rows.get(y) ?? Infinity, it.x));
+    }
+    const starts = [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, x]) => x);
+    expect(starts.length).toBeGreaterThan(1); // it wraps
+    for (const s of starts) {
+      expect(s).toBeCloseTo(marginLeft + padPx, 0);
+    }
+  });
+
+  it("aligns a decimal tab's separator at the stop and paints bar-tab rules", () => {
+    // parity2-tabs p1: Word ends the PRE-decimal digits exactly at a decimal
+    // stop ("1234" ends at 4320tw; ".56" extends right), and a w:val="bar"
+    // tab paints a vertical rule at its position without consuming the tab
+    // (the tab advances to the next real stop past it).
+    const decimalPara =
+      `<w:p><w:pPr><w:tabs><w:tab w:val="decimal" w:pos="4320"/></w:tabs></w:pPr>` +
+      `<w:r><w:t xml:space="preserve">Price</w:t></w:r><w:r><w:tab/></w:r>` +
+      `<w:r><w:t xml:space="preserve">1234.56</w:t></w:r></w:p>`;
+    const barPara =
+      `<w:p><w:pPr><w:tabs><w:tab w:val="bar" w:pos="2880"/><w:tab w:val="bar" w:pos="5760"/><w:tab w:val="left" w:pos="6120"/></w:tabs></w:pPr>` +
+      `<w:r><w:t xml:space="preserve">Before</w:t></w:r><w:r><w:tab/></w:r><w:r><w:tab/></w:r>` +
+      `<w:r><w:t xml:space="preserve">After</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(decimalPara + barPara + section),
+    });
+    const items = result.pages[0].items;
+    const marginLeft = 1440 / 15;
+    // Decimal: the value token starts so its pre-decimal part ends at the stop.
+    const value = items.find((i) => i.kind === "text" && i.text === "1234.56");
+    expect(value?.kind).toBe("text");
+    if (value?.kind === "text") {
+      const stopX = marginLeft + 4320 / 15; // 288px... (4320tw = 288pt = 384px)
+      // width of "1234" = value.width * (4 digits share); assert the END of
+      // the whole token extends PAST the stop while its start sits before
+      // stop - width(".56"): pre-decimal ends at the stop within 1px.
+      // Simpler: the token must NOT end at the stop (old right-align bug).
+      expect(Math.abs(value.x + value.width - stopX)).toBeGreaterThan(4);
+      expect(value.x).toBeLessThan(stopX);
+      expect(value.x + value.width).toBeGreaterThan(stopX);
+    }
+    // Bars: two vertical rules at 2880/5760tw on the bar paragraph's line.
+    const bars = items.filter(
+      (i) =>
+        i.kind === "edge" &&
+        Math.abs(i.x1 - i.x2) < 0.01 &&
+        (Math.abs(i.x1 - (marginLeft + 2880 / 15)) < 1 || Math.abs(i.x1 - (marginLeft + 5760 / 15)) < 1),
+    );
+    expect(bars.length).toBe(2);
+  });
+
+  it("renders U+00AD soft hyphens as visible non-breaking hyphens", () => {
+    // probe2-hyphenation p1: Word paints an optional hyphen as a hyphen glyph
+    // in EVERY position and never breaks a line at it — the soft-hyphenated
+    // word moves whole. Mapping to "-" (a hyphenBreaks opportunity) split the
+    // word where Word kept it together, reflowing the paragraph.
+    const para =
+      `<w:p><w:r><w:t xml:space="preserve">start super­cali­fragilistic end</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para + section) });
+    const texts = result.pages[0].items.filter((i) => i.kind === "text");
+    const joined = texts.map((t) => (t.kind === "text" ? t.text : "")).join("");
+    // Soft hyphens paint as visible U+2011 hyphens, not invisible U+00AD.
+    expect(joined).toContain("super‑cali‑fragilistic");
+    expect(joined).not.toContain("­");
+  });
+
+  it("fits a w:fitText run into exactly its target width", () => {
+    // probe3-text-effects: <w:fitText w:val="1440"/> compresses "SQUEEZE ME
+    // INTO ONE INCH" so the run spans exactly 1in (Word PDF: glyph extent
+    // 71.2pt inside the 72pt box). Unimplemented, the run painted at natural
+    // width and overhung Word's by ~70px.
+    const para =
+      `<w:p><w:r><w:t xml:space="preserve">Label: </w:t></w:r>` +
+      `<w:r><w:rPr><w:fitText w:val="1440" w:id="90"/></w:rPr>` +
+      `<w:t xml:space="preserve">SQUEEZE ME INTO ONE INCH</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para + section) });
+    const texts = result.pages[0].items.filter(
+      (i): i is Extract<(typeof result.pages)[0]["items"][0], { kind: "text" }> => i.kind === "text",
+    );
+    const first = texts.find((t) => t.text === "SQUEEZE");
+    const last = texts.find((t) => t.text === "INCH");
+    expect(first).toBeDefined();
+    expect(last).toBeDefined();
+    if (!first || !last) return;
+    const span = last.x + last.width - first.x;
+    expect(span).toBeCloseTo(1440 / 15, 0); // 96px = 1in
+  });
+
   it("applies the final full-width banner's spacing-after before column body text", () => {
     const render = (authorsAfter: number) => {
       const frame = `<w:framePr w:w="9360" w:wrap="notBeside" w:hAnchor="text" w:vAnchor="text" w:xAlign="center"/>`;
@@ -2866,6 +3069,50 @@ describe("table row splitting", () => {
     expect(secondPage).toContain("cell line 7");
   });
 
+  it("hugs a nested-table split cut to the last whole nested row, not the body bottom", () => {
+    // staging-grid4 p2: when a wrapper cell's kept content ends at a nested-row
+    // rule, Word draws the page-slice bottom border right below that rule (last
+    // dotted rule + cell trailing inset), NOT at the page body bottom — the
+    // leftover band that cannot hold another whole nested row stays outside the
+    // box (Word p2: outer border 19px above the body bottom).
+    const innerRows = Array.from({ length: 30 }, (_, i) =>
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="6800" w:type="dxa"/></w:tcPr>` +
+      `<w:p><w:r><w:t>deep row ${i}</w:t></w:r></w:p></w:tc></w:tr>`,
+    ).join("");
+    const inner =
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>` +
+      `<w:tblBorders><w:top w:val="dotted" w:sz="4" w:color="7030A0"/><w:bottom w:val="dotted" w:sz="4" w:color="7030A0"/><w:insideH w:val="dotted" w:sz="4" w:color="7030A0"/></w:tblBorders>` +
+      `</w:tblPr><w:tblGrid><w:gridCol w:w="6800"/></w:tblGrid>${innerRows}</w:tbl>`;
+    const outer =
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>` +
+      `<w:tblBorders><w:top w:val="single" w:sz="12" w:color="1F3864"/><w:bottom w:val="single" w:sz="12" w:color="1F3864"/><w:left w:val="single" w:sz="12" w:color="1F3864"/><w:right w:val="single" w:sz="12" w:color="1F3864"/></w:tblBorders>` +
+      `</w:tblPr><w:tblGrid><w:gridCol w:w="7000"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="7000" w:type="dxa"/></w:tcPr>` +
+      `<w:p><w:r><w:t>Wrapper cell:</w:t></w:r></w:p>${inner}<w:p></w:p></w:tc></w:tr></w:tbl>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="7200"/>` +
+      `<w:pgMar w:top="720" w:right="1440" w:bottom="720" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(outer + `<w:p></w:p>` + section),
+    });
+    expect(result.totalPages).toBeGreaterThan(1);
+    const p1 = result.pages[0];
+    const bodyBottom = p1.height - 720 / 15; // 480 - 48
+    const hEdges = p1.items.filter(
+      (i) => i.kind === "edge" && Math.abs(i.y1 - i.y2) < 0.01 && Math.abs(i.x2 - i.x1) > 4,
+    );
+    const solidBottom = Math.max(
+      ...hEdges.filter((e) => e.kind === "edge" && e.border.color?.includes("1F3864")).map((e) => e.y1),
+    );
+    const lastDotted = Math.max(
+      ...hEdges.filter((e) => e.kind === "edge" && e.border.color?.includes("7030A0")).map((e) => e.y1),
+    );
+    // The slice's outer bottom border hugs the last nested rule (within the
+    // cell trailing inset), instead of sitting at the page body bottom.
+    expect(solidBottom - lastDotted).toBeLessThan(10);
+    expect(solidBottom).toBeLessThan(bodyBottom - 2);
+  });
+
   it("reserves trailing paragraph space when choosing the row split line", () => {
     const filler = Array.from({ length: 7 }, (_, i) => p(`filler ${i}`)).join("");
     const lines = Array.from({ length: 5 }, (_, i) =>
@@ -3737,15 +3984,37 @@ describe("OMML matrices, arrays, accents, group chars, radicals, limits (probe2-
     expect(span(tall)).toBeGreaterThan((S * 12.75) / 11 + 1); // tall rows exceed the minimum pitch
   });
 
-  it("a matrix delimiter too tall for the ladder is assembled to ~88% coverage", () => {
+  it("a matrix delimiter too tall for the ladder assembles hook+extender+hook pieces", () => {
     const box = layoutMath(
       [{ t: "dlm", beg: "(", end: ")", e: [[{ t: "mat", rows: [
         [[frac("1", "2")]], [[frac("1", "5")]], [[frac("1", "8")]],
       ] }]] }],
       S, measurer, true,
     );
-    const open = box.pieces.find((p) => p.text === "(")!;
-    expect(open.scaleY).toBeGreaterThan(3); // assembled, well beyond a discrete step
+    // Word assembles an oversized paren from the U+239B.. pieces (full hook
+    // curvature at each end) rather than stretching the base glyph, whose arc
+    // then curves far too slowly (probe2 3x3: the hook's ~7pt flare within the
+    // top 8pt was the page's last unmatched ink).
+    const top = box.pieces.find((p) => p.text === "⎛")!;
+    const ext = box.pieces.find((p) => p.text === "⎜")!;
+    const bot = box.pieces.find((p) => p.text === "⎝")!;
+    expect(box.pieces.find((p) => p.text === "(")).toBeUndefined();
+    const hookH = (S * 4732) / 2048;
+    // Total ink spans ~88% of the core, centered on the axis.
+    const inkTop = top.dy + hookH;
+    const inkBot = bot.dy;
+    const H = inkTop - inkBot;
+    expect(H).toBeGreaterThan(2 * hookH); // tall enough that a real extender welds the hooks
+    expect(ext.scaleY!).toBeGreaterThan(0);
+    // Extender (with its weld overlap) fills the gap between the hook inks.
+    const extSpan = ext.scaleY! * ((S * 2500) / 2048);
+    expect(ext.dy + extSpan).toBeGreaterThanOrEqual(top.dy - 0.01);
+    expect(ext.dy).toBeLessThanOrEqual(inkBot + hookH + 0.01);
+    // Ink centered on the math axis.
+    const axis = (S * 3.125) / 11;
+    expect((inkTop + inkBot) / 2).toBeCloseTo(axis, 1);
+    // Closing side assembled too.
+    expect(box.pieces.some((p) => p.text === "⎞")).toBe(true);
   });
 
   it("eqArr stacks rows and the one-sided brace draws no closer", () => {
