@@ -12,6 +12,7 @@ import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagra
 import { SelectionSegment } from "./commands.js";
 import { adjustFloatingPosition, imageAltText, isFloatingDrawing, replaceImageBlip, setFloatingPosition, setImageAltText, setImageWrap } from "./images.js";
 import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
+import { graphemeStep } from "./grapheme.js";
 
 /**
  * Interactive text editing: caret placement, typing, Backspace/Delete,
@@ -251,8 +252,10 @@ export class DocxEditor {
 
   /** Step a point by one character across item boundaries in paint order. */
   private stepPoint(pt: SelPoint, delta: -1 | 1): SelPoint | null {
-    const next = pt.offset + delta;
-    if (next >= 0 && next <= pt.t.text.length) return { t: pt.t, offset: next };
+    // Grapheme-cluster step (see moveCaret): shift+arrow selection extends by
+    // whole clusters, so a selection edge never splits a conjunct.
+    const next = graphemeStep(pt.t.text, pt.offset, delta);
+    if (next !== null) return { t: pt.t, offset: next };
     const handle = this.host.getHandle();
     if (!handle) return null;
     const bindings = handle.bindings.filter((b) => b.item.src?.t);
@@ -2059,13 +2062,20 @@ export class DocxEditor {
     }
     if (!best) return null;
     const src = best.binding.item.src!;
+    const item = best.binding.item;
+    // `best.after` is a VISUAL side (the click landed past the span's right
+    // edge). In an RTL run the visual right edge is the LOGICAL START and the
+    // left edge the logical end, so invert the side→offset mapping the LTR
+    // path assumes — otherwise a right-margin click on an RTL line snaps to the
+    // wrong end of the word.
+    const logicalAfter = item.rtl ? !best.after : best.after;
     return {
       t: src.t as XmlElement,
       run: src.run,
-      offset: src.offset + (best.after ? best.binding.item.text.length : 0),
-      // Clicking past a span's right edge means "after its last char" — keep
-      // the caret on this line even when the next span starts the line below.
-      bias: best.after && best.binding.item.text.length > 0 ? "end" : undefined,
+      offset: src.offset + (logicalAfter ? item.text.length : 0),
+      // Landing after a span's last char keeps the caret on this line even when
+      // the next span starts the line below.
+      bias: logicalAfter && item.text.length > 0 ? "end" : undefined,
     };
   }
 
@@ -2430,8 +2440,12 @@ export class DocxEditor {
         this.deleteContents(-1);
         return;
       }
-      caret.t.text = caret.t.text.slice(0, caret.offset - 1) + caret.t.text.slice(caret.offset);
-      caret.offset -= 1;
+      // Delete the whole grapheme cluster before the caret (a Devanagari
+      // conjunct, an Arabic base+harakāt, a surrogate pair) — never a lone
+      // combining mark that would leave a broken cluster.
+      const from = graphemeStep(caret.t.text, caret.offset, -1) ?? caret.offset - 1;
+      caret.t.text = caret.t.text.slice(0, from) + caret.t.text.slice(caret.offset);
+      caret.offset = from;
       caret.bias = "end";
     } else {
       if (caret.offset >= caret.t.text.length) {
@@ -2448,7 +2462,9 @@ export class DocxEditor {
         this.deleteContents(1);
         return;
       }
-      caret.t.text = caret.t.text.slice(0, caret.offset) + caret.t.text.slice(caret.offset + 1);
+      // Forward-delete the whole grapheme cluster after the caret.
+      const to = graphemeStep(caret.t.text, caret.offset, 1) ?? caret.offset + 1;
+      caret.t.text = caret.t.text.slice(0, caret.offset) + caret.t.text.slice(to);
     }
     this.commit();
   }
@@ -2480,8 +2496,12 @@ export class DocxEditor {
   private moveCaret(delta: -1 | 1): void {
     const caret = this.caret;
     if (!caret) return;
-    const next = caret.offset + delta;
-    if (next >= 0 && next <= caret.t.text.length) {
+    // Step by grapheme cluster so the caret never lands inside a Devanagari
+    // conjunct, an Arabic base+harakāt, a Thai consonant+marks, or a surrogate
+    // pair. Logical (offset-based) movement: in an RTL run ArrowRight advances
+    // the offset, which paints leftward — matching Word's logical caret order.
+    const next = graphemeStep(caret.t.text, caret.offset, delta);
+    if (next !== null) {
       caret.offset = next;
       // Arrow affinity: moving RIGHT onto a boundary reads as "after the char
       // just passed" (upper line at a wrap); moving LEFT reads as "before the
