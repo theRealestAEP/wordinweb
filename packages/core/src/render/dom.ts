@@ -664,10 +664,28 @@ function renderComments(
     }
   }
 
+  // One pass buckets each anchored binding under every comment covering it,
+  // in document order (bindings are already in paint order). The highlights
+  // and balloon anchors below then iterate only a comment's own bindings —
+  // scanning ALL bindings once per comment was O(comments x bindings), which
+  // is quadratic on a many-comment doc and re-runs on every keystroke.
+  const bindingsByComment = new Map<string, TextBinding[]>();
+  for (const b of bindings) {
+    const t = b.item.src?.t;
+    if (!t) continue;
+    const ids = idsByT.get(t);
+    if (!ids) continue;
+    b.el.dataset.dxwComment = ids.join(" ");
+    for (const id of ids) {
+      const list = bindingsByComment.get(id);
+      if (list) list.push(b);
+      else bindingsByComment.set(id, [b]);
+    }
+  }
+
   // Continuous per-line highlight rects (word-granular spans would leave
   // gaps at every space if each span carried its own background).
-  for (const [id, ts] of anchors) {
-    const tsSet = new Set<unknown>(ts);
+  for (const [id] of anchors) {
     let run: { surface: HTMLElement; top: number; height: number; x0: number; x1: number } | null = null;
     const flush = (): void => {
       if (run && run.x1 > run.x0) {
@@ -681,13 +699,9 @@ function renderComments(
       }
       run = null;
     };
-    for (const b of bindings) {
-      const t = b.item.src?.t;
-      if (!t || !tsSet.has(t)) continue;
+    for (const b of bindingsByComment.get(id) ?? []) {
       const surface = b.el.parentElement;
       if (!surface) continue;
-      const ids = idsByT.get(t);
-      if (ids) b.el.dataset.dxwComment = ids.join(" ");
       const x0 = b.item.x;
       const x1 = b.item.x + b.item.width;
       if (run && (run.surface !== surface || run.top !== b.item.lineTop)) flush();
@@ -706,14 +720,12 @@ function renderComments(
   root.style.position = "relative";
   root.style.paddingRight = `${COMMENT_RAIL_WIDTH + 24}px`;
 
-  // Balloons in document order (bindings are in paint order).
+  // Balloons in document order (each comment's bucket is already in paint
+  // order, so its first entry is the anchor line).
   const placed: { comment: (typeof doc.comments)[number]; binding: TextBinding }[] = [];
   for (const comment of doc.comments) {
     if (comment.parentId) continue;
-    const ts = anchors.get(comment.id);
-    if (!ts?.length) continue;
-    const tsSet = new Set<unknown>(ts);
-    const first = bindings.find((b) => b.item.src?.t && tsSet.has(b.item.src.t));
+    const first = bindingsByComment.get(comment.id)?.[0];
     if (first) placed.push({ comment, binding: first });
   }
   let lastBottom = -Infinity;
