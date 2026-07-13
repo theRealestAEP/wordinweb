@@ -1302,6 +1302,29 @@ function breakParagraphImpl(
           if (a.kind === "frag" || a.kind === "space" || a.kind === "image") w += a.width;
         }
         target = stop.align === "center" ? stop.pos - w / 2 : stop.pos - w;
+        // A decimal stop aligns the DECIMAL SEPARATOR at the stop: the
+        // pre-decimal digits right-align to it and ".xx" extends past
+        // (parity2-tabs: Word ends "1234" exactly at the 4320tw stop with
+        // ".56" to its right; right-aligning the whole token sat the value
+        // 13pt left of Word). Text with no separator right-aligns whole.
+        if (stop.align === "decimal") {
+          let pre = 0;
+          let found = false;
+          for (let j = ai + 1; j < atoms.length; j++) {
+            const a = atoms[j];
+            if (a.kind === "tab" || a.kind === "break") break;
+            if (a.kind === "frag") {
+              const di = a.text.indexOf(".");
+              if (di >= 0) {
+                pre += measurer.width(a.text.slice(0, di), a.font, a.props.letterSpacing) * (a.props.textScale ?? 1);
+                found = true;
+                break;
+              }
+            }
+            if (a.kind === "frag" || a.kind === "space" || a.kind === "image") pre += a.width;
+          }
+          if (found) target = stop.pos - pre;
+        }
       }
       // A right/decimal tab whose ALIGNED text cannot reach its stop (the
       // cursor is already past stop − textWidth) WRAPS to a fresh line and

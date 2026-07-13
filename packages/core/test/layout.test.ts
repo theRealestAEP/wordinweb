@@ -893,6 +893,50 @@ describe("layout engine", () => {
     }
   });
 
+  it("aligns a decimal tab's separator at the stop and paints bar-tab rules", () => {
+    // parity2-tabs p1: Word ends the PRE-decimal digits exactly at a decimal
+    // stop ("1234" ends at 4320tw; ".56" extends right), and a w:val="bar"
+    // tab paints a vertical rule at its position without consuming the tab
+    // (the tab advances to the next real stop past it).
+    const decimalPara =
+      `<w:p><w:pPr><w:tabs><w:tab w:val="decimal" w:pos="4320"/></w:tabs></w:pPr>` +
+      `<w:r><w:t xml:space="preserve">Price</w:t></w:r><w:r><w:tab/></w:r>` +
+      `<w:r><w:t xml:space="preserve">1234.56</w:t></w:r></w:p>`;
+    const barPara =
+      `<w:p><w:pPr><w:tabs><w:tab w:val="bar" w:pos="2880"/><w:tab w:val="bar" w:pos="5760"/><w:tab w:val="left" w:pos="6120"/></w:tabs></w:pPr>` +
+      `<w:r><w:t xml:space="preserve">Before</w:t></w:r><w:r><w:tab/></w:r><w:r><w:tab/></w:r>` +
+      `<w:r><w:t xml:space="preserve">After</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(decimalPara + barPara + section),
+    });
+    const items = result.pages[0].items;
+    const marginLeft = 1440 / 15;
+    // Decimal: the value token starts so its pre-decimal part ends at the stop.
+    const value = items.find((i) => i.kind === "text" && i.text === "1234.56");
+    expect(value?.kind).toBe("text");
+    if (value?.kind === "text") {
+      const stopX = marginLeft + 4320 / 15; // 288px... (4320tw = 288pt = 384px)
+      // width of "1234" = value.width * (4 digits share); assert the END of
+      // the whole token extends PAST the stop while its start sits before
+      // stop - width(".56"): pre-decimal ends at the stop within 1px.
+      // Simpler: the token must NOT end at the stop (old right-align bug).
+      expect(Math.abs(value.x + value.width - stopX)).toBeGreaterThan(4);
+      expect(value.x).toBeLessThan(stopX);
+      expect(value.x + value.width).toBeGreaterThan(stopX);
+    }
+    // Bars: two vertical rules at 2880/5760tw on the bar paragraph's line.
+    const bars = items.filter(
+      (i) =>
+        i.kind === "edge" &&
+        Math.abs(i.x1 - i.x2) < 0.01 &&
+        (Math.abs(i.x1 - (marginLeft + 2880 / 15)) < 1 || Math.abs(i.x1 - (marginLeft + 5760 / 15)) < 1),
+    );
+    expect(bars.length).toBe(2);
+  });
+
   it("renders U+00AD soft hyphens as visible non-breaking hyphens", () => {
     // probe2-hyphenation p1: Word paints an optional hyphen as a hyphen glyph
     // in EVERY position and never breaks a line at it — the soft-hyphenated

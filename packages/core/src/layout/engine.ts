@@ -3356,6 +3356,29 @@ class Engine {
 
       this.y += floatOffset;
       this.emitLine(line, this.cur, this.colX, this.y);
+      // w:tab val="bar": not a tab stop — a vertical rule painted at the bar
+      // position on EVERY line of the paragraph, spanning the line box, and
+      // through the paragraph's after-spacing band on the last line
+      // (parity2-tabs: Word's bars at 2880/5760tw run 29.5px tall for an
+      // 18.5px single line + 8pt spacing-after; the tab characters
+      // themselves advance past bars to the next real stop).
+      if (props.tabs) {
+        for (const t of props.tabs) {
+          if (t.align === "bar" && !t.clear) {
+            const bx = this.colX + t.pos;
+            const barBottom =
+              this.y + line.height + (li === lines.length - 1 ? (props.spacingAfter ?? 0) : 0);
+            this.cur.items.push({
+              kind: "edge",
+              x1: bx,
+              y1: this.y,
+              x2: bx,
+              y2: barBottom,
+              border: { style: "single", width: 0.66, color: "#000000", space: 0 },
+            });
+          }
+        }
+      }
       this.emitLineNumber(line, this.cur, this.colX, this.y);
       // Bookmark targets resolve to the page carrying the paragraph's first
       // line (PAGEREF rewrite pass). Frame-laid content (fake page) records
