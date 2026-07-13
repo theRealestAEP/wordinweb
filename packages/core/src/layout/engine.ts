@@ -315,6 +315,12 @@ const CHICAGO = ["*", "†", "‡", "§"];
  * afterAutospacing): 14pt in CSS px. Empirically constant across font sizes. */
 const AUTO_PARA_SPACING_PX = 14 * (96 / 72);
 
+/** Default horizontal wrap distance Word insets body text by around a positioned
+ * w:framePr when w:hSpace is absent: measured 6pt on both frames of
+ * probe2-dropcaps-frames (frame edge → wrap-channel start = 6.0pt on each side).
+ * Explicit hSpace (including 0) overrides this. */
+const FRAME_WRAP_HSPACE_PX = 6 * (96 / 72);
+
 /** Note marks share numbering formats with page numbers, plus chicago. */
 function formatNoteMark(n: number, fmt: string): string {
   if (fmt === "chicago") {
@@ -2134,10 +2140,14 @@ class Engine {
     // wrap=around/auto/tight/through -> body wraps both sides (square);
     // notBeside -> body clears the frame vertically (topAndBottom); none -> no float.
     if (fr.wrap !== "none") {
+      // Word insets the wrap channel from the frame by w:hSpace (default 6pt when
+      // absent — probe2-dropcaps-frames right channel starts 6pt past the frame
+      // edge, which decides whether the trailing word wraps to the next line).
+      const hGap = fr.hSpace ?? FRAME_WRAP_HSPACE_PX;
       const list = this.floats.get(this.cur) ?? [];
       list.push({
-        x0: ox,
-        x1: ox + contentW,
+        x0: ox - hGap,
+        x1: ox + contentW + hGap,
         y0: oy,
         y1: oy + height,
         mode: fr.wrap === "notBeside" ? "topAndBottom" : "square",

@@ -777,6 +777,40 @@ describe("layout engine", () => {
     expect(bodyText.x).toBeGreaterThan(marginLeft + cap.width - 1);
   });
 
+  it("insets the wrap channel around a positioned frame by Word's default 6pt hSpace", () => {
+    // probe2-dropcaps-frames p1: body text wrapping beside a w:framePr callout
+    // starts 6pt (=8px) past the frame edge, not flush against it. Word applies
+    // this default horizontal wrap distance when w:hSpace is absent; getting it
+    // wrong widens the channel and lets a trailing word fit that Word wraps.
+    const marginLeft = 1440 / 15; // 96px
+    const frameWidthPx = 2000 / 15; // 2000 twips = 133.33px
+    const render = (hSpaceAttr: string) => {
+      const frame =
+        `<w:p><w:pPr>` +
+        `<w:framePr w:w="2000" w:h="1000" w:hRule="exact" w:wrap="around"` +
+        ` w:vAnchor="paragraph" w:hAnchor="margin" w:x="0" w:y="0"${hSpaceAttr}/>` +
+        `</w:pPr><w:r><w:t>Frame</w:t></w:r></w:p>`;
+      const body =
+        `<w:p><w:r><w:t xml:space="preserve">Body text that flows to the right of the positioned frame and keeps going for a while so it wraps onto several lines beside it.</w:t></w:r></w:p>`;
+      const section =
+        `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+        `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+      const { result } = layout({
+        "word/document.xml": wrapDocument(frame + body + section),
+      });
+      const bodyText = result.pages[0].items.find(
+        (i) => i.kind === "text" && i.text === "Body",
+      );
+      expect(bodyText?.kind).toBe("text");
+      return bodyText?.kind === "text" ? bodyText.x : NaN;
+    };
+    // Default (no hSpace): channel starts at frameRight + 6pt.
+    const defaultGapPx = 6 * (96 / 72); // 8px
+    expect(render("")).toBeCloseTo(marginLeft + frameWidthPx + defaultGapPx, 0);
+    // Explicit hSpace overrides the default (240 twips = 16px).
+    expect(render(` w:hSpace="240"`)).toBeCloseTo(marginLeft + frameWidthPx + 16, 0);
+  });
+
   it("applies the final full-width banner's spacing-after before column body text", () => {
     const render = (authorsAfter: number) => {
       const frame = `<w:framePr w:w="9360" w:wrap="notBeside" w:hAnchor="text" w:vAnchor="text" w:xAlign="center"/>`;
