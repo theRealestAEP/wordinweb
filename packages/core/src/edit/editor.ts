@@ -1,6 +1,7 @@
 import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
 import { XmlElement, cloneXml, localName } from "../xml.js";
+import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
 import { ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
 import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
@@ -109,6 +110,7 @@ export class DocxEditor {
 
   constructor(private host: EditorHost) {
     this.caretEl = document.createElement("div");
+    this.caretEl.dataset.dxwCaret = "1";
     const s = this.caretEl.style;
     s.position = "absolute";
     s.width = "1.5px";
@@ -663,6 +665,7 @@ export class DocxEditor {
 
   private onGripMouseDown = (e: MouseEvent): void => {
     const target = e.target as HTMLElement;
+    if (this.startCheckboxInteraction(e, target)) return;
     if (this.startWordArtInteraction(e, target)) return;
     if (this.startImageInteraction(e, target)) return;
     const gripEl = target.closest?.("[data-dxw-grip]") as HTMLElement | null;
@@ -1246,6 +1249,36 @@ export class DocxEditor {
     const b = handle?.wordarts.find((w) => w.item.src === src);
     if (b?.item.src) this.selectWordArt(b.el, b.item.src);
     else this.deselectWordArt();
+  }
+
+  /**
+   * Mousedown on a checkbox glyph (legacy form field or modern content
+   * control): toggle its checked state instead of dropping a caret. Routed
+   * through history so it undoes like any other edit. Suggesting mode toggles
+   * directly too — a checkbox's checked state is form data, not tracked
+   * prose, and Word does not record it as a w:ins/w:del revision. Returns true
+   * if consumed.
+   */
+  private startCheckboxInteraction(e: MouseEvent, target: HTMLElement): boolean {
+    if (e.button !== 0) return false;
+    const cbNode = target.closest?.("[data-dxw-checkbox]") as HTMLElement | null;
+    if (!cbNode) return false;
+    const handle = this.host.getHandle();
+    const binding = handle?.bindings.find((b) => b.el === cbNode);
+    const src = binding?.item.src;
+    const cbEl = checkboxStateElement(src?.run, src?.t);
+    if (!cbEl) return false;
+    e.preventDefault();
+    e.stopPropagation();
+    this.suppressNextMouseUp = true;
+    this.hideCaret();
+    this.host.history?.checkpoint();
+    toggleCheckbox(this.host.doc, cbEl);
+    this.host.doc.refresh();
+    this.host.rerender();
+    // Keep the editor focused so keyboard shortcuts (undo/redo) still land.
+    this.focusText();
+    return true;
   }
 
   /**
@@ -2671,6 +2704,9 @@ export class DocxEditor {
   private insertTextCore(text: string): void {
     const caret = this.caret;
     if (!caret) return;
+    // A checkbox content control's glyph is atomic: typing never edits it
+    // (toggle by clicking). Guards against corrupting the w:t inside an SDT.
+    if (checkboxStateElement(caret.run, caret.t)) return;
     if (this.suggesting) {
       const nc = insertSuggestedText(this.host.doc, caret.t, caret.offset, text, this.revMeta());
       if (nc) this.caret = { t: nc.t, run: caret.run, offset: nc.offset, bias: "end" };
@@ -2715,6 +2751,9 @@ export class DocxEditor {
         this.deleteContents(-1);
         return;
       }
+      // A checkbox glyph is atomic: don't let Backspace eat the ballot char
+      // out of an SDT (toggle by clicking instead).
+      if (checkboxStateElement(caret.run, caret.t)) return;
       // Delete the whole grapheme cluster before the caret (a Devanagari
       // conjunct, an Arabic base+harakāt, a surrogate pair) — never a lone
       // combining mark that would leave a broken cluster.
@@ -2737,6 +2776,8 @@ export class DocxEditor {
         this.deleteContents(1);
         return;
       }
+      // A checkbox glyph is atomic: Delete never removes the ballot char.
+      if (checkboxStateElement(caret.run, caret.t)) return;
       // Forward-delete the whole grapheme cluster after the caret.
       const to = graphemeStep(caret.t.text, caret.offset, 1) ?? caret.offset + 1;
       caret.t.text = caret.t.text.slice(0, caret.offset) + caret.t.text.slice(to);

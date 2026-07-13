@@ -1,4 +1,5 @@
 import { DocxDocument } from "../docx.js";
+import { checkboxStateElement } from "../checkbox.js";
 import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem } from "../layout/types.js";
 import { cssFont, cambriaMathDescentShare } from "../layout/measure.js";
 import { Border } from "../model.js";
@@ -490,6 +491,13 @@ function renderPage(
         node.dataset.dxwFontStyle = item.font.italic ? "italic" : "normal";
       }
       if (isHf) node.dataset.dxwHf = "1";
+      // Interactive checkbox glyphs get a pointer affordance + hit marker so a
+      // click toggles them (the editor consumes the mousedown).
+      if (item.kind === "text" && options.interactive &&
+          checkboxStateElement(item.src?.run, item.src?.t)) {
+        node.style.cursor = "pointer";
+        node.dataset.dxwCheckbox = "1";
+      }
       surface.appendChild(node);
       if (item.kind === "text") bindings.push({ el: node, item });
       if (item.kind === "image") {

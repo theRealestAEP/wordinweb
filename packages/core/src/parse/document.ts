@@ -157,6 +157,10 @@ interface FieldState {
    * phase23 p5's field-hyperlink bullets carry italic on the fldChar runs
    * but paint blue upright in Word. No field content is emitted at end. */
   live?: boolean;
+  /** Legacy FORMCHECKBOX: the w:checkBox element from the fldChar begin's
+   * w:ffData, carried onto the emitted field content so it becomes a
+   * click-to-toggle target. */
+  checkbox?: XmlElement;
 }
 
 export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
@@ -590,7 +594,23 @@ function parseParaChildren(
       captureRefBookmarkRun(ctx, fieldRun);
     } else if (ln === "smartTag" || ln === "sdt") {
       const content = ln === "sdt" ? child(el, "sdtContent") : el;
+      // Modern checkbox content control: the checked state lives in
+      // sdtPr/w14:checkbox and the displayed glyph is a plain w:t inside
+      // sdtContent. Tag that glyph's text content with the w14:checkbox element
+      // so it renders as a click-to-toggle target (and isn't treated as
+      // ordinary editable text).
+      const checkbox = ln === "sdt" ? child(child(el, "sdtPr"), "checkbox") : undefined;
+      const before = out.length;
       if (content) parseParaChildren(content, ctx, out, field, bookmarks);
+      if (checkbox) {
+        for (let i = before; i < out.length; i++) {
+          const pc = out[i];
+          const runs = pc.type === "run" ? [pc] : pc.runs;
+          for (const r of runs) {
+            for (const rc of r.content) if (rc.kind === "text") rc.checkbox = checkbox;
+          }
+        }
+      }
     }
     // bookmarkStart/bookmarkEnd/proofErr/commentRangeStart... ignored
   }
@@ -609,6 +629,7 @@ function flushField(field: FieldState): void {
       kind: "field",
       instruction: field.instruction,
       cachedResult: field.cachedResult,
+      ...(field.checkbox ? { checkbox: field.checkbox } : {}),
     });
   }
   field.mode = null;
@@ -616,6 +637,7 @@ function flushField(field: FieldState): void {
   field.cachedResult = "";
   field.carrier = null;
   field.live = false;
+  field.checkbox = undefined;
 }
 
 /**
@@ -723,6 +745,7 @@ function parseRun(
           const ddList = child(ffData, "ddList");
           if (checkBox) {
             field.cachedResult = onOff(child(checkBox, "checked")) ? "☒" : "☐";
+            field.checkbox = checkBox;
           } else if (ddList) {
             const entries = children(ddList, "listEntry");
             const sel = intAttr(child(ddList, "result"), "val") ?? 0;
@@ -742,6 +765,7 @@ function parseRun(
               kind: "field",
               instruction: field.instruction,
               cachedResult: field.cachedResult,
+              ...(field.checkbox ? { checkbox: field.checkbox } : {}),
             };
             if (carrier === run) run.content.push(content);
             else carrier.content.push(content);
@@ -751,6 +775,7 @@ function parseRun(
           field.cachedResult = "";
           field.carrier = null;
           field.live = false;
+          field.checkbox = undefined;
         }
         break;
       }

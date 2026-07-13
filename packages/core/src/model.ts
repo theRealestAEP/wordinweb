@@ -226,6 +226,10 @@ export interface TextContent {
   text: string;
   /** Source w:t element inside the run, when this text came verbatim from one. */
   srcT?: XmlElement;
+  /** When this text is the glyph of a modern checkbox content control, the
+   * source `w14:checkbox` element (in the enclosing w:sdt's sdtPr). Its
+   * presence makes the glyph a click-to-toggle target rather than plain text. */
+  checkbox?: XmlElement;
 }
 export interface BreakContent {
   kind: "break";
@@ -308,6 +312,10 @@ export interface FieldContent {
   instruction: string;
   /** Last cached result text from the file, used for unsupported fields. */
   cachedResult: string;
+  /** When this field is a legacy FORMCHECKBOX, the source `w:checkBox` element
+   * (in the fldChar begin's w:ffData). Its presence makes the rendered ballot
+   * box a click-to-toggle target; the glyph derives from its w:checked child. */
+  checkbox?: XmlElement;
 }
 
 /** What an anchored shape's coordinates are measured from. "char" (relH=

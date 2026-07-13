@@ -46,6 +46,7 @@ export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertFootnote } from "./edit/notes.js";
 export { insertPageField } from "./edit/fields.js";
+export { checkboxStateElement, checkboxChecked, toggleCheckbox } from "./checkbox.js";
 export { sectPrAt, insertBreakAt, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
 export type { LineNumberingPatch } from "./edit/sections.js";
 export { linearizeMath, parseMathLinear, setMathLinear, mathLinearOf } from "./edit/math.js";
