@@ -313,6 +313,9 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
 
   const jc = childVal(pPr, "jc");
   if (jc && ALIGN_MAP[jc]) props.alignment = ALIGN_MAP[jc];
+  if (jc === "distribute" || jc === "lowKashida" || jc === "mediumKashida" || jc === "highKashida") {
+    props.justifyKind = jc;
+  }
 
   const ind = child(pPr, "ind");
   if (ind) {

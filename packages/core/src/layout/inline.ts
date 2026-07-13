@@ -494,6 +494,27 @@ const EA_FAMILY_RE =
 const JUSTIFY_MAX_COMPRESS = 0.25;
 const JUSTIFY_STRETCH_FACTOR = 0.5;
 
+// Arabic kashida justification (w:jc lowKashida/mediumKashida/highKashida).
+// Word justifies by elongating the baseline joins (kashida/tatweel) rather than
+// stretching inter-word spaces. That elongation widens the packed text, so a
+// line holds fewer words and — at medium/high — the paragraph wraps to one more
+// line than plain "both" (measured on probe3-kashida p1: distribute/low pack to
+// 5 lines, medium/high to 6, for identical text). We approximate the elongation
+// as a per-glyph letter-spacing on the RTL runs, scaled by font size (em): it
+// both widens line-breaking to match Word's line count AND spreads the painted
+// glyphs across the column like tatweel. Calibrated to reproduce Word's per-
+// paragraph line counts on probe3-kashida p1. Plain "both"/"distribute" stay 0
+// (they fill via inter-word space).
+//
+// LOW is 0: Word's lowKashida elongates so little that the paragraph keeps the
+// natural 5-line break for this text, and forcing any uniform spread moved our
+// glyphs AWAY from Word's (matched-line ink overlap fell) — so lowKashida is
+// rendered exactly like plain "both". MEDIUM/HIGH are the smallest values that
+// reproduce Word's 6-line wrap without over-wrapping to 7.
+const KASHIDA_LOW_EM = 0.0;
+const KASHIDA_MEDIUM_EM = 0.032;
+const KASHIDA_HIGH_EM = 0.04;
+
 /**
  * Break a paragraph into measured, positioned line boxes for a given content
  * width. Handles indents, numbering label, tabs, justification, and line
@@ -1010,11 +1031,14 @@ function breakParagraphImpl(
       const slack = avail - line.width;
       if (slack > 0) for (const s of line.spans) s.x += slack / 2;
     } else {
+      // w:jc distribute stretches the LAST line too (Word fills it edge-to-edge
+      // with inter-word space); plain "both"/kashida leave the last line ragged.
+      const lastRagged = (isLast || endsWithBreak) && props.justifyKind !== "distribute";
       const align =
-        bidiPara && physAlign === "justify" && (isLast || endsWithBreak)
+        bidiPara && physAlign === "justify" && lastRagged
           ? "right"
           : (physAlign ?? "left");
-      applyAlignment(line, align, avail, startX, isLast || endsWithBreak, curPacked);
+      applyAlignment(line, align, avail, startX, lastRagged, curPacked);
     }
     // Re-attach hanging trailing spaces at the line's visual end (after
     // alignment so they never shift it). Bidi lines keep the old drop
@@ -2277,10 +2301,29 @@ function buildAtoms(
   const atoms: Atom[] = [];
   const anchors: Shape[] = [];
 
+  // Per-glyph kashida elongation (em fraction) for this paragraph's RTL runs.
+  const kashidaKind = doc.effectiveParaProps(para).justifyKind;
+  const kashidaEm =
+    kashidaKind === "highKashida"
+      ? KASHIDA_HIGH_EM
+      : kashidaKind === "mediumKashida"
+        ? KASHIDA_MEDIUM_EM
+        : kashidaKind === "lowKashida"
+          ? KASHIDA_LOW_EM
+          : 0;
+
   const pushRun = (run: Run, href?: string) => {
-    const props = doc.effectiveRunProps(para, run.props);
-    if (props.vanish) return;
-    const font = fontOf(props, fallbackFamily);
+    const baseProps = doc.effectiveRunProps(para, run.props);
+    if (baseProps.vanish) return;
+    const font = fontOf(baseProps, fallbackFamily);
+    // Kashida-justified paragraph: fold the per-glyph elongation into this RTL
+    // run's letterSpacing so both line-breaking (measurer.width) and painting
+    // (renderer reads props.letterSpacing) spread the Arabic glyphs. Non-RTL
+    // runs and non-kashida paragraphs are untouched.
+    const props =
+      kashidaEm > 0 && baseProps.rtl
+        ? { ...baseProps, letterSpacing: (baseProps.letterSpacing ?? 0) + kashidaEm * font.size }
+        : baseProps;
     // Superscript/subscript runs paint at 65% size but Word keys LINE
     // METRICS to the unscaled run size: a wrapped line holding only a
     // footnote marker still advances a full base-size line (parity2-notes:
