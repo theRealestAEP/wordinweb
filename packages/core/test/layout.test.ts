@@ -2950,6 +2950,50 @@ describe("table row splitting", () => {
     expect(secondPage).toContain("cell line 7");
   });
 
+  it("hugs a nested-table split cut to the last whole nested row, not the body bottom", () => {
+    // staging-grid4 p2: when a wrapper cell's kept content ends at a nested-row
+    // rule, Word draws the page-slice bottom border right below that rule (last
+    // dotted rule + cell trailing inset), NOT at the page body bottom — the
+    // leftover band that cannot hold another whole nested row stays outside the
+    // box (Word p2: outer border 19px above the body bottom).
+    const innerRows = Array.from({ length: 30 }, (_, i) =>
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="6800" w:type="dxa"/></w:tcPr>` +
+      `<w:p><w:r><w:t>deep row ${i}</w:t></w:r></w:p></w:tc></w:tr>`,
+    ).join("");
+    const inner =
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>` +
+      `<w:tblBorders><w:top w:val="dotted" w:sz="4" w:color="7030A0"/><w:bottom w:val="dotted" w:sz="4" w:color="7030A0"/><w:insideH w:val="dotted" w:sz="4" w:color="7030A0"/></w:tblBorders>` +
+      `</w:tblPr><w:tblGrid><w:gridCol w:w="6800"/></w:tblGrid>${innerRows}</w:tbl>`;
+    const outer =
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>` +
+      `<w:tblBorders><w:top w:val="single" w:sz="12" w:color="1F3864"/><w:bottom w:val="single" w:sz="12" w:color="1F3864"/><w:left w:val="single" w:sz="12" w:color="1F3864"/><w:right w:val="single" w:sz="12" w:color="1F3864"/></w:tblBorders>` +
+      `</w:tblPr><w:tblGrid><w:gridCol w:w="7000"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="7000" w:type="dxa"/></w:tcPr>` +
+      `<w:p><w:r><w:t>Wrapper cell:</w:t></w:r></w:p>${inner}<w:p></w:p></w:tc></w:tr></w:tbl>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="7200"/>` +
+      `<w:pgMar w:top="720" w:right="1440" w:bottom="720" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(outer + `<w:p></w:p>` + section),
+    });
+    expect(result.totalPages).toBeGreaterThan(1);
+    const p1 = result.pages[0];
+    const bodyBottom = p1.height - 720 / 15; // 480 - 48
+    const hEdges = p1.items.filter(
+      (i) => i.kind === "edge" && Math.abs(i.y1 - i.y2) < 0.01 && Math.abs(i.x2 - i.x1) > 4,
+    );
+    const solidBottom = Math.max(
+      ...hEdges.filter((e) => e.kind === "edge" && e.border.color?.includes("1F3864")).map((e) => e.y1),
+    );
+    const lastDotted = Math.max(
+      ...hEdges.filter((e) => e.kind === "edge" && e.border.color?.includes("7030A0")).map((e) => e.y1),
+    );
+    // The slice's outer bottom border hugs the last nested rule (within the
+    // cell trailing inset), instead of sitting at the page body bottom.
+    expect(solidBottom - lastDotted).toBeLessThan(10);
+    expect(solidBottom).toBeLessThan(bodyBottom - 2);
+  });
+
   it("reserves trailing paragraph space when choosing the row split line", () => {
     const filler = Array.from({ length: 7 }, (_, i) => p(`filler ${i}`)).join("");
     const lines = Array.from({ length: 5 }, (_, i) =>

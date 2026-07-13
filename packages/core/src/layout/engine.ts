@@ -6116,6 +6116,30 @@ class Engine {
       return null;
     }
 
+    // Cut position. For plain text rows Word draws the cut rule at the page
+    // body bottom and lets the last line's leading overhang it (avail —
+    // calibrated on staging-tblextreme/parity-rowsplit). But when every kept
+    // cell bottom is BOUNDED BY A NESTED-ROW RULE, Word cannot fill the
+    // leftover band with anything: the cut hugs the last whole nested row
+    // plus the cell's trailing inset (staging-grid4 p2: outer wrapper border
+    // at 941, 19px ABOVE the body bottom where the avail-anchored cut drew).
+    let nestedCut = 0;
+    let allBanded = true;
+    for (const { cell, keep, trailing } of partitions) {
+      if (keep.length === 0) continue;
+      const kb = Math.max(...keep.map(bottomOf));
+      nestedCut = Math.max(nestedCut, kb + trailing);
+      const onRule = cell.items.some(
+        (it) =>
+          it.kind === "edge" &&
+          Math.abs(it.y1 - it.y2) < 0.01 &&
+          Math.abs(it.x2 - it.x1) > 4 &&
+          Math.abs(it.y1 - kb) < 1,
+      );
+      if (!onRule) allBanded = false;
+    }
+    const cutH = allBanded && nestedCut > 12 ? Math.min(avail, nestedCut) : avail;
+
     const topCells: typeof laid.cells = [];
     const restCells: typeof laid.cells = [];
     let topH = 0;
@@ -6147,14 +6171,14 @@ class Engine {
           ? Math.min(ruleShift, restText - origText)
           : ruleShift;
       for (const it of rest) offsetItem(it, 0, -shift);
-      topCells.push({ ...cell, items: keep, height: Math.min(cell.height, avail) });
+      topCells.push({ ...cell, items: keep, height: Math.min(cell.height, cutH) });
       const cellRestH = rest.length > 0 ? Math.max(...rest.map(bottomOf)) + keepTop + trailing : 0;
       restCells.push({ ...cell, items: rest, height: cellRestH });
-      topH = Math.max(topH, keep.length > 0 ? Math.min(cell.height, avail) : 0);
+      topH = Math.max(topH, keep.length > 0 ? Math.min(cell.height, cutH) : 0);
       restH = Math.max(restH, cellRestH);
     }
     return {
-      top: { cells: topCells, height: Math.min(avail, Math.max(topH, 12)) },
+      top: { cells: topCells, height: Math.min(cutH, Math.max(topH, 12)) },
       rest: { cells: restCells, height: restH },
     };
   }
