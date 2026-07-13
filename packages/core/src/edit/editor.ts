@@ -1096,11 +1096,14 @@ export class DocxEditor {
     this.selectedImage = null;
   }
 
-  /** Re-select the same drawing after a re-render replaced its element. */
-  private reselectImage(src: XmlElement): void {
+  /** Re-select the same drawing after a re-render replaced its element.
+   * A header/footer drawing paints one instance per page from the same src;
+   * `near` (client px) picks the instance the user is actually working on
+   * instead of the first page's copy. */
+  private reselectImage(src: XmlElement, near?: { x: number; y: number }): void {
     const handle = this.host.getHandle();
     if (!handle) return;
-    const img = handle.images.find((b) => b.item.src === src);
+    const img = nearestInstance(handle.images.filter((b) => b.item.src === src), near);
     if (img) {
       this.selectImage(img.el, src, img.item);
       return;
@@ -1494,6 +1497,7 @@ export class DocxEditor {
       e.stopPropagation();
       const dir = target.dataset.dxwImgHandle;
       const { el, src } = this.selectedImage;
+      const nearPt = { x: el.getBoundingClientRect().left, y: el.getBoundingClientRect().top };
       const w0 = parseFloat(el.style.width);
       const h0 = parseFloat(el.style.height);
       const left0 = parseFloat(el.style.left) || 0;
@@ -1541,7 +1545,7 @@ export class DocxEditor {
               this.floatIfClipped(src, src, h, parseFloat(el.style.left) || null);
             }
             this.host.rerender();
-            this.reselectImage(src);
+            this.reselectImage(src, nearPt);
             return;
           }
         }
@@ -1550,7 +1554,7 @@ export class DocxEditor {
         el.style.height = `${h0}px`;
         el.style.left = `${left0}px`;
         el.style.top = `${top0}px`;
-        this.reselectImage(src);
+        this.reselectImage(src, nearPt);
       };
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
@@ -1776,8 +1780,16 @@ export class DocxEditor {
             // origin (a table cell's text area, not the page margin), which
             // moveFloatingImage cannot know. Measure the landing spot and
             // correct the residual once - exact for any anchor container,
-            // including a drop on a DIFFERENT page.
-            const landed = this.host.getHandle()?.images.find((b) => b.item.src === src);
+            // including a drop on a DIFFERENT page. A header/footer image
+            // paints one instance per page from this src — measure the
+            // instance nearest the drop point, not the first page's copy,
+            // or the "correction" is whole pages long and flings the image
+            // off every sheet.
+            const want = { x: wantClientLeft, y: wantClientTop };
+            const landed = nearestInstance(
+              (this.host.getHandle()?.images ?? []).filter((b) => b.item.src === src),
+              want,
+            );
             if (landed) {
               const lr = landed.el.getBoundingClientRect();
               const errX = (wantClientLeft - lr.left) / zoom;
@@ -1786,12 +1798,12 @@ export class DocxEditor {
                 this.host.rerender();
               }
             }
-            this.reselectImage(src);
+            this.reselectImage(src, want);
           } else {
             // Drop rejected: snap the preview back.
             el.style.left = `${left0}px`;
             el.style.top = `${top0}px`;
-            this.reselectImage(src);
+            this.reselectImage(src, { x: rect0.left, y: rect0.top });
           }
         } else {
           // Keep the drop in the image's own region: a body image dropped on
@@ -1812,7 +1824,7 @@ export class DocxEditor {
               dropX !== null ? dropX - binding.item.width / 2 : null,
             );
             this.host.rerender();
-            this.reselectImage(binding.item.src!);
+            this.reselectImage(binding.item.src!, { x: me.clientX, y: me.clientY });
           } else {
             this.deselectImage();
           }
@@ -3223,4 +3235,23 @@ export class DocxEditor {
       this.caretEl.style.opacity = this.caretEl.style.opacity === "1" ? "0" : "1";
     }, 530);
   }
+}
+
+/** Of several rendered instances of the same drawing (a header/footer image
+ * paints once per page), the one nearest a client-space point — the instance
+ * the user dragged or dropped on. Without `near`, the first (document-order)
+ * instance. */
+function nearestInstance<T extends { el: HTMLElement }>(list: T[], near?: { x: number; y: number }): T | undefined {
+  if (!near || list.length <= 1) return list[0];
+  let best: T | undefined;
+  let bestD = Infinity;
+  for (const c of list) {
+    const r = c.el.getBoundingClientRect();
+    const d = Math.hypot(r.left - near.x, r.top - near.y);
+    if (d < bestD) {
+      bestD = d;
+      best = c;
+    }
+  }
+  return best;
 }
