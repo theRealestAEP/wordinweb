@@ -200,6 +200,44 @@ export interface IncrData {
   sigs: string[];
   points: IncrPoint[];
   pages: InternalPage[];
+  /** Bookmark name -> display page number, for PAGEREF stability checks. */
+  bookmarks: Map<string, string>;
+}
+
+/** Fast content signature of an XML subtree (name/attrs/text/children) as a
+ * compact string, computed with a rolling cyrb53 over the tree WITHOUT building
+ * an intermediate serialized string — this runs over every block on every
+ * incremental relayout, so allocation matters. */
+function hashXml(root: XmlElement): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  const mix = (ch: number): void => {
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  };
+  const str = (s: string): void => {
+    for (let i = 0; i < s.length; i++) mix(s.charCodeAt(i));
+  };
+  const walk = (el: XmlElement): void => {
+    mix(1);
+    str(el.name);
+    for (const k in el.attrs) {
+      mix(2);
+      str(k);
+      mix(3);
+      str(el.attrs[k]);
+    }
+    if (el.text) {
+      mix(4);
+      str(el.text);
+    }
+    for (const c of el.children) walk(c);
+    mix(5);
+  };
+  walk(root);
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
 }
 
 /** Map an internal page to the public LaidOutPage shape (shares the items array
@@ -373,6 +411,15 @@ class Engine {
    * reused prefix instead of from 1. */
   private physBase = 0;
   private displayBase = 0;
+  /** During a tail relay: the prev layout's capture points, looked up to detect
+   * re-convergence (the tail settling back onto prev's page boundaries), and the
+   * prev page index to splice the unchanged suffix from once it does. */
+  private incrPrevPoints: Map<number, IncrPoint> | null = null;
+  private incrConvergePrevPageIdx = -1;
+  /** First changed block index; the tail may only re-converge with prev AFTER
+   * this block (before it, the relay trivially matches prev at the resume point
+   * and would wrongly splice the edit away). */
+  private incrFirstDirty = -1;
 
   constructor(
     private doc: DocxDocument,
@@ -522,25 +569,17 @@ class Engine {
     this.emitFootnoteAreas();
     this.emitColumnSeparators();
     this.finalizeHeadersFooters();
-    // PAGEREF rewrite: replace stale cached results with the bookmark's real
-    // page (Word recomputes these on open). The right edge stays fixed so
-    // TOC right-tab page numbers keep their alignment.
-    for (const page of this.pages) {
-      for (const it of page.items) {
-        if (it.kind !== "text" || it.pageRef === undefined) continue;
-        const resolved = this.bookmarkPages.get(it.pageRef);
-        if (resolved === undefined || resolved === it.text) continue;
-        const w = this.measurer.width(resolved, it.font, it.props.letterSpacing);
-        it.x += it.width - w;
-        it.width = w;
-        it.text = resolved;
-      }
-    }
+    this.rewritePageRefs(this.pages);
     this.applySectionVAlign();
     const pages: LaidOutPage[] = this.pages.map((p) => laidOutPage(p));
     const result: LayoutResult = { pages, totalPages: pages.length };
     if (this.incrPoints && !this.incrAbort) {
-      result._incr = { sigs: this.incrSigs!, points: this.incrPoints, pages: this.pages } satisfies IncrData;
+      result._incr = {
+        sigs: this.incrSigs!,
+        points: this.incrPoints,
+        pages: this.pages,
+        bookmarks: this.bookmarkPages,
+      } satisfies IncrData;
     }
     return result;
   }
@@ -604,15 +643,35 @@ class Engine {
   private hasDisqualifyingFeature(el: XmlElement): boolean {
     const name = el.name;
     const ln = name.includes(":") ? name.slice(name.indexOf(":") + 1) : name;
-    if (ln === "anchor" || ln === "framePr" || ln === "tblpPr") return true;
-    if (ln === "instrText" && /\b(PAGEREF|NUMPAGES|SECTIONPAGES)\b/.test(el.text)) return true;
-    if (ln === "fldSimple" && /\b(PAGEREF|NUMPAGES|SECTIONPAGES)\b/.test(el.attrs["w:instr"] ?? "")) return true;
+    // Positioned frames and floating tables reshape flow in ways the simple
+    // page rebuild doesn't reproduce. (Floating drawings via w:anchor are fine:
+    // reuse points are only captured on float-free page tops, and PAGEREF is
+    // handled by the bookmark-stability check in runIncremental.)
+    if (ln === "framePr" || ln === "tblpPr") return true;
+    if (ln === "instrText" && /\b(NUMPAGES|SECTIONPAGES)\b/.test(el.text)) return true;
+    if (ln === "fldSimple" && /\b(NUMPAGES|SECTIONPAGES)\b/.test(el.attrs["w:instr"] ?? "")) return true;
     for (const c of el.children) if (this.hasDisqualifyingFeature(c)) return true;
     return false;
   }
 
   private blockSig(block: Block): string {
-    return block.src ? cyrb53(serializeXml(block.src)) : " nosrc";
+    return block.src ? hashXml(block.src) : " nosrc";
+  }
+
+  /** PAGEREF rewrite: replace stale cached field text with the bookmark's real
+   * page. The right edge stays fixed so TOC right-tab page numbers keep align. */
+  private rewritePageRefs(pages: InternalPage[]): void {
+    for (const page of pages) {
+      for (const it of page.items) {
+        if (it.kind !== "text" || it.pageRef === undefined) continue;
+        const resolved = this.bookmarkPages.get(it.pageRef);
+        if (resolved === undefined || resolved === it.text) continue;
+        const w = this.measurer.width(resolved, it.font, it.props.letterSpacing);
+        it.x += it.width - w;
+        it.width = w;
+        it.text = resolved;
+      }
+    }
   }
 
   /** Record a reuse point when the current block starts at a pristine page top
@@ -621,13 +680,31 @@ class Engine {
     if (this.incrAbort || !this.incrPoints || this.balMeasuring) return;
     const p = this.cur;
     if (
-      this.col === 0 &&
-      p.items.length === 0 &&
-      Math.abs(this.y - p.bodyTop) < 1e-6 &&
-      p.bands.length === 1 &&
-      (this.floats.get(p)?.length ?? 0) === 0 &&
-      p.footnotes.length === 0
+      !(
+        this.col === 0 &&
+        p.items.length === 0 &&
+        Math.abs(this.y - p.bodyTop) < 1e-6 &&
+        p.bands.length === 1 &&
+        (this.floats.get(p)?.length ?? 0) === 0 &&
+        p.footnotes.length === 0
+      )
     ) {
+      return;
+    }
+    // Convergence: during a tail relay, if this pristine page top lands on the
+    // same block, same global page index, and same carry state as a prev-layout
+    // capture point, everything from here is identical — stop and splice prev's
+    // suffix. Discard the fresh page we just started (prev's covers it).
+    if (this.incrPrevPoints && blockIdx > this.incrFirstDirty) {
+      const globalPageIdx = this.pages.length - 1 + this.physBase;
+      const pp = this.incrPrevPoints.get(blockIdx);
+      if (pp && pp.pageCount === globalPageIdx && this.statesMatch(pp.state)) {
+        this.incrConvergePrevPageIdx = pp.pageCount;
+        this.pages.pop();
+        return;
+      }
+    }
+    {
       this.incrPoints.push({
         blockIdx,
         pageCount: this.pages.length - 1 + this.physBase,
@@ -664,6 +741,42 @@ class Engine {
         },
       });
     }
+  }
+
+  /** True when the current engine state at a clean page top exactly matches a
+   * prev-layout capture point — i.e. the relaid tail has re-converged and the
+   * rest of the layout is guaranteed identical. */
+  private statesMatch(s: IncrState): boolean {
+    const p = this.cur;
+    if (
+      this.col !== s.col ||
+      this.y !== s.y ||
+      this.sectionFirstPagePhys !== s.sectionFirstPagePhys ||
+      this.lastParaSpacingAfter !== s.lastParaSpacingAfter ||
+      this.lastParaAfterPad !== s.lastParaAfterPad ||
+      this.lastParaWasEmpty !== s.lastParaWasEmpty ||
+      this.trailingSectionBreakMarkGap !== s.trailingSectionBreakMarkGap ||
+      this.suppressNextSpaceBefore !== s.suppressNextSpaceBefore ||
+      this.docGridDropBefore !== s.docGridDropBefore ||
+      this.gridResyncPending !== s.gridResyncPending ||
+      this.verticalGridFlow !== s.verticalGridFlow ||
+      this.bannerSlotUsed !== s.bannerSlotUsed ||
+      p.physIndex !== s.page.physIndex ||
+      p.displayNumber !== s.page.displayNumber ||
+      p.bodyTop !== s.page.bodyTop ||
+      p.bodyBottom !== s.page.bodyBottom
+    ) {
+      return false;
+    }
+    if (this.seenNumIds.size !== s.seenNumIds.size) return false;
+    for (const id of this.seenNumIds) if (!s.seenNumIds.has(id)) return false;
+    if (this.counters.size !== s.counters.size) return false;
+    for (const [k, v] of this.counters) {
+      const w = s.counters.get(k);
+      if (!w || w.length !== v.length) return false;
+      for (let i = 0; i < v.length; i++) if (v[i] !== w[i]) return false;
+    }
+    return true;
   }
 
   /** Rebuild the resume page and restore running state, so layoutBlocks can be
@@ -738,32 +851,50 @@ class Engine {
     this.displayBase = inc.pages[prefixCount - 1].displayNumber;
     this.incrSigs = newSigs;
     this.incrPoints = [];
+    this.incrPrevPoints = new Map(inc.points.map((pt) => [pt.blockIdx, pt]));
+    this.incrFirstDirty = firstDirty;
     this.restoreIncrState(rp.state);
     this.layoutBlocks(blocks, rp.blockIdx);
     if (this.incrAbort) return null;
 
-    // Post-passes over the relaid tail only; the reused prefix was already
-    // finalized identically in prev (eligibility rules out cross-page fields).
+    // Every bookmark the relaid middle defines must land on the same page
+    // number as prev — otherwise a PAGEREF anywhere (including a reused prefix
+    // page we can't safely mutate) could now resolve differently. Fall back.
+    for (const [name, page] of this.bookmarkPages) {
+      if (inc.bookmarks.get(name) !== page) return null;
+    }
+
+    // Post-passes over the relaid middle pages only; the reused prefix and (on
+    // convergence) suffix were already finalized identically in prev
+    // (eligibility rules out footer totals / multi-column / frames).
     this.placeEndnotes();
     this.emitFootnoteAreas();
     this.emitColumnSeparators();
     this.finalizeHeadersFooters();
+    // Middle PAGEREFs resolve against the full (unchanged) bookmark map.
+    this.bookmarkPages = inc.bookmarks;
+    this.rewritePageRefs(this.pages);
     this.applySectionVAlign();
     if (this.incrAbort) return null;
 
-    const totalPages = prefixCount + this.pages.length;
+    // The tail either re-converged onto a prev page boundary (reuse prev pages
+    // from there) or ran to the document end (no suffix to reuse).
+    const suffixStart = this.incrConvergePrevPageIdx >= 0 ? this.incrConvergePrevPageIdx : inc.pages.length;
+    const totalPages = prefixCount + this.pages.length + (inc.pages.length - suffixStart);
     // A page-count change reshuffles page numbers (and any footer totals) across
     // the whole document, invalidating the reused prefix — do a full layout.
     if (totalPages !== prev.totalPages) return null;
 
-    const tail = this.pages.map((p) => laidOutPage(p));
-    const outPages = prev.pages.slice(0, prefixCount).concat(tail);
-    const outInternal = inc.pages.slice(0, prefixCount).concat(this.pages);
-    const points = inc.points.filter((pt) => pt.pageCount < prefixCount).concat(this.incrPoints);
+    const middle = this.pages.map((p) => laidOutPage(p));
+    const outPages = prev.pages.slice(0, prefixCount).concat(middle, prev.pages.slice(suffixStart));
+    const outInternal = inc.pages.slice(0, prefixCount).concat(this.pages, inc.pages.slice(suffixStart));
+    const points = inc.points
+      .filter((pt) => pt.pageCount < prefixCount)
+      .concat(this.incrPoints, inc.points.filter((pt) => pt.pageCount >= suffixStart));
     return {
       pages: outPages,
       totalPages: outPages.length,
-      _incr: { sigs: newSigs, points, pages: outInternal } satisfies IncrData,
+      _incr: { sigs: newSigs, points, pages: outInternal, bookmarks: inc.bookmarks } satisfies IncrData,
     };
   }
 
@@ -1624,6 +1755,8 @@ class Engine {
     for (let i = startIdx; i < blocks.length; i++) {
       const block = blocks[i];
       if (this.incrPoints) this.capturePoint(i);
+      if (this.incrConvergePrevPageIdx >= 0) return; // tail re-converged; suffix reused
+
       if (block.type === "paragraph") {
         // An empty paragraph that only carries a section break takes no
         // vertical space in Word (parity-colbalance: the columns start

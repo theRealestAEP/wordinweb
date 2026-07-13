@@ -202,11 +202,17 @@ export function DocxView({
     // (the default path builds a fresh, cold measurer per layoutDocument call).
     // Cache hits return the exact same values, so layout output is unchanged.
     const measurer: TextMeasurer = createMeasurer();
+    // Previous layout result, fed back so the engine can reuse the pages of an
+    // edit's unchanged prefix/suffix (incremental pagination). Same document, so
+    // it stays valid across keystrokes; the engine falls back to a full layout
+    // whenever it can't prove reuse is byte-identical.
+    let prevLayout: LayoutResult | null = null;
 
     const rerender = (doc: DocxDocument): number => {
       const perf = (globalThis as { __dxwPerf?: { last?: Record<string, number> } }).__dxwPerf;
       const t0 = perf ? performance.now() : 0;
-      const layout = layoutDocument(doc, { measurer });
+      const layout = layoutDocument(doc, { measurer, prev: prevLayout ?? undefined });
+      prevLayout = layout;
       const t1 = perf ? performance.now() : 0;
       const container = containerRef.current;
       if (!container) return 0;

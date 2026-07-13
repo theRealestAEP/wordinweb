@@ -131,6 +131,9 @@ function itemEq(a: unknown, b: unknown, depth: number): boolean {
 /** Two laid-out pages produce identical DOM: same geometry, same page-level
  * chrome fields (which land in dataset), and the same item list. */
 function pageEq(a: LaidOutPage, b: LaidOutPage): boolean {
+  // Incremental layout reuses the SAME page object for unchanged pages, so an
+  // identity hit means unchanged without walking thousands of items.
+  if (a === b) return true;
   if (
     a.width !== b.width ||
     a.height !== b.height ||
