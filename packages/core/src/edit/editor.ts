@@ -9,7 +9,7 @@ import { listTypeAt, setListLevel } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
 import { isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
 import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
-import { SelectionSegment } from "./commands.js";
+import { SelectionSegment, selectionTextLogical } from "./commands.js";
 import { adjustFloatingPosition, imageAltText, isFloatingDrawing, replaceImageBlip, setFloatingPosition, setImageAltText, setImageWrap } from "./images.js";
 import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
 import { graphemeStep } from "./grapheme.js";
@@ -610,20 +610,10 @@ export class DocxEditor {
 
   // ---------- clipboard ----------
 
-  /** Selection text with real spaces and newlines at paragraph boundaries. */
+  /** Selection text in LOGICAL (source) order, newlines at paragraph
+   * boundaries — so copied bidi/RTL text isn't mirror-reversed. */
   private selectionText(): string {
-    const segments = this.getSelectionSegments();
-    let out = "";
-    let lastPara: XmlElement | null = null;
-    for (const seg of segments) {
-      if (!seg.t) continue;
-      const t = seg.t as XmlElement;
-      const para = paragraphOf(this.host.doc, t);
-      if (lastPara && para !== lastPara) out += "\n";
-      lastPara = para;
-      out += t.text.slice(seg.start, seg.end);
-    }
-    return out;
+    return selectionTextLogical(this.host.doc, this.getSelectionSegments());
   }
 
   private onCopy = (e: ClipboardEvent): void => {
@@ -648,19 +638,24 @@ export class DocxEditor {
     if (!text) return;
     if (!this.caret && !this.hasSelection()) return;
     e.preventDefault();
+    this.pasteText(text);
+  };
+
+  /** Insert clipboard text at the caret. Newlines split into paragraph breaks;
+   * both text and the new marks route through the suggesting-aware cores so
+   * paste in suggesting mode records w:ins. One checkpoint + one commit. */
+  private pasteText(text: string): void {
     this.host.history?.checkpoint();
     if (this.hasSelection()) this.removeSelectedText();
-    const chunks = text.replace(/\r/g, "").split("\n");
+    if (!this.caret) return;
+    const chunks = text.replace(/\r\n?/g, "\n").split("\n");
     for (let i = 0; i < chunks.length; i++) {
-      if (i > 0) this.splitParagraphNoHistory();
-      const caret = this.caret;
-      if (!caret) break;
-      const chunk = chunks[i];
-      caret.t.text = caret.t.text.slice(0, caret.offset) + chunk + caret.t.text.slice(caret.offset);
-      caret.offset += chunk.length;
+      if (i > 0) this.splitParagraphCore();
+      if (!this.caret) break;
+      if (chunks[i]) this.insertTextCore(chunks[i]);
     }
     this.commit();
-  };
+  }
 
   // ---------- table drag-resize (columns and rows) ----------
 
@@ -2667,19 +2662,24 @@ export class DocxEditor {
   private insertText(text: string): void {
     this.host.history?.checkpoint("typing");
     if (this.hasSelection()) this.removeSelectedText();
+    this.insertTextCore(text);
+    this.commit();
+  }
+
+  /** Insert text at the caret (suggesting-aware) without touching history or
+   * committing — shared by typing and multi-chunk paste. */
+  private insertTextCore(text: string): void {
     const caret = this.caret;
     if (!caret) return;
     if (this.suggesting) {
       const nc = insertSuggestedText(this.host.doc, caret.t, caret.offset, text, this.revMeta());
       if (nc) this.caret = { t: nc.t, run: caret.run, offset: nc.offset, bias: "end" };
-      this.commit();
       return;
     }
     const t = caret.t;
     t.text = t.text.slice(0, caret.offset) + text + t.text.slice(caret.offset);
     caret.offset += text.length;
     caret.bias = "end";
-    this.commit();
   }
 
   private deleteContents(direction?: -1 | 1): void {
@@ -2897,6 +2897,13 @@ export class DocxEditor {
   }
 
   private splitParagraphNoHistory(): void {
+    this.splitParagraphCore();
+    this.commit();
+  }
+
+  /** Split the paragraph at the caret without history or commit — shared by
+   * Enter and multi-line paste. */
+  private splitParagraphCore(): void {
     const caret = this.caret;
     if (!caret) return;
     // Resolve containers from the w:t itself — cached run/model objects go
@@ -2953,7 +2960,6 @@ export class DocxEditor {
     if (this.suggesting) markParagraphGlyph(pEl, "ins", this.revMeta());
 
     this.caret = { t: afterT, run: caret.run, offset: 0 };
-    this.commit();
   }
 
   private commit(): void {
