@@ -451,7 +451,10 @@ describe("document parsing", () => {
     const firstProps = doc.effectiveRunProps(first, firstRun.props);
     const secondProps = doc.effectiveRunProps(second, secondRun.props);
     expect(firstProps.font).toBe("Cambria");
-    expect(firstProps.fontEastAsia).toBe("Cambria");
+    // eastAsiaTheme="majorEastAsia" resolves through the theme's <a:ea> face
+    // (majorFont ea = "MS Mincho"), NOT the Latin major font — a CJK run must
+    // never inherit the glyphless Latin theme face for its East Asian channel.
+    expect(firstProps.fontEastAsia).toBe("MS Mincho");
     expect(firstProps.fontComplex).toBe("Times New Roman");
     expect(secondProps.fontComplex).toBe("Tahoma");
 

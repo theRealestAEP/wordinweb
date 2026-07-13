@@ -222,6 +222,42 @@ const CJK_RE =
 function isCJK(ch: string): boolean {
   return CJK_RE.test(ch);
 }
+/** Word's OS-default East Asian face for a CJK run with no w:eastAsia resolved
+ * anywhere in the run/style/docDefaults/theme chain. Word picks it from the
+ * segment's script and the install's language default; proxy that by script so
+ * the glyphless Latin ascii font is never used for CJK text. Kana => Japanese
+ * (MS Mincho); Hangul => Korean (Batang); script-neutral Han defaults to MS
+ * Mincho, the generic East Asian face pushCJK maps to a covered macOS
+ * substitute. The result flows through pushCJK's usual family mapping. */
+function defaultEastAsia(seg: string): string {
+  if (/[぀-ヿㇰ-ㇿｦ-ﾟ]/.test(seg)) return "MS Mincho";
+  if (/[가-힯ᄀ-ᇿ㄰-㆏ꥠ-꥿]/.test(seg)) return "Batang";
+  return "MS Mincho";
+}
+/** Map a declared (Windows) East Asian family to the macOS face whose measured
+ * profile lives in WORD_FONT_METRICS. PAINT stays on the declared family; the
+ * Windows names carry NO general substitute so a Latin run that merely DECLARES
+ * one keeps a normal line height (wild-athabasca's ≤ in "MS Gothic"). */
+function macEastAsiaFace(family: string): string {
+  const fl = family.toLowerCase();
+  if (/mincho/.test(fl)) return "Hiragino Mincho ProN";
+  if (/gothic|meiryo/.test(fl)) return "Hiragino Sans";
+  if (/jhenghei|mingliu/.test(fl)) return "PingFang TC";
+  if (/yahei/.test(fl)) return "PingFang SC";
+  if (/simsun/.test(fl)) return "Songti SC";
+  if (/simhei/.test(fl)) return "Heiti SC";
+  return family;
+}
+/** East-Asian-channel FontSpec for a CJK segment (ruby base/annotation).
+ * Mirrors pushCJK's family resolution: CJK codepoints take the run's w:eastAsia
+ * face — never the w:ascii Latin font — falling back to the script default when
+ * no eastAsia is declared. Non-CJK text keeps the passed (ascii) font. */
+function eastAsiaFontOf(props: RunProps, font: FontSpec, text: string): FontSpec {
+  if (!CJK_RE.test(text)) return font;
+  const declared =
+    props.fontEastAsia ?? (EA_FAMILY_RE.test(font.family) ? font.family : defaultEastAsia(text));
+  return { ...font, family: macEastAsiaFace(declared), paintFamily: declared };
+}
 /** Full-width Latin/kana that Word packs half-width don't apply here; the
  * fixtures use ideographs, kana and full-width punctuation (all 1em). */
 function isWideCJK(ch: string): boolean {
@@ -2368,11 +2404,16 @@ function buildAtoms(
           const baseProps = doc.effectiveRunProps(para, content.base.props);
           const rtProps = doc.effectiveRunProps(para, content.rt.props);
           if (baseProps.vanish) break;
-          const baseFont = fontOf(baseProps, fallbackFamily);
-          const rtFont = fontOf(rtProps, fallbackFamily);
           const baseText = runPlainText(content.base);
           const rtText = runPlainText(content.rt);
           if (!baseText) break;
+          // Ruby base (kanji) and annotation (kana) are East Asian text: they
+          // paint in the run's w:eastAsia face, never the w:ascii Latin font.
+          // fontOf resolves only the ascii channel, so route CJK content through
+          // the eastAsia channel — else probe2-ruby-vertical's "漢字/かんじ"
+          // clusters render in Calibri despite rFonts w:eastAsia="MS Mincho".
+          const baseFont = eastAsiaFontOf(baseProps, fontOf(baseProps, fallbackFamily), baseText);
+          const rtFont = eastAsiaFontOf(rtProps, fontOf(rtProps, fallbackFamily), rtText);
           const baseW = measurer.width(baseText, baseFont, baseProps.letterSpacing);
           const rtW = measurer.width(rtText, rtFont, rtProps.letterSpacing);
           atoms.push({
@@ -2480,7 +2521,17 @@ function buildAtoms(
     // taller line box. Proxy the coverage test with kana presence: a CJK segment
     // with no kana under a Japanese eastAsia font is treated as the Chinese
     // fallback so its line pitch matches.
-    let family = props.fontEastAsia ?? font.family;
+    // CJK codepoints resolve through the w:eastAsia channel — they NEVER fall
+    // back to the w:ascii Latin font (Calibri/Carlito carry no CJK glyphs). When
+    // no eastAsia font is declared anywhere in the run/style/docDefaults/theme
+    // chain, Word uses the OS default East Asian face for the segment's script.
+    // The old `?? font.family` leaked the ascii font: probe2-ruby-vertical's
+    // untagged tbRl paragraph (Japanese kana, no rFonts, docDefaults ascii=Calibri
+    // with no eastAsia) painted 94 CJK spans in Calibri instead of MS Mincho.
+    // Only honour font.family when it is itself a CJK family (a CJK face declared
+    // via w:ascii, e.g. staging-eastasian-style ascii-only CJK runs).
+    let family =
+      props.fontEastAsia ?? (EA_FAMILY_RE.test(font.family) ? font.family : defaultEastAsia(seg));
     const declaredFamily = family;
     const japaneseEA = /mincho|gothic|meiryo|^yu|\byu /i.test(family);
     // Word picks the fallback by GLYPH COVERAGE of the declared face: only a
@@ -2507,13 +2558,7 @@ function buildAtoms(
     // WORD_FONT_METRICS. The Windows names deliberately have NO general
     // substitute/profile so a Latin run that merely DECLARES one keeps a
     // normal line height (wild-athabasca's header \u2264 in "MS Gothic").
-    const fl = family.toLowerCase();
-    if (/mincho/.test(fl)) family = "Hiragino Mincho ProN";
-    else if (/gothic|meiryo/.test(fl)) family = "Hiragino Sans";
-    else if (/jhenghei|mingliu/.test(fl)) family = "PingFang TC";
-    else if (/yahei/.test(fl)) family = "PingFang SC";
-    else if (/simsun/.test(fl)) family = "Songti SC";
-    else if (/simhei/.test(fl)) family = "Heiti SC";
+    family = macEastAsiaFace(family);
     const cjkFont: FontSpec = { ...font, family, paintFamily: realFamily };
     // Word's fallback is per GLYPH COVERAGE, not per segment: a Japanese font
     // keeps every character it covers (kana, fullwidth punctuation, shared

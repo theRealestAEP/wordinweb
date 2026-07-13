@@ -213,6 +213,12 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
       if (!kind || !theme) return undefined;
       if (kind === "majorBidi") return theme.majorBidiFont ?? theme.majorFont;
       if (kind === "minorBidi") return theme.minorBidiFont ?? theme.minorFont;
+      // eastAsiaTheme resolves through the theme's <a:ea> face, never the Latin
+      // major/minor font. Return undefined when the theme leaves it empty so
+      // the layout's script-based CJK default applies (else the run would take
+      // the glyphless Latin theme face for its East Asian codepoints).
+      if (kind === "majorEastAsia") return theme.majorEastAsiaFont;
+      if (kind === "minorEastAsia") return theme.minorEastAsiaFont;
       return kind.startsWith("major") ? theme.majorFont : theme.minorFont;
     };
     let font = attr(rFonts, "ascii") ?? attr(rFonts, "hAnsi") ?? themeFont(attr(rFonts, "asciiTheme"));
