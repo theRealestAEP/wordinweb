@@ -45,6 +45,16 @@ export interface LayoutOptions {
    * lead-in state are unchanged are reused instead of re-laid. The engine falls
    * back to a full layout whenever it cannot prove reuse is byte-identical. */
   prev?: LayoutResult;
+  /** The top-level block XML element (w:p / w:tbl) the editor mutated IN PLACE
+   * since `prev` — the paragraph the caret sits in for a single-character
+   * type/delete. Lets the incremental scan skip re-hashing every block: it
+   * re-hashes only the hinted block and its two neighbours and reuses prev's
+   * per-block signatures for the rest. Purely an optimisation — the fast path
+   * is gated on block-count parity and neighbour-signature checks, so a stale,
+   * structural, or wrong hint falls through to the full block scan. Absent for
+   * multi-block edits (paste, paragraph split/merge, undo/redo, structural ops),
+   * which take the full scan. */
+  dirtyHint?: XmlElement;
 }
 
 export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): LayoutResult {
@@ -52,7 +62,7 @@ export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): 
   if (options.prev && options.prev._incr) {
     // Incremental attempt uses its own engine; if it can't prove reuse is safe
     // it returns null and a fresh engine does a clean full layout.
-    const attempt = new Engine(doc, measurer).runIncremental(options.prev);
+    const attempt = new Engine(doc, measurer).runIncremental(options.prev, options.dirtyHint);
     if (attempt) return attempt;
   }
   return new Engine(doc, measurer).run();
@@ -203,6 +213,13 @@ export interface IncrData {
   /** Bookmark name -> display page number, for PAGEREF stability checks. */
   bookmarks: Map<string, string>;
 }
+
+/** Diagnostics for the last incremental attempt (dirty-hint fast path vs full
+ * block scan, and how many block signatures were hashed). Test-only — lets the
+ * equivalence harness assert the hint fast path actually fires and hashes just
+ * the hinted block plus neighbours instead of every block. Not part of the
+ * public API; carries no layout state. */
+export const __incrStats = { hintFastPath: false, blocksHashed: 0, firstDirty: -1 };
 
 /** Fast content signature of an XML subtree (name/attrs/text/children) as a
  * compact string, computed with a rolling cyrb53 over the tree WITHOUT building
@@ -825,15 +842,56 @@ class Engine {
   /** Attempt an incremental layout; return null (and leave a discarded, dirty
    * engine) if reuse can't be proven safe, so the caller does a full layout in a
    * fresh engine. */
-  runIncremental(prev: LayoutResult): LayoutResult | null {
+  runIncremental(prev: LayoutResult, dirtyHint?: XmlElement): LayoutResult | null {
     if (!this.incrEligible()) return null;
     const inc = prev._incr as IncrData;
     const blocks = this.doc.sections[0].blocks;
-    const newSigs = blocks.map((b) => this.blockSig(b));
 
+    let newSigs: string[] | null = null;
     let firstDirty = 0;
-    const n = Math.min(newSigs.length, inc.sigs.length);
-    while (firstDirty < n && newSigs[firstDirty] === inc.sigs[firstDirty]) firstDirty++;
+
+    // Dirty-hint fast path: a single in-place block edit (typing/deleting in
+    // one paragraph) names the changed block, so we can skip re-hashing all
+    // ~N blocks. Only trust it when the block count matches prev (structural
+    // edits — split/merge/paste — change it and fall through), the hinted
+    // block is found by identity, its signature actually changed, and both
+    // neighbours still match prev's stored signatures (a positional sanity
+    // check that catches a shifted or wrong hint). Then reuse prev's per-block
+    // signatures verbatim for every other block.
+    if (dirtyHint && blocks.length === inc.sigs.length) {
+      const d = blocks.findIndex((b) => b.src === dirtyHint);
+      if (d >= 0) {
+        let hashed = 1;
+        const sigD = this.blockSig(blocks[d]);
+        let neighborsOk = true;
+        if (d > 0) {
+          hashed++;
+          if (this.blockSig(blocks[d - 1]) !== inc.sigs[d - 1]) neighborsOk = false;
+        }
+        if (neighborsOk && d < blocks.length - 1) {
+          hashed++;
+          if (this.blockSig(blocks[d + 1]) !== inc.sigs[d + 1]) neighborsOk = false;
+        }
+        if (sigD !== inc.sigs[d] && neighborsOk) {
+          newSigs = inc.sigs.slice();
+          newSigs[d] = sigD;
+          firstDirty = d;
+          __incrStats.hintFastPath = true;
+          __incrStats.blocksHashed = hashed;
+          __incrStats.firstDirty = d;
+        }
+      }
+    }
+
+    if (newSigs === null) {
+      newSigs = blocks.map((b) => this.blockSig(b));
+      firstDirty = 0;
+      const n = Math.min(newSigs.length, inc.sigs.length);
+      while (firstDirty < n && newSigs[firstDirty] === inc.sigs[firstDirty]) firstDirty++;
+      __incrStats.hintFastPath = false;
+      __incrStats.blocksHashed = blocks.length;
+      __incrStats.firstDirty = firstDirty;
+    }
 
     // Latest captured page top at or before the first changed block.
     let rp: IncrPoint | undefined;

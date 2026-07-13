@@ -228,10 +228,10 @@ export function DocxView({
     // whenever it can't prove reuse is byte-identical.
     let prevLayout: LayoutResult | null = null;
 
-    const rerender = (doc: DocxDocument): number => {
+    const rerender = (doc: DocxDocument, dirtyBlock?: XmlElement): number => {
       const perf = (globalThis as { __dxwPerf?: { last?: Record<string, number> } }).__dxwPerf;
       const t0 = perf ? performance.now() : 0;
-      const layout = layoutDocument(doc, { measurer, prev: prevLayout ?? undefined });
+      const layout = layoutDocument(doc, { measurer, prev: prevLayout ?? undefined, dirtyHint: dirtyBlock });
       prevLayout = layout;
       const t1 = perf ? performance.now() : 0;
       const container = containerRef.current;
@@ -329,12 +329,12 @@ export function DocxView({
           doc,
           container: containerRef.current,
           getHandle: () => handle,
-          rerender: () => {
+          rerender: (dirtyBlock?: XmlElement) => {
             if (!breakCacheWarmed) {
               clearBreakCache(measurer);
               breakCacheWarmed = true;
             }
-            pages = rerender(doc);
+            pages = rerender(doc, dirtyBlock);
           },
           zoom,
           history,

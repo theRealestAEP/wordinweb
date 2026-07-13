@@ -37,8 +37,12 @@ export interface EditorHost {
   /** Scroll container that hosts the rendered pages. */
   container: HTMLElement;
   getHandle(): RenderHandle | null;
-  /** Re-layout and re-render after a model change (host updates its handle). */
-  rerender(): void;
+  /** Re-layout and re-render after a model change (host updates its handle).
+   * `dirtyBlock` is the single top-level block element (w:p / w:tbl) changed
+   * in place by a character-level edit; the host forwards it to the layout
+   * engine's incremental scan as a hint. Omitted for structural or multi-block
+   * changes, which take the engine's full block scan. */
+  rerender(dirtyBlock?: XmlElement): void;
   zoom?: number;
   /** Shared undo/redo stack (also fed by toolbar formatting commands). */
   history?: EditHistory;
@@ -3083,9 +3087,15 @@ export class DocxEditor {
     // An edit whose caret sits in a footnote must mark that part dirty so
     // save() re-serializes footnotes.xml (no-op for body/header/footer).
     if (this.caret) this.host.doc.markDirtyIfFootnote(this.caret.t);
+    // Hint the incremental layout at the block the caret sits in: for a single
+    // in-place character edit it is the only changed block, letting the engine
+    // skip re-hashing every block. Structural edits (split/merge/multi-block
+    // delete) change the block count, so the engine's guards reject the hint
+    // and fall back to the full scan — the hint is only ever an optimisation.
+    const dirtyBlock = this.caret ? paragraphOf(this.host.doc, this.caret.t) ?? undefined : undefined;
     this.host.doc.refresh();
     const t1 = perf ? performance.now() : 0;
-    this.host.rerender();
+    this.host.rerender(dirtyBlock);
     const t2 = perf ? performance.now() : 0;
     this.applyHfChrome();
     this.positionCaret();
