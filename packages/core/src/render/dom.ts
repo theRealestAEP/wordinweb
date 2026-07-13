@@ -420,6 +420,10 @@ export function renderToDom(
 
   const bindings = pages.flatMap((p) => p.bindings);
   const drawComments = options.comments !== false && doc.comments.length > 0;
+  // The balloon rail is reserved via root padding, which a reused root keeps
+  // from the prior render — release it when the last comment was just deleted
+  // (renderComments re-reserves it whenever it draws).
+  if (inPlace && !drawComments) root.style.paddingRight = "";
   if (drawComments) {
     renderComments(doc, root, bindings, zoom, options.onDeleteComment, options.onReplyComment);
   }
