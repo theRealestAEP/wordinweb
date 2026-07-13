@@ -13,6 +13,36 @@ import { FontSpec, TextSource } from "./types.js";
 import { TextMeasurer } from "./measure.js";
 import { MathBox, layoutMath } from "./math.js";
 import { XmlElement } from "../xml.js";
+import { formatNumber } from "../parse/numbering.js";
+
+/** Apply a field's `\* <format>` general-formatting switch to a computed
+ * number (Word's PAGE/NUMPAGES/SECTIONPAGES honour it, overriding the section's
+ * pgNumType). Returns undefined when no numeric switch is present so the caller
+ * keeps its default (section) formatting. The switch keyword is case-sensitive
+ * in Word: `roman`→i, `ROMAN`→I. `ArabicDash` wraps the arabic value in hyphens
+ * ("- 1 -"), matching Word's footer probe. */
+function starNumberFormat(instr: string, n: number): string | undefined {
+  const m = /\\\*\s+([A-Za-z]+)/.exec(instr);
+  if (!m) return undefined;
+  switch (m[1]) {
+    case "Arabic":
+    case "arabic":
+      return String(n);
+    case "roman":
+      return formatNumber(n, "lowerRoman");
+    case "ROMAN":
+      return formatNumber(n, "upperRoman");
+    case "alphabetic":
+      return formatNumber(n, "lowerLetter");
+    case "ALPHABETIC":
+      return formatNumber(n, "upperLetter");
+    case "ArabicDash":
+    case "arabicDash":
+      return `- ${n} -`;
+    default:
+      return undefined; // MERGEFORMAT/CHARFORMAT/CardText/... — not a number format
+  }
+}
 
 /** Resolves field instructions to display text at layout time. */
 export interface FieldContext {
@@ -31,6 +61,12 @@ export interface FieldContext {
    * (Word recomputes REF on open; cached results are stale). undefined when
    * the bookmark is unknown — the caller then keeps the cache. */
   refText?: (bookmark: string) => string | undefined;
+  /** REF `\p`: the referenced bookmark's position relative to this field
+   * occurrence ("above"/"below"), or undefined when the target is unknown. */
+  refPosition?: (fieldKey: object) => "above" | "below" | undefined;
+  /** REF `\r`: the referenced paragraph's number in relative context, or
+   * undefined when it is unknown (the caller then keeps the cache). */
+  refParaNumber?: (fieldKey: object) => string | undefined;
 }
 
 // ---------- atoms ----------
@@ -221,6 +257,17 @@ const CJK_RE =
   /[ᄀ-ᇿ⺀-⿟　-〿぀-ヿ㄰-㆏㐀-䶿一-鿿ꥠ-꥿가-퟿豈-﫿＀-￯]/;
 function isCJK(ch: string): boolean {
   return CJK_RE.test(ch);
+}
+// Ballot-box glyphs (empty U+2610, with-check U+2611, with-X U+2612) — the
+// display glyphs of legacy FORMCHECKBOX form fields and modern w14:checkbox
+// content controls. Latin body faces (Calibri/Arial/Times) have no cmap entry
+// for these, so Word's glyph fallback paints them in MS Gothic at full (1em)
+// advance. A browser left to its own fallback picks a heavier, larger system
+// box (probe2-form-checkboxes: the boxes inked ~3.2% over Word's weight and
+// left a structural halo). Route them to MS Gothic explicitly to match Word.
+const BALLOT_RE = /[☐☑☒]/;
+function isBallot(ch: string): boolean {
+  return BALLOT_RE.test(ch);
 }
 /** Word's OS-default East Asian face for a CJK run with no w:eastAsia resolved
  * anywhere in the run/style/docDefaults/theme chain. Word picks it from the
@@ -2548,7 +2595,17 @@ function buildAtoms(
           // PAGEREF renders its (stale) cached result now and is rewritten
           // with the bookmark's real page in the engine's final pass - Word
           // recomputes these on open, so the docx cache is untrustworthy.
-          const pm = /^\s*PAGEREF\s+([^\s\\]+)/i.exec(content.instruction);
+          // A PAGEREF with \p shows the relative POSITION ("above"/"below"),
+          // not the page number, so it must NOT enter the page-rewrite path.
+          const pagePos =
+            /\\p(\s|$)/i.test(content.instruction) && fields.refPosition
+              ? fields.refPosition(content)
+              : undefined;
+          const pm = pagePos ? null : /^\s*PAGEREF\s+([^\s\\]+)/i.exec(content.instruction);
+          if (pagePos) {
+            pushStyled(displayText(pagePos, props), props, font, href, { run, t: null, offset: 0 }, vertMetricsFont);
+            break;
+          }
           if (pm && text) {
             atoms.push({
               kind: "frag",
@@ -3011,19 +3068,37 @@ function buildAtoms(
     srcBase?: TextSource,
     metricsFont?: FontSpec,
   ) => {
-    if (!CJK_RE.test(text)) {
+    // A run that already declares an East-Asian face covers the ballot glyphs
+    // itself; only reroute the common case of a Latin body font whose fallback
+    // the browser would otherwise pick.
+    const ballotHere = BALLOT_RE.test(text) && !EA_FAMILY_RE.test(font.family);
+    if (!ballotHere && !CJK_RE.test(text)) {
       pushLatin(text, 0, props, font, href, srcBase, metricsFont);
       return;
     }
-    // Split into maximal CJK / non-CJK chunks so each uses the right font and
-    // break rules while keeping source offsets exact.
+    // Split into maximal ballot / CJK / Latin chunks so each uses the right
+    // font and break rules while keeping source offsets exact.
+    const classOf = (ch: string): 0 | 1 | 2 =>
+      ballotHere && isBallot(ch) ? 0 : isCJK(ch) ? 1 : 2;
     let i = 0;
     while (i < text.length) {
-      const cjk = isCJK(text[i]);
+      const cls = classOf(text[i]);
       let j = i + 1;
-      while (j < text.length && isCJK(text[j]) === cjk) j++;
+      while (j < text.length && classOf(text[j]) === cls) j++;
       const seg = text.slice(i, j);
-      if (cjk) pushCJK(seg, i, props, font, href, srcBase);
+      if (cls === 0) {
+        // Route ballot glyphs to MS Gothic via paintFamily (the CJK-paint
+        // pattern): the CSS stack lists "MS Gothic" first so the browser paints
+        // and MEASURES (measurer uses cssFont, giving MS Gothic's full 1em box)
+        // with it, while metrics stay keyed to the run's own family so the Latin
+        // line box is unchanged. paintFamily deliberately avoids metricsFont —
+        // metricsFont would set a small-caps strutFont on the item and the
+        // renderer's strut path repaints the outer span in the strut face,
+        // silently undoing the MS Gothic routing (the legacy FORMCHECKBOX glyphs
+        // regressed to Calibri that way).
+        const gFont: FontSpec = { ...font, paintFamily: "MS Gothic" };
+        pushLatin(seg, i, props, gFont, href, srcBase, metricsFont);
+      } else if (cls === 1) pushCJK(seg, i, props, font, href, srcBase);
       else pushLatin(seg, i, props, font, href, srcBase, metricsFont);
       i = j;
     }
@@ -3064,11 +3139,18 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
   const instr = instruction.trim();
   const keyword = instr.split(/\s+/)[0]?.toUpperCase();
   switch (keyword) {
-    case "PAGE":
-      return ctx.formatPageNumber(ctx.pageNumber());
+    case "PAGE": {
+      const n = ctx.pageNumber();
+      // An explicit \* switch overrides the section's pgNumType (a "PAGE \*
+      // roman" footer stays roman even in an arabic-restart section; "PAGE \*
+      // ArabicDash" paints "- 1 -"). Plain PAGE keeps the section format.
+      return starNumberFormat(instr, n) ?? ctx.formatPageNumber(n);
+    }
     case "NUMPAGES":
-    case "SECTIONPAGES":
-      return String(ctx.totalPages());
+    case "SECTIONPAGES": {
+      const n = ctx.totalPages();
+      return starNumberFormat(instr, n) ?? String(n);
+    }
     case "SEQ": {
       // Word recomputes SEQ on open; the docx cache is stale (and this
       // repo's sanitizer remaps cached digits). Compute per-identifier.
@@ -3081,9 +3163,24 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       // repo's sanitizer remaps cached digits: gatech's table-of-figures
       // "Bavoqe 0" caches for a caption whose SEQ renders 1). Re-render the
       // bookmark range's text for plain references; switches that change the
-      // output shape (\d\f\n\p\r\t\w — numbers, positions, separators) keep
-      // the cache. \h (hyperlink) and \* formatting are text-preserving.
+      // output shape (\d\f\n\t\w — numbers, separators) keep the cache. \h
+      // (hyperlink) and \* formatting are text-preserving. \p (position) and
+      // \r (paragraph number) are recomputed from document context below.
       const bookmark = instr.split(/\s+/)[1];
+      // \p: relative position ("above"/"below"). Word paints just the position
+      // word (the referenced text is not shown), so it wins over the range text.
+      if (/\\p(\s|$)/i.test(instr) && ctx.refPosition && fieldKey) {
+        const pos = ctx.refPosition(fieldKey);
+        if (pos) return pos;
+      }
+      // \r: paragraph number in relative context.
+      if (/\\r(\s|$)/i.test(instr) && ctx.refParaNumber && fieldKey) {
+        const n = ctx.refParaNumber(fieldKey);
+        if (n !== undefined) return n;
+      }
+      // A \p/\r ref whose target was not resolvable above falls through here;
+      // keep it in the exclusion so it retains its cache rather than painting
+      // the (position-less) bookmark text.
       if (bookmark && ctx.refText && !/\\[dfnprtw](\s|$)/i.test(instr)) {
         const text = ctx.refText(bookmark);
         if (text !== undefined) return text;

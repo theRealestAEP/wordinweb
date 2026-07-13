@@ -450,6 +450,7 @@ class Engine {
     }
     this.assignNoteNumbers();
     this.assignSeqNumbers();
+    this.assignRefContext();
     const sections = this.doc.sections;
     let prevSp: SectionProps | null = null;
     for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
@@ -904,6 +905,7 @@ class Engine {
 
     this.assignNoteNumbers();
     this.assignSeqNumbers();
+    this.assignRefContext();
 
     this.physBase = prefixCount;
     this.displayBase = inc.pages[prefixCount - 1].displayNumber;
@@ -1511,6 +1513,8 @@ class Engine {
       selfNoteMark: () => engine.selfNoteMark ?? "",
       seq: (ident, key, instr) => engine.resolveSeq(ident, key, instr),
       refText: (bookmark) => engine.refBookmarkText(bookmark),
+      refPosition: (key) => engine.refFieldPosition.get(key),
+      refParaNumber: (key) => engine.refFieldParaNumber.get(key),
     };
   }
 
@@ -1520,7 +1524,12 @@ class Engine {
   private refResolving = new Set<string>();
   private refBookmarkText(name: string): string | undefined {
     const runs = this.doc.refBookmarks?.get(name);
-    if (!runs || runs.length === 0) return undefined;
+    if (!runs) return undefined; // bookmark not captured — keep the field cache
+    // A captured but zero-length range is a real (empty) bookmark: Word's REF
+    // recompute shows nothing for it, so return "" (NOT undefined, which would
+    // fall back to the stale cache — probe3-index-xrefs' `tbl_c1` is an empty
+    // bookmark whose cache still reads "Table 1").
+    if (runs.length === 0) return "";
     if (this.refResolving.has(name)) return undefined; // circular REF chain
     this.refResolving.add(name);
     try {
@@ -1565,6 +1574,77 @@ class Engine {
       }
     };
     for (const s of this.doc.sections) visit(s.blocks);
+  }
+
+  /** REF `\p` position ("above"/"below") and `\r` paragraph number, keyed by
+   * the field occurrence. Word recomputes these on open; the docx cache is
+   * stale (probe3-index-xrefs' `REF … \p` caches "Table 1 below" but Word paints
+   * "above"; `REF … \r` caches "1" for an unnumbered caption Word numbers "0").
+   * Only \p/\r-switched REF fields are recorded — plain refs are untouched. */
+  private refFieldPosition = new WeakMap<object, "above" | "below">();
+  private refFieldParaNumber = new WeakMap<object, string>();
+  private assignRefContext(): void {
+    // Pass 1: record each bookmark's first-seen paragraph ordinal (linear
+    // document order) and whether that paragraph carries list numbering.
+    const bmOrdinal = new Map<string, number>();
+    const bmNumbered = new Map<string, boolean>();
+    let ord = 0;
+    const scan = (blocks: Block[]) => {
+      for (const b of blocks) {
+        if (b.type === "paragraph") {
+          ord++;
+          if (b.bookmarks) {
+            for (const nm of b.bookmarks) {
+              if (!bmOrdinal.has(nm)) {
+                bmOrdinal.set(nm, ord);
+                bmNumbered.set(nm, !!b.props.numbering);
+              }
+            }
+          }
+        } else {
+          for (const row of b.rows) for (const cell of row.cells) scan(cell.blocks);
+        }
+      }
+    };
+    for (const s of this.doc.sections) scan(s.blocks);
+
+    // Pass 2: resolve each REF field's \p position (target above/below this
+    // field) and \r number against the recorded target paragraph.
+    let ord2 = 0;
+    const resolve = (blocks: Block[]) => {
+      for (const b of blocks) {
+        if (b.type === "paragraph") {
+          ord2++;
+          for (const c of b.children) {
+            const runs = c.type === "run" ? [c] : c.runs;
+            for (const r of runs) {
+              for (const rc of r.content) {
+                if (rc.kind !== "field") continue;
+                // Both REF and PAGEREF honour \p (position). PAGEREF \p shows
+                // "above"/"below" instead of the bookmark's page number.
+                const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(rc.instruction);
+                if (!m) continue;
+                const target = m[1];
+                const rest = m[2];
+                const tord = bmOrdinal.get(target);
+                if (tord === undefined) continue;
+                if (/\\p(\s|$)/i.test(rest)) {
+                  this.refFieldPosition.set(rc, tord <= ord2 ? "above" : "below");
+                }
+                if (/\\r(\s|$)/i.test(rest) && !bmNumbered.get(target)) {
+                  // An unnumbered target paragraph has no list number: Word's
+                  // \r shows "0" (the index-xrefs caption is unnumbered).
+                  this.refFieldParaNumber.set(rc, "0");
+                }
+              }
+            }
+          }
+        } else {
+          for (const row of b.rows) for (const cell of row.cells) resolve(cell.blocks);
+        }
+      }
+    };
+    for (const s of this.doc.sections) resolve(s.blocks);
   }
 
   /** SEQ counters keyed by identifier; each field occurrence keeps its

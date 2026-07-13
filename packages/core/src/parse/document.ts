@@ -464,11 +464,18 @@ function parseParaChildren(
       const bm = attr(el, "name");
       // PAGEREF targets: record the name so layout can map it to a page.
       if (bookmarks && bm && !bm.startsWith("_GoBack")) bookmarks.push(bm);
-      // Cross-reference targets: open a run capture for the `_Ref` range so
-      // REF fields can re-render the referenced text (stale docx cache).
+      // Cross-reference targets: open a run capture for the bookmark range so
+      // REF fields can re-render the referenced text (the docx cache is stale —
+      // Word recomputes REF on open). Word's Insert-Cross-Reference tool names
+      // its targets `_RefNNN`, but a REF field can point at ANY user bookmark
+      // (probe3-index-xrefs references `tbl_c1`), so capture every named range,
+      // not just the auto-generated ones. `_GoBack` is Word's transient cursor
+      // marker and never a REF target. An empty (zero-length) range is kept as
+      // an empty run list so REF re-render yields "" (Word shows nothing for a
+      // REF to an empty bookmark) rather than falling back to the stale cache.
       const rb = ctx.refBookmarks;
       const id = attr(el, "id");
-      if (rb && id && bm && bm.startsWith("_Ref")) {
+      if (rb && id && bm && bm !== "_GoBack") {
         const runs: Run[] = [];
         rb.open.set(id, runs);
         rb.byName.set(bm, runs);
