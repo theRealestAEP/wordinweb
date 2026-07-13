@@ -893,6 +893,31 @@ describe("layout engine", () => {
     }
   });
 
+  it("fits a w:fitText run into exactly its target width", () => {
+    // probe3-text-effects: <w:fitText w:val="1440"/> compresses "SQUEEZE ME
+    // INTO ONE INCH" so the run spans exactly 1in (Word PDF: glyph extent
+    // 71.2pt inside the 72pt box). Unimplemented, the run painted at natural
+    // width and overhung Word's by ~70px.
+    const para =
+      `<w:p><w:r><w:t xml:space="preserve">Label: </w:t></w:r>` +
+      `<w:r><w:rPr><w:fitText w:val="1440" w:id="90"/></w:rPr>` +
+      `<w:t xml:space="preserve">SQUEEZE ME INTO ONE INCH</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(para + section) });
+    const texts = result.pages[0].items.filter(
+      (i): i is Extract<(typeof result.pages)[0]["items"][0], { kind: "text" }> => i.kind === "text",
+    );
+    const first = texts.find((t) => t.text === "SQUEEZE");
+    const last = texts.find((t) => t.text === "INCH");
+    expect(first).toBeDefined();
+    expect(last).toBeDefined();
+    if (!first || !last) return;
+    const span = last.x + last.width - first.x;
+    expect(span).toBeCloseTo(1440 / 15, 0); // 96px = 1in
+  });
+
   it("applies the final full-width banner's spacing-after before column body text", () => {
     const render = (authorsAfter: number) => {
       const frame = `<w:framePr w:w="9360" w:wrap="notBeside" w:hAnchor="text" w:vAnchor="text" w:xAlign="center"/>`;

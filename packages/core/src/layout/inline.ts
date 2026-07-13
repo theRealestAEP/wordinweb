@@ -2537,10 +2537,21 @@ function buildAtoms(
     // run's letterSpacing so both line-breaking (measurer.width) and painting
     // (renderer reads props.letterSpacing) spread the Arabic glyphs. Non-RTL
     // runs and non-kashida paragraphs are untouched.
-    const props =
+    let props =
       kashidaEm > 0 && baseProps.rtl
         ? { ...baseProps, letterSpacing: (baseProps.letterSpacing ?? 0) + kashidaEm * font.size }
         : baseProps;
+    // w:fitText: scale the run's advances so its text occupies exactly the
+    // target width (probe3-text-effects: "SQUEEZE ME INTO ONE INCH" fits
+    // 1440tw = 72pt; Word's PDF draws the group into that box exactly).
+    // Resolved into textScale so measuring and painting (renderer scaleX)
+    // both follow. Multi-run fitText groups (same w:id) are treated per run.
+    if (props.fitText !== undefined && props.fitText > 0) {
+      const natural = measurer.width(displayText(runPlainText(run), props), font, props.letterSpacing) * (props.textScale ?? 1);
+      if (natural > 0.1) {
+        props = { ...props, textScale: (props.textScale ?? 1) * (props.fitText / natural) };
+      }
+    }
     // Superscript/subscript runs paint at 65% size but Word keys LINE
     // METRICS to the unscaled run size: a wrapped line holding only a
     // footnote marker still advances a full base-size line (parity2-notes:
