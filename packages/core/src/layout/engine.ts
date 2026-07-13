@@ -315,6 +315,12 @@ const CHICAGO = ["*", "†", "‡", "§"];
  * afterAutospacing): 14pt in CSS px. Empirically constant across font sizes. */
 const AUTO_PARA_SPACING_PX = 14 * (96 / 72);
 
+/** Default horizontal wrap distance Word insets body text by around a positioned
+ * w:framePr when w:hSpace is absent: measured 6pt on both frames of
+ * probe2-dropcaps-frames (frame edge → wrap-channel start = 6.0pt on each side).
+ * Explicit hSpace (including 0) overrides this. */
+const FRAME_WRAP_HSPACE_PX = 6 * (96 / 72);
+
 /** Note marks share numbering formats with page numbers, plus chicago. */
 function formatNoteMark(n: number, fmt: string): string {
   if (fmt === "chicago") {
@@ -2201,23 +2207,49 @@ class Engine {
         break;
     }
     const laid = this.layoutFrame([para], contentW, this.fieldCtx(), { x: ox, y: oy });
-    for (const it of laid.items) {
-      offsetItem(it, ox, oy);
-      this.cur.items.push(it);
-    }
     const height =
       fr.hRule === "exact" && fr.h !== undefined
         ? fr.h
         : fr.hRule === "atLeast" && fr.h !== undefined
           ? Math.max(fr.h, laid.height)
           : laid.height;
+    // Word paints an exact/atLeast frame's paragraph box to the FRAME's height,
+    // not the content height: probe2-dropcaps-frames' pull-quote (h=1000tw
+    // exact, two lines of text) fills and rules the whole 50pt box, leaving
+    // empty shaded space under the text. Stretch the paragraph decorations by
+    // the surplus: the full-width shading rect grows, the bottom rule moves
+    // down, and the side rules extend. Content items are untouched.
+    const surplus = height - laid.height;
+    if (surplus > 0.5) {
+      for (const it of laid.items) {
+        if (it.kind === "rect" && it.width >= contentW - 4) {
+          it.height += surplus;
+        } else if (it.kind === "edge") {
+          const horizontal = Math.abs(it.y1 - it.y2) < 0.01;
+          if (horizontal && it.y1 > laid.height / 2 && Math.abs(it.x2 - it.x1) >= contentW - 8) {
+            it.y1 += surplus;
+            it.y2 += surplus;
+          } else if (!horizontal && Math.abs(it.x1 - it.x2) < 0.01 && it.y2 - it.y1 >= laid.height * 0.5) {
+            it.y2 += surplus;
+          }
+        }
+      }
+    }
+    for (const it of laid.items) {
+      offsetItem(it, ox, oy);
+      this.cur.items.push(it);
+    }
     // wrap=around/auto/tight/through -> body wraps both sides (square);
     // notBeside -> body clears the frame vertically (topAndBottom); none -> no float.
     if (fr.wrap !== "none") {
+      // Word insets the wrap channel from the frame by w:hSpace (default 6pt when
+      // absent — probe2-dropcaps-frames right channel starts 6pt past the frame
+      // edge, which decides whether the trailing word wraps to the next line).
+      const hGap = fr.hSpace ?? FRAME_WRAP_HSPACE_PX;
       const list = this.floats.get(this.cur) ?? [];
       list.push({
-        x0: ox,
-        x1: ox + contentW,
+        x0: ox - hGap,
+        x1: ox + contentW + hGap,
         y0: oy,
         y1: oy + height,
         mode: fr.wrap === "notBeside" ? "topAndBottom" : "square",
@@ -3404,6 +3436,29 @@ class Engine {
 
       this.y += floatOffset;
       this.emitLine(line, this.cur, this.colX, this.y);
+      // w:tab val="bar": not a tab stop — a vertical rule painted at the bar
+      // position on EVERY line of the paragraph, spanning the line box, and
+      // through the paragraph's after-spacing band on the last line
+      // (parity2-tabs: Word's bars at 2880/5760tw run 29.5px tall for an
+      // 18.5px single line + 8pt spacing-after; the tab characters
+      // themselves advance past bars to the next real stop).
+      if (props.tabs) {
+        for (const t of props.tabs) {
+          if (t.align === "bar" && !t.clear) {
+            const bx = this.colX + t.pos;
+            const barBottom =
+              this.y + line.height + (li === lines.length - 1 ? (props.spacingAfter ?? 0) : 0);
+            this.cur.items.push({
+              kind: "edge",
+              x1: bx,
+              y1: this.y,
+              x2: bx,
+              y2: barBottom,
+              border: { style: "single", width: 0.66, color: "#000000", space: 0 },
+            });
+          }
+        }
+      }
       this.emitLineNumber(line, this.cur, this.colX, this.y);
       // Bookmark targets resolve to the page carrying the paragraph's first
       // line (PAGEREF rewrite pass). Frame-laid content (fake page) records
@@ -6164,6 +6219,30 @@ class Engine {
       return null;
     }
 
+    // Cut position. For plain text rows Word draws the cut rule at the page
+    // body bottom and lets the last line's leading overhang it (avail —
+    // calibrated on staging-tblextreme/parity-rowsplit). But when every kept
+    // cell bottom is BOUNDED BY A NESTED-ROW RULE, Word cannot fill the
+    // leftover band with anything: the cut hugs the last whole nested row
+    // plus the cell's trailing inset (staging-grid4 p2: outer wrapper border
+    // at 941, 19px ABOVE the body bottom where the avail-anchored cut drew).
+    let nestedCut = 0;
+    let allBanded = true;
+    for (const { cell, keep, trailing } of partitions) {
+      if (keep.length === 0) continue;
+      const kb = Math.max(...keep.map(bottomOf));
+      nestedCut = Math.max(nestedCut, kb + trailing);
+      const onRule = cell.items.some(
+        (it) =>
+          it.kind === "edge" &&
+          Math.abs(it.y1 - it.y2) < 0.01 &&
+          Math.abs(it.x2 - it.x1) > 4 &&
+          Math.abs(it.y1 - kb) < 1,
+      );
+      if (!onRule) allBanded = false;
+    }
+    const cutH = allBanded && nestedCut > 12 ? Math.min(avail, nestedCut) : avail;
+
     const topCells: typeof laid.cells = [];
     const restCells: typeof laid.cells = [];
     let topH = 0;
@@ -6195,14 +6274,14 @@ class Engine {
           ? Math.min(ruleShift, restText - origText)
           : ruleShift;
       for (const it of rest) offsetItem(it, 0, -shift);
-      topCells.push({ ...cell, items: keep, height: Math.min(cell.height, avail) });
+      topCells.push({ ...cell, items: keep, height: Math.min(cell.height, cutH) });
       const cellRestH = rest.length > 0 ? Math.max(...rest.map(bottomOf)) + keepTop + trailing : 0;
       restCells.push({ ...cell, items: rest, height: cellRestH });
-      topH = Math.max(topH, keep.length > 0 ? Math.min(cell.height, avail) : 0);
+      topH = Math.max(topH, keep.length > 0 ? Math.min(cell.height, cutH) : 0);
       restH = Math.max(restH, cellRestH);
     }
     return {
-      top: { cells: topCells, height: Math.min(avail, Math.max(topH, 12)) },
+      top: { cells: topCells, height: Math.min(cutH, Math.max(topH, 12)) },
       rest: { cells: restCells, height: restH },
     };
   }

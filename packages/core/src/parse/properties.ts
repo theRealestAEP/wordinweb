@@ -267,6 +267,13 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
   const wScale = intAttr(child(rPr, "w"), "val");
   if (wScale !== undefined && wScale > 0 && wScale !== 100) props.textScale = wScale / 100;
 
+  // w:fitText: compress/stretch the run's glyph advances so the run occupies
+  // exactly this width (probe3-text-effects: "SQUEEZE ME INTO ONE INCH" into
+  // 1440tw). The effective horizontal scale is computed at layout time from
+  // the run's natural measure.
+  const fitText = intAttr(child(rPr, "fitText"), "val");
+  if (fitText !== undefined && fitText > 0) props.fitText = twipsToPx(fitText);
+
   // w:position: baseline shift in half-points, positive = raised. Word grows
   // the line box by the full shift (a +6pt raise adds exactly 6pt of pitch).
   const position = intAttr(child(rPr, "position"), "val");
