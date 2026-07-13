@@ -395,6 +395,37 @@ describe("layout engine", () => {
     expect(title.lineTop).toBeCloseTo(144, 3);
   });
 
+  it("carries an empty next-page section-break paragraph's spacing-after into the opener (mode 15)", () => {
+    // The empty paragraph that carries a next-page section break still owns a
+    // spacing-after (docDefaults 160tw = 8pt). Word collapses it against the new
+    // section's opener spacing-before (240tw = 12pt): the opener sits 4pt below
+    // the margin, NOT the full 12pt (probe3-field-switches p2). A stale "empty
+    // paragraph carries nothing" gave the opener the whole 12pt.
+    const styles =
+      `<w:styles ${W_NS}><w:docDefaults><w:pPrDefault><w:pPr>` +
+      `<w:spacing w:after="160" w:line="259" w:lineRule="auto"/>` +
+      `</w:pPr></w:pPrDefault></w:docDefaults></w:styles>`;
+    const geo =
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>`;
+    const body =
+      p("Section one body") +
+      `<w:p><w:pPr><w:sectPr>${geo}</w:sectPr></w:pPr></w:p>` +
+      `<w:p><w:pPr><w:spacing w:before="240"/></w:pPr><w:r><w:t>Opener</w:t></w:r></w:p>` +
+      `<w:sectPr>${geo}</w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(body),
+      "word/styles.xml": styles,
+    });
+    const opener = result.pages[1]?.items.find(
+      (i) => i.kind === "text" && i.text === "Opener",
+    );
+    expect(opener?.kind).toBe("text");
+    if (opener?.kind !== "text") return;
+    // 4pt = 5.33px above the section-2 body top (12pt before - 8pt carried after).
+    expect(opener.lineTop - result.pages[1].bodyTop).toBeCloseTo(4 * (4 / 3), 1);
+  });
+
   it("draws a vertical rule between columns for w:cols w:sep and honours per-column widths", () => {
     // w:cols w:sep="1" paints a rule centered in each inter-column gap; explicit
     // unequal w:col widths/spaces are honoured raw (probe3-columns-unequal).

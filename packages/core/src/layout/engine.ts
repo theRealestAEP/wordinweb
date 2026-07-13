@@ -530,11 +530,18 @@ class Engine {
         leadingBreakOf(opener)?.type === "page";
       // A legacy leading break keeps the empty section closer's after in the
       // collapse chain (NCCIH: 24px before - 8px carried after = 16px).
+      // In modern mode (>= 15) an EMPTY next-page section-break paragraph still
+      // contributes its own spacing-after to the collapse with the following
+      // section's opener - Word does not zero it just because the mark line is
+      // empty (probe3-field-switches p2: the section closer's 8pt after leaves
+      // the Heading1 before=12pt opener 4pt below the margin, not the full 12pt).
       const carryAfter = keepEmptyAfter
         ? (emptyCloserAfter ?? 0)
-        : this.lastParaWasEmpty
-          ? 0
-          : this.lastParaSpacingAfter;
+        : this.doc.compatibilityMode >= 15 && !canContinue && emptyCloserAfter !== undefined
+          ? emptyCloserAfter
+          : this.lastParaWasEmpty
+            ? 0
+            : this.lastParaSpacingAfter;
       // A new section's first paragraph governs its own spacing-before through
       // the cross-section carry-remainder rule (max(before, carriedAfter) -
       // carriedAfter), NOT the page-break drop. When the previous section ended
