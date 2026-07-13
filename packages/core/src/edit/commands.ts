@@ -1,6 +1,7 @@
 import { DocxDocument } from "../docx.js";
 import { Run, RunProps } from "../model.js";
 import { XmlElement, cloneXml, localName, child } from "../xml.js";
+import { paragraphOf } from "./blocks.js";
 
 /**
  * Editing commands, v1: character formatting over a selection.
@@ -313,4 +314,51 @@ export function summarizeSelection(segments: SelectionSegment[]): SelectionForma
 
 function mapDefined<T, U>(v: T | undefined, f: (v: T) => U): U | undefined {
   return v === undefined ? undefined : f(v);
+}
+
+/**
+ * Concatenate selection text in LOGICAL (source/reading) order, joining
+ * paragraphs with "\n". Selection segments arrive in visual paint order, which
+ * reorderVisual mirror-reverses within a bidi/RTL paragraph; re-sorting each
+ * paragraph's segments by their w:t document position restores the order the
+ * text was authored in, so copied Hebrew/Arabic is not reversed. Paragraphs are
+ * never bidi-reordered, so a paragraph's segments stay contiguous in the input.
+ */
+export function selectionTextLogical(doc: DocxDocument, segments: SelectionSegment[]): string {
+  const segs = segments.filter((s) => s.t);
+  if (segs.length === 0) return "";
+  const paras = segs.map((s) => paragraphOf(doc, s.t as XmlElement));
+  const orderCache = new Map<XmlElement, Map<XmlElement, number>>();
+  const rankOf = (para: XmlElement | null, t: XmlElement): number => {
+    if (!para) return 0;
+    let m = orderCache.get(para);
+    if (!m) {
+      m = new Map();
+      let i = 0;
+      const walk = (el: XmlElement): void => {
+        if (localName(el.name) === "t") m!.set(el, i++);
+        for (const c of el.children) walk(c);
+      };
+      walk(para);
+      orderCache.set(para, m);
+    }
+    return m.get(t) ?? 0;
+  };
+  let out = "";
+  let firstGroup = true;
+  for (let i = 0; i < segs.length; ) {
+    const para = paras[i];
+    let j = i;
+    while (j < segs.length && paras[j] === para) j++;
+    const group = segs.slice(i, j).sort((a, b) => {
+      const ra = rankOf(para, a.t as XmlElement);
+      const rb = rankOf(para, b.t as XmlElement);
+      return ra !== rb ? ra - rb : a.start - b.start;
+    });
+    if (!firstGroup) out += "\n";
+    firstGroup = false;
+    for (const seg of group) out += (seg.t as XmlElement).text.slice(seg.start, seg.end);
+    i = j;
+  }
+  return out;
 }

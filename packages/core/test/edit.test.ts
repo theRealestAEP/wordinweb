@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
-import { applyRunFormat, SelectionSegment } from "../src/edit/commands.js";
+import { applyRunFormat, SelectionSegment, selectionTextLogical } from "../src/edit/commands.js";
 import { addComment } from "../src/edit/comments.js";
 import { setListType, setListLevel } from "../src/edit/lists.js";
 import { setLink, removeLink, linkAt } from "../src/edit/links.js";
@@ -883,5 +883,48 @@ describe("math editing safety", () => {
     const isNary = (e: XmlElement): boolean =>
       e.name.endsWith("nary") ? true : e.children.some(isNary);
     expect(isNary(after)).toBe(true);
+  });
+});
+
+describe("selectionTextLogical (clipboard copy order)", () => {
+  it("emits logical order when bidi segments arrive reversed (visual paint order)", () => {
+    // A bidi/RTL paragraph's runs paint right-to-left, so getSelectionSegments
+    // hands them back reversed; copy must still read in source order.
+    const doc = loadDoc(
+      `<w:p>` +
+        `<w:r><w:t xml:space="preserve">שלום</w:t></w:r>` +
+        `<w:r><w:t xml:space="preserve"> </w:t></w:r>` +
+        `<w:r><w:t xml:space="preserve">עולם</w:t></w:r>` +
+        `</w:p>`,
+    );
+    const runs = (doc.sections[0].blocks[0] as Paragraph).children.filter(
+      (c) => c.type === "run",
+    ) as Run[];
+    const logical = [segFor(runs[0], 0, 4), segFor(runs[1], 0, 1), segFor(runs[2], 0, 4)];
+    const visual = [...logical].reverse();
+    expect(selectionTextLogical(doc, visual)).toBe("שלום עולם");
+    // Order-independent: same result no matter how the caller ordered them.
+    expect(selectionTextLogical(doc, logical)).toBe("שלום עולם");
+  });
+
+  it("keeps LTR single-run order and slices offsets", () => {
+    const doc = loadDoc(p("Hello world"));
+    const { run } = firstRun(doc);
+    expect(selectionTextLogical(doc, [segFor(run, 0, 11)])).toBe("Hello world");
+    expect(selectionTextLogical(doc, [segFor(run, 6, 11)])).toBe("world");
+  });
+
+  it("joins paragraphs with a newline in document order", () => {
+    const doc = loadDoc(p("First") + p("Second"));
+    const b0 = doc.sections[0].blocks[0] as Paragraph;
+    const b1 = doc.sections[0].blocks[1] as Paragraph;
+    const s0 = segFor(b0.children[0] as Run, 0, 5);
+    const s1 = segFor(b1.children[0] as Run, 0, 6);
+    expect(selectionTextLogical(doc, [s0, s1])).toBe("First\nSecond");
+  });
+
+  it("returns empty string for an empty selection", () => {
+    const doc = loadDoc(p("x"));
+    expect(selectionTextLogical(doc, [])).toBe("");
   });
 });
