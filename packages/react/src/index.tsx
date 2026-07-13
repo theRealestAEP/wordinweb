@@ -114,6 +114,18 @@ export interface DocxViewApi {
   save(): Uint8Array;
   /** Page count after the latest layout. */
   pageCount(): number;
+  /**
+   * Suggesting mode: when on, edits record as OOXML tracked changes (w:ins /
+   * w:del) instead of mutating text directly, and the view switches to markup
+   * so the suggestion shows live. `author` stamps the revision (defaults to the
+   * commentAuthor prop). Turning it off restores the prior revision view.
+   */
+  setSuggesting(on: boolean, author?: string): void;
+  isSuggesting(): boolean;
+  /** Accept the tracked change at the caret (keep insertion / apply deletion). */
+  acceptRevisionAtCaret(): boolean;
+  /** Reject the tracked change at the caret (drop insertion / restore deletion). */
+  rejectRevisionAtCaret(): boolean;
   document: DocxDocument;
 }
 
@@ -641,6 +653,11 @@ export function DocxView({
             printPages(handle.root, sp?.pageWidth ?? 816, sp?.pageHeight ?? 1056);
           },
           save: () => doc.save(),
+          setSuggesting: (on, author) => editor?.setSuggesting(on, author ?? commentAuthor),
+          isSuggesting: () => editor?.isSuggesting() ?? false,
+          // The editor re-renders through host.rerender (which updates pages).
+          acceptRevisionAtCaret: () => editor?.acceptRevisionRef() ?? false,
+          rejectRevisionAtCaret: () => editor?.rejectRevisionRef() ?? false,
         };
         apiRef.current = api;
         onReady?.(api);
