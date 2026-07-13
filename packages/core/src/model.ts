@@ -966,5 +966,11 @@ export interface Theme {
   minorFont: string;
   majorBidiFont?: string;
   minorBidiFont?: string;
+  /** East Asian faces from theme <a:ea> (fontScheme major/minorFont). Word's
+   * eastAsiaTheme="minor/majorEastAsia" resolves through these, NOT the Latin
+   * minor/major font — routing a CJK run's theme reference to the Latin face
+   * (Calibri) leaves East Asian text in a glyphless Latin font. */
+  majorEastAsiaFont?: string;
+  minorEastAsiaFont?: string;
   colors: Map<string, string>;
 }

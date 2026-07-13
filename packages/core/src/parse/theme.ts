@@ -25,6 +25,15 @@ export function parseTheme(root: XmlElement | undefined, bidiLanguage?: string):
   if (major) theme.majorFont = major;
   if (minor) theme.minorFont = minor;
 
+  // East Asian faces (<a:ea>) feed eastAsiaTheme="minor/majorEastAsia". The
+  // default theme leaves these empty (typeface=""), meaning "use the app's
+  // language default"; treat an empty value as absent so the CJK fallback
+  // (defaultEastAsia in layout) applies instead of an empty family.
+  const majorEa = attr(child(majorFonts, "ea"), "typeface");
+  const minorEa = attr(child(minorFonts, "ea"), "typeface");
+  if (majorEa) theme.majorEastAsiaFont = majorEa;
+  if (minorEa) theme.minorEastAsiaFont = minorEa;
+
   const bidiScript = bidiLanguage ? new Intl.Locale(bidiLanguage).maximize().script : undefined;
   const bidiFont = (fonts: XmlElement | undefined): string | undefined => {
     const direct = attr(child(fonts, "cs"), "typeface");
