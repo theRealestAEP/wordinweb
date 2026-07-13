@@ -26,7 +26,7 @@ import {
 } from "../parse/styles.js";
 import { mergeRunProps } from "../parse/properties.js";
 import { ptToPx } from "../units.js";
-import { child } from "../xml.js";
+import { child, serializeXml, cyrb53, XmlElement } from "../xml.js";
 import {
   BrokenParagraph,
   FieldContext,
@@ -48,7 +48,14 @@ export interface LayoutOptions {
 }
 
 export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): LayoutResult {
-  return new Engine(doc, options.measurer ?? createMeasurer()).run(options.prev);
+  const measurer = options.measurer ?? createMeasurer();
+  if (options.prev && options.prev._incr) {
+    // Incremental attempt uses its own engine; if it can't prove reuse is safe
+    // it returns null and a fresh engine does a clean full layout.
+    const attempt = new Engine(doc, measurer).runIncremental(options.prev);
+    if (attempt) return attempt;
+  }
+  return new Engine(doc, measurer).run();
 }
 
 // ---------- internal page ----------
@@ -142,6 +149,72 @@ interface LayoutSnapshot {
   lnLastPage: InternalPage | undefined;
   lnResetEpoch: number;
   lastRealPage: InternalPage | null;
+}
+
+/** Engine state captured at a clean page top, enough to resume block layout
+ * there in a fresh Engine and reproduce the identical tail (single-section,
+ * incremental path only — see Engine.run/capturePoint/resumeAt). */
+interface IncrState {
+  col: number;
+  y: number;
+  sectionFirstPagePhys: number;
+  lastParaSpacingAfter: number;
+  lastParaAfterPad: number;
+  lastParaWasEmpty: boolean;
+  trailingSectionBreakMarkGap: number;
+  suppressNextSpaceBefore: boolean;
+  docGridDropBefore: boolean;
+  gridResyncPending: boolean;
+  verticalGridFlow: boolean;
+  bannerSlotUsed: number;
+  counters: Map<number, number[]>;
+  seenNumIds: Set<number>;
+  /** Setup fields of the (empty) page the resume block starts on, so it can be
+   * rebuilt without re-running newPage's section/hf logic. */
+  page: {
+    sp: SectionProps;
+    physIndex: number;
+    displayNumber: number;
+    bodyTop: number;
+    bodyBottom: number;
+    bandTop: number;
+    softTop: boolean;
+    headerGrown?: boolean;
+    headerRel?: string;
+    footerRel?: string;
+    colXs: number[];
+    colWidths: number[];
+    bands: ColumnBand[];
+  };
+}
+
+interface IncrPoint {
+  blockIdx: number;
+  pageCount: number;
+  state: IncrState;
+}
+
+/** Incremental capture attached to a LayoutResult so the next layoutDocument
+ * call on the same document can reuse unchanged pages. */
+export interface IncrData {
+  sigs: string[];
+  points: IncrPoint[];
+  pages: InternalPage[];
+}
+
+/** Map an internal page to the public LaidOutPage shape (shares the items array
+ * so reuse preserves object identity for the renderer's page diff). */
+function laidOutPage(p: InternalPage): LaidOutPage {
+  return {
+    width: p.sp.pageWidth,
+    height: p.sp.pageHeight,
+    index: p.physIndex,
+    number: p.displayNumber,
+    items: p.items,
+    bodyTop: p.bodyTop,
+    bodyBottom: p.bodyBottom,
+    hfStart: p.hfStart ?? p.items.length,
+  };
 }
 
 const PAGE_FMT: Record<string, string> = {
@@ -286,13 +359,31 @@ class Engine {
    * breakParagraph's verticalGridResync). */
   private verticalGridFlow = false;
 
+  // ---- Incremental layout (single-section, see run/tailSnapshot) ----
+  /** Per top-level block content signature, recorded during a captured layout
+   * so the next incremental layout can find the first changed block. */
+  private incrSigs: string[] | null = null;
+  /** Reuse points captured at clean page tops: the block index that starts the
+   * page and a snapshot of engine state to resume from. */
+  private incrPoints: IncrPoint[] | null = null;
+  /** Set when something outside the eligible envelope was hit mid-layout (a
+   * float, banner, column band, …); disables incremental reuse for this result. */
+  private incrAbort = false;
+  /** Added to page indices so a resumed tail numbers pages continuing from the
+   * reused prefix instead of from 1. */
+  private physBase = 0;
+  private displayBase = 0;
+
   constructor(
     private doc: DocxDocument,
     private measurer: TextMeasurer,
   ) {}
 
-  run(prev?: LayoutResult): LayoutResult {
-    void prev; // incremental reuse wired in a later step; full layout for now
+  run(): LayoutResult {
+    if (this.incrEligible()) {
+      this.incrSigs = this.doc.sections[0].blocks.map((b) => this.blockSig(b));
+      this.incrPoints = [];
+    }
     this.assignNoteNumbers();
     this.assignSeqNumbers();
     const sections = this.doc.sections;
@@ -446,17 +537,234 @@ class Engine {
       }
     }
     this.applySectionVAlign();
-    const pages: LaidOutPage[] = this.pages.map((p) => ({
-      width: p.sp.pageWidth,
-      height: p.sp.pageHeight,
-      index: p.physIndex,
-      number: p.displayNumber,
-      items: p.items,
-      bodyTop: p.bodyTop,
-      bodyBottom: p.bodyBottom,
-      hfStart: p.hfStart ?? p.items.length,
-    }));
-    return { pages, totalPages: pages.length };
+    const pages: LaidOutPage[] = this.pages.map((p) => laidOutPage(p));
+    const result: LayoutResult = { pages, totalPages: pages.length };
+    if (this.incrPoints && !this.incrAbort) {
+      result._incr = { sigs: this.incrSigs!, points: this.incrPoints, pages: this.pages } satisfies IncrData;
+    }
+    return result;
+  }
+
+  // ---------- incremental layout (single-section prefix reuse) ----------
+
+  private _incrFeatureOk: boolean | null = null;
+
+  /** Whether this document is in the envelope the incremental path handles:
+   * one section, no notes, single column, upright flow, no line numbering /
+   * mirror margins / vertical alignment, and no positioned/floating content or
+   * cross-page reference fields (scanned once). Everything else falls back to a
+   * full layout. */
+  private incrEligible(): boolean {
+    if (this.incrAbort) return false;
+    if (this.doc.sections.length !== 1) return false;
+    if (this.doc.footnotes.size > 0 || this.doc.endnotes.size > 0) return false;
+    if (this.doc.mirrorMargins) return false;
+    const sp = this.doc.sections[0].props;
+    if (sp.columns.count > 1) return false;
+    if (sp.textDirection === "tbRl") return false;
+    if (sp.vAlign && sp.vAlign !== "top") return false;
+    if (sp.lineNumbering) return false;
+    if (this._incrFeatureOk === null) {
+      this._incrFeatureOk =
+        !this.hasDisqualifyingFeature(this.doc.docRoot) && !this.hfHasTotalField();
+    }
+    return this._incrFeatureOk;
+  }
+
+  /** A NUMPAGES/SECTIONPAGES field in a header/footer shows the whole-document
+   * page count on EVERY page. The tail-only relay finalizes headers/footers over
+   * just the relaid pages, so it cannot resolve that total — disqualify. */
+  private hfHasTotalField(): boolean {
+    const scan = (blocks: Block[]): boolean => {
+      for (const b of blocks) {
+        if (b.type === "paragraph") {
+          for (const child of b.children) {
+            const runs = child.type === "hyperlink" ? child.runs : [child];
+            for (const r of runs) {
+              for (const c of r.content) {
+                if (c.kind === "field" && /\b(NUMPAGES|SECTIONPAGES)\b/.test(c.instruction)) return true;
+              }
+            }
+          }
+        } else {
+          for (const row of b.rows) for (const cell of row.cells) if (scan(cell.blocks)) return true;
+        }
+      }
+      return false;
+    };
+    for (const hf of this.doc.headers.values()) if (scan(hf.blocks)) return true;
+    for (const hf of this.doc.footers.values()) if (scan(hf.blocks)) return true;
+    return false;
+  }
+
+  /** Floating drawings/tables, positioned frames, drop caps, and cross-page
+   * reference/count fields anywhere in the body break simple prefix/suffix
+   * reuse. (PAGE fields alone are fine — a page's own number is stable under a
+   * later edit, and footers are re-finalized on relaid pages.) */
+  private hasDisqualifyingFeature(el: XmlElement): boolean {
+    const name = el.name;
+    const ln = name.includes(":") ? name.slice(name.indexOf(":") + 1) : name;
+    if (ln === "anchor" || ln === "framePr" || ln === "tblpPr") return true;
+    if (ln === "instrText" && /\b(PAGEREF|NUMPAGES|SECTIONPAGES)\b/.test(el.text)) return true;
+    if (ln === "fldSimple" && /\b(PAGEREF|NUMPAGES|SECTIONPAGES)\b/.test(el.attrs["w:instr"] ?? "")) return true;
+    for (const c of el.children) if (this.hasDisqualifyingFeature(c)) return true;
+    return false;
+  }
+
+  private blockSig(block: Block): string {
+    return block.src ? cyrb53(serializeXml(block.src)) : " nosrc";
+  }
+
+  /** Record a reuse point when the current block starts at a pristine page top
+   * (empty single-band page, cursor at the body top, no floats or footnotes). */
+  private capturePoint(blockIdx: number): void {
+    if (this.incrAbort || !this.incrPoints || this.balMeasuring) return;
+    const p = this.cur;
+    if (
+      this.col === 0 &&
+      p.items.length === 0 &&
+      Math.abs(this.y - p.bodyTop) < 1e-6 &&
+      p.bands.length === 1 &&
+      (this.floats.get(p)?.length ?? 0) === 0 &&
+      p.footnotes.length === 0
+    ) {
+      this.incrPoints.push({
+        blockIdx,
+        pageCount: this.pages.length - 1 + this.physBase,
+        state: {
+          col: this.col,
+          y: this.y,
+          sectionFirstPagePhys: this.sectionFirstPagePhys,
+          lastParaSpacingAfter: this.lastParaSpacingAfter,
+          lastParaAfterPad: this.lastParaAfterPad,
+          lastParaWasEmpty: this.lastParaWasEmpty,
+          trailingSectionBreakMarkGap: this.trailingSectionBreakMarkGap,
+          suppressNextSpaceBefore: this.suppressNextSpaceBefore,
+          docGridDropBefore: this.docGridDropBefore,
+          gridResyncPending: this.gridResyncPending,
+          verticalGridFlow: this.verticalGridFlow,
+          bannerSlotUsed: this.bannerSlotUsed,
+          counters: new Map(Array.from(this.counters, ([k, v]) => [k, [...v]])),
+          seenNumIds: new Set(this.seenNumIds),
+          page: {
+            sp: p.sp,
+            physIndex: p.physIndex,
+            displayNumber: p.displayNumber,
+            bodyTop: p.bodyTop,
+            bodyBottom: p.bodyBottom,
+            bandTop: p.bandTop,
+            softTop: p.softTop,
+            headerGrown: p.headerGrown,
+            headerRel: p.headerRel,
+            footerRel: p.footerRel,
+            colXs: [...p.colXs],
+            colWidths: [...p.colWidths],
+            bands: p.bands.map((b) => ({ ...b, colXs: [...b.colXs], colWidths: [...b.colWidths], bottoms: [...b.bottoms] })),
+          },
+        },
+      });
+    }
+  }
+
+  /** Rebuild the resume page and restore running state, so layoutBlocks can be
+   * resumed from the resume block as if the prefix pages had just been laid. */
+  private restoreIncrState(s: IncrState): void {
+    const ps = s.page;
+    const page: InternalPage = {
+      items: [],
+      sp: ps.sp,
+      physIndex: ps.physIndex,
+      displayNumber: ps.displayNumber,
+      bodyTop: ps.bodyTop,
+      bandTop: ps.bandTop,
+      softTop: ps.softTop,
+      bodyBottom: ps.bodyBottom,
+      headerGrown: ps.headerGrown,
+      headerRel: ps.headerRel,
+      footerRel: ps.footerRel,
+      colXs: [...ps.colXs],
+      colWidths: [...ps.colWidths],
+      footnotes: [],
+      footnoteH: ps.colXs.map(() => 0),
+      bands: ps.bands.map((b) => ({ ...b, colXs: [...b.colXs], colWidths: [...b.colWidths], bottoms: [...b.bottoms] })),
+    };
+    this.pages.push(page);
+    this.cur = page;
+    this.lastRealPage = page;
+    this.sp = ps.sp;
+    this.doc.charGridEa = ps.sp.docGridCharGrid === true;
+    this.col = s.col;
+    this.y = s.y;
+    this.sectionFirstPagePhys = s.sectionFirstPagePhys;
+    this.lastParaSpacingAfter = s.lastParaSpacingAfter;
+    this.lastParaAfterPad = s.lastParaAfterPad;
+    this.lastParaWasEmpty = s.lastParaWasEmpty;
+    this.trailingSectionBreakMarkGap = s.trailingSectionBreakMarkGap;
+    this.suppressNextSpaceBefore = s.suppressNextSpaceBefore;
+    this.docGridDropBefore = s.docGridDropBefore;
+    this.gridResyncPending = s.gridResyncPending;
+    this.verticalGridFlow = s.verticalGridFlow;
+    this.bannerSlotUsed = s.bannerSlotUsed;
+    this.counters = new Map(Array.from(s.counters, ([k, v]) => [k, [...v]]));
+    this.seenNumIds = new Set(s.seenNumIds);
+  }
+
+  /** Attempt an incremental layout; return null (and leave a discarded, dirty
+   * engine) if reuse can't be proven safe, so the caller does a full layout in a
+   * fresh engine. */
+  runIncremental(prev: LayoutResult): LayoutResult | null {
+    if (!this.incrEligible()) return null;
+    const inc = prev._incr as IncrData;
+    const blocks = this.doc.sections[0].blocks;
+    const newSigs = blocks.map((b) => this.blockSig(b));
+
+    let firstDirty = 0;
+    const n = Math.min(newSigs.length, inc.sigs.length);
+    while (firstDirty < n && newSigs[firstDirty] === inc.sigs[firstDirty]) firstDirty++;
+
+    // Latest captured page top at or before the first changed block.
+    let rp: IncrPoint | undefined;
+    for (const pt of inc.points) {
+      if (pt.blockIdx <= firstDirty) rp = pt;
+      else break;
+    }
+    if (!rp || rp.pageCount === 0 || rp.pageCount >= inc.pages.length) return null;
+    const prefixCount = rp.pageCount;
+
+    this.assignNoteNumbers();
+    this.assignSeqNumbers();
+
+    this.physBase = prefixCount;
+    this.displayBase = inc.pages[prefixCount - 1].displayNumber;
+    this.incrSigs = newSigs;
+    this.incrPoints = [];
+    this.restoreIncrState(rp.state);
+    this.layoutBlocks(blocks, rp.blockIdx);
+    if (this.incrAbort) return null;
+
+    // Post-passes over the relaid tail only; the reused prefix was already
+    // finalized identically in prev (eligibility rules out cross-page fields).
+    this.placeEndnotes();
+    this.emitFootnoteAreas();
+    this.emitColumnSeparators();
+    this.finalizeHeadersFooters();
+    this.applySectionVAlign();
+    if (this.incrAbort) return null;
+
+    const totalPages = prefixCount + this.pages.length;
+    // A page-count change reshuffles page numbers (and any footer totals) across
+    // the whole document, invalidating the reused prefix — do a full layout.
+    if (totalPages !== prev.totalPages) return null;
+
+    const tail = this.pages.map((p) => laidOutPage(p));
+    const outPages = prev.pages.slice(0, prefixCount).concat(tail);
+    const outInternal = inc.pages.slice(0, prefixCount).concat(this.pages);
+    const points = inc.points.filter((pt) => pt.pageCount < prefixCount).concat(this.incrPoints);
+    return {
+      pages: outPages,
+      totalPages: outPages.length,
+      _incr: { sigs: newSigs, points, pages: outInternal } satisfies IncrData,
+    };
   }
 
   /**
@@ -573,12 +881,15 @@ class Engine {
     ) {
       this.pages.pop();
     }
-    const physIndex = this.pages.length + 1;
+    const physIndex = this.pages.length + 1 + this.physBase;
     let displayNumber: number;
     if (sectionStart && baseSp.pageNumberStart !== undefined) {
       displayNumber = baseSp.pageNumberStart;
     } else {
-      displayNumber = this.pages.length > 0 ? this.pages[this.pages.length - 1].displayNumber + 1 : 1;
+      displayNumber =
+        this.pages.length > 0
+          ? this.pages[this.pages.length - 1].displayNumber + 1
+          : this.displayBase + 1;
     }
     if (sectionStart) this.sectionFirstPagePhys = physIndex;
 
@@ -1304,12 +1615,15 @@ class Engine {
 
   // ---------- block flow ----------
 
-  private layoutBlocks(blocks: Block[]): void {
-    this.lastBannerKey = undefined;
-    this.lastBannerVSpace = 0;
-    this.lastBannerSpacingAfter = 0;
-    for (let i = 0; i < blocks.length; i++) {
+  private layoutBlocks(blocks: Block[], startIdx = 0): void {
+    if (startIdx === 0) {
+      this.lastBannerKey = undefined;
+      this.lastBannerVSpace = 0;
+      this.lastBannerSpacingAfter = 0;
+    }
+    for (let i = startIdx; i < blocks.length; i++) {
       const block = blocks[i];
+      if (this.incrPoints) this.capturePoint(i);
       if (block.type === "paragraph") {
         // An empty paragraph that only carries a section break takes no
         // vertical space in Word (parity-colbalance: the columns start

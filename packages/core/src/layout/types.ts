@@ -252,4 +252,8 @@ export interface LaidOutPage {
 export interface LayoutResult {
   pages: LaidOutPage[];
   totalPages: number;
+  /** Opaque incremental-reuse state (engine-internal); pass a previous result
+   * back as LayoutOptions.prev to enable incremental relayout. Not part of the
+   * rendered output and ignored by the equivalence harness. */
+  _incr?: unknown;
 }

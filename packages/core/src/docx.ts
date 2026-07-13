@@ -136,7 +136,9 @@ export class DocxDocument {
 
   /** Retained XML roots — source of truth for editing and save(). */
   private readonly docPart: string;
-  private readonly docRoot: XmlElement;
+  /** Parsed document.xml root (read-only outside the class; the layout engine
+   * scans it for incremental-reuse eligibility, tests walk it). */
+  readonly docRoot: XmlElement;
   private readonly hfParts: { relId: string; target: string; root: XmlElement; isHeader: boolean; rels: Relationships }[] = [];
   private readonly ctxBase: { theme: Theme; revisionView?: "final" | "markup" };
   /** Tracked-changes display mode; refresh() re-derives after changes. */
