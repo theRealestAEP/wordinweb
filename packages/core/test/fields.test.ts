@@ -119,3 +119,23 @@ describe("checkbox ballot glyph routing", () => {
     expect(ballot && ballot.kind === "text" ? ballot.font.family : "").toMatch(/calibri/i);
   });
 });
+
+describe("DATE/TIME re-evaluation (Word recomputes on open; cache is stale)", () => {
+  it("DATE \\@ ISO picture renders the CURRENT date, not the cache", () => {
+    const now = new Date();
+    const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    expect(resolveField('DATE \\@ "yyyy-MM-dd"', "1999-01-01", ctx())).toBe(iso);
+  });
+  it("TIME am/pm token renders the designator UPPERCASE like Word", () => {
+    expect(resolveField('TIME \\@ "h:mm am/pm"', "3:07 pm", ctx())).toMatch(/^\d{1,2}:\d{2} [AP]M$/);
+  });
+  it("month (M) and minute (m) stay case-distinguished in mixed pictures", () => {
+    const out = resolveField('DATE \\@ "M/d/yy H:mm"', "x", ctx());
+    const now = new Date();
+    expect(out.startsWith(`${now.getMonth() + 1}/${now.getDate()}/`)).toBe(true);
+    expect(out).toMatch(/ \d{1,2}:\d{2}$/);
+  });
+  it("CREATEDATE keeps its stored cache (a document moment, not the clock)", () => {
+    expect(resolveField("CREATEDATE", "May 5, 2020", ctx())).toBe("May 5, 2020");
+  });
+});
