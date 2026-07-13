@@ -1877,27 +1877,47 @@ export class DocxEditor {
     this.notifySelection();
   };
 
-  /** Minimal accept/reject popover for a clicked suggestion. */
+  /** Accept/reject popover for a clicked suggestion. Styled to match the
+   * editor chrome (DocxToolbar): white surface, 8px radius, soft shadow, a
+   * revision-ink kind chip, and a primary/secondary pill button pair. */
   private showSuggestionPopover(ref: RevisionRef, clientX: number, clientY: number): void {
     this.dismissSuggestionPopover();
+    const isIns = ref.kind === "insertion" || ref.kind === "markInsertion";
+    const ink = isIns ? "#C00000" : "#B0261C"; // matches the markup renderer's revision colors
     const box = document.createElement("div");
     box.dataset.dxwSuggestPopover = "1";
     box.style.cssText =
-      "position:fixed;z-index:1000;display:flex;gap:4px;align-items:center;background:#fff;" +
-      "border:1px solid #dadce0;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.2);" +
-      "padding:4px 6px;font:12px system-ui,sans-serif;color:#3c4043;";
+      "position:fixed;z-index:1000;display:flex;gap:8px;align-items:center;background:#fff;" +
+      "border:1px solid #dadce0;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);" +
+      "padding:6px 8px;font:12.5px system-ui,sans-serif;color:#3c4043;";
     box.style.left = `${Math.max(8, clientX - 60)}px`;
     box.style.top = `${clientY + 16}px`;
-    const label = document.createElement("span");
-    label.textContent = ref.kind === "insertion" || ref.kind === "markInsertion" ? "Insertion" : "Deletion";
-    label.style.cssText = "color:#5f6368;margin-right:2px;";
-    box.appendChild(label);
-    const mkBtn = (text: string, title: string, fn: () => void): void => {
+
+    const chip = document.createElement("span");
+    chip.style.cssText =
+      `display:inline-flex;align-items:center;gap:5px;padding:2px 9px 2px 7px;border-radius:10px;` +
+      `background:#fce8e6;color:${ink};font:600 11px system-ui,sans-serif;`;
+    const dot = document.createElement("span");
+    dot.style.cssText = `width:7px;height:7px;border-radius:50%;background:${ink};flex-shrink:0;`;
+    chip.appendChild(dot);
+    chip.appendChild(document.createTextNode(isIns ? "Insertion" : "Deletion"));
+    box.appendChild(chip);
+
+    const mkBtn = (text: string, title: string, primary: boolean, fn: () => void): void => {
       const b = document.createElement("button");
       b.textContent = text;
       b.title = title;
+      const base = primary
+        ? "border:1px solid #1a73e8;background:#1a73e8;color:#fff;"
+        : "border:1px solid #dadce0;background:#fff;color:#3c4043;";
       b.style.cssText =
-        "border:1px solid #dadce0;border-radius:4px;padding:2px 8px;cursor:pointer;background:#fff;color:#3c4043;";
+        base + "border-radius:14px;padding:4px 14px;cursor:pointer;font:600 12px system-ui,sans-serif;";
+      b.addEventListener("mouseenter", () => {
+        b.style.background = primary ? "#1765cc" : "#f1f3f4";
+      });
+      b.addEventListener("mouseleave", () => {
+        b.style.background = primary ? "#1a73e8" : "#fff";
+      });
       b.addEventListener("mousedown", (me) => {
         me.preventDefault();
         me.stopPropagation();
@@ -1908,8 +1928,8 @@ export class DocxEditor {
       });
       box.appendChild(b);
     };
-    mkBtn("Accept", "Accept this suggestion", () => this.acceptRevisionRef(ref));
-    mkBtn("Reject", "Reject this suggestion", () => this.rejectRevisionRef(ref));
+    mkBtn("Accept", "Accept this suggestion", true, () => this.acceptRevisionRef(ref));
+    mkBtn("Reject", "Reject this suggestion", false, () => this.rejectRevisionRef(ref));
     document.body.appendChild(box);
     this.suggestionPopover = box;
   }
