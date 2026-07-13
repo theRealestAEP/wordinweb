@@ -1547,6 +1547,13 @@ function renderText(item: TextItem): HTMLElement {
     const inner = document.createElement("span");
     inner.textContent = item.text;
     inner.style.fontSize = `${item.font.size}px`;
+    // Fallback-face baseline correction (Tamil Latha stands in for Word's
+    // Vijaya, whose baseline sits ~0.14em lower in the em box): shift the shrunk
+    // inner glyphs down so they land on Word's baseline, not the strut face's.
+    if (item.font.paintDY) {
+      inner.style.display = "inline-block";
+      inner.style.transform = `translateY(${item.font.paintDY}px)`;
+    }
     el.appendChild(inner);
     el.style.whiteSpace = "pre";
     el.style.font = cssFont(item.strutFont);
