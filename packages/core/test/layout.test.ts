@@ -3984,15 +3984,37 @@ describe("OMML matrices, arrays, accents, group chars, radicals, limits (probe2-
     expect(span(tall)).toBeGreaterThan((S * 12.75) / 11 + 1); // tall rows exceed the minimum pitch
   });
 
-  it("a matrix delimiter too tall for the ladder is assembled to ~88% coverage", () => {
+  it("a matrix delimiter too tall for the ladder assembles hook+extender+hook pieces", () => {
     const box = layoutMath(
       [{ t: "dlm", beg: "(", end: ")", e: [[{ t: "mat", rows: [
         [[frac("1", "2")]], [[frac("1", "5")]], [[frac("1", "8")]],
       ] }]] }],
       S, measurer, true,
     );
-    const open = box.pieces.find((p) => p.text === "(")!;
-    expect(open.scaleY).toBeGreaterThan(3); // assembled, well beyond a discrete step
+    // Word assembles an oversized paren from the U+239B.. pieces (full hook
+    // curvature at each end) rather than stretching the base glyph, whose arc
+    // then curves far too slowly (probe2 3x3: the hook's ~7pt flare within the
+    // top 8pt was the page's last unmatched ink).
+    const top = box.pieces.find((p) => p.text === "⎛")!;
+    const ext = box.pieces.find((p) => p.text === "⎜")!;
+    const bot = box.pieces.find((p) => p.text === "⎝")!;
+    expect(box.pieces.find((p) => p.text === "(")).toBeUndefined();
+    const hookH = (S * 4732) / 2048;
+    // Total ink spans ~88% of the core, centered on the axis.
+    const inkTop = top.dy + hookH;
+    const inkBot = bot.dy;
+    const H = inkTop - inkBot;
+    expect(H).toBeGreaterThan(2 * hookH); // tall enough that a real extender welds the hooks
+    expect(ext.scaleY!).toBeGreaterThan(0);
+    // Extender (with its weld overlap) fills the gap between the hook inks.
+    const extSpan = ext.scaleY! * ((S * 2500) / 2048);
+    expect(ext.dy + extSpan).toBeGreaterThanOrEqual(top.dy - 0.01);
+    expect(ext.dy).toBeLessThanOrEqual(inkBot + hookH + 0.01);
+    // Ink centered on the math axis.
+    const axis = (S * 3.125) / 11;
+    expect((inkTop + inkBot) / 2).toBeCloseTo(axis, 1);
+    // Closing side assembled too.
+    expect(box.pieces.some((p) => p.text === "⎞")).toBe(true);
   });
 
   it("eqArr stacks rows and the one-sided brace draws no closer", () => {
