@@ -821,6 +821,45 @@ export class DocxEditor {
     }
   }
 
+  /** First footnote source w:t of note `id` (document order), or null. */
+  private noteFirstT(id: number): XmlElement | null {
+    const scan = (blocks: ReturnType<DocxDocument["footnotes"]["get"]> | undefined): XmlElement | null => {
+      for (const b of blocks ?? []) {
+        if (b.type === "paragraph") {
+          for (const c of b.children) {
+            for (const r of c.type === "run" ? [c] : c.runs) {
+              for (const rc of r.content) if (rc.kind === "text" && rc.srcT) return rc.srcT;
+            }
+          }
+        } else {
+          for (const row of b.rows) for (const cell of row.cells) {
+            const f = scan(cell.blocks);
+            if (f) return f;
+          }
+        }
+      }
+      return null;
+    };
+    return scan(this.host.doc.footnotes.get(id));
+  }
+
+  /** Double-click-a-reference navigation: place the caret at the start of
+   * footnote `id`'s content and scroll it into view. */
+  private jumpToFootnote(id: number): boolean {
+    const t = this.noteFirstT(id);
+    if (!t) return false;
+    const b = this.host.getHandle()?.bindings.find((bd) => bd.item.src?.t === t);
+    if (!b?.item.src) return false;
+    this.inHeaderFooter = false;
+    this.hfPage = null;
+    this.clearSelection();
+    this.caret = { t, run: b.item.src.run, offset: 0 };
+    this.positionCaret();
+    this.focusText();
+    this.caretEl.scrollIntoView({ block: "center" });
+    return true;
+  }
+
   // ---------- drop-position indicator ----------
 
   private dropIndicator: HTMLElement | null = null;
@@ -1812,6 +1851,15 @@ export class DocxEditor {
         this.openMathEditor(binding.item.mathSrc, e.clientX, e.clientY);
         return;
       }
+    }
+    // Word UX: double-click a footnote/endnote reference mark to jump to its
+    // note at the page bottom (the mark is synthetic; renderText tags it).
+    if (e.detail >= 2) {
+      const refEl = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null)?.closest(
+        "[data-note-ref]",
+      ) as HTMLElement | null;
+      const noteId = refEl?.dataset.noteRef ? parseInt(refEl.dataset.noteRef, 10) : NaN;
+      if (Number.isFinite(noteId) && this.jumpToFootnote(noteId)) return;
     }
     const onGlyph = this.caretFromPoint(e.clientX, e.clientY);
     let caret = onGlyph ?? this.nearestCaret(e.clientX, e.clientY);
@@ -3020,6 +3068,9 @@ export class DocxEditor {
   private commit(): void {
     const perf = (globalThis as { __dxwPerf?: { last?: Record<string, number>; samples?: Record<string, number>[]; lastReused?: number } }).__dxwPerf;
     const t0 = perf ? performance.now() : 0;
+    // An edit whose caret sits in a footnote must mark that part dirty so
+    // save() re-serializes footnotes.xml (no-op for body/header/footer).
+    if (this.caret) this.host.doc.markDirtyIfFootnote(this.caret.t);
     this.host.doc.refresh();
     const t1 = perf ? performance.now() : 0;
     this.host.rerender();

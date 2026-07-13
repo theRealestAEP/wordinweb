@@ -1343,6 +1343,9 @@ function renderText(item: TextItem): HTMLElement {
   const tag = item.href ? "a" : "span";
   const el = document.createElement(tag) as HTMLElement;
   el.style.position = "absolute";
+  // Footnote/endnote reference mark: tag it so a double-click can jump to the
+  // note (the mark is synthetic — no editable source — so this is the hook).
+  if (item.noteId !== undefined) el.dataset.noteRef = String(item.noteId);
   el.style.left = `${item.x}px`;
   // Position by line top with glyphs bottomed on the line box. Baseline-
   // shifted runs (superscript/subscript) instead anchor the exact glyph box

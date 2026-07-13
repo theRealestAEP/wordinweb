@@ -695,6 +695,77 @@ describe("insertFootnote", () => {
   });
 });
 
+describe("footnote editing", () => {
+  // First text content of footnote `id`, or null.
+  const noteText = (doc: DocxDocument, id: number) => {
+    const blocks = doc.footnotes.get(id);
+    const para = blocks?.find((b) => b.type === "paragraph") as Paragraph | undefined;
+    for (const c of para?.children ?? []) {
+      for (const r of c.type === "run" ? [c] : c.runs) {
+        const tc = r.content.find((rc) => rc.kind === "text");
+        if (tc && tc.kind === "text") return tc;
+      }
+    }
+    return null;
+  };
+
+  it("keeps footnote text source refs (editable) and exposes the part as an editable root", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c) => c.kind === "text")!.srcT!;
+    insertFootnote(doc, t, 15, "See Smith 2024.");
+    const tc = noteText(doc, 1);
+    expect(tc, "footnote has a text content").toBeTruthy();
+    // The source w:t is KEPT (v1 stripped it → render-only).
+    expect(tc!.srcT).toBeTruthy();
+    // The footnotes part is now an editable root and reachable by findParentOf.
+    const roots = doc.editableRoots();
+    const noteInRoot = roots.some((root) => {
+      const walk = (el: XmlElement): boolean =>
+        el === tc!.srcT || el.children.some(walk);
+      return walk(root);
+    });
+    expect(noteInRoot, "footnote t reachable from an editable root").toBe(true);
+    expect(doc.findParentOf(tc!.srcT!)).toBeTruthy();
+  });
+
+  it("edits a footnote's text and round-trips through footnotes.xml on save", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c) => c.kind === "text")!.srcT!;
+    insertFootnote(doc, t, 15, "See Smith 2024.");
+    const tc = noteText(doc, 1)!;
+    // Simulate a caret edit: mutate the source w:t, flag the part, relayout.
+    tc.srcT!.text = tc.srcT!.text.replace("Smith", "Smith & Jones");
+    doc.markDirtyIfFootnote(tc.srcT!);
+    doc.refresh();
+    expect(noteText(doc, 1)!.text).toContain("Smith & Jones");
+    // Persisted to footnotes.xml.
+    const reloaded = DocxDocument.load(doc.save());
+    expect(noteText(reloaded, 1)!.text).toContain("Smith & Jones");
+  });
+
+  it("records a suggesting-mode edit inside a footnote as a w:ins in footnotes.xml", async () => {
+    const { insertSuggestedText } = await import("../src/edit/suggest.js");
+    const doc = loadDoc(p("Citation needed here"));
+    const t = firstRun(doc).run.content.find((c) => c.kind === "text")!.srcT!;
+    insertFootnote(doc, t, 15, "See Smith 2024.");
+    const tc = noteText(doc, 1)!;
+    let revId = 500;
+    // findParentOf must reach the footnote run for the suggest core to work.
+    const nc = insertSuggestedText(doc, tc.srcT!, 3, "XYZ", {
+      author: "Alex",
+      date: "2026-07-13T00:00:00Z",
+      nextId: () => revId++,
+    });
+    expect(nc, "suggested insert into a footnote resolves its run").toBeTruthy();
+    doc.markDirtyIfFootnote(nc!.t);
+    const fnXml = DocxDocument.load(doc.save()).pkg.text("word/footnotes.xml");
+    expect(fnXml).toContain("XYZ");
+    expect(fnXml).toMatch(/<w:ins\b/);
+  });
+});
+
 describe("insertPageField", () => {
   it("splits at the caret and inserts a PAGE fldSimple that round-trips", () => {
     const doc = loadDoc(p("Footer text here"));

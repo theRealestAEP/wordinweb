@@ -250,7 +250,9 @@ export class DocxDocument {
         this.footnotesRoot = root;
         this.footnotesRels = partRels;
       }
-      const notes = parseNotesPart(root, { ...this.ctxBase, rels: partRels });
+      // Footnotes are editable (sources kept, part retained + re-serialized on
+      // save); endnotes stay render-only for now.
+      const notes = parseNotesPart(root, { ...this.ctxBase, rels: partRels }, isFn);
       for (const [id, blocks] of notes) (isFn ? this.footnotes : this.endnotes).set(id, blocks);
     }
 
@@ -319,6 +321,14 @@ export class DocxDocument {
     this.comments = this.deriveComments();
     this.styles = parseStyles(this.stylesRoot ?? undefined, this.ctxBase);
     this.numbering = parseNumbering(this.numberingRoot ?? undefined, this.ctxBase);
+    // Re-derive footnote blocks from the retained tree (editable: keep source
+    // refs) so an edit to a footnote's w:t re-measures. Endnotes are render-
+    // only, parsed once at load, and left untouched here.
+    if (this.footnotesRoot) {
+      this.footnotes.clear();
+      const notes = parseNotesPart(this.footnotesRoot, { ...this.ctxBase, rels: this.footnotesRels }, true);
+      for (const [id, blocks] of notes) this.footnotes.set(id, blocks);
+    }
   }
 
   private deriveComments(): DocComment[] {
@@ -668,7 +678,7 @@ export class DocxDocument {
     // Re-derive the id -> blocks map so layout sees the new note.
     this.footnotes.clear();
     if (this.footnotesRoot) {
-      const notes = parseNotesPart(this.footnotesRoot, { ...this.ctxBase, rels: this.footnotesRels });
+      const notes = parseNotesPart(this.footnotesRoot, { ...this.ctxBase, rels: this.footnotesRels }, true);
       for (const [id, blocks] of notes) this.footnotes.set(id, blocks);
     }
   }
@@ -781,8 +791,22 @@ export class DocxDocument {
 
   /** The mutable XML roots (document body, header/footer parts, comments).
    * The comments root is last so history snapshot indices stay stable. */
+  /** Flag the footnotes part dirty when `t` lives inside it, so save()
+   * re-serializes footnotes.xml. Called by the editor after a text edit; a
+   * no-op for body/header/footer targets. */
+  markDirtyIfFootnote(t: XmlElement): void {
+    if (!this.footnotesRoot || this.footnotesDirty) return;
+    const contains = (el: XmlElement): boolean => {
+      if (el === t) return true;
+      for (const c of el.children) if (contains(c)) return true;
+      return false;
+    };
+    if (contains(this.footnotesRoot)) this.footnotesDirty = true;
+  }
+
   editableRoots(): XmlElement[] {
     const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
+    if (this.footnotesRoot) roots.push(this.footnotesRoot);
     if (this.commentsRoot) roots.push(this.commentsRoot);
     if (this.commentsExtRoot) roots.push(this.commentsExtRoot);
     return roots;
@@ -795,6 +819,7 @@ export class DocxDocument {
    */
   findParentOf(target: XmlElement): XmlElement | undefined {
     const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
+    if (this.footnotesRoot) roots.push(this.footnotesRoot);
     const walk = (el: XmlElement): XmlElement | undefined => {
       for (const c of el.children) {
         if (c === target) return el;

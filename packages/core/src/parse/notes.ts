@@ -5,10 +5,18 @@ import { DocParseContext, parseBlocks } from "./document.js";
 /**
  * Parse a footnotes.xml / endnotes.xml part into id → blocks. Separator and
  * continuation pseudo-notes are skipped — the engine draws its own rule.
- * Note content is render-only in v1: source references are stripped so the
- * editor never routes edits into a part that save() doesn't re-serialize.
+ *
+ * With `editable` (footnotes), source references to the part's XML are KEPT so
+ * the caret can bind to footnote text and edits route back into the retained
+ * footnotes.xml tree (save() re-serializes it when dirty). Without it
+ * (endnotes, still render-only), the sources are stripped so the editor never
+ * routes edits into a part save() doesn't yet re-serialize.
  */
-export function parseNotesPart(root: XmlElement, ctx: DocParseContext): Map<number, Block[]> {
+export function parseNotesPart(
+  root: XmlElement,
+  ctx: DocParseContext,
+  editable = false,
+): Map<number, Block[]> {
   const notes = new Map<number, Block[]>();
   for (const el of root.children) {
     const ln = localName(el.name);
@@ -18,7 +26,7 @@ export function parseNotesPart(root: XmlElement, ctx: DocParseContext): Map<numb
     const id = intAttr(el, "id");
     if (id === undefined) continue;
     const blocks = parseBlocks(el, ctx);
-    stripSources(blocks);
+    if (!editable) stripSources(blocks);
     notes.set(id, blocks);
   }
   return notes;
