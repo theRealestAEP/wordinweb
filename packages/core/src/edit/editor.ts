@@ -527,6 +527,10 @@ export class DocxEditor {
     this.inHeaderFooter = false;
     this.caret = null;
     this.clearSelection();
+    // Drop any header/footer image/WordArt selection so its chrome can't
+    // linger (and be resized/dragged) once we're back in the body.
+    this.deselectImage();
+    this.deselectWordArt();
     this.applyHfChrome();
   }
 
@@ -1549,6 +1553,11 @@ export class DocxEditor {
       const handle = this.host.getHandle();
       const binding = handle?.drawings.find((b) => b.el === target);
       if (!binding) return false;
+      // Region gate (mirrors text): a header/footer drawing is only
+      // selectable/draggable while editing that part, and body drawings are
+      // inert while editing a header/footer. Without this a header image could
+      // be grabbed from body mode and dragged — often into oblivion.
+      if ((this.regionOf(binding.item.src) === "hf") !== this.inHeaderFooter) return false;
       // A shape-fill hit (under the shape's text) selects the shape only: a
       // click on the fill selects it, a click on its text glyphs falls through
       // to edit the text, and it never drag-moves. Select on mousedown (not a
@@ -1618,6 +1627,11 @@ export class DocxEditor {
     if (imageBinding) {
       const binding = imageBinding;
       if (!binding?.item.src) return false;
+      // Region gate (mirrors text): header/footer images are only
+      // selectable/draggable in hf-edit mode; body images are inert while
+      // editing a header/footer. Blocks the body-mode grab that let a header
+      // image be dragged and lost.
+      if ((this.regionOf(binding.item.src) === "hf") !== this.inHeaderFooter) return false;
       e.preventDefault();
       e.stopPropagation();
       const startX = e.clientX;
