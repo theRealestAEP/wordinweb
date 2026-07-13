@@ -13,6 +13,17 @@ import { SelectionSegment } from "./commands.js";
 import { adjustFloatingPosition, imageAltText, isFloatingDrawing, replaceImageBlip, setFloatingPosition, setImageAltText, setImageWrap } from "./images.js";
 import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
 import { graphemeStep } from "./grapheme.js";
+import {
+  insertSuggestedText,
+  deleteSuggestedRange,
+  markParagraphGlyph,
+  paragraphGlyphRevision,
+  revisionForText,
+  acceptRevision,
+  rejectRevision,
+  RevisionMeta,
+  RevisionRef,
+} from "./suggest.js";
 
 /**
  * Interactive text editing: caret placement, typing, Backspace/Delete,
@@ -85,6 +96,16 @@ export class DocxEditor {
   private imeEl: HTMLTextAreaElement;
   private imeOverlay: HTMLSpanElement | null = null;
   private composing = false;
+
+  /** Suggesting mode: edits record as OOXML revisions (w:ins/w:del) instead of
+   * mutating text directly. Toggled via setSuggesting; forces markup view so a
+   * pending suggestion shows live (underlined/struck) as you type. */
+  private suggesting = false;
+  private revisionAuthor = "You";
+  /** Revision view active before suggesting mode forced markup; restored on off. */
+  private viewBeforeSuggesting: "final" | "markup" | null = null;
+  /** Accept/reject popover for a clicked suggestion. */
+  private suggestionPopover: HTMLElement | null = null;
 
   constructor(private host: EditorHost) {
     this.caretEl = document.createElement("div");
@@ -583,6 +604,7 @@ export class DocxEditor {
     c.removeEventListener("paste", this.onPaste);
     c.removeEventListener("dragover", this.onDragOver);
     c.removeEventListener("drop", this.onDrop);
+    this.dismissSuggestionPopover();
     this.hideCaret();
   }
 
@@ -1827,16 +1849,63 @@ export class DocxEditor {
     }
     // A plain click collapses any owned selection and places the caret.
     if (this.selection) this.clearSelection();
+    this.dismissSuggestionPopover();
     if (caret) {
       this.caret = caret;
       this.positionCaret();
       this.focusText();
+      // A click on a tracked change offers accept/reject (view-only or while
+      // suggesting). Placing the caret still works so the text stays editable.
+      const ref = revisionForText(this.host.doc, caret.t);
+      if (ref) this.showSuggestionPopover(ref, e.clientX, e.clientY);
     } else {
       this.hideCaret();
     }
     // Caret moves change toolbar state (current paragraph style etc.).
     this.notifySelection();
   };
+
+  /** Minimal accept/reject popover for a clicked suggestion. */
+  private showSuggestionPopover(ref: RevisionRef, clientX: number, clientY: number): void {
+    this.dismissSuggestionPopover();
+    const box = document.createElement("div");
+    box.dataset.dxwSuggestPopover = "1";
+    box.style.cssText =
+      "position:fixed;z-index:1000;display:flex;gap:4px;align-items:center;background:#fff;" +
+      "border:1px solid #dadce0;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.2);" +
+      "padding:4px 6px;font:12px system-ui,sans-serif;color:#3c4043;";
+    box.style.left = `${Math.max(8, clientX - 60)}px`;
+    box.style.top = `${clientY + 16}px`;
+    const label = document.createElement("span");
+    label.textContent = ref.kind === "insertion" || ref.kind === "markInsertion" ? "Insertion" : "Deletion";
+    label.style.cssText = "color:#5f6368;margin-right:2px;";
+    box.appendChild(label);
+    const mkBtn = (text: string, title: string, fn: () => void): void => {
+      const b = document.createElement("button");
+      b.textContent = text;
+      b.title = title;
+      b.style.cssText =
+        "border:1px solid #dadce0;border-radius:4px;padding:2px 8px;cursor:pointer;background:#fff;color:#3c4043;";
+      b.addEventListener("mousedown", (me) => {
+        me.preventDefault();
+        me.stopPropagation();
+      });
+      b.addEventListener("click", (ce) => {
+        ce.stopPropagation();
+        fn();
+      });
+      box.appendChild(b);
+    };
+    mkBtn("Accept", "Accept this suggestion", () => this.acceptRevisionRef(ref));
+    mkBtn("Reject", "Reject this suggestion", () => this.rejectRevisionRef(ref));
+    document.body.appendChild(box);
+    this.suggestionPopover = box;
+  }
+
+  private dismissSuggestionPopover(): void {
+    this.suggestionPopover?.remove();
+    this.suggestionPopover = null;
+  }
 
   /** True when the element belongs to the region currently being edited. */
   private inActiveRegion(t: XmlElement): boolean {
@@ -2414,11 +2483,106 @@ export class DocxEditor {
     this.positionCaret();
   }
 
+  // ---------- suggesting mode (tracked changes editing) ----------
+
+  /** Turn suggesting mode on/off. When on, every edit records as an OOXML
+   * revision and the view switches to markup so the suggestion shows live;
+   * turning off restores the prior revision view. `author` stamps w:author. */
+  setSuggesting(on: boolean, author?: string): void {
+    if (author) this.revisionAuthor = author;
+    if (on === this.suggesting) return;
+    this.suggesting = on;
+    this.dismissSuggestionPopover();
+    if (on) {
+      this.viewBeforeSuggesting = this.host.doc.revisionView;
+      if (this.host.doc.revisionView !== "markup") {
+        this.host.doc.setRevisionView("markup");
+        this.host.rerender();
+        this.positionCaret();
+      }
+    } else if (this.viewBeforeSuggesting && this.viewBeforeSuggesting !== this.host.doc.revisionView) {
+      this.host.doc.setRevisionView(this.viewBeforeSuggesting);
+      this.host.rerender();
+      this.positionCaret();
+    }
+  }
+
+  isSuggesting(): boolean {
+    return this.suggesting;
+  }
+
+  private revMeta(): RevisionMeta {
+    return {
+      author: this.revisionAuthor,
+      date: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+      nextId: () => this.host.doc.nextRevisionId(),
+    };
+  }
+
+  /** True when `t` sits inside a w:del authored by the current suggester
+   * (its content is already struck; a delete should skip past it). */
+  private inOwnDeletion(t: XmlElement): boolean {
+    const ref = revisionForText(this.host.doc, t);
+    return ref?.kind === "deletion" && ref.author === this.revisionAuthor;
+  }
+
+  /** The revision (run-level ins/del, or the caret paragraph's mark) at the
+   * caret, for accept/reject. */
+  revisionAtCaret(): RevisionRef | null {
+    const caret = this.caret;
+    if (!caret) return null;
+    const run = revisionForText(this.host.doc, caret.t);
+    if (run) return run;
+    // A paragraph-mark revision when the caret sits at the end of its line.
+    const pEl = paragraphOf(this.host.doc, caret.t);
+    if (pEl) {
+      const insMark = paragraphGlyphRevision(pEl, "ins");
+      if (insMark) return { el: insMark, kind: "markInsertion", paragraph: pEl };
+      const delMark = paragraphGlyphRevision(pEl, "del");
+      if (delMark) return { el: delMark, kind: "markDeletion", paragraph: pEl };
+    }
+    return null;
+  }
+
+  /** Accept (keep insertion / drop deletion) the given revision, or the one at
+   * the caret. Re-renders and returns whether anything changed. */
+  acceptRevisionRef(ref?: RevisionRef): boolean {
+    const target = ref ?? this.revisionAtCaret();
+    if (!target) return false;
+    this.host.history?.checkpoint();
+    if (!acceptRevision(this.host.doc, target)) return false;
+    this.dismissSuggestionPopover();
+    this.host.rerender();
+    this.positionCaret();
+    this.notifySelection();
+    return true;
+  }
+
+  /** Reject (drop insertion / restore deletion) the given revision, or the one
+   * at the caret. */
+  rejectRevisionRef(ref?: RevisionRef): boolean {
+    const target = ref ?? this.revisionAtCaret();
+    if (!target) return false;
+    this.host.history?.checkpoint();
+    if (!rejectRevision(this.host.doc, target)) return false;
+    this.dismissSuggestionPopover();
+    this.host.rerender();
+    this.positionCaret();
+    this.notifySelection();
+    return true;
+  }
+
   private insertText(text: string): void {
     this.host.history?.checkpoint("typing");
     if (this.hasSelection()) this.removeSelectedText();
     const caret = this.caret;
     if (!caret) return;
+    if (this.suggesting) {
+      const nc = insertSuggestedText(this.host.doc, caret.t, caret.offset, text, this.revMeta());
+      if (nc) this.caret = { t: nc.t, run: caret.run, offset: nc.offset, bias: "end" };
+      this.commit();
+      return;
+    }
     const t = caret.t;
     t.text = t.text.slice(0, caret.offset) + text + t.text.slice(caret.offset);
     caret.offset += text.length;
@@ -2436,6 +2600,10 @@ export class DocxEditor {
     const caret = this.caret;
     if (!caret) return;
     this.host.history?.checkpoint("deleting");
+    if (this.suggesting) {
+      this.suggestDelete(direction);
+      return;
+    }
     if (direction === -1) {
       if (caret.offset === 0) {
         const pEl = paragraphOf(this.host.doc, caret.t);
@@ -2484,9 +2652,84 @@ export class DocxEditor {
     this.commit();
   }
 
+  /** Backspace/Delete in suggesting mode: mark one character (or a paragraph
+   * mark at a boundary) as a tracked deletion instead of removing it. Skips over
+   * text already struck by this author so a repeated press keeps eating real
+   * content in the delete direction. */
+  private suggestDelete(direction: -1 | 1): void {
+    const caret = this.caret;
+    if (!caret) return;
+    const doc = this.host.doc;
+    // Already-struck content: step past it and retry on the next real char.
+    if (this.inOwnDeletion(caret.t)) {
+      if (!this.stepToNeighbor(direction)) return;
+      this.suggestDelete(direction);
+      return;
+    }
+    if (direction === -1) {
+      if (caret.offset === 0) {
+        const pEl = paragraphOf(doc, caret.t);
+        if (pEl && firstTextOf(pEl) === caret.t) {
+          // Start of paragraph: suggest deleting the PREVIOUS paragraph's mark
+          // (a merge). Don't actually join — Word keeps both until accepted.
+          const prev = siblingParagraph(doc, pEl, -1);
+          if (!prev) return;
+          if (paragraphGlyphRevision(prev, "del")) {
+            // Its mark is already struck; move the caret up so a further press
+            // eats the previous paragraph's text.
+            this.stepToNeighbor(-1);
+            this.positionCaret();
+            return;
+          }
+          markParagraphGlyph(prev, "del", this.revMeta());
+          this.commit();
+          return;
+        }
+        if (!this.stepToNeighbor(-1)) return;
+        this.suggestDelete(-1);
+        return;
+      }
+      const c = deleteSuggestedRange(doc, [{ t: caret.t, start: caret.offset - 1, end: caret.offset }], this.revMeta());
+      if (c) this.caret = { t: c.t, run: caret.run, offset: c.offset, bias: "end" };
+      this.commit();
+      return;
+    }
+    // Forward delete.
+    if (caret.offset >= caret.t.text.length) {
+      const pEl = paragraphOf(doc, caret.t);
+      if (pEl && lastTextOf(pEl) === caret.t) {
+        // End of paragraph: suggest deleting THIS paragraph's mark (merge fwd).
+        if (paragraphGlyphRevision(pEl, "del")) {
+          this.stepToNeighbor(1);
+          this.positionCaret();
+          return;
+        }
+        markParagraphGlyph(pEl, "del", this.revMeta());
+        this.commit();
+        return;
+      }
+      if (!this.stepToNeighbor(1)) return;
+      this.suggestDelete(1);
+      return;
+    }
+    const c = deleteSuggestedRange(doc, [{ t: caret.t, start: caret.offset, end: caret.offset + 1 }], this.revMeta());
+    if (c) this.caret = { t: c.t, run: caret.run, offset: c.offset };
+    this.commit();
+  }
+
   /** Delete the owned selection's text from the XML; caret → start. */
   private removeSelectedText(): void {
     const segments = this.getSelectionSegments();
+    if (this.suggesting) {
+      const ranges = segments
+        .filter((s) => s.t)
+        .map((s) => ({ t: s.t as XmlElement, start: s.start, end: s.end }));
+      const c = deleteSuggestedRange(this.host.doc, ranges, this.revMeta());
+      this.clearSelection();
+      const run = segments[0]?.run;
+      if (c && run) this.caret = { t: c.t, run, offset: c.offset };
+      return;
+    }
     // Group ranges per w:t, delete from the end so offsets stay valid.
     const byT = new Map<XmlElement, { start: number; end: number }[]>();
     let first: Caret | null = null;
@@ -2612,6 +2855,10 @@ export class DocxEditor {
     };
     const pIdx = pParent.children.indexOf(pEl);
     pParent.children.splice(pIdx + 1, 0, newP);
+
+    // Suggesting mode: the split introduces a new paragraph mark at the end of
+    // the FIRST paragraph — record it as an inserted glyph (pPr/rPr/w:ins).
+    if (this.suggesting) markParagraphGlyph(pEl, "ins", this.revMeta());
 
     this.caret = { t: afterT, run: caret.run, offset: 0 };
     this.commit();

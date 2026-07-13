@@ -846,6 +846,28 @@ export class DocxDocument {
     return this.nextDocPrId++;
   }
 
+  /** Next unused revision id (w:id on w:ins/w:del). Seeded once past the
+   * highest id already present in any editable root so a document that
+   * already has tracked changes never collides. */
+  private revIdCounter: number | null = null;
+  nextRevisionId(): number {
+    if (this.revIdCounter === null) {
+      let max = 0;
+      const scan = (el: XmlElement): void => {
+        const ln = localName(el.name);
+        if (ln === "ins" || ln === "del" || ln === "moveTo" || ln === "moveFrom") {
+          const idKey = Object.keys(el.attrs).find((k) => localName(k) === "id");
+          const v = idKey ? parseInt(el.attrs[idKey], 10) : NaN;
+          if (Number.isFinite(v) && v > max) max = v;
+        }
+        for (const c of el.children) scan(c);
+      };
+      for (const root of this.editableRoots()) scan(root);
+      this.revIdCounter = max + 1;
+    }
+    return this.revIdCounter++;
+  }
+
   /**
    * Add image bytes as a new media part + relationship (+ content-type
    * default). Returns the relationship id for use in a w:drawing.
