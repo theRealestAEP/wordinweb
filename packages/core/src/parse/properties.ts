@@ -385,6 +385,7 @@ export function parseParaProps(pPr: XmlElement | undefined, ctx: ParseContext): 
         mode: dc,
         lines: intAttr(frame, "lines") ?? 3,
         hSpace: twipsToPx(intAttr(frame, "hSpace") ?? 0),
+        pageAnchored: attr(frame, "hAnchor") === "page",
       };
     } else {
       // A general positioned text frame (w:framePr with a width and anchors):

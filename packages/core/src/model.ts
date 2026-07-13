@@ -165,7 +165,7 @@ export interface ParaProps {
   contextualSpacing?: boolean;
   keepNext?: boolean;
   /** w:framePr w:dropCap: the paragraph is a drop-cap letter frame. */
-  dropCap?: { mode: "drop" | "margin"; lines: number; hSpace: number };
+  dropCap?: { mode: "drop" | "margin"; lines: number; hSpace: number; pageAnchored?: boolean };
   /** w:framePr positioned text frame (absolute-positioned paragraph the body
    * text wraps around). Geometry in px. Individual attributes are optional so a
    * framePr merges attribute-by-attribute across the style cascade (a direct

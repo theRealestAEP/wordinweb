@@ -743,6 +743,40 @@ describe("layout engine", () => {
     expect(bodyText.x).toBeCloseTo(marginLeft, 0);
   });
 
+  it("keeps a TEXT-anchored dropCap=margin letter at the column with drop-style wrap", () => {
+    // parity2-dropcap p1: with hAnchor="text" (not "page"), Word keeps the
+    // margin drop cap AT the column edge and wraps the body around it, exactly
+    // like dropCap="drop" — the hang-into-margin treatment is page-anchor only.
+    // (This fixture scored 0.00 for days, then regressed to 1.78 when the hang
+    // path first shipped ungated.)
+    const marginCap =
+      `<w:p><w:pPr>` +
+      `<w:framePr w:dropCap="margin" w:lines="3" w:wrap="around" w:vAnchor="text" w:hAnchor="text"/>` +
+      `<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>` +
+      `<w:rPr><w:sz w:val="84"/></w:rPr></w:pPr>` +
+      `<w:r><w:rPr><w:sz w:val="84"/></w:rPr><w:t>M</w:t></w:r></w:p>`;
+    const body =
+      `<w:p><w:r><w:t xml:space="preserve">argin drop caps with a text anchor sink into the column like drop caps do</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(marginCap + body + section),
+    });
+    const page = result.pages[0];
+    const cap = page.items.find((i) => i.kind === "text" && i.text === "M");
+    const bodyText = page.items.find(
+      (i) => i.kind === "text" && i.text.includes("argin"),
+    );
+    expect(cap?.kind).toBe("text");
+    expect(bodyText?.kind).toBe("text");
+    if (cap?.kind !== "text" || bodyText?.kind !== "text") return;
+    const marginLeft = 1440 / 15;
+    // Letter sits AT the text margin (in the column), body indented past it.
+    expect(cap.x).toBeCloseTo(marginLeft, 0);
+    expect(bodyText.x).toBeGreaterThan(marginLeft + cap.width - 1);
+  });
+
   it("applies the final full-width banner's spacing-after before column body text", () => {
     const render = (authorsAfter: number) => {
       const frame = `<w:framePr w:w="9360" w:wrap="notBeside" w:hAnchor="text" w:vAnchor="text" w:xAlign="center"/>`;
