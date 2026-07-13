@@ -2280,16 +2280,26 @@ class Engine {
       const dropBroken = breakParagraph(this.doc, this.measurer, para, this.colWidth, this.fieldCtx());
       const dropLine = dropBroken.lines[0];
       if (dropLine) {
-        this.emitLine(dropLine, this.cur, this.colX, this.y);
-        const list = this.floats.get(this.cur) ?? [];
-        list.push({
-          x0: this.colX,
-          x1: this.colX + dropLine.width + props.dropCap.hSpace,
-          y0: this.y,
-          y1: this.y + dropLine.naturalHeight,
-          mode: "square",
-        });
-        this.floats.set(this.cur, list);
+        if (props.dropCap.mode === "margin") {
+          // dropCap="margin": the letter HANGS OUT into the left margin instead
+          // of sinking into the text block. Word aligns the letter's advance-box
+          // right edge at the text margin (its ink sits a side-bearing inside)
+          // and the following paragraph flows at FULL column width — no wrap
+          // exclusion (probe2-dropcaps-frames p1: the "M" paragraph's body text
+          // starts at the normal left margin, unlike the indented "drop" caps).
+          this.emitLine(dropLine, this.cur, this.colX - dropLine.width - props.dropCap.hSpace, this.y);
+        } else {
+          this.emitLine(dropLine, this.cur, this.colX, this.y);
+          const list = this.floats.get(this.cur) ?? [];
+          list.push({
+            x0: this.colX,
+            x1: this.colX + dropLine.width + props.dropCap.hSpace,
+            y0: this.y,
+            y1: this.y + dropLine.naturalHeight,
+            mode: "square",
+          });
+          this.floats.set(this.cur, list);
+        }
       }
       return;
     }
