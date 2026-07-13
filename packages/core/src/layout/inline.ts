@@ -461,7 +461,209 @@ const JUSTIFY_STRETCH_FACTOR = 0.5;
  * width. Handles indents, numbering label, tabs, justification, and line
  * spacing rules. All x positions are relative to the column origin.
  */
+type BreakLabel = {
+  text: string;
+  props: RunProps;
+  suffix: "tab" | "space" | "nothing";
+  metricsProps?: RunProps;
+  alignment?: "left" | "center" | "right";
+};
+type BreakBounds = (yOffset: number, estHeight: number) => LineBounds;
+type BreakOpts = { inTableCell?: boolean; verticalGridResync?: boolean; cache?: boolean };
+
+// --- Line-break cache -------------------------------------------------------
+// breakParagraph is a pure function of (paragraph content, content width,
+// numbering label, line pitch, opts, and the document's style/numbering/
+// settings) WHEN there are no floats intersecting the paragraph (boundsAt
+// undefined) and it holds no position-dependent content (page-number/ref
+// fields, note marks). Pagination re-breaks each paragraph several times per
+// layout (trial fits for keep-with-next / widow control) and typing re-lays the
+// whole document every keystroke, so the same paragraph is broken over and over
+// with identical inputs. Memoizing collapses that. The result is consumed
+// read-only (emitLine reads spans and pushes FRESH page items), so returning a
+// shared instance is safe. Only body-flow call sites opt in (opts.cache); table
+// cells are excluded via tableStyleId because their effective props depend on
+// table context that is not in the paragraph's own XML.
+// The cache is keyed PER MEASURER, not globally: a measurer's metrics/width
+// caches define a single consistent measurement world, and the persistent
+// measurer the editor holds lives exactly as long as the document. Tying the
+// break cache to it means (a) two documents never share entries, and (b) a
+// layout run with a different (e.g. cold-font, pre-fonts-ready) measurer can
+// never serve a stale break to the warm measurer the editor actually uses.
+const BP_CACHES = new WeakMap<TextMeasurer, Map<string, BrokenParagraph>>();
+const BP_CACHE_MAX = 60000;
+function bpCacheFor(measurer: TextMeasurer): Map<string, BrokenParagraph> {
+  let m = BP_CACHES.get(measurer);
+  if (!m) {
+    m = new Map();
+    BP_CACHES.set(measurer, m);
+  }
+  return m;
+}
+
+/** Drop a measurer's cached line breaks. The host calls this once after the
+ * first post-fonts-ready layout: webfont metrics can differ from the cold
+ * fallbacks used during initial load, so any breaks measured before fonts
+ * settled must be recomputed. Layouts after this are all warm and consistent. */
+export function clearBreakCache(measurer: TextMeasurer): void {
+  BP_CACHES.get(measurer)?.clear();
+}
+const paraSigMemo = new WeakMap<Paragraph, string>();
+// Stable per-paragraph identity. A break result's spans carry `src` references
+// to specific w:r/w:t elements for caret mapping, so two DIFFERENT paragraphs
+// with identical content must never share a cached break (the reusing one would
+// render items pointing at the other's elements). Keying on the source w:p
+// object — stable across refresh — scopes reuse to the same paragraph over
+// successive relayouts while excluding look-alikes (e.g. empty lines).
+const paraIdMap = new WeakMap<XmlElement, string>();
+let paraIdSeq = 0;
+function paraId(para: Paragraph): string {
+  const src = para.src as XmlElement;
+  let id = paraIdMap.get(src);
+  if (id === undefined) {
+    id = (paraIdSeq++).toString(36);
+    paraIdMap.set(src, id);
+  }
+  return id;
+}
+
+function xmlSigInto(el: XmlElement, out: string[]): void {
+  out.push("\x02", el.name);
+  for (const k in el.attrs) out.push("\x03", k, "\x04", el.attrs[k]);
+  if (el.text) out.push("\x05", el.text);
+  for (const c of el.children) xmlSigInto(c, out);
+  out.push("\x06");
+}
+
+/** Content signature of a paragraph, from its (stable, in-place-mutated) source
+ * XML. Memoized per model object: fresh each refresh, so it is computed once per
+ * paragraph per layout and reused across that layout's repeated trial breaks. */
+function paraSig(para: Paragraph): string {
+  let s = paraSigMemo.get(para);
+  if (s === undefined) {
+    const out: string[] = [];
+    xmlSigInto(para.src as XmlElement, out);
+    s = out.join("");
+    paraSigMemo.set(para, s);
+  }
+  return s;
+}
+
+/** Content that makes a paragraph's laid-out lines depend on more than the
+ * cache key captures, so it must not be cached:
+ * - field / noteRef: value depends on document position (page number, mark);
+ * - math: display equations are re-placed by the oMathPara justification
+ *   post-pass and their boxes are mutated after breaking;
+ * - anchor: a floating drawing's placement is position-dependent. */
+function paraHasPositionalContent(para: Paragraph): boolean {
+  for (const child of para.children) {
+    const runs = child.type === "hyperlink" ? child.runs : [child];
+    for (const r of runs) {
+      for (const c of r.content) {
+        if (c.kind === "field" || c.kind === "noteRef" || c.kind === "math" || c.kind === "anchor") {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function breakCacheKey(
+  doc: DocxDocument,
+  para: Paragraph,
+  contentWidth: number,
+  minLineHeight: number | undefined,
+  label: BreakLabel | undefined,
+  opts: BreakOpts | undefined,
+): string {
+  const labelSig = label
+    ? label.text + "\x07" + label.suffix + "\x07" + (label.alignment ?? "") +
+      "\x07" + JSON.stringify(label.props) + "\x07" + JSON.stringify(label.metricsProps ?? null)
+    : "";
+  return (
+    doc.layoutGlobalSig() +
+    "\x08" + paraId(para) +
+    "\x08" + paraSig(para) +
+    "\x08" + contentWidth +
+    "\x08" + (minLineHeight ?? -1) +
+    "\x08" + (opts?.inTableCell ? "1" : "0") + (opts?.verticalGridResync ? "1" : "0") +
+    "\x08" + labelSig
+  );
+}
+
+/** Clone of a break result whose lines and spans are fresh objects, so a
+ * caller may mutate line/span scalar fields (the engine snaps line heights to
+ * the doc grid and re-places spans in place during layout) without touching the
+ * pristine cached copy. Nested payloads (props, font, image, math box, source
+ * refs) are shared — the engine treats those as immutable. */
+function cloneBroken(b: BrokenParagraph): BrokenParagraph {
+  return {
+    ...b,
+    lines: b.lines.map((l) => ({ ...l, spans: l.spans.map((s) => ({ ...s })) })),
+  };
+}
+
+/** Projection of a break result's line geometry, for the dev-mode cache
+ * verifier (globalThis.__dxwVerifyBp). */
+function brokenProj(b: BrokenParagraph): string {
+  return JSON.stringify(
+    b.lines.map((l) => {
+      const ll = l as unknown as Record<string, number>;
+      return [
+        ll.width, ll.height, ll.naturalHeight, ll.baselineH, ll.maxDescent,
+        (l.spans as unknown as Record<string, unknown>[]).map((s) => [s.x, s.width ?? 0, s.text ?? ""]),
+      ];
+    }),
+  );
+}
+
 export function breakParagraph(
+  doc: DocxDocument,
+  measurer: TextMeasurer,
+  para: Paragraph,
+  contentWidth: number,
+  fields: FieldContext,
+  numberingLabel?: BreakLabel,
+  boundsAt?: BreakBounds,
+  minLineHeight?: number,
+  opts?: BreakOpts,
+): BrokenParagraph {
+  const cacheable =
+    opts?.cache === true &&
+    boundsAt === undefined &&
+    para.src !== undefined &&
+    para.props.tableStyleId === undefined &&
+    !paraHasPositionalContent(para);
+  if (!cacheable) {
+    return breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
+  }
+  const cache = bpCacheFor(measurer);
+  const key = breakCacheKey(doc, para, contentWidth, minLineHeight, numberingLabel, opts);
+  const hit = cache.get(key);
+  if (hit !== undefined) {
+    // Dev guard (globalThis.__dxwVerifyBp): recompute uncached and confirm the
+    // cached break still matches, catching any missed cache-key input.
+    if ((globalThis as { __dxwVerifyBp?: boolean }).__dxwVerifyBp) {
+      const fresh = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
+      if (brokenProj(hit) !== brokenProj(fresh)) {
+        const g = globalThis as { __dxwBpMismatch?: number };
+        g.__dxwBpMismatch = (g.__dxwBpMismatch ?? 0) + 1;
+        return fresh;
+      }
+    }
+    // Never hand out the cached instance: the engine mutates line/span fields
+    // (doc-grid height snapping, in-place re-placement) during layout.
+    return cloneBroken(hit);
+  }
+  const result = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
+  if (cache.size >= BP_CACHE_MAX) cache.clear();
+  // Store a pristine clone; return the original for this caller to mutate.
+  cache.set(key, cloneBroken(result));
+  return result;
+}
+
+function breakParagraphImpl(
   doc: DocxDocument,
   measurer: TextMeasurer,
   para: Paragraph,

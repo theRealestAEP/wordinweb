@@ -34,6 +34,7 @@ import {
   type XmlElement,
   insertTableAfter,
   createMeasurer,
+  clearBreakCache,
   type TextMeasurer,
   layoutDocument,
   listTypeAt,
@@ -292,11 +293,21 @@ export function DocxView({
 
       if (editable && containerRef.current) {
         const history = new EditHistory(doc);
+        // Line breaks measured during the initial load can use cold webfont
+        // fallback metrics (the first canvas measureText of a font, before it is
+        // fully active, differs from the warm value). By the time the user makes
+        // their first edit the canvas has painted and is warm, so drop the
+        // load-time cache once here; every edit relayout after is warm.
+        let breakCacheWarmed = false;
         editor = new DocxEditor({
           doc,
           container: containerRef.current,
           getHandle: () => handle,
           rerender: () => {
+            if (!breakCacheWarmed) {
+              clearBreakCache(measurer);
+              breakCacheWarmed = true;
+            }
             pages = rerender(doc);
           },
           zoom,

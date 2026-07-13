@@ -1,5 +1,5 @@
 import { Package } from "./zip.js";
-import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName } from "./xml.js";
+import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName, cyrb53 } from "./xml.js";
 import { strToU8, zipSync } from "fflate";
 import { twipsToPx } from "./units.js";
 import {
@@ -266,7 +266,38 @@ export class DocxDocument {
     this.refresh();
   }
 
+  /** Invalidated on refresh; see layoutGlobalSig. */
+  private _layoutGlobalSig: string | null = null;
+
+  /** Signature of everything OUTSIDE a paragraph's own XML that affects how it
+   * breaks into lines: style + numbering definitions, doc-level layout scalars,
+   * and the tracked-changes view mode. The line-break cache (layout/inline.ts)
+   * combines this with a paragraph's own content signature so a style/numbering/
+   * settings edit invalidates cached breaks even though the paragraph XML is
+   * unchanged. Memoized until the next refresh() (styles/numbering trees are
+   * stable across a plain text edit). */
+  layoutGlobalSig(): string {
+    if (this._layoutGlobalSig === null) {
+      const parts = [
+        String(this.defaultTabStop),
+        String(this.compatibilityMode),
+        String(this.charGridEa),
+        this.revisionView,
+        this.styles.defaultRPr.font ?? "",
+      ];
+      if (this.stylesRoot) parts.push(serializeXml(this.stylesRoot));
+      if (this.numberingRoot) parts.push(serializeXml(this.numberingRoot));
+      // Hash to a short token: this is concatenated into every line-break cache
+      // key, so it must stay small (the raw styles/numbering XML is tens of KB).
+      // A collision would only mean a style edit fails to invalidate cached
+      // breaks - astronomically unlikely, and the parity gate would catch it.
+      this._layoutGlobalSig = cyrb53(parts.join(""));
+    }
+    return this._layoutGlobalSig;
+  }
+
   refresh(): void {
+    this._layoutGlobalSig = null;
     const body = child(this.docRoot, "body");
     if (!body) throw new Error("document.xml has no w:body");
     // Some content (SmartArt cached drawings) lives in parts reachable only

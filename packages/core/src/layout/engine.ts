@@ -1916,6 +1916,7 @@ class Engine {
           ? this.makeBoundsAt(paraTop, undefined, rawSpacingBefore)
           : undefined,
         this.sp.docGridLinePitch,
+        { cache: true },
       );
 
     // The first paragraph on a page reached by a hard page break lands at the
@@ -2140,7 +2141,7 @@ class Engine {
           const np = this.doc.effectiveParaProps(blk);
           simY += Math.max(prevAfter, np.spacingBefore ?? 0);
           if (idx === lastIdx) break; // reached the anchor paragraph's top
-          const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch);
+          const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, { cache: true });
           simY += nb.lines.reduce((a, l) => a + l.height, 0);
           prevAfter = np.spacingAfter ?? 0;
         }
@@ -2369,6 +2370,7 @@ class Engine {
           this.numberingLabel(np, blk),
           undefined,
           this.sp.docGridLinePitch,
+          { cache: true },
         );
         // Collapsed gap from the end of the previous member's lines.
         const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
@@ -2481,6 +2483,7 @@ class Engine {
           this.numberingLabel(np, blk),
           undefined,
           this.sp.docGridLinePitch,
+          { cache: true },
         );
         const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
         if (!paragraphHasContent(blk)) {

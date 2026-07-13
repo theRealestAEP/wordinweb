@@ -6,6 +6,7 @@ export { Package, resolvePartPath } from "./zip.js";
 export { DocxDocument } from "./docx.js";
 export { layoutDocument } from "./layout/engine.js";
 export type { LayoutOptions } from "./layout/engine.js";
+export { clearBreakCache } from "./layout/inline.js";
 export * from "./layout/types.js";
 export {
   CanvasMeasurer,
