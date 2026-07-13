@@ -10,7 +10,7 @@ import { applyTableOp } from "../src/edit/tables.js";
 import { imageAltText, setImageAltText, replaceImageBlip } from "../src/edit/images.js";
 import { insertFootnote } from "../src/edit/notes.js";
 import { insertPageField } from "../src/edit/fields.js";
-import { linearizeMath, parseMathLinear, setMathLinear, mathLinearOf } from "../src/edit/math.js";
+import { linearizeMath, parseMathLinear, setMathLinear, mathLinearOf, isLinearSafe } from "../src/edit/math.js";
 import { XmlElement } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, makeDocxWithMedia, wrapDocument, p } from "./helpers.js";
@@ -724,5 +724,68 @@ describe("math editing", () => {
     const para3 = doc3.sections[0].blocks[0] as Paragraph;
     const math3 = (para3.children[0] as Run).content.find((c) => c.kind === "math");
     expect(math3 && math3.kind === "math" ? mathLinearOf(doc3, math3.src!) : "").toBe("a^2+b^2=c^2");
+  });
+});
+
+describe("math editing safety", () => {
+  const M = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"';
+  const load = (omml: string) => {
+    const doc = loadDoc(`<w:p ${M}>${omml}</w:p>`);
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    const math = (para.children[0] as Run).content.find((c) => c.kind === "math");
+    if (!math || math.kind !== "math" || !math.src) throw new Error("no math");
+    return { doc, para, srcOf: () => (((doc.sections[0].blocks[0] as Paragraph).children[0] as Run).content.find((c) => c.kind === "math") as { src: XmlElement }).src };
+  };
+  const run = (t: string) => `<m:r><m:t>${t}</m:t></m:r>`;
+  const INTEGRAL = `<m:oMath><m:nary><m:naryPr><m:chr m:val="∫"/></m:naryPr><m:sub>${run("a")}</m:sub><m:sup>${run("b")}</m:sup><m:e>${run("x")}</m:e></m:nary></m:oMath>`;
+  const DELIM = `<m:oMath><m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e>${run("x")}</m:e></m:d></m:oMath>`;
+  const MATRIX = `<m:oMath><m:m><m:mr><m:e>${run("a")}</m:e><m:e>${run("b")}</m:e></m:mr><m:mr><m:e>${run("c")}</m:e><m:e>${run("d")}</m:e></m:mr></m:m></m:oMath>`;
+  const ACCENT = `<m:oMath><m:acc><m:accPr><m:chr m:val="̂"/></m:accPr><m:e>${run("x")}</m:e></m:acc></m:oMath>`;
+  const LIMIT = `<m:oMath><m:limLow><m:e>${run("lim")}</m:e><m:lim>${run("n")}</m:lim></m:limLow></m:oMath>`;
+
+  it("classifies round-trippable equations as editable", () => {
+    for (const omml of [INTEGRAL, DELIM, MATRIX]) {
+      const { srcOf } = load(omml);
+      expect(isLinearSafe(srcOf())).toBe(true);
+    }
+  });
+
+  it("classifies structure-only equations (accent, limit) as read-only", () => {
+    for (const omml of [ACCENT, LIMIT]) {
+      const { srcOf } = load(omml);
+      expect(isLinearSafe(srcOf())).toBe(false);
+    }
+  });
+
+  it("linear parser reconstructs n-ary, delimiter and matrix structurally", () => {
+    expect(parseMathLinear("∫_a^bx")[0].t).toBe("nary");
+    expect(parseMathLinear("(x)")[0].t).toBe("dlm");
+    const mat = parseMathLinear("[a&b;c&d]")[0];
+    expect(mat.t).toBe("mat");
+    if (mat.t === "mat") expect(mat.rows.length).toBe(2);
+  });
+
+  it("editing a matrix cell keeps it a matrix (no collapse to literal text)", () => {
+    const { doc, srcOf } = load(MATRIX);
+    const linear = mathLinearOf(doc, srcOf());
+    expect(linear).toBe("[a&b;c&d]");
+    expect(setMathLinear(doc, srcOf(), "[a&b;c&e]")).toBe(true);
+    const after = srcOf();
+    expect(mathLinearOf(doc, after)).toBe("[a&b;c&e]");
+    // still a real m:m element, not a run of literal "[a&b;c&e]"
+    const hasMatrix = (e: XmlElement): boolean =>
+      e.name.endsWith("m") && e.children.some((c) => c.name.endsWith("mr")) ? true : e.children.some(hasMatrix);
+    expect(hasMatrix(after)).toBe(true);
+  });
+
+  it("n-ary integrand survives a round-trip through OMML", () => {
+    const { doc, srcOf } = load(INTEGRAL);
+    expect(mathLinearOf(doc, srcOf())).toBe("∫_a^bx");
+    expect(setMathLinear(doc, srcOf(), "∫_a^by")).toBe(true);
+    const after = srcOf();
+    expect(mathLinearOf(doc, after)).toBe("∫_a^by");
+    const isNary = (e: XmlElement): boolean =>
+      e.name.endsWith("nary") ? true : e.children.some(isNary);
+    expect(isNary(after)).toBe(true);
   });
 });

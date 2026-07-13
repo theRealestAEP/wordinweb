@@ -44,6 +44,42 @@ export function linearizeMath(nodes: MathNode[]): string {
   return out;
 }
 
+// N-ary operators (∑ ∏ ∫ …) linearize as "chr(_sub)(^sup)integrand"; the
+// integrand is exactly one unit so the parser can hand it back structurally.
+const NARY_CHRS = new Set([
+  "∑", "∏", "∐", "∫", "∬", "∭", "∮", "∯",
+  "∰", "⋀", "⋁", "⋂", "⋃", "⨀", "⨁", "⨂",
+  "⨄", "⨆",
+]);
+// Delimiter open -> close. "{" stays a grouping brace, never a delimiter.
+const DELIM_CLOSE: Record<string, string> = {
+  "(": ")", "[": "]", "⟨": "⟩", "⌊": "⌋", "⌈": "⌉",
+  "|": "|", "‖": "‖",
+};
+const DELIM_OPENS = "([⟨⌊⌈|‖";
+const DELIM_CLOSES = ")]⟩⌋⌉|‖";
+
+/** Split at top-level occurrences of any separator char (ignores {} and
+ * bracketed depth), so "a|b" splits but "(a|b)" and "{a|b}" do not. */
+function splitTop(text: string, seps: string): string[] {
+  const parts: string[] = [];
+  let cur = "";
+  let depth = 0;
+  for (let k = 0; k < text.length; k++) {
+    const c = text[k];
+    if (c === "{" || (DELIM_OPENS.includes(c) && c !== "|" && c !== "‖")) depth++;
+    else if (c === "}" || (DELIM_CLOSES.includes(c) && c !== "|" && c !== "‖")) depth = Math.max(0, depth - 1);
+    else if (depth === 0 && seps.includes(c)) {
+      parts.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += c;
+  }
+  parts.push(cur);
+  return parts;
+}
+
 /** Editable linear text -> MathNode AST. Scripts bind tighter than "/". */
 export function parseMathLinear(input: string): MathNode[] {
   let i = 0;
@@ -63,7 +99,62 @@ export function parseMathLinear(input: string): MathNode[] {
     return parseMathLinear(inner);
   };
 
-  /** One unit: a group, a root, or a single character (as a run). */
+  // A balanced delimited region: strip the outer pair, tracking {} and nested
+  // like-delimiters so "((a))" and "(a{b})" close at the right bracket.
+  const scanDelim = (open: string, close: string): string => {
+    i++; // opener
+    const start = i;
+    let brace = 0;
+    let nest = 0;
+    while (i < input.length) {
+      const c = input[i];
+      if (c === "{") brace++;
+      else if (c === "}") brace = Math.max(0, brace - 1);
+      else if (brace === 0 && open !== close && c === open) nest++;
+      else if (brace === 0 && c === close) {
+        if (nest === 0) break;
+        nest--;
+      }
+      i++;
+    }
+    const inner = input.slice(start, i);
+    if (input[i] === close) i++; // closer
+    return inner;
+  };
+
+  const parseDelim = (open: string): MathNode[] => {
+    const close = DELIM_CLOSE[open];
+    const inner = scanDelim(open, close);
+    // "[…]" carrying top-level & or ; is a matrix; otherwise a bracket group.
+    if (open === "[" && (splitTop(inner, "&").length > 1 || splitTop(inner, ";").length > 1)) {
+      const rows = splitTop(inner, ";").map((row) => splitTop(row, "&").map((cell) => parseMathLinear(cell)));
+      return [{ t: "mat", rows }];
+    }
+    const parts = splitTop(inner, "|").map((part) => parseMathLinear(part));
+    return [{ t: "dlm", beg: open, end: close, e: parts }];
+  };
+
+  const parseNary = (): MathNode[] => {
+    const chr = input[i];
+    i++;
+    let sub: MathNode[] = [];
+    let sup: MathNode[] = [];
+    const readScript = (): MathNode[] => (input[i] === "{" ? parseGroup() : i < input.length ? parseUnit() : []);
+    for (let g = 0; g < 2; g++) {
+      if (input[i] === "_" && sub.length === 0) {
+        i++;
+        sub = readScript();
+      } else if (input[i] === "^" && sup.length === 0) {
+        i++;
+        sup = readScript();
+      }
+    }
+    const startsIntegrand = i < input.length && input[i] !== "^" && input[i] !== "_" && input[i] !== "/";
+    const e = startsIntegrand ? (input[i] === "{" ? parseGroup() : parseUnit()) : [];
+    return [{ t: "nary", chr, sub, sup, e }];
+  };
+
+  /** One unit: a group, root, n-ary, delimiter/matrix, or a single run char. */
   const parseUnit = (): MathNode[] => {
     const ch = input[i];
     if (ch === "{") return parseGroup();
@@ -72,6 +163,8 @@ export function parseMathLinear(input: string): MathNode[] {
       const e = input[i] === "{" ? parseGroup() : parseUnit();
       return [{ t: "rad", e }];
     }
+    if (NARY_CHRS.has(ch)) return parseNary();
+    if (ch in DELIM_CLOSE) return parseDelim(ch);
     i++;
     return [{ t: "run", text: ch }];
   };
@@ -218,52 +311,141 @@ export function moveMath(doc: DocxDocument, oMathEl: XmlElement, t: XmlElement, 
   return true;
 }
 
+/** Derive the math AST from a live oMath element (reflects current XML). */
+function ommlToNodes(e: XmlElement): MathNode[] {
+  const ln = localName(e.name);
+  const kids = (name: string): MathNode[] => {
+    const c = e.children.find((ch) => localName(ch.name) === name);
+    return c ? ommlToNodes(c) : [];
+  };
+  const chrAttr = (prName: string, chrName: string, dflt: string): string => {
+    const pr = e.children.find((c) => localName(c.name) === prName);
+    const c = pr?.children.find((ch) => localName(ch.name) === chrName);
+    const k = c && Object.keys(c.attrs).find((key) => localName(key) === "val");
+    return c && k ? c.attrs[k] : dflt;
+  };
+  if (ln === "f") return [{ t: "frac", num: kids("num"), den: kids("den") }];
+  if (ln === "nary") {
+    return [{ t: "nary", chr: chrAttr("naryPr", "chr", "\u222b"), sub: kids("sub"), sup: kids("sup"), e: kids("e") }];
+  }
+  if (ln === "d") {
+    const pr = e.children.find((c) => localName(c.name) === "dPr");
+    const chr = (name: string, dflt: string) => {
+      const c = pr?.children.find((ch) => localName(ch.name) === name);
+      const k = c && Object.keys(c.attrs).find((key) => localName(key) === "val");
+      return c && k ? c.attrs[k] : dflt;
+    };
+    const parts = e.children.filter((c) => localName(c.name) === "e").map(ommlToNodes);
+    return [{ t: "dlm", beg: chr("begChr", "("), end: chr("endChr", ")"), e: parts }];
+  }
+  if (ln === "m" && e.children.some((c) => localName(c.name) === "mr")) {
+    const rows = e.children
+      .filter((c) => localName(c.name) === "mr")
+      .map((mr) => mr.children.filter((c) => localName(c.name) === "e").map(ommlToNodes));
+    return [{ t: "mat", rows }];
+  }
+  // Constructs with no faithful linear syntax: keep them as their own node so
+  // the round-trip check (isLinearSafe) sees the mismatch and refuses to let
+  // text editing silently drop the accent/limit/over-under/array structure.
+  if (ln === "acc") return [{ t: "acc", chr: chrAttr("accPr", "chr", "\u0302"), e: kids("e") }];
+  if (ln === "groupChr") {
+    return [
+      {
+        t: "grp",
+        chr: chrAttr("groupChrPr", "chr", "\u23df"),
+        pos: chrAttr("groupChrPr", "pos", "bot") === "top" ? "top" : "bot",
+        vertJc: chrAttr("groupChrPr", "vertJc", "bot") === "top" ? "top" : "bot",
+        e: kids("e"),
+      },
+    ];
+  }
+  if (ln === "limLow" || ln === "limUpp") {
+    return [{ t: "lim", pos: ln === "limLow" ? "low" : "upp", e: kids("e"), lim: kids("lim") }];
+  }
+  if (ln === "eqArr") {
+    const rows = e.children.filter((c) => localName(c.name) === "e").map(ommlToNodes);
+    return [{ t: "eqarr", rows }];
+  }
+  if (ln === "sSup") return [{ t: "sup", base: kids("e"), script: kids("sup") }];
+  if (ln === "sSub") return [{ t: "sub", base: kids("e"), script: kids("sub") }];
+  if (ln === "rad") return [{ t: "rad", e: kids("e") }];
+  if (ln === "t") return e.text ? [{ t: "run", text: e.text }] : [];
+  const out: MathNode[] = [];
+  for (const c of e.children) {
+    for (const n of ommlToNodes(c)) {
+      const last = out[out.length - 1];
+      if (n.t === "run" && last && last.t === "run") last.text += n.text;
+      else out.push(n);
+    }
+  }
+  return out;
+}
+
 /** The math AST currently in an oMath element (for prefilling the editor). */
 export function mathLinearOf(doc: DocxDocument, oMathEl: XmlElement): string {
   void doc;
-  // Re-derive from XML so the text reflects the current state.
-  const parse = (e: XmlElement): MathNode[] => {
-    const ln = localName(e.name);
-    const kids = (name: string): MathNode[] => {
-      const c = e.children.find((ch) => localName(ch.name) === name);
-      return c ? parse(c) : [];
-    };
-    if (ln === "f") return [{ t: "frac", num: kids("num"), den: kids("den") }];
-    if (ln === "nary") {
-      const pr = e.children.find((c) => localName(c.name) === "naryPr");
-      const chrEl = pr?.children.find((c) => localName(c.name) === "chr");
-      const chrKey = chrEl && Object.keys(chrEl.attrs).find((k) => localName(k) === "val");
-      return [{ t: "nary", chr: (chrKey && chrEl.attrs[chrKey]) || "\u222b", sub: kids("sub"), sup: kids("sup"), e: kids("e") }];
-    }
-    if (ln === "d") {
-      const pr = e.children.find((c) => localName(c.name) === "dPr");
-      const chr = (name: string, dflt: string) => {
-        const c = pr?.children.find((ch) => localName(ch.name) === name);
-        const k = c && Object.keys(c.attrs).find((key) => localName(key) === "val");
-        return c && k ? c.attrs[k] : dflt;
-      };
-      const parts = e.children.filter((c) => localName(c.name) === "e").map(parse);
-      return [{ t: "dlm", beg: chr("begChr", "("), end: chr("endChr", ")"), e: parts }];
-    }
-    if (ln === "m" && e.children.some((c) => localName(c.name) === "mr")) {
-      const rows = e.children
-        .filter((c) => localName(c.name) === "mr")
-        .map((mr) => mr.children.filter((c) => localName(c.name) === "e").map(parse));
-      return [{ t: "mat", rows }];
-    }
-    if (ln === "sSup") return [{ t: "sup", base: kids("e"), script: kids("sup") }];
-    if (ln === "sSub") return [{ t: "sub", base: kids("e"), script: kids("sub") }];
-    if (ln === "rad") return [{ t: "rad", e: kids("e") }];
-    if (ln === "t") return e.text ? [{ t: "run", text: e.text }] : [];
-    const out: MathNode[] = [];
-    for (const c of e.children) {
-      for (const n of parse(c)) {
-        const last = out[out.length - 1];
-        if (n.t === "run" && last && last.t === "run") last.text += n.text;
-        else out.push(n);
+  return linearizeMath(ommlToNodes(oMathEl));
+}
+
+/** Two ASTs are structurally identical (same node kinds, nesting, and the
+ * chr/beg/end/pos discriminants) \u2014 runs compare by presence, not text. */
+function sameStructure(a: MathNode[], b: MathNode[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let k = 0; k < a.length; k++) {
+    const x = a[k];
+    const y = b[k];
+    if (x.t !== y.t) return false;
+    switch (x.t) {
+      case "run":
+        break;
+      case "sup":
+      case "sub":
+        if (!sameStructure(x.base, (y as typeof x).base) || !sameStructure(x.script, (y as typeof x).script)) return false;
+        break;
+      case "frac":
+        if (!sameStructure(x.num, (y as typeof x).num) || !sameStructure(x.den, (y as typeof x).den)) return false;
+        break;
+      case "rad":
+        if (!sameStructure(x.e, (y as typeof x).e)) return false;
+        break;
+      case "nary": {
+        const yy = y as typeof x;
+        if (x.chr !== yy.chr || !sameStructure(x.sub, yy.sub) || !sameStructure(x.sup, yy.sup) || !sameStructure(x.e, yy.e))
+          return false;
+        break;
       }
+      case "dlm": {
+        const yy = y as typeof x;
+        if (x.beg !== yy.beg || x.end !== yy.end || x.e.length !== yy.e.length) return false;
+        for (let p = 0; p < x.e.length; p++) if (!sameStructure(x.e[p], yy.e[p])) return false;
+        break;
+      }
+      case "mat": {
+        const yy = y as typeof x;
+        if (x.rows.length !== yy.rows.length) return false;
+        for (let r = 0; r < x.rows.length; r++) {
+          if (x.rows[r].length !== yy.rows[r].length) return false;
+          for (let c = 0; c < x.rows[r].length; c++) if (!sameStructure(x.rows[r][c], yy.rows[r][c])) return false;
+        }
+        break;
+      }
+      default:
+        // acc / grp / lim / eqarr have no linear syntax: never round-trip-safe.
+        return false;
     }
-    return out;
-  };
-  return linearizeMath(parse(oMathEl));
+  }
+  return true;
+}
+
+/**
+ * True when the equation round-trips losslessly through the linear text form,
+ * so free-text editing can never silently change its structure. Equations that
+ * fail this (n-ary/delimiter/matrix the parser can't rebuild, accents, limits,
+ * over/under groups, equation arrays) are shown read-only instead.
+ */
+export function isLinearSafe(oMathEl: XmlElement): boolean {
+  const nodes = ommlToNodes(oMathEl);
+  const text = linearizeMath(nodes);
+  if (!text.trim()) return false;
+  return sameStructure(nodes, parseMathLinear(text));
 }
