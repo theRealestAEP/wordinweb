@@ -69,6 +69,10 @@ export interface RenderHandle {
   /** Per-page render records, retained so the next render can reuse the DOM of
    * pages whose layout is unchanged (see renderToDom's `prev` parameter). */
   _pages?: PageRender[];
+  /** Whether this render drew the comments overlay. Comment highlights live
+   * INSIDE page surfaces, so the next render must sweep them out of any page
+   * DOM it adopts before re-running the overlay. */
+  _hadComments?: boolean;
 }
 
 /** One page's DOM element plus the editor bindings it owns and the object URLs
@@ -336,12 +340,11 @@ export function renderToDom(
   // Incremental reuse: adopt the DOM of pages whose layout is unchanged. A
   // typical keystroke only touches one page, so the common prefix and suffix
   // of pages are byte-identical and their elements are moved into the new root
-  // instead of being rebuilt. Comments hang off the root and are re-measured
-  // per render, so reuse is skipped when the document has any (rare on the
-  // large fixtures; keeps the balloon layer simple and correct).
+  // instead of being rebuilt. Balloon cards hang off the old root and die with
+  // it; highlight rects live inside page surfaces and are swept from adopted
+  // pages below before the overlay re-runs.
   const prevPages = prev?._pages ?? [];
-  const canReuse =
-    prevPages.length > 0 && (options.comments === false || doc.comments.length === 0);
+  const canReuse = prevPages.length > 0;
   const pages: PageRender[] = new Array(layout.pages.length);
   let reusedCount = 0;
   if (canReuse) {
@@ -370,8 +373,24 @@ export function renderToDom(
   for (const pr of pages) root.appendChild(pr.el);
   container.appendChild(root);
 
+  // Adopted pages carry the previous render's highlight rects and span tags —
+  // strip them so the overlay pass below starts clean (and so nothing stale
+  // survives when the last comment was just deleted). Freshly built pages have
+  // none; scope the sweep to adopted elements only.
+  if (prev?._hadComments && reusedCount > 0) {
+    const fresh = new Set(pages);
+    for (const pr of prevPages) {
+      if (!fresh.has(pr)) continue;
+      for (const hl of Array.from(pr.el.querySelectorAll(".dxw-comment-hl"))) hl.remove();
+      for (const el of Array.from(pr.el.querySelectorAll<HTMLElement>("[data-dxw-comment]"))) {
+        delete el.dataset.dxwComment;
+      }
+    }
+  }
+
   const bindings = pages.flatMap((p) => p.bindings);
-  if (options.comments !== false && doc.comments.length > 0) {
+  const drawComments = options.comments !== false && doc.comments.length > 0;
+  if (drawComments) {
     renderComments(doc, root, bindings, zoom, options.onDeleteComment, options.onReplyComment);
   }
 
@@ -394,6 +413,7 @@ export function renderToDom(
     drawings: pages.flatMap((p) => p.drawings),
     wordarts: pages.flatMap((p) => p.wordarts),
     _pages: pages,
+    _hadComments: drawComments,
     destroy: () => {
       for (const pr of pages) for (const u of pr.urls) URL.revokeObjectURL(u);
       root.remove();
