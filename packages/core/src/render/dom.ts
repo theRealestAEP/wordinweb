@@ -1220,24 +1220,27 @@ function warpBaseline(warp: string, W: number, H: number): WarpGeo {
     }
     case "textWave1":
     case "textWave2": {
-      // Text fills the box on one sine period tilted down to the right (Word's
-      // centreline slopes ~0.34·H → 0.55·H across the box with a wave).
-      // Word's WAVE ONE baseline slopes gently down to the right with one
-      // shallow trough (measured centreline 0.34·H → dip 0.60·H → 0.52·H).
-      const fontPx = H * 0.42;
+      // Word's WAVE ONE fills the box (ink ~93%×90%, centred). One symmetric
+      // sine period centred on the mid-line: crest left, trough right, big
+      // amplitude so the large glyphs sweep from near the top to near the
+      // bottom (measured centroid 0.28·H crest → 0.76·H trough).
+      const fontPx = H * 0.44;
       const d =
-        `M ${mx} ${H * 0.36} ` +
-        `C ${W * 0.28} ${H * 0.36} ${W * 0.34} ${H * 0.62} ${W * 0.6} ${H * 0.62} ` +
-        `C ${W * 0.82} ${H * 0.62} ${W * 0.86} ${H * 0.5} ${W - mx} ${H * 0.5}`;
-      return { d, fontPx, pathLen: bw * 1.08, startFrac: 0, anchor: "start", fill: true };
+        `M ${mx} ${H * 0.5} ` +
+        `C ${W * 0.16} ${H * 0.33} ${W * 0.34} ${H * 0.33} ${W * 0.5} ${H * 0.5} ` +
+        `C ${W * 0.66} ${H * 0.67} ${W * 0.84} ${H * 0.67} ${W - mx} ${H * 0.5}`;
+      return { d, fontPx, pathLen: bw * 1.06, startFrac: 0, anchor: "start", fill: true };
     }
     case "textChevron": {
-      // Gentle downward chevron filling the box (ends high, middle low).
-      const fontPx = H * 0.46;
-      const yTop = H * 0.34;
-      const yBot = H * 0.66;
-      const d = `M ${mx} ${yTop} L ${W / 2} ${yBot} L ${W - mx} ${yTop}`;
-      return { d, fontPx, pathLen: 2 * Math.hypot(bw / 2, yBot - yTop), startFrac: 0, anchor: "start", fill: true };
+      // Word's CHEVRON is a symmetric downward valley (∨) filling the box, its
+      // apex ROUNDED — a quadratic, not two straight legs, so no glyph straddles
+      // a sharp vertex (the stray-letter artifact). Ends high, middle low.
+      const fontPx = H * 0.5;
+      const yEnds = H * 0.26;
+      const yCtrl = H * 1.18; // quadratic control → midpoint baseline ≈ 0.72·H
+      const d = `M ${mx} ${yEnds} Q ${W / 2} ${yCtrl} ${W - mx} ${yEnds}`;
+      const legs = 2 * Math.hypot(bw / 2, (yEnds + yCtrl) / 2 - yEnds);
+      return { d, fontPx, pathLen: (bw + legs) / 2, startFrac: 0, anchor: "start", fill: true };
     }
     case "textChevronInverted": {
       const fontPx = H * 0.46;
@@ -1251,11 +1254,18 @@ function warpBaseline(warp: string, W: number, H: number): WarpGeo {
     case "textButton":
     case "textButtonPour":
     default: {
-      // Text poured clockwise from the top of a circle inscribed in the box.
-      const r = Math.min(W, H) / 2 - Math.min(W, H) * 0.08;
+      // Text poured clockwise around a circle inscribed in the box. The
+      // baseline radius leaves room for the OUTWARD-pointing glyphs so the ring
+      // stays inside the box (Word's is a neat centred ring, not an overflowing
+      // one). The path STARTS at ~10 o'clock (−60° from top) so the string's
+      // first word rides centred across the top arc.
+      const r = Math.min(W, H) * 0.3;
       const cx = W / 2;
       const cy = H / 2;
-      const d = `M ${cx} ${cy - r} A ${r} ${r} 0 1 1 ${cx - 0.01} ${cy - r} Z`;
+      const a = (-60 * Math.PI) / 180;
+      const sx = cx + r * Math.sin(a);
+      const sy = cy - r * Math.cos(a);
+      const d = `M ${sx.toFixed(2)} ${sy.toFixed(2)} A ${r} ${r} 0 1 1 ${(sx - 0.01).toFixed(2)} ${sy.toFixed(2)} Z`;
       return { d, fontPx: 0, pathLen: 2 * Math.PI * r, startFrac: 0, anchor: "start", fill: false, pour: true };
     }
   }
@@ -1305,7 +1315,13 @@ function renderWarpText(item: WarpTextItem): HTMLElement {
     } catch {
       /* canvas unavailable (SSR): keep the estimate */
     }
-    fontPx = Math.max(6, Math.min(H * 0.22, (geo.pathLen * 0.82) / perPx));
+    // Size so the string wraps ~80% of the ring (CIRCLE across the top, POUR
+    // round the bottom), but never so large that the OUTWARD glyphs escape the
+    // box. Measured: glyphs reach ~0.6·fontPx beyond the baseline radius, so
+    // grow the font only until r + 0.6·font reaches the box edge.
+    const r = Math.min(W, H) * 0.3;
+    const fitCap = (Math.min(W, H) * 0.49 - r) / 0.92;
+    fontPx = Math.max(6, Math.min(fitCap, (geo.pathLen * 0.8) / perPx));
   }
 
   const id = `dxw-warp-${warpPathSeq++}`;
