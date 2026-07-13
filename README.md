@@ -77,10 +77,33 @@ footnotes, custom XML, embedded fonts survive edits unscathed).
 Supported today: bold, italic, underline, strike, font size, font family,
 text color, highlight — over any selection, including partial runs.
 
+## Rendering parity
+
+Fidelity is measured against **desktop Microsoft Word** itself. Every fixture is
+a real `.docx`: Word exports it to PDF (the ground truth), DocxInWeb renders the
+same file in the browser, and both are rasterized and compared **page-by-page**.
+The headline metric is *structural severity* — the fraction of ink with no
+counterpart after a single global page alignment, so antialiasing noise and
+sub-pixel line shifts don't count. Pages are grouped into capability areas
+(general word processing, complex tables, math, other languages, formatting,
+graphics, real-world documents) each with its own subscore, and a **Word** tab
+holds the parity target while a **LibreOffice** tab tracks deferred references.
+The remaining irreducible floor is pure font-rasterization difference — Chrome
+and Word antialias glyphs differently.
+
+```bash
+node scripts/parity-parallel.mjs            # full run → parity/out/results.json
+DXW_PARITY_FAST=1 node scripts/parity-parallel.mjs   # skip slow appearance passes
+node scripts/parity-render-report.mjs       # rebuild parity/out/report.html + report.png
+```
+
+See [`docs/EVALS.md`](docs/EVALS.md) for the full methodology.
+
 ## Docs
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the parse → layout → render pipeline fits together
 - [`docs/DISCOVERIES.md`](docs/DISCOVERIES.md) — ledger of non-obvious Word behaviors we measured (justify pack-vs-break rule, tcW/grid autofit semantics, retina hairline antialiasing, canvas ligature measurement, …) and the probe methodology that established them
+- [`docs/EVALS.md`](docs/EVALS.md) — the rendering parity eval: what it measures, the category taxonomy, and how to run it
 
 ## Roadmap
 
