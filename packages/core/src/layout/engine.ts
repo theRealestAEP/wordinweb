@@ -2127,16 +2127,38 @@ class Engine {
         break;
     }
     const laid = this.layoutFrame([para], contentW, this.fieldCtx(), { x: ox, y: oy });
-    for (const it of laid.items) {
-      offsetItem(it, ox, oy);
-      this.cur.items.push(it);
-    }
     const height =
       fr.hRule === "exact" && fr.h !== undefined
         ? fr.h
         : fr.hRule === "atLeast" && fr.h !== undefined
           ? Math.max(fr.h, laid.height)
           : laid.height;
+    // Word paints an exact/atLeast frame's paragraph box to the FRAME's height,
+    // not the content height: probe2-dropcaps-frames' pull-quote (h=1000tw
+    // exact, two lines of text) fills and rules the whole 50pt box, leaving
+    // empty shaded space under the text. Stretch the paragraph decorations by
+    // the surplus: the full-width shading rect grows, the bottom rule moves
+    // down, and the side rules extend. Content items are untouched.
+    const surplus = height - laid.height;
+    if (surplus > 0.5) {
+      for (const it of laid.items) {
+        if (it.kind === "rect" && it.width >= contentW - 4) {
+          it.height += surplus;
+        } else if (it.kind === "edge") {
+          const horizontal = Math.abs(it.y1 - it.y2) < 0.01;
+          if (horizontal && it.y1 > laid.height / 2 && Math.abs(it.x2 - it.x1) >= contentW - 8) {
+            it.y1 += surplus;
+            it.y2 += surplus;
+          } else if (!horizontal && Math.abs(it.x1 - it.x2) < 0.01 && it.y2 - it.y1 >= laid.height * 0.5) {
+            it.y2 += surplus;
+          }
+        }
+      }
+    }
+    for (const it of laid.items) {
+      offsetItem(it, ox, oy);
+      this.cur.items.push(it);
+    }
     // wrap=around/auto/tight/through -> body wraps both sides (square);
     // notBeside -> body clears the frame vertically (topAndBottom); none -> no float.
     if (fr.wrap !== "none") {

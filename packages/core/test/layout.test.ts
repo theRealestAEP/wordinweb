@@ -811,6 +811,56 @@ describe("layout engine", () => {
     expect(render(` w:hSpace="240"`)).toBeCloseTo(marginLeft + frameWidthPx + 16, 0);
   });
 
+  it("paints an exact-height frame's paragraph box to the frame height, not the content height", () => {
+    // probe2-dropcaps-frames p1: the pull-quote frame (w:h=1000 w:hRule=exact,
+    // two lines of text, pBdr box + shd fill) paints its fill and rules across
+    // the whole 1000-twip frame, leaving empty shaded space below the text.
+    // Web previously boxed only the laid content (~2 lines), losing the bottom
+    // third of the frame's ink.
+    const frameHPx = 1000 / 15; // 66.67px
+    const frame =
+      `<w:p><w:pPr>` +
+      `<w:framePr w:w="3000" w:h="1000" w:hRule="exact" w:wrap="around"` +
+      ` w:vAnchor="paragraph" w:hAnchor="margin" w:x="0" w:y="0"/>` +
+      `<w:pBdr>` +
+      `<w:top w:val="single" w:sz="6" w:space="4" w:color="BF8F00"/>` +
+      `<w:left w:val="single" w:sz="6" w:space="4" w:color="BF8F00"/>` +
+      `<w:bottom w:val="single" w:sz="6" w:space="4" w:color="BF8F00"/>` +
+      `<w:right w:val="single" w:sz="6" w:space="4" w:color="BF8F00"/>` +
+      `</w:pBdr>` +
+      `<w:shd w:val="clear" w:color="auto" w:fill="FFF2CC"/>` +
+      `<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>` +
+      `</w:pPr><w:r><w:t>Boxed frame</w:t></w:r></w:p>`;
+    const body = `<w:p><w:r><w:t>Body paragraph after the frame.</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(frame + body + section),
+    });
+    const items = result.pages[0].items;
+    const fill = items.find((i) => i.kind === "rect" && i.fill?.toUpperCase().includes("FFF2CC"));
+    expect(fill?.kind).toBe("rect");
+    if (fill?.kind !== "rect") return;
+    // The shading (border-box interior) grows far beyond one line (~19px):
+    // frame height minus the two border pads (space 4pt + rule ~= 6.33px each).
+    expect(fill.height).toBeGreaterThan(frameHPx - 16);
+    // Border-to-border the painted box spans the full frame height: the bottom
+    // rule sits ~frameH below the top rule, and the side rules span the fill.
+    const edges = items.filter((i) => i.kind === "edge" && i.border?.color?.toUpperCase().includes("BF8F00"));
+    expect(edges.length).toBe(4);
+    const rules = edges.filter((e) => e.kind === "edge" && Math.abs(e.y1 - e.y2) < 0.01);
+    expect(rules.length).toBe(2);
+    if (rules[0]?.kind === "edge" && rules[1]?.kind === "edge") {
+      expect(Math.abs(Math.abs(rules[1].y1 - rules[0].y1) - frameHPx)).toBeLessThan(3);
+    }
+    const sides = edges.filter((e) => e.kind === "edge" && Math.abs(e.x1 - e.x2) < 0.01);
+    expect(sides.length).toBe(2);
+    for (const s of sides) {
+      if (s.kind === "edge") expect(s.y2 - s.y1).toBeGreaterThan(frameHPx - 16);
+    }
+  });
+
   it("applies the final full-width banner's spacing-after before column body text", () => {
     const render = (authorsAfter: number) => {
       const frame = `<w:framePr w:w="9360" w:wrap="notBeside" w:hAnchor="text" w:vAnchor="text" w:xAlign="center"/>`;
