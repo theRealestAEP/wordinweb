@@ -4495,6 +4495,22 @@ class Engine {
           }
           this.textboxChains.set(shape.chainId, { blocks: storyBlocks, consumedY: cut });
         }
+        // A front shape with a visible fill gets a hit target over its box so a
+        // click on the fill selects the shape instead of dropping a caret in the
+        // body text behind it. Emitted BEFORE the text items so the shape's own
+        // text spans (added below) win equal-z hit-testing and stay editable.
+        if (front && shape.srcDrawing && (shape.fill || shape.geom) && inner.items.some((it) => it.kind === "text")) {
+          page.items.push({
+            kind: "drawingHit",
+            x: ox - fx,
+            y: oy - fy,
+            width,
+            height,
+            src: shape.srcDrawing,
+            anchored: true,
+            belowText: true,
+          });
+        }
         for (const it of inner.items) {
           if (it.kind === "text") {
             // Chained boxes hide whole lines outside their own [skipTopY,

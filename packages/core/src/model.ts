@@ -388,6 +388,10 @@ export interface ShapeTextbox {
   chainId?: string;
   /** Position in the linked chain (0 = the content box). */
   chainSeq?: number;
+  /** Source w:drawing element, attached at parse time so the shape's fill can
+   * be an interactive hit target (select the shape instead of the body text
+   * behind it). */
+  srcDrawing?: XmlElement;
 }
 
 /** WordArt (VML v:textpath, e.g. a "CONFIDENTIAL" watermark): text scaled to

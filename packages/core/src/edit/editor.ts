@@ -1496,6 +1496,18 @@ export class DocxEditor {
       const handle = this.host.getHandle();
       const binding = handle?.drawings.find((b) => b.el === target);
       if (!binding) return false;
+      // A shape-fill hit (under the shape's text) selects the shape only: a
+      // click on the fill selects it, a click on its text glyphs falls through
+      // to edit the text, and it never drag-moves. Select on mousedown (not a
+      // mouseup listener) so the suppression flag is consumed by THIS click's
+      // mouseup, leaving the next click free to deselect / enter text editing.
+      if (binding.item.belowText) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.suppressNextMouseUp = true;
+        this.selectImage(target, binding.item.src, undefined, "drawing");
+        return true;
+      }
       e.preventDefault();
       e.stopPropagation();
       const startX = e.clientX;
