@@ -135,6 +135,12 @@ export interface NumberingRef {
 export interface ParaProps {
   styleId?: string;
   alignment?: Alignment;
+  /** The exact OOXML w:jc value when it is a "justify" flavor whose behavior
+   * differs from plain "both": `distribute` also stretches the LAST line, and
+   * the Arabic `*Kashida` levels elongate glyphs (kashida) so lines pack fewer
+   * words and — at medium/high — wrap to more lines. Absent for plain "both".
+   * `alignment` stays "justify" for all of these. */
+  justifyKind?: "distribute" | "lowKashida" | "mediumKashida" | "highKashida";
   /** w:bidi — right-to-left paragraph: lines assemble RTL and default
    * alignment flips to the right edge. */
   bidi?: boolean;
