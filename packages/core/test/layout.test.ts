@@ -707,6 +707,42 @@ describe("layout engine", () => {
     expect(bodyText.x).toBeLessThan(208);
   });
 
+  it("hangs a dropCap=margin letter into the margin with full-width body text", () => {
+    // probe2-dropcaps-frames p1: Word renders w:dropCap="margin" with the big
+    // letter OUT in the left margin (advance edge at the text margin) and the
+    // following paragraph flowing at the FULL column width — unlike "drop",
+    // which sinks the letter and indents the text around it.
+    const marginCap =
+      `<w:p><w:pPr>` +
+      `<w:framePr w:dropCap="margin" w:lines="3" w:wrap="around" w:vAnchor="text" w:hAnchor="page"/>` +
+      `<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>` +
+      `<w:rPr><w:sz w:val="84"/></w:rPr></w:pPr>` +
+      `<w:r><w:rPr><w:sz w:val="84"/></w:rPr><w:t>M</w:t></w:r></w:p>`;
+    const body =
+      `<w:p><w:r><w:t xml:space="preserve">argin drop caps hang out into the left margin instead of sinking</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(marginCap + body + section),
+    });
+    const page = result.pages[0];
+    const cap = page.items.find((i) => i.kind === "text" && i.text === "M");
+    const bodyText = page.items.find(
+      (i) => i.kind === "text" && i.text.includes("argin"),
+    );
+    expect(cap?.kind).toBe("text");
+    expect(bodyText?.kind).toBe("text");
+    if (cap?.kind !== "text" || bodyText?.kind !== "text") return;
+    const marginLeft = 1440 / 15; // 96px text margin (1440 twips = 1in = 96px)
+    // The letter hangs into the margin: its left edge is LEFT of the text
+    // margin, and its advance right edge sits AT the text margin.
+    expect(cap.x).toBeLessThan(marginLeft - 1);
+    expect(cap.x + cap.width).toBeCloseTo(marginLeft, 0);
+    // Body text is NOT indented around the letter — it starts at the margin.
+    expect(bodyText.x).toBeCloseTo(marginLeft, 0);
+  });
+
   it("applies the final full-width banner's spacing-after before column body text", () => {
     const render = (authorsAfter: number) => {
       const frame = `<w:framePr w:w="9360" w:wrap="notBeside" w:hAnchor="text" w:vAnchor="text" w:xAlign="center"/>`;
