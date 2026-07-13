@@ -861,6 +861,38 @@ describe("layout engine", () => {
     }
   });
 
+  it("insets a bordered run (w:bdr) by rule width + space at segment and line starts", () => {
+    // probe2-run-borders p1: Word reserves the painted rule width + w:space
+    // horizontally at each bordered-segment boundary and re-insets EVERY
+    // wrapped line of the run (each visual line starts 1.00pt past the margin
+    // for sz=8). Skipping the inset let one extra word fit per line, shifting
+    // every subsequent wrap point.
+    const bordered =
+      `<w:p><w:r><w:rPr><w:bdr w:val="single" w:sz="8" w:space="0" w:color="7030A0"/></w:rPr>` +
+      `<w:t xml:space="preserve">This is a single bordered run whose text is long enough that it must wrap across two or three lines and every line re-insets from the margin by the border pad.</w:t></w:r></w:p>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(bordered + section),
+    });
+    const items = result.pages[0].items.filter((i) => i.kind === "text" && i.text.trim().length > 0);
+    const marginLeft = 1440 / 15; // 96px
+    const padPx = (8 / 8) * (96 / 72); // sz=8 -> 1pt rule, space=0 -> 1.333px
+    // Rows by y: every line's first glyph is inset by the pad, not at the margin.
+    const rows = new Map<number, number>();
+    for (const it of items) {
+      if (it.kind !== "text") continue;
+      const y = Math.round(it.baseline);
+      rows.set(y, Math.min(rows.get(y) ?? Infinity, it.x));
+    }
+    const starts = [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, x]) => x);
+    expect(starts.length).toBeGreaterThan(1); // it wraps
+    for (const s of starts) {
+      expect(s).toBeCloseTo(marginLeft + padPx, 0);
+    }
+  });
+
   it("applies the final full-width banner's spacing-after before column body text", () => {
     const render = (authorsAfter: number) => {
       const frame = `<w:framePr w:w="9360" w:wrap="notBeside" w:hAnchor="text" w:vAnchor="text" w:xAlign="center"/>`;
