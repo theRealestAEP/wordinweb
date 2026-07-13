@@ -329,34 +329,28 @@ export function renderToDom(
   const gap = options.pageGap ?? 24;
 
   ensureStylesheet();
-  const root = document.createElement("div");
-  root.className = "dxw-pages";
-  root.style.display = "flex";
-  root.style.flexDirection = "column";
-  root.style.alignItems = "center";
-  root.style.gap = `${gap}px`;
-  root.style.padding = `${gap}px 0`;
 
   // Incremental reuse: adopt the DOM of pages whose layout is unchanged. A
-  // typical keystroke only touches one page, so the common prefix and suffix
-  // of pages are byte-identical and their elements are moved into the new root
-  // instead of being rebuilt. Balloon cards hang off the old root and die with
-  // it; highlight rects live inside page surfaces and are swept from adopted
-  // pages below before the overlay re-runs.
+  // typical keystroke only touches one page, so the common prefix [0,lo) and
+  // suffix (hiNew,end] of pages are byte-identical; only [lo,hiNew] is rebuilt.
+  // Balloon cards hang off the old root and die with it; highlight rects live
+  // inside page surfaces and are swept from adopted pages below before the
+  // overlay re-runs.
   const prevPages = prev?._pages ?? [];
   const canReuse = prevPages.length > 0;
   const pages: PageRender[] = new Array(layout.pages.length);
   let reusedCount = 0;
+  // Changed-page window; the prefix/suffix outside it reuse prev's elements.
+  let lo = 0;
+  let hiNew = layout.pages.length - 1;
+  let hiOld = prevPages.length - 1;
   if (canReuse) {
-    let lo = 0;
     while (lo < layout.pages.length && lo < prevPages.length && pageEq(layout.pages[lo], prevPages[lo].page)) {
       const pr = prevPages[lo];
       pr.page = layout.pages[lo];
       pages[lo] = pr;
       lo++;
     }
-    let hiNew = layout.pages.length - 1;
-    let hiOld = prevPages.length - 1;
     while (hiNew >= lo && hiOld >= lo && pageEq(layout.pages[hiNew], prevPages[hiOld].page)) {
       const pr = prevPages[hiOld];
       pr.page = layout.pages[hiNew];
@@ -370,8 +364,35 @@ export function renderToDom(
     for (let i = 0; i < layout.pages.length; i++) pages[i] = renderPageRecord(doc, layout.pages[i], zoom, options);
   }
 
-  for (const pr of pages) root.appendChild(pr.el);
-  container.appendChild(root);
+  // Mutate the previous root in place when we adopted its pages: splice out the
+  // stale changed-window elements and splice in the rebuilt ones, leaving the
+  // untouched prefix/suffix where they are. The old code moved EVERY page
+  // element into a fresh root and re-appended it to the container, which forces
+  // the browser to re-lay out the whole document — on a long doc that reflow
+  // dominates the keystroke even when a single page changed. Fall back to a
+  // fresh root on first render or if prev's root isn't mounted where expected.
+  const inPlace = canReuse && prev !== undefined && prev.root.parentNode === container;
+  let root: HTMLElement;
+  if (inPlace) {
+    root = prev!.root;
+    const anchor = prevPages[hiOld + 1]?.el ?? null;
+    for (let i = lo; i <= hiOld; i++) prevPages[i].el.remove();
+    if (hiNew >= lo) {
+      const frag = document.createDocumentFragment();
+      for (let i = lo; i <= hiNew; i++) frag.appendChild(pages[i].el);
+      root.insertBefore(frag, anchor);
+    }
+  } else {
+    root = document.createElement("div");
+    root.className = "dxw-pages";
+    root.style.display = "flex";
+    root.style.flexDirection = "column";
+    root.style.alignItems = "center";
+    root.style.gap = `${gap}px`;
+    root.style.padding = `${gap}px 0`;
+    for (const pr of pages) root.appendChild(pr.el);
+    container.appendChild(root);
+  }
 
   // Adopted pages carry the previous render's highlight rects and span tags —
   // strip them so the overlay pass below starts clean (and so nothing stale
@@ -388,6 +409,15 @@ export function renderToDom(
     }
   }
 
+  // Comment balloon cards attach directly to the root (highlights live inside
+  // page surfaces and are swept above). When we reuse the previous root in
+  // place they survive from the prior render, so clear them before redrawing —
+  // the old code relied on the whole root being thrown away each render. A
+  // fresh root has none, so this only runs on the in-place path.
+  if (inPlace) {
+    for (const card of Array.from(root.querySelectorAll(".dxw-comment-card"))) card.remove();
+  }
+
   const bindings = pages.flatMap((p) => p.bindings);
   const drawComments = options.comments !== false && doc.comments.length > 0;
   if (drawComments) {
@@ -400,7 +430,9 @@ export function renderToDom(
   for (const pr of prevPages) {
     if (!kept.has(pr)) for (const u of pr.urls) URL.revokeObjectURL(u);
   }
-  prev?.root.remove();
+  // In-place renders keep prev's root as our own; only tear it down when we
+  // built a fresh one.
+  if (!inPlace) prev?.root.remove();
 
   const perf = (globalThis as { __dxwPerf?: { lastReused?: number } }).__dxwPerf;
   if (perf) perf.lastReused = reusedCount;
