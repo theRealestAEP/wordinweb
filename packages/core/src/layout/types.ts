@@ -26,6 +26,11 @@ export interface FontSpec {
    * line-pitch profile stays keyed by the macOS substitute face while the real
    * Windows glyphs (MS Mincho, Microsoft JhengHei, …) paint when available. */
   paintFamily?: string;
+  /** PAINT-only vertical nudge (CSS px, positive = down) applied to the glyphs
+   * without touching layout metrics or advances. Used when a substitute face
+   * (Latha for Word's Tamil Vijaya) sits on a different baseline than the face
+   * Word rasterized; the shift lands the glyphs on Word's baseline. */
+  paintDY?: number;
 }
 
 export interface PathItem {

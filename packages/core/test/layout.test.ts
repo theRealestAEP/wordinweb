@@ -37,6 +37,38 @@ describe("layout engine", () => {
     expect(pageText(result, 0)).toContain("Hello");
   });
 
+  it("routes Nirmala UI Indic runs to Mangal/Latha and shrinks Tamil to Vijaya's scale", () => {
+    // Word substitutes Nirmala UI per script on macOS export: Devanagari ->
+    // Mangal (glyph scale matches, no size change), Tamil -> Vijaya. We fall
+    // back to Latha for Tamil, whose glyphs run ~1.37x larger than Vijaya, so
+    // the Tamil clusters paint at TAMIL_GLYPH_SCALE of the nominal size with a
+    // paint-only baseline nudge — while the line-metrics font stays nominal so
+    // the pitch is untouched (probe3-indic p1: severity 5.76 -> 1.30).
+    const deva =
+      `<w:p><w:r><w:rPr><w:rFonts w:cs="Nirmala UI"/></w:rPr>` +
+      `<w:t xml:space="preserve">नमस्ते</w:t></w:r></w:p>`;
+    const tamil =
+      `<w:p><w:r><w:rPr><w:rFonts w:cs="Nirmala UI"/></w:rPr>` +
+      `<w:t xml:space="preserve">வணக்கம்</w:t></w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(deva + tamil) });
+    const texts = result.pages[0].items.filter(
+      (i): i is Extract<typeof i, { kind: "text" }> => i.kind === "text",
+    );
+    const devaItem = texts.find((i) => /[ऀ-ॿ]/.test(i.text));
+    const tamilItem = texts.find((i) => /[஀-௿]/.test(i.text));
+    expect(devaItem?.font.family).toBe("Mangal");
+    expect(tamilItem?.font.family).toBe("Latha");
+    // Devanagari keeps the nominal size; Tamil is scaled down and carries a
+    // downward paint nudge.
+    const nominal = devaItem!.font.size;
+    expect(tamilItem!.font.size).toBeCloseTo(nominal * 0.735, 3);
+    expect(tamilItem!.font.paintDY).toBeGreaterThan(0);
+    expect(devaItem!.font.paintDY ?? 0).toBe(0);
+    // The Tamil line box is NOT shrunk with the glyphs: its strut/metrics font
+    // stays at the nominal size so the pitch matches Word's Vijaya.
+    expect(tamilItem!.strutFont?.size).toBeCloseTo(nominal, 3);
+  });
+
   it("run spaces give the justify packer no compression budget (typed spaces re-wrap the line)", () => {
     // Typing spaces mid-line in a justified paragraph must eventually push
     // the following words to a wrap. Pre-fix, every typed space ADDED

@@ -494,6 +494,19 @@ const EA_FAMILY_RE =
 const JUSTIFY_MAX_COMPRESS = 0.25;
 const JUSTIFY_STRETCH_FACTOR = 0.5;
 
+// Tamil (Nirmala UI -> Latha fallback): Latha's glyph outlines are ~1.37x
+// larger per em than Word's Vijaya substitute, so paint Latha's Tamil clusters
+// at this fraction of the nominal point size to recover Vijaya's advances and
+// ink weight. The line box stays nominal (see pushStyled). Calibrated on
+// probe3-indic p1 by matching Word's rendered Tamil word widths.
+const TAMIL_GLYPH_SCALE = 0.735;
+// Latha's baseline sits ~0.136em higher in the em box than Word's Vijaya
+// substitute, so the shrunk Tamil glyphs paint ~2px (@11pt) above Word's
+// baseline. Nudge them down by this fraction of the nominal point size. Paint
+// only (see FontSpec.paintDY) — pitch and advances are untouched. Calibrated on
+// probe3-indic p1 (lineShift 2.89 -> 0.17 at 2px@11pt).
+const TAMIL_BASELINE_DY_EM = 0.136;
+
 // Arabic kashida justification (w:jc lowKashida/mediumKashida/highKashida).
 // Word justifies by elongating the baseline joins (kashida/tatweel) rather than
 // stretching inter-word spaces. That elongation widens the packed text, so a
@@ -2689,8 +2702,36 @@ function buildAtoms(
     const hasTamil = /[஀-௿]/.test(text);
     const indicFace = hasDeva && !hasTamil ? "Mangal" : hasTamil && !hasDeva ? "Latha" : null;
     if (indicFace && font.family.toLowerCase() !== indicFace.toLowerCase()) {
-      const indicFont = { ...font, family: indicFace };
-      const indicMetrics = metricsFont ? { ...metricsFont, family: indicFace } : metricsFont;
+      // Word substitutes Nirmala UI per script on macOS PDF export: Devanagari
+      // -> Mangal (whose glyph scale matches, so no size change), Tamil ->
+      // Vijaya. We only have Latha for Tamil, and Latha's glyphs run ~1.37x
+      // LARGER than Vijaya at the same point size (probe3-indic p1: Word renders
+      // "வணக்கம்" 54.0px wide, Latha@11pt paints 76.4px). Left unscaled the
+      // Tamil ink is ~41% too heavy (appearanceWeightRatio 1.41) and each line's
+      // glyphs overflow their box ~2x, so the painted ink centroids drift
+      // vertically (lineShift 5.76). Shrink the Latha GLYPHS to Vijaya's advance
+      // while keeping the line box nominal: the paint/width font takes the scale
+      // but metricsFont stays at the nominal size so the line pitch (~20px, which
+      // already matches Word's Vijaya pitch) is untouched.
+      const indicScale = indicFace === "Latha" ? TAMIL_GLYPH_SCALE : 1;
+      const indicFont =
+        indicScale === 1
+          ? { ...font, family: indicFace }
+          : {
+              ...font,
+              family: indicFace,
+              size: font.size * indicScale,
+              // Latha's baseline rides ~TAMIL_BASELINE_DY_EM higher in the em
+              // than Word's Vijaya; nudge the painted glyphs down onto Word's
+              // baseline (paint-only, no effect on pitch or advances).
+              paintDY: font.size * TAMIL_BASELINE_DY_EM,
+            };
+      const indicMetrics =
+        indicScale !== 1
+          ? { ...(metricsFont ?? font), family: indicFace, size: font.size }
+          : metricsFont
+            ? { ...metricsFont, family: indicFace }
+            : metricsFont;
       // Word resolves fonts per CHARACTER CLASS: the ASCII space (U+0020)
       // belongs to w:ascii (here Calibri), never the complex-script face. Mangal's
       // space advance is 0.5em (5.5px@11) against Calibri's 0.226em (2.49px), so
