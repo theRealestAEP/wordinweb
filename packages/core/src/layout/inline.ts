@@ -3229,11 +3229,60 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       return cachedResult || "";
     }
     case "DATE":
-    case "TIME":
+    case "TIME": {
+      // Word RE-EVALUATES DATE/TIME on open; the docx cache holds the moment
+      // the file was authored and goes stale immediately. Render from the
+      // live clock (the parity harness freezes it to the reference PDF's
+      // creation instant, so both sides evaluate the same moment).
+      const picture = /\\@\s+"([^"]*)"/.exec(instr)?.[1];
+      return formatDatePicture(new Date(), picture ?? (keyword === "TIME" ? "h:mm am/pm" : "M/d/yyyy"));
+    }
     case "CREATEDATE":
     case "SAVEDATE":
+      // These reference stored document moments — the cache IS the value.
       return cachedResult || "";
     default:
       return cachedResult || "";
   }
+}
+
+const DP_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const DP_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+/** Word date-picture formatter (\@ switch). Case distinguishes month (M) from
+ * minute (m); the AM/PM designator renders UPPERCASE whatever the token's own
+ * case (fixture token "am/pm", Word's PDF paints "PM"). */
+function formatDatePicture(d: Date, picture: string): string {
+  const h24 = d.getHours();
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hasAmPm = /am\/pm/i.test(picture);
+  // No /i flag: case is semantic (M=month, m=minute; H=24h, h=12h).
+  return picture.replace(
+    /'[^']*'|yyyy|yy|MMMM|MMM|MM|M|dddd|ddd|dd|d|HH|H|hh|h|mm|m|ss|s|am\/pm|AM\/PM|Am\/Pm/g,
+    (tok) => {
+      if (tok.startsWith("'")) return tok.slice(1, -1); // quoted literal
+      switch (tok) {
+        case "yyyy": return String(d.getFullYear());
+        case "yy": return pad(d.getFullYear() % 100);
+        case "MMMM": return DP_MONTHS[d.getMonth()];
+        case "MMM": return DP_MONTHS[d.getMonth()].slice(0, 3);
+        case "MM": return pad(d.getMonth() + 1);
+        case "M": return String(d.getMonth() + 1);
+        case "dddd": return DP_DAYS[d.getDay()];
+        case "ddd": return DP_DAYS[d.getDay()].slice(0, 3);
+        case "dd": return pad(d.getDate());
+        case "d": return String(d.getDate());
+        case "HH": return pad(h24);
+        case "H": return String(h24);
+        case "hh": return pad(hasAmPm ? h12 : h24);
+        case "h": return String(hasAmPm ? h12 : h24);
+        case "mm": return pad(d.getMinutes());
+        case "m": return String(d.getMinutes());
+        case "ss": return pad(d.getSeconds());
+        case "s": return String(d.getSeconds());
+        default: return /^am\/pm$/i.test(tok) ? (h24 < 12 ? "AM" : "PM") : tok;
+      }
+    },
+  );
 }
