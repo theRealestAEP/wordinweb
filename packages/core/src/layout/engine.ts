@@ -5029,6 +5029,12 @@ class Engine {
       this.emitPageBorders(page);
       page.hfStart = page.items.length;
       const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
+      // Headers/footers share the body's text column, so their left origin
+      // includes the binding gutter (probe3-mirror-book: on a recto page the
+      // gutter sits on the left, so the header starts marginLeft+gutter in, level
+      // with the body). On even mirror pages the gutter is already folded into the
+      // right margin (gutter = 0 here); non-gutter docs are unaffected.
+      const hfOriginX = sp.marginLeft + sp.gutter;
       const fields: FieldContext = {
         pageNumber: () => page.displayNumber,
         totalPages: () => total,
@@ -5041,13 +5047,13 @@ class Engine {
         const seenSnapshot = new Set(this.seenNumIds);
         this.hfMarginVTop = page.bodyTop;
         const { items } = this.layoutFrame(header.blocks, contentWidth, fields, {
-          x: sp.marginLeft,
+          x: hfOriginX,
           y: sp.headerDistance,
         }, false, this.pageFieldFrameOverlay(header));
         this.hfMarginVTop = null;
         this.counters = snapshot;
         this.seenNumIds = seenSnapshot;
-        for (const it of items) offsetItem(it, sp.marginLeft, sp.headerDistance);
+        for (const it of items) offsetItem(it, hfOriginX, sp.headerDistance);
         page.items.push(...items);
       }
       const footer = this.doc.footers.get(page.footerRel ?? "");
@@ -5065,13 +5071,13 @@ class Engine {
         seenSnapshot = new Set(this.seenNumIds);
         this.hfMarginVTop = page.bodyTop;
         const { items } = this.layoutFrame(footer.blocks, contentWidth, fields, {
-          x: sp.marginLeft,
+          x: hfOriginX,
           y: top,
         }, false, overlayPageFrame);
         this.hfMarginVTop = null;
         this.counters = snapshot;
         this.seenNumIds = seenSnapshot;
-        for (const it of items) offsetItem(it, sp.marginLeft, top);
+        for (const it of items) offsetItem(it, hfOriginX, top);
         page.items.push(...items);
       }
     }

@@ -395,6 +395,34 @@ describe("layout engine", () => {
     expect(title.lineTop).toBeCloseTo(144, 3);
   });
 
+  it("offsets a header by the binding gutter so it aligns with the body column", () => {
+    // probe3-mirror-book: a 0.5in gutter shifts the body text column right by the
+    // gutter; the header shares that column, so its left origin is marginLeft +
+    // gutter, not bare marginLeft.
+    const R_NS = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          p("Body") +
+            `<w:sectPr><w:headerReference ${R_NS} w:type="default" r:id="rIdH"/>` +
+            `<w:pgSz w:w="12240" w:h="15840"/>` +
+            `<w:pgMar w:top="1440" w:right="1080" w:bottom="1440" w:left="1080" w:header="720" w:footer="720" w:gutter="720"/></w:sectPr>`,
+        ),
+        "word/_rels/document.xml.rels":
+          `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+          `<Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`,
+        "word/header1.xml":
+          `<?xml version="1.0"?><w:hdr ${W_NS}><w:p><w:r><w:t>HdrText</w:t></w:r></w:p></w:hdr>`,
+      }),
+    );
+    const result = layoutDocument(doc, { measurer });
+    const hdr = result.pages[0].items.find((i) => i.kind === "text" && i.text === "HdrText");
+    expect(hdr?.kind).toBe("text");
+    if (hdr?.kind !== "text") return;
+    // (marginLeft 1080tw + gutter 720tw) = 1800tw = 120px.
+    expect(hdr.x).toBeCloseTo(120, 1);
+  });
+
   it("carries an empty next-page section-break paragraph's spacing-after into the opener (mode 15)", () => {
     // The empty paragraph that carries a next-page section break still owns a
     // spacing-after (docDefaults 160tw = 8pt). Word collapses it against the new
