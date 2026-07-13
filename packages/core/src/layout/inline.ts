@@ -962,6 +962,28 @@ function breakParagraphImpl(
         if (labelEnd > indentLeft) {
           x = nextDefaultTab(labelEnd, doc.defaultTabStop);
         }
+        // A bidi list reorders its spans contiguously (reorderVisual), so the
+        // hanging suffix-tab between the abjad/roman marker and the text must be
+        // materialised as a span or the marker collapses against the text (Word
+        // keeps a gap: probe2-arabic-rtl's "أ- <text>" list).
+        if (bidiPara) {
+          // With w:lvlJc="right" the marker is right-aligned in the hanging
+          // region: its right edge sits at (indentLeft - hanging) and the tab
+          // spans the whole hanging width to the text at indentLeft, so the gap
+          // is measured from the marker's nominal slot start, not its glyph end
+          // (Word's "أ- <text>" keeps a full-hanging gap regardless of marker
+          // width). Left-aligned markers keep the glyph-end measure.
+          const gap = numberingLabel.alignment === "right" ? x - labelX : x - labelEnd;
+          if (gap > 0) {
+            cur.push({
+              x: labelEnd,
+              width: gap,
+              text: "\t",
+              props: numberingLabel.props,
+              font: labelFont,
+            });
+          }
+        }
       }
     } else if (numberingLabel.suffix === "space") {
       x = labelX + labelWidth + measurer.width(" ", labelFont);
@@ -1275,6 +1297,34 @@ function breakParagraphImpl(
         ai--; // re-evaluate the tab from the fresh line's start
         continue;
       }
+      // A bidi (RTL) paragraph with a LEFT tab landing on an EXPLICIT stop that
+      // sits near the right edge cannot honour the stop once the pre-tab text is
+      // placed: the [stop, right-edge] column is narrower than the first word
+      // after the tab. Word moves the tab (and everything after it) to a fresh
+      // line, leaving the pre-tab segment alone, then fills that narrow column
+      // with the wrapping text (probe2-arabic-rtl's "البند الأول <tab> صفحة ١" ->
+      // three flush-left lines). Flushing BEFORE the tab is what keeps the
+      // pre-tab segment flush-left after reorderVisual (a tab left on the line
+      // would push it to the right). Gated to an explicit stop with a
+      // first-word-sized shortfall so ordinary bidi tabs — yiddish's many small
+      // left stops and default-grid trailing tabs — wrap normally instead.
+      if (bidiPara && stop.align === "left" && curLineWidth > 0) {
+        const explicit = (props.tabs ?? []).some(
+          (t) => !t.clear && t.align !== "bar" && Math.abs(t.pos - rawStop.pos) < 0.5,
+        );
+        let wFirst = 0;
+        for (let j = ai + 1; j < atoms.length; j++) {
+          const a = atoms[j];
+          if (a.kind !== "frag") break; // stop at the first space/tab/break
+          wFirst += a.width;
+        }
+        const lineEnd = lineStartX(lineIndex) + availFor(lineIndex);
+        if (explicit && wFirst > 0 && lineEnd - target < wFirst - 0.5) {
+          flush(false, false);
+          ai--; // re-evaluate the tab from the fresh line's start
+          continue;
+        }
+      }
       // An aligned tab POSITIONS its run at the stop: no 2px minimum (the
       // run must end exactly at the stop — a forced 2px push made a TOC
       // number whose stop sits 0.5pt inside the line end overflow and wrap
@@ -1434,6 +1484,16 @@ function breakParagraphImpl(
     // (staging-tblextreme: "12.5" on the 2880tw default stop paints ~1px past
     // the cell's text edge in Word's own render).
     if (!fits && cur.length > 0 && cur[cur.length - 1].text === "\t") {
+      // RTL left-tab column fill: when the tab begins the line (the pre-tab
+      // segment was flushed onto its own line above) and its stop sits near the
+      // right edge, the tabbed text wraps WITHIN the narrow [stop, right-edge]
+      // band, character-breaking like Word rather than overhanging the margin
+      // (probe2-arabic-rtl "صفحة" -> "صفح" | "ة"). Gated to a line-initial tab so
+      // ordinary bidi TOC tabs (title <tab> page number) keep their overhang.
+      if (bidiPara && cur[cur.length - 1].x <= lineStartX(lineIndex) + 0.5) {
+        hardWrapFrag(atom);
+        continue;
+      }
       fits = true;
       packUntilSpace = true;
     }
@@ -2290,6 +2350,125 @@ function finishLine(
 
 // ---------- atom building ----------
 
+type BidiClass =
+  | "L" | "R" | "AL" | "EN" | "AN" | "ES" | "ET" | "CS" | "NSM"
+  | "WS" | "B" | "S" | "ON";
+
+/** Compact UAX#9 bidi class for the characters that appear in RTL documents
+ * (Latin, Arabic, Hebrew, digits, common punctuation). Arabic-script symbols
+ * and punctuation are treated as strong AL so they stay in the RTL run — Word
+ * keeps the Arabic percent sign (U+066A) and comma (U+060C) on the RTL side of
+ * an embedded number rather than folding them into the Latin-digit island. */
+function bidiClass(cp: number): BidiClass {
+  if ((cp >= 0x660 && cp <= 0x669) || (cp >= 0x6f0 && cp <= 0x6f9)) return "AN";
+  if (
+    (cp >= 0x600 && cp <= 0x6ff) ||
+    (cp >= 0x750 && cp <= 0x77f) ||
+    (cp >= 0x8a0 && cp <= 0x8ff) ||
+    (cp >= 0xfb50 && cp <= 0xfdff) ||
+    (cp >= 0xfe70 && cp <= 0xfeff)
+  )
+    return "AL";
+  if ((cp >= 0x590 && cp <= 0x5ff) || (cp >= 0xfb1d && cp <= 0xfb4f)) return "R";
+  if (cp >= 0x30 && cp <= 0x39) return "EN";
+  if (cp === 0x2b || cp === 0x2d) return "ES";
+  if (cp === 0x23 || cp === 0x24 || cp === 0x25 || (cp >= 0xa2 && cp <= 0xa5)) return "ET";
+  if (cp === 0x2c || cp === 0x2e || cp === 0x2f || cp === 0x3a) return "CS";
+  if (cp === 0x20 || cp === 0x09 || cp === 0xa0) return "WS";
+  if (cp === 0x0a || cp === 0x0d || cp === 0x85 || cp === 0x2029) return "B";
+  if (
+    (cp >= 0x41 && cp <= 0x5a) ||
+    (cp >= 0x61 && cp <= 0x7a) ||
+    (cp >= 0xc0 && cp <= 0x24f) ||
+    (cp >= 0x1e00 && cp <= 0x1eff) ||
+    (cp >= 0x2c60 && cp <= 0x2c7f)
+  )
+    return "L";
+  return "ON";
+}
+
+/** Resolve, per character of an RTL run's text (base embedding level 1), whether
+ * that character lands on an odd (RTL) level. Runs the UAX#9 weak (W1-W7) and
+ * neutral (N1-N2) rules, then implicit level assignment I2: at the odd base
+ * level, L/EN/AN take an even (LTR) level while R stays odd. This groups Latin
+ * words and European numbers into LTR islands (e.g. "ISO 8601", "Unicode 15",
+ * "v2.0", "99.9") that reorderVisual then places in RTL visual order. Pure
+ * Arabic/Hebrew resolve to all-true (unchanged from the prior w:rtl behaviour),
+ * and a pure-digit word resolves to all-false, matching the earlier special
+ * case. */
+function resolveBidiRtl(text: string): boolean[] {
+  const n = text.length;
+  const cls: BidiClass[] = new Array(n);
+  for (let i = 0; i < n; i++) cls[i] = bidiClass(text.charCodeAt(i));
+  const sor: BidiClass = "R"; // base level 1 -> start/end of run is R
+  // W1: NSM takes the type of the previous character (sor at run start).
+  for (let i = 0; i < n; i++) if (cls[i] === "NSM") cls[i] = i > 0 ? cls[i - 1] : sor;
+  // W2: EN -> AN when the last strong type is AL.
+  {
+    let strong: BidiClass = sor;
+    for (let i = 0; i < n; i++) {
+      const c = cls[i];
+      if (c === "R" || c === "L" || c === "AL") strong = c;
+      else if (c === "EN" && strong === "AL") cls[i] = "AN";
+    }
+  }
+  // W3: AL -> R.
+  for (let i = 0; i < n; i++) if (cls[i] === "AL") cls[i] = "R";
+  // W4: a single ES between two EN, or a single CS between two numbers of the
+  // same type, joins them.
+  for (let i = 1; i < n - 1; i++) {
+    if (cls[i] === "ES" && cls[i - 1] === "EN" && cls[i + 1] === "EN") cls[i] = "EN";
+    else if (cls[i] === "CS") {
+      if (cls[i - 1] === "EN" && cls[i + 1] === "EN") cls[i] = "EN";
+      else if (cls[i - 1] === "AN" && cls[i + 1] === "AN") cls[i] = "AN";
+    }
+  }
+  // W5: a sequence of ET adjacent to EN becomes EN.
+  for (let i = 0; i < n; i++) {
+    if (cls[i] === "ET") {
+      let j = i;
+      while (j < n && cls[j] === "ET") j++;
+      if ((i > 0 && cls[i - 1] === "EN") || (j < n && cls[j] === "EN"))
+        for (let k = i; k < j; k++) cls[k] = "EN";
+      i = j - 1;
+    }
+  }
+  // W6: remaining separators/terminators become neutral.
+  for (let i = 0; i < n; i++)
+    if (cls[i] === "ES" || cls[i] === "ET" || cls[i] === "CS") cls[i] = "ON";
+  // W7: EN -> L when the last strong type is L.
+  {
+    let strong: BidiClass = sor;
+    for (let i = 0; i < n; i++) {
+      const c = cls[i];
+      if (c === "R" || c === "L") strong = c;
+      else if (c === "EN" && strong === "L") cls[i] = "L";
+    }
+  }
+  // N1/N2: resolve neutral runs. EN and AN count as R for this purpose; an
+  // unresolved neutral takes the embedding direction (R at base level 1).
+  const isNI = (c: BidiClass) => c === "WS" || c === "B" || c === "S" || c === "ON";
+  const dirOf = (c: BidiClass): "L" | "R" => (c === "L" ? "L" : "R");
+  for (let i = 0; i < n; i++) {
+    if (isNI(cls[i])) {
+      let j = i;
+      while (j < n && isNI(cls[j])) j++;
+      const left = i > 0 ? dirOf(cls[i - 1]) : "R";
+      const right = j < n ? dirOf(cls[j]) : "R";
+      const resolved: BidiClass = left === right ? left : "R";
+      for (let k = i; k < j; k++) cls[k] = resolved;
+      i = j - 1;
+    }
+  }
+  // I2 (odd base level): L, EN, AN take an even (LTR) level; R stays odd.
+  const out: boolean[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = cls[i];
+    out[i] = !(c === "L" || c === "EN" || c === "AN");
+  }
+  return out;
+}
+
 function buildAtoms(
   doc: DocxDocument,
   para: Paragraph,
@@ -2300,6 +2479,11 @@ function buildAtoms(
 ): { atoms: Atom[]; anchors: Shape[] } {
   const atoms: Atom[] = [];
   const anchors: Shape[] = [];
+
+  // RTL (w:bidi) paragraph: Latin words and numbers embedded in an RTL run
+  // resolve to an even (LTR) bidi level (UAX#9), so per-atom rtl comes from a
+  // character-level bidi pass over the run text rather than the run's w:rtl.
+  const bidiPara = doc.effectiveParaProps(para).bidi === true;
 
   // Per-glyph kashida elongation (em fraction) for this paragraph's RTL runs.
   const kashidaKind = doc.effectiveParaProps(para).justifyKind;
@@ -2655,6 +2839,11 @@ function buildAtoms(
     metricsFont?: FontSpec,
   ) => {
     const parts = text.split(/( +)/);
+    // In an RTL (w:bidi) run, resolve each character's bidi level so embedded
+    // Latin words and numbers become LTR islands (see resolveBidiRtl). Gated to
+    // RTL runs so LTR paragraphs (the common case) and pure-Arabic/Hebrew runs
+    // are byte-identical to before.
+    const charRtl = bidiPara && props.rtl ? resolveBidiRtl(text) : null;
     let offset = 0;
     // Measure by cumulative prefix differences: atom widths then sum exactly
     // to the whole string's measure. Summing independently measured words +
@@ -2691,15 +2880,31 @@ function buildAtoms(
             width: w,
             src: src ? { ...src, offset: src.offset + i } : undefined,
             metricsFont,
-            rtl: props.rtl,
+            rtl: charRtl ? charRtl[offset + i] : props.rtl,
           });
         }
       } else {
-        // Split the word at word-internal hyphens: Word allows a line break
-        // after a hyphen-minus that sits between two letters ("multi-word").
-        // Emit a frag per segment, keeping the hyphen with its left segment
-        // and marking it breakAfter. Widths stay cumulative-exact.
-        const breaks = hyphenBreaks(part);
+        // Split the word at word-internal hyphens (Word allows a line break
+        // after a hyphen-minus between two letters, "multi-word") AND at bidi
+        // level boundaries (a Latin/number island embedded in an RTL run
+        // resolves to an even/LTR level and must be its own frag so
+        // reorderVisual places it in RTL visual order). Widths stay
+        // cumulative-exact; the hyphen stays with its left segment (breakAfter).
+        // Split the word at word-internal hyphens (Word breaks after a
+        // hyphen-minus between two letters) AND, inside an RTL run, at bidi
+        // level boundaries (a Latin/number island embedded in RTL resolves to
+        // an even/LTR level and must be its own frag so reorderVisual places it
+        // in RTL visual order — probe2-arabic-rtl's "99.9٪"/"ISO 8601").
+        const hyBreaks = hyphenBreaks(part);
+        let breaks = hyBreaks;
+        if (charRtl) {
+          const set = new Set(hyBreaks);
+          for (let i = 1; i < part.length; i++) {
+            if (charRtl[offset + i] !== charRtl[offset + i - 1]) set.add(i);
+          }
+          breaks = [...set].sort((a, b) => a - b);
+        }
+        const hySet = new Set(hyBreaks);
         // A pure-digit word is a European Number regardless of the run's
         // w:rtl flag (UAX#9: EN takes an EVEN embedding level inside an RTL
         // paragraph). Keeping it odd reverses the ORDER of split digit spans
@@ -2707,12 +2912,23 @@ function buildAtoms(
         // p214's TOC painted "101" (runs "1"+"01") as "011".
         const fragRtl = props.rtl && !/^[0-9]+$/.test(part);
         if (breaks.length === 0) {
-          atoms.push({ kind: "frag", text: part, props, font, width: partWidth, href, src, metricsFont, rtl: fragRtl });
+          atoms.push({
+            kind: "frag",
+            text: part,
+            props,
+            font,
+            width: partWidth,
+            href,
+            src,
+            metricsFont,
+            rtl: charRtl ? charRtl[offset] : fragRtl,
+          });
         } else {
           let segStart = 0;
           let segPrevCum = prevCum;
           const bounds = [...breaks, part.length];
           for (const segEnd of bounds) {
+            if (segEnd <= segStart) continue;
             const seg = part.slice(segStart, segEnd);
             const segCum = measurer.width(text.slice(0, offset + segEnd), font, props.letterSpacing);
             const segWidth = Math.max(segCum - segPrevCum, 0);
@@ -2725,8 +2941,9 @@ function buildAtoms(
               href,
               src: src ? { run: src.run, t: src.t, offset: src.offset + segStart } : undefined,
               metricsFont,
-              breakAfter: segEnd < part.length,
-              rtl: props.rtl && !/^[0-9]+$/.test(seg),
+              // Only a hyphen is a line-break opportunity; a bidi split is not.
+              breakAfter: hySet.has(segEnd) ? true : undefined,
+              rtl: charRtl ? charRtl[offset + segStart] : props.rtl && !/^[0-9]+$/.test(seg),
             });
             segPrevCum = segCum;
             segStart = segEnd;
