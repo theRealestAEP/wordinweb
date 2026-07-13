@@ -65,6 +65,88 @@ export interface RenderHandle {
   wordarts: WordArtBinding[];
   /** Revoke object URLs etc. */
   destroy: () => void;
+  /** Per-page render records, retained so the next render can reuse the DOM of
+   * pages whose layout is unchanged (see renderToDom's `prev` parameter). */
+  _pages?: PageRender[];
+}
+
+/** One page's DOM element plus the editor bindings it owns and the object URLs
+ * it created. Retained on the handle so an incremental re-render can adopt an
+ * unchanged page wholesale instead of tearing it down and rebuilding it. */
+export interface PageRender {
+  el: HTMLElement;
+  page: LaidOutPage;
+  bindings: TextBinding[];
+  grips: GripBinding[];
+  images: ImageBinding[];
+  drawings: DrawingBinding[];
+  wordarts: WordArtBinding[];
+  urls: string[];
+}
+
+/** True for a parsed XML element (stable across doc.refresh — reference
+ * comparison is both correct and cheap for these). */
+function isXmlish(v: unknown): boolean {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    "attrs" in (v as object) &&
+    "children" in (v as object) &&
+    "name" in (v as object)
+  );
+}
+
+/** Structural equality of two page items, ignoring the editor-only `src`
+ * back-reference (which points at freshly-created model objects every layout).
+ * XML-element fields (e.g. a text item's `mathSrc`) are compared by identity:
+ * the underlying element tree is mutated in place, so an unchanged item keeps
+ * the same element object across layouts. Complete by construction for
+ * false-positive safety: any rendering-relevant field difference fails here. */
+function itemEq(a: unknown, b: unknown, depth: number): boolean {
+  if (a === b) return true;
+  if (depth > 16) return false; // guard; treat as different (forces rebuild)
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (isXmlish(a) || isXmlish(b)) return a === b;
+  const aArr = Array.isArray(a);
+  const bArr = Array.isArray(b);
+  if (aArr || bArr) {
+    if (!aArr || !bArr || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!itemEq(a[i], b[i], depth + 1)) return false;
+    return true;
+  }
+  const ao = a as Record<string, unknown>;
+  const bo = b as Record<string, unknown>;
+  for (const k in ao) {
+    if (k === "src") continue;
+    if (!(k in bo)) return false;
+    if (!itemEq(ao[k], bo[k], depth + 1)) return false;
+  }
+  for (const k in bo) {
+    if (k === "src") continue;
+    if (!(k in ao)) return false;
+  }
+  return true;
+}
+
+/** Two laid-out pages produce identical DOM: same geometry, same page-level
+ * chrome fields (which land in dataset), and the same item list. */
+function pageEq(a: LaidOutPage, b: LaidOutPage): boolean {
+  if (
+    a.width !== b.width ||
+    a.height !== b.height ||
+    a.number !== b.number ||
+    a.index !== b.index ||
+    a.bodyTop !== b.bodyTop ||
+    a.bodyBottom !== b.bodyBottom ||
+    a.hfStart !== b.hfStart ||
+    a.items.length !== b.items.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < a.items.length; i++) {
+    if (!itemEq(a.items[i], b.items[i], 0)) return false;
+  }
+  return true;
 }
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -167,20 +249,32 @@ function stripPngColorChunks(bytes: Uint8Array): Uint8Array {
  * 1:1 to an element; no browser reflow participates in positioning, so what
  * the layout engine computed is exactly what you see.
  */
-export function renderToDom(
+/** Build one page's DOM element and its owned bindings/urls as a record. */
+function renderPageRecord(
   doc: DocxDocument,
-  layout: LayoutResult,
-  container: HTMLElement,
-  options: RenderOptions = {},
-): RenderHandle {
-  const zoom = options.zoom ?? 1;
-  const gap = options.pageGap ?? 24;
+  page: LaidOutPage,
+  zoom: number,
+  options: RenderOptions,
+): PageRender {
   const urls: string[] = [];
   const bindings: TextBinding[] = [];
   const grips: GripBinding[] = [];
   const images: ImageBinding[] = [];
   const drawings: DrawingBinding[] = [];
   const wordarts: WordArtBinding[] = [];
+  const el = renderPage(doc, page, zoom, urls, options, bindings, grips, images, drawings, wordarts);
+  return { el, page, bindings, grips, images, drawings, wordarts, urls };
+}
+
+export function renderToDom(
+  doc: DocxDocument,
+  layout: LayoutResult,
+  container: HTMLElement,
+  options: RenderOptions = {},
+  prev?: RenderHandle,
+): RenderHandle {
+  const zoom = options.zoom ?? 1;
+  const gap = options.pageGap ?? 24;
 
   ensureStylesheet();
   const root = document.createElement("div");
@@ -191,23 +285,69 @@ export function renderToDom(
   root.style.gap = `${gap}px`;
   root.style.padding = `${gap}px 0`;
 
-  for (const page of layout.pages) {
-    root.appendChild(renderPage(doc, page, zoom, urls, options, bindings, grips, images, drawings, wordarts));
+  // Incremental reuse: adopt the DOM of pages whose layout is unchanged. A
+  // typical keystroke only touches one page, so the common prefix and suffix
+  // of pages are byte-identical and their elements are moved into the new root
+  // instead of being rebuilt. Comments hang off the root and are re-measured
+  // per render, so reuse is skipped when the document has any (rare on the
+  // large fixtures; keeps the balloon layer simple and correct).
+  const prevPages = prev?._pages ?? [];
+  const canReuse =
+    prevPages.length > 0 && (options.comments === false || doc.comments.length === 0);
+  const pages: PageRender[] = new Array(layout.pages.length);
+  let reusedCount = 0;
+  if (canReuse) {
+    let lo = 0;
+    while (lo < layout.pages.length && lo < prevPages.length && pageEq(layout.pages[lo], prevPages[lo].page)) {
+      const pr = prevPages[lo];
+      pr.page = layout.pages[lo];
+      pages[lo] = pr;
+      lo++;
+    }
+    let hiNew = layout.pages.length - 1;
+    let hiOld = prevPages.length - 1;
+    while (hiNew >= lo && hiOld >= lo && pageEq(layout.pages[hiNew], prevPages[hiOld].page)) {
+      const pr = prevPages[hiOld];
+      pr.page = layout.pages[hiNew];
+      pages[hiNew] = pr;
+      hiNew--;
+      hiOld--;
+    }
+    for (let i = lo; i <= hiNew; i++) pages[i] = renderPageRecord(doc, layout.pages[i], zoom, options);
+    reusedCount = layout.pages.length - (hiNew - lo + 1);
+  } else {
+    for (let i = 0; i < layout.pages.length; i++) pages[i] = renderPageRecord(doc, layout.pages[i], zoom, options);
   }
 
+  for (const pr of pages) root.appendChild(pr.el);
   container.appendChild(root);
+
+  const bindings = pages.flatMap((p) => p.bindings);
   if (options.comments !== false && doc.comments.length > 0) {
     renderComments(doc, root, bindings, zoom, options.onDeleteComment, options.onReplyComment);
   }
+
+  // Revoke object URLs owned by prev pages that were NOT adopted, then drop the
+  // old root (whatever is left in it is unreferenced now).
+  const kept = new Set(pages);
+  for (const pr of prevPages) {
+    if (!kept.has(pr)) for (const u of pr.urls) URL.revokeObjectURL(u);
+  }
+  prev?.root.remove();
+
+  const perf = (globalThis as { __dxwPerf?: { lastReused?: number } }).__dxwPerf;
+  if (perf) perf.lastReused = reusedCount;
+
   return {
     root,
     bindings,
-    grips,
-    images,
-    drawings,
-    wordarts,
+    grips: pages.flatMap((p) => p.grips),
+    images: pages.flatMap((p) => p.images),
+    drawings: pages.flatMap((p) => p.drawings),
+    wordarts: pages.flatMap((p) => p.wordarts),
+    _pages: pages,
     destroy: () => {
-      for (const u of urls) URL.revokeObjectURL(u);
+      for (const pr of pages) for (const u of pr.urls) URL.revokeObjectURL(u);
       root.remove();
     },
   };

@@ -2583,10 +2583,30 @@ export class DocxEditor {
   }
 
   private commit(): void {
+    const perf = (globalThis as { __dxwPerf?: { last?: Record<string, number>; samples?: Record<string, number>[]; lastReused?: number } }).__dxwPerf;
+    const t0 = perf ? performance.now() : 0;
     this.host.doc.refresh();
+    const t1 = perf ? performance.now() : 0;
     this.host.rerender();
+    const t2 = perf ? performance.now() : 0;
     this.applyHfChrome();
     this.positionCaret();
+    const t3 = perf ? performance.now() : 0;
+    if (perf) {
+      const r = perf.last ?? {};
+      perf.samples = perf.samples ?? [];
+      perf.samples.push({
+        refresh: t1 - t0,
+        rerenderCall: t2 - t1,
+        layout: r.layout ?? 0,
+        destroy: r.destroy ?? 0,
+        render: r.render ?? 0,
+        chromeCaret: t3 - t2,
+        total: t3 - t0,
+        totalPages: r.totalPages ?? 0,
+        pagesReused: perf.lastReused ?? 0,
+      });
+    }
   }
 
   // ---------- caret rendering ----------
