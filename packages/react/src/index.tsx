@@ -40,6 +40,9 @@ import {
   clearBreakCache,
   type TextMeasurer,
   layoutDocument,
+  detectMissingFonts,
+  type MissingFont,
+  type LayoutResult,
   listTypeAt,
   printPages,
   setListType,
@@ -159,6 +162,10 @@ export interface DocxViewProps {
   showComments?: boolean;
   /** Tracked-changes display: "final" (default) or "markup". */
   revisions?: "final" | "markup";
+  /** Fires after render with document-requested font faces the browser cannot
+   * render (unavailable, or lacking the document's script) — the page is
+   * silently substituting and may differ from Word. Empty array = all good. */
+  onMissingFonts?: (missing: MissingFont[]) => void;
 }
 
 async function toBytes(source: DocxViewProps["source"]): Promise<Uint8Array> {
@@ -192,6 +199,7 @@ export function DocxView({
   commentAuthor = "You",
   showComments = true,
   revisions = "final",
+  onMissingFonts,
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -281,9 +289,10 @@ export function DocxView({
           const latin = [
             "Carlito", "Caladea", "Cambria", "Times New Roman", "Arial",
             "Calibri", "Calibri Light", "Tahoma", "Franklin Gothic Medium",
-            // Indic faces gate layout too (complex-script advances must be
-            // real before line breaking): Mangal (Devanagari), Latha (Tamil).
-            "Mangal", "Latha",
+            // Complex-script faces gate layout too (advances must be real
+            // before line breaking): Mangal (Devanagari), Latha (Tamil),
+            // Noto Sans Lao Looped (Lao — bundled OFL webfont).
+            "Mangal", "Latha", "Noto Sans Lao Looped",
           ];
           for (const fam of latin) {
             for (const variant of ["", "italic ", "bold ", "bold italic "]) {
@@ -316,6 +325,10 @@ export function DocxView({
       const pageCount = rerender(doc);
       let pages = pageCount;
       onLoad?.({ pageCount, document: doc });
+      if (onMissingFonts && prevLayout) {
+        const missing = detectMissingFonts(prevLayout);
+        if (!cancelled) onMissingFonts(missing);
+      }
 
       if (editable && containerRef.current) {
         const history = new EditHistory(doc);

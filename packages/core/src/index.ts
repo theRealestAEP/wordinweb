@@ -56,3 +56,6 @@ export type { TableOp } from "./edit/tables.js";
 export type { ParagraphAlignment, PageLayoutPatch } from "./edit/blocks.js";
 export type { EditorHost } from "./edit/editor.js";
 export { serializeXml } from "./xml.js";
+export { detectMissingFonts } from "./render/fonts.js";
+export type { MissingFont } from "./render/fonts.js";
+export type { LayoutResult } from "./layout/types.js";

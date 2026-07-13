@@ -2832,7 +2832,16 @@ function buildAtoms(
     // has no Devanagari/Tamil, so this is inert there.)
     const hasDeva = /[ऀ-ॿ]/.test(text);
     const hasTamil = /[஀-௿]/.test(text);
-    const indicFace = hasDeva && !hasTamil ? "Mangal" : hasTamil && !hasDeva ? "Latha" : null;
+    // Lao: Word substitutes DokChampa (no macOS/browser equivalent exists and
+    // the font is licensed). The demo bundles OFL Noto Sans Lao Looped — the
+    // same traditional looped style — and the host preloads it, so route Lao
+    // runs there instead of whatever tiny system fallback Chrome picks.
+    const hasLao = /[຀-໿]/.test(text);
+    const indicFace =
+      hasDeva && !hasTamil && !hasLao ? "Mangal"
+      : hasTamil && !hasDeva && !hasLao ? "Latha"
+      : hasLao && !hasDeva && !hasTamil ? "Noto Sans Lao Looped"
+      : null;
     if (indicFace && font.family.toLowerCase() !== indicFace.toLowerCase()) {
       // Word substitutes Nirmala UI per script on macOS PDF export: Devanagari
       // -> Mangal (whose glyph scale matches, so no size change), Tamil ->
@@ -3154,7 +3163,9 @@ function buildAtoms(
         // re-routed Indic runs to the theme Calibri AFTER pushStyled had
         // already routed them to Word's real face (probe3-indic: Mangal set,
         // then clobbered; spans painted Calibri with browser-fallback glyphs).
-        if ((c >= 0x900 && c <= 0x97f) || (c >= 0xb80 && c <= 0xbff) || (c >= 0xe00 && c <= 0xe7f)) return false;
+        // Thai AND Lao (0x0E80-0x0EFF) — Lao was missed at first and the
+        // splitter re-clobbered the Lao face routing back to hAnsi.
+        if ((c >= 0x900 && c <= 0x97f) || (c >= 0xb80 && c <= 0xbff) || (c >= 0xe00 && c <= 0xeff)) return false;
         return c > 0x7f && !(c >= 0xe000 && c <= 0xf8ff) && !isCJK(ch);
       };
       if (Array.from(text).some(isHA)) {
