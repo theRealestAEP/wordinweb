@@ -118,7 +118,7 @@ export class DocxEditor {
     const s = this.caretEl.style;
     s.position = "absolute";
     s.width = "1.5px";
-    s.background = "#1a1a1a";
+    s.background = "var(--dxw-caret, #1a1a1a)";
     s.pointerEvents = "none";
     s.display = "none";
     s.zIndex = "10";
@@ -517,7 +517,7 @@ export class DocxEditor {
       rect.className = "dxw-sel";
       rect.style.cssText =
         `position:absolute;left:${r.x0}px;top:${r.top}px;width:${r.x1 - r.x0}px;` +
-        `height:${r.height}px;background:rgba(26,115,232,.28);pointer-events:none;z-index:4;`;
+        `height:${r.height}px;background:var(--dxw-selection, rgba(26,115,232,.28));pointer-events:none;z-index:4;`;
       r.surface.appendChild(rect);
       this.selectionRects.push(rect);
     }

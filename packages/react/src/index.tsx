@@ -736,7 +736,7 @@ export function DocxView({
       <div
         ref={containerRef}
         className={className}
-        style={{ background: "#e8eaed", overflow: "auto", height: "100%", ...style }}
+        style={{ background: "var(--dxw-canvas-bg, #e8eaed)", overflow: "auto", height: "100%", ...style }}
       >
         {error && (
           <div style={{ padding: 16, color: "#b00020", fontFamily: "system-ui" }}>
