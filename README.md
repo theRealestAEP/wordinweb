@@ -1,6 +1,6 @@
 # DocxInWeb
 
-Open-source, high-fidelity **Word/.docx viewer and editor for the web** — Google-Docs-grade rendering, embeddable as a single React component. It runs a real layout engine in the browser (the same approach Word takes), so pagination, page numbers, headers/footers, tables, and math land where Word puts them — no server, no conversion to lossy HTML flow.
+A Word/.docx viewer and editor for the web, embeddable as a single React component. It runs a layout engine in the browser (the same approach Word takes), so pagination, page numbers, headers/footers, tables, and math land where Word puts them. No server, no conversion to lossy HTML flow.
 
 ```tsx
 import { DocxView } from "@docxinweb/react";
@@ -207,9 +207,9 @@ Or in a stylesheet:
 .dxw-dark { --dxw-toolbar-bg: #1f2937; --dxw-toolbar-fg: #e5e7eb; /* … */ }
 ```
 
-## Architecture
+## How it works
 
-DocxInWeb never converts the document to flowing HTML. It **parses** the OOXML package into a typed model (styles with `basedOn` chains, numbering, sections, headers/footers, themes, relationships), runs a **layout engine** that breaks lines with real canvas metrics and paginates exactly like Word (`bodyTop = max(marginTop, headerDistance + headerHeight)`, `PAGE`/`NUMPAGES` resolved per page, widow/orphan control, table cell frames), and **renders** each primitive as one absolutely-positioned element — the browser does zero reflow, so what the engine computed is what you see. Editing keeps the **XML tree as the source of truth**: commands mutate the retained XML, the model is re-derived, layout re-runs, and `save()` re-serializes only the parts it models so everything else (bookmarks, custom XML, embedded fonts) survives untouched. Full detail in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+DocxInWeb never converts the document to flowing HTML. It parses the OOXML into a typed model, runs a layout engine that breaks lines with real canvas metrics and paginates like Word, and renders each primitive as one absolutely-positioned element, so the browser does zero reflow. Editing mutates the retained XML tree and re-serializes only the parts it models, leaving everything else byte-for-byte intact. See [`BLOG.md`](BLOG.md) for the pipeline and the parity work.
 
 ## Fonts
 
@@ -253,7 +253,7 @@ npx playwright test      # end-to-end editor/behavior specs
 
 ## Rendering parity
 
-Fidelity is measured against **desktop Microsoft Word** itself. Every fixture is a real `.docx`: Word exports it to PDF (the ground truth), DocxInWeb renders the same file in the browser, and both are rasterized and compared **page-by-page**. The headline metric is *structural severity* — the fraction of ink with no counterpart after a single global page alignment, so antialiasing noise and sub-pixel line shifts don't count. Pages are grouped into capability areas (general word processing, complex tables, math, other languages, formatting, graphics, real-world documents), each with its own subscore. The remaining irreducible floor is pure font-rasterization difference — Chrome and Word antialias glyphs differently.
+Fidelity is measured against desktop Microsoft Word. Word exports each fixture to PDF, DocxInWeb renders the same file in the browser, and both are rasterized and compared page-by-page. The certified run covers 1,154 Word pages at a mean structural severity of 0.026%, with two pages above 1% (both a licensed font we can't ship). Run it:
 
 ```bash
 node scripts/parity-parallel.mjs                     # full run → parity/out/results.json
@@ -261,34 +261,13 @@ DXW_PARITY_FAST=1 node scripts/parity-parallel.mjs   # skip slow appearance pass
 node scripts/parity-render-report.mjs                # (re)build parity/out/report.html
 ```
 
-The generated dashboard is served at `/report` by the dev server. `parity/` is git-ignored.
-
-See [`docs/EVALS.md`](docs/EVALS.md) for the full methodology.
-
-## How we got here
-
-The certified run measures **1,154 Word-authored pages** across 91 fixtures at a
-**mean structural severity of 0.026%**, with exactly two pages above 1% — both a
-consequence of a licensed font we can't ship, not a layout bug. Getting there
-took a real layout engine (not a docx-to-HTML mapping), a measurement rig that
-treats desktop Word's own PDF export as ground truth, and a long campaign of
-disproving "it's just a rasterization floor" — complex-script pages that looked
-irreducible at 12–17% severity turned out, nearly every time, to be real bugs
-(Indic space-font routing 17.26% → 1.30%, Arabic RTL 12.98% → 0.00%, kashida
-justification 14.02% → 0.95%).
-
-The full write-up — the architectural bet, the structural-severity metric, the
-weird-but-discoverable Word behaviors, and the keystroke-latency work that took
-editing from 5 s to ~250 ms — is in
-[`docs/PARITY-JOURNEY.md`](docs/PARITY-JOURNEY.md).
+The dashboard is served at `/report` by the dev server. `parity/` is git-ignored. The metric, the training loop behind the numbers, and the editing-perf work are in [`BLOG.md`](BLOG.md).
 
 ## Docs
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the parse → layout → render → edit pipeline fits together
-- [`docs/DISCOVERIES.md`](docs/DISCOVERIES.md) — ledger of non-obvious Word behaviors we measured (justify pack-vs-break rule, tcW/grid autofit semantics, retina hairline antialiasing, canvas ligature measurement, …) and the probe methodology that established them
-- [`docs/EVALS.md`](docs/EVALS.md) — the rendering-parity eval: what it measures, the category taxonomy, and how to run it
-- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — **Known limitations**: what editing doesn't support yet, shallow toolbar pickers (quick wins), rendering gaps, and untested areas
-- [`docs/PARITY-JOURNEY.md`](docs/PARITY-JOURNEY.md) — the long-form story of how we got to 0.026% mean severity: the layout-engine bet, the metric, the war stories, and the editing-perf work
+- [`BLOG.md`](BLOG.md) — how the layout engine works, the parity training loop, the structural-severity metric, and the keystroke-latency work
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — what editing doesn't support yet, shallow toolbar pickers, rendering residuals, and untested areas
+- [`docs/DISCOVERIES.md`](docs/DISCOVERIES.md) — ledger of non-obvious Word behaviors we measured and the probe methodology that established them
 
 ## License
 
