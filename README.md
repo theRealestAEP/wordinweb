@@ -121,6 +121,7 @@ editing from 5 s to ~250 ms — is in
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the parse → layout → render pipeline fits together
 - [`docs/DISCOVERIES.md`](docs/DISCOVERIES.md) — ledger of non-obvious Word behaviors we measured (justify pack-vs-break rule, tcW/grid autofit semantics, retina hairline antialiasing, canvas ligature measurement, …) and the probe methodology that established them
 - [`docs/EVALS.md`](docs/EVALS.md) — the rendering parity eval: what it measures, the category taxonomy, and how to run it
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — **Known limitations**: what editing doesn't support yet, shallow toolbar pickers (quick wins), rendering gaps, and untested areas
 - [`docs/PARITY-JOURNEY.md`](docs/PARITY-JOURNEY.md) — the long-form story of how we got to 0.026% mean severity: the layout-engine bet, the metric, the war stories, and the editing-perf work
 
 ## Roadmap
