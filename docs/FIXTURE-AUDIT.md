@@ -196,3 +196,18 @@ people.xml), external hyperlink targets, field `instrText`, drawing alt-text, bo
 names, owner-lock usernames, PDF metadata. Media is listed with sha256 + dimensions for
 manual visual review (`REVIEW` severity). Severity: `BLOCKER` = real PII/identifying;
 `WARN` = metadata worth scrubbing; `REVIEW` = eyeball the image; `OK` = benign default.
+
+## Rulings & status (2026-07-14)
+
+- **Class A remediation: EXECUTED.** Scanner re-run reports **BLOCKER = 0**
+  (rendering verified unchanged: patched PDFs and re-zipped docx measure at
+  their exact accepted parity values).
+- **Hamburg logo: ACCEPTED, no action.** Owner's ruling: publicly-sourced
+  content in wild-corpus fixtures is fine (the source document is public);
+  only personal PII (owner's name, private-file traces) must go. Class B is
+  therefore empty.
+- **History purge: QUEUED.** ~70 pre-scrub objects in pushed history still
+  carry owner-name metadata / the Outlook review trail. Plan: git-filter-repo
+  dropping historical `fixtures-staging/*.docx|pdf`, `~$*`, and `.codex-*`
+  blobs (current scrubbed files re-committed), then force-push. Scheduled
+  after in-flight agent branches merge — a rewrite would strand them.
