@@ -5215,6 +5215,22 @@ class Engine {
         if (widths[i] > clampW[i]) widths[i] = clampW[i] + (widths[i] - clampW[i]) * k;
       }
     }
+    // Min-contents that cannot all fit: Word never grows an autofit table
+    // past the available width — the oversized atom character-wraps inside
+    // its cell and the row grows DOWN. Shave the overflow proportionally to
+    // each column's height above a bare floor, so the runaway column (whose
+    // min-content is the giant word) absorbs almost all of it and the small
+    // columns stay near their own minimums.
+    const cap = Math.max(want, available);
+    const total = widths.reduce((a, b) => a + b, 0);
+    if (total > cap + 0.5) {
+      const floor = 12;
+      const flex = widths.reduce((a, w) => a + Math.max(0, w - floor), 0);
+      if (flex > 0) {
+        const k = Math.min(1, (total - cap) / flex);
+        for (let i = 0; i < nCols; i++) widths[i] -= Math.max(0, widths[i] - floor) * k;
+      }
+    }
     return widths;
   }
 

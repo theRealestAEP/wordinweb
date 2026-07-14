@@ -1785,7 +1785,12 @@ function breakParagraphImpl(
     // sized to its exact min-content (content + margins, no rule allowance —
     // chem p9's borderless-vertical table) must not character-wrap its own
     // sizing token over float noise between the measure and layout passes.
-    if (atom.width > availFor(lineIndex) + 0.01 && curLineWidth === 0) {
+    // In a table cell the tolerance is the rule allowance (≤2px): an
+    // explicit-width table's Word-exact column min sits content+margins with
+    // NO allowance, so the cell's sizing token overflows its inner width by
+    // up to the allowance — Word lets it overhang the rule (grid4 L3
+    // "consectetur"), it never character-wraps its own sizing token.
+    if (atom.width > availFor(lineIndex) + (opts?.inTableCell ? 2.5 : 0.01) && curLineWidth === 0) {
       // Single fragment wider than the line: hard character wrap.
       hardWrapFrag(atom);
       continue;
