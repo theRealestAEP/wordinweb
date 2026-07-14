@@ -7028,6 +7028,7 @@ function offsetItem(item: PageItem, dx: number, dy: number): void {
       item.baseline += dy;
       item.lineTop += dy;
       if (item.glyphTop !== undefined) item.glyphTop += dy;
+      if (item.caretClampX !== undefined) item.caretClampX += dx;
       break;
     case "rect":
     case "image":

@@ -344,12 +344,24 @@ export class DocxEditor {
     if (idx === -1) return null;
     const surface = bindings[idx].el.parentElement;
     const top = bindings[idx].item.lineTop;
+    // Neighbor cells in a table row share the same lineTop — Home/End stay
+    // inside the cell, not the visual row (Word's behavior).
+    const tcOf = (t: XmlElement): XmlElement | null => {
+      let cur = this.host.doc.findParentOf(t);
+      while (cur) {
+        if (localName(cur.name) === "tc") return cur;
+        cur = this.host.doc.findParentOf(cur);
+      }
+      return null;
+    };
+    const homeTc = tcOf(pt.t);
     let i = idx;
     const onSameLine = (k: number) =>
       k >= 0 && k < bindings.length &&
       bindings[k].el.parentElement === surface &&
       Math.abs(bindings[k].item.lineTop - top) < 0.5 &&
-      !!bindings[k].item.src?.t;
+      !!bindings[k].item.src?.t &&
+      tcOf(bindings[k].item.src!.t as XmlElement) === homeTc;
     if (edge === "start") {
       while (onSameLine(i - 1)) i--;
       const src = bindings[i].item.src!;
