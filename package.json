@@ -13,7 +13,8 @@
     "test": "npm run test -w @docxinweb/core",
     "dev": "npm run dev -w demo",
     "test:e2e": "playwright test",
-    "parity": "node scripts/parity-compare.mjs"
+    "parity": "node scripts/parity-compare.mjs",
+    "report:snapshot": "cp parity/out/report.html apps/demo/public/report.html"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

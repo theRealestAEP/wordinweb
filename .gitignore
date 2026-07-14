@@ -1,7 +1,6 @@
 node_modules/
 dist/
 *.tsbuildinfo
-apps/demo/public/fixtures/
 # Licensed Office fonts extracted from a local Word install for dev only —
 # NEVER commit the binaries. Regenerate via scripts/extract-dfonts.py.
 apps/demo/public/fonts-local/*.ttf
@@ -12,7 +11,6 @@ parity/
 # node_modules symlinks (worktree dev setups)
 node_modules
 /docs
-public/fixtures
 .claude
 test-results/
 /fixtures-staging
