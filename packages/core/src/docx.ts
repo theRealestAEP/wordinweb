@@ -817,6 +817,13 @@ export class DocxDocument {
    * body, headers, footers). Linear scan — documents are small and this only
    * runs on structural edits (Enter, paragraph merge).
    */
+  /** XML roots that can carry tracked changes: body, headers/footers, footnotes. */
+  revisionRoots(): XmlElement[] {
+    const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
+    if (this.footnotesRoot) roots.push(this.footnotesRoot);
+    return roots;
+  }
+
   findParentOf(target: XmlElement): XmlElement | undefined {
     const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
     if (this.footnotesRoot) roots.push(this.footnotesRoot);

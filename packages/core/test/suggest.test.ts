@@ -10,6 +10,9 @@ import {
   revisionForText,
   acceptRevision,
   rejectRevision,
+  collectRevisions,
+  acceptAllRevisions,
+  rejectAllRevisions,
   RevisionMeta,
 } from "../src/edit/suggest.js";
 import { makeDocx, wrapDocument, p } from "./helpers.js";
@@ -232,3 +235,55 @@ function findDelText(root: XmlElement): XmlElement | null {
   }
   return null;
 }
+
+describe("suggesting mode — review all", () => {
+  it("collectRevisions enumerates run and mark revisions in document order", () => {
+    const doc = loadDoc(p("Hello world") + p("Second para"));
+    insertSuggestedText(doc, firstT(doc, 0), 5, " brave", meta());
+    markParagraphGlyph(paraEl(doc, 0), "del", meta());
+    deleteSuggestedRange(doc, [{ t: firstT(doc, 1), start: 0, end: 6 }], meta());
+    doc.refresh();
+    const refs = collectRevisions(doc);
+    expect(refs.map((r) => r.kind)).toEqual(["insertion", "markDeletion", "deletion"]);
+    expect(refs.every((r) => r.author === "Alex")).toBe(true);
+  });
+
+  it("acceptAllRevisions applies everything in one pass", () => {
+    const doc = loadDoc(p("Hello world") + p("Second para"));
+    insertSuggestedText(doc, firstT(doc, 0), 5, " brave", meta());
+    deleteSuggestedRange(doc, [{ t: firstT(doc, 1), start: 0, end: 7 }], meta());
+    doc.refresh();
+    expect(acceptAllRevisions(doc)).toBe(2);
+    expect(collectRevisions(doc)).toHaveLength(0);
+    expect(finalText(doc, 0)).toBe("Hello brave world");
+    expect(finalText(doc, 1)).toBe("para");
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).not.toContain("<w:ins");
+    expect(xml).not.toContain("<w:del");
+  });
+
+  it("rejectAllRevisions restores the original document", () => {
+    const doc = loadDoc(p("Hello world") + p("Second para"));
+    insertSuggestedText(doc, firstT(doc, 0), 5, " brave", meta());
+    deleteSuggestedRange(doc, [{ t: firstT(doc, 1), start: 0, end: 7 }], meta());
+    doc.refresh();
+    expect(rejectAllRevisions(doc)).toBe(2);
+    expect(collectRevisions(doc)).toHaveLength(0);
+    expect(finalText(doc, 0)).toBe("Hello world");
+    expect(finalText(doc, 1)).toBe("Second para");
+  });
+
+  it("accept-all handles CONSECUTIVE paragraph-mark deletions (reverse order)", () => {
+    // Marks on paragraphs 0 and 1 both join with their following paragraph.
+    // Processed front-to-back, accepting p0's mark absorbs p1 and orphans its
+    // ref; the reverse-order pass must land all three paragraphs in one.
+    const doc = loadDoc(p("One") + p("Two") + p("Three"));
+    markParagraphGlyph(paraEl(doc, 0), "del", meta());
+    markParagraphGlyph(paraEl(doc, 1), "del", meta());
+    doc.refresh();
+    expect(acceptAllRevisions(doc)).toBe(2);
+    expect(collectRevisions(doc)).toHaveLength(0);
+    expect(finalText(doc, 0)).toBe("OneTwoThree");
+    expect(doc.sections[0].blocks.filter((b) => b.type === "paragraph")).toHaveLength(1);
+  });
+});

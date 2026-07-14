@@ -30,6 +30,9 @@ export {
   revisionForText,
   acceptRevision,
   rejectRevision,
+  collectRevisions,
+  acceptAllRevisions,
+  rejectAllRevisions,
 } from "./edit/suggest.js";
 export type { RevisionMeta, RevisionRef, RevisionKind, CaretTarget, DeleteRange } from "./edit/suggest.js";
 export { EditHistory } from "./edit/history.js";

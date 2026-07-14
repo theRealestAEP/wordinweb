@@ -22,6 +22,9 @@ import {
   revisionForText,
   acceptRevision,
   rejectRevision,
+  collectRevisions,
+  acceptAllRevisions,
+  rejectAllRevisions,
   RevisionMeta,
   RevisionRef,
 } from "./suggest.js";
@@ -2814,6 +2817,35 @@ export class DocxEditor {
     this.positionCaret();
     this.notifySelection();
     return true;
+  }
+
+  /** How many tracked changes the document currently holds. */
+  revisionCount(): number {
+    return collectRevisions(this.host.doc).length;
+  }
+
+  /** Accept every tracked change (one undo step). Returns how many applied. */
+  acceptAllRevisions(): number {
+    this.host.history?.checkpoint();
+    const n = acceptAllRevisions(this.host.doc);
+    if (n === 0) return 0;
+    this.dismissSuggestionPopover();
+    this.host.rerender();
+    this.positionCaret();
+    this.notifySelection();
+    return n;
+  }
+
+  /** Reject every tracked change (one undo step). Returns how many applied. */
+  rejectAllRevisions(): number {
+    this.host.history?.checkpoint();
+    const n = rejectAllRevisions(this.host.doc);
+    if (n === 0) return 0;
+    this.dismissSuggestionPopover();
+    this.host.rerender();
+    this.positionCaret();
+    this.notifySelection();
+    return n;
   }
 
   private insertText(text: string): void {

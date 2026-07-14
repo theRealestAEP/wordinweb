@@ -398,29 +398,88 @@ function joinWithNext(doc: DocxDocument, pEl: XmlElement): boolean {
 }
 
 /**
+ * Every tracked change in the document, in document order: run-level
+ * w:ins/w:del wrappers plus paragraph-mark revisions (pPr/rPr ins/del).
+ * Covers the body, headers/footers and footnotes — everything the editor
+ * can suggest into.
+ */
+export function collectRevisions(doc: DocxDocument): RevisionRef[] {
+  const out: RevisionRef[] = [];
+  const walk = (el: XmlElement): void => {
+    const ln = localName(el.name);
+    // Paragraph-mark revisions live in pPr/rPr; collect them at the w:p so
+    // they carry their owning paragraph, and never double-collect them as
+    // run-level wrappers.
+    if (ln === "pPr") return;
+    if (ln === "ins" || ln === "del") {
+      out.push({
+        el,
+        kind: ln === "ins" ? "insertion" : "deletion",
+        author: attrByLocal(el, "author"),
+      });
+    }
+    for (const c of el.children) walk(c);
+    // The paragraph-mark revision is the pilcrow at the paragraph's END, so
+    // it follows the paragraph's own runs in document order.
+    if (ln === "p") {
+      const rPr = el.children
+        .find((c) => localName(c.name) === "pPr")
+        ?.children.find((c) => localName(c.name) === "rPr");
+      for (const c of rPr?.children ?? []) {
+        const cn = localName(c.name);
+        if (cn === "ins" || cn === "del") {
+          out.push({
+            el: c,
+            kind: cn === "ins" ? "markInsertion" : "markDeletion",
+            paragraph: el,
+            author: attrByLocal(c, "author"),
+          });
+        }
+      }
+    }
+  };
+  for (const root of doc.revisionRoots()) walk(root);
+  return out;
+}
+
+function applyAccept(doc: DocxDocument, ref: RevisionRef): boolean {
+  switch (ref.kind) {
+    case "insertion":
+      return unwrap(doc, ref.el);
+    case "deletion":
+      return removeEl(doc, ref.el);
+    case "markInsertion":
+      return removeMarkRevision(ref);
+    case "markDeletion":
+      if (!ref.paragraph) return false;
+      removeMarkRevision(ref);
+      return joinWithNext(doc, ref.paragraph);
+  }
+}
+
+function applyReject(doc: DocxDocument, ref: RevisionRef): boolean {
+  switch (ref.kind) {
+    case "insertion":
+      return removeEl(doc, ref.el);
+    case "deletion":
+      convertDelTextToText(ref.el);
+      return unwrap(doc, ref.el);
+    case "markInsertion":
+      if (!ref.paragraph) return false;
+      removeMarkRevision(ref);
+      return joinWithNext(doc, ref.paragraph);
+    case "markDeletion":
+      return removeMarkRevision(ref);
+  }
+}
+
+/**
  * Accept a single revision: an insertion becomes permanent text, a deletion
  * removes its content, an inserted mark stays split, a deleted mark merges the
  * two paragraphs. Returns false if the element could not be located.
  */
 export function acceptRevision(doc: DocxDocument, ref: RevisionRef): boolean {
-  let ok = false;
-  switch (ref.kind) {
-    case "insertion":
-      ok = unwrap(doc, ref.el);
-      break;
-    case "deletion":
-      ok = removeEl(doc, ref.el);
-      break;
-    case "markInsertion":
-      ok = removeMarkRevision(ref);
-      break;
-    case "markDeletion":
-      if (ref.paragraph) {
-        removeMarkRevision(ref);
-        ok = joinWithNext(doc, ref.paragraph);
-      }
-      break;
-  }
+  const ok = applyAccept(doc, ref);
   if (ok) doc.refresh();
   return ok;
 }
@@ -431,27 +490,33 @@ export function acceptRevision(doc: DocxDocument, ref: RevisionRef): boolean {
  * is removed (the paragraphs stay separate). Returns false if not located.
  */
 export function rejectRevision(doc: DocxDocument, ref: RevisionRef): boolean {
-  let ok = false;
-  switch (ref.kind) {
-    case "insertion":
-      ok = removeEl(doc, ref.el);
-      break;
-    case "deletion":
-      convertDelTextToText(ref.el);
-      ok = unwrap(doc, ref.el);
-      break;
-    case "markInsertion":
-      if (ref.paragraph) {
-        removeMarkRevision(ref);
-        ok = joinWithNext(doc, ref.paragraph);
-      }
-      break;
-    case "markDeletion":
-      ok = removeMarkRevision(ref);
-      break;
-  }
+  const ok = applyReject(doc, ref);
   if (ok) doc.refresh();
   return ok;
+}
+
+/**
+ * Accept (or reject) every tracked change in one pass, refreshing the model
+ * once at the end. Refs are applied in REVERSE document order: a paragraph-
+ * mark accept/reject joins its paragraph with the NEXT one, so processing
+ * back-to-front keeps every earlier ref's elements attached to the tree
+ * (front-to-back, the second of two consecutive mark revisions would already
+ * be absorbed and silently skipped). Returns how many revisions were applied.
+ */
+export function acceptAllRevisions(doc: DocxDocument): number {
+  const refs = collectRevisions(doc);
+  let n = 0;
+  for (let i = refs.length - 1; i >= 0; i--) if (applyAccept(doc, refs[i])) n++;
+  if (n > 0) doc.refresh();
+  return n;
+}
+
+export function rejectAllRevisions(doc: DocxDocument): number {
+  const refs = collectRevisions(doc);
+  let n = 0;
+  for (let i = refs.length - 1; i >= 0; i--) if (applyReject(doc, refs[i])) n++;
+  if (n > 0) doc.refresh();
+  return n;
 }
 
 /** Remove a mark revision element (the w:ins/w:del inside pPr/rPr). */

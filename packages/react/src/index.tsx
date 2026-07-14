@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  collectRevisions,
   DocxDocument,
   DocxEditor,
   EditHistory,
@@ -137,6 +138,12 @@ export interface DocxViewApi {
   acceptRevisionAtCaret(): boolean;
   /** Reject the tracked change at the caret (drop insertion / restore deletion). */
   rejectRevisionAtCaret(): boolean;
+  /** How many tracked changes (suggestions) the document currently holds. */
+  revisionCount(): number;
+  /** Accept every tracked change (one undo step). Returns how many applied. */
+  acceptAllRevisions(): number;
+  /** Reject every tracked change (one undo step). Returns how many applied. */
+  rejectAllRevisions(): number;
   document: DocxDocument;
 }
 
@@ -297,6 +304,12 @@ export function DocxView({
   // numbers, close) surface right where the user is editing.
   const [hfMode, setHfMode] = useState(false);
   const apiRef = useRef<DocxViewApi | null>(null);
+  // The parsed document (and its undo history) survives re-runs of the main
+  // effect: toggling `editable` (Editing↔Viewing), `revisions` (markup/final)
+  // or `commentAuthor` must re-render the SAME document, not re-parse the
+  // original bytes — a reparse silently discarded every unsaved edit,
+  // including pending suggestions. Only a new `source` parses fresh.
+  const docCacheRef = useRef<{ source: DocxViewProps["source"]; doc: DocxDocument; history: EditHistory } | null>(null);
   useEffect(() => {
     const c = containerRef.current;
     if (!c) return;
@@ -370,9 +383,10 @@ export function DocxView({
     };
 
     (async () => {
-      const bytes = await toBytes(source);
+      const cached = docCacheRef.current?.source === source ? docCacheRef.current : null;
+      const bytes = cached ? null : await toBytes(source);
       if (cancelled) return;
-      if (typeof document !== "undefined" && document.fonts?.ready) {
+      if (!cached && typeof document !== "undefined" && document.fonts?.ready) {
         try {
           // Canvas measurement doesn't trigger webfont loads; request the
           // metric-compatible substitutes explicitly if the host provides them.
@@ -416,8 +430,10 @@ export function DocxView({
         }
       }
       if (cancelled) return;
-      const doc = DocxDocument.load(bytes);
-      if (revisions !== "final") doc.setRevisionView(revisions);
+      const doc = cached ? cached.doc : DocxDocument.load(bytes!);
+      if (!cached) docCacheRef.current = { source, doc, history: new EditHistory(doc) };
+      const wantView = revisions === "markup" ? "markup" : "final";
+      if (doc.revisionView !== wantView) doc.setRevisionView(wantView);
       // Feed the real page width into fit-to-width now that we know it, then
       // recompute (the first ResizeObserver pass ran against the 816px default).
       basePageWidthRef.current = doc.sections[0]?.props.pageWidth ?? 816;
@@ -432,7 +448,8 @@ export function DocxView({
       }
 
       if (editable && containerRef.current) {
-        const history = new EditHistory(doc);
+        // Undo history survives mode switches with the cached document.
+        const history = docCacheRef.current?.doc === doc ? docCacheRef.current.history : new EditHistory(doc);
         // Line breaks measured during the initial load can use cold webfont
         // fallback metrics (the first canvas measureText of a font, before it is
         // fully active, differs from the warm value). By the time the user makes
@@ -794,6 +811,11 @@ export function DocxView({
           // The editor re-renders through host.rerender (which updates pages).
           acceptRevisionAtCaret: () => editor?.acceptRevisionRef() ?? false,
           rejectRevisionAtCaret: () => editor?.rejectRevisionRef() ?? false,
+          // Count works in any mode (read-only walk); the bulk operations
+          // need the editor (they re-render + record an undo step).
+          revisionCount: () => collectRevisions(doc).length,
+          acceptAllRevisions: () => editor?.acceptAllRevisions() ?? 0,
+          rejectAllRevisions: () => editor?.rejectAllRevisions() ?? 0,
         };
         apiRef.current = api;
         onReady?.(api);
