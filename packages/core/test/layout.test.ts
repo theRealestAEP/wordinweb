@@ -395,6 +395,65 @@ describe("layout engine", () => {
     expect(title.lineTop).toBeCloseTo(144, 3);
   });
 
+  it("offsets a header by the binding gutter so it aligns with the body column", () => {
+    // probe3-mirror-book: a 0.5in gutter shifts the body text column right by the
+    // gutter; the header shares that column, so its left origin is marginLeft +
+    // gutter, not bare marginLeft.
+    const R_NS = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          p("Body") +
+            `<w:sectPr><w:headerReference ${R_NS} w:type="default" r:id="rIdH"/>` +
+            `<w:pgSz w:w="12240" w:h="15840"/>` +
+            `<w:pgMar w:top="1440" w:right="1080" w:bottom="1440" w:left="1080" w:header="720" w:footer="720" w:gutter="720"/></w:sectPr>`,
+        ),
+        "word/_rels/document.xml.rels":
+          `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+          `<Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`,
+        "word/header1.xml":
+          `<?xml version="1.0"?><w:hdr ${W_NS}><w:p><w:r><w:t>HdrText</w:t></w:r></w:p></w:hdr>`,
+      }),
+    );
+    const result = layoutDocument(doc, { measurer });
+    const hdr = result.pages[0].items.find((i) => i.kind === "text" && i.text === "HdrText");
+    expect(hdr?.kind).toBe("text");
+    if (hdr?.kind !== "text") return;
+    // (marginLeft 1080tw + gutter 720tw) = 1800tw = 120px.
+    expect(hdr.x).toBeCloseTo(120, 1);
+  });
+
+  it("carries an empty next-page section-break paragraph's spacing-after into the opener (mode 15)", () => {
+    // The empty paragraph that carries a next-page section break still owns a
+    // spacing-after (docDefaults 160tw = 8pt). Word collapses it against the new
+    // section's opener spacing-before (240tw = 12pt): the opener sits 4pt below
+    // the margin, NOT the full 12pt (probe3-field-switches p2). A stale "empty
+    // paragraph carries nothing" gave the opener the whole 12pt.
+    const styles =
+      `<w:styles ${W_NS}><w:docDefaults><w:pPrDefault><w:pPr>` +
+      `<w:spacing w:after="160" w:line="259" w:lineRule="auto"/>` +
+      `</w:pPr></w:pPrDefault></w:docDefaults></w:styles>`;
+    const geo =
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>`;
+    const body =
+      p("Section one body") +
+      `<w:p><w:pPr><w:sectPr>${geo}</w:sectPr></w:pPr></w:p>` +
+      `<w:p><w:pPr><w:spacing w:before="240"/></w:pPr><w:r><w:t>Opener</w:t></w:r></w:p>` +
+      `<w:sectPr>${geo}</w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(body),
+      "word/styles.xml": styles,
+    });
+    const opener = result.pages[1]?.items.find(
+      (i) => i.kind === "text" && i.text === "Opener",
+    );
+    expect(opener?.kind).toBe("text");
+    if (opener?.kind !== "text") return;
+    // 4pt = 5.33px above the section-2 body top (12pt before - 8pt carried after).
+    expect(opener.lineTop - result.pages[1].bodyTop).toBeCloseTo(4 * (4 / 3), 1);
+  });
+
   it("draws a vertical rule between columns for w:cols w:sep and honours per-column widths", () => {
     // w:cols w:sep="1" paints a rule centered in each inter-column gap; explicit
     // unequal w:col widths/spaces are honoured raw (probe3-columns-unequal).

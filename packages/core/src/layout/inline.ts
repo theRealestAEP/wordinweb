@@ -67,6 +67,10 @@ export interface FieldContext {
   /** REF `\r`: the referenced paragraph's number in relative context, or
    * undefined when it is unknown (the caller then keeps the cache). */
   refParaNumber?: (fieldKey: object) => string | undefined;
+  /** STYLEREF: the text of the referenced style's paragraph on the field's page
+   * (first-on-page, or last with \l). undefined keeps the cache. Header/footer
+   * only — body STYLEREF keeps its cache. */
+  styleRef?: (styleName: string, lastOnPage: boolean) => string | undefined;
 }
 
 // ---------- atoms ----------
@@ -3319,6 +3323,19 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       // creation instant, so both sides evaluate the same moment).
       const picture = /\\@\s+"([^"]*)"/.exec(instr)?.[1];
       return formatDatePicture(new Date(), picture ?? (keyword === "TIME" ? "h:mm am/pm" : "M/d/yyyy"));
+    }
+    case "STYLEREF": {
+      // Word recomputes STYLEREF on open (the docx cache reflects the style's
+      // value when saved and goes stale). A header/footer STYLEREF shows the
+      // first paragraph of the referenced style that starts on the field's page
+      // (or the last, with \l). Body STYLEREF and unknown styles keep the cache.
+      if (!ctx.styleRef) return cachedResult || "";
+      const m = /^STYLEREF\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(instr);
+      const name = m?.[1] ?? m?.[2];
+      if (!name) return cachedResult || "";
+      const lastOnPage = /\\l(\s|$)/i.test(instr);
+      const text = ctx.styleRef(name, lastOnPage);
+      return text !== undefined ? text : cachedResult || "";
     }
     case "CREATEDATE":
     case "SAVEDATE":
