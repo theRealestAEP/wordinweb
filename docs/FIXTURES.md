@@ -49,8 +49,8 @@ The older docx-lib fixtures (`parity-tables`, `parity-lists`, `parity-text`,
 `parity-firstpage`, `parity-headerfooter`, `parity-comments`, `parity-dividers`,
 `parity-pictures`, `parity-wrapmodes`, `parity-math` stubs, `sample`,
 `benchmark`, `exact`) were authored with the `docx` npm library; the
-sanitized real-document fixtures (`msa`, `chronology`, `pleading`, `forsale`,
-`pickett`, `real`) come from `scripts/sanitize-docx.py`.
+sanitized real-document fixtures (`msa`, `chronology`, `pleading-anon`, `forsale`,
+`coverletter-anon`, `real`) come from `scripts/sanitize-docx.py`.
 
 ## Validating BEFORE Word (required gate)
 
@@ -254,9 +254,9 @@ Coverage and Word page counts. Baselines for these live in
 | exact | metric calibration doc | — | docx lib |
 | msa | sanitized real contract (tables, headings, 1.15 spacing) | 9 | sanitize-docx.py + customXml scrub |
 | chronology | sanitized real doc | 2 | sanitize-docx.py |
-| pleading | sanitized legal pleading (VML line-number sidebar) | 7 | sanitize-docx.py |
+| pleading-anon | anonymized legal pleading (VML line-number sidebar) | 7 | sanitize-docx.py |
 | forsale | sanitized flyer (fixed-height cells, dashed tear-offs) | — | sanitize-docx.py |
-| pickett | sanitized real doc | 1 | sanitize-docx.py |
+| coverletter-anon | anonymized cover-letter template | 1 | sanitize-docx.py |
 | real | sanitized real doc | — | sanitize-docx.py |
 
 ## Operational notes for exporting (hard-won)

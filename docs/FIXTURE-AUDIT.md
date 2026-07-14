@@ -29,3 +29,13 @@ metadata, `REVIEW` = eyeball the image, `OK` = benign default.
   owner-name metadata and the Outlook review trail. Plan: `git-filter-repo` to
   drop historical `fixtures-staging/*.docx|pdf`, `~$*`, and `.codex-*` blobs, then
   force-push. Scheduled after in-flight agent branches merge.
+- **Anonymized twins replace name-bearing fixtures (2026-07-14).** `pleading`
+  (a FABRICATED deposition notice that referenced a real case, real attorneys
+  and a real firm) and `pickett`/`alexpickett` (cover-letter template carrying
+  the owner's real name in body text) are deleted; `pleading-anon` and
+  `coverletter-anon` take their suite slots with fresh Word reference PDFs
+  (pleading-anon 0.00% on all 7 pages, coverletter-anon 0.31%). Their old blobs
+  join the history-purge list above: `apps/demo/public/fixtures/pleading.docx`,
+  `pickett.docx`, `alexpickett.docx`, plus pre-scrub `coverletter-anon.docx` /
+  `forsale.docx` (their `settings.xml.rels` embedded a `file:///Users/<owner>/…`
+  attachedTemplate path — a leak class the scanner now needs to cover).
