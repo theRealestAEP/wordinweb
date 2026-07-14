@@ -188,14 +188,11 @@ export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
 }
 
 function displayText(text: string, props: RunProps): string {
-  // Word renders U+00AD (optional hyphen) as a VISIBLE hyphen glyph in every
-  // position, not just at line breaks — and does NOT break lines at it
-  // (probe2-hyphenation p1: the Word PDF draws "super-cali-fragilistic-
-  // expiali-docious" mid-line AND moves the whole word to the next line
-  // rather than splitting at any soft hyphen). Browsers hide the character,
-  // so map to U+2011 (non-breaking hyphen, same glyph, not a hyphenBreaks
-  // opportunity); same length keeps source offsets 1:1.
-  if (text.includes("­")) text = text.replace(/­/g, "‑");
+  // NOTE: raw U+00AD characters in w:t are mapped to visible U+2011 at PARSE
+  // time (see parse/document.ts) — a <w:softHyphen/> ELEMENT also emits
+  // U+00AD and must NOT be made visible, so the conversion needs provenance
+  // this function doesn't have. Mapping here broke wild2-sci-ieee-2col
+  // (85-91%): its footnote's softHyphen elements became visible glue.
   if (props.caps) return text.toUpperCase();
   return text;
 }

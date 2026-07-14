@@ -724,7 +724,16 @@ function parseRun(
     const ln = localName(el.name);
     switch (ln) {
       case "t": {
-        const text = decodeSymbolText(el.text, run.props.font);
+        // A raw U+00AD CHARACTER typed into w:t paints as a visible hyphen in
+        // Word at every position and never breaks (probe2-hyphenation p1's
+        // Word PDF: "super-cali-…" hyphens mid-line, whole word moves to the
+        // next line) — map to U+2011, same glyph, no break, offsets 1:1. The
+        // <w:softHyphen/> ELEMENT below is different: Word's conditional
+        // hyphen, invisible unless a line actually breaks there — it keeps
+        // U+00AD so the browser's own soft-hyphen handling applies
+        // (wild2-sci-ieee-2col's footnote regression when the two were
+        // conflated).
+        const text = decodeSymbolText(el.text, run.props.font).replace(/­/g, "‑");
         if (field.mode === "result" && !field.live) field.cachedResult += text;
         else if (field.mode !== "instr") run.content.push({ kind: "text", text, srcT: el });
         break;
