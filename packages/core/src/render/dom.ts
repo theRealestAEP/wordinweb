@@ -942,6 +942,27 @@ function ensureStylesheet(): void {
   font: 12px system-ui, sans-serif; color: #3c4043; outline: none;
 }
 .dxw-comment-reply-input:focus { border-color: var(--dxw-accent, #1a73e8); }
+/* Compact (phone/tablet) chrome: the balloon rail would force horizontal
+   scroll on a narrow viewport, so the host tags the scroll container
+   .dxw-narrow — reclaim the reserved rail and collapse balloons behind their
+   highlights. Tapping commented text (handled in the react host) re-opens the
+   comment as a floating sheet anchored to the bottom of the viewport. */
+.dxw-narrow .dxw-pages { padding-right: 0 !important; }
+.dxw-narrow .dxw-comment-hl { background: var(--dxw-comment-hl, rgba(255, 200, 90, .5)); }
+.dxw-narrow .dxw-comment-card { display: none; }
+.dxw-narrow .dxw-comment-card.dxw-open {
+  display: block !important;
+  position: fixed !important;
+  left: 50% !important; right: auto !important;
+  top: auto !important; bottom: 12px !important;
+  transform: translateX(-50%) !important;
+  width: min(360px, 92vw) !important;
+  max-height: 55vh; overflow: auto; z-index: 60;
+  box-shadow: 0 6px 28px rgba(0,0,0,.32);
+}
+/* The floating sheet dismisses on tap-outside; keep the delete (×) out of the
+   way so it can't be mistaken for a close button and lose a comment. */
+.dxw-narrow .dxw-comment-card.dxw-open .dxw-comment-delete { display: none; }
 `;
   document.head.appendChild(style);
 }
