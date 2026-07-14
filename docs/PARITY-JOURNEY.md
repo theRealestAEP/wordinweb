@@ -178,7 +178,7 @@ the whole glued unit (`"of $ [nbsp…] (blank)"`) to the next line together. Mis
 it and you fit one extra line per fill-in-blank table, cascading into
 `keepNext`/`cantSplit` flips at every page bottom downstream.
 
-Each of these was pinned with `scripts/make-*-probe*.py` — a synthetic document
+Each of these was pinned with `scripts/generators/make-*-probe*.py` — a synthetic document
 built to isolate one behavior, exported through Word, and read back from the
 PDF. That loop is the single most valuable tool in the repo.
 

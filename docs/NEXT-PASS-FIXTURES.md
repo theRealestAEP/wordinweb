@@ -15,14 +15,14 @@ say where the engine is weakest, worst-first.
 
 ## Wave 1
 
-Generator: `scripts/make-probe2-fixtures.py` (self-contained; no external
+Generator: `scripts/generators/make-probe2-fixtures.py` (self-contained; no external
 helper import). Fixtures are `probe2-<slug>.docx`; references are
 `parity/probe2-<slug>-word.pdf`.
 
 Build + validate + baseline:
 
 ```
-python3 scripts/make-probe2-fixtures.py                # all 12 fixtures
+python3 scripts/generators/make-probe2-fixtures.py                # all 12 fixtures
 python3 scripts/validate-docx.py fixtures-staging/probe2-*.docx
 # copy each into apps/demo/public/fixtures TEMPORARILY, then:
 DXW_PARITY_FAST=1 node scripts/parity-compare.mjs probe2-<slug>
@@ -63,15 +63,15 @@ page in bold).
 
 ## Wave 2
 
-Generator: `scripts/make-probe3-fixtures.py` (imports helpers from
-`scripts/make-staging-fixtures.py`; run with **python3.12+** — the helper
+Generator: `scripts/generators/make-probe3-fixtures.py` (imports helpers from
+`scripts/generators/make-staging-fixtures.py`; run with **python3.12+** — the helper
 library uses backslashes in f-strings). Fixtures are `probe3-<slug>.docx`;
 references are `parity/probe3-<slug>-word.pdf`.
 
 Build + validate + baseline:
 
 ```
-python3.12 scripts/make-probe3-fixtures.py           # all fixtures + robustness/
+python3.12 scripts/generators/make-probe3-fixtures.py           # all fixtures + robustness/
 python3.12 scripts/validate-docx.py fixtures-staging/probe3-*.docx
 # copy each into apps/demo/public/fixtures TEMPORARILY, then:
 DXW_PARITY_FAST=1 node scripts/parity-compare.mjs probe3-<slug>
