@@ -359,6 +359,15 @@ class Engine {
   private trailingSectionBreakMarkGap = 0;
   /** Bookmark name -> formatted display page number (PAGEREF rewrite). */
   private bookmarkPages = new Map<string, string>();
+  /** STYLEREF page-awareness: styleIds whose paragraphs a header/footer STYLEREF
+   * references (null until precomputed; empty set = no STYLEREF, tracking off). */
+  private styleRefTrack: Set<string> | null = null;
+  /** Each tracked heading-style paragraph's starting physical page + text, in
+   * document (layout) order. Word recomputes STYLEREF per page: the header shows
+   * the first (or, with \l, last) matching paragraph that starts on that page. */
+  private styleRefOccur: Array<{ phys: number; styleId: string; text: string }> = [];
+  /** Paragraphs already recorded (dedupe across measurement re-placements). */
+  private styleRefSeen = new WeakSet<object>();
   /** List counters per abstractNumId. */
   private counters = new Map<number, number[]>();
   /** numIds already referenced once (their startOverride restart has fired). */
@@ -457,6 +466,7 @@ class Engine {
     this.assignNoteNumbers();
     this.assignSeqNumbers();
     this.assignRefContext();
+    this.prepareStyleRef();
     const sections = this.doc.sections;
     let prevSp: SectionProps | null = null;
     for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
@@ -520,11 +530,18 @@ class Engine {
         leadingBreakOf(opener)?.type === "page";
       // A legacy leading break keeps the empty section closer's after in the
       // collapse chain (NCCIH: 24px before - 8px carried after = 16px).
+      // In modern mode (>= 15) an EMPTY next-page section-break paragraph still
+      // contributes its own spacing-after to the collapse with the following
+      // section's opener - Word does not zero it just because the mark line is
+      // empty (probe3-field-switches p2: the section closer's 8pt after leaves
+      // the Heading1 before=12pt opener 4pt below the margin, not the full 12pt).
       const carryAfter = keepEmptyAfter
         ? (emptyCloserAfter ?? 0)
-        : this.lastParaWasEmpty
-          ? 0
-          : this.lastParaSpacingAfter;
+        : this.doc.compatibilityMode >= 15 && !canContinue && emptyCloserAfter !== undefined
+          ? emptyCloserAfter
+          : this.lastParaWasEmpty
+            ? 0
+            : this.lastParaSpacingAfter;
       // A new section's first paragraph governs its own spacing-before through
       // the cross-section carry-remainder rule (max(before, carriedAfter) -
       // carriedAfter), NOT the page-break drop. When the previous section ended
@@ -629,7 +646,7 @@ class Engine {
     if (sp.lineNumbering) return false;
     if (this._incrFeatureOk === null) {
       this._incrFeatureOk =
-        !this.hasDisqualifyingFeature(this.doc.docRoot) && !this.hfHasTotalField();
+        !this.hasDisqualifyingFeature(this.doc.docRoot) && !this.hfHasTotalField() && !this.hfHasStyleRef();
     }
     return this._incrFeatureOk;
   }
@@ -912,6 +929,7 @@ class Engine {
     this.assignNoteNumbers();
     this.assignSeqNumbers();
     this.assignRefContext();
+    this.prepareStyleRef();
 
     this.physBase = prefixCount;
     this.displayBase = inc.pages[prefixCount - 1].displayNumber;
@@ -1651,6 +1669,116 @@ class Engine {
       }
     };
     for (const s of this.doc.sections) resolve(s.blocks);
+  }
+
+  /** Precompute STYLEREF page-awareness. Word recomputes a header/footer STYLEREF
+   * field on open: it shows the text of the first paragraph of the referenced
+   * style that STARTS on the field's page (or, with \l, the last such paragraph),
+   * falling back to the last one before the page. The docx cache is whatever the
+   * style pointed at when the file was saved, which goes stale immediately
+   * (probe2-styleref-headers: every page caches "Chapter One: Origins"). Build the
+   * set of styleIds any header/footer STYLEREF references so the body pass records
+   * where each such paragraph lands; if none, tracking stays off. */
+  private prepareStyleRef(): void {
+    const names = new Set<string>();
+    const scanInstr = (instr: string): void => {
+      const m = /^\s*STYLEREF\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(instr.trim());
+      if (m) names.add((m[1] ?? m[2] ?? "").toLowerCase());
+    };
+    const scan = (blocks: Block[]): void => {
+      for (const b of blocks) {
+        if (b.type === "paragraph") {
+          for (const child of b.children) {
+            const runs = child.type === "hyperlink" ? child.runs : [child];
+            for (const r of runs)
+              for (const c of r.content) if (c.kind === "field") scanInstr(c.instruction);
+          }
+        } else {
+          for (const row of b.rows) for (const cell of row.cells) scan(cell.blocks);
+        }
+      }
+    };
+    for (const hf of this.doc.headers.values()) scan(hf.blocks);
+    for (const hf of this.doc.footers.values()) scan(hf.blocks);
+    const track = new Set<string>();
+    if (names.size > 0) {
+      // A STYLEREF argument names a style by its display name (Word's "Heading 1")
+      // or, less commonly, its styleId ("Heading1"). Match either, case-insensitive.
+      for (const st of this.doc.styles.byId.values()) {
+        if (st.type !== "paragraph") continue;
+        if (names.has(st.id.toLowerCase()) || (st.name && names.has(st.name.toLowerCase()))) {
+          track.add(st.id);
+        }
+      }
+    }
+    this.styleRefTrack = track;
+    this.styleRefOccur = [];
+    this.styleRefSeen = new WeakSet<object>();
+  }
+
+  /** True when any header/footer carries a STYLEREF field (disqualifies the
+   * incremental prefix-reuse path, whose tail-only relay can't re-resolve a
+   * page-relative STYLEREF over reused pages). */
+  private hfHasStyleRef(): boolean {
+    const scan = (blocks: Block[]): boolean => {
+      for (const b of blocks) {
+        if (b.type === "paragraph") {
+          for (const child of b.children) {
+            const runs = child.type === "hyperlink" ? child.runs : [child];
+            for (const r of runs)
+              for (const c of r.content)
+                if (c.kind === "field" && /\bSTYLEREF\b/i.test(c.instruction)) return true;
+          }
+        } else {
+          for (const row of b.rows) for (const cell of row.cells) if (scan(cell.blocks)) return true;
+        }
+      }
+      return false;
+    };
+    for (const hf of this.doc.headers.values()) if (scan(hf.blocks)) return true;
+    for (const hf of this.doc.footers.values()) if (scan(hf.blocks)) return true;
+    return false;
+  }
+
+  /** Record a tracked heading-style paragraph's starting physical page. Called
+   * once per paragraph when its first line commits (the bookmark-page hook). */
+  private recordStyleRef(para: Paragraph, phys: number): void {
+    if (!this.styleRefTrack || this.styleRefTrack.size === 0 || phys === -1) return;
+    const styleId = para.props.styleId ?? this.doc.styles.defaultParagraphStyle;
+    if (!styleId || !this.styleRefTrack.has(styleId)) return;
+    if (this.styleRefSeen.has(para)) return;
+    this.styleRefSeen.add(para);
+    let text = "";
+    for (const child of para.children) {
+      const runs = child.type === "run" ? [child] : child.runs;
+      for (const r of runs) for (const c of r.content) if (c.kind === "text") text += c.text;
+    }
+    this.styleRefOccur.push({ phys, styleId, text });
+  }
+
+  /** Resolve a header/footer STYLEREF against the recorded occurrences. `phys` is
+   * the field's physical page; `lastOnPage` is the \l switch. Returns undefined
+   * when nothing matches (the caller keeps the docx cache). */
+  private resolveStyleRef(styleName: string, lastOnPage: boolean, phys: number): string | undefined {
+    if (!this.styleRefTrack || this.styleRefOccur.length === 0) return undefined;
+    const want = styleName.toLowerCase();
+    const ids = new Set<string>();
+    for (const st of this.doc.styles.byId.values()) {
+      if (st.type !== "paragraph") continue;
+      if (st.id.toLowerCase() === want || (st.name && st.name.toLowerCase() === want)) ids.add(st.id);
+    }
+    if (ids.size === 0) return undefined;
+    const occ = this.styleRefOccur.filter((o) => ids.has(o.styleId));
+    const onPage = occ.filter((o) => o.phys === phys);
+    if (onPage.length > 0) return (lastOnPage ? onPage[onPage.length - 1] : onPage[0]).text;
+    // No matching heading starts on the page: Word shows the last one before it
+    // (the heading still "in effect" — both the plain and \l forms).
+    let carry: string | undefined;
+    for (const o of occ) {
+      if (o.phys < phys) carry = o.text;
+      else break;
+    }
+    return carry;
   }
 
   /** SEQ counters keyed by identifier; each field occurrence keeps its
@@ -3473,6 +3601,12 @@ class Engine {
           }
         }
       }
+      // STYLEREF page-awareness: record the physical page carrying this
+      // paragraph's first line (frame-laid content resolves against the real page).
+      if (li === 0 && this.styleRefTrack && this.styleRefTrack.size > 0) {
+        const pg = this.cur.physIndex === -1 ? this.lastRealPage : this.cur;
+        if (pg) this.recordStyleRef(para, pg.physIndex);
+      }
       this.y += line.height;
 
       if (line.forcedBreakAfter) {
@@ -4895,10 +5029,17 @@ class Engine {
       this.emitPageBorders(page);
       page.hfStart = page.items.length;
       const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
+      // Headers/footers share the body's text column, so their left origin
+      // includes the binding gutter (probe3-mirror-book: on a recto page the
+      // gutter sits on the left, so the header starts marginLeft+gutter in, level
+      // with the body). On even mirror pages the gutter is already folded into the
+      // right margin (gutter = 0 here); non-gutter docs are unaffected.
+      const hfOriginX = sp.marginLeft + sp.gutter;
       const fields: FieldContext = {
         pageNumber: () => page.displayNumber,
         totalPages: () => total,
         formatPageNumber: (n) => formatNumber(n, PAGE_FMT[sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
+        styleRef: (name, lastOnPage) => this.resolveStyleRef(name, lastOnPage, page.physIndex),
       };
       const header = this.doc.headers.get(page.headerRel ?? "");
       if (header && header.blocks.length > 0) {
@@ -4906,13 +5047,13 @@ class Engine {
         const seenSnapshot = new Set(this.seenNumIds);
         this.hfMarginVTop = page.bodyTop;
         const { items } = this.layoutFrame(header.blocks, contentWidth, fields, {
-          x: sp.marginLeft,
+          x: hfOriginX,
           y: sp.headerDistance,
         }, false, this.pageFieldFrameOverlay(header));
         this.hfMarginVTop = null;
         this.counters = snapshot;
         this.seenNumIds = seenSnapshot;
-        for (const it of items) offsetItem(it, sp.marginLeft, sp.headerDistance);
+        for (const it of items) offsetItem(it, hfOriginX, sp.headerDistance);
         page.items.push(...items);
       }
       const footer = this.doc.footers.get(page.footerRel ?? "");
@@ -4930,13 +5071,13 @@ class Engine {
         seenSnapshot = new Set(this.seenNumIds);
         this.hfMarginVTop = page.bodyTop;
         const { items } = this.layoutFrame(footer.blocks, contentWidth, fields, {
-          x: sp.marginLeft,
+          x: hfOriginX,
           y: top,
         }, false, overlayPageFrame);
         this.hfMarginVTop = null;
         this.counters = snapshot;
         this.seenNumIds = seenSnapshot;
-        for (const it of items) offsetItem(it, sp.marginLeft, top);
+        for (const it of items) offsetItem(it, hfOriginX, top);
         page.items.push(...items);
       }
     }
