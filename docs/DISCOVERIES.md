@@ -4,14 +4,14 @@ A ledger of non-obvious findings made while chasing render parity — each one
 cost real investigation time and would be easy to re-litigate later. Every
 entry says what the symptom was, what the real cause turned out to be, where
 the fix lives, and how the claim was proven (usually a probe document
-exported through Word itself; see `scripts/make-*-probe*.py|mjs`).
+exported through Word itself; see `scripts/generators/make-*-probe*.py|mjs`).
 
 Rule of thumb from these: **never calibrate against our own measurements or
 against pdfminer word extents — build a probe doc, export it through Word,
 and read the geometry back out of the PDF.**
 
 ### The Times probe VALIDATES `WORD_FONT_METRICS['times new roman']` — the wild2 drifts are NOT TNR pitch (2026-07)
-`scripts/make-times-probe.py` (TNR + bare "Times" at 10/10.5/11/12pt ×
+`scripts/generators/make-times-probe.py` (TNR + bare "Times" at 10/10.5/11/12pt ×
 single/double/1.08×/atLeast, each block 50 forced-break lines in one paragraph)
 was finally exported through an unlocked Word (`parity/probe-times-word.pdf`)
 and regressed (`scripts/read-times-probe.py`, now recursing into pdfminer's
@@ -73,7 +73,7 @@ Carlito's advance table was verified **byte-identical** to Calibri's
 
 ### Word lays out with exact nominal hmtx advances — nothing else
 No kerning, no ligatures, no hinting, no quantization. Proven with
-`scripts/make-advance-probe.mjs` (20×-repeated-char paragraphs on a huge
+`scripts/generators/make-advance-probe.mjs` (20×-repeated-char paragraphs on a huge
 landscape page → per-char advances from the PDF match hmtx to PDF write
 precision, ±1.6 milli-em). Two consequences:
 
@@ -105,7 +105,7 @@ leave behind, capped at 25%** (`JUSTIFY_MAX_COMPRESS` /
 `JUSTIFY_STRETCH_FACTOR` in `layout/inline.ts`). A wide word packs at 24%
 compression while a narrow one is rejected at 12% — no flat threshold can
 model that (the sample lorem paragraph needs accept-at-21.6% AND
-reject-at-19.7%). Mapped empirically by `scripts/make-justify-probe*.py`:
+reject-at-19.7%). Mapped empirically by `scripts/generators/make-justify-probe*.py`:
 sweeps of the needed compression across final words of different widths,
 decisions read back from Word's export.
 
@@ -245,7 +245,7 @@ Word 351.87); p30 22.36%→19.17%, p31 12.08% (the resume/heading is now correct
 p30 align 4px→1px, our `Jade 7:` Heading1 ink 572.7pt vs Word 572.92 — see next
 note for their remaining table residual). parity-colbalance 1.24% and
 parity-columns 2.30% unchanged; every wild p1-29/p32-45 unmoved (max 1.84%).
-Derived with `scripts/make-colresume-probe.py` (2-col-balanced → 1-col-section,
+Derived with `scripts/generators/make-colresume-probe.py` (2-col-balanced → 1-col-section,
 uniform 11pt so line-pitch cancels the leading offset; sliver + normal-column +
 after/before-sweep variants) plus the pre-existing `parity-colbalance` Word PDF
 as the uneven-column ground truth (local Word could not export a fresh
@@ -274,7 +274,7 @@ section. Two independent gaps, both distinct from the balance resume:
    confined to the single wild-multicolumn table (benchmark/sample/
    parity-columns/parity-colbalance have no tables), so out of the resume scope.
 
-**PROBED 2026-07 (`scripts/make-lightgrid-probe.py`, LightGrid-Accent1, tblLook
+**PROBED 2026-07 (`scripts/generators/make-lightgrid-probe.py`, LightGrid-Accent1, tblLook
 04A0, 8×4, faithful reuse of the fixture's styles.xml + theme1.xml):**
 - **Bold bands = firstRow ∪ firstCol, EXACTLY — the naive read was right.** In
   `parity/probe-lightgrid-word.pdf` every row-0 cell AND every col-0 cell renders
@@ -571,7 +571,7 @@ front-matter delta. Cracking it needs a Word-export probe of the TOC field
 geometry (entry wrapping, PAGEREF page-number widths, tab-leader fill), which the
 screen-locked session forbids. Left untouched.
 
-**PROBED 2026-07 (`scripts/make-toc-probe.py`): the TOC layout PRIMITIVES are
+**PROBED 2026-07 (`scripts/generators/make-toc-probe.py`): the TOC layout PRIMITIVES are
 correct — the phase23 residual is fixture-specific, not a TOC-rendering bug.**
 A 40-entry probe reusing phase23's real styles.xml + theme1.xml (TOC1/2/3 with
 their `right dot-leader @9350tw` tab, Hyperlink, docDefaults, docGrid
@@ -942,7 +942,7 @@ uniform-metric hypothesis:
   construct-height desync, but the geometry is materially more correct and the
   mapping is the right resolution regardless.
 - **Method note:** measured entirely from the EXISTING Word reference PDFs —
-  a fresh Times probe (`scripts/make-times-probe.py` / `read-times-probe.py`,
+  a fresh Times probe (`scripts/generators/make-times-probe.py` / `read-times-probe.py`,
   covering TNR + bare "Times" at 10/10.5/11/12pt × single/double/1.08/atLeast)
   was generated and validated but could NOT be exported through Word: past
   midnight the session was screen-locked, so every `open`/save-as AppleEvent
@@ -1040,7 +1040,7 @@ sub-pixel accumulation:
 
 ### NIH row-height probe: the deficit is NOT per-row — it is a discrete ~0.79pt per PARAGRAPH→TABLE boundary (2026-07, unlocked Word)
 The plateau above was finally probed on an unlocked box.
-`scripts/make-nih-rowheight-probe.py` reproduces the fixture's exact guidance-
+`scripts/generators/make-nih-rowheight-probe.py` reproduces the fixture's exact guidance-
 table style (docDefault Calibri, Normal sz=24; number-paragraph = keepNext +
 `before=100` bold-red; guidance table = tblW auto, tblInd 500, ALL borders
 single **sz6** (0.75pt) space0, shd F3F3F3, single gridCol 9700, cantSplit rows,
@@ -1396,7 +1396,7 @@ paints 5pt right of Word (our trailing-tab + jc=right resolution vs Word's
   margins × the flexible-column share.
 - **CRACKED (2026-07, probe-autofit): Word autofit is simply
   PROPORTIONAL-TO-PREFERRED-WIDTH; there is no per-column "slack".** A 10-block
-  sweep (`scripts/make-autofit-probe.py`: 2–4 cols, single non-breaking tokens
+  sweep (`scripts/generators/make-autofit-probe.py`: 2–4 cols, single non-breaking tokens
   of known width, cell margins 0/108/300tw, borders on/off, tblW pct=5000 vs
   auto) exported to `parity/probe-autofit-word.pdf`; column boundaries read from
   the vertical rules (`read-autofit-probe.py`) vs our DOM (`read-autofit-ours.mjs`).

@@ -27,22 +27,22 @@ lower can score 90%+ structural at ~5% raw. Read them together: high structural
 
 ```
 # hand-built raw-XML fixtures (parity-* batch 1)
-python3 scripts/make-parity2-fixtures.py          # revisions, math, math2, columns,
+python3 scripts/generators/make-parity2-fixtures.py          # revisions, math, math2, columns,
                                                    #   colbalance, pageborders, rowsplit
-python3 scripts/make-hftemplate-fixture.py         # parity-hftemplates
+python3 scripts/generators/make-hftemplate-fixture.py         # parity-hftemplates
 
 # batch-2 hand-built fixtures (this expansion)
-python3 scripts/make-parity2-more.py               # the 10 parity2-* hand-built fixtures
+python3 scripts/generators/make-parity2-more.py               # the 10 parity2-* hand-built fixtures
 
 # batch-2 template-derived fixtures (this expansion)
-python3 scripts/make-parity2-templates.py          # coverpage, watermark, equations
+python3 scripts/generators/make-parity2-templates.py          # coverpage, watermark, equations
 
 # ALWAYS validate before exporting to Word (hard gate; see "Validating" below)
 python3 scripts/validate-docx.py
 
 # probes (single-feature calibration docs, not in the parity table)
-node   scripts/make-advance-probe.mjs
-python3 scripts/make-*-probe*.py
+node   scripts/generators/make-advance-probe.mjs
+python3 scripts/generators/make-*-probe*.py
 ```
 
 The older docx-lib fixtures (`parity-tables`, `parity-lists`, `parity-text`,
