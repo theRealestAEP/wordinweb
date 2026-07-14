@@ -99,11 +99,29 @@ node scripts/parity-render-report.mjs       # rebuild parity/out/report.html + r
 
 See [`docs/EVALS.md`](docs/EVALS.md) for the full methodology.
 
+## How we got here
+
+The certified run measures **1,154 Word-authored pages** across 91 fixtures at a
+**mean structural severity of 0.026%**, with exactly two pages above 1% — both a
+consequence of a licensed font we can't ship, not a layout bug. Getting there
+took a real layout engine (not a docx-to-HTML mapping), a measurement rig that
+treats desktop Word's own PDF export as ground truth, and a long campaign of
+disproving "it's just a rasterization floor" — complex-script pages that looked
+irreducible at 12–17% severity turned out, nearly every time, to be real bugs
+(Indic space-font routing 17.26% → 1.30%, Arabic RTL 12.98% → 0.00%, kashida
+justification 14.02% → 0.95%).
+
+The full write-up — the architectural bet, the structural-severity metric, the
+weird-but-discoverable Word behaviors, and the keystroke-latency work that took
+editing from 5 s to ~250 ms — is in
+[`docs/PARITY-JOURNEY.md`](docs/PARITY-JOURNEY.md).
+
 ## Docs
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the parse → layout → render pipeline fits together
 - [`docs/DISCOVERIES.md`](docs/DISCOVERIES.md) — ledger of non-obvious Word behaviors we measured (justify pack-vs-break rule, tcW/grid autofit semantics, retina hairline antialiasing, canvas ligature measurement, …) and the probe methodology that established them
 - [`docs/EVALS.md`](docs/EVALS.md) — the rendering parity eval: what it measures, the category taxonomy, and how to run it
+- [`docs/PARITY-JOURNEY.md`](docs/PARITY-JOURNEY.md) — the long-form story of how we got to 0.026% mean severity: the layout-engine bet, the metric, the war stories, and the editing-perf work
 
 ## Roadmap
 
