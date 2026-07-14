@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { DocxViewApi } from "./index.js";
 
 /**
@@ -107,6 +107,62 @@ function Btn({ label, title, active, onClick }: { label: React.ReactNode; title:
 
 function Sep() {
   return <span style={{ width: 1, height: 18, background: T.border, margin: "0 4px", flexShrink: 0 }} />;
+}
+
+function OverflowIcon() {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="currentColor">
+      <circle cx="8" cy="3" r="1.4" />
+      <circle cx="8" cy="8" r="1.4" />
+      <circle cx="8" cy="13" r="1.4" />
+    </svg>
+  );
+}
+
+/**
+ * "More" (⋮) menu holding the toolbar groups that don't fit the current width.
+ * On a phone/tablet the low-frequency groups collapse in here (Google-Docs
+ * pattern) so the primary row stays a single clean strip; every control stays
+ * reachable. The grouped controls render stacked, wrapping as needed.
+ */
+function OverflowMenu({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-flex", marginLeft: "auto" }}>
+      <button
+        title="More tools"
+        data-dxw-overflow=""
+        style={btnStyle(open)}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpen(!open)}
+      >
+        <OverflowIcon />
+      </button>
+      {open && (
+        <div
+          data-dxw-overflow-menu=""
+          onMouseDown={(e) => e.preventDefault()}
+          style={{
+            position: "absolute", top: 30, right: 0, zIndex: 100, background: T.popoverBg,
+            border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
+            padding: 8, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4,
+            maxWidth: 280,
+          }}
+        >
+          {children}
+        </div>
+      )}
+    </span>
+  );
 }
 
 const icon = { width: 16, height: 16, display: "block" } as const;
@@ -781,6 +837,25 @@ export function DocxToolbar({
   // selection; remember the last real range and restore it before applying.
   const savedRange = useRef<Range | null>(null);
   const imageInput = useRef<HTMLInputElement | null>(null);
+  // Responsive collapse: measure the toolbar width and pick a tier; the higher
+  // the tier the more low-frequency Home groups fold into the ⋮ overflow menu,
+  // so the strip stays single-row-clean on phones and tablets (Google Docs
+  // does exactly this). Full width keeps everything inline, so desktop and the
+  // e2e specs (1400px) are unchanged.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [tier, setTier] = useState(0);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      const w = el.clientWidth;
+      setTier(w >= 1000 ? 0 : w >= 720 ? 1 : 2);
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    measure();
+    return () => ro.disconnect();
+  }, []);
 
   const refresh = useCallback(() => {
     const sel = window.getSelection();
@@ -819,8 +894,244 @@ export function DocxToolbar({
     setFmt(api?.getSelectionFormat() ?? null);
   };
 
+  // Home-tab controls as ordered groups so the low-frequency ones can fold into
+  // the ⋮ overflow menu as the toolbar narrows. Keys drive the per-tier split.
+  const renderHome = () => {
+    const groups: { key: string; node: React.ReactNode }[] = [];
+    if (on("history"))
+      groups.push({
+        key: "history",
+        node: (
+          <>
+            <Btn label={"↶"} title="Undo (⌘Z)" onClick={() => { api?.undo(); refresh(); }} />
+            <Btn label={"↷"} title="Redo (⇧⌘Z)" onClick={() => { api?.redo(); refresh(); }} />
+            <Sep />
+          </>
+        ),
+      });
+    if (on("styles"))
+      groups.push({
+        key: "styles",
+        node: (
+          <select
+            title="Paragraph style"
+            value={curStyle ?? "__normal"}
+            onMouseDown={(e) => e.stopPropagation()}
+            onChange={(e) => {
+              if (e.target.value) {
+                api?.setParagraphStyle(e.target.value === "__normal" ? null : e.target.value);
+                setCurStyle(api?.getParagraphStyleId?.() ?? null);
+              }
+            }}
+            style={{ ...selectStyle, width: 92 }}
+          >
+            <option value="__normal">Normal</option>
+            {(api?.listParagraphStyles() ?? [])
+              .filter((s) => !/^normal$/i.test(s.name))
+              .map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            {curStyle !== null &&
+              !(api?.listParagraphStyles() ?? []).some((s) => s.id === curStyle) && (
+                <option value={curStyle}>
+                  {api?.document.styles.byId.get(curStyle)?.name ?? curStyle}
+                </option>
+              )}
+          </select>
+        ),
+      });
+    if (on("font"))
+      groups.push({
+        key: "font",
+        node: (
+          <select
+            title="Font"
+            value={fmt?.fontFamily ?? ""}
+            onMouseDown={(e) => e.stopPropagation()}
+            onChange={(e) => e.target.value && apply({ fontFamily: e.target.value })}
+            style={{ ...selectStyle, width: 130 }}
+          >
+            <option value="" disabled>Font</option>
+            {(fmt?.fontFamily && !detectFonts().includes(fmt.fontFamily) ? [fmt.fontFamily, ...detectFonts()] : detectFonts()).map((f) => (
+              <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
+            ))}
+          </select>
+        ),
+      });
+    if (on("size"))
+      groups.push({
+        key: "size",
+        node: (
+          <>
+          <select
+            title="Font size"
+            value={fmt?.fontSizePt ?? ""}
+            onMouseDown={(e) => e.stopPropagation()}
+            onChange={(e) => e.target.value && apply({ fontSizePt: parseFloat(e.target.value) })}
+            style={{ ...selectStyle, width: 58 }}
+          >
+            <option value="" disabled>Size</option>
+            {SIZES.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+          <Sep />
+          </>
+        ),
+      });
+    if (on("format"))
+      groups.push({
+        key: "format",
+        node: (
+          <>
+            <Btn label={<b>B</b>} title="Bold (⌘B)" active={!!fmt?.bold} onClick={() => apply({ bold: !fmt?.bold })} />
+            <Btn label={<i>I</i>} title="Italic" active={!!fmt?.italic} onClick={() => apply({ italic: !fmt?.italic })} />
+            <Btn label={<u>U</u>} title="Underline" active={!!fmt?.underline} onClick={() => apply({ underline: !fmt?.underline })} />
+            <Btn label={<s>S</s>} title="Strikethrough" active={!!fmt?.strike} onClick={() => apply({ strike: !fmt?.strike })} />
+            <Btn
+              label={<span style={{ fontSize: 12 }}>x<sup style={{ fontSize: 9 }}>2</sup></span>}
+              title="Superscript"
+              active={fmt?.verticalAlign === "superscript"}
+              onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "superscript" ? null : "superscript" })}
+            />
+            <Btn
+              label={<span style={{ fontSize: 12 }}>x<sub style={{ fontSize: 9 }}>2</sub></span>}
+              title="Subscript"
+              active={fmt?.verticalAlign === "subscript"}
+              onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "subscript" ? null : "subscript" })}
+            />
+            <Btn label={<ClearFormatIcon />} title="Clear formatting" onClick={() => apply({ clear: true })} />
+            <ActionMenu
+              label="Aa"
+              title="Change case"
+              width={52}
+              groups={[{ items: [["upper", "UPPERCASE"], ["lower", "lowercase"], ["title", "Title Case"]] }]}
+              onPick={(v) => { restoreSelection(); api?.changeCase(v as "upper" | "lower" | "title"); }}
+            />
+          </>
+        ),
+      });
+    if (on("color"))
+      groups.push({
+        key: "color",
+        node: (
+          <label title="Text color" style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
+            <span style={{ fontSize: 13, borderBottom: `3px solid ${fmt?.color && fmt.color !== "auto" ? fmt.color : "#000"}`, padding: "0 3px", color: T.fg }}>A</span>
+            <input
+              type="color"
+              value={fmt?.color && fmt.color !== "auto" ? fmt.color : "#000000"}
+              onMouseDown={(e) => e.stopPropagation()}
+              onChange={(e) => apply({ color: e.target.value })}
+              style={{ width: 0, height: 0, opacity: 0, border: "none", padding: 0 }}
+            />
+          </label>
+        ),
+      });
+    if (on("highlight"))
+      groups.push({
+        key: "highlight",
+        node: (
+          <>
+            <HighlightMenu current={fmt?.highlight} onPick={(v) => apply({ highlight: v })} />
+            <Sep />
+          </>
+        ),
+      });
+    if (on("alignment"))
+      groups.push({
+        key: "alignment",
+        node: (
+          <>
+            <Btn label={"≡"} title="Align left" onClick={() => api?.setAlignment("left")} />
+            <Btn label={"≣"} title="Center" onClick={() => api?.setAlignment("center")} />
+            <Btn label={"≢"} title="Align right" onClick={() => api?.setAlignment("right")} />
+            <Btn label={"☰"} title="Justify" onClick={() => api?.setAlignment("justify")} />
+            <Sep />
+          </>
+        ),
+      });
+    if (on("indent"))
+      groups.push({
+        key: "indent",
+        node: (
+          <>
+            <Btn label={<IndentIcon dir={-1} />} title="Decrease indent" onClick={() => api?.adjustIndent(-1)} />
+            <Btn label={<IndentIcon dir={1} />} title="Increase indent" onClick={() => api?.adjustIndent(1)} />
+          </>
+        ),
+      });
+    if (on("spacing"))
+      groups.push({
+        key: "spacing",
+        node: (
+          <ActionMenu
+            label="↕"
+            title="Line & paragraph spacing"
+            width={44}
+            groups={[
+              { label: "Line spacing", items: [["l:1", "Single"], ["l:1.15", "1.15"], ["l:1.5", "1.5"], ["l:2", "Double"]] },
+              { label: "Paragraph", items: [["b:add", "Add space before"], ["b:none", "Remove space before"], ["a:add", "Add space after"], ["a:none", "Remove space after"]] },
+            ]}
+            onPick={(v) => {
+              if (v.startsWith("l:")) api?.setParagraphSpacing({ lineMultiple: parseFloat(v.slice(2)) });
+              else if (v === "b:add") api?.setParagraphSpacing({ beforePt: 10 });
+              else if (v === "b:none") api?.setParagraphSpacing({ beforePt: null });
+              else if (v === "a:add") api?.setParagraphSpacing({ afterPt: 10 });
+              else if (v === "a:none") api?.setParagraphSpacing({ afterPt: null });
+            }}
+          />
+        ),
+      });
+    if (on("lists"))
+      groups.push({
+        key: "lists",
+        node: (
+          <>
+            <Btn
+              label={<BulletListIcon />}
+              title="Bulleted list"
+              active={listKind === "bullet"}
+              onClick={() => { api?.toggleList("bullet"); refresh(); }}
+            />
+            <Btn
+              label={<NumberListIcon />}
+              title="Numbered list"
+              active={listKind === "number"}
+              onClick={() => { api?.toggleList("number"); refresh(); }}
+            />
+            <Sep />
+          </>
+        ),
+      });
+
+    // Per-tier overflow: which group keys fold into ⋮. Tier 0 keeps all inline.
+    const overflowKeys =
+      tier === 0
+        ? new Set<string>()
+        : tier === 1
+          ? new Set(["styles", "indent", "spacing"])
+          : new Set(["styles", "font", "size", "color", "highlight", "alignment", "indent", "spacing"]);
+    const inline = groups.filter((g) => !overflowKeys.has(g.key));
+    const overflow = groups.filter((g) => overflowKeys.has(g.key));
+    return (
+      <>
+        {inline.map((g) => (
+          <Fragment key={g.key}>{g.node}</Fragment>
+        ))}
+        {overflow.length > 0 && (
+          <OverflowMenu>
+            {overflow.map((g) => (
+              <Fragment key={g.key}>{g.node}</Fragment>
+            ))}
+          </OverflowMenu>
+        )}
+      </>
+    );
+  };
+
   return (
     <div
+      ref={rootRef}
       className={className}
       onMouseOver={onTipOver}
       onMouseOut={onTipOut}
@@ -881,161 +1192,7 @@ export function DocxToolbar({
         ))}
       </div>
       <Sep />
-      {tab === "home" && on("history") && (
-        <>
-          <Btn label={"↶"} title="Undo (⌘Z)" onClick={() => { api?.undo(); refresh(); }} />
-          <Btn label={"↷"} title="Redo (⇧⌘Z)" onClick={() => { api?.redo(); refresh(); }} />
-          <Sep />
-        </>
-      )}
-      {tab === "home" && on("styles") && (
-      <select
-        title="Paragraph style"
-        value={curStyle ?? "__normal"}
-        onMouseDown={(e) => e.stopPropagation()}
-        onChange={(e) => {
-          if (e.target.value) {
-            api?.setParagraphStyle(e.target.value === "__normal" ? null : e.target.value);
-            setCurStyle(api?.getParagraphStyleId?.() ?? null);
-          }
-        }}
-        style={{ ...selectStyle, width: 92 }}
-      >
-        <option value="__normal">Normal</option>
-        {(api?.listParagraphStyles() ?? [])
-          .filter((s) => !/^normal$/i.test(s.name))
-          .map((s) => (
-            <option key={s.id} value={s.id}>{s.name}</option>
-          ))}
-        {curStyle !== null &&
-          !(api?.listParagraphStyles() ?? []).some((s) => s.id === curStyle) && (
-            <option value={curStyle}>
-              {api?.document.styles.byId.get(curStyle)?.name ?? curStyle}
-            </option>
-          )}
-      </select>
-      )}
-      {tab === "home" && on("font") && (
-      <select
-        title="Font"
-        value={fmt?.fontFamily ?? ""}
-        onMouseDown={(e) => e.stopPropagation()}
-        onChange={(e) => e.target.value && apply({ fontFamily: e.target.value })}
-        style={{ ...selectStyle, width: 130 }}
-      >
-        <option value="" disabled>Font</option>
-        {(fmt?.fontFamily && !detectFonts().includes(fmt.fontFamily) ? [fmt.fontFamily, ...detectFonts()] : detectFonts()).map((f) => (
-          <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
-        ))}
-      </select>
-      )}
-      {tab === "home" && on("size") && (
-      <select
-        title="Font size"
-        value={fmt?.fontSizePt ?? ""}
-        onMouseDown={(e) => e.stopPropagation()}
-        onChange={(e) => e.target.value && apply({ fontSizePt: parseFloat(e.target.value) })}
-        style={{ ...selectStyle, width: 58 }}
-      >
-        <option value="" disabled>Size</option>
-        {SIZES.map((s) => (
-          <option key={s} value={s}>{s}</option>
-        ))}
-      </select>
-      )}
-      <Sep />
-      {tab === "home" && on("format") && (
-      <>
-      <Btn label={<b>B</b>} title="Bold (⌘B)" active={!!fmt?.bold} onClick={() => apply({ bold: !fmt?.bold })} />
-      <Btn label={<i>I</i>} title="Italic" active={!!fmt?.italic} onClick={() => apply({ italic: !fmt?.italic })} />
-      <Btn label={<u>U</u>} title="Underline" active={!!fmt?.underline} onClick={() => apply({ underline: !fmt?.underline })} />
-      <Btn label={<s>S</s>} title="Strikethrough" active={!!fmt?.strike} onClick={() => apply({ strike: !fmt?.strike })} />
-      <Btn
-        label={<span style={{ fontSize: 12 }}>x<sup style={{ fontSize: 9 }}>2</sup></span>}
-        title="Superscript"
-        active={fmt?.verticalAlign === "superscript"}
-        onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "superscript" ? null : "superscript" })}
-      />
-      <Btn
-        label={<span style={{ fontSize: 12 }}>x<sub style={{ fontSize: 9 }}>2</sub></span>}
-        title="Subscript"
-        active={fmt?.verticalAlign === "subscript"}
-        onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "subscript" ? null : "subscript" })}
-      />
-      <Btn label={<ClearFormatIcon />} title="Clear formatting" onClick={() => apply({ clear: true })} />
-      <ActionMenu
-        label="Aa"
-        title="Change case"
-        width={52}
-        groups={[{ items: [["upper", "UPPERCASE"], ["lower", "lowercase"], ["title", "Title Case"]] }]}
-        onPick={(v) => { restoreSelection(); api?.changeCase(v as "upper" | "lower" | "title"); }}
-      />
-      </>
-      )}
-      {tab === "home" && on("color") && (
-      <label title="Text color" style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
-        <span style={{ fontSize: 13, borderBottom: `3px solid ${fmt?.color && fmt.color !== "auto" ? fmt.color : "#000"}`, padding: "0 3px", color: T.fg }}>A</span>
-        <input
-          type="color"
-          value={fmt?.color && fmt.color !== "auto" ? fmt.color : "#000000"}
-          onMouseDown={(e) => e.stopPropagation()}
-          onChange={(e) => apply({ color: e.target.value })}
-          style={{ width: 0, height: 0, opacity: 0, border: "none", padding: 0 }}
-        />
-      </label>
-      )}
-      {tab === "home" && on("highlight") && <HighlightMenu current={fmt?.highlight} onPick={(v) => apply({ highlight: v })} />}
-      <Sep />
-      {tab === "home" && on("alignment") && (
-        <>
-          <Btn label={"≡"} title="Align left" onClick={() => api?.setAlignment("left")} />
-          <Btn label={"≣"} title="Center" onClick={() => api?.setAlignment("center")} />
-          <Btn label={"≢"} title="Align right" onClick={() => api?.setAlignment("right")} />
-          <Btn label={"☰"} title="Justify" onClick={() => api?.setAlignment("justify")} />
-          <Sep />
-        </>
-      )}
-      {tab === "home" && on("indent") && (
-        <>
-          <Btn label={<IndentIcon dir={-1} />} title="Decrease indent" onClick={() => api?.adjustIndent(-1)} />
-          <Btn label={<IndentIcon dir={1} />} title="Increase indent" onClick={() => api?.adjustIndent(1)} />
-        </>
-      )}
-      {tab === "home" && on("spacing") && (
-        <ActionMenu
-          label="↕"
-          title="Line & paragraph spacing"
-          width={44}
-          groups={[
-            { label: "Line spacing", items: [["l:1", "Single"], ["l:1.15", "1.15"], ["l:1.5", "1.5"], ["l:2", "Double"]] },
-            { label: "Paragraph", items: [["b:add", "Add space before"], ["b:none", "Remove space before"], ["a:add", "Add space after"], ["a:none", "Remove space after"]] },
-          ]}
-          onPick={(v) => {
-            if (v.startsWith("l:")) api?.setParagraphSpacing({ lineMultiple: parseFloat(v.slice(2)) });
-            else if (v === "b:add") api?.setParagraphSpacing({ beforePt: 10 });
-            else if (v === "b:none") api?.setParagraphSpacing({ beforePt: null });
-            else if (v === "a:add") api?.setParagraphSpacing({ afterPt: 10 });
-            else if (v === "a:none") api?.setParagraphSpacing({ afterPt: null });
-          }}
-        />
-      )}
-      {tab === "home" && on("lists") && (
-        <>
-          <Btn
-            label={<BulletListIcon />}
-            title="Bulleted list"
-            active={listKind === "bullet"}
-            onClick={() => { api?.toggleList("bullet"); refresh(); }}
-          />
-          <Btn
-            label={<NumberListIcon />}
-            title="Numbered list"
-            active={listKind === "number"}
-            onClick={() => { api?.toggleList("number"); refresh(); }}
-          />
-          <Sep />
-        </>
-      )}
+      {tab === "home" && renderHome()}
       {tab === "insert" && (
         <>
           {on("table") && <TableMenu api={api} />}
