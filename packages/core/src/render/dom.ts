@@ -73,6 +73,8 @@ export interface RenderHandle {
    * INSIDE page surfaces, so the next render must sweep them out of any page
    * DOM it adopts before re-running the overlay. */
   _hadComments?: boolean;
+  /** Zoom this render painted at — adoption is only valid at the same zoom. */
+  _zoom?: number;
 }
 
 /** One page's DOM element plus the editor bindings it owns and the object URLs
@@ -337,7 +339,11 @@ export function renderToDom(
   // inside page surfaces and are swept from adopted pages below before the
   // overlay re-runs.
   const prevPages = prev?._pages ?? [];
-  const canReuse = prevPages.length > 0;
+  // Page adoption compares LAYOUT equality, and layout is zoom-independent —
+  // the zoom is baked into each page's painted DOM. Adopting across a zoom
+  // change would keep every page at the old scale (the in-place fit-to-width
+  // re-render was silently swallowed this way), so reuse requires same-zoom.
+  const canReuse = prevPages.length > 0 && prev?._zoom === zoom;
   const pages: PageRender[] = new Array(layout.pages.length);
   let reusedCount = 0;
   // Changed-page window; the prefix/suffix outside it reuse prev's elements.
@@ -450,6 +456,7 @@ export function renderToDom(
     wordarts: pages.flatMap((p) => p.wordarts),
     _pages: pages,
     _hadComments: drawComments,
+    _zoom: zoom,
     destroy: () => {
       for (const pr of pages) for (const u of pr.urls) URL.revokeObjectURL(u);
       root.remove();
