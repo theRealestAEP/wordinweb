@@ -519,11 +519,11 @@ function renderPage(
   el.style.position = "relative";
   el.style.width = `${page.width * zoom}px`;
   el.style.height = `${page.height * zoom}px`;
-  el.style.background = "#ffffff";
+  el.style.background = "var(--dxw-page-bg, #ffffff)";
   el.style.overflow = "hidden";
   el.style.flexShrink = "0";
   if (options.pageShadow !== false) {
-    el.style.boxShadow = "0 1px 3px rgba(0,0,0,.28), 0 4px 14px rgba(0,0,0,.12)";
+    el.style.boxShadow = "var(--dxw-page-shadow, 0 1px 3px rgba(0,0,0,.28), 0 4px 14px rgba(0,0,0,.12))";
   }
 
   el.dataset.bodyTop = String(page.bodyTop);
@@ -901,22 +901,22 @@ function ensureStylesheet(): void {
 .dxw-body-mode .dxw-page span[data-dxw-hf],
 .dxw-body-mode .dxw-page a[data-dxw-hf],
 .dxw-body-mode .dxw-page img[data-dxw-hf] { opacity: .55; }
-.dxw-comment-hl { background: rgba(255, 200, 90, .38); }
-.dxw-comment-hl.dxw-hot { background: rgba(255, 170, 0, .55); }
+.dxw-comment-hl { background: var(--dxw-comment-hl, rgba(255, 200, 90, .38)); }
+.dxw-comment-hl.dxw-hot { background: var(--dxw-comment-hl-active, rgba(255, 170, 0, .55)); }
 .dxw-comment-card {
   position: absolute;
   width: 220px;
   box-sizing: border-box;
   padding: 10px 12px;
-  background: #fff;
-  border: 1px solid #e0e0e0;
+  background: var(--dxw-comment-bg, #fff);
+  border: 1px solid var(--dxw-comment-border, #e0e0e0);
   border-radius: 6px;
   box-shadow: 0 1px 2px rgba(0,0,0,.10);
   font: 12px system-ui, sans-serif;
-  color: #3c4043;
+  color: var(--dxw-comment-fg, #3c4043);
   z-index: 3;
 }
-.dxw-comment-card.dxw-hot { border-color: #1a73e8; box-shadow: 0 2px 8px rgba(26,115,232,.25); }
+.dxw-comment-card.dxw-hot { border-color: var(--dxw-accent, #1a73e8); box-shadow: 0 2px 8px rgba(26,115,232,.25); }
 .dxw-comment-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .dxw-comment-avatar {
   width: 24px; height: 24px; border-radius: 50%; flex: none;
@@ -941,7 +941,7 @@ function ensureStylesheet(): void {
   border: 1px solid #dadce0; border-radius: 12px; padding: 4px 10px;
   font: 12px system-ui, sans-serif; color: #3c4043; outline: none;
 }
-.dxw-comment-reply-input:focus { border-color: #1a73e8; }
+.dxw-comment-reply-input:focus { border-color: var(--dxw-accent, #1a73e8); }
 `;
   document.head.appendChild(style);
 }

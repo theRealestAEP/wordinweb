@@ -1,6 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DocxViewApi } from "./index.js";
 
+/**
+ * Chrome theme tokens. Every color the toolbar paints routes through a CSS
+ * custom property, so an embedder can retheme the bar (e.g. a dark toolbar)
+ * just by setting these variables on any ancestor element — no fork needed.
+ * The fallback in each `var(...)` is the stock Google-Docs-style value, so the
+ * default look is byte-for-byte unchanged. See the README "Theming" section
+ * for the full variable list and a dark-toolbar example. Icons paint with
+ * `currentColor`, so they follow `--dxw-toolbar-fg` automatically.
+ */
+const T = {
+  bg: "var(--dxw-toolbar-bg, #f9fbfd)",
+  fg: "var(--dxw-toolbar-fg, #3c4043)",
+  border: "var(--dxw-toolbar-border, #dadce0)",
+  muted: "var(--dxw-toolbar-muted, #5f6368)",
+  accent: "var(--dxw-accent, #1a73e8)",
+  accentFg: "var(--dxw-accent-fg, #fff)",
+  activeBg: "var(--dxw-btn-active-bg, #dfe7f5)",
+  hoverBg: "var(--dxw-btn-hover-bg, #f1f3f4)",
+  tabActiveBg: "var(--dxw-tab-active-bg, #e8f0fe)",
+  popoverBg: "var(--dxw-popover-bg, #fff)",
+  popoverShadow: "var(--dxw-popover-shadow, 0 4px 16px rgba(0,0,0,.15))",
+} as const;
+
 /** Candidate families: always-usable ones (bundled substitutes or web-safe)
  * plus common document fonts. The dropdown filters to fonts the browser can
  * actually render (canvas width probe against the generic fallback). */
@@ -49,12 +72,12 @@ const btnStyle = (active: boolean): React.CSSProperties => ({
   minWidth: 26,
   height: 26,
   border: "1px solid transparent",
-  background: active ? "#dfe7f5" : "transparent",
+  background: active ? T.activeBg : "transparent",
   borderRadius: 4,
   cursor: "pointer",
   fontSize: 13,
   padding: "0 5px",
-  color: "#3c4043",
+  color: T.fg,
 });
 
 const selectStyle: React.CSSProperties = {
@@ -63,7 +86,7 @@ const selectStyle: React.CSSProperties = {
   background: "transparent",
   borderRadius: 4,
   fontSize: 13,
-  color: "#3c4043",
+  color: T.fg,
   cursor: "pointer",
 };
 
@@ -73,8 +96,8 @@ function Btn({ label, title, active, onClick }: { label: React.ReactNode; title:
       title={title}
       style={btnStyle(!!active)}
       onMouseDown={(e) => e.preventDefault()}
-      onMouseEnter={(e) => ((e.target as HTMLElement).style.background = active ? "#dfe7f5" : "#f1f3f4")}
-      onMouseLeave={(e) => ((e.target as HTMLElement).style.background = active ? "#dfe7f5" : "transparent")}
+      onMouseEnter={(e) => ((e.target as HTMLElement).style.background = active ? T.activeBg : T.hoverBg)}
+      onMouseLeave={(e) => ((e.target as HTMLElement).style.background = active ? T.activeBg : "transparent")}
       onClick={onClick}
     >
       {label}
@@ -83,16 +106,16 @@ function Btn({ label, title, active, onClick }: { label: React.ReactNode; title:
 }
 
 function Sep() {
-  return <span style={{ width: 1, height: 18, background: "#dadce0", margin: "0 4px", flexShrink: 0 }} />;
+  return <span style={{ width: 1, height: 18, background: T.border, margin: "0 4px", flexShrink: 0 }} />;
 }
 
 const icon = { width: 16, height: 16, display: "block" } as const;
 
 function ImageIcon() {
   return (
-    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
       <rect x="1.5" y="2.5" width="13" height="11" rx="1" />
-      <circle cx="5.2" cy="6" r="1.2" fill="#3c4043" stroke="none" />
+      <circle cx="5.2" cy="6" r="1.2" fill="currentColor" stroke="none" />
       <path d="M2.5 12l3.5-4 2.8 3 2-2.4 2.7 3.4" />
     </svg>
   );
@@ -101,7 +124,7 @@ function ImageIcon() {
 function HighlightIcon({ color }: { color: string }) {
   return (
     <svg style={icon} viewBox="0 0 16 16">
-      <path d="M3 9.5L9.5 3l3.5 3.5L6.5 13H4.5L3 11.5v-2z" fill="none" stroke="#3c4043" strokeWidth="1.3" />
+      <path d="M3 9.5L9.5 3l3.5 3.5L6.5 13H4.5L3 11.5v-2z" fill="none" stroke="currentColor" strokeWidth="1.3" />
       <rect x="2" y="13.5" width="12" height="2.5" rx="0.5" fill={color} />
     </svg>
   );
@@ -177,8 +200,8 @@ function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: stri
         <div
           onMouseDown={(e) => e.preventDefault()}
           style={{
-            position: "absolute", top: 28, left: 0, zIndex: 100, background: "#fff",
-            border: "1px solid #dadce0", borderRadius: 6, boxShadow: "0 4px 16px rgba(0,0,0,.15)",
+            position: "absolute", top: 28, left: 0, zIndex: 100, background: T.popoverBg,
+            border: `1px solid ${T.border}`, borderRadius: 6, boxShadow: T.popoverShadow,
             padding: 8, display: "flex", gap: 4, alignItems: "center",
           }}
         >
@@ -187,14 +210,14 @@ function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: stri
               key={h.name}
               title={h.name}
               onClick={() => { onPick(h.name); setOpen(false); }}
-              style={{ width: 20, height: 20, background: h.css, border: "1px solid #dadce0", borderRadius: 3, cursor: "pointer" }}
+              style={{ width: 20, height: 20, background: h.css, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer" }}
             />
           ))}
           <div
             title="No highlight"
             onClick={() => { onPick(null); setOpen(false); }}
             style={{
-              width: 20, height: 20, border: "1px solid #dadce0", borderRadius: 3, cursor: "pointer",
+              width: 20, height: 20, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer",
               background: "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
             }}
           />
@@ -206,10 +229,10 @@ function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: stri
 
 function BulletListIcon() {
   return (
-    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
-      <circle cx="3" cy="4" r="1.1" fill="#3c4043" stroke="none" />
-      <circle cx="3" cy="8" r="1.1" fill="#3c4043" stroke="none" />
-      <circle cx="3" cy="12" r="1.1" fill="#3c4043" stroke="none" />
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <circle cx="3" cy="4" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="3" cy="8" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="3" cy="12" r="1.1" fill="currentColor" stroke="none" />
       <path d="M6.5 4h8M6.5 8h8M6.5 12h8" strokeLinecap="round" />
     </svg>
   );
@@ -217,10 +240,10 @@ function BulletListIcon() {
 
 function NumberListIcon() {
   return (
-    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
-      <text x="1" y="5.6" fontSize="5.4" fill="#3c4043" stroke="none" fontFamily="system-ui">1</text>
-      <text x="1" y="9.9" fontSize="5.4" fill="#3c4043" stroke="none" fontFamily="system-ui">2</text>
-      <text x="1" y="14.2" fontSize="5.4" fill="#3c4043" stroke="none" fontFamily="system-ui">3</text>
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <text x="1" y="5.6" fontSize="5.4" fill="currentColor" stroke="none" fontFamily="system-ui">1</text>
+      <text x="1" y="9.9" fontSize="5.4" fill="currentColor" stroke="none" fontFamily="system-ui">2</text>
+      <text x="1" y="14.2" fontSize="5.4" fill="currentColor" stroke="none" fontFamily="system-ui">3</text>
       <path d="M6.5 4h8M6.5 8h8M6.5 12h8" strokeLinecap="round" />
     </svg>
   );
@@ -228,7 +251,7 @@ function NumberListIcon() {
 
 function LinkIcon() {
   return (
-    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
       <path d="M6.5 9.5l3-3" strokeLinecap="round" />
       <path d="M7.5 4.5l1.2-1.2a2.6 2.6 0 013.7 3.7L11.2 8.2" strokeLinecap="round" />
       <path d="M8.5 11.5l-1.2 1.2a2.6 2.6 0 01-3.7-3.7l1.2-1.2" strokeLinecap="round" />
@@ -238,7 +261,7 @@ function LinkIcon() {
 
 function ClearFormatIcon() {
   return (
-    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
       <path d="M5 3h8M9 3l-2.5 9" strokeLinecap="round" />
       <path d="M3 13.5l3.5-3.5M3 10l3.5 3.5" strokeLinecap="round" />
     </svg>
@@ -247,9 +270,9 @@ function ClearFormatIcon() {
 
 function IndentIcon({ dir }: { dir: 1 | -1 }) {
   return (
-    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
       <path d="M2 3h12M8 6.5h6M8 9.5h6M2 13h12" strokeLinecap="round" />
-      {dir === 1 ? <path d="M2.5 6l3 2-3 2z" fill="#3c4043" stroke="none" /> : <path d="M5.5 6l-3 2 3 2z" fill="#3c4043" stroke="none" />}
+      {dir === 1 ? <path d="M2.5 6l3 2-3 2z" fill="currentColor" stroke="none" /> : <path d="M5.5 6l-3 2 3 2z" fill="currentColor" stroke="none" />}
     </svg>
   );
 }
@@ -283,8 +306,8 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
       {open && (
         <div
           style={{
-            position: "absolute", top: 28, left: 0, zIndex: 100, background: "#fff",
-            border: "1px solid #dadce0", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,.15)",
+            position: "absolute", top: 28, left: 0, zIndex: 100, background: T.popoverBg,
+            border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
             padding: 10, width: 260, display: "flex", gap: 6, alignItems: "center",
           }}
         >
@@ -294,13 +317,13 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
             placeholder="Paste or type a link"
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && submit()}
-            style={{ flex: 1, border: "1px solid #dadce0", borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={{ flex: 1, border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
           />
           <button style={pillBtn} disabled={!url.trim()} onClick={submit}>Apply</button>
           {api?.getLinkAt() && (
             <button
               title="Remove link"
-              style={{ ...pillBtn, background: "#fff", color: "#3c4043" }}
+              style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}
               onClick={() => { api?.setLink(null); setOpen(false); }}
             >
               ✕
@@ -314,9 +337,9 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
 
 function FootnoteIcon() {
   return (
-    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
       <path d="M2.5 13V3.5M2.5 3.5h7" strokeLinecap="round" />
-      <text x="10.2" y="6.6" fontSize="6.4" fill="#3c4043" stroke="none" fontFamily="system-ui">1</text>
+      <text x="10.2" y="6.6" fontSize="6.4" fill="currentColor" stroke="none" fontFamily="system-ui">1</text>
       <path d="M2.5 13h11" strokeLinecap="round" strokeDasharray="1.5 1.6" />
     </svg>
   );
@@ -324,7 +347,7 @@ function FootnoteIcon() {
 
 function CommentIcon() {
   return (
-    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="#3c4043" strokeWidth="1.4">
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
       <path d="M1.5 3.5h13v8h-7l-3 3v-3h-3z" strokeLinejoin="round" />
       <path d="M8 5.5v4M6 7.5h4" strokeLinecap="round" />
     </svg>
@@ -364,8 +387,8 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
       {open && (
         <div
           style={{
-            position: "absolute", top: 28, right: 0, zIndex: 100, background: "#fff",
-            border: "1px solid #dadce0", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,.15)",
+            position: "absolute", top: 28, right: 0, zIndex: 100, background: T.popoverBg,
+            border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
             padding: 10, width: 240,
           }}
         >
@@ -382,13 +405,13 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
             }}
             style={{
               width: "100%", minHeight: 54, resize: "vertical", boxSizing: "border-box",
-              border: "1px solid #dadce0", borderRadius: 6, padding: 6,
+              border: `1px solid ${T.border}`, borderRadius: 6, padding: 6,
               font: "13px system-ui, sans-serif", outline: "none",
             }}
           />
           {hint && <div style={{ color: "#c5221f", fontSize: 12, marginTop: 4 }}>{hint}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
-            <button style={{ ...pillBtn, background: "#fff", color: "#3c4043" }} onClick={() => setOpen(false)}>Cancel</button>
+            <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => setOpen(false)}>Cancel</button>
             <button style={pillBtn} disabled={!text.trim()} onClick={submit}>Insert</button>
           </div>
         </div>
@@ -432,8 +455,8 @@ function CommentMenu({ api }: { api: DocxViewApi | null }) {
       {open && (
         <div
           style={{
-            position: "absolute", top: 28, right: 0, zIndex: 100, background: "#fff",
-            border: "1px solid #dadce0", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,.15)",
+            position: "absolute", top: 28, right: 0, zIndex: 100, background: T.popoverBg,
+            border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
             padding: 10, width: 240,
           }}
         >
@@ -450,12 +473,12 @@ function CommentMenu({ api }: { api: DocxViewApi | null }) {
             }}
             style={{
               width: "100%", minHeight: 54, resize: "vertical", boxSizing: "border-box",
-              border: "1px solid #dadce0", borderRadius: 6, padding: 6,
+              border: `1px solid ${T.border}`, borderRadius: 6, padding: 6,
               font: "13px system-ui, sans-serif", outline: "none",
             }}
           />
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
-            <button style={{ ...pillBtn, background: "#fff", color: "#3c4043" }} onClick={() => setOpen(false)}>
+            <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => setOpen(false)}>
               Cancel
             </button>
             <button style={pillBtn} disabled={!text.trim()} onClick={submit}>
@@ -469,13 +492,13 @@ function CommentMenu({ api }: { api: DocxViewApi | null }) {
 }
 
 const pillBtn: React.CSSProperties = {
-  border: "1px solid #dadce0",
+  border: `1px solid ${T.border}`,
   borderRadius: 14,
   padding: "3px 12px",
   fontSize: 12.5,
   cursor: "pointer",
-  background: "#1a73e8",
-  color: "#fff",
+  background: T.accent,
+  color: T.accentFg,
 };
 
 /** Google-Docs-style table menu: hover grid picker + row/column operations. */
@@ -528,16 +551,16 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
             top: 28,
             left: 0,
             zIndex: 100,
-            background: "#fff",
-            border: "1px solid #dadce0",
+            background: T.popoverBg,
+            border: `1px solid ${T.border}`,
             borderRadius: 6,
-            boxShadow: "0 4px 16px rgba(0,0,0,.15)",
+            boxShadow: T.popoverShadow,
             padding: 8,
             width: COLS * 18 + 16,
           }}
           onMouseDown={(e) => e.preventDefault()}
         >
-          <div style={{ fontSize: 12, color: "#5f6368", marginBottom: 4 }}>
+          <div style={{ fontSize: 12, color: T.muted, marginBottom: 4 }}>
             {hover.r > 0 ? `${hover.r} × ${hover.c}` : "Insert table"}
           </div>
           <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 16px)`, gap: 2 }}>
@@ -557,8 +580,8 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
                   style={{
                     width: 16,
                     height: 16,
-                    border: `1px solid ${lit ? "#1a73e8" : "#dadce0"}`,
-                    background: lit ? "#dfe7f5" : "#fff",
+                    border: `1px solid ${lit ? T.accent : T.border}`,
+                    background: lit ? T.activeBg : T.popoverBg,
                     borderRadius: 2,
                     cursor: "pointer",
                   }}
@@ -578,28 +601,28 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
                   }
                   setOpen(false);
                 }}
-                style={{ padding: "4px 6px", fontSize: 13, cursor: "pointer", borderRadius: 4, color: "#3c4043" }}
-                onMouseEnter={(e) => ((e.target as HTMLElement).style.background = "#f1f3f4")}
+                style={{ padding: "4px 6px", fontSize: 13, cursor: "pointer", borderRadius: 4, color: T.fg }}
+                onMouseEnter={(e) => ((e.target as HTMLElement).style.background = T.hoverBg)}
                 onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
               >
                 {label}
               </div>
             ))}
             <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 6px" }}>
-              <span style={{ fontSize: 12, color: "#5f6368", marginRight: 2 }}>Cell fill</span>
+              <span style={{ fontSize: 12, color: T.muted, marginRight: 2 }}>Cell fill</span>
               {CELL_FILLS.map((f) => (
                 <div
                   key={f}
                   title={`#${f}`}
                   onClick={() => { api?.tableOp({ kind: "cellShading", fill: f }); setOpen(false); }}
-                  style={{ width: 16, height: 16, background: `#${f}`, border: "1px solid #dadce0", borderRadius: 3, cursor: "pointer" }}
+                  style={{ width: 16, height: 16, background: `#${f}`, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer" }}
                 />
               ))}
               <div
                 title="No fill"
                 onClick={() => { api?.tableOp({ kind: "cellShading", fill: null }); setOpen(false); }}
                 style={{
-                  width: 16, height: 16, border: "1px solid #dadce0", borderRadius: 3, cursor: "pointer",
+                  width: 16, height: 16, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer",
                   background: "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
                 }}
               />
@@ -710,11 +733,17 @@ export function DocxToolbar({
   api,
   onSave,
   features,
+  className,
+  style,
 }: {
   api: DocxViewApi | null;
   onSave?: (bytes: Uint8Array) => void;
   /** Per-group overrides; every group defaults to enabled. */
   features?: Partial<Record<ToolbarFeature, boolean>>;
+  /** Extra class on the toolbar root (e.g. a scope for CSS-variable overrides). */
+  className?: string;
+  /** Inline overrides merged onto the toolbar root; wins over the defaults. */
+  style?: React.CSSProperties;
 }) {
   const on = (k: ToolbarFeature) => features?.[k] !== false;
   // Ribbon-style tabs: complex tool groups get their own surface instead of
@@ -792,6 +821,7 @@ export function DocxToolbar({
 
   return (
     <div
+      className={className}
       onMouseOver={onTipOver}
       onMouseOut={onTipOut}
       onMouseDownCapture={onTipOut}
@@ -800,10 +830,11 @@ export function DocxToolbar({
         gap: 2,
         alignItems: "center",
         padding: "4px 10px",
-        borderBottom: "1px solid #dadce0",
-        background: "#f9fbfd",
+        borderBottom: `1px solid ${T.border}`,
+        background: T.bg,
         flexWrap: "wrap",
         fontFamily: "system-ui, sans-serif",
+        ...style,
       }}
     >
       {tip && (
@@ -814,7 +845,7 @@ export function DocxToolbar({
             top: tip.y,
             transform: "translateX(-50%)",
             background: "rgba(32,33,36,.92)",
-            color: "#fff",
+            color: T.accentFg,
             font: "11.5px system-ui, sans-serif",
             padding: "4px 8px",
             borderRadius: 4,
@@ -836,8 +867,8 @@ export function DocxToolbar({
             onClick={() => setTab(t)}
             style={{
               border: "none",
-              background: tab === t ? "#e8f0fe" : "transparent",
-              color: tab === t ? "#1a73e8" : "#3c4043",
+              background: tab === t ? T.tabActiveBg : "transparent",
+              color: tab === t ? T.accent : T.fg,
               font: "600 12.5px system-ui, sans-serif",
               padding: "5px 10px",
               borderRadius: 6,
@@ -943,7 +974,7 @@ export function DocxToolbar({
       )}
       {tab === "home" && on("color") && (
       <label title="Text color" style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
-        <span style={{ fontSize: 13, borderBottom: `3px solid ${fmt?.color && fmt.color !== "auto" ? fmt.color : "#000"}`, padding: "0 3px", color: "#3c4043" }}>A</span>
+        <span style={{ fontSize: 13, borderBottom: `3px solid ${fmt?.color && fmt.color !== "auto" ? fmt.color : "#000"}`, padding: "0 3px", color: T.fg }}>A</span>
         <input
           type="color"
           value={fmt?.color && fmt.color !== "auto" ? fmt.color : "#000000"}
