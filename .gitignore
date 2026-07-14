@@ -16,3 +16,5 @@ public/fixtures
 .claude
 test-results/
 /fixtures-staging
+.codex-local/
+.codex-work/
