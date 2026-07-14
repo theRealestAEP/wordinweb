@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DocxDocument,
   DocxEditor,
@@ -146,6 +146,20 @@ export interface DocxViewProps {
   /** Zoom factor, 1 = 100%. */
   zoom?: number;
   /**
+   * Fit-to-width (Google-Docs mobile behavior): when the page is wider than the
+   * viewport, auto-scale down so it fits with a small gutter and never scrolls
+   * horizontally. The computed scale drives the real `zoom` (crisp text, not a
+   * blurry transform) and is capped at `zoom`, so a wide desktop viewport is
+   * unchanged. Recomputed on container resize. Default true.
+   */
+  fitWidth?: boolean;
+  /**
+   * Container width (px) at or below which the chrome switches to its compact
+   * phone/tablet treatment — the comment rail collapses to tap-to-open cards so
+   * balloons never force horizontal scroll. Default 820.
+   */
+  narrowWidth?: number;
+  /**
    * Enable editing commands (selection-based formatting, save-back).
    * Default false: pure render-only viewer.
    */
@@ -190,6 +204,8 @@ async function toBytes(source: DocxViewProps["source"]): Promise<Uint8Array> {
 export function DocxView({
   source,
   zoom = 1,
+  fitWidth = true,
+  narrowWidth = 820,
   editable = false,
   className,
   style,
@@ -203,6 +219,79 @@ export function DocxView({
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<Error | null>(null);
+  // Fit-to-width scale (page-width / container-width) recomputed on resize, and
+  // the compact-chrome flag. The effective zoom driven into the renderer caps
+  // the fit at the user's zoom so a roomy desktop viewport stays at 100%.
+  const [fitZoom, setFitZoom] = useState<number | null>(null);
+  const [narrow, setNarrow] = useState(false);
+  const basePageWidthRef = useRef(816);
+  const effectiveZoom = fitWidth && fitZoom != null ? Math.min(zoom, fitZoom) : zoom;
+  // Latest effective zoom the render loop should paint at. Held in a ref so a
+  // zoom change re-renders the pages in place (crisp) WITHOUT re-parsing the
+  // document or tearing down the editor — the big effect below reads it as its
+  // starting zoom and installs applyZoomRef to update it live.
+  const effZoomRef = useRef(effectiveZoom);
+  effZoomRef.current = effectiveZoom;
+  const applyZoomRef = useRef<((z: number) => void) | null>(null);
+
+  const recomputeFit = useCallback(() => {
+    const c = containerRef.current;
+    if (!c) return;
+    const cw = c.clientWidth;
+    if (!cw) return;
+    const gutter = 24; // breathing room so the page edge isn't flush
+    setFitZoom((cw - gutter) / basePageWidthRef.current);
+    setNarrow(cw <= narrowWidth);
+  }, [narrowWidth]);
+
+  // Recompute fit whenever the container resizes (orientation change, split
+  // view, window drag). Container width is independent of the page's own zoom,
+  // so scaling the page never feeds back into this — no resize loop.
+  useEffect(() => {
+    const c = containerRef.current;
+    if (!c || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => recomputeFit());
+    ro.observe(c);
+    recomputeFit();
+    return () => ro.disconnect();
+  }, [recomputeFit]);
+
+  // Push a zoom change into the live render loop (no reparse).
+  useEffect(() => {
+    applyZoomRef.current?.(effectiveZoom);
+  }, [effectiveZoom]);
+
+  // Reflect the compact flag on the container so the renderer's CSS (rail
+  // collapse, tap-to-open cards) can key off it.
+  useEffect(() => {
+    containerRef.current?.classList.toggle("dxw-narrow", narrow);
+  }, [narrow]);
+
+  // Tap-to-open comments in compact mode: tapping commented text surfaces that
+  // comment's card as a floating sheet (the rail is hidden on narrow); tapping
+  // empty space or another comment dismisses it. Additive listener — it never
+  // preventDefaults, so the editor's own caret-placement path is untouched.
+  useEffect(() => {
+    const c = containerRef.current;
+    if (!c) return;
+    const onTap = (e: Event) => {
+      if (!c.classList.contains("dxw-narrow")) return;
+      const root = c.querySelector<HTMLElement>(".dxw-pages");
+      if (!root) return;
+      const target = e.target as HTMLElement;
+      const closeAll = () =>
+        root.querySelectorAll(".dxw-comment-card.dxw-open").forEach((el) => el.classList.remove("dxw-open"));
+      if (target.closest?.(".dxw-comment-card")) return; // interacting inside a card
+      const span = target.closest?.("[data-dxw-comment]") as HTMLElement | null;
+      closeAll();
+      if (!span) return;
+      const id = span.dataset.dxwComment!.split(" ")[0];
+      const cards = Array.from(root.querySelectorAll<HTMLElement>(".dxw-comment-card"));
+      cards.find((el) => el.dataset.dxwCommentId === id)?.classList.add("dxw-open");
+    };
+    c.addEventListener("click", onTap);
+    return () => c.removeEventListener("click", onTap);
+  }, []);
   // Contextual header/footer hotbar: the editor announces hf-mode via a
   // bubbled dxw-hfmode event; the tools that only make sense there (page
   // numbers, close) surface right where the user is editing.
@@ -223,6 +312,13 @@ export function DocxView({
     let onDeleteComment: ((id: string) => void) | undefined;
     let onReplyComment: ((id: string, text: string) => void) | undefined;
     let applyStyleShortcut: ((styleId: string | null) => void) | undefined;
+    // Mutable current zoom for this document's lifetime: rerender() reads it and
+    // applyZoomRef updates it in place, so a zoom change re-paints without
+    // re-running this effect (which would reparse and drop editor/undo state).
+    let curZoom = effZoomRef.current;
+    // Kept as one object so applyZoom can update the editor's live zoom (the
+    // editor reads host.zoom on every hit-test); reassigned in the editable path.
+    let editorConfig: ConstructorParameters<typeof DocxEditor>[0] | null = null;
     setError(null);
 
     // One measurer for the document's lifetime: its width/metrics caches survive
@@ -252,7 +348,7 @@ export function DocxView({
       const prev = handle;
       const t2 = perf ? performance.now() : 0;
       handle = renderToDom(doc, layout, container, {
-        zoom,
+        zoom: curZoom,
         interactive: editable,
         comments: showComments,
         onDeleteComment,
@@ -322,8 +418,13 @@ export function DocxView({
       if (cancelled) return;
       const doc = DocxDocument.load(bytes);
       if (revisions !== "final") doc.setRevisionView(revisions);
+      // Feed the real page width into fit-to-width now that we know it, then
+      // recompute (the first ResizeObserver pass ran against the 816px default).
+      basePageWidthRef.current = doc.sections[0]?.props.pageWidth ?? 816;
+      curZoom = effZoomRef.current;
       const pageCount = rerender(doc);
       let pages = pageCount;
+      recomputeFit();
       onLoad?.({ pageCount, document: doc });
       if (onMissingFonts && prevLayout) {
         const missing = detectMissingFonts(prevLayout);
@@ -338,7 +439,7 @@ export function DocxView({
         // their first edit the canvas has painted and is warm, so drop the
         // load-time cache once here; every edit relayout after is warm.
         let breakCacheWarmed = false;
-        editor = new DocxEditor({
+        editorConfig = {
           doc,
           container: containerRef.current,
           getHandle: () => handle,
@@ -349,7 +450,7 @@ export function DocxView({
             }
             pages = rerender(doc, dirtyBlock);
           },
-          zoom,
+          zoom: curZoom,
           history,
           onFormatShortcut: (kind) => {
             const segs = editor?.getSelectionSegments() ?? [];
@@ -366,7 +467,8 @@ export function DocxView({
             document.dispatchEvent(new CustomEvent("dxw-selection"));
           },
           onStyleShortcut: (styleId) => applyStyleShortcut?.(styleId),
-        });
+        };
+        editor = new DocxEditor(editorConfig);
         editor.attach();
         applyStyleShortcut = (styleId) => {
           const caret = editor?.getCaretTarget();
@@ -696,6 +798,17 @@ export function DocxView({
         apiRef.current = api;
         onReady?.(api);
       }
+      // Live zoom updates: re-paint pages at the new scale in place. Reads doc
+      // and curZoom from this closure so it survives across zoom changes without
+      // re-running the effect (which would reparse and reset editor state).
+      applyZoomRef.current = (z: number) => {
+        if (z === curZoom) return;
+        curZoom = z;
+        if (editorConfig) editorConfig.zoom = z;
+        rerender(doc);
+      };
+      // Apply any zoom the ResizeObserver settled on while we were loading.
+      if (effZoomRef.current !== curZoom) applyZoomRef.current(effZoomRef.current);
     })().catch((e: unknown) => {
       if (cancelled) return;
       const err = e instanceof Error ? e : new Error(String(e));
@@ -705,12 +818,13 @@ export function DocxView({
 
     return () => {
       cancelled = true;
+      applyZoomRef.current = null;
       editor?.detach();
       editor = null;
       handle?.destroy();
       handle = null;
     };
-  }, [source, zoom, editable, commentAuthor, showComments, revisions]);
+  }, [source, editable, commentAuthor, showComments, revisions]);
 
   const hotBtn = (label: string, title: string, onClick: () => void) => (
     <button
@@ -736,7 +850,7 @@ export function DocxView({
       <div
         ref={containerRef}
         className={className}
-        style={{ background: "#e8eaed", overflow: "auto", height: "100%", ...style }}
+        style={{ background: "var(--dxw-canvas-bg, #e8eaed)", overflow: "auto", height: "100%", ...style }}
       >
         {error && (
           <div style={{ padding: 16, color: "#b00020", fontFamily: "system-ui" }}>

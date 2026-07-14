@@ -198,11 +198,15 @@ Formatting flow: DOM selection → `selectionToSegments` (via render bindings)
 middle, with `rPr` children inserted in schema order so Word accepts it.
 
 Typing (`DocxEditor`): `caretRangeFromPoint` → `(w:t, offset)`, splice the
-string, refresh + full relayout per keystroke — measured in single-digit ms,
-so incremental relayout is deferred complexity, not a requirement. The caret
-is our own positioned element: contentEditable's editing model cannot be
-reconciled with absolutely-positioned spans (the trap that kills most web
-docx editors).
+string, refresh, relayout. Relayout is **incremental**: `layoutDocument`
+takes the previous `LayoutResult` plus a dirty hint and reuses the pages of
+the edit's unchanged prefix/suffix, falling back to a full pass whenever it
+can't prove reuse is byte-identical (a `test/incr-equiv.test.ts` suite asserts
+incremental == full across edit positions). The renderer likewise adopts the
+DOM of unchanged pages and a single long-lived measurer keeps warm width
+caches across keystrokes. The caret is our own positioned element:
+contentEditable's editing model cannot be reconciled with absolutely-positioned
+spans (the trap that kills most web docx editors).
 
 ## 13. React & packaging
 

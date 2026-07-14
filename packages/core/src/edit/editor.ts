@@ -118,7 +118,7 @@ export class DocxEditor {
     const s = this.caretEl.style;
     s.position = "absolute";
     s.width = "1.5px";
-    s.background = "#1a1a1a";
+    s.background = "var(--dxw-caret, #1a1a1a)";
     s.pointerEvents = "none";
     s.display = "none";
     s.zIndex = "10";
@@ -517,7 +517,7 @@ export class DocxEditor {
       rect.className = "dxw-sel";
       rect.style.cssText =
         `position:absolute;left:${r.x0}px;top:${r.top}px;width:${r.x1 - r.x0}px;` +
-        `height:${r.height}px;background:rgba(26,115,232,.28);pointer-events:none;z-index:4;`;
+        `height:${r.height}px;background:var(--dxw-selection, rgba(26,115,232,.28));pointer-events:none;z-index:4;`;
       r.surface.appendChild(rect);
       this.selectionRects.push(rect);
     }
@@ -1990,24 +1990,58 @@ export class DocxEditor {
     this.dismissSuggestionPopover();
     const isIns = ref.kind === "insertion" || ref.kind === "markInsertion";
     const ink = isIns ? "#C00000" : "#B0261C"; // matches the markup renderer's revision colors
+    // Author + date come off the revision element (w:author / w:date). Word
+    // stamps these on every w:ins/w:del; show them so a reviewer sees WHO
+    // suggested the change and WHEN, like Google Docs' suggestion card.
+    const attrEndingWith = (suffix: string): string | undefined => {
+      const key = Object.keys(ref.el.attrs).find((k) => k.toLowerCase().endsWith(suffix));
+      return key ? ref.el.attrs[key] : undefined;
+    };
+    const author = ref.author || attrEndingWith("author") || "Unknown";
+    const rawDate = attrEndingWith("date");
+    const when = rawDate ? new Date(rawDate) : null;
+    const dateText = when && !isNaN(when.getTime()) ? when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
+    const initials = author
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((p) => p[0])
+      .slice(0, 2)
+      .join("")
+      .toUpperCase() || "?";
+
     const box = document.createElement("div");
     box.dataset.dxwSuggestPopover = "1";
     box.style.cssText =
-      "position:fixed;z-index:1000;display:flex;gap:8px;align-items:center;background:#fff;" +
-      "border:1px solid #dadce0;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);" +
-      "padding:6px 8px;font:12.5px system-ui,sans-serif;color:#3c4043;";
-    box.style.left = `${Math.max(8, clientX - 60)}px`;
+      "position:fixed;z-index:1000;display:flex;flex-direction:column;gap:8px;background:#fff;" +
+      "border:1px solid #dadce0;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,.18);" +
+      "padding:10px 12px;font:12.5px system-ui,sans-serif;color:#3c4043;min-width:210px;max-width:280px;";
+    box.style.left = `${Math.max(8, Math.min(clientX - 60, window.innerWidth - 292))}px`;
     box.style.top = `${clientY + 16}px`;
 
-    const chip = document.createElement("span");
-    chip.style.cssText =
-      `display:inline-flex;align-items:center;gap:5px;padding:2px 9px 2px 7px;border-radius:10px;` +
-      `background:#fce8e6;color:${ink};font:600 11px system-ui,sans-serif;`;
-    const dot = document.createElement("span");
-    dot.style.cssText = `width:7px;height:7px;border-radius:50%;background:${ink};flex-shrink:0;`;
-    chip.appendChild(dot);
-    chip.appendChild(document.createTextNode(isIns ? "Insertion" : "Deletion"));
-    box.appendChild(chip);
+    // Header: avatar + author + kind/date.
+    const head = document.createElement("div");
+    head.style.cssText = "display:flex;align-items:center;gap:8px;";
+    const avatar = document.createElement("span");
+    avatar.style.cssText =
+      `width:26px;height:26px;border-radius:50%;flex-shrink:0;background:${ink};color:#fff;` +
+      `display:flex;align-items:center;justify-content:center;font:600 10.5px system-ui,sans-serif;`;
+    avatar.textContent = initials;
+    const who = document.createElement("div");
+    who.style.cssText = "min-width:0;line-height:1.25;";
+    const nameEl = document.createElement("div");
+    nameEl.style.cssText = "font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+    nameEl.textContent = author;
+    const sub = document.createElement("div");
+    sub.style.cssText = `font-size:11px;color:${ink};`;
+    sub.textContent = (isIns ? "Suggested insertion" : "Suggested deletion") + (dateText ? ` · ${dateText}` : "");
+    who.append(nameEl, sub);
+    head.append(avatar, who);
+    box.appendChild(head);
+
+    const btnRow = document.createElement("div");
+    btnRow.style.cssText = "display:flex;gap:8px;justify-content:flex-end;";
+    box.appendChild(btnRow);
 
     const mkBtn = (text: string, title: string, primary: boolean, fn: () => void): void => {
       const b = document.createElement("button");
@@ -2032,10 +2066,10 @@ export class DocxEditor {
         ce.stopPropagation();
         fn();
       });
-      box.appendChild(b);
+      btnRow.appendChild(b);
     };
-    mkBtn("Accept", "Accept this suggestion", true, () => this.acceptRevisionRef(ref));
-    mkBtn("Reject", "Reject this suggestion", false, () => this.rejectRevisionRef(ref));
+    mkBtn("✓ Accept", "Accept this suggestion", true, () => this.acceptRevisionRef(ref));
+    mkBtn("✗ Reject", "Reject this suggestion", false, () => this.rejectRevisionRef(ref));
     document.body.appendChild(box);
     this.suggestionPopover = box;
   }
