@@ -2,8 +2,8 @@
   "name": "wordinweb",
   "private": true,
   "version": "0.1.0",
-  "description": "Open-source high-fidelity Word/.docx viewer and editor for the web",
-  "license": "PolyForm-Noncommercial-1.0.0",
+  "description": "Source-available high-fidelity Word/.docx viewer and editor for the web",
+  "license": "SEE LICENSE IN LICENSE",
   "workspaces": [
     "packages/*"
   ],

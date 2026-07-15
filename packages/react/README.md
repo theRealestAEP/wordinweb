@@ -232,14 +232,6 @@ import "@fontsource/caladea/400.css";   // Cambria metrics
 import "@fontsource/caladea/700.css";
 ```
 
-> **The Microsoft fonts in the separate parity demo are demo-only assets.** They
-> are included to reproduce this project's experimental parity results, but
-> they are not part of the WordInWeb library and should not be copied into
-> another application.
-> Applications using WordInWeb must source and license their own fonts. Without
-> the same fonts, the viewer falls back to substitutes and glyphs or line breaks
-> may differ from Word.
-
 For your own application, source your own fonts.
 
 ```css
@@ -273,4 +265,8 @@ and compared page-by-page. The test corpus and instructions are in
 
 ## License
 
-PolyForm Noncommercial 1.0.0 — free for noncommercial use; commercial use requires permission. See LICENSE.
+WordInWeb Small Business License 1.0 — MIT-style permissions for individuals,
+nonprofits, educational and public-research organizations, governments, and
+companies with no more than $1 million in annual revenue and $2 million in
+total funding. Larger companies require a separate commercial license. See
+`LICENSE`.

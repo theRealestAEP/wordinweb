@@ -6,4 +6,4 @@ This workspace is bundled into the public [`wordinweb`](https://www.npmjs.com/pa
 
 Documentation and source: https://github.com/theRealestAEP/wordinweb
 
-Licensed for noncommercial use under PolyForm Noncommercial 1.0.0.
+Licensed under the WordInWeb Small Business License 1.0. See `LICENSE`.
