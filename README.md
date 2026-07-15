@@ -265,8 +265,4 @@ and compared page-by-page. The test corpus and instructions are in
 
 ## License
 
-WordInWeb Small Business License 1.0 — MIT-style permissions for individuals,
-nonprofits, educational and public-research organizations, governments, and
-companies with no more than $1 million in annual revenue and $2 million in
-total funding. Larger companies require a separate commercial license. See
-`LICENSE`.
+MIT. See `LICENSE`.

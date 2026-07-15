@@ -1,59 +1,16 @@
-# WordInWeb Small Business License 1.0
+MIT License
 
 Copyright (c) 2026 WordInWeb contributors
 
-This is a source-available license. It is not the MIT License and is not an
-Open Source Initiative approved license.
-
-## Eligible Users
-
-You are eligible to use the Software under this license if you are:
-
-1. an individual using the Software on your own behalf;
-2. a nonprofit organization, educational institution, public research
-   organization, or government institution; or
-3. a for-profit organization that, together with its Affiliates, has both:
-   - no more than 1,000,000 USD in Gross Revenue for its most recently
-     completed fiscal year; and
-   - no more than 2,000,000 USD in aggregate Funding Raised.
-
-An individual using the Software on behalf of an organization is eligible only
-if that organization is eligible.
-
-## Permission
-
-Subject to the eligibility requirements above, permission is hereby granted,
-free of charge, to any person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the Software without
-restriction, including without limitation the rights to use, copy, modify,
-merge, publish, distribute, sublicense, and/or sell copies of the Software, and
-to permit persons to whom the Software is furnished to do so, subject to the
-following conditions:
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
-
-## Larger Companies
-
-A for-profit organization that exceeds either eligibility threshold is not
-licensed under these terms. Use by such an organization requires a separate
-commercial license from the copyright holder.
-
-## Definitions
-
-"Affiliate" means any entity that controls, is controlled by, or is under
-common control with an organization. "Control" means the direct or indirect
-power to direct an entity's management or policies, whether through ownership,
-contract, or otherwise.
-
-"Gross Revenue" means all revenue recognized before expenses, deductions, and
-taxes.
-
-"Funding Raised" means the aggregate gross proceeds received since formation
-from external financing, including equity, debt, convertible instruments,
-SAFEs, grants, and similar financing.
-
-## Disclaimer
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
