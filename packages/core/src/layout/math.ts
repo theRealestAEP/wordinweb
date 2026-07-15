@@ -1009,9 +1009,11 @@ function flow(
         // taller box re-sinks the whole equation (measured: +3.6 severity).
         const nestedGrown =
           display && breakDepth === 0 && node.e.some((seg) => containsRad([seg]));
+        const complexRad = !!(node.deg && node.deg.length) || node.e.some((seg) => containsRad([seg]));
         const hugTop = radAsc + size * RAD_GAP + ruleThick;
         const ruleTop = nestedGrown ? radAsc + size * RAD_GROWN_TOP : hugTop;
-        const paintRuleTop = ruleTop + RAD_RULE_RAISE;
+        const ruleRaise = complexRad ? RAD_RULE_RAISE : 0;
+        const paintRuleTop = ruleTop + ruleRaise;
         // The grown variant's foot also descends past the radicand descent
         // (probe2 raster: sign ink to 6.3pt below the baseline at 11pt).
         const signDesc = nestedGrown ? Math.max(radDesc, size * RAD_GROWN_FOOT) : radDesc;
@@ -1051,7 +1053,6 @@ function flow(
         // close), but structure does: dense's plain top-level radical takes
         // no extra reserve (p8 pinned), probe2's nested/degree line takes
         // +0.45em/+0.675em (mat3's PDF gap measurements).
-        const complexRad = !!(node.deg && node.deg.length) || node.e.some((seg) => containsRad([seg]));
         const topLevelDisplay = display && breakDepth === 0 && complexRad;
         const signW = measurer.width("√", font);
         box.pieces.push({
@@ -1077,7 +1078,7 @@ function flow(
           x1: radLeft - ruleOverhang,
           x2: box.width + ruleOverhang,
           dy: dy + ruleTop - ruleThick / 2,
-          paintDyOffset: RAD_RULE_RAISE,
+          paintDyOffset: ruleRaise || undefined,
           thick: ruleThick,
         });
         prevOperand = true;

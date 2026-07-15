@@ -4151,6 +4151,11 @@ describe("OMML matrices, arrays, accents, group chars, radicals, limits (probe2-
     expect(rules[1]).toBeGreaterThan(rules[0]); // outer vinculum higher than inner
   });
 
+  it("keeps a plain radical on its original Word-matched rule height", () => {
+    const box = layoutMath([{ t: "rad", e: [run("b²−4ac")] }], S, measurer, false);
+    expect(box.rules[0].paintDyOffset).toBeUndefined();
+  });
+
   it("limLow drops the limit below and limUpp raises it above the operator", () => {
     const low = layoutMath([{ t: "lim", pos: "low", e: [run("lim")], lim: [run("n")] }], S, measurer, true);
     const upp = layoutMath([{ t: "lim", pos: "upp", e: [run("max")], lim: [run("y")] }], S, measurer, true);
