@@ -3,6 +3,7 @@ import { checkboxStateElement } from "../checkbox.js";
 import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem, WarpTextItem } from "../layout/types.js";
 import { cssFont, cambriaMathDescentShare } from "../layout/measure.js";
 import { Border } from "../model.js";
+import { XmlElement } from "../xml.js";
 import { convertEmfToDataUrl } from "emf-converter";
 import { decodeTiff } from "./tiff.js";
 import { renderWmf } from "./wmf.js";
@@ -16,6 +17,12 @@ export interface RenderOptions {
   pageShadow?: boolean;
   /** Materialize interactive affordances (table resize grips). */
   interactive?: boolean;
+  /** Keep only nearby page contents mounted. Page shells always remain so
+   * scroll geometry is unchanged. Intended for long interactive documents. */
+  virtualize?: boolean;
+  /** Called after the mounted page window changes so editor chrome can be
+   * restored on newly-mounted pages. */
+  onViewportChange?: () => void;
   /** Show review comments (highlight + margin balloons). Default true. */
   comments?: boolean;
   /** Called when the user deletes a comment from its balloon. The balloon
@@ -56,6 +63,8 @@ export interface RenderHandle {
   root: HTMLElement;
   /** Rendered text elements in paint order, for selection mapping. */
   bindings: TextBinding[];
+  /** Mounted text bindings indexed by their retained source w:t element. */
+  bindingsByText: Map<XmlElement, TextBinding[]>;
   /** Table resize grips (only when options.interactive). */
   grips: GripBinding[];
   /** Rendered images, for interactive select/resize/move. */
@@ -66,6 +75,11 @@ export interface RenderHandle {
   wordarts: WordArtBinding[];
   /** Revoke object URLs etc. */
   destroy: () => void;
+  /** Temporarily mount every page, returning a function that restores the
+   * viewport window. Used by the synchronous print-clone path. */
+  materializeAll?: () => () => void;
+  /** Recompute the mounted page window after an external scroll/resize. */
+  updateViewport?: () => void;
   /** Per-page render records, retained so the next render can reuse the DOM of
    * pages whose layout is unchanged (see renderToDom's `prev` parameter). */
   _pages?: PageRender[];
@@ -75,6 +89,12 @@ export interface RenderHandle {
   _hadComments?: boolean;
   /** Zoom this render painted at — adoption is only valid at the same zoom. */
   _zoom?: number;
+  /** Whether this handle keeps only a viewport-sized page window mounted. */
+  _virtualized?: boolean;
+  /** Parsed-model generation whose source bindings this handle owns. */
+  _modelVersion?: number;
+  /** Remove viewport listeners before this handle is replaced. */
+  _stopVirtualizer?: () => void;
 }
 
 /** One page's DOM element plus the editor bindings it owns and the object URLs
@@ -89,6 +109,7 @@ export interface PageRender {
   drawings: DrawingBinding[];
   wordarts: WordArtBinding[];
   urls: string[];
+  mounted: boolean;
 }
 
 /** True for a parsed XML element (stable across doc.refresh — reference
@@ -317,7 +338,66 @@ function renderPageRecord(
   const drawings: DrawingBinding[] = [];
   const wordarts: WordArtBinding[] = [];
   const el = renderPage(doc, page, zoom, urls, options, bindings, grips, images, drawings, wordarts);
-  return { el, page, bindings, grips, images, drawings, wordarts, urls };
+  return { el, page, bindings, grips, images, drawings, wordarts, urls, mounted: true };
+}
+
+function renderPageShell(page: LaidOutPage, zoom: number, options: RenderOptions): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "dxw-page";
+  el.dataset.page = String(page.number);
+  el.style.position = "relative";
+  el.style.width = `${page.width * zoom}px`;
+  el.style.height = `${page.height * zoom}px`;
+  el.style.background = "var(--dxw-page-bg, #ffffff)";
+  el.style.overflow = "hidden";
+  el.style.flexShrink = "0";
+  if (options.pageShadow !== false) {
+    el.style.boxShadow = "var(--dxw-page-shadow, 0 1px 3px rgba(0,0,0,.28), 0 4px 14px rgba(0,0,0,.12))";
+  }
+  el.dataset.bodyTop = String(page.bodyTop);
+  el.dataset.bodyBottom = String(page.bodyBottom);
+  return el;
+}
+
+function renderEmptyPageRecord(page: LaidOutPage, zoom: number, options: RenderOptions): PageRender {
+  return {
+    el: renderPageShell(page, zoom, options),
+    page,
+    bindings: [],
+    grips: [],
+    images: [],
+    drawings: [],
+    wordarts: [],
+    urls: [],
+    mounted: false,
+  };
+}
+
+function mountPageRecord(doc: DocxDocument, record: PageRender, zoom: number, options: RenderOptions): void {
+  if (record.mounted) return;
+  const rendered = renderPageRecord(doc, record.page, zoom, options);
+  const surface = rendered.el.firstElementChild;
+  if (surface) record.el.appendChild(surface);
+  record.bindings = rendered.bindings;
+  record.grips = rendered.grips;
+  record.images = rendered.images;
+  record.drawings = rendered.drawings;
+  record.wordarts = rendered.wordarts;
+  record.urls = rendered.urls;
+  record.mounted = true;
+}
+
+function unmountPageRecord(record: PageRender): void {
+  if (!record.mounted) return;
+  for (const url of record.urls) URL.revokeObjectURL(url);
+  record.el.replaceChildren();
+  record.bindings = [];
+  record.grips = [];
+  record.images = [];
+  record.drawings = [];
+  record.wordarts = [];
+  record.urls = [];
+  record.mounted = false;
 }
 
 export function renderToDom(
@@ -329,8 +409,10 @@ export function renderToDom(
 ): RenderHandle {
   const zoom = options.zoom ?? 1;
   const gap = options.pageGap ?? 24;
+  const virtualized = options.virtualize === true && layout.pages.length > 20;
 
   ensureStylesheet();
+  prev?._stopVirtualizer?.();
 
   // Incremental reuse: adopt the DOM of pages whose layout is unchanged. A
   // typical keystroke only touches one page, so the common prefix [0,lo) and
@@ -343,8 +425,14 @@ export function renderToDom(
   // the zoom is baked into each page's painted DOM. Adopting across a zoom
   // change would keep every page at the old scale (the in-place fit-to-width
   // re-render was silently swallowed this way), so reuse requires same-zoom.
-  const canReuse = prevPages.length > 0 && prev?._zoom === zoom;
+  const canReuse =
+    prevPages.length > 0 &&
+    prev?._zoom === zoom &&
+    prev?._virtualized === virtualized &&
+    prev?._modelVersion === doc.modelVersion;
   const pages: PageRender[] = new Array(layout.pages.length);
+  const createRecord = (page: LaidOutPage): PageRender =>
+    virtualized ? renderEmptyPageRecord(page, zoom, options) : renderPageRecord(doc, page, zoom, options);
   let reusedCount = 0;
   // Changed-page window; the prefix/suffix outside it reuse prev's elements.
   let lo = 0;
@@ -364,10 +452,10 @@ export function renderToDom(
       hiNew--;
       hiOld--;
     }
-    for (let i = lo; i <= hiNew; i++) pages[i] = renderPageRecord(doc, layout.pages[i], zoom, options);
+    for (let i = lo; i <= hiNew; i++) pages[i] = createRecord(layout.pages[i]);
     reusedCount = layout.pages.length - (hiNew - lo + 1);
   } else {
-    for (let i = 0; i < layout.pages.length; i++) pages[i] = renderPageRecord(doc, layout.pages[i], zoom, options);
+    for (let i = 0; i < layout.pages.length; i++) pages[i] = createRecord(layout.pages[i]);
   }
 
   // Mutate the previous root in place when we adopted its pages: splice out the
@@ -399,40 +487,9 @@ export function renderToDom(
     for (const pr of pages) root.appendChild(pr.el);
     container.appendChild(root);
   }
+  root.classList.toggle("dxw-virtualized", virtualized);
 
-  // Adopted pages carry the previous render's highlight rects and span tags —
-  // strip them so the overlay pass below starts clean (and so nothing stale
-  // survives when the last comment was just deleted). Freshly built pages have
-  // none; scope the sweep to adopted elements only.
-  if (prev?._hadComments && reusedCount > 0) {
-    const fresh = new Set(pages);
-    for (const pr of prevPages) {
-      if (!fresh.has(pr)) continue;
-      for (const hl of Array.from(pr.el.querySelectorAll(".dxw-comment-hl"))) hl.remove();
-      for (const el of Array.from(pr.el.querySelectorAll<HTMLElement>("[data-dxw-comment]"))) {
-        delete el.dataset.dxwComment;
-      }
-    }
-  }
-
-  // Comment balloon cards attach directly to the root (highlights live inside
-  // page surfaces and are swept above). When we reuse the previous root in
-  // place they survive from the prior render, so clear them before redrawing —
-  // the old code relied on the whole root being thrown away each render. A
-  // fresh root has none, so this only runs on the in-place path.
-  if (inPlace) {
-    for (const card of Array.from(root.querySelectorAll(".dxw-comment-card"))) card.remove();
-  }
-
-  const bindings = pages.flatMap((p) => p.bindings);
   const drawComments = options.comments !== false && doc.comments.length > 0;
-  // The balloon rail is reserved via root padding, which a reused root keeps
-  // from the prior render — release it when the last comment was just deleted
-  // (renderComments re-reserves it whenever it draws).
-  if (inPlace && !drawComments) root.style.paddingRight = "";
-  if (drawComments) {
-    renderComments(doc, root, bindings, zoom, options.onDeleteComment, options.onReplyComment);
-  }
 
   // Revoke object URLs owned by prev pages that were NOT adopted, then drop the
   // old root (whatever is left in it is unreferenced now).
@@ -447,21 +504,155 @@ export function renderToDom(
   const perf = (globalThis as { __dxwPerf?: { lastReused?: number } }).__dxwPerf;
   if (perf) perf.lastReused = reusedCount;
 
-  return {
+  let frame = 0;
+  let handle: RenderHandle;
+
+  const refreshBindings = (): void => {
+    const mounted = pages.filter((p) => p.mounted);
+    handle.bindings = mounted.flatMap((p) => p.bindings);
+    const byText = new Map<XmlElement, TextBinding[]>();
+    for (const binding of handle.bindings) {
+      const t = binding.item.src?.t;
+      if (!t) continue;
+      const list = byText.get(t);
+      if (list) list.push(binding);
+      else byText.set(t, [binding]);
+    }
+    handle.bindingsByText = byText;
+    handle.grips = mounted.flatMap((p) => p.grips);
+    handle.images = mounted.flatMap((p) => p.images);
+    handle.drawings = mounted.flatMap((p) => p.drawings);
+    handle.wordarts = mounted.flatMap((p) => p.wordarts);
+  };
+
+  const clearComments = (): void => {
+    for (const page of pages) {
+      if (!page.mounted) continue;
+      for (const hl of Array.from(page.el.querySelectorAll(".dxw-comment-hl"))) hl.remove();
+      for (const el of Array.from(page.el.querySelectorAll<HTMLElement>("[data-dxw-comment]"))) {
+        delete el.dataset.dxwComment;
+      }
+    }
+    for (const card of Array.from(root.querySelectorAll(".dxw-comment-card"))) card.remove();
+    root.style.paddingRight = "";
+  };
+
+  const redrawComments = (): void => {
+    clearComments();
+    if (drawComments) {
+      renderComments(doc, root, handle.bindings, zoom, options.onDeleteComment, options.onReplyComment);
+    }
+  };
+
+  const wantedPages = (): Set<number> => {
+    const wanted = new Set<number>();
+    const top = container.scrollTop;
+    const bottom = top + Math.max(container.clientHeight, 1);
+    let y = gap;
+    let first = -1;
+    let last = -1;
+    for (let i = 0; i < pages.length; i++) {
+      const pageBottom = y + pages[i].page.height * zoom;
+      if (pageBottom >= top && y <= bottom) {
+        if (first < 0) first = i;
+        last = i;
+      }
+      y = pageBottom + gap;
+    }
+    if (first < 0) first = last = Math.max(0, pages.length - 1);
+    for (let i = Math.max(0, first - 2); i <= Math.min(pages.length - 1, last + 2); i++) wanted.add(i);
+    // Keep active caret/selection pages mounted even if the user scrolls away.
+    // The logical editor state then remains resolvable until it is cleared.
+    for (let i = 0; i < pages.length; i++) {
+      if (pages[i].mounted && pages[i].el.querySelector("[data-dxw-caret], .dxw-sel")) wanted.add(i);
+    }
+    return wanted;
+  };
+
+  const syncViewport = (notify: boolean, force = false): void => {
+    if (!virtualized) return;
+    const wanted = wantedPages();
+    let changed = false;
+    for (const i of wanted) {
+      if (pages[i].mounted) continue;
+      mountPageRecord(doc, pages[i], zoom, options);
+      changed = true;
+    }
+    for (let i = 0; i < pages.length; i++) {
+      if (!wanted.has(i) && pages[i].mounted) {
+        unmountPageRecord(pages[i]);
+        changed = true;
+      }
+    }
+    if (!changed && !force) return;
+    refreshBindings();
+    redrawComments();
+    if (notify) options.onViewportChange?.();
+  };
+
+  const scheduleViewport = (): void => {
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      syncViewport(true);
+    });
+  };
+
+  const stopVirtualizer = (): void => {
+    if (!virtualized) return;
+    container.removeEventListener("scroll", scheduleViewport);
+    window.removeEventListener("resize", scheduleViewport);
+    if (frame) cancelAnimationFrame(frame);
+    frame = 0;
+  };
+
+  handle = {
     root,
-    bindings,
-    grips: pages.flatMap((p) => p.grips),
-    images: pages.flatMap((p) => p.images),
-    drawings: pages.flatMap((p) => p.drawings),
-    wordarts: pages.flatMap((p) => p.wordarts),
+    bindings: [],
+    bindingsByText: new Map(),
+    grips: [],
+    images: [],
+    drawings: [],
+    wordarts: [],
     _pages: pages,
     _hadComments: drawComments,
     _zoom: zoom,
+    _virtualized: virtualized,
+    _modelVersion: doc.modelVersion,
+    _stopVirtualizer: stopVirtualizer,
+    updateViewport: () => syncViewport(true),
+    materializeAll: () => {
+      const mounted = pages.map((p) => p.mounted);
+      for (const page of pages) mountPageRecord(doc, page, zoom, options);
+      refreshBindings();
+      redrawComments();
+      return () => {
+        for (let i = 0; i < pages.length; i++) {
+          if (!mounted[i]) unmountPageRecord(pages[i]);
+        }
+        refreshBindings();
+        redrawComments();
+        options.onViewportChange?.();
+      };
+    },
     destroy: () => {
+      stopVirtualizer();
       for (const pr of pages) for (const u of pr.urls) URL.revokeObjectURL(u);
       root.remove();
     },
   };
+
+  if (virtualized) {
+    // Reused page records may already match the wanted viewport. Force the
+    // first pass so this new handle still receives their binding indexes.
+    syncViewport(false, true);
+    container.addEventListener("scroll", scheduleViewport, { passive: true });
+    window.addEventListener("resize", scheduleViewport);
+  } else {
+    refreshBindings();
+    redrawComments();
+  }
+  return handle;
 }
 
 /**
@@ -520,21 +711,7 @@ function renderPage(
   drawings: DrawingBinding[],
   wordarts: WordArtBinding[],
 ): HTMLElement {
-  const el = document.createElement("div");
-  el.className = "dxw-page";
-  el.dataset.page = String(page.number);
-  el.style.position = "relative";
-  el.style.width = `${page.width * zoom}px`;
-  el.style.height = `${page.height * zoom}px`;
-  el.style.background = "var(--dxw-page-bg, #ffffff)";
-  el.style.overflow = "hidden";
-  el.style.flexShrink = "0";
-  if (options.pageShadow !== false) {
-    el.style.boxShadow = "var(--dxw-page-shadow, 0 1px 3px rgba(0,0,0,.28), 0 4px 14px rgba(0,0,0,.12))";
-  }
-
-  el.dataset.bodyTop = String(page.bodyTop);
-  el.dataset.bodyBottom = String(page.bodyBottom);
+  const el = renderPageShell(page, zoom, options);
 
   // Inner surface scaled by zoom so item coordinates stay in layout px.
   const surface = document.createElement("div");

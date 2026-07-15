@@ -637,6 +637,14 @@ export function clearBreakCache(measurer: TextMeasurer): void {
   BP_CACHES.get(measurer)?.clear();
 }
 const paraSigMemo = new WeakMap<Paragraph, string>();
+const paraModelBySource = new WeakMap<XmlElement, Paragraph>();
+
+/** Invalidate the memoized XML signature for a paragraph whose retained w:p
+ * was edited without rebuilding the parsed document model. */
+export function invalidateParagraphSignature(src: XmlElement): void {
+  const para = paraModelBySource.get(src);
+  if (para) paraSigMemo.delete(para);
+}
 // Stable per-paragraph identity. A break result's spans carry `src` references
 // to specific w:r/w:t elements for caret mapping, so two DIFFERENT paragraphs
 // with identical content must never share a cached break (the reusing one would
@@ -667,6 +675,7 @@ function xmlSigInto(el: XmlElement, out: string[]): void {
  * XML. Memoized per model object: fresh each refresh, so it is computed once per
  * paragraph per layout and reused across that layout's repeated trial breaks. */
 function paraSig(para: Paragraph): string {
+  paraModelBySource.set(para.src as XmlElement, para);
   let s = paraSigMemo.get(para);
   if (s === undefined) {
     const out: string[] = [];

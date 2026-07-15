@@ -63,6 +63,12 @@ const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
  * header/footer parts, with helpers to resolve effective formatting.
  */
 export class DocxDocument {
+  /** Changes whenever refresh() rebuilds the parsed model. Plain in-place text
+   * edits can keep this stable so incremental layout reuses model-only caches. */
+  private _modelVersion = 0;
+  get modelVersion(): number {
+    return this._modelVersion;
+  }
   readonly pkg: Package;
   readonly theme: Theme;
   styles: Styles;
@@ -329,6 +335,7 @@ export class DocxDocument {
       const notes = parseNotesPart(this.footnotesRoot, { ...this.ctxBase, rels: this.footnotesRels }, true);
       for (const [id, blocks] of notes) this.footnotes.set(id, blocks);
     }
+    this._modelVersion++;
   }
 
   private deriveComments(): DocComment[] {

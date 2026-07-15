@@ -290,4 +290,7 @@ export interface LayoutResult {
    * back as LayoutOptions.prev to enable incremental relayout. Not part of the
    * rendered output and ignored by the equivalence harness. */
   _incr?: unknown;
+  /** Opaque page state used to refresh headers/footers without repaginating
+   * the body when their measured geometry is unchanged. */
+  _hf?: unknown;
 }

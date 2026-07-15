@@ -24,6 +24,32 @@ export function paragraphOf(doc: DocxDocument, target: XmlElement): XmlElement |
   return cur ?? null;
 }
 
+/** Top-level body block containing a caret element. Paragraphs inside table
+ * cells or text boxes belong to the outermost w:tbl / w:p that the layout
+ * engine hashes, so passing the nested paragraph would miss its dirty-hint
+ * fast path and force a scan of every document block. */
+export function topLevelBlockOf(doc: DocxDocument, target: XmlElement): XmlElement | null {
+  const paragraph = paragraphOf(doc, target);
+  if (!paragraph) return null;
+  const contains = (block: Block): boolean => {
+    if (block.src === paragraph) return true;
+    if (block.type === "paragraph") return false;
+    for (const row of block.rows) {
+      for (const cell of row.cells) {
+        for (const nested of cell.blocks) if (contains(nested)) return true;
+      }
+    }
+    return false;
+  };
+  for (const section of doc.sections) {
+    for (const block of section.blocks) if (contains(block)) return block.src ?? paragraph;
+  }
+  // Text boxes are nested inside paragraph run content rather than table cell
+  // blocks. Keeping their own paragraph hint is safe; the engine simply falls
+  // back to its full signature scan when it is not a top-level source.
+  return paragraph;
+}
+
 // ---------- tables ----------
 
 /**

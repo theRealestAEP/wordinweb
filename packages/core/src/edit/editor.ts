@@ -9,11 +9,17 @@ import { advanceCell, moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTab
 import { listTypeAt, setListLevel } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
 import { isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
-import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph } from "./blocks.js";
+import { exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph, topLevelBlockOf } from "./blocks.js";
 import { SelectionSegment, selectionTextLogical } from "./commands.js";
 import { adjustFloatingPosition, imageAltText, isFloatingDrawing, replaceImageBlip, setFloatingPosition, setImageAltText, setImageWrap } from "./images.js";
 import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
 import { graphemeStep } from "./grapheme.js";
+import { invalidateParagraphSignature } from "../layout/inline.js";
+import {
+  clipboardBlocksHtml,
+  htmlClipboardBlocks,
+  selectionClipboardBlocks,
+} from "./clipboard.js";
 import {
   insertSuggestedText,
   deleteSuggestedRange,
@@ -45,7 +51,7 @@ export interface EditorHost {
    * in place by a character-level edit; the host forwards it to the layout
    * engine's incremental scan as a hint. Omitted for structural or multi-block
    * changes, which take the engine's full block scan. */
-  rerender(dirtyBlock?: XmlElement): void;
+  rerender(dirtyBlock?: XmlElement, scope?: "local" | "global" | "background"): void;
   zoom?: number;
   /** Shared undo/redo stack (also fed by toolbar formatting commands). */
   history?: EditHistory;
@@ -93,6 +99,7 @@ export class DocxEditor {
    * our own highlight, which kills the flicker and survives toolbar focus). */
   private selection: { anchor: SelPoint; focus: SelPoint } | null = null;
   private selectionRects: HTMLElement[] = [];
+  private restoreSelectAllPages: (() => void) | null = null;
   /** True while a drag-selection is in progress (checked by onMouseUp, which
    * bubbles from the container BEFORE the document-level drag-end listener). */
   private dragSelecting = false;
@@ -201,6 +208,10 @@ export class DocxEditor {
   clearSelection(): void {
     this.selection = null;
     this.paintSelection();
+    const restore = this.restoreSelectAllPages;
+    this.restoreSelectAllPages = null;
+    restore?.();
+    this.host.getHandle()?.updateViewport?.();
     this.notifySelection();
   }
 
@@ -409,6 +420,9 @@ export class DocxEditor {
   selectAll(): void {
     const handle = this.host.getHandle();
     if (!handle) return;
+    if (handle._virtualized && !this.restoreSelectAllPages) {
+      this.restoreSelectAllPages = handle.materializeAll?.() ?? null;
+    }
     const editable = handle.bindings.filter(
       (b) => b.item.src?.t && this.regionOf(b.item.src.t as XmlElement) === (this.inHeaderFooter ? "hf" : "body"),
     );
@@ -630,6 +644,8 @@ export class DocxEditor {
     c.removeEventListener("dragover", this.onDragOver);
     c.removeEventListener("drop", this.onDrop);
     this.dismissSuggestionPopover();
+    this.restoreSelectAllPages?.();
+    this.restoreSelectAllPages = null;
     this.hideCaret();
   }
 
@@ -646,6 +662,15 @@ export class DocxEditor {
     if (!text) return;
     e.preventDefault();
     e.clipboardData?.setData("text/plain", text);
+    const blocks = selectionClipboardBlocks(this.host.doc, this.getSelectionSegments());
+    if (blocks.length > 0) {
+      const html = clipboardBlocksHtml(blocks);
+      e.clipboardData?.setData("text/html", html);
+    } else {
+      const div = document.createElement("div");
+      div.textContent = text;
+      e.clipboardData?.setData("text/html", div.innerHTML);
+    }
   };
 
   private onCut = (e: ClipboardEvent): void => {
@@ -653,6 +678,15 @@ export class DocxEditor {
     if (!text) return;
     e.preventDefault();
     e.clipboardData?.setData("text/plain", text);
+    const blocks = selectionClipboardBlocks(this.host.doc, this.getSelectionSegments());
+    if (blocks.length > 0) {
+      const html = clipboardBlocksHtml(blocks);
+      e.clipboardData?.setData("text/html", html);
+    } else {
+      const div = document.createElement("div");
+      div.textContent = text;
+      e.clipboardData?.setData("text/html", div.innerHTML);
+    }
     this.host.history?.checkpoint();
     this.removeSelectedText();
     this.commit();
@@ -660,8 +694,19 @@ export class DocxEditor {
 
   private onPaste = (e: ClipboardEvent): void => {
     const text = e.clipboardData?.getData("text/plain");
-    if (!text) return;
     if (!this.caret && !this.hasSelection()) return;
+    if (!this.suggesting) {
+      const html = e.clipboardData?.getData("text/html") ?? "";
+      const sp = this.host.doc.sections[0]?.props;
+      const width = sp ? sp.pageWidth - sp.marginLeft - sp.marginRight : 624;
+      const blocks = htmlClipboardBlocks(html, width);
+      if (blocks.length > 0) {
+        e.preventDefault();
+        this.pasteBlocks(blocks, html.length > 50_000 || blocks.length > 200);
+        return;
+      }
+    }
+    if (!text) return;
     e.preventDefault();
     this.pasteText(text);
   };
@@ -670,16 +715,110 @@ export class DocxEditor {
    * both text and the new marks route through the suggesting-aware cores so
    * paste in suggesting mode records w:ins. One checkpoint + one commit. */
   private pasteText(text: string): void {
+    const hadSelection = this.hasSelection();
     this.host.history?.checkpoint();
-    if (this.hasSelection()) this.removeSelectedText();
+    if (hadSelection) this.removeSelectedText();
     if (!this.caret) return;
     const chunks = text.replace(/\r\n?/g, "\n").split("\n");
+    const large = text.length > 50_000 || chunks.length > 200;
+    if (!this.suggesting && chunks.length > 1) {
+      this.insertPlainTextParagraphs(chunks);
+      this.commit(false, large ? "background" : "global");
+      return;
+    }
     for (let i = 0; i < chunks.length; i++) {
       if (i > 0) this.splitParagraphCore();
       if (!this.caret) break;
       if (chunks[i]) this.insertTextCore(chunks[i]);
     }
-    this.commit();
+    const textOnly = !hadSelection && !this.suggesting && chunks.length === 1 && !!this.caret?.t.text;
+    this.commit(textOnly, large ? "background" : "local");
+  }
+
+  /** Insert a multi-paragraph plain-text paste with one tree splice. Repeating
+   * splitParagraphCore for every newline turns a large paste into thousands of
+   * full parent-tree walks and can exhaust the page before layout starts. */
+  private insertPlainTextParagraphs(chunks: string[]): void {
+    const caret = this.caret;
+    if (!caret || chunks.length < 2 || checkboxStateElement(caret.run, caret.t)) return;
+    const rEl = this.host.doc.findParentOf(caret.t);
+    if (!rEl || localName(rEl.name) !== "r") return;
+    let pEl: XmlElement | undefined = this.host.doc.findParentOf(rEl);
+    while (pEl && localName(pEl.name) !== "p") pEl = this.host.doc.findParentOf(pEl);
+    if (!pEl) return;
+    const parent = this.host.doc.findParentOf(pEl);
+    if (!parent) return;
+    const runIdx = pEl.children.indexOf(rEl);
+    const textIdx = rEl.children.indexOf(caret.t);
+    if (runIdx === -1 || textIdx === -1) return;
+
+    const w = pEl.name.includes(":") ? pEl.name.slice(0, pEl.name.indexOf(":") + 1) : "";
+    const rPr = rEl.children.find((node) => localName(node.name) === "rPr");
+    const pPr = pEl.children.find((node) => localName(node.name) === "pPr");
+    const suffix = caret.t.text.slice(caret.offset);
+    const afterRunChildren = rEl.children.slice(textIdx + 1);
+    caret.t.text = caret.t.text.slice(0, caret.offset) + chunks[0];
+    rEl.children = rEl.children.slice(0, textIdx + 1);
+
+    const makeTextRun = (value: string): { run: XmlElement; text: XmlElement } => {
+      const t = {
+        name: caret.t.name,
+        attrs: { ...caret.t.attrs, "xml:space": "preserve" },
+        text: value,
+        children: [],
+      } satisfies XmlElement;
+      return {
+        text: t,
+        run: {
+          name: rEl.name,
+          attrs: { ...rEl.attrs },
+          text: "",
+          children: [...(rPr ? [cloneXml(rPr)] : []), t],
+        },
+      };
+    };
+    const makeParagraph = (run: XmlElement): XmlElement => {
+      const newPPr = pPr ? cloneXml(pPr) : undefined;
+      if (newPPr) newPPr.children = newPPr.children.filter((node) => localName(node.name) !== "sectPr");
+      return {
+        name: pEl.name,
+        attrs: {},
+        text: "",
+        children: [...(newPPr ? [newPPr] : []), run],
+      };
+    };
+
+    const inserted: XmlElement[] = [];
+    for (let i = 1; i < chunks.length - 1; i++) inserted.push(makeParagraph(makeTextRun(chunks[i]).run));
+    const last = makeTextRun(chunks[chunks.length - 1] + suffix);
+    last.run.children.push(...afterRunChildren);
+    const moved = pEl.children.slice(runIdx + 1);
+    const finalParagraph = makeParagraph(last.run);
+    finalParagraph.children.push(...moved);
+    pEl.children = pEl.children.slice(0, runIdx + 1);
+    inserted.push(finalParagraph);
+    parent.children.splice(parent.children.indexOf(pEl) + 1, 0, ...inserted);
+    this.caret = { t: last.text, run: caret.run, offset: chunks[chunks.length - 1].length, bias: "end" };
+  }
+
+  private pasteBlocks(blocks: XmlElement[], background: boolean): void {
+    this.host.history?.checkpoint();
+    if (this.hasSelection()) this.removeSelectedText();
+    if (!this.caret) return;
+    this.splitParagraphCore();
+    if (!this.caret) return;
+    const tail = paragraphOf(this.host.doc, this.caret.t);
+    const parent = tail ? this.host.doc.findParentOf(tail) : undefined;
+    if (!tail || !parent) return;
+    const copies = blocks.map(cloneXml);
+    parent.children.splice(parent.children.indexOf(tail), 0, ...copies);
+    for (let i = copies.length - 1; i >= 0; i--) {
+      const t = lastTextOf(copies[i]);
+      if (!t) continue;
+      this.caret = { t, run: this.caret.run, offset: t.text.length, bias: "end" };
+      break;
+    }
+    this.commit(false, background ? "background" : "global");
   }
 
   // ---------- table drag-resize (columns and rows) ----------
@@ -1973,11 +2112,13 @@ export class DocxEditor {
     }
     if (caret && e.detail >= 3) {
       this.selectParagraphAt(caret);
+      this.focusText();
       return;
     }
     if (caret && e.detail >= 2) {
       this.clearSelection();
       this.selectWordAt(caret);
+      this.focusText();
       return;
     }
     // A plain click collapses any owned selection and places the caret.
@@ -2501,25 +2642,6 @@ export class DocxEditor {
       this.applyHistory("redo");
       return;
     }
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
-      const text = this.selectionText();
-      if (text) {
-        e.preventDefault();
-        void navigator.clipboard?.writeText(text);
-      }
-      return;
-    }
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "x") {
-      const text = this.selectionText();
-      if (text) {
-        e.preventDefault();
-        void navigator.clipboard?.writeText(text);
-        this.host.history?.checkpoint();
-        this.removeSelectedText();
-        this.commit();
-      }
-      return;
-    }
     // Tab inside a table moves to the next cell (Shift+Tab previous), wrapping
     // across rows; Tab in the last cell appends a new row. This takes priority
     // over list-indent and never inserts a literal tab character. Checked
@@ -2850,9 +2972,10 @@ export class DocxEditor {
 
   private insertText(text: string): void {
     this.host.history?.checkpoint("typing");
+    const textOnly = !this.hasSelection() && !this.suggesting && !!this.caret?.t.text;
     if (this.hasSelection()) this.removeSelectedText();
     this.insertTextCore(text);
-    this.commit();
+    this.commit(textOnly);
   }
 
   /** Insert text at the caret (suggesting-aware) without touching history or
@@ -2938,7 +3061,7 @@ export class DocxEditor {
       const to = graphemeStep(caret.t.text, caret.offset, 1) ?? caret.offset + 1;
       caret.t.text = caret.t.text.slice(0, caret.offset) + caret.t.text.slice(to);
     }
-    this.commit();
+    this.commit(caret.t.text.length > 0);
   }
 
   /** Backspace/Delete in suggesting mode: mark one character (or a paragraph
@@ -3159,7 +3282,79 @@ export class DocxEditor {
     this.caret = { t: afterT, run: caret.run, offset: 0 };
   }
 
-  private commit(): void {
+  /** Update the retained parsed run for a simple in-place w:t edit. The XML
+   * element is still the source of truth; this avoids reparsing every block
+   * when typing cannot have changed document structure or formatting. */
+  private syncTextModel(t: XmlElement): boolean {
+    const handle = this.host.getHandle();
+    if (!handle) return false;
+    const runs = new Set<Run>();
+    for (const binding of handle.bindingsByText.get(t) ?? []) {
+      if (binding.item.src) runs.add(binding.item.src.run);
+    }
+    let updated = false;
+    let oldText: string | undefined;
+    for (const run of runs) {
+      for (const content of run.content) {
+        if (content.kind !== "text" || content.srcT !== t) continue;
+        oldText ??= content.text;
+        content.text = t.text;
+        updated = true;
+      }
+      if (updated && this.caret) this.caret.run = run;
+    }
+    if (updated && oldText !== undefined && oldText !== t.text && this.regionOf(t) === "hf") {
+      this.previewRepeatedText(t, oldText, t.text);
+    }
+    return updated;
+  }
+
+  /** Keep a simple header/footer text edit visible while its document-wide
+   * repagination is debounce-queued. The final cooperative layout replaces
+   * this preview and remains the source of truth for wrapping and geometry. */
+  private previewRepeatedText(t: XmlElement, oldText: string, newText: string): void {
+    let start = 0;
+    while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) start++;
+    let oldEnd = oldText.length;
+    let newEnd = newText.length;
+    while (oldEnd > start && newEnd > start && oldText[oldEnd - 1] === newText[newEnd - 1]) {
+      oldEnd--;
+      newEnd--;
+    }
+    const delta = newText.length - oldText.length;
+    const copies = new Map<Element, TextBinding[]>();
+    for (const binding of this.host.getHandle()?.bindingsByText.get(t) ?? []) {
+      const page = binding.el.closest(".dxw-page");
+      if (!page) continue;
+      const list = copies.get(page);
+      if (list) list.push(binding);
+      else copies.set(page, [binding]);
+    }
+    for (const bindings of copies.values()) {
+      bindings.sort((a, b) => a.item.src!.offset - b.item.src!.offset);
+      let target = -1;
+      for (let i = 0; i < bindings.length; i++) {
+        const src = bindings[i].item.src!;
+        if (start >= src.offset && start <= src.offset + bindings[i].item.text.length) target = i;
+      }
+      if (target < 0) continue;
+      const targetBinding = bindings[target];
+      const targetEnd = targetBinding.item.src!.offset + targetBinding.item.text.length;
+      if (oldEnd > targetEnd || targetBinding.item.text.length + delta < 0) continue;
+      let offset = bindings[0].item.src!.offset;
+      for (let i = 0; i < bindings.length; i++) {
+        const binding = bindings[i];
+        const length = binding.item.text.length + (i === target ? delta : 0);
+        binding.item.src!.offset = offset;
+        binding.item.text = newText.slice(offset, offset + length);
+        const textNode = deepTextNode(binding.el);
+        if (textNode) textNode.textContent = binding.item.text;
+        offset += length;
+      }
+    }
+  }
+
+  private commit(textOnly = false, scope: "local" | "global" | "background" = "local"): void {
     const perf = (globalThis as { __dxwPerf?: { last?: Record<string, number>; samples?: Record<string, number>[]; lastReused?: number } }).__dxwPerf;
     const t0 = perf ? performance.now() : 0;
     // An edit whose caret sits in a footnote must mark that part dirty so
@@ -3170,10 +3365,14 @@ export class DocxEditor {
     // skip re-hashing every block. Structural edits (split/merge/multi-block
     // delete) change the block count, so the engine's guards reject the hint
     // and fall back to the full scan — the hint is only ever an optimisation.
-    const dirtyBlock = this.caret ? paragraphOf(this.host.doc, this.caret.t) ?? undefined : undefined;
-    this.host.doc.refresh();
+    const dirtyParagraph = this.caret ? paragraphOf(this.host.doc, this.caret.t) ?? undefined : undefined;
+    const dirtyBlock = this.caret ? topLevelBlockOf(this.host.doc, this.caret.t) ?? undefined : undefined;
+    const syncedText = textOnly && this.caret ? this.syncTextModel(this.caret.t) : false;
+    if (syncedText && dirtyParagraph) invalidateParagraphSignature(dirtyParagraph);
+    else this.host.doc.refresh();
     const t1 = perf ? performance.now() : 0;
-    this.host.rerender(dirtyBlock);
+    const repeated = !!this.caret && this.regionOf(this.caret.t) === "hf";
+    this.host.rerender(repeated ? undefined : dirtyBlock, repeated ? "global" : scope);
     const t2 = perf ? performance.now() : 0;
     this.applyHfChrome();
     this.positionCaret();
@@ -3229,7 +3428,7 @@ export class DocxEditor {
       }
       return found;
     };
-    const candidates = handle.bindings.filter((b) => b.item.src?.t === caret.t);
+    const candidates = handle.bindingsByText.get(caret.t) ?? [];
     // Headers/footers render the same XML on every page — pin the caret to
     // the page copy the user is actually editing.
     const wantPage = this.inHeaderFooter ? this.hfPage : null;
@@ -3243,6 +3442,7 @@ export class DocxEditor {
       return;
     }
     const src = best.item.src!;
+    caret.run = src.run;
     const local = caret.offset - src.offset;
     const textNode = best.el.firstChild;
     let xPx = best.item.x;
