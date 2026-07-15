@@ -1,6 +1,6 @@
 {
   "name": "wordinweb",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "React component for high-fidelity DOCX viewing",
   "license": "PolyForm-Noncommercial-1.0.0",
   "repository": {
