@@ -1,4 +1,4 @@
-# DocxInWeb
+# WordinWeb
 
 A Word/.docx viewer and editor for the web, embeddable as a single React component.
 
