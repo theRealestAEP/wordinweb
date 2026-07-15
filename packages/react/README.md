@@ -1,5 +1,7 @@
 # WordInWeb
 
+[**Live demo →**](https://wordinweb-parity.callerinfo.workers.dev/)
+
 A Word/.docx viewer and editor for the web, embeddable as a single React component.
 
 ```tsx
@@ -12,7 +14,7 @@ Editing is in an Alpha state and is strictly opt-in via the `editable` flag; the
 
 If you discover an edge case or perf issue create an issue and include the offending Word file.
 
-Part of the broader roadmap is to migrate away from DOM rendering to just rendering on a canvas (or some hydrid thereof). Editing perf can suffer on really long documents.
+Part of the broader roadmap is to migrate away from DOM rendering to canvas rendering, or a hybrid of the two. Editing performance can suffer on very long documents.
 
 ---
 
@@ -83,7 +85,9 @@ export function Editor() {
 | Prop | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `source` | `ArrayBuffer \| Uint8Array \| Blob \| string` | — | The document: raw bytes, a `File`/`Blob`, or a URL to fetch. |
-| `zoom` | `number` | `1` | Zoom factor (`1` = 100%). Applied as a single `transform: scale()`; layout is unaffected. |
+| `zoom` | `number` | `1` | Maximum zoom factor (`1` = 100%). |
+| `fitWidth` | `boolean` | `true` | Scale wide pages down to fit the viewer without horizontal scrolling. Never enlarges beyond `zoom`. |
+| `narrowWidth` | `number` | `820` | Container width in pixels where comments switch to the compact treatment. |
 | `editable` | `boolean` | `false` | Enable editing (selection formatting, typing, save-back). Off = pure viewer. |
 | `showComments` | `boolean` | `true` | Render review comments (range highlights + margin balloons). |
 | `revisions` | `"final" \| "markup"` | `"final"` | Tracked-changes display: clean final text, or insertions underlined / deletions struck. |
@@ -129,6 +133,7 @@ The object passed to `onReady`. Every command operates on the current selection 
 **Suggesting mode (tracked changes)**
 - `setSuggesting(on, author?)` — when on, edits record as OOXML `w:ins`/`w:del` instead of mutating text directly, and the view switches to markup.
 - `isSuggesting()`, `acceptRevisionAtCaret()`, `rejectRevisionAtCaret()`.
+- `revisionCount()`, `acceptAllRevisions()`, `rejectAllRevisions()`.
 
 **Find & replace**
 - `find(query, { matchCase? })` → match count (selects the first).
@@ -250,14 +255,6 @@ For your own application, source your own fonts.
 Add a separate `@font-face` rule for every weight and style you use.
 
 When the browser can't render a requested face, `onMissingFonts` reports it so you can warn the user that the on-screen layout may drift from Word.
-
-## Package structure
-
-The repository keeps the parser and layout engine in an internal `core` workspace for development. The published `wordinweb` package bundles that workspace with the React components, so applications install one package.
-
-The demo, browser tests, fixture corpus, and Word parity references live in the
-separate [wordinweb-parity](https://github.com/theRealestAEP/wordinweb-parity)
-repository. That repository links this one as a Git submodule.
 
 ## Development
 
