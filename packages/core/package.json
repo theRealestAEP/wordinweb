@@ -1,5 +1,5 @@
 {
-  "name": "@docxinweb/core",
+  "name": "@wordinweb/core",
   "version": "0.1.0",
   "description": "DOCX parser and Word-parity layout engine",
   "license": "PolyForm-Noncommercial-1.0.0",

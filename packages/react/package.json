@@ -1,5 +1,5 @@
 {
-  "name": "@docxinweb/react",
+  "name": "@wordinweb/react",
   "version": "0.1.0",
   "description": "React component for high-fidelity DOCX viewing",
   "license": "PolyForm-Noncommercial-1.0.0",
@@ -19,7 +19,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@docxinweb/core": "0.1.0"
+    "@wordinweb/core": "0.1.0"
   },
   "peerDependencies": {
     "react": ">=18"

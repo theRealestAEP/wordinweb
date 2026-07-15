@@ -1,5 +1,5 @@
 {
-  "name": "docxinweb",
+  "name": "wordinweb",
   "private": true,
   "version": "0.1.0",
   "description": "Open-source high-fidelity Word/.docx viewer and editor for the web",
@@ -8,8 +8,8 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @docxinweb/core -w @docxinweb/react",
-    "test": "npm run test -w @docxinweb/core"
+    "build": "npm run build -w @wordinweb/core -w @wordinweb/react",
+    "test": "npm run test -w @wordinweb/core"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

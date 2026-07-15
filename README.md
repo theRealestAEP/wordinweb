@@ -1,9 +1,9 @@
-# WordinWeb
+# WordInWeb
 
 A Word/.docx viewer and editor for the web, embeddable as a single React component.
 
 ```tsx
-import { DocxView } from "@docxinweb/react";
+import { DocxView } from "@wordinweb/react";
 
 <DocxView source="/report.docx" />;                            // render-only viewer
 ```
@@ -19,11 +19,11 @@ Part of the broader roadmap is to migrate away from DOM rendering to just render
 ## Install
 
 ```bash
-npm install @docxinweb/react @docxinweb/core react react-dom
+npm install @wordinweb/react @wordinweb/core react react-dom
 ```
 
-- `@docxinweb/core` — parser + layout engine + DOM renderer. Framework-agnostic, one runtime dependency (`fflate`).
-- `@docxinweb/react` — the `<DocxView />` component and the optional `<DocxToolbar />`.
+- `@wordinweb/core` — parser + layout engine + DOM renderer. Framework-agnostic, one runtime dependency (`fflate`).
+- `@wordinweb/react` — the `<DocxView />` component and the optional `<DocxToolbar />`.
 
 To match Word's glyph advances exactly, load the metric-compatible substitute fonts (Carlito ≈ Calibri, Caladea ≈ Cambria) in your app — see [Fonts](#fonts).
 
@@ -32,7 +32,7 @@ To match Word's glyph advances exactly, load the metric-compatible substitute fo
 ### View-only
 
 ```tsx
-import { DocxView } from "@docxinweb/react";
+import { DocxView } from "@wordinweb/react";
 
 export function Preview() {
   return <DocxView source="/report.docx" zoom={1} style={{ height: "100vh" }} />;
@@ -47,7 +47,7 @@ The editor exposes its commands through an imperative `api` handed to `onReady`.
 
 ```tsx
 import { useState } from "react";
-import { DocxView, DocxToolbar, type DocxViewApi } from "@docxinweb/react";
+import { DocxView, DocxToolbar, type DocxViewApi } from "@wordinweb/react";
 
 export function Editor() {
   const [api, setApi] = useState<DocxViewApi | null>(null);
@@ -213,7 +213,7 @@ Or in a stylesheet:
 
 ## How it works
 
-DocxInWeb never converts the document to flowing HTML. It parses the OOXML into a typed model, runs a layout engine that breaks lines with real canvas metrics and paginates like Word, and renders each primitive as one absolutely-positioned element, so the browser does zero reflow. Editing mutates the retained XML tree and re-serializes only the parts it models, leaving everything else byte-for-byte intact. 
+WordInWeb never converts the document to flowing HTML. It parses the OOXML into a typed model, runs a layout engine that breaks lines with real canvas metrics and paginates like Word, and renders each primitive as one absolutely-positioned element, so the browser does zero reflow. Editing mutates the retained XML tree and re-serializes only the parts it models, leaving everything else byte-for-byte intact.
 
 See [`BLOG.md`](BLOG.md) for the pipeline and the parity work.
 
@@ -232,9 +232,9 @@ import "@fontsource/caladea/700.css";
 
 > **The Microsoft fonts in the separate parity demo are demo-only assets.** They
 > are included to reproduce this project's experimental parity results, but
-> they are not part of the DocxInWeb library and should not be copied into
+> they are not part of the WordInWeb library and should not be copied into
 > another application.
-> Applications using DocxInWeb must source and license their own fonts. Without
+> Applications using WordInWeb must source and license their own fonts. Without
 > the same fonts, the viewer falls back to substitutes and glyphs or line breaks
 > may differ from Word.
 
@@ -258,8 +258,8 @@ When the browser can't render a requested face, `onMissingFonts` reports it so y
 
 | Package | What it is |
 | --- | --- |
-| `@docxinweb/core` | Parser + layout engine + DOM renderer. Framework-agnostic, zero deps besides `fflate`. |
-| `@docxinweb/react` | `<DocxView />` + `<DocxToolbar />`. |
+| `@wordinweb/core` | Parser + layout engine + DOM renderer. Framework-agnostic, zero deps besides `fflate`. |
+| `@wordinweb/react` | `<DocxView />` + `<DocxToolbar />`. |
 
 The demo, browser tests, fixture corpus, and Word parity references live in the
 separate [wordinweb-parity](https://github.com/theRealestAEP/wordinweb-parity)
@@ -276,7 +276,7 @@ npm run build            # build core + react
 ## Rendering parity
 
 Fidelity is measured against desktop Microsoft Word. Word exports each fixture
-to PDF, DocxInWeb renders the same file in the browser, and both are rasterized
+to PDF, WordInWeb renders the same file in the browser, and both are rasterized
 and compared page-by-page. The test corpus and instructions are in
 [wordinweb-parity](https://github.com/theRealestAEP/wordinweb-parity).
 

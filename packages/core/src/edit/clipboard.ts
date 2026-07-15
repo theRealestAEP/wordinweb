@@ -285,7 +285,7 @@ function textOf(node: XmlElement): string {
 }
 
 /** A semantic HTML fallback lets rich copies retain table shape in apps that
- * do not preserve the private DocxInWeb clipboard flavor. */
+ * do not preserve the private WordInWeb clipboard flavor. */
 export function clipboardBlocksHtml(blocks: XmlElement[]): string {
   const renderParagraph = (paragraph: XmlElement): string => `<p>${paragraph.children
     .filter((node) => localName(node.name) === "r")

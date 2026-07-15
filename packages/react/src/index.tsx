@@ -55,7 +55,7 @@ import {
   setParagraphAlignment,
   setParagraphStyle,
   summarizeSelection,
-} from "@docxinweb/core";
+} from "@wordinweb/core";
 
 export interface DocxViewApi {
   /** Apply character formatting to the current browser selection. */
@@ -1049,6 +1049,6 @@ export function DocxView({
   );
 }
 
-export { DocxDocument, layoutDocument, renderToDom, printPages } from "@docxinweb/core";
-export type { RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch } from "@docxinweb/core";
+export { DocxDocument, layoutDocument, renderToDom, printPages } from "@wordinweb/core";
+export type { RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch } from "@wordinweb/core";
 export { DocxToolbar } from "./toolbar.js";
