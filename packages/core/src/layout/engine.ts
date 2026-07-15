@@ -4119,7 +4119,7 @@ class Engine {
           page.items.push({
             kind: "rect",
             x: bx + rule.x1,
-            y: baseline - rule.dy - rule.thick / 2,
+            y: baseline - rule.dy - (rule.paintDyOffset ?? 0) - rule.thick / 2,
             width: rule.x2 - rule.x1,
             height: rule.thick,
             fill: "#000000",
@@ -4291,8 +4291,8 @@ class Engine {
       let b = baseline;
       if (span.props.verticalAlign === "superscript" || span.props.verticalAlign === "subscript") {
         // Word shifts the baseline by a fraction of the UNSCALED font size:
-        // superscript up 7/22, subscript down 1/11 (measured from Word's own
-        // PDF export at 11pt and 22pt; see scripts/make-vertalign-probe.py).
+        // superscript up 7/22, subscript down 1/11, measured from Word's own
+        // PDF export at 11pt and 22pt.
         const baseSize = span.props.size ?? 14.666;
         b += span.props.verticalAlign === "superscript" ? -baseSize * (7 / 22) : baseSize / 11;
       }

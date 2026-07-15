@@ -1,6 +1,6 @@
 # DocxInWeb
 
-A Word/.docx viewer and editor for the web, embeddable as a single React component. It runs a layout engine in the browser (the same approach Word takes), so pagination, page numbers, headers/footers, tables, and math land where Word puts them. No server, no conversion to lossy HTML flow.
+A Word/.docx viewer and editor for the web, embeddable as a single React component.
 
 ```tsx
 import { DocxView } from "@docxinweb/react";
@@ -8,7 +8,11 @@ import { DocxView } from "@docxinweb/react";
 <DocxView source="/report.docx" />;                            // render-only viewer
 ```
 
-Editing is strictly opt-in via the `editable` flag; the default is a pure viewer.
+Editing is in an Alpha state and is strictly opt-in via the `editable` flag; the default is a pure viewer.
+
+If you discover an edge case or perf issue create an issue and include the offending Word file.
+
+Part of the broader roadmap is to migrate away from DOM rendering to just rendering on a canvas (or some hydrid thereof). Editing perf can suffer on really long documents.
 
 ---
 
@@ -209,7 +213,9 @@ Or in a stylesheet:
 
 ## How it works
 
-DocxInWeb never converts the document to flowing HTML. It parses the OOXML into a typed model, runs a layout engine that breaks lines with real canvas metrics and paginates like Word, and renders each primitive as one absolutely-positioned element, so the browser does zero reflow. Editing mutates the retained XML tree and re-serializes only the parts it models, leaving everything else byte-for-byte intact. See [`BLOG.md`](BLOG.md) for the pipeline and the parity work.
+DocxInWeb never converts the document to flowing HTML. It parses the OOXML into a typed model, runs a layout engine that breaks lines with real canvas metrics and paginates like Word, and renders each primitive as one absolutely-positioned element, so the browser does zero reflow. Editing mutates the retained XML tree and re-serializes only the parts it models, leaving everything else byte-for-byte intact. 
+
+See [`BLOG.md`](BLOG.md) for the pipeline and the parity work.
 
 ## Fonts
 
@@ -223,6 +229,27 @@ import "@fontsource/carlito/700-italic.css";
 import "@fontsource/caladea/400.css";   // Cambria metrics
 import "@fontsource/caladea/700.css";
 ```
+
+> **The Microsoft fonts in the demo are demo-only assets.** They are included to
+> reproduce this project's experimental parity results, but they are not part
+> of the DocxInWeb library and should not be copied into another application.
+> Applications using DocxInWeb must source and license their own fonts. Without
+> the same fonts, the viewer falls back to substitutes and glyphs or line breaks
+> may differ from Word.
+
+For your own application, source your own fonts.
+
+```css
+@font-face {
+  font-family: "Calibri";
+  src: local("Calibri"), url("/fonts/Calibri.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+```
+
+Add a separate `@font-face` rule for every weight and style you use.
 
 When the browser can't render a requested face, `onMissingFonts` reports it so you can warn the user that the on-screen layout may drift from Word.
 
@@ -260,14 +287,6 @@ node scripts/parity-parallel.mjs                     # full run → parity/out/r
 DXW_PARITY_FAST=1 node scripts/parity-parallel.mjs   # skip slow appearance passes
 node scripts/parity-render-report.mjs                # (re)build parity/out/report.html
 ```
-
-The dashboard is served at `/report` by the dev server. `parity/` is git-ignored. The metric, the training loop behind the numbers, and the editing-perf work are in [`BLOG.md`](BLOG.md).
-
-## Docs
-
-- [`BLOG.md`](BLOG.md) — how the layout engine works, the parity training loop, the structural-severity metric, and the keystroke-latency work
-- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — what editing doesn't support yet, shallow toolbar pickers, rendering residuals, and untested areas
-- [`docs/DISCOVERIES.md`](docs/DISCOVERIES.md) — ledger of non-obvious Word behaviors we measured and the probe methodology that established them
 
 ## License
 

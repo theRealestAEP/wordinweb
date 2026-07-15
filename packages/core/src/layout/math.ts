@@ -191,6 +191,8 @@ export interface MathRule {
   x2: number;
   /** Center of the rule relative to the main baseline, px, up positive. */
   dy: number;
+  /** Visual-only vertical adjustment that does not change line layout. */
+  paintDyOffset?: number;
   thick: number;
 }
 export interface MathBox {
@@ -304,7 +306,12 @@ const RAD_LINE_BELOW = 0.675 - 1.4 / 11;
 // radicand descent (sign ink to 6.3pt below the baseline).
 const RAD_GROWN_TOP = 8.17 / 11;
 const RAD_GROWN_FOOT = 6.3 / 11;
-const RAD_RULE_OVERHANG = 0.04; // em past the radicand (measured 0.4-0.6pt)
+// Extend the separately painted vinculum slightly into the radical glyph so
+// fractional-pixel rasterization cannot leave a gap at the join. Word also
+// carries the rule this far past the radicand (measured 0.4-0.6pt).
+const RAD_RULE_OVERHANG = 0.04;
+// Lift the separately painted rule so its top edge matches Word's vinculum.
+const RAD_RULE_RAISE = 2;
 // m:deg placement: MATH RadicalKernBeforeDegree / RadicalKernAfterDegree,
 // with the baseline raised 65% of the sign's ink height above its ink bottom
 // (RadicalDegreeBottomRaisePercent 65; -0.027em fits the measured 4.75pt).
@@ -1004,10 +1011,11 @@ function flow(
           display && breakDepth === 0 && node.e.some((seg) => containsRad([seg]));
         const hugTop = radAsc + size * RAD_GAP + ruleThick;
         const ruleTop = nestedGrown ? radAsc + size * RAD_GROWN_TOP : hugTop;
+        const paintRuleTop = ruleTop + RAD_RULE_RAISE;
         // The grown variant's foot also descends past the radicand descent
         // (probe2 raster: sign ink to 6.3pt below the baseline at 11pt).
         const signDesc = nestedGrown ? Math.max(radDesc, size * RAD_GROWN_FOOT) : radDesc;
-        const signInkH = ruleTop + signDesc;
+        const signInkH = paintRuleTop + signDesc;
         // Optional degree (∛): a script-size index tucked into the sign's kern,
         // its baseline raised RAD_DEG_RAISE of the sign ink height above the
         // sign's ink bottom.
@@ -1033,7 +1041,7 @@ function flow(
         if (nestedGrown) {
           const inkTopNat = (size * RAD_VARIANTS[0].top) / 2048;
           const inkBotNat = (size * RAD_VARIANTS[0].bot) / 2048;
-          grow = (ruleTop + size * RAD_GROWN_FOOT) / (inkTopNat - inkBotNat);
+          grow = (paintRuleTop + size * RAD_GROWN_FOOT) / (inkTopNat - inkBotNat);
           signAnchor = (-size * RAD_GROWN_FOOT - inkBotNat * grow) / (1 - grow);
         }
         // Only the COMPLEX radical (a degree index or a nested radicand)
@@ -1064,7 +1072,14 @@ function flow(
         for (const pc of radBox.pieces) box.pieces.push(rebase(pc, radLeft, dy));
         for (const r of radBox.rules) box.rules.push({ ...r, x1: radLeft + r.x1, x2: radLeft + r.x2, dy: dy + r.dy });
         box.width = radLeft + radBox.width;
-        box.rules.push({ x1: radLeft, x2: box.width, dy: dy + ruleTop - ruleThick / 2, thick: ruleThick });
+        const ruleOverhang = size * RAD_RULE_OVERHANG;
+        box.rules.push({
+          x1: radLeft - ruleOverhang,
+          x2: box.width + ruleOverhang,
+          dy: dy + ruleTop - ruleThick / 2,
+          paintDyOffset: RAD_RULE_RAISE,
+          thick: ruleThick,
+        });
         prevOperand = true;
         break;
       }

@@ -3508,7 +3508,7 @@ describe("anchored drawing position variants", () => {
   const WPS = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"';
   const WP14 = 'xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"';
 
-  /** Anchored wps textbox run (mirrors scripts/make-staging-fixtures.py). */
+  /** Anchored wps textbox run used by the fixture helpers below. */
   const anchorBox = (opts: {
     x: number; // EMU
     y: number; // EMU
@@ -4129,10 +4129,19 @@ describe("OMML matrices, arrays, accents, group chars, radicals, limits (probe2-
     const box = layoutMath([{ t: "rad", deg: [run("3")], e: [run("x+y")] }], S, measurer, false);
     const deg = box.pieces.find((p) => p.text === "3")!;
     const sign = box.pieces.find((p) => p.text === "√")!;
+    const radicand = box.pieces.find((p) => p.text.includes("𝑥"))!;
+    const rule = box.rules[0];
     expect(deg.dy).toBeGreaterThan(0); // degree raised
     expect(deg.x).toBeLessThan(sign.x); // before the sign
     expect(box.rules.length).toBe(1); // one vinculum
     expect(sign.scaleY).toBeGreaterThan(1);
+    expect(rule.x1).toBeLessThan(radicand.x); // overlap the glyph/rule join
+    expect(rule.x2).toBeGreaterThan(box.width); // overhang the radicand like Word
+    expect(rule.paintDyOffset).toBe(2); // visual-only lift leaves line layout unchanged
+    expect(rule.dy + rule.thick / 2).toBeCloseTo(sign.ownAscent!, 3);
+    const metrics = measurer.metrics(sign.font);
+    const paintedSignTop = sign.scaleAnchor! + (metrics.ascent - sign.scaleAnchor!) * sign.scaleY!;
+    expect(paintedSignTop).toBeCloseTo(rule.dy + rule.paintDyOffset! + rule.thick / 2, 3);
   });
 
   it("a nested radical raises the outer vinculum above the inner one", () => {
