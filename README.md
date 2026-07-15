@@ -230,9 +230,10 @@ import "@fontsource/caladea/400.css";   // Cambria metrics
 import "@fontsource/caladea/700.css";
 ```
 
-> **The Microsoft fonts in the demo are demo-only assets.** They are included to
-> reproduce this project's experimental parity results, but they are not part
-> of the DocxInWeb library and should not be copied into another application.
+> **The Microsoft fonts in the separate parity demo are demo-only assets.** They
+> are included to reproduce this project's experimental parity results, but
+> they are not part of the DocxInWeb library and should not be copied into
+> another application.
 > Applications using DocxInWeb must source and license their own fonts. Without
 > the same fonts, the viewer falls back to substitutes and glyphs or line breaks
 > may differ from Word.
@@ -253,40 +254,31 @@ Add a separate `@font-face` rule for every weight and style you use.
 
 When the browser can't render a requested face, `onMissingFonts` reports it so you can warn the user that the on-screen layout may drift from Word.
 
-## Performance HUD
-
-Append `?perf=1` to the demo URL to overlay a per-keystroke performance HUD — layout, render, destroy, and refresh timings plus a rolling median and how many pages the incremental pagination reused. Off by default (normal sessions pay nothing); the numbers are selectable with a Copy button for pasting ground-truth timings.
-
 ## Packages
 
 | Package | What it is |
 | --- | --- |
 | `@docxinweb/core` | Parser + layout engine + DOM renderer. Framework-agnostic, zero deps besides `fflate`. |
 | `@docxinweb/react` | `<DocxView />` + `<DocxToolbar />`. |
-| `apps/demo` | Vite demo: file-open, zoom, editing, find/replace, and the parity dashboard at `/report`. |
+
+The demo, browser tests, fixture corpus, and Word parity references live in the
+separate [wordinweb-parity](https://github.com/theRealestAEP/wordinweb-parity)
+repository. That repository links this one as a Git submodule.
 
 ## Development
 
 ```bash
 npm install
-npm run dev              # demo app + parity dashboard at /report (Vite, default :5173)
 npm test                 # core unit tests (parser + layout, deterministic measurer)
 npm run build            # build core + react
-npm -w demo run fixtures # generate sample .docx fixtures
-npx playwright test      # end-to-end editor/behavior specs
 ```
-
-`npm run dev` serves both the viewer and the eval dashboard: the viewer at `/`, and the pixel-parity report at [`/report`](http://localhost:5173/report) (a friendly placeholder appears until you generate results — see below).
 
 ## Rendering parity
 
-Fidelity is measured against desktop Microsoft Word. Word exports each fixture to PDF, DocxInWeb renders the same file in the browser, and both are rasterized and compared page-by-page. The certified run covers 1,154 Word pages at a mean structural severity of 0.026%, with two pages above 1% (both a licensed font we can't ship). Run it:
-
-```bash
-node scripts/parity-parallel.mjs                     # full run → parity/out/results.json
-DXW_PARITY_FAST=1 node scripts/parity-parallel.mjs   # skip slow appearance passes
-node scripts/parity-render-report.mjs                # (re)build parity/out/report.html
-```
+Fidelity is measured against desktop Microsoft Word. Word exports each fixture
+to PDF, DocxInWeb renders the same file in the browser, and both are rasterized
+and compared page-by-page. The test corpus and instructions are in
+[wordinweb-parity](https://github.com/theRealestAEP/wordinweb-parity).
 
 ## License
 

@@ -2,16 +2,11 @@ node_modules/
 dist/
 *.tsbuildinfo
 .DS_Store
-parity/
-
-# node_modules symlinks (worktree dev setups)
-node_modules
 /docs
-.claude
+.claude/
 test-results/
-/fixtures-staging
 .codex-local/
 .codex-work/
-/internal
+internal/
 __pycache__/
 *.py[cod]
