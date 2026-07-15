@@ -8,10 +8,11 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @wordinweb/core -w @wordinweb/react",
+    "build": "npm run build -w @wordinweb/core -w wordinweb",
     "test": "npm run test -w @wordinweb/core"
   },
   "devDependencies": {
+    "tsup": "^8.5.0",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
   }

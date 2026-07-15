@@ -1,8 +1,20 @@
 {
-  "name": "@wordinweb/react",
+  "name": "wordinweb",
   "version": "0.1.0",
   "description": "React component for high-fidelity DOCX viewing",
   "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theRealestAEP/wordinweb.git",
+    "directory": "packages/react"
+  },
+  "homepage": "https://github.com/theRealestAEP/wordinweb#readme",
+  "bugs": {
+    "url": "https://github.com/theRealestAEP/wordinweb/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,15 +28,19 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsup",
+    "prepack": "npm run build"
   },
   "dependencies": {
-    "@wordinweb/core": "0.1.0"
+    "emf-converter": "^1.5.0",
+    "fflate": "^0.8.2",
+    "wmf": "^1.0.2"
   },
   "peerDependencies": {
     "react": ">=18"
   },
   "devDependencies": {
+    "@wordinweb/core": "0.1.0",
     "@types/react": "^18.3.0",
     "react": "^18.3.0"
   }

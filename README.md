@@ -3,7 +3,7 @@
 A Word/.docx viewer and editor for the web, embeddable as a single React component.
 
 ```tsx
-import { DocxView } from "@wordinweb/react";
+import { DocxView } from "wordinweb";
 
 <DocxView source="/report.docx" />;                            // render-only viewer
 ```
@@ -19,11 +19,10 @@ Part of the broader roadmap is to migrate away from DOM rendering to just render
 ## Install
 
 ```bash
-npm install @wordinweb/react @wordinweb/core react react-dom
+npm install wordinweb react react-dom
 ```
 
-- `@wordinweb/core` — parser + layout engine + DOM renderer. Framework-agnostic, one runtime dependency (`fflate`).
-- `@wordinweb/react` — the `<DocxView />` component and the optional `<DocxToolbar />`.
+The package includes the `<DocxView />` component, optional `<DocxToolbar />`, parser, layout engine, and DOM renderer.
 
 To match Word's glyph advances exactly, load the metric-compatible substitute fonts (Carlito ≈ Calibri, Caladea ≈ Cambria) in your app — see [Fonts](#fonts).
 
@@ -32,7 +31,7 @@ To match Word's glyph advances exactly, load the metric-compatible substitute fo
 ### View-only
 
 ```tsx
-import { DocxView } from "@wordinweb/react";
+import { DocxView } from "wordinweb";
 
 export function Preview() {
   return <DocxView source="/report.docx" zoom={1} style={{ height: "100vh" }} />;
@@ -47,7 +46,7 @@ The editor exposes its commands through an imperative `api` handed to `onReady`.
 
 ```tsx
 import { useState } from "react";
-import { DocxView, DocxToolbar, type DocxViewApi } from "@wordinweb/react";
+import { DocxView, DocxToolbar, type DocxViewApi } from "wordinweb";
 
 export function Editor() {
   const [api, setApi] = useState<DocxViewApi | null>(null);
@@ -254,12 +253,9 @@ Add a separate `@font-face` rule for every weight and style you use.
 
 When the browser can't render a requested face, `onMissingFonts` reports it so you can warn the user that the on-screen layout may drift from Word.
 
-## Packages
+## Package structure
 
-| Package | What it is |
-| --- | --- |
-| `@wordinweb/core` | Parser + layout engine + DOM renderer. Framework-agnostic, zero deps besides `fflate`. |
-| `@wordinweb/react` | `<DocxView />` + `<DocxToolbar />`. |
+The repository keeps the parser and layout engine in an internal `core` workspace for development. The published `wordinweb` package bundles that workspace with the React components, so applications install one package.
 
 The demo, browser tests, fixture corpus, and Word parity references live in the
 separate [wordinweb-parity](https://github.com/theRealestAEP/wordinweb-parity)
@@ -270,7 +266,7 @@ repository. That repository links this one as a Git submodule.
 ```bash
 npm install
 npm test                 # core unit tests (parser + layout, deterministic measurer)
-npm run build            # build core + react
+npm run build            # build the public package
 ```
 
 ## Rendering parity

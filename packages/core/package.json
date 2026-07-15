@@ -1,8 +1,18 @@
 {
   "name": "@wordinweb/core",
+  "private": true,
   "version": "0.1.0",
   "description": "DOCX parser and Word-parity layout engine",
   "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theRealestAEP/wordinweb.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/theRealestAEP/wordinweb#readme",
+  "bugs": {
+    "url": "https://github.com/theRealestAEP/wordinweb/issues"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
