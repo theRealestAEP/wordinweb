@@ -4,8 +4,8 @@ export { parseXml, localName, child, children, attr } from "./xml.js";
 export type { XmlElement } from "./xml.js";
 export { Package, resolvePartPath } from "./zip.js";
 export { DocxDocument } from "./docx.js";
-export { layoutDocument } from "./layout/engine.js";
-export type { LayoutOptions } from "./layout/engine.js";
+export { layoutDocument, layoutDocumentAsync, relayoutHeadersFooters } from "./layout/engine.js";
+export type { LayoutOptions, AsyncLayoutOptions } from "./layout/engine.js";
 export { clearBreakCache } from "./layout/inline.js";
 export * from "./layout/types.js";
 export {

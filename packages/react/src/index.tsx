@@ -38,9 +38,10 @@ import {
   type XmlElement,
   insertTableAfter,
   createMeasurer,
-  clearBreakCache,
   type TextMeasurer,
   layoutDocument,
+  layoutDocumentAsync,
+  relayoutHeadersFooters,
   detectMissingFonts,
   type MissingFont,
   type LayoutResult,
@@ -200,6 +201,8 @@ async function toBytes(source: DocxViewProps["source"]): Promise<Uint8Array> {
   return new Uint8Array(source);
 }
 
+const BACKGROUND_LAYOUT_PAGE_THRESHOLD = 50;
+
 /**
  * High-fidelity paginated DOCX viewer (and, with `editable`, editor).
  *
@@ -226,6 +229,7 @@ export function DocxView({
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<Error | null>(null);
+  const [layoutBusy, setLayoutBusy] = useState(false);
   // Fit-to-width scale (page-width / container-width) recomputed on resize, and
   // the compact-chrome flag. The effective zoom driven into the renderer caps
   // the fit at the user's zoom so a roomy desktop viewport stays at 100%.
@@ -344,13 +348,34 @@ export function DocxView({
     // it stays valid across keystrokes; the engine falls back to a full layout
     // whenever it can't prove reuse is byte-identical.
     let prevLayout: LayoutResult | null = null;
+    let paintedModelVersion = -1;
+    let pages = 0;
+    let layoutJob = 0;
+    let layoutAbort: AbortController | null = null;
+    let layoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let restoreEditorFocus = false;
 
-    const rerender = (doc: DocxDocument, dirtyBlock?: XmlElement): number => {
+    const setLayoutPending = (pending: boolean): void => {
+      const container = containerRef.current;
+      if (pending && container) {
+        restoreEditorFocus ||= document.activeElement === container || container.contains(document.activeElement);
+      }
+      if (container) {
+        container.inert = pending;
+        container.toggleAttribute("data-dxw-layout-busy", pending);
+        container.setAttribute("aria-busy", String(pending));
+      }
+      setLayoutBusy(pending);
+      if (!pending && restoreEditorFocus && container) {
+        restoreEditorFocus = false;
+        container.focus({ preventScroll: true });
+      }
+    };
+
+    const paintLayout = (doc: DocxDocument, layout: LayoutResult, layoutMs: number): number => {
       const perf = (globalThis as { __dxwPerf?: { last?: Record<string, number> } }).__dxwPerf;
-      const t0 = perf ? performance.now() : 0;
-      const layout = layoutDocument(doc, { measurer, prev: prevLayout ?? undefined, dirtyHint: dirtyBlock });
       prevLayout = layout;
-      const t1 = perf ? performance.now() : 0;
+      paintedModelVersion = doc.modelVersion;
       const container = containerRef.current;
       if (!container) return 0;
       // Re-rendering replaces the page DOM; keep the user's scroll position
@@ -363,9 +388,11 @@ export function DocxView({
       handle = renderToDom(doc, layout, container, {
         zoom: curZoom,
         interactive: editable,
+        virtualize: true,
         comments: showComments,
         onDeleteComment,
         onReplyComment,
+        onViewportChange: () => editor?.afterRender(),
       }, prev ?? undefined);
       container.scrollTop = scrollTop;
       container.scrollLeft = scrollLeft;
@@ -373,13 +400,93 @@ export function DocxView({
       editor?.afterRender();
       if (perf) {
         perf.last = {
-          layout: t1 - t0,
-          destroy: t2 - t1,
+          layout: layoutMs,
+          destroy: 0,
           render: t3 - t2,
           totalPages: layout.totalPages,
         };
       }
+      pages = layout.totalPages;
       return layout.totalPages;
+    };
+
+    const queueGlobalLayout = (doc: DocxDocument, delayMs = 0, preferHeadersOnly = false): void => {
+      layoutAbort?.abort();
+      if (layoutTimer) clearTimeout(layoutTimer);
+      const abort = new AbortController();
+      layoutAbort = abort;
+      const job = ++layoutJob;
+      const modelVersion = doc.modelVersion;
+      const start = () => {
+        layoutTimer = null;
+        if (cancelled || job !== layoutJob || abort.signal.aborted) return;
+        const started = performance.now();
+        if (preferHeadersOnly && prevLayout) {
+          const fast = relayoutHeadersFooters(doc, prevLayout, measurer);
+          if (fast) {
+            if (doc.modelVersion === modelVersion) paintLayout(doc, fast, performance.now() - started);
+            layoutAbort = null;
+            setLayoutPending(false);
+            return;
+          }
+        }
+        setLayoutPending(true);
+        void layoutDocumentAsync(doc, { measurer, signal: abort.signal }).then((layout) => {
+          if (cancelled || job !== layoutJob || abort.signal.aborted || doc.modelVersion !== modelVersion) return;
+          paintLayout(doc, layout, performance.now() - started);
+        }).catch((cause: unknown) => {
+          if (abort.signal.aborted || cancelled) return;
+          const err = cause instanceof Error ? cause : new Error(String(cause));
+          setError(err);
+          onError?.(err);
+        }).finally(() => {
+          if (job !== layoutJob) return;
+          layoutAbort = null;
+          setLayoutPending(false);
+        });
+      };
+      if (delayMs > 0) {
+        setLayoutPending(false);
+        layoutTimer = setTimeout(start, delayMs);
+      } else {
+        start();
+      }
+    };
+
+    const rerender = (
+      doc: DocxDocument,
+      dirtyBlock?: XmlElement,
+      scope: "local" | "global" | "background" = "local",
+    ): number => {
+      const modelChanged = paintedModelVersion !== doc.modelVersion;
+      const headerFooterOnly = scope === "global" && !modelChanged;
+      const globalChange = scope !== "local" || modelChanged;
+      const queue =
+        editable &&
+        prevLayout !== null &&
+        (scope === "background" ||
+          (prevLayout.totalPages > BACKGROUND_LAYOUT_PAGE_THRESHOLD && globalChange));
+      if (queue) {
+        queueGlobalLayout(doc, headerFooterOnly ? 120 : 0, headerFooterOnly);
+        return prevLayout!.totalPages;
+      }
+
+      layoutAbort?.abort();
+      layoutAbort = null;
+      if (layoutTimer) clearTimeout(layoutTimer);
+      layoutTimer = null;
+      layoutJob++;
+      setLayoutPending(false);
+      const started = performance.now();
+      const layout =
+        headerFooterOnly && prevLayout
+          ? relayoutHeadersFooters(doc, prevLayout, measurer) ?? layoutDocument(doc, { measurer })
+          : layoutDocument(doc, {
+              measurer,
+              prev: globalChange ? undefined : prevLayout ?? undefined,
+              dirtyHint: globalChange ? undefined : dirtyBlock,
+            });
+      return paintLayout(doc, layout, performance.now() - started);
     };
 
     (async () => {
@@ -439,7 +546,7 @@ export function DocxView({
       basePageWidthRef.current = doc.sections[0]?.props.pageWidth ?? 816;
       curZoom = effZoomRef.current;
       const pageCount = rerender(doc);
-      let pages = pageCount;
+      pages = pageCount;
       recomputeFit();
       onLoad?.({ pageCount, document: doc });
       if (onMissingFonts && prevLayout) {
@@ -450,22 +557,12 @@ export function DocxView({
       if (editable && containerRef.current) {
         // Undo history survives mode switches with the cached document.
         const history = docCacheRef.current?.doc === doc ? docCacheRef.current.history : new EditHistory(doc);
-        // Line breaks measured during the initial load can use cold webfont
-        // fallback metrics (the first canvas measureText of a font, before it is
-        // fully active, differs from the warm value). By the time the user makes
-        // their first edit the canvas has painted and is warm, so drop the
-        // load-time cache once here; every edit relayout after is warm.
-        let breakCacheWarmed = false;
         editorConfig = {
           doc,
           container: containerRef.current,
           getHandle: () => handle,
-          rerender: (dirtyBlock?: XmlElement) => {
-            if (!breakCacheWarmed) {
-              clearBreakCache(measurer);
-              breakCacheWarmed = true;
-            }
-            pages = rerender(doc, dirtyBlock);
+          rerender: (dirtyBlock?: XmlElement, scope?: "local" | "global" | "background") => {
+            pages = rerender(doc, dirtyBlock, scope);
           },
           zoom: curZoom,
           history,
@@ -519,11 +616,15 @@ export function DocxView({
         const selectMatch = (i: number) => {
           const m = findState.matches[i];
           if (!m || !editor) return;
+          const restore = handle?._virtualized ? handle.materializeAll?.() : undefined;
           editor.selectRanges(m.ranges);
           // Bring the hit into view.
           const t = m.ranges[0]?.t;
-          const el = handle?.bindings.find((b) => b.item.src?.t === t)?.el;
+          const el = handle?.bindingsByText.get(t)?.[0]?.el;
           el?.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+          restore?.();
+          handle?.updateViewport?.();
+          editor.selectRanges(m.ranges);
         };
         const api: DocxViewApi = {
           document: doc,
@@ -803,7 +904,9 @@ export function DocxView({
           print: () => {
             if (!handle) return;
             const sp = doc.sections[0]?.props;
+            const restore = handle.materializeAll?.();
             printPages(handle.root, sp?.pageWidth ?? 816, sp?.pageHeight ?? 1056);
+            restore?.();
           },
           save: () => doc.save(),
           setSuggesting: (on, author) => editor?.setSuggesting(on, author ?? commentAuthor),
@@ -840,6 +943,18 @@ export function DocxView({
 
     return () => {
       cancelled = true;
+      layoutJob++;
+      layoutAbort?.abort();
+      layoutAbort = null;
+      if (layoutTimer) clearTimeout(layoutTimer);
+      layoutTimer = null;
+      const container = containerRef.current;
+      if (container) {
+        container.inert = false;
+        container.removeAttribute("data-dxw-layout-busy");
+        container.setAttribute("aria-busy", "false");
+      }
+      setLayoutBusy(false);
       applyZoomRef.current = null;
       editor?.detach();
       editor = null;
@@ -880,6 +995,26 @@ export function DocxView({
           </div>
         )}
       </div>
+      {layoutBusy && (
+        <div
+          data-dxw-layout-status=""
+          aria-live="polite"
+          style={{
+            position: "absolute",
+            top: 10,
+            right: 12,
+            zIndex: 45,
+            padding: "5px 10px",
+            borderRadius: 14,
+            background: "rgba(32,33,36,.88)",
+            color: "#fff",
+            font: "12px system-ui,sans-serif",
+            pointerEvents: "none",
+          }}
+        >
+          Repaginating…
+        </div>
+      )}
       {editable && hfMode && (
         <div
           data-dxw-hf-hotbar=""

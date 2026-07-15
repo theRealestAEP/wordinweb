@@ -57,6 +57,13 @@ export interface LayoutOptions {
   dirtyHint?: XmlElement;
 }
 
+export interface AsyncLayoutOptions extends LayoutOptions {
+  /** Cancels a superseded background layout before its result is painted. */
+  signal?: AbortSignal;
+  /** Maximum main-thread time spent between event-loop yields. */
+  sliceMs?: number;
+}
+
 export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): LayoutResult {
   const measurer = options.measurer ?? createMeasurer();
   if (options.prev && options.prev._incr) {
@@ -66,6 +73,50 @@ export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): 
     if (attempt) return attempt;
   }
   return new Engine(doc, measurer).run();
+}
+
+/** Regenerate header/footer page layers while retaining the already-laid body.
+ * Returns null unless the new header/footer measurements prove that every
+ * page's body box is unchanged, in which case the result is identical to a
+ * full layout for the supported header/footer content. */
+export function relayoutHeadersFooters(
+  doc: DocxDocument,
+  prev: LayoutResult,
+  measurer: TextMeasurer = createMeasurer(),
+): LayoutResult | null {
+  return new Engine(doc, measurer).runHeadersFootersOnly(prev);
+}
+
+/** Full layout that yields between top-level blocks for large interactive
+ * documents. The completed result is identical to layoutDocument; callers
+ * should paint it atomically and discard it when the signal is aborted. */
+export async function layoutDocumentAsync(
+  doc: DocxDocument,
+  options: AsyncLayoutOptions = {},
+): Promise<LayoutResult> {
+  options.signal?.throwIfAborted();
+  const measurer = options.measurer ?? createMeasurer();
+  const engine = new Engine(doc, measurer);
+  if (!engine.canRunAsync()) {
+    await yieldToMain(options.signal);
+    return layoutDocument(doc, options);
+  }
+  return engine.runAsync(options.signal, options.sliceMs ?? 8);
+}
+
+function yieldToMain(signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, 0);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 // ---------- internal page ----------
@@ -89,6 +140,10 @@ interface InternalPage {
   displayNumber: number;
   headerRel?: string;
   footerRel?: string;
+  /** Frame heights measured before body layout. Header/footer-only refreshes
+   * must reproduce these exactly or fall back to full repagination. */
+  headerHeight: number;
+  footerHeight: number;
   bodyTop: number;
   bodyBottom: number;
   /** Top of the current column band (continuous sections restart columns
@@ -192,6 +247,8 @@ interface IncrState {
     headerGrown?: boolean;
     headerRel?: string;
     footerRel?: string;
+    headerHeight: number;
+    footerHeight: number;
     colXs: number[];
     colWidths: number[];
     bands: ColumnBand[];
@@ -212,6 +269,18 @@ export interface IncrData {
   pages: InternalPage[];
   /** Bookmark name -> display page number, for PAGEREF stability checks. */
   bookmarks: Map<string, string>;
+  /** Parsed-model generation used to invalidate caches after structural or
+   * formatting refreshes while preserving them for in-place text edits. */
+  modelVersion: number;
+  seqCounters: Map<string, number>;
+  seqAssigned: WeakMap<object, string>;
+  refFieldPosition: WeakMap<object, "above" | "below">;
+  refFieldParaNumber: WeakMap<object, string>;
+}
+
+interface HeaderFooterData {
+  pages: InternalPage[];
+  modelVersion: number;
 }
 
 /** Diagnostics for the last incremental attempt (dirty-hint fast path vs full
@@ -459,6 +528,91 @@ class Engine {
   ) {}
 
   run(): LayoutResult {
+    this.startRun();
+    const sections = this.doc.sections;
+    let prevSp: SectionProps | null = null;
+    for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+      prevSp = this.layoutSectionWithBoundary(sections, sectionIndex, prevSp);
+    }
+    return this.finishRun();
+  }
+
+  runHeadersFootersOnly(prev: LayoutResult): LayoutResult | null {
+    const prior = prev._hf as HeaderFooterData | undefined;
+    if (!prior || prior.modelVersion !== this.doc.modelVersion || !this.hfFastPathEligible()) return null;
+
+    const pages = prior.pages.map((page) => {
+      if (page.hfStart === undefined) return null;
+      return {
+        ...page,
+        items: page.items.slice(0, page.hfStart),
+        colXs: [...page.colXs],
+        colWidths: [...page.colWidths],
+        footnotes: page.footnotes.map((note) => ({ ...note, items: [...note.items] })),
+        footnoteH: [...page.footnoteH],
+        bands: page.bands.map((band) => ({
+          ...band,
+          colXs: [...band.colXs],
+          colWidths: [...band.colWidths],
+          bottoms: [...band.bottoms],
+        })),
+      } satisfies InternalPage;
+    });
+    if (pages.some((page) => page === null)) return null;
+    this.pages = pages as InternalPage[];
+
+    for (let i = 0; i < this.pages.length; i++) {
+      const page = this.pages[i];
+      this.sp = page.sp;
+      const contentWidth = page.sp.pageWidth - page.sp.marginLeft - page.sp.marginRight - page.sp.gutter;
+      const header = this.doc.headers.get(page.headerRel ?? "");
+      const footer = this.doc.footers.get(page.footerRel ?? "");
+      const headerHeight = this.measureHeaderFooter(header, page, contentWidth, this.pageFieldFrameOverlay(header));
+      const footerHeight = this.measureHeaderFooter(footer, page, contentWidth, this.pageFieldFrameOverlay(footer));
+      if (headerHeight !== page.headerHeight || footerHeight !== page.footerHeight) return null;
+    }
+
+    this.finalizeHeadersFooters(false);
+    const publicPages = this.pages.map((page) => laidOutPage(page));
+    const result: LayoutResult = {
+      pages: publicPages,
+      totalPages: publicPages.length,
+      _hf: { pages: this.pages, modelVersion: this.doc.modelVersion } satisfies HeaderFooterData,
+    };
+    const incremental = prev._incr as IncrData | undefined;
+    if (incremental) result._incr = { ...incremental, pages: this.pages } satisfies IncrData;
+    return result;
+  }
+
+  canRunAsync(): boolean {
+    return this.doc.sections.length > 0;
+  }
+
+  async runAsync(signal?: AbortSignal, sliceMs = 8): Promise<LayoutResult> {
+    await yieldToMain(signal);
+    this.startRun();
+    if (this.doc.sections.length !== 1 || this.doc.sections[0].props.textDirection === "tbRl") {
+      let prevSp: SectionProps | null = null;
+      for (let sectionIndex = 0; sectionIndex < this.doc.sections.length; sectionIndex++) {
+        signal?.throwIfAborted();
+        prevSp = this.layoutSectionWithBoundary(this.doc.sections, sectionIndex, prevSp);
+        await yieldToMain(signal);
+      }
+      return this.finishRun();
+    }
+    const section = this.doc.sections[0];
+    const sp = section.props;
+    this.sp = sp;
+    this.doc.charGridEa = sp.docGridCharGrid === true;
+    this.lnSectionEpoch++;
+    this.newPage(true);
+    await this.layoutBlocksAsync(section.blocks, signal, sliceMs);
+    this.prevBandBalanced = this.balanceBottom !== undefined;
+    signal?.throwIfAborted();
+    return this.finishRun();
+  }
+
+  private startRun(): void {
     if (this.incrEligible()) {
       this.incrSigs = this.doc.sections[0].blocks.map((b) => this.blockSig(b));
       this.incrPoints = [];
@@ -467,9 +621,13 @@ class Engine {
     this.assignSeqNumbers();
     this.assignRefContext();
     this.prepareStyleRef();
-    const sections = this.doc.sections;
-    let prevSp: SectionProps | null = null;
-    for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+  }
+
+  private layoutSectionWithBoundary(
+    sections: Section[],
+    sectionIndex: number,
+    prevSp: SectionProps | null,
+  ): SectionProps {
       const section = sections[sectionIndex];
       const sp = section.props;
       // A continuous section shares the page: restart the column band at the
@@ -601,8 +759,11 @@ class Engine {
         this.col = 0;
         this.balanceBottom = undefined;
       }
-      prevSp = sp;
-    }
+      return sp;
+  }
+
+  private finishRun(): LayoutResult {
+    const sections = this.doc.sections;
     if (this.pages.length === 0) {
       this.sp = sections[0]?.props ?? ({} as SectionProps);
     }
@@ -613,13 +774,22 @@ class Engine {
     this.rewritePageRefs(this.pages);
     this.applySectionVAlign();
     const pages: LaidOutPage[] = this.pages.map((p) => laidOutPage(p));
-    const result: LayoutResult = { pages, totalPages: pages.length };
+    const result: LayoutResult = {
+      pages,
+      totalPages: pages.length,
+      _hf: { pages: this.pages, modelVersion: this.doc.modelVersion } satisfies HeaderFooterData,
+    };
     if (this.incrPoints && !this.incrAbort) {
       result._incr = {
         sigs: this.incrSigs!,
         points: this.incrPoints,
         pages: this.pages,
         bookmarks: this.bookmarkPages,
+        modelVersion: this.doc.modelVersion,
+        seqCounters: this.seqCounters,
+        seqAssigned: this.seqAssigned,
+        refFieldPosition: this.refFieldPosition,
+        refFieldParaNumber: this.refFieldParaNumber,
       } satisfies IncrData;
     }
     return result;
@@ -775,6 +945,8 @@ class Engine {
             headerGrown: p.headerGrown,
             headerRel: p.headerRel,
             footerRel: p.footerRel,
+            headerHeight: p.headerHeight,
+            footerHeight: p.footerHeight,
             colXs: [...p.colXs],
             colWidths: [...p.colWidths],
             bands: p.bands.map((b) => ({ ...b, colXs: [...b.colXs], colWidths: [...b.colWidths], bottoms: [...b.bottoms] })),
@@ -836,6 +1008,8 @@ class Engine {
       headerGrown: ps.headerGrown,
       headerRel: ps.headerRel,
       footerRel: ps.footerRel,
+      headerHeight: ps.headerHeight,
+      footerHeight: ps.footerHeight,
       colXs: [...ps.colXs],
       colWidths: [...ps.colWidths],
       footnotes: [],
@@ -867,8 +1041,19 @@ class Engine {
    * engine) if reuse can't be proven safe, so the caller does a full layout in a
    * fresh engine. */
   runIncremental(prev: LayoutResult, dirtyHint?: XmlElement): LayoutResult | null {
-    if (!this.incrEligible()) return null;
     const inc = prev._incr as IncrData;
+    const sameModel = inc.modelVersion === this.doc.modelVersion;
+    // Reused pages retain editor source bindings to parsed Run objects. A
+    // refresh rebuilds those objects, so carrying pages across generations
+    // would leave clicks editing detached model/XML references (notably after
+    // undo replaces the XML descendants). Plain in-place text edits keep the
+    // generation stable and are the incremental fast path.
+    if (!sameModel) return null;
+    // A retained incremental result proves the previous model was eligible.
+    // An in-place text edit cannot introduce a disqualifying structural field,
+    // frame, section, or note, so avoid rescanning the complete XML tree.
+    if (sameModel) this._incrFeatureOk = true;
+    if (!this.incrEligible()) return null;
     const blocks = this.doc.sections[0].blocks;
 
     let newSigs: string[] | null = null;
@@ -923,16 +1108,16 @@ class Engine {
       if (pt.blockIdx <= firstDirty) rp = pt;
       else break;
     }
-    if (!rp || rp.pageCount === 0 || rp.pageCount >= inc.pages.length) return null;
+    if (!rp || rp.pageCount >= inc.pages.length) return null;
     const prefixCount = rp.pageCount;
 
-    this.assignNoteNumbers();
-    this.assignSeqNumbers();
-    this.assignRefContext();
-    this.prepareStyleRef();
+    this.seqCounters = new Map(inc.seqCounters);
+    this.seqAssigned = inc.seqAssigned;
+    this.refFieldPosition = inc.refFieldPosition;
+    this.refFieldParaNumber = inc.refFieldParaNumber;
 
     this.physBase = prefixCount;
-    this.displayBase = inc.pages[prefixCount - 1].displayNumber;
+    this.displayBase = prefixCount > 0 ? inc.pages[prefixCount - 1].displayNumber : 0;
     this.incrSigs = newSigs;
     this.incrPoints = [];
     this.incrPrevPoints = new Map(inc.points.map((pt) => [pt.blockIdx, pt]));
@@ -978,7 +1163,18 @@ class Engine {
     return {
       pages: outPages,
       totalPages: outPages.length,
-      _incr: { sigs: newSigs, points, pages: outInternal, bookmarks: inc.bookmarks } satisfies IncrData,
+      _hf: { pages: outInternal, modelVersion: this.doc.modelVersion } satisfies HeaderFooterData,
+      _incr: {
+        sigs: newSigs,
+        points,
+        pages: outInternal,
+        bookmarks: inc.bookmarks,
+        modelVersion: this.doc.modelVersion,
+        seqCounters: this.seqCounters,
+        seqAssigned: this.seqAssigned,
+        refFieldPosition: this.refFieldPosition,
+        refFieldParaNumber: this.refFieldParaNumber,
+      } satisfies IncrData,
     };
   }
 
@@ -1130,6 +1326,8 @@ class Engine {
       sp,
       physIndex,
       displayNumber,
+      headerHeight: 0,
+      footerHeight: 0,
       bodyTop: Math.abs(sp.marginTop),
       bandTop: Math.abs(sp.marginTop),
       softTop: !sectionStart,
@@ -1170,6 +1368,8 @@ class Engine {
     const headerH = this.measureHeaderFooter(header, page, contentWidth, this.pageFieldFrameOverlay(header));
     const footerOverlay = this.pageFieldFrameOverlay(footer);
     const footerH = this.measureHeaderFooter(footer, page, contentWidth, footerOverlay);
+    page.headerHeight = headerH;
+    page.footerHeight = footerH;
 
     if (sp.marginTop >= 0) {
       page.bodyTop = Math.max(sp.marginTop, headerH > 0 ? sp.headerDistance + headerH : 0);
@@ -1740,6 +1940,46 @@ class Engine {
     return false;
   }
 
+  /** Header/footer-only relayout intentionally supports the common static-text
+   * and page-number case. Content that depends on body traversal or nested
+   * drawing state takes the exact full-layout fallback. */
+  private hfFastPathEligible(): boolean {
+    const scan = (blocks: Block[]): boolean => {
+      for (const block of blocks) {
+        if (block.type === "table") {
+          for (const row of block.rows) for (const cell of row.cells) if (!scan(cell.blocks)) return false;
+          continue;
+        }
+        if (block.props.numbering) return false;
+        for (const child of block.children) {
+          const runs = child.type === "hyperlink" ? child.runs : [child];
+          for (const run of runs) {
+            for (const content of run.content) {
+              if (content.kind === "noteRef") return false;
+              if (content.kind === "anchor") {
+                const shape = content.shape;
+                if (shape.type === "textbox" && !scan(shape.blocks)) return false;
+                if (shape.type === "art" && shape.texts?.some((text) => !scan(text.blocks))) return false;
+              }
+              if (content.kind === "drawing") {
+                if (content.textbox && !scan(content.textbox.blocks)) return false;
+                if (content.texts?.some((text) => !scan(text.blocks))) return false;
+              }
+              if (content.kind === "field") {
+                const command = content.instruction.trim().split(/\s+/, 1)[0]?.toUpperCase();
+                if (command !== "PAGE" && command !== "NUMPAGES") return false;
+              }
+            }
+          }
+        }
+      }
+      return true;
+    };
+    for (const header of this.doc.headers.values()) if (!scan(header.blocks)) return false;
+    for (const footer of this.doc.footers.values()) if (!scan(footer.blocks)) return false;
+    return true;
+  }
+
   /** Record a tracked heading-style paragraph's starting physical page. Called
    * once per paragraph when its first line commits (the bookmark-page hook). */
   private recordStyleRef(para: Paragraph, phys: number): void {
@@ -2019,15 +2259,43 @@ class Engine {
   // ---------- block flow ----------
 
   private layoutBlocks(blocks: Block[], startIdx = 0): void {
-    if (startIdx === 0) {
-      this.lastBannerKey = undefined;
-      this.lastBannerVSpace = 0;
-      this.lastBannerSpacingAfter = 0;
-    }
+    this.prepareBlockFlow(startIdx);
     for (let i = startIdx; i < blocks.length; i++) {
-      const block = blocks[i];
       if (this.incrPoints) this.capturePoint(i);
       if (this.incrConvergePrevPageIdx >= 0) return; // tail re-converged; suffix reused
+      this.layoutBlock(blocks, i);
+    }
+  }
+
+  private async layoutBlocksAsync(
+    blocks: Block[],
+    signal?: AbortSignal,
+    sliceMs = 8,
+    startIdx = 0,
+  ): Promise<void> {
+    this.prepareBlockFlow(startIdx);
+    await yieldToMain(signal);
+    let sliceStart = performance.now();
+    for (let i = startIdx; i < blocks.length; i++) {
+      if (this.incrPoints) this.capturePoint(i);
+      if (this.incrConvergePrevPageIdx >= 0) return;
+      this.layoutBlock(blocks, i);
+      if (performance.now() - sliceStart >= sliceMs) {
+        await yieldToMain(signal);
+        sliceStart = performance.now();
+      }
+    }
+  }
+
+  private prepareBlockFlow(startIdx: number): void {
+    if (startIdx !== 0) return;
+    this.lastBannerKey = undefined;
+    this.lastBannerVSpace = 0;
+    this.lastBannerSpacingAfter = 0;
+  }
+
+  private layoutBlock(blocks: Block[], i: number): void {
+      const block = blocks[i];
 
       if (block.type === "paragraph") {
         // An empty paragraph that only carries a section break takes no
@@ -2044,7 +2312,7 @@ class Engine {
             this.lastParaAfterPad = 0;
             this.lastParaWasEmpty = false;
           }
-          continue;
+          return;
         }
         // PDF-measured (wild2-legal p1, wild2-med-phase23 p1): the empty
         // paragraph that OPENS the document can take TWO slots in Word.
@@ -2104,7 +2372,6 @@ class Engine {
       } else {
         this.placeTable(block);
       }
-    }
   }
 
   // ---------- numbering ----------
@@ -4280,6 +4547,8 @@ class Engine {
       sp: this.sp,
       physIndex: -1,
       displayNumber: -1,
+      headerHeight: 0,
+      footerHeight: 0,
       bodyTop: 0,
       bandTop: 0,
       softTop: false,
@@ -5021,12 +5290,12 @@ class Engine {
     if (pb.right) page.items.push({ kind: "edge", x1: x2, y1, x2, y2, border: pb.right });
   }
 
-  private finalizeHeadersFooters(): void {
+  private finalizeHeadersFooters(emitBorders = true): void {
     const total = this.pages.length;
     for (const page of this.pages) {
       const sp = page.sp;
       this.sp = sp; // frames built here must resolve anchors against this page's section
-      this.emitPageBorders(page);
+      if (emitBorders) this.emitPageBorders(page);
       page.hfStart = page.items.length;
       const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
       // Headers/footers share the body's text column, so their left origin
