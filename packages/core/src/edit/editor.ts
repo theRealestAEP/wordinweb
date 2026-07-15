@@ -388,6 +388,52 @@ export class DocxEditor {
     return { t: src.t as XmlElement, offset: src.offset + bindings[i].item.text.length, bias: "end" };
   }
 
+  /** Start of the current/adjacent paragraph in document order. Cmd+Up first
+   * reaches the current paragraph start, then the previous one; Cmd+Down
+   * reaches the next paragraph. */
+  private paragraphPoint(pt: SelPoint, dir: -1 | 1): SelPoint | null {
+    const handle = this.host.getHandle();
+    if (!handle?._pages) return null;
+    const byText = new Map<XmlElement, { point: SelPoint; page: number }>();
+    for (let page = 0; page < handle._pages.length; page++) {
+      for (const item of handle._pages[page].page.items) {
+        if (item.kind !== "text" || !item.src?.t) continue;
+        const previous = byText.get(item.src.t);
+        if (!previous || item.src.offset < previous.point.offset) {
+          byText.set(item.src.t, { point: { t: item.src.t, offset: item.src.offset }, page });
+        }
+      }
+    }
+    const starts: { paragraph: XmlElement; point: SelPoint; page: number }[] = [];
+    const seen = new Set<XmlElement>();
+    const walk = (element: XmlElement, paragraph: XmlElement | null): void => {
+      if (localName(element.name) === "p") paragraph = element;
+      const start = byText.get(element);
+      if (paragraph && start && !seen.has(paragraph)) {
+        seen.add(paragraph);
+        starts.push({ paragraph, ...start });
+      }
+      for (const child of element.children) walk(child, paragraph);
+    };
+    for (const root of this.host.doc.editableRoots()) {
+      const name = localName(root.name);
+      if ((name === "hdr" || name === "ftr") !== this.inHeaderFooter) continue;
+      walk(root, null);
+    }
+    const current = paragraphOf(this.host.doc, pt.t);
+    const index = starts.findIndex((entry) => entry.paragraph === current);
+    if (index === -1) return null;
+    const atStart = pt.t === starts[index].point.t && pt.offset === starts[index].point.offset;
+    const target = starts[dir === -1 && !atStart ? index : index + dir];
+    if (!target) return null;
+    const page = handle._pages[target.page];
+    if (!page.mounted) {
+      page.el.scrollIntoView({ block: "center", behavior: "instant" });
+      handle.updateViewport?.();
+    }
+    return target.point;
+  }
+
   private setSelectionOrCaret(anchor: SelPoint, focus: SelPoint): void {
     if (anchor.t === focus.t && anchor.offset === focus.offset) {
       this.clearSelection();
@@ -2588,6 +2634,11 @@ export class DocxEditor {
     // IME composition owns the keystream until compositionend delivers the
     // final text (keydown arrives as isComposing / legacy keyCode 229).
     if (this.composing || e.isComposing || e.keyCode === 229) return;
+    // A handled caret command should make the insertion point visible even
+    // when it becomes a no-op at a document or line boundary.
+    if (this.caret && (e.key === "Backspace" || e.key === "Delete" || e.key.startsWith("Arrow"))) {
+      this.positionCaret();
+    }
     // A selected image is deleted by Backspace/Delete regardless of caret
     // state (selecting an image hides the caret).
     if ((e.key === "Backspace" || e.key === "Delete") && this.selectedImage) {
@@ -2696,22 +2747,9 @@ export class DocxEditor {
         if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
           this.moveFocus((pt) => this.lineEdgePoint(pt, e.key === "ArrowLeft" ? "start" : "end"), extend);
         } else {
-          const handle = this.host.getHandle();
-          const list =
-            handle?.bindings.filter(
-              (b) =>
-                b.item.src?.t &&
-                (this.regionOf(b.item.src.t as XmlElement) === "hf") === this.inHeaderFooter,
-            ) ?? [];
-          const b = e.key === "ArrowUp" ? list[0] : list[list.length - 1];
-          if (b?.item.src) {
-            const target = {
-              t: b.item.src.t as XmlElement,
-              offset: e.key === "ArrowUp" ? b.item.src.offset : b.item.src.offset + b.item.text.length,
-            };
-            this.moveFocus(() => target, extend);
-          }
+          this.moveFocus((pt) => this.paragraphPoint(pt, e.key === "ArrowUp" ? -1 : 1), extend);
         }
+        this.revealCaret();
         return;
       }
       return; // other shortcuts pass through (undo handled above, copy/cut above)
@@ -2726,9 +2764,11 @@ export class DocxEditor {
     } else if (e.key === "Backspace") {
       e.preventDefault();
       this.deleteContents(hasRange ? undefined : -1);
+      this.revealCaret();
     } else if (e.key === "Delete") {
       e.preventDefault();
       this.deleteContents(hasRange ? undefined : 1);
+      this.revealCaret();
     } else if (e.key === "Enter") {
       e.preventDefault();
       this.splitParagraph();
@@ -3021,7 +3061,8 @@ export class DocxEditor {
           const junction = lastTextOf(prev);
           this.host.history?.checkpoint();
           if (mergeParagraphBackward(this.host.doc, pEl)) {
-            if (junction) this.caret = { t: junction, run: caret.run, offset: junction.text.length };
+            const target = junction && paragraphOf(this.host.doc, junction) ? junction : caret.t;
+            this.caret = { t: target, run: caret.run, offset: target === junction ? target.text.length : 0 };
             this.commit();
           }
           return;
@@ -3395,6 +3436,13 @@ export class DocxEditor {
   }
 
   // ---------- caret rendering ----------
+
+  private revealCaret(block: ScrollLogicalPosition = "nearest"): void {
+    this.positionCaret();
+    if (this.caretEl.isConnected) {
+      this.caretEl.scrollIntoView({ block, inline: "nearest", behavior: "instant" });
+    }
+  }
 
   private hideCaret(): void {
     this.caret = null;
