@@ -478,31 +478,37 @@ export function resizeTableColumn(
     }
   }
 
-  // Keep per-cell tcW (dxa) in sync when the table has no merged cells,
-  // creating tcPr/tcW when absent: Word stamps explicit cell widths on drag,
-  // and a grid without tcW is otherwise treated as autofit (Word semantics).
-  if (!hasSpans(tblEl)) {
-    for (const tr of rowsOf(tblEl)) {
-      const cells = cellsOf(tr);
-      cells.forEach((tc, i) => {
-        if (!cols[i]) return;
-        const w = prefixOf(tc);
-        let tcPr = child(tc, "tcPr");
-        if (!tcPr) {
-          tcPr = { name: `${w}tcPr`, attrs: {}, children: [], text: "" };
-          tc.children.unshift(tcPr);
-        }
-        let tcW = child(tcPr, "tcW");
-        if (!tcW) {
-          tcW = { name: `${w}tcW`, attrs: { [`${w}type`]: "dxa" }, children: [], text: "" };
-          tcPr.children.unshift(tcW);
-        }
-        const typeKey = Object.keys(tcW.attrs).find((k) => localName(k) === "type");
-        if (!typeKey || tcW.attrs[typeKey] === "dxa") {
-          const wKey = Object.keys(tcW.attrs).find((k) => localName(k) === "w") ?? prefixOf(tcW) + "w";
-          tcW.attrs[wKey] = String(widthOf(cols[i]));
-        }
-      });
+  // Word stamps explicit tcW (dxa) on EVERY cell when a boundary is dragged —
+  // including gridSpan cells, which get the sum of their covered grid
+  // columns, and pct/auto cells, which convert to fixed. This must be
+  // unconditional: the layout only trusts a grid whose cells all declare
+  // widths (a grid with no tcW anywhere autofits, Word semantics), so
+  // skipping spanned tables here made their drags silent no-ops — the
+  // rewritten grid stayed untrusted and autofit snapped the columns back.
+  for (const tr of rowsOf(tblEl)) {
+    let col = 0;
+    for (const tc of cellsOf(tr)) {
+      const w = prefixOf(tc);
+      let tcPr = child(tc, "tcPr");
+      if (!tcPr) {
+        tcPr = { name: `${w}tcPr`, attrs: {}, children: [], text: "" };
+        tc.children.unshift(tcPr);
+      }
+      const gs = child(tcPr, "gridSpan");
+      const gsKey = gs && Object.keys(gs.attrs).find((k) => localName(k) === "val");
+      const span = gs && gsKey ? Math.max(1, parseInt(gs.attrs[gsKey], 10) || 1) : 1;
+      const total = cols.slice(col, col + span).reduce((a, c) => a + widthOf(c), 0);
+      col += span;
+      if (!total) continue;
+      let tcW = child(tcPr, "tcW");
+      if (!tcW) {
+        tcW = { name: `${w}tcW`, attrs: {}, children: [], text: "" };
+        tcPr.children.unshift(tcW);
+      }
+      const typeKey = Object.keys(tcW.attrs).find((k) => localName(k) === "type") ?? `${w}type`;
+      const wKey = Object.keys(tcW.attrs).find((k) => localName(k) === "w") ?? `${w}w`;
+      tcW.attrs[typeKey] = "dxa";
+      tcW.attrs[wKey] = String(total);
     }
   }
   doc.refresh();

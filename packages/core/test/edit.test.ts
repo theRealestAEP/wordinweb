@@ -280,6 +280,34 @@ describe("table operations", () => {
     return found as never;
   };
 
+  it("drag-resizing a column stamps dxa tcW on every cell, spans included", async () => {
+    const { resizeTableColumn } = await import("../src/edit/tables.js");
+    // Percent-width table with a gridSpan row and NO tcW anywhere — the shape
+    // the layout treats as autofit (untrusted grid). A drag must convert it
+    // to a fully-declared fixed grid or the new widths are ignored.
+    const doc = loadDoc(
+      `<w:tbl><w:tblPr><w:tblW w:type="pct" w:w="5000"/></w:tblPr>
+       <w:tblGrid><w:gridCol w:w="100"/><w:gridCol w:w="100"/><w:gridCol w:w="100"/></w:tblGrid>
+       <w:tr><w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>C1</w:t></w:r></w:p></w:tc></w:tr>
+       <w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>AB2</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>C2</w:t></w:r></w:p></w:tc></w:tr>
+       </w:tbl>` + p("after"),
+    );
+    const tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table" || !tbl.src) throw new Error("not a table");
+    expect(resizeTableColumn(doc, tbl.src, 1, 30, [200, 200, 200])).toBe(true);
+    const xml = serializeXml(tbl.src);
+    // Grid rewritten from the rendered widths with the delta applied.
+    const gridW = [...xml.matchAll(/<w:gridCol w:w="(\d+)"\/>/g)].map((m) => parseInt(m[1], 10));
+    expect(gridW.length).toBe(3);
+    expect(gridW[0]).toBeGreaterThan(gridW[1]); // +30px went to col 1, out of col 2
+    // Every cell now declares a fixed width — spanned cell covers two columns.
+    const tcW = [...xml.matchAll(/<w:tcW w:type="dxa" w:w="(\d+)"\/>/g)].map((m) => parseInt(m[1], 10));
+    expect(tcW.length).toBe(5);
+    expect(tcW[3]).toBe(gridW[0] + gridW[1]); // AB2 spans cols 1+2
+    // Table width converted from pct to explicit dxa (Word drag semantics).
+    expect(xml).toContain('<w:tblW w:type="dxa"');
+  });
+
   it("inserts and deletes rows", async () => {
     const { applyTableOp } = await import("../src/edit/tables.js");
     const doc = tableDoc();
