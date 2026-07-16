@@ -1,8 +1,9 @@
 import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
-import { XmlElement, cloneXml, localName } from "../xml.js";
+import { XmlElement, attr, cloneXml, localName } from "../xml.js";
 import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
 import { ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
+import { TextItem } from "../layout/types.js";
 import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
 import { advanceCell, moveDrawingTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
@@ -15,6 +16,7 @@ import { adjustFloatingPosition, imageAltText, isFloatingDrawing, replaceImageBl
 import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
 import { graphemeStep } from "./grapheme.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
+import { resolveParagraphStyleChain } from "../parse/styles.js";
 import {
   clipboardBlocksHtml,
   htmlClipboardBlocks,
@@ -88,6 +90,35 @@ function deepTextNode(el: HTMLElement): Node | null {
   return n;
 }
 
+function textElements(el: XmlElement): XmlElement[] {
+  const out: XmlElement[] = [];
+  const walk = (node: XmlElement): void => {
+    if (localName(node.name) === "t") out.push(node);
+    for (const child of node.children) walk(child);
+  };
+  walk(el);
+  return out;
+}
+
+function emptyParagraphLike(el: XmlElement): { paragraph: XmlElement; text: XmlElement } {
+  const prefix = el.name.includes(":") ? el.name.slice(0, el.name.indexOf(":") + 1) : "";
+  const text: XmlElement = {
+    name: `${prefix}t`,
+    attrs: { "xml:space": "preserve" },
+    children: [],
+    text: "",
+  };
+  return {
+    paragraph: {
+      name: `${prefix}p`,
+      attrs: {},
+      children: [{ name: `${prefix}r`, attrs: {}, children: [text], text: "" }],
+      text: "",
+    },
+    text,
+  };
+}
+
 export class DocxEditor {
   private caret: Caret | null = null;
   /** Header/footer editing is gated behind double-click, like Word. */
@@ -99,7 +130,7 @@ export class DocxEditor {
    * our own highlight, which kills the flicker and survives toolbar focus). */
   private selection: { anchor: SelPoint; focus: SelPoint } | null = null;
   private selectionRects: HTMLElement[] = [];
-  private restoreSelectAllPages: (() => void) | null = null;
+  private selectedAll = false;
   /** True while a drag-selection is in progress (checked by onMouseUp, which
    * bubbles from the container BEFORE the document-level drag-end listener). */
   private dragSelecting = false;
@@ -207,11 +238,8 @@ export class DocxEditor {
 
   clearSelection(): void {
     this.selection = null;
+    this.selectedAll = false;
     this.paintSelection();
-    const restore = this.restoreSelectAllPages;
-    this.restoreSelectAllPages = null;
-    restore?.();
-    this.host.getHandle()?.updateViewport?.();
     this.notifySelection();
   }
 
@@ -238,11 +266,56 @@ export class DocxEditor {
     return boundary;
   }
 
+  private activeTextItems(): TextItem[] {
+    const handle = this.host.getHandle();
+    if (!handle) return [];
+    const activeTexts = new Set<XmlElement>();
+    const collect = (element: XmlElement): void => {
+      if (localName(element.name) === "t") activeTexts.add(element);
+      for (const child of element.children) collect(child);
+    };
+    for (const root of this.host.doc.editableRoots()) {
+      const name = localName(root.name);
+      const headerFooter = name === "hdr" || name === "ftr";
+      if (headerFooter === this.inHeaderFooter) collect(root);
+    }
+    const items = handle._pages
+      ? handle._pages.flatMap((page) => page.page.items)
+      : handle.bindings.map((binding) => binding.item);
+    return items.filter(
+      (item): item is TextItem =>
+        item.kind === "text" &&
+        !!item.src?.t &&
+        activeTexts.has(item.src.t as XmlElement),
+    );
+  }
+
   /** Segments covered by the owned selection, in document paint order. */
   getSelectionSegments(): SelectionSegment[] {
     const sel = this.selection;
     const handle = this.host.getHandle();
     if (!sel || !handle) return [];
+    if (this.selectedAll) {
+      const segments: SelectionSegment[] = [];
+      for (const item of this.activeTextItems()) {
+        const src = item.src!;
+        if (item.text.length === 0) continue;
+        const segment: SelectionSegment = {
+          run: src.run,
+          t: src.t,
+          start: src.offset,
+          end: src.offset + item.text.length,
+          props: item.props,
+        };
+        const previous = segments[segments.length - 1];
+        if (previous && previous.t === segment.t && segment.start <= previous.end + 1) {
+          previous.end = Math.max(previous.end, segment.end);
+        } else {
+          segments.push(segment);
+        }
+      }
+      return segments;
+    }
     let a = this.pointIndex(sel.anchor);
     let f = this.pointIndex(sel.focus);
     if (a === null || f === null) return [];
@@ -442,6 +515,7 @@ export class DocxEditor {
       return;
     }
     this.hideCaret();
+    this.selectedAll = false;
     this.selection = { anchor, focus };
     this.paintSelection();
     this.notifySelection();
@@ -464,21 +538,16 @@ export class DocxEditor {
   }
 
   selectAll(): void {
-    const handle = this.host.getHandle();
-    if (!handle) return;
-    if (handle._virtualized && !this.restoreSelectAllPages) {
-      this.restoreSelectAllPages = handle.materializeAll?.() ?? null;
-    }
-    const editable = handle.bindings.filter(
-      (b) => b.item.src?.t && this.regionOf(b.item.src.t as XmlElement) === (this.inHeaderFooter ? "hf" : "body"),
-    );
+    const editable = this.activeTextItems();
     if (editable.length === 0) return;
-    const first = editable[0].item.src!;
-    const last = editable[editable.length - 1].item.src!;
+    const first = editable[0].src!;
+    const lastItem = editable[editable.length - 1];
+    const last = lastItem.src!;
     this.hideCaret();
+    this.selectedAll = true;
     this.selection = {
       anchor: { t: first.t as XmlElement, offset: first.offset },
-      focus: { t: last.t as XmlElement, offset: last.offset + editable[editable.length - 1].item.text.length },
+      focus: { t: last.t as XmlElement, offset: last.offset + lastItem.text.length },
     };
     this.paintSelection();
     this.notifySelection();
@@ -487,6 +556,7 @@ export class DocxEditor {
   /** Select the given post-edit ranges (used after formatting to persist). */
   selectRanges(ranges: { t: XmlElement; start: number; end: number }[]): void {
     if (ranges.length === 0) return;
+    this.selectedAll = false;
     const first = ranges[0];
     const last = ranges[ranges.length - 1];
     this.selection = {
@@ -503,10 +573,31 @@ export class DocxEditor {
     const sel = this.selection;
     const handle = this.host.getHandle();
     if (!sel || !handle) return;
-    let a = this.pointIndex(sel.anchor);
-    let f = this.pointIndex(sel.focus);
+    const activeTexts = this.selectedAll
+      ? new Set(this.activeTextItems().map((item) => item.src!.t))
+      : null;
+    const bindings = activeTexts
+      ? handle.bindings.filter((binding) => !!binding.item.src?.t && activeTexts.has(binding.item.src.t))
+      : handle.bindings;
+    if (bindings.length === 0) return;
+    let a = this.selectedAll ? 0 : this.pointIndex(sel.anchor);
+    let f = this.selectedAll
+      ? (bindings.length - 1) * 1e6 + bindings[bindings.length - 1].item.text.length
+      : this.pointIndex(sel.focus);
     if (a === null || f === null) return;
-    const [startPt, endPt] = a <= f ? [sel.anchor, sel.focus] : [sel.focus, sel.anchor];
+    const [startPt, endPt] = this.selectedAll
+      ? [
+          { t: bindings[0].item.src!.t as XmlElement, offset: bindings[0].item.src!.offset },
+          {
+            t: bindings[bindings.length - 1].item.src!.t as XmlElement,
+            offset:
+              bindings[bindings.length - 1].item.src!.offset +
+              bindings[bindings.length - 1].item.text.length,
+          },
+        ]
+      : a <= f
+        ? [sel.anchor, sel.focus]
+        : [sel.focus, sel.anchor];
     if (a > f) [a, f] = [f, a];
     const startIdx = Math.floor(a / 1e6);
     const endIdx = Math.floor(f / 1e6);
@@ -530,7 +621,7 @@ export class DocxEditor {
     };
 
     for (let i = startIdx; i <= endIdx; i++) {
-      const b = handle.bindings[i];
+      const b = bindings[i];
       const item = b.item;
       const src = item.src;
       if (!src?.t) continue;
@@ -690,8 +781,6 @@ export class DocxEditor {
     c.removeEventListener("dragover", this.onDragOver);
     c.removeEventListener("drop", this.onDrop);
     this.dismissSuggestionPopover();
-    this.restoreSelectAllPages?.();
-    this.restoreSelectAllPages = null;
     this.hideCaret();
   }
 
@@ -968,6 +1057,7 @@ export class DocxEditor {
       }
       if (dragging) {
         this.hideCaret();
+        this.selectedAll = false;
         this.selection = {
           anchor: { t: anchor.t, offset: anchor.offset },
           focus: { t: focus.t, offset: focus.offset },
@@ -1001,6 +1091,7 @@ export class DocxEditor {
     const last = lastTextOf(pEl);
     if (!first || !last) return;
     this.hideCaret();
+    this.selectedAll = false;
     this.selection = {
       anchor: { t: first, offset: 0 },
       focus: { t: last, offset: last.text.length },
@@ -1019,6 +1110,7 @@ export class DocxEditor {
     while (e < text.length && isWord(text[e])) e++;
     if (e > s) {
       this.hideCaret();
+      this.selectedAll = false;
       this.selection = { anchor: { t: caret.t, offset: s }, focus: { t: caret.t, offset: e } };
       this.paintSelection();
       this.notifySelection();
@@ -2740,7 +2832,7 @@ export class DocxEditor {
         }
         return;
       }
-      // Cmd+Left/Right = line start/end; Cmd+Up/Down = document start/end.
+      // Cmd+Left/Right = line edge; Cmd+Up/Down = adjacent paragraph start.
       if (e.key.startsWith("Arrow")) {
         e.preventDefault();
         const extend = e.shiftKey;
@@ -3039,9 +3131,10 @@ export class DocxEditor {
 
   private deleteContents(direction?: -1 | 1): void {
     if (direction === undefined) {
+      const selectedAll = this.selectedAll;
       this.host.history?.checkpoint();
       this.removeSelectedText();
-      this.commit();
+      this.commit(false, selectedAll ? "global" : "local");
       return;
     }
     const caret = this.caret;
@@ -3172,6 +3265,26 @@ export class DocxEditor {
 
   /** Delete the owned selection's text from the XML; caret → start. */
   private removeSelectedText(): void {
+    if (this.selectedAll && !this.inHeaderFooter && !this.suggesting) {
+      const root = this.host.doc.editableRoots()[0];
+      const body = localName(root.name) === "body"
+        ? root
+        : root.children.find((child) => localName(child.name) === "body");
+      if (body) {
+        const empty = emptyParagraphLike(body);
+        const sectionProperties = body.children.filter(
+          (child) => localName(child.name) === "sectPr",
+        );
+        body.children = [empty.paragraph, ...sectionProperties];
+        this.clearSelection();
+        this.caret = {
+          t: empty.text,
+          run: { type: "run", props: {}, content: [] },
+          offset: 0,
+        };
+        return;
+      }
+    }
     const segments = this.getSelectionSegments();
     if (this.suggesting) {
       const ranges = segments
@@ -3194,10 +3307,66 @@ export class DocxEditor {
       list.push({ start: seg.start, end: seg.end });
       byT.set(t, list);
     }
+    const fullySelected = new Set<XmlElement>();
+    for (const [t, ranges] of byT) {
+      const ordered = [...ranges].sort((a, b) => a.start - b.start);
+      let end = 0;
+      for (const range of ordered) {
+        if (range.start > end) break;
+        end = Math.max(end, range.end);
+      }
+      if (end >= t.text.length) fullySelected.add(t);
+    }
+    const paragraphs = new Set<XmlElement>();
+    for (const t of fullySelected) {
+      const paragraph = paragraphOf(this.host.doc, t);
+      if (paragraph) paragraphs.add(paragraph);
+    }
+    const fullySelectedParagraphs = [...paragraphs].filter((paragraph) => {
+      const texts = textElements(paragraph).filter((text) => text.text.length > 0);
+      return texts.length > 0 && texts.every((text) => fullySelected.has(text));
+    });
+    const fullySelectedTables = new Set<XmlElement>();
+    for (const paragraph of fullySelectedParagraphs) {
+      const paragraphProperties = paragraph.children.find(
+        (child) => localName(child.name) === "pPr",
+      );
+      const paragraphTexts = textElements(paragraph).filter((text) => text.text.length > 0);
+      const style = paragraphProperties?.children.find((child) => localName(child.name) === "pStyle");
+      const styleNumbering = resolveParagraphStyleChain(
+        this.host.doc.styles,
+        attr(style, "val"),
+        false,
+      ).pPr.numbering;
+      const isList = paragraphTexts.some((text) => listTypeAt(this.host.doc, text)) || !!styleNumbering;
+      if (paragraphProperties && isList) {
+        paragraphProperties.children = paragraphProperties.children.filter(
+          (child) => localName(child.name) !== "numPr" && localName(child.name) !== "pStyle",
+        );
+      }
+      let ancestor = this.host.doc.findParentOf(paragraph);
+      while (ancestor && localName(ancestor.name) !== "tbl") {
+        ancestor = this.host.doc.findParentOf(ancestor);
+      }
+      if (!ancestor) continue;
+      const tableTexts = textElements(ancestor).filter((text) => text.text.length > 0);
+      if (tableTexts.length > 0 && tableTexts.every((text) => fullySelected.has(text))) {
+        fullySelectedTables.add(ancestor);
+      }
+    }
     for (const [t, ranges] of byT) {
       ranges.sort((a, b) => b.start - a.start);
       for (const r of ranges) {
         t.text = t.text.slice(0, r.start) + t.text.slice(r.end);
+      }
+    }
+    for (const table of fullySelectedTables) {
+      const parent = this.host.doc.findParentOf(table);
+      if (!parent) continue;
+      const empty = emptyParagraphLike(table);
+      parent.children.splice(parent.children.indexOf(table), 1, empty.paragraph);
+      if (first && textElements(table).includes(first.t)) {
+        first = { t: empty.text, run: first.run, offset: 0 };
       }
     }
     this.clearSelection();
