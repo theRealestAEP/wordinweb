@@ -22,6 +22,11 @@ export interface TextMeasurer {
    * by the browser strut, which differs from the engine's calibrated line
    * profile (Hiragino/PingFang) whenever the real Windows face paints. */
   paintBox?(font: FontSpec): { ascent: number; descent: number } | undefined;
+  /** Ink extents (actualBoundingBox*) of `text` in the RESOLVED paint face,
+   * px above/below the baseline. The radical join needs the √ glyph's real
+   * ink — which face paints it (real Cambria Math vs the STIX substitute)
+   * changes the extents, so a baked table can't cover both. */
+  inkBox?(text: string, font: FontSpec): { ascent: number; descent: number } | undefined;
 }
 
 export function fontKey(font: FontSpec): string {
@@ -236,6 +241,7 @@ export class CanvasMeasurer implements TextMeasurer {
   private widthCache = new Map<string, number>();
   private metricsCache = new Map<string, FontMetrics>();
   private paintBoxCache = new Map<string, { ascent: number; descent: number } | null>();
+  private inkBoxCache = new Map<string, { ascent: number; descent: number } | null>();
   private currentFont = "";
 
   constructor() {
@@ -293,6 +299,22 @@ export class CanvasMeasurer implements TextMeasurer {
           ? { ascent: tm.fontBoundingBoxAscent / 3, descent: tm.fontBoundingBoxDescent / 3 }
           : null;
       this.paintBoxCache.set(key, m);
+    }
+    return m ?? undefined;
+  }
+
+  /** Glyph ink extents at 3x (like width()) from the resolved paint face. */
+  inkBox(text: string, font: FontSpec): { ascent: number; descent: number } | undefined {
+    const key = "ink " + fontKey(font) + " " + text;
+    let m = this.inkBoxCache.get(key);
+    if (m === undefined) {
+      this.setFont({ ...font, size: font.size * 3 });
+      const tm = this.ctx.measureText(text);
+      m =
+        tm.actualBoundingBoxAscent !== undefined && tm.actualBoundingBoxDescent !== undefined
+          ? { ascent: tm.actualBoundingBoxAscent / 3, descent: tm.actualBoundingBoxDescent / 3 }
+          : null;
+      this.inkBoxCache.set(key, m);
     }
     return m ?? undefined;
   }

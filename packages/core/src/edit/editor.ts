@@ -2405,7 +2405,7 @@ export class DocxEditor {
     row.style.cssText = "display:flex;gap:6px;align-items:center;";
     const input = document.createElement("input");
     input.value = original;
-    input.title = "Linear math: x^2, x_i, {a+b}/{2}, √{x}";
+    input.title = "Linear math: x^2, x_i, {a+b}/{2}, √{x}, √[n]{x}";
     input.style.cssText =
       "width:260px;border:1px solid #dadce0;border-radius:6px;padding:5px 8px;outline:none;" +
       "font:14px 'Cambria Math','STIX Two Math',serif;transition:border-color .12s,background .12s;";
@@ -2433,7 +2433,7 @@ export class DocxEditor {
         }
       });
     } else {
-      caption.textContent = "Linear math: x^2, x_i, {a+b}/{2}, √{x}. Enter to apply.";
+      caption.textContent = "Linear math: x^2, x_i, {a+b}/{2}, √{x}, √[n]{x}. Enter to apply.";
       const apply = document.createElement("button");
       apply.textContent = "Apply";
       apply.style.cssText =

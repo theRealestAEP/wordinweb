@@ -4139,9 +4139,16 @@ describe("OMML matrices, arrays, accents, group chars, radicals, limits (probe2-
     expect(rule.x2).toBeGreaterThan(box.width); // overhang the radicand like Word
     expect(rule.paintDyOffset).toBe(2); // visual-only lift leaves line layout unchanged
     expect(rule.dy + rule.thick / 2).toBeCloseTo(sign.ownAscent!, 3);
-    const metrics = measurer.metrics(sign.font);
-    const paintedSignTop = sign.scaleAnchor! + (metrics.ascent - sign.scaleAnchor!) * sign.scaleY!;
-    expect(paintedSignTop).toBeCloseTo(rule.dy + rule.paintDyOffset! + rule.thick / 2, 3);
+    // The sign scales by its REAL ink extents (U+221A: 1886..-85/2048 em),
+    // not the font-box ascent: the arm tip must land exactly on the painted
+    // vinculum top and the foot on the radicand's descent, or the join shows
+    // a visible break.
+    const inkTop = (sign.font.size * 1886) / 2048;
+    const inkBot = (sign.font.size * -85) / 2048;
+    const mapped = (p: number) => sign.scaleAnchor! + (p - sign.scaleAnchor!) * sign.scaleY!;
+    expect(mapped(inkTop)).toBeCloseTo(rule.dy + rule.paintDyOffset! + rule.thick / 2, 3);
+    const radMetrics = measurer.metrics(radicand.font);
+    expect(mapped(inkBot)).toBeCloseTo(-radMetrics.descent, 3);
   });
 
   it("a nested radical raises the outer vinculum above the inner one", () => {

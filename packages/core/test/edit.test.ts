@@ -11,7 +11,7 @@ import { imageAltText, setImageAltText, replaceImageBlip } from "../src/edit/ima
 import { insertFootnote } from "../src/edit/notes.js";
 import { insertPageField } from "../src/edit/fields.js";
 import { linearizeMath, parseMathLinear, setMathLinear, mathLinearOf, isLinearSafe } from "../src/edit/math.js";
-import { XmlElement } from "../src/xml.js";
+import { XmlElement, localName } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, makeDocxWithMedia, wrapDocument, p } from "./helpers.js";
 import { Paragraph, Run, TextContent } from "../src/model.js";
@@ -811,10 +811,14 @@ describe("math editing", () => {
   });
 
   it("linear form round-trips through the parser", () => {
-    const cases = ["e^x=1+x+x/2", "a_i+b^{2y}", "{a+b}/{2c}", "√{x+1}"];
+    const cases = ["e^x=1+x+x/2", "a_i+b^{2y}", "{a+b}/{2c}", "√{x+1}", "√[3]{x+1}", "√[5]{x+1}"];
     for (const c of cases) {
       expect(linearizeMath(parseMathLinear(c))).toBe(c);
     }
+    // ∛/∜ are accepted as input shorthands and canonicalize to √[n]{…} so the
+    // degree stays editable as a plain digit.
+    expect(linearizeMath(parseMathLinear("∛{x+1}"))).toBe("√[3]{x+1}");
+    expect(linearizeMath(parseMathLinear("∜{x+1}"))).toBe("√[4]{x+1}");
   });
 
   it("rewrites an equation from linear text", () => {
@@ -943,6 +947,30 @@ describe("math editing safety", () => {
     const hasMatrix = (e: XmlElement): boolean =>
       e.name.endsWith("m") && e.children.some((c) => c.name.endsWith("mr")) ? true : e.children.some(hasMatrix);
     expect(hasMatrix(after)).toBe(true);
+  });
+
+  it("radical degree (nth root) survives linearization and editing", () => {
+    const CUBE = `<m:oMath><m:rad><m:deg>${run("3")}</m:deg><m:e>${run("x+1")}</m:e></m:rad></m:oMath>`;
+    const { doc, srcOf } = load(CUBE);
+    expect(mathLinearOf(doc, srcOf())).toBe("√[3]{x+1}");
+    expect(isLinearSafe(srcOf())).toBe(true);
+    expect(setMathLinear(doc, srcOf(), "√[5]{y+2}")).toBe(true);
+    const after = srcOf();
+    expect(mathLinearOf(doc, after)).toBe("√[5]{y+2}");
+    const degText = (e: XmlElement, inDeg = false): string => {
+      const here = inDeg && localName(e.name) === "t" ? e.text : "";
+      return here + e.children.map((c) => degText(c, inDeg || localName(e.name) === "deg")).join("");
+    };
+    expect(degText(after)).toBe("5");
+  });
+
+  it("a hidden degree (m:degHide) stays a plain square root", () => {
+    const HIDDEN =
+      `<m:oMath><m:rad><m:radPr><m:degHide m:val="1"/></m:radPr>` +
+      `<m:deg></m:deg><m:e>${run("x")}</m:e></m:rad></m:oMath>`;
+    const { doc, srcOf } = load(HIDDEN);
+    expect(mathLinearOf(doc, srcOf())).toBe("√x");
+    expect(isLinearSafe(srcOf())).toBe(true);
   });
 
   it("n-ary integrand survives a round-trip through OMML", () => {

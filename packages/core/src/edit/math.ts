@@ -27,9 +27,14 @@ export function linearizeMath(nodes: MathNode[]): string {
       case "frac":
         out += group(n.num) + "/" + group(n.den);
         break;
-      case "rad":
-        out += "√" + group(n.e);
+      case "rad": {
+        // Degree (nth root) linearizes as √[deg]{e} — the index stays plain
+        // editable text (∛ would bake the 3 into one atomic character). The
+        // parser still ACCEPTS ∛/∜ as input shorthands.
+        const deg = n.deg && n.deg.length ? linearizeMath(n.deg) : "";
+        out += deg ? "√[" + deg + "]" + group(n.e) : "√" + group(n.e);
         break;
+      }
       case "nary":
         out += n.chr + (n.sub.length ? "_" + group(n.sub) : "") + (n.sup.length ? "^" + group(n.sup) : "") + group(n.e);
         break;
@@ -158,10 +163,14 @@ export function parseMathLinear(input: string): MathNode[] {
   const parseUnit = (): MathNode[] => {
     const ch = input[i];
     if (ch === "{") return parseGroup();
-    if (ch === "√") {
+    if (ch === "√" || ch === "∛" || ch === "∜") {
       i++;
+      let deg: MathNode[] =
+        ch === "∛" ? [{ t: "run", text: "3" }] : ch === "∜" ? [{ t: "run", text: "4" }] : [];
+      // "√[deg]{e}": a bracket group right after √ is the root's index.
+      if (ch === "√" && input[i] === "[") deg = parseMathLinear(scanDelim("[", "]"));
       const e = input[i] === "{" ? parseGroup() : parseUnit();
-      return [{ t: "rad", e }];
+      return deg.length ? [{ t: "rad", e, deg }] : [{ t: "rad", e }];
     }
     if (NARY_CHRS.has(ch)) return parseNary();
     if (ch in DELIM_CLOSE) return parseDelim(ch);
@@ -368,7 +377,11 @@ function ommlToNodes(e: XmlElement): MathNode[] {
   }
   if (ln === "sSup") return [{ t: "sup", base: kids("e"), script: kids("sup") }];
   if (ln === "sSub") return [{ t: "sub", base: kids("e"), script: kids("sub") }];
-  if (ln === "rad") return [{ t: "rad", e: kids("e") }];
+  if (ln === "rad") {
+    const hide = chrAttr("radPr", "degHide", "0");
+    const deg = hide === "1" || hide === "true" || hide === "on" ? [] : kids("deg");
+    return deg.length ? [{ t: "rad", e: kids("e"), deg }] : [{ t: "rad", e: kids("e") }];
+  }
   if (ln === "t") return e.text ? [{ t: "run", text: e.text }] : [];
   const out: MathNode[] = [];
   for (const c of e.children) {
@@ -405,9 +418,11 @@ function sameStructure(a: MathNode[], b: MathNode[]): boolean {
       case "frac":
         if (!sameStructure(x.num, (y as typeof x).num) || !sameStructure(x.den, (y as typeof x).den)) return false;
         break;
-      case "rad":
-        if (!sameStructure(x.e, (y as typeof x).e)) return false;
+      case "rad": {
+        const yy = y as typeof x;
+        if (!sameStructure(x.e, yy.e) || !sameStructure(x.deg ?? [], yy.deg ?? [])) return false;
         break;
+      }
       case "nary": {
         const yy = y as typeof x;
         if (x.chr !== yy.chr || !sameStructure(x.sub, yy.sub) || !sameStructure(x.sup, yy.sup) || !sameStructure(x.e, yy.e))

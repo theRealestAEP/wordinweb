@@ -1038,14 +1038,22 @@ function flow(
         // Word's span (rule top down to the -RAD_GROWN_FOOT foot): scaling about
         // a point below the ink bottom can only lift the foot, so solve the
         // two-point mapping with the real U+221A ink extents (RAD_VARIANTS[0]).
-        let grow = Math.max(1, signInkH / (m.ascent + signDesc));
-        let signAnchor = -signDesc;
-        if (nestedGrown) {
-          const inkTopNat = (size * RAD_VARIANTS[0].top) / 2048;
-          const inkBotNat = (size * RAD_VARIANTS[0].bot) / 2048;
-          grow = (paintRuleTop + size * RAD_GROWN_FOOT) / (inkTopNat - inkBotNat);
-          signAnchor = (-size * RAD_GROWN_FOOT - inkBotNat * grow) / (1 - grow);
-        }
+        // Two-point mapping from the glyph's REAL ink extents onto
+        // [foot, rule top] for every radical, not just the grown nested
+        // outer: sizing from the font-box ascent (m.ascent 0.9502em vs the
+        // ink top's 0.9209em) left the scaled arm tip ~0.03em short of the
+        // painted vinculum — a visible break at the join. The ink must come
+        // from the face that actually paints: real Cambria Math and the STIX
+        // substitute carry different √ extents, so measure it live and keep
+        // the Cambria MATH-table values only as the no-canvas fallback.
+        const signInk = measurer.inkBox?.("√", font);
+        const inkTopNat = signInk ? signInk.ascent : (size * RAD_VARIANTS[0].top) / 2048;
+        const inkBotNat = signInk ? -signInk.descent : (size * RAD_VARIANTS[0].bot) / 2048;
+        const signFoot = nestedGrown ? size * RAD_GROWN_FOOT : signDesc;
+        const grow = (paintRuleTop + signFoot) / (inkTopNat - inkBotNat);
+        // Anchor only matters when a scale is applied (grow > 1.05 below);
+        // at grow == 1 the formula degenerates, so pin it to keep it finite.
+        const signAnchor = grow === 1 ? 0 : (-signFoot - inkBotNat * grow) / (1 - grow);
         // Only the COMPLEX radical (a degree index or a nested radicand)
         // swaps to Word's oversized assembled variant whose font box far
         // exceeds its ink; growth alone cannot discriminate (probe2's nested
