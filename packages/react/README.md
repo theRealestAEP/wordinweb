@@ -14,7 +14,7 @@ Editing is in an Alpha state and is strictly opt-in via the `editable` flag; the
 
 If you discover an edge case or perf issue create an issue and include the offending Word file.
 
-Part of the broader roadmap is to migrate away from DOM rendering to canvas rendering, or a hybrid of the two. Editing performance can suffer on very long documents.
+Long-document performance work focuses on incremental parsing/layout and page virtualization; the current renderer remains DOM-based.
 
 ---
 

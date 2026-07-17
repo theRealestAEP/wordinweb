@@ -561,7 +561,7 @@ export function renderToDom(
     }
   };
 
-  const wantedPages = (): Set<number> => {
+  const wantedPages = (overscan = 2): Set<number> => {
     const wanted = new Set<number>();
     const top = container.scrollTop;
     const bottom = top + Math.max(container.clientHeight, 1);
@@ -577,7 +577,7 @@ export function renderToDom(
       y = pageBottom + gap;
     }
     if (first < 0) first = last = Math.max(0, pages.length - 1);
-    for (let i = Math.max(0, first - 2); i <= Math.min(pages.length - 1, last + 2); i++) wanted.add(i);
+    for (let i = Math.max(0, first - overscan); i <= Math.min(pages.length - 1, last + overscan); i++) wanted.add(i);
     // Keep active caret/selection pages mounted even if the user scrolls away.
     // The logical editor state then remains resolvable until it is cleared.
     for (let i = 0; i < pages.length; i++) {
@@ -586,9 +586,9 @@ export function renderToDom(
     return wanted;
   };
 
-  const syncViewport = (notify: boolean, force = false): void => {
+  const syncViewport = (notify: boolean, force = false, overscan = 2): void => {
     if (!virtualized) return;
-    const wanted = wantedPages();
+    const wanted = wantedPages(overscan);
     let changed = false;
     for (const i of wanted) {
       if (pages[i].mounted) continue;
@@ -603,15 +603,31 @@ export function renderToDom(
     }
     if (!changed && !force) return;
     refreshBindings();
-    redrawComments();
+    if (drawComments || force) redrawComments();
     if (notify) options.onViewportChange?.();
   };
 
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
+  let syncedScrollTop = container.scrollTop;
+  let pendingOverscan = 2;
   const scheduleViewport = (): void => {
+    const fast = Math.abs(container.scrollTop - syncedScrollTop) > Math.max(container.clientHeight, 1) * 2;
+    if (fast) {
+      pendingOverscan = 0;
+      if (settleTimer !== undefined) clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        settleTimer = undefined;
+        syncedScrollTop = container.scrollTop;
+        syncViewport(true);
+      }, 80);
+    }
     if (frame) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
-      syncViewport(true);
+      const overscan = pendingOverscan;
+      pendingOverscan = 2;
+      syncedScrollTop = container.scrollTop;
+      syncViewport(true, false, overscan);
     });
   };
 
@@ -621,6 +637,8 @@ export function renderToDom(
     window.removeEventListener("resize", scheduleViewport);
     if (frame) cancelAnimationFrame(frame);
     frame = 0;
+    if (settleTimer !== undefined) clearTimeout(settleTimer);
+    settleTimer = undefined;
   };
 
   handle = {

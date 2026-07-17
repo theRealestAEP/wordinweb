@@ -50,10 +50,8 @@ export interface LayoutOptions {
    * type/delete. Lets the incremental scan skip re-hashing every block: it
    * re-hashes only the hinted block and its two neighbours and reuses prev's
    * per-block signatures for the rest. Purely an optimisation — the fast path
-   * is gated on block-count parity and neighbour-signature checks, so a stale,
-   * structural, or wrong hint falls through to the full block scan. Absent for
-   * multi-block edits (paste, paragraph split/merge, undo/redo, structural ops),
-   * which take the full scan. */
+   * is gated on block identity/count and neighbour-signature checks, so a stale
+   * or wrong hint falls through to the full block scan. */
   dirtyHint?: XmlElement;
   /** Exact retained text element changed by a local edit. Used only to bound
    * structural page comparison before the first actually dirty page. */
@@ -243,6 +241,7 @@ interface LayoutSnapshot {
   counters: Map<number, number[]>;
   seenNumIds: Set<number>;
   bookmarkPages: Map<string, string>;
+  bookmarkPageIndices: Map<string, number>;
   placedFootnotes: Set<number>;
   lnCounter: number;
   lnLastPage: InternalPage | undefined;
@@ -308,6 +307,8 @@ export interface IncrData {
   pages: InternalPage[];
   /** Bookmark name -> display page number, for PAGEREF stability checks. */
   bookmarks: Map<string, string>;
+  /** Bookmark name -> zero-based physical page index. */
+  bookmarkPageIndices: Map<string, number>;
   /** Parsed-model generation used to invalidate caches after structural or
    * formatting refreshes while preserving them for in-place text edits. */
   modelVersion: number;
@@ -335,6 +336,7 @@ export const __incrStats = {
   resumePage: -1,
   convergedBlock: -1,
   convergedPage: -1,
+  pageShift: 0,
   blocksLaid: 0,
   fallbackReason: "",
 };
@@ -477,6 +479,7 @@ class Engine {
   private trailingSectionBreakMarkGap = 0;
   /** Bookmark name -> formatted display page number (PAGEREF rewrite). */
   private bookmarkPages = new Map<string, string>();
+  private bookmarkPageIndices = new Map<string, number>();
   /** STYLEREF page-awareness: styleIds whose paragraphs a header/footer STYLEREF
    * references (null until precomputed; empty set = no STYLEREF, tracking off). */
   private styleRefTrack: Set<string> | null = null;
@@ -573,6 +576,8 @@ class Engine {
   private incrConvergeBlockIdx = -1;
   private incrConvergePageIdx = -1;
   private incrConvergeItemDelta = 0;
+  private incrConvergePrevPointPageIdx = -1;
+  private incrPageShift = 0;
   /** New block indices are old indices plus this value after a structural
    * split, so convergence compares the same semantic suffix boundary. */
   private incrBlockDelta = 0;
@@ -846,6 +851,7 @@ class Engine {
         points: this.incrPoints,
         pages: this.pages,
         bookmarks: this.bookmarkPages,
+        bookmarkPageIndices: this.bookmarkPageIndices,
         modelVersion: this.doc.modelVersion,
         seqCounters: this.seqCounters,
         seqAssigned: this.seqAssigned,
@@ -1009,9 +1015,13 @@ class Engine {
     // and append the old body suffix; headers/footers are finalized normally.
     if (this.incrPrevPoints && blockIdx > this.incrFirstDirty) {
       const pp = this.incrPrevPoints.get(blockIdx);
-      if (pp && pp.pageCount === globalPageIdx && this.statesMatch(pp.state)) {
+      const pageShift = pp ? globalPageIdx - pp.pageCount : 0;
+      if (pp && this.statesMatch(pp.state, pageShift)) {
         __incrStats.convergedBlock = blockIdx;
         __incrStats.convergedPage = globalPageIdx;
+        __incrStats.pageShift = pageShift;
+        this.incrPageShift = pageShift;
+        this.incrConvergePrevPointPageIdx = pp.pageCount;
         this.incrPoints.push(snapshot());
         const reuseWholePage =
           p.items.length === 0 &&
@@ -1040,7 +1050,7 @@ class Engine {
   /** True when the current engine state at a clean page top exactly matches a
    * prev-layout capture point — i.e. the relaid tail has re-converged and the
    * rest of the layout is guaranteed identical. */
-  private statesMatch(s: IncrState): boolean {
+  private statesMatch(s: IncrState, pageShift = 0): boolean {
     const p = this.cur;
     if (
       this.col !== s.col ||
@@ -1055,8 +1065,8 @@ class Engine {
       this.gridResyncPending !== s.gridResyncPending ||
       this.verticalGridFlow !== s.verticalGridFlow ||
       this.bannerSlotUsed !== s.bannerSlotUsed ||
-      p.physIndex !== s.page.physIndex ||
-      p.displayNumber !== s.page.displayNumber ||
+      p.physIndex !== s.page.physIndex + pageShift ||
+      p.displayNumber !== s.page.displayNumber + pageShift ||
       p.bodyTop !== s.page.bodyTop ||
       p.bodyBottom !== s.page.bodyBottom
     ) {
@@ -1118,11 +1128,71 @@ class Engine {
     this.seenNumIds = new Set(s.seenNumIds);
   }
 
+  private bodyHasPageField(el: XmlElement = this.doc.docRoot): boolean {
+    const name = el.name.includes(":") ? el.name.slice(el.name.indexOf(":") + 1) : el.name;
+    const instruction = name === "instrText" ? el.text : name === "fldSimple" ? (el.attrs["w:instr"] ?? "") : "";
+    if (/\bPAGE\b/i.test(instruction)) return true;
+    return el.children.some((child) => this.bodyHasPageField(child));
+  }
+
+  /** Clone a retained suffix page onto its new physical/display number. Body
+   * items and page-border items stay identical; headers and footers are removed
+   * so the final pass can rebuild PAGE fields against the shifted number. */
+  private shiftRetainedPage(page: InternalPage, pageShift: number): InternalPage | null {
+    if (page.hfStart === undefined) return null;
+    const physIndex = page.physIndex + pageShift;
+    const displayNumber = page.displayNumber + pageShift;
+    const isFirstOfSection = physIndex === this.sectionFirstPagePhys;
+    const useEven = this.doc.evenAndOddHeaders && displayNumber % 2 === 0;
+    const headerRel = page.sp.titlePage && isFirstOfSection
+      ? page.sp.headerRefs.first
+      : useEven
+        ? page.sp.headerRefs.even
+        : page.sp.headerRefs.default;
+    const footerRel = page.sp.titlePage && isFirstOfSection
+      ? page.sp.footerRefs.first
+      : useEven
+        ? page.sp.footerRefs.even
+        : page.sp.footerRefs.default;
+    const shifted: InternalPage = {
+      ...page,
+      items: page.items.slice(0, page.hfStart),
+      physIndex,
+      displayNumber,
+      headerRel,
+      footerRel,
+      hfStart: undefined,
+      colXs: [...page.colXs],
+      colWidths: [...page.colWidths],
+      footnotes: page.footnotes.map((note) => ({ ...note, items: [...note.items] })),
+      footnoteH: [...page.footnoteH],
+      bands: page.bands.map((band) => ({
+        ...band,
+        colXs: [...band.colXs],
+        colWidths: [...band.colWidths],
+        bottoms: [...band.bottoms],
+      })),
+    };
+    if (headerRel === page.headerRel && footerRel === page.footerRel) return shifted;
+
+    this.sp = shifted.sp;
+    const contentWidth = shifted.sp.pageWidth - shifted.sp.marginLeft - shifted.sp.marginRight - shifted.sp.gutter;
+    const header = this.doc.headers.get(headerRel ?? "");
+    const footer = this.doc.footers.get(footerRel ?? "");
+    const headerHeight = this.measureHeaderFooter(header, shifted, contentWidth, this.pageFieldFrameOverlay(header));
+    const footerHeight = this.measureHeaderFooter(footer, shifted, contentWidth, this.pageFieldFrameOverlay(footer));
+    if (headerHeight !== page.headerHeight || footerHeight !== page.footerHeight) return null;
+    shifted.headerHeight = headerHeight;
+    shifted.footerHeight = footerHeight;
+    return shifted;
+  }
+
   /** Attempt an incremental layout; return null (and leave a discarded, dirty
    * engine) if reuse can't be proven safe, so the caller does a full layout in a
    * fresh engine. */
   runIncremental(prev: LayoutResult, dirtyHint?: XmlElement, dirtySource?: XmlElement): LayoutResult | null {
     __incrStats.fallbackReason = "";
+    __incrStats.pageShift = 0;
     const fallback = (reason: string): null => {
       __incrStats.fallbackReason = reason;
       const perf = (globalThis as { __dxwPerf?: { incr?: typeof __incrStats } }).__dxwPerf;
@@ -1147,15 +1217,17 @@ class Engine {
     let newSigs: string[] | null = null;
     let firstDirty = 0;
 
-    // Enter's direct-body split replaces one parsed block with two while every
-    // other block retains identity. The dirty hint is the new second paragraph.
+    // Enter/click-and-type replaces one parsed block with two or more while
+    // every other block retains identity. The dirty hint is the final new
+    // paragraph.
     // Verify the shifted neighbours before carrying the old signatures across,
     // avoiding an O(N) XML hash pass on long legal documents.
-    if (dirtyHint && blocks.length === inc.sigs.length + 1) {
+    if (dirtyHint && blocks.length > inc.sigs.length) {
+      const delta = blocks.length - inc.sigs.length;
       const inserted = blocks.findIndex((block) => block.src === dirtyHint);
-      const changed = inserted - 1;
+      const changed = inserted - delta;
       if (changed >= 0) {
-        let hashed = 2;
+        let hashed = delta + 1;
         let neighborsOk = true;
         if (changed > 0) {
           hashed++;
@@ -1163,18 +1235,48 @@ class Engine {
         }
         if (neighborsOk && inserted < blocks.length - 1) {
           hashed++;
-          neighborsOk = this.blockSig(blocks[inserted + 1]) === inc.sigs[inserted];
+          neighborsOk = this.blockSig(blocks[inserted + 1]) === inc.sigs[changed + 1];
         }
         if (neighborsOk) {
           newSigs = inc.sigs.slice();
           newSigs[changed] = this.blockSig(blocks[changed]);
-          newSigs.splice(inserted, 0, this.blockSig(blocks[inserted]));
+          newSigs.splice(changed + 1, 0, ...blocks.slice(changed + 1, inserted + 1).map((block) => this.blockSig(block)));
           firstDirty = changed;
           __incrStats.hintFastPath = true;
           __incrStats.blocksHashed = hashed;
           __incrStats.firstDirty = changed;
-          this.incrBlockDelta = 1;
+          this.incrBlockDelta = delta;
           this.incrBlockShiftAfter = changed;
+        }
+      }
+    }
+
+    // Backspace/Delete can merge two direct body paragraphs while retaining
+    // the parsed model. Verify the unchanged neighbours, then remove the old
+    // second paragraph signature and shift later checkpoints back one block.
+    if (newSigs === null && dirtyHint && blocks.length === inc.sigs.length - 1) {
+      const changed = blocks.findIndex((block) => block.src === dirtyHint);
+      if (changed >= 0) {
+        let hashed = 1;
+        let neighborsOk = true;
+        if (changed > 0) {
+          hashed++;
+          neighborsOk = this.blockSig(blocks[changed - 1]) === inc.sigs[changed - 1];
+        }
+        if (neighborsOk && changed < blocks.length - 1) {
+          hashed++;
+          neighborsOk = this.blockSig(blocks[changed + 1]) === inc.sigs[changed + 2];
+        }
+        if (neighborsOk) {
+          newSigs = inc.sigs.slice();
+          newSigs[changed] = this.blockSig(blocks[changed]);
+          newSigs.splice(changed + 1, 1);
+          firstDirty = changed;
+          __incrStats.hintFastPath = true;
+          __incrStats.blocksHashed = hashed;
+          __incrStats.firstDirty = changed;
+          this.incrBlockDelta = -1;
+          this.incrBlockShiftAfter = changed + 1;
         }
       }
     }
@@ -1249,27 +1351,53 @@ class Engine {
     __incrStats.resumePage = rp.pageCount;
     __incrStats.convergedBlock = -1;
     __incrStats.convergedPage = -1;
+    __incrStats.pageShift = 0;
     __incrStats.blocksLaid = 0;
     this.restoreIncrState(rp.state, inc.pages[rp.pageCount].items.slice(0, rp.pageItemCount));
     this.layoutBlocks(blocks, rp.blockIdx);
     if (this.incrAbort) return fallback("layout-abort");
 
-    // The relaid middle must leave the document on the same number of physical
-    // pages. Otherwise page fields and section numbering in the retained
-    // prefix/suffix would be stale, so fall back before finalizing page layers.
     const suffixStart = this.incrConvergePrevPageIdx >= 0 ? this.incrConvergePrevPageIdx : inc.pages.length;
-    const totalPages = prefixCount + this.pages.length + (inc.pages.length - suffixStart);
-    if (totalPages !== prev.totalPages) return fallback("page-count");
+    const middleCount = this.pages.length;
+    const hasRetainedSuffix = suffixStart < inc.pages.length;
+    const pageShift = hasRetainedSuffix ? prefixCount + middleCount - suffixStart : 0;
+    if (hasRetainedSuffix && pageShift !== this.incrPageShift) return fallback("page-shift");
+    if (pageShift !== 0 && this.bodyHasPageField()) return fallback("body-page-field-shift");
+
+    const shiftedSuffix: InternalPage[] = [];
+    if (pageShift !== 0) {
+      for (const page of inc.pages.slice(suffixStart)) {
+        const shifted = this.shiftRetainedPage(page, pageShift);
+        if (!shifted) return fallback("shifted-header-footer");
+        shiftedSuffix.push(shifted);
+      }
+    }
 
     // Carry forward bookmarks outside the relaid middle and update those whose
     // targets moved. A moved bookmark only invalidates retained layout when a
     // PAGEREF actually consumes it; without such a field, the page map is
     // metadata and the converged prefix/suffix remain byte-identical.
     const mergedBookmarks = new Map(inc.bookmarks);
-    const movedBookmarks = new Set<string>();
+    const mergedBookmarkPageIndices = new Map(inc.bookmarkPageIndices);
+    if (pageShift !== 0) {
+      for (const [name, oldPageIndex] of inc.bookmarkPageIndices) {
+        if (oldPageIndex < suffixStart) continue;
+        const page = inc.pages[oldPageIndex];
+        if (!page) continue;
+        mergedBookmarkPageIndices.set(name, oldPageIndex + pageShift);
+        mergedBookmarks.set(
+          name,
+          formatNumber(page.displayNumber + pageShift, PAGE_FMT[page.sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
+        );
+      }
+    }
     for (const [name, page] of this.bookmarkPages) {
-      if (inc.bookmarks.get(name) !== page) movedBookmarks.add(name);
       mergedBookmarks.set(name, page);
+    }
+    for (const [name, pageIndex] of this.bookmarkPageIndices) mergedBookmarkPageIndices.set(name, pageIndex);
+    const movedBookmarks = new Set<string>();
+    for (const [name, page] of mergedBookmarks) {
+      if (inc.bookmarks.get(name) !== page) movedBookmarks.add(name);
     }
     const pageRefUpdates: { item: TextItem; text: string }[] = [];
     if (movedBookmarks.size > 0) {
@@ -1289,45 +1417,65 @@ class Engine {
     }
     for (const update of pageRefUpdates) update.item.text = update.text;
 
-    // Post-passes over the relaid middle pages only; the reused prefix and (on
-    // convergence) suffix were already finalized identically in prev
-    // (eligibility rules out footer totals / multi-column / frames).
+    // Post-passes cover the relaid middle. When the suffix moved to different
+    // physical page numbers, rebuild its header/footer layer so PAGE fields and
+    // even/odd variants follow the new numbering while body layout stays reused.
     this.placeEndnotes();
     this.emitFootnoteAreas();
     this.emitColumnSeparators();
-    this.finalizeHeadersFooters();
-    // Middle PAGEREFs resolve against the merged full-document bookmark map.
     this.bookmarkPages = mergedBookmarks;
-    this.rewritePageRefs(this.pages);
+    this.bookmarkPageIndices = mergedBookmarkPageIndices;
     this.applySectionVAlign();
+    if (pageShift !== 0) {
+      for (let i = 0; i < middleCount; i++) this.emitPageBorders(this.pages[i]);
+      this.pages.push(...shiftedSuffix);
+      this.finalizeHeadersFooters(false);
+    } else {
+      this.finalizeHeadersFooters();
+    }
+    this.rewritePageRefs(this.pages);
     if (this.incrAbort) return fallback("postpass-abort");
 
-    const middle = this.pages.map((p) => laidOutPage(p));
+    const middle = this.pages.slice(0, middleCount).map((p) => laidOutPage(p));
     // A dirty block can begin on the preceding page with a leading page break,
     // while its first changed glyph lands on the next page. Tell the renderer
     // how far it may structurally compare relaid leading pages. Adoption still
     // requires pageEq; source absence alone is never treated as equality.
     let structuralPrefixEnd = prefixCount;
     if (dirtySource) {
-      const dirtyMiddleIdx = this.pages.findIndex((page) =>
+      const dirtyMiddleIdx = this.pages.slice(0, middleCount).findIndex((page) =>
         page.items.some((item) => item.kind === "text" && item.src?.t === dirtySource),
       );
       if (dirtyMiddleIdx > 0) structuralPrefixEnd += dirtyMiddleIdx;
     }
-    const outPages = prev.pages.slice(0, prefixCount).concat(middle, prev.pages.slice(suffixStart));
-    const outInternal = inc.pages.slice(0, prefixCount).concat(this.pages, inc.pages.slice(suffixStart));
+    const outPages = prev.pages.slice(0, prefixCount).concat(
+      pageShift !== 0 ? this.pages.map((page) => laidOutPage(page)) : middle.concat(prev.pages.slice(suffixStart)),
+    );
+    const outInternal = inc.pages.slice(0, prefixCount).concat(
+      pageShift !== 0 ? this.pages : this.pages.concat(inc.pages.slice(suffixStart)),
+    );
+    const shiftPoint = (pt: IncrPoint, itemDelta = 0): IncrPoint => ({
+      ...pt,
+      blockIdx: shiftedBlockIdx(pt.blockIdx),
+      pageCount: pt.pageCount + pageShift,
+      pageItemCount: pt.pageItemCount + itemDelta,
+      state: {
+        ...pt.state,
+        page: {
+          ...pt.state.page,
+          physIndex: pt.state.page.physIndex + pageShift,
+          displayNumber: pt.state.page.displayNumber + pageShift,
+        },
+      },
+    });
     const samePageTail =
       this.incrConvergeBlockIdx >= 0
         ? inc.points
             .filter((pt) =>
-              pt.pageCount === this.incrConvergePageIdx &&
+              pt.pageCount === this.incrConvergePrevPointPageIdx &&
               shiftedBlockIdx(pt.blockIdx) > this.incrConvergeBlockIdx,
             )
-            .map((pt) => ({
-              ...pt,
-              blockIdx: shiftedBlockIdx(pt.blockIdx),
-              pageItemCount: pt.pageItemCount + this.incrConvergeItemDelta,
-            }))
+            .map((pt) => shiftPoint(pt, this.incrConvergeItemDelta))
         : [];
     const points = inc.points
       .filter((pt) => pt.pageCount < prefixCount)
@@ -1336,7 +1484,7 @@ class Engine {
         samePageTail,
         inc.points
           .filter((pt) => pt.pageCount >= suffixStart)
-          .map((pt) => ({ ...pt, blockIdx: shiftedBlockIdx(pt.blockIdx) })),
+          .map((pt) => shiftPoint(pt)),
       );
     const perf = (globalThis as { __dxwPerf?: { incr?: typeof __incrStats } }).__dxwPerf;
     if (perf) perf.incr = { ...__incrStats };
@@ -1349,6 +1497,7 @@ class Engine {
         points,
         pages: outInternal,
         bookmarks: mergedBookmarks,
+        bookmarkPageIndices: mergedBookmarkPageIndices,
         modelVersion: this.doc.modelVersion,
         seqCounters: this.seqCounters,
         seqAssigned: this.seqAssigned,
@@ -1768,6 +1917,7 @@ class Engine {
       counters: new Map(Array.from(this.counters, ([k, v]) => [k, [...v]])),
       seenNumIds: new Set(this.seenNumIds),
       bookmarkPages: new Map(this.bookmarkPages),
+      bookmarkPageIndices: new Map(this.bookmarkPageIndices),
       placedFootnotes: new Set(this.placedFootnotes),
       lnCounter: this.lnCounter,
       lnLastPage: this.lnLastPage,
@@ -1808,6 +1958,7 @@ class Engine {
     this.counters = s.counters;
     this.seenNumIds = s.seenNumIds;
     this.bookmarkPages = s.bookmarkPages;
+    this.bookmarkPageIndices = s.bookmarkPageIndices;
     this.placedFootnotes = s.placedFootnotes;
     this.lnCounter = s.lnCounter;
     this.lnLastPage = s.lnLastPage;
@@ -4051,6 +4202,7 @@ class Engine {
           for (const bm of para.bookmarks) {
             if (!this.bookmarkPages.has(bm)) {
               this.bookmarkPages.set(bm, formatNumber(pg.displayNumber, PAGE_FMT[pg.sp.pageNumberFormat ?? "decimal"] ?? "decimal"));
+              this.bookmarkPageIndices.set(bm, pg.physIndex - 1);
             }
           }
         }

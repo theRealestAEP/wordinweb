@@ -492,7 +492,7 @@ export function DocxView({
         comments: showComments,
         onDeleteComment,
         onReplyComment,
-        onViewportChange: () => editor?.afterRender(),
+        onViewportChange: () => editor?.afterViewportChange(),
       }, prev ?? undefined);
       container.scrollTop = scrollTop;
       container.scrollLeft = scrollLeft;

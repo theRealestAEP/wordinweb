@@ -14,7 +14,7 @@ Editing is in an Alpha state and is strictly opt-in via the `editable` flag; the
 
 If you discover an edge case or perf issue create an issue and include the offending Word file.
 
-Part of the broader roadmap is to migrate away from DOM rendering to canvas rendering, or a hybrid of the two. Editing performance can suffer on very long documents.
+Long-document performance work focuses on incremental parsing/layout and page virtualization; the current renderer remains DOM-based.
 
 ---
 
@@ -67,7 +67,7 @@ export function Editor() {
 
   return (
     <div>
-      {api && <DocxToolbar api={api} onSave={download} />}
+      {api && <DocxToolbar api={api} mode="advanced" onSave={download} />}
       <DocxView
         source="/report.docx"
         editable
@@ -138,8 +138,8 @@ The object passed to `onReady`. Every command operates on the current selection 
 - `insertPageNumber("page" | "pageOfTotal")` — dynamic `PAGE` / `Page X of Y` field.
 - `insertField(instruction, cachedResult?)`, `insertDateTime("date" | "time", picture?)` — live Word fields.
 - `addBookmark(name)`, `listBookmarks()`, `insertCrossReference(name, "text" | "page")` — named bookmark targets and live `REF` / `PAGEREF` fields.
-- `insertEquation(linear)`, `insertSymbol(symbol)` — native editable OMML equations and Unicode symbols.
-- `insertShape(preset, text?)` — floating editable DrawingML rectangles, rounded rectangles, ellipses, diamonds, and text boxes.
+- `insertEquation(linear)`, `insertSymbol(symbol)` — native editable OMML equations and arbitrary Unicode symbols.
+- `insertShape(preset, text?)` — floating editable DrawingML rectangles, rounded rectangles, ellipses, diamonds, and text boxes. Advanced mode also exposes Text Box as its own Insert control.
 - `insertWordArt(text, preset?)` — editable DrawingML WordArt with plain, arch, wave, and chevron presets.
 - `insertChart(data)`, `updateSelectedChart(data)` — native editable ChartML with its embedded workbook.
 - `insertSmartArt(data)`, `updateSelectedSmartArt(data)` — native editable SmartArt data, layout, style, colors, and cached drawing parts.
@@ -166,6 +166,7 @@ The object passed to `onReady`. Every command operates on the current selection 
 ### `DocxToolbar`
 
 A ready-made formatting toolbar for an editable `DocxView`. Use `mode="simple"` for the basic Home editing strip or `mode="advanced"` for the full Home / Insert / Draw / Layout ribbon supported by the installed version.
+Layout includes Word-style paper presets plus a custom width/height dialog; both document and current-section scope emit native page-size properties.
 
 | Prop | Type | What it does |
 | --- | --- | --- |
@@ -186,6 +187,7 @@ Every color the chrome paints — the toolbar, comment cards, selection, caret, 
 | `--dxw-toolbar-fg` | `#3c4043` | Toolbar text & icons (icons use `currentColor`) |
 | `--dxw-toolbar-border` | `#dadce0` | Toolbar borders & separators |
 | `--dxw-toolbar-muted` | `#5f6368` | Secondary/label text |
+| `--dxw-toolbar-z-index` | `100` | Toolbar and open-menu stacking level |
 | `--dxw-accent` | `#1a73e8` | Primary accent (active tab, pills, focus rings) |
 | `--dxw-accent-fg` | `#fff` | Text/icon on an accent fill |
 | `--dxw-btn-active-bg` | `#dfe7f5` | Toggled button background |
@@ -193,6 +195,9 @@ Every color the chrome paints — the toolbar, comment cards, selection, caret, 
 | `--dxw-tab-active-bg` | `#e8f0fe` | Active ribbon-tab background |
 | `--dxw-popover-bg` | `#fff` | Dropdown / popover surface |
 | `--dxw-popover-shadow` | `0 4px 16px rgba(0,0,0,.15)` | Popover shadow |
+| `--dxw-layout-menu-width` | `304px` | Layout option-menu width |
+| `--dxw-layout-menu-max-height` | `480px` | Layout option-menu scroll limit |
+| `--dxw-layout-preview-bg` | `#fff` | Paper fill in Layout option previews |
 | `--dxw-canvas-bg` | `#e8eaed` | Scroll area behind the pages |
 | `--dxw-page-bg` | `#ffffff` | Page paper |
 | `--dxw-page-shadow` | `0 1px 3px …, 0 4px 14px …` | Page drop shadow |
@@ -232,6 +237,12 @@ Or in a stylesheet:
 ```css
 .dxw-dark { --dxw-toolbar-bg: #1f2937; --dxw-toolbar-fg: #e5e7eb; /* … */ }
 ```
+
+Layout controls also expose stable `.dxw-layout-ribbon`, `.dxw-layout-menu-trigger`,
+`.dxw-layout-menu`, `.dxw-layout-menu-item`, and `.dxw-layout-preview` classes.
+Their `data-dxw-layout-menu`, `data-dxw-layout-option`, and
+`data-dxw-layout-preview` attributes identify each menu, action, and diagram
+when a host needs a narrowly scoped style override.
 
 ## How it works
 

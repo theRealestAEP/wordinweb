@@ -181,6 +181,7 @@ export function insertInkAt(
   color = "#202124",
   widthPx = 2,
   opacity = 1,
+  refreshModel = true,
 ): XmlElement | null {
   if (points.length < 2) return null;
   const caretRun = doc.findParentOf(caretT);
@@ -249,6 +250,6 @@ export function insertInkAt(
     ]),
   ]);
   parent.children.splice(parent.children.indexOf(caretRun) + 1, 0, el(`${w}r`, {}, [drawing]));
-  doc.refresh();
+  if (refreshModel) doc.refresh();
   return drawing;
 }

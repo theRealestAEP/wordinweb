@@ -202,7 +202,11 @@ export class DocxEditor {
   private selection: { anchor: SelPoint; focus: SelPoint } | null = null;
   private selectionRects: HTMLElement[] = [];
   private selectedAll = false;
-  /** A click-and-type placement below a float has already recorded the undo
+  /** Header/footer membership for hit-testing and caret movement. Rebuilt only
+   * when refresh() replaces the parsed model; header/footer trees are tiny. */
+  private regionModelVersion = -1;
+  private headerFooterElements = new WeakSet<XmlElement>();
+  /** A click-and-type placement in body whitespace has already recorded the undo
    * snapshot that the following text insertion belongs to. */
   private pendingClickTypeCheckpoint = false;
   private clickTypeCheckpointUntil = 0;
@@ -259,6 +263,7 @@ export class DocxEditor {
   /** Focus the hidden text target (keeps IME working); falls back to the
    * container if the textarea is not attached yet. */
   private focusText(): void {
+    if (!this.imeEl.isConnected) this.host.container.appendChild(this.imeEl);
     if (this.imeEl.isConnected) this.imeEl.focus({ preventScroll: true });
     else this.host.container.focus({ preventScroll: true });
   }
@@ -300,6 +305,15 @@ export class DocxEditor {
     this.applyHfChrome();
     this.paintSelection();
     this.positionCaret();
+    if (this.caret || this.selection) this.focusText();
+  }
+
+  /** Repaint only state affected by virtualized page mounts. Scrolling keeps
+   * the current focus and skips header/footer mode notifications in body mode. */
+  afterViewportChange(): void {
+    if (this.inHeaderFooter) this.applyHfChrome();
+    if (this.selection) this.paintSelection();
+    if (this.caret) this.positionCaret();
   }
 
   // ---------- owned selection ----------
@@ -1356,6 +1370,14 @@ export class DocxEditor {
     const page = target.closest?.(".dxw-page") as HTMLElement | null;
     const surface = page?.firstElementChild as HTMLElement | null;
     if (!page || !surface || !surface.contains(target)) return false;
+    const zoom = this.host.zoom ?? 1;
+    const rect = surface.getBoundingClientRect();
+    const localY = (e.clientY - rect.top) / zoom;
+    const bodyTop = parseFloat(page.dataset.bodyTop ?? "0");
+    const bodyBottom = parseFloat(page.dataset.bodyBottom ?? "0");
+    // Keep the header/footer bands available for their double-click entry
+    // gesture even while a drawing tool is armed.
+    if (localY < bodyTop || localY > bodyBottom) return false;
     this.deselectInkGroup();
     if (tool.kind === "eraser") return this.startInkEraser(e, page, tool.size);
     if (tool.kind === "lasso") return this.startInkLasso(e, page, surface);
@@ -1366,8 +1388,6 @@ export class DocxEditor {
     this.deselectWordArt();
     this.hideCaret();
 
-    const zoom = this.host.zoom ?? 1;
-    const rect = surface.getBoundingClientRect();
     const pointAt = (clientX: number, clientY: number) => ({
       x: Math.max(0, Math.min((clientX - rect.left) / zoom, rect.width / zoom)),
       y: Math.max(0, Math.min((clientY - rect.top) / zoom, rect.height / zoom)),
@@ -1405,9 +1425,18 @@ export class DocxEditor {
       if (points.length < 2) return;
       const anchor = this.nearestCaret(e.clientX, e.clientY, "body") ?? this.nearestCaret(up.clientX, up.clientY, "body");
       if (!anchor) return;
+      const paragraph = paragraphOf(this.host.doc, anchor.t);
+      const dirtyBlock = topLevelBlockOf(this.host.doc, anchor.t) ?? paragraph ?? undefined;
       this.host.history?.checkpoint();
-      if (insertInkAt(this.host.doc, anchor.t, points, tool.color, tool.width, tool.kind === "highlighter" ? 0.45 : 1)) {
-        this.host.rerender(undefined, "global");
+      if (insertInkAt(this.host.doc, anchor.t, points, tool.color, tool.width, tool.kind === "highlighter" ? 0.45 : 1, false)) {
+        const reparsed = paragraph ? this.host.doc.reparseBodyParagraph(paragraph) : null;
+        if (reparsed) {
+          invalidateParagraphSignature(paragraph!);
+          this.host.rerender(dirtyBlock, "local", anchor.t);
+        } else {
+          this.host.doc.refresh();
+          this.host.rerender(undefined, "global");
+        }
       }
     };
     document.addEventListener("mousemove", onMove);
@@ -2990,7 +3019,9 @@ export class DocxEditor {
     }
 
     if (caret && region === "body" && !onGlyph && e.detail === 1 && !e.shiftKey) {
-      caret = this.extendCaretBelowFloatingTable(caret, e.clientX, e.clientY) ?? caret;
+      caret = this.extendCaretBelowFloatingTable(caret, e.clientX, e.clientY) ??
+        this.extendCaretIntoBodyWhitespace(caret, e.clientX, e.clientY) ??
+        caret;
     }
 
     if (caret && e.shiftKey) {
@@ -3324,14 +3355,19 @@ export class DocxEditor {
   }
 
   private regionOf(t: XmlElement): "body" | "hf" {
-    let cur: XmlElement | undefined = t;
-    let root: XmlElement | undefined;
-    while (cur) {
-      root = cur;
-      cur = this.host.doc.findParentOf(cur);
+    if (this.regionModelVersion !== this.host.doc.modelVersion) {
+      this.headerFooterElements = new WeakSet<XmlElement>();
+      const visit = (element: XmlElement): void => {
+        this.headerFooterElements.add(element);
+        for (const child of element.children) visit(child);
+      };
+      for (const root of this.host.doc.revisionRoots()) {
+        const name = localName(root.name);
+        if (name === "hdr" || name === "ftr") visit(root);
+      }
+      this.regionModelVersion = this.host.doc.modelVersion;
     }
-    const ln = root ? localName(root.name) : "";
-    return ln === "hdr" || ln === "ftr" ? "hf" : "body";
+    return this.headerFooterElements.has(t) ? "hf" : "body";
   }
 
   /**
@@ -3523,6 +3559,106 @@ export class DocxEditor {
     this.host.doc.refresh();
     this.host.rerender(undefined, "global");
     return caret;
+  }
+
+  /** Word-style click-and-type: clicking below the final body line on a page
+   * creates the intervening empty paragraphs so vertical arrows visit every
+   * visible line instead of jumping across synthetic paragraph spacing. */
+  private extendCaretIntoBodyWhitespace(caret: Caret, x: number, y: number): Caret | null {
+    const handle = this.host.getHandle();
+    const page = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(".dxw-page") as HTMLElement | null;
+    const surface = page?.firstElementChild as HTMLElement | null;
+    if (!handle || !page || !surface) return null;
+    const rect = surface.getBoundingClientRect();
+    const zoom = this.host.zoom ?? 1;
+    const ly = (y - rect.top) / zoom;
+    const bodyTop = parseFloat(page.dataset.bodyTop ?? "0");
+    const bodyBottom = parseFloat(page.dataset.bodyBottom ?? "0");
+    if (ly < bodyTop || ly > bodyBottom) return null;
+
+    const paragraph = paragraphOf(this.host.doc, caret.t);
+    const parent = paragraph ? this.host.doc.findParentOf(paragraph) : undefined;
+    if (!paragraph || !parent || localName(parent.name) !== "body") return null;
+    const endText = lastTextOf(paragraph);
+    if (!endText) return null;
+
+    const binding = (handle.bindingsByText.get(endText) ?? [])
+      .filter((candidate) => candidate.el.parentElement === surface && candidate.item.src)
+      .sort((a, b) => b.item.lineTop - a.item.lineTop)[0];
+    if (!binding) return null;
+    const lineHeight = Math.max(1, binding.item.lineHeight);
+    if (ly <= binding.item.lineTop + lineHeight / 2) return null;
+    const hasLaterLine = handle.bindings.some((candidate) =>
+      candidate.el.parentElement === surface &&
+      candidate.item.src?.t &&
+      this.regionOf(candidate.item.src.t as XmlElement) === "body" &&
+      candidate.item.lineTop > binding.item.lineTop + lineHeight / 2,
+    );
+    if (hasLaterLine) return null;
+    const lineCount = Math.max(1, Math.round((ly - binding.item.lineTop) / lineHeight));
+
+    this.host.history?.checkpoint();
+    this.caret = {
+      t: endText,
+      run: binding.item.src!.run,
+      offset: endText.text.length,
+      bias: endText.text.length > 0 ? "end" : undefined,
+    };
+    const split = this.splitParagraphCore();
+    if (!split) return null;
+    const afterSources = [split.after];
+    const w = split.after.name.includes(":") ? split.after.name.slice(0, split.after.name.indexOf(":") + 1) : "";
+    const templatePPr = split.after.children.find((child) => localName(child.name) === "pPr");
+    const templateRun = split.after.children.find((child) =>
+      localName(child.name) === "r" && child.children.includes(this.caret!.t)
+    );
+    const templateRPr = templateRun?.children.find((child) => localName(child.name) === "rPr");
+    let previous = split.after;
+    for (let i = 1; i < lineCount; i++) {
+      if (this.suggesting) markParagraphGlyph(previous, "ins", this.revMeta());
+      const t: XmlElement = {
+        name: this.caret!.t.name,
+        attrs: { ...this.caret!.t.attrs, "xml:space": "preserve" },
+        children: [],
+        text: "",
+      };
+      const run: XmlElement = {
+        name: templateRun?.name ?? `${w}r`,
+        attrs: { ...(templateRun?.attrs ?? {}) },
+        children: [...(templateRPr ? [cloneXml(templateRPr)] : []), t],
+        text: "",
+      };
+      const paragraph: XmlElement = {
+        name: split.after.name,
+        attrs: {},
+        children: [...(templatePPr ? [cloneXml(templatePPr)] : []), run],
+        text: "",
+      };
+      const previousIndex = parent.children.indexOf(previous);
+      parent.children.splice(previousIndex + 1, 0, paragraph);
+      afterSources.push(paragraph);
+      previous = paragraph;
+      this.caret = { t, run: caret.run, offset: 0 };
+    }
+    const reparsed = this.host.doc.reparseDirectBodyParagraphSplits(split.before, afterSources);
+    if (reparsed) {
+      for (const child of reparsed[reparsed.length - 1].children) {
+        const runs = child.type === "run" ? [child] : child.runs;
+        const run = runs.find((candidate) =>
+          candidate.content.some((content) => content.kind === "text" && content.srcT === this.caret!.t),
+        );
+        if (run) {
+          this.caret!.run = run;
+          break;
+        }
+      }
+      invalidateParagraphSignature(split.before);
+      for (const source of afterSources) invalidateParagraphSignature(source);
+    }
+    this.pendingClickTypeCheckpoint = true;
+    this.commit(false, "local", !!reparsed);
+    this.focusText();
+    return this.caret;
   }
 
   private caretFromPoint(x: number, y: number): Caret | null {
@@ -4089,7 +4225,8 @@ export class DocxEditor {
           if (mergeParagraphBackward(this.host.doc, pEl)) {
             const target = junction && paragraphOf(this.host.doc, junction) ? junction : caret.t;
             this.caret = { t: target, run: caret.run, offset: target === junction ? target.text.length : 0 };
-            this.commit();
+            invalidateParagraphSignature(paragraphOf(this.host.doc, target) ?? pEl);
+            this.commit(false, "local", true);
           }
           return;
         }
@@ -4115,7 +4252,10 @@ export class DocxEditor {
           const next = siblingParagraph(this.host.doc, pEl, 1);
           if (!next) return;
           this.host.history?.checkpoint();
-          if (mergeParagraphBackward(this.host.doc, next)) this.commit();
+          if (mergeParagraphBackward(this.host.doc, next)) {
+            invalidateParagraphSignature(pEl);
+            this.commit(false, "local", true);
+          }
           return;
         }
         if (!this.stepToNeighbor(1)) return;
@@ -4379,6 +4519,7 @@ export class DocxEditor {
       invalidateParagraphSignature(split.after);
     }
     this.commit(false, "local", !!reparsed);
+    this.focusText();
   }
 
   /** Split the paragraph at the caret without history or commit — shared by

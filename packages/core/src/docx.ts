@@ -522,29 +522,182 @@ export class DocxDocument {
     this._modelVersion++;
   }
 
-  /**
-   * Reparse the two direct body paragraphs created by Enter without rebuilding
-   * the complete document model. This deliberately covers only the simple
-   * single-section body case used by incremental pagination; structural
-   * containers, revisions, bookmarks, and section breaks use refresh().
-   */
+  /** Reparse the two sibling body-story paragraphs created by Enter without
+   * rebuilding the complete document model. Paragraphs nested in table cells
+   * are included because legal documents spend most of their body inside
+   * tables; revisions, bookmarks, fields, and section breaks use refresh(). */
   reparseDirectBodyParagraphSplit(
     beforeSource: XmlElement,
     afterSource: XmlElement,
   ): { before: Paragraph; after: Paragraph } | null {
-    if (this.sections.length !== 1) return null;
-    const body = child(this.docRoot, "body");
-    if (!body) return null;
-    const beforeIndex = body.children.indexOf(beforeSource);
-    if (beforeIndex < 0 || body.children[beforeIndex + 1] !== afterSource) return null;
-    if (localName(beforeSource.name) !== "p" || localName(afterSource.name) !== "p") return null;
+    const parsed = this.reparseDirectBodyParagraphSplits(beforeSource, [afterSource]);
+    return parsed ? { before: parsed[0], after: parsed[1] } : null;
+  }
 
-    const blocks = this.sections[0].blocks;
-    if (blocks.some((block) => block.src === afterSource)) return null;
-    const blockIndex = blocks.findIndex((block) => block.type === "paragraph" && block.src === beforeSource);
-    if (blockIndex < 0) return null;
+  /** Reparse a body paragraph plus several new siblings created by
+   * click-and-type without rebuilding the complete document model. */
+  reparseDirectBodyParagraphSplits(
+    beforeSource: XmlElement,
+    afterSources: XmlElement[],
+  ): Paragraph[] | null {
+    if (afterSources.length === 0) return null;
+    const parent = this.findParentOf(beforeSource);
+    if (!parent) return null;
+    const beforeIndex = parent.children.indexOf(beforeSource);
+    if (beforeIndex < 0 || afterSources.some((source, i) => parent.children[beforeIndex + i + 1] !== source)) {
+      return null;
+    }
+    if (localName(beforeSource.name) !== "p" || afterSources.some((source) => localName(source.name) !== "p")) {
+      return null;
+    }
+
+    const findBlockList = (blocks: Block[]): { blocks: Block[]; index: number } | null => {
+      const index = blocks.findIndex((block) => block.type === "paragraph" && block.src === beforeSource);
+      if (index >= 0) return { blocks, index };
+      for (const block of blocks) {
+        if (block.type !== "table") continue;
+        for (const row of block.rows) {
+          for (const cell of row.cells) {
+            const found = findBlockList(cell.blocks);
+            if (found) return found;
+          }
+        }
+      }
+      return null;
+    };
+    let location: { blocks: Block[]; index: number } | null = null;
+    for (const section of this.sections) {
+      location = findBlockList(section.blocks);
+      if (location) break;
+    }
+    if (!location) return null;
+    const { blocks, index: blockIndex } = location;
+    if (afterSources.some((source) => blocks.some((block) => block.src === source))) return null;
     const old = blocks[blockIndex];
     if (old.type !== "paragraph" || old.sectionBreak) return null;
+
+    const unsafe = (element: XmlElement): boolean => {
+      const name = localName(element.name);
+      if (
+        name === "sectPr" ||
+        name === "bookmarkStart" ||
+        name === "bookmarkEnd" ||
+        name === "fldChar" ||
+        name === "instrText" ||
+        name === "fldSimple" ||
+        name === "sdt" ||
+        name === "ins" ||
+        name === "del" ||
+        name.startsWith("move") ||
+        name.endsWith("PrChange")
+      ) return true;
+      return element.children.some(unsafe);
+    };
+    if (unsafe(beforeSource) || afterSources.some(unsafe)) return null;
+
+    const readPart = (part: string) => this.readXmlOptional(part);
+    const ctx: DocParseContext = {
+      ...this.ctxBase,
+      rels: this.documentRels,
+      readPart,
+      independentTextboxStories: true,
+    };
+    const parsed = [beforeSource, ...afterSources].map((source) => parseParagraph(source, ctx));
+    if (parsed.some((paragraph) => paragraph.revisionHidden || paragraph.sectionBreak)) return null;
+    blocks.splice(blockIndex, 1, ...parsed);
+    return parsed;
+  }
+
+  /** Reparse one retained body-story paragraph after a structural edit that
+   * leaves its surrounding block list unchanged, such as inserting ink. */
+  reparseBodyParagraph(source: XmlElement): Paragraph | null {
+    if (localName(source.name) !== "p") return null;
+    const findBlockList = (blocks: Block[]): { blocks: Block[]; index: number } | null => {
+      const index = blocks.findIndex((block) => block.type === "paragraph" && block.src === source);
+      if (index >= 0) return { blocks, index };
+      for (const block of blocks) {
+        if (block.type !== "table") continue;
+        for (const row of block.rows) {
+          for (const cell of row.cells) {
+            const found = findBlockList(cell.blocks);
+            if (found) return found;
+          }
+        }
+      }
+      return null;
+    };
+    let location: { blocks: Block[]; index: number } | null = null;
+    for (const section of this.sections) {
+      location = findBlockList(section.blocks);
+      if (location) break;
+    }
+    if (!location) return null;
+    const old = location.blocks[location.index];
+    if (old.type !== "paragraph" || old.sectionBreak) return null;
+
+    const unsafe = (element: XmlElement): boolean => {
+      const name = localName(element.name);
+      // Bookmark ranges retain parsed Run identities in refBookmarks. A local
+      // paragraph replacement would leave those references stale; other
+      // fields, controls, and revisions are safe to parse one-for-one.
+      if (name === "sectPr" || name === "bookmarkStart" || name === "bookmarkEnd") return true;
+      return element.children.some(unsafe);
+    };
+    if (unsafe(source)) return null;
+
+    const paragraph = parseParagraph(source, {
+      ...this.ctxBase,
+      rels: this.documentRels,
+      readPart: (part: string) => this.readXmlOptional(part),
+      independentTextboxStories: true,
+    });
+    if (paragraph.revisionHidden || paragraph.sectionBreak) return null;
+    location.blocks[location.index] = paragraph;
+    return paragraph;
+  }
+
+  /** Reparse two sibling body-story paragraphs after Backspace/Delete merged
+   * their XML into one. Keeps the parsed model generation stable so long
+   * documents can use incremental layout instead of repaginating in full. */
+  reparseDirectBodyParagraphMerge(
+    beforeSource: XmlElement,
+    afterSource: XmlElement,
+    survivorSource: XmlElement,
+  ): Paragraph | null {
+    if (survivorSource !== beforeSource && survivorSource !== afterSource) return null;
+    if (localName(beforeSource.name) !== "p" || localName(afterSource.name) !== "p") return null;
+    const parent = this.findParentOf(survivorSource);
+    if (!parent || parent.children.includes(survivorSource === beforeSource ? afterSource : beforeSource)) return null;
+
+    const findBlockList = (blocks: Block[]): { blocks: Block[]; index: number } | null => {
+      const index = blocks.findIndex((block, i) =>
+        block.type === "paragraph" &&
+        block.src === beforeSource &&
+        blocks[i + 1]?.type === "paragraph" &&
+        blocks[i + 1].src === afterSource,
+      );
+      if (index >= 0) return { blocks, index };
+      for (const block of blocks) {
+        if (block.type !== "table") continue;
+        for (const row of block.rows) {
+          for (const cell of row.cells) {
+            const found = findBlockList(cell.blocks);
+            if (found) return found;
+          }
+        }
+      }
+      return null;
+    };
+    let location: { blocks: Block[]; index: number } | null = null;
+    for (const section of this.sections) {
+      location = findBlockList(section.blocks);
+      if (location) break;
+    }
+    if (!location) return null;
+    const { blocks, index } = location;
+    const before = blocks[index];
+    const after = blocks[index + 1];
+    if (before.type !== "paragraph" || after.type !== "paragraph" || before.sectionBreak || after.sectionBreak) return null;
 
     const unsafe = (element: XmlElement): boolean => {
       const name = localName(element.name);
@@ -566,17 +719,15 @@ export class DocxDocument {
     if (unsafe(beforeSource) || unsafe(afterSource)) return null;
 
     const readPart = (part: string) => this.readXmlOptional(part);
-    const ctx: DocParseContext = {
+    const merged = parseParagraph(survivorSource, {
       ...this.ctxBase,
       rels: this.documentRels,
       readPart,
       independentTextboxStories: true,
-    };
-    const before = parseParagraph(beforeSource, ctx);
-    const after = parseParagraph(afterSource, ctx);
-    if (before.revisionHidden || after.revisionHidden || before.sectionBreak || after.sectionBreak) return null;
-    blocks.splice(blockIndex, 1, before, after);
-    return { before, after };
+    });
+    if (merged.revisionHidden || merged.sectionBreak) return null;
+    blocks.splice(index, 2, merged);
+    return merged;
   }
 
   private deriveComments(): DocComment[] {

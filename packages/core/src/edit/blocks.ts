@@ -305,6 +305,10 @@ export function mergeParagraphBackward(doc: DocxDocument, pEl: XmlElement): bool
   if (idx <= 0) return false;
   const prev = parent.children[idx - 1];
   if (localName(prev.name) !== "p") return false;
+  const finishMerge = (survivor: XmlElement): boolean => {
+    if (!doc.reparseDirectBodyParagraphMerge(prev, pEl, survivor)) doc.refresh();
+    return true;
+  };
 
   // Word treats page/column breaks as characters: Backspace at the start of
   // the paragraph after a break deletes the BREAK, bumping the text up while
@@ -328,6 +332,7 @@ export function mergeParagraphBackward(doc: DocxDocument, pEl: XmlElement): bool
       if (visible.length === 1) {
         // Break-only paragraph: remove it whole.
         parent.children.splice(idx - 1, 1);
+        return finishMerge(pEl);
       } else {
         last.parent.children.splice(last.parent.children.indexOf(last.el), 1);
       }
@@ -341,15 +346,13 @@ export function mergeParagraphBackward(doc: DocxDocument, pEl: XmlElement): bool
   // pulling the current one into it.
   if (visible.length === 0) {
     parent.children.splice(idx - 1, 1);
-    doc.refresh();
-    return true;
+    return finishMerge(pEl);
   }
 
   const moved = pEl.children.filter((c) => localName(c.name) !== "pPr");
   prev.children.push(...moved);
   parent.children.splice(idx, 1);
-  doc.refresh();
-  return true;
+  return finishMerge(prev);
 }
 
 /** First w:t element inside a paragraph (document order), if any. */
