@@ -145,8 +145,10 @@ describe("editing exotic tables (floating tblpPr + old-style tblCellSpacing)", (
     const grips = result.pages.flatMap((pg) => pg.items).filter((i) => i.kind === "grip");
     const col = grips.filter((g) => g.kind === "grip" && g.axis === "col");
     const row = grips.filter((g) => g.kind === "grip" && g.axis === "row");
+    const move = grips.filter((g) => g.kind === "grip" && g.axis === "move");
     // 2 columns -> 2 vertical boundaries; 2 rows -> 2 row boundaries.
     expect(col.length).toBe(2);
     expect(row.length).toBe(2);
+    expect(move.length).toBe(1);
   });
 });

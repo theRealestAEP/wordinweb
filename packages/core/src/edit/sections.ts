@@ -34,6 +34,51 @@ function containsEl(root: XmlElement, target: XmlElement): boolean {
   return false;
 }
 
+export interface CoverPageContent {
+  title: string;
+  subtitle?: string;
+  author?: string;
+}
+
+/** Insert an editable, Word-native cover page before the current document body. */
+export function insertCoverPage(doc: DocxDocument, content: CoverPageContent): boolean {
+  const body = bodyOf(doc);
+  if (!body || !content.title.trim()) return false;
+  const w = body.name.includes(":") ? body.name.slice(0, body.name.indexOf(":") + 1) : "w:";
+  const paragraph = (
+    text: string,
+    style: string | null,
+    size: number,
+    color: string,
+    before: number,
+    bold = false,
+  ) => el(`${w}p`, {}, [
+    el(`${w}pPr`, {}, [
+      ...(style ? [el(`${w}pStyle`, { [`${w}val`]: style })] : []),
+      el(`${w}spacing`, { [`${w}before`]: String(before), [`${w}after`]: "180" }),
+      el(`${w}jc`, { [`${w}val`]: "center" }),
+    ]),
+    el(`${w}r`, {}, [
+      el(`${w}rPr`, {}, [
+        ...(bold ? [el(`${w}b`)] : []),
+        el(`${w}color`, { [`${w}val`]: color }),
+        el(`${w}sz`, { [`${w}val`]: String(size) }),
+        el(`${w}szCs`, { [`${w}val`]: String(size) }),
+      ]),
+      el(`${w}t`, { "xml:space": "preserve" }, [], text),
+    ]),
+  ]);
+  const cover = [
+    paragraph(content.title.trim(), "Title", 64, "2F5597", 3600, true),
+    ...(content.subtitle?.trim() ? [paragraph(content.subtitle.trim(), "Subtitle", 30, "5B6573", 120)] : []),
+    ...(content.author?.trim() ? [paragraph(content.author.trim(), null, 22, "404040", 720)] : []),
+    el(`${w}p`, {}, [el(`${w}r`, {}, [el(`${w}br`, { [`${w}type`]: "page" })])]),
+  ];
+  body.children.unshift(...cover);
+  doc.refresh();
+  return true;
+}
+
 /**
  * The sectPr that governs the section containing `t` (or the body's final
  * sectPr when the caret sits in the last section).
@@ -81,6 +126,67 @@ export function insertBreakAt(doc: DocxDocument, t: XmlElement, offset: number, 
     const tail = el(`${rw}r`, {}, [...(rPr ? [cloneDeep(rPr)] : []), tailT]);
     pEl.children.splice(rIdx + 1, 0, brRun, tail);
   }
+  doc.refresh();
+  return true;
+}
+
+/** Insert Word's Blank Page building block as a distinct editable paragraph. */
+export function insertBlankPageAt(doc: DocxDocument, t: XmlElement, offset: number): boolean {
+  const rEl = doc.findParentOf(t);
+  const pEl = rEl && doc.findParentOf(rEl);
+  const parent = pEl && doc.findParentOf(pEl);
+  if (!rEl || !pEl || !parent || localName(rEl.name) !== "r" || localName(pEl.name) !== "p") return false;
+  const rw = rEl.name.includes(":") ? rEl.name.slice(0, rEl.name.indexOf(":") + 1) : "";
+  const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
+  const breakRun = () => el(`${rw}r`, {}, [
+    ...(rPr ? [cloneDeep(rPr)] : []),
+    el(`${rw}br`, { [`${rw}type`]: "page" }),
+  ]);
+
+  const textIndex = rEl.children.indexOf(t);
+  const runIndex = pEl.children.indexOf(rEl);
+  if (textIndex === -1 || runIndex === -1) return false;
+  const prefix = t.text.slice(0, offset);
+  const suffix = t.text.slice(offset);
+  t.text = prefix;
+  const tailText = cloneDeep(t);
+  tailText.text = suffix;
+  const tailRun = el(rEl.name, { ...rEl.attrs }, [
+    ...rEl.children.slice(0, textIndex).filter((c) => localName(c.name) === "rPr").map(cloneDeep),
+    tailText,
+    ...rEl.children.slice(textIndex + 1),
+  ]);
+  rEl.children = rEl.children.slice(0, textIndex + 1);
+
+  const pPr = pEl.children.find((c) => localName(c.name) === "pPr");
+  const ordinaryPPr = pPr ? cloneDeep(pPr) : null;
+  if (ordinaryPPr) {
+    ordinaryPPr.children = ordinaryPPr.children.filter((c) => localName(c.name) !== "sectPr");
+  }
+  const headBefore = pEl.children.slice(0, runIndex).filter((c) => localName(c.name) !== "pPr");
+  const tailAfter = pEl.children.slice(runIndex + 1).filter((c) => localName(c.name) !== "pPr");
+  pEl.children = [
+    ...(ordinaryPPr ? [cloneDeep(ordinaryPPr)] : []),
+    ...headBefore,
+    rEl,
+    breakRun(),
+  ];
+
+  const anchorRun = el(`${rw}r`, {}, [
+    ...(rPr ? [cloneDeep(rPr)] : []),
+    el(`${rw}t`, { "xml:space": "preserve" }, [], ""),
+  ]);
+  const blank = el(pEl.name, { ...pEl.attrs }, [
+    ...(ordinaryPPr ? [cloneDeep(ordinaryPPr)] : []),
+    anchorRun,
+    breakRun(),
+  ]);
+  const tail = el(pEl.name, { ...pEl.attrs }, [
+    ...(pPr ? [cloneDeep(pPr)] : []),
+    tailRun,
+    ...tailAfter,
+  ]);
+  parent.children.splice(parent.children.indexOf(pEl) + 1, 0, blank, tail);
   doc.refresh();
   return true;
 }

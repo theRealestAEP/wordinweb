@@ -1,20 +1,40 @@
 import { describe, expect, it } from "vitest";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { DocxDocument } from "../src/docx.js";
 import { applyRunFormat, SelectionSegment, selectionTextLogical } from "../src/edit/commands.js";
 import { addComment } from "../src/edit/comments.js";
 import { setListType, setListLevel } from "../src/edit/lists.js";
 import { setLink, removeLink, linkAt } from "../src/edit/links.js";
-import { adjustIndent, setParagraphSpacing } from "../src/edit/paragraph.js";
+import { adjustIndent, setDropCapAt, setParagraphSpacing } from "../src/edit/paragraph.js";
 import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
-import { applyTableOp } from "../src/edit/tables.js";
-import { imageAltText, setImageAltText, replaceImageBlip } from "../src/edit/images.js";
+import { applyTableOp, resizeDrawing } from "../src/edit/tables.js";
+import {
+  drawingRotation,
+  imageAltText,
+  replaceImageBlip,
+  setDrawingOrder,
+  setDrawingRotation,
+  setFloatingPagePosition,
+  setImageAltText,
+} from "../src/edit/images.js";
 import { insertFootnote } from "../src/edit/notes.js";
-import { insertPageField } from "../src/edit/fields.js";
-import { linearizeMath, parseMathLinear, setMathLinear, mathLinearOf, isLinearSafe } from "../src/edit/math.js";
+import { insertDateTimeField, insertField, insertPageField } from "../src/edit/fields.js";
+import { insertBlankPageAt, insertCoverPage } from "../src/edit/sections.js";
+import { drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
+import { buildChartXml, insertChartAt, setChartData } from "../src/edit/charts.js";
+import { buildSmartArtDataXml, buildSmartArtDrawingXml, insertSmartArtAt, setSmartArtData } from "../src/edit/smartart.js";
+import { insertEmbeddedObjectAt, insertModel3DAt, insertWebVideoAt } from "../src/edit/objects.js";
+import { buildOlePackage, extractOlePackage } from "../src/parse/ole.js";
+import { insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, listBookmarks, validBookmarkName } from "../src/edit/references.js";
+import { linearizeMath, parseMathLinear, setMathLinear, insertMathAt, mathLinearOf, isLinearSafe } from "../src/edit/math.js";
 import { XmlElement, localName } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
-import { makeDocx, makeDocxWithMedia, wrapDocument, p } from "./helpers.js";
+import { makeDocx, makeDocxWithMedia, wrapDocument, p, W_NS } from "./helpers.js";
 import { Paragraph, Run, TextContent } from "../src/model.js";
+import { layoutDocument } from "../src/layout/engine.js";
+import type { ChartData, SmartArtData } from "../src/model.js";
+import { Package } from "../src/zip.js";
+import * as CFB from "cfb";
 
 function loadDoc(body: string, extra: Record<string, string> = {}) {
   return DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body), ...extra }));
@@ -39,6 +59,144 @@ function segFor(run: Run, start: number, end: number): SelectionSegment {
   const t = (run.content.find((c) => c.kind === "text") as TextContent | undefined)?.srcT ?? null;
   return { run, t: t as SelectionSegment["t"], start, end, props: run.props };
 }
+
+describe("package content types", () => {
+  const customProperties = `<?xml version="1.0"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"
+  xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"/>`;
+  const contentTypes = (customOverride: string, prefix = "") => `<?xml version="1.0"?>
+<${prefix}Types xmlns${prefix ? `:${prefix.slice(0, -1)}` : ""}="http://schemas.openxmlformats.org/package/2006/content-types">
+  <${prefix}Default Extension="xml" ContentType="application/xml"/>
+  <${prefix}Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <${prefix}Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  ${customOverride}
+</${prefix}Types>`;
+  const customContentType = "application/vnd.openxmlformats-officedocument.custom-properties+xml";
+
+  it("adds the custom-properties content type when the preserved part is missing its override", () => {
+    const doc = DocxDocument.load(makeDocx({
+      "word/document.xml": wrapDocument(p("Custom properties")),
+      "docProps/custom.xml": customProperties,
+      "[Content_Types].xml": contentTypes("", "ct:"),
+    }));
+
+    const savedContentTypes = strFromU8(unzipSync(doc.save())["[Content_Types].xml"]);
+    expect(savedContentTypes).toContain("<ct:Override");
+    expect(savedContentTypes).toContain(`PartName="/docProps/custom.xml" ContentType="${customContentType}"`);
+  });
+
+  it("preserves an existing custom-properties content type without duplicating it", () => {
+    const override = `<Override PartName="/docProps/custom.xml" ContentType="${customContentType}"/>`;
+    const doc = DocxDocument.load(makeDocx({
+      "word/document.xml": wrapDocument(p("Custom properties")),
+      "docProps/custom.xml": customProperties,
+      "[Content_Types].xml": contentTypes(override),
+    }));
+
+    const savedContentTypes = strFromU8(unzipSync(doc.save())["[Content_Types].xml"]);
+    expect(savedContentTypes.match(/PartName="\/docProps\/custom\.xml"/g)).toHaveLength(1);
+    expect(savedContentTypes).toContain(`PartName="/docProps/custom.xml" ContentType="${customContentType}"`);
+  });
+});
+
+describe("no-op package round trip", () => {
+  it("preserves original modeled XML bytes until a retained tree changes", () => {
+    const crlf = (xml: string) => xml.replace(/\n/g, "\r\n");
+    const documentXml = crlf(wrapDocument(p("Original")));
+    const relationships = crlf(`<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+</Relationships>`);
+    const contentTypes = crlf(`<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
+</Types>`);
+    const headerXml = crlf(`<?xml version="1.0"?>
+<w:hdr ${W_NS}>
+  ${p("Header")}
+</w:hdr>`);
+    const footerXml = crlf(`<?xml version="1.0"?>
+<w:ftr ${W_NS}>
+  ${p("Footer")}
+</w:ftr>`);
+    const originalParts = {
+      "word/document.xml": documentXml,
+      "word/_rels/document.xml.rels": relationships,
+      "[Content_Types].xml": contentTypes,
+      "word/header1.xml": headerXml,
+      "word/footer1.xml": footerXml,
+    };
+    const doc = DocxDocument.load(makeDocx(originalParts));
+
+    const untouched = unzipSync(doc.save());
+    for (const [part, xml] of Object.entries(originalParts)) {
+      expect(untouched[part]).toEqual(strToU8(xml));
+    }
+
+    const { run } = firstRun(doc);
+    const text = run.content.find((item) => item.kind === "text") as TextContent;
+    text.srcT!.text = "Edited";
+    const edited = unzipSync(doc.save());
+    expect(edited["word/document.xml"]).not.toEqual(strToU8(documentXml));
+    expect(strFromU8(edited["word/document.xml"])).toContain(">Edited</w:t>");
+    for (const part of ["word/_rels/document.xml.rels", "[Content_Types].xml", "word/header1.xml", "word/footer1.xml"]) {
+      expect(edited[part]).toEqual(strToU8(originalParts[part as keyof typeof originalParts]));
+    }
+    expect(textOf(firstRun(DocxDocument.load(doc.save())).para)).toBe("Edited");
+
+    const header = doc.headers.get("rId1")?.blocks[0];
+    if (!header || header.type !== "paragraph") throw new Error("header paragraph missing");
+    const headerRun = header.children[0];
+    if (!headerRun || headerRun.type !== "run") throw new Error("header run missing");
+    const headerText = headerRun.content.find((item) => item.kind === "text") as TextContent;
+    headerText.srcT!.text = "Edited header";
+    const headerEdited = unzipSync(doc.save());
+    expect(strFromU8(headerEdited["word/header1.xml"])).toContain(">Edited header</w:t>");
+    expect(headerEdited["word/footer1.xml"]).toEqual(strToU8(footerXml));
+    const reloadedHeader = DocxDocument.load(doc.save()).headers.get("rId1")?.blocks[0];
+    if (!reloadedHeader || reloadedHeader.type !== "paragraph") throw new Error("reloaded header missing");
+    expect(textOf(reloadedHeader)).toBe("Edited header");
+  });
+
+  it("keeps an empty-paragraph caret anchor in memory without saving its synthetic run", () => {
+    const doc = loadDoc(
+      `<w:p><w:pPr><w:pBdr><w:bottom w:val="single"/></w:pBdr></w:pPr></w:p>` +
+      p("Following paragraph"),
+    );
+    const paragraph = doc.sections[0].blocks[0] as Paragraph;
+    const anchor = paragraph.children[0] as Run;
+    expect(anchor.content[0]).toMatchObject({ kind: "text", text: "" });
+    expect((anchor.content[0] as TextContent).srcT).toBeDefined();
+
+    const savedDocument = parseXml(strFromU8(unzipSync(doc.save())["word/document.xml"]));
+    const body = savedDocument.children.find((item) => localName(item.name) === "body")!;
+    const savedParagraph = body.children.find((item) => localName(item.name) === "p")!;
+    expect(savedParagraph.children.map((item) => localName(item.name))).toEqual(["pPr"]);
+
+    (anchor.content[0] as TextContent).srcT!.text = "Typed";
+    expect(strFromU8(unzipSync(doc.save())["word/document.xml"])).toContain(">Typed</w:t>");
+  });
+
+  it("does not add a fontTable relationship when the preserved part had none", () => {
+    const relationships = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`;
+    const doc = loadDoc(p("Font table"), {
+      "word/fontTable.xml": `<w:fonts ${W_NS}/>`,
+      "word/_rels/document.xml.rels": relationships,
+    });
+
+    const saved = unzipSync(doc.save());
+    expect(saved["word/fontTable.xml"]).toBeDefined();
+    expect(strFromU8(saved["word/_rels/document.xml.rels"])).not.toContain("/fontTable");
+  });
+});
 
 describe("run formatting commands", () => {
   it("formats a full run in place (no split)", () => {
@@ -170,6 +328,36 @@ describe("paragraph styles", () => {
 });
 
 describe("undo/redo history", () => {
+  it("retains text identities and model generation when the editor accepts a text-only undo", async () => {
+    const { EditHistory } = await import("../src/edit/history.js");
+    const doc = loadDoc(p("Hello world"));
+    const history = new EditHistory(doc);
+    const { run } = firstRun(doc);
+    const content = run.content[0] as TextContent;
+    const t = content.srcT!;
+    const modelVersion = doc.modelVersion;
+    history.applyTextChanges = (changes) => {
+      if (changes.length !== 1 || changes[0] !== t) return false;
+      content.text = t.text;
+      return true;
+    };
+
+    history.checkpoint("typing");
+    t.text = "Hello brave world";
+    content.text = t.text;
+    expect(history.undo()).toBe(true);
+    expect(history.lastTextChanges).toEqual([t]);
+    expect(t.text).toBe("Hello world");
+    expect(content.text).toBe("Hello world");
+    expect(doc.modelVersion).toBe(modelVersion);
+
+    expect(history.redo()).toBe(true);
+    expect(history.lastTextChanges).toEqual([t]);
+    expect(t.text).toBe("Hello brave world");
+    expect(content.text).toBe("Hello brave world");
+    expect(doc.modelVersion).toBe(modelVersion);
+  });
+
   it("undoes and redoes a text mutation", async () => {
     const { EditHistory } = await import("../src/edit/history.js");
     const doc = loadDoc(p("Hello world"));
@@ -212,11 +400,78 @@ describe("undo/redo history", () => {
     const history = new EditHistory(doc);
     const { run } = firstRun(doc);
     history.checkpoint();
+    const modelVersion = doc.modelVersion;
     applyRunFormat(doc, [segFor(run, 6, 11)], { bold: true });
     expect((firstRun(doc).para.children as Run[]).length).toBe(3);
     history.undo();
+    expect(history.lastTextChanges).toBeNull();
+    expect(doc.modelVersion).toBeGreaterThan(modelVersion);
     expect((firstRun(doc).para.children as Run[]).length).toBe(1);
     expect(textOf(firstRun(doc).para)).toBe("Hello brave world");
+  });
+});
+
+describe("local paragraph split reparsing", () => {
+  it("splices two parsed paragraphs while preserving model generation and unchanged blocks", () => {
+    const doc = loadDoc(p("before") + p("alpha beta") + p("after"));
+    const first = doc.sections[0].blocks[0];
+    const original = doc.sections[0].blocks[1] as Paragraph;
+    const last = doc.sections[0].blocks[2];
+    const originalRun = original.children[0] as Run;
+    const originalText = (originalRun.content[0] as TextContent).srcT!;
+    const source = original.src!;
+    const body = doc.docRoot.children.find((element) => localName(element.name) === "body")!;
+    const sourceIndex = body.children.indexOf(source);
+    const afterText: XmlElement = {
+      name: originalText.name,
+      attrs: { ...originalText.attrs, "xml:space": "preserve" },
+      children: [],
+      text: " beta",
+    };
+    const afterSource: XmlElement = {
+      name: source.name,
+      attrs: {},
+      text: "",
+      children: [{ name: originalRun.src!.name, attrs: {}, text: "", children: [afterText] }],
+    };
+    originalText.text = "alpha";
+    body.children.splice(sourceIndex + 1, 0, afterSource);
+
+    const version = doc.modelVersion;
+    const reparsed = doc.reparseDirectBodyParagraphSplit(source, afterSource);
+    expect(reparsed).not.toBeNull();
+    expect(doc.modelVersion).toBe(version);
+    expect(doc.sections[0].blocks).toHaveLength(4);
+    expect(doc.sections[0].blocks[0]).toBe(first);
+    expect(doc.sections[0].blocks[3]).toBe(last);
+    expect(textOf(reparsed!.before)).toBe("alpha");
+    expect(textOf(reparsed!.after)).toBe(" beta");
+    const afterRun = reparsed!.after.children[0] as Run;
+    expect((afterRun.content[0] as TextContent).srcT).toBe(afterText);
+
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.sections[0].blocks.map((block) => block.type === "paragraph" ? textOf(block) : "table"))
+      .toEqual(["before", "alpha", " beta", "after"]);
+  });
+
+  it.each([
+    ["bookmark", `<w:p><w:bookmarkStart w:id="1" w:name="target"/><w:r><w:t>alpha beta</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>`],
+    ["revision", `<w:p><w:ins w:id="1"><w:r><w:t>alpha beta</w:t></w:r></w:ins></w:p>`],
+    ["content control", `<w:p><w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>alpha beta</w:t></w:r></w:sdtContent></w:sdt></w:p>`],
+    ["field", `<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DATE </w:instrText></w:r><w:r><w:t>alpha beta</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`],
+    ["section break", `<w:p><w:pPr><w:sectPr/></w:pPr><w:r><w:t>alpha beta</w:t></w:r></w:p>`],
+  ])("falls back to a full refresh for a %s paragraph", (_name, paragraph) => {
+    const doc = loadDoc(paragraph + p("after"));
+    const source = doc.sections[0].blocks[0].src!;
+    const body = doc.docRoot.children.find((element) => localName(element.name) === "body")!;
+    const sourceIndex = body.children.indexOf(source);
+    const afterSource = parseXml(`<w:p><w:r><w:t>tail</w:t></w:r></w:p>`);
+    body.children.splice(sourceIndex + 1, 0, afterSource);
+
+    expect(doc.reparseDirectBodyParagraphSplit(source, afterSource)).toBeNull();
+    const version = doc.modelVersion;
+    doc.refresh();
+    expect(doc.modelVersion).toBeGreaterThan(version);
   });
 });
 
@@ -256,6 +511,87 @@ describe("block commands", () => {
     expect(sp.pageWidth).toBeGreaterThan(sp.pageHeight); // landscape
     const reloaded = DocxDocument.load(doc.save());
     expect(reloaded.sections[0].props.pageWidth).toBeGreaterThan(reloaded.sections[0].props.pageHeight);
+  });
+
+  it("saves and reopens mirrored margins through settings.xml", async () => {
+    const { setPageLayout } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(
+      p("text") + `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`,
+      {
+        "word/settings.xml": `<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/><w:proofState w:spelling="clean"/><w:compat/></w:settings>`,
+      },
+    );
+    setPageLayout(doc, {
+      margins: { top: 1, right: 1, bottom: 1, left: 1.25 },
+      mirrorMargins: true,
+    });
+    expect(doc.mirrorMargins).toBe(true);
+    expect(doc.sections[0].props.marginLeft).toBeCloseTo(120, 1);
+
+    const saved = unzipSync(doc.save());
+    const settings = strFromU8(saved["word/settings.xml"]);
+    const rels = strFromU8(saved["word/_rels/document.xml.rels"]);
+    const contentTypes = strFromU8(saved["[Content_Types].xml"]);
+    expect(settings).toContain("<w:mirrorMargins");
+    expect(settings.indexOf("<w:zoom")).toBeLessThan(settings.indexOf("<w:mirrorMargins"));
+    expect(settings.indexOf("<w:mirrorMargins")).toBeLessThan(settings.indexOf("<w:proofState"));
+    expect(settings.indexOf("<w:mirrorMargins")).toBeLessThan(settings.indexOf("<w:compat"));
+    expect(rels).toContain("/relationships/settings");
+    expect(contentTypes).toContain("wordprocessingml.settings+xml");
+
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.mirrorMargins).toBe(true);
+    expect(reloaded.sections[0].props.marginLeft).toBeCloseTo(120, 1);
+    setPageLayout(reloaded, { mirrorMargins: false });
+    expect(reloaded.mirrorMargins).toBe(false);
+    expect(strFromU8(unzipSync(reloaded.save())["word/settings.xml"])).not.toContain("mirrorMargins");
+  });
+
+  it("round-trips every supported page dimension", async () => {
+    const { setPageLayout } = await import("../src/edit/blocks.js");
+    const sizes = [
+      [8.5, 11], [8.5, 14], [3.5, 5], [4, 6], [5, 7], [8, 10],
+      [8.27, 11.69], [4.13, 5.83], [4.13, 9.5],
+    ] as const;
+    for (const [width, height] of sizes) {
+      const doc = loadDoc(
+        p("text") + `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`,
+      );
+      setPageLayout(doc, { size: { width, height } });
+      const saved = doc.save();
+      const documentXml = strFromU8(unzipSync(saved)["word/document.xml"]);
+      expect(documentXml).toContain(
+        `<w:pgSz w:w="${Math.round(width * 1440)}" w:h="${Math.round(height * 1440)}"`,
+      );
+      const reloaded = DocxDocument.load(saved);
+      expect(reloaded.sections[0].props.pageWidth).toBeCloseTo(width * 96, 0);
+      expect(reloaded.sections[0].props.pageHeight).toBeCloseTo(height * 96, 0);
+    }
+  });
+
+  it("scopes section margins while mirror mode remains document-global", async () => {
+    const { setPageLayout } = await import("../src/edit/blocks.js");
+    const section = `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const doc = loadDoc(
+      `<w:p><w:pPr>${section}</w:pPr><w:r><w:t>first</w:t></w:r></w:p>` + p("second") + section,
+    );
+    const sectPrs: XmlElement[] = [];
+    const collect = (element: XmlElement) => {
+      if (localName(element.name) === "sectPr") sectPrs.push(element);
+      for (const child of element.children) collect(child);
+    };
+    collect(doc.docRoot);
+    expect(sectPrs).toHaveLength(2);
+
+    setPageLayout(doc, { margins: { left: 0.5 }, mirrorMargins: true }, sectPrs[0]);
+    expect(doc.sections[0].props.marginLeft).toBeCloseTo(48, 1);
+    expect(doc.sections[1].props.marginLeft).toBeCloseTo(96, 1);
+    expect(doc.mirrorMargins).toBe(true);
+
+    setPageLayout(doc, { margins: { left: 0.75 }, mirrorMargins: false });
+    expect(doc.sections[0].props.marginLeft).toBeCloseTo(72, 1);
+    expect(doc.sections[1].props.marginLeft).toBeCloseTo(72, 1);
+    expect(doc.mirrorMargins).toBe(false);
   });
 });
 
@@ -306,6 +642,46 @@ describe("table operations", () => {
     expect(tcW[3]).toBe(gridW[0] + gridW[1]); // AB2 spans cols 1+2
     // Table width converted from pct to explicit dxa (Word drag semantics).
     expect(xml).toContain('<w:tblW w:type="dxa"');
+  });
+
+  it("drag-moving a table stores page-anchored coordinates", async () => {
+    const { moveTableTo } = await import("../src/edit/tables.js");
+    const doc = tableDoc();
+    const tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table" || !tbl.src) throw new Error("not a table");
+
+    expect(moveTableTo(doc, tbl.src, 120, 240)).toBe(true);
+
+    const moved = doc.sections[0].blocks[0];
+    if (moved.type !== "table") throw new Error("not a table");
+    expect(moved.props.floating?.hAnchor).toBe("page");
+    expect(moved.props.floating?.vAnchor).toBe("page");
+    expect(moved.props.floating?.x).toBeCloseTo(120, 5);
+    expect(moved.props.floating?.y).toBeCloseTo(240, 5);
+    const xml = serializeXml(tbl.src);
+    expect(xml).toContain('w:tblpX="1800"');
+    expect(xml).toContain('w:tblpY="3600"');
+  });
+
+  it("adds Word's editable paragraph after terminal non-text blocks once", async () => {
+    const { ensureParagraphAfterTerminalBlock } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(
+      `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+       <w:tr><w:tc><w:p><w:r><w:t>last cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`,
+    );
+    expect(doc.sections[0].blocks.map((block) => block.type)).toEqual(["table"]);
+    expect(ensureParagraphAfterTerminalBlock(doc)).toBe(true);
+    expect(doc.sections[0].blocks.map((block) => block.type)).toEqual(["table", "paragraph"]);
+    expect(ensureParagraphAfterTerminalBlock(doc)).toBe(false);
+
+    for (const terminal of [
+      `<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath></w:p>`,
+    ]) {
+      const objectDoc = loadDoc(terminal);
+      expect(ensureParagraphAfterTerminalBlock(objectDoc)).toBe(true);
+      expect(objectDoc.sections[0].blocks.map((block) => block.type)).toEqual(["paragraph", "paragraph"]);
+      expect(ensureParagraphAfterTerminalBlock(objectDoc)).toBe(false);
+    }
   });
 
   it("inserts and deletes rows", async () => {
@@ -451,6 +827,611 @@ describe("image insertion", () => {
     expect(reloaded.media(rimgs[0].part)?.length).toBe(png.length);
     expect(reloaded.pkg.text("[Content_Types].xml")).toContain('Extension="png"');
   });
+
+  it("stores SVG icons as native vector image parts", async () => {
+    const { insertImageAt } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(p("icon"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path d="M2 2h28v28H2z"/></svg>');
+    const relId = doc.addImageResource(svg, "svg");
+    expect(insertImageAt(doc, t, relId, 32, 32)).not.toBeNull();
+
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.pkg.text("[Content_Types].xml")).toContain('Extension="svg" ContentType="image/svg+xml"');
+    expect(reloaded.pkg.binary("word/media/image1.svg")).toEqual(svg);
+  });
+});
+
+describe("chart insertion", () => {
+  const DATA: ChartData = {
+    type: "column",
+    title: "Quarterly sales",
+    categories: ["Q1", "Q2", "Q3", "Q4"],
+    series: [
+      { name: "Revenue", values: [12, 19, 15, 24] },
+      { name: "Costs", values: [8, 11, 10, 14] },
+    ],
+  };
+
+  it("packages native ChartML with an editable embedded workbook and round-trips cached data", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    expect(insertChartAt(doc, t, DATA)).not.toBeNull();
+
+    const saved = DocxDocument.load(doc.save());
+    expect(saved.pkg.names()).toContain("word/charts/chart1.xml");
+    expect(saved.pkg.names()).toContain("word/charts/_rels/chart1.xml.rels");
+    expect(saved.pkg.names()).toContain("word/embeddings/Microsoft_Excel_Worksheet1.xlsx");
+    expect(saved.pkg.text("word/document.xml")).toContain("<c:chart");
+    expect(saved.pkg.text("word/charts/chart1.xml")).toContain("Quarterly sales");
+    expect(saved.pkg.text("word/charts/chart1.xml")).toContain("Data!$B$2:$B$5");
+    expect(saved.pkg.text("word/charts/_rels/chart1.xml.rels")).toContain("relationships/package");
+    expect(saved.pkg.text("[Content_Types].xml")).toContain("drawingml.chart+xml");
+
+    const workbookBytes = saved.pkg.binary("word/embeddings/Microsoft_Excel_Worksheet1.xlsx");
+    if (!workbookBytes) throw new Error("embedded workbook missing");
+    const workbook = Package.from(workbookBytes);
+    expect(workbook.names()).toContain("xl/worksheets/sheet1.xml");
+    expect(workbook.text("xl/worksheets/sheet1.xml")).toContain("Revenue");
+    expect(workbook.text("xl/worksheets/sheet1.xml")).toContain("<v>24</v>");
+
+    const para = saved.sections[0].blocks[0] as Paragraph;
+    const drawing = para.children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!drawing || drawing.kind !== "drawing") throw new Error("chart drawing missing");
+    expect(drawing.chart).toEqual(DATA);
+    expect(drawing.width).toBeCloseTo(480, 0);
+    expect(drawing.height).toBeCloseTo(288, 0);
+    expect(drawing.srcDrawing).toBeTruthy();
+  });
+
+  it("updates a selected chart's ChartML and workbook with undo and redo", async () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertChartAt(doc, t, DATA);
+    const reloaded = DocxDocument.load(doc.save());
+    const para = reloaded.sections[0].blocks[0] as Paragraph;
+    const drawing = para.children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!drawing || drawing.kind !== "drawing" || !drawing.srcDrawing) throw new Error("chart drawing missing");
+    const source = drawing.srcDrawing;
+    const updated: ChartData = {
+      type: "line",
+      title: "Updated trend",
+      categories: ["Jan", "Feb", "Mar"],
+      series: [{ name: "Total", values: [3, 7, 5] }],
+    };
+    const { EditHistory } = await import("../src/edit/history.js");
+    const history = new EditHistory(reloaded);
+    history.checkpoint();
+    expect(setChartData(reloaded, source, updated)).toBe(true);
+    expect(history.undo()).toBe(true);
+    expect(history.lastTextChanges).toBeNull();
+    expect(reloaded.pkg.text("word/charts/chart1.xml")).toContain("<c:barChart>");
+    expect(history.redo()).toBe(true);
+    expect(history.lastTextChanges).toBeNull();
+    expect(reloaded.pkg.text("word/charts/chart1.xml")).toContain("<c:lineChart>");
+
+    const saved = DocxDocument.load(reloaded.save());
+    expect(saved.pkg.text("word/charts/chart1.xml")).toContain("<c:lineChart>");
+    expect(saved.pkg.text("word/charts/chart1.xml")).toContain("Updated trend");
+    const workbookBytes = saved.pkg.binary("word/embeddings/Microsoft_Excel_Worksheet1.xlsx");
+    if (!workbookBytes) throw new Error("embedded workbook missing");
+    expect(Package.from(workbookBytes).text("xl/worksheets/sheet1.xml")).toContain("<v>7</v>");
+    const after = (saved.sections[0].blocks[0] as Paragraph).children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!after || after.kind !== "drawing") throw new Error("updated chart missing");
+    expect(after.srcDrawing).not.toBe(source);
+    expect(after.chart).toEqual(updated);
+  });
+
+  it("emits the native plot element for every supported chart type", () => {
+    expect(buildChartXml({ ...DATA, type: "column" })).toContain('<c:barDir val="col"/>');
+    expect(buildChartXml({ ...DATA, type: "bar" })).toContain('<c:barDir val="bar"/>');
+    expect(buildChartXml({ ...DATA, type: "line" })).toContain("<c:lineChart>");
+    expect(buildChartXml({ ...DATA, type: "pie" })).toContain("<c:pieChart>");
+  });
+});
+
+describe("SmartArt insertion", () => {
+  const DATA: SmartArtData = { layout: "process", items: ["Discover", "Design", "Deliver"] };
+
+  it("packages native diagram data/layout/drawing parts and round-trips editable nodes", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    expect(insertSmartArtAt(doc, t, DATA)).not.toBeNull();
+    const saved = DocxDocument.load(doc.save());
+    expect(saved.pkg.names()).toContain("word/diagrams/data1.xml");
+    expect(saved.pkg.names()).toContain("word/diagrams/layout1.xml");
+    expect(saved.pkg.names()).toContain("word/diagrams/quickStyle1.xml");
+    expect(saved.pkg.names()).toContain("word/diagrams/colors1.xml");
+    expect(saved.pkg.names()).toContain("word/diagrams/drawing1.xml");
+    expect(saved.pkg.text("word/document.xml")).toContain("<dgm:relIds");
+    expect(saved.pkg.text("word/diagrams/data1.xml")).toContain("Discover");
+    expect(saved.pkg.text("word/diagrams/data1.xml")).toContain("dataModelExt");
+    const drawingRelId = saved.pkg.text("word/diagrams/data1.xml").match(/dataModelExt[^>]+relId="([^"]+)"/)?.[1];
+    expect(drawingRelId).toBeTruthy();
+    expect(saved.pkg.text("word/_rels/document.xml.rels")).toContain(`Id="${drawingRelId}" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="diagrams/drawing1.xml"`);
+    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain("urn:wordinweb:smartart:process");
+    expect(saved.pkg.text("word/document.xml")).toContain('r:qs="rId3"');
+    expect(saved.pkg.text("word/document.xml")).toContain('r:cs="rId4"');
+    expect(saved.pkg.text("[Content_Types].xml")).toContain("drawingml.diagramData+xml");
+    expect(saved.pkg.text("[Content_Types].xml")).toContain("drawingml.diagramStyle+xml");
+    expect(saved.pkg.text("[Content_Types].xml")).toContain("drawingml.diagramColors+xml");
+    expect(saved.pkg.text("[Content_Types].xml")).toContain("diagramDrawing+xml");
+
+    const para = saved.sections[0].blocks[0] as Paragraph;
+    const drawing = para.children.flatMap((item) => item.type === "run" ? item.content : []).find((item) => item.kind === "drawing");
+    if (!drawing || drawing.kind !== "drawing") throw new Error("SmartArt drawing missing");
+    expect(drawing.smartArt).toEqual(DATA);
+    expect(drawing.paths).toHaveLength(3);
+    expect(drawing.texts).toHaveLength(3);
+    expect(drawing.srcDrawing).toBeTruthy();
+  });
+
+  it("normalizes cached connector extents and keeps model ids tied to diagram data", () => {
+    for (const layout of ["cycle", "hierarchy"] as const) {
+      const xml = buildSmartArtDrawingXml({ layout, items: ["One", "Two", "Three"] });
+      const extents = [...xml.matchAll(/<a:ext cx="(-?\d+)" cy="(-?\d+)"\/>/g)];
+      expect(extents.length).toBeGreaterThan(0);
+      for (const [, cx, cy] of extents) {
+        expect(Number(cx)).toBeGreaterThan(0);
+        expect(Number(cy)).toBeGreaterThan(0);
+      }
+      expect(xml).toMatch(/<a:xfrm[^>]+flip[HV]="1"/);
+      for (const id of ["1", "2", "3"]) expect(xml).toContain(`modelId="${id}"`);
+      const dataXml = buildSmartArtDataXml({ layout, items: ["One", "Two", "Three"] }, "rIdDrawing");
+      for (const [, id] of xml.matchAll(/<dsp:sp modelId="([^"]+)"/g)) {
+        expect(id).toMatch(/^\d+$/);
+        expect(dataXml).toContain(`modelId="${id}"`);
+      }
+    }
+  });
+
+  it("updates selected SmartArt layout and text with undo and redo", async () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertSmartArtAt(doc, t, DATA);
+    const reloaded = DocxDocument.load(doc.save());
+    const para = reloaded.sections[0].blocks[0] as Paragraph;
+    const drawing = para.children.flatMap((item) => item.type === "run" ? item.content : []).find((item) => item.kind === "drawing");
+    if (!drawing || drawing.kind !== "drawing" || !drawing.srcDrawing) throw new Error("SmartArt drawing missing");
+    const updated: SmartArtData = { layout: "hierarchy", items: ["Lead", "Plan", "Build", "Test"] };
+    const { EditHistory } = await import("../src/edit/history.js");
+    const history = new EditHistory(reloaded);
+    history.checkpoint();
+    expect(setSmartArtData(reloaded, drawing.srcDrawing, updated)).toBe(true);
+    expect(reloaded.pkg.text("word/diagrams/data1.xml")).toContain("Lead");
+    expect(reloaded.pkg.text("word/diagrams/layout1.xml")).toContain("smartart:hierarchy");
+    expect(history.undo()).toBe(true);
+    expect(reloaded.pkg.text("word/diagrams/data1.xml")).toContain("Discover");
+    expect(history.redo()).toBe(true);
+    expect(reloaded.pkg.text("word/diagrams/data1.xml")).toContain("Lead");
+    const saved = DocxDocument.load(reloaded.save());
+    const after = (saved.sections[0].blocks[0] as Paragraph).children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!after || after.kind !== "drawing") throw new Error("updated SmartArt missing");
+    expect(after.smartArt).toEqual(updated);
+  });
+
+  it("builds cached geometry for every supported layout family", () => {
+    for (const layout of ["process", "cycle", "hierarchy", "list"] as const) {
+      const xml = buildSmartArtDrawingXml({ ...DATA, layout });
+      expect(xml).toContain("<dsp:drawing");
+      expect(xml).toContain("Discover");
+      expect(xml).toContain("<a:prstGeom");
+    }
+  });
+});
+
+describe("advanced object insertion", () => {
+  const POSTER = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+
+  const firstImage = (doc: DocxDocument) => {
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    const image = para.children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "image");
+    if (!image || image.kind !== "image") throw new Error("inserted object poster missing");
+    return image;
+  };
+
+  it("packages a native 3D model with a selectable raster fallback", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    const glb = new Uint8Array([0x67, 0x6c, 0x54, 0x46, 2, 0, 0, 0, 12, 0, 0, 0]);
+    expect(insertModel3DAt(doc, t, { data: glb, poster: POSTER })).toBe(true);
+
+    const saved = DocxDocument.load(doc.save());
+    expect(saved.pkg.binary("word/media/model3d1.glb")).toEqual(glb);
+    expect(saved.pkg.text("word/document.xml")).toContain("<am3d:model3d");
+    expect(saved.pkg.text("word/document.xml")).toContain("<mc:AlternateContent");
+    expect(saved.pkg.text("word/_rels/document.xml.rels")).toContain("relationships/model3d");
+    expect(saved.pkg.text("[Content_Types].xml")).toContain('Extension="glb" ContentType="model/gltf-binary"');
+    const image = firstImage(saved);
+    expect(image.model3D).toEqual({ part: "word/media/model3d1.glb", posterPart: "word/media/image1.png" });
+    expect(image.srcDrawing).toBeTruthy();
+  });
+
+  it("stores native online-video metadata without executing embedded HTML", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    expect(insertWebVideoAt(doc, t, { url: "https://youtu.be/dQw4w9WgXcQ", poster: POSTER })).toBe(true);
+
+    const saved = DocxDocument.load(doc.save());
+    const xml = saved.pkg.text("word/document.xml");
+    expect(xml).toContain("<wp15:webVideoPr");
+    expect(xml).toContain("https://www.youtube.com/embed/dQw4w9WgXcQ");
+    const image = firstImage(saved);
+    expect(image.webVideo?.url).toBe("https://www.youtube.com/embed/dQw4w9WgXcQ");
+    expect(image.webVideo?.width).toBe(640);
+    expect(image.srcDrawing).toBeTruthy();
+  });
+
+  it("round-trips arbitrary files through a native OLE Package and resizes its preview", () => {
+    const payload = new TextEncoder().encode("embedded report data");
+    const ole = buildOlePackage(payload, "report.txt");
+    expect(Array.from(ole.slice(0, 8))).toEqual([208, 207, 17, 224, 161, 177, 26, 225]);
+    const cfb = CFB.read(ole, { type: "array" });
+    expect(cfb.FileIndex[0].clsid?.toUpperCase()).toBe("0C00030000000000C000000000000046");
+    expect(Array.from(CFB.find(cfb, "\u0001Ole")?.content ?? [])).toEqual([
+      1, 0, 0, 2,
+      0, 0, 0, 0,
+      0, 0, 0, 0,
+      0, 0, 0, 0,
+    ]);
+    expect(extractOlePackage(ole)).toEqual({ filename: "report.txt", data: payload });
+
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    expect(insertEmbeddedObjectAt(doc, t, { data: payload, filename: "report.txt", poster: POSTER })).toBe(true);
+    let saved = DocxDocument.load(doc.save());
+    const documentXml = saved.pkg.text("word/document.xml");
+    expect(documentXml).toContain("<o:OLEObject");
+    const oleObject = documentXml.match(/<o:OLEObject[^>]+\/>/)?.[0] ?? "";
+    expect(oleObject).toMatch(/\bObjectID="_\d+"/);
+    expect(oleObject).toContain('ProgID="Package"');
+    const shapeId = oleObject.match(/\bShapeID="(_x0000_i(\d+))"/)?.[1];
+    const shapeNumber = Number(oleObject.match(/\bShapeID="_x0000_i(\d+)"/)?.[1]);
+    expect(shapeId).toBeTruthy();
+    expect(shapeNumber).toBeGreaterThanOrEqual(1025);
+    const shapeTypeId = documentXml.match(/<v:shapetype[^>]+\bid="(_x0000_t(\d+))"/)?.[1];
+    const shapeTypeNumber = Number(documentXml.match(/<v:shapetype[^>]+\bid="_x0000_t(\d+)"/)?.[1]);
+    expect(shapeTypeId).toBeTruthy();
+    expect(shapeTypeNumber).toBeGreaterThanOrEqual(1025);
+    expect(documentXml).toContain(`type="#${shapeTypeId}"`);
+    expect(oleObject).toMatch(/\br:id="rId\d+"/);
+    expect(documentXml.match(/<v:formulas>/g)).toHaveLength(1);
+    expect(documentXml.match(/<v:f eqn=/g)).toHaveLength(12);
+    expect(documentXml).toContain('<v:path o:extrusionok="f" gradientshapeok="t" o:connecttype="rect"/>');
+    expect(documentXml).toContain('<o:lock v:ext="edit" aspectratio="t"/>');
+    expect(saved.pkg.text("word/_rels/document.xml.rels")).toContain("relationships/oleObject");
+    expect(saved.pkg.text("[Content_Types].xml")).toContain('ContentType="application/vnd.openxmlformats-officedocument.oleObject"');
+    const embedded = saved.pkg.binary("word/embeddings/oleObject1.bin");
+    if (!embedded) throw new Error("OLE object part missing");
+    expect(extractOlePackage(embedded)).toEqual({ filename: "report.txt", data: payload });
+
+    const image = firstImage(saved);
+    expect(image.embeddedObject).toEqual({
+      part: "word/embeddings/oleObject1.bin",
+      filename: "report.txt",
+      progId: "Package",
+    });
+    expect(image.srcDrawing).toBeTruthy();
+    expect(resizeDrawing(saved, image.srcDrawing!, 400, 240)).toBe(true);
+    saved = DocxDocument.load(saved.save());
+    expect(saved.pkg.text("word/document.xml")).toContain("width:300pt;height:180pt");
+    expect(firstImage(saved).width).toBeCloseTo(400, 0);
+    expect(firstImage(saved).height).toBeCloseTo(240, 0);
+  });
+
+  it("embeds DOCX bytes as an activatable Word.Document.12 package", () => {
+    const embeddedDocx = loadDoc(p("Embedded source")).save();
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    expect(insertEmbeddedObjectAt(doc, t, {
+      data: embeddedDocx,
+      filename: "source.docx",
+      poster: POSTER,
+    })).toBe(true);
+
+    const saved = DocxDocument.load(doc.save());
+    const xml = saved.pkg.text("word/document.xml");
+    expect(xml).toContain('ProgID="Word.Document.12"');
+    expect(xml).toContain("<o:FieldCodes>\\s</o:FieldCodes>");
+    expect(saved.pkg.text("word/_rels/document.xml.rels")).toContain(
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="embeddings/Microsoft_Word_Document.docx"',
+    );
+    expect(saved.pkg.text("[Content_Types].xml")).toContain(
+      'Extension="docx" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document"',
+    );
+    expect(saved.pkg.binary("word/embeddings/Microsoft_Word_Document.docx")).toEqual(embeddedDocx);
+    expect(firstImage(saved).embeddedObject).toEqual({
+      part: "word/embeddings/Microsoft_Word_Document.docx",
+      filename: "source.docx",
+      progId: "Word.Document.12",
+    });
+  });
+
+  it("repairs legacy WordInWeb SmartArt and DOCX Package objects on load", () => {
+    const embeddedDocx = loadDoc(p("Legacy embedded source")).save();
+    const source = loadDoc(p("Anchor"));
+    const t = (firstRun(source).run.content[0] as TextContent).srcT!;
+    insertSmartArtAt(source, t, { layout: "cycle", items: ["Discover", "Design", "Deliver"] });
+    insertEmbeddedObjectAt(source, t, { data: embeddedDocx, filename: "legacy.docx", poster: POSTER });
+    const files = unzipSync(source.save());
+
+    files["word/diagrams/data1.xml"] = strToU8(
+      strFromU8(files["word/diagrams/data1.xml"])
+        .replace('modelId="4" srcId=', 'modelId="c1" srcId=')
+        .replace('modelId="5" srcId=', 'modelId="c2" srcId=')
+        .replace('modelId="6" srcId=', 'modelId="c3" srcId='),
+    );
+    files["word/diagrams/drawing1.xml"] = strToU8(
+      strFromU8(files["word/diagrams/drawing1.xml"]).replace(/<a:ext cx="2841862" cy="1"\/>/, '<a:ext cx="-2841862" cy="0"/>'),
+    );
+    const documentXml = strFromU8(files["word/document.xml"])
+      .replace(/_x0000_t\d+/g, "_x0000_t75_1002")
+      .replace(/_x0000_i\d+/g, "_x0000_i1002")
+      .replace('ProgID="Word.Document.12"', 'ProgID="Package"')
+      .replace("<o:FieldCodes>\\s</o:FieldCodes>", "");
+    files["word/document.xml"] = strToU8(documentXml);
+    files["word/_rels/document.xml.rels"] = strToU8(
+      strFromU8(files["word/_rels/document.xml.rels"]).replace(
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="embeddings/Microsoft_Word_Document.docx"',
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/oleObject1.bin"',
+      ),
+    );
+    files["word/embeddings/oleObject1.bin"] = buildOlePackage(embeddedDocx, "legacy.docx");
+    delete files["word/embeddings/Microsoft_Word_Document.docx"];
+    files["[Content_Types].xml"] = strToU8(
+      strFromU8(files["[Content_Types].xml"])
+        .replace(/<Default Extension="docx"[^>]+\/>/, "")
+        .replace("</Types>", '<Override PartName="/word/embeddings/oleObject1.bin" ContentType="application/vnd.openxmlformats-officedocument.oleObject"/></Types>'),
+    );
+
+    const repaired = DocxDocument.load(zipSync(files));
+    const saved = DocxDocument.load(repaired.save());
+    const repairedData = saved.pkg.text("word/diagrams/data1.xml");
+    const repairedDrawing = saved.pkg.text("word/diagrams/drawing1.xml");
+    expect(repairedData).not.toMatch(/modelId="c\d+"/);
+    expect(repairedDrawing).not.toMatch(/<a:ext cx="-?\d+" cy="(?:0|-\d+)"/);
+    expect(repairedDrawing).toContain("Discover");
+    expect(saved.pkg.text("word/document.xml")).toContain('ProgID="Word.Document.12"');
+    expect(saved.pkg.text("word/document.xml")).toContain("<o:FieldCodes>\\s</o:FieldCodes>");
+    expect(saved.pkg.text("word/_rels/document.xml.rels")).toContain("relationships/package");
+    expect(saved.pkg.binary("word/embeddings/Microsoft_Word_Document.docx")).toEqual(embeddedDocx);
+    expect(saved.pkg.has("word/embeddings/oleObject1.bin")).toBe(false);
+  });
+});
+
+describe("blank page insertion", () => {
+  it("splits head and tail around a distinct editable blank-page paragraph", () => {
+    const doc = loadDoc(
+      `<w:p w:rsidR="1"><w:pPr><w:spacing w:after="120"/><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:pPr>` +
+      `<w:bookmarkStart w:id="0" w:name="Split"/><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">Alpha</w:t><w:tab/></w:r><w:bookmarkEnd w:id="0"/></w:p>`,
+    );
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    expect(insertBlankPageAt(doc, t, 2)).toBe(true);
+    const saved = doc.save();
+    const reloaded = DocxDocument.load(saved);
+    const xml = reloaded.pkg.text("word/document.xml");
+    expect((xml.match(/<w:br w:type="page"\/>/g) ?? [])).toHaveLength(2);
+    expect((xml.match(/<w:sectPr>/g) ?? [])).toHaveLength(1);
+    const paragraphs = [...xml.matchAll(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g)].map((match) => match[0]);
+    expect(paragraphs).toHaveLength(3);
+    expect(paragraphs[0]).toContain("Al");
+    expect(paragraphs[0]).toContain("bookmarkStart");
+    expect(paragraphs[0]).not.toContain("sectPr");
+    expect(paragraphs[1]).toMatch(/<w:t xml:space="preserve"\/><\/w:r><w:r><w:rPr><w:b\/><\/w:rPr><w:br w:type="page"\/>/);
+    expect(paragraphs[1]).not.toContain("sectPr");
+    expect(paragraphs[2]).toContain("pha");
+    expect(paragraphs[2]).toContain("<w:tab/>");
+    expect(paragraphs[2]).toContain("bookmarkEnd");
+    expect(paragraphs[2]).toContain("<w:sectPr>");
+    const blocks = reloaded.sections.flatMap((section) => section.blocks) as Paragraph[];
+    expect(blocks.map(textOf)).toEqual(["Al", "", "pha"]);
+    const layout = layoutDocument(reloaded);
+    expect(layout.pages).toHaveLength(3);
+    expect(
+      layout.pages[1].items.some((item) => item.kind === "text" && item.text === "" && item.src?.t),
+    ).toBe(true);
+  });
+});
+
+describe("cover page insertion", () => {
+  it("prepends editable title, subtitle, author, and a page break", () => {
+    const doc = loadDoc(p("Existing content"));
+    expect(insertCoverPage(doc, { title: "Project Atlas", subtitle: "Launch plan", author: "Ada Lovelace" })).toBe(true);
+    const saved = doc.save();
+    const xml = DocxDocument.load(saved).pkg.text("word/document.xml");
+    expect(xml).toContain("Project Atlas");
+    expect(xml).toContain("Launch plan");
+    expect(xml).toContain("Ada Lovelace");
+    expect(xml).toContain('w:pStyle w:val="Title"');
+    expect(xml.indexOf("Project Atlas")).toBeLessThan(xml.indexOf("Existing content"));
+    expect((xml.match(/<w:br w:type="page"\/>/g) ?? [])).toHaveLength(1);
+  });
+});
+
+describe("shape insertion", () => {
+  it("creates native anchored DrawingML shapes that retain editable text", () => {
+    const presets: ShapePreset[] = ["rectangle", "roundedRectangle", "ellipse", "diamond", "textBox"];
+    for (const preset of presets) {
+      const doc = loadDoc(p("Anchor"));
+      const { run } = firstRun(doc);
+      const t = (run.content[0] as TextContent).srcT!;
+      expect(insertShapeAt(doc, t, preset, "Editable shape")).not.toBeNull();
+      const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml");
+      expect(xml).toContain("<wp:anchor");
+      expect(xml).toContain("<wps:wsp");
+      expect(xml).toContain("<w:txbxContent>");
+      expect(xml).toContain("Editable shape");
+      const expectedGeom = preset === "roundedRectangle" ? "roundRect" : preset === "textBox" || preset === "rectangle" ? "rect" : preset;
+      expect(xml).toContain(`a:prstGeom prst="${expectedGeom}"`);
+
+      const reloaded = DocxDocument.load(doc.save());
+      const para = reloaded.sections[0].blocks[0] as Paragraph;
+      const anchor = para.children.flatMap((child) => child.type === "run" ? child.content : []).find((content) => content.kind === "anchor");
+      expect(anchor?.kind).toBe("anchor");
+      if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("shape missing");
+      expect(anchor.shape.blocks[0]?.type).toBe("paragraph");
+      expect(anchor.shape.srcDrawing).toBeTruthy();
+      expect(anchor.shape.textboxStory).toBe(true);
+    }
+  });
+
+  it("keeps an empty text box as a real selectable DrawingML object", () => {
+    const doc = loadDoc(p("Anchor"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    const drawing = insertShapeAt(doc, t, "textBox");
+    expect(drawing).not.toBeNull();
+    const xml = serializeXml(drawing!);
+    expect(xml).toContain("<a:noFill/>");
+    expect(xml).toContain("<a:ln");
+    expect(xml).toContain("<w:t");
+  });
+
+  it("persists page alignment, rotation, and front/back order", () => {
+    const doc = loadDoc(p("Anchor"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    const first = insertShapeAt(doc, t, "rectangle", "First")!;
+    const second = insertShapeAt(doc, t, "ellipse", "Second")!;
+
+    expect(setFloatingPagePosition(doc, first, 120, 240)).toBe(true);
+    expect(setDrawingRotation(doc, first, 90)).toBe(true);
+    expect(drawingRotation(first)).toBe(90);
+    expect(setDrawingOrder(doc, first, "front")).toBe(true);
+    const frontXml = serializeXml(first);
+    const secondXml = serializeXml(second);
+    expect(frontXml).toContain('relativeFrom="page"');
+    expect(frontXml).toContain("1143000");
+    expect(frontXml).toContain("2286000");
+    expect(frontXml).toContain('rot="5400000"');
+    expect(Number(/relativeHeight="(\d+)"/.exec(frontXml)![1])).toBeGreaterThan(
+      Number(/relativeHeight="(\d+)"/.exec(secondXml)![1]),
+    );
+    expect(serializeXml(doc.docRoot).indexOf("First")).toBeGreaterThan(serializeXml(doc.docRoot).indexOf("Second"));
+
+    expect(setDrawingOrder(doc, first, "back")).toBe(true);
+    expect(serializeXml(first)).toContain('relativeHeight="0"');
+    expect(serializeXml(doc.docRoot).indexOf("First")).toBeLessThan(serializeXml(doc.docRoot).indexOf("Second"));
+    const reloaded = DocxDocument.load(doc.save());
+    const para = reloaded.sections[0].blocks[0] as Paragraph;
+    const shape = para.children
+      .flatMap((child) => child.type === "run" ? child.content : [])
+      .find((content) => content.kind === "anchor" && content.shape.type === "textbox" && content.shape.rotation === 90);
+    if (!shape || shape.kind !== "anchor" || shape.shape.type !== "textbox") throw new Error("shape missing");
+    expect(shape.shape.rotation).toBe(90);
+  });
+});
+
+describe("WordArt insertion", () => {
+  it("creates native editable DrawingML text warps that round-trip", () => {
+    const presets: Array<[WordArtPreset, string]> = [
+      ["plain", "textNoShape"],
+      ["archUp", "textArchUp"],
+      ["archDown", "textArchDown"],
+      ["wave", "textWave1"],
+      ["chevron", "textChevron"],
+    ];
+    for (const [preset, warp] of presets) {
+      const doc = loadDoc(p("Anchor"));
+      const { run } = firstRun(doc);
+      const t = (run.content[0] as TextContent).srcT!;
+      expect(insertWordArtAt(doc, t, "Editable WordArt", preset)).not.toBeNull();
+      const saved = doc.save();
+      const xml = DocxDocument.load(saved).pkg.text("word/document.xml");
+      expect(xml).toContain('name="WordArt ');
+      expect(xml).toContain(`<a:prstTxWarp prst="${warp}">`);
+      expect(xml).toContain("Editable WordArt");
+      expect(xml).toContain('<w:color w:val="2E74B5"');
+
+      const reloaded = DocxDocument.load(saved);
+      const para = reloaded.sections[0].blocks[0] as Paragraph;
+      const anchor = para.children.flatMap((child) => child.type === "run" ? child.content : []).find((content) => content.kind === "anchor");
+      if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("WordArt missing");
+      expect(anchor.shape.warp).toBe(warp === "textNoShape" ? undefined : warp);
+      expect(anchor.shape.blocks[0]?.type).toBe("paragraph");
+    }
+  });
+
+  it("does not insert empty WordArt", () => {
+    const doc = loadDoc(p("Anchor"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    expect(insertWordArtAt(doc, t, "", "plain")).toBeNull();
+  });
+
+  it("uses tight plain-text bounds and edits DrawingML text through save/reopen", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    const drawing = insertWordArtAt(doc, t, "Before", "plain");
+    if (!drawing) throw new Error("WordArt missing");
+    expect(isDrawingWordArt(drawing)).toBe(true);
+    expect(drawingWordArtText(drawing)).toBe("Before");
+    expect(serializeXml(drawing)).toContain('cy="381000"');
+    expect(setDrawingWordArtText(doc, drawing, "After")).toBe(true);
+    const saved = DocxDocument.load(doc.save());
+    const xml = saved.pkg.text("word/document.xml");
+    expect(xml).toContain("After");
+    expect(xml).not.toContain(">Before<");
+    expect(xml).toContain('cy="381000"');
+  });
+});
+
+describe("ink insertion", () => {
+  it("creates movable freehand DrawingML geometry that round-trips", () => {
+    const doc = loadDoc(p("Anchor"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    expect(insertInkAt(doc, t, [
+      { x: 120, y: 180 },
+      { x: 140, y: 195 },
+      { x: 165, y: 178 },
+    ], "#C00000", 4, 0.45)).not.toBeNull();
+
+    const saved = doc.save();
+    const xml = DocxDocument.load(saved).pkg.text("word/document.xml");
+    expect(xml).toContain("<wp:anchor");
+    expect(xml).toContain("<a:custGeom>");
+    expect(xml).toContain("<a:moveTo>");
+    expect(xml).toContain("<a:lnTo>");
+    expect(xml).toContain('a:srgbClr val="C00000"');
+    expect(xml).toContain('<a:alpha val="45000"/>');
+
+    const reloaded = DocxDocument.load(saved);
+    const para = reloaded.sections[0].blocks[0] as Paragraph;
+    const anchor = para.children.flatMap((child) => child.type === "run" ? child.content : []).find((content) => content.kind === "anchor");
+    expect(anchor?.kind).toBe("anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "art") throw new Error("ink missing");
+    expect(anchor.shape.ink).toBe(true);
+    expect(anchor.shape.paths).toHaveLength(1);
+    expect(anchor.shape.paths[0].d).toMatch(/^M .* L .* L /);
+    expect(anchor.shape.paths[0].stroke?.opacity).toBe(0.45);
+    expect(anchor.shape.srcDrawing).toBeTruthy();
+  });
+
+  it("rotates native ink geometry as one selectable object", () => {
+    const doc = loadDoc(p("Anchor"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    const drawing = insertInkAt(doc, t, [{ x: 20, y: 30 }, { x: 80, y: 60 }])!;
+    expect(setDrawingRotation(doc, drawing, 90)).toBe(true);
+    const reloaded = DocxDocument.load(doc.save());
+    const para = reloaded.sections[0].blocks[0] as Paragraph;
+    const anchor = para.children.flatMap((child) => child.type === "run" ? child.content : []).find((content) => content.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "art") throw new Error("ink missing");
+    expect(anchor.shape.rotation).toBe(90);
+  });
 });
 
 describe("addComment", () => {
@@ -543,6 +1524,30 @@ describe("paragraph formatting", () => {
     const props = (doc.sections[0].blocks[0] as Paragraph).props;
     expect(props.lineSpacing?.rule).toBe("auto");
     expect(props.lineSpacing?.value).toBeCloseTo(1.5, 2);
+  });
+
+  it("applies, changes, removes, and round-trips a native drop cap", () => {
+    const doc = loadDoc(p("Once upon a time"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((content) => content.kind === "text")!.srcT!;
+    expect(setDropCapAt(doc, t, "drop", 3)).toBe(true);
+    expect(doc.sections[0].blocks).toHaveLength(2);
+    const cap = doc.sections[0].blocks[0] as Paragraph;
+    const body = doc.sections[0].blocks[1] as Paragraph;
+    expect(cap.props.dropCap).toMatchObject({ mode: "drop", lines: 3 });
+    expect(textOf(cap)).toBe("O");
+    expect(textOf(body)).toBe("nce upon a time");
+
+    const bodyT = (body.children[0] as Run).content.find((content) => content.kind === "text")!.srcT!;
+    expect(setDropCapAt(doc, bodyT, "margin", 2)).toBe(true);
+    expect((doc.sections[0].blocks[0] as Paragraph).props.dropCap).toMatchObject({ mode: "margin", lines: 2, pageAnchored: true });
+    expect(DocxDocument.load(doc.save()).sections[0].blocks).toHaveLength(2);
+
+    const changedBody = doc.sections[0].blocks[1] as Paragraph;
+    const changedT = (changedBody.children[0] as Run).content.find((content) => content.kind === "text")!.srcT!;
+    expect(setDropCapAt(doc, changedT, null)).toBe(true);
+    expect(doc.sections[0].blocks).toHaveLength(1);
+    expect(textOf(doc.sections[0].blocks[0] as Paragraph)).toBe("Once upon a time");
   });
 });
 
@@ -687,6 +1692,14 @@ describe("image editing", () => {
     );
   }
 
+  it("adds a trailing editable paragraph after a terminal image-only paragraph", async () => {
+    const { ensureParagraphAfterTerminalBlock } = await import("../src/edit/blocks.js");
+    const doc = loadWithImage();
+    expect(ensureParagraphAfterTerminalBlock(doc)).toBe(true);
+    expect(doc.sections[0].blocks.map((block) => block.type)).toEqual(["paragraph", "paragraph"]);
+    expect(ensureParagraphAfterTerminalBlock(doc)).toBe(false);
+  });
+
   it("parses crop and rotation; edits alt text and blip target", () => {
     const doc = loadWithImage();
     const para = doc.sections[0].blocks[0] as Paragraph;
@@ -825,6 +1838,79 @@ describe("insertPageField", () => {
     expect(text).toContain("Page ");
     expect(text).toContain(" of ");
   });
+
+  it("inserts generic and live date/time fields with Word field instructions", () => {
+    const doc = loadDoc(p("Fields: "));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c) => c.kind === "text")!.srcT!;
+    expect(insertField(doc, t, t.text.length, "NUMPAGES \\* MERGEFORMAT", "1")).toBe(true);
+    expect(insertDateTimeField(doc, t, t.text.length, "date", "MMMM d, yyyy")).toBe(true);
+    const xml = serializeXml(doc.editableRoots()[0]);
+    expect(xml).toContain('w:instr=" NUMPAGES \\* MERGEFORMAT "');
+    expect(xml).toContain('w:instr=" DATE \\@ &quot;MMMM d, yyyy&quot; \\* MERGEFORMAT "');
+    expect(xml).toMatch(/<w:fldSimple[^>]*>[\s\S]*?<\/w:fldSimple><w:r><w:t xml:space="preserve"\/><\/w:r>/);
+
+    const reloaded = DocxDocument.load(doc.save());
+    const para = reloaded.sections[0].blocks[0] as Paragraph;
+    const instructions = para.children.flatMap((child) =>
+      (child.type === "run" ? [child] : child.runs).flatMap((oneRun) =>
+        oneRun.content.filter((content) => content.kind === "field").map((content) => content.kind === "field" ? content.instruction : ""),
+      ),
+    );
+    expect(instructions.some((instruction) => instruction.includes("NUMPAGES"))).toBe(true);
+    expect(instructions.some((instruction) => instruction.includes('DATE \\@ "MMMM d, yyyy"'))).toBe(true);
+  });
+
+  it("inserts a field at the exact text position inside a multi-content run", () => {
+    const doc = loadDoc(`<w:p><w:r><w:t>BeforeAfter</w:t><w:tab/><w:t>Suffix</w:t></w:r></w:p>`);
+    const { run } = firstRun(doc);
+    const t = run.content.find((content) => content.kind === "text")!.srcT!;
+    expect(insertField(doc, t, 6, "PAGE")).toBe(true);
+    const xml = serializeXml(doc.editableRoots()[0]);
+    expect(xml).toMatch(/>Before<\/w:t><\/w:r><w:fldSimple[^>]*><w:r>[\s\S]*?<\/w:r><\/w:fldSimple><w:r><w:t[^>]*>After<\/w:t><w:tab\/><w:t>Suffix<\/w:t>/);
+  });
+});
+
+describe("bookmarks and cross-references", () => {
+  it("validates Word bookmark names", () => {
+    expect(validBookmarkName("Quarterly_Revenue2")).toBe(true);
+    expect(validBookmarkName("2Revenue")).toBe(false);
+    expect(validBookmarkName("Quarterly Revenue")).toBe(false);
+    expect(validBookmarkName("A".repeat(41))).toBe(false);
+  });
+
+  it("wraps a partial selection and preserves it through save-back", () => {
+    const doc = loadDoc(p("Quarterly Revenue"));
+    const { run } = firstRun(doc);
+    expect(insertBookmarkAroundSelection(doc, [segFor(run, 0, 9)], "Quarterly")).toBe(true);
+    expect(listBookmarks(doc)).toEqual(["Quarterly"]);
+    expect(insertBookmarkAroundSelection(doc, [segFor(run, 0, 9)], "Quarterly")).toBe(false);
+    const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml");
+    expect(xml).toMatch(/<w:bookmarkStart[^>]+w:name="Quarterly"[^>]*><w:r>[\s\S]*?<w:t[^>]*>Quarterly<\/w:t><\/w:r><w:bookmarkEnd/);
+  });
+
+  it("inserts a zero-length bookmark at an exact caret offset", () => {
+    const doc = loadDoc(p("HeadTail"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((content) => content.kind === "text")!.srcT!;
+    expect(insertBookmarkAt(doc, t, 4, "Middle")).toBe(true);
+    const xml = serializeXml(doc.editableRoots()[0]);
+    expect(xml).toMatch(/>Head<\/w:t><\/w:r><w:bookmarkStart[^>]+w:name="Middle"[^>]*><w:bookmarkEnd[^>]*><w:r><w:t[^>]*>Tail<\/w:t>/);
+  });
+
+  it("inserts live REF and PAGEREF fields only for existing bookmarks", () => {
+    const doc = loadDoc(p("Quarterly Revenue") + p("See "));
+    const first = firstRun(doc).run;
+    expect(insertBookmarkAroundSelection(doc, [segFor(first, 0, 17)], "Revenue")).toBe(true);
+    const second = firstRun(doc, 1).run;
+    const target = second.content.find((content) => content.kind === "text")!.srcT!;
+    expect(insertCrossReference(doc, target, target.text.length, "Missing", "text")).toBe(false);
+    expect(insertCrossReference(doc, target, target.text.length, "Revenue", "text")).toBe(true);
+    expect(insertCrossReference(doc, target, target.text.length, "Revenue", "page")).toBe(true);
+    const xml = serializeXml(doc.editableRoots()[0]);
+    expect(xml).toContain('w:instr=" REF Revenue \\h \\* MERGEFORMAT "');
+    expect(xml).toContain('w:instr=" PAGEREF Revenue \\h \\* MERGEFORMAT "');
+  });
 });
 
 describe("math editing", () => {
@@ -868,6 +1954,42 @@ describe("math editing", () => {
     const para3 = doc3.sections[0].blocks[0] as Paragraph;
     const math3 = (para3.children[0] as Run).content.find((c) => c.kind === "math");
     expect(math3 && math3.kind === "math" ? mathLinearOf(doc3, math3.src!) : "").toBe("a^2+b^2=c^2");
+  });
+
+  it("inserts a new editable OMML equation at the caret", () => {
+    const doc = loadDoc(p("BeforeAfter"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((content) => content.kind === "text")!.srcT!;
+    expect(insertMathAt(doc, t, 6, "x^2+y/2")).not.toBeNull();
+    const xml = serializeXml(doc.editableRoots()[0]);
+    expect(xml).toContain('xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"');
+    expect(xml).toMatch(/>Before<\/w:t><\/w:r><m:oMath>/);
+    expect(xml).toMatch(/<\/m:oMath><w:r><w:t[^>]*>After<\/w:t>/);
+
+    const reloaded = DocxDocument.load(doc.save());
+    const para = reloaded.sections[0].blocks[0] as Paragraph;
+    const math = para.children.flatMap((child) => child.type === "run" ? child.content : child.runs.flatMap((oneRun) => oneRun.content))
+      .find((content) => content.kind === "math");
+    expect(math && math.kind === "math" ? mathLinearOf(reloaded, math.src!) : "").toBe("x^2+y/2");
+  });
+
+  it("declares the math namespace on the edited header part", () => {
+    const doc = loadDoc(
+      `<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdH" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></w:sectPr>`,
+      {
+        "word/_rels/document.xml.rels": `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`,
+        "word/header1.xml": `<?xml version="1.0"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>`,
+      },
+    );
+    const header = doc.headers.get("rIdH");
+    const run = header?.blocks[0]?.type === "paragraph" ? header.blocks[0].children[0] : null;
+    if (!run || run.type !== "run") throw new Error("header run missing");
+    const t = run.content.find((content) => content.kind === "text")?.srcT;
+    if (!t) throw new Error("header text missing");
+    expect(insertMathAt(doc, t, t.text.length, "x^2")).not.toBeNull();
+    const saved = DocxDocument.load(doc.save()).pkg.text("word/header1.xml");
+    expect(saved).toContain('xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"');
+    expect(saved).toContain("<m:oMath>");
   });
 });
 

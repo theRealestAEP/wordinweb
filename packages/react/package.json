@@ -1,6 +1,6 @@
 {
   "name": "wordinweb",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "React component for high-fidelity DOCX viewing",
   "license": "MIT",
   "repository": {
@@ -37,11 +37,14 @@
     "wmf": "^1.0.2"
   },
   "peerDependencies": {
-    "react": ">=18"
+    "react": ">=18",
+    "react-dom": ">=18"
   },
   "devDependencies": {
     "@wordinweb/core": "0.1.0",
     "@types/react": "^18.3.0",
-    "react": "^18.3.0"
+    "@types/react-dom": "^18.3.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
   }
 }

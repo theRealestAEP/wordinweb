@@ -116,19 +116,36 @@ The object passed to `onReady`. Every command operates on the current selection 
 **Page layout**
 - `setPageLayout(patch, scope?)` — margins, page size, orientation, columns, page borders. `scope` = `"document"` (all sections) or `"section"` (the caret's).
 - `insertBreak("page" | "column" | "sectionNextPage" | "sectionContinuous")`.
+- `insertBlankPage()` — inserts a complete blank page at the caret.
+- `insertCoverPage({ title, subtitle?, author? })` — prepends an editable, styled cover page.
 - `setLineNumbering(patch, scope?)`, `getLineNumbering()`.
+- `openHeaderFooter("header" | "footer")`, `closeHeaderFooter()` — create or directly enter page header/footer editing; Escape closes it.
 
 **Tables**
 - `insertTable(rows, cols)`.
 - `tableOp(op)` — insert/delete row/column, merge/split cells, cell vertical align, cell shading, delete table.
 
 **Images**
-- `insertImage(file)` — inserts a `Blob`/`File` inline at the caret, clamped to the column width (TIFF/WMF/EMF are decoded to something the browser can paint).
+- `insertImage(file)` — inserts a raster image or editable SVG icon inline at the caret, clamped to the column width (TIFF/WMF/EMF are decoded to something the browser can paint).
+- `insertScreenshot()` — opens the browser screen/window/tab picker and inserts the captured frame as an editable PNG picture.
+- `insertModel3D(file, poster?)` — packages a GLB as a native Office 3D model with an editable poster fallback.
+- `insertOnlineVideo(url)` — inserts Word online-video metadata with a safe browser poster; double-click opens the validated HTTP(S) URL.
+- `insertEmbeddedObject(file, filename?)` — embeds any file as a native OLE Package; double-click safely downloads the original file in the browser.
 
-**Comments, footnotes & fields**
+**Comments, footnotes & Insert content**
 - `addComment(text)` — comment on the selection (`false` if nothing is selected).
 - `addFootnote(text)` — footnote at the caret.
 - `insertPageNumber("page" | "pageOfTotal")` — dynamic `PAGE` / `Page X of Y` field.
+- `insertField(instruction, cachedResult?)`, `insertDateTime("date" | "time", picture?)` — live Word fields.
+- `addBookmark(name)`, `listBookmarks()`, `insertCrossReference(name, "text" | "page")` — named bookmark targets and live `REF` / `PAGEREF` fields.
+- `insertEquation(linear)`, `insertSymbol(symbol)` — native editable OMML equations and Unicode symbols.
+- `insertShape(preset, text?)` — floating editable DrawingML rectangles, rounded rectangles, ellipses, diamonds, and text boxes.
+- `insertWordArt(text, preset?)` — editable DrawingML WordArt with plain, arch, wave, and chevron presets.
+- `insertChart(data)`, `updateSelectedChart(data)` — native editable ChartML with its embedded workbook.
+- `insertSmartArt(data)`, `updateSelectedSmartArt(data)` — native editable SmartArt data, layout, style, colors, and cached drawing parts.
+- `setDrawingTool({ kind: "pen", color, width } | { kind: "eraser", size } | { kind: "lasso" } | null)`, `getDrawingTool()` — draw, erase, or lasso-select movable DrawingML ink.
+- `arrangeObject(action)` — align the selected image, shape, or ink group to the page; rotate it 90°; or bring it to the front/send it to the back. Arrow keys nudge selected floating objects by 1px (`Shift` = 10px).
+- `setDropCap("drop" | "margin" | null, lines?)` — apply, change, or remove a native Word drop cap on the caret paragraph.
 
 **Suggesting mode (tracked changes)**
 - `setSuggesting(on, author?)` — when on, edits record as OOXML `w:ins`/`w:del` instead of mutating text directly, and the view switches to markup.
@@ -144,16 +161,17 @@ The object passed to `onReady`. Every command operates on the current selection 
 - `undo()`, `redo()`, `canUndo()`, `canRedo()`.
 - `save()` → edited `.docx` bytes (`Uint8Array`). Everything the model doesn't touch round-trips byte-for-byte.
 - `print()` — browser print dialog / save-as-PDF of the rendered pages.
-- `pageCount()`, `closeHeaderFooter()`, and `document` (the parsed `DocxDocument`).
+- `pageCount()` and `document` (the parsed `DocxDocument`).
 
 ### `DocxToolbar`
 
-A ready-made formatting toolbar for an editable `DocxView`. Ribbon-style tabs (Home / Insert / Layout) wired to the `api`.
+A ready-made formatting toolbar for an editable `DocxView`. Use `mode="simple"` for the basic Home editing strip or `mode="advanced"` for the full Home / Insert / Draw / Layout ribbon supported by the installed version.
 
 | Prop | Type | What it does |
 | --- | --- | --- |
 | `api` | `DocxViewApi \| null` | The api from `onReady`. |
 | `onSave` | `(bytes: Uint8Array) => void` | Adds a Download button; receives `api.save()` bytes. |
+| `mode` | `"simple" \| "advanced"` | Editing surface. Defaults to `"advanced"`; simple omits the Insert, Draw, and Layout ribbons. |
 | `features` | `Partial<Record<ToolbarFeature, boolean>>` | Per-group toggles; every group defaults on. Set one `false` to hide it (e.g. `{ table: false, image: false }`). |
 | `className` | `string` | Class on the toolbar root — handy as a scope for CSS-variable overrides. |
 | `style` | `React.CSSProperties` | Inline overrides merged onto the toolbar root. |

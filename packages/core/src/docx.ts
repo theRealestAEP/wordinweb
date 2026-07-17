@@ -12,6 +12,7 @@ import {
   Run,
   RunProps,
   Section,
+  SmartArtData,
   Styles,
   Theme,
 } from "./model.js";
@@ -26,10 +27,18 @@ import {
   tableCondOrder,
 } from "./parse/styles.js";
 import { parseNumbering } from "./parse/numbering.js";
-import { parseBody, parseBlocks, DocParseContext } from "./parse/document.js";
+import { parseBody, parseBlocks, parseParagraph, DocParseContext } from "./parse/document.js";
 import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
 import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
+import { extractOlePackage } from "./parse/ole.js";
+import {
+  buildSmartArtColorsXml,
+  buildSmartArtDataXml,
+  buildSmartArtDrawingXml,
+  buildSmartArtLayoutXml,
+  buildSmartArtStyleXml,
+} from "./edit/smartart.js";
 
 const REL_TYPE_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 
@@ -66,8 +75,15 @@ export class DocxDocument {
   /** Changes whenever refresh() rebuilds the parsed model. Plain in-place text
    * edits can keep this stable so incremental layout reuses model-only caches. */
   private _modelVersion = 0;
+  private _packageResourceVersion = 0;
   get modelVersion(): number {
     return this._modelVersion;
+  }
+
+  /** Invalidate layout derived from related parts such as ChartML. */
+  markPackageResourceChanged(): void {
+    this._packageResourceVersion++;
+    this._layoutGlobalSig = null;
   }
   readonly pkg: Package;
   readonly theme: Theme;
@@ -142,6 +158,11 @@ export class DocxDocument {
 
   /** Retained XML roots — source of truth for editing and save(). */
   private readonly docPart: string;
+  /** Retained settings.xml tree. A synthetic empty root keeps history root
+   * indices stable for documents that did not originally contain the part. */
+  private readonly settingsPart: string;
+  private readonly settingsRoot: XmlElement;
+  private settingsDirty = false;
   /** Parsed document.xml root (read-only outside the class; the layout engine
    * scans it for incremental-reuse eligibility, tests walk it). */
   readonly docRoot: XmlElement;
@@ -152,6 +173,10 @@ export class DocxDocument {
   private readonly relsPath: string;
   private relsRoot: XmlElement | null = null;
   private contentTypesRoot: XmlElement | null = null;
+  /** Canonical XML as first parsed from each always-modeled package part.
+   * If the retained tree still matches on save, keep the part's original
+   * bytes instead of replacing producer formatting such as CRLF line ends. */
+  private readonly originalModeledXml = new Map<string, string>();
   private nextDocPrId = 1000;
 
   /** Transient layout state: set by the engine while laying out a docGrid
@@ -168,7 +193,14 @@ export class DocxDocument {
     this.docPart = docPart;
     const docDir = docPart.slice(0, docPart.lastIndexOf("/") + 1);
 
-    const settings = this.readXmlOptional(docDir + "settings.xml");
+    this.settingsPart = docDir + "settings.xml";
+    this.settingsRoot = this.readXmlOptional(this.settingsPart) ?? {
+      name: "w:settings",
+      attrs: { "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main" },
+      children: [],
+      text: "",
+    };
+    const settings = this.settingsRoot;
     const bidiThemeLanguage = attr(child(settings, "themeFontLang"), "bidi");
     const themeXml = this.readXmlOptional(docDir + "theme/theme1.xml");
     this.theme = parseTheme(themeXml, bidiThemeLanguage);
@@ -188,11 +220,15 @@ export class DocxDocument {
     this.relsPath = relsPathFor(docPart);
     this.relsRoot = this.readXmlOptional(this.relsPath) ?? null;
     this.contentTypesRoot = this.readXmlOptional("[Content_Types].xml") ?? null;
-    this.documentRels = parseRelationships(this.relsRoot ?? undefined, docPart);
+    if (this.relsRoot) this.rememberOriginalXml(this.relsPath, this.relsRoot);
+    if (this.contentTypesRoot) this.rememberOriginalXml("[Content_Types].xml", this.contentTypesRoot);
 
     const docRoot = this.readXmlOptional(docPart);
     if (!docRoot) throw new Error(`Missing ${docPart} in package`);
     this.docRoot = docRoot;
+    this.rememberOriginalXml(docPart, docRoot);
+    this.repairLegacyWordInWebObjects();
+    this.documentRels = parseRelationships(this.relsRoot ?? undefined, docPart);
 
     if (settings) {
       this.evenAndOddHeaders = onOff(child(settings, "evenAndOddHeaders")) ?? false;
@@ -238,6 +274,7 @@ export class DocxDocument {
       const root = this.readXmlOptional(rel.target);
       if (!root) continue;
       const partRels = parseRelationships(this.readXmlOptional(relsPathFor(rel.target)), rel.target);
+      this.rememberOriginalXml(rel.target, root);
       this.hfParts.push({ relId: rel.id, target: rel.target, root, isHeader, rels: partRels });
     }
 
@@ -263,6 +300,140 @@ export class DocxDocument {
     }
 
     this.refresh();
+  }
+
+  /** Repair only objects emitted by older WordInWeb builds that Word rejects. */
+  private repairLegacyWordInWebObjects(): void {
+    const raw = this.pkg.raw();
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    const all = (root: XmlElement, name: string): XmlElement[] => {
+      const found = localName(root.name) === name ? [root] : [];
+      for (const item of root.children) found.push(...all(item, name));
+      return found;
+    };
+    const first = (root: XmlElement, name: string): XmlElement | undefined => all(root, name)[0];
+    const setAttr = (element: XmlElement, name: string, value: string): void => {
+      const key = Object.keys(element.attrs).find((item) => localName(item) === name) ?? name;
+      element.attrs[key] = value;
+    };
+    const element = (name: string, attrs: Record<string, string> = {}, children: XmlElement[] = [], text = ""): XmlElement => ({
+      name, attrs, children, text,
+    });
+
+    // Old WordInWeb SmartArt used non-schema connector ids (c1/c2/...) and
+    // negative/zero cached extents. The urn signature is ours, so rebuilding
+    // only these parts cannot touch third-party SmartArt.
+    for (const part of Object.keys(raw)) {
+      const match = new RegExp(`^${docDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}diagrams/data(\\d+)\\.xml$`).exec(part);
+      if (!match) continue;
+      const dataRoot = this.readXmlOptional(part);
+      if (!dataRoot) continue;
+      const typeId = attr(first(dataRoot, "prSet"), "loTypeId") ?? "";
+      const layout = typeId.startsWith("urn:wordinweb:smartart:") ? typeId.slice("urn:wordinweb:smartart:".length) : "";
+      if (layout !== "list" && layout !== "process" && layout !== "hierarchy" && layout !== "cycle") continue;
+      const ptList = first(dataRoot, "ptLst");
+      const items = ptList
+        ? ptList.children
+          .filter((item) => localName(item.name) === "pt" && attr(item, "type") !== "doc")
+          .map((item) => all(item, "t").find((text) => text.text)?.text ?? "")
+          .filter(Boolean)
+        : [];
+      if (!items.length) continue;
+      const drawingRelId = attr(first(dataRoot, "dataModelExt"), "relId");
+      if (!drawingRelId) continue;
+      const n = match[1];
+      const drawingPart = `${docDir}diagrams/drawing${n}.xml`;
+      const drawingRoot = this.readXmlOptional(drawingPart);
+      const modelIds = [
+        ...all(dataRoot, "pt").map((item) => attr(item, "modelId") ?? ""),
+        ...all(dataRoot, "cxn").map((item) => attr(item, "modelId") ?? ""),
+      ];
+      const legacyConnectionId = all(dataRoot, "cxn").some((item) => /^c\d+$/.test(attr(item, "modelId") ?? ""));
+      const invalidExtent = !!drawingRoot && all(drawingRoot, "ext").some(
+        (item) => Number(attr(item, "cx")) <= 0 || Number(attr(item, "cy")) <= 0,
+      );
+      const staleShapeId = !!drawingRoot && all(drawingRoot, "sp").some(
+        (item) => !modelIds.includes(attr(item, "modelId") ?? ""),
+      );
+      if (!legacyConnectionId && !invalidExtent && !staleShapeId) continue;
+      const data: SmartArtData = { layout, items };
+      raw[part] = strToU8(buildSmartArtDataXml(data, drawingRelId));
+      raw[`${docDir}diagrams/layout${n}.xml`] = strToU8(buildSmartArtLayoutXml(data));
+      raw[`${docDir}diagrams/quickStyle${n}.xml`] = strToU8(buildSmartArtStyleXml());
+      raw[`${docDir}diagrams/colors${n}.xml`] = strToU8(buildSmartArtColorsXml());
+      raw[drawingPart] = strToU8(buildSmartArtDrawingXml(data));
+    }
+
+    if (!this.relsRoot || !this.contentTypesRoot) return;
+    let migrated = 0;
+    for (const object of all(this.docRoot, "object")) {
+      const ole = first(object, "OLEObject");
+      const imageData = first(object, "imagedata");
+      const filename = attr(imageData, "title") ?? "";
+      if (!ole || attr(ole, "ProgID") !== "Package" || !filename.toLowerCase().endsWith(".docx")) continue;
+      const relId = attr(ole, "id");
+      const rel = this.relsRoot.children.find((item) => item.attrs.Id === relId);
+      if (!rel || !rel.attrs.Type?.endsWith("/oleObject") || !rel.attrs.Target?.startsWith("embeddings/")) continue;
+      const oldPart = `${docDir}${rel.attrs.Target}`;
+      const packaged = raw[oldPart] ? extractOlePackage(raw[oldPart]) : null;
+      if (!packaged || !packaged.filename.toLowerCase().endsWith(".docx") ||
+        packaged.data[0] !== 0x50 || packaged.data[1] !== 0x4b) continue;
+
+      let index = 1;
+      const packageName = () => `Microsoft_Word_Document${index === 1 ? "" : index}.docx`;
+      while (raw[`${docDir}embeddings/${packageName()}`]) index++;
+      const target = `embeddings/${packageName()}`;
+      const newPart = `${docDir}${target}`;
+      raw[newPart] = packaged.data;
+      delete raw[oldPart];
+      rel.attrs.Type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package";
+      rel.attrs.Target = target;
+      this.contentTypesRoot.children = this.contentTypesRoot.children.filter(
+        (item) => item.attrs.PartName !== `/${oldPart}`,
+      );
+      if (!this.contentTypesRoot.children.some(
+        (item) => localName(item.name) === "Default" && item.attrs.Extension?.toLowerCase() === "docx",
+      )) {
+        this.contentTypesRoot.children.unshift(element("Default", {
+          Extension: "docx",
+          ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }));
+      }
+
+      const vmlId = 1025 + migrated++;
+      const shapeTypeId = `_x0000_t${vmlId}`;
+      const shapeId = `_x0000_i${vmlId}`;
+      const shapeType = first(object, "shapetype");
+      const shape = first(object, "shape");
+      if (shapeType) {
+        shapeType.attrs = {
+          id: shapeTypeId,
+          coordsize: "21600,21600",
+          "o:spt": "75",
+          "o:preferrelative": "t",
+          path: "m@4@5l@4@11@9@11@9@5xe",
+          filled: "f",
+          stroked: "f",
+        };
+        shapeType.children = [
+          element("v:stroke", { joinstyle: "miter" }),
+          element("v:formulas", {}, [
+            "if lineDrawn pixelLineWidth 0", "sum @0 1 0", "sum 0 0 @1", "prod @2 1 2",
+            "prod @3 21600 pixelWidth", "prod @3 21600 pixelHeight", "sum @0 0 1", "prod @6 1 2",
+            "prod @7 21600 pixelWidth", "sum @8 21600 0", "prod @7 21600 pixelHeight", "sum @10 21600 0",
+          ].map((eqn) => element("v:f", { eqn }))),
+          element("v:path", { "o:extrusionok": "f", gradientshapeok: "t", "o:connecttype": "rect" }),
+          element("o:lock", { "v:ext": "edit", aspectratio: "t" }),
+        ];
+      }
+      if (shape) {
+        setAttr(shape, "id", shapeId);
+        setAttr(shape, "type", `#${shapeTypeId}`);
+      }
+      setAttr(ole, "ProgID", "Word.Document.12");
+      setAttr(ole, "ShapeID", shapeId);
+      if (!first(ole, "FieldCodes")) ole.children.push(element("o:FieldCodes", {}, [], "\\s"));
+    }
   }
 
   /**
@@ -292,6 +463,7 @@ export class DocxDocument {
         String(this.defaultTabStop),
         String(this.compatibilityMode),
         String(this.charGridEa),
+        String(this._packageResourceVersion),
         this.revisionView,
         this.styles.defaultRPr.font ?? "",
       ];
@@ -308,19 +480,31 @@ export class DocxDocument {
 
   refresh(): void {
     this._layoutGlobalSig = null;
+    (this as { mirrorMargins: boolean }).mirrorMargins = onOff(child(this.settingsRoot, "mirrorMargins")) ?? false;
     const body = child(this.docRoot, "body");
     if (!body) throw new Error("document.xml has no w:body");
     // Some content (SmartArt cached drawings) lives in parts reachable only
     // through relationship indirection at parse time.
     const readPart = (part: string) => this.readXmlOptional(part);
     const refBookmarks = { open: new Map<string, Run[]>(), byName: new Map<string, Run[]>() };
-    const ctx: DocParseContext = { ...this.ctxBase, rels: this.documentRels, readPart, refBookmarks };
+    const ctx: DocParseContext = {
+      ...this.ctxBase,
+      rels: this.documentRels,
+      readPart,
+      refBookmarks,
+      independentTextboxStories: true,
+    };
     this.sections = parseBody(body, ctx);
     this.refBookmarks = refBookmarks.byName;
     this.headers.clear();
     this.footers.clear();
     for (const part of this.hfParts) {
-      const partCtx: DocParseContext = { ...this.ctxBase, rels: part.rels, readPart };
+      const partCtx: DocParseContext = {
+        ...this.ctxBase,
+        rels: part.rels,
+        readPart,
+        independentTextboxStories: true,
+      };
       const hf: HeaderFooter = { blocks: parseBlocks(part.root, partCtx) };
       (part.isHeader ? this.headers : this.footers).set(part.relId, hf);
     }
@@ -336,6 +520,63 @@ export class DocxDocument {
       for (const [id, blocks] of notes) this.footnotes.set(id, blocks);
     }
     this._modelVersion++;
+  }
+
+  /**
+   * Reparse the two direct body paragraphs created by Enter without rebuilding
+   * the complete document model. This deliberately covers only the simple
+   * single-section body case used by incremental pagination; structural
+   * containers, revisions, bookmarks, and section breaks use refresh().
+   */
+  reparseDirectBodyParagraphSplit(
+    beforeSource: XmlElement,
+    afterSource: XmlElement,
+  ): { before: Paragraph; after: Paragraph } | null {
+    if (this.sections.length !== 1) return null;
+    const body = child(this.docRoot, "body");
+    if (!body) return null;
+    const beforeIndex = body.children.indexOf(beforeSource);
+    if (beforeIndex < 0 || body.children[beforeIndex + 1] !== afterSource) return null;
+    if (localName(beforeSource.name) !== "p" || localName(afterSource.name) !== "p") return null;
+
+    const blocks = this.sections[0].blocks;
+    if (blocks.some((block) => block.src === afterSource)) return null;
+    const blockIndex = blocks.findIndex((block) => block.type === "paragraph" && block.src === beforeSource);
+    if (blockIndex < 0) return null;
+    const old = blocks[blockIndex];
+    if (old.type !== "paragraph" || old.sectionBreak) return null;
+
+    const unsafe = (element: XmlElement): boolean => {
+      const name = localName(element.name);
+      if (
+        name === "sectPr" ||
+        name === "bookmarkStart" ||
+        name === "bookmarkEnd" ||
+        name === "fldChar" ||
+        name === "instrText" ||
+        name === "fldSimple" ||
+        name === "sdt" ||
+        name === "ins" ||
+        name === "del" ||
+        name.startsWith("move") ||
+        name.endsWith("PrChange")
+      ) return true;
+      return element.children.some(unsafe);
+    };
+    if (unsafe(beforeSource) || unsafe(afterSource)) return null;
+
+    const readPart = (part: string) => this.readXmlOptional(part);
+    const ctx: DocParseContext = {
+      ...this.ctxBase,
+      rels: this.documentRels,
+      readPart,
+      independentTextboxStories: true,
+    };
+    const before = parseParagraph(beforeSource, ctx);
+    const after = parseParagraph(afterSource, ctx);
+    if (before.revisionHidden || after.revisionHidden || before.sectionBreak || after.sectionBreak) return null;
+    blocks.splice(blockIndex, 1, before, after);
+    return { before, after };
   }
 
   private deriveComments(): DocComment[] {
@@ -796,8 +1037,6 @@ export class DocxDocument {
     return map;
   }
 
-  /** The mutable XML roots (document body, header/footer parts, comments).
-   * The comments root is last so history snapshot indices stay stable. */
   /** Flag the footnotes part dirty when `t` lives inside it, so save()
    * re-serializes footnotes.xml. Called by the editor after a text edit; a
    * no-op for body/header/footer targets. */
@@ -811,12 +1050,71 @@ export class DocxDocument {
     if (contains(this.footnotesRoot)) this.footnotesDirty = true;
   }
 
+  /** The mutable XML roots (document body, related modeled parts, settings).
+   * settingsRoot is always second and always present so its history snapshot
+   * index stays stable even when optional related roots are created later. */
   editableRoots(): XmlElement[] {
-    const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
+    const roots = [this.docRoot, this.settingsRoot, ...this.hfParts.map((p) => p.root)];
     if (this.footnotesRoot) roots.push(this.footnotesRoot);
     if (this.commentsRoot) roots.push(this.commentsRoot);
     if (this.commentsExtRoot) roots.push(this.commentsExtRoot);
     return roots;
+  }
+
+  /** Toggle the document-global facing-page margin mode in settings.xml. */
+  setMirrorMargins(enabled: boolean): void {
+    this.settingsRoot.children = this.settingsRoot.children.filter((c) => localName(c.name) !== "mirrorMargins");
+    if (enabled) {
+      // CT_Settings is a sequence. mirrorMargins follows saveFormsData and
+      // precedes alignBordersAndEdges/proofState/defaultTabStop/compat. Insert
+      // before the first child that is not one of its schema predecessors so
+      // Word never has to repair settings.xml.
+      const beforeMirror = new Set([
+        "writeProtection", "view", "zoom", "removePersonalInformation", "removeDateAndTime",
+        "doNotDisplayPageBoundaries", "displayBackgroundShape", "printPostScriptOverText",
+        "printFractionalCharacterWidth", "printFormsData", "embedTrueTypeFonts",
+        "embedSystemFonts", "saveSubsetFonts", "saveFormsData",
+      ]);
+      const index = this.settingsRoot.children.findIndex((c) => !beforeMirror.has(localName(c.name)));
+      const mirror = { name: "w:mirrorMargins", attrs: {}, children: [], text: "" };
+      this.settingsRoot.children.splice(index === -1 ? this.settingsRoot.children.length : index, 0, mirror);
+    }
+
+    const rels = this.ensureRelsRoot();
+    const settingsRelType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings";
+    if (!rels.children.some((r) => r.attrs["Type"]?.endsWith("/settings"))) {
+      let maxId = 0;
+      for (const r of rels.children) {
+        const match = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+        if (match) maxId = Math.max(maxId, parseInt(match[1], 10));
+      }
+      rels.children.push({
+        name: "Relationship",
+        attrs: {
+          Id: `rId${maxId + 1}`,
+          Type: settingsRelType,
+          Target: this.settingsPart.slice(this.docPart.lastIndexOf("/") + 1),
+        },
+        children: [],
+        text: "",
+      });
+    }
+    if (this.contentTypesRoot) {
+      const partName = `/${this.settingsPart}`;
+      if (!this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) {
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: {
+            PartName: partName,
+            ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
+          },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    this.settingsDirty = true;
+    (this as { mirrorMargins: boolean }).mirrorMargins = enabled;
   }
 
   /**
@@ -854,11 +1152,35 @@ export class DocxDocument {
    * XML parts we model are re-serialized; every other part round-trips
    * byte-for-byte.
    */
+  private rememberOriginalXml(part: string, root: XmlElement): void {
+    this.originalModeledXml.set(part, serializeXml(root, true));
+  }
+
+  private writeModeledXml(files: Record<string, Uint8Array>, part: string, root: XmlElement): void {
+    const xml = serializeXml(root, true);
+    if (xml !== this.originalModeledXml.get(part)) files[part] = strToU8(xml);
+  }
+
   save(): Uint8Array {
     const files: Record<string, Uint8Array> = { ...this.pkg.raw() };
-    files[this.docPart] = strToU8(serializeXml(this.docRoot, true));
+    if (files["docProps/custom.xml"] && this.contentTypesRoot && !this.contentTypesRoot.children.some(
+      (item) => localName(item.name) === "Override" && item.attrs.PartName === "/docProps/custom.xml",
+    )) {
+      const prefixEnd = this.contentTypesRoot.name.indexOf(":") + 1;
+      const prefix = prefixEnd > 0 ? this.contentTypesRoot.name.slice(0, prefixEnd) : "";
+      this.contentTypesRoot.children.push({
+        name: `${prefix}Override`,
+        attrs: {
+          PartName: "/docProps/custom.xml",
+          ContentType: "application/vnd.openxmlformats-officedocument.custom-properties+xml",
+        },
+        children: [],
+        text: "",
+      });
+    }
+    this.writeModeledXml(files, this.docPart, this.docRoot);
     for (const part of this.hfParts) {
-      files[part.target] = strToU8(serializeXml(part.root, true));
+      this.writeModeledXml(files, part.target, part.root);
     }
     if (this.commentsDirty && this.commentsRoot && this.commentsPart) {
       files[this.commentsPart] = strToU8(serializeXml(this.commentsRoot, true));
@@ -875,8 +1197,9 @@ export class DocxDocument {
     if (this.footnotesDirty && this.footnotesRoot && this.footnotesPart) {
       files[this.footnotesPart] = strToU8(serializeXml(this.footnotesRoot, true));
     }
-    if (this.relsRoot) files[this.relsPath] = strToU8(serializeXml(this.relsRoot, true));
-    if (this.contentTypesRoot) files["[Content_Types].xml"] = strToU8(serializeXml(this.contentTypesRoot, true));
+    if (this.settingsDirty) files[this.settingsPart] = strToU8(serializeXml(this.settingsRoot, true));
+    if (this.relsRoot) this.writeModeledXml(files, this.relsPath, this.relsRoot);
+    if (this.contentTypesRoot) this.writeModeledXml(files, "[Content_Types].xml", this.contentTypesRoot);
     return zipSync(files);
   }
 
@@ -995,7 +1318,7 @@ export class DocxDocument {
 
     // Content type default for the extension
     const MIME: Record<string, string> = {
-      png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+      png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", svg: "image/svg+xml", webp: "image/webp",
     };
     if (this.contentTypesRoot && MIME[ext]) {
       const has = this.contentTypesRoot.children.some(
@@ -1011,6 +1334,242 @@ export class DocxDocument {
       }
     }
     return relId;
+  }
+
+  /** Add a GLB model part and its Office 2019 model3d relationship. */
+  addModel3DResource(bytes: Uint8Array): { relId: string; part: string } {
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    let n = 1;
+    while (this.pkg.has(`${docDir}media/model3d${n}.glb`)) n++;
+    const part = `${docDir}media/model3d${n}.glb`;
+    this.pkg.raw()[part] = bytes;
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const rel of rels.children) {
+      const match = /^rId(\d+)$/.exec(rel.attrs.Id ?? "");
+      if (match) maxId = Math.max(maxId, Number(match[1]));
+    }
+    const relId = `rId${maxId + 1}`;
+    rels.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: relId,
+        Type: "http://schemas.microsoft.com/office/2017/06/relationships/model3d",
+        Target: `media/model3d${n}.glb`,
+      },
+      children: [],
+      text: "",
+    });
+    this.documentRels.set(relId, { id: relId, type: "model3d", target: part, external: false });
+    if (this.contentTypesRoot && !this.contentTypesRoot.children.some(
+      (item) => localName(item.name) === "Default" && item.attrs.Extension?.toLowerCase() === "glb",
+    )) {
+      this.contentTypesRoot.children.unshift({
+        name: "Default",
+        attrs: { Extension: "glb", ContentType: "model/gltf-binary" },
+        children: [],
+        text: "",
+      });
+    }
+    return { relId, part };
+  }
+
+  /** Add an OLE package part used by a Word w:object. */
+  addEmbeddedObjectResource(bytes: Uint8Array): { relId: string; part: string } {
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    let n = 1;
+    while (this.pkg.has(`${docDir}embeddings/oleObject${n}.bin`)) n++;
+    const part = `${docDir}embeddings/oleObject${n}.bin`;
+    this.pkg.raw()[part] = bytes;
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const rel of rels.children) {
+      const match = /^rId(\d+)$/.exec(rel.attrs.Id ?? "");
+      if (match) maxId = Math.max(maxId, Number(match[1]));
+    }
+    const relId = `rId${maxId + 1}`;
+    rels.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: relId,
+        Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject",
+        Target: `embeddings/oleObject${n}.bin`,
+      },
+      children: [],
+      text: "",
+    });
+    this.documentRels.set(relId, { id: relId, type: "oleObject", target: part, external: false });
+    const partName = `/${part}`;
+    if (this.contentTypesRoot && !this.contentTypesRoot.children.some((item) => item.attrs.PartName === partName)) {
+      this.contentTypesRoot.children.push({
+        name: "Override",
+        attrs: { PartName: partName, ContentType: "application/vnd.openxmlformats-officedocument.oleObject" },
+        children: [],
+        text: "",
+      });
+    }
+    return { relId, part };
+  }
+
+  /** Add a DOCX package embedded as an activatable Word.Document.12 object. */
+  addEmbeddedWordDocumentResource(bytes: Uint8Array): { relId: string; part: string } {
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    let n = 1;
+    const name = () => `Microsoft_Word_Document${n === 1 ? "" : n}.docx`;
+    while (this.pkg.has(`${docDir}embeddings/${name()}`)) n++;
+    const part = `${docDir}embeddings/${name()}`;
+    this.pkg.raw()[part] = bytes;
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const rel of rels.children) {
+      const match = /^rId(\d+)$/.exec(rel.attrs.Id ?? "");
+      if (match) maxId = Math.max(maxId, Number(match[1]));
+    }
+    const relId = `rId${maxId + 1}`;
+    rels.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: relId,
+        Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package",
+        Target: `embeddings/${name()}`,
+      },
+      children: [],
+      text: "",
+    });
+    this.documentRels.set(relId, { id: relId, type: "package", target: part, external: false });
+    if (this.contentTypesRoot && !this.contentTypesRoot.children.some(
+      (item) => localName(item.name) === "Default" && item.attrs.Extension?.toLowerCase() === "docx",
+    )) {
+      this.contentTypesRoot.children.unshift({
+        name: "Default",
+        attrs: {
+          Extension: "docx",
+          ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        },
+        children: [],
+        text: "",
+      });
+    }
+    return { relId, part };
+  }
+
+  /** Add a native ChartML part and its embedded editable workbook. */
+  addChartResource(chartXml: string, workbook: Uint8Array): { relId: string; part: string } {
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    let n = 1;
+    while (this.pkg.has(`${docDir}charts/chart${n}.xml`) || this.pkg.has(`${docDir}embeddings/Microsoft_Excel_Worksheet${n}.xlsx`)) n++;
+    const part = `${docDir}charts/chart${n}.xml`;
+    const workbookPart = `${docDir}embeddings/Microsoft_Excel_Worksheet${n}.xlsx`;
+    this.pkg.raw()[part] = strToU8(chartXml);
+    this.pkg.raw()[workbookPart] = workbook;
+    this.pkg.raw()[relsPathFor(part)] = strToU8(
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="../embeddings/Microsoft_Excel_Worksheet${n}.xlsx"/>` +
+      `</Relationships>`,
+    );
+
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const rel of rels.children) {
+      const match = /^rId(\d+)$/.exec(rel.attrs.Id ?? "");
+      if (match) maxId = Math.max(maxId, Number(match[1]));
+    }
+    const relId = `rId${maxId + 1}`;
+    rels.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: relId,
+        Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+        Target: `charts/chart${n}.xml`,
+      },
+      children: [],
+      text: "",
+    });
+    this.documentRels.set(relId, { id: relId, type: "chart", target: part, external: false });
+
+    const overrides = [
+      [`/${part}`, "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"],
+      [`/${workbookPart}`, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+    ];
+    for (const [partName, contentType] of overrides) {
+      if (this.contentTypesRoot && !this.contentTypesRoot.children.some((item) => item.attrs.PartName === partName)) {
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: { PartName: partName, ContentType: contentType },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    return { relId, part };
+  }
+
+  /** Add the SmartArt data/layout/style/color parts and its cached diagram drawing. */
+  addSmartArtResources(
+    layoutXml: string,
+    styleXml: string,
+    colorsXml: string,
+    drawingXml: string,
+    dataXml: (drawingRelId: string) => string,
+  ): { dataRelId: string; layoutRelId: string; styleRelId: string; colorsRelId: string; drawingRelId: string } {
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    let n = 1;
+    while (
+      this.pkg.has(`${docDir}diagrams/data${n}.xml`) ||
+      this.pkg.has(`${docDir}diagrams/layout${n}.xml`) ||
+      this.pkg.has(`${docDir}diagrams/quickStyle${n}.xml`) ||
+      this.pkg.has(`${docDir}diagrams/colors${n}.xml`) ||
+      this.pkg.has(`${docDir}diagrams/drawing${n}.xml`)
+    ) n++;
+    const parts = {
+      data: `${docDir}diagrams/data${n}.xml`,
+      layout: `${docDir}diagrams/layout${n}.xml`,
+      style: `${docDir}diagrams/quickStyle${n}.xml`,
+      colors: `${docDir}diagrams/colors${n}.xml`,
+      drawing: `${docDir}diagrams/drawing${n}.xml`,
+    };
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const rel of rels.children) {
+      const match = /^rId(\d+)$/.exec(rel.attrs.Id ?? "");
+      if (match) maxId = Math.max(maxId, Number(match[1]));
+    }
+    const dataRelId = `rId${maxId + 1}`;
+    const layoutRelId = `rId${maxId + 2}`;
+    const styleRelId = `rId${maxId + 3}`;
+    const colorsRelId = `rId${maxId + 4}`;
+    const drawingRelId = `rId${maxId + 5}`;
+    const related = [
+      [dataRelId, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData", `diagrams/data${n}.xml`, parts.data],
+      [layoutRelId, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout", `diagrams/layout${n}.xml`, parts.layout],
+      [styleRelId, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramQuickStyle", `diagrams/quickStyle${n}.xml`, parts.style],
+      [colorsRelId, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramColors", `diagrams/colors${n}.xml`, parts.colors],
+      [drawingRelId, "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing", `diagrams/drawing${n}.xml`, parts.drawing],
+    ] as const;
+    for (const [id, type, target, part] of related) {
+      rels.children.push({ name: "Relationship", attrs: { Id: id, Type: type, Target: target }, children: [], text: "" });
+      this.documentRels.set(id, { id, type, target: part, external: false });
+    }
+    this.pkg.raw()[parts.layout] = strToU8(layoutXml);
+    this.pkg.raw()[parts.style] = strToU8(styleXml);
+    this.pkg.raw()[parts.colors] = strToU8(colorsXml);
+    this.pkg.raw()[parts.drawing] = strToU8(drawingXml);
+    this.pkg.raw()[parts.data] = strToU8(dataXml(drawingRelId));
+
+    const overrides = [
+      [`/${parts.data}`, "application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml"],
+      [`/${parts.layout}`, "application/vnd.openxmlformats-officedocument.drawingml.diagramLayout+xml"],
+      [`/${parts.style}`, "application/vnd.openxmlformats-officedocument.drawingml.diagramStyle+xml"],
+      [`/${parts.colors}`, "application/vnd.openxmlformats-officedocument.drawingml.diagramColors+xml"],
+      [`/${parts.drawing}`, "application/vnd.ms-office.drawingml.diagramDrawing+xml"],
+    ];
+    for (const [partName, contentType] of overrides) {
+      if (this.contentTypesRoot && !this.contentTypesRoot.children.some((item) => item.attrs.PartName === partName)) {
+        this.contentTypesRoot.children.push({ name: "Override", attrs: { PartName: partName, ContentType: contentType }, children: [], text: "" });
+      }
+    }
+    return { dataRelId, layoutRelId, styleRelId, colorsRelId, drawingRelId };
   }
 
   static load(data: ArrayBuffer | Uint8Array): DocxDocument {

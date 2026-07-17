@@ -32,9 +32,13 @@ import { emuToPx, ptToPx, twipsToPx } from "../units.js";
 import { ParseContext, parseBorder, parseParaProps, parseRunProps, parseShading } from "./properties.js";
 import { parseSectionProps, defaultSectionProps } from "./section.js";
 import { Relationships, parseRelationships, relsPathFor } from "./rels.js";
+import { parseChartPart } from "./chart.js";
+import { parseSmartArtParts } from "./smartart.js";
 
 export interface DocParseContext extends ParseContext {
   rels: Relationships;
+  /** Text boxes parsed from a header/footer part edit as independent stories. */
+  independentTextboxStories?: boolean;
   /** Read another package part's XML (SmartArt cached drawings live in
    * word/diagrams/drawing*.xml, reachable only through the data part). */
   readPart?: (part: string) => XmlElement | undefined;
@@ -259,7 +263,7 @@ function ensureCaretAnchor(p: XmlElement, para: Paragraph): void {
   }
   const w = p.name.includes(":") ? p.name.slice(0, p.name.indexOf(":") + 1) : "";
   const tEl: XmlElement = { name: `${w}t`, attrs: { "xml:space": "preserve" }, children: [], text: "" };
-  const rEl: XmlElement = { name: `${w}r`, attrs: {}, children: [tEl], text: "" };
+  const rEl: XmlElement = { name: `${w}r`, attrs: {}, children: [tEl], text: "", omitWhenEmpty: true };
   // Insert after pPr so the caret sits at the paragraph start (before any
   // break/image), letting typed text land on the current page.
   const pPrIdx = p.children.findIndex((c) => localName(c.name) === "pPr");
@@ -959,8 +963,11 @@ function tagDrawingSource(
   if (img.kind === "image") img.srcDrawing = el;
   else if (img.kind === "drawing") img.srcDrawing = el;
   else if (img.kind === "anchor") {
-    const sh = img.shape as { srcDrawing?: XmlElement };
+    const sh = img.shape as { srcDrawing?: XmlElement; wordArt?: boolean; z?: number };
     sh.srcDrawing = el;
+    const anchor = child(el, "anchor");
+    if ((attr(child(anchor, "docPr"), "name") ?? "").startsWith("WordArt ")) sh.wordArt = true;
+    if (anchor) sh.z = intAttr(anchor, "relativeHeight") ?? 0;
   }
 }
 
@@ -980,6 +987,10 @@ function parseDrawing(
   const lines: DrawingLine[] = [];
   const paths: DrawingPath[] = [];
   const texts: DrawingTextShape[] = [];
+  let chart: DrawingContent["chart"];
+  let smartArt: DrawingContent["smartArt"];
+  let model3D: ImageContent["model3D"];
+  let webVideo: ImageContent["webVideo"];
   // First wps shape carrying a text box (DrawingML wps:txbx). Resolved after
   // the walk into a floating ShapeTextbox honoring the anchor's wrap mode.
   let textboxEl: XmlElement | undefined;
@@ -1021,6 +1032,19 @@ function parseDrawing(
       const blip = findDescendant(el, "blip");
       const rid = blip ? (attr(blip, "embed") ?? attr(blip, "link")) : undefined;
       const rel = rid ? ctx.rels.get(rid) : undefined;
+      const webVideoPr = blip ? findDescendant(blip, "webVideoPr") : undefined;
+      if (webVideoPr) {
+        const embeddedHtml = attr(webVideoPr, "embeddedHtml") ?? "";
+        const src = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(embeddedHtml)?.[1];
+        if (src) {
+          webVideo = {
+            url: src,
+            embeddedHtml,
+            width: intAttr(webVideoPr, "w") ?? 640,
+            height: intAttr(webVideoPr, "h") ?? 360,
+          };
+        }
+      }
       if (rel && !rel.external) {
         const x = ox + (intAttr(off, "x") ?? 0) * sx;
         const y = oy + (intAttr(off, "y") ?? 0) * sy;
@@ -1062,7 +1086,12 @@ function parseDrawing(
       const blip = raster && findDescendant(raster, "blip");
       const rid = blip ? (attr(blip, "embed") ?? attr(blip, "link")) : undefined;
       const rel = rid ? ctx.rels.get(rid) : undefined;
+      const modelRelId = attr(el, "embed") ?? attr(el, "link");
+      const modelRel = modelRelId ? ctx.rels.get(modelRelId) : undefined;
       if (rel && !rel.external) {
+        if (modelRel && !modelRel.external) {
+          model3D = { part: modelRel.target, posterPart: rel.target };
+        }
         const xfrm = path(el, "spPr", "xfrm");
         const off = child(xfrm, "off");
         const ext = child(xfrm, "ext");
@@ -1190,7 +1219,12 @@ function parseDrawing(
         const lnColor = fillColorOf(lnEl2);
         if (lnColor) {
           const wEmu = intAttr(lnEl2, "w") ?? 0;
-          stroke = { color: lnColor, width: Math.max(emuToPx(wEmu), 1) };
+          const alpha = findDescendant(lnEl2, "alpha");
+          stroke = {
+            color: lnColor,
+            width: Math.max(emuToPx(wEmu), 1),
+            ...(alpha ? { opacity: Math.max(0, Math.min(1, (intAttr(alpha, "val") ?? 100000) / 100000)) } : {}),
+          };
         }
       }
       if (custGeom && (fill || stroke)) {
@@ -1282,6 +1316,13 @@ function parseDrawing(
   let padB = 0;
   const dgmRelIds = child(child(child(holder, "graphic"), "graphicData"), "relIds");
   if (dgmRelIds && ctx.readPart) {
+    const dataRel = ctx.rels.get(attr(dgmRelIds, "dm") ?? "");
+    const layoutRel = ctx.rels.get(attr(dgmRelIds, "lo") ?? "");
+    if (dataRel && !dataRel.external) {
+      const dataRoot = ctx.readPart(dataRel.target);
+      const layoutRoot = layoutRel && !layoutRel.external ? ctx.readPart(layoutRel.target) : undefined;
+      if (dataRoot) smartArt = parseSmartArtParts(dataRoot, layoutRoot) ?? undefined;
+    }
     const dspRoot = resolveDiagramDrawing(dgmRelIds, ctx);
     if (dspRoot) {
       const fxEl = child(holder, "effectExtent");
@@ -1291,6 +1332,15 @@ function parseDrawing(
       padB = emuToPx(intAttr(fxEl, "b") ?? 0);
       collectDiagramShapes(dspRoot, ctx, { lines, paths, texts }, padL, padT);
     }
+  }
+
+  const chartGraphicData = child(child(holder, "graphic"), "graphicData");
+  const chartRef = chartGraphicData ? findDescendant(chartGraphicData, "chart") : undefined;
+  const chartRelId = chartRef ? attr(chartRef, "id") : undefined;
+  const chartRel = chartRelId ? ctx.rels.get(chartRelId) : undefined;
+  if (chartRel && !chartRel.external && ctx.readPart) {
+    const chartRoot = ctx.readPart(chartRel.target);
+    if (chartRoot) chart = parseChartPart(chartRoot) ?? undefined;
   }
 
   // DrawingML text box (wps:txbx): a floating shape with fill/stroke, text
@@ -1321,6 +1371,12 @@ function parseDrawing(
     const alignOf = (holder: XmlElement | undefined): "left" | "center" | "right" | undefined => {
       const a = holder ? findDescendant(holder, "align") : undefined;
       return a?.text === "center" || a?.text === "right" || a?.text === "left" ? (a.text as "left" | "center" | "right") : undefined;
+    };
+    const vAlignOf = (holder: XmlElement | undefined): "top" | "center" | "bottom" | undefined => {
+      const a = holder ? findDescendant(holder, "align") : undefined;
+      return a?.text === "center" || a?.text === "bottom" || a?.text === "top"
+        ? (a.text as "top" | "center" | "bottom")
+        : undefined;
     };
     // wp14:sizeRelH/V give a percent-of-page/margin size overriding the extent.
     const sizeRel = (name: string): { pct: number; rel: "page" | "margin" } | undefined => {
@@ -1395,6 +1451,7 @@ function parseDrawing(
         hRel: relOf(posH),
         vRel: relOf(posV),
         hAlign: alignOf(posH),
+        vAlign: vAlignOf(posV),
         blocks: txbxContent ? parseBlocks(txbxContent, ctx) : [],
         ...(textboxChainId !== undefined ? { chainId: textboxChainId, chainSeq: textboxChainSeq ?? 0 } : {}),
         ...(fillColorOf(spPr) ? { fill: fillColorOf(spPr)! } : {}),
@@ -1415,6 +1472,7 @@ function parseDrawing(
         ...(attr(anchor, "allowOverlap") === "0" ? { allowOverlap: false } : {}),
         dist: { t: distPx("distT"), b: distPx("distB"), l: distPx("distL"), r: distPx("distR") },
         ...(rot ? { rotation: rot / 60000 } : {}),
+        ...(ctx.independentTextboxStories ? { textboxStory: true } : {}),
       },
     };
   }
@@ -1458,6 +1516,9 @@ function parseDrawing(
   // Anchored template art (multi-shape groups, freeform paths): absolute
   // placement via the anchor, no text-flow participation.
   if (anchor && (paths.length > 0 || lines.length + images.length > 1 || texts.length > 0)) {
+    const docPr = child(anchor, "docPr");
+    const docPrName = attr(docPr, "name") ?? "";
+    const ink = attr(docPr, "descr") === "WordInWeb ink" || /^Ink(?:\s|$)/i.test(docPrName);
     const rel = (el: XmlElement | undefined): AnchorRel => {
       const v = el ? attr(el, "relativeFrom") : undefined;
       return v === "page" ? "page" : v === "margin" ? "margin" : v === "column" ? "column" : "text";
@@ -1487,10 +1548,18 @@ function parseDrawing(
     const hAlign = alignEl?.text === "center" || alignEl?.text === "right" || alignEl?.text === "left"
       ? (alignEl.text as "left" | "center" | "right")
       : undefined;
+    const vAlignEl = posV ? findDescendant(posV, "align") : undefined;
+    const vAlign = vAlignEl?.text === "center" || vAlignEl?.text === "bottom" || vAlignEl?.text === "top"
+      ? (vAlignEl.text as "top" | "center" | "bottom")
+      : undefined;
+    const graphicData = child(child(holder, "graphic"), "graphicData");
+    const artXfrm = graphicData ? findDescendant(graphicData, "xfrm") : undefined;
+    const artRot = intAttr(artXfrm, "rot");
     return {
       kind: "anchor",
       shape: {
         type: "art",
+        ...(ink ? { ink: true } : {}),
         x: oh.px,
         y: ov.px,
         pctX: oh.pct,
@@ -1500,7 +1569,9 @@ function parseDrawing(
         hRel: rel(posH),
         vRel: rel(posV),
         hAlign,
+        vAlign,
         behind: attr(anchor, "behindDoc") === "1",
+        ...(artRot ? { rotation: artRot / 60000 } : {}),
         lines,
         images,
         paths,
@@ -1527,6 +1598,10 @@ function parseDrawing(
       const hAlign = alignEl?.text === "center" || alignEl?.text === "right" || alignEl?.text === "left"
         ? (alignEl.text as "left" | "center" | "right")
         : undefined;
+      const vAlignEl = posV ? child(posV, "align") : undefined;
+      const vAlign = vAlignEl?.text === "center" || vAlignEl?.text === "bottom" || vAlignEl?.text === "top"
+        ? (vAlignEl.text as "top" | "center" | "bottom")
+        : undefined;
       let wrap: "square" | "topAndBottom" | "none" = "square";
       if (child(anchor, "wrapNone")) wrap = "none";
       else if (child(anchor, "wrapTopAndBottom")) wrap = "topAndBottom";
@@ -1545,11 +1620,14 @@ function parseDrawing(
           hRel: rel(posH),
           vRel: rel(posV),
           hAlign,
+          vAlign,
           wrap,
           ...(behind ? { behind: true } : {}),
           dist: { t: distPx("distT"), b: distPx("distB"), l: distPx("distL"), r: distPx("distR") },
           ...(images[0].crop ? { crop: images[0].crop } : {}),
           ...(images[0].rotation ? { rotation: images[0].rotation } : {}),
+          ...(model3D ? { model3D } : {}),
+          ...(webVideo ? { webVideo } : {}),
         },
       };
     }
@@ -1562,15 +1640,19 @@ function parseDrawing(
       ...(images[0].crop ? { crop: images[0].crop } : {}),
       ...(images[0].rotation ? { rotation: images[0].rotation } : {}),
       ...(images[0].border ? { border: images[0].border } : {}),
+      ...(model3D ? { model3D } : {}),
+      ...(webVideo ? { webVideo } : {}),
     };
   }
-  if (lines.length === 0 && images.length === 0 && paths.length === 0 && texts.length === 0) return null;
+  if (lines.length === 0 && images.length === 0 && paths.length === 0 && texts.length === 0 && !chart && !smartArt) return null;
   return {
     kind: "drawing",
     width: emuToPx(cx) + padL + padR,
     height: emuToPx(cy) + padT + padB,
     lines,
     images,
+    ...(chart ? { chart } : {}),
+    ...(smartArt ? { smartArt } : {}),
     ...(paths.length ? { paths } : {}),
     ...(texts.length ? { texts } : {}),
   };
@@ -2084,6 +2166,9 @@ function vmlPathDegenerate(path: string | undefined): boolean {
 
 export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent[] {
   const out: RunContent[] = [];
+  const oleEl = findDescendant(pict, "OLEObject");
+  const oleRelId = oleEl ? attr(oleEl, "id") : undefined;
+  const oleRel = oleRelId ? ctx.rels.get(oleRelId) : undefined;
   // Shapetypes are template definitions referenced by shapes via type="#id".
   // Collect their guide paths so a WordArt shape can tell whether Word could
   // fit its text to the box (see vmlPathDegenerate).
@@ -2221,6 +2306,16 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
             part: rel.target,
             width,
             height,
+            srcDrawing: pict,
+            ...(oleRel && !oleRel.external
+              ? {
+                  embeddedObject: {
+                    part: oleRel.target,
+                    filename: attr(imagedata, "title") || "Embedded object",
+                    progId: attr(oleEl, "ProgID") || "Package",
+                  },
+                }
+              : {}),
           });
         }
         return;
@@ -2270,6 +2365,8 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
             pctHeightRel: relOf(style.get("mso-height-relative")),
             textAnchor: ta === "middle" ? "middle" : ta === "bottom" ? "bottom" : undefined,
             ...(vmlInsets ? { insets: vmlInsets } : {}),
+            srcDrawing: el,
+            ...(ctx.independentTextboxStories ? { textboxStory: true } : {}),
           },
         });
         return;

@@ -545,6 +545,43 @@ export function resizeTableRow(
   return true;
 }
 
+/** Position a table at page coordinates, converting an inline table to a float. */
+export function moveTableTo(doc: DocxDocument, tblEl: XmlElement, xPx: number, yPx: number): boolean {
+  if (localName(tblEl.name) !== "tbl") return false;
+  const w = prefixOf(tblEl);
+  let tblPr = child(tblEl, "tblPr");
+  if (!tblPr) {
+    tblPr = { name: `${w}tblPr`, attrs: {}, children: [], text: "" };
+    tblEl.children.unshift(tblPr);
+  }
+  let position = child(tblPr, "tblpPr");
+  if (!position) {
+    position = { name: `${w}tblpPr`, attrs: {}, children: [], text: "" };
+    const styleIdx = tblPr.children.findIndex((c) => localName(c.name) === "tblStyle");
+    tblPr.children.splice(styleIdx + 1, 0, position);
+  }
+  const keyOf = (name: string): string | undefined =>
+    Object.keys(position!.attrs).find((key) => localName(key) === name);
+  const set = (name: string, value: string): void => {
+    position!.attrs[keyOf(name) ?? `${w}${name}`] = value;
+  };
+  const remove = (name: string): void => {
+    const key = keyOf(name);
+    if (key) delete position!.attrs[key];
+  };
+  for (const name of ["leftFromText", "rightFromText", "topFromText", "bottomFromText"]) {
+    if (!keyOf(name)) set(name, "0");
+  }
+  set("horzAnchor", "page");
+  set("vertAnchor", "page");
+  set("tblpX", String(Math.round(pxToTwips(xPx))));
+  set("tblpY", String(Math.round(pxToTwips(yPx))));
+  remove("tblpXSpec");
+  remove("tblpYSpec");
+  doc.refresh();
+  return true;
+}
+
 /** Set the extents of an inline drawing (wp:extent + a:ext), px. */
 export function resizeDrawing(
   doc: DocxDocument,
@@ -579,6 +616,33 @@ export function resizeDrawing(
     for (const c of el.children) walk(c, insideGroup);
   };
   walk(drawingEl, false);
+  if (!touched) {
+    const find = (el: XmlElement): XmlElement | undefined => {
+      if (localName(el.name) === "shape" || localName(el.name) === "rect") return el;
+      for (const child of el.children) {
+        const match = find(child);
+        if (match) return match;
+      }
+      return undefined;
+    };
+    const shape = find(drawingEl);
+    if (shape) {
+      const style = shape.attrs.style ?? "";
+      const withoutSize = style
+        .split(";")
+        .filter((entry) => !/^\s*(?:width|height)\s*:/i.test(entry))
+        .filter(Boolean);
+      withoutSize.push(`width:${widthPx * 0.75}pt`, `height:${heightPx * 0.75}pt`);
+      shape.attrs.style = withoutSize.join(";");
+      const setObjectSize = (name: "dxaOrig" | "dyaOrig", value: number): void => {
+        const key = Object.keys(drawingEl.attrs).find((candidate) => localName(candidate) === name);
+        if (key) drawingEl.attrs[key] = String(Math.round(value * 15));
+      };
+      setObjectSize("dxaOrig", widthPx);
+      setObjectSize("dyaOrig", heightPx);
+      touched = true;
+    }
+  }
   if (touched) doc.refresh();
   return touched;
 }
@@ -600,6 +664,12 @@ export function moveDrawingTo(
   const destParent = doc.findParentOf(destRun);
   if (!destParent) return false;
   if (destRun === imgRun) return false;
+  // A shape's editable textbox is part of the drawing run itself. Using that
+  // text as the destination would remove imgRun and then insert it into one
+  // of its own descendants, detaching the drawing and creating a cycle.
+  for (let cur: XmlElement | undefined = targetT; cur; cur = doc.findParentOf(cur)) {
+    if (cur === imgRun) return false;
+  }
   // Never move a run to a DIFFERENT part (body <-> header/footer): the
   // drawing's r:embed relationship is part-scoped, so the image would render
   // nowhere in the destination part — a drop on the footer silently

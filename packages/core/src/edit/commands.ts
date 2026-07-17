@@ -234,6 +234,7 @@ function prefixAttrs(prefix: string, attrs: Record<string, string>): Record<stri
 }
 
 export function setRunProps(rEl: XmlElement, patch: RunFormatPatch): void {
+  if (Object.keys(patch).length === 0) return;
   if (patch.clear) {
     rEl.children = rEl.children.filter((c) => localName(c.name) !== "rPr");
     return;

@@ -55,6 +55,9 @@ export interface LayoutOptions {
    * multi-block edits (paste, paragraph split/merge, undo/redo, structural ops),
    * which take the full scan. */
   dirtyHint?: XmlElement;
+  /** Exact retained text element changed by a local edit. Used only to bound
+   * structural page comparison before the first actually dirty page. */
+  dirtySource?: XmlElement;
 }
 
 export interface AsyncLayoutOptions extends LayoutOptions {
@@ -69,10 +72,29 @@ export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): 
   if (options.prev && options.prev._incr) {
     // Incremental attempt uses its own engine; if it can't prove reuse is safe
     // it returns null and a fresh engine does a clean full layout.
-    const attempt = new Engine(doc, measurer).runIncremental(options.prev, options.dirtyHint);
+    const attempt = new Engine(doc, measurer).runIncremental(options.prev, options.dirtyHint, options.dirtySource);
     if (attempt) return attempt;
   }
-  return new Engine(doc, measurer).run();
+  return layoutWithBodyPageTotal(doc, measurer);
+}
+
+function bodyHasPageTotal(el: XmlElement): boolean {
+  const name = el.name.includes(":") ? el.name.slice(el.name.indexOf(":") + 1) : el.name;
+  if (name === "instrText" && /\bNUMPAGES\b/i.test(el.text)) return true;
+  if (name === "fldSimple" && /\bNUMPAGES\b/i.test(el.attrs["w:instr"] ?? "")) return true;
+  return el.children.some(bodyHasPageTotal);
+}
+
+function layoutWithBodyPageTotal(doc: DocxDocument, measurer: TextMeasurer): LayoutResult {
+  let result = new Engine(doc, measurer).run();
+  if (!bodyHasPageTotal(doc.docRoot)) return result;
+
+  for (let pass = 0; pass < 2; pass++) {
+    const total = result.totalPages;
+    result = new Engine(doc, measurer, total).run();
+    if (result.totalPages === total) break;
+  }
+  return result;
 }
 
 /** Regenerate header/footer page layers while retaining the already-laid body.
@@ -101,7 +123,17 @@ export async function layoutDocumentAsync(
     await yieldToMain(options.signal);
     return layoutDocument(doc, options);
   }
-  return engine.runAsync(options.signal, options.sliceMs ?? 8);
+  const sliceMs = options.sliceMs ?? 8;
+  let result = await engine.runAsync(options.signal, sliceMs);
+  if (!bodyHasPageTotal(doc.docRoot)) return result;
+
+  for (let pass = 0; pass < 2; pass++) {
+    options.signal?.throwIfAborted();
+    const total = result.totalPages;
+    result = await new Engine(doc, measurer, total).runAsync(options.signal, sliceMs);
+    if (result.totalPages === total) break;
+  }
+  return result;
 }
 
 function yieldToMain(signal?: AbortSignal): Promise<void> {
@@ -197,6 +229,8 @@ interface LayoutSnapshot {
   bodyBottom: number;
   hfStart: number | undefined;
   floats: { x0: number; x1: number; y0: number; y1: number; mode: "square" | "topAndBottom" }[];
+  floatWrapRegistered: Array<[Table, InternalPage]>;
+  floatingTablePositions: Array<[Table, { page: InternalPage; x: number; y: number; width: number; height: number; allowOverlap: boolean }]>;
   col: number;
   y: number;
   sp: SectionProps;
@@ -232,8 +266,9 @@ interface IncrState {
   gridResyncPending: boolean;
   verticalGridFlow: boolean;
   bannerSlotUsed: number;
-  counters: Map<number, number[]>;
-  seenNumIds: Set<number>;
+  /** Compact immutable snapshots; restored to Map/Set only when resuming. */
+  counters: Array<[number, number[]]>;
+  seenNumIds: number[];
   /** Setup fields of the (empty) page the resume block starts on, so it can be
    * rebuilt without re-running newPage's section/hf logic. */
   page: {
@@ -258,6 +293,10 @@ interface IncrState {
 interface IncrPoint {
   blockIdx: number;
   pageCount: number;
+  /** Number of body items already emitted before this block. This lets an
+   * edit resume at a clean block boundary inside a dense page instead of
+   * replaying every earlier block on that page. */
+  pageItemCount: number;
   state: IncrState;
 }
 
@@ -288,7 +327,17 @@ interface HeaderFooterData {
  * equivalence harness assert the hint fast path actually fires and hashes just
  * the hinted block plus neighbours instead of every block. Not part of the
  * public API; carries no layout state. */
-export const __incrStats = { hintFastPath: false, blocksHashed: 0, firstDirty: -1 };
+export const __incrStats = {
+  hintFastPath: false,
+  blocksHashed: 0,
+  firstDirty: -1,
+  resumeBlock: -1,
+  resumePage: -1,
+  convergedBlock: -1,
+  convergedPage: -1,
+  blocksLaid: 0,
+  fallbackReason: "",
+};
 
 /** Fast content signature of an XML subtree (name/attrs/text/children) as a
  * compact string, computed with a rolling cyrb53 over the tree WITHOUT building
@@ -446,6 +495,9 @@ class Engine {
   /** Floating tables whose wrap rect has already been registered (by a
    * look-ahead reflow pass or their own placement) — prevents double wrap. */
   private floatWrapRegistered = new Map<Table, InternalPage>();
+  /** Resolved floating-table footprints. Omitted tblOverlap permits overlap;
+   * `never` tables are shifted below earlier colliding floating tables. */
+  private floatingTablePositions = new Map<Table, { page: InternalPage; x: number; y: number; width: number; height: number; allowOverlap: boolean }>();
   /** Linked text-box chains (wps:linkedTxbx): the seq-0 box records its story
    * and the frame-local Y at which it overflowed, so later boxes continue it. */
   private textboxChains = new Map<string, { blocks: Block[]; consumedY: number }>();
@@ -516,7 +568,15 @@ class Engine {
    * re-convergence (the tail settling back onto prev's page boundaries), and the
    * prev page index to splice the unchanged suffix from once it does. */
   private incrPrevPoints: Map<number, IncrPoint> | null = null;
+  private incrPrevPages: InternalPage[] | null = null;
   private incrConvergePrevPageIdx = -1;
+  private incrConvergeBlockIdx = -1;
+  private incrConvergePageIdx = -1;
+  private incrConvergeItemDelta = 0;
+  /** New block indices are old indices plus this value after a structural
+   * split, so convergence compares the same semantic suffix boundary. */
+  private incrBlockDelta = 0;
+  private incrBlockShiftAfter = -1;
   /** First changed block index; the tail may only re-converge with prev AFTER
    * this block (before it, the relay trivially matches prev at the resume point
    * and would wrongly splice the edit away). */
@@ -525,6 +585,7 @@ class Engine {
   constructor(
     private doc: DocxDocument,
     private measurer: TextMeasurer,
+    private knownTotalPages?: number,
   ) {}
 
   run(): LayoutResult {
@@ -885,75 +946,95 @@ class Engine {
     }
   }
 
-  /** Record a reuse point when the current block starts at a pristine page top
-   * (empty single-band page, cursor at the body top, no floats or footnotes). */
+  /** Record a reuse point at a clean top-level block boundary. Page-top points
+   * retain whole-page reuse; intra-page points retain the already-laid body
+   * prefix so editing a short block on a dense page does not replay every
+   * preceding paragraph. */
   private capturePoint(blockIdx: number): void {
     if (this.incrAbort || !this.incrPoints || this.balMeasuring) return;
     const p = this.cur;
     if (
-      !(
-        this.col === 0 &&
-        p.items.length === 0 &&
-        Math.abs(this.y - p.bodyTop) < 1e-6 &&
-        p.bands.length === 1 &&
-        (this.floats.get(p)?.length ?? 0) === 0 &&
-        p.footnotes.length === 0
-      )
-    ) {
-      return;
-    }
-    // Convergence: during a tail relay, if this pristine page top lands on the
-    // same block, same global page index, and same carry state as a prev-layout
-    // capture point, everything from here is identical — stop and splice prev's
-    // suffix. Discard the fresh page we just started (prev's covers it).
+      this.col !== 0 ||
+      p.bands.length !== 1 ||
+      (this.floats.get(p)?.length ?? 0) !== 0 ||
+      p.footnotes.length !== 0
+    ) return;
+    const atPageTop = p.items.length === 0 && Math.abs(this.y - p.bodyTop) < 1e-6;
+    // Numbering state grows throughout long legal documents. Keep every page
+    // top plus a bounded sample of intra-page block points so the retained
+    // counter snapshots stay modest while replay remains capped at 15 blocks.
+    if (!atPageTop && blockIdx % 16 !== 0) return;
+    const globalPageIdx = this.pages.length - 1 + this.physBase;
+    const snapshot = (): IncrPoint => ({
+      blockIdx,
+      pageCount: globalPageIdx,
+      pageItemCount: p.items.length,
+      state: {
+        col: this.col,
+        y: this.y,
+        sectionFirstPagePhys: this.sectionFirstPagePhys,
+        lastParaSpacingAfter: this.lastParaSpacingAfter,
+        lastParaAfterPad: this.lastParaAfterPad,
+        lastParaWasEmpty: this.lastParaWasEmpty,
+        trailingSectionBreakMarkGap: this.trailingSectionBreakMarkGap,
+        suppressNextSpaceBefore: this.suppressNextSpaceBefore,
+        docGridDropBefore: this.docGridDropBefore,
+        gridResyncPending: this.gridResyncPending,
+        verticalGridFlow: this.verticalGridFlow,
+        bannerSlotUsed: this.bannerSlotUsed,
+        counters: Array.from(this.counters, ([k, v]) => [k, [...v]] as [number, number[]]),
+        seenNumIds: [...this.seenNumIds],
+        page: {
+          sp: p.sp,
+          physIndex: p.physIndex,
+          displayNumber: p.displayNumber,
+          bodyTop: p.bodyTop,
+          bodyBottom: p.bodyBottom,
+          bandTop: p.bandTop,
+          softTop: p.softTop,
+          headerGrown: p.headerGrown,
+          headerRel: p.headerRel,
+          footerRel: p.footerRel,
+          headerHeight: p.headerHeight,
+          footerHeight: p.footerHeight,
+          colXs: [...p.colXs],
+          colWidths: [...p.colWidths],
+          bands: p.bands.map((b) => ({ ...b, colXs: [...b.colXs], colWidths: [...b.colWidths], bottoms: [...b.bottoms] })),
+        },
+      },
+    });
+    // Convergence: if this block lands on the same page with the same carry
+    // state as before, every later block is unchanged. At a page top the old
+    // page is reused wholesale. Inside a page, keep the freshly relaid prefix
+    // and append the old body suffix; headers/footers are finalized normally.
     if (this.incrPrevPoints && blockIdx > this.incrFirstDirty) {
-      const globalPageIdx = this.pages.length - 1 + this.physBase;
       const pp = this.incrPrevPoints.get(blockIdx);
       if (pp && pp.pageCount === globalPageIdx && this.statesMatch(pp.state)) {
-        this.incrConvergePrevPageIdx = pp.pageCount;
-        this.pages.pop();
+        __incrStats.convergedBlock = blockIdx;
+        __incrStats.convergedPage = globalPageIdx;
+        this.incrPoints.push(snapshot());
+        const reuseWholePage =
+          p.items.length === 0 &&
+          pp.pageItemCount === 0 &&
+          Math.abs(this.y - p.bodyTop) < 1e-6;
+        if (reuseWholePage) {
+          this.incrConvergePrevPageIdx = pp.pageCount;
+          this.pages.pop();
+        } else {
+          const oldPage = this.incrPrevPages?.[pp.pageCount];
+          if (!oldPage) return;
+          const freshCount = p.items.length;
+          const oldBodyEnd = oldPage.hfStart ?? oldPage.items.length;
+          p.items.push(...oldPage.items.slice(pp.pageItemCount, oldBodyEnd));
+          this.incrConvergePrevPageIdx = pp.pageCount + 1;
+          this.incrConvergeBlockIdx = blockIdx;
+          this.incrConvergePageIdx = globalPageIdx;
+          this.incrConvergeItemDelta = freshCount - pp.pageItemCount;
+        }
         return;
       }
     }
-    {
-      this.incrPoints.push({
-        blockIdx,
-        pageCount: this.pages.length - 1 + this.physBase,
-        state: {
-          col: this.col,
-          y: this.y,
-          sectionFirstPagePhys: this.sectionFirstPagePhys,
-          lastParaSpacingAfter: this.lastParaSpacingAfter,
-          lastParaAfterPad: this.lastParaAfterPad,
-          lastParaWasEmpty: this.lastParaWasEmpty,
-          trailingSectionBreakMarkGap: this.trailingSectionBreakMarkGap,
-          suppressNextSpaceBefore: this.suppressNextSpaceBefore,
-          docGridDropBefore: this.docGridDropBefore,
-          gridResyncPending: this.gridResyncPending,
-          verticalGridFlow: this.verticalGridFlow,
-          bannerSlotUsed: this.bannerSlotUsed,
-          counters: new Map(Array.from(this.counters, ([k, v]) => [k, [...v]])),
-          seenNumIds: new Set(this.seenNumIds),
-          page: {
-            sp: p.sp,
-            physIndex: p.physIndex,
-            displayNumber: p.displayNumber,
-            bodyTop: p.bodyTop,
-            bodyBottom: p.bodyBottom,
-            bandTop: p.bandTop,
-            softTop: p.softTop,
-            headerGrown: p.headerGrown,
-            headerRel: p.headerRel,
-            footerRel: p.footerRel,
-            headerHeight: p.headerHeight,
-            footerHeight: p.footerHeight,
-            colXs: [...p.colXs],
-            colWidths: [...p.colWidths],
-            bands: p.bands.map((b) => ({ ...b, colXs: [...b.colXs], colWidths: [...b.colWidths], bottoms: [...b.bottoms] })),
-          },
-        },
-      });
-    }
+    this.incrPoints.push(snapshot());
   }
 
   /** True when the current engine state at a clean page top exactly matches a
@@ -981,12 +1062,12 @@ class Engine {
     ) {
       return false;
     }
-    if (this.seenNumIds.size !== s.seenNumIds.size) return false;
-    for (const id of this.seenNumIds) if (!s.seenNumIds.has(id)) return false;
-    if (this.counters.size !== s.counters.size) return false;
-    for (const [k, v] of this.counters) {
-      const w = s.counters.get(k);
-      if (!w || w.length !== v.length) return false;
+    if (this.seenNumIds.size !== s.seenNumIds.length) return false;
+    for (const id of s.seenNumIds) if (!this.seenNumIds.has(id)) return false;
+    if (this.counters.size !== s.counters.length) return false;
+    for (const [k, w] of s.counters) {
+      const v = this.counters.get(k);
+      if (!v || w.length !== v.length) return false;
       for (let i = 0; i < v.length; i++) if (v[i] !== w[i]) return false;
     }
     return true;
@@ -994,10 +1075,10 @@ class Engine {
 
   /** Rebuild the resume page and restore running state, so layoutBlocks can be
    * resumed from the resume block as if the prefix pages had just been laid. */
-  private restoreIncrState(s: IncrState): void {
+  private restoreIncrState(s: IncrState, prefixItems: PageItem[]): void {
     const ps = s.page;
     const page: InternalPage = {
-      items: [],
+      items: prefixItems,
       sp: ps.sp,
       physIndex: ps.physIndex,
       displayNumber: ps.displayNumber,
@@ -1033,14 +1114,21 @@ class Engine {
     this.gridResyncPending = s.gridResyncPending;
     this.verticalGridFlow = s.verticalGridFlow;
     this.bannerSlotUsed = s.bannerSlotUsed;
-    this.counters = new Map(Array.from(s.counters, ([k, v]) => [k, [...v]]));
+    this.counters = new Map(s.counters.map(([k, v]) => [k, [...v]]));
     this.seenNumIds = new Set(s.seenNumIds);
   }
 
   /** Attempt an incremental layout; return null (and leave a discarded, dirty
    * engine) if reuse can't be proven safe, so the caller does a full layout in a
    * fresh engine. */
-  runIncremental(prev: LayoutResult, dirtyHint?: XmlElement): LayoutResult | null {
+  runIncremental(prev: LayoutResult, dirtyHint?: XmlElement, dirtySource?: XmlElement): LayoutResult | null {
+    __incrStats.fallbackReason = "";
+    const fallback = (reason: string): null => {
+      __incrStats.fallbackReason = reason;
+      const perf = (globalThis as { __dxwPerf?: { incr?: typeof __incrStats } }).__dxwPerf;
+      if (perf) perf.incr = { ...__incrStats };
+      return null;
+    };
     const inc = prev._incr as IncrData;
     const sameModel = inc.modelVersion === this.doc.modelVersion;
     // Reused pages retain editor source bindings to parsed Run objects. A
@@ -1048,16 +1136,48 @@ class Engine {
     // would leave clicks editing detached model/XML references (notably after
     // undo replaces the XML descendants). Plain in-place text edits keep the
     // generation stable and are the incremental fast path.
-    if (!sameModel) return null;
+    if (!sameModel) return fallback("model-version");
     // A retained incremental result proves the previous model was eligible.
     // An in-place text edit cannot introduce a disqualifying structural field,
     // frame, section, or note, so avoid rescanning the complete XML tree.
     if (sameModel) this._incrFeatureOk = true;
-    if (!this.incrEligible()) return null;
+    if (!this.incrEligible()) return fallback("ineligible");
     const blocks = this.doc.sections[0].blocks;
 
     let newSigs: string[] | null = null;
     let firstDirty = 0;
+
+    // Enter's direct-body split replaces one parsed block with two while every
+    // other block retains identity. The dirty hint is the new second paragraph.
+    // Verify the shifted neighbours before carrying the old signatures across,
+    // avoiding an O(N) XML hash pass on long legal documents.
+    if (dirtyHint && blocks.length === inc.sigs.length + 1) {
+      const inserted = blocks.findIndex((block) => block.src === dirtyHint);
+      const changed = inserted - 1;
+      if (changed >= 0) {
+        let hashed = 2;
+        let neighborsOk = true;
+        if (changed > 0) {
+          hashed++;
+          neighborsOk = this.blockSig(blocks[changed - 1]) === inc.sigs[changed - 1];
+        }
+        if (neighborsOk && inserted < blocks.length - 1) {
+          hashed++;
+          neighborsOk = this.blockSig(blocks[inserted + 1]) === inc.sigs[inserted];
+        }
+        if (neighborsOk) {
+          newSigs = inc.sigs.slice();
+          newSigs[changed] = this.blockSig(blocks[changed]);
+          newSigs.splice(inserted, 0, this.blockSig(blocks[inserted]));
+          firstDirty = changed;
+          __incrStats.hintFastPath = true;
+          __incrStats.blocksHashed = hashed;
+          __incrStats.firstDirty = changed;
+          this.incrBlockDelta = 1;
+          this.incrBlockShiftAfter = changed;
+        }
+      }
+    }
 
     // Dirty-hint fast path: a single in-place block edit (typing/deleting in
     // one paragraph) names the changed block, so we can skip re-hashing all
@@ -1067,7 +1187,7 @@ class Engine {
     // neighbours still match prev's stored signatures (a positional sanity
     // check that catches a shifted or wrong hint). Then reuse prev's per-block
     // signatures verbatim for every other block.
-    if (dirtyHint && blocks.length === inc.sigs.length) {
+    if (newSigs === null && dirtyHint && blocks.length === inc.sigs.length) {
       const d = blocks.findIndex((b) => b.src === dirtyHint);
       if (d >= 0) {
         let hashed = 1;
@@ -1108,7 +1228,7 @@ class Engine {
       if (pt.blockIdx <= firstDirty) rp = pt;
       else break;
     }
-    if (!rp || rp.pageCount >= inc.pages.length) return null;
+    if (!rp || rp.pageCount >= inc.pages.length) return fallback("resume-point");
     const prefixCount = rp.pageCount;
 
     this.seqCounters = new Map(inc.seqCounters);
@@ -1120,18 +1240,54 @@ class Engine {
     this.displayBase = prefixCount > 0 ? inc.pages[prefixCount - 1].displayNumber : 0;
     this.incrSigs = newSigs;
     this.incrPoints = [];
-    this.incrPrevPoints = new Map(inc.points.map((pt) => [pt.blockIdx, pt]));
+    const shiftedBlockIdx = (blockIdx: number): number =>
+      blockIdx > this.incrBlockShiftAfter ? blockIdx + this.incrBlockDelta : blockIdx;
+    this.incrPrevPoints = new Map(inc.points.map((pt) => [shiftedBlockIdx(pt.blockIdx), pt]));
+    this.incrPrevPages = inc.pages;
     this.incrFirstDirty = firstDirty;
-    this.restoreIncrState(rp.state);
+    __incrStats.resumeBlock = rp.blockIdx;
+    __incrStats.resumePage = rp.pageCount;
+    __incrStats.convergedBlock = -1;
+    __incrStats.convergedPage = -1;
+    __incrStats.blocksLaid = 0;
+    this.restoreIncrState(rp.state, inc.pages[rp.pageCount].items.slice(0, rp.pageItemCount));
     this.layoutBlocks(blocks, rp.blockIdx);
-    if (this.incrAbort) return null;
+    if (this.incrAbort) return fallback("layout-abort");
 
-    // Every bookmark the relaid middle defines must land on the same page
-    // number as prev — otherwise a PAGEREF anywhere (including a reused prefix
-    // page we can't safely mutate) could now resolve differently. Fall back.
+    // The relaid middle must leave the document on the same number of physical
+    // pages. Otherwise page fields and section numbering in the retained
+    // prefix/suffix would be stale, so fall back before finalizing page layers.
+    const suffixStart = this.incrConvergePrevPageIdx >= 0 ? this.incrConvergePrevPageIdx : inc.pages.length;
+    const totalPages = prefixCount + this.pages.length + (inc.pages.length - suffixStart);
+    if (totalPages !== prev.totalPages) return fallback("page-count");
+
+    // Carry forward bookmarks outside the relaid middle and update those whose
+    // targets moved. A moved bookmark only invalidates retained layout when a
+    // PAGEREF actually consumes it; without such a field, the page map is
+    // metadata and the converged prefix/suffix remain byte-identical.
+    const mergedBookmarks = new Map(inc.bookmarks);
+    const movedBookmarks = new Set<string>();
     for (const [name, page] of this.bookmarkPages) {
-      if (inc.bookmarks.get(name) !== page) return null;
+      if (inc.bookmarks.get(name) !== page) movedBookmarks.add(name);
+      mergedBookmarks.set(name, page);
     }
+    const pageRefUpdates: { item: TextItem; text: string }[] = [];
+    if (movedBookmarks.size > 0) {
+      for (const page of inc.pages) {
+        for (const item of page.items) {
+          if (item.kind !== "text" || item.pageRef === undefined || !movedBookmarks.has(item.pageRef)) continue;
+          const text = mergedBookmarks.get(item.pageRef);
+          if (text === undefined || text === item.text) continue;
+          const width = this.measurer.width(text, item.font, item.props.letterSpacing);
+          // A different advance can re-break the paragraph containing the
+          // field, so retain the full-layout fallback for that case. Equal-
+          // width page-number changes only replace glyphs in retained pages.
+          if (Math.abs(width - item.width) > 1e-6) return fallback("bookmark-page-ref-width");
+          pageRefUpdates.push({ item, text });
+        }
+      }
+    }
+    for (const update of pageRefUpdates) update.item.text = update.text;
 
     // Post-passes over the relaid middle pages only; the reused prefix and (on
     // convergence) suffix were already finalized identically in prev
@@ -1140,26 +1296,50 @@ class Engine {
     this.emitFootnoteAreas();
     this.emitColumnSeparators();
     this.finalizeHeadersFooters();
-    // Middle PAGEREFs resolve against the full (unchanged) bookmark map.
-    this.bookmarkPages = inc.bookmarks;
+    // Middle PAGEREFs resolve against the merged full-document bookmark map.
+    this.bookmarkPages = mergedBookmarks;
     this.rewritePageRefs(this.pages);
     this.applySectionVAlign();
-    if (this.incrAbort) return null;
-
-    // The tail either re-converged onto a prev page boundary (reuse prev pages
-    // from there) or ran to the document end (no suffix to reuse).
-    const suffixStart = this.incrConvergePrevPageIdx >= 0 ? this.incrConvergePrevPageIdx : inc.pages.length;
-    const totalPages = prefixCount + this.pages.length + (inc.pages.length - suffixStart);
-    // A page-count change reshuffles page numbers (and any footer totals) across
-    // the whole document, invalidating the reused prefix — do a full layout.
-    if (totalPages !== prev.totalPages) return null;
+    if (this.incrAbort) return fallback("postpass-abort");
 
     const middle = this.pages.map((p) => laidOutPage(p));
+    // A dirty block can begin on the preceding page with a leading page break,
+    // while its first changed glyph lands on the next page. Tell the renderer
+    // how far it may structurally compare relaid leading pages. Adoption still
+    // requires pageEq; source absence alone is never treated as equality.
+    let structuralPrefixEnd = prefixCount;
+    if (dirtySource) {
+      const dirtyMiddleIdx = this.pages.findIndex((page) =>
+        page.items.some((item) => item.kind === "text" && item.src?.t === dirtySource),
+      );
+      if (dirtyMiddleIdx > 0) structuralPrefixEnd += dirtyMiddleIdx;
+    }
     const outPages = prev.pages.slice(0, prefixCount).concat(middle, prev.pages.slice(suffixStart));
     const outInternal = inc.pages.slice(0, prefixCount).concat(this.pages, inc.pages.slice(suffixStart));
+    const samePageTail =
+      this.incrConvergeBlockIdx >= 0
+        ? inc.points
+            .filter((pt) =>
+              pt.pageCount === this.incrConvergePageIdx &&
+              shiftedBlockIdx(pt.blockIdx) > this.incrConvergeBlockIdx,
+            )
+            .map((pt) => ({
+              ...pt,
+              blockIdx: shiftedBlockIdx(pt.blockIdx),
+              pageItemCount: pt.pageItemCount + this.incrConvergeItemDelta,
+            }))
+        : [];
     const points = inc.points
       .filter((pt) => pt.pageCount < prefixCount)
-      .concat(this.incrPoints, inc.points.filter((pt) => pt.pageCount >= suffixStart));
+      .concat(
+        this.incrPoints,
+        samePageTail,
+        inc.points
+          .filter((pt) => pt.pageCount >= suffixStart)
+          .map((pt) => ({ ...pt, blockIdx: shiftedBlockIdx(pt.blockIdx) })),
+      );
+    const perf = (globalThis as { __dxwPerf?: { incr?: typeof __incrStats } }).__dxwPerf;
+    if (perf) perf.incr = { ...__incrStats };
     return {
       pages: outPages,
       totalPages: outPages.length,
@@ -1168,13 +1348,15 @@ class Engine {
         sigs: newSigs,
         points,
         pages: outInternal,
-        bookmarks: inc.bookmarks,
+        bookmarks: mergedBookmarks,
         modelVersion: this.doc.modelVersion,
         seqCounters: this.seqCounters,
         seqAssigned: this.seqAssigned,
         refFieldPosition: this.refFieldPosition,
         refFieldParaNumber: this.refFieldParaNumber,
       } satisfies IncrData,
+      _incremental: true,
+      _incrementalStructuralPrefixEnd: structuralPrefixEnd,
     };
   }
 
@@ -1572,6 +1754,8 @@ class Engine {
       bodyBottom: p.bodyBottom,
       hfStart: p.hfStart,
       floats: [...(this.floats.get(p) ?? [])],
+      floatWrapRegistered: [...this.floatWrapRegistered],
+      floatingTablePositions: [...this.floatingTablePositions].map(([table, position]) => [table, { ...position }]),
       col: this.col,
       y: this.y,
       sp: this.sp,
@@ -1609,6 +1793,8 @@ class Engine {
     p.bodyBottom = s.bodyBottom;
     p.hfStart = s.hfStart;
     this.floats.set(p, s.floats);
+    this.floatWrapRegistered = new Map(s.floatWrapRegistered);
+    this.floatingTablePositions = new Map(s.floatingTablePositions.map(([table, position]) => [table, { ...position }]));
     this.cur = p;
     this.col = s.col;
     this.y = s.y;
@@ -1731,7 +1917,7 @@ class Engine {
     const real = () => (engine.cur.physIndex !== -1 ? engine.cur : engine.lastRealPage ?? engine.cur);
     return {
       pageNumber: () => real().displayNumber,
-      totalPages: () => engine.pages.length, // refined in final header/footer pass
+      totalPages: () => engine.knownTotalPages ?? engine.pages.length,
       formatPageNumber: (n) => formatNumber(n, PAGE_FMT[real().sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
       noteMark: (type, id) => (type === "footnote" ? engine.footnoteMark(id) : engine.endnoteMark(id)),
       selfNoteMark: () => engine.selfNoteMark ?? "",
@@ -2295,6 +2481,7 @@ class Engine {
   }
 
   private layoutBlock(blocks: Block[], i: number): void {
+      if (this.incrPrevPoints) __incrStats.blocksLaid++;
       const block = blocks[i];
 
       if (block.type === "paragraph") {
@@ -4142,6 +4329,9 @@ class Engine {
           rotation: span.image.rotation,
           border: span.image.border,
           src: span.image.srcDrawing,
+          model3D: span.image.model3D,
+          webVideo: span.image.webVideo,
+          embeddedObject: span.image.embeddedObject,
         });
         continue;
       }
@@ -4190,6 +4380,16 @@ class Engine {
           }
           continue;
         }
+        if (span.drawing.chart) {
+          page.items.push({
+            kind: "chart",
+            x: bx,
+            y: by,
+            width: span.drawing.width,
+            height: span.drawing.height,
+            data: span.drawing.chart,
+          });
+        }
         for (const img of span.drawing.images) {
           page.items.push({
             kind: "image",
@@ -4227,13 +4427,8 @@ class Engine {
             stroke: pth.stroke,
           });
         }
-        // Positioned text bodies (SmartArt cached-drawing shapes, multi-
-        // textbox groups): each is a mini text frame laid out inside its box.
-        for (const ts of span.drawing.texts ?? []) {
-          this.emitDrawingText(ts, bx, by, page, this.fieldCtx());
-        }
         // A transparent hit target over the group makes the whole drawing
-        // (icon, logo) selectable and draggable as one unit.
+        // selectable while its own text remains directly editable.
         if (span.drawing.srcDrawing) {
           page.items.push({
             kind: "drawingHit",
@@ -4243,7 +4438,14 @@ class Engine {
             height: span.drawing.height,
             src: span.drawing.srcDrawing,
             anchored: false,
+            belowText: true,
+            smartArt: !!span.drawing.smartArt,
           });
+        }
+        // Positioned text bodies (SmartArt cached-drawing shapes, multi-
+        // textbox groups): each is a mini text frame laid out inside its box.
+        for (const ts of span.drawing.texts ?? []) {
+          this.emitDrawingText(ts, bx, by, page, this.fieldCtx(), true);
         }
         continue;
       }
@@ -4873,7 +5075,11 @@ class Engine {
           washout: shape.washout,
           behind: shape.behind,
           front: shape.wrap === "none" && !shape.behind,
+          z: shape.z,
           src: shape.srcDrawing,
+          model3D: shape.model3D,
+          webVideo: shape.webVideo,
+          embeddedObject: shape.embeddedObject,
         });
         // Frames (physIndex -1, e.g. table cells) register floats too so the
         // frame's own text wraps; layoutFrame clears the entry when done.
@@ -4893,24 +5099,56 @@ class Engine {
       }
       if (shape.type === "art") {
         const baseW = shape.hRel === "page" ? sp.pageWidth : sp.pageWidth - sp.marginLeft - sp.marginRight;
+        const baseH = shape.vRel === "page" ? sp.pageHeight : sp.pageHeight - sp.marginTop - sp.marginBottom;
         let ox = originX(shape.hRel) + (shape.pctX !== undefined ? shape.pctX * sp.pageWidth : shape.x);
         if (shape.hAlign === "center") ox = originX(shape.hRel) + (baseW - shape.width) / 2;
         else if (shape.hAlign === "right") ox = originX(shape.hRel) + baseW - shape.width;
-        const oy = originY(shape.vRel) + (shape.pctY !== undefined ? shape.pctY * sp.pageHeight : shape.y);
+        let oy = originY(shape.vRel) + (shape.pctY !== undefined ? shape.pctY * sp.pageHeight : shape.y);
+        if (shape.vAlign === "center") oy = originY(shape.vRel) + (baseH - shape.height) / 2;
+        else if (shape.vAlign === "bottom") oy = originY(shape.vRel) + baseH - shape.height;
+        else if (shape.vAlign === "top") oy = originY(shape.vRel);
+        const centerX = ox - fx + shape.width / 2;
+        const centerY = oy - fy + shape.height / 2;
+        const rotate = shape.rotation
+          ? (itemX: number, itemY: number) => ({ deg: shape.rotation!, ox: centerX - itemX, oy: centerY - itemY })
+          : undefined;
         // Filled custGeom bands paint first; blip/image fills (e.g. the Facet
         // cover's white alpha-gradient overlay that lightens the band toward
         // the bottom) composite on top.
         for (const pth of shape.paths) {
-          page.items.push({ kind: "path", x: ox + pth.x - fx, y: oy + pth.y - fy, width: pth.width, height: pth.height, d: pth.d, viewW: pth.viewW, viewH: pth.viewH, fill: pth.fill, stroke: pth.stroke });
+          const x = ox + pth.x - fx;
+          const y = oy + pth.y - fy;
+          page.items.push({ kind: "path", x, y, width: pth.width, height: pth.height, d: pth.d, viewW: pth.viewW, viewH: pth.viewH, fill: pth.fill, stroke: pth.stroke, ...(rotate ? { rotate: rotate(x, y) } : {}), z: shape.z });
         }
         for (const l of shape.lines) {
-          page.items.push({ kind: "edge", x1: ox + l.x1 - fx, y1: oy + l.y1 - fy, x2: ox + l.x2 - fx, y2: oy + l.y2 - fy, border: { style: "single", width: l.weight, color: l.color, space: 0 } });
+          const x1 = ox + l.x1 - fx;
+          const y1 = oy + l.y1 - fy;
+          const x2 = ox + l.x2 - fx;
+          const y2 = oy + l.y2 - fy;
+          page.items.push({ kind: "edge", x1, y1, x2, y2, border: { style: "single", width: l.weight, color: l.color, space: 0 }, ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}), z: shape.z });
         }
         for (const img of shape.images) {
-          page.items.push({ kind: "image", x: ox + img.x - fx, y: oy + img.y - fy, width: img.width, height: img.height, part: img.part, behind: shape.behind });
+          const x = ox + img.x - fx;
+          const y = oy + img.y - fy;
+          page.items.push({ kind: "image", x, y, width: img.width, height: img.height, part: img.part, behind: shape.behind, ...(rotate ? { rotate: rotate(x, y) } : {}), z: shape.z });
+        }
+        if (shape.srcDrawing) {
+          page.items.push({
+            kind: "drawingHit",
+            x: ox - fx,
+            y: oy - fy,
+            width: shape.width,
+            height: shape.height,
+            src: shape.srcDrawing,
+            anchored: true,
+            ink: shape.ink,
+            belowText: !shape.behind,
+            ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
+            z: shape.z,
+          });
         }
         for (const ts of shape.texts ?? []) {
-          this.emitDrawingText(ts, ox - fx, oy - fy, page, fields);
+          this.emitDrawingText(ts, ox - fx, oy - fy, page, fields, !shape.behind, rotate, shape.z);
         }
         continue;
       }
@@ -5039,8 +5277,10 @@ class Engine {
             viewH: shape.geom.viewH,
             fill: shape.fill,
             ...(shape.stroke ? { stroke: { color: shape.stroke.color, width: shape.stroke.weight } } : {}),
+            ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
             ...(behind ? { behind: true } : {}),
             ...(front ? { front: true } : {}),
+            z: shape.z,
           });
         }
         if (shape.fill && !shape.geom) {
@@ -5054,6 +5294,7 @@ class Engine {
             ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
             ...(behind ? { behind: true } : {}),
             ...(front ? { front: true } : {}),
+            z: shape.z,
           });
         }
         if (shape.stroke && !shape.geom) {
@@ -5070,6 +5311,7 @@ class Engine {
               border: b,
               ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}),
               ...(front ? { front: true } : {}),
+              z: shape.z,
             });
           edge(x0, y0, x0 + width, y0);
           edge(x0, y0 + height, x0 + width, y0 + height);
@@ -5101,9 +5343,9 @@ class Engine {
           const texts = inner.items.filter((it): it is Extract<PageItem, { kind: "text" }> => it.kind === "text");
           const str = texts.map((it) => it.text).join("").replace(/\s+/g, " ").trim();
           if (str) {
-            // A visible fill stays a select target (the warp text is painted as a
-            // pointer-transparent SVG, so clicks on the shape reach this hit).
-            if (front && shape.srcDrawing && (shape.fill || shape.geom)) {
+            // Warp text is pointer-transparent, so its full box is the select
+            // target even when WordArt has no backing fill or outline.
+            if (front && shape.srcDrawing) {
               page.items.push({
                 kind: "drawingHit",
                 x: ox - fx,
@@ -5113,6 +5355,8 @@ class Engine {
                 src: shape.srcDrawing,
                 anchored: true,
                 belowText: true,
+                ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
+                z: shape.z,
               });
             }
             const f = texts[0].font;
@@ -5130,8 +5374,10 @@ class Engine {
               italic: f.italic,
               fill: col && col !== "auto" ? col : "#000000",
               warp: shape.warp,
+              ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
               ...(behind ? { behind: true } : {}),
               ...(front ? { front: true } : {}),
+              z: shape.z,
             });
           }
           continue;
@@ -5148,11 +5394,12 @@ class Engine {
           }
           this.textboxChains.set(shape.chainId, { blocks: storyBlocks, consumedY: cut });
         }
-        // A front shape with a visible fill gets a hit target over its box so a
-        // click on the fill selects the shape instead of dropping a caret in the
-        // body text behind it. Emitted BEFORE the text items so the shape's own
-        // text spans (added below) win equal-z hit-testing and stay editable.
-        if (front && shape.srcDrawing && (shape.fill || shape.geom) && inner.items.some((it) => it.kind === "text")) {
+        // Every text box keeps a full-box hit target, including Word's
+        // transparent/borderless VML text boxes. It is emitted before the
+        // story text so glyph clicks can enter text editing while blank parts
+        // of the box still select the object.
+        const independentStory = !!shape.textboxStory && !shape.wordArt;
+        if (front && shape.srcDrawing) {
           page.items.push({
             kind: "drawingHit",
             x: ox - fx,
@@ -5161,11 +5408,15 @@ class Engine {
             height,
             src: shape.srcDrawing,
             anchored: true,
-            belowText: true,
+            belowText: !shape.wordArt,
+            ...(independentStory ? { textboxStory: true } : {}),
+            ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
+            z: shape.z,
           });
         }
         for (const it of inner.items) {
           if (it.kind === "text") {
+            if (independentStory && shape.srcDrawing) it.textboxStory = shape.srcDrawing;
             // Chained boxes hide whole lines outside their own [skipTopY,
             // content-bottom] window (overflow flows to the next box); a plain
             // noAutofit box clips at the box bottom edge (unchanged).
@@ -5182,6 +5433,7 @@ class Engine {
           }
           if (behind && (it.kind === "text" || it.kind === "rect")) it.behind = true;
           if (front && (it.kind === "text" || it.kind === "rect" || it.kind === "edge")) it.front = true;
+          if (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit") it.z = shape.z;
           page.items.push(it);
         }
 
@@ -5214,18 +5466,23 @@ class Engine {
     oy: number,
     page: InternalPage,
     fields: FieldContext,
+    front = false,
+    rotate?: (itemX: number, itemY: number) => { deg: number; ox: number; oy: number },
+    z?: number,
   ): void {
     const tx = ox + ts.x;
     const ty = oy + ts.y;
     if (ts.fill) {
-      page.items.push({ kind: "rect", x: tx, y: ty, width: ts.width, height: ts.height, fill: ts.fill });
+      page.items.push({ kind: "rect", x: tx, y: ty, width: ts.width, height: ts.height, fill: ts.fill, ...(rotate ? { rotate: rotate(tx, ty) } : {}), ...(front ? { front: true } : {}), z });
     }
     if (ts.stroke) {
       const b = { style: "single" as const, width: ts.stroke.weight, color: ts.stroke.color, space: 0 };
-      page.items.push({ kind: "edge", x1: tx, y1: ty, x2: tx + ts.width, y2: ty, border: b });
-      page.items.push({ kind: "edge", x1: tx, y1: ty + ts.height, x2: tx + ts.width, y2: ty + ts.height, border: b });
-      page.items.push({ kind: "edge", x1: tx, y1: ty, x2: tx, y2: ty + ts.height, border: b });
-      page.items.push({ kind: "edge", x1: tx + ts.width, y1: ty, x2: tx + ts.width, y2: ty + ts.height, border: b });
+      const edge = (x1: number, y1: number, x2: number, y2: number) =>
+        page.items.push({ kind: "edge", x1, y1, x2, y2, border: b, ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}), ...(front ? { front: true } : {}), z });
+      edge(tx, ty, tx + ts.width, ty);
+      edge(tx, ty + ts.height, tx + ts.width, ty + ts.height);
+      edge(tx, ty, tx, ty + ts.height);
+      edge(tx + ts.width, ty, tx + ts.width, ty + ts.height);
     }
     const ins = ts.insets;
     const inner = this.layoutFrame(ts.blocks, Math.max(ts.width - ins.l - ins.r, 1), fields, {
@@ -5237,6 +5494,14 @@ class Engine {
     else if (ts.textAnchor === "bottom") innerTop = ty + ts.height - ins.b - inner.height;
     for (const it of inner.items) {
       offsetItem(it, tx + ins.l, innerTop);
+      if (front && (it.kind === "text" || it.kind === "rect" || it.kind === "edge")) it.front = true;
+      if (rotate && (it.kind === "text" || it.kind === "rect")) {
+        const iy = it.kind === "text" ? (it.glyphTop ?? it.lineTop) : it.y;
+        it.rotate = rotate(it.x, iy);
+      } else if (rotate && it.kind === "edge") {
+        it.rotate = rotate(Math.min(it.x1, it.x2), Math.min(it.y1, it.y2));
+      }
+      if (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit") it.z = z;
       page.items.push(it);
     }
   }
@@ -6056,6 +6321,27 @@ class Engine {
     // their spanned rows rather than inflating their starting row.
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
     const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+    const tableHeight =
+      (s2 || this.rowBorderWidths(tbl, 0).top / 2) +
+      rowHeights.reduce((sum, height) => sum + height, 0) +
+      Math.max(0, tbl.rows.length - 1) * s2 +
+      (s2 || this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2);
+
+    // A normal table cannot wrap beside a floating exclusion rectangle. If
+    // its footprint would intersect one, Word moves the whole table below the
+    // float (benchmark-edited: the inline fixed-width table follows the moved
+    // page-anchored table instead of painting through it).
+    for (let guard = 0; guard < 20; guard++) {
+      const hit = (this.floats.get(this.cur) ?? []).find(
+        (rect) =>
+          this.y < rect.y1 &&
+          this.y + tableHeight > rect.y0 &&
+          x0 < rect.x1 &&
+          x0 + tableWidth > rect.x0,
+      );
+      if (!hit) break;
+      this.y = hit.y1;
+    }
 
     // tblHeader rows never sit alone at a column bottom: Word keeps the
     // header block together with the FIRST data row, so when they don't fit
@@ -6070,6 +6356,22 @@ class Engine {
 
     let segTop = this.y;
     let segPage = this.cur;
+    let moveEmitted = false;
+    const markTableStart = () => {
+      if (moveEmitted) return;
+      moveEmitted = true;
+      if (!tbl.src) return;
+      this.cur.items.push({
+        kind: "grip",
+        axis: "move",
+        x: x0,
+        x2: x0 + tableWidth,
+        y1: segTop,
+        y2: segTop + tableHeight,
+        tbl: tbl.src,
+        boundary: 0,
+      });
+    };
 
     // Row coordinates are horizontal-rule centerlines. Flow coordinates are
     // the table's outer edges, so advance half the top rule before painting
@@ -6107,6 +6409,7 @@ class Engine {
             const hIdx = tbl.rows.indexOf(hr);
             const hLaid = this.layoutRow(tbl, hr, hIdx, widths);
             const hH = rowHeights[hIdx];
+            markTableStart();
             this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hH);
             this.y += hH;
           }
@@ -6172,6 +6475,7 @@ class Engine {
           this.rowNoteHeight(laid) > 0 || (this.cur.footnoteH[this.col] ?? 0) > 0 ? NOTE_SEP_H : 0;
         const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y, keepSlack) : null;
         if (parts) {
+          markTableStart();
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
           this.y += parts.top.height;
           advance();
@@ -6185,6 +6489,7 @@ class Engine {
         if (this.pageIsEmptyAtCursor() || this.y <= this.cur.bodyTop + topHalf + 0.01) break;
         advance();
       }
+      markTableStart();
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
       this.y += rowHeight;
       // Separated cell borders: 2*spacing of vertical air between each row's
@@ -6290,6 +6595,33 @@ class Engine {
     else if (fl.yAlign === "top") y = vOriginY;
     else y = vOriginY + (fl.y ?? 0);
 
+    const known = this.floatingTablePositions.get(tbl);
+    if (known?.page === this.cur) {
+      x = known.x;
+      y = known.y;
+    } else {
+      if (!fl.allowOverlap || [...this.floatingTablePositions.values()].some((prior) => prior.page === this.cur && !prior.allowOverlap)) {
+        for (let guard = 0; guard < this.floatingTablePositions.size + 1; guard++) {
+          let moved = false;
+          for (const prior of this.floatingTablePositions.values()) {
+            if (
+              prior.page === this.cur &&
+              (!fl.allowOverlap || !prior.allowOverlap) &&
+              y < prior.y + prior.height &&
+              y + tableHeight > prior.y &&
+              x < prior.x + prior.width &&
+              x + tableWidth > prior.x
+            ) {
+              y = prior.y + prior.height;
+              moved = true;
+            }
+          }
+          if (!moved) break;
+        }
+      }
+      this.floatingTablePositions.set(tbl, { page: this.cur, x, y, width: tableWidth, height: tableHeight, allowOverlap: fl.allowOverlap });
+    }
+
     return { x, y, tableWidth, tableHeight, topLead, widths, s2, laidRows, rowHeights };
   }
 
@@ -6331,6 +6663,18 @@ class Engine {
     // page-anchored floats in probe3-table-exotics overlap, and B paints over A
     // without A's cells showing through B's gaps).
     page.items.push({ kind: "rect", x, y, width: tableWidth, height: tableHeight, fill: "#ffffff" });
+    if (tbl.src) {
+      page.items.push({
+        kind: "grip",
+        axis: "move",
+        x,
+        x2: x + tableWidth,
+        y1: y,
+        y2: y + tableHeight,
+        tbl: tbl.src,
+        boundary: 0,
+      });
+    }
 
     // Paint the rows at the absolute position by swapping the flow cursor, like
     // a nested frame. paintRow reads this.cur / this.y.

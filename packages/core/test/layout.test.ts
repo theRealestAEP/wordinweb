@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { strFromU8, unzipSync } from "fflate";
 import { DocxDocument } from "../src/docx.js";
-import { layoutDocument } from "../src/layout/engine.js";
+import { layoutDocument, layoutDocumentAsync } from "../src/layout/engine.js";
 import { ApproxMeasurer, type TextMeasurer } from "../src/layout/measure.js";
 import { formatNumber } from "../src/parse/numbering.js";
 import { makeDocx, wrapDocument, p, W_NS } from "./helpers.js";
 import { layoutMath } from "../src/layout/math.js";
 import type { MathNode } from "../src/model.js";
+import type { Paragraph, Run, TextContent } from "../src/model.js";
+import { insertChartAt } from "../src/edit/charts.js";
 
 const measurer = new ApproxMeasurer();
 
@@ -35,6 +38,41 @@ describe("layout engine", () => {
     const { result } = layout({ "word/document.xml": wrapDocument(p("Hello world")) });
     expect(result.totalPages).toBe(1);
     expect(pageText(result, 0)).toContain("Hello");
+  });
+
+  it("keeps a source caret anchor on an empty numbered paragraph", () => {
+    const numbering =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<w:numbering ${W_NS}><w:abstractNum w:abstractNumId="7">` +
+      `<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/>` +
+      `<w:lvlText w:val="%1."/><w:suff w:val="tab"/><w:pPr><w:tabs><w:tab w:val="num" w:pos="720"/></w:tabs><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl>` +
+      `</w:abstractNum><w:num w:numId="7"><w:abstractNumId w:val="7"/></w:num></w:numbering>`;
+    const emptyList =
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="7"/></w:numPr></w:pPr>` +
+      `<w:r><w:t xml:space="preserve"></w:t></w:r></w:p>`;
+    const { doc, result } = layout({
+      "word/document.xml": wrapDocument(emptyList),
+      "word/numbering.xml": numbering,
+    });
+    const line = result.pages[0].items.filter((item) => item.kind === "text");
+    const label = line.find((item) => item.kind === "text" && item.text === "a.");
+    const anchor = line.find((item) => item.kind === "text" && item.text === "" && item.src?.t);
+    expect(label?.kind).toBe("text");
+    expect(anchor?.kind).toBe("text");
+    if (label?.kind !== "text" || anchor?.kind !== "text") throw new Error("numbered line items missing");
+    expect(anchor.x).toBeGreaterThanOrEqual(label.x + label.width);
+
+    doc.refresh();
+    const refreshed = layoutDocument(doc, { measurer });
+    const refreshedAnchor = refreshed.pages[0].items.find(
+      (item) => item.kind === "text" && item.text === "" && item.src?.t,
+    );
+    const refreshedParagraph = doc.sections[0].blocks[0] as Paragraph;
+    const refreshedRun = refreshedParagraph.children[0] as Run;
+    expect(refreshedAnchor?.kind).toBe("text");
+    if (refreshedAnchor?.kind !== "text") throw new Error("refreshed anchor missing");
+    expect(refreshedAnchor.src?.run).toBe(refreshedRun);
+    expect(refreshedAnchor.src?.run).not.toBe(anchor.src?.run);
   });
 
   it("routes Nirmala UI Indic runs to Mangal/Latha and shrinks Tamil to Vijaya's scale", () => {
@@ -1249,6 +1287,24 @@ describe("layout engine", () => {
     for (let i = 0; i < total; i++) {
       const text = pageText(result, i);
       expect(text).toContain(`Page ${i + 1} of ${total}`);
+    }
+  });
+
+  it("resolves a body NUMPAGES field after sync and async pagination", async () => {
+    const body =
+      `<w:p><w:r><w:t xml:space="preserve">Total pages: </w:t></w:r>` +
+      `<w:fldSimple w:instr=" NUMPAGES \\* MERGEFORMAT "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>` +
+      `<w:p><w:r><w:br w:type="page"/><w:t>Second page</w:t></w:r></w:p>`;
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body) }));
+    const results = [
+      layoutDocument(doc, { measurer }),
+      await layoutDocumentAsync(doc, { measurer, sliceMs: 1 }),
+    ];
+
+    for (const result of results) {
+      expect(result.totalPages).toBe(2);
+      expect(pageText(result, 0)).toContain("Total pages: 2");
+      expect(pageText(result, 1)).toContain("Second page");
     }
   });
 
@@ -4670,6 +4726,57 @@ describe("tail parity rules (textboxes/nccih/hf2/yiddish)", () => {
   });
 });
 
+describe("floating table flow and overlap", () => {
+  const floatingTable = (text: string, overlap: "allow" | "never", y = 1440) =>
+    `<w:tbl><w:tblPr>` +
+    `<w:tblpPr w:horzAnchor="page" w:vertAnchor="page" w:tblpX="1440" w:tblpY="${y}"/>` +
+    (overlap === "never" ? `<w:tblOverlap w:val="never"/>` : ``) +
+    `<w:tblW w:w="3000" w:type="dxa"/><w:tblLayout w:type="fixed"/>` +
+    `</w:tblPr><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>` +
+    `<w:tr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>` +
+    `<w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+  const inlineTable = (text: string) =>
+    `<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+    `<w:tblGrid><w:gridCol w:w="6000"/></w:tblGrid><w:tr><w:tc>` +
+    `<w:tcPr><w:tcW w:w="6000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p>` +
+    `</w:tc></w:tr></w:tbl>`;
+  const topOf = (result: ReturnType<typeof layoutDocument>, text: string): number => {
+    const item = result.pages[0].items.find((candidate) => candidate.kind === "text" && candidate.text === text);
+    if (!item || item.kind !== "text") throw new Error(`missing ${text}`);
+    return item.lineTop;
+  };
+
+  it("moves an inline table below an intersecting floating table", () => {
+    const body = p("Intro") + floatingTable("FLOAT", "allow") + `<w:p/>` + inlineTable("INLINE");
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    expect(topOf(result, "INLINE")).toBeGreaterThan(topOf(result, "FLOAT"));
+  });
+
+  it("allows allow/allow overlap and prevents overlap when either table says never", () => {
+    const render = (first: "allow" | "never", second: "allow" | "never") =>
+      layout({
+        "word/document.xml": wrapDocument(
+          p("Intro") + floatingTable("A", first) + floatingTable("B", second) + p("Tail"),
+        ),
+      }).result;
+    const rects = (result: ReturnType<typeof layoutDocument>) => result.pages[0].items.filter(
+      (item): item is Extract<typeof item, { kind: "rect" }> =>
+        item.kind === "rect" && item.fill === "#ffffff" && Math.abs(item.width - 200) < 2,
+    );
+    const intersects = (a: Extract<ReturnType<typeof rects>[number], { kind: "rect" }>, b: Extract<ReturnType<typeof rects>[number], { kind: "rect" }>) =>
+      a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+
+    const allowed = render("allow", "allow");
+    expect(topOf(allowed, "B")).toBeCloseTo(topOf(allowed, "A"), 2);
+    expect(intersects(rects(allowed)[0], rects(allowed)[1])).toBe(true);
+    for (const policies of [["allow", "never"], ["never", "allow"]] as const) {
+      const prevented = render(...policies);
+      expect(topOf(prevented, "B")).toBeGreaterThan(topOf(prevented, "A") + 10);
+      expect(intersects(rects(prevented)[0], rects(prevented)[1])).toBe(false);
+    }
+  });
+});
+
 describe("mirror margins", () => {
   // settings.xml w:mirrorMargins: odd (recto) pages keep the gutter on the
   // left (content origin = left margin + gutter); even (verso) pages swap the
@@ -4704,6 +4811,42 @@ describe("mirror margins", () => {
     expect(result.pages.length).toBeGreaterThanOrEqual(2);
     expect(minTextX(result, 0)).toBeCloseTo(120, 1);
     expect(minTextX(result, 1)).toBeCloseTo(120, 1);
+  });
+
+  it("updates even-page geometry immediately across undo and redo", async () => {
+    const { setPageLayout } = await import("../src/edit/blocks.js");
+    const { EditHistory } = await import("../src/edit/history.js");
+    const historySectPr =
+      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +
+      '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"' +
+      ' w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>';
+    const historyBody = Array.from({ length: 90 }, () => p("Line")).join("") + historySectPr;
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(historyBody) }));
+    const history = new EditHistory(doc);
+    const textX = () => {
+      const result = layoutDocument(doc, { measurer });
+      return [minTextX(result, 0), minTextX(result, 1)];
+    };
+
+    history.checkpoint();
+    setPageLayout(doc, {
+      margins: { top: 1, right: 1, bottom: 1, left: 1.25 },
+      mirrorMargins: true,
+    });
+    expect(doc.mirrorMargins).toBe(true);
+    expect(textX()[0]).toBeCloseTo(120, 1);
+    expect(textX()[1]).toBeCloseTo(96, 1);
+
+    expect(history.undo()).toBe(true);
+    expect(doc.mirrorMargins).toBe(false);
+    expect(textX()[0]).toBeCloseTo(96, 1);
+    expect(textX()[1]).toBeCloseTo(96, 1);
+
+    expect(history.redo()).toBe(true);
+    expect(doc.mirrorMargins).toBe(true);
+    expect(textX()[0]).toBeCloseTo(120, 1);
+    expect(textX()[1]).toBeCloseTo(96, 1);
+    expect(strFromU8(unzipSync(doc.save())["word/settings.xml"])).toContain("mirrorMargins");
   });
 });
 
@@ -4749,5 +4892,44 @@ describe("prstTxWarp WordArt", () => {
     const items = result.pages[0].items;
     expect(items.some((i) => i.kind === "warptext")).toBe(false);
     expect(items.some((i) => i.kind === "text" && i.text.includes("ARCH"))).toBe(true);
+  });
+
+  it("keeps fill-less rotated WordArt selectable and rotates its warp", () => {
+    const xml = warpBox("textWave1")
+      .replace('<a:xfrm>', '<a:xfrm rot="5400000">')
+      .replace('<a:solidFill><a:srgbClr val="2E74B5"/></a:solidFill>', '<a:noFill/>');
+    const { result } = layout({ "word/document.xml": wrapDocument(xml) });
+    const items = result.pages[0].items;
+    const hit = items.find((item) => item.kind === "drawingHit");
+    const warp = items.find((item) => item.kind === "warptext");
+    expect(hit?.kind).toBe("drawingHit");
+    expect(warp?.kind).toBe("warptext");
+    if (hit?.kind !== "drawingHit" || warp?.kind !== "warptext") throw new Error("WordArt items missing");
+    expect(hit.rotate?.deg).toBe(90);
+    expect(warp.rotate?.deg).toBe(90);
+  });
+});
+
+describe("native chart layout", () => {
+  it("emits chart paint and a selectable drawing hit at the inline extent", () => {
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(p("Anchor")) }));
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    const t = ((para.children[0] as Run).content[0] as TextContent).srcT!;
+    insertChartAt(doc, t, {
+      type: "column",
+      title: "Sales",
+      categories: ["Q1", "Q2"],
+      series: [{ name: "Revenue", values: [10, 14] }],
+    });
+    const items = layoutDocument(doc, { measurer }).pages[0].items;
+    const chart = items.find((item) => item.kind === "chart");
+    const hit = items.find((item) => item.kind === "drawingHit");
+    if (chart?.kind !== "chart" || hit?.kind !== "drawingHit") throw new Error("chart items missing");
+    expect(chart.data.title).toBe("Sales");
+    expect(chart.width).toBeCloseTo(480, 0);
+    expect(chart.height).toBeCloseTo(288, 0);
+    expect(hit.src).toBeTruthy();
+    expect(hit.width).toBeCloseTo(chart.width, 4);
+    expect(hit.height).toBeCloseTo(chart.height, 4);
   });
 });

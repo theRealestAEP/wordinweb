@@ -1,6 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { MathNode } from "../model.js";
-import { XmlElement, localName } from "../xml.js";
+import { XmlElement, cloneXml, localName } from "../xml.js";
 
 /**
  * Math editing: equations round-trip through a linear form ("e^x = 1+x+x/2",
@@ -211,6 +211,69 @@ export function setMathLinear(doc: DocxDocument, oMathEl: XmlElement, text: stri
   oMathEl.children = nodes.map((n) => buildOmml(n, m));
   doc.refresh();
   return true;
+}
+
+/** Insert a new inline OMML equation at a text position. */
+export function insertMathAt(
+  doc: DocxDocument,
+  t: XmlElement,
+  offset: number,
+  text: string,
+): XmlElement | null {
+  const nodes = parseMathLinear(text.trim());
+  if (nodes.length === 0) return null;
+  const run = doc.findParentOf(t);
+  const parent = run && doc.findParentOf(run);
+  if (!run || !parent || localName(run.name) !== "r") return null;
+
+  const contains = (root: XmlElement): boolean =>
+    root === t || root.children.some(contains);
+  const root = doc.editableRoots().find(contains);
+  if (root && !Object.prototype.hasOwnProperty.call(root.attrs, "xmlns:m")) {
+    root.attrs["xmlns:m"] = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+  }
+  const equation = el("m:oMath", nodes.map((node) => buildOmml(node, "m:")));
+  const runIndex = parent.children.indexOf(run);
+  const textIndex = run.children.indexOf(t);
+  if (runIndex < 0 || textIndex < 0 || !root) return null;
+  const at = Math.max(0, Math.min(offset, t.text.length));
+  const rPr = run.children.find((child) => localName(child.name) === "rPr");
+  const makeText = (text: string): XmlElement => ({
+    name: t.name,
+    attrs: { ...t.attrs, "xml:space": "preserve" },
+    children: [],
+    text,
+  });
+  const makeRun = (content: XmlElement[]): XmlElement => ({
+    name: run.name,
+    attrs: { ...run.attrs },
+    children: [...(rPr ? [cloneXml(rPr)] : []), ...content],
+    text: "",
+  });
+  const before = run.children.slice(0, textIndex).filter((child) => localName(child.name) !== "rPr");
+  const after = run.children.slice(textIndex + 1).filter((child) => localName(child.name) !== "rPr");
+  let beforeRun: XmlElement | null;
+  let afterRun: XmlElement | null;
+  if (at === 0) {
+    beforeRun = before.length > 0 ? makeRun(before) : null;
+    run.children = [...(rPr ? [rPr] : []), t, ...after];
+    afterRun = run;
+  } else {
+    const tail = at < t.text.length ? makeText(t.text.slice(at)) : null;
+    t.text = t.text.slice(0, at);
+    run.children = [...(rPr ? [rPr] : []), ...before, t];
+    beforeRun = run;
+    afterRun = tail || after.length > 0 ? makeRun([...(tail ? [tail] : []), ...after]) : null;
+  }
+  parent.children.splice(
+    runIndex,
+    1,
+    ...(beforeRun ? [beforeRun] : []),
+    equation,
+    ...(afterRun ? [afterRun] : []),
+  );
+  doc.refresh();
+  return equation;
 }
 
 function el(name: string, children: XmlElement[] = [], text = ""): XmlElement {

@@ -67,7 +67,7 @@ export function Editor() {
 
   return (
     <div>
-      {api && <DocxToolbar api={api} onSave={download} />}
+      {api && <DocxToolbar api={api} mode="advanced" onSave={download} />}
       <DocxView
         source="/report.docx"
         editable
@@ -116,19 +116,36 @@ The object passed to `onReady`. Every command operates on the current selection 
 **Page layout**
 - `setPageLayout(patch, scope?)` — margins, page size, orientation, columns, page borders. `scope` = `"document"` (all sections) or `"section"` (the caret's).
 - `insertBreak("page" | "column" | "sectionNextPage" | "sectionContinuous")`.
+- `insertBlankPage()` — inserts a complete blank page at the caret.
+- `insertCoverPage({ title, subtitle?, author? })` — prepends an editable, styled cover page.
 - `setLineNumbering(patch, scope?)`, `getLineNumbering()`.
+- `openHeaderFooter("header" | "footer")`, `closeHeaderFooter()` — create or directly enter page header/footer editing; Escape closes it.
 
 **Tables**
 - `insertTable(rows, cols)`.
 - `tableOp(op)` — insert/delete row/column, merge/split cells, cell vertical align, cell shading, delete table.
 
 **Images**
-- `insertImage(file)` — inserts a `Blob`/`File` inline at the caret, clamped to the column width (TIFF/WMF/EMF are decoded to something the browser can paint).
+- `insertImage(file)` — inserts a raster image or editable SVG icon inline at the caret, clamped to the column width (TIFF/WMF/EMF are decoded to something the browser can paint).
+- `insertScreenshot()` — opens the browser screen/window/tab picker and inserts the captured frame as an editable PNG picture.
+- `insertModel3D(file, poster?)` — packages a GLB as a native Office 3D model with an editable poster fallback.
+- `insertOnlineVideo(url)` — inserts Word online-video metadata with a safe browser poster; double-click opens the validated HTTP(S) URL.
+- `insertEmbeddedObject(file, filename?)` — embeds any file as a native OLE Package; double-click safely downloads the original file in the browser.
 
-**Comments, footnotes & fields**
+**Comments, footnotes & Insert content**
 - `addComment(text)` — comment on the selection (`false` if nothing is selected).
 - `addFootnote(text)` — footnote at the caret.
 - `insertPageNumber("page" | "pageOfTotal")` — dynamic `PAGE` / `Page X of Y` field.
+- `insertField(instruction, cachedResult?)`, `insertDateTime("date" | "time", picture?)` — live Word fields.
+- `addBookmark(name)`, `listBookmarks()`, `insertCrossReference(name, "text" | "page")` — named bookmark targets and live `REF` / `PAGEREF` fields.
+- `insertEquation(linear)`, `insertSymbol(symbol)` — native editable OMML equations and arbitrary Unicode symbols.
+- `insertShape(preset, text?)` — floating editable DrawingML rectangles, rounded rectangles, ellipses, diamonds, and text boxes. Advanced mode also exposes Text Box as its own Insert control.
+- `insertWordArt(text, preset?)` — editable DrawingML WordArt with plain, arch, wave, and chevron presets.
+- `insertChart(data)`, `updateSelectedChart(data)` — native editable ChartML with its embedded workbook.
+- `insertSmartArt(data)`, `updateSelectedSmartArt(data)` — native editable SmartArt data, layout, style, colors, and cached drawing parts.
+- `setDrawingTool({ kind: "pen", color, width } | { kind: "eraser", size } | { kind: "lasso" } | null)`, `getDrawingTool()` — draw, erase, or lasso-select movable DrawingML ink.
+- `arrangeObject(action)` — align the selected image, shape, or ink group to the page; rotate it 90°; or bring it to the front/send it to the back. Arrow keys nudge selected floating objects by 1px (`Shift` = 10px).
+- `setDropCap("drop" | "margin" | null, lines?)` — apply, change, or remove a native Word drop cap on the caret paragraph.
 
 **Suggesting mode (tracked changes)**
 - `setSuggesting(on, author?)` — when on, edits record as OOXML `w:ins`/`w:del` instead of mutating text directly, and the view switches to markup.
@@ -144,16 +161,18 @@ The object passed to `onReady`. Every command operates on the current selection 
 - `undo()`, `redo()`, `canUndo()`, `canRedo()`.
 - `save()` → edited `.docx` bytes (`Uint8Array`). Everything the model doesn't touch round-trips byte-for-byte.
 - `print()` — browser print dialog / save-as-PDF of the rendered pages.
-- `pageCount()`, `closeHeaderFooter()`, and `document` (the parsed `DocxDocument`).
+- `pageCount()` and `document` (the parsed `DocxDocument`).
 
 ### `DocxToolbar`
 
-A ready-made formatting toolbar for an editable `DocxView`. Ribbon-style tabs (Home / Insert / Layout) wired to the `api`.
+A ready-made formatting toolbar for an editable `DocxView`. Use `mode="simple"` for the basic Home editing strip or `mode="advanced"` for the full Home / Insert / Draw / Layout ribbon supported by the installed version.
+Layout includes Word-style paper presets plus a custom width/height dialog; both document and current-section scope emit native page-size properties.
 
 | Prop | Type | What it does |
 | --- | --- | --- |
 | `api` | `DocxViewApi \| null` | The api from `onReady`. |
 | `onSave` | `(bytes: Uint8Array) => void` | Adds a Download button; receives `api.save()` bytes. |
+| `mode` | `"simple" \| "advanced"` | Editing surface. Defaults to `"advanced"`; simple omits the Insert, Draw, and Layout ribbons. |
 | `features` | `Partial<Record<ToolbarFeature, boolean>>` | Per-group toggles; every group defaults on. Set one `false` to hide it (e.g. `{ table: false, image: false }`). |
 | `className` | `string` | Class on the toolbar root — handy as a scope for CSS-variable overrides. |
 | `style` | `React.CSSProperties` | Inline overrides merged onto the toolbar root. |
@@ -168,6 +187,7 @@ Every color the chrome paints — the toolbar, comment cards, selection, caret, 
 | `--dxw-toolbar-fg` | `#3c4043` | Toolbar text & icons (icons use `currentColor`) |
 | `--dxw-toolbar-border` | `#dadce0` | Toolbar borders & separators |
 | `--dxw-toolbar-muted` | `#5f6368` | Secondary/label text |
+| `--dxw-toolbar-z-index` | `100` | Toolbar and open-menu stacking level |
 | `--dxw-accent` | `#1a73e8` | Primary accent (active tab, pills, focus rings) |
 | `--dxw-accent-fg` | `#fff` | Text/icon on an accent fill |
 | `--dxw-btn-active-bg` | `#dfe7f5` | Toggled button background |
@@ -175,6 +195,9 @@ Every color the chrome paints — the toolbar, comment cards, selection, caret, 
 | `--dxw-tab-active-bg` | `#e8f0fe` | Active ribbon-tab background |
 | `--dxw-popover-bg` | `#fff` | Dropdown / popover surface |
 | `--dxw-popover-shadow` | `0 4px 16px rgba(0,0,0,.15)` | Popover shadow |
+| `--dxw-layout-menu-width` | `304px` | Layout option-menu width |
+| `--dxw-layout-menu-max-height` | `480px` | Layout option-menu scroll limit |
+| `--dxw-layout-preview-bg` | `#fff` | Paper fill in Layout option previews |
 | `--dxw-canvas-bg` | `#e8eaed` | Scroll area behind the pages |
 | `--dxw-page-bg` | `#ffffff` | Page paper |
 | `--dxw-page-shadow` | `0 1px 3px …, 0 4px 14px …` | Page drop shadow |
@@ -214,6 +237,12 @@ Or in a stylesheet:
 ```css
 .dxw-dark { --dxw-toolbar-bg: #1f2937; --dxw-toolbar-fg: #e5e7eb; /* … */ }
 ```
+
+Layout controls also expose stable `.dxw-layout-ribbon`, `.dxw-layout-menu-trigger`,
+`.dxw-layout-menu`, `.dxw-layout-menu-item`, and `.dxw-layout-preview` classes.
+Their `data-dxw-layout-menu`, `data-dxw-layout-option`, and
+`data-dxw-layout-preview` attributes identify each menu, action, and diagram
+when a host needs a narrowly scoped style override.
 
 ## How it works
 

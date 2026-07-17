@@ -1,4 +1,5 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { DocxViewApi } from "./index.js";
 
 /**
@@ -90,6 +91,23 @@ const selectStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
+const PAGE_SIZES = [
+  { value: "letter", label: "Letter", description: '8.5" × 11"', width: 8.5, height: 11 },
+  { value: "legal", label: "Legal", description: '8.5" × 14"', width: 8.5, height: 14 },
+  { value: "3.5x5", label: "3.5 × 5", description: '3.5" × 5"', width: 3.5, height: 5 },
+  { value: "3.5x5-borderless", label: "3.5 × 5 Borderless", description: '3.5" × 5"', width: 3.5, height: 5 },
+  { value: "4x6", label: "4 × 6", description: '4" × 6"', width: 4, height: 6 },
+  { value: "4x6-borderless", label: "4 × 6 Borderless", description: '4" × 6"', width: 4, height: 6 },
+  { value: "5x7", label: "5 × 7", description: '5" × 7"', width: 5, height: 7 },
+  { value: "5x7-borderless", label: "5 × 7 Borderless", description: '5" × 7"', width: 5, height: 7 },
+  { value: "8x10", label: "8 × 10", description: '8" × 10"', width: 8, height: 10 },
+  { value: "8x10-borderless", label: "8 × 10 Borderless", description: '8" × 10"', width: 8, height: 10 },
+  { value: "a4", label: "A4", description: '8.27" × 11.69"', width: 8.27, height: 11.69 },
+  { value: "a4-borderless", label: "A4 Borderless", description: '8.27" × 11.69"', width: 8.27, height: 11.69 },
+  { value: "a6", label: "A6", description: '4.13" × 5.83"', width: 4.13, height: 5.83 },
+  { value: "envelope10", label: "Envelope #10", description: '4.13" × 9.5"', width: 4.13, height: 9.5 },
+] as const;
+
 function Btn({ label, title, active, onClick }: { label: React.ReactNode; title: string; active?: boolean; onClick: () => void }) {
   return (
     <button
@@ -150,12 +168,12 @@ function OverflowMenu({ children }: { children: React.ReactNode }) {
       {open && (
         <div
           data-dxw-overflow-menu=""
-          onMouseDown={(e) => e.preventDefault()}
           style={{
             position: "absolute", top: 30, right: 0, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
             padding: 8, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4,
-            maxWidth: 280,
+            width: "min(280px, calc(100vw - 16px))",
+            boxSizing: "border-box",
           }}
         >
           {children}
@@ -557,6 +575,617 @@ const pillBtn: React.CSSProperties = {
   color: T.accentFg,
 };
 
+function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [error, setError] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    inputRef.current?.focus();
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const submit = () => {
+    const value = name.trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(value)) {
+      setError("Start with a letter; use letters, numbers, or underscores (40 characters max).");
+      return;
+    }
+    if (!api?.addBookmark(value)) {
+      setError("Select text or place the caret, and use a bookmark name that is not already present.");
+      return;
+    }
+    setName("");
+    setError("");
+    setOpen(false);
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert bookmark" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        Bookmark
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 280, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 6, color: T.fg }}>Bookmark name</div>
+          <input
+            ref={inputRef}
+            value={name}
+            placeholder="Quarterly_Revenue"
+            onChange={(event) => { setName(event.target.value); setError(""); }}
+            onKeyDown={(event) => event.key === "Enter" && submit()}
+            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+          />
+          {error && <div style={{ color: "#c5221f", fontSize: 11.5, marginTop: 5 }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
+            <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => setOpen(false)}>Cancel</button>
+            <button style={pillBtn} disabled={!name.trim()} onClick={submit}>Add</button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [bookmark, setBookmark] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const bookmarks = open ? api?.listBookmarks() ?? [] : [];
+  const selected = bookmarks.includes(bookmark) ? bookmark : bookmarks[0] ?? "";
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const insert = (kind: "text" | "page") => {
+    if (selected && api?.insertCrossReference(selected, kind)) setOpen(false);
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert cross-reference" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        Cross-reference
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 260, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          {bookmarks.length === 0 ? (
+            <div style={{ color: T.muted, fontSize: 12 }}>Add a bookmark first, then reference its text or page.</div>
+          ) : (
+            <>
+              <select value={selected} onChange={(event) => setBookmark(event.target.value)} style={{ ...selectStyle, width: "100%", borderColor: T.border }}>
+                {bookmarks.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
+                <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => insert("page")}>Page number</button>
+                <button style={pillBtn} onClick={() => insert("text")}>Bookmark text</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
+function EquationMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [linear, setLinear] = useState("x={-b±√{b^2-4ac}}/{2a}");
+  const [error, setError] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    inputRef.current?.focus();
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const submit = () => {
+    if (api?.insertEquation(linear)) {
+      setError("");
+      setOpen(false);
+    } else {
+      setError("Place the caret in editable text and enter a valid equation.");
+    }
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert equation" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ fontFamily: "'Cambria Math', serif", fontSize: 18 }}>π</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 340, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg }}>Linear equation</div>
+          <input
+            ref={inputRef}
+            aria-label="Linear equation"
+            value={linear}
+            onChange={(event) => { setLinear(event.target.value); setError(""); }}
+            onKeyDown={(event) => event.key === "Enter" && submit()}
+            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "15px 'Cambria Math', serif", outline: "none" }}
+          />
+          <div style={{ color: T.muted, fontSize: 11.5, marginTop: 5 }}>Use ^, _, /, √&#123;…&#125;, ∫, matrices [a&amp;b;c&amp;d], and grouped &#123;…&#125; expressions.</div>
+          {error && <div style={{ color: "#c5221f", fontSize: 11.5, marginTop: 5 }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+            <button style={pillBtn} disabled={!linear.trim()} onClick={submit}>Insert</button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+const SYMBOLS = ["Ω", "±", "×", "÷", "≤", "≥", "≠", "≈", "∞", "∑", "√", "∫", "→", "↔", "©", "®", "™", "€", "£", "¥", "✓", "•", "§", "¶"];
+
+function SymbolMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [custom, setCustom] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
+  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, (typeof window === "undefined" ? 280 : window.innerWidth) - 272));
+  const insertCustom = () => {
+    if (api?.insertSymbol(custom)) {
+      setCustom("");
+      setOpen(false);
+    }
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert advanced symbol" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ fontFamily: "serif", fontSize: 14 }}>Ω <span style={{ fontFamily: "system-ui, sans-serif", fontSize: 12 }}>Advanced Symbol</span></span>
+      </button>
+      {open && (
+        <div style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: 264, padding: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 32px)", gap: 5 }}>
+            {SYMBOLS.map((symbol) => (
+              <button key={symbol} title={`Insert ${symbol}`} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (api?.insertSymbol(symbol)) setOpen(false); }} style={{ width: 32, height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "17px 'Cambria Math', serif" }}>
+                {symbol}
+              </button>
+            ))}
+          </div>
+          <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 8, paddingTop: 8 }}>
+            <label style={{ display: "block", color: T.muted, font: "11.5px system-ui, sans-serif", marginBottom: 4 }} htmlFor="dxw-advanced-symbol">Any Unicode symbol</label>
+            <div style={{ display: "flex", gap: 6 }}>
+              <input
+                id="dxw-advanced-symbol"
+                aria-label="Advanced symbol characters"
+                value={custom}
+                onChange={(event) => setCustom(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && insertCustom()}
+                placeholder="Paste or type a symbol"
+                style={{ minWidth: 0, flex: 1, border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 7px", background: T.popoverBg, color: T.fg, font: "15px 'Cambria Math', serif" }}
+              />
+              <button type="button" disabled={!custom} onClick={insertCustom} style={pillBtn}>Insert</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+const SHAPES = [
+  ["rectangle", "Rectangle", "▭"],
+  ["roundedRectangle", "Rounded rectangle", "▢"],
+  ["ellipse", "Ellipse", "◯"],
+  ["diamond", "Diamond", "◇"],
+  ["textBox", "Text box", "T"],
+] as const;
+
+function ShapeMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const insert = (preset: Parameters<DocxViewApi["insertShape"]>[0]) => {
+    if (api?.insertShape(preset, text)) {
+      setText("");
+      setOpen(false);
+    }
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert shape" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ fontSize: 17 }}>◇</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 250, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <input
+            aria-label="Shape text"
+            value={text}
+            placeholder="Shape text (optional)"
+            onChange={(event) => setText(event.target.value)}
+            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+          />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
+            {SHAPES.map(([preset, label, glyph]) => (
+              <button key={preset} title={`Insert ${label}`} onClick={() => insert(preset)} style={{ minHeight: 48, border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif" }}>
+                <span style={{ display: "block", fontSize: 20, lineHeight: 1 }}>{glyph}</span>
+                <span>{label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function TextBoxMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const insert = () => {
+    if (api?.insertShape("textBox", text)) {
+      setText("");
+      setOpen(false);
+    }
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert text box" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Text Box</button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 240, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <label htmlFor="dxw-text-box-text" style={{ display: "block", color: T.muted, font: "11.5px system-ui, sans-serif", marginBottom: 4 }}>Initial text</label>
+          <input
+            id="dxw-text-box-text"
+            aria-label="Text box text"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => event.key === "Enter" && insert()}
+            placeholder="Text box"
+            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+          />
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+            <button type="button" onClick={insert} style={pillBtn}>Insert</button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+const WORD_ART = [
+  ["plain", "Plain", "WordArt"],
+  ["archUp", "Arch up", "⌒"],
+  ["archDown", "Arch down", "⌣"],
+  ["wave", "Wave", "∿"],
+  ["chevron", "Chevron", "⌃"],
+] as const;
+
+function WordArtMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("Your text here");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert WordArt" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ color: "#2e74b5", fontSize: 17, fontStyle: "italic", fontWeight: 700 }}>A</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 270, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <input
+            aria-label="WordArt text"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+          />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
+            {WORD_ART.map(([preset, label, glyph]) => (
+              <button
+                key={preset}
+                title={`Insert WordArt ${label}`}
+                disabled={!text}
+                onClick={() => {
+                  if (api?.insertWordArt(text, preset)) setOpen(false);
+                }}
+                style={{ minHeight: 48, border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: "#2e74b5", cursor: text ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}
+              >
+                <span style={{ display: "block", fontSize: 19, lineHeight: 1.2 }}>{glyph}</span>
+                <span>{label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function ChartMenu({ api }: { api: DocxViewApi | null }) {
+  type Chart = Parameters<DocxViewApi["insertChart"]>[0];
+  const [open, setOpen] = useState(false);
+  const [type, setType] = useState<Chart["type"]>("column");
+  const [title, setTitle] = useState("Quarterly sales");
+  const [categories, setCategories] = useState("Q1, Q2, Q3, Q4");
+  const [series, setSeries] = useState("Revenue: 12, 19, 15, 24\nCosts: 8, 11, 10, 14");
+  const [error, setError] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const submit = () => {
+    const categoryValues = categories.split(",").map((value) => value.trim()).filter(Boolean);
+    const seriesValues = series.split(/\r?\n/).map((line) => {
+      const separator = line.indexOf(":");
+      if (separator === -1) return null;
+      const name = line.slice(0, separator).trim();
+      const values = line.slice(separator + 1).split(",").map((value) => Number(value.trim()));
+      return name && values.length === categoryValues.length && values.every(Number.isFinite) ? { name, values } : null;
+    }).filter((value): value is NonNullable<typeof value> => value !== null);
+    if (!categoryValues.length || !seriesValues.length || seriesValues.length !== series.split(/\r?\n/).filter((line) => line.trim()).length) {
+      setError("Use comma-separated categories and one “Name: 1, 2, 3” series per line.");
+      return;
+    }
+    const data: Chart = { type, title, categories: categoryValues, series: seriesValues };
+    if (api?.updateSelectedChart(data) || api?.insertChart(data)) {
+      setError("");
+      setOpen(false);
+    }
+  };
+  const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert or edit chart" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Chart</button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 320, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <select aria-label="Chart type" value={type} onChange={(event) => setType(event.target.value as Chart["type"])} style={fieldStyle}>
+            <option value="column">Column</option>
+            <option value="bar">Bar</option>
+            <option value="line">Line</option>
+            <option value="pie">Pie</option>
+          </select>
+          <input aria-label="Chart title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Chart title" style={fieldStyle} />
+          <input aria-label="Chart categories" value={categories} onChange={(event) => setCategories(event.target.value)} placeholder="Q1, Q2, Q3, Q4" style={fieldStyle} />
+          <textarea aria-label="Chart series" rows={3} value={series} onChange={(event) => setSeries(event.target.value)} style={{ ...fieldStyle, resize: "vertical" }} />
+          <div style={{ color: T.muted, font: "11.5px system-ui, sans-serif" }}>Each series: Name: value, value, value</div>
+          {error && <div role="alert" style={{ color: "#c5221f", font: "11.5px system-ui, sans-serif" }}>{error}</div>}
+          <button onClick={submit} style={{ border: 0, borderRadius: 6, padding: "7px 10px", background: T.accent, color: T.accentFg, cursor: "pointer", font: "600 12px system-ui, sans-serif" }}>Insert or update chart</button>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function SmartArtMenu({ api }: { api: DocxViewApi | null }) {
+  type SmartArt = Parameters<DocxViewApi["insertSmartArt"]>[0];
+  const [open, setOpen] = useState(false);
+  const [layout, setLayout] = useState<SmartArt["layout"]>("process");
+  const [items, setItems] = useState("Discover\nDesign\nDeliver");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const submit = () => {
+    const values = items.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+    if (!values.length) return;
+    const data: SmartArt = { layout, items: values };
+    if (api?.updateSelectedSmartArt(data) || api?.insertSmartArt(data)) setOpen(false);
+  };
+  const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert or edit SmartArt" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>SmartArt</button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 280, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <select aria-label="SmartArt layout" value={layout} onChange={(event) => setLayout(event.target.value as SmartArt["layout"])} style={fieldStyle}>
+            <option value="process">Process</option>
+            <option value="cycle">Cycle</option>
+            <option value="hierarchy">Hierarchy</option>
+            <option value="list">List</option>
+          </select>
+          <textarea aria-label="SmartArt items" rows={5} value={items} onChange={(event) => setItems(event.target.value)} style={{ ...fieldStyle, resize: "vertical" }} />
+          <div style={{ color: T.muted, font: "11.5px system-ui, sans-serif" }}>One diagram item per line.</div>
+          <button disabled={!items.trim()} onClick={submit} style={{ border: 0, borderRadius: 6, padding: "7px 10px", background: items.trim() ? T.accent : T.border, color: T.accentFg, cursor: items.trim() ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}>Insert or update SmartArt</button>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function MediaMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert online video" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Media</button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 300, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <input aria-label="Online video URL" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg }} />
+          <button
+            disabled={!url.trim()}
+            onClick={() => void api?.insertOnlineVideo(url).then((inserted) => inserted && setOpen(false))}
+            style={{ border: 0, borderRadius: 6, padding: "7px 10px", background: url.trim() ? T.accent : T.border, color: T.accentFg, cursor: url.trim() ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}
+          >
+            Insert online video
+          </button>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function DrawTab({ api }: { api: DocxViewApi | null }) {
+  const [color, setColor] = useState("#202124");
+  const [width, setWidth] = useState(2);
+  const kindOf = (tool: ReturnType<NonNullable<DocxViewApi["getDrawingTool"]>>) =>
+    tool ? tool.kind === "eraser" ? "eraser" : tool.kind === "lasso" ? "lasso" : tool.kind === "highlighter" ? "highlighter" : "pen" : "select";
+  const [active, setActive] = useState<"select" | "pen" | "highlighter" | "eraser" | "lasso">(kindOf(api?.getDrawingTool() ?? null));
+  useEffect(() => {
+    const update = (event: Event) => setActive(kindOf((event as CustomEvent).detail));
+    document.addEventListener("dxw-drawing-tool", update);
+    return () => document.removeEventListener("dxw-drawing-tool", update);
+  }, []);
+  useEffect(() => () => api?.setDrawingTool(null), [api]);
+  const activate = (kind: "pen" | "highlighter", nextColor = color, nextWidth = width) => {
+    setColor(nextColor);
+    setWidth(nextWidth);
+    api?.setDrawingTool({ kind, color: nextColor, width: nextWidth });
+  };
+  return (
+    <>
+      <Btn label="Select" title="Select objects" active={active === "select"} onClick={() => api?.setDrawingTool(null)} />
+      <Btn label="Pen" title="Draw with pen" active={active === "pen"} onClick={() => activate("pen")} />
+      <Btn label="Highlighter" title="Draw with highlighter" active={active === "highlighter"} onClick={() => activate("highlighter", "#F9D949", 12)} />
+      <Btn label="Eraser" title="Stroke eraser" active={active === "eraser"} onClick={() => api?.setDrawingTool({ kind: "eraser", size: 14 })} />
+      <Btn label="Lasso" title="Lasso ink" active={active === "lasso"} onClick={() => api?.setDrawingTool({ kind: "lasso" })} />
+      <Sep />
+      <label title="Pen color" style={{ display: "inline-flex", alignItems: "center", gap: 5, color: T.fg, font: "12px system-ui, sans-serif" }}>
+        Color
+        <input
+          aria-label="Pen color"
+          type="color"
+          value={color}
+          onChange={(event) => activate(active === "highlighter" ? "highlighter" : "pen", event.target.value, width)}
+          style={{ width: 28, height: 24, padding: 1, border: `1px solid ${T.border}`, borderRadius: 4, background: "transparent" }}
+        />
+      </label>
+      <ActionMenu
+        label={`${width} px`}
+        title="Pen width"
+        width={70}
+        groups={[{ items: [["1", "1 px"], ["2", "2 px"], ["4", "4 px"], ["8", "8 px"], ["12", "12 px"]] }]}
+        onPick={(value) => activate(active === "highlighter" ? "highlighter" : "pen", color, Number(value))}
+      />
+    </>
+  );
+}
+
+function ScreenshotButton({ api }: { api: DocxViewApi | null }) {
+  const [status, setStatus] = useState("");
+  const capture = async () => {
+    setStatus("Capturing screenshot…");
+    const result = await api?.insertScreenshot();
+    setStatus(result === "inserted"
+      ? "Screenshot inserted."
+      : result === "unsupported"
+        ? "Screen capture is not supported in this browser."
+        : result === "cancelled"
+          ? "Screen capture was cancelled or denied."
+          : result === "no-caret"
+            ? "Click in the document before inserting a screenshot."
+            : "Screenshot failed. Please try again.");
+  };
+  return (
+    <span style={{ position: "relative", display: "inline-flex" }}>
+      <Btn label="Screenshot" title="Capture and insert a screen, window, or tab" onClick={() => void capture()} />
+      {status && (
+        <span
+          role={status === "Screenshot inserted." ? "status" : "alert"}
+          data-dxw-screenshot-status=""
+          style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 210, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
+        >
+          {status}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [subtitle, setSubtitle] = useState("");
+  const [author, setAuthor] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const insert = () => {
+    if (!title.trim() || !api?.insertCoverPage({ title, subtitle, author })) return;
+    setOpen(false);
+    setTitle("");
+    setSubtitle("");
+    setAuthor("");
+  };
+  const input = (label: string, value: string, set: (value: string) => void) => (
+    <input
+      aria-label={label}
+      placeholder={label}
+      value={value}
+      onChange={(event) => set(event.target.value)}
+      style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif" }}
+    />
+  );
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert cover page" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Cover page</button>
+      {open && (
+        <div style={{ position: "absolute", top: 30, left: 0, zIndex: 100, width: 260, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          {input("Cover title", title, setTitle)}
+          {input("Cover subtitle", subtitle, setSubtitle)}
+          {input("Cover author", author, setAuthor)}
+          <button disabled={!title.trim()} onClick={insert} style={{ border: 0, borderRadius: 6, padding: "7px 10px", background: title.trim() ? T.accent : T.border, color: T.accentFg, cursor: title.trim() ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}>Insert cover</button>
+        </div>
+      )}
+    </span>
+  );
+}
+
 /** Google-Docs-style table menu: hover grid picker + row/column operations. */
 function TableMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
@@ -694,73 +1323,671 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
  * Default formatting toolbar for an editable DocxView. Compact, grouped like
  * a word processor; every control preserves the selection/caret.
  */
+type LayoutPatch = Parameters<DocxViewApi["setPageLayout"]>[0];
+
+type LayoutMenuOption = {
+  value: string;
+  label: string;
+  description?: string;
+  preview: React.ReactNode;
+};
+
+function PagePreview({
+  kind,
+  width = 8.5,
+  height = 11,
+  margins,
+  mirrored,
+  columns,
+  border,
+  lineNumbers,
+}: {
+  kind: string;
+  width?: number;
+  height?: number;
+  margins?: [number, number, number, number];
+  mirrored?: boolean;
+  columns?: number;
+  border?: "none" | "thin" | "thick" | "accent";
+  lineNumbers?: boolean;
+}) {
+  const maxWidth = mirrored ? 21 : 34;
+  const maxHeight = 42;
+  const scale = Math.min(maxWidth / width, maxHeight / height);
+  const paperWidth = Math.max(12, width * scale);
+  const paperHeight = Math.max(18, height * scale);
+  const papers = mirrored ? 2 : 1;
+  const inset = margins ?? [0.8, 0.8, 0.8, 0.8];
+  const borderWidth = border === "thick" ? 2 : border === "none" ? 0 : 1;
+  const borderColor = border === "accent" ? T.accent : T.muted;
+  return (
+    <span
+      aria-hidden="true"
+      className="dxw-layout-preview"
+      data-dxw-layout-preview={kind}
+      style={{ width: 52, height: 46, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 3, flex: "0 0 52px" }}
+    >
+      {Array.from({ length: papers }, (_, paper) => (
+        <span
+          key={paper}
+          className="dxw-layout-preview-page"
+          style={{
+            position: "relative", display: "block", boxSizing: "border-box",
+            width: paperWidth, height: paperHeight, background: "var(--dxw-layout-preview-bg, #fff)",
+            border: `${Math.max(1, borderWidth)}px solid ${borderWidth ? borderColor : T.border}`,
+          }}
+        >
+          {kind === "margins" && (
+            <span style={{
+              position: "absolute",
+              top: `${Math.min(35, inset[0] * 18)}%`, right: `${Math.min(35, (mirrored && paper === 0 ? inset[3] : inset[1]) * 15)}%`,
+              bottom: `${Math.min(35, inset[2] * 18)}%`, left: `${Math.min(35, (mirrored && paper === 0 ? inset[1] : inset[3]) * 15)}%`,
+              border: `1px solid ${T.accent}`, boxSizing: "border-box",
+            }} />
+          )}
+          {!!columns && (
+            <span style={{ position: "absolute", inset: "5px 3px", display: "flex", gap: 2 }}>
+              {Array.from({ length: columns }, (_, column) => (
+                <span key={column} style={{ flex: 1, background: `repeating-linear-gradient(to bottom, ${T.muted} 0 1px, transparent 1px 4px)` }} />
+              ))}
+            </span>
+          )}
+          {border === "none" && <span style={{ position: "absolute", inset: 4, border: `1px dashed ${T.border}` }} />}
+          {lineNumbers && (
+            <span style={{ position: "absolute", inset: "4px 3px", display: "grid", gridTemplateColumns: "8px 1fr", gap: 2 }}>
+              <span style={{ fontSize: 5, lineHeight: "6px", color: T.accent }}>1<br />2<br />3<br />4</span>
+              <span style={{ background: `repeating-linear-gradient(to bottom, ${T.muted} 0 1px, transparent 1px 6px)` }} />
+            </span>
+          )}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function LayoutMenu({
+  name,
+  label,
+  open,
+  onOpenChange,
+  options,
+  onPick,
+}: {
+  name: string;
+  label: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  options: LayoutMenuOption[];
+  onPick: (value: string) => void;
+}) {
+  const id = useId();
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const keyboardOpen = useRef<"first" | "last" | null>(null);
+  const [position, setPosition] = useState({ left: 8, top: 8, maxHeight: 480 });
+  const [portalTokens, setPortalTokens] = useState<React.CSSProperties>({});
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const trigger = triggerRef.current;
+      const menu = menuRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const menuWidth = menu?.offsetWidth ?? 304;
+      const left = Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8));
+      const below = window.innerHeight - rect.bottom - 12;
+      const above = rect.top - 12;
+      const placeAbove = below < 180 && above > below;
+      const maxHeight = Math.max(120, Math.min(480, placeAbove ? above : below));
+      const shownHeight = Math.min(menu?.scrollHeight ?? maxHeight, maxHeight);
+      const top = placeAbove ? Math.max(8, rect.top - shownHeight - 4) : rect.bottom + 4;
+      setPosition({ left, top, maxHeight });
+      const computed = getComputedStyle(trigger);
+      const tokens: Record<string, string> = {};
+      for (const property of [
+        "--dxw-toolbar-fg", "--dxw-toolbar-border", "--dxw-toolbar-muted",
+        "--dxw-accent", "--dxw-btn-hover-bg", "--dxw-popover-bg",
+        "--dxw-popover-shadow", "--dxw-layout-menu-width",
+        "--dxw-layout-menu-max-height", "--dxw-layout-preview-bg",
+        "--dxw-toolbar-z-index",
+      ]) {
+        const value = computed.getPropertyValue(property);
+        if (value) tokens[property] = value;
+      }
+      setPortalTokens(tokens as React.CSSProperties);
+    };
+    update();
+    if (keyboardOpen.current) {
+      const items = menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
+      const item = keyboardOpen.current === "last" ? items?.[items.length - 1] : items?.[0];
+      item?.focus({ preventScroll: true });
+      keyboardOpen.current = null;
+    }
+    const frame = requestAnimationFrame(update);
+    const close = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) onOpenChange(false);
+    };
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        const restore = menuRef.current?.contains(document.activeElement);
+        onOpenChange(false);
+        if (restore) requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+      }
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", keydown);
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", keydown);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [open]);
+
+  const restoreTrigger = () => requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+  const onMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = menuRef.current
+      ? Array.from(menuRef.current.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      : [];
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    let next = current;
+    if (event.key === "ArrowDown") next = current < 0 ? 0 : (current + 1) % items.length;
+    else if (event.key === "ArrowUp") next = current < 0 ? items.length - 1 : (current - 1 + items.length) % items.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else if ((event.key === "Enter" || event.key === " ") && current >= 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      items[current].click();
+      return;
+    } else if (event.key === "Escape" || event.key === "Tab") {
+      event.preventDefault();
+      event.stopPropagation();
+      onOpenChange(false);
+      restoreTrigger();
+      return;
+    } else return;
+    event.preventDefault();
+    event.stopPropagation();
+    items[next]?.focus({ preventScroll: true });
+  };
+
+  return (
+    <span className="dxw-layout-control" style={{ display: "inline-flex", minWidth: 0 }}>
+      <button
+        ref={triggerRef}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        title={label}
+        className="dxw-layout-menu-trigger"
+        data-dxw-layout-menu-trigger={name}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => onOpenChange(!open)}
+        onKeyDown={(event) => {
+          if (!open && (event.key === "Enter" || event.key === " " || event.key === "ArrowDown" || event.key === "ArrowUp")) {
+            event.preventDefault();
+            keyboardOpen.current = event.key === "ArrowUp" ? "last" : "first";
+            onOpenChange(true);
+          }
+        }}
+        style={{
+          ...btnStyle(open), minWidth: 76, maxWidth: "100%", height: 30, padding: "0 8px",
+          display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 6,
+          whiteSpace: "nowrap", fontWeight: 500,
+        }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+        <span aria-hidden="true" style={{ fontSize: 10 }}>⌄</span>
+      </button>
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          id={id}
+          role="menu"
+          aria-label={label}
+          className="dxw-layout-menu"
+          data-dxw-layout-menu={name}
+          onMouseDown={(event) => event.preventDefault()}
+          onKeyDown={onMenuKeyDown}
+          style={{
+            ...portalTokens,
+            position: "fixed", left: position.left, top: position.top,
+            zIndex: "var(--dxw-toolbar-z-index, 100)",
+            width: "min(var(--dxw-layout-menu-width, 304px), calc(100vw - 16px))",
+            maxHeight: `min(var(--dxw-layout-menu-max-height, ${position.maxHeight}px), ${position.maxHeight}px)`,
+            overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box",
+            background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
+            boxShadow: T.popoverShadow, padding: 6,
+          }}
+        >
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="menuitem"
+              className="dxw-layout-menu-item"
+              data-dxw-layout-option={option.value}
+              tabIndex={-1}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={(event) => {
+                onPick(option.value);
+                onOpenChange(false);
+                if (event.detail === 0) restoreTrigger();
+              }}
+              style={{
+                width: "100%", border: 0, borderRadius: 6, background: "transparent", color: T.fg,
+                display: "flex", alignItems: "center", gap: 10, padding: "5px 8px",
+                textAlign: "left", cursor: "pointer", fontFamily: "inherit",
+              }}
+              onMouseEnter={(event) => (event.currentTarget.style.background = T.hoverBg)}
+              onMouseLeave={(event) => (event.currentTarget.style.background = "transparent")}
+            >
+              {option.preview}
+              <span style={{ minWidth: 0 }}>
+                <span style={{ display: "block", fontSize: 13, fontWeight: 550 }}>{option.label}</span>
+                {option.description && <span style={{ display: "block", fontSize: 11, color: T.muted, marginTop: 1 }}>{option.description}</span>}
+              </span>
+            </button>
+          ))}
+        </div>
+      , document.body)}
+    </span>
+  );
+}
+
+function MarginMenu({
+  scope,
+  onApply,
+  open,
+  onOpenChange,
+}: {
+  scope: "document" | "section";
+  onApply: (patch: LayoutPatch) => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [customOpen, setCustomOpen] = useState(false);
+  const [values, setValues] = useState({ top: "1", bottom: "1", left: "1", right: "1" });
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const [dialogPosition, setDialogPosition] = useState({ left: 8, top: 8 });
+  useEffect(() => {
+    if (!customOpen) return;
+    const positionDialog = () => {
+      const trigger = rootRef.current?.querySelector<HTMLElement>("[data-dxw-layout-menu-trigger]");
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const width = Math.min(244, window.innerWidth - 16);
+      setDialogPosition({
+        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 294)),
+      });
+    };
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
+    };
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCustomOpen(false);
+    };
+    positionDialog();
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", keydown);
+    window.addEventListener("resize", positionDialog);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", keydown);
+      window.removeEventListener("resize", positionDialog);
+    };
+  }, [customOpen]);
+
+  const pick = (value: string) => {
+    if (value === "m:custom") {
+      setCustomOpen(true);
+      return;
+    }
+    setCustomOpen(false);
+    if (value === "m:normal") onApply({ margins: { top: 1, right: 1, bottom: 1, left: 1 }, mirrorMargins: false });
+    else if (value === "m:narrow") onApply({ margins: { top: 0.5, right: 0.5, bottom: 0.5, left: 0.5 }, mirrorMargins: false });
+    else if (value === "m:moderate") onApply({ margins: { top: 1, right: 0.75, bottom: 1, left: 0.75 }, mirrorMargins: false });
+    else if (value === "m:wide") onApply({ margins: { top: 1, right: 2, bottom: 1, left: 2 }, mirrorMargins: false });
+    else if (value === "m:mirrored") onApply({ margins: { top: 1, right: 1, bottom: 1, left: 1.25 }, mirrorMargins: true });
+  };
+  const valid = Object.values(values).every((value) =>
+    value.trim() !== "" && Number.isFinite(Number(value)) && Number(value) >= 0,
+  );
+  const applyCustom = () => {
+    if (!valid) return;
+    onApply({
+      margins: {
+        top: Number(values.top), bottom: Number(values.bottom),
+        left: Number(values.left), right: Number(values.right),
+      },
+      mirrorMargins: false,
+    });
+    setCustomOpen(false);
+  };
+  const field = (side: keyof typeof values, label: string) => (
+    <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
+      <span>{label}</span>
+      <input
+        aria-label={`${label} margin (inches)`}
+        type="number"
+        min="0"
+        step="0.01"
+        required
+        autoFocus={side === "top"}
+        value={values[side]}
+        onChange={(event) => setValues({ ...values, [side]: event.target.value })}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setCustomOpen(false);
+          else if (event.key === "Enter") applyCustom();
+        }}
+        style={{ width: 92, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px" }}
+      />
+    </label>
+  );
+
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-flex" }}>
+      <LayoutMenu
+        name="margins"
+        label="Margins"
+        open={open}
+        onOpenChange={onOpenChange}
+        onPick={pick}
+        options={[
+          { value: "m:normal", label: "Normal", description: '1" on every side', preview: <PagePreview kind="margins" margins={[1, 1, 1, 1]} /> },
+          { value: "m:narrow", label: "Narrow", description: '0.5" on every side', preview: <PagePreview kind="margins" margins={[0.5, 0.5, 0.5, 0.5]} /> },
+          { value: "m:moderate", label: "Moderate", description: '1" top/bottom, 0.75" left/right', preview: <PagePreview kind="margins" margins={[1, 0.75, 1, 0.75]} /> },
+          { value: "m:wide", label: "Wide", description: '1" top/bottom, 2" left/right', preview: <PagePreview kind="margins" margins={[1, 2, 1, 2]} /> },
+          { value: "m:mirrored", label: "Mirrored", description: "Facing pages; inside margin 1.25\"", preview: <PagePreview kind="margins" margins={[1, 1, 1, 1.25]} mirrored /> },
+          { value: "m:custom", label: "Custom Margins…", description: "Set each side in inches", preview: <PagePreview kind="margins" margins={[0.7, 1.2, 0.7, 1.2]} /> },
+        ]}
+      />
+      {customOpen && (
+        <div
+          role="dialog"
+          aria-label="Custom Margins"
+          onMouseDown={(event) => event.stopPropagation()}
+          style={{
+            position: "fixed", top: dialogPosition.top, left: dialogPosition.left, zIndex: 201,
+            width: "min(224px, calc(100vw - 16px))", boxSizing: "border-box",
+            background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
+            boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7,
+          }}
+        >
+          <strong style={{ fontSize: 13 }}>Custom Margins</strong>
+          {field("top", "Top")}
+          {field("bottom", "Bottom")}
+          {field("left", "Left")}
+          {field("right", "Right")}
+          <span style={{ color: T.muted, fontSize: 11 }}>
+            Applies to {scope === "section" ? "this section" : "the whole document"} and turns mirrored margins off for the whole document.
+          </span>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+            <button type="button" onClick={() => setCustomOpen(false)} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Cancel</button>
+            <button type="button" onClick={applyCustom} disabled={!valid} style={pillBtn}>Apply</button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function PageSizeMenu({
+  scope,
+  onApply,
+  open,
+  onOpenChange,
+}: {
+  scope: "document" | "section";
+  onApply: (patch: LayoutPatch) => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [customOpen, setCustomOpen] = useState(false);
+  const [values, setValues] = useState({ width: "8.5", height: "11" });
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const [dialogPosition, setDialogPosition] = useState({ left: 8, top: 8 });
+  useEffect(() => {
+    if (!customOpen) return;
+    const positionDialog = () => {
+      const trigger = rootRef.current?.querySelector<HTMLElement>("[data-dxw-layout-menu-trigger]");
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const width = Math.min(244, window.innerWidth - 16);
+      setDialogPosition({
+        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 210)),
+      });
+    };
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
+    };
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCustomOpen(false);
+    };
+    positionDialog();
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", keydown);
+    window.addEventListener("resize", positionDialog);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", keydown);
+      window.removeEventListener("resize", positionDialog);
+    };
+  }, [customOpen]);
+
+  const valid = Object.values(values).every((value) =>
+    value.trim() !== "" && Number.isFinite(Number(value)) && Number(value) > 0,
+  );
+  const applyCustom = () => {
+    if (!valid) return;
+    onApply({ size: { width: Number(values.width), height: Number(values.height) } });
+    setCustomOpen(false);
+  };
+  const field = (side: keyof typeof values, label: string) => (
+    <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
+      <span>{label}</span>
+      <input
+        aria-label={`Page ${side} (inches)`}
+        type="number"
+        min="0.01"
+        step="0.01"
+        required
+        autoFocus={side === "width"}
+        value={values[side]}
+        onChange={(event) => setValues({ ...values, [side]: event.target.value })}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setCustomOpen(false);
+          else if (event.key === "Enter") applyCustom();
+        }}
+        style={{ width: 92, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px" }}
+      />
+    </label>
+  );
+
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-flex" }}>
+      <LayoutMenu
+        name="size"
+        label="Size"
+        open={open}
+        onOpenChange={onOpenChange}
+        options={[
+          ...PAGE_SIZES.map((size) => ({
+            value: size.value,
+            label: size.label,
+            description: size.description,
+            preview: <PagePreview kind="size" width={size.width} height={size.height} />,
+          })),
+          { value: "custom", label: "Custom Paper Size…", description: "Set width and height in inches", preview: <PagePreview kind="size" width={7.5} height={10} /> },
+        ]}
+        onPick={(value) => {
+          if (value === "custom") {
+            setCustomOpen(true);
+            return;
+          }
+          setCustomOpen(false);
+          const size = PAGE_SIZES.find((entry) => entry.value === value);
+          if (size) onApply({ size: { width: size.width, height: size.height } });
+        }}
+      />
+      {customOpen && (
+        <div
+          role="dialog"
+          aria-label="Custom Paper Size"
+          onMouseDown={(event) => event.stopPropagation()}
+          style={{
+            position: "fixed", top: dialogPosition.top, left: dialogPosition.left, zIndex: 201,
+            width: "min(224px, calc(100vw - 16px))", boxSizing: "border-box",
+            background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
+            boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7,
+          }}
+        >
+          <strong style={{ fontSize: 13 }}>Custom Paper Size</strong>
+          {field("width", "Width")}
+          {field("height", "Height")}
+          <span style={{ color: T.muted, fontSize: 11 }}>
+            Applies to {scope === "section" ? "this section" : "the whole document"}.
+          </span>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+            <button type="button" onClick={() => setCustomOpen(false)} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Cancel</button>
+            <button type="button" onClick={applyCustom} disabled={!valid} style={pillBtn}>Apply</button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 /** Word's Layout ribbon, scoped to the whole document or the caret's
  * section (per-page layout = section breaks + section scope). */
-function LayoutTab({ api }: { api: DocxViewApi | null }) {
+function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange: boolean }) {
   const [scope, setScope] = useState<"document" | "section">("document");
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
   const set = (patch: Parameters<NonNullable<typeof api>["setPageLayout"]>[0]) => api?.setPageLayout(patch, scope);
   const setLn = (patch: Parameters<NonNullable<typeof api>["setLineNumbering"]>[0]) => api?.setLineNumbering(patch, scope);
-  const sel = (title: string, entries: [string, string][], onPick: (v: string) => void, width = 96) => (
-    <select
-      title={title}
-      value=""
-      onMouseDown={(e) => e.stopPropagation()}
-      onChange={(e) => { if (e.target.value) onPick(e.target.value); e.target.value = ""; }}
-      style={{ ...selectStyle, width }}
-    >
-      <option value="" disabled>{title}</option>
-      {entries.map(([v, l]) => (
-        <option key={v} value={v}>{l}</option>
-      ))}
-    </select>
-  );
+  const menuState = (name: string) => ({
+    open: openMenu === name,
+    onOpenChange: (open: boolean) => setOpenMenu(open ? name : null),
+  });
   return (
-    <>
+    <span
+      ref={rootRef}
+      className="dxw-layout-ribbon"
+      data-dxw-layout-ribbon=""
+      style={{ display: "flex", flex: "1 1 640px", minWidth: 0, alignItems: "center", flexWrap: "wrap", gap: 2 }}
+    >
       <select
         title="Apply layout changes to"
+        aria-label="Apply layout changes to"
         value={scope}
         onMouseDown={(e) => e.stopPropagation()}
         onChange={(e) => setScope(e.target.value as "document" | "section")}
-        style={{ ...selectStyle, width: 118 }}
+        style={{ ...selectStyle, width: 118, maxWidth: "100%" }}
       >
         <option value="document">Whole document</option>
         <option value="section">This section</option>
       </select>
       <Sep />
-      {sel("Margins", [["m:normal", 'Normal (1")'], ["m:narrow", 'Narrow (0.5")'], ["m:wide", 'Wide (1.5")']], (v) => {
-        if (v === "m:normal") set({ margins: { top: 1, right: 1, bottom: 1, left: 1 } });
-        else if (v === "m:narrow") set({ margins: { top: 0.5, right: 0.5, bottom: 0.5, left: 0.5 } });
-        else set({ margins: { top: 1, right: 1.5, bottom: 1, left: 1.5 } });
-      }, 88)}
-      {sel("Orientation", [["portrait", "Portrait"], ["landscape", "Landscape"]], (v) => set({ orientation: v as "portrait" | "landscape" }), 96)}
-      {sel("Size", [["letter", "Letter"], ["legal", "Legal"], ["a4", "A4"]], (v) => {
-        if (v === "letter") set({ size: { width: 8.5, height: 11 } });
-        else if (v === "legal") set({ size: { width: 8.5, height: 14 } });
-        else set({ size: { width: 8.27, height: 11.69 } });
-      }, 64)}
-      {sel("Columns", [["1", "One column"], ["2", "Two columns"], ["3", "Three columns"]], (v) => set({ columns: parseInt(v, 10) }), 84)}
-      {sel("Page border", [["none", "No border"], ["thin", "Thin box (\u00bdpt)"], ["thick", "Thick box (1\u00bdpt)"], ["accent", "Blue box"]], (v) => {
-        if (v === "none") set({ pageBorders: null });
-        else if (v === "thin") set({ pageBorders: { sz: 4 } });
-        else if (v === "thick") set({ pageBorders: { sz: 12 } });
-        else set({ pageBorders: { sz: 8, color: "4472C4" } });
-      }, 96)}
-      {sel("Line numbers", [
-        ["off", "None"],
-        ["continuous", "Continuous"],
-        ["eachPage", "Restart each page"],
-        ["eachSection", "Restart each section"],
-        ["by5", "Count by 5"],
-        ["by10", "Count by 10"],
-      ], (v) => {
-        if (v === "off") setLn({ enabled: false });
-        else if (v === "continuous") setLn({ enabled: true, countBy: 1, restart: "continuous" });
-        else if (v === "eachPage") setLn({ enabled: true, countBy: 1, restart: "newPage" });
-        else if (v === "eachSection") setLn({ enabled: true, countBy: 1, restart: "newSection" });
-        else if (v === "by5") setLn({ enabled: true, countBy: 5 });
-        else setLn({ enabled: true, countBy: 10 });
-      }, 118)}
-    </>
+      <MarginMenu scope={scope} onApply={set} {...menuState("margins")} />
+      <LayoutMenu
+        name="orientation"
+        label="Orientation"
+        {...menuState("orientation")}
+        options={[
+          { value: "portrait", label: "Portrait", description: "Vertical page", preview: <PagePreview kind="orientation" /> },
+          { value: "landscape", label: "Landscape", description: "Horizontal page", preview: <PagePreview kind="orientation" width={11} height={8.5} /> },
+        ]}
+        onPick={(value) => set({ orientation: value as "portrait" | "landscape" })}
+      />
+      <PageSizeMenu scope={scope} onApply={set} {...menuState("size")} />
+      <LayoutMenu
+        name="columns"
+        label="Columns"
+        {...menuState("columns")}
+        options={[
+          { value: "1", label: "One", description: "Single text column", preview: <PagePreview kind="columns" columns={1} /> },
+          { value: "2", label: "Two", description: "Two equal columns", preview: <PagePreview kind="columns" columns={2} /> },
+          { value: "3", label: "Three", description: "Three equal columns", preview: <PagePreview kind="columns" columns={3} /> },
+        ]}
+        onPick={(value) => set({ columns: parseInt(value, 10) })}
+      />
+      <LayoutMenu
+        name="page-border"
+        label="Page border"
+        {...menuState("page-border")}
+        options={[
+          { value: "none", label: "None", description: "No page border", preview: <PagePreview kind="page-border" border="none" /> },
+          { value: "thin", label: "Thin box", description: "½ pt solid line", preview: <PagePreview kind="page-border" border="thin" /> },
+          { value: "thick", label: "Thick box", description: "1½ pt solid line", preview: <PagePreview kind="page-border" border="thick" /> },
+          { value: "accent", label: "Accent box", description: "Blue 1 pt line", preview: <PagePreview kind="page-border" border="accent" /> },
+        ]}
+        onPick={(value) => {
+          if (value === "none") set({ pageBorders: null });
+          else if (value === "thin") set({ pageBorders: { sz: 4 } });
+          else if (value === "thick") set({ pageBorders: { sz: 12 } });
+          else set({ pageBorders: { sz: 8, color: "4472C4" } });
+        }}
+      />
+      <LayoutMenu
+        name="line-numbers"
+        label="Line numbers"
+        {...menuState("line-numbers")}
+        options={[
+          { value: "off", label: "None", description: "Hide line numbers", preview: <PagePreview kind="line-numbers" /> },
+          { value: "continuous", label: "Continuous", description: "Number every line continuously", preview: <PagePreview kind="line-numbers" lineNumbers /> },
+          { value: "eachPage", label: "Restart each page", description: "Start at 1 on every page", preview: <PagePreview kind="line-numbers" lineNumbers /> },
+          { value: "eachSection", label: "Restart each section", description: "Start at 1 in each section", preview: <PagePreview kind="line-numbers" lineNumbers /> },
+          { value: "by5", label: "Count by 5", description: "Show every fifth line", preview: <PagePreview kind="line-numbers" lineNumbers /> },
+          { value: "by10", label: "Count by 10", description: "Show every tenth line", preview: <PagePreview kind="line-numbers" lineNumbers /> },
+        ]}
+        onPick={(value) => {
+          if (value === "off") setLn({ enabled: false });
+          else if (value === "continuous") setLn({ enabled: true, countBy: 1, restart: "continuous" });
+          else if (value === "eachPage") setLn({ enabled: true, countBy: 1, restart: "newPage" });
+          else if (value === "eachSection") setLn({ enabled: true, countBy: 1, restart: "newSection" });
+          else if (value === "by5") setLn({ enabled: true, countBy: 5 });
+          else setLn({ enabled: true, countBy: 10 });
+        }}
+      />
+      {showArrange && (
+        <>
+          <Sep />
+          <ActionMenu
+            label="Align"
+            title="Align selected object to page"
+            width={76}
+            groups={[
+              { label: "Horizontal", items: [["alignLeft", "Align left"], ["alignCenter", "Align center"], ["alignRight", "Align right"]] },
+              { label: "Vertical", items: [["alignTop", "Align top"], ["alignMiddle", "Align middle"], ["alignBottom", "Align bottom"]] },
+            ]}
+            onPick={(value) => api?.arrangeObject(value as Parameters<NonNullable<typeof api>["arrangeObject"]>[0])}
+          />
+          <ActionMenu
+            label="Rotate"
+            title="Rotate selected object"
+            width={78}
+            groups={[{ items: [["rotateRight", "Rotate right 90°"], ["rotateLeft", "Rotate left 90°"]] }]}
+            onPick={(value) => api?.arrangeObject(value as Parameters<NonNullable<typeof api>["arrangeObject"]>[0])}
+          />
+          <ActionMenu
+            label="Arrange"
+            title="Change selected object stacking order"
+            width={86}
+            groups={[{ items: [["bringToFront", "Bring to front"], ["sendToBack", "Send to back"]] }]}
+            onPick={(value) => api?.arrangeObject(value as Parameters<NonNullable<typeof api>["arrangeObject"]>[0])}
+          />
+        </>
+      )}
+    </span>
   );
 }
 
@@ -780,31 +2007,64 @@ export type ToolbarFeature =
   | "lists"
   | "table"
   | "image"
+  | "icon"
+  | "screenshot"
+  | "model3D"
+  | "media"
+  | "object"
+  | "chart"
+  | "smartArt"
   | "comment"
   | "footnote"
+  | "bookmark"
+  | "crossReference"
+  | "dateTime"
+  | "field"
+  | "equation"
+  | "symbol"
+  | "shape"
+  | "textBox"
+  | "wordArt"
+  | "drawing"
+  | "arrange"
+  | "dropCap"
+  | "headerFooter"
+  | "coverPage"
+  | "pageNumber"
+  | "break"
   | "layout"
   | "download";
 
-export function DocxToolbar({
-  api,
-  onSave,
-  features,
-  className,
-  style,
-}: {
+export type ToolbarMode = "simple" | "advanced";
+
+export interface DocxToolbarProps {
   api: DocxViewApi | null;
   onSave?: (bytes: Uint8Array) => void;
+  /** Simple shows basic Home editing; advanced adds the Insert, Draw, and Layout ribbons. */
+  mode?: ToolbarMode;
   /** Per-group overrides; every group defaults to enabled. */
   features?: Partial<Record<ToolbarFeature, boolean>>;
   /** Extra class on the toolbar root (e.g. a scope for CSS-variable overrides). */
   className?: string;
   /** Inline overrides merged onto the toolbar root; wins over the defaults. */
   style?: React.CSSProperties;
-}) {
+}
+
+export function DocxToolbar({
+  api,
+  onSave,
+  mode = "advanced",
+  features,
+  className,
+  style,
+}: DocxToolbarProps) {
   const on = (k: ToolbarFeature) => features?.[k] !== false;
   // Ribbon-style tabs: complex tool groups get their own surface instead of
   // one overloaded row (Layout especially).
-  const [tab, setTab] = useState<"home" | "insert" | "layout">("home");
+  const [tab, setTab] = useState<"home" | "insert" | "draw" | "layout">("home");
+  const iconInput = useRef<HTMLInputElement | null>(null);
+  const modelInput = useRef<HTMLInputElement | null>(null);
+  const objectInput = useRef<HTMLInputElement | null>(null);
   // Subtle delayed tooltips: controls declare `title`; on first hover the
   // title moves to data-tip (suppressing the OS tooltip) and a quiet custom
   // one fades in under the control after a beat.
@@ -848,13 +2108,17 @@ export function DocxToolbar({
     const el = rootRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const measure = () => {
-      const w = el.clientWidth;
-      setTier(w >= 1000 ? 0 : w >= 720 ? 1 : 2);
+      const w = Math.min(el.clientWidth, window.innerWidth);
+      setTier(w >= 1280 ? 0 : w >= 720 ? 1 : 2);
     };
     const ro = new ResizeObserver(measure);
     ro.observe(el);
+    window.addEventListener("resize", measure);
     measure();
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+    };
   }, []);
 
   const refresh = useCallback(() => {
@@ -1133,11 +2397,18 @@ export function DocxToolbar({
     <div
       ref={rootRef}
       className={className}
+      data-dxw-toolbar-mode={mode}
       onMouseOver={onTipOver}
       onMouseOut={onTipOut}
       onMouseDownCapture={onTipOut}
       style={{
+        position: "relative",
+        zIndex: "var(--dxw-toolbar-z-index, 100)",
         display: "flex",
+        width: "100%",
+        maxWidth: "100%",
+        minWidth: 0,
+        boxSizing: "border-box",
         gap: 2,
         alignItems: "center",
         padding: "4px 10px",
@@ -1169,69 +2440,222 @@ export function DocxToolbar({
           {tip.text}
         </div>
       )}
-      <div style={{ display: "flex", gap: 2, marginRight: 8 }}>
-        {(["home", "insert", "layout"] as const).map((t) => (
-          <button
-            key={t}
-            data-tab={t}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => setTab(t)}
-            style={{
-              border: "none",
-              background: tab === t ? T.tabActiveBg : "transparent",
-              color: tab === t ? T.accent : T.fg,
-              font: "600 12.5px system-ui, sans-serif",
-              padding: "5px 10px",
-              borderRadius: 6,
-              cursor: "pointer",
-              textTransform: "capitalize",
-            }}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
-      <Sep />
-      {tab === "home" && renderHome()}
-      {tab === "insert" && (
+      {mode === "advanced" && (
         <>
+          <div style={{ display: "flex", gap: 2, marginRight: 8 }}>
+            {(["home", "insert", "draw", "layout"] as const)
+              .filter((t) => (t !== "draw" || on("drawing")) && (t !== "layout" || on("layout")))
+              .map((t) => (
+              <button
+                key={t}
+                data-tab={t}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => setTab(t)}
+                style={{
+                  border: "none",
+                  background: tab === t ? T.tabActiveBg : "transparent",
+                  color: tab === t ? T.accent : T.fg,
+                  font: "600 12.5px system-ui, sans-serif",
+                  padding: "5px 10px",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  textTransform: "capitalize",
+                }}
+              >
+                {t}
+              </button>
+              ))}
+          </div>
+          <Sep />
+        </>
+      )}
+      {(mode === "simple" || tab === "home") && renderHome()}
+      {mode === "advanced" && tab === "insert" && (
+        <>
+          {on("coverPage") && <CoverPageMenu api={api} />}
           {on("table") && <TableMenu api={api} />}
           {on("image") && <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />}
+          {on("icon") && <Btn label="Icons" title="Insert SVG icon" onClick={() => iconInput.current?.click()} />}
+          {on("screenshot") && <ScreenshotButton api={api} />}
+          {tier === 0 ? (
+            <>
+          {on("model3D") && <Btn label="3D Models" title="Insert a GLB 3D model" onClick={() => modelInput.current?.click()} />}
+          {on("smartArt") && <SmartArtMenu api={api} />}
+          {on("chart") && <ChartMenu api={api} />}
+          {on("media") && <MediaMenu api={api} />}
+          {on("shape") && <ShapeMenu api={api} />}
+          {on("textBox") && <TextBoxMenu api={api} />}
+          {on("wordArt") && <WordArtMenu api={api} />}
           {on("link") && <LinkMenu api={api} />}
           {on("comment") && <CommentMenu api={api} />}
           {on("footnote") && <FootnoteMenu api={api} />}
+          {on("bookmark") && <BookmarkMenu api={api} />}
+          {on("crossReference") && <CrossReferenceMenu api={api} />}
+          {on("headerFooter") && (
+            <>
+              <Btn label="Header" title="Edit header" onClick={() => api?.openHeaderFooter("header")} />
+              <Btn label="Footer" title="Edit footer" onClick={() => api?.openHeaderFooter("footer")} />
+            </>
+          )}
           <Sep />
-          <ActionMenu
-            label="Page number"
-            title="Insert a dynamic page number at the caret"
-            width={104}
-            groups={[{ items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] }]}
-            onPick={(v) => {
-              if (v === "pn:page") api?.insertPageNumber("page");
-              else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
-            }}
-          />
-          <ActionMenu
-            label="Break"
-            title="Insert a page, column or section break at the caret"
-            width={64}
-            groups={[
-              { label: "Breaks", items: [["br:page", "Page break"], ["br:column", "Column break"]] },
-              { label: "Section breaks", items: [["br:next", "Section break (next page)"], ["br:cont", "Section break (continuous)"]] },
-            ]}
-            onPick={(v) => {
-              if (v === "br:page") api?.insertBreak("page");
-              else if (v === "br:column") api?.insertBreak("column");
-              else if (v === "br:next") api?.insertBreak("sectionNextPage");
-              else if (v === "br:cont") api?.insertBreak("sectionContinuous");
-            }}
-          />
+          {on("pageNumber") && (
+            <ActionMenu
+              label="Page number"
+              title="Insert a dynamic page number at the caret"
+              width={104}
+              groups={[{ items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] }]}
+              onPick={(v) => {
+                if (v === "pn:page") api?.insertPageNumber("page");
+                else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
+              }}
+            />
+          )}
+          {on("break") && (
+            <>
+              <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />
+              <ActionMenu
+                label="Break"
+                title="Insert a page, column or section break at the caret"
+                width={64}
+                groups={[
+                  { label: "Breaks", items: [["br:page", "Page break"], ["br:column", "Column break"]] },
+                  { label: "Section breaks", items: [["br:next", "Section break (next page)"], ["br:cont", "Section break (continuous)"]] },
+                ]}
+                onPick={(v) => {
+                  if (v === "br:page") api?.insertBreak("page");
+                  else if (v === "br:column") api?.insertBreak("column");
+                  else if (v === "br:next") api?.insertBreak("sectionNextPage");
+                  else if (v === "br:cont") api?.insertBreak("sectionContinuous");
+                }}
+              />
+            </>
+          )}
+          {on("dateTime") && (
+            <ActionMenu
+              label="Date & time"
+              title="Insert an automatically updating date or time"
+              width={100}
+              groups={[
+                { label: "Date", items: [["date:short", "Short date"], ["date:long", "Long date"], ["date:intl", "Day month year"]] },
+                { label: "Time", items: [["time:12", "12-hour time"], ["time:24", "24-hour time"]] },
+              ]}
+              onPick={(value) => {
+                if (value === "date:short") api?.insertDateTime("date", "M/d/yyyy");
+                else if (value === "date:long") api?.insertDateTime("date", "MMMM d, yyyy");
+                else if (value === "date:intl") api?.insertDateTime("date", "d MMMM yyyy");
+                else if (value === "time:12") api?.insertDateTime("time", "h:mm am/pm");
+                else if (value === "time:24") api?.insertDateTime("time", "HH:mm");
+              }}
+            />
+          )}
+          {on("field") && (
+            <ActionMenu
+              label="Field"
+              title="Insert a Word field"
+              width={68}
+              groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]}
+              onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)}
+            />
+          )}
+          {on("equation") && <EquationMenu api={api} />}
+          {on("symbol") && <SymbolMenu api={api} />}
+          {on("dropCap") && (
+            <ActionMenu
+              label="Drop cap"
+              title="Drop cap"
+              width={84}
+              groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]}
+              onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")}
+            />
+          )}
+          {on("object") && <Btn label="Object" title="Embed a file in this document" onClick={() => objectInput.current?.click()} />}
+            </>
+          ) : (
+            <OverflowMenu>
+              {on("model3D") && <Btn label="3D Models" title="Insert a GLB 3D model" onClick={() => modelInput.current?.click()} />}
+              {on("smartArt") && <SmartArtMenu api={api} />}
+              {on("chart") && <ChartMenu api={api} />}
+              {on("media") && <MediaMenu api={api} />}
+              {on("shape") && <ShapeMenu api={api} />}
+              {on("textBox") && <TextBoxMenu api={api} />}
+              {on("wordArt") && <WordArtMenu api={api} />}
+              {on("link") && <LinkMenu api={api} />}
+              {on("comment") && <CommentMenu api={api} />}
+              {on("footnote") && <FootnoteMenu api={api} />}
+              {on("bookmark") && <BookmarkMenu api={api} />}
+              {on("crossReference") && <CrossReferenceMenu api={api} />}
+              {on("headerFooter") && (
+                <>
+                  <Btn label="Header" title="Edit header" onClick={() => api?.openHeaderFooter("header")} />
+                  <Btn label="Footer" title="Edit footer" onClick={() => api?.openHeaderFooter("footer")} />
+                </>
+              )}
+              {on("pageNumber") && (
+                <ActionMenu
+                  label="Page number"
+                  title="Insert a dynamic page number at the caret"
+                  width={104}
+                  groups={[{ items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] }]}
+                  onPick={(v) => {
+                    if (v === "pn:page") api?.insertPageNumber("page");
+                    else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
+                  }}
+                />
+              )}
+              {on("break") && (
+                <>
+                  <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />
+                  <ActionMenu
+                    label="Break"
+                    title="Insert a page, column or section break at the caret"
+                    width={64}
+                    groups={[
+                      { label: "Breaks", items: [["br:page", "Page break"], ["br:column", "Column break"]] },
+                      { label: "Section breaks", items: [["br:next", "Section break (next page)"], ["br:cont", "Section break (continuous)"]] },
+                    ]}
+                    onPick={(v) => {
+                      if (v === "br:page") api?.insertBreak("page");
+                      else if (v === "br:column") api?.insertBreak("column");
+                      else if (v === "br:next") api?.insertBreak("sectionNextPage");
+                      else if (v === "br:cont") api?.insertBreak("sectionContinuous");
+                    }}
+                  />
+                </>
+              )}
+              {on("dateTime") && (
+                <ActionMenu
+                  label="Date & time"
+                  title="Insert an automatically updating date or time"
+                  width={100}
+                  groups={[
+                    { label: "Date", items: [["date:short", "Short date"], ["date:long", "Long date"], ["date:intl", "Day month year"]] },
+                    { label: "Time", items: [["time:12", "12-hour time"], ["time:24", "24-hour time"]] },
+                  ]}
+                  onPick={(value) => {
+                    if (value === "date:short") api?.insertDateTime("date", "M/d/yyyy");
+                    else if (value === "date:long") api?.insertDateTime("date", "MMMM d, yyyy");
+                    else if (value === "date:intl") api?.insertDateTime("date", "d MMMM yyyy");
+                    else if (value === "time:12") api?.insertDateTime("time", "h:mm am/pm");
+                    else if (value === "time:24") api?.insertDateTime("time", "HH:mm");
+                  }}
+                />
+              )}
+              {on("field") && (
+                <ActionMenu label="Field" title="Insert a Word field" width={68} groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]} onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)} />
+              )}
+              {on("equation") && <EquationMenu api={api} />}
+              {on("symbol") && <SymbolMenu api={api} />}
+              {on("dropCap") && <ActionMenu label="Drop cap" title="Drop cap" width={84} groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]} onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")} />}
+              {on("object") && <Btn label="Object" title="Embed a file in this document" onClick={() => objectInput.current?.click()} />}
+            </OverflowMenu>
+          )}
         </>
       )}
+      {mode === "advanced" && tab === "draw" && on("drawing") && <DrawTab api={api} />}
       <input
         ref={imageInput}
         type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp"
+        accept="image/png,image/jpeg,image/gif,image/svg+xml,image/webp"
         style={{ display: "none" }}
         onChange={(e) => {
           const f = e.target.files?.[0];
@@ -1239,7 +2663,41 @@ export function DocxToolbar({
           e.target.value = "";
         }}
       />
-      {tab === "layout" && on("layout") && <LayoutTab api={api} />}
+      <input
+        ref={iconInput}
+        type="file"
+        accept=".svg"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void api?.insertImage(f);
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={modelInput}
+        aria-label="3D model file"
+        type="file"
+        accept=".glb,model/gltf-binary"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void api?.insertModel3D(f);
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={objectInput}
+        aria-label="Embedded object file"
+        type="file"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void api?.insertEmbeddedObject(f);
+          e.target.value = "";
+        }}
+      />
+      {mode === "advanced" && tab === "layout" && on("layout") && <LayoutTab api={api} showArrange={on("arrange")} />}
       {on("download") && onSave && (
         <>
           <span style={{ flex: 1 }} />

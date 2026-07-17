@@ -1,4 +1,5 @@
-import { Border, Run, RunProps } from "../model.js";
+import { Border, EmbeddedObjectReference, Model3DReference, Run, RunProps, WebVideoReference } from "../model.js";
+import type { ChartData } from "../model.js";
 import type { XmlElement } from "../xml.js";
 
 /** Maps a rendered text item back to its source XML for editing. */
@@ -44,10 +45,12 @@ export interface PathItem {
   viewW: number;
   viewH: number;
   fill?: string;
-  stroke?: { color: string; width: number };
+  stroke?: { color: string; width: number; opacity?: number };
+  rotate?: { deg: number; ox: number; oy: number };
   /** Paint under / over the body text (anchored-shape layering). */
   behind?: boolean;
   front?: boolean;
+  z?: number;
 }
 
 export interface TextItem {
@@ -90,6 +93,9 @@ export interface TextItem {
   href?: string;
   /** Present for editable text (absent on numbering labels etc.). */
   src?: TextSource;
+  /** Source drawing when this text belongs to an independently editable
+   * text-box story. */
+  textboxStory?: XmlElement;
   /** Rotate about a point (px, relative to this item's top-left). */
   rotate?: { deg: number; ox: number; oy: number };
   /** Paint under the body text (behindDoc textbox content). */
@@ -97,6 +103,7 @@ export interface TextItem {
   /** Paint over the body text (non-behindDoc anchored shape content: Word
    * layers in-front shapes above the text layer). */
   front?: boolean;
+  z?: number;
   /** Right-to-left run: renderer sets direction:rtl so the browser shapes and
    * orders the (Arabic/Hebrew) glyphs within the span box. */
   rtl?: boolean;
@@ -124,6 +131,7 @@ export interface RectItem {
   behind?: boolean;
   /** Paint over the body text (non-behindDoc anchored shape fill). */
   front?: boolean;
+  z?: number;
 }
 
 export interface LineEdgeItem {
@@ -139,6 +147,7 @@ export interface LineEdgeItem {
   rotate?: { deg: number; ox: number; oy: number };
   /** Paint over the body text (non-behindDoc anchored shape border). */
   front?: boolean;
+  z?: number;
 }
 
 export interface ImageItem {
@@ -152,6 +161,8 @@ export interface ImageItem {
   /** a:srcRect crop (fractions) and a:xfrm rotation (degrees). */
   crop?: { l: number; t: number; r: number; b: number };
   rotation?: number;
+  /** Whole-group rotation about an external origin. */
+  rotate?: { deg: number; ox: number; oy: number };
   /** Picture-watermark "washout" (VML v:imagedata gain/blacklevel, 0..1
    * fractions). Per-channel linear recolor, measured against Word's PDF of
    * probe2-picture-watermark (gain 0.3, blacklevel 0.35: source 32 -> 215,
@@ -166,8 +177,21 @@ export interface ImageItem {
    * (Word's z-order; without this, later-emitted text spans cover the image
    * and it neither shows in front nor receives clicks/drags). */
   front?: boolean;
+  z?: number;
   /** Source w:drawing element (for interactive resize/move). */
   src?: XmlElement;
+  model3D?: Model3DReference;
+  webVideo?: WebVideoReference;
+  embeddedObject?: EmbeddedObjectReference;
+}
+
+export interface ChartItem {
+  kind: "chart";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  data: ChartData;
 }
 
 /** Interactive resize zone over a table boundary (column or row). */
@@ -181,17 +205,25 @@ export interface DrawingHitItem {
   src: XmlElement;
   /** Anchored drawings drag by offset; inline ones re-anchor into text. */
   anchored: boolean;
+  /** Freehand stroke that may be removed with the Draw ribbon's eraser. */
+  ink?: boolean;
+  /** Native SmartArt diagram selection target. */
+  smartArt?: boolean;
   /** A shape fill hit that sits UNDER the shape's own text spans (same z): a
-   * click on bare fill selects the shape, but clicks on the text glyphs still
-   * reach the text for editing. Such hits select only (never drag-move). */
+   * click on bare fill selects or drags the shape, while clicks on its text
+   * glyphs still reach the text editor. */
   belowText?: boolean;
+  /** The drawing owns an independently editable text-box story. */
+  textboxStory?: boolean;
+  rotate?: { deg: number; ox: number; oy: number };
+  z?: number;
 }
 
 export interface GripItem {
   kind: "grip";
   /** "col": vertical zone at x spanning y1..y2. "row": horizontal zone at y1
-   * spanning x..x2. */
-  axis: "col" | "row";
+   * spanning x..x2. "move": table bounds x..x2, y1..y2. */
+  axis: "col" | "row" | "move";
   x: number;
   y1: number;
   y2: number;
@@ -253,8 +285,10 @@ export interface WarpTextItem {
   fill: string;
   /** Preset name (textArchUp, textWave1, textChevron, textCirclePour, …). */
   warp: string;
+  rotate?: { deg: number; ox: number; oy: number };
   behind?: boolean;
   front?: boolean;
+  z?: number;
 }
 
 export type PageItem =
@@ -263,6 +297,7 @@ export type PageItem =
   | RectItem
   | LineEdgeItem
   | ImageItem
+  | ChartItem
   | DrawingHitItem
   | GripItem
   | WordArtItem
@@ -290,6 +325,13 @@ export interface LayoutResult {
    * back as LayoutOptions.prev to enable incremental relayout. Not part of the
    * rendered output and ignored by the equivalence harness. */
   _incr?: unknown;
+  /** Internal marker: unchanged pages in this result retain exact object
+   * identity from the previous layout, so the DOM diff can use identity
+   * instead of structurally walking a dense changed page. */
+  _incremental?: boolean;
+  /** Exclusive global page index through which an incremental render may run
+   * pageEq before the page containing the exact dirty text source. */
+  _incrementalStructuralPrefixEnd?: number;
   /** Opaque page state used to refresh headers/footers without repaginating
    * the body when their measured geometry is unchanged. */
   _hf?: unknown;

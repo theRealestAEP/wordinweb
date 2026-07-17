@@ -102,6 +102,46 @@ export function insertTableAfter(
   return true;
 }
 
+/** Ensure a terminal body block with no text caret has an editable paragraph
+ * after it. Word always leaves an insertion point after a terminal table and
+ * lets the paragraph mark after a math/image-only line receive the caret. */
+export function ensureParagraphAfterTerminalBlock(doc: DocxDocument): boolean {
+  const body = child(doc.editableRoots()[0], "body");
+  if (!body) return false;
+  const sectPrIdx = body.children.findIndex((c) => localName(c.name) === "sectPr");
+  const insertAt = sectPrIdx === -1 ? body.children.length : sectPrIdx;
+  let lastBlock: XmlElement | undefined;
+  for (let i = insertAt - 1; i >= 0; i--) {
+    const name = localName(body.children[i].name);
+    if (name === "p" || name === "tbl") {
+      lastBlock = body.children[i];
+      break;
+    }
+  }
+  if (!lastBlock) return false;
+  const lastName = localName(lastBlock.name);
+  if (lastName !== "tbl") {
+    if (lastName !== "p") return false;
+    const parsed = doc.sections
+      .flatMap((section) => section.blocks)
+      .find((block) => block.src === lastBlock);
+    if (!parsed || parsed.type !== "paragraph") return false;
+    const hasTextCaret = parsed.children.some((child) => {
+      const runs = child.type === "run" ? [child] : child.runs;
+      return runs.some((run) => run.content.some((content) => content.kind === "text" && content.srcT));
+    });
+    if (hasTextCaret) return false;
+  }
+  const w = prefixOf(lastBlock);
+  body.children.splice(
+    insertAt,
+    0,
+    el(`${w}p`, {}, [el(`${w}r`, {}, [el(`${w}t`, { "xml:space": "preserve" })])]),
+  );
+  doc.refresh();
+  return true;
+}
+
 // ---------- paragraph alignment ----------
 
 export type ParagraphAlignment = "left" | "center" | "right" | "justify";
@@ -146,6 +186,8 @@ export function setParagraphAlignment(
 export interface PageLayoutPatch {
   /** Margins in inches. */
   margins?: { top?: number; right?: number; bottom?: number; left?: number };
+  /** Document-global facing-page mode (settings.xml w:mirrorMargins). */
+  mirrorMargins?: boolean;
   /** Page size in inches (before orientation). */
   size?: { width: number; height: number };
   orientation?: "portrait" | "landscape";
@@ -245,6 +287,7 @@ export function setPageLayout(doc: DocxDocument, patch: PageLayoutPatch, target?
       }
     }
   }
+  if (patch.mirrorMargins !== undefined) doc.setMirrorMargins(patch.mirrorMargins);
   doc.refresh();
   return true;
 }

@@ -22,6 +22,7 @@ export { applyRunFormat, summarizeSelection } from "./edit/commands.js";
 export type { RunFormatPatch, SelectionSegment, SelectionFormat } from "./edit/commands.js";
 export { selectionToSegments } from "./edit/selection.js";
 export { DocxEditor } from "./edit/editor.js";
+export type { ObjectArrangeAction } from "./edit/editor.js";
 export {
   insertSuggestedText,
   deleteSuggestedRange,
@@ -38,21 +39,37 @@ export type { RevisionMeta, RevisionRef, RevisionKind, CaretTarget, DeleteRange 
 export { EditHistory } from "./edit/history.js";
 export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";
 export { applyTableOp, cellContextOf } from "./edit/tables.js";
-export { setImageWrap, adjustFloatingPosition, isFloatingDrawing } from "./edit/images.js";
+export {
+  setImageWrap,
+  adjustFloatingPosition,
+  setFloatingPagePosition,
+  isFloatingDrawing,
+  drawingRotation,
+  setDrawingRotation,
+  setDrawingOrder,
+} from "./edit/images.js";
 export { addComment, deleteComment, replyToComment } from "./edit/comments.js";
 export { setListType, listTypeAt, setListLevel } from "./edit/lists.js";
 export type { ListKind } from "./edit/lists.js";
 export { setLink, removeLink, linkAt } from "./edit/links.js";
-export { adjustIndent, setParagraphSpacing } from "./edit/paragraph.js";
-export type { ParagraphSpacingPatch } from "./edit/paragraph.js";
+export { adjustIndent, setParagraphSpacing, setDropCapAt } from "./edit/paragraph.js";
+export type { ParagraphSpacingPatch, DropCapMode } from "./edit/paragraph.js";
 export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertFootnote } from "./edit/notes.js";
-export { insertPageField } from "./edit/fields.js";
+export { insertField, insertPageField, insertDateTimeField } from "./edit/fields.js";
+export { drawingWordArtText, insertShapeAt, insertWordArtAt, insertInkAt, isDrawingWordArt, setDrawingWordArtText } from "./edit/drawings.js";
+export type { DrawingTool, InkPoint, ShapePreset, WordArtPreset } from "./edit/drawings.js";
+export { buildChartWorkbook, buildChartXml, insertChartAt, normalizeChartData, setChartData } from "./edit/charts.js";
+export { buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, normalizeSmartArtData, setSmartArtData } from "./edit/smartart.js";
+export { insertModel3DAt, insertWebVideoAt, insertEmbeddedObjectAt, normalizeWebVideoUrl } from "./edit/objects.js";
+export type { Model3DInsert, WebVideoInsert, EmbeddedObjectInsert } from "./edit/objects.js";
+export { buildOlePackage, extractOlePackage } from "./parse/ole.js";
+export { validBookmarkName, listBookmarks, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference } from "./edit/references.js";
 export { checkboxStateElement, checkboxChecked, toggleCheckbox } from "./checkbox.js";
-export { sectPrAt, insertBreakAt, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
-export type { LineNumberingPatch } from "./edit/sections.js";
-export { linearizeMath, parseMathLinear, setMathLinear, mathLinearOf } from "./edit/math.js";
+export { sectPrAt, insertBreakAt, insertBlankPageAt, insertCoverPage, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
+export type { CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
+export { linearizeMath, parseMathLinear, setMathLinear, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages } from "./render/dom.js";
 export type { FindMatch } from "./edit/find.js";
 export type { TableOp } from "./edit/tables.js";

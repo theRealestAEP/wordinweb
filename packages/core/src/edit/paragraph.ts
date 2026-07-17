@@ -1,5 +1,5 @@
 import { DocxDocument } from "../docx.js";
-import { XmlElement, localName } from "../xml.js";
+import { XmlElement, cloneXml, localName } from "../xml.js";
 import { paragraphOf } from "./blocks.js";
 
 /**
@@ -66,6 +66,140 @@ export interface ParagraphSpacingPatch {
   /** Space before/after in points; null removes the attribute. */
   beforePt?: number | null;
   afterPt?: number | null;
+}
+
+export type DropCapMode = "drop" | "margin";
+
+function firstText(node: XmlElement): XmlElement | undefined {
+  if (localName(node.name) === "t") return node;
+  for (const child of node.children) {
+    const found = firstText(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function dropCapFrame(paragraph: XmlElement): XmlElement | undefined {
+  const pPr = paragraph.children.find((child) => localName(child.name) === "pPr");
+  const frame = pPr?.children.find((child) => localName(child.name) === "framePr");
+  const mode = frame && frame.attrs[Object.keys(frame.attrs).find((key) => localName(key) === "dropCap") ?? ""];
+  return mode === "drop" || mode === "margin" ? frame : undefined;
+}
+
+function setDropCapSize(run: XmlElement, w: string, lines: number): void {
+  let rPr = run.children.find((child) => localName(child.name) === "rPr");
+  if (!rPr) {
+    rPr = { name: `${w}rPr`, attrs: {}, children: [], text: "" };
+    run.children.unshift(rPr);
+  }
+  rPr.children = rPr.children.filter((child) => localName(child.name) !== "sz" && localName(child.name) !== "szCs");
+  const value = String(Math.max(2, Math.round(lines * 28)));
+  const later = new Set(["highlight", "u", "effect", "bdr", "shd", "fitText", "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout", "specVanish", "oMath", "rPrChange"]);
+  const at = rPr.children.findIndex((child) => later.has(localName(child.name)));
+  rPr.children.splice(at === -1 ? rPr.children.length : at, 0,
+    { name: `${w}sz`, attrs: { [`${w}val`]: value }, children: [], text: "" },
+    { name: `${w}szCs`, attrs: { [`${w}val`]: value }, children: [], text: "" },
+  );
+}
+
+/** Apply or remove Word's native paragraph drop cap around the first letter. */
+export function setDropCapAt(
+  doc: DocxDocument,
+  target: XmlElement,
+  mode: DropCapMode | null,
+  lines = 3,
+): boolean {
+  const paragraph = paragraphOf(doc, target);
+  const parent = paragraph && doc.findParentOf(paragraph);
+  if (!paragraph || !parent) return false;
+  const index = parent.children.indexOf(paragraph);
+  const previous = parent.children[index - 1];
+  const currentDrop = dropCapFrame(paragraph) ? paragraph : undefined;
+  const previousDrop = previous && localName(previous.name) === "p" && dropCapFrame(previous) ? previous : undefined;
+  const dropParagraph = currentDrop ?? previousDrop;
+
+  if (mode === null) {
+    if (!dropParagraph) return false;
+    const body = dropParagraph === paragraph
+      ? parent.children.slice(index + 1).find((child) => localName(child.name) === "p")
+      : paragraph;
+    const letter = firstText(dropParagraph)?.text ?? "";
+    const bodyText = body && firstText(body);
+    if (!body || !bodyText) return false;
+    bodyText.text = letter + bodyText.text;
+    parent.children.splice(parent.children.indexOf(dropParagraph), 1);
+    doc.refresh();
+    return true;
+  }
+
+  if (dropParagraph) {
+    const frame = dropCapFrame(dropParagraph)!;
+    const w = prefixOf(dropParagraph);
+    frame.attrs[attrKey(frame, "dropCap", w)] = mode;
+    frame.attrs[attrKey(frame, "lines", w)] = String(lines);
+    frame.attrs[attrKey(frame, "hSpace", w)] = "144";
+    frame.attrs[attrKey(frame, "wrap", w)] = mode === "margin" ? "around" : "auto";
+    if (mode === "margin") {
+      frame.attrs[attrKey(frame, "hAnchor", w)] = "page";
+      frame.attrs[attrKey(frame, "vAnchor", w)] = "text";
+    } else {
+      for (const name of ["hAnchor", "vAnchor"]) {
+        const key = Object.keys(frame.attrs).find((candidate) => localName(candidate) === name);
+        if (key) delete frame.attrs[key];
+      }
+    }
+    const run = dropParagraph.children.find((child) => localName(child.name) === "r");
+    if (run) setDropCapSize(run, w, lines);
+    doc.refresh();
+    return true;
+  }
+
+  const sourceText = firstText(paragraph);
+  const sourceRun = sourceText && doc.findParentOf(sourceText);
+  if (!sourceText || !sourceRun || localName(sourceRun.name) !== "r") return false;
+  const chars = Array.from(sourceText.text);
+  if (chars.length === 0) return false;
+  const letter = chars.shift()!;
+  sourceText.text = chars.join("");
+  const w = prefixOf(paragraph);
+  const rPr = sourceRun.children.find((child) => localName(child.name) === "rPr");
+  const capRun: XmlElement = {
+    name: `${w}r`,
+    attrs: {},
+    children: [
+      ...(rPr ? [cloneXml(rPr)] : []),
+      { name: `${w}t`, attrs: {}, children: [], text: letter },
+    ],
+    text: "",
+  };
+  setDropCapSize(capRun, w, lines);
+  const frameAttrs: Record<string, string> = {
+    [`${w}dropCap`]: mode,
+    [`${w}lines`]: String(lines),
+    [`${w}hSpace`]: "144",
+    [`${w}wrap`]: mode === "margin" ? "around" : "auto",
+    ...(mode === "margin" ? { [`${w}hAnchor`]: "page", [`${w}vAnchor`]: "text" } : {}),
+  };
+  const capParagraph: XmlElement = {
+    name: `${w}p`,
+    attrs: {},
+    children: [
+      {
+        name: `${w}pPr`,
+        attrs: {},
+        children: [
+          { name: `${w}framePr`, attrs: frameAttrs, children: [], text: "" },
+          { name: `${w}spacing`, attrs: { [`${w}after`]: "0" }, children: [], text: "" },
+        ],
+        text: "",
+      },
+      capRun,
+    ],
+    text: "",
+  };
+  parent.children.splice(index, 0, capParagraph);
+  doc.refresh();
+  return true;
 }
 
 /** Set line spacing and/or space before/after on the target paragraphs. */

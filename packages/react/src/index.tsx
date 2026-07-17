@@ -23,19 +23,45 @@ import {
   replaceAll,
   setLink,
   setParagraphSpacing,
+  setDropCapAt,
   transformCase,
   exactLineHeightAt,
   replyToComment,
   insertImageAt,
   setImageWrap,
   insertFootnote,
+  insertField,
+  insertDateTimeField,
   insertPageField,
+  listBookmarks,
+  insertBookmarkAroundSelection,
+  insertBookmarkAt,
+  insertCrossReference,
+  insertMathAt,
+  insertShapeAt,
+  insertWordArtAt,
+  insertChartAt,
+  setChartData,
+  insertSmartArtAt,
+  setSmartArtData,
+  insertEmbeddedObjectAt,
+  insertModel3DAt,
+  insertWebVideoAt,
   insertBreakAt,
+  insertBlankPageAt,
+  insertCoverPage,
   insertSectionBreak,
   sectPrAt,
   setLineNumbering,
   lineNumberingAt,
   type XmlElement,
+  type ShapePreset,
+  type WordArtPreset,
+  type DrawingTool,
+  type CoverPageContent,
+  type ObjectArrangeAction,
+  type ChartData,
+  type SmartArtData,
   insertTableAfter,
   createMeasurer,
   type TextMeasurer,
@@ -57,6 +83,30 @@ import {
   summarizeSelection,
 } from "@wordinweb/core";
 
+async function objectPoster(title: string, subtitle: string, glyph: string): Promise<Blob> {
+  const canvas = document.createElement("canvas");
+  canvas.width = 640;
+  canvas.height = 360;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas is unavailable");
+  context.fillStyle = "#f3f6fb";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "#2e74b5";
+  context.fillRect(0, 0, 12, canvas.height);
+  context.fillStyle = "#2e74b5";
+  context.font = "bold 92px Arial, sans-serif";
+  context.fillText(glyph, 46, 143);
+  context.fillStyle = "#172b4d";
+  context.font = "bold 34px Arial, sans-serif";
+  context.fillText(title, 46, 220);
+  context.fillStyle = "#52616f";
+  context.font = "22px Arial, sans-serif";
+  context.fillText(subtitle, 46, 260, 540);
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!blob) throw new Error("Could not create object preview");
+  return blob;
+}
+
 export interface DocxViewApi {
   /** Apply character formatting to the current browser selection. */
   applyFormat(patch: RunFormatPatch): void;
@@ -66,6 +116,44 @@ export interface DocxViewApi {
   addFootnote(text: string): boolean;
   /** Insert a dynamic page-number field at the caret (body, header or footer). */
   insertPageNumber(kind?: "page" | "pageOfTotal"): boolean;
+  /** Insert any Word field instruction supported by the renderer. */
+  insertField(instruction: string, cachedResult?: string): boolean;
+  /** Insert a live DATE or TIME field with an optional Word date picture. */
+  insertDateTime(kind: "date" | "time", picture?: string): boolean;
+  /** Named bookmarks in document order. */
+  listBookmarks(): string[];
+  /** Add a bookmark around the selection, or a zero-length bookmark at the caret. */
+  addBookmark(name: string): boolean;
+  /** Insert a live text or page reference to a bookmark. */
+  insertCrossReference(bookmark: string, kind: "text" | "page"): boolean;
+  /** Insert an editable inline equation from WordInWeb's linear math syntax. */
+  insertEquation(linear: string): boolean;
+  /** Insert a Unicode symbol through the normal undo/suggestion-aware typing path. */
+  insertSymbol(symbol: string): boolean;
+  /** Insert a floating editable DrawingML shape at the caret. */
+  insertShape(preset: ShapePreset, text?: string): boolean;
+  /** Insert editable DrawingML WordArt at the caret. */
+  insertWordArt(text: string, preset?: WordArtPreset): boolean;
+  /** Insert a native editable ChartML chart at the caret. */
+  insertChart(data: ChartData): boolean;
+  /** Replace the selected native chart's type and data. */
+  updateSelectedChart(data: ChartData): boolean;
+  /** Insert a native editable SmartArt diagram at the caret. */
+  insertSmartArt(data: SmartArtData): boolean;
+  /** Replace the selected native SmartArt diagram's layout and node text. */
+  updateSelectedSmartArt(data: SmartArtData): boolean;
+  /** Insert a native Office 3D model with an optional custom poster image. */
+  insertModel3D(file: Blob, poster?: Blob): Promise<boolean>;
+  /** Insert Word online-video metadata with a browser-safe poster. */
+  insertOnlineVideo(url: string): Promise<boolean>;
+  /** Embed an arbitrary file as a native OLE Package object. */
+  insertEmbeddedObject(file: Blob, filename?: string): Promise<boolean>;
+  /** Activate a freehand pen, or return to selection mode with null. */
+  setDrawingTool(tool: DrawingTool | null): void;
+  /** Current freehand pen, or null while in selection mode. */
+  getDrawingTool(): DrawingTool | null;
+  /** Align, rotate, or reorder the selected image, shape, or ink group. */
+  arrangeObject(action: ObjectArrangeAction): boolean;
   undo(): void;
   redo(): void;
   canUndo(): boolean;
@@ -76,6 +164,8 @@ export interface DocxViewApi {
   tableOp(op: TableOp): void;
   /** Insert an image file at the caret (inline, natural size clamped to column). */
   insertImage(file: Blob): Promise<void>;
+  /** Capture a screen, window, or browser tab and insert the current frame as a PNG picture. */
+  insertScreenshot(): Promise<ScreenshotInsertResult>;
   /** Align the paragraph(s) under the caret or selection. */
   setAlignment(align: ParagraphAlignment): void;
   /** Apply a named paragraph style (null clears back to Normal). */
@@ -92,6 +182,8 @@ export interface DocxViewApi {
   adjustIndent(direction: 1 | -1): void;
   /** Line spacing multiple and/or space before/after (points). */
   setParagraphSpacing(patch: { lineMultiple?: number; beforePt?: number | null; afterPt?: number | null }): void;
+  /** Apply or remove a native Word drop cap on the caret paragraph. */
+  setDropCap(mode: "drop" | "margin" | null, lines?: number): boolean;
   /** Remove direct character formatting from the selection. */
   clearFormatting(): void;
   /** Change the selection's case. */
@@ -112,6 +204,10 @@ export interface DocxViewApi {
   setPageLayout(patch: PageLayoutPatch, scope?: "document" | "section"): void;
   /** Insert a page/column break or a section break at the caret. */
   insertBreak(kind: "page" | "column" | "sectionNextPage" | "sectionContinuous"): boolean;
+  /** Insert a full blank page at the caret (two consecutive page breaks). */
+  insertBlankPage(): boolean;
+  /** Insert an editable cover page before the current document. */
+  insertCoverPage(content: CoverPageContent): boolean;
   /** Toggle/configure margin line numbers (Word's Layout > Line Numbers).
    * scope "section" targets the caret's section; "document" every section. */
   setLineNumbering(patch: LineNumberingPatch, scope?: "document" | "section"): void;
@@ -119,6 +215,8 @@ export interface DocxViewApi {
   getLineNumbering(): { countBy: number; restart: "continuous" | "newPage" | "newSection"; start: number } | null;
   /** Leave header/footer editing mode. */
   closeHeaderFooter(): void;
+  /** Enter and, if needed, create the header or footer on the caret's page. */
+  openHeaderFooter(kind: "header" | "footer"): boolean;
   /** Effective formatting of the current selection (toolbar state), or null. */
   getSelectionFormat(): SelectionFormat | null;
   /** Print the rendered pages (browser print dialog / save as PDF). */
@@ -147,6 +245,8 @@ export interface DocxViewApi {
   rejectAllRevisions(): number;
   document: DocxDocument;
 }
+
+export type ScreenshotInsertResult = "inserted" | "unsupported" | "cancelled" | "error" | "no-caret";
 
 export interface DocxViewProps {
   /** The document: raw bytes, a File/Blob, or a URL to fetch. */
@@ -457,6 +557,7 @@ export function DocxView({
       doc: DocxDocument,
       dirtyBlock?: XmlElement,
       scope: "local" | "global" | "background" = "local",
+      dirtySource?: XmlElement,
     ): number => {
       const modelChanged = paintedModelVersion !== doc.modelVersion;
       const headerFooterOnly = scope === "global" && !modelChanged;
@@ -485,6 +586,7 @@ export function DocxView({
               measurer,
               prev: globalChange ? undefined : prevLayout ?? undefined,
               dirtyHint: globalChange ? undefined : dirtyBlock,
+              dirtySource: globalChange ? undefined : dirtySource,
             });
       return paintLayout(doc, layout, performance.now() - started);
     };
@@ -561,14 +663,15 @@ export function DocxView({
           doc,
           container: containerRef.current,
           getHandle: () => handle,
-          rerender: (dirtyBlock?: XmlElement, scope?: "local" | "global" | "background") => {
-            pages = rerender(doc, dirtyBlock, scope);
+          rerender: (dirtyBlock?: XmlElement, scope?: "local" | "global" | "background", dirtySource?: XmlElement) => {
+            pages = rerender(doc, dirtyBlock, scope, dirtySource);
           },
           zoom: curZoom,
           history,
           onFormatShortcut: (kind) => {
             const segs = editor?.getSelectionSegments() ?? [];
             if (segs.length === 0) return;
+            const selectedAll = editor?.isEntireDocumentSelected() ?? false;
             const fmt = summarizeSelection(segs);
             const patch =
               kind === "bold" ? { bold: !fmt?.bold } :
@@ -577,7 +680,8 @@ export function DocxView({
             history.checkpoint();
             const formatted = applyRunFormat(doc, segs, patch);
             pages = rerender(doc);
-            if (formatted.length > 0) editor?.selectRanges(formatted);
+            if (selectedAll) editor?.selectAll();
+            else if (formatted.length > 0) editor?.selectRanges(formatted);
             document.dispatchEvent(new CustomEvent("dxw-selection"));
           },
           onStyleShortcut: (styleId) => applyStyleShortcut?.(styleId),
@@ -626,6 +730,12 @@ export function DocxView({
           handle?.updateViewport?.();
           editor.selectRanges(m.ranges);
         };
+        const insertionTarget = () => {
+          const caret = editor?.getCaretTarget();
+          if (caret) return caret;
+          const last = [...(editor?.getSelectionSegments() ?? [])].reverse().find((segment) => segment.t);
+          return last?.t ? { t: last.t, offset: last.end } : null;
+        };
         const api: DocxViewApi = {
           document: doc,
           pageCount: () => pages,
@@ -638,20 +748,16 @@ export function DocxView({
             const own = editor?.getSelectionSegments() ?? [];
             const segments = own.length > 0 ? own : selectionToSegments(handle.bindings);
             if (segments.length === 0) return;
+            const selectedAll = editor?.isEntireDocumentSelected() ?? false;
             history.checkpoint();
             const formatted = applyRunFormat(doc, segments, patch);
             pages = rerender(doc);
             // Keep the formatted text selected so toolbar actions compose.
-            if (formatted.length > 0) editor?.selectRanges(formatted);
+            if (selectedAll) editor?.selectAll();
+            else if (formatted.length > 0) editor?.selectRanges(formatted);
           },
           addFootnote: (text) => {
-            // Caret first; else the end of the current selection.
-            let target = editor?.getCaretTarget() ?? null;
-            if (!target) {
-              const segs = editor?.getSelectionSegments() ?? [];
-              const last = [...segs].reverse().find((sg) => sg.t);
-              if (last?.t) target = { t: last.t, offset: last.end };
-            }
+            const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
             if (insertFootnote(doc, target.t, target.offset, text) !== null) {
@@ -661,13 +767,7 @@ export function DocxView({
             return false;
           },
           insertPageNumber: (kind = "page") => {
-            // Caret first; else the end of the current selection.
-            let target = editor?.getCaretTarget() ?? null;
-            if (!target) {
-              const segs = editor?.getSelectionSegments() ?? [];
-              const last = [...segs].reverse().find((sg) => sg.t);
-              if (last?.t) target = { t: last.t, offset: last.end };
-            }
+            const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
             if (insertPageField(doc, target.t, target.offset, kind)) {
@@ -676,6 +776,139 @@ export function DocxView({
             }
             return false;
           },
+          insertField: (instruction, cachedResult) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertField(doc, target.t, target.offset, instruction, cachedResult)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          insertDateTime: (kind, picture) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            const format = picture ?? (kind === "time" ? "h:mm am/pm" : "M/d/yyyy");
+            if (!insertDateTimeField(doc, target.t, target.offset, kind, format)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          listBookmarks: () => listBookmarks(doc),
+          addBookmark: (name) => {
+            const segments = editor?.getSelectionSegments() ?? [];
+            const target = editor?.getCaretTarget();
+            history.checkpoint();
+            const done = segments.length > 0
+              ? insertBookmarkAroundSelection(doc, segments, name)
+              : target
+                ? insertBookmarkAt(doc, target.t, target.offset, name)
+                : false;
+            if (done) pages = rerender(doc);
+            return done;
+          },
+          insertCrossReference: (bookmark, kind) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertCrossReference(doc, target.t, target.offset, bookmark, kind)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          insertEquation: (linear) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertMathAt(doc, target.t, target.offset, linear)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          insertSymbol: (symbol) => editor?.insertText(symbol) ?? false,
+          insertShape: (preset, text) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertShapeAt(doc, target.t, preset, text)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertWordArt: (text, preset = "plain") => {
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertWordArtAt(doc, target.t, text, preset)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertChart: (data) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertChartAt(doc, target.t, data)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          updateSelectedChart: (data) => {
+            const source = editor?.getSelectedDrawingSource();
+            if (!source) return false;
+            history.checkpoint();
+            if (!setChartData(doc, source, data)) return false;
+            pages = rerender(doc, undefined, "global");
+            editor?.reselectDrawing(source);
+            return true;
+          },
+          insertSmartArt: (data) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertSmartArtAt(doc, target.t, data)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          updateSelectedSmartArt: (data) => {
+            const source = editor?.getSelectedDrawingSource();
+            if (!source) return false;
+            history.checkpoint();
+            if (!setSmartArtData(doc, source, data)) return false;
+            pages = rerender(doc, undefined, "global");
+            editor?.reselectDrawing(source);
+            return true;
+          },
+          insertModel3D: async (file, poster) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            const preview = poster ?? await objectPoster("3D model", "Double-click in Word to explore", "◇");
+            const data = new Uint8Array(await file.arrayBuffer());
+            const posterBytes = new Uint8Array(await preview.arrayBuffer());
+            history.checkpoint();
+            if (!insertModel3DAt(doc, target.t, { data, poster: posterBytes })) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertOnlineVideo: async (url) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            const preview = await objectPoster("Online video", url, "▶");
+            const poster = new Uint8Array(await preview.arrayBuffer());
+            history.checkpoint();
+            if (!insertWebVideoAt(doc, target.t, { url, poster })) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertEmbeddedObject: async (file, filename) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            const name = filename ?? (file instanceof File ? file.name : "embedded-file.bin");
+            const preview = await objectPoster("Embedded object", name, "▤");
+            const data = new Uint8Array(await file.arrayBuffer());
+            const poster = new Uint8Array(await preview.arrayBuffer());
+            history.checkpoint();
+            if (!insertEmbeddedObjectAt(doc, target.t, { data, filename: name, poster })) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          setDrawingTool: (tool) => editor?.setDrawingTool(tool),
+          getDrawingTool: () => editor?.getDrawingTool() ?? null,
+          arrangeObject: (action) => editor?.arrangeSelectedObject(action) ?? false,
           addComment: (text) => {
             const segs = editor?.getSelectionSegments() ?? [];
             const segments = segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : [];
@@ -713,15 +946,22 @@ export function DocxView({
             const caret = editor?.getCaretTarget();
             if (!caret) return;
             const bytes = new Uint8Array(await file.arrayBuffer());
-            const bmp = await createImageBitmap(new Blob([bytes.buffer as ArrayBuffer]));
+            const isSvg = file.type === "image/svg+xml";
+            const bmp = isSvg ? null : await createImageBitmap(new Blob([bytes.buffer as ArrayBuffer], { type: file.type }));
+            const svgRoot = isSvg
+              ? new DOMParser().parseFromString(new TextDecoder().decode(bytes), "image/svg+xml").documentElement
+              : null;
+            const viewBox = (svgRoot?.getAttribute("viewBox") ?? "").trim().split(/[\s,]+/).map(Number);
+            const naturalWidth = (bmp?.width ?? parseFloat(svgRoot?.getAttribute("width") ?? "")) || viewBox[2] || 96;
+            const naturalHeight = (bmp?.height ?? parseFloat(svgRoot?.getAttribute("height") ?? "")) || viewBox[3] || 96;
             const sp = doc.sections[0]?.props;
             const maxW = sp ? sp.pageWidth - sp.marginLeft - sp.marginRight : 624;
-            const scale = Math.min(1, maxW / bmp.width);
-            const ext = (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
+            const scale = Math.min(1, maxW / naturalWidth);
+            const ext = file.type === "image/svg+xml" ? "svg" : (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
             history.checkpoint();
             const relId = doc.addImageResource(bytes, ext === "jpg" ? "jpeg" : ext);
-            const h = bmp.height * scale;
-            const drawing = insertImageAt(doc, caret.t, relId, bmp.width * scale, h);
+            const h = naturalHeight * scale;
+            const drawing = insertImageAt(doc, caret.t, relId, naturalWidth * scale, h);
             if (drawing) {
               // An image taller than an "exact"-spaced line would be clipped
               // (Word) or overlap neighbors — float it with square wrap.
@@ -731,7 +971,45 @@ export function DocxView({
               }
               pages = rerender(doc);
             }
-            bmp.close();
+            bmp?.close();
+          },
+          insertScreenshot: async () => {
+            if (!editor?.getCaretTarget()) return "no-caret";
+            if (!navigator.mediaDevices?.getDisplayMedia) return "unsupported";
+            let stream: MediaStream | null = null;
+            try {
+              stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+              const video = document.createElement("video");
+              video.muted = true;
+              video.playsInline = true;
+              video.srcObject = stream;
+              const ready = new Promise<void>((resolve, reject) => {
+                if (video.readyState >= HTMLMediaElement.HAVE_METADATA && video.videoWidth > 0 && video.videoHeight > 0) {
+                  resolve();
+                  return;
+                }
+                video.addEventListener("loadedmetadata", () => resolve(), { once: true });
+                video.addEventListener("error", () => reject(new Error("Captured video is unavailable")), { once: true });
+              });
+              await video.play();
+              await ready;
+              const canvas = document.createElement("canvas");
+              canvas.width = video.videoWidth;
+              canvas.height = video.videoHeight;
+              const context = canvas.getContext("2d");
+              if (!context || canvas.width === 0 || canvas.height === 0) return "error";
+              context.drawImage(video, 0, 0);
+              const image = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+              if (!image) return "error";
+              await api.insertImage(image);
+              return "inserted";
+            } catch (error) {
+              return error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")
+                ? "cancelled"
+                : "error";
+            } finally {
+              for (const track of stream?.getTracks() ?? []) track.stop();
+            }
           },
           setAlignment: (align) => {
             if (!handle) return;
@@ -747,6 +1025,7 @@ export function DocxView({
             }
           },
           closeHeaderFooter: () => editor?.exitHeaderFooter(),
+          openHeaderFooter: (kind) => editor?.enterHeaderFooter(kind) ?? false,
           insertBreak: (kind) => {
             let target = editor?.getCaretTarget() ?? null;
             if (!target) {
@@ -762,6 +1041,20 @@ export function DocxView({
                 : insertSectionBreak(doc, target.t, kind === "sectionNextPage" ? "nextPage" : "continuous");
             if (done) pages = rerender(doc);
             return done;
+          },
+          insertBlankPage: () => {
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertBlankPageAt(doc, target.t, target.offset)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          insertCoverPage: (content) => {
+            history.checkpoint();
+            if (!insertCoverPage(doc, content)) return false;
+            pages = rerender(doc);
+            return true;
           },
           setPageLayout: (patch, scope) => {
             history.checkpoint();
@@ -811,17 +1104,27 @@ export function DocxView({
             history.checkpoint();
             if (setParagraphSpacing(doc, targets as Parameters<typeof setParagraphSpacing>[1], patch)) pages = rerender(doc);
           },
+          setDropCap: (mode, lines = 3) => {
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!setDropCapAt(doc, target.t, mode, lines)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
           clearFormatting: () => {
             api.applyFormat({ clear: true });
           },
           changeCase: (mode) => {
             const segs = editor?.getSelectionSegments() ?? [];
             if (segs.length === 0) return;
+            const selectedAll = editor?.isEntireDocumentSelected() ?? false;
             history.checkpoint();
             const changed = transformCase(doc, segs, mode);
             if (changed.length > 0) {
               pages = rerender(doc);
-              editor?.selectRanges(changed);
+              if (selectedAll) editor?.selectAll();
+              else editor?.selectRanges(changed);
             }
           },
           find: (query, opts) => {
@@ -1050,5 +1353,6 @@ export function DocxView({
 }
 
 export { DocxDocument, layoutDocument, renderToDom, printPages } from "@wordinweb/core";
-export type { RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch } from "@wordinweb/core";
+export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset } from "@wordinweb/core";
 export { DocxToolbar } from "./toolbar.js";
+export type { DocxToolbarProps, ToolbarFeature, ToolbarMode } from "./toolbar.js";

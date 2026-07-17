@@ -2,12 +2,15 @@ import { DocxDocument } from "../docx.js";
 import { minchoCovers } from "./mincho-coverage.js";
 import {
   DrawingContent,
+  EmbeddedObjectReference,
+  Model3DReference,
   Paragraph,
   ParaProps,
   Run,
   RunProps,
   Shape,
   TabStop,
+  WebVideoReference,
 } from "../model.js";
 import { FontSpec, TextSource } from "./types.js";
 import { TextMeasurer } from "./measure.js";
@@ -146,6 +149,9 @@ interface ImageAtom {
   rotation?: number;
   border?: { color: string; width: number };
   srcDrawing?: XmlElement;
+  model3D?: Model3DReference;
+  webVideo?: WebVideoReference;
+  embeddedObject?: EmbeddedObjectReference;
 }
 interface DrawingAtom {
   kind: "drawing";
@@ -349,6 +355,9 @@ export interface LineSpan {
     rotation?: number;
     border?: { color: string; width: number };
     srcDrawing?: XmlElement;
+    model3D?: Model3DReference;
+    webVideo?: WebVideoReference;
+    embeddedObject?: EmbeddedObjectReference;
   };
   drawing?: DrawingContent;
   math?: MathBox;
@@ -645,6 +654,7 @@ export function invalidateParagraphSignature(src: XmlElement): void {
   const para = paraModelBySource.get(src);
   if (para) paraSigMemo.delete(para);
 }
+
 // Stable per-paragraph identity. A break result's spans carry `src` references
 // to specific w:r/w:t elements for caret mapping, so two DIFFERENT paragraphs
 // with identical content must never share a cached break (the reusing one would
@@ -720,6 +730,7 @@ function breakCacheKey(
     : "";
   return (
     doc.layoutGlobalSig() +
+    "\x08" + doc.modelVersion +
     "\x08" + paraId(para) +
     "\x08" + paraSig(para) +
     "\x08" + contentWidth +
@@ -1102,10 +1113,14 @@ function breakParagraphImpl(
       if (cur[cur.length - 1].runSpace) curRunSpaceWidth -= cur[cur.length - 1].width;
       hanging.unshift(cur.pop()!);
     }
-    if (cur.length === 0 && isLast && anchorSrc) {
+    // Synthetic list labels and non-text inline objects already occupy `cur`,
+    // but they are not editable sources. Keep the real zero-width w:t anchor
+    // on an otherwise-empty list item so clicking its number can place a
+    // caret, and alongside object-only lines when a source anchor exists.
+    if (isLast && anchorSrc && !cur.some((span) => span.src)) {
       const anchorProps = doc.effectiveRunProps(para, anchorSrc.run.props);
       cur.push({
-        x: lineStartX(lineIndex),
+        x: lineStartX(lineIndex) + curLineWidth,
         width: 0,
         text: "",
         props: anchorProps,
@@ -1564,7 +1579,18 @@ function breakParagraphImpl(
         width: w,
         image:
           atom.kind === "image"
-            ? { part: atom.part, width: w, height: h, crop: atom.crop, rotation: atom.rotation, border: atom.border, srcDrawing: atom.srcDrawing }
+            ? {
+                part: atom.part,
+                width: w,
+                height: h,
+                crop: atom.crop,
+                rotation: atom.rotation,
+                border: atom.border,
+                srcDrawing: atom.srcDrawing,
+                model3D: atom.model3D,
+                webVideo: atom.webVideo,
+                embeddedObject: atom.embeddedObject,
+              }
             : undefined,
         drawing: atom.kind === "drawing" ? atom.drawing : undefined,
         props: atom.props,
@@ -2669,6 +2695,19 @@ function buildAtoms(
     for (const content of run.content) {
       switch (content.kind) {
         case "text":
+          if (content.text.length === 0 && content.srcT) {
+            atoms.push({
+              kind: "frag",
+              text: "",
+              props,
+              font,
+              width: 0,
+              href,
+              src: { run, t: content.srcT, offset: 0 },
+              metricsFont: vertMetricsFont,
+            });
+            break;
+          }
           // Literal TAB characters inside w:t (generator files; Word
           // normalizes them to w:tab on save but renders them as tab stops).
           if (content.text.includes("\t")) {
@@ -2747,6 +2786,9 @@ function buildAtoms(
             rotation: content.rotation,
             border: content.border,
             srcDrawing: content.srcDrawing,
+            model3D: content.model3D,
+            webVideo: content.webVideo,
+            embeddedObject: content.embeddedObject,
           });
           break;
         case "anchor":

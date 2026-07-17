@@ -1366,6 +1366,78 @@ describe("phase23 fidelity rules", () => {
   });
 });
 
+describe("header-owned VML textbox stories", () => {
+  const documentXml = wrapDocument(
+    `<w:p><w:r><w:t>Body survives</w:t></w:r></w:p>` +
+      `<w:sectPr><w:headerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdH"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`,
+  );
+  const relationships = `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+    `<Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>` +
+    `</Relationships>`;
+  const headerXml = `<?xml version="1.0"?>
+    <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml">
+      <w:p><w:r><w:pict><v:shape id="GutterNumbers" style="position:absolute;margin-left:-47.15pt;margin-top:0;width:36pt;height:669.6pt;mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin" filled="f" stroked="f">
+        <v:textbox inset="0,0,0,0"><w:txbxContent>
+          <w:p><w:r><w:t>1</w:t></w:r></w:p><w:p><w:r><w:t>2</w:t></w:r></w:p>
+        </w:txbxContent></v:textbox>
+      </v:shape></w:pict></w:r></w:p>
+    </w:hdr>`;
+  const load = () => DocxDocument.load(makeDocx({
+    "word/document.xml": documentXml,
+    "word/_rels/document.xml.rels": relationships,
+    "word/header1.xml": headerXml,
+  }));
+
+  it("retains the source shape and emits a transparent object hit plus tagged story text", () => {
+    const doc = load();
+    const header = doc.headers.get("rIdH");
+    const paragraph = header?.blocks[0];
+    if (!paragraph || paragraph.type !== "paragraph") throw new Error("header paragraph missing");
+    const run = paragraph.children[0];
+    if (run.type !== "run") throw new Error("header run missing");
+    const anchor = run.content.find((content) => content.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("textbox missing");
+    expect(anchor.shape.srcDrawing?.attrs.id).toBe("GutterNumbers");
+
+    const page = layoutDocument(doc, { measurer: new ApproxMeasurer() }).pages[0];
+    const hit = page.items.find(
+      (item) => item.kind === "drawingHit" && item.src === anchor.shape.srcDrawing,
+    );
+    expect(hit).toMatchObject({ kind: "drawingHit", textboxStory: true });
+    const story = page.items.filter(
+      (item) => item.kind === "text" && item.textboxStory === anchor.shape.srcDrawing,
+    );
+    expect(story.map((item) => item.kind === "text" ? item.text : "").join(""))
+      .toContain("12");
+  });
+
+  it("saves edited story text in the same header-owned VML shape", () => {
+    const doc = load();
+    const header = doc.headers.get("rIdH");
+    const paragraph = header?.blocks[0];
+    if (!paragraph || paragraph.type !== "paragraph") throw new Error("header paragraph missing");
+    const run = paragraph.children[0];
+    if (run.type !== "run") throw new Error("header run missing");
+    const anchor = run.content.find((content) => content.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("textbox missing");
+    const storyParagraph = anchor.shape.blocks[0];
+    if (storyParagraph.type !== "paragraph") throw new Error("story paragraph missing");
+    const storyRun = storyParagraph.children[0];
+    if (storyRun.type !== "run") throw new Error("story run missing");
+    const text = storyRun.content.find((content) => content.kind === "text")?.srcT;
+    if (!text) throw new Error("story text missing");
+    text.text = "ONE";
+
+    const reopened = DocxDocument.load(doc.save());
+    const saved = reopened.pkg.text("word/header1.xml");
+    expect(saved).toContain('id="GutterNumbers"');
+    expect(saved).toContain("margin-left:-47.15pt");
+    expect(saved).toContain("<w:t>ONE</w:t>");
+    expect(reopened.pkg.text("word/document.xml")).toContain("Body survives");
+  });
+});
+
 describe("VML picture watermark", () => {
   const headerXml = (imagedataAttrs: string) => `<?xml version="1.0"?>
 <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"

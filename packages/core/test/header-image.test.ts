@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import { moveDrawingTo } from "../src/edit/tables.js";
+import { insertShapeAt } from "../src/edit/drawings.js";
 import { localName, XmlElement } from "../src/xml.js";
 import { Paragraph, Run } from "../src/model.js";
 import { makeDocxWithMedia, wrapDocument, p } from "./helpers.js";
@@ -96,5 +97,24 @@ describe("header image drag safety (moveDrawingTo cross-part guard)", () => {
     let root: XmlElement = drawing;
     for (let par = doc.findParentOf(root); par; par = doc.findParentOf(par)) root = par;
     expect(localName(root.name)).toBe("hdr");
+  });
+
+  it("refuses to move a shape run into its own editable textbox", () => {
+    const doc = DocxDocument.load(makeDocxWithMedia({ "word/document.xml": wrapDocument(p("ANCHOR")) }, {}));
+    const anchor = firstText(doc.sections[0].blocks[0] as Paragraph);
+    const drawing = insertShapeAt(doc, anchor, "roundedRectangle", "SELF TARGET")!;
+    let ownText: XmlElement | undefined;
+    const findOwnText = (node: XmlElement): void => {
+      if (localName(node.name) === "t" && node.text === "SELF TARGET") ownText = node;
+      for (const child of node.children) findOwnText(child);
+    };
+    findOwnText(drawing);
+    expect(ownText).toBeDefined();
+    expect(moveDrawingTo(doc, drawing, ownText!)).toBe(false);
+
+    const reloaded = DocxDocument.load(doc.save());
+    const xml = reloaded.pkg.text("word/document.xml");
+    expect((xml.match(/<w:drawing>/g) ?? [])).toHaveLength(1);
+    expect(xml).toContain("SELF TARGET");
   });
 });

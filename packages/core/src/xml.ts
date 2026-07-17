@@ -15,6 +15,8 @@ export interface XmlElement {
   children: XmlElement[];
   /** Concatenated character data directly inside this element. */
   text: string;
+  /** Editor placeholder retained in memory but omitted from XML while empty. */
+  omitWhenEmpty?: boolean;
 }
 
 /** cyrb53 string hash (Bryc, public domain): a fast, well-distributed 53-bit
@@ -235,6 +237,16 @@ export function serializeXml(el: XmlElement, declaration = false): string {
   const out: string[] = [];
   if (declaration) out.push('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
   const write = (e: XmlElement) => {
+    if (
+      e.omitWhenEmpty &&
+      Object.keys(e.attrs).length === 0 &&
+      e.text.length === 0 &&
+      e.children.length === 1 &&
+      localName(e.children[0].name) === "t" &&
+      e.children[0].children.length === 0 &&
+      e.children[0].text.length === 0 &&
+      Object.keys(e.children[0].attrs).every((key) => key === "xml:space" && e.children[0].attrs[key] === "preserve")
+    ) return;
     out.push("<", e.name);
     for (const [k, v] of Object.entries(e.attrs)) {
       out.push(" ", k, '="', escapeAttr(v), '"');
@@ -262,6 +274,7 @@ export function cloneXml(el: XmlElement): XmlElement {
     attrs: { ...el.attrs },
     text: el.text,
     children: el.children.map(cloneXml),
+    ...(el.omitWhenEmpty ? { omitWhenEmpty: true } : {}),
   };
 }
 

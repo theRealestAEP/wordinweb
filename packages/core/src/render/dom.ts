@@ -1,12 +1,13 @@
 import { DocxDocument } from "../docx.js";
 import { checkboxStateElement } from "../checkbox.js";
-import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem, WarpTextItem } from "../layout/types.js";
+import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem, WarpTextItem, ChartItem } from "../layout/types.js";
 import { cssFont, cambriaMathDescentShare } from "../layout/measure.js";
 import { Border } from "../model.js";
 import { XmlElement } from "../xml.js";
 import { convertEmfToDataUrl } from "emf-converter";
 import { decodeTiff } from "./tiff.js";
 import { renderWmf } from "./wmf.js";
+import { extractOlePackage } from "../parse/ole.js";
 
 export interface RenderOptions {
   /** Zoom factor (1 = 100%). */
@@ -430,6 +431,11 @@ export function renderToDom(
     prev?._zoom === zoom &&
     prev?._virtualized === virtualized &&
     prev?._modelVersion === doc.modelVersion;
+  const samePage = (a: LaidOutPage, b: LaidOutPage, index: number): boolean =>
+    a === b ||
+    (layout._incremental === true
+      ? index < (layout._incrementalStructuralPrefixEnd ?? 0) && pageEq(a, b)
+      : pageEq(a, b));
   const pages: PageRender[] = new Array(layout.pages.length);
   const createRecord = (page: LaidOutPage): PageRender =>
     virtualized ? renderEmptyPageRecord(page, zoom, options) : renderPageRecord(doc, page, zoom, options);
@@ -439,13 +445,13 @@ export function renderToDom(
   let hiNew = layout.pages.length - 1;
   let hiOld = prevPages.length - 1;
   if (canReuse) {
-    while (lo < layout.pages.length && lo < prevPages.length && pageEq(layout.pages[lo], prevPages[lo].page)) {
+    while (lo < layout.pages.length && lo < prevPages.length && samePage(layout.pages[lo], prevPages[lo].page, lo)) {
       const pr = prevPages[lo];
       pr.page = layout.pages[lo];
       pages[lo] = pr;
       lo++;
     }
-    while (hiNew >= lo && hiOld >= lo && pageEq(layout.pages[hiNew], prevPages[hiOld].page)) {
+    while (hiNew >= lo && hiOld >= lo && samePage(layout.pages[hiNew], prevPages[hiOld].page, hiNew)) {
       const pr = prevPages[hiOld];
       pr.page = layout.pages[hiNew];
       pages[hiNew] = pr;
@@ -486,6 +492,17 @@ export function renderToDom(
     root.style.padding = `${gap}px 0`;
     for (const pr of pages) root.appendChild(pr.el);
     container.appendChild(root);
+  }
+  // Equal-width PAGEREF updates keep their retained page geometry and item
+  // identity. Refresh the mounted glyphs while adopting those page records;
+  // virtualized offscreen pages will paint the new item text when mounted.
+  for (const page of pages) {
+    if (!page.mounted) continue;
+    for (const binding of page.bindings) {
+      if (binding.item.pageRef !== undefined && binding.el.textContent !== binding.item.text) {
+        binding.el.textContent = binding.item.text;
+      }
+    }
   }
   root.classList.toggle("dxw-virtualized", virtualized);
 
@@ -746,14 +763,34 @@ function renderPage(
         g.style.width = "6px";
         g.style.height = `${item.y2 - item.y1}px`;
         g.style.cursor = "col-resize";
-      } else {
+      } else if (item.axis === "row") {
         g.style.left = `${item.x}px`;
         g.style.top = `${item.y1 - 3}px`;
         g.style.width = `${(item.x2 ?? item.x) - item.x}px`;
         g.style.height = "6px";
         g.style.cursor = "row-resize";
+      } else {
+        g.style.left = `${item.x - 24}px`;
+        g.style.top = `${item.y1 - 24}px`;
+        g.style.width = "22px";
+        g.style.height = "22px";
+        g.style.display = "grid";
+        g.style.placeItems = "center";
+        g.style.boxSizing = "border-box";
+        g.style.border = "1px solid #7f7f7f";
+        g.style.background = "#ffffff";
+        g.style.color = "#3f3f3f";
+        g.style.cursor = "move";
+        g.style.opacity = "0";
+        g.style.pointerEvents = "none";
+        g.style.boxShadow = "0 1px 1px rgba(0,0,0,.08)";
+        g.title = "Move table";
+        g.dataset.dxwTableMove = "1";
+        g.innerHTML =
+          '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square">' +
+          '<path d="M8 1.5v13M1.5 8h13M8 1.5 5.7 3.8M8 1.5l2.3 2.3M8 14.5l-2.3-2.3M8 14.5l2.3-2.3M1.5 8l2.3-2.3M1.5 8l2.3 2.3M14.5 8l-2.3-2.3M14.5 8l-2.3 2.3"/></svg>';
       }
-      g.style.zIndex = "5";
+      g.style.zIndex = item.axis === "move" ? "7" : "5";
       g.dataset.dxwItemKind = item.kind;
       g.dataset.dxwGrip = String(grips.length);
       surface.appendChild(g);
@@ -773,7 +810,9 @@ function renderPage(
         node.dataset.dxwFontSize = String(item.font.size);
         node.dataset.dxwFontWeight = item.font.bold ? "700" : "400";
         node.dataset.dxwFontStyle = item.font.italic ? "italic" : "normal";
+        if (item.textboxStory) node.dataset.dxwTextboxStory = "1";
       }
+      if (item.kind === "drawingHit" && item.textboxStory) node.dataset.dxwTextboxStoryObject = "1";
       if (isHf) node.dataset.dxwHf = "1";
       // Interactive checkbox glyphs get a pointer affordance + hit marker so a
       // click toggles them (the editor consumes the mousedown).
@@ -806,6 +845,68 @@ function renderPage(
         wordarts.push({ el: node, item });
       }
     }
+  }
+  const moveGrips = grips.filter((binding) => binding.item.axis === "move");
+  if (moveGrips.length > 0) {
+    let armed: GripBinding | undefined;
+    let disarmTimer: ReturnType<typeof setTimeout> | undefined;
+    const cancelDisarm = () => {
+      if (disarmTimer !== undefined) clearTimeout(disarmTimer);
+      disarmTimer = undefined;
+    };
+    const scheduleDisarm = () => {
+      if (disarmTimer !== undefined) return;
+      disarmTimer = setTimeout(() => {
+        armed = undefined;
+        for (const binding of moveGrips) {
+          binding.el.style.opacity = "0";
+          binding.el.style.pointerEvents = "none";
+        }
+        disarmTimer = undefined;
+      }, 800);
+    };
+    surface.addEventListener("mousemove", (event) => {
+      const rect = surface.getBoundingClientRect();
+      const x = (event.clientX - rect.left) / zoom;
+      const y = (event.clientY - rect.top) / zoom;
+      let hovered: GripBinding | undefined;
+      for (const binding of moveGrips) {
+        const item = binding.item;
+        const overTable =
+          x >= item.x && x <= (item.x2 ?? item.x) && y >= item.y1 && y <= item.y2;
+        if (overTable) hovered = binding;
+      }
+      if (hovered) {
+        armed = hovered;
+        cancelDisarm();
+      }
+      if (armed) {
+        const item = armed.item;
+        const handleLeft = parseFloat(armed.el.style.left);
+        const handleTop = parseFloat(armed.el.style.top);
+        const overTable =
+          x >= item.x && x <= (item.x2 ?? item.x) && y >= item.y1 && y <= item.y2;
+        const overHandle =
+          x >= handleLeft && x <= handleLeft + 22 && y >= handleTop && y <= handleTop + 22;
+        const overCorner =
+          x >= handleLeft && x <= item.x + 2 && y >= handleTop && y <= item.y1 + 2;
+        if (overTable || overHandle || overCorner) cancelDisarm();
+        else scheduleDisarm();
+      }
+      for (const binding of moveGrips) {
+        const handleLeft = parseFloat(binding.el.style.left);
+        const handleTop = parseFloat(binding.el.style.top);
+        const overHandle =
+          x >= handleLeft && x <= handleLeft + 22 && y >= handleTop && y <= handleTop + 22;
+        const active = armed === binding;
+        binding.el.style.opacity = active ? "1" : "0";
+        binding.el.style.pointerEvents = active && overHandle ? "auto" : "none";
+      }
+    });
+    surface.addEventListener("mouseleave", () => {
+      scheduleDisarm();
+    });
+    surface.addEventListener("mouseenter", cancelDisarm);
   }
   return el;
 }
@@ -1082,8 +1183,8 @@ function ensureStylesheet(): void {
 .dxw-hf-mode .dxw-page span:not([data-dxw-hf]),
 .dxw-hf-mode .dxw-page a:not([data-dxw-hf]),
 .dxw-hf-mode .dxw-page img:not([data-dxw-hf]) { opacity: .45; }
-.dxw-body-mode .dxw-page span[data-dxw-hf],
-.dxw-body-mode .dxw-page a[data-dxw-hf],
+.dxw-body-mode .dxw-page span[data-dxw-hf]:not([data-dxw-textbox-story]),
+.dxw-body-mode .dxw-page a[data-dxw-hf]:not([data-dxw-textbox-story]),
 .dxw-body-mode .dxw-page img[data-dxw-hf] { opacity: .55; }
 .dxw-comment-hl { background: var(--dxw-comment-hl, rgba(255, 200, 90, .38)); }
 .dxw-comment-hl.dxw-hot { background: var(--dxw-comment-hl-active, rgba(255, 170, 0, .55)); }
@@ -1151,6 +1252,139 @@ function ensureStylesheet(): void {
   document.head.appendChild(style);
 }
 
+const CHART_COLORS = ["#4472c4", "#ed7d31", "#a5a5a5", "#ffc000", "#5b9bd5", "#70ad47"];
+
+function renderChart(item: ChartItem): HTMLElement {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${item.width} ${item.height}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", item.data.title || "Chart");
+  svg.dataset.dxwChart = "1";
+  svg.style.cssText = `position:absolute;left:${item.x}px;top:${item.y}px;width:${item.width}px;height:${item.height}px;pointer-events:none;overflow:visible`;
+
+  const node = (name: string, attrs: Record<string, string | number> = {}, text?: string): SVGElement => {
+    const result = document.createElementNS(ns, name);
+    for (const [key, value] of Object.entries(attrs)) result.setAttribute(key, String(value));
+    if (text !== undefined) result.textContent = text;
+    return result;
+  };
+  const addText = (x: number, y: number, text: string, attrs: Record<string, string | number> = {}): void => {
+    svg.appendChild(node("text", { x, y, fill: "#595959", "font-family": "Arial, sans-serif", "font-size": 10, ...attrs }, text));
+  };
+
+  svg.appendChild(node("rect", { x: 0, y: 0, width: item.width, height: item.height, fill: "#fff" }));
+  const titleHeight = item.data.title ? 30 : 12;
+  if (item.data.title) addText(item.width / 2, 20, item.data.title, { "text-anchor": "middle", fill: "#404040", "font-size": 15, "font-weight": 600 });
+  const legendWidth = item.data.series.length > 1 ? Math.min(104, item.width * 0.24) : 0;
+  const plot = { x: 48, y: titleHeight + 5, width: Math.max(item.width - 62 - legendWidth, 40), height: Math.max(item.height - titleHeight - 42, 40) };
+
+  if (item.data.type === "pie") {
+    const values = item.data.series[0]?.values ?? [];
+    const total = values.reduce((sum, value) => sum + Math.max(value, 0), 0) || 1;
+    const radius = Math.max(Math.min(plot.width, plot.height) * 0.42, 8);
+    const cx = plot.x + plot.width / 2;
+    const cy = plot.y + plot.height / 2;
+    let angle = -Math.PI / 2;
+    values.forEach((value, index) => {
+      const next = angle + (Math.max(value, 0) / total) * Math.PI * 2;
+      const x1 = cx + Math.cos(angle) * radius;
+      const y1 = cy + Math.sin(angle) * radius;
+      const x2 = cx + Math.cos(next) * radius;
+      const y2 = cy + Math.sin(next) * radius;
+      const large = next - angle > Math.PI ? 1 : 0;
+      svg.appendChild(node("path", {
+        d: `M ${cx} ${cy} L ${x1} ${y1} A ${radius} ${radius} 0 ${large} 1 ${x2} ${y2} Z`,
+        fill: CHART_COLORS[index % CHART_COLORS.length], stroke: "#fff", "stroke-width": 1,
+      }));
+      angle = next;
+    });
+    const lx = plot.x + plot.width + 8;
+    item.data.categories.forEach((category, index) => {
+      const y = plot.y + 10 + index * 16;
+      svg.appendChild(node("rect", { x: lx, y: y - 8, width: 9, height: 9, fill: CHART_COLORS[index % CHART_COLORS.length] }));
+      addText(lx + 14, y, category);
+    });
+    return svg as unknown as HTMLElement;
+  }
+
+  const allValues = item.data.series.flatMap((series) => series.values);
+  const low = Math.min(0, ...allValues);
+  const high = Math.max(0, ...allValues);
+  const range = high - low || 1;
+  const valueY = (value: number) => plot.y + plot.height - ((value - low) / range) * plot.height;
+  const valueX = (value: number) => plot.x + ((value - low) / range) * plot.width;
+  for (let step = 0; step <= 4; step++) {
+    const value = low + (range * step) / 4;
+    if (item.data.type === "bar") {
+      const x = valueX(value);
+      svg.appendChild(node("line", { x1: x, y1: plot.y, x2: x, y2: plot.y + plot.height, stroke: "#d9d9d9", "stroke-width": 1 }));
+      addText(x, plot.y + plot.height + 15, Number(value.toFixed(2)).toString(), { "text-anchor": "middle" });
+    } else {
+      const y = valueY(value);
+      svg.appendChild(node("line", { x1: plot.x, y1: y, x2: plot.x + plot.width, y2: y, stroke: "#d9d9d9", "stroke-width": 1 }));
+      addText(plot.x - 6, y + 3, Number(value.toFixed(2)).toString(), { "text-anchor": "end" });
+    }
+  }
+
+  const categoryCount = Math.max(item.data.categories.length, 1);
+  const seriesCount = Math.max(item.data.series.length, 1);
+  const labelEvery = Math.max(1, Math.ceil(categoryCount / 8));
+  if (item.data.type === "bar") {
+    const band = plot.height / categoryCount;
+    const barHeight = Math.max((band * 0.72) / seriesCount, 1);
+    item.data.categories.forEach((category, categoryIndex) => {
+      if (categoryIndex % labelEvery === 0) addText(plot.x - 6, plot.y + band * (categoryIndex + 0.5) + 3, category, { "text-anchor": "end" });
+      item.data.series.forEach((series, seriesIndex) => {
+        const value = series.values[categoryIndex] ?? 0;
+        const zero = valueX(0);
+        const edge = valueX(value);
+        svg.appendChild(node("rect", {
+          x: Math.min(zero, edge), y: plot.y + categoryIndex * band + (band - barHeight * seriesCount) / 2 + seriesIndex * barHeight,
+          width: Math.max(Math.abs(edge - zero), 0.5), height: barHeight,
+          fill: CHART_COLORS[seriesIndex % CHART_COLORS.length],
+        }));
+      });
+    });
+  } else {
+    const band = plot.width / categoryCount;
+    item.data.categories.forEach((category, index) => {
+      if (index % labelEvery === 0) addText(plot.x + band * (index + 0.5), plot.y + plot.height + 15, category, { "text-anchor": "middle" });
+    });
+    if (item.data.type === "column") {
+      const barWidth = Math.max((band * 0.72) / seriesCount, 1);
+      item.data.series.forEach((series, seriesIndex) => series.values.forEach((value, categoryIndex) => {
+        const zero = valueY(0);
+        const edge = valueY(value);
+        svg.appendChild(node("rect", {
+          x: plot.x + categoryIndex * band + (band - barWidth * seriesCount) / 2 + seriesIndex * barWidth,
+          y: Math.min(zero, edge), width: barWidth, height: Math.max(Math.abs(edge - zero), 0.5),
+          fill: CHART_COLORS[seriesIndex % CHART_COLORS.length],
+        }));
+      }));
+    } else {
+      item.data.series.forEach((series, seriesIndex) => {
+        const points = series.values.map((value, index) => `${plot.x + band * (index + 0.5)},${valueY(value)}`).join(" ");
+        svg.appendChild(node("polyline", { points, fill: "none", stroke: CHART_COLORS[seriesIndex % CHART_COLORS.length], "stroke-width": 2 }));
+        series.values.forEach((value, index) => svg.appendChild(node("circle", {
+          cx: plot.x + band * (index + 0.5), cy: valueY(value), r: 2.5,
+          fill: "#fff", stroke: CHART_COLORS[seriesIndex % CHART_COLORS.length], "stroke-width": 1.5,
+        })));
+      });
+    }
+  }
+
+  if (item.data.series.length > 1) {
+    const x = plot.x + plot.width + 10;
+    item.data.series.forEach((series, index) => {
+      const y = plot.y + 11 + index * 17;
+      svg.appendChild(node("rect", { x, y: y - 8, width: 10, height: 10, fill: CHART_COLORS[index % CHART_COLORS.length] }));
+      addText(x + 15, y, series.name);
+    });
+  }
+  return svg as unknown as HTMLElement;
+}
+
 function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElement | null {
   switch (item.kind) {
     case "rect": {
@@ -1179,12 +1413,17 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       svg.style.width = `${item.width}px`;
       svg.style.height = `${item.height}px`;
       svg.style.overflow = "visible";
+      if (item.rotate) {
+        svg.style.transform = `rotate(${item.rotate.deg}deg)`;
+        svg.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
+      }
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("d", item.d);
       path.setAttribute("fill", item.fill ?? "none");
       if (item.stroke) {
         path.setAttribute("stroke", item.stroke.color);
         path.setAttribute("stroke-width", String(item.stroke.width));
+        if (item.stroke.opacity !== undefined) path.setAttribute("stroke-opacity", String(item.stroke.opacity));
         // Stroke width is meant in page px, not viewBox units.
         path.setAttribute("vector-effect", "non-scaling-stroke");
       }
@@ -1203,9 +1442,15 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       // A fill hit sits at the shape's own z-layer, UNDER its text spans (which
       // are emitted later, so they win equal-z hit-testing over their glyphs);
       // a standalone drawing hit floats above everything.
-      hit.style.cursor = item.belowText ? "default" : "move";
+      hit.style.cursor = "move";
       hit.style.zIndex = item.belowText ? "1" : "6";
+      if (item.rotate) {
+        hit.style.transform = `rotate(${item.rotate.deg}deg)`;
+        hit.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
+      }
       hit.dataset.dxwDrawing = "1";
+      if (item.ink) hit.dataset.dxwInk = "1";
+      if (item.smartArt) hit.dataset.dxwSmartArt = "1";
       return hit;
     }
     case "edge": {
@@ -1213,6 +1458,8 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       if (item.front) el.style.zIndex = "1";
       return el;
     }
+    case "chart":
+      return renderChart(item);
     case "image": {
       const bytes = doc.media(item.part);
       if (!bytes) return null;
@@ -1427,7 +1674,10 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
         node.style.left = `${item.x - 0.5}px`;
         node.style.top = `${item.y - 0.5}px`;
       }
-      if (item.rotation) node.style.transform = `rotate(${item.rotation}deg)`;
+      if (item.rotate) {
+        node.style.transform = `rotate(${item.rotate.deg}deg)`;
+        node.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
+      } else if (item.rotation) node.style.transform = `rotate(${item.rotation}deg)`;
       // a:ln picture outline: Word paints the line just OUTSIDE the image box
       // (the rule bbox sits ~half its width beyond the image edge). `outline`
       // draws outside the border edge without shifting the image or its layout.
@@ -1440,6 +1690,35 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       if (item.behind) node.style.zIndex = "-1";
       else if (item.front) node.style.zIndex = "2";
       node.dataset.dxwImageFormat = ext;
+      if (item.model3D) node.dataset.dxwModel3d = "1";
+      if (item.webVideo) {
+        node.dataset.dxwWebVideo = "1";
+        node.addEventListener("dblclick", () => {
+          window.open(item.webVideo!.url, "_blank", "noopener,noreferrer");
+        });
+      }
+      if (item.embeddedObject) {
+        node.dataset.dxwEmbeddedObject = "1";
+        node.title = `Double-click to open ${item.embeddedObject.filename}`;
+        node.addEventListener("dblclick", () => {
+          const objectBytes = doc.media(item.embeddedObject!.part);
+          if (!objectBytes) return;
+          const embedded = item.embeddedObject!.progId === "Word.Document.12"
+            ? { filename: item.embeddedObject!.filename, data: objectBytes }
+            : extractOlePackage(objectBytes);
+          if (!embedded) return;
+          const buffer = embedded.data.buffer.slice(
+            embedded.data.byteOffset,
+            embedded.data.byteOffset + embedded.data.byteLength,
+          ) as ArrayBuffer;
+          const url = URL.createObjectURL(new Blob([buffer]));
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = embedded.filename;
+          link.click();
+          URL.revokeObjectURL(url);
+        });
+      }
       return node;
     }
     case "text":
@@ -1643,6 +1922,10 @@ function renderWarpText(item: WarpTextItem): HTMLElement {
   svg.style.width = `${W}px`;
   svg.style.height = `${H}px`;
   svg.style.overflow = "visible";
+  if (item.rotate) {
+    svg.style.transform = `rotate(${item.rotate.deg}deg)`;
+    svg.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
+  }
   // The warp text is decorative (not editable); let clicks fall through to the
   // shape's fill hit target beneath so the fill still selects the shape.
   svg.style.pointerEvents = "none";

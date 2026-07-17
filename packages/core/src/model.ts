@@ -269,6 +269,30 @@ export interface ImageContent {
   border?: { color: string; width: number };
   /** Source w:drawing (or pict) element, for resize/move editing. */
   srcDrawing?: XmlElement;
+  /** Native Office 3D model shown through its saved poster raster. */
+  model3D?: Model3DReference;
+  /** Word online-video metadata shown through its saved poster raster. */
+  webVideo?: WebVideoReference;
+  /** Embedded OLE package activated as a safe download in the browser. */
+  embeddedObject?: EmbeddedObjectReference;
+}
+
+export interface Model3DReference {
+  part: string;
+  posterPart: string;
+}
+
+export interface WebVideoReference {
+  url: string;
+  embeddedHtml: string;
+  width: number;
+  height: number;
+}
+
+export interface EmbeddedObjectReference {
+  part: string;
+  filename: string;
+  progId: string;
 }
 /** OMML equation node (subset: runs, scripts, fractions, radicals). */
 export type MathNode =
@@ -409,6 +433,10 @@ export interface ShapeTextbox {
    * be an interactive hit target (select the shape instead of the body text
    * behind it). */
   srcDrawing?: XmlElement;
+  /** Header/footer-owned textbox whose text is edited as an independent story. */
+  textboxStory?: boolean;
+  /** DrawingML WordArt, including the identity textNoShape preset. */
+  wordArt?: boolean;
   /** bodyPr a:prstTxWarp preset name (textArchUp, textWave1, textChevron,
    * textCirclePour, …): the shape's text is bent onto the preset's envelope
    * rather than flowed as ordinary lines. "textNoShape" (no warp) is dropped. */
@@ -454,6 +482,8 @@ export interface ShapeWordArt {
 export interface ShapeArt {
   type: "art";
   srcDrawing?: XmlElement;
+  /** A freehand stroke, selectable by the Draw ribbon's stroke eraser. */
+  ink?: boolean;
   x: number;
   y: number;
   /** Percent-of-page offsets (wp14:pctPos*Offset), 0..1. */
@@ -464,7 +494,10 @@ export interface ShapeArt {
   hRel: AnchorRel;
   vRel: AnchorRel;
   hAlign?: "left" | "center" | "right";
+  vAlign?: "top" | "center" | "bottom";
   behind?: boolean;
+  /** a:xfrm rotation, degrees clockwise. */
+  rotation?: number;
   lines: DrawingLine[];
   images: DrawingImage[];
   paths: DrawingPath[];
@@ -500,9 +533,15 @@ export interface ShapeImage {
   washout?: { gain: number; blacklevel: number };
   /** Source w:drawing element (editing). */
   srcDrawing?: XmlElement;
+  model3D?: Model3DReference;
+  webVideo?: WebVideoReference;
+  embeddedObject?: EmbeddedObjectReference;
 }
 
-export type Shape = ShapeLine | ShapeTextbox | ShapeImage | ShapeArt | ShapeWordArt;
+export type Shape = (ShapeLine | ShapeTextbox | ShapeImage | ShapeArt | ShapeWordArt) & {
+  /** wp:anchor relativeHeight, used for object stacking order. */
+  z?: number;
+};
 
 /**
  * Floating/anchored object: does not occupy inline space; positioned against
@@ -546,6 +585,10 @@ export interface DrawingContent {
   height: number;
   lines: DrawingLine[];
   images: DrawingImage[];
+  /** Native ChartML chart data resolved from the related chart part. */
+  chart?: ChartData;
+  /** Native SmartArt diagram data resolved from its diagram parts. */
+  smartArt?: SmartArtData;
   /** Freeform vector shapes (a:custGeom), as SVG path data. */
   paths?: DrawingPath[];
   /** An INLINE wps text box (wp:inline wps:txbx): a fixed-extent box that
@@ -564,6 +607,27 @@ export interface DrawingContent {
   /** Positioned text bodies inside the drawing (multi-textbox groups and
    * SmartArt cached-drawing shapes). Painted above lines/paths. */
   texts?: DrawingTextShape[];
+}
+
+export type ChartType = "column" | "bar" | "line" | "pie";
+
+export interface ChartSeries {
+  name: string;
+  values: number[];
+}
+
+export interface ChartData {
+  type: ChartType;
+  title?: string;
+  categories: string[];
+  series: ChartSeries[];
+}
+
+export type SmartArtLayout = "process" | "cycle" | "hierarchy" | "list";
+
+export interface SmartArtData {
+  layout: SmartArtLayout;
+  items: string[];
 }
 
 /** A text body positioned inside a composite drawing (a wps textbox in a
@@ -595,7 +659,7 @@ export interface DrawingPath {
   viewW: number;
   viewH: number;
   fill?: string;
-  stroke?: { color: string; width: number };
+  stroke?: { color: string; width: number; opacity?: number };
 }
 
 /**
