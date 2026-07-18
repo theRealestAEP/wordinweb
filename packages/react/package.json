@@ -1,6 +1,6 @@
 {
   "name": "wordinweb",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "React component for high-fidelity DOCX viewing and editing",
   "license": "MIT",
   "repository": {
@@ -8,7 +8,7 @@
     "url": "git+https://github.com/theRealestAEP/wordinweb.git",
     "directory": "packages/react"
   },
-  "homepage": "https://github.com/theRealestAEP/wordinweb#readme",
+  "homepage": "https://wordinweb-parity.callerinfo.workers.dev/",
   "bugs": {
     "url": "https://github.com/theRealestAEP/wordinweb/issues"
   },

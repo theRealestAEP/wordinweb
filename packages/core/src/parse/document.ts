@@ -184,6 +184,26 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
   if (bookmarks.length > 0) para.bookmarks = bookmarks;
   // Unterminated field (shouldn't happen in valid files): flush as text
   flushField(field);
+  // Word promotes a simple bare run-over-run fraction when it is the
+  // paragraph's only visible content. The XML may still use m:oMath rather
+  // than m:oMathPara (staging-tblextreme's standalone fraction), but it is
+  // centered and spaced as a display equation in Word. Compound fractions
+  // and n-ary objects keep their authored inline math style.
+  const visibleContent = para.children.flatMap((paraChild) =>
+    (paraChild.type === "run" ? [paraChild] : paraChild.runs).flatMap((run) =>
+      run.content.filter((content) => content.kind !== "text" || content.text.length > 0),
+    ),
+  );
+  if (visibleContent.length === 1 && visibleContent[0].kind === "math") {
+    const node = visibleContent[0].nodes.length === 1 ? visibleContent[0].nodes[0] : undefined;
+    if (
+      node?.t === "frac" &&
+      node.num.every((part) => part.t === "run") &&
+      node.den.every((part) => part.t === "run")
+    ) {
+      visibleContent[0].display = true;
+    }
+  }
   suppressTocHyperlinkFormatting(para);
   // Final view: a paragraph whose MARK is a tracked deletion (pPr/rPr/w:del)
   // and whose content was all deleted does not exist — Word removes the line
@@ -529,8 +549,10 @@ function parseParaChildren(
       const nodes = parseOmml(el);
       if (nodes.length > 0) {
         // m:oMathPara marks a display equation (centered, display-style
-        // layout); a bare m:oMath flows inline.
+        // layout). A bare m:oMath normally flows inline; parseParagraph later
+        // promotes it when it is the paragraph's only visible content.
         const display = ln === "oMathPara";
+        const multiEquationDisplay = display && children(el, "oMath").length > 3;
         // m:oMathParaPr/m:jc: explicit display-equation justification
         // (dense's F1 definition is jc=left and Word paints it flush left).
         const jcVal = display ? attr(child(child(el, "oMathParaPr"), "jc"), "val") : undefined;
@@ -542,7 +564,7 @@ function parseParaChildren(
         let segment: MathNode[] = [];
         const flushMath = () => {
           if (segment.length === 0) return;
-          content.push({ kind: "math", nodes: segment, src: el, display, jc });
+          content.push({ kind: "math", nodes: segment, src: el, display, multiEquationDisplay, jc });
           segment = [];
         };
         for (const node of nodes) {
@@ -819,6 +841,12 @@ function parseRun(
       case "tab":
         run.content.push({ kind: "tab" });
         break;
+      case "pgNum":
+        // Legacy page-number fields use the empty w:pgNum run element rather
+        // than a fldChar/instrText complex field. Resolve it through the same
+        // live PAGE-field path so repeated footers show the physical page.
+        run.content.push({ kind: "field", instruction: "PAGE", cachedResult: "" });
+        break;
       case "drawing": {
         const img = parseDrawing(el, ctx);
         if (img) {
@@ -876,7 +904,11 @@ function parseRun(
           // map the common ones so they don't render as their Latin-1 byte
           // (Wingdings F0E0 is a right arrow, not "a-grave"). Getting the glyph
           // right also keeps its width close to Word's, so lines don't reflow.
-          const mapped = /wingdings|webdings|symbol/i.test(font) ? SYMBOL_CHAR_MAP[code] : undefined;
+          const mapped = /^symbol$/i.test(font)
+            ? SYMBOL_TEXT_CHAR_MAP[code]
+            : /wingdings|webdings/i.test(font)
+              ? SYMBOL_CHAR_MAP[code]
+              : undefined;
           run.content.push({ kind: "text", text: mapped ?? String.fromCharCode(code) });
         }
         break;
@@ -1387,7 +1419,10 @@ function parseDrawing(
       const pctEl = el ? el.children.find((c) => localName(c.name).startsWith("pct")) : undefined;
       if (!pctEl) return undefined;
       const rf = attr(el!, "relativeFrom");
-      return { pct: (parseInt(pctEl.text, 10) || 0) / 100000, rel: rf === "page" ? "page" : "margin" };
+      const pct = (parseInt(pctEl.text, 10) || 0) / 100000;
+      // Word serializes zero-valued sizeRel records alongside an ordinary
+      // extent; zero means the relative-size override is inactive.
+      return pct > 0 ? { pct, rel: rf === "page" ? "page" : "margin" } : undefined;
     };
 
     const spPr = child(textboxEl, "spPr");
@@ -1957,6 +1992,7 @@ function collectDiagramShapes(
           blocks,
           insets: { l: insetOf("lIns", 9.6), t: insetOf("tIns", 4.8), r: insetOf("rIns", 9.6), b: insetOf("bIns", 4.8) },
           textAnchor: anchorAttr === "ctr" ? "middle" : anchorAttr === "b" ? "bottom" : "top",
+          paintOffsetY: 0.75,
         });
       }
     }
@@ -2063,6 +2099,8 @@ function drawingMLRun(r: XmlElement, ctx: DocParseContext): Run | null {
   const props: RunProps = {};
   const sz = rPr ? intAttr(rPr, "sz") : undefined;
   props.size = ptToPx((sz ?? 1800) / 100);
+  const kern = rPr ? intAttr(rPr, "kern") : undefined;
+  if (kern !== undefined) props.kerningThreshold = kern > 0 ? ptToPx(kern / 100) : null;
   if (rPr && attr(rPr, "b") === "1") props.bold = true;
   if (rPr && attr(rPr, "i") === "1") props.italic = true;
   const u = rPr ? attr(rPr, "u") : undefined;
@@ -2157,12 +2195,8 @@ function anchorRel(v: string | undefined): "page" | "margin" | "text" | "column"
 }
 
 /** A VML text-guide path is well-formed only if every coordinate pair carries
- * both values ("m@7,0l@8,0…"). Word's picture-/WordArt-watermark shapetype
- * (_x0000_t136) needs the top and bottom guide lines to compute the fitshape
- * scale; a path with a missing coordinate ("m@7,l@8,…", a comma immediately
- * followed by the next command letter or another comma) leaves the guide
- * undefined, so Word abandons fitshape and draws the string at its nominal
- * font-size — a near-invisible mark. Detecting that lets us match Word. */
+ * both values ("m@7,0l@8,0…"). With a missing coordinate ("m@7,l@8,…"), Word
+ * collapses the fitted glyph outlines into a thin band. */
 function vmlPathDegenerate(path: string | undefined): boolean {
   if (!path) return false;
   return /,\s*[a-zA-Z,]/.test(path);
@@ -2225,8 +2259,8 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
         const hAlignRaw = style.get("mso-position-horizontal");
         const vAlignRaw = style.get("mso-position-vertical");
         // The shape's guide path comes from its shapetype (type="#id") or,
-        // rarely, an inline path attr. A degenerate guide means Word draws the
-        // text at its nominal font-size instead of filling the box.
+        // rarely, an inline path attr. A degenerate guide collapses the fitted
+        // glyph outlines instead of filling the box.
         const typeRef = (el.attrs["type"] ?? "").replace(/^#/, "");
         const guidePath = el.attrs["path"] ?? shapeTypePaths.get(typeRef);
         const noFit = vmlPathDegenerate(guidePath);
@@ -2600,6 +2634,8 @@ function parseCell(tc: XmlElement, ctx: DocParseContext): TableCell {
     if (tcW && attr(tcW, "type") === "dxa") {
       const w = intAttr(tcW, "w");
       if (w) props.width = twipsToPx(w);
+    } else if (tcW && attr(tcW, "type") === "auto") {
+      props.widthAuto = true;
     }
     const borders = child(tcPr, "tcBorders");
     if (borders) {

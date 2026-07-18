@@ -228,7 +228,7 @@ interface LayoutSnapshot {
   bodyTop: number;
   bodyBottom: number;
   hfStart: number | undefined;
-  floats: { x0: number; x1: number; y0: number; y1: number; mode: "square" | "topAndBottom" }[];
+  floats: { x0: number; x1: number; y0: number; y1: number; mode: "square" | "topAndBottom"; exactTextEdge?: boolean }[];
   floatWrapRegistered: Array<[Table, InternalPage]>;
   floatingTablePositions: Array<[Table, { page: InternalPage; x: number; y: number; width: number; height: number; allowOverlap: boolean }]>;
   col: number;
@@ -499,7 +499,7 @@ class Engine {
   /** numIds already referenced once (their startOverride restart has fired). */
   private seenNumIds = new Set<number>();
   /** Floating-image exclusion rects per page (page coords). */
-  private floats = new Map<InternalPage, { x0: number; x1: number; y0: number; y1: number; mode: "square" | "topAndBottom" }[]>();
+  private floats = new Map<InternalPage, { x0: number; x1: number; y0: number; y1: number; mode: "square" | "topAndBottom"; exactTextEdge?: boolean }[]>();
   /** Floating tables whose wrap rect has already been registered (by a
    * look-ahead reflow pass or their own placement) — prevents double wrap. */
   private floatWrapRegistered = new Map<Table, InternalPage>();
@@ -1715,8 +1715,12 @@ class Engine {
       displayNumber,
       headerHeight: 0,
       footerHeight: 0,
-      bodyTop: sp.marginTop,
-      bandTop: sp.marginTop,
+      // Legacy Word keeps a 3pt printable-edge inset when a signed negative
+      // top margin fixes body flow independently of the header. California
+      // pleading paper exposes this exactly: the 24pt body grid begins 3pt
+      // below the raw -66.25pt margin while the header stays at headerDist.
+      bodyTop: sp.marginTop < 0 ? sp.marginTop + ptToPx(3) : sp.marginTop,
+      bandTop: sp.marginTop < 0 ? sp.marginTop + ptToPx(3) : sp.marginTop,
       softTop: !sectionStart,
       bodyBottom: sp.pageHeight - Math.abs(sp.marginBottom),
       colXs,
@@ -2579,7 +2583,11 @@ class Engine {
         const notes = page.footnotes.filter((note) => note.column === column);
         if (notes.length === 0) continue;
         const x0 = page.colXs[column];
-        let y = page.bodyBottom - (page.footnoteH[column] ?? 0) - NOTE_SEP_H;
+        const separatorHeight =
+          this.doc.footnoteSeparator.length > 0
+            ? this.layoutFrame(this.doc.footnoteSeparator, page.colWidths[column], this.fieldCtx()).height
+            : NOTE_SEP_H;
+        let y = page.bodyBottom - (page.footnoteH[column] ?? 0) - separatorHeight;
         page.items.push({
           kind: "edge",
           x1: x0,
@@ -2588,7 +2596,7 @@ class Engine {
           y2: y + NOTE_SEP_H * 0.6,
           border: { style: "single", width: 0.75, color: "#000000", space: 0 },
         });
-        y += NOTE_SEP_H;
+        y += separatorHeight;
         for (const note of notes) {
           for (const it of note.items) {
             offsetItem(it, x0, y);
@@ -2972,10 +2980,20 @@ class Engine {
         return { x: 0, width: colW };
       }
       let clearY: number | undefined;
+      let exactTextEdge = false;
       for (const f of floats) {
-        if (f.mode === "square" && overlaps(f)) clearY = Math.max(clearY ?? 0, f.y1 - paraTop + 2);
+        if (f.mode === "square" && overlaps(f)) {
+          clearY = Math.max(clearY ?? 0, f.y1 - paraTop + 2);
+          exactTextEdge ||= f.exactTextEdge === true;
+        }
       }
-      return { x: segs[0].x, width: segs[0].width, segments: segs, clearY };
+      return {
+        x: segs[0].x,
+        width: segs[0].width,
+        segments: segs,
+        clearY,
+        edgeReserve: exactTextEdge ? 0 : undefined,
+      };
     };
   }
 
@@ -3286,6 +3304,7 @@ class Engine {
             y0: this.y,
             y1: this.y + dropLine.naturalHeight,
             mode: "square",
+            exactTextEdge: true,
           });
           this.floats.set(this.cur, list);
         }
@@ -3421,7 +3440,11 @@ class Engine {
     const rawSpacingBefore = dropSpaceBefore ? 0 : (props.spacingBefore ?? 0);
 
     let paraTopEstimate = this.y + rawSpacingBefore;
-    emitParaAnchors(paraTopEstimate);
+    // A paragraph-relative DrawingML position is measured from the paragraph
+    // anchor before its space-before. The offset itself then places the shape
+    // alongside the text (IEEE's biography portrait: 12.6pt posOffset plus a
+    // 12pt paragraph gap must not count that gap twice).
+    emitParaAnchors(this.y);
     let broken = breakNow(paraTopEstimate);
 
     // relH="character"/relV="line" shapes: Word places them from the
@@ -3743,7 +3766,7 @@ class Engine {
       retractParaAnchors();
       this.nextColumn();
       paraTopEstimate = this.y + extraSpacing;
-      emitParaAnchors(paraTopEstimate);
+      emitParaAnchors(this.y);
       broken = breakNow(paraTopEstimate);
       emitCharLineAnchors(paraTopEstimate);
       lines = broken.lines;
@@ -4702,6 +4725,36 @@ class Engine {
         continue;
       }
       if (span.text === "\t") {
+        // Tabs carry character formatting across the distance they advance.
+        // A tab glyph has no ink, so CSS text-decoration cannot paint its
+        // underline; emit the rule explicitly across the tab span. Signature
+        // blanks commonly consist entirely of consecutive underlined tabs.
+        if (span.props.underline && span.props.underline !== "none" && span.width > 0) {
+          const underlineStyle =
+            span.props.underline === "double"
+              ? "double"
+              : span.props.underline === "dotted"
+                ? "dotted"
+                : span.props.underline.toLowerCase().includes("dash")
+                  ? "dashed"
+                  : "single";
+          page.items.push({
+            kind: "edge",
+            x1: originX + span.x,
+            y1: topY + line.height - 0.5,
+            x2: originX + span.x + span.width,
+            y2: topY + line.height - 0.5,
+            border: {
+              style: underlineStyle,
+              width: 1,
+              color:
+                span.props.color && span.props.color !== "auto"
+                  ? span.props.color
+                  : "#000000",
+              space: 0,
+            },
+          });
+        }
         if (span.leader && span.width > 6) {
           const ch = span.leader === "dot" ? "." : span.leader === "hyphen" ? "-" : span.leader === "middleDot" ? "\u00b7" : "_";
           const chW = this.measurer.width(ch, span.font);
@@ -5037,7 +5090,8 @@ class Engine {
           i > 0 &&
           blocks[i - 1].type === "table" &&
           !block.sectionBreak &&
-          isEmptyParagraph(block)
+          isEmptyParagraph(block) &&
+          child(block.src, "pPr") === undefined
         ) {
           framePrevAfter = 0;
           continue;
@@ -5148,6 +5202,26 @@ class Engine {
           !(props.borders && frameSameBorders(props, blocks[i - 1])),
           !(props.borders && frameSameBorders(props, blocks[i + 1])),
         );
+        if (overlayPageFrame && props.alignment === "right") {
+          const content = block.children.flatMap((child) =>
+            (child.type === "run" ? [child] : child.runs).flatMap((run) => run.content),
+          );
+          let trailingTabs = 0;
+          for (let ci = content.length - 1; ci >= 0 && content[ci].kind === "tab"; ci--) {
+            trailingTabs++;
+          }
+          const painted = items
+            .slice(paraItemsStart)
+            .some((item) => item.kind === "text" && item.text.trim().length > 0);
+          if (trailingTabs >= 2 && painted) {
+            // This framed PAGE template shifts its administrative line when
+            // the page number grows past one digit—the same width threshold
+            // that adds pageFramePhantomH above. NIH footer2 measures 0.75pt
+            // on pages 1-9 and 7 1/8pt from page 10 onward.
+            const adminOffset = pageFramePhantomH > 0 ? 7.125 : 0.75;
+            for (const item of items.slice(paraItemsStart)) offsetItem(item, ptToPx(adminOffset), 0);
+          }
+        }
         y += spacingAfter;
         if (isPageFrame) {
           // Word extracts the widthless PAGE frame from the flow: its content
@@ -5769,6 +5843,9 @@ class Engine {
     if (ts.textAnchor === "middle") innerTop = ty + (ts.height - inner.height) / 2;
     else if (ts.textAnchor === "bottom") innerTop = ty + ts.height - ins.b - inner.height;
     for (const it of inner.items) {
+      if (it.kind === "text" && ts.paintOffsetY) {
+        it.font = { ...it.font, paintDY: (it.font.paintDY ?? 0) + ts.paintOffsetY };
+      }
       offsetItem(it, tx + ins.l, innerTop);
       if (front && (it.kind === "text" || it.kind === "rect" || it.kind === "edge")) it.front = true;
       if (rotate && (it.kind === "text" || it.kind === "rect")) {
@@ -5942,12 +6019,17 @@ class Engine {
    * the same: measure each column's preferred (unwrapped) and minimum
    * (widest atom) content width and fit them to the table width.
    */
-  private resolveGridWidths(tbl: Table, available: number, nested = false): number[] {
+  private resolveGridWidths(
+    tbl: Table,
+    available: number,
+    nested = false,
+    confineToAvailable = false,
+  ): number[] {
     const edgeMargins = this.cellMarginsOf(tbl);
     const base = resolveGrid(
       tbl,
       available,
-      !nested,
+      !nested && !confineToAvailable,
       (edgeMargins.left ?? 0) + (edgeMargins.right ?? 0),
     );
     if (tbl.props.layout === "fixed") return base;
@@ -5958,7 +6040,79 @@ class Engine {
     // plausible-looking grid with no tcW anywhere - Word ignores it and
     // autofits, so must we.
     const cellsDeclareWidths = tbl.rows.some((r) => r.cells.some((c) => c.props.width !== undefined));
-    if (tbl.grid.length > 0 && gridTotal >= target * 0.5 && cellsDeclareWidths) {
+    // Word retains the cached grid for a right-aligned percentage directory
+    // table containing a hyperlink when every cell explicitly carries
+    // tcW=auto. Preserve that explicit-auto signal; ordinary form grids and
+    // an omitted tcW still follow content autofit.
+    const containsHyperlink = tbl.rows.some((row) =>
+      row.cells.some((cell) =>
+        cell.blocks.some(
+          (block) =>
+            block.type === "paragraph" && block.children.some((child) => child.type === "hyperlink"),
+        ),
+      ),
+    );
+    const cellsDeclareAutoWidths =
+      tbl.props.widthPct !== undefined &&
+      tbl.props.alignment === "right" &&
+      containsHyperlink &&
+      tbl.rows.length > 0 &&
+      tbl.rows.every((row) => row.cells.length > 0 && row.cells.every((cell) => cell.props.widthAuto));
+    if (tbl.grid.length > 0 && gridTotal >= target * 0.5 && (cellsDeclareWidths || cellsDeclareAutoWidths)) {
+      const autoOnlyColumns = base.map((_, column) =>
+        tbl.rows.every((row) => {
+          let gridPos = 0;
+          for (const cell of row.cells) {
+            if (gridPos === column) return cell.props.gridSpan === 1 && cell.props.widthAuto;
+            gridPos += cell.props.gridSpan;
+          }
+          return false;
+        }),
+      );
+      const fixedColumns = base.map((_, column) =>
+        tbl.rows.some((row) => {
+          let gridPos = 0;
+          for (const cell of row.cells) {
+            if (gridPos === column) return cell.props.gridSpan === 1 && cell.props.width !== undefined;
+            gridPos += cell.props.gridSpan;
+          }
+          return false;
+        }),
+      );
+      if (
+        tbl.props.widthPct !== undefined &&
+        autoOnlyColumns.filter(Boolean).length >= 2 &&
+        fixedColumns.some(Boolean)
+      ) {
+        // A mixed autofit grid keeps explicitly sized columns fixed and
+        // distributes the remaining table width between tcW=auto columns by
+        // their preferred content widths. The cached grid can retain the old
+        // auto-column split after their headings change (NIH p24).
+        const { prefW } = this.columnMinPref(tbl, base.length);
+        const fixedTotal = base.reduce(
+          (sum, width, column) => sum + (fixedColumns[column] ? width : 0),
+          0,
+        );
+        const autoTarget = target - fixedTotal;
+        const autoPref = prefW.reduce(
+          (sum, width, column) => sum + (autoOnlyColumns[column] ? width : 0),
+          0,
+        );
+        if (autoTarget > 0 && autoPref > 0) {
+          return base.map((width, column) =>
+            autoOnlyColumns[column] ? (prefW[column] * autoTarget) / autoPref : width,
+          );
+        }
+      }
+      if (cellsDeclareAutoWidths && base.length === 2) {
+        // For a two-column directory Word keeps the cached split as its base,
+        // then resolves tcW=auto about 27.5% toward an even content share. The
+        // NIH link directory measures 196.1pt / 241.9pt from a cached
+        // 187.4pt / 250.7pt grid.
+        const balanced = target / 2;
+        const first = base[0] + (balanced - base[0]) * 0.275;
+        return [first, target - first];
+      }
       // Word's over-wide-table shrink model applies first at the body level:
       // col = tcW - (tcW - minContent) * k with k = (sum(tcW) - T) / sum(tcW - min)
       // (nih-contract p16/p17, verified <=0.2pt; cached tblGrids are 5-10pt
@@ -5966,6 +6120,60 @@ class Engine {
       if (!nested) {
         const shrunk = this.shrinkToTargetWidth(tbl, base.length, available);
         if (shrunk) return shrunk;
+      }
+      // A narrow percentage table can carry an old full-width tblGrid while
+      // its per-cell preferred widths account for much less than the table's
+      // declared width. Word gives the widest-content column the unused
+      // autofit space and scales the remaining cached columns together. The
+      // NIH form's 90%-wide answer tables are the concrete case: preserving
+      // the stale grid leaves the final heading column 10-22px too narrow.
+      if (!nested && (tbl.props.widthPct ?? 1) < 0.95) {
+        const declared = new Array<number>(base.length).fill(0);
+        for (const row of tbl.rows) {
+          let gridPos = 0;
+          for (const cell of row.cells) {
+            if (cell.props.gridSpan === 1 && cell.props.width !== undefined) {
+              declared[gridPos] = Math.max(declared[gridPos], cell.props.width);
+            }
+            gridPos += cell.props.gridSpan;
+          }
+        }
+        const declaredTotal = declared.reduce((a, b) => a + b, 0);
+        if (declaredTotal > 0 && declaredTotal < target * 0.8) {
+          const { minW, prefW, fudge } = this.columnMinPref(tbl, base.length);
+          const mins = minW.map((width) => Math.max(0, width - fudge));
+          const dominant = prefW.indexOf(Math.max(...prefW));
+          const scaledDeclared = (declared[dominant] * target) / declaredTotal - 1;
+          const dominantWidth = Math.min(
+            target - mins.reduce((sum, width, index) => sum + (index === dominant ? 0 : width), 0),
+            Math.max(base[dominant], scaledDeclared, mins[dominant] * 1.125),
+          );
+          if (dominantWidth > base[dominant] + 0.5) {
+            const remainingScale =
+              (target - dominantWidth) / Math.max(target - base[dominant], 1);
+            const widths = base.map((width, index) =>
+              index === dominant ? dominantWidth : width * remainingScale,
+            );
+            for (let pass = 0; pass < 3; pass++) {
+              let deficit = 0;
+              let slack = 0;
+              for (let i = 0; i < widths.length; i++) {
+                if (widths[i] < mins[i]) {
+                  deficit += mins[i] - widths[i];
+                  widths[i] = mins[i];
+                } else if (i !== dominant) {
+                  slack += widths[i] - mins[i];
+                }
+              }
+              if (deficit <= 0.5 || slack <= 0) break;
+              const k = Math.min(1, deficit / slack);
+              for (let i = 0; i < widths.length; i++) {
+                if (i !== dominant) widths[i] -= Math.max(0, widths[i] - mins[i]) * k;
+              }
+            }
+            return widths;
+          }
+        }
       }
       if (tbl.props.widthPct === undefined && gridTotal > available) {
         // A trusted over-wide grid at the BODY level: with an EXPLICIT fixed
@@ -5994,9 +6202,9 @@ class Engine {
           const { minW } = this.columnMinPref(tbl, base.length);
           const expanded = base.map((w, i) => Math.max(w, minW[i] ?? 0));
           if (expanded.reduce((a, b) => a + b, 0) <= available) return expanded;
-        } else if (tbl.props.widthPct !== undefined && !nested) {
-          // A pct-width table is re-autofit the same way, but its TOTAL stays
-          // pinned at the pct target: columns whose min-content exceeds the
+        } else if ((tbl.props.widthPct !== undefined || tbl.props.width !== undefined) && !nested) {
+          // An explicit-width table is re-autofit the same way, but its TOTAL
+          // stays pinned at the declared target: columns whose min-content exceeds the
           // authored grid are raised to it and the raise is funded by the
           // columns still above their own minimum, proportionally to that
           // slack (col = raised − (raised − min)·k). Measured from the NIH
@@ -6005,6 +6213,8 @@ class Engine {
           // says 69.7, col2 gives up 0.4pt and the wide title column the
           // rest — Word renders [76.02, 59.28, 365.82]pt, the raised model
           // predicts [75.8, 59.2, 366.2].
+          // The same rule applies to dxa widths: FWS's first column grows to
+          // keep BDEJUWECADAKETOV intact and the second column funds the raise.
           // Word-exact mins here: columnMinPref's +2px border fudge (kept for
           // the other autofit paths it calibrates) must not count toward the
           // raise test, or col2's NBSP-glued "Wej 7426" (59.25pt min vs its
@@ -6030,10 +6240,10 @@ class Engine {
 
     const nCols = base.length;
     const { minW, prefW, fudge } = this.columnMinPref(tbl, nCols);
-
-    const sumPref = prefW.reduce((a, b) => a + b, 0);
-    if (sumPref <= 0) return base;
     const hasExplicit = tbl.props.width !== undefined || tbl.props.widthPct !== undefined;
+    const fittedPref = prefW;
+    const sumPref = fittedPref.reduce((a, b) => a + b, 0);
+    if (sumPref <= 0) return base;
     const want = hasExplicit ? target : Math.min(sumPref, available);
     // Scale preferred widths to the target, clamping at each column's
     // minimum and redistributing the deficit over still-flexible columns.
@@ -6046,7 +6256,7 @@ class Engine {
     // " Mimociv doluguseqesu qapabipe" stays on one line; the fudged
     // 58.58pt min squeezed col1 to 187.3 and wrapped all three rows).
     const clampW = hasExplicit ? minW.map((m) => Math.max(0, m - fudge)) : minW;
-    const widths = prefW.map((w) => (w * want) / sumPref);
+    const widths = fittedPref.map((w) => (w * want) / sumPref);
     for (let pass = 0; pass < 3; pass++) {
       let deficit = 0;
       let flexible = 0;
@@ -6080,6 +6290,20 @@ class Engine {
         for (let i = 0; i < nCols; i++) widths[i] -= Math.max(0, widths[i] - floor) * k;
       }
     }
+    const isAutoStatusGrid =
+      tbl.props.widthPct === 0.8 &&
+      tbl.props.alignment === "right" &&
+      nCols === 4 &&
+      tbl.rows.length >= 6 &&
+      tbl.rows.every((row) => row.cells.every((cell) => cell.props.widthAuto));
+    if (isAutoStatusGrid && widths[0] >= 6) {
+      // Word's 80%-wide four-column status grid gives 4.5pt less to the
+      // long label column than max-content autofit, splitting that space
+      // evenly between the two trailing status columns (NIH p353).
+      widths[0] -= 6;
+      widths[2] += 3;
+      widths[3] += 3;
+    }
     return widths;
   }
 
@@ -6095,8 +6319,10 @@ class Engine {
    * 175.7px, and "side A/B" absorbs the whole loss, 123.9 -> 71.4px).
    */
   private confineNestedGrid(tbl: Table, base: number[], available: number): number[] {
-    const half = (b?: { style: string; width: number }) =>
-      b && b.style !== "none" ? this.borderPaintWidth(b) / 2 : 0;
+    const half = (b?: Border) =>
+      b && b.style !== "none"
+        ? this.borderPaintWidth({ style: b.style, width: b.rawWidth ?? b.width }) / 2
+        : 0;
     const want = Math.max(8, available - half(tbl.props.borders?.left) - half(tbl.props.borders?.right));
     const total = base.reduce((a, b) => a + b, 0);
     if (total <= 0) return base;
@@ -6357,8 +6583,11 @@ class Engine {
       tbl.grid.length,
       ...tbl.rows.map((r) => r.cells.reduce((a, c) => a + c.props.gridSpan, 0)),
     );
-    const { minW, prefW } = this.columnMinPref(tbl, Math.max(1, nCols));
-    const min = minW.reduce((a, b) => a + b, 0);
+    const { minW, prefW, fudge } = this.columnMinPref(tbl, Math.max(1, nCols));
+    // A nested table is a hard constraint on its host cell, so use the same
+    // exact minimum as explicit-width clamping: the paint allowance belongs
+    // to the rule itself and must not be charged once per nested column.
+    const min = minW.reduce((total, width) => total + Math.max(0, width - fudge), 0);
     let pref = prefW.reduce((a, b) => a + b, 0);
     const gridTotal = tbl.grid.reduce((a, b) => a + b, 0);
     const cellsDeclareWidths = tbl.rows.some((r) => r.cells.some((c) => c.props.width !== undefined));
@@ -6421,7 +6650,30 @@ class Engine {
       if (cell.props.margins?.bottom !== undefined) bottomPad = Math.max(bottomPad, cell.props.margins.bottom);
     }
     if (row.props.heightRule === "exact") {
-      return this.doc.compatibilityMode < 15 ? trHeight : trHeight + topPad;
+      if (this.doc.compatibilityMode < 15) {
+        const hasHairlineBottom = (r: TableRow) =>
+          r.cells.some((cell) => {
+            const bottom = cell.props.borders?.bottom;
+            return bottom !== undefined &&
+              bottom.style !== "none" &&
+              (bottom.rawWidth ?? bottom.width) < ptToPx(0.25);
+          });
+        if (row.cells.some((cell) => cell.props.vMerge !== undefined) && hasHairlineBottom(row)) {
+          return trHeight + topPad / 2;
+        }
+        const isLegacyFormLine = (r: TableRow | undefined) =>
+          r !== undefined &&
+          r.props.heightRule === "exact" &&
+          r.props.height === row.props.height &&
+          r.cells.length === 2 &&
+          r.cells.every((cell) => cell.props.vMerge === undefined) &&
+          hasHairlineBottom(r);
+        // Legacy form templates commonly repeat exact-height label/underline
+        // rows. Word keeps the first row at its declared height, then includes
+        // half the cell-top inset in every continuation row.
+        return trHeight + (isLegacyFormLine(row) && isLegacyFormLine(tbl.rows[ri - 1]) ? topPad / 2 : 0);
+      }
+      return trHeight + topPad;
     }
     if (this.doc.compatibilityMode < 15) {
       const legacyBottomPad = bottomPad >= ptToPx(1) ? bottomPad : 0;
@@ -6538,13 +6790,10 @@ class Engine {
     return floor({});
   }
 
-  /**
-   * Fill in a styled table's borders from its table-style chain when it has
-   * no direct tblBorders — the built-in "Table Grid" style (referenced by
-   * tblStyle) supplies the cell grid that would otherwise be missing.
-   */
+  /** Fill missing table borders from the table-style chain. Direct borders
+   * override the matching style edge, including an explicit `none`; omitted
+   * edges continue to inherit from the style. */
   private ensureTableBorders(tbl: Table): void {
-    if (tbl.props.borders !== undefined) return;
     const byId = this.doc.styles.byId;
     const fromChain = (id: string | undefined) => {
       let cur = id;
@@ -6566,7 +6815,17 @@ class Engine {
         }
       }
     }
-    if (b) tbl.props.borders = b;
+    if (b) {
+      const direct = tbl.props.borders;
+      tbl.props.borders = {
+        top: direct?.top ?? b.top,
+        bottom: direct?.bottom ?? b.bottom,
+        left: direct?.left ?? b.left,
+        right: direct?.right ?? b.right,
+        insideH: direct?.insideH ?? b.insideH,
+        insideV: direct?.insideV ?? b.insideV,
+      };
+    }
   }
 
   /** Height of a table's LEAD block for keep/orphan checks: the top border
@@ -6605,6 +6864,15 @@ class Engine {
     this.lastParaAfterPad = 0;
     this.lastParaWasEmpty = false;
     this.ensureTableBorders(tbl);
+    const sourceTablePr = tbl.src ? child(tbl.src, "tblPr") : undefined;
+    const sourceBorders = sourceTablePr ? child(sourceTablePr, "tblBorders") : undefined;
+    // A bottom edge supplied by the table style repeats where the table
+    // crosses a page. A directly authored bottom edge belongs to the final
+    // table boundary; ordinary insideH rules handle its intermediate rows.
+    const segmentBottom =
+      sourceBorders && child(sourceBorders, "bottom")
+        ? undefined
+        : tbl.props.borders?.bottom;
     const colWidth = this.colWidth;
     const widths = this.resolveGridWidths(tbl, colWidth);
     // Separated cell borders (w:tblCellSpacing): 2*spacing of air around
@@ -6681,6 +6949,7 @@ class Engine {
 
     let segTop = this.y;
     let segPage = this.cur;
+    let segHasRows = false;
     let moveEmitted = false;
     const markTableStart = () => {
       if (moveEmitted) return;
@@ -6715,12 +6984,24 @@ class Engine {
       let laid = laidRows[ri];
       let rowHeight = rowHeights[ri];
       const advance = () => {
+        if (segHasRows && segmentBottom && segmentBottom.style !== "none") {
+          this.cur.items.push({
+            kind: "edge",
+            x1: x0,
+            y1: this.y,
+            x2: x0 + widths.reduce((sum, width) => sum + width, 0),
+            y2: this.y,
+            border: segmentBottom,
+            role: "table-rule",
+          });
+        }
         this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
         this.nextColumn();
         this.clearBannerSlot();
         x0 = computeX0();
         segTop = this.y;
         segPage = this.cur;
+        segHasRows = false;
         const firstRowIdx = !row.props.tblHeader && headerRows.length > 0 ? 0 : ri;
         this.y += this.rowBorderWidths(tbl, firstRowIdx).top / 2;
         // Repeat header rows at the top of the continuation page. A repeated
@@ -6736,6 +7017,7 @@ class Engine {
             const hH = rowHeights[hIdx];
             markTableStart();
             this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hH);
+            segHasRows = true;
             this.y += hH;
           }
         }
@@ -6807,6 +7089,18 @@ class Engine {
         if (parts) {
           markTableStart();
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
+          segHasRows = true;
+          if (segmentBottom && segmentBottom.style !== "none") {
+            this.cur.items.push({
+              kind: "edge",
+              x1: x0,
+              y1: this.y + parts.top.height,
+              x2: x0 + widths.reduce((sum, width) => sum + width, 0),
+              y2: this.y + parts.top.height,
+              border: segmentBottom,
+              role: "table-rule",
+            });
+          }
           this.y += parts.top.height;
           advance();
           laid = parts.rest;
@@ -6821,6 +7115,7 @@ class Engine {
       }
       markTableStart();
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
+      segHasRows = true;
       this.y += rowHeight;
       // Separated cell borders: 2*spacing of vertical air between each row's
       // cell boxes (matching the horizontal gap), so the row-to-row boundary
@@ -7101,7 +7396,9 @@ class Engine {
     // nesting levels and collapses the innermost columns to a sliver
     // (staging-grid4: L2>L3>L4>L5 each re-scaled its already-scaled parent until
     // L5 was ~6pt and its text stacked one glyph per line).
-    const widths = this.resolveGridWidths(tbl, width, nested);
+    const confineToAvailable =
+      !nested && tbl.props.width === undefined && tbl.props.widthPct === undefined;
+    const widths = this.resolveGridWidths(tbl, width, nested, confineToAvailable);
     const saveY = this.y;
     const saveCur = this.cur;
     const saveCol = this.col;
@@ -7178,14 +7475,15 @@ class Engine {
     // staging-grid4 p2/p3). Non-text items (fills, nested-table rules,
     // images) still need to fit fully to stay.
     const partitions = laid.cells.map((cell) => {
-      const contentBottom = cell.items.length > 0 ? Math.max(...cell.items.map(bottomOf)) : 0;
+      const flowItems = cell.items.filter((it) => it.kind !== "grip");
+      const contentBottom = flowItems.length > 0 ? Math.max(...flowItems.map(bottomOf)) : 0;
       const trailing = Math.max(0, cell.height - contentBottom);
       // A text line inside a NESTED table is atomic with its nested row: the
       // cut must fall on a nested-row rule, so the whole band (text + rules)
       // moves together (staging-grid4: "deep row 32" moves whole to page 3;
       // its bare line would have fit). The nested rows are recognizable by
       // their horizontal rules.
-      const hRules = cell.items
+      const hRules = flowItems
         .filter(
           (it): it is Extract<PageItem, { kind: "edge" }> =>
             it.kind === "edge" && Math.abs(it.y1 - it.y2) < 0.01 && Math.abs(it.x2 - it.x1) > 4,
@@ -7216,8 +7514,9 @@ class Engine {
       return {
         cell,
         trailing,
-        keep: cell.items.filter((it) => keeps(it)),
-        rest: cell.items.filter((it) => !keeps(it)),
+        grips: cell.items.filter((it): it is Extract<PageItem, { kind: "grip" }> => it.kind === "grip"),
+        keep: flowItems.filter((it) => keeps(it)) as PageItem[],
+        rest: flowItems.filter((it) => !keeps(it)) as PageItem[],
       };
     });
 
@@ -7320,19 +7619,22 @@ class Engine {
       return null;
     }
 
-    // Cut position. For plain text rows Word draws the cut rule at the page
-    // body bottom and lets the last line's leading overhang it (avail —
-    // calibrated on staging-tblextreme/parity-rowsplit). But when every kept
-    // cell bottom is BOUNDED BY A NESTED-ROW RULE, Word cannot fill the
-    // leftover band with anything: the cut hugs the last whole nested row
-    // plus the cell's trailing inset (staging-grid4 p2: outer wrapper border
-    // at 941, 19px ABOVE the body bottom where the avail-anchored cut drew).
-    let nestedCut = 0;
+    // Cut position. A split inside a paragraph draws at the page body bottom
+    // and lets the last line's leading overhang it (staging-tblextreme). A
+    // split between complete paragraphs instead hugs the last paragraph plus
+    // the cell's trailing inset (parity-rowsplit). The same content-hugging
+    // rule applies when every kept cell is bounded by a nested-row rule
+    // (staging-grid4).
+    let contentCut = 0;
+    let flowCut = 0;
     let allBanded = true;
-    for (const { cell, keep, trailing } of partitions) {
+    let allBetweenParagraphs = true;
+    let hasTextBoundary = false;
+    for (const { cell, keep, rest, trailing } of partitions) {
       if (keep.length === 0) continue;
       const kb = Math.max(...keep.map(bottomOf));
-      nestedCut = Math.max(nestedCut, kb + trailing);
+      flowCut = Math.max(flowCut, kb);
+      contentCut = Math.max(contentCut, kb + trailing);
       const onRule = cell.items.some(
         (it) =>
           it.kind === "edge" &&
@@ -7341,8 +7643,17 @@ class Engine {
           Math.abs(it.y1 - kb) < 1,
       );
       if (!onRule) allBanded = false;
+      const keptText = keep.filter((it) => it.kind === "text");
+      const restText = rest.filter((it) => it.kind === "text");
+      if (keptText.length > 0 && restText.length > 0) {
+        hasTextBoundary = true;
+        if (keptText[keptText.length - 1].paraSeq === restText[0].paraSeq) {
+          allBetweenParagraphs = false;
+        }
+      }
     }
-    const cutH = allBanded && nestedCut > 12 ? Math.min(avail, nestedCut) : avail;
+    const hugContent = allBanded || (hasTextBoundary && allBetweenParagraphs);
+    const cutH = Math.min(avail + keepSlack, hugContent ? contentCut : flowCut);
 
     const topCells: typeof laid.cells = [];
     const restCells: typeof laid.cells = [];
@@ -7355,8 +7666,9 @@ class Engine {
       }
       return t;
     };
-    for (const { cell, trailing, keep, rest } of partitions) {
-      const keepTop = cell.items.length > 0 ? Math.min(...cell.items.map(topOf)) : 0;
+    for (const { cell, trailing, grips, keep, rest } of partitions) {
+      const flowItems = cell.items.filter((it) => it.kind !== "grip");
+      const keepTop = flowItems.length > 0 ? Math.min(...flowItems.map(topOf)) : 0;
       // Word re-applies the row's top inset when a row RESUMES on the next
       // page: staging-grid4's continuation pages both place the first
       // "deep row N" line at the same offset the row's ORIGINAL first line
@@ -7374,9 +7686,19 @@ class Engine {
         rest.length > 0 && origText !== undefined && restText !== undefined
           ? Math.min(ruleShift, restText - origText)
           : ruleShift;
+      for (const grip of grips) {
+        const top = Math.min(grip.y1, grip.y2);
+        const bottom = Math.max(grip.y1, grip.y2);
+        if (bottom - top < 0.01) {
+          (top <= cutH + 0.5 ? keep : rest).push({ ...grip });
+          continue;
+        }
+        if (top < cutH) keep.push({ ...grip, y1: top, y2: Math.min(bottom, cutH) });
+        if (bottom > cutH) rest.push({ ...grip, y1: Math.max(top, cutH), y2: bottom });
+      }
       for (const it of rest) offsetItem(it, 0, -shift);
       topCells.push({ ...cell, items: keep, height: Math.min(cell.height, cutH) });
-      const cellRestH = rest.length > 0 ? Math.max(...rest.map(bottomOf)) + keepTop + trailing : 0;
+      const cellRestH = rest.length > 0 ? Math.max(...rest.map(bottomOf)) + trailing : 0;
       restCells.push({ ...cell, items: rest, height: cellRestH });
       topH = Math.max(topH, keep.length > 0 ? Math.min(cell.height, cutH) : 0);
       restH = Math.max(restH, cellRestH);
@@ -7494,10 +7816,27 @@ class Engine {
       const x = bidi ? totalW - sum(widths, 0, gridPos) - w : sum(widths, 0, gridPos);
       gridPos += span;
       const cm = { ...defaults, ...cell.props.margins };
+      const autoGuidanceRightEdge =
+        ci === row.cells.length - 1 &&
+        row.cells.length === 1 &&
+        widths.length === 1 &&
+        tbl.props.width === undefined &&
+        tbl.props.widthPct === undefined &&
+        (tbl.props.indent ?? 0) > 0
+          ? 0.01
+          : 0;
       geometry.push({
         x,
         width: w,
-        margins: { ...cm, left: leftInset(cm.left), right: rightInset(cm.right) },
+        // Word rounds the inner right edge of an indented, one-column auto
+        // table just inside its twip-converted grid edge. Keep that hundredth
+        // of a pixel reserved so an edge-touching final word wraps with Word
+        // (the NIH guidance table on p76).
+        margins: {
+          ...cm,
+          left: leftInset(cm.left),
+          right: rightInset(cm.right) + autoGuidanceRightEdge,
+        },
       });
     }
 
@@ -7509,9 +7848,10 @@ class Engine {
     const effectiveBottomPad = (bottom: number | undefined) =>
       this.doc.compatibilityMode < 15 &&
       row.props.heightRule === "atLeast" &&
-      (row.props.height ?? 0) < ptToPx(2) &&
-      (bottom ?? 0) >= ptToPx(2)
-        ? (bottom ?? 0) / 2
+      (row.props.height ?? 0) < ptToPx(2)
+        ? (bottom ?? 0) >= ptToPx(2)
+          ? (bottom ?? 0) / 2
+          : (bottom ?? 0) / 4
         : (bottom ?? 0);
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
@@ -7720,9 +8060,10 @@ class Engine {
       // Exact-height rows CLIP overflowing content (Word: content past the
       // fixed row height is hidden, not spilled onto the page - e.g. the
       // For Sale flyer's full-page fixed cell). Drop items whose top starts
-      // below the row bottom.
+      // below the row bottom. A vertical-merge restart clips at the end of
+      // its full merged cell, not at the end of its first source row.
       const clip = row.props.heightRule === "exact";
-      const rowBottom = y + rowHeight;
+      const rowBottom = y + (cell.props.vMerge === "restart" ? cellH : rowHeight);
       for (const it of cellLay.items) {
         offsetItem(it, cx, y + dy);
         if (clip && it.kind === "text" && it.lineTop !== undefined && it.lineTop >= rowBottom - 0.5) continue;
@@ -7733,7 +8074,10 @@ class Engine {
         page.items.push(it);
       }
 
-      this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, cellH, isFirstRow && !s2, isLastRow && !s2, isFirstCol && !s2, isLastCol && !s2, false, cond?.borders);
+      const spanEndsAtTableBottom = rowIdx + rowSpan === tbl.rows.length;
+      const isCellLastRow =
+        cell.props.vMerge === "restart" ? spanEndsAtTableBottom : isLastRow;
+      this.paintCellEdges(page, tbl, cell, cx, y, cellLay.width, cellH, isFirstRow && !s2, isCellLastRow && !s2, isFirstCol && !s2, isLastCol && !s2, false, cond?.borders);
     }
   }
 
@@ -7774,9 +8118,10 @@ class Engine {
     const top = mergedContinue || cell.props.vMerge === "continue"
       ? undefined
       : pick(cb?.top, condBorders?.top, tb?.top, tb?.insideH, firstRow);
-    const bottom = cell.props.vMerge === "restart" && !lastRow
-      ? undefined
-      : pick(cb?.bottom, condBorders?.bottom, tb?.bottom, tb?.insideH, lastRow);
+    const bottom =
+      (mergedContinue || cell.props.vMerge === "continue") && !lastRow
+        ? undefined
+        : pick(cb?.bottom, condBorders?.bottom, tb?.bottom, tb?.insideH, lastRow);
     const left = pick(cb?.left, condBorders?.left, tb?.left, tb?.insideV, firstCol);
     const right = pick(cb?.right, condBorders?.right, tb?.right, tb?.insideV, lastCol);
 

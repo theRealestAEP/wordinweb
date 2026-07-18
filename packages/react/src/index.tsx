@@ -626,6 +626,7 @@ export function DocxView({
             }
           }
           loads.push(document.fonts.load('16px "Cambria Math"').catch(() => []));
+          loads.push(document.fonts.load('16px "Segoe UI Emoji"', "🚀").catch(() => []));
           // CJK faces only affect PAINT (widths are em-based, line pitch comes
           // from a metrics table), so they don't gate layout — but load them so
           // the screenshot/paint uses the real glyphs when available.

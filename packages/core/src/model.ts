@@ -110,6 +110,11 @@ export interface RunProps {
   smallCaps?: boolean;
   /** Letter spacing px (w:spacing, twips in OOXML). */
   letterSpacing?: number;
+  /** Minimum font size in px at which w:kern enables pair kerning; null is
+   * the explicit w:kern=0 override. */
+  kerningThreshold?: number | null;
+  /** Paint-only letter spacing when layout advances intentionally differ. */
+  paintLetterSpacing?: number;
   /** w:w horizontal character scaling as a fraction (1.5 = 150%). */
   textScale?: number;
   /** w:fitText target width in px: the run's advances scale so its text
@@ -333,6 +338,9 @@ export interface MathContent {
    * display-style layout - larger n-ary operators with limits stacked
    * above/below, and full-size fraction numerators/denominators. */
   display?: boolean;
+  /** Display group with several direct equations. Word leaves a small
+   * advance after script clusters in these grouped displays. */
+  multiEquationDisplay?: boolean;
   /** m:oMathParaPr/m:jc - display-equation justification. Absent: the
    * document default (settings m:mathPr/m:defJc, itself "centerGroup" when
    * unset). */
@@ -466,13 +474,11 @@ export interface ShapeWordArt {
   /** Clockwise degrees. */
   rotation: number;
   behind?: boolean;
-  /** The v:textpath font-size (px). Only used when the text is NOT fit to the
-   * shape (see noFit). */
+  /** The source v:textpath font-size (px). */
   fontSize?: number;
   /** The referenced v:shapetype has a malformed text-guide path (missing
-   * coordinates), so Word cannot compute the fitshape scale and falls back to
-   * drawing the string at its nominal font-size — a near-invisible mark rather
-   * than a box-filling watermark. Render at fontSize, unstretched, to match. */
+   * coordinates), so Word collapses its horizontal glyph outlines into a thin
+   * vertical band instead of painting a box-filling watermark. */
   noFit?: boolean;
   /** Source VML shape element (v:shape / v:rect) for interactive editing:
    * the v:textpath string, fill/opacity, and rotation live under it. */
@@ -646,6 +652,8 @@ export interface DrawingTextShape {
   insets: { l: number; t: number; r: number; b: number };
   /** Vertical anchoring of the text inside the box (bodyPr anchor). */
   textAnchor?: "top" | "middle" | "bottom";
+  /** DrawingML cached text paint-only baseline adjustment in px. */
+  paintOffsetY?: number;
 }
 
 export interface DrawingPath {
@@ -743,6 +751,8 @@ export interface Paragraph {
 export interface TableCellProps {
   /** Preferred width px (from tcW when dxa). */
   width?: number;
+  /** The source explicitly declares tcW type="auto" (distinct from no tcW). */
+  widthAuto?: boolean;
   gridSpan: number;
   vMerge?: "restart" | "continue";
   borders?: { top?: Border; bottom?: Border; left?: Border; right?: Border; tl2br?: Border; tr2bl?: Border };

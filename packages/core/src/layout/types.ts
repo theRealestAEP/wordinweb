@@ -22,6 +22,8 @@ export interface FontSpec {
   size: number;
   bold: boolean;
   italic: boolean;
+  /** Pair kerning is active because the run met its w:kern size threshold. */
+  kerning?: boolean;
   /** Optional PAINT-only family tried before `family` in the CSS stack, without
    * affecting metrics or width lookups (keyed by `family`). Used for CJK: the
    * line-pitch profile stays keyed by the macOS substitute face while the real
@@ -256,10 +258,10 @@ export interface WordArtItem {
   /** Clockwise degrees. */
   rotation: number;
   behind?: boolean;
-  /** v:textpath font-size (px), used only when noFit is set. */
+  /** Source v:textpath font-size (px). */
   fontSize?: number;
-  /** Malformed shapetype guide path: render at nominal fontSize, unstretched
-   * (Word can't fitshape, so it draws a near-invisible mark). */
+  /** Malformed shapetype guide path: Word collapses the fitted glyph outlines
+   * into a thin vertical band. */
   noFit?: boolean;
   /** Source VML shape element (v:shape / v:rect), for interactive select/edit. */
   src?: XmlElement;

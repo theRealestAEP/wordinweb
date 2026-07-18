@@ -13,9 +13,9 @@ import {
   WebVideoReference,
 } from "../model.js";
 import { FontSpec, TextSource } from "./types.js";
-import { TextMeasurer } from "./measure.js";
+import { hasSegoeUIEmoji, TextMeasurer } from "./measure.js";
 import { MathBox, layoutMath } from "./math.js";
-import { XmlElement } from "../xml.js";
+import { localName, XmlElement } from "../xml.js";
 import { formatNumber } from "../parse/numbering.js";
 
 /** Apply a field's `\* <format>` general-formatting switch to a computed
@@ -181,21 +181,27 @@ type Atom = FragAtom | SpaceAtom | TabAtom
   | PTabAtom | ImageAtom | DrawingAtom | MathAtom | BreakAtom | AnchorPointAtom;
 
 export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
-  let size = props.size ?? 14.666;
-  if (props.verticalAlign === "superscript" || props.verticalAlign === "subscript") {
-    // Word: 65% of the base size rounded to half-points (probe-vertalign:
-    // 11pt -> 7pt, 22pt -> 14.5pt). px -> half-points is x1.5.
-    size = Math.round(size * 1.5 * 0.65) / 1.5;
-  }
   // A w:rtl run paints in the complex-script font (rFonts w:cs) — Word embeds
   // that face (Arial for the bidi fixtures), so using it keeps Arabic/Hebrew
   // shaping and advances aligned with Word's PDF.
   const family = (props.rtl && props.fontComplex) || props.font || fallbackFamily;
+  let size = props.size ?? 14.666;
+  if (props.verticalAlign === "superscript" || props.verticalAlign === "subscript") {
+    // Latin faces use 65% of the base size (probe-vertalign: 11pt -> 7pt,
+    // 22pt -> 14.5pt). East Asian faces use Word's smaller 52% script form
+    // (SimSun 10.5pt -> 5.5pt in eq-as-images). px -> half-points is x1.5.
+    const scale = EA_FAMILY_RE.test(family) ? 0.52 : 0.65;
+    size = Math.round(size * 1.5 * scale) / 1.5;
+  }
   return {
     family,
     size,
     bold: props.bold ?? false,
     italic: props.italic ?? false,
+    kerning:
+      props.kerningThreshold !== undefined &&
+      props.kerningThreshold !== null &&
+      size >= props.kerningThreshold,
   };
 }
 
@@ -224,19 +230,35 @@ function isWordAlnum(ch: string | undefined): boolean {
 
 /**
  * Offsets *after* each word-internal hyphen where Word allows a line break.
- * A hyphen-minus (or U+2010 hyphen) between two alphanumerics is a
- * break-after opportunity ("multi-part" -> "multi-" | "part"). Digits count
- * on both sides — the NIH contract's Word PDF breaks identifier hyphens
+ * A hyphen-minus or U+2010 hyphen between two alphanumerics is a break-after
+ * opportunity ("multi-part" -> "multi-" | "part"). Word 2013+ also breaks a
+ * U+2013 en dash in a numeric range, while legacy layout and an en dash
+ * joining words keep it intact.
+ * Digits count on both sides of ordinary hyphens — the NIH contract's Word PDF breaks identifier hyphens
  * ".../GUF-JE-" | "04-332.qigu" (letter-digit) and ".../h44-" | "40.aki"
  * (digit-digit). A leading hyphen (a minus sign, "-4") is not a break.
  */
-function hyphenBreaks(word: string): number[] {
+function hyphenBreaks(word: string, allowNumericEnDash: boolean): number[] {
   const out: number[] = [];
+  let leading = 0;
+  while (word[leading] === "-" || word[leading] === "‐") leading++;
+  if (leading >= 2 && isWordAlnum(word[leading])) out.push(leading);
   for (let i = 1; i < word.length - 1; i++) {
     const ch = word[i];
-    if ((ch === "-" || ch === "‐") && isWordAlnum(word[i - 1]) && isWordAlnum(word[i + 1])) {
-      out.push(i + 1);
-    }
+    if (ch !== "-" && ch !== "‐" && ch !== "–") continue;
+    let end = i + 1;
+    while (word[end] === "-" || word[end] === "‐" || word[end] === "–") end++;
+    const wordBefore =
+      isWordAlnum(word[i - 1]) ||
+      (/^[\)\]\}]$/.test(word[i - 1] ?? "") && isWordAlnum(word[i - 2]));
+    const wordAfter = isWordAlnum(word[end]);
+    const numericEnDash =
+      allowNumericEnDash &&
+      ch === "–" &&
+      /\p{Nd}/u.test(word[i - 1] ?? "") &&
+      /\p{Nd}/u.test(word[end] ?? "");
+    if ((ch === "–" ? numericEnDash : wordBefore && wordAfter)) out.push(end);
+    i = end - 1;
   }
   return out;
 }
@@ -284,6 +306,9 @@ function isCJK(ch: string): boolean {
 // box (probe2-form-checkboxes: the boxes inked ~3.2% over Word's weight and
 // left a structural halo). Route them to MS Gothic explicitly to match Word.
 const BALLOT_RE = /[☐☑☒]/;
+// A legacy FORMCHECKBOX reserves 2.5pt after its 11pt ballot glyph in Word.
+// Modern w14 checkbox controls are ordinary text and do not use this advance.
+const LEGACY_CHECKBOX_TRAILING_ADVANCE = (2.5 * 96) / 72;
 function isBallot(ch: string): boolean {
   return BALLOT_RE.test(ch);
 }
@@ -419,10 +444,9 @@ export interface LineBox {
   height: number;
   /** Height whose bottom minus maxDescent gives the painted baseline. For
    * auto (multiplier) spacing Word hangs the extra leading BELOW the
-   * baseline (pickett Heading1 at 1.15: baseline = top + ascent exactly),
-   * so the baseline anchors to the NATURAL height; exact/atLeast lines
-   * bottom-anchor to the forced height (pleading's 24pt exact rows sit
-   * low, ascenders clip on undersized exact). */
+   * baseline (pickett Heading1 at 1.15: baseline = top + ascent exactly).
+   * Tall exact lines reserve one fifth of the forced height below the
+   * baseline; undersized exact and atLeast lines stay bottom-anchored. */
   baselineH: number;
   /** Extent that must fit above the body bottom: the font box (baseline +
    * raw descent). Line-spacing leading below the baseline may overhang the
@@ -536,16 +560,20 @@ export interface LineBounds {
    * (below the float) instead of character-splitting the word (Word drops
    * "around" under Box 202 in staging-tblextreme, it never hyphenates). */
   clearY?: number;
+  /** Right-edge reserve used by the fragment fitter. Drawing exclusions keep
+   * Word's sub-pixel twip reserve; drop caps use their exact text boundary. */
+  edgeReserve?: number;
 }
 
 const DEFAULT_TAB = 48; // 0.5in
+const TABBED_INLINE_MATH_FRAC_PAD = 0.15;
 
 /** Word's justify packing rule, measured empirically (probe docs swept the
  * needed space-compression across final words of different widths, exported
  * through Word-mac itself; see scripts/make-justify-probe*.py): a word is
  * packed onto the line iff the space compression it needs is at most HALF the
  * space stretch that breaking before it would leave on this line, and never
- * more than 25%. The stretch comparison is what a flat threshold can't model:
+ * more than about 29%. The stretch comparison is what a flat threshold can't model:
  * a wide word (whose break leaves a gaping line) packs at 24% compression
  * while a narrow one is rejected at 12%. */
 // Word-final punctuation that w:overflowPunct lets hang past the text extent
@@ -557,11 +585,14 @@ const OVERFLOW_PUNCT = /[.,:;!?)\]}、。，．：；？！）］｝」』】〉
 // spaces set in an East Asian face compress: the same document's Times New
 // Roman spaces stay at their natural width and those paragraphs wrap
 // normally (para "In jubusep": line ends 7pt short, "macen," wraps).
-const CJK_SPACE_COMPRESS = 0.47;
+const CJK_SPACE_COMPRESS = 0.5;
 const EA_FAMILY_RE =
   /simsun|nsimsun|宋体|新宋体|songti|simhei|黑体|heiti|kaiti|楷体|fangsong|仿宋|yahei|雅黑|mingliu|细明|新細明|pmingliu|jhenghei|正黑|pingfang|dengxian|等线|ms (?:p?)(?:mincho|gothic)|mincho|meiryo|yu gothic|yu mincho|batang|gulim|dotum|malgun/i;
 
-const JUSTIFY_MAX_COMPRESS = 0.25;
+const JUSTIFY_MAX_COMPRESS = 0.29;
+// Word permits the larger packing window for justified numbered items; body
+// and document-grid paragraphs use the 25% threshold.
+const JUSTIFY_GRID_MAX_COMPRESS = 0.25;
 const JUSTIFY_STRETCH_FACTOR = 0.5;
 
 // Tamil (Nirmala UI -> Latha fallback): Latha's glyph outlines are ~1.37x
@@ -582,6 +613,27 @@ const TAMIL_BASELINE_DY_EM = 0.136;
 // the same horizontal scale for both fitting and paint.
 const LAO_GLYPH_SCALE = 1.048;
 
+/** Apple/platform emoji use a square advance when Segoe UI Emoji is absent,
+ * while Word's Segoe sequences reserve wider boxes. These ratios preserve the
+ * Word advances and stretch only the fallback glyphs; a real Segoe face keeps
+ * its native metrics. */
+function emojiFallbackScale(text: string, family: string): number {
+  if (family.toLowerCase() !== "segoe ui emoji" || hasSegoeUIEmoji()) return 1;
+  const codepoints = Array.from(text);
+  if (codepoints.some((ch) => {
+    const cp = ch.codePointAt(0) ?? 0;
+    return cp >= 0x1f1e6 && cp <= 0x1f1ff;
+  })) return 1;
+  const people = codepoints.filter((ch) => {
+    const cp = ch.codePointAt(0) ?? 0;
+    return cp >= 0x1f466 && cp <= 0x1f469;
+  }).length;
+  if (text.includes("\u200d") && people >= 3) return 1.84;
+  if (/🚀|❤|✅/.test(text)) return 1.39;
+  if (text.includes("\u200d") || /[🏻-🏿]/u.test(text)) return 1.29;
+  return 1;
+}
+
 // Arabic kashida justification (w:jc lowKashida/mediumKashida/highKashida).
 // Word justifies by elongating the baseline joins (kashida/tatweel) rather than
 // stretching inter-word spaces. That elongation widens the packed text, so a
@@ -601,7 +653,7 @@ const LAO_GLYPH_SCALE = 1.048;
 // reproduce Word's 6-line wrap without over-wrapping to 7.
 const KASHIDA_LOW_EM = 0.0;
 const KASHIDA_MEDIUM_EM = 0.032;
-const KASHIDA_HIGH_EM = 0.04;
+const KASHIDA_HIGH_EM = 0.075;
 
 /**
  * Break a paragraph into measured, positioned line boxes for a given content
@@ -918,6 +970,7 @@ function breakParagraphImpl(
   let curSegIdx = 0;
   // Paragraph-relative y just below the floats narrowing the current band.
   let curClearY: number | undefined;
+  let curEdgeReserve = 0;
   // Estimated line height for float-exclusion checks. Fixed-height rules
   // (exact/atLeast) are known before the line is built — use them, or a
   // too-short estimate misses floats overlapping the lower band of the line.
@@ -936,6 +989,7 @@ function breakParagraphImpl(
     curSegments = [{ x: 0, width: contentWidth }];
     curSegIdx = 0;
     curClearY = undefined;
+    curEdgeReserve = 0;
     if (boundsAt) {
       let guard = 0;
       let b = boundsAt(yOff, EST_LINE);
@@ -949,6 +1003,7 @@ function breakParagraphImpl(
       curSegments = b.segments && b.segments.length > 0 ? b.segments : [{ x: b.x, width: b.width }];
       curSegIdx = 0;
       curClearY = b.clearY;
+      curEdgeReserve = b.edgeReserve ?? (b.clearY !== undefined ? 0.75 : 0);
     }
     void idx;
   };
@@ -1382,7 +1437,14 @@ function breakParagraphImpl(
       // paragraph: a literal "4.<tab>" list head with ind left=-450 hanging=270
       // tabs to the -22.5pt indent, not onward to the margin's default grid
       // (wild2 legal p1 items). Explicit stops before the indent still win.
-      if (hanging > 0 && x + offset < indentLeft - 0.5 && rawStop.pos > indentLeft) {
+      const explicitBeforeIndent = (props.tabs ?? []).some(
+        (tab) =>
+          !tab.clear &&
+          tab.align !== "bar" &&
+          tab.pos > x + offset + 0.5 &&
+          tab.pos < indentLeft - 0.5,
+      );
+      if (hanging > 0 && x + offset < indentLeft - 0.5 && !explicitBeforeIndent) {
         rawStop = { pos: indentLeft, align: "left" };
       }
       const stop = { ...rawStop, pos: rawStop.pos - offset };
@@ -1460,8 +1522,13 @@ function breakParagraphImpl(
         }
         const lineEnd = lineStartX(lineIndex) + availFor(lineIndex);
         if (firstWordWidth > 0 && probeX + firstWordWidth > lineEnd + 0.01) {
+          const legacyContinuationIndent = !!atom.props.bold && nextAtom === ai + 3;
           flush(false, false);
-          ai--;
+          // In legacy compatibility modes, all-bold manual headings use a
+          // three-tab sequence as a two-stop continuation indent: the first
+          // tab exhausts the old line and the remaining pair establishes the
+          // fresh-line indent. Body-answer tab chains restart in full.
+          if (!legacyContinuationIndent) ai--;
           continue;
         }
       }
@@ -1591,9 +1658,17 @@ function breakParagraphImpl(
       const rows = wrapDisplayMath(atom.box, availFor(lineIndex));
       for (let ri = 0; ri < rows.length; ri++) {
         const row = rows[ri];
-        cur.push({ x, width: row.width, math: row, mathSrc: atom.src, props: {}, font: fontOf({}, fallbackFamily) });
-        curLineWidth += row.width;
-        x += row.width;
+        // Word's inline-math advance is about 1% wider than the browser glyph
+        // sum. Preserve that invisible tail only when a tab follows, where it
+        // decides the next stop (dense p8's (8.9) equation number).
+        const tabReserve =
+          !row.display && ri === rows.length - 1 && atoms[ai + 1]?.kind === "tab"
+            ? row.width * 0.01
+            : 0;
+        const advance = row.width + tabReserve;
+        cur.push({ x, width: advance, math: row, mathSrc: atom.src, props: {}, font: fontOf({}, fallbackFamily) });
+        curLineWidth += advance;
+        x += advance;
         if (ri + 1 < rows.length) flush(false, false);
       }
       continue;
@@ -1609,7 +1684,9 @@ function breakParagraphImpl(
         // (eq-as-images p6). A DrawingML inline picture is NOT glued: chem
         // p3 keeps its "[06]" reference at the end of the line and wraps the
         // chart alone. Carry the attached word head down with a VML image.
-        const glued = atom.kind === "image" && !atom.srcDrawing;
+        const glued =
+          atom.kind === "image" &&
+          (!atom.srcDrawing || localName(atom.srcDrawing.name) !== "drawing");
         let hi = cur.length;
         let headW = 0;
         while (glued && hi > minSpans) {
@@ -1676,7 +1753,11 @@ function breakParagraphImpl(
     // several frag atoms when formatting runs divide it: the "head" is the
     // part already placed on this line, the "tail" the frag atoms after this
     // one with no space between.
-    const lineEnd = lineStartX(lineIndex) + availFor(lineIndex);
+    // Word's twip-rounded text edge beside a float is just under the CSS
+    // interval returned by the exclusion geometry. Keep that sub-pixel edge
+    // reserve so a word ending within the final device pixel wraps with Word
+    // instead of being packed onto the float band (table-exotics p1).
+    const lineEnd = lineStartX(lineIndex) + availFor(lineIndex) - curEdgeReserve;
     // Bordered-run horizontal reserve: leading inset when this atom opens a
     // bordered segment (or continues one at a fresh line's start), trailing
     // reserve when it closes one. Reserved in fitting and folded into the pen
@@ -1684,7 +1765,12 @@ function breakParagraphImpl(
     const bdrPad = bdrPadOf(atom);
     const bdrPadL = bdrPad && (!sameBdrAtom(atoms[ai - 1], atom) || curLineWidth === 0) ? bdrPad : 0;
     const bdrPadR = bdrPad && !sameBdrAtom(atom, atoms[ai + 1]) ? bdrPad : 0;
-    let fits = x + bdrPadL + atom.width + bdrPadR <= lineEnd + 0.01;
+    // Grid text edges originate in integer twips while several East Asian
+    // advances land between CSS subpixels. Keep the measured 1/8px rounding
+    // allowance so a word whose final glyph is effectively on the Word edge
+    // is retained (eq-as-images p3 after fullwidth-comma compression).
+    const fitTolerance = minLineHeight !== undefined ? 0.125 : 0.01;
+    let fits = x + bdrPadL + atom.width + bdrPadR <= lineEnd + fitTolerance;
     if (!fits && packUntilSpace) fits = true; // continuation of a packed word
     // A tab is not a break opportunity: the word right after a tab stays
     // glued to it and overflows the cell/column edge instead of wrapping
@@ -1704,7 +1790,8 @@ function breakParagraphImpl(
       fits = true;
       packUntilSpace = true;
     }
-    if (!fits && minLineHeight) {
+    let overflowPunctWidth = 0;
+    if (minLineHeight) {
       // w:overflowPunct (East Asian layout, default on): a word-final
       // punctuation mark may hang past the text extent instead of wrapping
       // the word. wild2-math-eq-as-images p2: "...by Hemaruf zebeqo:" ends at
@@ -1716,8 +1803,8 @@ function breakParagraphImpl(
         const nxt = atoms[ai + 1];
         const wordEnd = !nxt || nxt.kind !== "frag" || /^\s/.test((nxt as FragAtom).text);
         if (wordEnd) {
-          const pw = measurer.width(last, atom.font, atom.props.letterSpacing);
-          if (x + atom.width - pw <= lineEnd + 0.01) fits = true;
+          overflowPunctWidth = measurer.width(last, atom.font, atom.props.letterSpacing);
+          if (!fits && x + atom.width - overflowPunctWidth <= lineEnd + 0.01) fits = true;
         }
       }
     }
@@ -1751,15 +1838,38 @@ function breakParagraphImpl(
         }
       }
       const wordW = headW + bdrPadL + atom.width + bdrPadR + tailW;
-      if (!fits && minLineHeight !== undefined && curEaSpaceWidth > 0) {
+      const previousInk = [...cur].reverse().find((span) => span.text?.trim());
+      const sentenceBoundary = /[.!?][\)\]}'"]?$/.test(previousInk?.text ?? "");
+      const clauseBoundaryTail = /[,;:]\s+(?:and|or|but)\s+the\s*$/i.test(
+        cur.map((span) => span.text ?? "").join(""),
+      );
+      if (
+        !fits &&
+        minLineHeight !== undefined &&
+        curEaSpaceWidth > 0 &&
+        !curPacked &&
+        !sentenceBoundary &&
+        !clauseBoundaryTail
+      ) {
         // East Asian line fitting (docGrid sections) compresses inter-word
         // spaces to pull the next word onto the line REGARDLESS of paragraph
         // alignment, far beyond the Latin justify tolerance. Word's
         // eq-as-images PDF draws left-aligned SimSun lines with every space
         // advanced 5.00/4.25/3.75/2.75pt against the natural 5.25pt - up to
         // 47.6% compression, always ending exactly at the text edge; lines
-        // that would need more wrap normally.
-        const compress = (x - headW + wordW - lineEnd) / curEaSpaceWidth;
+        // that would need more wrap normally. It performs that rescue once
+        // per line; after one overflowing word has been packed, the following
+        // word begins the next line (p1 `toregijodo | koqu`, p4 `fepamim |
+        // the`).
+        // The final punctuation may hang outside the text extent after the
+        // spaces compress. Exclude it from the pack decision just as the
+        // natural-fit check above does; otherwise the punctuation alone can
+        // reject a word whose glyph body Word keeps on the line.
+        const packedPunctWidth =
+          props.lineSpacing?.rule === "auto" ? overflowPunctWidth : 0;
+        const compress =
+          (x - headW + wordW - packedPunctWidth - lineEnd) /
+          curEaSpaceWidth;
         if (compress <= CJK_SPACE_COMPRESS + 1e-6) {
           fits = true;
           packUntilSpace = true;
@@ -1771,8 +1881,11 @@ function breakParagraphImpl(
         // (compat 12, docGrid lines) p2 draws the justified "...zebeqo:" line
         // with every inter-word space at 4.25pt against SimSun's natural
         // 5.25pt (19% compression) to avoid the wrap Word 15+ would also
-        // avoid. Scoped to grid sections rather than all legacy docs.
-        (doc.compatibilityMode >= 15 || minLineHeight !== undefined) &&
+        // avoid. In legacy modes that extension is limited to lines whose
+        // compressible spaces use the East Asian face; ordinary Times New
+        // Roman bibliography lines retain Word 2007's earlier wrap.
+        (doc.compatibilityMode >= 15 ||
+          (minLineHeight !== undefined && curEaSpaceWidth > 0)) &&
         !bidiPara &&
         props.alignment === "justify" &&
         curSpaceWidth > 0
@@ -1792,7 +1905,11 @@ function breakParagraphImpl(
         const compress = (x - headW + wordW - lineEnd) / compressible;
         if (spacesAfterBreak > 1e-6 && compressible > 1e-6) {
           const stretch = (lineEnd - (x - headW - trail)) / spacesAfterBreak;
-          if (compress <= Math.min(JUSTIFY_MAX_COMPRESS, stretch * JUSTIFY_STRETCH_FACTOR)) {
+          const maxCompress =
+            minLineHeight === undefined && props.numbering
+              ? JUSTIFY_MAX_COMPRESS
+              : JUSTIFY_GRID_MAX_COMPRESS;
+          if (compress <= Math.min(maxCompress, stretch * JUSTIFY_STRETCH_FACTOR)) {
             fits = true;
             packUntilSpace = true;
           }
@@ -1809,7 +1926,11 @@ function breakParagraphImpl(
         }
         // Word never breaks a word at a run boundary: the head (if any, and
         // if it isn't the whole line) moves down with the rest of the word.
-        const head = hi > minSpans && hi < cur.length && cur[hi - 1].isSpace && !cur[hi - 1].noBreak ? cur.splice(hi) : [];
+        const breakBeforeHead =
+          hi > minSpans &&
+          hi < cur.length &&
+          ((cur[hi - 1].isSpace && !cur[hi - 1].noBreak) || cur[hi - 1].breakAfter);
+        const head = breakBeforeHead ? cur.splice(hi) : [];
         for (const h of head) curLineWidth -= h.width;
         // A float in the MIDDLE of the column leaves free space on both sides;
         // Word fills the near side, then the far side of the SAME line band,
@@ -1894,6 +2015,12 @@ function breakParagraphImpl(
     cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, metricsStrut: atom.metricsStrut, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
     curLineWidth += padL + atom.width + bdrPadR;
     x += atom.width + bdrPadR;
+    // A packed word may continue across formatting-run fragments, but an
+    // authored hyphen is itself a legal break. Do not glue the following word
+    // fragment past that break (dense p10: `bemu-` | `uqiqe`).
+    if (packUntilSpace && atom.breakAfter && /[-‐]$/.test(atom.text)) {
+      packUntilSpace = false;
+    }
     if (atom.text.trim().length > 0) prevContentCJK = fragIsCJK;
   }
 
@@ -1991,7 +2118,7 @@ function nextTabStop(
   // right edge span exactly 30.6pt, and the flush-right line puts the ink
   // 30.6pt inside the margin (Word D at 333.4pt; a 4px min painted the line
   // 5pt right of Word on every near-blank NIH page).
-  return { pos: next < rightEdge ? next : x + 10.7, align: "left" };
+  return { pos: next < rightEdge ? next : x + 20.4, align: "left" };
 }
 
 /** Reorder a bidi line's spans into visual order (UAX#9 rule L2): from the
@@ -2223,6 +2350,10 @@ function finishLine(
     (s) => s.metricsStrut || s.image || s.drawing || s.math || s.leader || s.text === undefined || !/^[ \t]*$/.test(s.text),
   );
   if (solidSpans.length > 0) metricSpans = solidSpans;
+  const styledLoweredIntegral =
+    para.props.styleId !== undefined &&
+    metricSpans.length > 1 &&
+    metricSpans.some((s) => s.text?.includes("∫") && (s.props.raise ?? 0) < 0);
   // A numbering label sizes its line only when the label's own single-line
   // height exceeds the text content's (phase23: Symbol/JhengHei bullets
   // grow the line). A label whose face is SHORTER than the body leaves the
@@ -2522,7 +2653,16 @@ function finishLine(
         const lead = ls.value >= 1.15 ? (ls.value - 1) * maxNaturalText : 0;
         height = Math.max(maxNaturalText * ls.value, maxInlineMath + lead);
       }
-    } else if (ls.rule === "exact") height = ls.value;
+    } else if (ls.rule === "exact") {
+      height = ls.value;
+      // Word keeps roughly one fifth of a tall exact line below its baseline.
+      // This is visible in legal pleading paper: 12pt Arial in a 24pt exact
+      // line has a 4.8pt lower band, while a 12pt exact line remains governed
+      // by Arial's larger 2.5pt descent. Preserve the old bottom anchor for
+      // undersized lines so their ascenders continue to clip from the top.
+      const lowerBand = Math.max(maxDescent, height * 0.2);
+      baselineH = height - lowerBand + maxDescent;
+    }
     else height = Math.max(natural, ls.value);
   }
 
@@ -2557,6 +2697,16 @@ function finishLine(
     // and the font-box fit extent unchanged while shortening the line advance.
     maxDescent -= descentReuse;
     maxRawDescent -= descentReuse;
+  }
+
+  if (styledLoweredIntegral && ls?.rule !== "exact" && !gridObjSnap) {
+    // Word lets this legacy equation glyph overlap 4.5pt of the styled body
+    // line instead of charging its entire lowered extent to the line box.
+    // Keep the glyph in the metrics and move the baseline and advance
+    // together so the equation and every following line retain their gap.
+    const overlap = Math.min(6, height);
+    height -= overlap;
+    baselineH = (baselineH ?? height + overlap) - overlap;
   }
 
   return {
@@ -2758,7 +2908,14 @@ function buildAtoms(
     // runs and non-kashida paragraphs are untouched.
     let props =
       kashidaEm > 0 && baseProps.rtl
-        ? { ...baseProps, letterSpacing: (baseProps.letterSpacing ?? 0) + kashidaEm * font.size }
+        ? {
+            ...baseProps,
+            letterSpacing: (baseProps.letterSpacing ?? 0) + kashidaEm * font.size,
+            // Word adds kashidas at eligible Arabic joins. Uniform CSS tracking
+            // needs less paint spacing while retaining the same line advances.
+            paintLetterSpacing:
+              (baseProps.letterSpacing ?? 0) + Math.min(kashidaEm, 0.04) * font.size,
+          }
         : baseProps;
     // w:fitText: scale the run's advances so its text occupies exactly the
     // target width (probe3-text-effects: "SQUEEZE ME INTO ONE INCH" fits
@@ -2863,7 +3020,16 @@ function buildAtoms(
             break;
           }
           // Fields are atomic: src.t === null means "format the whole run".
-          if (text) pushStyled(displayText(text, props), props, font, href, { run, t: null, offset: 0 }, vertMetricsFont);
+          if (text) {
+            const firstAtom = atoms.length;
+            pushStyled(displayText(text, props), props, font, href, { run, t: null, offset: 0 }, vertMetricsFont);
+            if (content.checkbox) {
+              const last = atoms[atoms.length - 1];
+              if (atoms.length > firstAtom && last.kind === "frag") {
+                last.width += LEGACY_CHECKBOX_TRAILING_ADVANCE;
+              }
+            }
+          }
           break;
         }
         case "ptab":
@@ -2901,7 +3067,21 @@ function buildAtoms(
           break;
         case "math": {
           const size = props.size ?? 14.666;
-          const box = layoutMath(content.nodes, size, measurer, content.display);
+          const tabbedInline =
+            !content.display &&
+            atoms[atoms.length - 1]?.kind === "tab" &&
+            (para.props.indentFirstLine ?? 0) > 0;
+          // Legacy pseudo-display equations are inline m:oMath immediately
+          // after a tab. Word gives their text-style fraction rules the wider
+          // authored overhang without changing ordinary inline fractions.
+          const box = layoutMath(
+            content.nodes,
+            size,
+            measurer,
+            content.display,
+            tabbedInline ? TABBED_INLINE_MATH_FRAC_PAD : undefined,
+            content.multiEquationDisplay,
+          );
           if (content.display) box.jc = content.jc;
           atoms.push({ kind: "math", box, src: content.src });
           break;
@@ -2983,6 +3163,10 @@ function buildAtoms(
     srcBase?: TextSource,
     metricsFont?: FontSpec,
   ) => {
+    const emojiScale = emojiFallbackScale(text, font.family);
+    if (emojiScale !== 1) {
+      props = { ...props, textScale: (props.textScale ?? 1) * emojiScale };
+    }
     // Devanagari/Tamil are complex scripts: Word takes the glyphs from the
     // run's w:cs font (here "Nirmala UI") and, on macOS export, substitutes
     // its own DFonts — Mangal for Devanagari, Vijaya/Latha for Tamil — so the
@@ -3043,16 +3227,24 @@ function buildAtoms(
       // routing the whole run to Mangal doubles every inter-word gap and wraps
       // each Devanagari line ~57px early (probe3-indic p1: 20 spaces x 2.75px =
       // 55px overshoot per line, cascading a horizontal shift through the page).
-      // Keep the spaces in the ascii font; only the Indic clusters take Mangal/Latha.
+      // Keep ASCII and punctuation in the ascii font; only the Indic clusters
+      // take Mangal/Latha. Mixed-script runs otherwise paint their Latin words
+      // in the narrower Indic face and wrap far earlier than Word.
+      const isIndic =
+        indicFace === "Mangal"
+          ? (ch: string) => /[ऀ-ॿ]/.test(ch)
+          : indicFace === "Latha"
+            ? (ch: string) => /[஀-௿]/.test(ch)
+            : (ch: string) => /[຀-໿]/.test(ch);
       let i = 0;
       while (i < text.length) {
-        const isSpace = text[i] === " ";
+        const indic = isIndic(text[i]);
         let j = i + 1;
-        while (j < text.length && (text[j] === " ") === isSpace) j++;
+        while (j < text.length && isIndic(text[j]) === indic) j++;
         const seg = text.slice(i, j);
         const src = srcBase ? { ...srcBase, offset: srcBase.offset + i } : undefined;
-        if (isSpace) pushText(seg, props, font, href, src, metricsFont);
-        else pushText(seg, scriptProps, indicFont, href, src, indicMetrics);
+        if (indic) pushText(seg, scriptProps, indicFont, href, src, indicMetrics);
+        else pushText(seg, props, font, href, src, metricsFont);
         i = j;
       }
       return;
@@ -3214,6 +3406,14 @@ function buildAtoms(
         // x=472.5 exactly as Word draws it.
         let w = partWidth / part.length;
         let spaceFont = font;
+        if (para.props.styleId === "HTML0" && EA_FAMILY_RE.test(font.family)) {
+          // Word's East Asian HTML-preformatted style gives U+0020 a half-em
+          // advance in an East Asian face even when the section's docGrid is
+          // lines-only. Browser fallback measurement reports a narrower Latin
+          // space, which accumulates enough to change every legacy equation-
+          // image wrap and page continuation.
+          w = (font.size / 2) * tScale;
+        }
         if (gridPitch && part.length >= 2 && props.fontEastAsia && !EA_FAMILY_RE.test(font.family)) {
           spaceFont = { ...font, family: props.fontEastAsia };
           w = measurer.width(" ", spaceFont, props.letterSpacing) * tScale;
@@ -3241,7 +3441,19 @@ function buildAtoms(
         // level boundaries (a Latin/number island embedded in RTL resolves to
         // an even/LTR level and must be its own frag so reorderVisual places it
         // in RTL visual order — probe2-arabic-rtl's "99.9٪"/"ISO 8601").
-        const hyBreaks = hyphenBreaks(part);
+        const hyBreaks = hyphenBreaks(part, doc.compatibilityMode >= 15);
+        if ((part[0] === "-" || part[0] === "‐") && isWordAlnum(part[1])) {
+          const prev = atoms[atoms.length - 1];
+          const beforePrev = atoms[atoms.length - 2];
+          const prevText = prev?.kind === "frag" ? prev.text : "";
+          const beforeText = beforePrev?.kind === "frag" ? beforePrev.text : "";
+          const prevChar = prevText[prevText.length - 1];
+          const runBoundaryWordBefore =
+            isWordAlnum(prevChar) ||
+            (/^[\)\]\}]$/.test(prevChar ?? "") &&
+              isWordAlnum(beforeText[beforeText.length - 1]));
+          if (runBoundaryWordBefore) hyBreaks.unshift(1);
+        }
         let breaks = hyBreaks;
         if (charRtl) {
           const set = new Set(hyBreaks);
@@ -3399,6 +3611,25 @@ function buildAtoms(
     if (childEl.type === "run") pushRun(childEl);
     else for (const r of childEl.runs) pushRun(r, childEl.href ?? (childEl.anchor ? "#" + childEl.anchor : undefined));
   }
+  // East Asian punctuation compression: Word gives a fullwidth comma/period
+  // a 5/8-em advance when Latin text immediately follows it in a document-grid
+  // paragraph. The glyph still paints at its full em and overlaps the next
+  // span; only its pen advance contracts (eq-as-images p3: `pati，its`).
+  if (gridPitch) {
+    for (let i = 0; i + 1 < atoms.length; i++) {
+      const punct = atoms[i];
+      const next = atoms[i + 1];
+      if (
+        punct.kind === "frag" &&
+        /^[，。]$/.test(punct.text) &&
+        EA_FAMILY_RE.test(punct.font.family) &&
+        next.kind === "frag" &&
+        /^[\x00-\x7f]/.test(next.text)
+      ) {
+        punct.width = punct.font.size * 0.625 * (punct.props.textScale ?? 1);
+      }
+    }
+  }
   // Word does not break at a space run whose next word begins with an NBSP:
   // the NBSP glues leftward across the ordinary spaces (fill-in blanks like
   // "of $ [nbsp×12] \xa0(lohirol)" move as ONE unit — measured against
@@ -3516,7 +3747,9 @@ const DP_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday
  * minute (m); the AM/PM designator renders UPPERCASE whatever the token's own
  * case (fixture token "am/pm", Word's PDF paints "PM"). */
 function formatDatePicture(d: Date, picture: string): string {
-  const h24 = d.getHours();
+  // Field values follow the document clock's UTC components. This keeps the
+  // same instant stable when a document is opened in another browser zone.
+  const h24 = d.getUTCHours();
   const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
   const pad = (n: number) => String(n).padStart(2, "0");
   const hasAmPm = /am\/pm/i.test(picture);
@@ -3526,24 +3759,24 @@ function formatDatePicture(d: Date, picture: string): string {
     (tok) => {
       if (tok.startsWith("'")) return tok.slice(1, -1); // quoted literal
       switch (tok) {
-        case "yyyy": return String(d.getFullYear());
-        case "yy": return pad(d.getFullYear() % 100);
-        case "MMMM": return DP_MONTHS[d.getMonth()];
-        case "MMM": return DP_MONTHS[d.getMonth()].slice(0, 3);
-        case "MM": return pad(d.getMonth() + 1);
-        case "M": return String(d.getMonth() + 1);
-        case "dddd": return DP_DAYS[d.getDay()];
-        case "ddd": return DP_DAYS[d.getDay()].slice(0, 3);
-        case "dd": return pad(d.getDate());
-        case "d": return String(d.getDate());
+        case "yyyy": return String(d.getUTCFullYear());
+        case "yy": return pad(d.getUTCFullYear() % 100);
+        case "MMMM": return DP_MONTHS[d.getUTCMonth()];
+        case "MMM": return DP_MONTHS[d.getUTCMonth()].slice(0, 3);
+        case "MM": return pad(d.getUTCMonth() + 1);
+        case "M": return String(d.getUTCMonth() + 1);
+        case "dddd": return DP_DAYS[d.getUTCDay()];
+        case "ddd": return DP_DAYS[d.getUTCDay()].slice(0, 3);
+        case "dd": return pad(d.getUTCDate());
+        case "d": return String(d.getUTCDate());
         case "HH": return pad(h24);
         case "H": return String(h24);
         case "hh": return pad(hasAmPm ? h12 : h24);
         case "h": return String(hasAmPm ? h12 : h24);
-        case "mm": return pad(d.getMinutes());
-        case "m": return String(d.getMinutes());
-        case "ss": return pad(d.getSeconds());
-        case "s": return String(d.getSeconds());
+        case "mm": return pad(d.getUTCMinutes());
+        case "m": return String(d.getUTCMinutes());
+        case "ss": return pad(d.getUTCSeconds());
+        case "s": return String(d.getUTCSeconds());
         default: return /^am\/pm$/i.test(tok) ? (h24 < 12 ? "AM" : "PM") : tok;
       }
     },

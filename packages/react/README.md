@@ -119,7 +119,7 @@ The object passed to `onReady`. Every command operates on the current selection 
 - `insertBlankPage()` — inserts a complete blank page at the caret.
 - `insertCoverPage({ title, subtitle?, author? })` — prepends an editable, styled cover page.
 - `setLineNumbering(patch, scope?)`, `getLineNumbering()`.
-- `openHeaderFooter("header" | "footer")`, `closeHeaderFooter()` — create or directly enter page header/footer editing; Escape closes it.
+- `openHeaderFooter("header" | "footer")`, `closeHeaderFooter()` — create or directly enter the repeating page layer; shapes and lines inserted there repeat on the pages using that header/footer. Escape closes it.
 
 **Tables**
 - `insertTable(rows, cols)`.
@@ -139,7 +139,7 @@ The object passed to `onReady`. Every command operates on the current selection 
 - `insertField(instruction, cachedResult?)`, `insertDateTime("date" | "time", picture?)` — live Word fields.
 - `addBookmark(name)`, `listBookmarks()`, `insertCrossReference(name, "text" | "page")` — named bookmark targets and live `REF` / `PAGEREF` fields.
 - `insertEquation(linear)`, `insertSymbol(symbol)` — native editable OMML equations and arbitrary Unicode symbols.
-- `insertShape(preset, text?)` — floating editable DrawingML rectangles, rounded rectangles, ellipses, diamonds, and text boxes. Advanced mode also exposes Text Box as its own Insert control.
+- `insertShape(preset, text?)` — floating editable DrawingML lines, rectangles, rounded rectangles, ellipses, diamonds, and text boxes. Selected objects expose exact page position, size, outline, wrapping, and layer controls.
 - `insertWordArt(text, preset?)` — editable DrawingML WordArt with plain, arch, wave, and chevron presets.
 - `insertChart(data)`, `updateSelectedChart(data)` — native editable ChartML with its embedded workbook.
 - `insertSmartArt(data)`, `updateSelectedSmartArt(data)` — native editable SmartArt data, layout, style, colors, and cached drawing parts.
@@ -167,6 +167,10 @@ The object passed to `onReady`. Every command operates on the current selection 
 
 A ready-made formatting toolbar for an editable `DocxView`. Use `mode="simple"` for the basic Home editing strip or `mode="advanced"` for the full Home / Insert / Draw / Layout ribbon supported by the installed version.
 Layout includes Word-style paper presets plus a custom width/height dialog; both document and current-section scope emit native page-size properties.
+Editable text also has a right-click menu for clipboard, formatting, links,
+comments, lists, and alignment. Word-style shortcuts include heading levels,
+page breaks, links, comments, lists, and paragraph alignment in addition to the
+standard formatting and history commands.
 
 | Prop | Type | What it does |
 | --- | --- | --- |

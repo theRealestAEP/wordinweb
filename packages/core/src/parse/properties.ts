@@ -262,6 +262,9 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
   const spacing = intAttr(child(rPr, "spacing"), "val");
   if (spacing !== undefined) props.letterSpacing = twipsToPx(spacing);
 
+  const kern = intAttr(child(rPr, "kern"), "val");
+  if (kern !== undefined) props.kerningThreshold = kern > 0 ? halfPtToPx(kern) : null;
+
   // w:w: horizontal character scaling in percent (Text scale 150% stretches
   // glyph advances and painted glyphs; 66% condenses).
   const wScale = intAttr(child(rPr, "w"), "val");

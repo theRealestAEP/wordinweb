@@ -1403,6 +1403,16 @@ function renderChart(item: ChartItem): HTMLElement {
   return svg as unknown as HTMLElement;
 }
 
+function setItemLayer(
+  element: HTMLElement | SVGElement,
+  item: { behind?: boolean; front?: boolean; z?: number },
+  frontLayer = 1,
+): void {
+  if (item.behind) element.style.zIndex = "-1";
+  else if (item.z !== undefined) element.style.zIndex = String(item.z);
+  else if (item.front) element.style.zIndex = String(frontLayer);
+}
+
 function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElement | null {
   switch (item.kind) {
     case "rect": {
@@ -1417,8 +1427,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
         el.style.transform = `rotate(${item.rotate.deg}deg)`;
         el.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
       }
-      if (item.behind) el.style.zIndex = "-1";
-      else if (item.front) el.style.zIndex = "1";
+      setItemLayer(el, item);
       return el;
     }
     case "path": {
@@ -1445,8 +1454,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
         // Stroke width is meant in page px, not viewBox units.
         path.setAttribute("vector-effect", "non-scaling-stroke");
       }
-      if (item.behind) svg.style.zIndex = "-1";
-      else if (item.front) svg.style.zIndex = "1";
+      setItemLayer(svg, item);
       svg.appendChild(path);
       return svg as unknown as HTMLElement;
     }
@@ -1461,7 +1469,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       // are emitted later, so they win equal-z hit-testing over their glyphs);
       // a standalone drawing hit floats above everything.
       hit.style.cursor = "move";
-      hit.style.zIndex = item.belowText ? "1" : "6";
+      hit.style.zIndex = item.z !== undefined ? String(item.z) : item.belowText ? "1" : "6";
       if (item.rotate) {
         hit.style.transform = `rotate(${item.rotate.deg}deg)`;
         hit.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
@@ -1479,7 +1487,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
     }
     case "edge": {
       const el = renderEdge(item.x1, item.y1, item.x2, item.y2, item.border, item.rotate);
-      if (item.front) el.style.zIndex = "1";
+      setItemLayer(el, item);
       return el;
     }
     case "chart":
@@ -1711,8 +1719,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       // text" (wrapNone, not behind): above the text layer — anchored image
       // items emit before their paragraph's spans, so without a z-index the
       // text paints over the image and steals its clicks/drags.
-      if (item.behind) node.style.zIndex = "-1";
-      else if (item.front) node.style.zIndex = "2";
+      setItemLayer(node, item, 2);
       node.dataset.dxwImageFormat = ext;
       if (item.model3D) node.dataset.dxwModel3d = "1";
       if (item.webVideo) {
@@ -1779,15 +1786,21 @@ function renderWordArt(item: WordArtItem): HTMLElement {
   const weight = item.bold ? "bold " : "";
   const style = item.italic ? "italic " : "";
   if (item.noFit) {
-    // Degenerate shapetype guide path: Word could not fit the text to the box,
-    // so it draws the string at its nominal (tiny) font-size — a near-invisible
-    // mark. Render unstretched at fontSize; the exact spot is immaterial at
-    // ~1px, so anchor at the box origin.
-    const fs = item.fontSize && item.fontSize > 0 ? item.fontSize : 1.33;
-    span.style.font = `${style}${weight}${fs}px "${item.fontFamily}", sans-serif`;
-    span.style.left = "0px";
-    span.style.top = "0px";
-    box.appendChild(span);
+    // With a missing text-guide coordinate, Word collapses the WordArt's
+    // horizontal glyph outlines onto a thin vertical stroke while retaining
+    // their fitted height. The containing box still supplies the authored
+    // rotation, so a -40deg watermark becomes the faint +50deg mark seen in
+    // Word. The standard _x0000_t136 guide places that collapsed band at these
+    // proportions of the shape box.
+    const stroke = document.createElement("div");
+    stroke.style.position = "absolute";
+    stroke.style.left = `${item.width * 0.0603}px`;
+    stroke.style.top = `${item.height * -0.079}px`;
+    stroke.style.width = "0.5px";
+    stroke.style.height = `${item.height * 0.651}px`;
+    stroke.style.background = item.fill;
+    stroke.style.opacity = String(item.opacity);
+    box.appendChild(stroke);
     return box;
   }
   // Word's VML textpath stretches the glyph INK to the shape box: side
@@ -1885,7 +1898,7 @@ function warpBaseline(warp: string, W: number, H: number): WarpGeo {
       // sine period centred on the mid-line: crest left, trough right, big
       // amplitude so the large glyphs sweep from near the top to near the
       // bottom (measured centroid 0.28·H crest → 0.76·H trough).
-      const fontPx = H * 0.44;
+      const fontPx = H * 0.78;
       const d =
         `M ${mx} ${H * 0.5} ` +
         `C ${W * 0.16} ${H * 0.33} ${W * 0.34} ${H * 0.33} ${W * 0.5} ${H * 0.5} ` +
@@ -1896,7 +1909,7 @@ function warpBaseline(warp: string, W: number, H: number): WarpGeo {
       // Word's CHEVRON is a symmetric downward valley (∨) filling the box, its
       // apex ROUNDED — a quadratic, not two straight legs, so no glyph straddles
       // a sharp vertex (the stray-letter artifact). Ends high, middle low.
-      const fontPx = H * 0.5;
+      const fontPx = H * 0.78;
       const yEnds = H * 0.26;
       const yCtrl = H * 1.18; // quadratic control → midpoint baseline ≈ 0.72·H
       const d = `M ${mx} ${yEnds} Q ${W / 2} ${yCtrl} ${W - mx} ${yEnds}`;
@@ -1923,7 +1936,7 @@ function warpBaseline(warp: string, W: number, H: number): WarpGeo {
       const r = Math.min(W, H) * 0.3;
       const cx = W / 2;
       const cy = H / 2;
-      const a = (-60 * Math.PI) / 180;
+      const a = (-90 * Math.PI) / 180;
       const sx = cx + r * Math.sin(a);
       const sy = cy - r * Math.cos(a);
       const d = `M ${sx.toFixed(2)} ${sy.toFixed(2)} A ${r} ${r} 0 1 1 ${(sx - 0.01).toFixed(2)} ${sy.toFixed(2)} Z`;
@@ -1953,13 +1966,111 @@ function renderWarpText(item: WarpTextItem): HTMLElement {
   // The warp text is decorative (not editable); let clicks fall through to the
   // shape's fill hit target beneath so the fill still selects the shape.
   svg.style.pointerEvents = "none";
-  if (item.behind) svg.style.zIndex = "-1";
-  else if (item.front) svg.style.zIndex = "1";
+  setItemLayer(svg, item);
 
   const geo = warpBaseline(item.warp, W, H);
   const weight = item.bold ? "bold" : "normal";
   const style = item.italic ? "italic" : "normal";
-  const family = `"${item.fontFamily}", sans-serif`;
+  const family = /^calibri(?: light)?$/i.test(item.fontFamily)
+    ? `"${item.fontFamily}", "Carlito", sans-serif`
+    : `"${item.fontFamily}", sans-serif`;
+
+  if (item.warp === "textWave1" || item.warp === "textWave2" || item.warp === "textChevron") {
+    // Wave and chevron presets bend the text envelope while keeping each
+    // glyph's vertical axis upright. SVG textPath rotates glyphs along the
+    // tangent, which produces ordinary arched text instead of WordArt.
+    const fontPx = H * 0.98;
+    let widths = [...item.text].map((ch) => (ch === " " ? fontPx * 0.25 : fontPx * 0.6));
+    try {
+      const ctx = document.createElement("canvas").getContext("2d");
+      if (ctx) {
+        ctx.font = `${style} ${weight} ${fontPx}px ${family}`;
+        widths = [...item.text].map((ch) => ctx.measureText(ch).width);
+      }
+    } catch {
+      // Keep the deterministic fallback widths above.
+    }
+    const naturalWidth = widths.reduce((sum, width) => sum + width, 0);
+    const scaleX = naturalWidth > 0 ? (W * 0.94) / naturalWidth : 1;
+    let pen = W * 0.03;
+    [...item.text].forEach((ch, index) => {
+      const advance = widths[index] * scaleX;
+      const x = pen + advance / 2;
+      pen += advance;
+      if (ch === " ") return;
+      const baseline =
+        item.warp === "textChevron"
+          ? H * (0.74 + 0.21 * Math.abs((2 * x) / W - 1))
+          : H * (0.85 + 0.1 * Math.sin(2 * Math.PI * (x / W - 0.5)));
+      const glyph = document.createElementNS(SVG_NS, "text");
+      glyph.setAttribute("x", "0");
+      glyph.setAttribute("y", "0");
+      glyph.setAttribute("fill", item.fill);
+      glyph.setAttribute("font-family", family);
+      glyph.setAttribute("font-size", `${fontPx.toFixed(2)}`);
+      glyph.setAttribute("font-weight", weight);
+      glyph.setAttribute("font-style", style);
+      glyph.setAttribute("text-anchor", "middle");
+      glyph.setAttribute("dominant-baseline", "alphabetic");
+      glyph.setAttribute(
+        "transform",
+        `translate(${x.toFixed(2)} ${baseline.toFixed(2)}) scale(${scaleX.toFixed(5)} 1)`,
+      );
+      glyph.textContent = ch;
+      svg.appendChild(glyph);
+    });
+    return svg;
+  }
+
+  if (geo.pour) {
+    // Circle-pour distributes characters around the full ring. Rendering each
+    // glyph independently preserves Word's tall, radially oriented letters;
+    // a textPath instead shrinks the font to its natural string width.
+    const chars = [...item.text];
+    const radius = Math.min(W, H) * 0.368;
+    const fontPx = Math.min(W, H) * 0.38;
+    let advances = chars.map((ch) => (ch === " " ? fontPx * 0.25 : fontPx * 0.55));
+    try {
+      const ctx = document.createElement("canvas").getContext("2d");
+      if (ctx) {
+        ctx.font = `${style} ${weight} ${fontPx}px ${family}`;
+        advances = chars.map((ch) => ctx.measureText(ch).width);
+      }
+    } catch {
+      // Keep the deterministic fallback advances above.
+    }
+    const totalAdvance = advances.reduce((sum, advance) => sum + advance, 0);
+    const firstCenter = (-76 * Math.PI) / 180;
+    const angularScale = 1.0125;
+    let along = 0;
+    chars.forEach((ch, index) => {
+      const angle =
+        firstCenter +
+        (2 * Math.PI * angularScale * (along + advances[index] / 2 - advances[0] / 2)) /
+          totalAdvance;
+      along += advances[index];
+      if (ch === " ") return;
+      const x = W / 2 + radius * Math.sin(angle);
+      const y = H / 2 - radius * Math.cos(angle);
+      const glyph = document.createElementNS(SVG_NS, "text");
+      glyph.setAttribute("x", "0");
+      glyph.setAttribute("y", "0");
+      glyph.setAttribute("fill", item.fill);
+      glyph.setAttribute("font-family", family);
+      glyph.setAttribute("font-size", `${fontPx.toFixed(2)}`);
+      glyph.setAttribute("font-weight", weight);
+      glyph.setAttribute("font-style", style);
+      glyph.setAttribute("text-anchor", "middle");
+      glyph.setAttribute("dominant-baseline", "central");
+      glyph.setAttribute(
+        "transform",
+        `translate(${x.toFixed(2)} ${y.toFixed(2)}) rotate(${((angle * 180) / Math.PI).toFixed(2)})`,
+      );
+      glyph.textContent = ch;
+      svg.appendChild(glyph);
+    });
+    return svg;
+  }
 
   // Font size: presets that fill the box use their box-derived size; textArchUp
   // rides the run's own size; circle-pour sizes glyphs to wrap ~82% of the
@@ -1968,25 +2079,6 @@ function renderWarpText(item: WarpTextItem): HTMLElement {
   let startFrac = geo.startFrac;
   if (geo.natural) {
     fontPx = item.fontSize;
-  } else if (geo.pour) {
-    let perPx = item.text.length * 0.55;
-    try {
-      const ctx = document.createElement("canvas").getContext("2d");
-      if (ctx) {
-        ctx.font = `${style} ${weight} 100px ${family}`;
-        const w = ctx.measureText(item.text).width;
-        if (w > 0) perPx = w / 100;
-      }
-    } catch {
-      /* canvas unavailable (SSR): keep the estimate */
-    }
-    // Size so the string wraps ~80% of the ring (CIRCLE across the top, POUR
-    // round the bottom), but never so large that the OUTWARD glyphs escape the
-    // box. Measured: glyphs reach ~0.6·fontPx beyond the baseline radius, so
-    // grow the font only until r + 0.6·font reaches the box edge.
-    const r = Math.min(W, H) * 0.3;
-    const fitCap = (Math.min(W, H) * 0.49 - r) / 0.92;
-    fontPx = Math.max(6, Math.min(fitCap, (geo.pathLen * 0.8) / perPx));
   }
 
   const id = `dxw-warp-${warpPathSeq++}`;
@@ -2098,6 +2190,7 @@ function renderText(item: TextItem): HTMLElement {
   el.style.setProperty("-webkit-font-smoothing", "antialiased");
 
   const props = item.props;
+  if (item.font.kerning) el.style.fontKerning = "normal";
   let color = props.color && props.color !== "auto" ? props.color : "#000000";
   el.style.color = color;
   if (props.underline && props.underline !== "none") {
@@ -2118,7 +2211,20 @@ function renderText(item: TextItem): HTMLElement {
   // Small caps are realized by the layout engine (per-segment uppercase +
   // reduced font size); CSS font-variant would be a no-op on the emitted
   // uppercase text and must not double-apply.
-  if (props.letterSpacing) el.style.letterSpacing = `${props.letterSpacing}px`;
+  const paintLetterSpacing = props.paintLetterSpacing ?? props.letterSpacing;
+  if (paintLetterSpacing) el.style.letterSpacing = `${paintLetterSpacing}px`;
+  if (
+    props.paintLetterSpacing !== undefined &&
+    props.letterSpacing !== undefined &&
+    item.text.trim()
+  ) {
+    const paintWidth =
+      item.width - (props.letterSpacing - props.paintLetterSpacing) * item.text.length;
+    if (paintWidth > 0.1) {
+      el.style.transform = `scaleX(${item.width / paintWidth})`;
+      el.style.transformOrigin = "0 50%";
+    }
+  }
   // w:w character scaling: the engine already scaled the advances; stretch
   // the painted glyphs to match. Math items own their transform (scaleY).
   if (props.textScale && props.textScale !== 1 && !item.mathScaleY) {
@@ -2153,8 +2259,7 @@ function renderText(item: TextItem): HTMLElement {
     el.style.transform = `rotate(${item.rotate.deg}deg)${prev ? " " + prev : ""}`;
     el.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
   }
-  if (item.behind) el.style.zIndex = "-1";
-  else if (item.front) el.style.zIndex = "1";
+  setItemLayer(el, item);
   return el;
 }
 
@@ -2167,17 +2272,32 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     el.style.transformOrigin = `${rotate.ox}px ${rotate.oy}px`;
   }
   const horizontal = Math.abs(y2 - y1) < 0.01;
-  // Hairline borders (Word default 0.5pt = 0.67px) land on fractional device
-  // pixels and antialias to light gray - noticeably fainter than Word. Snap
-  // the width up to whole device pixels. For placement, keep paragraph borders
+  // Snap authored border widths to whole device pixels. At the parity
+  // renderer's 2x scale Word's default 0.5pt rule is one physical pixel;
+  // using the layout engine's 1px paint floor makes it two pixels instead.
+  // For placement, keep paragraph borders
   // with w:space on Word's fractional rectangle positions; zero-space table/page
-  // rules match Word better on the device grid.
+  // thicker rules match Word better on the device grid. Hairlines retain the
+  // row layout's fractional position: snapping every accumulated sz-4 row
+  // boundary shifts alternating rules by a full CSS pixel in long grids.
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
-  const declaredWidth =
-    border.rawWidth !== undefined && border.rawWidth < 0.25 ? border.rawWidth : border.width;
-  const w = Math.max(1 / dpr, Math.round(declaredWidth * dpr) / dpr);
+  const ultraThin =
+    rotate === undefined &&
+    border.style === "single" &&
+    border.rawWidth !== undefined &&
+    border.rawWidth < 0.25;
+  const deviceHairline =
+    rotate === undefined &&
+    border.style === "single" &&
+    border.rawWidth !== undefined &&
+    border.rawWidth < 0.75;
+  const declaredWidth = border.rawWidth ?? border.width;
+  const w =
+    border.rawWidth !== undefined && border.rawWidth < 0.25
+      ? border.rawWidth
+      : Math.max(1 / dpr, Math.round(declaredWidth * dpr) / dpr);
   const snap = (v: number) => Math.round(v * dpr) / dpr;
-  const place = border.space === 0 ? snap : (v: number) => v;
+  const place = border.space === 0 && !deviceHairline ? snap : (v: number) => v;
   // Word's dash pattern is [3 1] x line width (read from its own PDF
   // export) - noticeably longer than CSS `dashed`. Paint dashes/dots as a
   // repeating gradient so the rhythm matches.
@@ -2187,9 +2307,40 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
       : border.style === "dotted"
         ? [1, 1]
         : null;
+  if (!horizontal && Math.abs(x2 - x1) >= 0.01) {
+    const x = Math.min(x1, x2);
+    const y = Math.min(y1, y2);
+    const stroke = document.createElement("div");
+    const strokeHeight = border.style === "double" ? w * 3 : w;
+    stroke.style.position = "absolute";
+    stroke.style.left = `${x1 - x}px`;
+    stroke.style.top = `${y1 - y - strokeHeight / 2}px`;
+    stroke.style.width = `${Math.hypot(x2 - x1, y2 - y1)}px`;
+    stroke.style.height = `${strokeHeight}px`;
+    stroke.style.transform = `rotate(${Math.atan2(y2 - y1, x2 - x1)}rad)`;
+    stroke.style.transformOrigin = "0 50%";
+    if (border.style === "double") {
+      stroke.style.background = `linear-gradient(180deg, ${border.color} 0 ${w}px, transparent ${w}px ${w * 2}px, ${border.color} ${w * 2}px ${w * 3}px)`;
+    } else if (dashPattern) {
+      const on = Math.max(dashPattern[0] * border.width, 2);
+      const period = on + Math.max(dashPattern[1] * border.width, 1);
+      stroke.style.background = `repeating-linear-gradient(90deg, ${border.color} 0 ${on}px, transparent ${on}px ${period}px)`;
+    } else if (border.style === "triple") {
+      stroke.style.height = "0";
+      stroke.style.borderTop = `${w}px double ${border.color}`;
+    } else {
+      stroke.style.background = border.color;
+    }
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+    el.style.width = `${Math.abs(x2 - x1)}px`;
+    el.style.height = `${Math.abs(y2 - y1)}px`;
+    el.appendChild(stroke);
+    return el;
+  }
   if (horizontal) {
     el.style.left = `${Math.min(x1, x2)}px`;
-    el.style.top = `${place(y1 - w / 2)}px`;
+    el.style.top = `${place(y1 - w / 2 - (ultraThin ? 0.4 : 0))}px`;
     el.style.width = `${Math.abs(x2 - x1)}px`;
     if (border.style === "double") {
       el.style.height = `${w * 3}px`;
@@ -2197,11 +2348,22 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     } else if (dashPattern) {
       const on = Math.max(dashPattern[0] * border.width, 2);
       const period = on + Math.max(dashPattern[1] * border.width, 1);
-      el.style.height = `${w}px`;
+      el.style.height = `${w < 1 && rotate === undefined ? 1 : w}px`;
       el.style.background = `repeating-linear-gradient(90deg, ${border.color} 0 ${on}px, transparent ${on}px ${period}px)`;
+      if (w < 1 && rotate === undefined) {
+        el.style.transform = `scaleY(${w})`;
+        el.style.transformOrigin = "0 0";
+      }
     } else if (border.style === "triple") {
       el.style.height = "0";
       el.style.borderTop = `${w}px double ${border.color}`;
+    } else if (deviceHairline) {
+      // Chromium expands a fractional-height background to two device rows.
+      // A half-scaled 1px strip preserves Word's one-device-pixel rule.
+      el.style.height = "1px";
+      el.style.background = border.color;
+      el.style.transform = "scaleY(.5)";
+      el.style.transformOrigin = "0 0";
     } else {
       el.style.height = `${w}px`;
       el.style.background = border.color;
@@ -2216,11 +2378,20 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     } else if (dashPattern) {
       const on = Math.max(dashPattern[0] * border.width, 2);
       const period = on + Math.max(dashPattern[1] * border.width, 1);
-      el.style.width = `${w}px`;
+      el.style.width = `${w < 1 && rotate === undefined ? 1 : w}px`;
       el.style.background = `repeating-linear-gradient(180deg, ${border.color} 0 ${on}px, transparent ${on}px ${period}px)`;
+      if (w < 1 && rotate === undefined) {
+        el.style.transform = `scaleX(${w})`;
+        el.style.transformOrigin = "0 0";
+      }
     } else if (border.style === "triple") {
       el.style.width = "0";
       el.style.borderLeft = `${w}px double ${border.color}`;
+    } else if (deviceHairline) {
+      el.style.width = "1px";
+      el.style.background = border.color;
+      el.style.transform = "scaleX(.5)";
+      el.style.transformOrigin = "0 0";
     } else {
       el.style.width = `${w}px`;
       el.style.background = border.color;

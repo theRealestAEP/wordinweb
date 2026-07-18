@@ -96,6 +96,9 @@ export class DocxDocument {
   /** Note content by note id (render-only; sources stripped). */
   readonly footnotes: Map<number, Block[]> = new Map();
   readonly endnotes: Map<number, Block[]> = new Map();
+  /** The separator paragraph controls the gap between its rule and the first
+   * footnote. */
+  readonly footnoteSeparator: Block[] = [];
   /** `_Ref` cross-reference bookmark ranges (name → captured runs). REF
    * fields re-render the referenced text from these — Word recomputes REF on
    * open, so the cached field result in the file is stale. */
@@ -227,6 +230,8 @@ export class DocxDocument {
     if (!docRoot) throw new Error(`Missing ${docPart} in package`);
     this.docRoot = docRoot;
     this.rememberOriginalXml(docPart, docRoot);
+    const coreProperties = this.readXmlOptional("docProps/core.xml");
+    this.hydrateCorePropertyControls(docRoot, coreProperties);
     this.repairLegacyWordInWebObjects();
     this.documentRels = parseRelationships(this.relsRoot ?? undefined, docPart);
 
@@ -275,6 +280,7 @@ export class DocxDocument {
       if (!root) continue;
       const partRels = parseRelationships(this.readXmlOptional(relsPathFor(rel.target)), rel.target);
       this.rememberOriginalXml(rel.target, root);
+      this.hydrateCorePropertyControls(root, coreProperties);
       this.hfParts.push({ relId: rel.id, target: rel.target, root, isHeader, rels: partRels });
     }
 
@@ -292,6 +298,12 @@ export class DocxDocument {
         this.footnotesPart = rel.target;
         this.footnotesRoot = root;
         this.footnotesRels = partRels;
+        const separator = root.children.find(
+          (item) => localName(item.name) === "footnote" && attr(item, "type") === "separator",
+        );
+        if (separator) {
+          this.footnoteSeparator.push(...parseBlocks(separator, { ...this.ctxBase, rels: partRels }));
+        }
       }
       // Footnotes are editable (sources kept, part retained + re-serialized on
       // save); endnotes stay render-only for now.
@@ -300,6 +312,40 @@ export class DocxDocument {
     }
 
     this.refresh();
+  }
+
+  /** Resolve content controls mapped to standard package core properties.
+   * Word refreshes these bindings on open, so the serialized sdtContent can
+   * be stale even though the visible value comes from docProps/core.xml. */
+  private hydrateCorePropertyControls(root: XmlElement, coreProperties: XmlElement | undefined): void {
+    if (!coreProperties) return;
+    const textNodes = (element: XmlElement): XmlElement[] => {
+      const out = localName(element.name) === "t" ? [element] : [];
+      for (const item of element.children) out.push(...textNodes(item));
+      return out;
+    };
+    const walk = (element: XmlElement): void => {
+      if (localName(element.name) === "sdt") {
+        const binding = child(child(element, "sdtPr"), "dataBinding");
+        const xpath = attr(binding, "xpath") ?? "";
+        const propertyMatch = /\/(?:[^/:]+:)?([A-Za-z_][\w.-]*)(?:\[\d+\])?\s*$/.exec(xpath);
+        if (xpath.includes("coreProperties") && propertyMatch) {
+          const property = coreProperties.children.find(
+            (item) => localName(item.name) === propertyMatch[1],
+          );
+          const content = child(element, "sdtContent");
+          const targets = content ? textNodes(content) : [];
+          // An empty bound property leaves the serialized placeholder visible
+          // when w:showingPlcHdr is set; only a real value replaces it.
+          if (property?.text && targets.length > 0) {
+            targets[0].text = property.text;
+            for (const target of targets.slice(1)) target.text = "";
+          }
+        }
+      }
+      for (const item of element.children) walk(item);
+    };
+    walk(root);
   }
 
   /** Repair only objects emitted by older WordInWeb builds that Word rejects. */

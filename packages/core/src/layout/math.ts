@@ -17,6 +17,10 @@ import { TextMeasurer, hasCambriaMath } from "./measure.js";
 // superscripts, 12x0.60 = 7.2); an 11pt base gives the long-calibrated 8pt.
 const SCRIPT_SCALE = 0.73;
 const SCRIPT_SCRIPT_SCALE = 0.6;
+// Word reserves an invisible edit placeholder for an authored empty script
+// slot. These advances are measured at the script size.
+const EMPTY_SCRIPT_ADVANCE = 0.89;
+const EMPTY_SUP_ADVANCE = 0.84;
 const floorHalfPt = (px: number): number => Math.floor(px * 0.75 * 2 + 1e-6) / 2 / 0.75;
 // Math style stops at scriptscript: deeper structures reuse that size.
 const scriptSize = (size: number, floor: number): number =>
@@ -36,6 +40,7 @@ const RULE_THICK = 0.75 / 11;
 const BIN_OP_SPACE = 0.25;
 const FUNC_NAME_SPACE = 0.18; // em each side of an m:func name (dense p7 (4.6))
 const COMMA_SPACE = 0.17; // em after a math comma (dense p7 B(h, r, θ))
+const SEMICOLON_SPACE = 0.153; // em after a math semicolon (dense p7 F₁ arguments)
 const FRAC_PAD = 0.06; // em: rule sticks out past the wider part
 // n-ary/matrix/delimiter geometry measured from Word's parity-math2 export
 // at 11pt: the operator keeps the SURROUNDING font size (math fonts carry a
@@ -73,7 +78,7 @@ const MAT_COL_GAP_STIX = 12.2 / 11;
 const MAT_COL_GAP_REAL_INLINE = 11.4 / 11;
 const MAT_COL_GAP_REAL_DISPLAY = 11.13 / 11;
 const DLM_PAD_STIX = 1.2 / 11; // content inset from a delimiter glyph
-const DLM_PAD_REAL = 0.8 / 11;
+const DLM_PAD_REAL = 1 / 11;
 const matColGap = (display: boolean): number =>
   hasCambriaMath()
     ? display
@@ -86,6 +91,7 @@ const dlmPad = (): number => (hasCambriaMath() ? DLM_PAD_REAL : DLM_PAD_STIX);
 // 294.14, 'a' x0 294.13) and leaves only a hair before the closer (0.37pt at
 // 11pt on both 2x2 matrices; 0.18 on the 3x3).
 const DLM_MAT_END_PAD = 0.3 / 11;
+const DLM_TRAILING_SPACE_PAD = 0.125;
 
 // Display-mode geometry (m:oMathPara), measured from Word's own export of
 // parity2-equations at 11pt (baseline offsets are size-11 y0 deltas from the
@@ -124,6 +130,11 @@ const INT_D_INK = 1.3584 + 0.7925;
 const INT_D_ASC = 1.3584;
 const INT_D_DESC = 0.7925;
 const INT_D_ADV = 0.8066;
+// Word tucks display-integral limits back over the variant's advance. At 12pt
+// the lower limit begins 7pt after the operator's left edge, while the glyph
+// advances 9.68pt; the upper limit is staggered 4.5pt from the lower.
+const INT_D_LIMIT_OVERLAP = 0.37;
+const INT_D_SUP_STAGGER = 0.375;
 // Stretch anchor A solves A + (0.877 - A) * k = 1.3584 for k = ink ratio.
 const INT_D_ANCHOR = (1.3584 - 0.877 * (INT_D_INK / INT_TEXT_INK)) / (1 - INT_D_INK / INT_TEXT_INK);
 
@@ -377,7 +388,7 @@ const SUP_DLM_DROP = 460 / 2048;
 // italic correction / cut-in kern that Word applies before a superscript.
 const ITALIC_MATH_RE = /[\u{1D434}-\u{1D467}ℎ]/u;
 const SUP_KERN_IN = 0.0; // em (parity-math: e^x sup lands at base+0.568em vs 0.4961 hmtx)
-const SCRIPT_TRAIL = 0.0; // em after a sup/sub cluster (parity-math '=', dense t^{h-1}( )
+const SCRIPT_TRAIL_GROUPED_DISPLAY = 0.12;
 
 /** Does this subtree lay a delimiter (m:d or literal bracket glyphs) outside
  * sup/sub script arguments and n-ary limits? (Script protrusions never drive
@@ -475,9 +486,28 @@ function containsBlocky(nodes: MathNode[]): boolean {
   return false;
 }
 
-export function layoutMath(nodes: MathNode[], baseSize: number, measurer: TextMeasurer, display = false): MathBox {
+export function layoutMath(
+  nodes: MathNode[],
+  baseSize: number,
+  measurer: TextMeasurer,
+  display = false,
+  fractionPadEm = FRAC_PAD,
+  multiEquationDisplay = false,
+): MathBox {
   const box: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [], display, baseSize };
-  flow(nodes, baseSize, 0, box, measurer, false, display, 0, floorHalfPt(baseSize * SCRIPT_SCRIPT_SCALE));
+  flow(
+    nodes,
+    baseSize,
+    0,
+    box,
+    measurer,
+    false,
+    display,
+    0,
+    floorHalfPt(baseSize * SCRIPT_SCRIPT_SCALE),
+    fractionPadEm,
+    multiEquationDisplay ? SCRIPT_TRAIL_GROUPED_DISPLAY : 0,
+  );
   // Line metrics: at least the math font's own box at each piece's offset.
   // A stretched delimiter variant carries its own (larger) ink extents.
   for (const p of box.pieces) {
@@ -517,6 +547,8 @@ function flow(
   display = false,
   breakDepth = 0,
   scriptFloor = 0,
+  fractionPadEm = FRAC_PAD,
+  scriptTrailEm = 0,
 ): void {
   let prevOperand = false;
   for (const node of nodes) {
@@ -525,6 +557,14 @@ function flow(
         // Split on binary operators so Word's medium spacing appears
         // around them (and text extraction sees the gaps).
         const font = fontAt(size);
+        // Preserved spaces in an m:sty="p" math run are em spaces in Word,
+        // not ordinary Cambria Math word spaces. Taylor's two authored spaces
+        // between "+…," and "-∞<x<∞" therefore occupy exactly two ems.
+        if (node.normal && /^\s+$/.test(node.text)) {
+          box.pieces.push({ text: node.text, x: box.width, dy, font });
+          box.width += [...node.text].length * size;
+          break;
+        }
         // m:func name: Word kerns a thin space on both sides of the function
         // name, even at script size inside otherwise-tight content (dense p7
         // (4.6) denominator: '2𝑟 cos 𝜃' gaps 2.0/2.13px at 11.33px = ~0.18em).
@@ -545,7 +585,7 @@ function flow(
         // parity-math's = gaps); display equations keep the medium space around
         // relations (parity2-equations f(x)=, e^x=).
         const relGap = display ? medGap : size * (5 / 18);
-        const toks = node.text.split(/([=+−×÷<>≤≥±≠,-])/).filter((s) => s.length > 0);
+        const toks = node.text.split(/([=+−×÷<>≤≥±≠,;\-])/).filter((s) => s.length > 0);
         for (let ti = 0; ti < toks.length; ti++) {
           const tok = toks[ti];
           // Punctuation: Word kerns a thin space AFTER a math comma even when
@@ -556,13 +596,18 @@ function flow(
           // the gap Word draws — do not add the synthetic kern on top of them
           // (probe2-math-matrices' piecewise arms measured the plain 3-space
           // gap, not 3 spaces + the kern).
-          if (tok === ",") {
+          if (tok === "," || tok === ";") {
             const text = mathText(tok, node.normal);
             box.pieces.push({ text, x: box.width, dy, font });
             box.width += measurer.width(text, font);
             const nextIsSpace = ti + 1 < toks.length && /^\s/.test(toks[ti + 1]);
-            if (!tight && !nextIsSpace) box.width += size * COMMA_SPACE;
-            prevOperand = false;
+            const spacedSemicolon =
+              tok === ";" &&
+              (ti === toks.length - 1 || !BIN_OPS.has(toks[ti + 1]));
+            if (!tight && !nextIsSpace && (tok === "," || spacedSemicolon)) {
+              box.width += size * (tok === "," ? COMMA_SPACE : SEMICOLON_SPACE);
+            }
+            prevOperand = tok === ";";
             continue;
           }
           const isOp = BIN_OPS.has(tok);
@@ -595,7 +640,7 @@ function flow(
         // Scripts render at 8/11 in text (non-display) style even inside a
         // display equation (Word: b², xᵏ stay script-size).
         const beforeBase = box.pieces.length;
-        flow(node.base, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor);
+        flow(node.base, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
         // A superscript on a TALL base (a delimiter group, possibly holding
         // its own scripts) rides near the base's ink top: OpenType shiftUp =
         // max(SuperscriptShiftUp, baseInkTop - SuperscriptBaselineDropMax),
@@ -627,13 +672,19 @@ function flow(
           box.width += size * SUP_KERN_IN;
         }
         const beforeScript = box.pieces.length;
-        flow(node.script, scriptSize(size, scriptFloor), scriptDy, box, measurer, true, false, breakDepth + 2, scriptFloor);
+        const scriptFontSize = scriptSize(size, scriptFloor);
+        if (node.t === "sub" && node.script.length === 0) {
+          box.width += scriptFontSize * EMPTY_SCRIPT_ADVANCE;
+        } else if (node.t === "sup" && node.script.length === 0) {
+          box.width += scriptFontSize * EMPTY_SUP_ADVANCE;
+        } else {
+          flow(node.script, scriptFontSize, scriptDy, box, measurer, true, false, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
+        }
         for (let i = beforeScript; i < box.pieces.length; i++) box.pieces[i].script = true;
-        // Word also leaves a small trail after the script cluster before the
-        // next atom (parity-math: '=' lands 0.12em past sup-end + the thick
-        // relation space; dense p7 row3: t^{h-1}( gap 0.17em vs the bare
-        // delimiter pad).
-        box.width += size * SCRIPT_TRAIL;
+        // Display math leaves a small trail after the script cluster before
+        // the next atom. Inline math stays tight so script-heavy prose keeps
+        // Word's line breaks and pagination.
+        if (display) box.width += size * scriptTrailEm;
         prevOperand = true;
         break;
       }
@@ -651,18 +702,18 @@ function flow(
         // glyph-to-glyph), so only display fraction parts inherit the ambient
         // (spaced) context.
         const fracTight = display ? tight : true;
-        const numW = widthOf(node.num, scale, measurer, display, fracTight, scriptFloor);
-        const denW = widthOf(node.den, scale, measurer, display, fracTight, scriptFloor);
-        const pad = size * FRAC_PAD;
+        const numW = widthOf(node.num, scale, measurer, display, fracTight, scriptFloor, fractionPadEm, scriptTrailEm);
+        const denW = widthOf(node.den, scale, measurer, display, fracTight, scriptFloor, fractionPadEm, scriptTrailEm);
+        const pad = size * fractionPadEm;
         const barW = Math.max(numW, denW) + 2 * pad;
         const x0 = box.width;
         // numerator centered over the bar
         const numBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-        flow(node.num, scale, 0, numBox, measurer, fracTight, display, breakDepth + 2, scriptFloor);
+        flow(node.num, scale, 0, numBox, measurer, fracTight, display, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
         for (const p of numBox.pieces) box.pieces.push(rebase(p, x0 + (barW - numW) / 2, dy + numRaise));
         for (const r of numBox.rules) box.rules.push({ ...r, x1: x0 + (barW - numW) / 2 + r.x1, x2: x0 + (barW - numW) / 2 + r.x2, dy: dy + numRaise + r.dy });
         const denBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-        flow(node.den, scale, 0, denBox, measurer, fracTight, display, breakDepth + 2, scriptFloor);
+        flow(node.den, scale, 0, denBox, measurer, fracTight, display, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
         // A denominator holding a NESTED FRACTION (dense p7's (...+t²r²)^{1/2}
         // with the ½ drawn as a stacked mini-fraction) drops further: Word
         // keeps the bar-to-denominator clearance, so the shift grows 1:1 with
@@ -702,7 +753,7 @@ function flow(
         // Display sum-class operators enlarge the glyph and stack limits
         // above/below; integral-class keep their limits beside even in display.
         if (display && !isInt) {
-          naryDisplay(node, size, dy, box, measurer, scriptFloor);
+          naryDisplay(node, size, dy, box, measurer, scriptFloor, fractionPadEm, scriptTrailEm);
           prevOperand = true;
           break;
         }
@@ -745,20 +796,32 @@ function flow(
         const intSubDrop = display && visibleSub ? INT_SUB_DROP_D : INT_SUB_DROP;
         const supDy = dy + size * (isInt ? intSupRaise : NARY_SUP_RAISE);
         const subDy = dy - size * (isInt ? intSubDrop : NARY_SUB_DROP);
-        const supStagger = isInt ? size * INT_SUP_STAGGER : 0;
-        const supW = widthOf(node.sup, scale, measurer, false, true, scriptFloor) + supStagger;
-        const subW = widthOf(node.sub, scale, measurer, false, true, scriptFloor);
-        const x0 = box.width;
+        const supStagger = isInt
+          ? size * (display ? INT_D_SUP_STAGGER : INT_SUP_STAGGER)
+          : 0;
+        const supW = visibleSup
+          ? widthOf(node.sup, scale, measurer, false, true, scriptFloor, fractionPadEm, scriptTrailEm) + supStagger
+          : 0;
+        const subW = visibleSub
+          ? widthOf(node.sub, scale, measurer, false, true, scriptFloor, fractionPadEm, scriptTrailEm)
+          : 0;
+        const x0 =
+          box.width -
+          (display && isInt && (visibleSup || visibleSub) ? size * INT_D_LIMIT_OVERLAP : 0);
         const supBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-        flow(node.sup, scale, 0, supBox, measurer, true, false, breakDepth + 2, scriptFloor);
-        for (const pc of supBox.pieces) box.pieces.push(rebase(pc, x0 + supStagger, supDy, true));
-        for (const r of supBox.rules) box.rules.push({ ...r, x1: x0 + supStagger + r.x1, x2: x0 + supStagger + r.x2, dy: supDy + r.dy });
+        if (visibleSup) {
+          flow(node.sup, scale, 0, supBox, measurer, true, false, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
+          for (const pc of supBox.pieces) box.pieces.push(rebase(pc, x0 + supStagger, supDy, true));
+          for (const r of supBox.rules) box.rules.push({ ...r, x1: x0 + supStagger + r.x1, x2: x0 + supStagger + r.x2, dy: supDy + r.dy });
+        }
         const subBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-        flow(node.sub, scale, 0, subBox, measurer, true, false, breakDepth + 2, scriptFloor);
-        for (const pc of subBox.pieces) box.pieces.push(rebase(pc, x0, subDy, true));
-        for (const r of subBox.rules) box.rules.push({ ...r, x1: x0 + r.x1, x2: x0 + r.x2, dy: subDy + r.dy });
+        if (visibleSub) {
+          flow(node.sub, scale, 0, subBox, measurer, true, false, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
+          for (const pc of subBox.pieces) box.pieces.push(rebase(pc, x0, subDy, true));
+          for (const r of subBox.rules) box.rules.push({ ...r, x1: x0 + r.x1, x2: x0 + r.x2, dy: subDy + r.dy });
+        }
         box.width = x0 + Math.max(supW, subW) + size * NARY_E_GAP;
-        flow(node.e, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor);
+        flow(node.e, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
         prevOperand = true;
         break;
       }
@@ -773,7 +836,7 @@ function flow(
         let coreDesc = 0;
         const parts: MathBox[] = node.e.map((part) => {
           const b: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-          flow(part, size, 0, b, measurer, tight, display, breakDepth + 1, scriptFloor);
+          flow(part, size, 0, b, measurer, tight, display, breakDepth + 1, scriptFloor, fractionPadEm, scriptTrailEm);
           for (const pc of b.pieces) {
             const m = measurer.metrics(pc.font);
             const asc = pc.ownAscent ?? pc.dy + m.ascent;
@@ -851,7 +914,15 @@ function flow(
         // A matrix/eqArr hugs its delimiter: no pad after the opener, only a
         // hair before the closer. An empty beg/end (cases' one-sided brace)
         // draws no glyph on that side.
-        const innerPad = size * (matLike ? DLM_MAT_END_PAD : dlmPad());
+        const lastPart = node.e[node.e.length - 1];
+        const tail = lastPart?.[lastPart.length - 1];
+        const trailingSpaces =
+          display && tail?.t === "run" && /^\s+$/.test(tail.text)
+            ? [...tail.text].length
+            : 0;
+        const innerPad =
+          size * (matLike ? DLM_MAT_END_PAD : dlmPad()) +
+          size * DLM_TRAILING_SPACE_PAD * trailingSpaces;
         const drawDelim = (ch: string) => {
           if (!ch) return;
           const asm = asmH !== undefined ? DLM_ASM_PIECES[ch] : undefined;
@@ -933,7 +1004,7 @@ function flow(
         const cells = node.rows.map((row) =>
           row.map((cell) => {
             const b: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-            flow(cell, size, 0, b, measurer, tight, display, breakDepth + 2, scriptFloor);
+            flow(cell, size, 0, b, measurer, tight, display, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
             for (const pc of b.pieces) {
               const m = measurer.metrics(pc.font);
               b.ascent = Math.max(b.ascent, pc.dy + m.ascent);
@@ -987,7 +1058,7 @@ function flow(
         const ruleThick = Math.max(size * RULE_THICK, 0.75);
         // Radicand laid out first so its extents size the sign / rule.
         const radBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-        flow(node.e, size, 0, radBox, measurer, tight, display, breakDepth + 2, scriptFloor);
+        flow(node.e, size, 0, radBox, measurer, tight, display, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
         let radAsc = m.ascent * 0.5;
         let radDesc = 0;
         for (const pc of radBox.pieces) {
@@ -1025,7 +1096,7 @@ function flow(
           const dScale = scriptSize(size, scriptFloor);
           box.width += size * RAD_KERN_BEFORE_DEG;
           const degBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-          flow(node.deg, dScale, 0, degBox, measurer, true, false, breakDepth + 2, scriptFloor);
+          flow(node.deg, dScale, 0, degBox, measurer, true, false, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
           const degDy = dy - radDesc + RAD_DEG_RAISE * signInkH + size * RAD_DEG_ADJ;
           for (const pc of degBox.pieces) box.pieces.push(rebase(pc, box.width, degDy, true));
           for (const r of degBox.rules) box.rules.push({ ...r, x1: box.width + r.x1, x2: box.width + r.x2, dy: degDy + r.dy });
@@ -1098,7 +1169,7 @@ function flow(
         const axis = dy + size * RULE_CENTER;
         const rowBoxes = node.rows.map((row) => {
           const b: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-          flow(row, size, 0, b, measurer, tight, display, breakDepth + 2, scriptFloor);
+          flow(row, size, 0, b, measurer, tight, display, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
           for (const pc of b.pieces) {
             const pm = measurer.metrics(pc.font);
             b.ascent = Math.max(b.ascent, pc.ownAscent ?? pc.dy + pm.ascent);
@@ -1131,7 +1202,7 @@ function flow(
         // Combining accent composed over the base by the font (Word emits the
         // base glyph followed by the combining mark at the same origin).
         const before = box.pieces.length;
-        flow(node.e, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor);
+        flow(node.e, size, dy, box, measurer, tight, display, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
         if (box.pieces.length > before) {
           const last = box.pieces[box.pieces.length - 1];
           last.text += node.chr;
@@ -1148,7 +1219,7 @@ function flow(
         const isTop = node.pos === "top";
         const bScale = isTop ? size : scriptSize(size, scriptFloor);
         const baseBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-        flow(node.e, bScale, 0, baseBox, measurer, tight, display, breakDepth + 2, scriptFloor);
+        flow(node.e, bScale, 0, baseBox, measurer, tight, display, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
         const baseW = baseBox.width;
         const maxVariant = GRP_VARIANTS_EM[GRP_VARIANTS_EM.length - 1] * size;
         let braceW = maxVariant;
@@ -1188,10 +1259,10 @@ function flow(
         // centered on the wider of the two.
         const isLow = node.pos === "low";
         const baseBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-        flow(node.e, size, 0, baseBox, measurer, tight, display, breakDepth + 2, scriptFloor);
+        flow(node.e, size, 0, baseBox, measurer, tight, display, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
         const lScale = scriptSize(size, scriptFloor);
         const limBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-        flow(node.lim, lScale, 0, limBox, measurer, true, false, breakDepth + 2, scriptFloor);
+        flow(node.lim, lScale, 0, limBox, measurer, true, false, breakDepth + 2, scriptFloor, fractionPadEm, scriptTrailEm);
         const w = Math.max(baseBox.width, limBox.width);
         const x0 = box.width;
         const baseX = x0 + (w - baseBox.width) / 2;
@@ -1219,12 +1290,14 @@ function naryDisplay(
   box: MathBox,
   measurer: TextMeasurer,
   scriptFloor: number,
+  fractionPadEm: number,
+  scriptTrailEm: number,
 ): void {
   const opFont = fontAt(size * NARY_OP_SCALE_D);
   const opW = measurer.width(node.chr, opFont);
   const scale = scriptSize(size, scriptFloor);
-  const supW = widthOf(node.sup, scale, measurer, false, true, scriptFloor);
-  const subW = widthOf(node.sub, scale, measurer, false, true, scriptFloor);
+  const supW = widthOf(node.sup, scale, measurer, false, true, scriptFloor, fractionPadEm, scriptTrailEm);
+  const subW = widthOf(node.sub, scale, measurer, false, true, scriptFloor, fractionPadEm, scriptTrailEm);
   const stackW = Math.max(opW, supW, subW);
   const x0 = box.width;
   const cx = x0 + stackW / 2;
@@ -1233,7 +1306,7 @@ function naryDisplay(
   // upper limit
   if (node.sup.length) {
     const supBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-    flow(node.sup, scale, 0, supBox, measurer, true, false, 2, scriptFloor);
+    flow(node.sup, scale, 0, supBox, measurer, true, false, 2, scriptFloor, fractionPadEm, scriptTrailEm);
     const ox = cx - supW / 2;
     const oy = dy + size * NARY_OVER_RAISE_D;
     for (const pc of supBox.pieces) box.pieces.push(rebase(pc, ox, oy, true));
@@ -1242,14 +1315,14 @@ function naryDisplay(
   // lower limit
   if (node.sub.length) {
     const subBox: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-    flow(node.sub, scale, 0, subBox, measurer, true, false, 2, scriptFloor);
+    flow(node.sub, scale, 0, subBox, measurer, true, false, 2, scriptFloor, fractionPadEm, scriptTrailEm);
     const ux = cx - subW / 2;
     const uy = dy - size * NARY_UNDER_DROP_D;
     for (const pc of subBox.pieces) box.pieces.push(rebase(pc, ux, uy, true));
     for (const r of subBox.rules) box.rules.push({ ...r, x1: ux + r.x1, x2: ux + r.x2, dy: uy + r.dy });
   }
   box.width = x0 + stackW + size * NARY_E_GAP;
-  flow(node.e, size, dy, box, measurer, false, true, 2, scriptFloor);
+  flow(node.e, size, dy, box, measurer, false, true, 2, scriptFloor, fractionPadEm, scriptTrailEm);
 }
 
 function widthOf(
@@ -1259,8 +1332,10 @@ function widthOf(
   display = false,
   tight = true,
   scriptFloor = 0,
+  fractionPadEm = FRAC_PAD,
+  scriptTrailEm = 0,
 ): number {
   const tmp: MathBox = { width: 0, ascent: 0, descent: 0, pieces: [], rules: [] };
-  flow(nodes, size, 0, tmp, measurer, tight, display, 2, scriptFloor);
+  flow(nodes, size, 0, tmp, measurer, tight, display, 2, scriptFloor, fractionPadEm, scriptTrailEm);
   return tmp.width;
 }

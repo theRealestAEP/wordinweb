@@ -31,7 +31,7 @@ export interface TextMeasurer {
 
 export function fontKey(font: FontSpec): string {
   const paint = font.paintFamily && font.paintFamily !== font.family ? `${font.paintFamily}>` : "";
-  return `${font.bold ? "bold " : ""}${font.italic ? "italic " : ""}${font.size}px ${paint}${font.family}`;
+  return `${font.bold ? "bold " : ""}${font.italic ? "italic " : ""}${font.kerning ? "kern " : ""}${font.size}px ${paint}${font.family}`;
 }
 
 /**
@@ -220,6 +220,37 @@ export function hasCambriaMath(): boolean {
   return _cambriaMath;
 }
 
+let _segoeUIEmoji: boolean | undefined;
+/** True when the browser can resolve the requested Windows emoji face instead
+ * of silently falling through to its platform emoji font. */
+export function hasSegoeUIEmoji(): boolean {
+  if (_segoeUIEmoji !== undefined) return _segoeUIEmoji;
+  try {
+    const canvas =
+      typeof OffscreenCanvas !== "undefined"
+        ? new OffscreenCanvas(1, 1)
+        : typeof document !== "undefined"
+          ? document.createElement("canvas")
+          : null;
+    const ctx = canvas?.getContext("2d") as
+      | CanvasRenderingContext2D
+      | OffscreenCanvasRenderingContext2D
+      | null;
+    if (!ctx) return (_segoeUIEmoji = false);
+    ctx.font = '48px "Segoe UI Emoji", sans-serif';
+    const requested = ctx.measureText("☺");
+    ctx.font = "48px sans-serif";
+    const fallback = ctx.measureText("☺");
+    _segoeUIEmoji =
+      Math.abs(requested.width - fallback.width) > 0.01 ||
+      Math.abs((requested.actualBoundingBoxRight ?? 0) - (fallback.actualBoundingBoxRight ?? 0)) > 0.01 ||
+      Math.abs((requested.actualBoundingBoxAscent ?? 0) - (fallback.actualBoundingBoxAscent ?? 0)) > 0.01;
+  } catch {
+    _segoeUIEmoji = false;
+  }
+  return _segoeUIEmoji;
+}
+
 /** Below-baseline share of the math glyph box, used by the delimiter
  * vertical-stretch anchor in the DOM renderer. The math LINE metric stays the
  * STIX Two Math hhea share (0.238) even when real Cambria Math paints the
@@ -259,16 +290,17 @@ export class CanvasMeasurer implements TextMeasurer {
 
   private setFont(font: FontSpec): void {
     const css = cssFont(font);
-    if (css !== this.currentFont) {
+    const key = `${css}\0${font.kerning ? "normal" : "none"}`;
+    if (key !== this.currentFont) {
       this.ctx.font = css;
       // Word lays text out with nominal advances (verified against Word-mac's
       // own PDF export: per-glyph advances match the font's hmtx exactly).
       // Canvas applies kerning AND ligatures unless told otherwise — "ffi"
       // in "officia" measures ~0.5px narrow while the DOM renderer paints
       // with font-variant-ligatures: none. optimizeSpeed disables shaping.
-      (this.ctx as { fontKerning?: string }).fontKerning = "none";
+      (this.ctx as { fontKerning?: string }).fontKerning = font.kerning ? "normal" : "none";
       (this.ctx as { textRendering?: string }).textRendering = "optimizeSpeed";
-      this.currentFont = css;
+      this.currentFont = key;
     }
   }
 
