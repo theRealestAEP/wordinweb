@@ -888,10 +888,13 @@ function parseRun(
       case "endnoteReference": {
         const id = intAttr(el, "id");
         if (id !== undefined) {
+          const customMark = attr(el, "customMarkFollows");
           run.content.push({
             kind: "noteRef",
             noteType: ln === "footnoteReference" ? "footnote" : "endnote",
             id,
+            customMarkFollows:
+              customMark !== undefined && customMark !== "0" && customMark !== "false" && customMark !== "off",
           });
         }
         break;
@@ -1396,6 +1399,7 @@ function parseDrawing(
     const rot = intAttr(xfrm, "rot");
     const lnEl = child(spPr, "ln");
     const strokeColor = lnEl && !child(lnEl, "noFill") ? fillColorOf(lnEl) : undefined;
+    const fill = child(spPr, "noFill") ? undefined : (fillColorOf(spPr) ?? styleFillOf(textboxEl));
     const bodyPr = child(textboxEl, "bodyPr");
     const insetOf = (name: string, dflt: number): number => {
       const v = bodyPr ? intAttr(bodyPr, name) : undefined;
@@ -1454,7 +1458,7 @@ function parseDrawing(
         vAlign: vAlignOf(posV),
         blocks: txbxContent ? parseBlocks(txbxContent, ctx) : [],
         ...(textboxChainId !== undefined ? { chainId: textboxChainId, chainSeq: textboxChainSeq ?? 0 } : {}),
-        ...(fillColorOf(spPr) ? { fill: fillColorOf(spPr)! } : {}),
+        ...(fill ? { fill } : {}),
         ...(strokeColor ? { stroke: { color: strokeColor, weight: Math.max(emuToPx(intAttr(lnEl, "w") ?? 0), 0.75) } } : {}),
         textAnchor: anchorAttr === "ctr" ? "middle" : anchorAttr === "b" ? "bottom" : anchorAttr === "t" ? "top" : undefined,
         insets: {

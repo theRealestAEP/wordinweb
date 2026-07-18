@@ -1469,6 +1469,12 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       hit.dataset.dxwDrawing = "1";
       if (item.ink) hit.dataset.dxwInk = "1";
       if (item.smartArt) hit.dataset.dxwSmartArt = "1";
+      if (item.height < 12) {
+        const target = document.createElement("div");
+        target.style.cssText =
+          `position:absolute;left:0;top:${-(12 - item.height) / 2}px;width:100%;height:12px;cursor:move;`;
+        hit.appendChild(target);
+      }
       return hit;
     }
     case "edge": {
@@ -2069,6 +2075,10 @@ function renderText(item: TextItem): HTMLElement {
     el.style.alignItems = "flex-end";
     el.style.whiteSpace = "pre";
     el.style.font = cssFont(item.font);
+    if (item.font.paintDY) {
+      const transform = el.style.transform;
+      el.style.transform = `${transform ? `${transform} ` : ""}translateY(${item.font.paintDY}px)`;
+    }
   }
   if (item.rtl) {
     // RTL run: let the browser shape (Arabic contextual forms) and order the
@@ -2163,7 +2173,9 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
   // with w:space on Word's fractional rectangle positions; zero-space table/page
   // rules match Word better on the device grid.
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
-  const w = Math.max(1 / dpr, Math.round(border.width * dpr) / dpr);
+  const declaredWidth =
+    border.rawWidth !== undefined && border.rawWidth < 0.25 ? border.rawWidth : border.width;
+  const w = Math.max(1 / dpr, Math.round(declaredWidth * dpr) / dpr);
   const snap = (v: number) => Math.round(v * dpr) / dpr;
   const place = border.space === 0 ? snap : (v: number) => v;
   // Word's dash pattern is [3 1] x line width (read from its own PDF

@@ -109,6 +109,8 @@ interface FragAtom {
    * font (small-caps reduced segments still key line metrics to the base
    * run size, like Word). */
   metricsFont?: FontSpec;
+  /** Hidden field result that sizes the line without painting or setting its baseline. */
+  metricsStrut?: boolean;
   /** Render right-to-left (Arabic/Hebrew run). */
   rtl?: boolean;
 }
@@ -238,6 +240,7 @@ function hyphenBreaks(word: string): number[] {
   }
   return out;
 }
+
 // Word's URL/long-token break rule, measured against every mid-token line
 // break on pp116-260 of wild2-legal-nih-contract's Word PDF (22 breaks):
 // the ONLY in-token break opportunity is the hyphen rule above. '/', '_',
@@ -380,6 +383,8 @@ export interface LineSpan {
   src?: TextSource;
   /** Line-metrics font when it differs from the paint font (small caps). */
   metricsFont?: FontSpec;
+  /** Hidden field result that sizes the line without painting or setting its baseline. */
+  metricsStrut?: boolean;
   /** Numbering/bullet label glyph (sizes the line only when taller than the
    * text content — see finishLine). */
   numLabel?: boolean;
@@ -571,6 +576,11 @@ const TAMIL_GLYPH_SCALE = 0.735;
 // only (see FontSpec.paintDY) — pitch and advances are untouched. Calibrated on
 // probe3-indic p1 (lineShift 2.89 -> 0.17 at 2px@11pt).
 const TAMIL_BASELINE_DY_EM = 0.136;
+
+// Noto Sans Lao Looped is the distributable substitute for Word's DokChampa.
+// DokChampa's shaped advances are 1.048x wider for the Lao probe text, so use
+// the same horizontal scale for both fitting and paint.
+const LAO_GLYPH_SCALE = 1.048;
 
 // Arabic kashida justification (w:jc lowKashida/mediumKashida/highKashida).
 // Word justifies by elongating the baseline joins (kashida/tatweel) rather than
@@ -1223,6 +1233,7 @@ function breakParagraphImpl(
         href: atom.href,
         src: atom.src ? { ...atom.src, offset: atom.src.offset + sliceOff } : undefined,
         metricsFont: atom.metricsFont,
+        metricsStrut: atom.metricsStrut,
         rtl: atom.rtl,
         rtlLevel: levelOf(atom.rtl),
       });
@@ -1409,6 +1420,49 @@ function breakParagraphImpl(
             if (a.kind === "frag" || a.kind === "space" || a.kind === "image") pre += a.width;
           }
           if (found) target = stop.pos - pre;
+        }
+      }
+      if (
+        doc.compatibilityMode < 15 &&
+        stop.align === "left" &&
+        !bidiPara &&
+        curLineWidth > 0
+      ) {
+        let nextAtom = ai + 1;
+        let probeX = Math.max(target, x + 2);
+        while (atoms[nextAtom]?.kind === "tab") {
+          let probeStop = nextTabStop(
+            probeX + offset,
+            props.tabs,
+            contentWidth - indentRight,
+            doc.defaultTabStop,
+          );
+          if (opts?.inTableCell) {
+            let guard = 0;
+            while (probeStop.align === "decimal" && guard++ < 8) {
+              probeStop = nextTabStop(
+                probeStop.pos,
+                props.tabs,
+                contentWidth - indentRight,
+                doc.defaultTabStop,
+              );
+            }
+          }
+          if (probeStop.align !== "left") break;
+          probeX = Math.max(probeStop.pos - offset, probeX + 2);
+          nextAtom++;
+        }
+        let firstWordWidth = 0;
+        for (let j = nextAtom; j < atoms.length; j++) {
+          const a = atoms[j];
+          if (a.kind !== "frag") break;
+          firstWordWidth += a.width;
+        }
+        const lineEnd = lineStartX(lineIndex) + availFor(lineIndex);
+        if (firstWordWidth > 0 && probeX + firstWordWidth > lineEnd + 0.01) {
+          flush(false, false);
+          ai--;
+          continue;
         }
       }
       // A right/decimal tab whose ALIGNED text cannot reach its stop (the
@@ -1837,7 +1891,7 @@ function breakParagraphImpl(
     // this atom to a fresh line, where a mid-segment continuation re-insets.
     const padL = bdrPad && (!sameBdrAtom(atoms[ai - 1], atom) || curLineWidth === 0) ? bdrPad : 0;
     x += padL;
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, metricsStrut: atom.metricsStrut, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
     curLineWidth += padL + atom.width + bdrPadR;
     x += atom.width + bdrPadR;
     if (atom.text.trim().length > 0) prevContentCJK = fragIsCJK;
@@ -2079,6 +2133,7 @@ function finishLine(
   // line profiles (substituted CJK faces) do NOT grid-snap under auto
   // spacing (staging-eastasian), while Latin faces do.
   let tallestTextIsEa = false;
+  let metricsStrutHeight = 0;
 
   const consider = (font: FontSpec, imageHeight?: number, objRaise = 0, descShift = 0) => {
     if (imageHeight !== undefined) {
@@ -2165,7 +2220,7 @@ function finishLine(
   // p17) leaves the line at the 10pt pitch. Whitespace metrics count only
   // when the line holds nothing else.
   const solidSpans = metricSpans.filter(
-    (s) => s.image || s.drawing || s.math || s.leader || s.text === undefined || !/^[ \t]*$/.test(s.text),
+    (s) => s.metricsStrut || s.image || s.drawing || s.math || s.leader || s.text === undefined || !/^[ \t]*$/.test(s.text),
   );
   if (solidSpans.length > 0) metricSpans = solidSpans;
   // A numbering label sizes its line only when the label's own single-line
@@ -2209,7 +2264,13 @@ function finishLine(
     const lineHasObject = metricSpans.some((s) => s.image || s.drawing);
     for (const s of metricSpans) {
       let textMetrics: ReturnType<TextMeasurer["metrics"]> | undefined;
-      if (s.image || s.drawing) {
+      if (s.metricsStrut) {
+        metricsStrutHeight = Math.max(
+          metricsStrutHeight,
+          measurer.metrics(s.metricsFont ?? s.font).lineHeight,
+        );
+        consider(s.metricsFont ?? s.font);
+      } else if (s.image || s.drawing) {
         const objectMetrics = measurer.metrics(s.metricsFont ?? s.font);
         const objectHeight = s.image?.height ?? s.drawing!.height;
         const objRaise = s.props.raise ?? 0;
@@ -2307,6 +2368,15 @@ function finishLine(
     )
       ? Math.min(...metricSpans.map((s) => -s.props.raise!))
       : 0;
+
+  if (metricsStrutHeight > 0) {
+    for (const s of spans) {
+      if (s.metricsStrut || s.image || s.drawing || s.math) continue;
+      const spanHeight = measurer.metrics(s.font).lineHeight;
+      const paintDY = Math.max(0, (metricsStrutHeight - spanHeight) / 2);
+      if (paintDY > 0) s.font = { ...s.font, paintDY: (s.font.paintDY ?? 0) + paintDY };
+    }
+  }
 
   // w:docGrid (type=lines): Word snaps each line's single-line font height up
   // to the grid pitch before the line-spacing multiplier. The extra space sits
@@ -2644,6 +2714,17 @@ function buildAtoms(
 ): { atoms: Atom[]; anchors: Shape[] } {
   const atoms: Atom[] = [];
   const anchors: Shape[] = [];
+  const stylelessOleParagraph =
+    doc.styles.defaultRPr.font === undefined &&
+    doc.styles.defaultRPr.size === undefined &&
+    para.children.some((child) => {
+      const runs = child.type === "run" ? [child] : child.runs;
+      return runs.some((run) =>
+        run.content.some(
+          (content) => content.kind === "image" && content.embeddedObject !== undefined,
+        ),
+      );
+    });
 
   // RTL (w:bidi) paragraph: Latin words and numbers embedded in an RTL run
   // resolve to an even (LTR) bidi level (UAX#9), so per-atom rtl comes from a
@@ -2662,7 +2743,13 @@ function buildAtoms(
           : 0;
 
   const pushRun = (run: Run, href?: string) => {
-    const baseProps = doc.effectiveRunProps(para, run.props);
+    let baseProps = doc.effectiveRunProps(para, run.props);
+    // When a minimal package omits styles.xml, current Word synthesizes its
+    // 12pt Normal defaults. This matters for inline OLE objects because their
+    // horizontal position begins immediately after the preceding text.
+    if (stylelessOleParagraph && baseProps.size === undefined) {
+      baseProps = { ...baseProps, size: 16 };
+    }
     if (baseProps.vanish) return;
     const font = fontOf(baseProps, fallbackFamily);
     // Kashida-justified paragraph: fold the per-glyph elongation into this RTL
@@ -2761,6 +2848,20 @@ function buildAtoms(
             });
             break;
           }
+          if (!text && /^\s*SEQ\b/i.test(content.instruction) && /\\h(\s|$)/i.test(content.instruction)) {
+            atoms.push({
+              kind: "frag",
+              text: "",
+              props,
+              font,
+              width: 0,
+              href,
+              src: { run, t: null, offset: 0 },
+              metricsFont: vertMetricsFont,
+              metricsStrut: true,
+            });
+            break;
+          }
           // Fields are atomic: src.t === null means "format the whole run".
           if (text) pushStyled(displayText(text, props), props, font, href, { run, t: null, offset: 0 }, vertMetricsFont);
           break;
@@ -2808,6 +2909,8 @@ function buildAtoms(
         case "noteRef": {
           const text = content.self
             ? (fields.selfNoteMark?.() ?? "")
+            : content.customMarkFollows
+              ? ""
             : (fields.noteMark?.(content.noteType, content.id) ?? "");
           if (!text) break;
           // Word's FootnoteReference style supplies superscript; force it
@@ -2900,6 +3003,10 @@ function buildAtoms(
       : hasLao && !hasDeva && !hasTamil ? "Noto Sans Lao Looped"
       : null;
     if (indicFace && font.family.toLowerCase() !== indicFace.toLowerCase()) {
+      const scriptProps =
+        indicFace === "Noto Sans Lao Looped"
+          ? { ...props, textScale: (props.textScale ?? 1) * LAO_GLYPH_SCALE }
+          : props;
       // Word substitutes Nirmala UI per script on macOS PDF export: Devanagari
       // -> Mangal (whose glyph scale matches, so no size change), Tamil ->
       // Vijaya. We only have Latha for Tamil, and Latha's glyphs run ~1.37x
@@ -2945,7 +3052,7 @@ function buildAtoms(
         const seg = text.slice(i, j);
         const src = srcBase ? { ...srcBase, offset: srcBase.offset + i } : undefined;
         if (isSpace) pushText(seg, props, font, href, src, metricsFont);
-        else pushText(seg, props, indicFont, href, src, indicMetrics);
+        else pushText(seg, scriptProps, indicFont, href, src, indicMetrics);
         i = j;
       }
       return;
@@ -3339,8 +3446,8 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       // Word recomputes SEQ on open; the docx cache is stale (and this
       // repo's sanitizer remaps cached digits). Compute per-identifier.
       const ident = instr.split(/\s+/)[1];
-      if (ident && ctx.seq && fieldKey) return ctx.seq(ident, fieldKey, instr);
-      return cachedResult || "";
+      const value = ident && ctx.seq && fieldKey ? ctx.seq(ident, fieldKey, instr) : cachedResult || "";
+      return /\\h(\s|$)/i.test(instr) ? "" : value;
     }
     case "REF": {
       // Word recomputes REF on open — the docx cache is stale (and this

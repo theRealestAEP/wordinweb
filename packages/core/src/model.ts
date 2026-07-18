@@ -673,6 +673,8 @@ export interface NoteRefContent {
   noteType: "footnote" | "endnote";
   id: number;
   self?: boolean;
+  /** The document supplies the visible mark in the following run content. */
+  customMarkFollows?: boolean;
 }
 
 /** w:ruby — an East-Asian ruby (furigana) cluster: an annotation run (w:rt)

@@ -11,7 +11,15 @@ import { pxToTwips } from "../units.js";
 import { listTypeAt, setListLevel } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
 import { isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
-import { drawingWordArtText, insertInkAt, isDrawingWordArt, setDrawingWordArtText, type DrawingTool } from "./drawings.js";
+import {
+  drawingLineStyle,
+  drawingWordArtText,
+  insertInkAt,
+  isDrawingWordArt,
+  setDrawingLineStyle,
+  setDrawingWordArtText,
+  type DrawingTool,
+} from "./drawings.js";
 import { ensureParagraphAfterTerminalBlock, exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph, topLevelBlockOf } from "./blocks.js";
 import { SelectionSegment, selectionTextLogical } from "./commands.js";
 import {
@@ -28,6 +36,7 @@ import {
   setImageWrap,
 } from "./images.js";
 import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
+import { requestTextInputDialog } from "./dialog.js";
 
 export type ObjectArrangeAction =
   | "alignLeft"
@@ -105,6 +114,10 @@ export interface EditorHost {
   onFormatShortcut?: (kind: "bold" | "italic" | "underline") => void;
   /** Cmd/Ctrl+Alt+1..6 / 0 handler: apply Heading N / Normal (null). */
   onStyleShortcut?: (styleId: string | null) => void;
+  /** Text-context and keyboard commands implemented by the public editor API. */
+  onTextCommand?: (
+    command: "link" | "comment" | "alignLeft" | "alignCenter" | "alignRight" | "justify" | "bullet" | "number",
+  ) => void;
 }
 
 interface Caret {
@@ -210,6 +223,7 @@ export class DocxEditor {
    * snapshot that the following text insertion belongs to. */
   private pendingClickTypeCheckpoint = false;
   private clickTypeCheckpointUntil = 0;
+  private textContextMenu: HTMLDivElement | null = null;
   /** True while a drag-selection is in progress (checked by onMouseUp, which
    * bubbles from the container BEFORE the document-level drag-end listener). */
   private dragSelecting = false;
@@ -963,6 +977,7 @@ export class DocxEditor {
     c.addEventListener("copy", this.onCopy);
     c.addEventListener("cut", this.onCut);
     c.addEventListener("paste", this.onPaste);
+    c.addEventListener("contextmenu", this.onContextMenu);
     c.addEventListener("dragover", this.onDragOver);
     c.addEventListener("drop", this.onDrop);
     this.applyHfChrome();
@@ -983,8 +998,10 @@ export class DocxEditor {
     c.removeEventListener("copy", this.onCopy);
     c.removeEventListener("cut", this.onCut);
     c.removeEventListener("paste", this.onPaste);
+    c.removeEventListener("contextmenu", this.onContextMenu);
     c.removeEventListener("dragover", this.onDragOver);
     c.removeEventListener("drop", this.onDrop);
+    this.dismissTextContextMenu();
     this.dismissSuggestionPopover();
     this.setDrawingTool(null);
     this.deselectInkGroup();
@@ -2187,23 +2204,73 @@ export class DocxEditor {
     };
     extra("Alt", "Alternative text", () => {
       const cur = imageAltText(src);
-      const next = window.prompt("Alternative text", cur);
-      if (next === null) return;
-      this.host.history?.checkpoint();
-      if (setImageAltText(this.host.doc, src, next)) this.host.rerender();
-      this.deselectImage();
+      void requestTextInputDialog(this.host.container, {
+        title: "Alternative text",
+        label: "Describe this object for screen readers",
+        value: cur,
+      }).then((next) => {
+        if (next === null) return;
+        this.host.history?.checkpoint();
+        if (setImageAltText(this.host.doc, src, next)) this.host.rerender();
+        this.deselectImage();
+      });
     });
     extra("Size", "Exact size (px)", () => {
       const curW = parseFloat(el.style.width) || 0;
       const curH = parseFloat(el.style.height) || 0;
       const cur = `${Math.round(curW)}x${Math.round(curH)}`;
-      const next = window.prompt("Size in px (width x height)", cur);
-      const m = next && /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/i.exec(next);
-      if (!m) return;
-      this.host.history?.checkpoint();
-      if (resizeDrawing(this.host.doc, src, parseInt(m[1], 10), parseInt(m[2], 10))) this.host.rerender();
-      this.deselectImage();
+      void requestTextInputDialog(this.host.container, {
+        title: "Exact size",
+        label: "Width × height in pixels",
+        value: cur,
+        placeholder: "640 × 360",
+      }).then((next) => {
+        const match = next && /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/i.exec(next);
+        if (!match) return;
+        this.host.history?.checkpoint();
+        if (resizeDrawing(this.host.doc, src, parseInt(match[1], 10), parseInt(match[2], 10))) this.host.rerender();
+        this.deselectImage();
+      });
     });
+    extra("Position", "Exact page position (px)", () => {
+      const curX = parseFloat(el.style.left) || 0;
+      const curY = parseFloat(el.style.top) || 0;
+      void requestTextInputDialog(this.host.container, {
+        title: "Page position",
+        label: "X, Y in pixels",
+        value: `${Math.round(curX)}, ${Math.round(curY)}`,
+        placeholder: "120, 80",
+      }).then((next) => {
+        const match = next && /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/.exec(next);
+        if (!match) return;
+        this.host.history?.checkpoint();
+        if (!isFloatingDrawing(src)) setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
+        if (setFloatingPagePosition(this.host.doc, src, parseFloat(match[1]), parseFloat(match[2]))) {
+          this.host.rerender();
+          this.reselectImage(src);
+        }
+      });
+    });
+    if (kind === "drawing") {
+      extra("Outline", "Outline color and weight", () => {
+        const style = drawingLineStyle(src);
+        if (!style) return;
+        void requestTextInputDialog(this.host.container, {
+          title: "Outline",
+          label: "Color and width in pixels",
+          value: `${style.color}, ${Number(style.width.toFixed(2))}`,
+          placeholder: "#1a73e8, 1.5",
+        }).then((next) => {
+          const match = next && /^\s*#?([0-9a-f]{6})\s*,\s*(\d+(?:\.\d+)?)\s*$/i.exec(next);
+          if (!match) return;
+          this.host.history?.checkpoint();
+          if (setDrawingLineStyle(this.host.doc, src, `#${match[1]}`, parseFloat(match[2]))) {
+            this.host.rerender();
+            this.reselectImage(src);
+          }
+        });
+      });
+    }
     if (kind === "drawing" && isDrawingWordArt(src)) {
       extra("Edit text", "Edit WordArt text", () => this.editDrawingWordArt(src));
     }
@@ -2385,13 +2452,17 @@ export class DocxEditor {
 
     button("Edit text", "Edit watermark text", () => {
       const cur = wordArtText(src);
-      const next = window.prompt("Watermark text", cur);
-      if (next === null || next === cur) return;
-      this.host.history?.checkpoint();
-      if (setWordArtText(this.host.doc, src, next)) {
-        this.host.rerender();
-        this.reselectWordArt(src);
-      }
+      void requestTextInputDialog(this.host.container, {
+        title: "Watermark text",
+        value: cur,
+      }).then((next) => {
+        if (next === null || next === cur) return;
+        this.host.history?.checkpoint();
+        if (setWordArtText(this.host.doc, src, next)) {
+          this.host.rerender();
+          this.reselectWordArt(src);
+        }
+      });
     });
     const sep1 = document.createElement("span");
     sep1.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
@@ -2403,15 +2474,20 @@ export class DocxEditor {
     bar.appendChild(sep2);
     button("Rotate", "Set rotation (degrees)", () => {
       const cur = wordArtRotation(src);
-      const next = window.prompt("Rotation (degrees clockwise)", String(cur));
-      if (next === null) return;
-      const deg = parseFloat(next);
-      if (!Number.isFinite(deg)) return;
-      this.host.history?.checkpoint();
-      if (setWordArtRotation(this.host.doc, src, deg)) {
-        this.host.rerender();
-        this.reselectWordArt(src);
-      }
+      void requestTextInputDialog(this.host.container, {
+        title: "Watermark rotation",
+        label: "Degrees clockwise",
+        value: String(cur),
+      }).then((next) => {
+        if (next === null) return;
+        const degrees = parseFloat(next);
+        if (!Number.isFinite(degrees)) return;
+        this.host.history?.checkpoint();
+        if (setWordArtRotation(this.host.doc, src, degrees)) {
+          this.host.rerender();
+          this.reselectWordArt(src);
+        }
+      });
     });
     const sep3 = document.createElement("span");
     sep3.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
@@ -3606,16 +3682,21 @@ export class DocxEditor {
     };
     const split = this.splitParagraphCore();
     if (!split) return null;
-    const afterSources = [split.after];
+    const hasPageBreak = (element: XmlElement): boolean =>
+      (localName(element.name) === "br" && attr(element, "type") === "page") ||
+      element.children.some(hasPageBreak);
+    const insertBeforeTrailingBreak = hasPageBreak(split.after);
+    const afterSources: XmlElement[] = insertBeforeTrailingBreak ? [] : [split.after];
     const w = split.after.name.includes(":") ? split.after.name.slice(0, split.after.name.indexOf(":") + 1) : "";
     const templatePPr = split.after.children.find((child) => localName(child.name) === "pPr");
     const templateRun = split.after.children.find((child) =>
       localName(child.name) === "r" && child.children.includes(this.caret!.t)
     );
     const templateRPr = templateRun?.children.find((child) => localName(child.name) === "rPr");
-    let previous = split.after;
+    let previous = insertBeforeTrailingBreak ? split.before : split.after;
+    let caretSource = split.after;
     for (let i = 1; i < lineCount; i++) {
-      if (this.suggesting) markParagraphGlyph(previous, "ins", this.revMeta());
+      if (this.suggesting && previous !== split.before) markParagraphGlyph(previous, "ins", this.revMeta());
       const t: XmlElement = {
         name: this.caret!.t.name,
         attrs: { ...this.caret!.t.attrs, "xml:space": "preserve" },
@@ -3638,11 +3719,14 @@ export class DocxEditor {
       parent.children.splice(previousIndex + 1, 0, paragraph);
       afterSources.push(paragraph);
       previous = paragraph;
+      caretSource = paragraph;
       this.caret = { t, run: caret.run, offset: 0 };
     }
+    if (insertBeforeTrailingBreak) afterSources.push(split.after);
     const reparsed = this.host.doc.reparseDirectBodyParagraphSplits(split.before, afterSources);
     if (reparsed) {
-      for (const child of reparsed[reparsed.length - 1].children) {
+      const caretParagraph = reparsed[afterSources.indexOf(caretSource) + 1];
+      for (const child of caretParagraph.children) {
         const runs = child.type === "run" ? [child] : child.runs;
         const run = runs.find((candidate) =>
           candidate.content.some((content) => content.kind === "text" && content.srcT === this.caret!.t),
@@ -3707,6 +3791,112 @@ export class DocxEditor {
     };
   }
 
+  private dismissTextContextMenu = (): void => {
+    this.textContextMenu?.remove();
+    this.textContextMenu = null;
+    document.removeEventListener("mousedown", this.onContextMenuDocumentMouseDown);
+  };
+
+  private onContextMenuDocumentMouseDown = (event: MouseEvent): void => {
+    if (!this.textContextMenu?.contains(event.target as Node)) this.dismissTextContextMenu();
+  };
+
+  private onContextMenu = (event: MouseEvent): void => {
+    const target = event.target as HTMLElement | null;
+    if (!target?.closest('[data-dxw-item-kind="text"]')) return;
+    const caret = this.caretFromPoint(event.clientX, event.clientY);
+    if (!caret || (this.regionOf(caret.t) === "hf") !== this.inHeaderFooter) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.dismissTextContextMenu();
+    if (!this.hasSelection()) {
+      this.caret = caret;
+      this.selectWordAt(caret);
+    }
+
+    const menu = document.createElement("div");
+    menu.dataset.dxwTextContextMenu = "1";
+    menu.setAttribute("role", "menu");
+    menu.style.cssText =
+      `position:fixed;left:${event.clientX}px;top:${event.clientY}px;z-index:2147483647;min-width:210px;` +
+      "padding:5px;background:#fff;border:1px solid #dadce0;border-radius:8px;box-shadow:0 4px 18px rgba(0,0,0,.2);" +
+      "font:13px system-ui,sans-serif;color:#202124;";
+    const isApplePlatform = /Mac|iPhone|iPad/.test(navigator.platform);
+    const mod = isApplePlatform ? "⌘" : "Ctrl+";
+    const item = (label: string, shortcut: string, disabled: boolean, action: () => void): void => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.disabled = disabled;
+      button.setAttribute("role", "menuitem");
+      button.style.cssText =
+        "display:flex;width:100%;align-items:center;justify-content:space-between;gap:24px;border:0;border-radius:5px;" +
+        `padding:7px 9px;background:transparent;color:${disabled ? "#9aa0a6" : "#202124"};cursor:${disabled ? "default" : "pointer"};`;
+      const name = document.createElement("span");
+      name.textContent = label;
+      const keys = document.createElement("span");
+      keys.textContent = shortcut;
+      keys.style.color = "#5f6368";
+      keys.style.fontSize = "11px";
+      button.append(name, keys);
+      button.addEventListener("mouseenter", () => {
+        if (!button.disabled) button.style.background = "#f1f3f4";
+      });
+      button.addEventListener("mouseleave", () => {
+        button.style.background = "transparent";
+      });
+      button.addEventListener("click", () => {
+        if (button.disabled) return;
+        this.dismissTextContextMenu();
+        action();
+      });
+      menu.appendChild(button);
+    };
+    const separator = (): void => {
+      const line = document.createElement("div");
+      line.style.cssText = "height:1px;background:#e8eaed;margin:4px 2px;";
+      menu.appendChild(line);
+    };
+    const selectedText = selectionTextLogical(this.host.doc, this.getSelectionSegments());
+    const clipboard = navigator.clipboard;
+    const copy = (): Promise<void> => clipboard.writeText(selectedText);
+    item("Copy", `${mod}C`, !selectedText || !clipboard?.writeText, () => void copy());
+    item("Cut", `${mod}X`, !selectedText || !clipboard?.writeText, () => {
+      void copy().then(() => {
+        this.host.history?.checkpoint();
+        this.removeSelectedText();
+        this.commit();
+      });
+    });
+    item("Paste", `${mod}V`, !clipboard?.readText, () => {
+      void clipboard.readText().then((text) => {
+        if (text) this.insertText(text);
+      });
+    });
+    separator();
+    item("Bold", `${mod}B`, !selectedText, () => this.host.onFormatShortcut?.("bold"));
+    item("Italic", `${mod}I`, !selectedText, () => this.host.onFormatShortcut?.("italic"));
+    item("Underline", `${mod}U`, !selectedText, () => this.host.onFormatShortcut?.("underline"));
+    separator();
+    item("Link…", `${mod}K`, !selectedText, () => this.host.onTextCommand?.("link"));
+    item("New comment…", isApplePlatform ? "⌘⌥A" : "Ctrl+Alt+M", !selectedText, () => this.host.onTextCommand?.("comment"));
+    item("Bulleted list", `${mod}Shift+L`, false, () => this.host.onTextCommand?.("bullet"));
+    item("Numbered list", `${mod}Shift+7`, false, () => this.host.onTextCommand?.("number"));
+    separator();
+    item("Align left", `${mod}L`, false, () => this.host.onTextCommand?.("alignLeft"));
+    item("Center", `${mod}E`, false, () => this.host.onTextCommand?.("alignCenter"));
+    item("Align right", `${mod}R`, false, () => this.host.onTextCommand?.("alignRight"));
+    item("Justify", `${mod}J`, false, () => this.host.onTextCommand?.("justify"));
+    separator();
+    item("Select all", `${mod}A`, false, () => this.selectAll());
+
+    document.body.appendChild(menu);
+    const rect = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(6, Math.min(event.clientX, window.innerWidth - rect.width - 6))}px`;
+    menu.style.top = `${Math.max(6, Math.min(event.clientY, window.innerHeight - rect.height - 6))}px`;
+    this.textContextMenu = menu;
+    setTimeout(() => document.addEventListener("mousedown", this.onContextMenuDocumentMouseDown), 0);
+  };
+
   // ---------- keyboard ----------
 
   private onKeyDown = (e: KeyboardEvent): void => {
@@ -3717,6 +3907,11 @@ export class DocxEditor {
         (e.key.length !== 1 || e.metaKey || e.ctrlKey || e.altKey)) {
       this.pendingClickTypeCheckpoint = false;
       this.clickTypeCheckpointUntil = 0;
+    }
+    if (this.textContextMenu) {
+      if (e.key === "Escape") e.preventDefault();
+      this.dismissTextContextMenu();
+      if (e.key === "Escape") return;
     }
     if (e.key === "Escape" && this.drawingTool) {
       e.preventDefault();
@@ -3845,6 +4040,17 @@ export class DocxEditor {
       }
     }
     const meta = e.metaKey || e.ctrlKey;
+    // Word: Ctrl+Alt+M (Windows) / Cmd+Option+A (Mac) adds a comment.
+    const isApplePlatform = /Mac|iPhone|iPad/.test(navigator.platform);
+    if (
+      isApplePlatform
+        ? e.metaKey && e.altKey && e.key.toLowerCase() === "a"
+        : e.ctrlKey && e.altKey && e.key.toLowerCase() === "m"
+    ) {
+      e.preventDefault();
+      if (this.hasSelection()) this.host.onTextCommand?.("comment");
+      return;
+    }
     // Word parity: Ctrl/Cmd+Alt+1..6 apply Heading 1..6; +0 back to Normal.
     if (meta && e.altKey && /^[0-6]$/.test(e.key)) {
       e.preventDefault();
@@ -3863,6 +4069,28 @@ export class DocxEditor {
           e.preventDefault();
           this.host.onFormatShortcut?.(k === "b" ? "bold" : k === "i" ? "italic" : "underline");
         }
+        return;
+      }
+      if (!e.shiftKey && k === "k") {
+        e.preventDefault();
+        if (this.hasSelection()) this.host.onTextCommand?.("link");
+        return;
+      }
+      if (e.shiftKey && (k === "l" || k === "8")) {
+        e.preventDefault();
+        this.host.onTextCommand?.("bullet");
+        return;
+      }
+      if (e.shiftKey && k === "7") {
+        e.preventDefault();
+        this.host.onTextCommand?.("number");
+        return;
+      }
+      if (!e.shiftKey && (k === "l" || k === "e" || k === "r" || k === "j")) {
+        e.preventDefault();
+        this.host.onTextCommand?.(
+          k === "l" ? "alignLeft" : k === "e" ? "alignCenter" : k === "r" ? "alignRight" : "justify",
+        );
         return;
       }
       // Cmd+Left/Right = line edge; Cmd+Up/Down = adjacent paragraph start.

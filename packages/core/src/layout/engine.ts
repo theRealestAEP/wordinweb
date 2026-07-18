@@ -192,6 +192,8 @@ interface InternalPage {
   colXs: number[];
   colWidths: number[];
   hfStart?: number;
+  openingFlowOverlapApplied?: boolean;
+  openingColumnReserve?: number;
   /** Footnote content bound to each column, emitted above bodyBottom at the end. */
   footnotes: { items: PageItem[]; height: number; column: number }[];
   footnoteH: number[];
@@ -428,6 +430,9 @@ const NOTE_SEP_GAP = 4.4;
  * may cross the body bottom before Word moves/splits the row. Well under the
  * ~one-line gap that triggers a genuine row move; suppressed under footnotes. */
 const ROW_OVERHANG_TOL = 3;
+/** The custom-note/full-width-banner layout admits a final body line when only
+ * a small part of its font box crosses the text-bottom boundary. */
+const CUSTOM_NOTE_BANNER_OVERHANG = 3;
 
 const CHICAGO = ["*", "†", "‡", "§"];
 
@@ -548,6 +553,7 @@ class Engine {
   /** Vertical flow already consumed in the current later-column pre-banner
    * slot. It reduces the below-banner capacity by the same amount. */
   private bannerSlotUsed = 0;
+  private customNoteBannerFit = false;
   /** True while a section-level tbRl vertical flow is being laid: paragraphs
    * re-establish the vertical grid after embedded Western runs (see
    * breakParagraph's verticalGridResync). */
@@ -633,7 +639,7 @@ class Engine {
       const contentWidth = page.sp.pageWidth - page.sp.marginLeft - page.sp.marginRight - page.sp.gutter;
       const header = this.doc.headers.get(page.headerRel ?? "");
       const footer = this.doc.footers.get(page.footerRel ?? "");
-      const headerHeight = this.measureHeaderFooter(header, page, contentWidth, this.pageFieldFrameOverlay(header));
+      const headerHeight = this.measureHeaderFooter(header, page, contentWidth, this.pageFieldFrameOverlay(header), true);
       const footerHeight = this.measureHeaderFooter(footer, page, contentWidth, this.pageFieldFrameOverlay(footer));
       if (headerHeight !== page.headerHeight || footerHeight !== page.footerHeight) return null;
     }
@@ -833,6 +839,7 @@ class Engine {
     if (this.pages.length === 0) {
       this.sp = sections[0]?.props ?? ({} as SectionProps);
     }
+    this.applyOpeningFlowOverlap();
     this.placeEndnotes();
     this.emitFootnoteAreas();
     this.emitColumnSeparators();
@@ -860,6 +867,55 @@ class Engine {
       } satisfies IncrData;
     }
     return result;
+  }
+
+  /** Some document-opening empty paragraphs reserve a second mark line for
+   * pagination while the following content paints over it on page one. Keep
+   * the reservation in flow so later page breaks stay unchanged, then lift
+   * only the painted first-page body. */
+  private applyOpeningFlowOverlap(): void {
+    const opening = this.doc.sections[0]?.blocks[0];
+    const next = this.doc.sections[0]?.blocks[1];
+    const page = this.pages[0];
+    if (
+      !page ||
+      page.openingFlowOverlapApplied ||
+      opening?.type !== "paragraph" ||
+      opening.sectionBreak ||
+      paragraphHasContent(opening)
+    ) {
+      return;
+    }
+    const beforeNegativeTable =
+      next?.type === "table" && (next.props.indent ?? 0) < 0;
+    const header = this.doc.headers.get(page.headerRel ?? "");
+    const headerAnchors = header?.blocks.flatMap((block) =>
+      block.type === "paragraph" ? this.collectAnchors(block) : [],
+    ) ?? [];
+    const beforeParagraphUnderUnwrappedHeader =
+      next?.type === "paragraph" &&
+      page.headerGrown === true &&
+      headerAnchors.length > 0 &&
+      headerAnchors.every(
+        (shape) => !("wrap" in shape) || shape.wrap === undefined || shape.wrap === "none",
+      );
+    if (!beforeNegativeTable && !beforeParagraphUnderUnwrappedHeader) return;
+    const firstBodyItem = page.items.findIndex(
+      (item) => item.kind !== "text" || item.text.length > 0,
+    );
+    if (firstBodyItem < 0) return;
+    const paraProps = this.doc.effectiveParaProps(opening);
+    const markProps = this.doc.effectiveRunProps(opening, paraProps.markRunProps ?? {});
+    let overlap = this.measurer.metrics(
+      fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"),
+    ).lineHeight;
+    if (beforeParagraphUnderUnwrappedHeader) {
+      overlap += paraProps.spacingAfter ?? 0;
+    }
+    for (let i = firstBodyItem; i < page.items.length; i++) {
+      offsetItem(page.items[i], 0, -overlap);
+    }
+    page.openingFlowOverlapApplied = true;
   }
 
   // ---------- incremental layout (single-section prefix reuse) ----------
@@ -1179,7 +1235,7 @@ class Engine {
     const contentWidth = shifted.sp.pageWidth - shifted.sp.marginLeft - shifted.sp.marginRight - shifted.sp.gutter;
     const header = this.doc.headers.get(headerRel ?? "");
     const footer = this.doc.footers.get(footerRel ?? "");
-    const headerHeight = this.measureHeaderFooter(header, shifted, contentWidth, this.pageFieldFrameOverlay(header));
+    const headerHeight = this.measureHeaderFooter(header, shifted, contentWidth, this.pageFieldFrameOverlay(header), true);
     const footerHeight = this.measureHeaderFooter(footer, shifted, contentWidth, this.pageFieldFrameOverlay(footer));
     if (headerHeight !== page.headerHeight || footerHeight !== page.footerHeight) return null;
     shifted.headerHeight = headerHeight;
@@ -1659,8 +1715,8 @@ class Engine {
       displayNumber,
       headerHeight: 0,
       footerHeight: 0,
-      bodyTop: Math.abs(sp.marginTop),
-      bandTop: Math.abs(sp.marginTop),
+      bodyTop: sp.marginTop,
+      bandTop: sp.marginTop,
       softTop: !sectionStart,
       bodyBottom: sp.pageHeight - Math.abs(sp.marginBottom),
       colXs,
@@ -1696,22 +1752,28 @@ class Engine {
     // only field text width changes.
     const header = this.doc.headers.get(page.headerRel ?? "");
     const footer = this.doc.footers.get(page.footerRel ?? "");
-    const headerH = this.measureHeaderFooter(header, page, contentWidth, this.pageFieldFrameOverlay(header));
+    const headerH = this.measureHeaderFooter(header, page, contentWidth, this.pageFieldFrameOverlay(header), true);
     const footerOverlay = this.pageFieldFrameOverlay(footer);
     const footerH = this.measureHeaderFooter(footer, page, contentWidth, footerOverlay);
     page.headerHeight = headerH;
     page.footerHeight = footerH;
 
     if (sp.marginTop >= 0) {
-      page.bodyTop = Math.max(sp.marginTop, headerH > 0 ? sp.headerDistance + headerH : 0);
+      const headerBodyHeight =
+        this.doc.compatibilityMode < 15 &&
+        header?.blocks.every((block) => block.type === "paragraph" && !paragraphHasContent(block))
+          ? ptToPx(7)
+          : headerH;
+      page.bodyTop = Math.max(
+        sp.marginTop,
+        headerBodyHeight > 0 ? sp.headerDistance + headerBodyHeight : 0,
+      );
       page.bandTop = page.bodyTop;
       page.headerGrown = page.bodyTop > sp.marginTop;
     }
-    // w:docGrid: Word drops the first line of a section a fixed number of grid
-    // rows below the top margin (measured from staging-eastasian: the first
-    // heading baseline sits 4 line-pitches below the margin, with the normal
-    // spacing-before suppressed). Reproduced as a top reserve of 4x linePitch
-    // that also swallows the first paragraph's spacing-before.
+    // w:docGrid: Word reserves four grid rows at a section opening. Heading 1
+    // uses the first row plus its 1.5pt leading; placeParagraph narrows the
+    // reserve once it can inspect the opening paragraph style.
     if (sp.docGridLinePitch && isFirstOfSection) {
       page.bodyTop += 4 * sp.docGridLinePitch;
       this.docGridDropBefore = true;
@@ -1972,7 +2034,8 @@ class Engine {
     if (this.col + 1 < this.cur.colXs.length) {
       this.col++;
       this.y = this.columnStartY(this.col);
-      this.bannerSlotUsed = 0;
+      this.bannerSlotUsed =
+        this.cur.bannerTop !== undefined ? (this.cur.openingColumnReserve ?? 0) : 0;
       this.lastParaSpacingAfter = 0;
       this.lastParaAfterPad = 0;
     this.lastParaAfterPad = 0;
@@ -2397,7 +2460,7 @@ class Engine {
             const runs = c.type === "run" ? [c] : c.runs;
             for (const r of runs) {
               for (const rc of r.content) {
-                if (rc.kind !== "noteRef" || rc.self) continue;
+                if (rc.kind !== "noteRef" || rc.self || rc.customMarkFollows) continue;
                 if (rc.noteType === "footnote" && this.doc.footnotes.has(rc.id) && !this.footnoteNumbers.has(rc.id)) {
                   this.footnoteNumbers.set(rc.id, fnStart + fn++);
                 } else if (rc.noteType === "endnote" && this.doc.endnotes.has(rc.id) && !this.endnoteNumbers.has(rc.id)) {
@@ -2653,12 +2716,12 @@ class Engine {
           return;
         }
         // PDF-measured (wild2-legal p1, wild2-med-phase23 p1): the empty
-        // paragraph that OPENS the document can take TWO slots in Word.
-        // Before a table (wild2-legal) the top table's border grid sits at
-        // margin + 27.6pt for a 12pt Normal mark (2 x 13.8), where a single
-        // mark line (us, LibreOffice) puts it 13.8pt higher. Before a
-        // paragraph the doubling only happens when the HEADER OUTGREW the
-        // top margin, and then includes the mark's spacing-after too:
+        // paragraph that OPENS the document can take two slots in Word.
+        // Before a table this reserves two mark lines for pagination; a
+        // negatively-indented table visually overlaps the second line (handled
+        // when the table is painted below). Before a paragraph the doubling
+        // only happens when the HEADER OUTGREW the top margin, and then
+        // includes the mark's spacing-after too:
         // phase23's first body baseline is at grown bodyTop + 2 x (13.4 line
         // + 6 after) + ascent (179.05), while its continuation pages start
         // exactly at bodyTop (140.30). An empty opener before a paragraph
@@ -3104,6 +3167,25 @@ class Engine {
 
   private placeParagraph(para: Paragraph, prev?: Block, next?: Block, siblings?: Block[], index?: number): void {
     const props = this.doc.effectiveParaProps(para);
+    const detachedFootnotes = customFootnoteAnchorIds(para);
+    if (detachedFootnotes && next?.type === "paragraph") {
+      const nextProps = this.doc.effectiveParaProps(next);
+      const nextFrame = nextProps.frame ? this.resolveFrame(nextProps.frame) : undefined;
+      if (
+        nextFrame?.wrap === "notBeside" &&
+        nextFrame.w !== undefined &&
+        this.cur.colXs.length > 1 &&
+        nextFrame.w > this.colWidth + 1
+      ) {
+        for (const id of detachedFootnotes) this.registerFootnote(id, this.cur);
+        const markProps = this.doc.effectiveRunProps(para, props.markRunProps ?? {});
+        this.cur.openingColumnReserve = this.measurer.metrics(
+          fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"),
+        ).lineHeight;
+        this.customNoteBannerFit = true;
+        return;
+      }
+    }
     // A positioned text frame (w:framePr with a width) is lifted out of normal
     // flow: it paints at an absolute anchor position and body text wraps around
     // it. It does NOT advance the cursor or the spacing chain (staging-frames).
@@ -3314,18 +3396,27 @@ class Engine {
     const isLeadingPageBreak = leadBreak?.type === "page" && !props.pageBreakBefore;
     if (breakBeforeForced && !(isLeadingPageBreak && keepSpBeforeAtPageTop)) dropSpaceBefore = true;
     if (this.docGridDropBefore) {
-      // An explicit w:snapToGrid="0" opts the opening paragraph out of half
-      // of the section's four-row top reserve. Measured controls: the inherited
-      // grid staging-eastasian title uses all four rows, while wild2-math's
-      // opted-out title starts two rows higher. Keep bodyTop aligned with the
-      // actual cursor so page-top fit checks use the reduced reserve too.
+      // An explicit w:snapToGrid="0" keeps its own spacing-before; a spaced
+      // opening consumes the reserve, while an unspaced opening uses half of
+      // it. Heading 1 instead starts on the first row plus Word's 1.5pt grid
+      // leading. Keep bodyTop aligned with the actual cursor so page-top fit
+      // checks use the same origin.
       if (props.snapToGrid === false && this.sp.docGridLinePitch) {
-        const reduction = 2 * this.sp.docGridLinePitch;
+        const reduction =
+          (props.spacingBefore ?? 0) > 0
+            ? 4 * this.sp.docGridLinePitch
+            : 2 * this.sp.docGridLinePitch;
         this.cur.bodyTop -= reduction;
         this.y -= reduction;
+      } else if (para.props.styleId === "Heading1" && this.sp.docGridLinePitch) {
+        const reduction = 3 * this.sp.docGridLinePitch - ptToPx(1.5);
+        this.cur.bodyTop -= reduction;
+        this.y -= reduction;
+        dropSpaceBefore = true;
+      } else {
+        dropSpaceBefore = true;
       }
       this.docGridDropBefore = false;
-      dropSpaceBefore = true;
     }
     const rawSpacingBefore = dropSpaceBefore ? 0 : (props.spacingBefore ?? 0);
 
@@ -3606,11 +3697,10 @@ class Engine {
 
     // Word 2010's default document-grid pagination keeps a leading manual
     // page-break line on the old page when it belongs to a keepNext chain.
-    // On an otherwise empty page it places that chain against the bottom: the
-    // visible paragraph, its collapsed gap, then the invisible break line.
-    // nccih's cover title is 285.85pt lower in Word with both keepNext values
-    // enabled; disabling either one, removing docGrid, or using compat 15 puts
-    // it back at margin + spacingBefore.
+    // On an otherwise empty page with no footer it places that chain against
+    // the bottom: the visible paragraph, its collapsed gap, then the invisible
+    // break line. A first-page footer keeps the chain at its normal position
+    // (wild2-med-nccih-protocol p1).
     const nextPara = next?.type === "paragraph" ? next : undefined;
     const nextProps = nextPara ? this.doc.effectiveParaProps(nextPara) : undefined;
     const nextLeadBreak = nextPara ? leadingBreakOf(nextPara) : undefined;
@@ -3620,6 +3710,7 @@ class Engine {
       this.pageIsEmptyAtCursor() &&
       this.doc.compatibilityMode < 15 &&
       this.sp.docGridType === "default" &&
+      !this.cur.footerRel &&
       props.keepNext &&
       nextPara &&
       nextProps?.keepNext &&
@@ -3940,6 +4031,7 @@ class Engine {
       let simCol = this.col;
       let simOnCurrentPage = true;
       let simBannerUsed = this.bannerSlotUsed;
+      const paragraphOverhang = this.customNoteBannerFit ? CUSTOM_NOTE_BANNER_OVERHANG : 0;
       const updateBottom = () => {
         bottom =
           simOnCurrentPage && this.balanceBottom !== undefined && simCol + 1 < this.cur.colXs.length
@@ -3974,16 +4066,20 @@ class Engine {
         }
       };
       const nextSimColumn = () => {
-        simBannerUsed = 0;
         simNotes = 0;
         simNoted.clear();
         if (simCol + 1 < this.cur.colXs.length) {
           simCol++;
           simY = simOnCurrentPage ? this.columnStartY(simCol) : this.cur.bodyTop;
+          simBannerUsed =
+            simOnCurrentPage && this.cur.bannerTop !== undefined
+              ? (this.cur.openingColumnReserve ?? 0)
+              : 0;
         } else {
           simCol = 0;
           simOnCurrentPage = false;
           simY = this.cur.bodyTop;
+          simBannerUsed = 0;
         }
         updateBottom();
       };
@@ -4015,7 +4111,7 @@ class Engine {
           (simBalancing
             ? simY > bottom + 0.01
             : simY + lines[li].fitHeight + (li === lines.length - 1 ? keepNextTail : 0) >
-              bottom - simNotes - noteAdd - simSep + 0.01);
+              bottom - simNotes - noteAdd - simSep + paragraphOverhang + 0.01);
         // The paragraph's VERY FIRST line does not fit on the current partial
         // page: the whole paragraph moves to the next column/page. This is a
         // PHYSICAL fit, independent of widowControl — the emit loop moves line 0
@@ -4145,7 +4241,11 @@ class Engine {
         !postTablePageBreak &&
         (balancing
           ? (balBottomBased ? this.y + line.fitHeight : this.y) > this.bodyBottom + 0.01
-          : this.y + line.fitHeight > this.bodyBottom - pendingNotes + 0.01) && !this.pageIsEmptyAtCursor();
+          : this.y + line.fitHeight >
+            this.bodyBottom - pendingNotes +
+              (this.customNoteBannerFit ? CUSTOM_NOTE_BANNER_OVERHANG : 0) +
+              0.01) &&
+        !this.pageIsEmptyAtCursor();
       if ((planned || overflow) && li > fragStartLine) {
         closeFragment(li, false);
         this.nextColumn();
@@ -4880,7 +4980,7 @@ class Engine {
      * floats a cell-anchored text box and flows the paragraph around it -
      * staging-tblextreme "Box 202"), and explicit tabs skip decimal stops. */
     inCell?: boolean,
-  ): { items: PageItem[]; height: number } {
+  ): { items: PageItem[]; height: number; contentBottom: number } {
     const items: PageItem[] = [];
     let y = 0;
     // An unconsumed PAGE frame awaiting its collision test with the next
@@ -5146,13 +5246,37 @@ class Engine {
           y = Math.max(y, pendingPageFrame.bottom);
           pendingPageFrame = null;
         }
-        y = this.layoutTableInFrame(block, fake, 0, y, width, fields);
+        y = this.layoutTableInFrame(block, fake, 0, y, width, fields, inCell === true);
         framePrevAfter = 0;
       }
     }
     if (pendingPageFrame) y = Math.max(y, pendingPageFrame.bottom);
+    const itemBottom = (item: PageItem): number => {
+      if (item.kind === "text") return (item.glyphTop ?? item.lineTop) + item.lineHeight;
+      if (item.kind === "rect" || item.kind === "image" || item.kind === "path" || item.kind === "drawingHit") {
+        return item.y + item.height;
+      }
+      if (item.kind === "edge") return Math.max(item.y1, item.y2);
+      if (item.kind === "wordart" || item.kind === "warptext") return item.y + item.height;
+      return 0;
+    };
+    const headerBandBottom = this.sp.marginTop - (origin?.y ?? 0);
+    const paintedHeaderBottom = items.reduce((bottom, item) => {
+      const itemEnd = itemBottom(item);
+      return "behind" in item && item.behind && itemEnd <= headerBandBottom + 0.01
+        ? Math.max(bottom, itemEnd)
+        : bottom;
+    }, 0);
+    const wrappedBottom = (this.floats.get(fake) ?? []).reduce(
+      (bottom, float) => Math.max(bottom, float.y1 - (origin?.y ?? 0)),
+      0,
+    );
     this.floats.delete(fake);
-    return { items, height: y + pageFramePhantomH };
+    return {
+      items,
+      height: y + pageFramePhantomH,
+      contentBottom: Math.max(y + pageFramePhantomH, paintedHeaderBottom, wrappedBottom),
+    };
   }
 
   /**
@@ -5663,6 +5787,7 @@ class Engine {
     page: InternalPage,
     contentWidth: number,
     overlayPageFrame = false,
+    reserveBodyClearance = false,
   ): number {
     if (!hf || hf.blocks.length === 0) return 0;
     const fields: FieldContext = {
@@ -5674,10 +5799,38 @@ class Engine {
     // be consumed by measurement: snapshot.
     const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
     const seenSnapshot = new Set(this.seenNumIds);
-    const { height } = this.layoutFrame(hf.blocks, contentWidth, fields, undefined, false, overlayPageFrame);
+    const origin = reserveBodyClearance
+      ? { x: page.sp.marginLeft + page.sp.gutter, y: page.sp.headerDistance }
+      : undefined;
+    const { height, contentBottom } = this.layoutFrame(
+      hf.blocks,
+      contentWidth,
+      fields,
+      origin,
+      false,
+      overlayPageFrame,
+    );
     this.counters = snapshot;
     this.seenNumIds = seenSnapshot;
-    return height;
+    const anchors = hf.blocks.flatMap((block) =>
+      block.type === "paragraph" ? this.collectAnchors(block) : [],
+    );
+    const hasOnlyUnwrappedAnchors =
+      anchors.length > 0 &&
+      anchors.every(
+        (shape) => !("wrap" in shape) || shape.wrap === undefined || shape.wrap === "none",
+      );
+    const complexHeader =
+      anchors.length > 0 || hf.blocks.some((block) => block.type === "table");
+    // Word keeps 22.5pt between complex header content (tables and positioned
+    // shapes) and the body. Plain header text uses its natural height even
+    // with a tight top margin. A header made only of unwrapped page decoration
+    // (watermarks, logos, pleading-paper rails and line numbers) reserves no
+    // gap, including when ordinary header text accompanies it.
+    return reserveBodyClearance
+      ? Math.max(height, contentBottom) +
+          (!hasOnlyUnwrappedAnchors && complexHeader ? ptToPx(22.5) : 0)
+      : height;
   }
 
   private pageFieldFrameOverlay(hf: HeaderFooter | undefined): boolean {
@@ -5752,7 +5905,17 @@ class Engine {
         const measured = this.layoutFrame(footer.blocks, contentWidth, fields, undefined, false, overlayPageFrame);
         this.counters = snapshot;
         this.seenNumIds = seenSnapshot;
-        const top = sp.pageHeight - sp.footerDistance - measured.height;
+        const legacyPageFrame =
+          this.doc.compatibilityMode < 15 &&
+          footer.blocks.some(
+            (block) =>
+              block.type === "paragraph" &&
+              this.doc.effectiveParaProps(block).frame?.vAnchor === "page",
+          );
+        const top =
+          sp.pageHeight -
+          sp.footerDistance -
+          (legacyPageFrame ? 0 : measured.height);
         snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
         seenSnapshot = new Set(this.seenNumIds);
         this.hfMarginVTop = page.bodyTop;
@@ -6257,7 +6420,17 @@ class Engine {
       if (cell.props.margins?.top !== undefined) topPad = Math.max(topPad, cell.props.margins.top);
       if (cell.props.margins?.bottom !== undefined) bottomPad = Math.max(bottomPad, cell.props.margins.bottom);
     }
-    if (row.props.heightRule === "exact") return trHeight + topPad;
+    if (row.props.heightRule === "exact") {
+      return this.doc.compatibilityMode < 15 ? trHeight : trHeight + topPad;
+    }
+    if (this.doc.compatibilityMode < 15) {
+      const legacyBottomPad = bottomPad >= ptToPx(1) ? bottomPad : 0;
+      const legacyTopPad =
+        row.props.heightRule === "atLeast" && (row.props.height ?? 0) >= ptToPx(30)
+          ? Math.max(topPad - ptToPx(0.25), 0)
+          : topPad;
+      return Math.max(contentHeight, trHeight + legacyTopPad + legacyBottomPad);
+    }
     const borderPad = this.rowBorderShare(tbl, ri);
     return Math.max(contentHeight, trHeight + topPad + bottomPad + borderPad);
   }
@@ -6590,9 +6763,14 @@ class Engine {
       // so it gets no allowance (staging-longtable p8/p9: Word moves the
       // 240-exact row #195 that would overhang the body bottom by 1pt).
       const overhang =
-        noteReserve > 0 || row.props.cantSplit || row.props.heightRule === "exact"
+        noteReserve > 0 || row.props.heightRule === "exact"
           ? 0
-          : ROW_OVERHANG_TOL;
+          : row.props.cantSplit
+            ? this.doc.compatibilityMode < 15 &&
+              (row.props.heightRule !== "atLeast" || (row.props.height ?? 0) >= ptToPx(2))
+              ? this.cur.footerHeight
+              : 0
+            : ROW_OVERHANG_TOL;
       while (this.y + rowHeight > this.bodyBottom - this.rowNoteHeight(laid) + overhang + 0.01 && guard++ < 50) {
         // w:cantSplit is honored only while the row CAN fit on one page:
         // a row taller than the page body must split regardless (Word does —
@@ -6913,6 +7091,7 @@ class Engine {
     y: number,
     width: number,
     fields: FieldContext,
+    nested: boolean,
   ): number {
     this.ensureTableBorders(tbl);
     // Nested tables use the SAME width resolution as body tables: a trusted
@@ -6922,7 +7101,7 @@ class Engine {
     // nesting levels and collapses the innermost columns to a sliver
     // (staging-grid4: L2>L3>L4>L5 each re-scaled its already-scaled parent until
     // L5 was ~6pt and its text stacked one glyph per line).
-    const widths = this.resolveGridWidths(tbl, width, true);
+    const widths = this.resolveGridWidths(tbl, width, nested);
     const saveY = this.y;
     const saveCur = this.cur;
     const saveCol = this.col;
@@ -7327,6 +7506,13 @@ class Engine {
     // height already established by its ordinary/nested cells.
     let maxH = 0;
     let measuredContentH = 0;
+    const effectiveBottomPad = (bottom: number | undefined) =>
+      this.doc.compatibilityMode < 15 &&
+      row.props.heightRule === "atLeast" &&
+      (row.props.height ?? 0) < ptToPx(2) &&
+      (bottom ?? 0) >= ptToPx(2)
+        ? (bottom ?? 0) / 2
+        : (bottom ?? 0);
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
       const { x, width: w, margins: m } = geometry[ci];
@@ -7346,7 +7532,7 @@ class Engine {
         true,
       );
       for (const it of items) offsetItem(it, (m.left ?? 0), (m.top ?? 0));
-      const cellHeight = height + (m.top ?? 0) + (m.bottom ?? 0);
+      const cellHeight = height + (m.top ?? 0) + effectiveBottomPad(m.bottom);
       cells[ci] = { items, height: cellHeight, x, width: w, cellIdx: ci };
       measuredContentH = Math.max(measuredContentH, height);
       maxH = Math.max(maxH, cellHeight);
@@ -7400,7 +7586,7 @@ class Engine {
           it.rotate = { deg, ox: centerX - it.x, oy: centerY - top };
         }
       }
-      const cellHeight = frameWidth + (m.top ?? 0) + (m.bottom ?? 0);
+      const cellHeight = frameWidth + (m.top ?? 0) + effectiveBottomPad(m.bottom);
       cells[ci] = { items, height: cellHeight, x, width: w, cellIdx: ci, rotated: true };
       maxH = Math.max(maxH, cellHeight);
     }
@@ -7631,6 +7817,33 @@ class Engine {
 }
 
 // ---------- helpers ----------
+
+/** A custom-mark footnote attached through an otherwise blank paragraph is a
+ * zero-height anchor. IEEE templates use this to place the author footnote
+ * without opening a body line before the full-width title banner. */
+function customFootnoteAnchorIds(p: Paragraph): number[] | undefined {
+  const ids: number[] = [];
+  for (const child of p.children) {
+    const runs = child.type === "run" ? [child] : child.runs;
+    for (const run of runs) {
+      for (const content of run.content) {
+        if (content.kind === "text") {
+          if (content.text.trim().length > 0) return undefined;
+        } else if (
+          content.kind === "noteRef" &&
+          content.noteType === "footnote" &&
+          !content.self &&
+          content.customMarkFollows
+        ) {
+          ids.push(content.id);
+        } else {
+          return undefined;
+        }
+      }
+    }
+  }
+  return ids.length > 0 ? ids : undefined;
+}
 
 /** A paragraph with no rendered content at all: no text, images, drawings,
  * math, fields, tabs, breaks, note references, or floating anchors. (An

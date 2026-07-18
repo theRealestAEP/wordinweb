@@ -149,6 +149,9 @@ const WORD_FONT_METRICS: Record<string, { asc: number; desc: number; gap: number
   // profile and over-pitched every line by 1.08x).
   mangal: { asc: 1.2450, desc: 0.4399, gap: 0 },
   latha: { asc: 0.9266, desc: 0.3369, gap: 0 },
+  // Word substitutes Lao text to DokChampa. Its hhea box is 2850/-1117 at
+  // 2048 UPEM; this is also the line profile Word uses in the reference PDF.
+  "noto sans lao looped": { asc: 1.391602, desc: 0.545410, gap: 0 },
 };
 
 /** Quarter-point in px (0.25pt at 96dpi). */

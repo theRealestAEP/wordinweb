@@ -198,6 +198,24 @@ Every color the chrome paints — the toolbar, comment cards, selection, caret, 
 | `--dxw-layout-menu-width` | `304px` | Layout option-menu width |
 | `--dxw-layout-menu-max-height` | `480px` | Layout option-menu scroll limit |
 | `--dxw-layout-preview-bg` | `#fff` | Paper fill in Layout option previews |
+| `--dxw-select-height` | `26px` | Custom select trigger height |
+| `--dxw-select-border` | `transparent` | Custom select trigger border color |
+| `--dxw-select-radius` | `4px` | Custom select trigger corner radius |
+| `--dxw-select-bg` | `transparent` | Custom select trigger fill |
+| `--dxw-select-fg` | toolbar foreground | Custom select trigger text |
+| `--dxw-select-font` | `13px system-ui` | Custom select trigger font |
+| `--dxw-select-padding` | `0 6px` | Custom select trigger padding |
+| `--dxw-select-menu-bg` | popover background | Custom select menu fill |
+| `--dxw-select-menu-border` | toolbar border | Custom select menu border color |
+| `--dxw-select-menu-radius` | `8px` | Custom select menu corner radius |
+| `--dxw-select-menu-shadow` | popover shadow | Custom select menu shadow |
+| `--dxw-select-menu-max-height` | `320px` | Custom select menu scroll limit |
+| `--dxw-color-menu-width` | `236px` | Text and drawing color palette width |
+| `--dxw-dialog-backdrop` | `rgba(32,33,36,.38)` | Editor dialog scrim |
+| `--dxw-dialog-z-index` | `1000` | Editor dialog stacking level |
+| `--dxw-dialog-width` | `420px` | Editor dialog width |
+| `--dxw-dialog-radius` | `10px` | Editor dialog corner radius |
+| `--dxw-dialog-field-bg` | popover background | Editor dialog field fill |
 | `--dxw-canvas-bg` | `#e8eaed` | Scroll area behind the pages |
 | `--dxw-page-bg` | `#ffffff` | Page paper |
 | `--dxw-page-shadow` | `0 1px 3px …, 0 4px 14px …` | Page drop shadow |
@@ -237,6 +255,31 @@ Or in a stylesheet:
 ```css
 .dxw-dark { --dxw-toolbar-bg: #1f2937; --dxw-toolbar-fg: #e5e7eb; /* … */ }
 ```
+
+### Custom menus and dialogs
+
+All visible toolbar choices use WordInWeb-rendered controls rather than the
+browser's native select, prompt, or color-picker UI. `ToolbarMenuSelect` is
+exported for host-app controls that should match the toolbar:
+
+```tsx
+<ToolbarMenuSelect
+  value={zoom}
+  ariaLabel="Document zoom"
+  options={[
+    { value: "0.75", label: "75%" },
+    { value: "1", label: "100%" },
+    { value: "1.25", label: "125%" },
+  ]}
+  onChange={setZoom}
+/>
+```
+
+For selector-level styling, the stable hooks are
+`.dxw-menu-select-trigger`, `.dxw-menu-select-menu`,
+`.dxw-menu-select-option`, `.dxw-color-menu`, `.dxw-color-swatch`,
+`.dxw-input-dialog`, `.dxw-input-dialog-field`, and the dialog action button
+classes. Prefer the variables above for theme changes.
 
 Layout controls also expose stable `.dxw-layout-ribbon`, `.dxw-layout-menu-trigger`,
 `.dxw-layout-menu`, `.dxw-layout-menu-item`, and `.dxw-layout-preview` classes.

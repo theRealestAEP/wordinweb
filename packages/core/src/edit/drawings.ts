@@ -6,7 +6,7 @@ const NS_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDr
 const NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const NS_WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
 
-export type ShapePreset = "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox";
+export type ShapePreset = "line" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox";
 export type WordArtPreset = "plain" | "archUp" | "archDown" | "wave" | "chevron";
 export interface InkPoint { x: number; y: number }
 export type DrawingTool =
@@ -45,27 +45,50 @@ export function insertShapeAt(
 
   const w = prefixOf(caretRun);
   const id = String(doc.nextDrawingId());
-  const width = preset === "textBox" ? 240 : 192;
-  const height = preset === "textBox" ? 72 : 96;
+  const isLine = preset === "line";
+  const width = isLine ? 240 : preset === "textBox" ? 240 : 192;
+  const height = isLine ? 2 : preset === "textBox" ? 72 : 96;
   const cx = String(Math.round(width * EMU_PER_PX));
   const cy = String(Math.round(height * EMU_PER_PX));
   const geometry =
     preset === "roundedRectangle" ? "roundRect" : preset === "rectangle" || preset === "textBox" ? "rect" : preset;
   const isTextBox = preset === "textBox";
-  const shapeName = isTextBox ? `Text Box ${id}` : `Shape ${id}`;
+  const shapeName = isLine ? `Line ${id}` : isTextBox ? `Text Box ${id}` : `Shape ${id}`;
 
   const spPr = [
-    el("a:xfrm", {}, [el("a:off", { x: "0", y: "0" }), el("a:ext", { cx, cy })]),
+    el("a:xfrm", {}, [
+      el("a:off", { x: "0", y: "0" }),
+      el("a:ext", { cx, cy }),
+    ]),
     el("a:prstGeom", { prst: geometry }, [el("a:avLst")]),
-    isTextBox
+    isTextBox || isLine
       ? el("a:noFill")
       : el("a:solidFill", {}, [el("a:srgbClr", { val: "4472C4" })]),
-    el("a:ln", { w: "12700" }, [el("a:solidFill", {}, [el("a:srgbClr", { val: isTextBox ? "404040" : "2F5597" })])]),
+    el("a:ln", { w: "12700" }, [el("a:solidFill", {}, [el("a:srgbClr", { val: isTextBox || isLine ? "404040" : "2F5597" })])]),
   ];
   const textRun = el(`${w}r`, {}, [
     el(`${w}rPr`, {}, [el(`${w}color`, { [`${w}val`]: isTextBox ? "202124" : "FFFFFF" }), el(`${w}sz`, { [`${w}val`]: "22" })]),
     el(`${w}t`, { "xml:space": "preserve" }, [], text),
   ]);
+  const shapeChildren = isLine
+    ? [
+        el("wps:cNvCnPr", {}, [el("a:cxnSpLocks", { noChangeShapeType: "1" })]),
+        el("wps:spPr", { bwMode: "auto" }, spPr),
+        el("wps:bodyPr"),
+      ]
+    : [
+        el("wps:cNvSpPr", isTextBox ? { txBox: "1" } : {}),
+        el("wps:spPr", {}, spPr),
+        el("wps:txbx", {}, [
+          el(`${w}txbxContent`, {}, [
+            el(`${w}p`, {}, [
+              el(`${w}pPr`, {}, [el(`${w}jc`, { [`${w}val`]: isTextBox ? "left" : "center" })]),
+              textRun,
+            ]),
+          ]),
+        ]),
+        el("wps:bodyPr", { rot: "0", anchor: isTextBox ? "t" : "ctr" }, [el("a:noAutofit")]),
+      ];
   const drawing = el(`${w}drawing`, {}, [
     el("wp:anchor", {
       "xmlns:wp": NS_WP,
@@ -78,24 +101,12 @@ export function insertShapeAt(
       el("wp:positionV", { relativeFrom: "paragraph" }, [el("wp:posOffset", {}, [], "0")]),
       el("wp:extent", { cx, cy }),
       el("wp:effectExtent", { l: "0", t: "0", r: "0", b: "0" }),
-      el("wp:wrapSquare", { wrapText: "bothSides" }),
+      isLine ? el("wp:wrapNone") : el("wp:wrapSquare", { wrapText: "bothSides" }),
       el("wp:docPr", { id, name: shapeName }),
       el("wp:cNvGraphicFramePr"),
       el("a:graphic", { "xmlns:a": NS_A }, [
         el("a:graphicData", { uri: NS_WPS }, [
-          el("wps:wsp", { "xmlns:wps": NS_WPS }, [
-            el("wps:cNvSpPr", { txBox: "1" }),
-            el("wps:spPr", {}, spPr),
-            el("wps:txbx", {}, [
-              el(`${w}txbxContent`, {}, [
-                el(`${w}p`, {}, [
-                  el(`${w}pPr`, {}, [el(`${w}jc`, { [`${w}val`]: isTextBox ? "left" : "center" })]),
-                  textRun,
-                ]),
-              ]),
-            ]),
-            el("wps:bodyPr", { rot: "0", anchor: isTextBox ? "t" : "ctr" }, [el("a:noAutofit")]),
-          ]),
+          el("wps:wsp", { "xmlns:wps": NS_WPS }, shapeChildren),
         ]),
       ]),
     ]),
@@ -169,6 +180,32 @@ export function setDrawingWordArtText(doc: DocxDocument, drawing: XmlElement, te
   if (!textElement) return false;
   textElement.text = text;
   textElement.attrs["xml:space"] = "preserve";
+  doc.refresh();
+  return true;
+}
+
+export function drawingLineStyle(drawing: XmlElement): { color: string; width: number } | null {
+  const line = descendant(drawing, "ln");
+  if (!line) return null;
+  const color = descendant(line, "srgbClr")?.attrs.val ?? "000000";
+  const width = Math.max((parseInt(line.attrs.w ?? "0", 10) || 0) / EMU_PER_PX, 0.75);
+  return { color: `#${color.toUpperCase()}`, width };
+}
+
+export function setDrawingLineStyle(
+  doc: DocxDocument,
+  drawing: XmlElement,
+  color: string,
+  widthPx: number,
+): boolean {
+  const line = descendant(drawing, "ln");
+  if (!line) return false;
+  line.attrs.w = String(Math.max(1, Math.round(widthPx * EMU_PER_PX)));
+  line.children = line.children.filter((child) => {
+    const name = localName(child.name);
+    return name !== "solidFill" && name !== "noFill";
+  });
+  line.children.unshift(el("a:solidFill", {}, [el("a:srgbClr", { val: color.replace(/^#/, "").toUpperCase() })]));
   doc.refresh();
   return true;
 }

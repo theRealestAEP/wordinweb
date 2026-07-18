@@ -23,6 +23,8 @@ export type { RunFormatPatch, SelectionSegment, SelectionFormat } from "./edit/c
 export { selectionToSegments } from "./edit/selection.js";
 export { DocxEditor } from "./edit/editor.js";
 export type { ObjectArrangeAction } from "./edit/editor.js";
+export { requestTextInputDialog } from "./edit/dialog.js";
+export type { TextInputDialogOptions } from "./edit/dialog.js";
 export {
   insertSuggestedText,
   deleteSuggestedRange,
@@ -58,7 +60,16 @@ export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertFootnote } from "./edit/notes.js";
 export { insertField, insertPageField, insertDateTimeField } from "./edit/fields.js";
-export { drawingWordArtText, insertShapeAt, insertWordArtAt, insertInkAt, isDrawingWordArt, setDrawingWordArtText } from "./edit/drawings.js";
+export {
+  drawingLineStyle,
+  drawingWordArtText,
+  insertShapeAt,
+  insertWordArtAt,
+  insertInkAt,
+  isDrawingWordArt,
+  setDrawingLineStyle,
+  setDrawingWordArtText,
+} from "./edit/drawings.js";
 export type { DrawingTool, InkPoint, ShapePreset, WordArtPreset } from "./edit/drawings.js";
 export { buildChartWorkbook, buildChartXml, insertChartAt, normalizeChartData, setChartData } from "./edit/charts.js";
 export { buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, normalizeSmartArtData, setSmartArtData } from "./edit/smartart.js";

@@ -21,6 +21,7 @@ import {
   removeLink,
   replaceMatch,
   replaceAll,
+  requestTextInputDialog,
   setLink,
   setParagraphSpacing,
   setDropCapAt,
@@ -608,14 +609,20 @@ export function DocxView({
           const latin = [
             "Carlito", "Caladea", "Cambria", "Times New Roman", "Arial",
             "Calibri", "Calibri Light", "Tahoma", "Franklin Gothic Medium",
-            // Complex-script faces gate layout too (advances must be real
-            // before line breaking): Mangal (Devanagari), Latha (Tamil),
-            // Noto Sans Lao Looped (Lao — bundled OFL webfont).
-            "Mangal", "Latha", "Noto Sans Lao Looped",
           ];
           for (const fam of latin) {
             for (const variant of ["", "italic ", "bold ", "bold italic "]) {
               loads.push(document.fonts.load(`${variant}16px "${fam}"`).catch(() => []));
+            }
+          }
+          const complex = [
+            ["Mangal", "अ"],
+            ["Latha", "அ"],
+            ["Noto Sans Lao Looped", "ກ"],
+          ] as const;
+          for (const [fam, sample] of complex) {
+            for (const variant of ["", "bold "]) {
+              loads.push(document.fonts.load(`${variant}16px "${fam}"`, sample).catch(() => []));
             }
           }
           loads.push(document.fonts.load('16px "Cambria Math"').catch(() => []));
@@ -629,7 +636,7 @@ export function DocxView({
           ];
           for (const fam of cjk) {
             for (const variant of ["", "bold "]) {
-              loads.push(document.fonts.load(`${variant}16px "${fam}"`).catch(() => []));
+              loads.push(document.fonts.load(`${variant}16px "${fam}"`, "A漢").catch(() => []));
             }
           }
           await Promise.all(loads);
@@ -685,6 +692,40 @@ export function DocxView({
             document.dispatchEvent(new CustomEvent("dxw-selection"));
           },
           onStyleShortcut: (styleId) => applyStyleShortcut?.(styleId),
+          onTextCommand: (command) => {
+            const current = apiRef.current;
+            if (!current) return;
+            if (command === "link") {
+              const anchor = containerRef.current;
+              if (!anchor) return;
+              void requestTextInputDialog(anchor, {
+                title: "Link address",
+                label: "URL",
+                value: current.getLinkAt() ?? "https://",
+              }).then((next) => {
+                if (next !== null) current.setLink(next.trim() || null);
+              });
+            } else if (command === "comment") {
+              const anchor = containerRef.current;
+              if (!anchor) return;
+              void requestTextInputDialog(anchor, {
+                title: "New comment",
+                label: "Comment",
+                submitLabel: "Comment",
+                multiline: true,
+              }).then((text) => {
+                if (text?.trim()) current.addComment(text.trim());
+              });
+            } else if (command === "bullet" || command === "number") {
+              current.toggleList(command);
+            } else {
+              current.setAlignment(
+                command === "alignLeft" ? "left" :
+                command === "alignCenter" ? "center" :
+                command === "alignRight" ? "right" : "justify",
+              );
+            }
+          },
         };
         editor = new DocxEditor(editorConfig);
         editor.attach();
@@ -1338,8 +1379,9 @@ export function DocxView({
           }}
         >
           <span style={{ font: "600 11.5px system-ui, sans-serif", color: "#5f6368", padding: "0 4px" }}>
-            Header &amp; footer
+            Header &amp; footer · repeats on pages
           </span>
+          {hotBtn("Line", "Insert a reusable line in the repeating page layer", () => apiRef.current?.insertShape("line"))}
           {hotBtn("Page number", "Insert a dynamic page number at the caret", () => apiRef.current?.insertPageNumber("page"))}
           {hotBtn("Page X of Y", "Insert 'Page X of Y' at the caret", () => apiRef.current?.insertPageNumber("pageOfTotal"))}
           {hotBtn("Close", "Return to the document body", () => {
@@ -1354,5 +1396,11 @@ export function DocxView({
 
 export { DocxDocument, layoutDocument, renderToDom, printPages } from "@wordinweb/core";
 export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset } from "@wordinweb/core";
-export { DocxToolbar } from "./toolbar.js";
-export type { DocxToolbarProps, ToolbarFeature, ToolbarMode } from "./toolbar.js";
+export { DocxToolbar, ToolbarMenuSelect } from "./toolbar.js";
+export type {
+  DocxToolbarProps,
+  ToolbarFeature,
+  ToolbarMenuSelectOption,
+  ToolbarMenuSelectProps,
+  ToolbarMode,
+} from "./toolbar.js";

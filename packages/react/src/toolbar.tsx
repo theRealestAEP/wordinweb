@@ -81,16 +81,6 @@ const btnStyle = (active: boolean): React.CSSProperties => ({
   color: T.fg,
 });
 
-const selectStyle: React.CSSProperties = {
-  height: 26,
-  border: "1px solid transparent",
-  background: "transparent",
-  borderRadius: 4,
-  fontSize: 13,
-  color: T.fg,
-  cursor: "pointer",
-};
-
 const PAGE_SIZES = [
   { value: "letter", label: "Letter", description: '8.5" × 11"', width: 8.5, height: 11 },
   { value: "legal", label: "Legal", description: '8.5" × 14"', width: 8.5, height: 14 },
@@ -204,6 +194,285 @@ function HighlightIcon({ color }: { color: string }) {
   );
 }
 
+export interface ToolbarMenuSelectOption {
+  value: string;
+  label: React.ReactNode;
+  group?: string;
+  disabled?: boolean;
+  fontFamily?: string;
+}
+
+export interface ToolbarMenuSelectProps {
+  value: string;
+  options: ToolbarMenuSelectOption[];
+  onChange: (value: string) => void;
+  placeholder?: React.ReactNode;
+  title?: string;
+  ariaLabel?: string;
+  triggerAriaLabel?: string;
+  width?: number | string;
+  menuWidth?: number;
+  className?: string;
+  style?: React.CSSProperties;
+}
+
+/** CSS-overridable replacement for visible native selects. An inert,
+ * transparent select is kept as an event bridge for existing integrations;
+ * every user-facing part is a button/listbox rendered by us. */
+export function ToolbarMenuSelect({
+  value,
+  options,
+  onChange,
+  placeholder = "Choose…",
+  title,
+  ariaLabel,
+  triggerAriaLabel,
+  width,
+  menuWidth,
+  className,
+  style,
+}: ToolbarMenuSelectProps) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ left: 8, top: 8, width: menuWidth ?? 180, maxHeight: 320 });
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const keyboardOpen = useRef<"first" | "last" | null>(null);
+  const id = useId();
+  const selected = options.find((option) => option.value === value);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const nextWidth = Math.min(
+        window.innerWidth - 16,
+        menuWidth ?? Math.max(rect.width, menuRef.current?.scrollWidth ?? 180),
+      );
+      const below = window.innerHeight - rect.bottom - 8;
+      const above = rect.top - 8;
+      const placeAbove = below < 140 && above > below;
+      const maxHeight = Math.max(96, Math.min(320, placeAbove ? above : below));
+      const shownHeight = Math.min(menuRef.current?.scrollHeight ?? maxHeight, maxHeight);
+      setPosition({
+        left: Math.max(8, Math.min(rect.left, window.innerWidth - nextWidth - 8)),
+        top: placeAbove ? Math.max(8, rect.top - shownHeight - 4) : rect.bottom + 4,
+        width: nextWidth,
+        maxHeight,
+      });
+    };
+    update();
+    const frame = requestAnimationFrame(() => {
+      update();
+      if (!keyboardOpen.current) return;
+      const items = menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]');
+      const item = keyboardOpen.current === "last" ? items?.[items.length - 1] : items?.[0];
+      item?.focus({ preventScroll: true });
+      keyboardOpen.current = null;
+    });
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+      }
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", keydown);
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", keydown);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [open, menuWidth]);
+
+  const pick = (next: string) => {
+    const option = options.find((item) => item.value === next);
+    if (!option || option.disabled) return;
+    onChange(next);
+    setOpen(false);
+  };
+  const onMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = menuRef.current
+      ? Array.from(menuRef.current.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)'))
+      : [];
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    let next = current;
+    if (event.key === "ArrowDown") next = current < 0 ? 0 : (current + 1) % items.length;
+    else if (event.key === "ArrowUp") next = current < 0 ? items.length - 1 : (current - 1 + items.length) % items.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else if ((event.key === "Enter" || event.key === " ") && current >= 0) {
+      event.preventDefault();
+      items[current].click();
+      return;
+    } else if (event.key === "Escape" || event.key === "Tab") {
+      event.preventDefault();
+      setOpen(false);
+      requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+      return;
+    } else return;
+    event.preventDefault();
+    items[next]?.focus({ preventScroll: true });
+  };
+
+  let previousGroup: string | undefined;
+  return (
+    <span
+      ref={rootRef}
+      className={`dxw-menu-select${className ? ` ${className}` : ""}`}
+      data-dxw-menu-select=""
+      style={{ position: "relative", display: "inline-flex", width }}
+    >
+      <select
+        tabIndex={-1}
+        title={title}
+        aria-label={ariaLabel}
+        aria-hidden="true"
+        value={value}
+        onChange={(event) => pick(event.target.value)}
+        data-dxw-native-bridge=""
+        style={{
+          position: "absolute",
+          width: 1,
+          height: 1,
+          inset: 0,
+          opacity: 0,
+          pointerEvents: "none",
+        }}
+      >
+        {!options.some((option) => option.value === value) && <option value="">{String(placeholder)}</option>}
+        {options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{String(option.label)}</option>)}
+      </select>
+      <button
+        ref={triggerRef}
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        aria-label={triggerAriaLabel}
+        data-tip={title}
+        className="dxw-menu-select-trigger"
+        data-dxw-menu-select-trigger=""
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => setOpen(!open)}
+        onKeyDown={(event) => {
+          if (!open && (event.key === "Enter" || event.key === " " || event.key === "ArrowDown" || event.key === "ArrowUp")) {
+            event.preventDefault();
+            keyboardOpen.current = event.key === "ArrowUp" ? "last" : "first";
+            setOpen(true);
+          }
+        }}
+        style={{
+          width: "100%",
+          minWidth: 0,
+          height: "var(--dxw-select-height, 26px)",
+          border: "1px solid var(--dxw-select-border, transparent)",
+          borderRadius: "var(--dxw-select-radius, 4px)",
+          background: "var(--dxw-select-bg, transparent)",
+          color: "var(--dxw-select-fg, var(--dxw-toolbar-fg, #3c4043))",
+          padding: "var(--dxw-select-padding, 0 6px)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 6,
+          cursor: "pointer",
+          font: "var(--dxw-select-font, 13px system-ui, sans-serif)",
+          ...style,
+        }}
+      >
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: selected?.fontFamily }}>
+          {selected?.label ?? placeholder}
+        </span>
+        <span aria-hidden="true" className="dxw-menu-select-chevron" style={{ flexShrink: 0, fontSize: 10 }}>⌄</span>
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          id={id}
+          role="listbox"
+          aria-label={ariaLabel ?? title}
+          className="dxw-menu-select-menu"
+          data-dxw-menu-select-menu=""
+          onMouseDown={(event) => event.preventDefault()}
+          onKeyDown={onMenuKeyDown}
+          style={{
+            position: "fixed",
+            left: position.left,
+            top: position.top,
+            zIndex: "var(--dxw-toolbar-z-index, 100)",
+            width: position.width,
+            maxHeight: `min(var(--dxw-select-menu-max-height, 320px), ${position.maxHeight}px)`,
+            overflowY: "auto",
+            overscrollBehavior: "contain",
+            boxSizing: "border-box",
+            padding: "var(--dxw-select-menu-padding, 5px)",
+            border: "1px solid var(--dxw-select-menu-border, var(--dxw-toolbar-border, #dadce0))",
+            borderRadius: "var(--dxw-select-menu-radius, 8px)",
+            background: "var(--dxw-select-menu-bg, var(--dxw-popover-bg, #fff))",
+            boxShadow: "var(--dxw-select-menu-shadow, var(--dxw-popover-shadow, 0 4px 16px rgba(0,0,0,.15)))",
+          }}
+        >
+          {options.map((option) => {
+            const groupChanged = option.group !== previousGroup;
+            previousGroup = option.group;
+            const active = option.value === value;
+            return (
+              <Fragment key={option.value}>
+                {groupChanged && option.group && (
+                  <div className="dxw-menu-select-group" style={{ padding: "6px 8px 3px", color: T.muted, font: "600 10.5px system-ui, sans-serif" }}>
+                    {option.group}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  disabled={option.disabled}
+                  tabIndex={-1}
+                  className="dxw-menu-select-option"
+                  data-dxw-menu-select-option={option.value}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => pick(option.value)}
+                  style={{
+                    width: "100%",
+                    minHeight: 30,
+                    border: 0,
+                    borderRadius: 6,
+                    padding: "5px 8px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    background: active ? T.activeBg : "transparent",
+                    color: option.disabled ? T.muted : T.fg,
+                    textAlign: "left",
+                    cursor: option.disabled ? "default" : "pointer",
+                    font: "13px system-ui, sans-serif",
+                    fontFamily: option.fontFamily,
+                  }}
+                  onMouseEnter={(event) => { if (!active && !option.disabled) event.currentTarget.style.background = T.hoverBg; }}
+                  onMouseLeave={(event) => { if (!active) event.currentTarget.style.background = "transparent"; }}
+                >
+                  <span style={{ flex: 1 }}>{option.label}</span>
+                  {active && <span aria-hidden="true" style={{ color: T.accent, fontWeight: 700 }}>✓</span>}
+                </button>
+              </Fragment>
+            );
+          })}
+        </div>
+      )}
+    </span>
+  );
+}
+
 /** Menu select that runs an action and resets (never shows a value). */
 function ActionMenu({
   label,
@@ -219,32 +488,20 @@ function ActionMenu({
   width?: number;
 }) {
   return (
-    <select
+    <ToolbarMenuSelect
       title={title}
+      triggerAriaLabel={title}
       value=""
-      onMouseDown={(e) => e.stopPropagation()}
-      onChange={(e) => {
-        if (e.target.value) onPick(e.target.value);
-      }}
-      style={{ ...selectStyle, width }}
-    >
-      <option value="" disabled>
-        {label}
-      </option>
-      {groups.map((g, i) =>
-        g.label ? (
-          <optgroup key={i} label={g.label}>
-            {g.items.map(([v, t]) => (
-              <option key={v} value={v}>{t}</option>
-            ))}
-          </optgroup>
-        ) : (
-          g.items.map(([v, t]) => (
-            <option key={v} value={v}>{t}</option>
-          ))
-        ),
-      )}
-    </select>
+      placeholder={label}
+      width={width}
+      menuWidth={Math.max(width ?? 0, 190)}
+      options={groups.flatMap((group) => group.items.map(([value, text]) => ({
+        value,
+        label: text,
+        group: group.label,
+      })))}
+      onChange={onPick}
+    />
   );
 }
 
@@ -295,6 +552,154 @@ function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: stri
               background: "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
             }}
           />
+        </div>
+      )}
+    </span>
+  );
+}
+
+const COLOR_SWATCHES = [
+  "#000000", "#434343", "#666666", "#999999", "#b7b7b7", "#cccccc", "#d9d9d9", "#ffffff",
+  "#980000", "#ff0000", "#ff9900", "#ffff00", "#00ff00", "#00ffff", "#4a86e8", "#0000ff",
+  "#9900ff", "#ff00ff", "#e6b8af", "#f4cccc", "#fce5cd", "#fff2cc", "#d9ead3", "#d0e0e3",
+  "#c9daf8", "#cfe2f3", "#d9d2e9", "#ead1dc", "#a61c00", "#cc0000", "#e69138", "#6aa84f",
+] as const;
+
+function normalizedColor(value: string): string | null {
+  const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value.trim());
+  if (!match) return null;
+  const digits = match[1].length === 3
+    ? match[1].split("").map((digit) => digit + digit).join("")
+    : match[1];
+  return `#${digits.toLowerCase()}`;
+}
+
+/** Custom palette + hex entry used anywhere a native color picker used to
+ * appear. All surfaces expose stable classes and inherit the toolbar tokens. */
+function ColorMenu({
+  current,
+  title,
+  trigger,
+  onPick,
+}: {
+  current: string;
+  title: string;
+  trigger: React.ReactNode;
+  onPick: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [custom, setCustom] = useState(current);
+  const [position, setPosition] = useState({ left: 8, top: 8 });
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const valid = normalizedColor(custom);
+  useLayoutEffect(() => {
+    if (!open) return;
+    setCustom(current);
+    const update = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = Math.min(236, window.innerWidth - 16);
+      const menuHeight = menuRef.current?.offsetHeight ?? 188;
+      const top = window.innerHeight - rect.bottom >= menuHeight + 8
+        ? rect.bottom + 4
+        : Math.max(8, rect.top - menuHeight - 4);
+      setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)), top });
+    };
+    update();
+    const frame = requestAnimationFrame(update);
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+      }
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", keydown);
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", keydown);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [open, current]);
+  const pick = (value: string) => {
+    onPick(value);
+    setOpen(false);
+  };
+  return (
+    <span ref={rootRef} className="dxw-color-control" style={{ position: "relative", display: "inline-flex" }}>
+      <button
+        ref={triggerRef}
+        type="button"
+        title={title}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        className="dxw-color-trigger"
+        data-dxw-color-trigger=""
+        style={{ ...btnStyle(open), display: "inline-flex", alignItems: "center", gap: 5 }}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => setOpen(!open)}
+      >
+        {trigger}
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          role="dialog"
+          aria-label={title}
+          className="dxw-color-menu"
+          data-dxw-color-menu=""
+          onMouseDown={(event) => event.stopPropagation()}
+          style={{
+            position: "fixed", left: position.left, top: position.top,
+            zIndex: "var(--dxw-toolbar-z-index, 100)",
+            width: "min(var(--dxw-color-menu-width, 236px), calc(100vw - 16px))",
+            boxSizing: "border-box", padding: 8,
+            border: `1px solid ${T.border}`, borderRadius: 8,
+            background: T.popoverBg, boxShadow: T.popoverShadow,
+          }}
+        >
+          <div className="dxw-color-swatches" style={{ display: "grid", gridTemplateColumns: "repeat(8, 1fr)", gap: 4 }}>
+            {COLOR_SWATCHES.map((color) => (
+              <button
+                key={color}
+                type="button"
+                title={color}
+                aria-label={`Choose ${color}`}
+                className="dxw-color-swatch"
+                data-dxw-color={color}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => pick(color)}
+                style={{
+                  width: 23, height: 23, padding: 0, borderRadius: 4, cursor: "pointer",
+                  border: color.toLowerCase() === current.toLowerCase() ? `2px solid ${T.accent}` : `1px solid ${T.border}`,
+                  background: color,
+                }}
+              />
+            ))}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
+            <span aria-hidden="true" style={{ width: 24, height: 24, borderRadius: 4, border: `1px solid ${T.border}`, background: valid ?? current, flexShrink: 0 }} />
+            <input
+              aria-label="Custom hex color"
+              className="dxw-color-value"
+              value={custom}
+              onChange={(event) => setCustom(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter" && valid) pick(valid); }}
+              spellCheck={false}
+              placeholder="#1a73e8"
+              style={{ minWidth: 0, flex: 1, height: 28, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "3px 6px", color: T.fg, background: T.popoverBg }}
+            />
+            <button type="button" disabled={!valid} onClick={() => valid && pick(valid)} style={pillBtn}>Apply</button>
+          </div>
         </div>
       )}
     </span>
@@ -659,9 +1064,15 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
             <div style={{ color: T.muted, fontSize: 12 }}>Add a bookmark first, then reference its text or page.</div>
           ) : (
             <>
-              <select value={selected} onChange={(event) => setBookmark(event.target.value)} style={{ ...selectStyle, width: "100%", borderColor: T.border }}>
-                {bookmarks.map((name) => <option key={name} value={name}>{name}</option>)}
-              </select>
+              <ToolbarMenuSelect
+                value={selected}
+                ariaLabel="Bookmark to reference"
+                width="100%"
+                menuWidth={240}
+                options={bookmarks.map((name) => ({ value: name, label: name }))}
+                onChange={setBookmark}
+                style={{ borderColor: T.border }}
+              />
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
                 <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => insert("page")}>Page number</button>
                 <button style={pillBtn} onClick={() => insert("text")}>Bookmark text</button>
@@ -782,6 +1193,7 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
 }
 
 const SHAPES = [
+  ["line", "Line", "―"],
   ["rectangle", "Rectangle", "▭"],
   ["roundedRectangle", "Rounded rectangle", "▢"],
   ["ellipse", "Ellipse", "◯"],
@@ -974,12 +1386,20 @@ function ChartMenu({ api }: { api: DocxViewApi | null }) {
       <button title="Insert or edit chart" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Chart</button>
       {open && (
         <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 320, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <select aria-label="Chart type" value={type} onChange={(event) => setType(event.target.value as Chart["type"])} style={fieldStyle}>
-            <option value="column">Column</option>
-            <option value="bar">Bar</option>
-            <option value="line">Line</option>
-            <option value="pie">Pie</option>
-          </select>
+          <ToolbarMenuSelect
+            value={type}
+            ariaLabel="Chart type"
+            width="100%"
+            menuWidth={300}
+            options={[
+              { value: "column", label: "Column" },
+              { value: "bar", label: "Bar" },
+              { value: "line", label: "Line" },
+              { value: "pie", label: "Pie" },
+            ]}
+            onChange={(value) => setType(value as Chart["type"])}
+            style={fieldStyle}
+          />
           <input aria-label="Chart title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Chart title" style={fieldStyle} />
           <input aria-label="Chart categories" value={categories} onChange={(event) => setCategories(event.target.value)} placeholder="Q1, Q2, Q3, Q4" style={fieldStyle} />
           <textarea aria-label="Chart series" rows={3} value={series} onChange={(event) => setSeries(event.target.value)} style={{ ...fieldStyle, resize: "vertical" }} />
@@ -1018,12 +1438,20 @@ function SmartArtMenu({ api }: { api: DocxViewApi | null }) {
       <button title="Insert or edit SmartArt" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>SmartArt</button>
       {open && (
         <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 280, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <select aria-label="SmartArt layout" value={layout} onChange={(event) => setLayout(event.target.value as SmartArt["layout"])} style={fieldStyle}>
-            <option value="process">Process</option>
-            <option value="cycle">Cycle</option>
-            <option value="hierarchy">Hierarchy</option>
-            <option value="list">List</option>
-          </select>
+          <ToolbarMenuSelect
+            value={layout}
+            ariaLabel="SmartArt layout"
+            width="100%"
+            menuWidth={260}
+            options={[
+              { value: "process", label: "Process" },
+              { value: "cycle", label: "Cycle" },
+              { value: "hierarchy", label: "Hierarchy" },
+              { value: "list", label: "List" },
+            ]}
+            onChange={(value) => setLayout(value as SmartArt["layout"])}
+            style={fieldStyle}
+          />
           <textarea aria-label="SmartArt items" rows={5} value={items} onChange={(event) => setItems(event.target.value)} style={{ ...fieldStyle, resize: "vertical" }} />
           <div style={{ color: T.muted, font: "11.5px system-ui, sans-serif" }}>One diagram item per line.</div>
           <button disabled={!items.trim()} onClick={submit} style={{ border: 0, borderRadius: 6, padding: "7px 10px", background: items.trim() ? T.accent : T.border, color: T.accentFg, cursor: items.trim() ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}>Insert or update SmartArt</button>
@@ -1089,16 +1517,17 @@ function DrawTab({ api }: { api: DocxViewApi | null }) {
       <Btn label="Eraser" title="Stroke eraser" active={active === "eraser"} onClick={() => api?.setDrawingTool({ kind: "eraser", size: 14 })} />
       <Btn label="Lasso" title="Lasso ink" active={active === "lasso"} onClick={() => api?.setDrawingTool({ kind: "lasso" })} />
       <Sep />
-      <label title="Pen color" style={{ display: "inline-flex", alignItems: "center", gap: 5, color: T.fg, font: "12px system-ui, sans-serif" }}>
-        Color
-        <input
-          aria-label="Pen color"
-          type="color"
-          value={color}
-          onChange={(event) => activate(active === "highlighter" ? "highlighter" : "pen", event.target.value, width)}
-          style={{ width: 28, height: 24, padding: 1, border: `1px solid ${T.border}`, borderRadius: 4, background: "transparent" }}
-        />
-      </label>
+      <ColorMenu
+        current={color}
+        title="Pen color"
+        trigger={(
+          <>
+            <span style={{ font: "12px system-ui, sans-serif" }}>Color</span>
+            <span aria-hidden="true" style={{ width: 18, height: 18, borderRadius: 4, border: `1px solid ${T.border}`, background: color }} />
+          </>
+        )}
+        onPick={(value) => activate(active === "highlighter" ? "highlighter" : "pen", value, width)}
+      />
       <ActionMenu
         label={`${width} px`}
         title="Pen width"
@@ -1676,9 +2105,8 @@ function MarginMenu({
       <span>{label}</span>
       <input
         aria-label={`${label} margin (inches)`}
-        type="number"
-        min="0"
-        step="0.01"
+        type="text"
+        inputMode="decimal"
         required
         autoFocus={side === "top"}
         value={values[side]}
@@ -1796,9 +2224,8 @@ function PageSizeMenu({
       <span>{label}</span>
       <input
         aria-label={`Page ${side} (inches)`}
-        type="number"
-        min="0.01"
-        step="0.01"
+        type="text"
+        inputMode="decimal"
         required
         autoFocus={side === "width"}
         value={values[side]}
@@ -1885,17 +2312,19 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
       data-dxw-layout-ribbon=""
       style={{ display: "flex", flex: "1 1 640px", minWidth: 0, alignItems: "center", flexWrap: "wrap", gap: 2 }}
     >
-      <select
+      <ToolbarMenuSelect
         title="Apply layout changes to"
-        aria-label="Apply layout changes to"
+        ariaLabel="Apply layout changes to"
         value={scope}
-        onMouseDown={(e) => e.stopPropagation()}
-        onChange={(e) => setScope(e.target.value as "document" | "section")}
-        style={{ ...selectStyle, width: 118, maxWidth: "100%" }}
-      >
-        <option value="document">Whole document</option>
-        <option value="section">This section</option>
-      </select>
+        width={118}
+        menuWidth={170}
+        options={[
+          { value: "document", label: "Whole document" },
+          { value: "section", label: "This section" },
+        ]}
+        onChange={(value) => setScope(value as "document" | "section")}
+        style={{ maxWidth: "100%" }}
+      />
       <Sep />
       <MarginMenu scope={scope} onApply={set} {...menuState("margins")} />
       <LayoutMenu
@@ -2093,8 +2522,8 @@ export function DocxToolbar({
   const [fmt, setFmt] = useState<ReturnType<NonNullable<DocxViewApi["getSelectionFormat"]>> | null>(null);
   const [curStyle, setCurStyle] = useState<string | null>(null);
   const [listKind, setListKind] = useState<"bullet" | "number" | null>(null);
-  // Native <select>/<input type=color> steal focus and collapse the document
-  // selection; remember the last real range and restore it before applying.
+  // Toolbar popovers can move focus away from the document selection; remember
+  // the last real range and restore it before applying their choice.
   const savedRange = useRef<Range | null>(null);
   const imageInput = useRef<HTMLInputElement | null>(null);
   // Responsive collapse: measure the toolbar width and pick a tier; the higher
@@ -2177,49 +2606,46 @@ export function DocxToolbar({
       groups.push({
         key: "styles",
         node: (
-          <select
+          <ToolbarMenuSelect
             title="Paragraph style"
             value={curStyle ?? "__normal"}
-            onMouseDown={(e) => e.stopPropagation()}
-            onChange={(e) => {
-              if (e.target.value) {
-                api?.setParagraphStyle(e.target.value === "__normal" ? null : e.target.value);
+            width={92}
+            menuWidth={190}
+            options={[
+              { value: "__normal", label: "Normal" },
+              ...(api?.listParagraphStyles() ?? [])
+                .filter((style) => !/^normal$/i.test(style.name))
+                .map((style) => ({ value: style.id, label: style.name })),
+              ...(curStyle !== null && !(api?.listParagraphStyles() ?? []).some((style) => style.id === curStyle)
+                ? [{ value: curStyle, label: api?.document.styles.byId.get(curStyle)?.name ?? curStyle }]
+                : []),
+            ]}
+            onChange={(value) => {
+              if (value) {
+                api?.setParagraphStyle(value === "__normal" ? null : value);
                 setCurStyle(api?.getParagraphStyleId?.() ?? null);
               }
             }}
-            style={{ ...selectStyle, width: 92 }}
-          >
-            <option value="__normal">Normal</option>
-            {(api?.listParagraphStyles() ?? [])
-              .filter((s) => !/^normal$/i.test(s.name))
-              .map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            {curStyle !== null &&
-              !(api?.listParagraphStyles() ?? []).some((s) => s.id === curStyle) && (
-                <option value={curStyle}>
-                  {api?.document.styles.byId.get(curStyle)?.name ?? curStyle}
-                </option>
-              )}
-          </select>
+          />
         ),
       });
     if (on("font"))
       groups.push({
         key: "font",
         node: (
-          <select
+          <ToolbarMenuSelect
             title="Font"
             value={fmt?.fontFamily ?? ""}
-            onMouseDown={(e) => e.stopPropagation()}
-            onChange={(e) => e.target.value && apply({ fontFamily: e.target.value })}
-            style={{ ...selectStyle, width: 130 }}
-          >
-            <option value="" disabled>Font</option>
-            {(fmt?.fontFamily && !detectFonts().includes(fmt.fontFamily) ? [fmt.fontFamily, ...detectFonts()] : detectFonts()).map((f) => (
-              <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
-            ))}
-          </select>
+            placeholder="Font"
+            width={130}
+            menuWidth={210}
+            options={(fmt?.fontFamily && !detectFonts().includes(fmt.fontFamily) ? [fmt.fontFamily, ...detectFonts()] : detectFonts()).map((font) => ({
+              value: font,
+              label: font,
+              fontFamily: font,
+            }))}
+            onChange={(value) => value && apply({ fontFamily: value })}
+          />
         ),
       });
     if (on("size"))
@@ -2227,18 +2653,15 @@ export function DocxToolbar({
         key: "size",
         node: (
           <>
-          <select
+          <ToolbarMenuSelect
             title="Font size"
-            value={fmt?.fontSizePt ?? ""}
-            onMouseDown={(e) => e.stopPropagation()}
-            onChange={(e) => e.target.value && apply({ fontSizePt: parseFloat(e.target.value) })}
-            style={{ ...selectStyle, width: 58 }}
-          >
-            <option value="" disabled>Size</option>
-            {SIZES.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
+            value={fmt?.fontSizePt === undefined ? "" : String(fmt.fontSizePt)}
+            placeholder="Size"
+            width={58}
+            menuWidth={92}
+            options={SIZES.map((size) => ({ value: String(size), label: String(size) }))}
+            onChange={(value) => value && apply({ fontSizePt: parseFloat(value) })}
+          />
           <Sep />
           </>
         ),
@@ -2279,16 +2702,12 @@ export function DocxToolbar({
       groups.push({
         key: "color",
         node: (
-          <label title="Text color" style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
-            <span style={{ fontSize: 13, borderBottom: `3px solid ${fmt?.color && fmt.color !== "auto" ? fmt.color : "#000"}`, padding: "0 3px", color: T.fg }}>A</span>
-            <input
-              type="color"
-              value={fmt?.color && fmt.color !== "auto" ? fmt.color : "#000000"}
-              onMouseDown={(e) => e.stopPropagation()}
-              onChange={(e) => apply({ color: e.target.value })}
-              style={{ width: 0, height: 0, opacity: 0, border: "none", padding: 0 }}
-            />
-          </label>
+          <ColorMenu
+            current={fmt?.color && fmt.color !== "auto" ? fmt.color : "#000000"}
+            title="Text color"
+            trigger={<span style={{ fontSize: 13, borderBottom: `3px solid ${fmt?.color && fmt.color !== "auto" ? fmt.color : "#000"}`, padding: "0 3px", color: T.fg }}>A</span>}
+            onPick={(value) => apply({ color: value })}
+          />
         ),
       });
     if (on("highlight"))

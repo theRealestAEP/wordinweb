@@ -204,4 +204,60 @@ describe("incremental same-page block checkpoints", () => {
     expect(paintProjection(repeated)).toBe(paintProjection(layoutDocument(doc, { measurer })));
     expect(__incrStats.blocksLaid).toBeLessThanOrEqual(20);
   });
+
+  it("reparses a paragraph split inside a table cell without refreshing the document", () => {
+    const tableXml =
+      `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>` +
+      `<w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>` +
+      p("alpha bravo charlie delta") +
+      `</w:tc></w:tr></w:tbl>`;
+    const trailing = Array.from({ length: 80 }, (_, i) => p(`tail-${i} echo foxtrot golf hotel`)).join("");
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(tableXml + trailing + section) }));
+    const first = layoutDocument(doc, { measurer });
+    const table = doc.sections[0].blocks[0];
+    expect(table.type).toBe("table");
+    if (table.type !== "table") throw new Error("expected table");
+    const cellBlocks = table.rows[0].cells[0].blocks;
+    const before = cellBlocks[0] as Paragraph;
+    const beforeSource = before.src!;
+    const beforeRun = before.children[0] as Run;
+    const beforeText = beforeRun.content[0] as TextContent;
+    const beforeT = beforeText.srcT!;
+    const splitAt = 12;
+    const afterT: XmlElement = {
+      name: beforeT.name,
+      attrs: { ...beforeT.attrs, "xml:space": "preserve" },
+      children: [],
+      text: beforeT.text.slice(splitAt),
+    };
+    const afterSource: XmlElement = {
+      name: beforeSource.name,
+      attrs: {},
+      text: "",
+      children: [{ name: beforeRun.src!.name, attrs: {}, text: "", children: [afterT] }],
+    };
+    beforeT.text = beforeT.text.slice(0, splitAt);
+    const cellSource = doc.findParentOf(beforeSource)!;
+    cellSource.children.splice(cellSource.children.indexOf(beforeSource) + 1, 0, afterSource);
+    const version = doc.modelVersion;
+
+    const reparsed = doc.reparseDirectBodyParagraphSplit(beforeSource, afterSource);
+    expect(reparsed).not.toBeNull();
+    expect(doc.modelVersion).toBe(version);
+    expect(cellBlocks).toHaveLength(2);
+    expect(cellBlocks[0].src).toBe(beforeSource);
+    expect(cellBlocks[1].src).toBe(afterSource);
+    invalidateParagraphSignature(beforeSource);
+    invalidateParagraphSignature(afterSource);
+
+    const incremental = layoutDocument(doc, {
+      measurer,
+      prev: first,
+      dirtyHint: table.src,
+      dirtySource: afterT,
+    });
+    expect(incremental._incremental).toBe(true);
+    expect(paintProjection(incremental)).toBe(paintProjection(layoutDocument(doc, { measurer })));
+  });
 });
