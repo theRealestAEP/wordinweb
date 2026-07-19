@@ -285,6 +285,8 @@ export interface ImageContent {
 export interface Model3DReference {
   part: string;
   posterPart: string;
+  /** Native Office model orientation, in degrees around the X/Y/Z axes. */
+  rotation?: { x: number; y: number; z: number };
 }
 
 export interface WebVideoReference {

@@ -346,6 +346,14 @@ export function DocxView({
   effZoomRef.current = effectiveZoom;
   const applyZoomRef = useRef<((z: number) => void) | null>(null);
 
+  // Register the browser 3D viewport only for editable documents. Unknown
+  // <model-viewer> elements upgrade in place if a document renders first.
+  useEffect(() => {
+    if (editable && typeof window !== "undefined" && !customElements.get("model-viewer")) {
+      void import("@google/model-viewer");
+    }
+  }, [editable]);
+
   const recomputeFit = useCallback(() => {
     const c = containerRef.current;
     if (!c) return;
@@ -869,8 +877,10 @@ export function DocxView({
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
-            if (!insertShapeAt(doc, target.t, preset, text)) return false;
+            const drawing = insertShapeAt(doc, target.t, preset, text);
+            if (!drawing) return false;
             pages = rerender(doc, undefined, "global");
+            editor?.reselectDrawing(drawing);
             return true;
           },
           insertWordArt: (text, preset = "plain") => {

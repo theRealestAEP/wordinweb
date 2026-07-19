@@ -1125,7 +1125,17 @@ function parseDrawing(
       const modelRel = modelRelId ? ctx.rels.get(modelRelId) : undefined;
       if (rel && !rel.external) {
         if (modelRel && !modelRel.external) {
-          model3D = { part: modelRel.target, posterPart: rel.target };
+          const rot = child(child(el, "trans"), "rot");
+          const rotation = {
+            x: (intAttr(rot, "ax") ?? 0) / 60000,
+            y: (intAttr(rot, "ay") ?? 0) / 60000,
+            z: (intAttr(rot, "az") ?? 0) / 60000,
+          };
+          model3D = {
+            part: modelRel.target,
+            posterPart: rel.target,
+            ...(rotation.x || rotation.y || rotation.z ? { rotation } : {}),
+          };
         }
         const xfrm = path(el, "spPr", "xfrm");
         const off = child(xfrm, "off");

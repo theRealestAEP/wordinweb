@@ -18,6 +18,12 @@ export interface Model3DInsert {
   alt?: string;
 }
 
+export interface Model3DRotation {
+  x: number;
+  y: number;
+  z: number;
+}
+
 export interface WebVideoInsert {
   url: string;
   poster: Uint8Array;
@@ -153,6 +159,39 @@ export function insertModel3DAt(doc: DocxDocument, caretT: XmlElement, input: Mo
     el("mc:Fallback", {}, [fallback]),
   ]);
   return insertAfterCaretRun(doc, caretT, alternate);
+}
+
+/** Save a 3D model's native X/Y/Z orientation in DrawingML angle units. */
+export function setModel3DRotation(
+  doc: DocxDocument,
+  drawingEl: XmlElement,
+  rotation: Model3DRotation,
+): boolean {
+  let model: XmlElement | undefined;
+  const visit = (node: XmlElement): void => {
+    if (model) return;
+    if (localName(node.name) === "model3d") model = node;
+    else for (const child of node.children) visit(child);
+  };
+  visit(drawingEl);
+  if (!model) return false;
+  const trans = model.children.find((child) => localName(child.name) === "trans");
+  if (!trans) return false;
+  let rot = trans.children.find((child) => localName(child.name) === "rot");
+  if (!rot) {
+    rot = el("am3d:rot");
+    const post = trans.children.findIndex((child) => localName(child.name) === "postTrans");
+    trans.children.splice(post === -1 ? trans.children.length : post, 0, rot);
+  }
+  const angle = (degrees: number): string => {
+    const normalized = ((degrees % 360) + 360) % 360;
+    return String(Math.round(normalized * 60000));
+  };
+  rot.attrs.ax = angle(rotation.x);
+  rot.attrs.ay = angle(rotation.y);
+  rot.attrs.az = angle(rotation.z);
+  doc.refresh();
+  return true;
 }
 
 export function normalizeWebVideoUrl(value: string): string | null {

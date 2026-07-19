@@ -817,7 +817,7 @@ function renderPage(
     }
     // Drawing hit overlays only exist in the editor; skip in read-only.
     if (item.kind === "drawingHit" && !options.interactive) continue;
-    const node = renderItem(doc, item, urls);
+    const node = renderItem(doc, item, urls, options.interactive === true);
     if (node) {
       node.dataset.dxwItemKind = item.kind;
       if ((item.kind === "rect" || item.kind === "edge") && item.role) {
@@ -1413,7 +1413,7 @@ function setItemLayer(
   else if (item.front) element.style.zIndex = String(frontLayer);
 }
 
-function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElement | null {
+function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interactive: boolean): HTMLElement | null {
   switch (item.kind) {
     case "rect": {
       const el = document.createElement("div");
@@ -1694,6 +1694,85 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[]): HTMLElem
       } else {
         img.style.width = `${item.width}px`;
         img.style.height = `${item.height}px`;
+      }
+      if (item.model3D && interactive) {
+        const modelBytes = doc.media(item.model3D.part);
+        if (modelBytes) {
+          const modelUrl = docMediaUrl(doc, item.model3D.part, () => {
+            const buffer = modelBytes.buffer.slice(
+              modelBytes.byteOffset,
+              modelBytes.byteOffset + modelBytes.byteLength,
+            ) as ArrayBuffer;
+            return URL.createObjectURL(new Blob([buffer], { type: "model/gltf-binary" }));
+          });
+          const frame = document.createElement("div");
+          frame.appendChild(node);
+          const viewer = document.createElement("model-viewer");
+          viewer.dataset.dxwModel3dViewer = "1";
+          viewer.setAttribute("src", modelUrl);
+          viewer.setAttribute("poster", img.src);
+          viewer.setAttribute("alt", "3D model");
+          viewer.setAttribute("loading", "eager");
+          viewer.setAttribute("interaction-prompt", "none");
+          viewer.style.cssText =
+            "position:absolute;inset:0;width:100%;height:100%;background:transparent;cursor:grab;touch-action:none;";
+          let rotation = { x: 0, y: 0, z: 0, ...item.model3D.rotation };
+          const orient = (): void => {
+            // model-viewer expects roll(Z), pitch(X), yaw(Y); Office stores X/Y/Z.
+            viewer.setAttribute("orientation", `${rotation.z}deg ${rotation.x}deg ${rotation.y}deg`);
+          };
+          orient();
+          let pointerId: number | null = null;
+          let startX = 0;
+          let startY = 0;
+          let startRotation = rotation;
+          let moved = false;
+          viewer.addEventListener("pointerdown", (event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            event.stopPropagation();
+            pointerId = event.pointerId;
+            startX = event.clientX;
+            startY = event.clientY;
+            startRotation = rotation;
+            moved = false;
+            viewer.setPointerCapture(event.pointerId);
+            viewer.style.cursor = "grabbing";
+          });
+          viewer.addEventListener("pointermove", (event) => {
+            if (pointerId !== event.pointerId) return;
+            const dx = event.clientX - startX;
+            const dy = event.clientY - startY;
+            if (!moved && Math.hypot(dx, dy) < 2) return;
+            moved = true;
+            rotation = {
+              x: startRotation.x + dy * 0.5,
+              y: startRotation.y + dx * 0.5,
+              z: startRotation.z,
+            };
+            orient();
+          });
+          const finish = (event: PointerEvent, commit: boolean): void => {
+            if (pointerId !== event.pointerId) return;
+            if (viewer.hasPointerCapture(event.pointerId)) viewer.releasePointerCapture(event.pointerId);
+            pointerId = null;
+            viewer.style.cursor = "grab";
+            if (!moved) return;
+            if (!commit) {
+              rotation = startRotation;
+              orient();
+              return;
+            }
+            viewer.dispatchEvent(new CustomEvent("dxw-model3d-rotate", {
+              bubbles: true,
+              detail: rotation,
+            }));
+          };
+          viewer.addEventListener("pointerup", (event) => finish(event, true));
+          viewer.addEventListener("pointercancel", (event) => finish(event, false));
+          frame.appendChild(viewer);
+          node = frame;
+        }
       }
       node.style.position = "absolute";
       node.style.left = `${item.x}px`;

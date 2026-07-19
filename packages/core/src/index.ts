@@ -73,8 +73,8 @@ export {
 export type { DrawingTool, InkPoint, ShapePreset, WordArtPreset } from "./edit/drawings.js";
 export { buildChartWorkbook, buildChartXml, insertChartAt, normalizeChartData, setChartData } from "./edit/charts.js";
 export { buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, normalizeSmartArtData, setSmartArtData } from "./edit/smartart.js";
-export { insertModel3DAt, insertWebVideoAt, insertEmbeddedObjectAt, normalizeWebVideoUrl } from "./edit/objects.js";
-export type { Model3DInsert, WebVideoInsert, EmbeddedObjectInsert } from "./edit/objects.js";
+export { insertModel3DAt, setModel3DRotation, insertWebVideoAt, insertEmbeddedObjectAt, normalizeWebVideoUrl } from "./edit/objects.js";
+export type { Model3DInsert, Model3DRotation, WebVideoInsert, EmbeddedObjectInsert } from "./edit/objects.js";
 export { buildOlePackage, extractOlePackage } from "./parse/ole.js";
 export { validBookmarkName, listBookmarks, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference } from "./edit/references.js";
 export { checkboxStateElement, checkboxChecked, toggleCheckbox } from "./checkbox.js";

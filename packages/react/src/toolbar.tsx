@@ -1112,6 +1112,7 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert equation" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
         <span style={{ fontFamily: "'Cambria Math', serif", fontSize: 18 }}>π</span>
+        <span style={{ marginLeft: 5 }}>Equation</span>
       </button>
       {open && (
         <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 340, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>

@@ -1,6 +1,6 @@
 {
   "name": "wordinweb",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "React component for high-fidelity DOCX viewing and editing",
   "license": "MIT",
   "repository": {
@@ -32,8 +32,10 @@
     "prepack": "npm run build"
   },
   "dependencies": {
+    "@google/model-viewer": "^4.3.1",
     "emf-converter": "^1.5.0",
     "fflate": "^0.8.2",
+    "three": "^0.183.2",
     "wmf": "^1.0.2"
   },
   "peerDependencies": {
@@ -41,9 +43,9 @@
     "react-dom": ">=18"
   },
   "devDependencies": {
-    "@wordinweb/core": "0.1.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
+    "@wordinweb/core": "0.1.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0"
   }

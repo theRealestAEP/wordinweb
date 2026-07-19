@@ -128,7 +128,7 @@ The object passed to `onReady`. Every command operates on the current selection 
 **Images**
 - `insertImage(file)` — inserts a raster image or editable SVG icon inline at the caret, clamped to the column width (TIFF/WMF/EMF are decoded to something the browser can paint).
 - `insertScreenshot()` — opens the browser screen/window/tab picker and inserts the captured frame as an editable PNG picture.
-- `insertModel3D(file, poster?)` — packages a GLB as a native Office 3D model with an editable poster fallback.
+- `insertModel3D(file, poster?)` — packages a GLB as a native Office 3D model; editable documents show a drag-to-rotate viewport and save the orientation back to Word.
 - `insertOnlineVideo(url)` — inserts Word online-video metadata with a safe browser poster; double-click opens the validated HTTP(S) URL.
 - `insertEmbeddedObject(file, filename?)` — embeds any file as a native OLE Package; double-click safely downloads the original file in the browser.
 

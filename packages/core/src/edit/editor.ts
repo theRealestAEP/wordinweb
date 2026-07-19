@@ -37,6 +37,7 @@ import {
 } from "./images.js";
 import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
 import { requestTextInputDialog } from "./dialog.js";
+import { setModel3DRotation, type Model3DRotation } from "./objects.js";
 
 export type ObjectArrangeAction =
   | "alignLeft"
@@ -968,7 +969,9 @@ export class DocxEditor {
     c.tabIndex = 0;
     c.style.outline = "none";
     c.addEventListener("mousedown", this.onGripMouseDown, true);
+    c.addEventListener("pointerdown", this.onModel3DPointerDown, true);
     c.addEventListener("mouseup", this.onMouseUp);
+    c.addEventListener("dxw-model3d-rotate", this.onModel3DRotate as EventListener);
     c.addEventListener("keydown", this.onKeyDown);
     c.appendChild(this.imeEl);
     this.imeEl.addEventListener("compositionstart", this.onCompositionStart);
@@ -988,7 +991,9 @@ export class DocxEditor {
     if (this.host.history) this.host.history.applyTextChanges = null;
     const c = this.host.container;
     c.removeEventListener("mousedown", this.onGripMouseDown, true);
+    c.removeEventListener("pointerdown", this.onModel3DPointerDown, true);
     c.removeEventListener("mouseup", this.onMouseUp);
+    c.removeEventListener("dxw-model3d-rotate", this.onModel3DRotate as EventListener);
     c.removeEventListener("keydown", this.onKeyDown);
     this.imeEl.removeEventListener("compositionstart", this.onCompositionStart);
     this.imeEl.removeEventListener("compositionupdate", this.onCompositionUpdate);
@@ -2034,6 +2039,39 @@ export class DocxEditor {
   private imageToolbar: HTMLDivElement | null = null;
   private wordArtTextEditor: { input: HTMLInputElement; finish: (commit: boolean, reselect: boolean) => void } | null = null;
 
+  private model3DBinding(target: EventTarget | null): ImageBinding | undefined {
+    const viewer = (target as HTMLElement | null)?.closest?.("[data-dxw-model3d-viewer]");
+    return viewer
+      ? this.host.getHandle()?.images.find((binding) => binding.el.contains(viewer))
+      : undefined;
+  }
+
+  /** First press selects a model; subsequent drags belong to its 3D viewport. */
+  private onModel3DPointerDown = (event: PointerEvent): void => {
+    const binding = this.model3DBinding(event.target);
+    const src = binding?.item.src;
+    if (!binding || !src || this.selectedImage?.src === src) return;
+    if ((this.regionOf(src) === "hf") !== this.inHeaderFooter) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.selectImage(binding.el, src, binding.item);
+  };
+
+  private onModel3DRotate = (event: Event): void => {
+    const binding = this.model3DBinding(event.target);
+    const src = binding?.item.src;
+    const detail = (event as CustomEvent<Model3DRotation>).detail;
+    if (!binding || !src || !detail || ![detail.x, detail.y, detail.z].every(Number.isFinite)) return;
+    event.stopPropagation();
+    const rect = binding.el.getBoundingClientRect();
+    const near = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    this.host.history?.checkpoint();
+    if (setModel3DRotation(this.host.doc, src, detail)) {
+      this.host.rerender(undefined, "local");
+      this.reselectImage(src, near);
+    }
+  };
+
   /** First click selects a text box as an object; the second click edits only
    * its story, even when the source shape lives in a header part. */
   private startTextboxTextInteraction(e: MouseEvent, target: HTMLElement): boolean {
@@ -2159,13 +2197,16 @@ export class DocxEditor {
     ];
     for (const [mode, label] of modes) {
       const b = document.createElement("button");
+      b.type = "button";
       b.textContent = label;
       const active =
         (mode === "inline" && !isFloating) ||
         (isFloating && this.currentWrap(src) === mode);
+      b.setAttribute("aria-pressed", String(active));
       b.style.cssText =
-        `border:none;border-radius:3px;padding:3px 7px;cursor:pointer;color:#3c4043;` +
-        `background:${active ? "#dfe7f5" : "transparent"};`;
+        `border:1px solid ${active ? "#8ab4f8" : "transparent"};border-radius:4px;padding:3px 7px;` +
+        `cursor:pointer;color:${active ? "#174ea6" : "#3c4043"};font-weight:${active ? "600" : "400"};` +
+        `background:${active ? "#d2e3fc" : "transparent"};`;
       b.addEventListener("mousedown", (me) => {
         me.preventDefault();
         me.stopPropagation();
@@ -2271,6 +2312,15 @@ export class DocxEditor {
         });
       });
     }
+    const drawingBinding = kind === "drawing"
+      ? this.host.getHandle()?.drawings.find((binding) => binding.item.src === src)
+      : undefined;
+    if (drawingBinding?.item.textboxStory && !isDrawingWordArt(src)) {
+      extra("Edit text", "Edit shape text", () => {
+        const rect = drawingBinding.el.getBoundingClientRect();
+        this.enterTextboxStory(src, rect.left + rect.width / 2, rect.top + rect.height / 2);
+      });
+    }
     if (kind === "drawing" && isDrawingWordArt(src)) {
       extra("Edit text", "Edit WordArt text", () => this.editDrawingWordArt(src));
     }
@@ -2292,6 +2342,15 @@ export class DocxEditor {
         });
         input.click();
         this.deselectImage();
+      });
+    }
+    if (el.dataset.dxwModel3d) {
+      extra("Reset 3D", "Reset 3D rotation", () => {
+        this.host.history?.checkpoint();
+        if (setModel3DRotation(this.host.doc, src, { x: 0, y: 0, z: 0 })) {
+          this.host.rerender(undefined, "local");
+          this.reselectImage(src);
+        }
       });
     }
     const surface = el.parentElement!;
@@ -2536,6 +2595,10 @@ export class DocxEditor {
   /** Handle mousedown on images / their resize handle. Returns true if consumed. */
   private startImageInteraction(e: MouseEvent, target: HTMLElement): boolean {
     const zoom = this.host.zoom ?? 1;
+
+    // The live 3D viewport owns drags once selected; its pointer handler
+    // updates the native model orientation instead of moving the picture box.
+    if (target.closest?.("[data-dxw-model3d-viewer]")) return true;
 
     // Resize handles: corners aspect-locked, edges free-stretch (Word).
     // The element previews live; the model updates once on release, and the
@@ -2975,6 +3038,7 @@ export class DocxEditor {
     if (this.wordArtOverlay?.contains(e.target as Node)) return;
     if (this.wordArtTextEditor?.input.contains(e.target as Node)) return;
     if (this.selectedInkGroup?.overlay.contains(e.target as Node)) return;
+    if ((e.target as HTMLElement | null)?.closest?.("[data-dxw-model3d-viewer]")) return;
     this.deselectInkGroup();
     this.deselectImage();
     this.deselectWordArt();
