@@ -1,6 +1,6 @@
 # WordInWeb
 
-[**Live demo →**](https://wordinweb-parity.callerinfo.workers.dev/)
+[**Live demo →**](https://word-in-web.com/)
 
 A Word/.docx viewer and editor for the web, embeddable as a single React component.
 
