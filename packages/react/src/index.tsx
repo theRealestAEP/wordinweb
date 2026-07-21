@@ -53,6 +53,7 @@ import {
   insertCoverPage,
   insertSectionBreak,
   sectPrAt,
+  sectionContextAt,
   setLineNumbering,
   lineNumberingAt,
   type XmlElement,
@@ -155,6 +156,8 @@ export interface DocxViewApi {
   getDrawingTool(): DrawingTool | null;
   /** Align, rotate, or reorder the selected image, shape, or ink group. */
   arrangeObject(action: ObjectArrangeAction): boolean;
+  /** True while an image, shape, or ink group is selected. */
+  hasSelectedObject(): boolean;
   undo(): void;
   redo(): void;
   canUndo(): boolean;
@@ -181,8 +184,8 @@ export interface DocxViewApi {
   getLinkAt(): string | null;
   /** Step paragraph indent by half an inch (Word's indent buttons). */
   adjustIndent(direction: 1 | -1): void;
-  /** Line spacing multiple and/or space before/after (points). */
-  setParagraphSpacing(patch: { lineMultiple?: number; beforePt?: number | null; afterPt?: number | null }): void;
+  /** Line spacing multiple or exact point height, and/or space before/after (points). */
+  setParagraphSpacing(patch: { lineMultiple?: number; exactLinePt?: number; beforePt?: number | null; afterPt?: number | null }): void;
   /** Apply or remove a native Word drop cap on the caret paragraph. */
   setDropCap(mode: "drop" | "margin" | null, lines?: number): boolean;
   /** Remove direct character formatting from the selection. */
@@ -203,6 +206,8 @@ export interface DocxViewApi {
   getParagraphStyleId(): string | null;
   /** Change margins / page size / orientation (inches). */
   setPageLayout(patch: PageLayoutPatch, scope?: "document" | "section"): void;
+  /** One-based logical section containing the caret or selection. */
+  getSectionContext(): { index: number; count: number } | null;
   /** Insert a page/column break or a section break at the caret. */
   insertBreak(kind: "page" | "column" | "sectionNextPage" | "sectionContinuous"): boolean;
   /** Insert a full blank page at the caret (two consecutive page breaks). */
@@ -276,6 +281,8 @@ export interface DocxViewProps {
   className?: string;
   style?: React.CSSProperties;
   onLoad?: (info: { pageCount: number; document: DocxDocument }) => void;
+  /** Fires whenever editing changes the rendered page count. */
+  onPageCountChange?: (pageCount: number) => void;
   /** Fires when the document is ready; the api is only usable while mounted. */
   onReady?: (api: DocxViewApi) => void;
   onError?: (error: Error) => void;
@@ -321,6 +328,7 @@ export function DocxView({
   className,
   style,
   onLoad,
+  onPageCountChange,
   onReady,
   onError,
   commentAuthor = "You",
@@ -345,6 +353,8 @@ export function DocxView({
   const effZoomRef = useRef(effectiveZoom);
   effZoomRef.current = effectiveZoom;
   const applyZoomRef = useRef<((z: number) => void) | null>(null);
+  const onPageCountChangeRef = useRef(onPageCountChange);
+  onPageCountChangeRef.current = onPageCountChange;
 
   // Register the browser 3D viewport only for editable documents. Unknown
   // <model-viewer> elements upgrade in place if a document renders first.
@@ -515,6 +525,7 @@ export function DocxView({
           totalPages: layout.totalPages,
         };
       }
+      if (pages !== layout.totalPages) onPageCountChangeRef.current?.(layout.totalPages);
       pages = layout.totalPages;
       return layout.totalPages;
     };
@@ -961,6 +972,7 @@ export function DocxView({
           setDrawingTool: (tool) => editor?.setDrawingTool(tool),
           getDrawingTool: () => editor?.getDrawingTool() ?? null,
           arrangeObject: (action) => editor?.arrangeSelectedObject(action) ?? false,
+          hasSelectedObject: () => editor?.hasSelectedObject() ?? false,
           addComment: (text) => {
             const segs = editor?.getSelectionSegments() ?? [];
             const segments = segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : [];
@@ -1092,7 +1104,7 @@ export function DocxView({
                 ? insertBreakAt(doc, target.t, target.offset, kind)
                 : insertSectionBreak(doc, target.t, kind === "sectionNextPage" ? "nextPage" : "continuous");
             if (done) pages = rerender(doc);
-            return done;
+            return !!done;
           },
           insertBlankPage: () => {
             const target = insertionTarget();
@@ -1116,6 +1128,10 @@ export function DocxView({
               if (t) target = sectPrAt(doc, t) ?? undefined;
             }
             if (setPageLayout(doc, patch, target)) pages = rerender(doc);
+          },
+          getSectionContext: () => {
+            const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t;
+            return t ? sectionContextAt(doc, t) : null;
           },
           setLineNumbering: (patch, scope) => {
             history.checkpoint();
@@ -1338,11 +1354,70 @@ export function DocxView({
     </button>
   );
   return (
-    <div style={{ position: "relative", ...(style?.height ? { height: style.height } : {}) }}>
+    <div
+      style={{
+        position: "relative",
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+        ...(style?.height ? { height: style.height } : {}),
+      }}
+    >
+      {editable && hfMode && (
+        <div
+          data-dxw-editor-context-row=""
+          style={{
+            flex: "0 0 52px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "var(--dxw-canvas-bg, #e8eaed)",
+            position: "relative",
+            zIndex: 40,
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            data-dxw-hf-hotbar=""
+            style={{
+              display: "flex",
+              gap: 6,
+              background: "rgba(249,251,253,.96)",
+              border: "1px solid #dadce0",
+              borderRadius: 18,
+              padding: "5px 8px",
+              boxShadow: "0 2px 10px rgba(0,0,0,.15)",
+              alignItems: "center",
+              pointerEvents: "auto",
+            }}
+          >
+            <span style={{ font: "600 11.5px system-ui, sans-serif", color: "#5f6368", padding: "0 4px" }}>
+              Header &amp; footer · repeats on pages
+            </span>
+            {hotBtn("Page number", "Insert a dynamic page number at the caret", () => apiRef.current?.insertPageNumber("page"))}
+            {hotBtn("Page X of Y", "Insert 'Page X of Y' at the caret", () => apiRef.current?.insertPageNumber("pageOfTotal"))}
+            {hotBtn("Close", "Return to the document body", () => {
+              apiRef.current?.closeHeaderFooter();
+              setHfMode(false);
+            })}
+          </div>
+        </div>
+      )}
       <div
         ref={containerRef}
         className={className}
-        style={{ background: "var(--dxw-canvas-bg, #e8eaed)", overflow: "auto", height: "100%", ...style }}
+        style={{
+          background: "var(--dxw-canvas-bg, #e8eaed)",
+          overflow: "auto",
+          height: "100%",
+          ...style,
+          ...(editable ? {
+            height: "auto",
+            flex: "1 1 auto",
+            minHeight: 0,
+            boxSizing: "border-box" as const,
+          } : {}),
+        }}
       >
         {error && (
           <div style={{ padding: 16, color: "#b00020", fontFamily: "system-ui" }}>
@@ -1356,7 +1431,7 @@ export function DocxView({
           aria-live="polite"
           style={{
             position: "absolute",
-            top: 10,
+            top: editable ? 62 : 10,
             right: 12,
             zIndex: 45,
             padding: "5px 10px",
@@ -1368,37 +1443,6 @@ export function DocxView({
           }}
         >
           Repaginating…
-        </div>
-      )}
-      {editable && hfMode && (
-        <div
-          data-dxw-hf-hotbar=""
-          style={{
-            position: "absolute",
-            top: 10,
-            left: "50%",
-            transform: "translateX(-50%)",
-            display: "flex",
-            gap: 6,
-            zIndex: 40,
-            background: "rgba(249,251,253,.96)",
-            border: "1px solid #dadce0",
-            borderRadius: 18,
-            padding: "5px 8px",
-            boxShadow: "0 2px 10px rgba(0,0,0,.15)",
-            alignItems: "center",
-          }}
-        >
-          <span style={{ font: "600 11.5px system-ui, sans-serif", color: "#5f6368", padding: "0 4px" }}>
-            Header &amp; footer · repeats on pages
-          </span>
-          {hotBtn("Line", "Insert a reusable line in the repeating page layer", () => apiRef.current?.insertShape("line"))}
-          {hotBtn("Page number", "Insert a dynamic page number at the caret", () => apiRef.current?.insertPageNumber("page"))}
-          {hotBtn("Page X of Y", "Insert 'Page X of Y' at the caret", () => apiRef.current?.insertPageNumber("pageOfTotal"))}
-          {hotBtn("Close", "Return to the document body", () => {
-            apiRef.current?.closeHeaderFooter();
-            setHfMode(false);
-          })}
         </div>
       )}
     </div>

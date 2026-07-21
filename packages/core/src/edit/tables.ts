@@ -592,12 +592,28 @@ export function resizeDrawing(
   const EMU = 9525;
   const cx = String(Math.max(Math.round(widthPx * EMU), EMU));
   const cy = String(Math.max(Math.round(heightPx * EMU), EMU));
+  let lineExtent: XmlElement | undefined;
+  const findLineExtent = (node: XmlElement): void => {
+    if (lineExtent) return;
+    if (localName(node.name) === "spPr") {
+      const preset = attr(child(node, "prstGeom"), "prst") ?? "";
+      if (preset === "line" || preset.startsWith("straightConnector")) {
+        lineExtent = child(child(node, "xfrm"), "ext");
+        return;
+      }
+    }
+    for (const childNode of node.children) findLineExtent(childNode);
+  };
+  findLineExtent(drawingEl);
+  const keepHorizontal = lineExtent
+    ? parseInt(lineExtent.attrs[Object.keys(lineExtent.attrs).find((key) => localName(key) === "cy") ?? "cy"] ?? "0", 10) === 0
+    : false;
   let touched = false;
   const setExt = (el: XmlElement) => {
     const cxKey = Object.keys(el.attrs).find((k) => localName(k) === "cx") ?? "cx";
     const cyKey = Object.keys(el.attrs).find((k) => localName(k) === "cy") ?? "cy";
     el.attrs[cxKey] = cx;
-    el.attrs[cyKey] = cy;
+    el.attrs[cyKey] = el === lineExtent && keepHorizontal ? "0" : cy;
     touched = true;
   };
   // Vector groups scale through their group transform: update the outer

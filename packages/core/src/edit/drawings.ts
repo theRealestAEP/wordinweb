@@ -50,6 +50,9 @@ export function insertShapeAt(
   const height = isLine ? 2 : preset === "textBox" ? 72 : 96;
   const cx = String(Math.round(width * EMU_PER_PX));
   const cy = String(Math.round(height * EMU_PER_PX));
+  // Keep the line geometry horizontal while the outer extent retains enough
+  // height to provide a usable selection target and resize handles.
+  const shapeCy = isLine ? "0" : cy;
   const geometry =
     preset === "roundedRectangle" ? "roundRect" : preset === "rectangle" || preset === "textBox" ? "rect" : preset;
   const isTextBox = preset === "textBox";
@@ -58,7 +61,7 @@ export function insertShapeAt(
   const spPr = [
     el("a:xfrm", {}, [
       el("a:off", { x: "0", y: "0" }),
-      el("a:ext", { cx, cy }),
+      el("a:ext", { cx, cy: shapeCy }),
     ]),
     el("a:prstGeom", { prst: geometry }, [el("a:avLst")]),
     isTextBox || isLine
@@ -171,6 +174,11 @@ export function isDrawingWordArt(drawing: XmlElement): boolean {
   return (descendant(drawing, "docPr")?.attrs.name ?? "").startsWith("WordArt ");
 }
 
+export function isDrawingLine(drawing: XmlElement): boolean {
+  const preset = descendant(drawing, "prstGeom")?.attrs.prst ?? "";
+  return preset === "line" || preset.startsWith("straightConnector");
+}
+
 export function drawingWordArtText(drawing: XmlElement): string {
   return isDrawingWordArt(drawing) ? descendant(drawing, "t")?.text ?? "" : "";
 }
@@ -185,11 +193,37 @@ export function setDrawingWordArtText(doc: DocxDocument, drawing: XmlElement, te
 }
 
 export function drawingLineStyle(drawing: XmlElement): { color: string; width: number } | null {
+  const spPr = descendant(drawing, "spPr");
+  if (!spPr) return null;
   const line = descendant(drawing, "ln");
-  if (!line) return null;
+  if (!line) return { color: "#000000", width: 0.75 };
   const color = descendant(line, "srgbClr")?.attrs.val ?? "000000";
   const width = Math.max((parseInt(line.attrs.w ?? "0", 10) || 0) / EMU_PER_PX, 0.75);
   return { color: `#${color.toUpperCase()}`, width };
+}
+
+export function drawingFillColor(drawing: XmlElement): string | null {
+  const spPr = descendant(drawing, "spPr");
+  if (!spPr || spPr.children.some((child) => localName(child.name) === "noFill")) return null;
+  const solidFill = spPr.children.find((child) => localName(child.name) === "solidFill");
+  const color = solidFill ? descendant(solidFill, "srgbClr")?.attrs.val : undefined;
+  return color ? `#${color.toUpperCase()}` : null;
+}
+
+export function setDrawingFill(doc: DocxDocument, drawing: XmlElement, color: string | null): boolean {
+  const spPr = descendant(drawing, "spPr");
+  if (!spPr) return false;
+  spPr.children = spPr.children.filter((child) => {
+    const name = localName(child.name);
+    return name !== "solidFill" && name !== "noFill";
+  });
+  const fill = color
+    ? el("a:solidFill", {}, [el("a:srgbClr", { val: color.replace(/^#/, "").toUpperCase() })])
+    : el("a:noFill");
+  const lineIndex = spPr.children.findIndex((child) => localName(child.name) === "ln");
+  spPr.children.splice(lineIndex === -1 ? spPr.children.length : lineIndex, 0, fill);
+  doc.refresh();
+  return true;
 }
 
 export function setDrawingLineStyle(
@@ -198,8 +232,13 @@ export function setDrawingLineStyle(
   color: string,
   widthPx: number,
 ): boolean {
-  const line = descendant(drawing, "ln");
-  if (!line) return false;
+  const spPr = descendant(drawing, "spPr");
+  if (!spPr) return false;
+  let line = spPr.children.find((child) => localName(child.name) === "ln");
+  if (!line) {
+    line = el("a:ln");
+    spPr.children.push(line);
+  }
   line.attrs.w = String(Math.max(1, Math.round(widthPx * EMU_PER_PX)));
   line.children = line.children.filter((child) => {
     const name = localName(child.name);

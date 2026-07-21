@@ -10,7 +10,7 @@ import { DocxView } from "wordinweb";
 <DocxView source="/report.docx" />;                            // render-only viewer
 ```
 
-Editing is in an Alpha state and is strictly opt-in via the `editable` flag; the default is a pure viewer.
+Set the `editable` flag to enable editing; the default configuration is a pure viewer.
 
 If you discover an edge case or perf issue create an issue and include the offending Word file.
 
@@ -93,6 +93,7 @@ export function Editor() {
 | `revisions` | `"final" \| "markup"` | `"final"` | Tracked-changes display: clean final text, or insertions underlined / deletions struck. |
 | `commentAuthor` | `string` | `"You"` | Name stamped on comments, replies, and suggestions. |
 | `onLoad` | `(info: { pageCount; document }) => void` | — | Fires once the document is parsed and laid out. |
+| `onPageCountChange` | `(pageCount: number) => void` | — | Fires when editing changes the rendered page count. |
 | `onReady` | `(api: DocxViewApi) => void` | — | Fires when editing is wired up; the `api` is valid only while mounted. Only called when `editable`. |
 | `onMissingFonts` | `(missing: MissingFont[]) => void` | — | Fires after render with any requested faces the browser can't render (silently substituted; layout may differ from Word). Empty array = all good. |
 | `onError` | `(error: Error) => void` | — | Fires if parsing or rendering throws. |
@@ -110,7 +111,7 @@ The object passed to `onReady`. Every command operates on the current selection 
 - `setAlignment("left" | "center" | "right" | "justify")`.
 - `setParagraphStyle(styleId | null)`, `listParagraphStyles()`, `getParagraphStyleId()`.
 - `toggleList("bullet" | "number")`, `getListType()`.
-- `adjustIndent(1 | -1)`, `setParagraphSpacing({ lineMultiple?, beforePt?, afterPt? })`.
+- `adjustIndent(1 | -1)`, `setParagraphSpacing({ lineMultiple?, exactLinePt?, beforePt?, afterPt? })`.
 - `setLink(url | null)`, `getLinkAt()`.
 
 **Page layout**
@@ -166,10 +167,11 @@ The object passed to `onReady`. Every command operates on the current selection 
 ### `DocxToolbar`
 
 A ready-made formatting toolbar for an editable `DocxView`. Use `mode="simple"` for the basic Home editing strip or `mode="advanced"` for the full Home / Insert / Draw / Layout ribbon supported by the installed version.
+The searchable Help guide opens from the toolbar, `F1`, or `Cmd/Ctrl+/`. It documents the current tools, platform-specific shortcuts, object controls, and recipes for pleading-paper rules, column dividers, resume lines, and repeating page art; set `features={{ help: false }}` to hide it.
 Layout includes Word-style paper presets plus a custom width/height dialog; both document and current-section scope emit native page-size properties.
 Editable text also has a right-click menu for clipboard, formatting, links,
 comments, lists, and alignment. Word-style shortcuts include heading levels,
-page breaks, links, comments, lists, and paragraph alignment in addition to the
+page and column breaks, links, comments, lists, and paragraph alignment in addition to the
 standard formatting and history commands.
 
 | Prop | Type | What it does |

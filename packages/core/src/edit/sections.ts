@@ -104,11 +104,36 @@ export function sectPrAt(doc: DocxDocument, t: XmlElement): XmlElement | null {
   return seen ? bodySectPr : bodySectPr;
 }
 
+/** One-based logical section containing `t`, plus the document section count. */
+export function sectionContextAt(doc: DocxDocument, t: XmlElement): { index: number; count: number } | null {
+  const body = bodyOf(doc);
+  const target = sectPrAt(doc, t);
+  if (!body || !target) return null;
+  const sections: XmlElement[] = [];
+  const visit = (node: XmlElement): void => {
+    if (localName(node.name) === "sectPr") sections.push(node);
+    else for (const child of node.children) visit(child);
+  };
+  visit(body);
+  const index = sections.indexOf(target);
+  return index < 0 ? null : { index: index + 1, count: sections.length };
+}
+
+export interface BreakInsertion {
+  t: XmlElement;
+  offset: number;
+}
+
 /** Insert a page or column break at the caret (splits the run). */
-export function insertBreakAt(doc: DocxDocument, t: XmlElement, offset: number, kind: "page" | "column"): boolean {
+export function insertBreakAt(
+  doc: DocxDocument,
+  t: XmlElement,
+  offset: number,
+  kind: "page" | "column",
+): BreakInsertion | null {
   const rEl = doc.findParentOf(t);
   const pEl = rEl && doc.findParentOf(rEl);
-  if (!rEl || !pEl || localName(rEl.name) !== "r") return false;
+  if (!rEl || !pEl || localName(rEl.name) !== "r") return null;
   const rw = rEl.name.includes(":") ? rEl.name.slice(0, rEl.name.indexOf(":") + 1) : "";
   const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
   const brRun = el(`${rw}r`, {}, [
@@ -116,8 +141,11 @@ export function insertBreakAt(doc: DocxDocument, t: XmlElement, offset: number, 
     el(`${rw}br`, { [`${rw}type`]: kind }),
   ]);
   const rIdx = pEl.children.indexOf(rEl);
+  let destination = t;
   if (offset >= t.text.length) {
-    pEl.children.splice(rIdx + 1, 0, brRun);
+    destination = el(`${rw}t`, { "xml:space": "preserve" }, [], "");
+    const tail = el(`${rw}r`, {}, [...(rPr ? [cloneDeep(rPr)] : []), destination]);
+    pEl.children.splice(rIdx + 1, 0, brRun, tail);
   } else if (offset <= 0) {
     pEl.children.splice(rIdx, 0, brRun);
   } else {
@@ -125,9 +153,10 @@ export function insertBreakAt(doc: DocxDocument, t: XmlElement, offset: number, 
     t.text = t.text.slice(0, offset);
     const tail = el(`${rw}r`, {}, [...(rPr ? [cloneDeep(rPr)] : []), tailT]);
     pEl.children.splice(rIdx + 1, 0, brRun, tail);
+    destination = tailT;
   }
   doc.refresh();
-  return true;
+  return { t: destination, offset: 0 };
 }
 
 /** Insert Word's Blank Page building block as a distinct editable paragraph. */

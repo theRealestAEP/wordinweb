@@ -1,6 +1,8 @@
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { requestTextInputDialog } from "@wordinweb/core";
 import type { DocxViewApi } from "./index.js";
+import { HelpGuide } from "./help.js";
 
 /**
  * Chrome theme tokens. Every color the toolbar paints routes through a CSS
@@ -98,9 +100,10 @@ const PAGE_SIZES = [
   { value: "envelope10", label: "Envelope #10", description: '4.13" × 9.5"', width: 4.13, height: 9.5 },
 ] as const;
 
-function Btn({ label, title, active, onClick }: { label: React.ReactNode; title: string; active?: boolean; onClick: () => void }) {
+function Btn({ label, title, active, onClick, buttonRef }: { label: React.ReactNode; title: string; active?: boolean; onClick: () => void; buttonRef?: React.Ref<HTMLButtonElement> }) {
   return (
     <button
+      ref={buttonRef}
       title={title}
       style={btnStyle(!!active)}
       onMouseDown={(e) => e.preventDefault()}
@@ -1494,47 +1497,55 @@ function MediaMenu({ api }: { api: DocxViewApi | null }) {
 }
 
 function DrawTab({ api }: { api: DocxViewApi | null }) {
-  const [color, setColor] = useState("#202124");
-  const [width, setWidth] = useState(2);
+  const [pen, setPen] = useState({ color: "#202124", width: 2 });
+  const [highlighter, setHighlighter] = useState({ color: "#F9D949", width: 12 });
   const kindOf = (tool: ReturnType<NonNullable<DocxViewApi["getDrawingTool"]>>) =>
     tool ? tool.kind === "eraser" ? "eraser" : tool.kind === "lasso" ? "lasso" : tool.kind === "highlighter" ? "highlighter" : "pen" : "select";
   const [active, setActive] = useState<"select" | "pen" | "highlighter" | "eraser" | "lasso">(kindOf(api?.getDrawingTool() ?? null));
   useEffect(() => {
-    const update = (event: Event) => setActive(kindOf((event as CustomEvent).detail));
+    const update = (event: Event) => {
+      const tool = (event as CustomEvent<ReturnType<NonNullable<DocxViewApi["getDrawingTool"]>>>).detail;
+      setActive(kindOf(tool));
+      if (tool?.kind === "highlighter") setHighlighter({ color: tool.color, width: tool.width });
+      else if (tool?.kind === "pen") setPen({ color: tool.color, width: tool.width });
+    };
     document.addEventListener("dxw-drawing-tool", update);
     return () => document.removeEventListener("dxw-drawing-tool", update);
   }, []);
   useEffect(() => () => api?.setDrawingTool(null), [api]);
-  const activate = (kind: "pen" | "highlighter", nextColor = color, nextWidth = width) => {
-    setColor(nextColor);
-    setWidth(nextWidth);
-    api?.setDrawingTool({ kind, color: nextColor, width: nextWidth });
+  const activate = (kind: "pen" | "highlighter", patch?: Partial<{ color: string; width: number }>) => {
+    const next = { ...(kind === "highlighter" ? highlighter : pen), ...patch };
+    if (kind === "highlighter") setHighlighter(next);
+    else setPen(next);
+    api?.setDrawingTool({ kind, color: next.color, width: next.width });
   };
+  const inkKind = active === "highlighter" ? "highlighter" : "pen";
+  const ink = inkKind === "highlighter" ? highlighter : pen;
   return (
     <>
       <Btn label="Select" title="Select objects" active={active === "select"} onClick={() => api?.setDrawingTool(null)} />
       <Btn label="Pen" title="Draw with pen" active={active === "pen"} onClick={() => activate("pen")} />
-      <Btn label="Highlighter" title="Draw with highlighter" active={active === "highlighter"} onClick={() => activate("highlighter", "#F9D949", 12)} />
+      <Btn label="Highlighter" title="Draw with highlighter" active={active === "highlighter"} onClick={() => activate("highlighter")} />
       <Btn label="Eraser" title="Stroke eraser" active={active === "eraser"} onClick={() => api?.setDrawingTool({ kind: "eraser", size: 14 })} />
       <Btn label="Lasso" title="Lasso ink" active={active === "lasso"} onClick={() => api?.setDrawingTool({ kind: "lasso" })} />
       <Sep />
       <ColorMenu
-        current={color}
-        title="Pen color"
+        current={ink.color}
+        title={inkKind === "highlighter" ? "Highlighter color" : "Pen color"}
         trigger={(
           <>
             <span style={{ font: "12px system-ui, sans-serif" }}>Color</span>
-            <span aria-hidden="true" style={{ width: 18, height: 18, borderRadius: 4, border: `1px solid ${T.border}`, background: color }} />
+            <span aria-hidden="true" style={{ width: 18, height: 18, borderRadius: 4, border: `1px solid ${T.border}`, background: ink.color }} />
           </>
         )}
-        onPick={(value) => activate(active === "highlighter" ? "highlighter" : "pen", value, width)}
+        onPick={(value) => activate(inkKind, { color: value })}
       />
       <ActionMenu
-        label={`${width} px`}
-        title="Pen width"
+        label={`${ink.width} px`}
+        title={inkKind === "highlighter" ? "Highlighter width" : "Pen width"}
         width={70}
         groups={[{ items: [["1", "1 px"], ["2", "2 px"], ["4", "4 px"], ["8", "8 px"], ["12", "12 px"]] }]}
-        onPick={(value) => activate(active === "highlighter" ? "highlighter" : "pen", color, Number(value))}
+        onPick={(value) => activate(inkKind, { width: Number(value) })}
       />
     </>
   );
@@ -1769,6 +1780,7 @@ function PagePreview({
   margins,
   mirrored,
   columns,
+  columnSeparator,
   border,
   lineNumbers,
 }: {
@@ -1778,6 +1790,7 @@ function PagePreview({
   margins?: [number, number, number, number];
   mirrored?: boolean;
   columns?: number;
+  columnSeparator?: boolean;
   border?: "none" | "thin" | "thick" | "accent";
   lineNumbers?: boolean;
 }) {
@@ -1820,6 +1833,9 @@ function PagePreview({
               {Array.from({ length: columns }, (_, column) => (
                 <span key={column} style={{ flex: 1, background: `repeating-linear-gradient(to bottom, ${T.muted} 0 1px, transparent 1px 4px)` }} />
               ))}
+              {columnSeparator && (
+                <span style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: T.muted }} />
+              )}
             </span>
           )}
           {border === "none" && <span style={{ position: "absolute", inset: 4, border: `1px dashed ${T.border}` }} />}
@@ -2298,8 +2314,23 @@ function PageSizeMenu({
  * section (per-page layout = section breaks + section scope). */
 function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange: boolean }) {
   const [scope, setScope] = useState<"document" | "section">("document");
+  const [section, setSection] = useState<{ index: number; count: number } | null>(null);
+  const [objectSelected, setObjectSelected] = useState(false);
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    const refresh = () => {
+      setSection(api?.getSectionContext() ?? null);
+      setObjectSelected(api?.hasSelectedObject() ?? false);
+    };
+    refresh();
+    document.addEventListener("dxw-selection", refresh);
+    document.addEventListener("dxw-object-selection", refresh);
+    return () => {
+      document.removeEventListener("dxw-selection", refresh);
+      document.removeEventListener("dxw-object-selection", refresh);
+    };
+  }, [api]);
   const set = (patch: Parameters<NonNullable<typeof api>["setPageLayout"]>[0]) => api?.setPageLayout(patch, scope);
   const setLn = (patch: Parameters<NonNullable<typeof api>["setLineNumbering"]>[0]) => api?.setLineNumbering(patch, scope);
   const menuState = (name: string) => ({
@@ -2311,17 +2342,32 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
       ref={rootRef}
       className="dxw-layout-ribbon"
       data-dxw-layout-ribbon=""
-      style={{ display: "flex", flex: "1 1 640px", minWidth: 0, alignItems: "center", flexWrap: "wrap", gap: 2 }}
+      style={{
+        display: "flex",
+        flex: "0 0 100%",
+        order: 2,
+        minWidth: 0,
+        boxSizing: "border-box",
+        alignItems: "center",
+        flexWrap: "wrap",
+        gap: 2,
+        paddingTop: 4,
+        marginTop: 2,
+        borderTop: `1px solid ${T.border}`,
+      }}
     >
       <ToolbarMenuSelect
         title="Apply layout changes to"
         ariaLabel="Apply layout changes to"
         value={scope}
-        width={118}
-        menuWidth={170}
+        width={section ? 160 : 142}
+        menuWidth={205}
         options={[
           { value: "document", label: "Whole document" },
-          { value: "section", label: "This section" },
+          {
+            value: "section",
+            label: section ? `This section · ${section.index} of ${section.count}` : "This section",
+          },
         ]}
         onChange={(value) => setScope(value as "document" | "section")}
         style={{ maxWidth: "100%" }}
@@ -2341,14 +2387,15 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
       <PageSizeMenu scope={scope} onApply={set} {...menuState("size")} />
       <LayoutMenu
         name="columns"
-        label="Columns"
+        label="Columns & divider"
         {...menuState("columns")}
         options={[
           { value: "1", label: "One", description: "Single text column", preview: <PagePreview kind="columns" columns={1} /> },
           { value: "2", label: "Two", description: "Two equal columns", preview: <PagePreview kind="columns" columns={2} /> },
+          { value: "2-divider", label: "Two + divider line", description: "Two columns with Word's automatic vertical line between them", preview: <PagePreview kind="columns" columns={2} columnSeparator /> },
           { value: "3", label: "Three", description: "Three equal columns", preview: <PagePreview kind="columns" columns={3} /> },
         ]}
-        onPick={(value) => set({ columns: parseInt(value, 10) })}
+        onPick={(value) => set({ columns: parseInt(value, 10), columnSeparator: value === "2-divider" })}
       />
       <LayoutMenu
         name="page-border"
@@ -2388,7 +2435,7 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
           else setLn({ enabled: true, countBy: 10 });
         }}
       />
-      {showArrange && (
+      {showArrange && objectSelected && (
         <>
           <Sep />
           <ActionMenu
@@ -2463,6 +2510,7 @@ export type ToolbarFeature =
   | "pageNumber"
   | "break"
   | "layout"
+  | "help"
   | "download";
 
 export type ToolbarMode = "simple" | "advanced";
@@ -2492,9 +2540,14 @@ export function DocxToolbar({
   // Ribbon-style tabs: complex tool groups get their own surface instead of
   // one overloaded row (Layout especially).
   const [tab, setTab] = useState<"home" | "insert" | "draw" | "layout">("home");
+  const [helpOpen, setHelpOpen] = useState(false);
+  const apple = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const shortcut = (key: string) => apple ? `⌘${key}` : `Ctrl+${key}`;
+  const closeHelp = useCallback(() => setHelpOpen(false), []);
   const iconInput = useRef<HTMLInputElement | null>(null);
   const modelInput = useRef<HTMLInputElement | null>(null);
   const objectInput = useRef<HTMLInputElement | null>(null);
+  const helpTrigger = useRef<HTMLButtonElement | null>(null);
   // Subtle delayed tooltips: controls declare `title`; on first hover the
   // title moves to data-tip (suppressing the OS tooltip) and a quiet custom
   // one fades in under the control after a beat.
@@ -2534,6 +2587,17 @@ export function DocxToolbar({
   // e2e specs (1400px) are unchanged.
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [tier, setTier] = useState(0);
+  useEffect(() => {
+    if (!on("help")) return;
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "F1" || ((event.metaKey || event.ctrlKey) && event.key === "/")) {
+        event.preventDefault();
+        setHelpOpen(true);
+      }
+    };
+    document.addEventListener("keydown", keydown);
+    return () => document.removeEventListener("keydown", keydown);
+  }, [features]);
   useEffect(() => {
     const el = rootRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
@@ -2754,14 +2818,30 @@ export function DocxToolbar({
             width={44}
             groups={[
               { label: "Line spacing", items: [["l:1", "Single"], ["l:1.15", "1.15"], ["l:1.5", "1.5"], ["l:2", "Double"]] },
+              { label: "Exact line height", items: [["e:12", "Exactly 12 pt"], ["e:18", "Exactly 18 pt"], ["e:24", "Exactly 24 pt"], ["e:custom", "Custom exact height…"]] },
               { label: "Paragraph", items: [["b:add", "Add space before"], ["b:none", "Remove space before"], ["a:add", "Add space after"], ["a:none", "Remove space after"]] },
             ]}
             onPick={(v) => {
               if (v.startsWith("l:")) api?.setParagraphSpacing({ lineMultiple: parseFloat(v.slice(2)) });
+              else if (v === "e:custom") {
+                const anchor = rootRef.current;
+                if (!anchor) return;
+                void requestTextInputDialog(anchor, {
+                  title: "Exact line height",
+                  label: "Line height (points)",
+                  value: "24",
+                  placeholder: "24",
+                  submitLabel: "Apply",
+                }).then((next) => {
+                  if (next === null) return;
+                  const points = Number(next.trim());
+                  if (Number.isFinite(points) && points > 0) api?.setParagraphSpacing({ exactLinePt: points });
+                });
+              } else if (v.startsWith("e:")) api?.setParagraphSpacing({ exactLinePt: parseFloat(v.slice(2)) });
               else if (v === "b:add") api?.setParagraphSpacing({ beforePt: 10 });
-              else if (v === "b:none") api?.setParagraphSpacing({ beforePt: null });
+              else if (v === "b:none") api?.setParagraphSpacing({ beforePt: 0 });
               else if (v === "a:add") api?.setParagraphSpacing({ afterPt: 10 });
-              else if (v === "a:none") api?.setParagraphSpacing({ afterPt: null });
+              else if (v === "a:none") api?.setParagraphSpacing({ afterPt: 0 });
             }}
           />
         ),
@@ -2885,6 +2965,29 @@ export function DocxToolbar({
                 {t}
               </button>
               ))}
+            {on("help") && (
+              <button
+                ref={helpTrigger}
+                type="button"
+                title={`Help and keyboard shortcuts (${shortcut("/")})`}
+                aria-haspopup="dialog"
+                aria-expanded={helpOpen}
+                data-dxw-help-trigger=""
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => setHelpOpen(true)}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  color: T.fg,
+                  font: "600 12.5px system-ui, sans-serif",
+                  padding: "5px 10px",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                }}
+              >
+                Help
+              </button>
+            )}
           </div>
           <Sep />
         </>
@@ -3118,12 +3221,18 @@ export function DocxToolbar({
         }}
       />
       {mode === "advanced" && tab === "layout" && on("layout") && <LayoutTab api={api} showArrange={on("arrange")} />}
+      {mode === "simple" && on("help") && (
+        <span style={{ marginLeft: "auto" }}>
+          <Btn buttonRef={helpTrigger} label="Help" title={`Help and keyboard shortcuts (${shortcut("/")})`} onClick={() => setHelpOpen(true)} />
+        </span>
+      )}
       {on("download") && onSave && (
         <>
           <span style={{ flex: 1 }} />
           <Btn label="Download" title="Save edited .docx" onClick={() => api && onSave(api.save())} />
         </>
       )}
+      <HelpGuide open={helpOpen} onClose={closeHelp} returnFocus={helpTrigger} />
     </div>
   );
 }

@@ -171,6 +171,7 @@ function pageEq(a: LaidOutPage, b: LaidOutPage): boolean {
     a.bodyTop !== b.bodyTop ||
     a.bodyBottom !== b.bodyBottom ||
     a.hfStart !== b.hfStart ||
+    JSON.stringify(a.columnBands) !== JSON.stringify(b.columnBands) ||
     a.items.length !== b.items.length
   ) {
     return false;
@@ -357,6 +358,7 @@ function renderPageShell(page: LaidOutPage, zoom: number, options: RenderOptions
   }
   el.dataset.bodyTop = String(page.bodyTop);
   el.dataset.bodyBottom = String(page.bodyBottom);
+  el.dataset.columnBands = JSON.stringify(page.columnBands);
   return el;
 }
 
@@ -1204,6 +1206,7 @@ function ensureStylesheet(): void {
 .dxw-body-mode .dxw-page span[data-dxw-hf]:not([data-dxw-textbox-story]),
 .dxw-body-mode .dxw-page a[data-dxw-hf]:not([data-dxw-textbox-story]),
 .dxw-body-mode .dxw-page img[data-dxw-hf] { opacity: .55; }
+.dxw-body-mode .dxw-page [data-dxw-drawing][data-dxw-hf]:not([data-dxw-textbox-story-object]) { pointer-events: none; }
 .dxw-comment-hl { background: var(--dxw-comment-hl, rgba(255, 200, 90, .38)); }
 .dxw-comment-hl.dxw-hot { background: var(--dxw-comment-hl-active, rgba(255, 170, 0, .55)); }
 .dxw-comment-card {
@@ -1469,7 +1472,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
       // are emitted later, so they win equal-z hit-testing over their glyphs);
       // a standalone drawing hit floats above everything.
       hit.style.cursor = "move";
-      hit.style.zIndex = item.z !== undefined ? String(item.z) : item.belowText ? "1" : "6";
+      hit.style.zIndex = item.behind ? "-1" : item.z !== undefined ? String(item.z) : item.belowText ? "1" : "6";
       if (item.rotate) {
         hit.style.transform = `rotate(${item.rotate.deg}deg)`;
         hit.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
@@ -1832,7 +1835,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
       return node;
     }
     case "text":
-      return renderText(item);
+      return renderText(item, interactive);
     case "wordart":
       return renderWordArt(item);
     case "warptext":
@@ -2191,7 +2194,7 @@ function renderWarpText(item: WarpTextItem): HTMLElement {
   return svg;
 }
 
-function renderText(item: TextItem): HTMLElement {
+function renderText(item: TextItem, interactive: boolean): HTMLElement {
   const tag = item.href ? "a" : "span";
   const el = document.createElement(tag) as HTMLElement;
   el.style.position = "absolute";
@@ -2328,9 +2331,22 @@ function renderText(item: TextItem): HTMLElement {
     el.style.cursor = "pointer";
   }
   if (item.href) {
-    (el as HTMLAnchorElement).href = item.href;
-    (el as HTMLAnchorElement).target = "_blank";
-    (el as HTMLAnchorElement).rel = "noreferrer noopener";
+    const anchor = el as HTMLAnchorElement;
+    anchor.href = item.href;
+    anchor.target = "_blank";
+    anchor.rel = "noreferrer noopener";
+    anchor.title = item.href;
+    if (interactive) {
+      anchor.addEventListener("mouseup", (event) => {
+        if (event.metaKey || event.ctrlKey) event.stopPropagation();
+      });
+      anchor.addEventListener("click", (event) => {
+        event.preventDefault();
+        if (event.metaKey || event.ctrlKey) {
+          window.open(anchor.href, "_blank", "noopener,noreferrer");
+        }
+      });
+    }
     if (!props.color) el.style.color = "#0563c1";
   }
   if (item.rotate) {

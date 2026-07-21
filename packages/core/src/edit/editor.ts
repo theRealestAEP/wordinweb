@@ -12,10 +12,13 @@ import { listTypeAt, setListLevel } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
 import { isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
 import {
+  drawingFillColor,
   drawingLineStyle,
   drawingWordArtText,
   insertInkAt,
+  isDrawingLine,
   isDrawingWordArt,
+  setDrawingFill,
   setDrawingLineStyle,
   setDrawingWordArtText,
   type DrawingTool,
@@ -178,7 +181,17 @@ function emptyParagraphLike(el: XmlElement): { paragraph: XmlElement; text: XmlE
 }
 
 function removeDrawingRun(doc: DocxDocument, src: XmlElement): boolean {
-  let run: XmlElement | undefined = doc.findParentOf(src);
+  // A text-box selection can resolve to an element inside w:txbxContent.
+  // Climb out to the drawing container first so the first nested text run is
+  // never mistaken for the outer run that owns the object.
+  let drawing: XmlElement | undefined = src;
+  while (drawing) {
+    const name = localName(drawing.name);
+    if (name === "drawing" || name === "pict" || name === "object" || name === "AlternateContent") break;
+    drawing = doc.findParentOf(drawing);
+  }
+  if (!drawing) return false;
+  let run: XmlElement | undefined = doc.findParentOf(drawing);
   while (run && localName(run.name) !== "r") run = doc.findParentOf(run);
   const parent = run ? doc.findParentOf(run) : undefined;
   if (!run || !parent) return false;
@@ -1044,6 +1057,15 @@ export class DocxEditor {
   /** Source XML for the selected image, shape, chart, or drawing. */
   getSelectedDrawingSource(): XmlElement | null {
     return this.selectedImage?.src ?? null;
+  }
+
+  /** Whether Layout's contextual object commands currently have a target. */
+  hasSelectedObject(): boolean {
+    return this.selectedImage !== null || this.selectedInkGroup !== null;
+  }
+
+  private notifyObjectSelection(): void {
+    document.dispatchEvent(new CustomEvent("dxw-object-selection", { detail: this.hasSelectedObject() }));
   }
 
   /** Restore an object selection after a render replaced its DOM element. */
@@ -1942,8 +1964,10 @@ export class DocxEditor {
   private selectedInkGroup: { sources: XmlElement[]; bindings: DrawingBinding[]; overlay: HTMLDivElement } | null = null;
 
   private deselectInkGroup(): void {
+    const changed = this.selectedInkGroup !== null;
     this.selectedInkGroup?.overlay.remove();
     this.selectedInkGroup = null;
+    if (changed) this.notifyObjectSelection();
   }
 
   private selectInkGroup(bindings: DrawingBinding[]): void {
@@ -1965,6 +1989,7 @@ export class DocxEditor {
       "cursor:move;z-index:9;";
     surface.appendChild(overlay);
     this.selectedInkGroup = { sources, bindings, overlay };
+    this.notifyObjectSelection();
     this.hideCaret();
     this.focusText();
   }
@@ -2103,12 +2128,14 @@ export class DocxEditor {
   }
 
   private deselectImage(): void {
+    const changed = this.selectedImage !== null;
     this.wordArtTextEditor?.finish(true, false);
     this.imageOverlay?.remove();
     this.imageToolbar?.remove();
     this.imageOverlay = null;
     this.imageToolbar = null;
     this.selectedImage = null;
+    if (changed) this.notifyObjectSelection();
   }
 
   /** Re-select the same drawing after a re-render replaced its element.
@@ -2169,7 +2196,18 @@ export class DocxEditor {
     overlay.style.boxSizing = "border-box";
     overlay.style.pointerEvents = "none";
     overlay.style.zIndex = "2147483647";
+    const line = kind === "drawing" && isDrawingLine(src);
+    if (line) {
+      const move = document.createElement("div");
+      move.dataset.dxwObjectMove = "1";
+      move.title = "Drag to move line";
+      move.style.cssText =
+        "position:absolute;left:5px;right:5px;top:calc(50% - 7px);height:14px;" +
+        "pointer-events:auto;cursor:move;";
+      overlay.appendChild(move);
+    }
     for (const [dir, fx, fy] of DocxEditor.HANDLE_DIRS) {
+      if (line && dir !== "e" && dir !== "w") continue;
       const h = document.createElement("div");
       const corner = dir.length === 2;
       h.style.cssText =
@@ -2179,6 +2217,19 @@ export class DocxEditor {
         `box-shadow:0 1px 2px rgba(0,0,0,.25);`;
       h.dataset.dxwImgHandle = dir;
       overlay.appendChild(h);
+    }
+    if (el.dataset.dxwModel3d) {
+      const move = document.createElement("button");
+      move.type = "button";
+      move.dataset.dxwObjectMove = "1";
+      move.title = "Drag to move 3D object";
+      move.setAttribute("aria-label", "Move 3D object");
+      move.textContent = "Move";
+      move.style.cssText =
+        "position:absolute;left:6px;top:6px;border:1px solid #8ab4f8;border-radius:4px;" +
+        "padding:3px 7px;background:rgba(255,255,255,.94);color:#174ea6;font:600 11px system-ui,sans-serif;" +
+        "pointer-events:auto;cursor:move;box-shadow:0 1px 3px rgba(0,0,0,.2);";
+      overlay.appendChild(move);
     }
 
     // Wrap-mode mini toolbar (Word: Inline / Square / Top and bottom).
@@ -2293,6 +2344,44 @@ export class DocxEditor {
       });
     });
     if (kind === "drawing") {
+      extra("Rotate", "Set rotation (degrees)", () => {
+        void requestTextInputDialog(this.host.container, {
+          title: "Rotation",
+          label: "Degrees clockwise",
+          value: String(drawingRotation(src)),
+          placeholder: "90",
+        }).then((next) => {
+          if (next === null) return;
+          const degrees = parseFloat(next);
+          if (!Number.isFinite(degrees)) return;
+          this.host.history?.checkpoint();
+          if (setDrawingRotation(this.host.doc, src, degrees)) {
+            this.host.rerender(undefined, "global");
+            this.reselectImage(src);
+          }
+        });
+      });
+      if (!isDrawingLine(src)) {
+        extra("Fill", "Shape fill color", () => {
+          void requestTextInputDialog(this.host.container, {
+            title: "Fill",
+            label: "Color or none",
+            value: drawingFillColor(src) ?? "none",
+            placeholder: "#4472C4 or none",
+          }).then((next) => {
+            if (next === null) return;
+            const color = /^\s*none\s*$/i.test(next)
+              ? null
+              : /^\s*#?([0-9a-f]{6})\s*$/i.exec(next)?.[1];
+            if (color === undefined) return;
+            this.host.history?.checkpoint();
+            if (setDrawingFill(this.host.doc, src, color ? `#${color}` : null)) {
+              this.host.rerender();
+              this.reselectImage(src);
+            }
+          });
+        });
+      }
       extra("Outline", "Outline color and weight", () => {
         const style = drawingLineStyle(src);
         if (!style) return;
@@ -2311,12 +2400,13 @@ export class DocxEditor {
           }
         });
       });
+      extra("Delete", "Delete shape", () => this.deleteSelectedImage());
     }
     const drawingBinding = kind === "drawing"
       ? this.host.getHandle()?.drawings.find((binding) => binding.item.src === src)
       : undefined;
     if (drawingBinding?.item.textboxStory && !isDrawingWordArt(src)) {
-      extra("Edit text", "Edit shape text", () => {
+      extra("Edit text", "Edit shape text with the Home font controls", () => {
         const rect = drawingBinding.el.getBoundingClientRect();
         this.enterTextboxStory(src, rect.left + rect.width / 2, rect.top + rect.height / 2);
       });
@@ -2366,6 +2456,7 @@ export class DocxEditor {
     bar.style.left = `${left}px`;
     this.imageOverlay = overlay;
     this.imageToolbar = bar;
+    this.notifyObjectSelection();
     this.focusText();
   }
 
@@ -2375,7 +2466,7 @@ export class DocxEditor {
     this.host.history?.checkpoint();
     if (removeDrawingRun(this.host.doc, src)) {
       this.host.doc.refresh();
-      this.host.rerender();
+      this.host.rerender(undefined, "global");
     }
     this.deselectImage();
   }
@@ -2595,6 +2686,15 @@ export class DocxEditor {
   /** Handle mousedown on images / their resize handle. Returns true if consumed. */
   private startImageInteraction(e: MouseEvent, target: HTMLElement): boolean {
     const zoom = this.host.zoom ?? 1;
+    const objectMove = target.closest?.("[data-dxw-object-move]") as HTMLElement | null;
+
+    // The capture-phase editor handler sees toolbar clicks before the button's
+    // own mousedown listener. Leave them to the toolbar instead of starting a
+    // text selection that removes the selected object and its controls.
+    if (this.imageToolbar?.contains(target)) {
+      this.suppressNextMouseUp = true;
+      return true;
+    }
 
     // The live 3D viewport owns drags once selected; its pointer handler
     // updates the native model orientation instead of moving the picture box.
@@ -2608,6 +2708,7 @@ export class DocxEditor {
       e.stopPropagation();
       const dir = target.dataset.dxwImgHandle;
       const { el, src } = this.selectedImage;
+      const line = this.selectedImage.kind === "drawing" && isDrawingLine(src);
       const nearPt = { x: el.getBoundingClientRect().left, y: el.getBoundingClientRect().top };
       const w0 = parseFloat(el.style.width);
       const h0 = parseFloat(el.style.height);
@@ -2636,7 +2737,7 @@ export class DocxEditor {
           h = h0 * scale;
         }
         w = Math.max(8, w);
-        h = Math.max(8, h);
+        h = line ? h0 : Math.max(8, h);
         apply(el);
         if (this.imageOverlay) apply(this.imageOverlay);
       };
@@ -2707,9 +2808,25 @@ export class DocxEditor {
 
     // Click selects a vector drawing group (icon/logo overlay); drag
     // re-anchors it to the drop position, same as an inline image.
-    if (target.dataset.dxwDrawing) {
-      const handle = this.host.getHandle();
-      const binding = handle?.drawings.find((b) => b.el === target);
+    const drawingTarget = objectMove && this.selectedImage?.kind === "drawing"
+      ? this.selectedImage.el
+      : target.closest?.("[data-dxw-drawing]") as HTMLElement | null;
+    const handle = this.host.getHandle();
+    let drawingBinding = drawingTarget
+      ? handle?.drawings.find((b) => b.el === drawingTarget)
+      : undefined;
+    if (!drawingBinding && !target.closest("button")) {
+      const pointCaret = this.caretFromPoint(e.clientX, e.clientY);
+      if (!pointCaret || !this.inActiveRegion(pointCaret.t)) {
+        drawingBinding = handle?.drawings.find((candidate) => {
+          if (!candidate.item.behind) return false;
+          const rect = candidate.el.getBoundingClientRect();
+          return e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+        });
+      }
+    }
+    if (drawingBinding) {
+      const binding = drawingBinding;
       if (!binding) return false;
       // Region gate (mirrors text): a header/footer drawing is only
       // selectable/draggable while editing that part, and body drawings are
@@ -2733,11 +2850,41 @@ export class DocxEditor {
       }
       const startX = e.clientX;
       const startY = e.clientY;
+      const el = binding.el;
+      const left0 = parseFloat(el.style.left) || 0;
+      const top0 = parseFloat(el.style.top) || 0;
       const rect0 = binding.el.getBoundingClientRect();
       let moved = false;
+      let toolbarLeft0 = 0;
+      let toolbarTop0 = 0;
       const onMove = (me: MouseEvent) => {
-        if (!moved && Math.hypot(me.clientX - startX, me.clientY - startY) > 5) moved = true;
-        if (moved && !binding.item.anchored) this.showDropIndicator(me.clientX, me.clientY);
+        if (!moved && Math.hypot(me.clientX - startX, me.clientY - startY) > 5) {
+          moved = true;
+          if (binding.item.anchored) {
+            if (this.selectedImage?.src !== binding.item.src) {
+              this.selectImage(el, binding.item.src, undefined, "drawing");
+            }
+            toolbarLeft0 = parseFloat(this.imageToolbar?.style.left ?? "") || 0;
+            toolbarTop0 = parseFloat(this.imageToolbar?.style.top ?? "") || 0;
+          }
+        }
+        if (!moved) return;
+        if (binding.item.anchored) {
+          const dx = (me.clientX - startX) / zoom;
+          const dy = (me.clientY - startY) / zoom;
+          el.style.left = `${left0 + dx}px`;
+          el.style.top = `${top0 + dy}px`;
+          if (this.imageOverlay) {
+            this.imageOverlay.style.left = `${left0 + dx}px`;
+            this.imageOverlay.style.top = `${top0 + dy}px`;
+          }
+          if (this.imageToolbar) {
+            this.imageToolbar.style.left = `${toolbarLeft0 + dx}px`;
+            this.imageToolbar.style.top = `${toolbarTop0 + dy}px`;
+          }
+        } else {
+          this.showDropIndicator(me.clientX, me.clientY);
+        }
       };
       const onUp = (me: MouseEvent) => {
         document.removeEventListener("mousemove", onMove);
@@ -2745,15 +2892,37 @@ export class DocxEditor {
         this.hideDropIndicator();
         this.suppressNextMouseUp = false;
         if (!moved) {
-          this.selectImage(target, binding.item.src, undefined, "drawing");
+          this.selectImage(binding.el, binding.item.src, undefined, "drawing");
           return;
         }
         if (binding.item.anchored) {
           this.host.history?.checkpoint();
-          const want = { x: rect0.left + me.clientX - startX, y: rect0.top + me.clientY - startY };
-          if (this.moveFloatingDrawing(binding, me.clientX - startX, me.clientY - startY)) {
+          const dxClient = me.clientX - startX;
+          const dyClient = me.clientY - startY;
+          const want = { x: rect0.left + dxClient, y: rect0.top + dyClient };
+          const pageRect = el.closest(".dxw-page")?.getBoundingClientRect();
+          const centerX = want.x + rect0.width / 2;
+          const centerY = want.y + rect0.height / 2;
+          const staysOnPage = !!pageRect &&
+            centerX >= pageRect.left && centerX <= pageRect.right &&
+            centerY >= pageRect.top && centerY <= pageRect.bottom;
+          // The element moved only as a preview. Restore its source position
+          // before applying the pointer delta to the document model.
+          el.style.left = `${left0}px`;
+          el.style.top = `${top0}px`;
+          const changed = staysOnPage
+            ? setFloatingPagePosition(
+                this.host.doc,
+                binding.item.src,
+                left0 + dxClient / zoom,
+                top0 + dyClient / zoom,
+              )
+            : this.moveFloatingDrawing(binding, dxClient, dyClient);
+          if (changed) {
             this.host.rerender();
             this.reselectImage(binding.item.src, want);
+          } else {
+            this.reselectImage(binding.item.src, { x: rect0.left, y: rect0.top });
           }
           return;
         }
@@ -2777,14 +2946,20 @@ export class DocxEditor {
     // paints above them — so when the click isn't on an actual glyph,
     // hit-test behind images by point (Word keeps them selectable this way).
     let imageBinding: ImageBinding | undefined;
-    if (target.tagName === "IMG") {
+    const pointCaret = this.caretFromPoint(e.clientX, e.clientY);
+    if (objectMove && this.selectedImage?.kind === "image") {
+      const selected = this.selectedImage;
+      imageBinding = this.host.getHandle()?.images.find(
+        (binding) => binding.el === selected.el && binding.item.src === selected.src,
+      );
+    } else if (target.tagName === "IMG") {
       const handle = this.host.getHandle();
       imageBinding = handle?.images.find((b) => b.el === target || b.el.contains(target));
     } else if (
       !target.closest("button") &&
       !target.dataset.dxwImgHandle &&
       !this.imageOverlay?.contains(target) &&
-      !this.caretFromPoint(e.clientX, e.clientY)
+      (!pointCaret || !this.inActiveRegion(pointCaret.t))
     ) {
       const handle = this.host.getHandle();
       imageBinding = handle?.images.find((b) => {
@@ -2806,18 +2981,21 @@ export class DocxEditor {
       const startX = e.clientX;
       const startY = e.clientY;
       const floating = isFloatingDrawing(binding.item.src!);
+      const moveAsObject = !!objectMove;
       const el = binding.el;
       const left0 = parseFloat(el.style.left) || 0;
       const top0 = parseFloat(el.style.top) || 0;
       const rect0 = el.getBoundingClientRect();
       let moved = false;
       let ghost: HTMLElement | null = null;
+      let toolbarLeft0 = parseFloat(this.imageToolbar?.style.left ?? "") || 0;
+      let toolbarTop0 = parseFloat(this.imageToolbar?.style.top ?? "") || 0;
       const grabX = e.clientX - el.getBoundingClientRect().left;
       const grabY = e.clientY - el.getBoundingClientRect().top;
       const onMove = (me: MouseEvent) => {
         if (!moved && Math.hypot(me.clientX - startX, me.clientY - startY) > 5) {
           moved = true;
-          if (!floating) {
+          if (!floating && !moveAsObject) {
             // Inline images re-anchor into text: a translucent ghost travels
             // with the cursor while the insertion point marks the drop.
             ghost = el.cloneNode(true) as HTMLElement;
@@ -2826,13 +3004,17 @@ export class DocxEditor {
             ghost.style.pointerEvents = "none";
             ghost.style.zIndex = "1000";
             document.body.appendChild(ghost);
-          } else if (this.imageOverlay === null) {
+          } else if (this.selectedImage?.src !== binding.item.src) {
             // Floating images move live: show the box while dragging.
             this.selectImage(el, binding.item.src!, binding.item);
           }
+          if (floating || moveAsObject) {
+            toolbarLeft0 = parseFloat(this.imageToolbar?.style.left ?? "") || 0;
+            toolbarTop0 = parseFloat(this.imageToolbar?.style.top ?? "") || 0;
+          }
         }
         if (!moved) return;
-        if (floating) {
+        if (floating || moveAsObject) {
           // Live move: the element (and its selection chrome) follows.
           const nl = left0 + (me.clientX - startX) / zoom;
           const nt = top0 + (me.clientY - startY) / zoom;
@@ -2841,6 +3023,10 @@ export class DocxEditor {
           if (this.imageOverlay) {
             this.imageOverlay.style.left = `${nl}px`;
             this.imageOverlay.style.top = `${nt}px`;
+          }
+          if (this.imageToolbar) {
+            this.imageToolbar.style.left = `${toolbarLeft0 + (me.clientX - startX) / zoom}px`;
+            this.imageToolbar.style.top = `${toolbarTop0 + (me.clientY - startY) / zoom}px`;
           }
         } else if (ghost) {
           ghost.style.left = `${me.clientX - grabX}px`;
@@ -2926,6 +3112,18 @@ export class DocxEditor {
             el.style.left = `${left0}px`;
             el.style.top = `${top0}px`;
             this.reselectImage(src, { x: rect0.left, y: rect0.top });
+          }
+        } else if (moveAsObject) {
+          const src = binding.item.src!;
+          const dx = (me.clientX - startX) / zoom;
+          const dy = (me.clientY - startY) / zoom;
+          const want = { x: rect0.left + me.clientX - startX, y: rect0.top + me.clientY - startY };
+          el.style.left = `${left0}px`;
+          el.style.top = `${top0}px`;
+          setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
+          if (setFloatingPagePosition(this.host.doc, src, binding.item.x + dx, binding.item.y + dy)) {
+            this.host.rerender();
+            this.reselectImage(src, want);
           }
         } else {
           // Keep the drop in the image's own region: a body image dropped on
@@ -3034,7 +3232,7 @@ export class DocxEditor {
     // not deselect: removing the bar between mousedown and mouseup detaches
     // the button and the browser never composes its click (the second wrap
     // change in a row silently did nothing).
-    if (this.imageOverlay?.contains(e.target as Node)) return;
+    if (this.imageOverlay?.contains(e.target as Node) || this.imageToolbar?.contains(e.target as Node)) return;
     if (this.wordArtOverlay?.contains(e.target as Node)) return;
     if (this.wordArtTextEditor?.input.contains(e.target as Node)) return;
     if (this.selectedInkGroup?.overlay.contains(e.target as Node)) return;
@@ -3062,6 +3260,9 @@ export class DocxEditor {
     }
     const onGlyph = this.caretFromPoint(e.clientX, e.clientY);
     let caret = onGlyph ?? this.nearestCaret(e.clientX, e.clientY);
+    if (!onGlyph && !this.inHeaderFooter && e.detail === 1 && !e.shiftKey) {
+      caret = this.extendCaretAfterPageTable(e.clientX, e.clientY) ?? caret;
+    }
     let region = caret ? this.regionOf(caret.t) : "body";
     const storyObject = (e.target as HTMLElement | null)?.closest?.(
       "[data-dxw-textbox-story-object]",
@@ -3159,9 +3360,12 @@ export class DocxEditor {
     }
 
     if (caret && region === "body" && !onGlyph && e.detail === 1 && !e.shiftKey) {
-      caret = this.extendCaretBelowFloatingTable(caret, e.clientX, e.clientY) ??
-        this.extendCaretIntoBodyWhitespace(caret, e.clientX, e.clientY) ??
-        caret;
+      const columnCaret = this.extendCaretIntoLaterColumn(caret, e.clientX, e.clientY);
+      caret = columnCaret
+        ? this.extendCaretIntoBodyWhitespace(columnCaret, e.clientX, e.clientY, false) ?? columnCaret
+        : this.extendCaretBelowFloatingTable(caret, e.clientX, e.clientY) ??
+          this.extendCaretIntoBodyWhitespace(caret, e.clientX, e.clientY) ??
+          caret;
     }
 
     if (caret && e.shiftKey) {
@@ -3631,6 +3835,188 @@ export class DocxEditor {
     };
   }
 
+  private columnAtPoint(
+    page: HTMLElement,
+    x: number,
+    y: number,
+  ): { index: number; left: number; right: number } | null {
+    const bands = JSON.parse(page.dataset.columnBands ?? "[]") as Array<{
+      top: number;
+      colXs: number[];
+      colWidths: number[];
+    }>;
+    let band = bands[0];
+    for (const candidate of bands) {
+      if (candidate.top <= y + 0.01) band = candidate;
+      else break;
+    }
+    if (!band || band.colXs.length < 2) return null;
+    let best = 0;
+    let bestDistance = Infinity;
+    for (let i = 0; i < band.colXs.length; i++) {
+      const left = band.colXs[i];
+      const right = left + band.colWidths[i];
+      const distance = x < left ? left - x : x > right ? x - right : 0;
+      if (distance < bestDistance) {
+        best = i;
+        bestDistance = distance;
+      }
+    }
+    return {
+      index: best,
+      left: band.colXs[best],
+      right: band.colXs[best] + band.colWidths[best],
+    };
+  }
+
+  /** Word columns are one text flow. Clicking an empty later column inserts
+   * the column break that Word otherwise exposes through Layout > Breaks, then
+   * keeps click-and-type's vertical placement inside that column. */
+  private extendCaretIntoLaterColumn(caret: Caret, x: number, y: number): Caret | null {
+    const handle = this.host.getHandle();
+    const page = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(".dxw-page") as HTMLElement | null;
+    const surface = page?.firstElementChild as HTMLElement | null;
+    if (!handle || !page || !surface) return null;
+    const rect = surface.getBoundingClientRect();
+    const zoom = this.host.zoom ?? 1;
+    const lx = (x - rect.left) / zoom;
+    const ly = (y - rect.top) / zoom;
+    const targetColumn = this.columnAtPoint(page, lx, ly);
+    if (!targetColumn) return null;
+
+    const binding = handle.bindings
+      .filter((candidate) =>
+        candidate.el.parentElement === surface &&
+        candidate.item.src?.t === caret.t &&
+        caret.offset >= candidate.item.src.offset &&
+        caret.offset <= candidate.item.src.offset + candidate.item.text.length,
+      )
+      .sort((a, b) => Math.abs(a.item.lineTop - ly) - Math.abs(b.item.lineTop - ly))[0];
+    if (!binding) return null;
+    const sourceColumn = this.columnAtPoint(
+      page,
+      binding.item.x + Math.max(1, binding.item.width) / 2,
+      binding.item.lineTop,
+    );
+    if (!sourceColumn || targetColumn.index <= sourceColumn.index) return null;
+
+    const rEl = this.host.doc.findParentOf(caret.t);
+    const pEl = rEl && this.host.doc.findParentOf(rEl);
+    if (!rEl || !pEl || localName(rEl.name) !== "r" || localName(pEl.name) !== "p") return null;
+    const prefix = rEl.name.includes(":") ? rEl.name.slice(0, rEl.name.indexOf(":") + 1) : "";
+    const rPr = rEl.children.find((child) => localName(child.name) === "rPr");
+    const breakRuns: XmlElement[] = [];
+    for (let i = sourceColumn.index; i < targetColumn.index; i++) {
+      breakRuns.push({
+        name: `${prefix}r`,
+        attrs: {},
+        children: [
+          ...(rPr ? [cloneXml(rPr)] : []),
+          { name: `${prefix}br`, attrs: { [`${prefix}type`]: "column" }, children: [], text: "" },
+        ],
+        text: "",
+      });
+    }
+    const runIndex = pEl.children.indexOf(rEl);
+    const oldText = caret.t.text;
+    let targetText = caret.t;
+    this.host.history?.checkpoint();
+    if (caret.offset <= 0) {
+      pEl.children.splice(runIndex, 0, ...breakRuns);
+    } else {
+      const tailText: XmlElement = {
+        name: caret.t.name,
+        attrs: { ...caret.t.attrs, "xml:space": "preserve" },
+        children: [],
+        text: oldText.slice(caret.offset),
+      };
+      const tailRun: XmlElement = {
+        name: rEl.name,
+        attrs: {},
+        children: [...(rPr ? [cloneXml(rPr)] : []), tailText],
+        text: "",
+      };
+      caret.t.text = oldText.slice(0, caret.offset);
+      pEl.children.splice(runIndex + 1, 0, ...breakRuns, tailRun);
+      targetText = tailText;
+    }
+
+    this.caret = { t: targetText, run: caret.run, offset: 0 };
+    this.pendingClickTypeCheckpoint = true;
+    this.commit(false, "global");
+    return this.nearestCaret(x, y, "body") ?? this.caret;
+  }
+
+  /** A table can end partway through an intermediate page while the next body
+   * block starts on a later page. Word still lets the user click the open body
+   * area below that table. Materialize ordinary empty paragraphs between the
+   * table and the following block so the requested line becomes editable. */
+  private extendCaretAfterPageTable(x: number, y: number): Caret | null {
+    const handle = this.host.getHandle();
+    const page = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(".dxw-page") as HTMLElement | null;
+    const surface = page?.firstElementChild as HTMLElement | null;
+    if (!handle || !page || !surface) return null;
+    const rect = surface.getBoundingClientRect();
+    const zoom = this.host.zoom ?? 1;
+    const lx = (x - rect.left) / zoom;
+    const ly = (y - rect.top) / zoom;
+    const bodyTop = parseFloat(page.dataset.bodyTop ?? "0");
+    const bodyBottom = parseFloat(page.dataset.bodyBottom ?? "0");
+    if (ly < bodyTop || ly > bodyBottom) return null;
+    if (this.nearestCaret(x, y, "body")) return null;
+
+    const table = handle.grips
+      .filter((grip) => {
+        if (grip.item.axis !== "move" || grip.el.parentElement !== surface) return false;
+        if (ly <= grip.item.y2 + 1 || lx < grip.item.x || lx > (grip.item.x2 ?? grip.item.x)) return false;
+        const parent = this.host.doc.findParentOf(grip.item.tbl);
+        if (!parent || localName(parent.name) !== "body") return false;
+        const tblPr = grip.item.tbl.children.find((child) => localName(child.name) === "tblPr");
+        return tblPr?.children.some((child) => localName(child.name) === "tblpPr") !== true;
+      })
+      .sort((a, b) => b.item.y2 - a.item.y2)[0];
+    if (!table) return null;
+
+    const parent = this.host.doc.findParentOf(table.item.tbl)!;
+    const nearby = handle.bindings
+      .filter((binding) =>
+        binding.el.parentElement === surface &&
+        binding.item.src?.t &&
+        this.regionOf(binding.item.src.t as XmlElement) === "body" &&
+        binding.item.lineTop <= table.item.y2 + 1,
+      )
+      .sort((a, b) => b.item.lineTop - a.item.lineTop)[0];
+    const lineHeight = Math.max(1, nearby?.item.lineHeight ?? 16);
+    const lineCount = Math.max(1, Math.round((ly - table.item.y2) / lineHeight) + 1);
+    const w = table.item.tbl.name.includes(":")
+      ? table.item.tbl.name.slice(0, table.item.tbl.name.indexOf(":") + 1)
+      : "";
+    const paragraphs: XmlElement[] = [];
+    let targetText: XmlElement | null = null;
+    for (let i = 0; i < lineCount; i++) {
+      const created = emptyParagraphLike(table.item.tbl);
+      if (i === 0) {
+        // A structurally bare paragraph immediately after a table is the
+        // mandatory table-end mark and intentionally collapses in layout.
+        // pPr identifies this one as authored click-and-type space.
+        created.paragraph.children.unshift({ name: `${w}pPr`, attrs: {}, children: [], text: "" });
+      }
+      paragraphs.push(created.paragraph);
+      targetText = created.text;
+    }
+
+    this.host.history?.checkpoint();
+    parent.children.splice(parent.children.indexOf(table.item.tbl) + 1, 0, ...paragraphs);
+    this.pendingClickTypeCheckpoint = true;
+    this.host.doc.refresh();
+    this.host.rerender(undefined, "global");
+    const binding = targetText ? this.host.getHandle()?.bindingsByText.get(targetText)?.[0] : undefined;
+    if (!targetText || !binding?.item.src) return null;
+    this.caret = { t: targetText, run: binding.item.src.run, offset: 0 };
+    this.focusText();
+    return this.caret;
+  }
+
   /** Materialize Word's click-and-type position below a moved floating table. */
   private extendCaretBelowFloatingTable(caret: Caret, x: number, y: number): Caret | null {
     const handle = this.host.getHandle();
@@ -3704,7 +4090,7 @@ export class DocxEditor {
   /** Word-style click-and-type: clicking below the final body line on a page
    * creates the intervening empty paragraphs so vertical arrows visit every
    * visible line instead of jumping across synthetic paragraph spacing. */
-  private extendCaretIntoBodyWhitespace(caret: Caret, x: number, y: number): Caret | null {
+  private extendCaretIntoBodyWhitespace(caret: Caret, x: number, y: number, checkpoint = true): Caret | null {
     const handle = this.host.getHandle();
     const page = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(".dxw-page") as HTMLElement | null;
     const surface = page?.firstElementChild as HTMLElement | null;
@@ -3737,7 +4123,7 @@ export class DocxEditor {
     if (hasLaterLine) return null;
     const lineCount = Math.max(1, Math.round((ly - binding.item.lineTop) / lineHeight));
 
-    this.host.history?.checkpoint();
+    if (checkpoint) this.host.history?.checkpoint();
     this.caret = {
       t: endText,
       run: binding.item.src!.run,
@@ -3839,11 +4225,11 @@ export class DocxEditor {
     if (!binding?.item.src?.t) return null;
     // caretRangeFromPoint snaps to the nearest TEXT node, which jumps to a
     // different cell when the click lands in an empty cell (its zero-width
-    // anchor is not a caret target). Reject an answer whose element rect does
-    // not vertically contain the click - nearestCaret's geometry then picks
-    // the correct cell/column.
+    // anchor is not a caret target). It can also jump sideways to a repeated
+    // header line number when the body is blank. Reject an answer outside the
+    // element rect - nearestCaret's geometry then picks the correct region.
     const r = binding.el.getBoundingClientRect();
-    if (y < r.top - 4 || y > r.bottom + 4) return null;
+    if (x < r.left - 4 || x > r.right + 4 || y < r.top - 4 || y > r.bottom + 4) return null;
     const local = Math.min(offset, binding.item.text.length);
     return {
       t: binding.item.src.t,
@@ -4061,10 +4447,15 @@ export class DocxEditor {
       return;
     }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && this.caret) {
-      // Word: Cmd/Ctrl+Enter inserts a page break.
+      // Word: Cmd/Ctrl+Enter inserts a page break; adding Shift inserts a
+      // column break.
       e.preventDefault();
       this.host.history?.checkpoint();
-      if (insertBreakAt(this.host.doc, this.caret.t, this.caret.offset, "page")) this.commit();
+      const destination = insertBreakAt(this.host.doc, this.caret.t, this.caret.offset, e.shiftKey ? "column" : "page");
+      if (destination) {
+        this.caret = { ...this.caret, ...destination };
+        this.commit();
+      }
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {

@@ -19,8 +19,8 @@ import {
 } from "../src/edit/images.js";
 import { insertFootnote } from "../src/edit/notes.js";
 import { insertDateTimeField, insertField, insertPageField } from "../src/edit/fields.js";
-import { insertBlankPageAt, insertCoverPage } from "../src/edit/sections.js";
-import { drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
+import { insertBlankPageAt, insertBreakAt, insertCoverPage, sectionContextAt } from "../src/edit/sections.js";
+import { drawingLineStyle, drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingLineStyle, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
 import { buildChartXml, insertChartAt, setChartData } from "../src/edit/charts.js";
 import { buildSmartArtDataXml, buildSmartArtDrawingXml, insertSmartArtAt, setSmartArtData } from "../src/edit/smartart.js";
 import { insertEmbeddedObjectAt, insertModel3DAt, insertWebVideoAt } from "../src/edit/objects.js";
@@ -511,6 +511,20 @@ describe("block commands", () => {
     expect(sp.pageWidth).toBeGreaterThan(sp.pageHeight); // landscape
     const reloaded = DocxDocument.load(doc.save());
     expect(reloaded.sections[0].props.pageWidth).toBeGreaterThan(reloaded.sections[0].props.pageHeight);
+  });
+
+  it("saves and reopens Word's native line-between-columns setting", async () => {
+    const { setPageLayout } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(
+      p("left") + p("right") +
+        `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`,
+    );
+    expect(setPageLayout(doc, { columns: 2, columnSeparator: true })).toBe(true);
+    expect(doc.sections[0].props.columns).toMatchObject({ count: 2, sep: true });
+    const saved = strFromU8(unzipSync(doc.save())["word/document.xml"]);
+    expect(saved).toMatch(/<w:cols\b[^>]*w:num="2"[^>]*w:sep="1"/);
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.sections[0].props.columns).toMatchObject({ count: 2, sep: true });
   });
 
   it("saves and reopens mirrored margins through settings.xml", async () => {
@@ -1245,6 +1259,35 @@ describe("blank page insertion", () => {
   });
 });
 
+describe("page and section navigation", () => {
+  it("returns an editable target after a trailing page break", () => {
+    const doc = loadDoc(p("Plain"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    const destination = insertBreakAt(doc, t, t.text.length, "page");
+
+    expect(destination).not.toBeNull();
+    expect(destination?.offset).toBe(0);
+    expect(destination?.t.text).toBe("");
+    expect(doc.findParentOf(destination!.t)).toBeTruthy();
+    expect(layoutDocument(doc).pages).toHaveLength(2);
+  });
+
+  it("reports the logical section at the caret when continuous sections share a page", () => {
+    const continuous = `<w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const sectionParagraph = (text: string) =>
+      `<w:p><w:pPr>${continuous}</w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const doc = loadDoc(sectionParagraph("Intro") + sectionParagraph("Article") + p("Ending") + continuous);
+    const texts = doc.sections.map((section) => {
+      const paragraph = section.blocks[0] as Paragraph;
+      return (paragraph.children[0] as Run).content.find((content) => content.kind === "text") as TextContent;
+    });
+
+    expect(sectionContextAt(doc, texts[0].srcT!)).toEqual({ index: 1, count: 3 });
+    expect(sectionContextAt(doc, texts[1].srcT!)).toEqual({ index: 2, count: 3 });
+    expect(sectionContextAt(doc, texts[2].srcT!)).toEqual({ index: 3, count: 3 });
+  });
+});
+
 describe("cover page insertion", () => {
   it("prepends editable title, subtitle, author, and a page break", () => {
     const doc = loadDoc(p("Existing content"));
@@ -1297,6 +1340,27 @@ describe("shape insertion", () => {
     expect(xml).toContain("<a:noFill/>");
     expect(xml).toContain("<a:ln");
     expect(xml).toContain("<w:t");
+  });
+
+  it("adds an explicit outline when a shape only has Word's default line style", () => {
+    const doc = loadDoc(p("Anchor"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    const drawing = insertShapeAt(doc, t, "rectangle", "Styled")!;
+    const find = (element: XmlElement, name: string): XmlElement | undefined => {
+      if (localName(element.name) === name) return element;
+      for (const child of element.children) {
+        const match = find(child, name);
+        if (match) return match;
+      }
+      return undefined;
+    };
+    const spPr = find(drawing, "spPr")!;
+    spPr.children = spPr.children.filter((child) => localName(child.name) !== "ln");
+
+    expect(drawingLineStyle(drawing)).toEqual({ color: "#000000", width: 0.75 });
+    expect(setDrawingLineStyle(doc, drawing, "#00FF00", 3)).toBe(true);
+    expect(serializeXml(drawing)).toContain('<a:ln w="28575"><a:solidFill><a:srgbClr val="00FF00"/>');
   });
 
   it("persists page alignment, rotation, and front/back order", () => {
@@ -1524,6 +1588,26 @@ describe("paragraph formatting", () => {
     const props = (doc.sections[0].blocks[0] as Paragraph).props;
     expect(props.lineSpacing?.rule).toBe("auto");
     expect(props.lineSpacing?.value).toBeCloseTo(1.5, 2);
+  });
+
+  it("sets and round-trips an exact line height in points", () => {
+    const doc = loadDoc(p("target"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((c) => c.kind === "text")!.srcT!;
+    expect(setParagraphSpacing(doc, [t], { exactLinePt: 24, beforePt: 0, afterPt: 0 })).toBe(true);
+
+    const spacing = (doc.sections[0].blocks[0] as Paragraph).props.lineSpacing;
+    expect(spacing?.rule).toBe("exact");
+    expect(spacing?.value).toBeCloseTo(32, 1); // 24pt at 96 CSS pixels per inch
+
+    const saved = doc.save();
+    const xml = strFromU8(unzipSync(saved)["word/document.xml"]);
+    expect(xml).toContain('w:line="480"');
+    expect(xml).toContain('w:lineRule="exact"');
+    expect(xml).toContain('w:before="0"');
+    expect(xml).toContain('w:after="0"');
+    const reloaded = DocxDocument.load(saved);
+    expect((reloaded.sections[0].blocks[0] as Paragraph).props.lineSpacing).toMatchObject({ rule: "exact" });
   });
 
   it("applies, changes, removes, and round-trips a native drop cap", () => {

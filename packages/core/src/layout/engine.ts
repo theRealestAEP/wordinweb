@@ -391,6 +391,11 @@ function laidOutPage(p: InternalPage): LaidOutPage {
     bodyTop: p.bodyTop,
     bodyBottom: p.bodyBottom,
     hfStart: p.hfStart ?? p.items.length,
+    columnBands: p.bands.map((band) => ({
+      top: band.top,
+      colXs: [...band.colXs],
+      colWidths: [...band.colWidths],
+    })),
   };
 }
 
@@ -5468,19 +5473,19 @@ class Engine {
         for (const pth of shape.paths) {
           const x = ox + pth.x - fx;
           const y = oy + pth.y - fy;
-          page.items.push({ kind: "path", x, y, width: pth.width, height: pth.height, d: pth.d, viewW: pth.viewW, viewH: pth.viewH, fill: pth.fill, stroke: pth.stroke, ...(rotate ? { rotate: rotate(x, y) } : {}), z: shape.z });
+          page.items.push({ kind: "path", x, y, width: pth.width, height: pth.height, d: pth.d, viewW: pth.viewW, viewH: pth.viewH, fill: pth.fill, stroke: pth.stroke, ...(rotate ? { rotate: rotate(x, y) } : {}), ...(shape.behind ? { behind: true } : { front: true }), z: shape.z });
         }
         for (const l of shape.lines) {
           const x1 = ox + l.x1 - fx;
           const y1 = oy + l.y1 - fy;
           const x2 = ox + l.x2 - fx;
           const y2 = oy + l.y2 - fy;
-          page.items.push({ kind: "edge", x1, y1, x2, y2, border: { style: "single", width: l.weight, color: l.color, space: 0 }, ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}), z: shape.z });
+          page.items.push({ kind: "edge", x1, y1, x2, y2, border: { style: "single", width: l.weight, color: l.color, space: 0 }, ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}), ...(shape.behind ? { behind: true } : { front: true }), z: shape.z });
         }
         for (const img of shape.images) {
           const x = ox + img.x - fx;
           const y = oy + img.y - fy;
-          page.items.push({ kind: "image", x, y, width: img.width, height: img.height, part: img.part, behind: shape.behind, ...(rotate ? { rotate: rotate(x, y) } : {}), z: shape.z });
+          page.items.push({ kind: "image", x, y, width: img.width, height: img.height, part: img.part, behind: shape.behind, ...(!shape.behind ? { front: true } : {}), ...(rotate ? { rotate: rotate(x, y) } : {}), z: shape.z });
         }
         if (shape.srcDrawing) {
           page.items.push({
@@ -5493,6 +5498,7 @@ class Engine {
             anchored: true,
             ink: shape.ink,
             belowText: !shape.behind,
+            behind: shape.behind,
             ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
             z: shape.z,
           });
@@ -5660,6 +5666,7 @@ class Engine {
               y2,
               border: b,
               ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}),
+              ...(behind ? { behind: true } : {}),
               ...(front ? { front: true } : {}),
               z: shape.z,
             });
@@ -5695,7 +5702,7 @@ class Engine {
           if (str) {
             // Warp text is pointer-transparent, so its full box is the select
             // target even when WordArt has no backing fill or outline.
-            if (front && shape.srcDrawing) {
+            if (shape.srcDrawing) {
               page.items.push({
                 kind: "drawingHit",
                 x: ox - fx,
@@ -5705,8 +5712,9 @@ class Engine {
                 src: shape.srcDrawing,
                 anchored: true,
                 belowText: true,
+                ...(behind ? { behind: true } : {}),
                 ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
-                z: shape.z,
+                z: shape.wordArt ? (shape.z ?? 0) + 1 : shape.z,
               });
             }
             const f = texts[0].font;
@@ -5749,7 +5757,7 @@ class Engine {
         // story text so glyph clicks can enter text editing while blank parts
         // of the box still select the object.
         const independentStory = !!shape.textboxStory && !shape.wordArt;
-        if (front && shape.srcDrawing) {
+        if (shape.srcDrawing) {
           page.items.push({
             kind: "drawingHit",
             x: ox - fx,
@@ -5759,9 +5767,10 @@ class Engine {
             src: shape.srcDrawing,
             anchored: true,
             belowText: !shape.wordArt,
+            ...(behind ? { behind: true } : {}),
             ...(independentStory ? { textboxStory: true } : {}),
             ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
-            z: shape.z,
+            z: shape.wordArt ? (shape.z ?? 0) + 1 : shape.z,
           });
         }
         for (const it of inner.items) {
@@ -5781,7 +5790,7 @@ class Engine {
           } else if (rotate && it.kind === "edge") {
             it.rotate = rotate(Math.min(it.x1, it.x2), Math.min(it.y1, it.y2));
           }
-          if (behind && (it.kind === "text" || it.kind === "rect")) it.behind = true;
+          if (behind && (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit")) it.behind = true;
           if (front && (it.kind === "text" || it.kind === "rect" || it.kind === "edge")) it.front = true;
           if (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit") it.z = shape.z;
           page.items.push(it);

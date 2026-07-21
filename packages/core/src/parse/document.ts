@@ -1564,7 +1564,7 @@ function parseDrawing(
 
   // Anchored template art (multi-shape groups, freeform paths): absolute
   // placement via the anchor, no text-flow participation.
-  if (anchor && (paths.length > 0 || lines.length + images.length > 1 || texts.length > 0)) {
+  if (anchor && (paths.length > 0 || lines.length > 0 || images.length > 1 || texts.length > 0)) {
     const docPr = child(anchor, "docPr");
     const docPrName = attr(docPr, "name") ?? "";
     const ink = attr(docPr, "descr") === "WordInWeb ink" || /^Ink(?:\s|$)/i.test(docPrName);

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import { moveDrawingTo } from "../src/edit/tables.js";
 import { insertShapeAt } from "../src/edit/drawings.js";
+import { drawingRotation, setDrawingRotation } from "../src/edit/images.js";
+import { layoutDocument } from "../src/layout/engine.js";
 import { localName, XmlElement } from "../src/xml.js";
 import { Paragraph, Run } from "../src/model.js";
 import { makeDocxWithMedia, wrapDocument, p } from "./helpers.js";
@@ -31,14 +33,14 @@ const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /** Doc with body text + a header holding an inline image (and, optionally, a
  * second header paragraph of text as an in-part move target). */
-function loadHeaderImageDoc(extraHeaderPara = ""): DocxDocument {
+function loadHeaderImageDoc(extraHeaderPara = "", body = p("BODYTEXT")): DocxDocument {
   const header = `<?xml version="1.0"?>
 <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p>${INLINE_DRAWING}</w:p>${extraHeaderPara}</w:hdr>`;
   return DocxDocument.load(
     makeDocxWithMedia(
       {
         "word/document.xml": wrapDocument(
-          p("BODYTEXT") +
+          body +
             `<w:sectPr><w:headerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rId5"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>`,
         ),
         "word/_rels/document.xml.rels": `<?xml version="1.0"?>
@@ -73,6 +75,26 @@ function firstText(para: Paragraph): XmlElement {
 }
 
 describe("header image drag safety (moveDrawingTo cross-part guard)", () => {
+  it("keeps a rotated line in the repeating header layer on every page", () => {
+    const body = Array.from({ length: 120 }, (_, index) => p(`BODY ${index}`)).join("");
+    const doc = loadHeaderImageDoc(`<w:p><w:r><w:t>LINE ANCHOR</w:t></w:r></w:p>`, body);
+    const header = doc.headers.get("rId5")!;
+    const anchor = firstText(header.blocks[1] as Paragraph);
+    const line = insertShapeAt(doc, anchor, "line")!;
+    expect(setDrawingRotation(doc, line, 90)).toBe(true);
+    expect(drawingRotation(line)).toBe(90);
+
+    const reopened = DocxDocument.load(doc.save());
+    const result = layoutDocument(reopened);
+    expect(result.pages.length).toBeGreaterThan(1);
+    for (const page of result.pages) {
+      const headerLine = page.items.slice(page.hfStart).find(
+        (item) => item.kind === "drawingHit" && item.rotate?.deg === 90,
+      );
+      expect(headerLine).toBeDefined();
+    }
+  });
+
   it("refuses to move a header image onto body text (would dangle its rel)", () => {
     const doc = loadHeaderImageDoc();
     const drawing = headerDrawing(doc);

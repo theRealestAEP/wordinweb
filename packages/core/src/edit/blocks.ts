@@ -193,6 +193,8 @@ export interface PageLayoutPatch {
   orientation?: "portrait" | "landscape";
   /** Equal-width text columns (1 removes w:cols). */
   columns?: number;
+  /** Draw a vertical rule between text columns. Used with columns > 1. */
+  columnSeparator?: boolean;
   /** Box page border (null removes). sz in eighth-points, color hex. */
   pageBorders?: { sz?: number; color?: string; offsetFrom?: "text" | "page" } | null;
 }
@@ -281,7 +283,11 @@ export function setPageLayout(doc: DocxDocument, patch: PageLayoutPatch, target?
       sectPr.children = sectPr.children.filter((c) => localName(c.name) !== "cols");
       if (patch.columns > 1) {
         // Word's default gutter between equal columns is 0.5in.
-        const cols = el(`${w}cols`, { [`${w}num`]: String(patch.columns), [`${w}space`]: "720" });
+        const cols = el(`${w}cols`, {
+          [`${w}num`]: String(patch.columns),
+          [`${w}space`]: "720",
+          ...(patch.columnSeparator ? { [`${w}sep`]: "1" } : {}),
+        });
         const idx = sectPr.children.indexOf(pgMar);
         sectPr.children.splice(idx + 1, 0, cols);
       }

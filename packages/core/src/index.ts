@@ -61,12 +61,14 @@ export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.j
 export { insertFootnote } from "./edit/notes.js";
 export { insertField, insertPageField, insertDateTimeField } from "./edit/fields.js";
 export {
+  drawingFillColor,
   drawingLineStyle,
   drawingWordArtText,
   insertShapeAt,
   insertWordArtAt,
   insertInkAt,
   isDrawingWordArt,
+  setDrawingFill,
   setDrawingLineStyle,
   setDrawingWordArtText,
 } from "./edit/drawings.js";
@@ -78,8 +80,8 @@ export type { Model3DInsert, Model3DRotation, WebVideoInsert, EmbeddedObjectInse
 export { buildOlePackage, extractOlePackage } from "./parse/ole.js";
 export { validBookmarkName, listBookmarks, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference } from "./edit/references.js";
 export { checkboxStateElement, checkboxChecked, toggleCheckbox } from "./checkbox.js";
-export { sectPrAt, insertBreakAt, insertBlankPageAt, insertCoverPage, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
-export type { CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
+export { sectPrAt, sectionContextAt, insertBreakAt, insertBlankPageAt, insertCoverPage, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
+export type { BreakInsertion, CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
 export { linearizeMath, parseMathLinear, setMathLinear, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages } from "./render/dom.js";
 export type { FindMatch } from "./edit/find.js";

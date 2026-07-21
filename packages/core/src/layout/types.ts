@@ -149,6 +149,8 @@ export interface LineEdgeItem {
   rotate?: { deg: number; ox: number; oy: number };
   /** Paint over the body text (non-behindDoc anchored shape border). */
   front?: boolean;
+  /** Paint below the body text (behindDoc anchored shape border). */
+  behind?: boolean;
   z?: number;
 }
 
@@ -215,6 +217,8 @@ export interface DrawingHitItem {
    * click on bare fill selects or drags the shape, while clicks on its text
    * glyphs still reach the text editor. */
   belowText?: boolean;
+  /** Keep a behindDoc drawing target under the body text. */
+  behind?: boolean;
   /** The drawing owns an independently editable text-box story. */
   textboxStory?: boolean;
   rotate?: { deg: number; ox: number; oy: number };
@@ -318,6 +322,9 @@ export interface LaidOutPage {
   bodyBottom: number;
   /** Items from this index on belong to the header/footer parts. */
   hfStart: number;
+  /** Column geometry for editor hit-testing. A page can contain more than one
+   * band when a continuous section changes the column layout mid-page. */
+  columnBands: Array<{ top: number; colXs: number[]; colWidths: number[] }>;
 }
 
 export interface LayoutResult {

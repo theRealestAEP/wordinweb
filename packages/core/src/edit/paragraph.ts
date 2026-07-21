@@ -63,6 +63,8 @@ export function adjustIndent(doc: DocxDocument, targets: XmlElement[], direction
 export interface ParagraphSpacingPatch {
   /** Line spacing multiple (1, 1.15, 1.5, 2 …) — w:line auto rule. */
   lineMultiple?: number;
+  /** Exact line height in points — w:line exact rule. */
+  exactLinePt?: number;
   /** Space before/after in points; null removes the attribute. */
   beforePt?: number | null;
   afterPt?: number | null;
@@ -218,7 +220,10 @@ export function setParagraphSpacing(
       sp = { name: `${w}spacing`, attrs: {}, children: [], text: "" };
       pPr.children.push(sp);
     }
-    if (patch.lineMultiple !== undefined) {
+    if (patch.exactLinePt !== undefined) {
+      sp.attrs[attrKey(sp, "line", w)] = String(Math.round(patch.exactLinePt * 20));
+      sp.attrs[attrKey(sp, "lineRule", w)] = "exact";
+    } else if (patch.lineMultiple !== undefined) {
       sp.attrs[attrKey(sp, "line", w)] = String(Math.round(patch.lineMultiple * 240));
       sp.attrs[attrKey(sp, "lineRule", w)] = "auto";
     }
