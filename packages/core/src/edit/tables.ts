@@ -546,7 +546,13 @@ export function resizeTableRow(
 }
 
 /** Position a table at page coordinates, converting an inline table to a float. */
-export function moveTableTo(doc: DocxDocument, tblEl: XmlElement, xPx: number, yPx: number): boolean {
+export function moveTableTo(
+  doc: DocxDocument,
+  tblEl: XmlElement,
+  xPx: number,
+  yPx: number,
+  preservePageStart = false,
+): boolean {
   if (localName(tblEl.name) !== "tbl") return false;
   const w = prefixOf(tblEl);
   let tblPr = child(tblEl, "tblPr");
@@ -556,6 +562,27 @@ export function moveTableTo(doc: DocxDocument, tblEl: XmlElement, xPx: number, y
   }
   let position = child(tblPr, "tblpPr");
   if (!position) {
+    if (preservePageStart) {
+      const parent = doc.findParentOf(tblEl);
+      const tableIndex = parent?.children.indexOf(tblEl) ?? -1;
+      const previous = parent && tableIndex > 0 ? parent.children[tableIndex - 1] : undefined;
+      const breakRun: XmlElement = {
+        name: `${w}r`,
+        attrs: {},
+        children: [{ name: `${w}br`, attrs: { [`${w}type`]: "page" }, children: [], text: "" }],
+        text: "",
+      };
+      if (previous && localName(previous.name) === "p") {
+        previous.children.push(breakRun);
+      } else if (parent && tableIndex >= 0) {
+        parent.children.splice(tableIndex, 0, {
+          name: `${w}p`,
+          attrs: {},
+          children: [breakRun],
+          text: "",
+        });
+      }
+    }
     position = { name: `${w}tblpPr`, attrs: {}, children: [], text: "" };
     const styleIdx = tblPr.children.findIndex((c) => localName(c.name) === "tblStyle");
     tblPr.children.splice(styleIdx + 1, 0, position);

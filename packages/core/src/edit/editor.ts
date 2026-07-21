@@ -1393,8 +1393,17 @@ export class DocxEditor {
       const delta = isCol ? dx : dy;
       if ((isMove ? Math.hypot(dx, dy) : Math.abs(delta)) >= 1) {
         this.host.history?.checkpoint();
+        const page = surface.parentElement as HTMLElement | null;
+        const pages = Array.from(this.host.getHandle()?.root.querySelectorAll<HTMLElement>(".dxw-page") ?? []);
+        const bodyTop = parseFloat(page?.dataset.bodyTop ?? "");
+        const preservePageStart =
+          isMove &&
+          page !== null &&
+          pages.indexOf(page) > 0 &&
+          Number.isFinite(bodyTop) &&
+          Math.abs(grip.item.y1 - bodyTop) <= 1;
         const ok = isMove
-          ? moveTableTo(this.host.doc, grip.item.tbl, grip.item.x + dx, grip.item.y1 + dy)
+          ? moveTableTo(this.host.doc, grip.item.tbl, grip.item.x + dx, grip.item.y1 + dy, preservePageStart)
           : isCol
             ? resizeTableColumn(this.host.doc, grip.item.tbl, grip.item.boundary, dx, grip.item.renderedWidths)
             : resizeTableRow(this.host.doc, grip.item.tbl, grip.item.boundary, (grip.item.rowHeightPx ?? 0) + dy);

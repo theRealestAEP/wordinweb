@@ -698,6 +698,21 @@ describe("table operations", () => {
     expect(xml).toContain('w:tblpY="3600"');
   });
 
+  it("keeps a table that started a later page on that page when drag-moving it", async () => {
+    const { moveTableTo } = await import("../src/edit/tables.js");
+    const doc = loadDoc(p("before") +
+      `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+       <w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`);
+    const tbl = doc.sections[0].blocks[1];
+    if (tbl.type !== "table" || !tbl.src) throw new Error("not a table");
+
+    expect(moveTableTo(doc, tbl.src, 120, 96, true)).toBe(true);
+
+    const xml = serializeXml(doc.editableRoots()[0]);
+    expect(xml).toContain('<w:t xml:space="preserve">before</w:t></w:r><w:r><w:br w:type="page"/></w:r></w:p><w:tbl>');
+    expect(xml).toContain('w:tblpY="1440"');
+  });
+
   it("adds Word's editable paragraph after terminal non-text blocks once", async () => {
     const { ensureParagraphAfterTerminalBlock } = await import("../src/edit/blocks.js");
     const doc = loadDoc(
