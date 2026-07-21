@@ -163,6 +163,27 @@ describe("no-op package round trip", () => {
     expect(textOf(reloadedHeader)).toBe("Edited header");
   });
 
+  it("canonicalizes placeholder percentage grids for Google Docs without changing Word autofit", () => {
+    const doc = loadDoc(
+      `<w:tbl><w:tblPr><w:tblW w:type="pct" w:w="100%"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="100"/><w:gridCol w:w="100"/><w:gridCol w:w="100"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:p><w:r><w:t>Key</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:p><w:r><w:t>Status</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:p><w:r><w:t>Description of the item</w:t></w:r></w:p></w:tc></w:tr>` +
+      `<w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:p><w:r><w:t>ok</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:p><w:r><w:t>A much longer description cell that should dominate the width</w:t></w:r></w:p></w:tc></w:tr>` +
+      `</w:tbl><w:sectPr><w:pgSz w:w="11906" w:h="16838"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>` +
+      `</w:sectPr>`,
+    );
+
+    const saved = strFromU8(unzipSync(doc.save())["word/document.xml"]);
+    expect(saved).toContain('<w:tblW w:type="pct" w:w="5000"/>');
+    expect([...saved.matchAll(/<w:gridCol w:w="(\d+)"\/>/g)].map((match) => Number(match[1])))
+      .toEqual([600, 900, 7526]);
+  });
+
   it("keeps an empty-paragraph caret anchor in memory without saving its synthetic run", () => {
     const doc = loadDoc(
       `<w:p><w:pPr><w:pBdr><w:bottom w:val="single"/></w:pBdr></w:pPr></w:p>` +

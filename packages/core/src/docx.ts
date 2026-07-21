@@ -1,7 +1,7 @@
 import { Package } from "./zip.js";
 import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName, cyrb53 } from "./xml.js";
 import { strToU8, zipSync } from "fflate";
-import { twipsToPx } from "./units.js";
+import { pxToTwips, twipsToPx } from "./units.js";
 import {
   Block,
   DocComment,
@@ -1358,7 +1358,103 @@ export class DocxDocument {
     if (xml !== this.originalModeledXml.get(part)) files[part] = strToU8(xml);
   }
 
+  /**
+   * Canonicalize producer shorthand that Google Docs otherwise interprets as
+   * a fixed, few-twip table. Word treats `tblW="100%"` plus a placeholder
+   * grid as autofit; Google needs the standard pct value and a usable cached
+   * grid. The cached widths follow the same content-dominant shape and do not
+   * change Word's autofit result.
+   */
+  private normalizePercentageTableGrids(): void {
+    const setAttr = (element: XmlElement, name: string, value: string): void => {
+      const key = Object.keys(element.attrs).find((item) => localName(item) === name);
+      element.attrs[key ?? `${element.name.includes(":") ? element.name.split(":")[0] + ":" : ""}${name}`] = value;
+    };
+    const textLength = (blocks: Block[]): number => {
+      let length = 0;
+      for (const block of blocks) {
+        if (block.type === "table") {
+          for (const row of block.rows) {
+            for (const cell of row.cells) length += textLength(cell.blocks);
+          }
+          continue;
+        }
+        for (const item of block.children) {
+          const runs = item.type === "run" ? [item] : item.runs;
+          for (const run of runs) {
+            for (const content of run.content) {
+              if (content.kind === "text") length += content.text.length;
+              else if (content.kind === "tab") length += 4;
+            }
+          }
+        }
+      }
+      return length;
+    };
+    const normalize = (table: Extract<Block, { type: "table" }>, available: number): void => {
+      const source = table.src;
+      if (!source) return;
+      const tableProps = child(source, "tblPr");
+      const tableWidth = child(tableProps, "tblW");
+      const rawWidth = attr(tableWidth, "w")?.trim();
+      if (attr(tableWidth, "type") !== "pct" || !rawWidth?.endsWith("%")) return;
+
+      const percent = Number.parseFloat(rawWidth);
+      if (!Number.isFinite(percent) || percent <= 0) return;
+      setAttr(tableWidth!, "w", String(Math.round(percent * 50)));
+
+      const grid = child(source, "tblGrid");
+      const columns = children(grid, "gridCol");
+      if (columns.length === 0) return;
+      const target = Math.round(pxToTwips(available) * percent / 100);
+      const authoredTotal = columns.reduce((sum, column) => sum + (intAttr(column, "w") ?? 0), 0);
+      if (target <= 0 || authoredTotal >= target * 0.1) return;
+
+      const floor = 600;
+      const widths = new Array<number>(columns.length).fill(floor);
+      for (const row of table.rows) {
+        let column = 0;
+        for (const cell of row.cells) {
+          const span = Math.max(1, Math.min(cell.props.gridSpan, columns.length - column));
+          const demand = Math.max(floor * span, textLength(cell.blocks) * 100 + 300);
+          for (let offset = 0; offset < span; offset++) {
+            widths[column + offset] = Math.max(widths[column + offset], demand / span);
+          }
+          column += cell.props.gridSpan;
+          if (column >= columns.length) break;
+        }
+      }
+
+      const dominant = widths.indexOf(Math.max(...widths));
+      const total = widths.reduce((sum, width) => sum + width, 0);
+      if (total < target) {
+        widths[dominant] += target - total;
+      } else if (total > target) {
+        const slack = widths.reduce((sum, width) => sum + Math.max(0, width - floor), 0);
+        const scale = slack > 0 ? Math.min(1, (total - target) / slack) : 0;
+        for (let index = 0; index < widths.length; index++) {
+          widths[index] -= Math.max(0, widths[index] - floor) * scale;
+        }
+      }
+      const rounded = widths.map(Math.round);
+      rounded[dominant] += target - rounded.reduce((sum, width) => sum + width, 0);
+      columns.forEach((column, index) => setAttr(column, "w", String(rounded[index])));
+    };
+
+    for (const section of this.sections) {
+      const contentWidth = section.props.pageWidth - section.props.marginLeft -
+        section.props.marginRight - section.props.gutter;
+      const columnCount = Math.max(1, section.props.columns.count);
+      const available = section.props.columns.widths?.[0] ??
+        (contentWidth - section.props.columns.space * (columnCount - 1)) / columnCount;
+      for (const block of section.blocks) {
+        if (block.type === "table") normalize(block, available);
+      }
+    }
+  }
+
   save(): Uint8Array {
+    this.normalizePercentageTableGrids();
     const files: Record<string, Uint8Array> = { ...this.pkg.raw() };
     if (files["docProps/custom.xml"] && this.contentTypesRoot && !this.contentTypesRoot.children.some(
       (item) => localName(item.name) === "Override" && item.attrs.PartName === "/docProps/custom.xml",
