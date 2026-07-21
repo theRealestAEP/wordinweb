@@ -1365,45 +1365,115 @@ export class DocxEditor {
     const zoom = this.host.zoom ?? 1;
     const startX = e.clientX;
     const startY = e.clientY;
+    const pages = Array.from(handle?.root.querySelectorAll<HTMLElement>(".dxw-page") ?? []);
+    const sourcePage = surface.parentElement as HTMLElement | null;
+    const sourcePageIndex = sourcePage ? pages.indexOf(sourcePage) : -1;
+    const sourceRect = surface.getBoundingClientRect();
+    const pointerOffsetX = (startX - sourceRect.left) / zoom - grip.item.x;
+    const pointerOffsetY = (startY - sourceRect.top) / zoom - grip.item.y1;
     let dx = 0;
     let dy = 0;
-    const onMove = (me: MouseEvent) => {
-      dx = (me.clientX - startX) / zoom;
-      dy = (me.clientY - startY) / zoom;
+    let targetPageIndex = sourcePageIndex;
+    let targetX = grip.item.x;
+    let targetY = grip.item.y1;
+    let pointerX = startX;
+    let pointerY = startY;
+    let scrollParent = surface.parentElement;
+    while (scrollParent) {
+      const style = getComputedStyle(scrollParent);
+      if (/(auto|scroll)/.test(style.overflowY) && scrollParent.scrollHeight > scrollParent.clientHeight) break;
+      scrollParent = scrollParent.parentElement;
+    }
+    scrollParent ??= document.scrollingElement as HTMLElement | null;
+    const updateMove = (clientX: number, clientY: number) => {
+      dx = (clientX - startX) / zoom;
+      dy = (clientY - startY) / zoom;
       if (isMove) {
         const width = (grip.item.x2 ?? grip.item.x) - grip.item.x;
         const height = grip.item.y2 - grip.item.y1;
-        const maxX = Math.max(0, parseFloat(surface.style.width) - width);
-        const maxY = Math.max(0, parseFloat(surface.style.height) - height);
-        dx = Math.max(-grip.item.x, Math.min(dx, maxX - grip.item.x));
-        dy = Math.max(-grip.item.y1, Math.min(dy, maxY - grip.item.y1));
-        guide.style.left = `${grip.item.x + dx}px`;
-        guide.style.top = `${grip.item.y1 + dy}px`;
+        let targetSurface = surface;
+        let bestDistance = Infinity;
+        for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+          const candidate = pages[pageIndex].firstElementChild as HTMLElement | null;
+          if (!candidate) continue;
+          const rect = candidate.getBoundingClientRect();
+          const distX =
+            clientX < rect.left ? rect.left - clientX : clientX > rect.right ? clientX - rect.right : 0;
+          const distY =
+            clientY < rect.top ? rect.top - clientY : clientY > rect.bottom ? clientY - rect.bottom : 0;
+          const distance = distX * distX + distY * distY;
+          if (distance >= bestDistance) continue;
+          bestDistance = distance;
+          targetSurface = candidate;
+          targetPageIndex = pageIndex;
+        }
+        const targetRect = targetSurface.getBoundingClientRect();
+        const maxX = Math.max(0, targetRect.width / zoom - width);
+        const maxY = Math.max(0, targetRect.height / zoom - height);
+        targetX = Math.max(0, Math.min((clientX - targetRect.left) / zoom - pointerOffsetX, maxX));
+        targetY = Math.max(0, Math.min((clientY - targetRect.top) / zoom - pointerOffsetY, maxY));
+        dx = targetX - grip.item.x;
+        dy = targetY - grip.item.y1;
+        if (guide.parentElement !== targetSurface) targetSurface.appendChild(guide);
+        guide.style.left = `${targetX}px`;
+        guide.style.top = `${targetY}px`;
       } else if (isCol) {
         guide.style.left = `${grip.item.x + dx}px`;
       } else {
         guide.style.top = `${grip.item.y1 + dy}px`;
       }
     };
+    const onMove = (me: MouseEvent) => {
+      pointerX = me.clientX;
+      pointerY = me.clientY;
+      updateMove(pointerX, pointerY);
+    };
+    let autoScrollFrame: number | undefined;
+    const autoScroll = () => {
+      if (isMove && scrollParent) {
+        const isDocumentScroll = scrollParent === document.documentElement || scrollParent === document.body;
+        const rect = isDocumentScroll ? { top: 0, bottom: window.innerHeight } : scrollParent.getBoundingClientRect();
+        const margin = 48;
+        const amount =
+          pointerY < rect.top + margin
+            ? -Math.min(28, Math.ceil(rect.top + margin - pointerY))
+            : pointerY > rect.bottom - margin
+              ? Math.min(28, Math.ceil(pointerY - (rect.bottom - margin)))
+              : 0;
+        if (amount !== 0) {
+          const before = scrollParent.scrollTop;
+          scrollParent.scrollTop += amount;
+          if (scrollParent.scrollTop !== before) updateMove(pointerX, pointerY);
+        }
+      }
+      autoScrollFrame = requestAnimationFrame(autoScroll);
+    };
+    autoScrollFrame = requestAnimationFrame(autoScroll);
     const onUp = () => {
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
+      if (autoScrollFrame !== undefined) cancelAnimationFrame(autoScrollFrame);
       guide.remove();
       this.suppressNextMouseUp = false;
       const delta = isCol ? dx : dy;
-      if ((isMove ? Math.hypot(dx, dy) : Math.abs(delta)) >= 1) {
+      if ((isMove ? targetPageIndex !== sourcePageIndex || Math.hypot(dx, dy) >= 1 : Math.abs(delta) >= 1)) {
         this.host.history?.checkpoint();
-        const page = surface.parentElement as HTMLElement | null;
-        const pages = Array.from(this.host.getHandle()?.root.querySelectorAll<HTMLElement>(".dxw-page") ?? []);
-        const bodyTop = parseFloat(page?.dataset.bodyTop ?? "");
+        const bodyTop = parseFloat(sourcePage?.dataset.bodyTop ?? "");
         const preservePageStart =
           isMove &&
-          page !== null &&
-          pages.indexOf(page) > 0 &&
+          sourcePage !== null &&
+          sourcePageIndex > 0 &&
           Number.isFinite(bodyTop) &&
           Math.abs(grip.item.y1 - bodyTop) <= 1;
         const ok = isMove
-          ? moveTableTo(this.host.doc, grip.item.tbl, grip.item.x + dx, grip.item.y1 + dy, preservePageStart)
+          ? moveTableTo(
+              this.host.doc,
+              grip.item.tbl,
+              targetX,
+              targetY,
+              preservePageStart,
+              targetPageIndex - sourcePageIndex,
+            )
           : isCol
             ? resizeTableColumn(this.host.doc, grip.item.tbl, grip.item.boundary, dx, grip.item.renderedWidths)
             : resizeTableRow(this.host.doc, grip.item.tbl, grip.item.boundary, (grip.item.rowHeightPx ?? 0) + dy);

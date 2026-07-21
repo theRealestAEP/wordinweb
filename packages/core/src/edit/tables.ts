@@ -552,6 +552,7 @@ export function moveTableTo(
   xPx: number,
   yPx: number,
   preservePageStart = false,
+  pageDelta = 0,
 ): boolean {
   if (localName(tblEl.name) !== "tbl") return false;
   const w = prefixOf(tblEl);
@@ -561,31 +562,54 @@ export function moveTableTo(
     tblEl.children.unshift(tblPr);
   }
   let position = child(tblPr, "tblpPr");
+  const wasInline = !position;
   if (!position) {
-    if (preservePageStart) {
-      const parent = doc.findParentOf(tblEl);
-      const tableIndex = parent?.children.indexOf(tblEl) ?? -1;
-      const previous = parent && tableIndex > 0 ? parent.children[tableIndex - 1] : undefined;
-      const breakRun: XmlElement = {
+    position = { name: `${w}tblpPr`, attrs: {}, children: [], text: "" };
+    const styleIdx = tblPr.children.findIndex((c) => localName(c.name) === "tblStyle");
+    tblPr.children.splice(styleIdx + 1, 0, position);
+  }
+  let pageBreakAdjustment = pageDelta + (wasInline && preservePageStart ? 1 : 0);
+  const parent = doc.findParentOf(tblEl);
+  if (parent && pageBreakAdjustment > 0) {
+    const tableIndex = parent.children.indexOf(tblEl);
+    let previous = tableIndex > 0 ? parent.children[tableIndex - 1] : undefined;
+    if (!previous || localName(previous.name) !== "p") {
+      previous = { name: `${w}p`, attrs: {}, children: [], text: "" };
+      parent.children.splice(tableIndex, 0, previous);
+    }
+    while (pageBreakAdjustment-- > 0) {
+      previous.children.push({
         name: `${w}r`,
         attrs: {},
         children: [{ name: `${w}br`, attrs: { [`${w}type`]: "page" }, children: [], text: "" }],
         text: "",
-      };
-      if (previous && localName(previous.name) === "p") {
-        previous.children.push(breakRun);
-      } else if (parent && tableIndex >= 0) {
-        parent.children.splice(tableIndex, 0, {
-          name: `${w}p`,
-          attrs: {},
-          children: [breakRun],
-          text: "",
-        });
+      });
+    }
+  } else if (parent && pageBreakAdjustment < 0) {
+    while (pageBreakAdjustment++ < 0) {
+      const tableIndex = parent.children.indexOf(tblEl);
+      const previous = tableIndex > 0 ? parent.children[tableIndex - 1] : undefined;
+      if (!previous || localName(previous.name) !== "p") break;
+      let removed = false;
+      for (let runIndex = previous.children.length - 1; runIndex >= 0 && !removed; runIndex--) {
+        const run = previous.children[runIndex];
+        if (localName(run.name) !== "r") continue;
+        for (let childIndex = run.children.length - 1; childIndex >= 0; childIndex--) {
+          const runChild = run.children[childIndex];
+          if (localName(runChild.name) !== "br" || attr(runChild, "type") !== "page") continue;
+          run.children.splice(childIndex, 1);
+          if (!run.children.some((childEl) => localName(childEl.name) !== "rPr")) {
+            previous.children.splice(runIndex, 1);
+          }
+          removed = true;
+          break;
+        }
+      }
+      if (!removed) break;
+      if (!previous.children.some((childEl) => localName(childEl.name) !== "pPr")) {
+        parent.children.splice(parent.children.indexOf(previous), 1);
       }
     }
-    position = { name: `${w}tblpPr`, attrs: {}, children: [], text: "" };
-    const styleIdx = tblPr.children.findIndex((c) => localName(c.name) === "tblStyle");
-    tblPr.children.splice(styleIdx + 1, 0, position);
   }
   const keyOf = (name: string): string | undefined =>
     Object.keys(position!.attrs).find((key) => localName(key) === name);
