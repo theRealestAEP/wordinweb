@@ -90,6 +90,8 @@ export interface TextItem {
    * the bookmark's page number (Word recomputes PAGEREF on open; the docx
    * cached result is stale in real TOCs). */
   pageRef?: string;
+  /** DOCX bookmarks that begin on this text item. */
+  bookmarks?: string[];
   /** Source m:oMath element when this text is a piece of an equation. */
   mathSrc?: XmlElement;
   href?: string;
