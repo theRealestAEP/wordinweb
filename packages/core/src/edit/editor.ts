@@ -5578,10 +5578,40 @@ export class DocxEditor {
     if (this.caret) {
       const paragraph = paragraphOf(this.host.doc, this.caret.t);
       if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && clearListParagraphFormatting(this.host.doc, paragraph)) {
-        this.commit();
+        const reparsed = this.host.doc.reparseBodyParagraph(paragraph);
+        if (reparsed) {
+          for (const child of reparsed.children) {
+            const runs = child.type === "run" ? [child] : child.runs;
+            const run = runs.find((candidate) =>
+              candidate.content.some((content) => content.kind === "text" && content.srcT === this.caret!.t),
+            );
+            if (run) {
+              this.caret.run = run;
+              break;
+            }
+          }
+          invalidateParagraphSignature(paragraph);
+        }
+        this.commit(false, "local", !!reparsed);
         this.focusText();
         return;
       }
+    }
+    const insertedBefore = this.insertBlankParagraphBeforeAtStart();
+    if (insertedBefore) {
+      const reparsed = this.host.doc.insertDirectBodyParagraphBefore(insertedBefore.reference, insertedBefore.blank);
+      if (reparsed) {
+        const run = reparsed.children
+          .flatMap((child) => child.type === "run" ? [child] : child.runs)
+          .find((candidate) =>
+            candidate.content.some((content) => content.kind === "text" && content.srcT === insertedBefore.text),
+          );
+        if (run) this.caret = { t: insertedBefore.text, run, offset: 0 };
+        invalidateParagraphSignature(insertedBefore.blank);
+      }
+      this.commit(false, "local", !!reparsed);
+      this.focusText();
+      return;
     }
     const split = this.splitParagraphCore();
     const reparsed = split
@@ -5603,6 +5633,51 @@ export class DocxEditor {
     }
     this.commit(false, "local", !!reparsed);
     this.focusText();
+  }
+
+  /** Enter at the exact paragraph start only needs a blank paragraph before
+   * the existing content. Retaining the original paragraph keeps its parsed
+   * model, fields, and bookmarks valid for incremental pagination. */
+  private insertBlankParagraphBeforeAtStart(): { blank: XmlElement; reference: XmlElement; text: XmlElement } | null {
+    const caret = this.caret;
+    if (!caret || caret.offset !== 0) return null;
+    const rEl = this.host.doc.findParentOf(caret.t);
+    if (!rEl || localName(rEl.name) !== "r") return null;
+    let pEl: XmlElement | undefined = this.host.doc.findParentOf(rEl);
+    while (pEl && localName(pEl.name) !== "p") pEl = this.host.doc.findParentOf(pEl);
+    if (!pEl) return null;
+    const texts = textElements(pEl);
+    const textIndex = texts.indexOf(caret.t);
+    if (textIndex < 0 || texts.slice(0, textIndex).some((text) => text.text.length > 0)) return null;
+    const parent = this.host.doc.findParentOf(pEl);
+    if (!parent) return null;
+
+    const prefix = pEl.name.includes(":") ? pEl.name.slice(0, pEl.name.indexOf(":") + 1) : "";
+    const pPr = pEl.children.find((child) => localName(child.name) === "pPr");
+    const blankPPr = pPr ? cloneXml(pPr) : undefined;
+    if (blankPPr) blankPPr.children = blankPPr.children.filter((child) => localName(child.name) !== "sectPr");
+    const rPr = rEl.children.find((child) => localName(child.name) === "rPr");
+    const blankText: XmlElement = {
+      name: caret.t.name,
+      attrs: { ...caret.t.attrs, "xml:space": "preserve" },
+      text: "",
+      children: [],
+    };
+    const blankRun: XmlElement = {
+      name: rEl.name,
+      attrs: { ...rEl.attrs },
+      text: "",
+      children: [...(rPr ? [cloneXml(rPr)] : []), blankText],
+    };
+    const blank: XmlElement = {
+      name: prefix + "p",
+      attrs: {},
+      text: "",
+      children: [...(blankPPr ? [blankPPr] : []), blankRun],
+    };
+    parent.children.splice(parent.children.indexOf(pEl), 0, blank);
+    if (this.suggesting) markParagraphGlyph(blank, "ins", this.revMeta());
+    return { blank, reference: pEl, text: blankText };
   }
 
   /** Split the paragraph at the caret without history or commit — shared by

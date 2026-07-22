@@ -580,6 +580,51 @@ export class DocxDocument {
     return parsed ? { before: parsed[0], after: parsed[1] } : null;
   }
 
+  /** Insert a new paragraph immediately before a retained body paragraph
+   * without rebuilding the complete document model. Used by Enter at the
+   * exact paragraph start, where the existing paragraph itself is unchanged. */
+  insertDirectBodyParagraphBefore(
+    referenceSource: XmlElement,
+    insertedSource: XmlElement,
+  ): Paragraph | null {
+    const parent = this.findParentOf(referenceSource);
+    if (!parent) return null;
+    const referenceIndex = parent.children.indexOf(referenceSource);
+    if (referenceIndex < 1 || parent.children[referenceIndex - 1] !== insertedSource) return null;
+    if (localName(referenceSource.name) !== "p" || localName(insertedSource.name) !== "p") return null;
+
+    const findBlockList = (blocks: Block[]): { blocks: Block[]; index: number } | null => {
+      const index = blocks.findIndex((block) => block.type === "paragraph" && block.src === referenceSource);
+      if (index >= 0) return { blocks, index };
+      for (const block of blocks) {
+        if (block.type !== "table") continue;
+        for (const row of block.rows) {
+          for (const cell of row.cells) {
+            const found = findBlockList(cell.blocks);
+            if (found) return found;
+          }
+        }
+      }
+      return null;
+    };
+    let location: { blocks: Block[]; index: number } | null = null;
+    for (const section of this.sections) {
+      location = findBlockList(section.blocks);
+      if (location) break;
+    }
+    if (!location || location.blocks.some((block) => block.src === insertedSource)) return null;
+
+    const paragraph = parseParagraph(insertedSource, {
+      ...this.ctxBase,
+      rels: this.documentRels,
+      readPart: (part: string) => this.readXmlOptional(part),
+      independentTextboxStories: true,
+    });
+    if (paragraph.revisionHidden || paragraph.sectionBreak) return null;
+    location.blocks.splice(location.index, 0, paragraph);
+    return paragraph;
+  }
+
   /** Reparse a body paragraph plus several new siblings created by
    * click-and-type without rebuilding the complete document model. */
   reparseDirectBodyParagraphSplits(
@@ -959,6 +1004,8 @@ export class DocxDocument {
 
   markNumberingChanged(): void {
     this.numberingDirty = true;
+    this.numbering = parseNumbering(this.numberingRoot ?? undefined, this.ctxBase);
+    this._layoutGlobalSig = null;
   }
 
   /**

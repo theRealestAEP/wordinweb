@@ -306,6 +306,8 @@ interface IncrPoint {
 export interface IncrData {
   sigs: string[];
   points: IncrPoint[];
+  /** Last top-level block that can consume each abstract numbering counter. */
+  lastNumberingUse: Map<number, number>;
   pages: InternalPage[];
   /** Bookmark name -> display page number, for PAGEREF stability checks. */
   bookmarks: Map<string, string>;
@@ -568,6 +570,7 @@ class Engine {
   /** Per top-level block content signature, recorded during a captured layout
    * so the next incremental layout can find the first changed block. */
   private incrSigs: string[] | null = null;
+  private incrLastNumberingUse: Map<number, number> | null = null;
   /** Reuse points captured at clean page tops: the block index that starts the
    * page and a snapshot of engine state to resume from. */
   private incrPoints: IncrPoint[] | null = null;
@@ -691,7 +694,9 @@ class Engine {
 
   private startRun(): void {
     if (this.incrEligible()) {
-      this.incrSigs = this.doc.sections[0].blocks.map((b) => this.blockSig(b));
+      const blocks = this.doc.sections[0].blocks;
+      this.incrSigs = blocks.map((b) => this.blockSig(b));
+      this.incrLastNumberingUse = this.lastNumberingUse(blocks);
       this.incrPoints = [];
     }
     this.assignNoteNumbers();
@@ -861,6 +866,7 @@ class Engine {
       result._incr = {
         sigs: this.incrSigs!,
         points: this.incrPoints,
+        lastNumberingUse: this.incrLastNumberingUse!,
         pages: this.pages,
         bookmarks: this.bookmarkPages,
         bookmarkPageIndices: this.bookmarkPageIndices,
@@ -997,6 +1003,46 @@ class Engine {
     return block.src ? hashXml(block.src) : "\u0000nosrc";
   }
 
+  private blockNumberingKeys(block: Block, keys: Set<number>): void {
+    if (block.type === "paragraph") {
+      const numbering = this.doc.effectiveParaProps(block).numbering;
+      const instance = numbering ? this.doc.numberingInstance(numbering.numId) : undefined;
+      if (instance) keys.add(instance.abstractNumId);
+      return;
+    }
+    for (const row of block.rows) {
+      for (const cell of row.cells) {
+        for (const nested of cell.blocks) this.blockNumberingKeys(nested, keys);
+      }
+    }
+  }
+
+  private lastNumberingUse(blocks: Block[]): Map<number, number> {
+    const lastUse = new Map<number, number>();
+    for (let index = 0; index < blocks.length; index++) {
+      const keys = new Set<number>();
+      this.blockNumberingKeys(blocks[index], keys);
+      for (const key of keys) lastUse.set(key, index);
+    }
+    return lastUse;
+  }
+
+  private numberingCountersAffectLabels(abstractNumId: number): boolean {
+    const abstract = this.doc.numbering.abstract.get(abstractNumId);
+    if (!abstract) return true;
+    for (const level of abstract.levels.values()) {
+      if (level.format !== "bullet" && level.format !== "none") return true;
+    }
+    for (const instance of this.doc.numbering.instances.values()) {
+      if (instance.abstractNumId !== abstractNumId) continue;
+      for (const override of instance.overrides.values()) {
+        const format = override.level?.format;
+        if (format && format !== "bullet" && format !== "none") return true;
+      }
+    }
+    return false;
+  }
+
   /** PAGEREF rewrite: replace stale cached field text with the bookmark's real
    * page. The right edge stays fixed so TOC right-tab page numbers keep align. */
   private rewritePageRefs(pages: InternalPage[]): void {
@@ -1077,7 +1123,7 @@ class Engine {
     if (this.incrPrevPoints && blockIdx > this.incrFirstDirty) {
       const pp = this.incrPrevPoints.get(blockIdx);
       const pageShift = pp ? globalPageIdx - pp.pageCount : 0;
-      if (pp && this.statesMatch(pp.state, pageShift)) {
+      if (pp && this.statesMatch(pp.state, pageShift, blockIdx)) {
         __incrStats.convergedBlock = blockIdx;
         __incrStats.convergedPage = globalPageIdx;
         __incrStats.pageShift = pageShift;
@@ -1111,7 +1157,7 @@ class Engine {
   /** True when the current engine state at a clean page top exactly matches a
    * prev-layout capture point — i.e. the relaid tail has re-converged and the
    * rest of the layout is guaranteed identical. */
-  private statesMatch(s: IncrState, pageShift = 0): boolean {
+  private statesMatch(s: IncrState, pageShift = 0, blockIdx = 0): boolean {
     const p = this.cur;
     if (
       this.col !== s.col ||
@@ -1133,12 +1179,24 @@ class Engine {
     ) {
       return false;
     }
-    if (this.seenNumIds.size !== s.seenNumIds.length) return false;
-    for (const id of s.seenNumIds) if (!this.seenNumIds.has(id)) return false;
-    if (this.counters.size !== s.counters.length) return false;
-    for (const [k, w] of s.counters) {
-      const v = this.counters.get(k);
-      if (!v || w.length !== v.length) return false;
+    const numberingActive = (abstractNumId: number): boolean =>
+      this.numberingCountersAffectLabels(abstractNumId) &&
+      (!this.incrLastNumberingUse || (this.incrLastNumberingUse.get(abstractNumId) ?? -1) >= blockIdx);
+    const numIdActive = (numId: number): boolean => {
+      const instance = this.doc.numberingInstance(numId);
+      return !instance || numberingActive(instance.abstractNumId);
+    };
+    const oldSeen = s.seenNumIds.filter(numIdActive);
+    const newSeen = [...this.seenNumIds].filter(numIdActive);
+    if (oldSeen.length !== newSeen.length) return false;
+    for (const id of oldSeen) if (!this.seenNumIds.has(id)) return false;
+    const oldCounters = new Map(s.counters);
+    const counterKeys = new Set([...oldCounters.keys(), ...this.counters.keys()]);
+    for (const key of counterKeys) {
+      if (!numberingActive(key)) continue;
+      const w = oldCounters.get(key);
+      const v = this.counters.get(key);
+      if (!v || !w || w.length !== v.length) return false;
       for (let i = 0; i < v.length; i++) if (v[i] !== w[i]) return false;
     }
     return true;
@@ -1385,6 +1443,21 @@ class Engine {
       __incrStats.firstDirty = firstDirty;
     }
 
+    this.incrLastNumberingUse = new Map(
+      [...inc.lastNumberingUse].map(([key, index]) => [
+        key,
+        index > this.incrBlockShiftAfter ? index + this.incrBlockDelta : index,
+      ]),
+    );
+    const changedEnd = Math.min(blocks.length - 1, firstDirty + Math.max(0, this.incrBlockDelta));
+    for (let index = firstDirty; index <= changedEnd; index++) {
+      const keys = new Set<number>();
+      this.blockNumberingKeys(blocks[index], keys);
+      for (const key of keys) {
+        this.incrLastNumberingUse.set(key, Math.max(index, this.incrLastNumberingUse.get(key) ?? -1));
+      }
+    }
+
     // Latest captured page top at or before the first changed block.
     let rp: IncrPoint | undefined;
     for (const pt of inc.points) {
@@ -1556,6 +1629,7 @@ class Engine {
       _incr: {
         sigs: newSigs,
         points,
+        lastNumberingUse: this.incrLastNumberingUse!,
         pages: outInternal,
         bookmarks: mergedBookmarks,
         bookmarkPageIndices: mergedBookmarkPageIndices,

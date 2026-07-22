@@ -1,4 +1,5 @@
 import { DocxDocument } from "../docx.js";
+import { invalidateParagraphSignature } from "../layout/inline.js";
 import { XmlElement, attr, localName } from "../xml.js";
 import { paragraphOf } from "./blocks.js";
 
@@ -35,17 +36,11 @@ export function listTypeAt(doc: DocxDocument, target: XmlElement): ListKind | nu
 }
 
 /**
- * Find (or create) a single-level numbering definition of the given kind and
- * return its numId. Reuses a matching definition when the file already has
- * one so repeated toggles don't pile up abstractNums.
+ * Create an independent numbering definition of the given kind and return its
+ * numId. A toolbar-created list starts a new sequence instead of continuing an
+ * unrelated list elsewhere in the document.
  */
-function ensureListNum(doc: DocxDocument, kind: ListKind): number | null {
-  for (const [numId, inst] of doc.numbering.instances) {
-    const lvl = doc.numberingLevel(numId, 0);
-    if (!lvl) continue;
-    if (kind === "bullet" ? lvl.format === "bullet" : lvl.format === "decimal") return numId;
-    void inst;
-  }
+function createListNum(doc: DocxDocument, kind: ListKind): number | null {
   const root = doc.numberingTree(true);
   if (!root) return null;
   const w = prefixOf(root);
@@ -128,7 +123,7 @@ export function setListType(doc: DocxDocument, targets: XmlElement[], kind: List
   }
   if (paragraphs.size === 0) return false;
 
-  const numId = kind === null ? null : ensureListNum(doc, kind);
+  const numId = kind === null ? null : createListNum(doc, kind);
   if (kind !== null && numId === null) return false;
 
   let touched = false;
@@ -160,6 +155,16 @@ export function setListType(doc: DocxDocument, targets: XmlElement[], kind: List
     }
     touched = true;
   }
-  if (touched) doc.refresh();
+  if (touched) {
+    let reparsed = true;
+    for (const paragraph of paragraphs) {
+      if (!doc.reparseBodyParagraph(paragraph)) {
+        reparsed = false;
+        break;
+      }
+      invalidateParagraphSignature(paragraph);
+    }
+    if (!reparsed) doc.refresh();
+  }
   return touched;
 }

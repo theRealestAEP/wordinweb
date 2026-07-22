@@ -433,6 +433,29 @@ describe("undo/redo history", () => {
 });
 
 describe("local paragraph split reparsing", () => {
+  it("inserts a blank paragraph before a structured paragraph without refreshing the model", () => {
+    const doc = loadDoc(
+      `<w:p><w:bookmarkStart w:id="1" w:name="target"/><w:r><w:t>alpha</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>` +
+      p("after"),
+    );
+    const original = doc.sections[0].blocks[0] as Paragraph;
+    const source = original.src!;
+    const body = doc.docRoot.children.find((element) => localName(element.name) === "body")!;
+    const sourceIndex = body.children.indexOf(source);
+    const inserted = parseXml(`<w:p><w:r><w:t xml:space="preserve"></w:t></w:r></w:p>`);
+    body.children.splice(sourceIndex, 0, inserted);
+
+    const version = doc.modelVersion;
+    const parsed = doc.insertDirectBodyParagraphBefore(source, inserted);
+    expect(parsed).not.toBeNull();
+    expect(doc.modelVersion).toBe(version);
+    expect(doc.sections[0].blocks).toHaveLength(3);
+    expect(doc.sections[0].blocks[0]).toBe(parsed);
+    expect(doc.sections[0].blocks[1]).toBe(original);
+    expect(textOf(parsed!)).toBe("");
+    expect(textOf(original)).toBe("alpha");
+  });
+
   it("splices two parsed paragraphs while preserving model generation and unchanged blocks", () => {
     const doc = loadDoc(p("before") + p("alpha beta") + p("after"));
     const first = doc.sections[0].blocks[0];
@@ -1740,6 +1763,29 @@ describe("setListType", () => {
     // toggle off
     expect(setListType(doc, [t], null)).toBe(true);
     expect((doc.sections[0].blocks[0] as Paragraph).props.numbering).toBeUndefined();
+  });
+
+  it("starts a new list sequence and reparses the paragraph locally", () => {
+    const numbering = `<?xml version="1.0"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+    const numbered = (text: string) => `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const doc = loadDoc(numbered("one") + numbered("two") + numbered("three") + p("alpha"), { "word/numbering.xml": numbering });
+    const target = firstRun(doc, 3).run;
+    const t = target.content.find((c): c is TextContent => c.kind === "text")!.srcT!;
+    const version = doc.modelVersion;
+
+    expect(setListType(doc, [t], "number")).toBe(true);
+    expect(doc.modelVersion).toBe(version);
+    const added = doc.sections[0].blocks[3] as Paragraph;
+    expect(added.props.numbering?.numId).not.toBe(1);
+    expect(doc.numberingInstance(added.props.numbering!.numId)?.abstractNumId).not.toBe(0);
+    const labels = layoutDocument(doc).pages.flatMap((page) => page.items)
+      .filter((item) => item.kind === "text" && /^\d+\.$/.test(item.text))
+      .map((item) => item.kind === "text" ? item.text : "");
+    expect(labels).toEqual(["1.", "2.", "3.", "1."]);
+
+    expect(setListType(doc, [t], null)).toBe(true);
+    expect(doc.modelVersion).toBe(version);
+    expect((doc.sections[0].blocks[3] as Paragraph).props.numbering).toBeUndefined();
   });
 });
 

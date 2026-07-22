@@ -83,6 +83,7 @@ import {
   type MissingFont,
   type LayoutResult,
   listTypeAt,
+  topLevelBlockOf,
   printPages,
   setListType,
   paragraphStyleIdOf,
@@ -1290,9 +1291,10 @@ export function DocxView({
             const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
             if (targets.length === 0) return;
             const current = listTypeAt(doc, targets[0]);
+            const dirtyBlock = targets.length === 1 ? topLevelBlockOf(doc, targets[0]) ?? undefined : undefined;
             history.checkpoint();
             if (setListType(doc, targets as Parameters<typeof setListType>[1], current === kind ? null : kind)) {
-              pages = rerender(doc);
+              pages = rerender(doc, dirtyBlock);
               document.dispatchEvent(new CustomEvent("dxw-selection"));
             }
           },
