@@ -433,6 +433,29 @@ describe("undo/redo history", () => {
 });
 
 describe("local paragraph split reparsing", () => {
+  it("inserts a blank paragraph before a structured paragraph without refreshing the model", () => {
+    const doc = loadDoc(
+      `<w:p><w:bookmarkStart w:id="1" w:name="target"/><w:r><w:t>alpha</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>` +
+      p("after"),
+    );
+    const original = doc.sections[0].blocks[0] as Paragraph;
+    const source = original.src!;
+    const body = doc.docRoot.children.find((element) => localName(element.name) === "body")!;
+    const sourceIndex = body.children.indexOf(source);
+    const inserted = parseXml(`<w:p><w:r><w:t xml:space="preserve"></w:t></w:r></w:p>`);
+    body.children.splice(sourceIndex, 0, inserted);
+
+    const version = doc.modelVersion;
+    const parsed = doc.insertDirectBodyParagraphBefore(source, inserted);
+    expect(parsed).not.toBeNull();
+    expect(doc.modelVersion).toBe(version);
+    expect(doc.sections[0].blocks).toHaveLength(3);
+    expect(doc.sections[0].blocks[0]).toBe(parsed);
+    expect(doc.sections[0].blocks[1]).toBe(original);
+    expect(textOf(parsed!)).toBe("");
+    expect(textOf(original)).toBe("alpha");
+  });
+
   it("splices two parsed paragraphs while preserving model generation and unchanged blocks", () => {
     const doc = loadDoc(p("before") + p("alpha beta") + p("after"));
     const first = doc.sections[0].blocks[0];
