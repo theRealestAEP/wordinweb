@@ -1,6 +1,7 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, attr, localName } from "../xml.js";
 import { SelectionSegment, applyRunFormat } from "./commands.js";
+import { EditProvenance, defaultProvenance } from "./provenance.js";
 
 function el(name: string, attrs: Record<string, string> = {}, children: XmlElement[] = [], text = ""): XmlElement {
   return { name, attrs, children, text };
@@ -19,6 +20,7 @@ export function addComment(
   text: string,
   author: string,
   initials?: string,
+  prov: EditProvenance = defaultProvenance(),
 ): boolean {
   if (!text.trim() || segments.length === 0) return false;
   const commentsRoot = doc.commentsTree(true);
@@ -62,10 +64,7 @@ export function addComment(
   const usedParaIds = new Set(doc.comments.map((c) => c.paraId).filter(Boolean));
   let paraId = "";
   do {
-    paraId = Math.floor(Math.random() * 0xfffffff0 + 1)
-      .toString(16)
-      .toUpperCase()
-      .padStart(8, "0");
+    paraId = prov.paraId();
   } while (usedParaIds.has(paraId));
   commentsRoot.children.push(
     el(
@@ -74,7 +73,7 @@ export function addComment(
         [`${w}id`]: newId,
         [`${w}author`]: author,
         ...(initials ? { [`${w}initials`]: initials } : {}),
-        [`${w}date`]: new Date().toISOString(),
+        [`${w}date`]: prov.date(),
       },
       [
         el(
@@ -160,6 +159,7 @@ export function replyToComment(
   text: string,
   author: string,
   initials?: string,
+  prov: EditProvenance = defaultProvenance(),
 ): boolean {
   const commentsRoot = doc.commentsTree();
   const parent = doc.comments.find((c) => c.id === parentId);
@@ -178,10 +178,7 @@ export function replyToComment(
   const usedParaIds = new Set(doc.comments.map((c) => c.paraId).filter(Boolean));
   const freshParaId = (): string => {
     for (;;) {
-      const pid = Math.floor(Math.random() * 0xfffffff0 + 1)
-        .toString(16)
-        .toUpperCase()
-        .padStart(8, "0");
+      const pid = prov.paraId();
       if (!usedParaIds.has(pid)) {
         usedParaIds.add(pid);
         return pid;
@@ -219,7 +216,7 @@ export function replyToComment(
         [`${w}id`]: newId,
         [`${w}author`]: author,
         ...(initials ? { [`${w}initials`]: initials } : {}),
-        [`${w}date`]: new Date().toISOString(),
+        [`${w}date`]: prov.date(),
       },
       [
         el(

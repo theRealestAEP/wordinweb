@@ -180,7 +180,7 @@ export class DocxDocument {
    * If the retained tree still matches on save, keep the part's original
    * bytes instead of replacing producer formatting such as CRLF line ends. */
   private readonly originalModeledXml = new Map<string, string>();
-  private nextDocPrId = 1000;
+  private docPrIdCounter: number | null = null;
 
   /** Transient layout state: set by the engine while laying out a docGrid
    * type="charsAndLines" section so line measurement can give East-Asian
@@ -1543,9 +1543,25 @@ export class DocxDocument {
     return zipSync(files);
   }
 
-  /** Fresh unique docPr id for inserted drawings. */
+  /** Fresh unique docPr id for inserted drawings. Seeded once past the
+   * highest id already present in any editable root (floor 1000, matching
+   * the historical seed for documents with no drawings) so a document that
+   * already carries drawings never gets a colliding id. */
   nextDrawingId(): number {
-    return this.nextDocPrId++;
+    if (this.docPrIdCounter === null) {
+      let max = 999;
+      const scan = (el: XmlElement): void => {
+        if (localName(el.name) === "docPr") {
+          const idKey = Object.keys(el.attrs).find((k) => localName(k) === "id");
+          const v = idKey ? parseInt(el.attrs[idKey], 10) : NaN;
+          if (Number.isFinite(v) && v > max) max = v;
+        }
+        for (const c of el.children) scan(c);
+      };
+      for (const root of this.editableRoots()) scan(root);
+      this.docPrIdCounter = max + 1;
+    }
+    return this.docPrIdCounter++;
   }
 
   /** Next unused revision id (w:id on w:ins/w:del). Seeded once past the

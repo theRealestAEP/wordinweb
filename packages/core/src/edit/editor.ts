@@ -83,6 +83,7 @@ export type SelectedObjectCommand =
   | "reset3d"
   | "delete";
 import { graphemeStep } from "./grapheme.js";
+import { EditProvenance, defaultProvenance } from "./provenance.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
 import { resolveParagraphStyleChain } from "../parse/styles.js";
 import {
@@ -257,6 +258,10 @@ function pointInPolygon(point: { x: number; y: number }, polygon: readonly { x: 
 
 export class DocxEditor {
   private caret: Caret | null = null;
+  /** Source of edit-time nondeterministic values (dates, random ids).
+   * Replicated editing swaps in a recorded provenance so every replica
+   * writes identical XML; local editing keeps the ambient default. */
+  provenance: EditProvenance = defaultProvenance();
   /** Header/footer editing is gated behind double-click, like Word. */
   private inHeaderFooter = false;
   /** Page whose header/footer is being edited. The same hdr/ftr XML renders
@@ -5152,7 +5157,7 @@ export class DocxEditor {
   private revMeta(): RevisionMeta {
     return {
       author: this.revisionAuthor,
-      date: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+      date: this.provenance.date().replace(/\.\d+Z$/, "Z"),
       nextId: () => this.host.doc.nextRevisionId(),
     };
   }
