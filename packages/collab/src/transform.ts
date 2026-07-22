@@ -35,6 +35,10 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "splitParagraph":
       // The tail (offset >= at.offset) leaves this run for the new run.
       return [{ runId: intent.at.runId, at: intent.at.offset, del: 0, ins: 0, movedToRunId: intent.newRunId }];
+    case "formatRun":
+      // Whole-run formatting moves no text and preserves the run id — no
+      // position of any concurrent intent is affected.
+      return [];
   }
 }
 
@@ -89,6 +93,9 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
     case "splitParagraph":
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
+    case "formatRun":
+      // Addressed by run id only; nothing to transform (whole-run).
+      return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);
       const e = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.end }, ahead);

@@ -63,7 +63,24 @@ export interface SplitParagraphIntent extends IntentBase {
   newRunId: StableId;
 }
 
-export type Intent = InsertTextIntent | DeleteTextIntent | SplitParagraphIntent;
+/**
+ * Character-format an entire run (bold/italic/underline/…). Whole-run only:
+ * it mutates the run's w:rPr in place, so no run splits, no new ids, and the
+ * run id is preserved — which makes its transform identity (formatting moves
+ * no text). Sub-range formatting splits the run into up to three, needing the
+ * run-split id-inheritance + position remapping (plan doc 03 F3); that is a
+ * documented extension, not implemented here.
+ */
+export interface FormatRunIntent extends IntentBase {
+  kind: "formatRun";
+  blockId: StableId;
+  runId: StableId;
+  /** RunFormatPatch (bold/italic/underline/strike/color/…). Structural shape
+   * mirrors @wordinweb/core's RunFormatPatch; carried verbatim. */
+  patch: Record<string, unknown>;
+}
+
+export type Intent = InsertTextIntent | DeleteTextIntent | SplitParagraphIntent | FormatRunIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

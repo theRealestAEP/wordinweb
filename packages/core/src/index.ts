@@ -19,7 +19,7 @@ export { renderToDom } from "./render/dom.js";
 export type { RenderHandle, RenderOptions, TextBinding } from "./render/dom.js";
 export { formatNumber } from "./parse/numbering.js";
 export { applyRunFormat, summarizeSelection } from "./edit/commands.js";
-export type { RunFormatPatch, SelectionSegment, SelectionFormat } from "./edit/commands.js";
+export type { RunFormatPatch, SelectionSegment, SelectionFormat, FormattedRange } from "./edit/commands.js";
 export { selectionToSegments } from "./edit/selection.js";
 export { DocxEditor } from "./edit/editor.js";
 export type { ObjectArrangeAction, SelectedObjectCommand, SelectedObjectKind } from "./edit/editor.js";

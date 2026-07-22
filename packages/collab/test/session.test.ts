@@ -155,3 +155,44 @@ describe("DocumentSession deleteText", () => {
     expect(e.kind).toBe("rejected");
   });
 });
+
+describe("DocumentSession formatRun (whole-run character formatting)", () => {
+  function isBold(session: DocumentSession, paraIdx: number): boolean {
+    const para = session.doc.sections[paraIdx].blocks ? undefined : undefined;
+    void para;
+    // Read bold from the serialized run properties.
+    return serializeXml(session.doc.docRoot).includes("<w:b/>");
+  }
+
+  it("applies bold to a whole run and preserves the run id", () => {
+    const session = new DocumentSession(makeDoc(["word"]));
+    const { blockId, runId } = runIdOf(session, 0);
+    const e = session.submit({ kind: "formatRun", clientId: "a", clientSeq: 1, base: 0, blockId, runId, patch: { bold: true } });
+    expect(e.kind).toBe("applied");
+    expect(isBold(session, 0)).toBe(true);
+    // The run id survives (whole-run format is in-place).
+    const para = session.doc.sections[0].blocks[0] as Paragraph;
+    expect(session.ids.idOf((para.children[0] as Run).src!)).toBe(runId);
+  });
+
+  it("a concurrent insert in the run being formatted is unaffected by the format transform", () => {
+    const session = new DocumentSession(makeDoc(["abc"]));
+    const { blockId, runId } = runIdOf(session, 0);
+    // Format the run bold, and concurrently (base 0) insert at offset 3.
+    session.submit({ kind: "formatRun", clientId: "a", clientSeq: 1, base: 0, blockId, runId, patch: { italic: true } });
+    session.submit({ kind: "insertText", clientId: "b", clientSeq: 1, base: 0, at: { blockId, runId, offset: 3 }, text: "d" });
+    expect(docText(session.doc)).toBe("abcd");
+    expect(serializeXml(session.doc.docRoot)).toContain("<w:i/>");
+  });
+
+  it("determinism: same format+edit stream yields identical XML twice", () => {
+    const build = () => {
+      const s = new DocumentSession(makeDoc(["xy"]));
+      const { blockId, runId } = runIdOf(s, 0);
+      s.submit({ kind: "formatRun", clientId: "a", clientSeq: 1, base: 0, blockId, runId, patch: { bold: true, underline: true } });
+      s.submit({ kind: "insertText", clientId: "a", clientSeq: 2, base: s.seq, at: { blockId, runId, offset: 2 }, text: "z" });
+      return serializeXml(s.doc.docRoot);
+    };
+    expect(build()).toBe(build());
+  });
+});

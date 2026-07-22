@@ -4,10 +4,12 @@ import {
   applyInsertText,
   applySplitParagraph,
   applyDeleteRange,
+  applyRunFormat,
   type EditCaret,
   type Run,
   type Block,
   type XmlElement,
+  type SelectionSegment,
 } from "@wordinweb/core";
 import { Intent, Position } from "./intents.js";
 
@@ -52,6 +54,17 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       ids.assign(res.after, intent.newBlockId);
       const newRun = res.after.children.find((c) => localRun(c));
       if (newRun) ids.assign(newRun, intent.newRunId);
+      return true;
+    }
+    case "formatRun": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry) return false;
+      // Whole-run format: a segment with t=null covers the entire run, so
+      // applyRunFormat takes the in-place (no-split) path — run id preserved.
+      const seg: SelectionSegment = { run: entry.run, t: null, start: 0, end: 0, props: entry.run.props };
+      applyRunFormat(doc, [seg], intent.patch as never);
       return true;
     }
   }
