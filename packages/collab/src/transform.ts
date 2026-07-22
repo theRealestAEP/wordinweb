@@ -39,6 +39,9 @@ export function runEditsOf(intent: Intent): RunEdit[] {
       // Whole-run formatting moves no text and preserves the run id — no
       // position of any concurrent intent is affected.
       return [];
+    case "formatParagraph":
+      // Block-level; moves no text, preserves ids.
+      return [];
   }
 }
 
@@ -95,6 +98,9 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
     case "formatRun":
       // Addressed by run id only; nothing to transform (whole-run).
+      return { ...intent, base: newBase };
+    case "formatParagraph":
+      // Addressed by block id only; nothing to transform.
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

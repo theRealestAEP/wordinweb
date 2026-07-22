@@ -80,7 +80,25 @@ export interface FormatRunIntent extends IntentBase {
   patch: Record<string, unknown>;
 }
 
-export type Intent = InsertTextIntent | DeleteTextIntent | SplitParagraphIntent | FormatRunIntent;
+/**
+ * Paragraph-level formatting: alignment and/or paragraph style. Block-level —
+ * it mutates the paragraph's w:pPr, creates no tracked nodes, and moves no
+ * text, so the block id is preserved and its transform is identity.
+ */
+export interface FormatParagraphIntent extends IntentBase {
+  kind: "formatParagraph";
+  blockId: StableId;
+  align?: "left" | "center" | "right" | "justify";
+  /** Paragraph style id; null clears to Normal. Omit to leave unchanged. */
+  styleId?: string | null;
+}
+
+export type Intent =
+  | InsertTextIntent
+  | DeleteTextIntent
+  | SplitParagraphIntent
+  | FormatRunIntent
+  | FormatParagraphIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

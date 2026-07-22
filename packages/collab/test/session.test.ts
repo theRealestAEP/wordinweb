@@ -196,3 +196,32 @@ describe("DocumentSession formatRun (whole-run character formatting)", () => {
     expect(build()).toBe(build());
   });
 });
+
+describe("DocumentSession formatParagraph (block-level formatting)", () => {
+  it("applies center alignment to a paragraph and preserves its block id", () => {
+    const session = new DocumentSession(makeDoc(["line"]));
+    const { blockId } = runIdOf(session, 0);
+    const e = session.submit({ kind: "formatParagraph", clientId: "a", clientSeq: 1, base: 0, blockId, align: "center" });
+    expect(e.kind).toBe("applied");
+    expect(serializeXml(session.doc.docRoot)).toContain(`w:val="center"`);
+    const para = session.doc.sections[0].blocks[0] as Paragraph;
+    expect(session.ids.idOf(para.src!)).toBe(blockId);
+  });
+
+  it("applies a paragraph style", () => {
+    const session = new DocumentSession(makeDoc(["heading text"]));
+    const { blockId } = runIdOf(session, 0);
+    const e = session.submit({ kind: "formatParagraph", clientId: "a", clientSeq: 1, base: 0, blockId, styleId: "Heading1" });
+    expect(e.kind).toBe("applied");
+    expect(serializeXml(session.doc.docRoot)).toContain("Heading1");
+  });
+
+  it("a concurrent text edit and a paragraph format on the same block both land", () => {
+    const session = new DocumentSession(makeDoc(["abc"]));
+    const { blockId, runId } = runIdOf(session, 0);
+    session.submit({ kind: "formatParagraph", clientId: "a", clientSeq: 1, base: 0, blockId, align: "right" });
+    session.submit({ kind: "insertText", clientId: "b", clientSeq: 1, base: 0, at: { blockId, runId, offset: 3 }, text: "d" });
+    expect(docText(session.doc)).toBe("abcd");
+    expect(serializeXml(session.doc.docRoot)).toContain(`w:val="right"`);
+  });
+});

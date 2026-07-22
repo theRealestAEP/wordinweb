@@ -5,6 +5,8 @@ import {
   applySplitParagraph,
   applyDeleteRange,
   applyRunFormat,
+  setParagraphAlignment,
+  setParagraphStyle,
   type EditCaret,
   type Run,
   type Block,
@@ -67,12 +69,32 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       applyRunFormat(doc, [seg], intent.patch as never);
       return true;
     }
+    case "formatParagraph": {
+      const blockEl = ids.elOf(intent.blockId);
+      if (!blockEl) return false;
+      // setParagraphAlignment/Style resolve the paragraph by walking UP from a
+      // target, so pass a descendant w:t (or the block itself as a fallback).
+      const target = firstTextDescendant(blockEl) ?? blockEl;
+      let changed = false;
+      if (intent.align) changed = setParagraphAlignment(doc, [target], intent.align) || changed;
+      if (intent.styleId !== undefined) changed = setParagraphStyle(doc, [target], intent.styleId) || changed;
+      return changed;
+    }
   }
 }
 
 function localRun(el: XmlElement): boolean {
   const n = el.name;
   return n === "w:r" || n.endsWith(":r") || n === "r";
+}
+
+function firstTextDescendant(el: XmlElement): XmlElement | null {
+  if (el.name === "w:t" || el.name.endsWith(":t")) return el;
+  for (const c of el.children) {
+    const found = firstTextDescendant(c);
+    if (found) return found;
+  }
+  return null;
 }
 
 interface RunEntry {
