@@ -9,3 +9,4 @@
 export { CollabHub, type Connection, type DocProvider } from "./hub.js";
 export { PROTOCOL_VERSION, type ClientMessage, type ServerMessage } from "./protocol.js";
 export { attachWebSocketServer, type WsServer, type WsSocket } from "./ws.js";
+export { InMemoryStorage, type StorageDriver } from "./storage.js";

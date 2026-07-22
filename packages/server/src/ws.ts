@@ -36,7 +36,7 @@ export function attachWebSocketServer(wss: WsServer, hub: CollabHub): void {
       } catch {
         return;
       }
-      if (msg && typeof msg === "object" && "t" in msg) hub.handle(conn, msg);
+      if (msg && typeof msg === "object" && "t" in msg) void hub.handle(conn, msg).catch(() => {});
     });
     socket.on("close", () => hub.disconnect(conn));
   });

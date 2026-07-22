@@ -29,13 +29,45 @@ export class DocumentSession {
     this.ids = doc.enableStableIds();
   }
 
-  /** Newest assigned sequence number (0 before any entry). */
+  /** Newest assigned sequence number (0 before any entry). Derived from the
+   * last log entry so it stays correct after a snapshot prunes the log
+   * prefix (rehydration). */
   get seq(): number {
-    return this.log.length;
+    return this.log.length === 0 ? 0 : this.log[this.log.length - 1].seq;
   }
 
   entriesSince(base: number): LogEntry[] {
-    return this.log.slice(base);
+    // Entries strictly after `base` by sequence number (log prefix may be
+    // pruned past a snapshot, so index math would be wrong).
+    return this.log.filter((e) => e.seq > base);
+  }
+
+  /**
+   * Rehydrate from a persisted log tail whose entries are already sequenced
+   * and canonical (their positions were transformed when first submitted).
+   * Applies them in order WITHOUT re-transforming, and restores the log,
+   * dedup set, and seq. The document passed to the constructor must be the
+   * snapshot the tail continues from.
+   *
+   * NOTE (plan round-2 F1): this reconstructs stable ids by the snapshot's
+   * parse order plus the carried ids in split entries. That is exact for
+   * histories without pre-snapshot splits; a snapshot taken after splits
+   * needs the ID sidecar (documented next step) to reproduce the id table.
+   */
+  loadCanonical(tail: LogEntry[]): void {
+    for (const e of tail) {
+      if (e.kind === "applied") {
+        applyIntent(this.doc, this.ids, e.intent);
+        if (e.intent.kind === "splitParagraph") {
+          this.doc.refresh();
+          this.ids.assignFromRoots(this.doc.editableRoots());
+        }
+        this.seen.add(idempotencyKey(e.intent));
+      } else {
+        this.seen.add(`${e.clientId}:${e.clientSeq}`);
+      }
+      this.log.push(e);
+    }
   }
 
   /**
@@ -56,12 +88,11 @@ export class DocumentSession {
     }
     this.seen.add(key);
 
-    if (intent.base < 0 || intent.base > this.log.length) {
+    if (intent.base < 0 || intent.base > this.seq) {
       return this.reject(intent, "invalid base");
     }
     const ahead = this.log
-      .slice(intent.base)
-      .filter((e): e is Extract<LogEntry, { kind: "applied" }> => e.kind === "applied")
+      .filter((e): e is Extract<LogEntry, { kind: "applied" }> => e.kind === "applied" && e.seq > intent.base)
       .map((e) => e.intent);
     const canonical = transformIntent(intent, ahead);
 
@@ -79,14 +110,14 @@ export class DocumentSession {
       this.ids.assignFromRoots(this.doc.editableRoots());
     }
 
-    const entry: LogEntry = { seq: this.log.length + 1, kind: "applied", intent: canonical };
+    const entry: LogEntry = { seq: this.seq + 1, kind: "applied", intent: canonical };
     this.log.push(entry);
     return entry;
   }
 
   private reject(intent: Intent, reason: string): LogEntry {
     const entry: LogEntry = {
-      seq: this.log.length + 1,
+      seq: this.seq + 1,
       kind: "rejected",
       clientId: intent.clientId,
       clientSeq: intent.clientSeq,

@@ -38,17 +38,17 @@ class FakeConn implements Connection {
 }
 
 describe("CollabHub", () => {
-  it("refuses a version-mismatched client at hello", () => {
+  it("refuses a version-mismatched client at hello", async () => {
     const hub = new CollabHub(provider);
     const c = new FakeConn("c1");
-    hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION + 1, docId: "d", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION + 1, docId: "d", sinceSeq: 0 });
     expect(c.last()).toEqual({ t: "refused", reason: "version-mismatch" });
   });
 
-  it("welcomes a joining client with a snapshot and the current seq", () => {
+  it("welcomes a joining client with a snapshot and the current seq", async () => {
     const hub = new CollabHub(provider);
     const c = new FakeConn("c1");
-    hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
     const w = c.last();
     expect(w.t).toBe("welcome");
     if (w.t === "welcome") {
@@ -59,25 +59,25 @@ describe("CollabHub", () => {
     expect(hub.activeDocs()).toEqual(["d"]);
   });
 
-  it("refuses submit from a connection that has not joined", () => {
+  it("refuses submit from a connection that has not joined", async () => {
     const hub = new CollabHub(provider);
     const c = new FakeConn("c1");
     const intent: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" };
-    hub.handle(c, { t: "submit", intent });
+    await hub.handle(c, { t: "submit", intent });
     expect(c.last()).toEqual({ t: "refused", reason: "not-joined" });
   });
 
-  it("broadcasts a submitted intent to every participant in the room", () => {
+  it("broadcasts a submitted intent to every participant in the room", async () => {
     const hub = new CollabHub(provider);
     const a = new FakeConn("a");
     const b = new FakeConn("b");
-    hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
-    hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
 
     // Address paragraph 0's run using ids the session assigned (1 = para, 2 = run
     // in deterministic parse order for a single-paragraph doc).
     const intent: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" };
-    hub.handle(a, { t: "submit", intent });
+    await hub.handle(a, { t: "submit", intent });
 
     for (const c of [a, b]) {
       const msg = c.last();
@@ -90,29 +90,29 @@ describe("CollabHub", () => {
     }
   });
 
-  it("isolates rooms: a submit on one doc does not reach another", () => {
+  it("isolates rooms: a submit on one doc does not reach another", async () => {
     const hub = new CollabHub(provider);
     const a = new FakeConn("a");
     const b = new FakeConn("b");
-    hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "docA", sinceSeq: 0 });
-    hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "docB", sinceSeq: 0 });
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "docA", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "docB", sinceSeq: 0 });
     const before = b.received.length;
     const intent: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" };
-    hub.handle(a, { t: "submit", intent });
+    await hub.handle(a, { t: "submit", intent });
     expect(b.received.length).toBe(before); // b got nothing new
     expect(hub.activeDocs().sort()).toEqual(["docA", "docB"]);
   });
 
-  it("drops a connection on disconnect", () => {
+  it("drops a connection on disconnect", async () => {
     const hub = new CollabHub(provider);
     const a = new FakeConn("a");
     const b = new FakeConn("b");
-    hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
-    hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
     hub.disconnect(b);
     const beforeB = b.received.length;
     const intent: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" };
-    hub.handle(a, { t: "submit", intent });
+    await hub.handle(a, { t: "submit", intent });
     expect(b.received.length).toBe(beforeB); // disconnected b receives nothing
   });
 });
@@ -120,7 +120,7 @@ describe("CollabHub", () => {
 import { attachWebSocketServer, WsServer, WsSocket } from "../src/ws.js";
 
 describe("attachWebSocketServer", () => {
-  it("bridges ws-style frames to the hub and serializes responses", () => {
+  it("bridges ws-style frames to the hub and serializes responses", async () => {
     let onConn: ((s: WsSocket) => void) | null = null;
     const wss: WsServer = { on: (_e, cb) => { onConn = cb as (s: WsSocket) => void; } };
     const hub = new CollabHub(provider);
@@ -136,11 +136,12 @@ describe("attachWebSocketServer", () => {
     };
     onConn!(socket);
     onMsg!(JSON.stringify({ t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 }));
+    await new Promise((r) => setTimeout(r, 0)); // flush the fire-and-forget handle()
     expect(sent).toHaveLength(1);
     expect(JSON.parse(sent[0]).t).toBe("welcome");
   });
 
-  it("ignores a malformed frame without crashing", () => {
+  it("ignores a malformed frame without crashing", async () => {
     let onConn: ((s: WsSocket) => void) | null = null;
     const wss: WsServer = { on: (_e, cb) => { onConn = cb as (s: WsSocket) => void; } };
     attachWebSocketServer(wss, new CollabHub(provider));
@@ -148,5 +149,44 @@ describe("attachWebSocketServer", () => {
     const socket: WsSocket = { send: () => {}, on: (e, cb: ((d: unknown) => void) & (() => void)) => { if (e === "message") onMsg = cb; } };
     onConn!(socket);
     expect(() => onMsg!("{ not json")).not.toThrow();
+  });
+});
+
+import { InMemoryStorage } from "../src/storage.js";
+
+describe("CollabHub persistence + rehydration", () => {
+  it("persists sequenced entries and rehydrates a new hub from storage", async () => {
+    const storage = new InMemoryStorage();
+    const hub1 = new CollabHub(provider, storage);
+    const a = new FakeConn("a");
+    await hub1.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    const intent: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" };
+    await hub1.handle(a, { t: "submit", intent });
+
+    // The entry is durably stored.
+    const log = await storage.readLog("d", 0);
+    expect(log).toHaveLength(1);
+    expect(log[0].kind).toBe("applied");
+
+    // A fresh hub (simulating a restart) rehydrates the doc from the log tail:
+    // the joining client's welcome reports the persisted seq.
+    const hub2 = new CollabHub(provider, storage);
+    const b = new FakeConn("b");
+    await hub2.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    const w = b.last();
+    expect(w.t).toBe("welcome");
+    if (w.t === "welcome") expect(w.seq).toBe(1);
+  });
+
+  it("deduplicates a resent intent across the persisted log", async () => {
+    const storage = new InMemoryStorage();
+    const hub = new CollabHub(provider, storage);
+    const a = new FakeConn("a");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    const intent: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 5, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "X" };
+    await hub.handle(a, { t: "submit", intent });
+    await hub.handle(a, { t: "submit", intent }); // resend
+    const log = await storage.readLog("d", 0);
+    expect(log).toHaveLength(1); // deduped
   });
 });

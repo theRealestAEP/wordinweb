@@ -1,6 +1,7 @@
 import { DocxDocument } from "@wordinweb/core";
 import { DocumentSession } from "@wordinweb/collab/server";
 import { ClientMessage, ServerMessage, PROTOCOL_VERSION } from "./protocol.js";
+import { StorageDriver } from "./storage.js";
 
 /**
  * A connection the hub can send to, abstracting the transport (WebSocket in
@@ -37,17 +38,22 @@ export class CollabHub {
   private rooms = new Map<string, Room>();
   private connDoc = new Map<string, string>();
 
-  constructor(private provider: DocProvider) {}
+  /** Optional persistence (plan doc 06). Without a driver the hub is purely
+   * in-memory (a session lives only while a room is held). With one, rooms
+   * rehydrate from snapshot+log on first access and every sequenced entry is
+   * durably appended before broadcast. */
+  constructor(private provider: DocProvider, private storage?: StorageDriver) {}
 
-  /** Handle an inbound message from a connection. */
-  handle(conn: Connection, msg: ClientMessage): void {
+  /** Handle an inbound message from a connection. Async because a storage-
+   * backed hello rehydrates and a submit persists before broadcast. */
+  async handle(conn: Connection, msg: ClientMessage): Promise<void> {
     switch (msg.t) {
       case "hello": {
         if (msg.protocolVersion !== PROTOCOL_VERSION) {
           conn.send({ t: "refused", reason: "version-mismatch" });
           return;
         }
-        const room = this.room(msg.docId);
+        const room = await this.room(msg.docId);
         room.conns.add(conn);
         this.connDoc.set(conn.id, msg.docId);
         conn.send({
@@ -66,8 +72,12 @@ export class CollabHub {
           return;
         }
         const room = this.rooms.get(docId)!;
+        const before = room.session.seq;
         const entry = room.session.submit(msg.intent);
-        // Broadcast the sequenced (canonical) entry to every participant.
+        // A deduplicated re-send returns an already-sequenced entry (seq <=
+        // before); persist only genuinely new entries so the log stays
+        // append-once. Durability before ack (plan doc 06), then broadcast.
+        if (this.storage && entry.seq > before) await this.storage.appendEntries(docId, [entry]);
         const out: ServerMessage = { t: "broadcast", entries: [entry] };
         for (const c of room.conns) c.send(out);
         return;
@@ -87,14 +97,30 @@ export class CollabHub {
     return [...this.rooms.keys()];
   }
 
-  private room(docId: string): Room {
+  private async room(docId: string): Promise<Room> {
     let room = this.rooms.get(docId);
     if (!room) {
-      const doc = DocxDocument.load(this.provider.load(docId));
-      room = { session: new DocumentSession(doc), conns: new Set() };
+      const session = await this.startSession(docId);
+      room = { session, conns: new Set() };
       this.rooms.set(docId, room);
     }
     return room;
+  }
+
+  private async startSession(docId: string): Promise<DocumentSession> {
+    if (this.storage) {
+      const snap = await this.storage.loadSnapshot(docId);
+      if (snap) {
+        const session = new DocumentSession(DocxDocument.load(snap.docx));
+        session.loadCanonical(await this.storage.readLog(docId, snap.seq));
+        return session;
+      }
+      // No snapshot yet: start fresh but replay any persisted log tail.
+      const session = new DocumentSession(DocxDocument.load(this.provider.load(docId)));
+      session.loadCanonical(await this.storage.readLog(docId, 0));
+      return session;
+    }
+    return new DocumentSession(DocxDocument.load(this.provider.load(docId)));
   }
 }
 
