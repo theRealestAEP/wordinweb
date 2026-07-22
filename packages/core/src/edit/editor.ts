@@ -5578,7 +5578,21 @@ export class DocxEditor {
     if (this.caret) {
       const paragraph = paragraphOf(this.host.doc, this.caret.t);
       if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && clearListParagraphFormatting(this.host.doc, paragraph)) {
-        this.commit();
+        const reparsed = this.host.doc.reparseBodyParagraph(paragraph);
+        if (reparsed) {
+          for (const child of reparsed.children) {
+            const runs = child.type === "run" ? [child] : child.runs;
+            const run = runs.find((candidate) =>
+              candidate.content.some((content) => content.kind === "text" && content.srcT === this.caret!.t),
+            );
+            if (run) {
+              this.caret.run = run;
+              break;
+            }
+          }
+          invalidateParagraphSignature(paragraph);
+        }
+        this.commit(false, "local", !!reparsed);
         this.focusText();
         return;
       }
