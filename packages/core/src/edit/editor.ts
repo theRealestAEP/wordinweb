@@ -10,7 +10,7 @@ import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColu
 import { pxToTwips } from "../units.js";
 import { listTypeAt, setListLevel } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
-import { isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
+import { deleteMath, isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
 import {
   drawingFillColor,
   drawingLineStyle,
@@ -3902,6 +3902,19 @@ export class DocxEditor {
     document.body.appendChild(box);
     this.mathEditorEl = box;
 
+    const deleteEquation = () => {
+      this.host.history?.checkpoint();
+      if (deleteMath(this.host.doc, oMathEl)) this.host.rerender();
+      this.closeMathEditor();
+      this.focusText();
+    };
+    const remove = document.createElement("button");
+    remove.textContent = "Delete";
+    remove.setAttribute("aria-label", "Delete equation");
+    remove.style.cssText =
+      "border:1px solid #f1a7a2;border-radius:14px;padding:3px 12px;cursor:pointer;background:#fff;color:#b3261e;";
+    remove.addEventListener("click", deleteEquation);
+
     if (!editable) {
       // Read-only: the structure can't be represented as linear text, so we
       // never let it be rewritten. Show the approximation for reference only.
@@ -3909,6 +3922,7 @@ export class DocxEditor {
       input.style.background = "#f1f3f4";
       input.style.color = "#5f6368";
       caption.textContent = "Structured equation — text editing is disabled to protect its formatting.";
+      row.appendChild(remove);
       setTimeout(() => input.select(), 0);
       input.addEventListener("keydown", (ke) => {
         ke.stopPropagation();
@@ -3924,6 +3938,7 @@ export class DocxEditor {
       apply.style.cssText =
         "border:1px solid #dadce0;border-radius:14px;padding:3px 12px;cursor:pointer;background:#1a73e8;color:#fff;";
       row.appendChild(apply);
+      row.appendChild(remove);
       const reject = () => {
         input.style.borderColor = "#d93025";
         input.style.background = "#fce8e6";
@@ -3935,6 +3950,10 @@ export class DocxEditor {
       };
       const commitMath = () => {
         const val = input.value.trim();
+        if (!val) {
+          deleteEquation();
+          return;
+        }
         // Unchanged text: never rewrite (an accidental Apply must be a no-op).
         if (val === original.trim()) {
           this.closeMathEditor();
