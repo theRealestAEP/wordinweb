@@ -22,6 +22,13 @@ export type StableId = number;
 
 const TRACKED = new Set(["p", "tbl", "r"]);
 
+/** Resolve a structural path `[rootIndex, childIndex, …]` to its element. */
+function resolvePath(roots: XmlElement[], path: number[]): XmlElement | undefined {
+  let el: XmlElement | undefined = roots[path[0]];
+  for (let i = 1; i < path.length && el; i++) el = el.children[path[i]];
+  return el;
+}
+
 export interface EncodedCaret {
   blockId: StableId;
   runId: StableId;
@@ -128,6 +135,44 @@ export class StableIds {
 
   nextId(): StableId {
     return this.next;
+  }
+
+  /**
+   * Export the table as `(id, path)` pairs, where a path is the structural
+   * location of the id'd element within the given roots: `[rootIndex,
+   * childIndex, childIndex, …]`. This is the checkpoint ID sidecar (plan doc
+   * 03): it lets a replica that reloads a snapshot reproduce the exact id
+   * table — parse-order re-derivation cannot, because split-created nodes
+   * carry non-sequential ids. Also carries `next` so id allocation resumes
+   * consistently.
+   */
+  exportSidecar(roots: XmlElement[]): { next: StableId; entries: [StableId, number[]][] } {
+    const pathOf = new Map<XmlElement, number[]>();
+    roots.forEach((root, ri) => {
+      const walk = (el: XmlElement, path: number[]): void => {
+        pathOf.set(el, path);
+        el.children.forEach((c, i) => walk(c, [...path, i]));
+      };
+      walk(root, [ri]);
+    });
+    const entries: [StableId, number[]][] = [];
+    for (const [el, id] of this.byEl) {
+      const path = pathOf.get(el);
+      if (path) entries.push([id, path]);
+    }
+    return { next: this.next, entries };
+  }
+
+  /** Rebuild the table from a sidecar against freshly parsed roots (the
+   * snapshot the sidecar was exported from). Replaces any current mappings. */
+  importSidecar(roots: XmlElement[], sidecar: { next: StableId; entries: [StableId, number[]][] }): void {
+    this.byEl.clear();
+    this.byId.clear();
+    for (const [id, path] of sidecar.entries) {
+      const el = resolvePath(roots, path);
+      if (el) this.install(el, id);
+    }
+    this.next = sidecar.next;
   }
 
   /** Encode a caret as wire-stable addresses. `t` is the w:t (or other text

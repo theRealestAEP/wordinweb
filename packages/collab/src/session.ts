@@ -1,5 +1,8 @@
 import { DocxDocument, StableIds } from "@wordinweb/core";
 import { Intent, LogEntry, idempotencyKey } from "./intents.js";
+
+/** The ID sidecar carried in a checkpoint bundle (plan doc 03). */
+export type IdSidecar = ReturnType<StableIds["exportSidecar"]>;
 import { transformIntent } from "./transform.js";
 import { applyIntent } from "./apply.js";
 
@@ -40,6 +43,27 @@ export class DocumentSession {
     // Entries strictly after `base` by sequence number (log prefix may be
     // pruned past a snapshot, so index math would be wrong).
     return this.log.filter((e) => e.seq > base);
+  }
+
+  /**
+   * A checkpoint bundle (plan doc 03): the snapshot docx bytes at the current
+   * seq plus the ID sidecar, so a client bootstrapping from it reproduces the
+   * exact id table (parse order alone cannot, because split-created nodes
+   * carry non-sequential ids).
+   */
+  checkpoint(): { seq: number; docx: Uint8Array; sidecar: IdSidecar } {
+    return {
+      seq: this.seq,
+      docx: this.doc.save(),
+      sidecar: this.ids.exportSidecar(this.doc.editableRoots()),
+    };
+  }
+
+  /** Install an ID sidecar (from a checkpoint bundle) onto the current
+   * document — used when rehydrating from a snapshot so subsequent tail
+   * entries resolve their carried ids correctly. */
+  installSidecar(sidecar: IdSidecar): void {
+    this.ids.importSidecar(this.doc.editableRoots(), sidecar);
   }
 
   /**

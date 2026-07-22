@@ -237,3 +237,40 @@ describe("DocxDocument stable-id lifecycle (opt-in)", () => {
     expect(ids.idOf(beta)).toBe(betaId);
   });
 });
+
+describe("StableIds sidecar (round-2 F1: id agreement across reload)", () => {
+  it("reproduces the exact table — including non-parse-order carried ids — after a reload", () => {
+    const doc = loadDoc(THREE_PARAS);
+    const ids = doc.enableStableIds();
+    // Simulate a split-created node with a carried, non-sequential id.
+    const body = doc.docRoot.children.find((c) => localName(c.name) === "body")!;
+    const newP: XmlElement = { name: "w:p", attrs: {}, children: [
+      { name: "w:r", attrs: {}, children: [{ name: "w:t", attrs: { "xml:space": "preserve" }, children: [], text: "new" }], text: "" },
+    ], text: "" };
+    body.children.push(newP);
+    // Carried ids are installed at apply time (before any parse-order walk),
+    // exactly as the split apply path does.
+    ids.assign(newP, 7777); // carried id, out of parse-order sequence
+    ids.assign(newP.children[0], 7778);
+    doc.refresh();
+    ids.assignFromRoots(doc.editableRoots()); // fills any gaps, keeps carried ids
+
+    const sidecar = ids.exportSidecar(doc.editableRoots());
+
+    // Reload from serialized bytes (fresh element identities) and rebuild ids
+    // via the sidecar — parse-order alone could not reproduce 7777/7778.
+    const bytes = doc.save();
+    const reloaded = DocxDocument.load(bytes);
+    const rids = reloaded.enableStableIds();
+    rids.importSidecar(reloaded.editableRoots(), sidecar);
+
+    // The reloaded last paragraph resolves to id 7777, its run to 7778.
+    const rbody = reloaded.docRoot.children.find((c) => localName(c.name) === "body")!;
+    const rNewP = rbody.children[rbody.children.length - 1];
+    expect(rids.idOf(rNewP)).toBe(7777);
+    expect(rids.idOf(rNewP.children[0])).toBe(7778);
+    // And the original three paragraphs keep their parse-order ids.
+    expect(rids.idOf(reloaded.editableRoots()[0])).toBeUndefined(); // root isn't tracked
+    expect(rids.nextId()).toBe(sidecar.next);
+  });
+});

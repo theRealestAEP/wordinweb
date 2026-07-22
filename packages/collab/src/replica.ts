@@ -26,12 +26,14 @@ export class ClientReplica {
   /** Server seq the confirmed baseline reflects. */
   confirmedSeq = 0;
   private confirmedBytes: Uint8Array;
+  private confirmedSidecar: ReturnType<StableIds["exportSidecar"]>;
   private pending: Intent[] = [];
 
   constructor(bytes: Uint8Array) {
     this.doc = DocxDocument.load(bytes);
     this.ids = this.doc.enableStableIds();
     this.confirmedBytes = this.doc.save();
+    this.confirmedSidecar = this.ids.exportSidecar(this.doc.editableRoots());
   }
 
   /** Apply a locally produced intent optimistically and enqueue it as pending.
@@ -91,10 +93,15 @@ export class ClientReplica {
   private restoreConfirmed(): void {
     this.doc = DocxDocument.load(this.confirmedBytes);
     this.ids = this.doc.enableStableIds();
+    // Reproduce the exact id table via the sidecar — parse-order alone would
+    // renumber split-created carried ids and break address resolution
+    // (plan round-2 F1).
+    this.ids.importSidecar(this.doc.editableRoots(), this.confirmedSidecar);
   }
 
   private snapshotConfirmed(): void {
     this.confirmedBytes = this.doc.save();
+    this.confirmedSidecar = this.ids.exportSidecar(this.doc.editableRoots());
   }
 
   private resync(): void {

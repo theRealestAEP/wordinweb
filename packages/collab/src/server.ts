@@ -4,7 +4,7 @@
  * WebSocket host in packages/server) drives; nothing here touches sockets,
  * storage, or timers.
  */
-export { DocumentSession, type Broadcast } from "./session.js";
+export { DocumentSession, type Broadcast, type IdSidecar } from "./session.js";
 export { applyIntent } from "./apply.js";
 export * from "./intents.js";
 export * from "./transform.js";

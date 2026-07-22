@@ -97,3 +97,38 @@ describe("multi-client convergence (optimistic apply + reconciliation)", () => {
     for (const c of clients) expect(serializeXml(c.doc.docRoot)).toBe(serverXml);
   });
 });
+
+import { SplitParagraphIntent } from "../src/intents.js";
+
+describe("sidecar: split-created ids survive a reconciliation restore (round-2 F1)", () => {
+  it("a client that split then hits a remote interleave still converges", () => {
+    const initial = docBytes(["HelloWorld"]);
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const a = new ClientReplica(initial);
+    const b = new ClientReplica(initial);
+    const addr = runAddr(server);
+
+    // Client A splits "HelloWorld" -> "Hello" | "World" (carried ids 6000/6001).
+    const split: SplitParagraphIntent = {
+      kind: "splitParagraph", clientId: "a", clientSeq: 1, base: 0,
+      at: { blockId: addr.blockId, runId: addr.runId, offset: 5 }, newBlockId: 6000, newRunId: 6001,
+    };
+    a.submitLocal(split);
+    // Client B concurrently inserts "!" at the end of the (still whole) run.
+    const bIns = { kind: "insertText" as const, clientId: "b", clientSeq: 1, base: 0, at: { blockId: addr.blockId, runId: addr.runId, offset: addr.len }, text: "!" };
+    b.submitLocal(bIns);
+
+    // Server order: split then insert. B's insert offset 10 remaps past the
+    // split point into the new run 6001.
+    const e1 = server.submit(split);
+    const e2 = server.submit(bIns);
+    a.receive([e1, e2]);
+    b.receive([e1, e2]);
+
+    // A had a local split in its history; its confirmed-restore during
+    // reconciliation must not lose the carried ids. All three converge.
+    const serverXml = serializeXml(server.doc.docRoot);
+    expect(serializeXml(a.doc.docRoot)).toBe(serverXml);
+    expect(serializeXml(b.doc.docRoot)).toBe(serverXml);
+  });
+});
