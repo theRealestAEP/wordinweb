@@ -84,6 +84,7 @@ export type SelectedObjectCommand =
   | "delete";
 import { graphemeStep } from "./grapheme.js";
 import { EditProvenance, defaultProvenance } from "./provenance.js";
+import { applyInsertText, applySplitParagraph, MutationCtx } from "./mutations.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
 import { resolveParagraphStyleChain } from "../parse/styles.js";
 import {
@@ -5262,20 +5263,13 @@ export class DocxEditor {
   /** Insert text at the caret (suggesting-aware) without touching history or
    * committing — shared by typing and multi-chunk paste. */
   private insertTextCore(text: string): void {
-    const caret = this.caret;
-    if (!caret) return;
-    // A checkbox content control's glyph is atomic: typing never edits it
-    // (toggle by clicking). Guards against corrupting the w:t inside an SDT.
-    if (checkboxStateElement(caret.run, caret.t)) return;
-    if (this.suggesting) {
-      const nc = insertSuggestedText(this.host.doc, caret.t, caret.offset, text, this.revMeta());
-      if (nc) this.caret = { t: nc.t, run: caret.run, offset: nc.offset, bias: "end" };
-      return;
-    }
-    const t = caret.t;
-    t.text = t.text.slice(0, caret.offset) + text + t.text.slice(caret.offset);
-    caret.offset += text.length;
-    caret.bias = "end";
+    if (!this.caret) return;
+    this.caret = applyInsertText(this.host.doc, this.caret, text, this.mutationCtx());
+  }
+
+  /** Context the extracted mutation core needs from the editor. */
+  private mutationCtx(): MutationCtx {
+    return { suggesting: this.suggesting, revMeta: () => this.revMeta() };
   }
 
   private deleteContents(direction?: -1 | 1): void {
@@ -5688,63 +5682,11 @@ export class DocxEditor {
   /** Split the paragraph at the caret without history or commit — shared by
    * Enter and multi-line paste. */
   private splitParagraphCore(): { before: XmlElement; after: XmlElement } | null {
-    const caret = this.caret;
-    if (!caret) return null;
-    // Resolve containers from the w:t itself — cached run/model objects go
-    // stale after any refresh, but the t element's identity is durable.
-    const rEl = this.host.doc.findParentOf(caret.t);
-    if (!rEl || localName(rEl.name) !== "r") return null;
-    let pEl: XmlElement | undefined = this.host.doc.findParentOf(rEl);
-    while (pEl && localName(pEl.name) !== "p") pEl = this.host.doc.findParentOf(pEl);
-    if (!pEl) return null;
-    const pParent = this.host.doc.findParentOf(pEl);
-    if (!pParent) return null;
-    const runIdx = pEl.children.indexOf(rEl);
-    const tIdx = rEl.children.indexOf(caret.t);
-    if (runIdx === -1 || tIdx === -1) return null;
-
-    const prefix = pEl.name.includes(":") ? pEl.name.slice(0, pEl.name.indexOf(":") + 1) : "";
-    const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
-
-    // Split the caret run: text after the caret moves to a new run.
-    const afterT: XmlElement = {
-      name: caret.t.name,
-      attrs: { ...caret.t.attrs, "xml:space": "preserve" },
-      text: caret.t.text.slice(caret.offset),
-      children: [],
-    };
-    const afterRun: XmlElement = {
-      name: rEl.name,
-      attrs: { ...rEl.attrs },
-      text: "",
-      children: [...(rPr ? [cloneXml(rPr)] : []), afterT, ...rEl.children.slice(tIdx + 1)],
-    };
-    caret.t.text = caret.t.text.slice(0, caret.offset);
-    rEl.children = rEl.children.slice(0, tIdx + 1);
-
-    // New paragraph: cloned pPr (minus any section break!) + moved content.
-    const pPrEl = pEl.children.find((c) => localName(c.name) === "pPr");
-    const newPPr = pPrEl ? cloneXml(pPrEl) : undefined;
-    if (newPPr) {
-      newPPr.children = newPPr.children.filter((c) => localName(c.name) !== "sectPr");
-    }
-    const moved = pEl.children.slice(runIdx + 1);
-    pEl.children = pEl.children.slice(0, runIdx + 1);
-    const newP: XmlElement = {
-      name: prefix + "p",
-      attrs: {},
-      text: "",
-      children: [...(newPPr ? [newPPr] : []), afterRun, ...moved],
-    };
-    const pIdx = pParent.children.indexOf(pEl);
-    pParent.children.splice(pIdx + 1, 0, newP);
-
-    // Suggesting mode: the split introduces a new paragraph mark at the end of
-    // the FIRST paragraph — record it as an inserted glyph (pPr/rPr/w:ins).
-    if (this.suggesting) markParagraphGlyph(pEl, "ins", this.revMeta());
-
-    this.caret = { t: afterT, run: caret.run, offset: 0 };
-    return { before: pEl, after: newP };
+    if (!this.caret) return null;
+    const result = applySplitParagraph(this.host.doc, this.caret, this.mutationCtx());
+    if (!result) return null;
+    this.caret = result.caret;
+    return { before: result.before, after: result.after };
   }
 
   /** Update the retained parsed run for a simple in-place w:t edit. The XML
