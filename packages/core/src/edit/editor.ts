@@ -5600,7 +5600,15 @@ export class DocxEditor {
     const insertedBefore = this.insertBlankParagraphBeforeAtStart();
     if (insertedBefore) {
       const reparsed = this.host.doc.insertDirectBodyParagraphBefore(insertedBefore.reference, insertedBefore.blank);
-      if (reparsed) invalidateParagraphSignature(insertedBefore.blank);
+      if (reparsed) {
+        const run = reparsed.children
+          .flatMap((child) => child.type === "run" ? [child] : child.runs)
+          .find((candidate) =>
+            candidate.content.some((content) => content.kind === "text" && content.srcT === insertedBefore.text),
+          );
+        if (run) this.caret = { t: insertedBefore.text, run, offset: 0 };
+        invalidateParagraphSignature(insertedBefore.blank);
+      }
       this.commit(false, "local", !!reparsed);
       this.focusText();
       return;
@@ -5630,7 +5638,7 @@ export class DocxEditor {
   /** Enter at the exact paragraph start only needs a blank paragraph before
    * the existing content. Retaining the original paragraph keeps its parsed
    * model, fields, and bookmarks valid for incremental pagination. */
-  private insertBlankParagraphBeforeAtStart(): { blank: XmlElement; reference: XmlElement } | null {
+  private insertBlankParagraphBeforeAtStart(): { blank: XmlElement; reference: XmlElement; text: XmlElement } | null {
     const caret = this.caret;
     if (!caret || caret.offset !== 0) return null;
     const rEl = this.host.doc.findParentOf(caret.t);
@@ -5669,7 +5677,7 @@ export class DocxEditor {
     };
     parent.children.splice(parent.children.indexOf(pEl), 0, blank);
     if (this.suggesting) markParagraphGlyph(blank, "ins", this.revMeta());
-    return { blank, reference: pEl };
+    return { blank, reference: pEl, text: blankText };
   }
 
   /** Split the paragraph at the caret without history or commit — shared by
