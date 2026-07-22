@@ -1,0 +1,27 @@
+{
+  "name": "@wordinweb/server",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Collaborative-editing host for wordinweb: routes clients to per-document sessions (thin transport over @wordinweb/collab)",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@wordinweb/collab": "0.1.0",
+    "@wordinweb/core": "0.1.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}
