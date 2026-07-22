@@ -51,8 +51,9 @@ function detectFonts(): string[] {
     };
     ctx.font = "16px monospace";
     const base = ctx.measureText(probe).width;
-    // Bundled substitutes make Calibri/Cambria always renderable.
-    const always = new Set(["Calibri", "Cambria"]);
+    // Keep the standard document families selectable even when a browser's
+    // synchronous width probe runs before their @font-face files finish loading.
+    const always = new Set(["Arial", "Calibri", "Cambria", "Courier New", "Times New Roman"]);
     availableFonts = FONT_CANDIDATES.filter((f) => always.has(f) || Math.abs(widthIn(f) - base) > 0.5);
   } catch {
     availableFonts = FONT_CANDIDATES;
@@ -795,6 +796,7 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
         >
           <input
             ref={inputRef}
+            type="url"
             value={url}
             placeholder="Paste or type a link"
             onChange={(e) => setUrl(e.target.value)}
@@ -1111,6 +1113,10 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
       setError("Place the caret in editable text and enter a valid equation.");
     }
   };
+  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
+  const viewportWidth = typeof window === "undefined" ? 356 : window.innerWidth;
+  const popoverWidth = Math.min(340, viewportWidth - 16);
+  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert equation" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
@@ -1118,7 +1124,7 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ marginLeft: 5 }}>Equation</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 340, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div data-dxw-equation-menu="" style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg }}>Linear equation</div>
           <input
             ref={inputRef}
@@ -1198,6 +1204,7 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
 
 const SHAPES = [
   ["line", "Line", "―"],
+  ["verticalLine", "Vertical line", "│"],
   ["rectangle", "Rectangle", "▭"],
   ["roundedRectangle", "Rounded rectangle", "▢"],
   ["ellipse", "Ellipse", "◯"],
@@ -1205,9 +1212,87 @@ const SHAPES = [
   ["textBox", "Text box", "T"],
 ] as const;
 
+function DividerMenu({ api }: { api: DocxViewApi | null }) {
+  type Divider = NonNullable<ReturnType<DocxViewApi["getParagraphDivider"]>>;
+  const [open, setOpen] = useState(false);
+  const [style, setStyle] = useState<Divider["style"]>("single");
+  const [color, setColor] = useState("#000000");
+  const [widthPt, setWidthPt] = useState(1);
+  const [spacePt, setSpacePt] = useState(1);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const toggle = () => {
+    if (!open) {
+      const current = api?.getParagraphDivider();
+      if (current) {
+        setStyle(current.style);
+        setColor(current.color);
+        setWidthPt(current.widthPt);
+        setSpacePt(current.spacePt);
+      }
+    }
+    setOpen(!open);
+  };
+  const apply = () => {
+    if (api?.setParagraphDivider({ style, color, widthPt, spacePt })) setOpen(false);
+  };
+  const previewStyle = style === "double" || style === "thinThickSmallGap"
+    ? "double"
+    : style;
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert or edit divider" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>Divider</button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 270, padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div style={{ color: T.muted, font: "11.5px system-ui, sans-serif" }}>Horizontal rule below the current paragraph</div>
+          <div aria-hidden="true" style={{ height: 12, borderBottom: `${Math.max(widthPt, 1)}px ${previewStyle} ${color}` }} />
+          <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
+            Style
+            <select aria-label="Divider style" value={style} onChange={(event) => setStyle(event.target.value as Divider["style"])} style={{ border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 7px", background: T.popoverBg, color: T.fg }}>
+              <option value="single">Single</option>
+              <option value="double">Double</option>
+              <option value="dashed">Dashed</option>
+              <option value="dotted">Dotted</option>
+              <option value="thinThickSmallGap">Thin + thick</option>
+            </select>
+          </label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 7 }}>
+            <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
+              Color
+              <input aria-label="Divider color" type="color" value={color} onChange={(event) => setColor(event.target.value)} style={{ width: "100%", height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg }} />
+            </label>
+            <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
+              Width (pt)
+              <input aria-label="Divider width in points" type="number" min="0.25" step="0.25" value={widthPt} onChange={(event) => setWidthPt(Number(event.target.value))} style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 6px", color: T.fg, background: T.popoverBg }} />
+            </label>
+            <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
+              Gap (pt)
+              <input aria-label="Divider gap in points" type="number" min="0" step="1" value={spacePt} onChange={(event) => setSpacePt(Number(event.target.value))} style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 6px", color: T.fg, background: T.popoverBg }} />
+            </label>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+            <button type="button" onClick={() => { if (api?.setParagraphDivider(null)) setOpen(false); }} style={{ ...pillBtn, background: T.popoverBg, color: T.fg, border: `1px solid ${T.border}` }}>Remove</button>
+            <button type="button" onClick={apply} style={pillBtn}>Apply divider</button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 function ShapeMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
+  const [lineColor, setLineColor] = useState("#404040");
+  const [lineWidth, setLineWidth] = useState("1.33");
+  const [lineDash, setLineDash] = useState<"solid" | "dashed" | "dotted">("solid");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
     if (!open) return;
@@ -1218,7 +1303,10 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const insert = (preset: Parameters<DocxViewApi["insertShape"]>[0]) => {
-    if (api?.insertShape(preset, text)) {
+    const isLine = preset === "line" || preset === "verticalLine";
+    const width = Number(lineWidth);
+    if (isLine && (!Number.isFinite(width) || width <= 0)) return;
+    if (api?.insertShape(preset, text, isLine ? { color: lineColor, width, dash: lineDash } : undefined)) {
       setText("");
       setOpen(false);
     }
@@ -1229,7 +1317,7 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ fontSize: 17 }}>◇</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 250, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 290, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <input
             aria-label="Shape text"
             value={text}
@@ -1237,6 +1325,45 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
             onChange={(event) => setText(event.target.value)}
             style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
           />
+          <div style={{ marginTop: 9, color: T.muted, font: "11.5px system-ui, sans-serif" }}>Line appearance</div>
+          <div style={{ display: "grid", gridTemplateColumns: "auto 82px 88px", gap: 6, alignItems: "end", marginTop: 5 }}>
+            <ColorMenu
+              current={lineColor}
+              title="Line color"
+              trigger={(
+                <>
+                  <span style={{ fontSize: 12 }}>Color</span>
+                  <span aria-hidden="true" style={{ width: 16, height: 16, borderRadius: 3, border: `1px solid ${T.border}`, background: lineColor }} />
+                </>
+              )}
+              onPick={setLineColor}
+            />
+            <label style={{ display: "grid", gap: 3, color: T.muted, font: "10.5px system-ui, sans-serif" }}>
+              Weight (px)
+              <input
+                aria-label="Line width in pixels"
+                type="number"
+                min="0.25"
+                step="0.25"
+                value={lineWidth}
+                onChange={(event) => setLineWidth(event.target.value)}
+                style={{ width: "100%", height: 28, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "3px 5px", color: T.fg, background: T.popoverBg }}
+              />
+            </label>
+            <label style={{ display: "grid", gap: 3, color: T.muted, font: "10.5px system-ui, sans-serif" }}>
+              Style
+              <select
+                aria-label="Line style"
+                value={lineDash}
+                onChange={(event) => setLineDash(event.target.value as typeof lineDash)}
+                style={{ width: "100%", height: 28, border: `1px solid ${T.border}`, borderRadius: 5, padding: "3px 4px", color: T.fg, background: T.popoverBg }}
+              >
+                <option value="solid">Solid</option>
+                <option value="dashed">Dashed</option>
+                <option value="dotted">Dotted</option>
+              </select>
+            </label>
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
             {SHAPES.map(([preset, label, glyph]) => (
               <button key={preset} title={`Insert ${label}`} onClick={() => insert(preset)} style={{ minHeight: 48, border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif" }}>
@@ -1348,13 +1475,13 @@ function WordArtMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
-function ChartMenu({ api }: { api: DocxViewApi | null }) {
+function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: string }) {
   type Chart = Parameters<DocxViewApi["insertChart"]>[0];
   const [open, setOpen] = useState(false);
   const [type, setType] = useState<Chart["type"]>("column");
-  const [title, setTitle] = useState("Quarterly sales");
-  const [categories, setCategories] = useState("Q1, Q2, Q3, Q4");
-  const [series, setSeries] = useState("Revenue: 12, 19, 15, 24\nCosts: 8, 11, 10, 14");
+  const [title, setTitle] = useState("");
+  const [categories, setCategories] = useState(["", ""]);
+  const [series, setSeries] = useState([{ name: "", values: ["", ""] }]);
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
@@ -1366,30 +1493,59 @@ function ChartMenu({ api }: { api: DocxViewApi | null }) {
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const submit = () => {
-    const categoryValues = categories.split(",").map((value) => value.trim()).filter(Boolean);
-    const seriesValues = series.split(/\r?\n/).map((line) => {
-      const separator = line.indexOf(":");
-      if (separator === -1) return null;
-      const name = line.slice(0, separator).trim();
-      const values = line.slice(separator + 1).split(",").map((value) => Number(value.trim()));
-      return name && values.length === categoryValues.length && values.every(Number.isFinite) ? { name, values } : null;
-    }).filter((value): value is NonNullable<typeof value> => value !== null);
-    if (!categoryValues.length || !seriesValues.length || seriesValues.length !== series.split(/\r?\n/).filter((line) => line.trim()).length) {
-      setError("Use comma-separated categories and one “Name: 1, 2, 3” series per line.");
+    const categoryValues = categories.map((value) => value.trim());
+    const rawSeries = series.map((entry) => ({
+      name: entry.name.trim(),
+      values: entry.values.map((value) => value.trim()),
+    }));
+    if (
+      categoryValues.some((value) => !value) ||
+      rawSeries.some((entry) => !entry.name || entry.values.some((value) => value === "" || !Number.isFinite(Number(value))))
+    ) {
+      setError("Give every category and series a name, and enter a number in every data cell.");
       return;
     }
+    const seriesValues = rawSeries.map((entry) => ({ name: entry.name, values: entry.values.map(Number) }));
     const data: Chart = { type, title, categories: categoryValues, series: seriesValues };
     if (api?.updateSelectedChart(data) || api?.insertChart(data)) {
       setError("");
       setOpen(false);
     }
   };
+  const addCategory = () => {
+    setCategories([...categories, ""]);
+    setSeries(series.map((entry) => ({ ...entry, values: [...entry.values, ""] })));
+  };
+  const removeCategory = (index: number) => {
+    if (categories.length === 1) return;
+    setCategories(categories.filter((_, itemIndex) => itemIndex !== index));
+    setSeries(series.map((entry) => ({ ...entry, values: entry.values.filter((_, itemIndex) => itemIndex !== index) })));
+  };
+  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
+  const viewportWidth = typeof window === "undefined" ? 456 : window.innerWidth;
+  const popoverWidth = Math.min(440, viewportWidth - 16);
+  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
   const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+  const toggle = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    const selected = api?.getSelectedChart();
+    setType(selected?.type ?? "column");
+    setTitle(selected?.title ?? "");
+    setCategories(selected ? [...selected.categories] : ["", ""]);
+    setSeries(selected
+      ? selected.series.map((entry) => ({ name: entry.name, values: entry.values.map(String) }))
+      : [{ name: "", values: ["", ""] }]);
+    setError("");
+    setOpen(true);
+  };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
-      <button title="Insert or edit chart" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Chart</button>
+      <button title="Insert or edit chart" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>{label}</button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 320, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, maxHeight: "calc(100vh - 48px)", overflow: "auto", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <ToolbarMenuSelect
             value={type}
             ariaLabel="Chart type"
@@ -1405,9 +1561,55 @@ function ChartMenu({ api }: { api: DocxViewApi | null }) {
             style={fieldStyle}
           />
           <input aria-label="Chart title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Chart title" style={fieldStyle} />
-          <input aria-label="Chart categories" value={categories} onChange={(event) => setCategories(event.target.value)} placeholder="Q1, Q2, Q3, Q4" style={fieldStyle} />
-          <textarea aria-label="Chart series" rows={3} value={series} onChange={(event) => setSeries(event.target.value)} style={{ ...fieldStyle, resize: "vertical" }} />
-          <div style={{ color: T.muted, font: "11.5px system-ui, sans-serif" }}>Each series: Name: value, value, value</div>
+          <div role="group" aria-label="Chart data" style={{ display: "grid", gap: 7 }}>
+            <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>Data</strong>
+            <div style={{ overflowX: "auto" }}>
+              <div style={{ display: "grid", gridTemplateColumns: `minmax(110px,1.2fr) repeat(${categories.length},minmax(72px,1fr)) 62px`, gap: 5, minWidth: categories.length > 3 ? 430 : undefined }}>
+                <span style={{ alignSelf: "center", color: T.muted, font: "11px system-ui, sans-serif" }}>Series</span>
+                {categories.map((category, index) => (
+                  <label key={index} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 3 }}>
+                    <input
+                      aria-label={`Chart category ${index + 1}`}
+                      value={category}
+                      placeholder="Category"
+                      onChange={(event) => setCategories(categories.map((value, itemIndex) => itemIndex === index ? event.target.value : value))}
+                      style={fieldStyle}
+                    />
+                    {categories.length > 1 && <button type="button" aria-label={`Remove chart category ${index + 1}`} onClick={() => removeCategory(index)} style={{ ...pillBtn, padding: "0 6px" }}>×</button>}
+                  </label>
+                ))}
+                <span />
+                {series.map((entry, seriesIndex) => (
+                  <Fragment key={seriesIndex}>
+                    <input
+                      aria-label={`Chart series ${seriesIndex + 1} name`}
+                      value={entry.name}
+                      placeholder="Series"
+                      onChange={(event) => setSeries(series.map((value, itemIndex) => itemIndex === seriesIndex ? { ...value, name: event.target.value } : value))}
+                      style={fieldStyle}
+                    />
+                    {entry.values.map((value, valueIndex) => (
+                      <input
+                        key={valueIndex}
+                        aria-label={`Chart series ${seriesIndex + 1} value ${valueIndex + 1}`}
+                        type="number"
+                        step="any"
+                        value={value}
+                        placeholder="0"
+                        onChange={(event) => setSeries(series.map((seriesValue, itemIndex) => itemIndex === seriesIndex ? { ...seriesValue, values: seriesValue.values.map((itemValue, itemValueIndex) => itemValueIndex === valueIndex ? event.target.value : itemValue) } : seriesValue))}
+                        style={fieldStyle}
+                      />
+                    ))}
+                    <button type="button" aria-label={`Remove chart series ${seriesIndex + 1}`} disabled={series.length === 1} onClick={() => setSeries(series.filter((_, itemIndex) => itemIndex !== seriesIndex))} style={{ ...pillBtn, padding: "0 7px" }}>Remove</button>
+                  </Fragment>
+                ))}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button type="button" onClick={() => setSeries([...series, { name: "", values: categories.map(() => "") }])} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Add series</button>
+              <button type="button" onClick={addCategory} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Add category</button>
+            </div>
+          </div>
           {error && <div role="alert" style={{ color: "#c5221f", font: "11.5px system-ui, sans-serif" }}>{error}</div>}
           <button onClick={submit} style={{ border: 0, borderRadius: 6, padding: "7px 10px", background: T.accent, color: T.accentFg, cursor: "pointer", font: "600 12px system-ui, sans-serif" }}>Insert or update chart</button>
         </div>
@@ -1416,50 +1618,88 @@ function ChartMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
-function SmartArtMenu({ api }: { api: DocxViewApi | null }) {
+function SmartArtMenu({ api, label = "SmartArt" }: { api: DocxViewApi | null; label?: string }) {
   type SmartArt = Parameters<DocxViewApi["insertSmartArt"]>[0];
   const [open, setOpen] = useState(false);
+  const [step, setStep] = useState<"layout" | "items">("layout");
+  const [editing, setEditing] = useState(false);
   const [layout, setLayout] = useState<SmartArt["layout"]>("process");
-  const [items, setItems] = useState("Discover\nDesign\nDeliver");
+  const [items, setItems] = useState([""]);
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
   const submit = () => {
-    const values = items.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+    const values = items.map((value) => value.trim()).filter(Boolean);
     if (!values.length) return;
     const data: SmartArt = { layout, items: values };
     if (api?.updateSelectedSmartArt(data) || api?.insertSmartArt(data)) setOpen(false);
   };
   const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+  const toggle = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    const selected = api?.getSelectedSmartArt();
+    setEditing(!!selected);
+    setLayout(selected?.layout ?? "process");
+    setItems(selected ? [...selected.items] : [""]);
+    setStep(selected ? "items" : "layout");
+    setOpen(true);
+  };
+  const layouts: Array<{ value: SmartArt["layout"]; label: string }> = [
+    { value: "process", label: "Process" },
+    { value: "cycle", label: "Cycle" },
+    { value: "hierarchy", label: "Hierarchy" },
+    { value: "list", label: "List" },
+  ];
+  const preview = (value: SmartArt["layout"]) => {
+    const node = { width: 22, height: 13, borderRadius: 3, background: T.accent };
+    if (value === "list") return <div style={{ display: "grid", gap: 4 }}>{[0, 1, 2].map((key) => <span key={key} style={{ ...node, width: 72 }} />)}</div>;
+    if (value === "hierarchy") return <div style={{ display: "grid", justifyItems: "center", gap: 8 }}><span style={node} /><div style={{ display: "flex", gap: 12 }}><span style={node} /><span style={node} /></div></div>;
+    if (value === "cycle") return <div style={{ position: "relative", width: 76, height: 48 }}>{[[27, 0], [53, 18], [27, 35], [1, 18]].map(([left, top], key) => <span key={key} style={{ ...node, position: "absolute", left, top }} />)}</div>;
+    return <div style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={node} /><span>→</span><span style={node} /><span>→</span><span style={node} /></div>;
+  };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
-      <button title="Insert or edit SmartArt" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>SmartArt</button>
-      {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 280, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <ToolbarMenuSelect
-            value={layout}
-            ariaLabel="SmartArt layout"
-            width="100%"
-            menuWidth={260}
-            options={[
-              { value: "process", label: "Process" },
-              { value: "cycle", label: "Cycle" },
-              { value: "hierarchy", label: "Hierarchy" },
-              { value: "list", label: "List" },
-            ]}
-            onChange={(value) => setLayout(value as SmartArt["layout"])}
-            style={fieldStyle}
-          />
-          <textarea aria-label="SmartArt items" rows={5} value={items} onChange={(event) => setItems(event.target.value)} style={{ ...fieldStyle, resize: "vertical" }} />
-          <div style={{ color: T.muted, font: "11.5px system-ui, sans-serif" }}>One diagram item per line.</div>
-          <button disabled={!items.trim()} onClick={submit} style={{ border: 0, borderRadius: 6, padding: "7px 10px", background: items.trim() ? T.accent : T.border, color: T.accentFg, cursor: items.trim() ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}>Insert or update SmartArt</button>
-        </div>
+      <button title="Insert or edit SmartArt" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>{label}</button>
+      {open && createPortal(
+        <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 16, background: "rgba(0,0,0,.34)" }} onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
+          <div role="dialog" aria-modal="true" aria-label={editing ? "Edit SmartArt" : "Insert SmartArt"} style={{ width: "min(560px,calc(100vw - 32px))", maxHeight: "calc(100vh - 32px)", overflow: "auto", boxSizing: "border-box", padding: 18, display: "grid", gap: 14, color: T.fg, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: T.popoverShadow }}>
+            <div>
+              <strong style={{ display: "block", font: "600 18px system-ui, sans-serif" }}>{step === "layout" ? "Choose a SmartArt layout" : editing ? "Edit SmartArt" : "Add SmartArt text"}</strong>
+              <span style={{ color: T.muted, font: "12px system-ui, sans-serif" }}>{step === "layout" ? "Choose one of the supported layout families." : layouts.find((item) => item.value === layout)?.label}</span>
+            </div>
+            {step === "layout" ? (
+              <div role="group" aria-label="SmartArt layouts" style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10 }}>
+                {layouts.map((option) => (
+                  <button key={option.value} type="button" aria-label={`${option.label} SmartArt`} onClick={() => { setLayout(option.value); setStep("items"); }} style={{ minHeight: 118, display: "grid", placeItems: "center", gap: 9, padding: 12, border: `1px solid ${layout === option.value ? T.accent : T.border}`, borderRadius: 9, background: layout === option.value ? T.activeBg : T.popoverBg, color: T.fg, cursor: "pointer" }}>
+                    {preview(option.value)}
+                    <span style={{ font: "600 13px system-ui, sans-serif" }}>{option.label}</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div role="group" aria-label="SmartArt items" style={{ display: "grid", gap: 7 }}>
+                {items.map((item, index) => (
+                  <div key={index} style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 5 }}>
+                    <input aria-label={`SmartArt item ${index + 1}`} value={item} placeholder="Item" onChange={(event) => setItems(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} style={fieldStyle} />
+                    <button type="button" aria-label={`Move SmartArt item ${index + 1} up`} disabled={index === 0} onClick={() => setItems(items.map((value, itemIndex) => itemIndex === index - 1 ? items[index] : itemIndex === index ? items[index - 1] : value))} style={{ ...pillBtn, padding: "0 8px" }}>↑</button>
+                    <button type="button" aria-label={`Move SmartArt item ${index + 1} down`} disabled={index === items.length - 1} onClick={() => setItems(items.map((value, itemIndex) => itemIndex === index ? items[index + 1] : itemIndex === index + 1 ? items[index] : value))} style={{ ...pillBtn, padding: "0 8px" }}>↓</button>
+                    <button type="button" aria-label={`Remove SmartArt item ${index + 1}`} disabled={items.length === 1} onClick={() => setItems(items.filter((_, itemIndex) => itemIndex !== index))} style={{ ...pillBtn, padding: "0 8px" }}>×</button>
+                  </div>
+                ))}
+                <button type="button" onClick={() => setItems([...items, ""])} style={{ ...pillBtn, justifySelf: "start", background: T.popoverBg, color: T.fg }}>Add item</button>
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <div>{step === "items" && <button type="button" onClick={() => setStep("layout")} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Back</button>}</div>
+              <div style={{ display: "flex", gap: 7 }}>
+                <button type="button" onClick={() => setOpen(false)} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Cancel</button>
+                {step === "items" && <button type="button" disabled={!items.some((item) => item.trim())} onClick={submit} style={{ border: 0, borderRadius: 6, padding: "7px 12px", background: items.some((item) => item.trim()) ? T.accent : T.border, color: T.accentFg, cursor: items.some((item) => item.trim()) ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}>{editing ? "Update" : "Insert"}</button>}
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
     </span>
   );
@@ -1482,7 +1722,7 @@ function MediaMenu({ api }: { api: DocxViewApi | null }) {
       <button title="Insert online video" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Media</button>
       {open && (
         <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 300, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <input aria-label="Online video URL" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg }} />
+          <input aria-label="Online video URL" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg }} />
           <button
             disabled={!url.trim()}
             onClick={() => void api?.insertOnlineVideo(url).then((inserted) => inserted && setOpen(false))}
@@ -1760,6 +2000,62 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+function TableFormatTab({
+  api,
+  fill,
+  onChanged,
+}: {
+  api: DocxViewApi | null;
+  fill: string | null;
+  onChanged: () => void;
+}) {
+  const run = (op: Parameters<DocxViewApi["tableOp"]>[0]) => {
+    api?.tableOp(op);
+    onChanged();
+  };
+  return (
+    <span data-dxw-table-format="" style={{ display: "contents" }}>
+      <ColorMenu
+        current={fill ?? "#FFFFFF"}
+        title="Cell fill color"
+        trigger={(
+          <>
+            <span aria-hidden="true" style={{ width: 14, height: 14, borderRadius: 3, border: `1px solid ${T.border}`, background: fill ?? "#FFFFFF" }} />
+            Cell fill
+          </>
+        )}
+        onPick={(color) => run({ kind: "cellShading", fill: color })}
+      />
+      {fill !== null && <Btn label="No fill" title="Remove cell fill" onClick={() => run({ kind: "cellShading", fill: null })} />}
+      <ActionMenu
+        label="Cell alignment"
+        title="Align text inside the current cell"
+        width={132}
+        groups={[{ items: [["top", "Top"], ["center", "Middle"], ["bottom", "Bottom"]] }]}
+        onPick={(value) => run({ kind: "cellVAlign", v: value as "top" | "center" | "bottom" })}
+      />
+      <ActionMenu
+        label="Rows & columns"
+        title="Edit rows and columns around the current cell"
+        width={144}
+        groups={[
+          { label: "Rows", items: [["rowAbove", "Insert row above"], ["rowBelow", "Insert row below"], ["deleteRow", "Delete row"]] },
+          { label: "Columns", items: [["colLeft", "Insert column left"], ["colRight", "Insert column right"], ["deleteCol", "Delete column"]] },
+        ]}
+        onPick={(value) => run(value as Parameters<DocxViewApi["tableOp"]>[0])}
+      />
+      <ActionMenu
+        label="Merge"
+        title="Merge or split the current cell"
+        width={78}
+        groups={[{ items: [["mergeRight", "Merge right"], ["mergeDown", "Merge down"], ["splitCell", "Split cell"]] }]}
+        onPick={(value) => run(value as Parameters<DocxViewApi["tableOp"]>[0])}
+      />
+      <Btn label="Delete table" title="Delete the current table" onClick={() => run("deleteTable")} />
+    </span>
+  );
+}
+
 /**
  * Default formatting toolbar for an editable DocxView. Compact, grouped like
  * a word processor; every control preserves the selection/caret.
@@ -1782,6 +2078,7 @@ function PagePreview({
   columns,
   columnSeparator,
   border,
+  borderColor,
   lineNumbers,
 }: {
   kind: string;
@@ -1792,6 +2089,7 @@ function PagePreview({
   columns?: number;
   columnSeparator?: boolean;
   border?: "none" | "thin" | "thick" | "accent";
+  borderColor?: string;
   lineNumbers?: boolean;
 }) {
   const maxWidth = mirrored ? 21 : 34;
@@ -1802,7 +2100,7 @@ function PagePreview({
   const papers = mirrored ? 2 : 1;
   const inset = margins ?? [0.8, 0.8, 0.8, 0.8];
   const borderWidth = border === "thick" ? 2 : border === "none" ? 0 : 1;
-  const borderColor = border === "accent" ? T.accent : T.muted;
+  const pageBorderColor = borderColor ?? (border === "accent" ? T.accent : T.muted);
   return (
     <span
       aria-hidden="true"
@@ -1817,7 +2115,7 @@ function PagePreview({
           style={{
             position: "relative", display: "block", boxSizing: "border-box",
             width: paperWidth, height: paperHeight, background: "var(--dxw-layout-preview-bg, #fff)",
-            border: `${Math.max(1, borderWidth)}px solid ${borderWidth ? borderColor : T.border}`,
+            border: `${Math.max(1, borderWidth)}px solid ${borderWidth ? pageBorderColor : T.border}`,
           }}
         >
           {kind === "margins" && (
@@ -2122,8 +2420,9 @@ function MarginMenu({
       <span>{label}</span>
       <input
         aria-label={`${label} margin (inches)`}
-        type="text"
-        inputMode="decimal"
+        type="number"
+        min="0"
+        step="0.05"
         required
         autoFocus={side === "top"}
         value={values[side]}
@@ -2241,8 +2540,9 @@ function PageSizeMenu({
       <span>{label}</span>
       <input
         aria-label={`Page ${side} (inches)`}
-        type="text"
-        inputMode="decimal"
+        type="number"
+        min="0.1"
+        step="0.05"
         required
         autoFocus={side === "width"}
         value={values[side]}
@@ -2297,6 +2597,130 @@ function PageSizeMenu({
           <strong style={{ fontSize: 13 }}>Custom Paper Size</strong>
           {field("width", "Width")}
           {field("height", "Height")}
+          <span style={{ color: T.muted, fontSize: 11 }}>
+            Applies to {scope === "section" ? "this section" : "the whole document"}.
+          </span>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+            <button type="button" onClick={() => setCustomOpen(false)} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Cancel</button>
+            <button type="button" onClick={applyCustom} disabled={!valid} style={pillBtn}>Apply</button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function PageBorderMenu({
+  scope,
+  onApply,
+  open,
+  onOpenChange,
+}: {
+  scope: "document" | "section";
+  onApply: (patch: LayoutPatch) => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [customOpen, setCustomOpen] = useState(false);
+  const [color, setColor] = useState("#4472c4");
+  const [widthPt, setWidthPt] = useState("1");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const [dialogPosition, setDialogPosition] = useState({ left: 8, top: 8 });
+  useEffect(() => {
+    if (!customOpen) return;
+    const positionDialog = () => {
+      const trigger = rootRef.current?.querySelector<HTMLElement>("[data-dxw-layout-menu-trigger]");
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const width = Math.min(244, window.innerWidth - 16);
+      setDialogPosition({
+        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 224)),
+      });
+    };
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
+    };
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCustomOpen(false);
+    };
+    positionDialog();
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", keydown);
+    window.addEventListener("resize", positionDialog);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", keydown);
+      window.removeEventListener("resize", positionDialog);
+    };
+  }, [customOpen]);
+
+  const validColor = normalizedColor(color);
+  const width = Number(widthPt);
+  const valid = validColor !== null && Number.isFinite(width) && width >= 0.25 && width <= 12;
+  const applyCustom = () => {
+    if (!validColor || !valid) return;
+    onApply({ pageBorders: { sz: Math.round(width * 8), color: validColor } });
+    setCustomOpen(false);
+  };
+  const pick = (value: string) => {
+    if (value === "custom") {
+      setCustomOpen(true);
+      return;
+    }
+    setCustomOpen(false);
+    if (value === "none") onApply({ pageBorders: null });
+    else if (value === "thin") onApply({ pageBorders: { sz: 4 } });
+    else if (value === "thick") onApply({ pageBorders: { sz: 12 } });
+    else onApply({ pageBorders: { sz: 8, color: "4472C4" } });
+  };
+
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-flex" }}>
+      <LayoutMenu
+        name="page-border"
+        label="Page border"
+        open={open}
+        onOpenChange={onOpenChange}
+        onPick={pick}
+        options={[
+          { value: "none", label: "None", description: "No page border", preview: <PagePreview kind="page-border" border="none" /> },
+          { value: "thin", label: "Thin box", description: "½ pt solid line", preview: <PagePreview kind="page-border" border="thin" /> },
+          { value: "thick", label: "Thick box", description: "1½ pt solid line", preview: <PagePreview kind="page-border" border="thick" /> },
+          { value: "accent", label: "Accent box", description: "Blue 1 pt line", preview: <PagePreview kind="page-border" border="accent" /> },
+          { value: "custom", label: "Custom border…", description: "Choose a color and line weight", preview: <PagePreview kind="page-border" border="accent" borderColor={validColor ?? "#4472c4"} /> },
+        ]}
+      />
+      {customOpen && (
+        <div
+          role="dialog"
+          aria-label="Custom Page Border"
+          onMouseDown={(event) => event.stopPropagation()}
+          style={{
+            position: "fixed", top: dialogPosition.top, left: dialogPosition.left, zIndex: 201,
+            width: "min(224px, calc(100vw - 16px))", boxSizing: "border-box",
+            background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
+            boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 8,
+          }}
+        >
+          <strong style={{ fontSize: 13 }}>Custom Page Border</strong>
+          <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
+            <span>Color</span>
+            <span style={{ display: "flex", gap: 6 }}>
+              <input aria-label="Page border color picker" type="color" value={validColor ?? "#4472c4"} onChange={(event) => setColor(event.target.value)} style={{ width: 34, height: 28, padding: 1, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg }} />
+              <input aria-label="Page border color" autoFocus value={color} onChange={(event) => setColor(event.target.value)} onKeyDown={(event) => event.key === "Enter" && applyCustom()} spellCheck={false} style={{ width: 92, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg }} />
+            </span>
+          </label>
+          <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
+            <span>Weight</span>
+            <select aria-label="Page border width" value={widthPt} onChange={(event) => setWidthPt(event.target.value)} style={{ width: 132, border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg }}>
+              <option value="0.5">½ pt</option>
+              <option value="1">1 pt</option>
+              <option value="1.5">1½ pt</option>
+              <option value="2.25">2¼ pt</option>
+              <option value="3">3 pt</option>
+            </select>
+          </label>
           <span style={{ color: T.muted, fontSize: 11 }}>
             Applies to {scope === "section" ? "this section" : "the whole document"}.
           </span>
@@ -2397,23 +2821,7 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
         ]}
         onPick={(value) => set({ columns: parseInt(value, 10), columnSeparator: value === "2-divider" })}
       />
-      <LayoutMenu
-        name="page-border"
-        label="Page border"
-        {...menuState("page-border")}
-        options={[
-          { value: "none", label: "None", description: "No page border", preview: <PagePreview kind="page-border" border="none" /> },
-          { value: "thin", label: "Thin box", description: "½ pt solid line", preview: <PagePreview kind="page-border" border="thin" /> },
-          { value: "thick", label: "Thick box", description: "1½ pt solid line", preview: <PagePreview kind="page-border" border="thick" /> },
-          { value: "accent", label: "Accent box", description: "Blue 1 pt line", preview: <PagePreview kind="page-border" border="accent" /> },
-        ]}
-        onPick={(value) => {
-          if (value === "none") set({ pageBorders: null });
-          else if (value === "thin") set({ pageBorders: { sz: 4 } });
-          else if (value === "thick") set({ pageBorders: { sz: 12 } });
-          else set({ pageBorders: { sz: 8, color: "4472C4" } });
-        }}
-      />
+      <PageBorderMenu scope={scope} onApply={set} {...menuState("page-border")} />
       <LayoutMenu
         name="line-numbers"
         label="Line numbers"
@@ -2468,6 +2876,126 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
   );
 }
 
+type SelectedObjectContext = NonNullable<ReturnType<DocxViewApi["getSelectedObjectContext"]>>;
+
+function SmartArtTextControls({ api, nodeIndex }: { api: DocxViewApi | null; nodeIndex?: number }) {
+  const nodeSelected = nodeIndex !== undefined;
+  const [format, setFormat] = useState(() => api?.getSelectedSmartArtTextFormat() ?? null);
+  useEffect(() => setFormat(api?.getSelectedSmartArtTextFormat() ?? null), [api, nodeIndex]);
+  if (!format) return null;
+  const apply = (patch: Parameters<DocxViewApi["setSelectedSmartArtTextFormat"]>[0]) => {
+    if (api?.setSelectedSmartArtTextFormat(patch)) setFormat(api.getSelectedSmartArtTextFormat());
+  };
+  const fonts = detectFonts();
+  const sizes = SIZES.includes(format.fontSizePt) ? SIZES : [format.fontSizePt, ...SIZES];
+  const scope = nodeSelected ? "selected node" : "all nodes";
+  return (
+    <>
+      <Sep />
+      <ToolbarMenuSelect
+        title={`Font for ${scope}`}
+        value={format.fontFamily}
+        width={126}
+        menuWidth={210}
+        options={(fonts.includes(format.fontFamily) ? fonts : [format.fontFamily, ...fonts]).map((font) => ({
+          value: font,
+          label: font,
+          fontFamily: font,
+        }))}
+        onChange={(fontFamily) => fontFamily && apply({ fontFamily })}
+      />
+      <ToolbarMenuSelect
+        title={`Font size for ${scope}`}
+        value={String(format.fontSizePt)}
+        width={58}
+        menuWidth={92}
+        options={sizes.map((size) => ({ value: String(size), label: String(size) }))}
+        onChange={(value) => value && apply({ fontSizePt: Number(value) })}
+      />
+      <Btn label={<b>B</b>} title={`Bold ${scope}`} active={format.bold} onClick={() => apply({ bold: !format.bold })} />
+      <Btn label={<i>I</i>} title={`Italic ${scope}`} active={format.italic} onClick={() => apply({ italic: !format.italic })} />
+      <ColorMenu
+        current={format.color}
+        title={`Text color for ${scope}`}
+        trigger={<span style={{ fontSize: 13, borderBottom: `3px solid ${format.color}`, padding: "0 3px" }}>A</span>}
+        onPick={(color) => apply({ color })}
+      />
+      <ActionMenu
+        label={format.alignment === "center" ? "Center" : format.alignment === "right" ? "Right" : "Left"}
+        title={`Text alignment for ${scope}`}
+        width={74}
+        groups={[{ items: [["left", "Align left"], ["center", "Align center"], ["right", "Align right"]] }]}
+        onPick={(alignment) => apply({ alignment: alignment as "left" | "center" | "right" })}
+      />
+    </>
+  );
+}
+
+function ObjectFormatTab({
+  api,
+  context,
+  showArrange,
+}: {
+  api: DocxViewApi | null;
+  context: SelectedObjectContext;
+  showArrange: boolean;
+}) {
+  const run = (command: Parameters<DocxViewApi["runSelectedObjectCommand"]>[0]) => api?.runSelectedObjectCommand(command);
+  const wrap = (
+    <ActionMenu
+      label="Wrap"
+      title="Wrap"
+      width={72}
+      groups={[{ items: [
+        ["wrapInline", "Inline with text"],
+        ["wrapSquare", "Square"],
+        ["wrapTopAndBottom", "Top and bottom"],
+        ["wrapFront", "In front of text"],
+        ["wrapBehind", "Behind text"],
+      ] }]}
+      onPick={(value) => run(value as Parameters<DocxViewApi["runSelectedObjectCommand"]>[0])}
+    />
+  );
+  return (
+    <span data-dxw-object-format="" style={{ display: "contents" }}>
+      {context.kind === "chart" && <ChartMenu api={api} label="Edit data" />}
+      {context.kind === "smartArt" && <SmartArtMenu api={api} label="Edit SmartArt" />}
+      {context.kind === "smartArt" && <SmartArtTextControls api={api} nodeIndex={context.smartArtNodeIndex} />}
+      {context.canEditText && (
+        <Btn
+          label="Edit text"
+          title={context.kind === "smartArt" ? "Edit selected SmartArt node text" : "Edit shape text"}
+          onClick={() => run("editText")}
+        />
+      )}
+      {(context.kind === "shape" || context.kind === "smartArt") && (
+        <Btn
+          label={context.kind === "smartArt" ? (context.smartArtNodeSelected ? "Node fill" : "Fill all") : "Fill"}
+          title={context.kind === "smartArt" ? (context.smartArtNodeSelected ? "Selected SmartArt node fill" : "All SmartArt node fills") : "Fill color"}
+          onClick={() => run("fill")}
+        />
+      )}
+      {context.kind === "shape" && <Btn label="Outline" title="Outline color, weight, and style" onClick={() => run("outline")} />}
+      {context.kind === "line" && <Btn label="Line style" title="Line color, weight, and style" onClick={() => run("lineStyle")} />}
+      {(context.kind === "image" || context.kind === "model3d") && <Btn label="Alt text" title="Alternative text" onClick={() => run("altText")} />}
+      {wrap}
+      <Btn label="Size" title="Exact size" onClick={() => run("size")} />
+      <Btn label="Position" title="Exact page position" onClick={() => run("position")} />
+      {(context.kind === "shape" || context.kind === "line" || context.kind === "image" || context.kind === "model3d") && (
+        <Btn label="Rotate" title="Set rotation" onClick={() => run("rotate")} />
+      )}
+      {showArrange && (
+        <>
+          <Btn label="Bring forward" title="Bring selected object forward" onClick={() => run("bringForward")} />
+          <Btn label="Send backward" title="Send selected object backward" onClick={() => run("sendBackward")} />
+        </>
+      )}
+      {context.kind === "model3d" && <Btn label="Reset 3D" title="Reset 3D rotation" onClick={() => run("reset3d")} />}
+      <Btn label="Delete" title="Delete selected object" onClick={() => run("delete")} />
+    </span>
+  );
+}
+
 /** Toolbar control groups a host can disable via the `features` prop. */
 export type ToolbarFeature =
   | "history"
@@ -2500,6 +3028,7 @@ export type ToolbarFeature =
   | "equation"
   | "symbol"
   | "shape"
+  | "divider"
   | "textBox"
   | "wordArt"
   | "drawing"
@@ -2539,7 +3068,16 @@ export function DocxToolbar({
   const on = (k: ToolbarFeature) => features?.[k] !== false;
   // Ribbon-style tabs: complex tool groups get their own surface instead of
   // one overloaded row (Layout especially).
-  const [tab, setTab] = useState<"home" | "insert" | "draw" | "layout">("home");
+  type NormalTab = "home" | "insert" | "draw" | "layout";
+  const [tab, setTab] = useState<NormalTab | "format" | "tableFormat">("home");
+  const priorNormalTab = useRef<NormalTab>("home");
+  const [objectContext, setObjectContext] = useState<SelectedObjectContext | null>(null);
+  const [tableCellFill, setTableCellFill] = useState<string | null | undefined>(undefined);
+  const tableContextRef = useRef<string | null | undefined>(undefined);
+  const selectNormalTab = (next: NormalTab) => {
+    priorNormalTab.current = next;
+    setTab(next);
+  };
   const [helpOpen, setHelpOpen] = useState(false);
   const apple = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const shortcut = (key: string) => apple ? `⌘${key}` : `Ctrl+${key}`;
@@ -2599,6 +3137,24 @@ export function DocxToolbar({
     return () => document.removeEventListener("keydown", keydown);
   }, [features]);
   useEffect(() => {
+    const refreshObject = () => {
+      const next = api?.getSelectedObjectContext() ?? null;
+      setObjectContext(next);
+      setTab((current) => {
+        if (next) {
+          if (["home", "insert", "draw", "layout"].includes(current)) priorNormalTab.current = current as NormalTab;
+          return "format";
+        }
+        return current === "format"
+          ? (tableContextRef.current !== undefined ? "tableFormat" : priorNormalTab.current)
+          : current;
+      });
+    };
+    refreshObject();
+    document.addEventListener("dxw-object-selection", refreshObject);
+    return () => document.removeEventListener("dxw-object-selection", refreshObject);
+  }, [api]);
+  useEffect(() => {
     const el = rootRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const measure = () => {
@@ -2623,6 +3179,18 @@ export function DocxToolbar({
     setFmt(api?.getSelectionFormat() ?? null);
     setCurStyle(api?.getParagraphStyleId?.() ?? null);
     setListKind(api?.getListType?.() ?? null);
+    const nextTableFill = api?.getTableCellFill();
+    const wasInTable = tableContextRef.current !== undefined;
+    tableContextRef.current = nextTableFill;
+    setTableCellFill(nextTableFill);
+    setTab((current) => {
+      if (nextTableFill !== undefined && !wasInTable && current !== "format") {
+        if (["home", "insert", "draw", "layout"].includes(current)) priorNormalTab.current = current as NormalTab;
+        return "tableFormat";
+      }
+      if (nextTableFill === undefined && current === "tableFormat") return priorNormalTab.current;
+      return current;
+    });
   }, [api]);
 
   useEffect(() => {
@@ -2830,8 +3398,10 @@ export function DocxToolbar({
                   title: "Exact line height",
                   label: "Line height (points)",
                   value: "24",
-                  placeholder: "24",
                   submitLabel: "Apply",
+                  inputType: "number",
+                  min: 1,
+                  step: 0.5,
                 }).then((next) => {
                   if (next === null) return;
                   const points = Number(next.trim());
@@ -2949,8 +3519,9 @@ export function DocxToolbar({
               <button
                 key={t}
                 data-tab={t}
+                aria-pressed={tab === t}
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => setTab(t)}
+                onClick={() => selectNormalTab(t)}
                 style={{
                   border: "none",
                   background: tab === t ? T.tabActiveBg : "transparent",
@@ -2965,6 +3536,51 @@ export function DocxToolbar({
                 {t}
               </button>
               ))}
+            {objectContext && (
+              <button
+                data-tab="format"
+                aria-pressed={tab === "format"}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => setTab("format")}
+                style={{
+                  border: "none",
+                  background: tab === "format" ? T.tabActiveBg : "transparent",
+                  color: tab === "format" ? T.accent : T.fg,
+                  font: "600 12.5px system-ui, sans-serif",
+                  padding: "5px 10px",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                }}
+              >
+                {{
+                  shape: "Shape Format",
+                  line: "Line Format",
+                  smartArt: "SmartArt Format",
+                  chart: "Chart Format",
+                  image: "Picture Format",
+                  model3d: "3D Format",
+                }[objectContext.kind]}
+              </button>
+            )}
+            {!objectContext && tableCellFill !== undefined && (
+              <button
+                data-tab="tableFormat"
+                aria-pressed={tab === "tableFormat"}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => setTab("tableFormat")}
+                style={{
+                  border: "none",
+                  background: tab === "tableFormat" ? T.tabActiveBg : "transparent",
+                  color: tab === "tableFormat" ? T.accent : T.fg,
+                  font: "600 12.5px system-ui, sans-serif",
+                  padding: "5px 10px",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                }}
+              >
+                Table Format
+              </button>
+            )}
             {on("help") && (
               <button
                 ref={helpTrigger}
@@ -3007,6 +3623,7 @@ export function DocxToolbar({
           {on("chart") && <ChartMenu api={api} />}
           {on("media") && <MediaMenu api={api} />}
           {on("shape") && <ShapeMenu api={api} />}
+          {on("divider") && <DividerMenu api={api} />}
           {on("textBox") && <TextBoxMenu api={api} />}
           {on("wordArt") && <WordArtMenu api={api} />}
           {on("link") && <LinkMenu api={api} />}
@@ -3015,10 +3632,13 @@ export function DocxToolbar({
           {on("bookmark") && <BookmarkMenu api={api} />}
           {on("crossReference") && <CrossReferenceMenu api={api} />}
           {on("headerFooter") && (
-            <>
-              <Btn label="Header" title="Edit header" onClick={() => api?.openHeaderFooter("header")} />
-              <Btn label="Footer" title="Edit footer" onClick={() => api?.openHeaderFooter("footer")} />
-            </>
+            <ActionMenu
+              label="Header & footer"
+              title="Edit the repeating header or footer"
+              width={118}
+              groups={[{ items: [["header", "Header"], ["footer", "Footer"]] }]}
+              onPick={(value) => api?.openHeaderFooter(value as "header" | "footer")}
+            />
           )}
           <Sep />
           {on("pageNumber") && (
@@ -3100,6 +3720,7 @@ export function DocxToolbar({
               {on("chart") && <ChartMenu api={api} />}
               {on("media") && <MediaMenu api={api} />}
               {on("shape") && <ShapeMenu api={api} />}
+              {on("divider") && <DividerMenu api={api} />}
               {on("textBox") && <TextBoxMenu api={api} />}
               {on("wordArt") && <WordArtMenu api={api} />}
               {on("link") && <LinkMenu api={api} />}
@@ -3108,10 +3729,13 @@ export function DocxToolbar({
               {on("bookmark") && <BookmarkMenu api={api} />}
               {on("crossReference") && <CrossReferenceMenu api={api} />}
               {on("headerFooter") && (
-                <>
-                  <Btn label="Header" title="Edit header" onClick={() => api?.openHeaderFooter("header")} />
-                  <Btn label="Footer" title="Edit footer" onClick={() => api?.openHeaderFooter("footer")} />
-                </>
+                <ActionMenu
+                  label="Header & footer"
+                  title="Edit the repeating header or footer"
+                  width={118}
+                  groups={[{ items: [["header", "Header"], ["footer", "Footer"]] }]}
+                  onPick={(value) => api?.openHeaderFooter(value as "header" | "footer")}
+                />
               )}
               {on("pageNumber") && (
                 <ActionMenu
@@ -3175,6 +3799,12 @@ export function DocxToolbar({
         </>
       )}
       {mode === "advanced" && tab === "draw" && on("drawing") && <DrawTab api={api} />}
+      {mode === "advanced" && tab === "format" && objectContext && (
+        <ObjectFormatTab api={api} context={objectContext} showArrange={on("arrange")} />
+      )}
+      {mode === "advanced" && tab === "tableFormat" && tableCellFill !== undefined && (
+        <TableFormatTab api={api} fill={tableCellFill} onChanged={refresh} />
+      )}
       <input
         ref={imageInput}
         type="file"

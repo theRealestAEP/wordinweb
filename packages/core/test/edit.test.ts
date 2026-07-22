@@ -5,9 +5,9 @@ import { applyRunFormat, SelectionSegment, selectionTextLogical } from "../src/e
 import { addComment } from "../src/edit/comments.js";
 import { setListType, setListLevel } from "../src/edit/lists.js";
 import { setLink, removeLink, linkAt } from "../src/edit/links.js";
-import { adjustIndent, setDropCapAt, setParagraphSpacing } from "../src/edit/paragraph.js";
+import { adjustIndent, paragraphDividerAt, setDropCapAt, setParagraphDivider, setParagraphSpacing } from "../src/edit/paragraph.js";
 import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
-import { applyTableOp, resizeDrawing } from "../src/edit/tables.js";
+import { applyTableOp, cellShadingAt, resizeDrawing } from "../src/edit/tables.js";
 import {
   drawingRotation,
   imageAltText,
@@ -22,7 +22,7 @@ import { insertDateTimeField, insertField, insertPageField } from "../src/edit/f
 import { insertBlankPageAt, insertBreakAt, insertCoverPage, sectionContextAt } from "../src/edit/sections.js";
 import { drawingLineStyle, drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingLineStyle, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
 import { buildChartXml, insertChartAt, setChartData } from "../src/edit/charts.js";
-import { buildSmartArtDataXml, buildSmartArtDrawingXml, insertSmartArtAt, setSmartArtData } from "../src/edit/smartart.js";
+import { buildSmartArtDataXml, buildSmartArtDrawingXml, insertSmartArtAt, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "../src/edit/smartart.js";
 import { insertEmbeddedObjectAt, insertModel3DAt, insertWebVideoAt } from "../src/edit/objects.js";
 import { buildOlePackage, extractOlePackage } from "../src/parse/ole.js";
 import { insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, listBookmarks, validBookmarkName } from "../src/edit/references.js";
@@ -534,6 +534,19 @@ describe("block commands", () => {
     expect(reloaded.sections[0].props.pageWidth).toBeGreaterThan(reloaded.sections[0].props.pageHeight);
   });
 
+  it("saves and reopens a custom page border color", async () => {
+    const { setPageLayout } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(
+      p("text") + `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`,
+    );
+    expect(setPageLayout(doc, { pageBorders: { sz: 12, color: "#C62828" } })).toBe(true);
+    const saved = strFromU8(unzipSync(doc.save())["word/document.xml"]);
+    expect(saved.match(/w:color="C62828"/g)).toHaveLength(4);
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.sections[0].props.pageBorders?.top).toMatchObject({ color: "#C62828", width: 2 });
+    expect(reloaded.sections[0].props.pageBorders?.right).toMatchObject({ color: "#C62828", width: 2 });
+  });
+
   it("saves and reopens Word's native line-between-columns setting", async () => {
     const { setPageLayout } = await import("../src/edit/blocks.js");
     const doc = loadDoc(
@@ -1024,6 +1037,10 @@ describe("SmartArt insertion", () => {
     expect(drawingRelId).toBeTruthy();
     expect(saved.pkg.text("word/_rels/document.xml.rels")).toContain(`Id="${drawingRelId}" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="diagrams/drawing1.xml"`);
     expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain("urn:wordinweb:smartart:process");
+    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain('<dgm:forEach axis="ch" ptType="node">');
+    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain(
+      '<dgm:presOf axis="desOrSelf" ptType="node"/>',
+    );
     expect(saved.pkg.text("word/document.xml")).toContain('r:qs="rId3"');
     expect(saved.pkg.text("word/document.xml")).toContain('r:cs="rId4"');
     expect(saved.pkg.text("[Content_Types].xml")).toContain("drawingml.diagramData+xml");
@@ -1084,6 +1101,99 @@ describe("SmartArt insertion", () => {
       .find((item) => item.kind === "drawing");
     if (!after || after.kind !== "drawing") throw new Error("updated SmartArt missing");
     expect(after.smartArt).toEqual(updated);
+  });
+
+  it("updates cached node fills without changing connector or text colors and round-trips", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertSmartArtAt(doc, t, { layout: "hierarchy", items: ["Lead", "Plan", "Build"] });
+    const loaded = DocxDocument.load(doc.save());
+    const drawing = (loaded.sections[0].blocks[0] as Paragraph).children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!drawing || drawing.kind !== "drawing" || !drawing.srcDrawing) throw new Error("SmartArt drawing missing");
+    const before = loaded.pkg.text("word/diagrams/drawing1.xml");
+    const connectorColors = before.match(/<a:srgbClr val="7F8C8D"/g)?.length ?? 0;
+    const textColors = before.match(/<a:srgbClr val="FFFFFF"/g)?.length ?? 0;
+
+    expect(smartArtFillColor(loaded, drawing.srcDrawing, 1)).toBe("#ED7D31");
+    expect(setSmartArtFill(loaded, drawing.srcDrawing, "#112233", 1)).toBe(true);
+    expect(smartArtFillColor(loaded, drawing.srcDrawing, 0)).toBe("#4472C4");
+    expect(smartArtFillColor(loaded, drawing.srcDrawing, 1)).toBe("#112233");
+    expect(loaded.pkg.text("word/diagrams/drawing1.xml").match(/<a:srgbClr val="112233"/g)?.length).toBe(1);
+
+    expect(setSmartArtFill(loaded, drawing.srcDrawing, "#AA22CC")).toBe(true);
+    expect(smartArtFillColor(loaded, drawing.srcDrawing)).toBe("#AA22CC");
+    const changed = loaded.pkg.text("word/diagrams/drawing1.xml");
+    expect(changed.match(/<a:srgbClr val="AA22CC"/g)?.length).toBe(3);
+    expect(changed.match(/<a:srgbClr val="7F8C8D"/g)?.length ?? 0).toBe(connectorColors);
+    expect(changed.match(/<a:srgbClr val="FFFFFF"/g)?.length ?? 0).toBe(textColors);
+
+    const saved = DocxDocument.load(loaded.save());
+    const savedDrawing = (saved.sections[0].blocks[0] as Paragraph).children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!savedDrawing || savedDrawing.kind !== "drawing" || !savedDrawing.srcDrawing) throw new Error("saved SmartArt drawing missing");
+    expect(smartArtFillColor(saved, savedDrawing.srcDrawing)).toBe("#AA22CC");
+    expect(saved.pkg.text("word/diagrams/drawing1.xml")).toContain('<a:srgbClr val="AA22CC"/>');
+  });
+
+  it("updates one node's editable and cached text and round-trips", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertSmartArtAt(doc, t, DATA);
+    const loaded = DocxDocument.load(doc.save());
+    const drawing = (loaded.sections[0].blocks[0] as Paragraph).children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!drawing || drawing.kind !== "drawing" || !drawing.srcDrawing) throw new Error("SmartArt drawing missing");
+
+    expect(setSmartArtNodeText(loaded, drawing.srcDrawing, 1, "Prototype & review")).toBe(true);
+    expect(loaded.pkg.text("word/diagrams/data1.xml")).toContain("Prototype &amp; review");
+    expect(loaded.pkg.text("word/diagrams/drawing1.xml")).toContain("Prototype &amp; review");
+    expect(loaded.pkg.text("word/diagrams/data1.xml")).toContain("Discover");
+    expect(loaded.pkg.text("word/diagrams/data1.xml")).toContain("Deliver");
+
+    const saved = DocxDocument.load(loaded.save());
+    const savedDrawing = (saved.sections[0].blocks[0] as Paragraph).children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!savedDrawing || savedDrawing.kind !== "drawing") throw new Error("saved SmartArt missing");
+    expect(savedDrawing.smartArt?.items).toEqual(["Discover", "Prototype & review", "Deliver"]);
+  });
+
+  it("formats one node's text in editable and cached SmartArt", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertSmartArtAt(doc, t, DATA);
+    const loaded = DocxDocument.load(doc.save());
+    const drawing = (loaded.sections[0].blocks[0] as Paragraph).children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!drawing || drawing.kind !== "drawing" || !drawing.srcDrawing) throw new Error("SmartArt drawing missing");
+
+    expect(setSmartArtTextFormat(loaded, drawing.srcDrawing, {
+      fontFamily: "Arial",
+      fontSizePt: 18,
+      color: "#112233",
+      bold: false,
+      italic: true,
+      alignment: "right",
+    }, 1)).toBe(true);
+    expect(smartArtTextFormat(loaded, drawing.srcDrawing, 1)).toEqual({
+      fontFamily: "Arial",
+      fontSizePt: 18,
+      color: "#112233",
+      bold: false,
+      italic: true,
+      alignment: "right",
+    });
+    const cached = loaded.pkg.text("word/diagrams/drawing1.xml");
+    const editable = loaded.pkg.text("word/diagrams/data1.xml");
+    expect(cached).toContain('sz="1800" b="0" i="1"');
+    expect(cached).toContain('<a:latin typeface="Arial"/>');
+    expect(cached).toContain('<a:srgbClr val="112233"/>');
+    expect(editable).toContain('<a:latin typeface="Arial"/>');
   });
 
   it("builds cached geometry for every supported layout family", () => {
@@ -1310,6 +1420,23 @@ describe("blank page insertion", () => {
       layout.pages[1].items.some((item) => item.kind === "text" && item.text === "" && item.src?.t),
     ).toBe(true);
   });
+
+  it("keeps a blank page independent when inserted inside a bulleted list", () => {
+    const doc = loadDoc(
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>` +
+      `<w:r><w:t>Alpha</w:t></w:r></w:p>`,
+    );
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+
+    expect(insertBlankPageAt(doc, t, 2)).toBe(true);
+
+    const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml");
+    const paragraphs = [...xml.matchAll(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g)].map((match) => match[0]);
+    expect(paragraphs).toHaveLength(3);
+    expect(paragraphs[0]).toContain("<w:numPr>");
+    expect(paragraphs[1]).not.toContain("<w:numPr>");
+    expect(paragraphs[2]).toContain("<w:numPr>");
+  });
 });
 
 describe("page and section navigation", () => {
@@ -1357,6 +1484,28 @@ describe("cover page insertion", () => {
 });
 
 describe("shape insertion", () => {
+  it("creates a native vertical line and preserves its axis when resized", () => {
+    const doc = loadDoc(p("Anchor"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    const drawing = insertShapeAt(doc, t, "verticalLine")!;
+
+    expect(serializeXml(drawing)).toContain('<a:prstGeom prst="line"');
+    expect(serializeXml(drawing)).toContain('<a:ext cx="0" cy="2286000"/>');
+    expect(resizeDrawing(doc, drawing, 4, 500)).toBe(true);
+    expect(serializeXml(drawing)).toContain('<wp:extent cx="38100" cy="4762500"/>');
+    expect(serializeXml(drawing)).toContain('<a:ext cx="0" cy="4762500"/>');
+
+    const reloaded = DocxDocument.load(doc.save());
+    const para = reloaded.sections[0].blocks[0] as Paragraph;
+    const anchor = para.children.flatMap((child) => child.type === "run" ? child.content : [])
+      .find((content) => content.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "art") throw new Error("vertical line missing");
+    expect(anchor.shape.lines).toHaveLength(1);
+    expect(anchor.shape.lines[0].x1).toBe(anchor.shape.lines[0].x2);
+    expect(anchor.shape.lines[0].y2 - anchor.shape.lines[0].y1).toBeCloseTo(500, 1);
+  });
+
   it("creates native anchored DrawingML shapes that retain editable text", () => {
     const presets: ShapePreset[] = ["rectangle", "roundedRectangle", "ellipse", "diamond", "textBox"];
     for (const preset of presets) {
@@ -1411,9 +1560,11 @@ describe("shape insertion", () => {
     const spPr = find(drawing, "spPr")!;
     spPr.children = spPr.children.filter((child) => localName(child.name) !== "ln");
 
-    expect(drawingLineStyle(drawing)).toEqual({ color: "#000000", width: 0.75 });
-    expect(setDrawingLineStyle(doc, drawing, "#00FF00", 3)).toBe(true);
+    expect(drawingLineStyle(drawing)).toEqual({ color: "#000000", width: 0.75, dash: "solid" });
+    expect(setDrawingLineStyle(doc, drawing, "#00FF00", 3, "dashed")).toBe(true);
     expect(serializeXml(drawing)).toContain('<a:ln w="28575"><a:solidFill><a:srgbClr val="00FF00"/>');
+    expect(serializeXml(drawing)).toContain('<a:prstDash val="dash"/>');
+    expect(drawingLineStyle(drawing)).toEqual({ color: "#00FF00", width: 3, dash: "dashed" });
   });
 
   it("persists page alignment, rotation, and front/back order", () => {
@@ -1643,6 +1794,33 @@ describe("paragraph formatting", () => {
     expect(props.lineSpacing?.value).toBeCloseTo(1.5, 2);
   });
 
+  it("creates, reads, customizes, and removes a paragraph divider", () => {
+    const doc = loadDoc(p("target"));
+    const { run } = firstRun(doc);
+    const t = run.content.find((content) => content.kind === "text")!.srcT!;
+
+    expect(paragraphDividerAt(doc, t)).toBeNull();
+    expect(setParagraphDivider(doc, [t], {
+      style: "thinThickSmallGap",
+      color: "#2E74B5",
+      widthPt: 3,
+      spacePt: 1,
+    })).toBe(true);
+    expect(paragraphDividerAt(doc, t)).toEqual({
+      style: "thinThickSmallGap",
+      color: "#2E74B5",
+      widthPt: 3,
+      spacePt: 1,
+    });
+    expect(serializeXml(doc.editableRoots()[0])).toContain(
+      '<w:pBdr><w:bottom w:val="thinThickSmallGap" w:sz="24" w:space="1" w:color="2E74B5"/></w:pBdr>',
+    );
+
+    expect(setParagraphDivider(doc, [t], null)).toBe(true);
+    expect(paragraphDividerAt(doc, t)).toBeNull();
+    expect(serializeXml(doc.editableRoots()[0])).not.toContain("<w:pBdr>");
+  });
+
   it("sets and round-trips an exact line height in points", () => {
     const doc = loadDoc(p("target"));
     const { run } = firstRun(doc);
@@ -1786,7 +1964,10 @@ describe("cell merge/split", () => {
 
   it("sets cell shading and vertical alignment", () => {
     const doc = loadDoc(TBL + p("after"));
+    expect(cellShadingAt(doc, tOf(doc, "B2"))).toBeNull();
     expect(applyTableOp(doc, tOf(doc, "B2"), { kind: "cellShading", fill: "FFF2CC" })).toBe(true);
+    expect(cellShadingAt(doc, tOf(doc, "B2"))).toBe("#FFF2CC");
+    expect(cellShadingAt(doc, tOf(doc, "after"))).toBeUndefined();
     expect(applyTableOp(doc, tOf(doc, "B2"), { kind: "cellVAlign", v: "center" })).toBe(true);
     const tbl = doc.sections[0].blocks[0];
     if (tbl.type !== "table") throw new Error();

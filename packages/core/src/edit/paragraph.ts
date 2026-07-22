@@ -70,6 +70,90 @@ export interface ParagraphSpacingPatch {
   afterPt?: number | null;
 }
 
+export type ParagraphDividerStyle = "single" | "double" | "dotted" | "dashed" | "thinThickSmallGap";
+
+export interface ParagraphDivider {
+  style: ParagraphDividerStyle;
+  color: string;
+  widthPt: number;
+  spacePt: number;
+}
+
+const DIVIDER_STYLES = new Set<ParagraphDividerStyle>([
+  "single",
+  "double",
+  "dotted",
+  "dashed",
+  "thinThickSmallGap",
+]);
+
+/** Direct bottom-border divider on the target paragraph. */
+export function paragraphDividerAt(doc: DocxDocument, target: XmlElement): ParagraphDivider | null {
+  const paragraph = paragraphOf(doc, target);
+  const pPr = paragraph?.children.find((child) => localName(child.name) === "pPr");
+  const pBdr = pPr?.children.find((child) => localName(child.name) === "pBdr");
+  const bottom = pBdr?.children.find((child) => localName(child.name) === "bottom");
+  if (!bottom) return null;
+  const value = bottom.attrs[Object.keys(bottom.attrs).find((key) => localName(key) === "val") ?? ""];
+  if (value === "none" || value === "nil") return null;
+  const style = DIVIDER_STYLES.has(value as ParagraphDividerStyle)
+    ? value as ParagraphDividerStyle
+    : "single";
+  const colorValue = bottom.attrs[Object.keys(bottom.attrs).find((key) => localName(key) === "color") ?? ""];
+  const sizeValue = bottom.attrs[Object.keys(bottom.attrs).find((key) => localName(key) === "sz") ?? ""];
+  const spaceValue = bottom.attrs[Object.keys(bottom.attrs).find((key) => localName(key) === "space") ?? ""];
+  return {
+    style,
+    color: colorValue && colorValue !== "auto" ? `#${colorValue.toUpperCase()}` : "#000000",
+    widthPt: (parseInt(sizeValue ?? "4", 10) || 4) / 8,
+    spacePt: parseInt(spaceValue ?? "0", 10) || 0,
+  };
+}
+
+/** Create, update, or remove a native Word paragraph-bottom-border divider. */
+export function setParagraphDivider(
+  doc: DocxDocument,
+  targets: XmlElement[],
+  divider: ParagraphDivider | null,
+): boolean {
+  const paragraphs = paragraphsOf(doc, targets);
+  if (paragraphs.size === 0) return false;
+  for (const paragraph of paragraphs) {
+    const w = prefixOf(paragraph);
+    const pPr = ensurePPr(paragraph);
+    let pBdr = pPr.children.find((child) => localName(child.name) === "pBdr");
+    if (!divider) {
+      if (!pBdr) continue;
+      pBdr.children = pBdr.children.filter((child) => localName(child.name) !== "bottom");
+      if (pBdr.children.length === 0) pPr.children.splice(pPr.children.indexOf(pBdr), 1);
+      continue;
+    }
+    if (!pBdr) {
+      pBdr = { name: `${w}pBdr`, attrs: {}, children: [], text: "" };
+      const later = new Set([
+        "shd", "tabs", "spacing", "ind", "contextualSpacing", "mirrorIndents", "suppressOverlap",
+        "jc", "textDirection", "textAlignment", "textboxTightWrap", "outlineLvl", "divId", "cnfStyle",
+        "rPr", "sectPr", "pPrChange",
+      ]);
+      const index = pPr.children.findIndex((child) => later.has(localName(child.name)));
+      pPr.children.splice(index === -1 ? pPr.children.length : index, 0, pBdr);
+    }
+    let bottom = pBdr.children.find((child) => localName(child.name) === "bottom");
+    if (!bottom) {
+      bottom = { name: `${w}bottom`, attrs: {}, children: [], text: "" };
+      pBdr.children.push(bottom);
+    }
+    bottom.attrs = {
+      [`${w}val`]: divider.style,
+      [`${w}sz`]: String(Math.max(1, Math.round(divider.widthPt * 8))),
+      [`${w}space`]: String(Math.max(0, Math.round(divider.spacePt))),
+      [`${w}color`]: divider.color.replace(/^#/, "").toUpperCase(),
+    };
+  }
+  doc.refresh();
+  return true;
+}
+
 export type DropCapMode = "drop" | "margin";
 
 function firstText(node: XmlElement): XmlElement | undefined {

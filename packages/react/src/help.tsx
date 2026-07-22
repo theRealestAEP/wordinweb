@@ -45,7 +45,7 @@ const GUIDE_GROUPS: GuideGroup[] = [
     items: [
       {
         title: "Open or upload a document",
-        description: "Choose a sample from Try a template or use Upload .docx to edit a local Word file in the browser.",
+        description: "Choose File → Open .docx to edit a local Word file, or choose a starting document from the template menu.",
       },
       {
         title: "Zoom, review, and author",
@@ -107,7 +107,7 @@ const GUIDE_GROUPS: GuideGroup[] = [
       },
       {
         title: "Shapes and lines",
-        description: "Insert a line, rectangle, rounded rectangle, ellipse, arrow, or callout. Select it to move, resize, rotate, change wrapping and layering, or edit fill and outline.",
+        description: "Insert a horizontal or vertical line, rectangle, rounded rectangle, ellipse, arrow, or callout. Select it to move, resize, rotate, change wrapping and layering, or edit its color, thickness, and solid, dashed, or dotted outline.",
       },
       {
         title: "Text boxes and WordArt",
@@ -173,7 +173,7 @@ const GUIDE_GROUPS: GuideGroup[] = [
       },
       {
         title: "Page borders and line numbers",
-        description: "Apply a repeating page border and enable continuous, per-page, per-section, or interval-based line numbering.",
+        description: "Apply a repeating page border with a preset or custom color and line weight, and enable continuous, per-page, per-section, or interval-based line numbering.",
       },
       {
         title: "Arrange selected objects",
@@ -194,7 +194,7 @@ const GUIDE_GROUPS: GuideGroup[] = [
       },
       {
         title: "Exact object properties",
-        description: "Use Size to set the object's width × height, Position for exact page coordinates, Fill for a shape's interior color, and Outline for its border or line color and thickness.",
+        description: "Set a line's color, weight, and solid, dashed, or dotted style directly in Insert → Shapes. After insertion, select it and choose Line style to revise those settings; Size and Position provide exact geometry.",
       },
     ],
   },
@@ -208,7 +208,7 @@ const GUIDE_GROUPS: GuideGroup[] = [
           "Open Insert → Header, then insert a text box in the repeating header layer.",
           "Enter 1 through 28 as separate paragraphs and select all of those numbered paragraphs.",
           "Open Home → Line & paragraph spacing → Exactly 24 pt, then choose Remove space before and Remove space after.",
-          "Use Insert → Shape → Line for each vertical rule, rotate and position it in the same repeating header layer.",
+          "Open Insert → Shapes, set the line color, weight, and style, then insert a Vertical line for each rule and set its exact Size and Position in the repeating header layer.",
           "Choose Close to return to body text.",
         ],
       },
@@ -223,11 +223,11 @@ const GUIDE_GROUPS: GuideGroup[] = [
       },
       {
         title: "Resume horizontal rule",
-        description: "Use a body line when the rule belongs to one location in the document.",
+        description: "Use a native paragraph divider so the rule stays attached to the résumé heading or contact line.",
         steps: [
-          "Place the caret near the intended rule and choose Insert → Shape → Line.",
-          "Drag to position and size it; use Position for exact placement.",
-          "Choose Inline, Wrap, In front, or Behind according to how nearby text should flow.",
+          "Place the caret in the paragraph that should carry the rule and choose Insert → Divider.",
+          "Choose a single, double, dashed, dotted, or thin + thick style, then set its color, width, and gap.",
+          "Choose Apply divider. Return to the same paragraph and reopen Divider whenever you want to edit or remove it.",
         ],
       },
       {
@@ -236,7 +236,7 @@ const GUIDE_GROUPS: GuideGroup[] = [
       },
       {
         title: "Border around every page",
-        description: "Choose Layout → Page border for a true page border. Use header shapes when the design needs custom partial rules or ornaments.",
+        description: "Choose Layout → Page border → Custom border, set the color and line weight, then apply it to the whole document or current section.",
       },
     ],
   },

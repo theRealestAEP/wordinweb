@@ -13,8 +13,10 @@ import {
   TableOp,
   applyRunFormat,
   applyTableOp,
+  cellShadingAt,
   addComment,
   adjustIndent,
+  paragraphDividerAt,
   deleteComment,
   findAll,
   linkAt,
@@ -23,6 +25,7 @@ import {
   replaceAll,
   requestTextInputDialog,
   setLink,
+  setParagraphDivider,
   setParagraphSpacing,
   setDropCapAt,
   transformCase,
@@ -40,6 +43,7 @@ import {
   insertCrossReference,
   insertMathAt,
   insertShapeAt,
+  setDrawingLineStyle,
   insertWordArtAt,
   insertChartAt,
   setChartData,
@@ -60,10 +64,15 @@ import {
   type ShapePreset,
   type WordArtPreset,
   type DrawingTool,
+  type DrawingLineDash,
   type CoverPageContent,
   type ObjectArrangeAction,
+  type SelectedObjectCommand,
+  type SelectedObjectKind,
+  type ParagraphDivider,
   type ChartData,
   type SmartArtData,
+  type SmartArtTextFormat,
   insertTableAfter,
   createMeasurer,
   type TextMeasurer,
@@ -133,17 +142,29 @@ export interface DocxViewApi {
   /** Insert a Unicode symbol through the normal undo/suggestion-aware typing path. */
   insertSymbol(symbol: string): boolean;
   /** Insert a floating editable DrawingML shape at the caret. */
-  insertShape(preset: ShapePreset, text?: string): boolean;
+  insertShape(
+    preset: ShapePreset,
+    text?: string,
+    lineStyle?: { color: string; width: number; dash: DrawingLineDash },
+  ): boolean;
   /** Insert editable DrawingML WordArt at the caret. */
   insertWordArt(text: string, preset?: WordArtPreset): boolean;
   /** Insert a native editable ChartML chart at the caret. */
   insertChart(data: ChartData): boolean;
   /** Replace the selected native chart's type and data. */
   updateSelectedChart(data: ChartData): boolean;
+  /** Data for the selected native chart, or null when another object is selected. */
+  getSelectedChart(): ChartData | null;
   /** Insert a native editable SmartArt diagram at the caret. */
   insertSmartArt(data: SmartArtData): boolean;
   /** Replace the selected native SmartArt diagram's layout and node text. */
   updateSelectedSmartArt(data: SmartArtData): boolean;
+  /** Data for the selected native SmartArt diagram, or null when another object is selected. */
+  getSelectedSmartArt(): SmartArtData | null;
+  /** Text formatting for the selected SmartArt node, or the first node when the group is selected. */
+  getSelectedSmartArtTextFormat(): SmartArtTextFormat | null;
+  /** Format the selected SmartArt node, or every node when the group is selected. */
+  setSelectedSmartArtTextFormat(patch: Partial<SmartArtTextFormat>): boolean;
   /** Insert a native Office 3D model with an optional custom poster image. */
   insertModel3D(file: Blob, poster?: Blob): Promise<boolean>;
   /** Insert Word online-video metadata with a browser-safe poster. */
@@ -158,6 +179,10 @@ export interface DocxViewApi {
   arrangeObject(action: ObjectArrangeAction): boolean;
   /** True while an image, shape, or ink group is selected. */
   hasSelectedObject(): boolean;
+  /** Kind of the selected object, used by contextual formatting controls. */
+  getSelectedObjectContext(): { kind: SelectedObjectKind; canEditText: boolean; smartArtNodeSelected?: boolean; smartArtNodeIndex?: number } | null;
+  /** Run a formatting command against the current selected object. */
+  runSelectedObjectCommand(command: SelectedObjectCommand): boolean;
   undo(): void;
   redo(): void;
   canUndo(): boolean;
@@ -166,6 +191,8 @@ export interface DocxViewApi {
   insertTable(rows: number, cols: number): void;
   /** Row/column/table operations on the table containing the caret. */
   tableOp(op: TableOp): void;
+  /** Current table-cell fill, undefined when the caret is outside a table. */
+  getTableCellFill(): string | null | undefined;
   /** Insert an image file at the caret (inline, natural size clamped to column). */
   insertImage(file: Blob): Promise<void>;
   /** Capture a screen, window, or browser tab and insert the current frame as a PNG picture. */
@@ -186,6 +213,10 @@ export interface DocxViewApi {
   adjustIndent(direction: 1 | -1): void;
   /** Line spacing multiple or exact point height, and/or space before/after (points). */
   setParagraphSpacing(patch: { lineMultiple?: number; exactLinePt?: number; beforePt?: number | null; afterPt?: number | null }): void;
+  /** Create, customize, or remove the bottom-border divider on the selected paragraph(s). */
+  setParagraphDivider(divider: ParagraphDivider | null): boolean;
+  /** Direct bottom-border divider on the caret paragraph. */
+  getParagraphDivider(): ParagraphDivider | null;
   /** Apply or remove a native Word drop cap on the caret paragraph. */
   setDropCap(mode: "drop" | "margin" | null, lines?: number): boolean;
   /** Remove direct character formatting from the selection. */
@@ -722,6 +753,7 @@ export function DocxView({
                 title: "Link address",
                 label: "URL",
                 value: current.getLinkAt() ?? "https://",
+                inputType: "url",
               }).then((next) => {
                 if (next !== null) current.setLink(next.trim() || null);
               });
@@ -884,12 +916,13 @@ export function DocxView({
             return true;
           },
           insertSymbol: (symbol) => editor?.insertText(symbol) ?? false,
-          insertShape: (preset, text) => {
+          insertShape: (preset, text, lineStyle) => {
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
             const drawing = insertShapeAt(doc, target.t, preset, text);
             if (!drawing) return false;
+            if (lineStyle) setDrawingLineStyle(doc, drawing, lineStyle.color, lineStyle.width, lineStyle.dash);
             pages = rerender(doc, undefined, "global");
             editor?.reselectDrawing(drawing);
             return true;
@@ -919,6 +952,7 @@ export function DocxView({
             editor?.reselectDrawing(source);
             return true;
           },
+          getSelectedChart: () => editor?.getSelectedChartData() ?? null,
           insertSmartArt: (data) => {
             const target = insertionTarget();
             if (!target) return false;
@@ -936,6 +970,7 @@ export function DocxView({
             editor?.reselectDrawing(source);
             return true;
           },
+          getSelectedSmartArt: () => editor?.getSelectedSmartArtData() ?? null,
           insertModel3D: async (file, poster) => {
             const target = insertionTarget();
             if (!target) return false;
@@ -973,6 +1008,10 @@ export function DocxView({
           getDrawingTool: () => editor?.getDrawingTool() ?? null,
           arrangeObject: (action) => editor?.arrangeSelectedObject(action) ?? false,
           hasSelectedObject: () => editor?.hasSelectedObject() ?? false,
+          getSelectedObjectContext: () => editor?.getSelectedObjectContext() ?? null,
+          runSelectedObjectCommand: (command) => editor?.runSelectedObjectCommand(command) ?? false,
+          getSelectedSmartArtTextFormat: () => editor?.getSelectedSmartArtTextFormat() ?? null,
+          setSelectedSmartArtTextFormat: (patch) => editor?.setSelectedSmartArtTextFormat(patch) ?? false,
           addComment: (text) => {
             const segs = editor?.getSelectionSegments() ?? [];
             const segments = segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : [];
@@ -1005,6 +1044,10 @@ export function DocxView({
             if (!caret) return;
             history.checkpoint();
             if (applyTableOp(doc, caret.t, op)) pages = rerender(doc);
+          },
+          getTableCellFill: () => {
+            const caret = editor?.getCaretTarget();
+            return caret ? cellShadingAt(doc, caret.t) : undefined;
           },
           insertImage: async (file) => {
             const caret = editor?.getCaretTarget();
@@ -1171,6 +1214,24 @@ export function DocxView({
             if (targets.length === 0) return;
             history.checkpoint();
             if (setParagraphSpacing(doc, targets as Parameters<typeof setParagraphSpacing>[1], patch)) pages = rerender(doc);
+          },
+          setParagraphDivider: (divider) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const caret = editor?.getCaretTarget();
+            const targets = segs.length > 0
+              ? segs.map((segment) => segment.t).filter((target): target is NonNullable<typeof target> => !!target)
+              : caret
+                ? [caret.t]
+                : [];
+            if (targets.length === 0) return false;
+            history.checkpoint();
+            if (!setParagraphDivider(doc, targets, divider)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          getParagraphDivider: () => {
+            const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
+            return target ? paragraphDividerAt(doc, target) : null;
           },
           setDropCap: (mode, lines = 3) => {
             const target = insertionTarget();

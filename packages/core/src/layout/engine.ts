@@ -4690,7 +4690,7 @@ class Engine {
             y1: by + l.y1,
             x2: bx + l.x2,
             y2: by + l.y2,
-            border: { style: "single", width: l.weight, color: l.color, space: 0 },
+            border: { style: l.style ?? "single", width: l.weight, color: l.color, space: 0 },
           });
         }
         for (const pth of span.drawing.paths ?? []) {
@@ -4720,6 +4720,17 @@ class Engine {
             anchored: false,
             belowText: true,
             smartArt: !!span.drawing.smartArt,
+            smartArtNodes: span.drawing.smartArt
+              ? (span.drawing.paths ?? []).flatMap((path) => path.smartArtNodeIndex === undefined ? [] : [{
+                  index: path.smartArtNodeIndex,
+                  x: path.x,
+                  y: path.y,
+                  width: path.width,
+                  height: path.height,
+                }])
+              : undefined,
+            chartData: span.drawing.chart,
+            smartArtData: span.drawing.smartArt,
           });
         }
         // Positioned text bodies (SmartArt cached-drawing shapes, multi-
@@ -5480,7 +5491,7 @@ class Engine {
           const y1 = oy + l.y1 - fy;
           const x2 = ox + l.x2 - fx;
           const y2 = oy + l.y2 - fy;
-          page.items.push({ kind: "edge", x1, y1, x2, y2, border: { style: "single", width: l.weight, color: l.color, space: 0 }, ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}), ...(shape.behind ? { behind: true } : { front: true }), z: shape.z });
+          page.items.push({ kind: "edge", x1, y1, x2, y2, border: { style: l.style ?? "single", width: l.weight, color: l.color, space: 0 }, ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}), ...(shape.behind ? { behind: true } : { front: true }), z: shape.z });
         }
         for (const img of shape.images) {
           const x = ox + img.x - fx;

@@ -192,6 +192,10 @@ export function insertBlankPageAt(doc: DocxDocument, t: XmlElement, offset: numb
   if (ordinaryPPr) {
     ordinaryPPr.children = ordinaryPPr.children.filter((c) => localName(c.name) !== "sectPr");
   }
+  const blankPPr = ordinaryPPr ? cloneDeep(ordinaryPPr) : null;
+  if (blankPPr) {
+    blankPPr.children = blankPPr.children.filter((c) => localName(c.name) !== "numPr");
+  }
   const headBefore = pEl.children.slice(0, runIndex).filter((c) => localName(c.name) !== "pPr");
   const tailAfter = pEl.children.slice(runIndex + 1).filter((c) => localName(c.name) !== "pPr");
   pEl.children = [
@@ -206,7 +210,7 @@ export function insertBlankPageAt(doc: DocxDocument, t: XmlElement, offset: numb
     el(`${rw}t`, { "xml:space": "preserve" }, [], ""),
   ]);
   const blank = el(pEl.name, { ...pEl.attrs }, [
-    ...(ordinaryPPr ? [cloneDeep(ordinaryPPr)] : []),
+    ...(blankPPr ? [blankPPr] : []),
     anchorRun,
     breakRun(),
   ]);

@@ -1,7 +1,8 @@
 import { strToU8 } from "fflate";
 import type { DocxDocument } from "../docx.js";
 import type { SmartArtData } from "../model.js";
-import { type XmlElement, attr, localName, parseXml } from "../xml.js";
+import { type XmlElement, attr, localName, parseXml, serializeXml } from "../xml.js";
+import { parseRelationships, relsPathFor } from "../parse/rels.js";
 
 const EMU_PER_PX = 9525;
 const NS_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
@@ -24,6 +25,15 @@ interface DiagramShape {
   color?: string;
 }
 
+export interface SmartArtTextFormat {
+  fontFamily: string;
+  fontSizePt: number;
+  color: string;
+  bold: boolean;
+  italic: boolean;
+  alignment: "left" | "center" | "right";
+}
+
 function el(name: string, attrs: Record<string, string> = {}, children: XmlElement[] = [], text = ""): XmlElement {
   return { name, attrs, children, text };
 }
@@ -42,13 +52,225 @@ function descendant(node: XmlElement | undefined, name: string): XmlElement | un
   return undefined;
 }
 
+function descendants(node: XmlElement, name: string, out: XmlElement[] = []): XmlElement[] {
+  if (localName(node.name) === name) out.push(node);
+  for (const child of node.children) descendants(child, name, out);
+  return out;
+}
+
+function smartArtDrawingPart(doc: DocxDocument, drawing: XmlElement): string | null {
+  const relIds = descendant(drawing, "relIds");
+  const dataRel = relIds ? doc.documentRels.get(attr(relIds, "dm") ?? "") : undefined;
+  if (!dataRel || dataRel.external) return null;
+  const dataXml = doc.pkg.text(dataRel.target);
+  if (!dataXml) return null;
+  const drawingRelId = attr(descendant(parseXml(dataXml), "dataModelExt"), "relId");
+  if (drawingRelId) {
+    const hostRel = doc.documentRels.get(drawingRelId);
+    if (hostRel && !hostRel.external) return hostRel.target;
+    const relsXml = doc.pkg.text(relsPathFor(dataRel.target));
+    if (relsXml) {
+      const dataRelEntry = parseRelationships(parseXml(relsXml), dataRel.target).get(drawingRelId);
+      if (dataRelEntry && !dataRelEntry.external) return dataRelEntry.target;
+    }
+  }
+  for (const rel of doc.documentRels.values()) {
+    if (!rel.external && rel.type.endsWith("/diagramDrawing")) return rel.target;
+  }
+  return null;
+}
+
+function smartArtNodeShapes(root: XmlElement): XmlElement[] {
+  return descendants(root, "sp").filter((shape) => {
+    const spPr = shape.children.find((child) => localName(child.name) === "spPr");
+    if (!spPr) return false;
+    const name = attr(descendant(shape, "cNvPr"), "name") ?? "";
+    const geometry = (attr(descendant(spPr, "prstGeom"), "prst") ?? "").toLowerCase();
+    return !/^connector\b/i.test(name) && geometry !== "line" && !geometry.includes("connector");
+  });
+}
+
+function smartArtNodeShapeProperties(root: XmlElement): XmlElement[] {
+  return smartArtNodeShapes(root).flatMap((shape) => {
+    const spPr = shape.children.find((child) => localName(child.name) === "spPr");
+    return spPr ? [spPr] : [];
+  });
+}
+
+function replaceTextLeaves(root: XmlElement, value: string): boolean {
+  const leaves = descendants(root, "t").filter((node) => node.children.length === 0);
+  if (!leaves.length) return false;
+  leaves[0].text = value;
+  for (const leaf of leaves.slice(1)) leaf.text = "";
+  return true;
+}
+
+function directChild(node: XmlElement, name: string): XmlElement | undefined {
+  return node.children.find((child) => localName(child.name) === name);
+}
+
+function textColor(rPr: XmlElement | undefined): string {
+  const color = attr(descendant(directChild(rPr ?? el("a:rPr"), "solidFill"), "srgbClr"), "val")
+    ?? attr(descendant(directChild(rPr ?? el("a:rPr"), "solidFill"), "sysClr"), "lastClr");
+  return `#${(color ?? "000000").toUpperCase()}`;
+}
+
+function applyTextFormat(root: XmlElement, format: SmartArtTextFormat): void {
+  for (const run of descendants(root, "r")) {
+    let rPr = directChild(run, "rPr");
+    if (!rPr) {
+      rPr = el("a:rPr");
+      run.children.unshift(rPr);
+    }
+    rPr.attrs.sz = String(Math.round(format.fontSizePt * 100));
+    rPr.attrs.b = format.bold ? "1" : "0";
+    rPr.attrs.i = format.italic ? "1" : "0";
+    for (const name of ["latin", "ea", "cs"] as const) {
+      let font = directChild(rPr, name);
+      if (!font) {
+        font = el(`a:${name}`);
+        rPr.children.push(font);
+      }
+      font.attrs.typeface = format.fontFamily;
+    }
+    rPr.children = rPr.children.filter((child) => {
+      const name = localName(child.name);
+      return !["solidFill", "noFill", "gradFill", "pattFill"].includes(name);
+    });
+    rPr.children.unshift(el("a:solidFill", {}, [el("a:srgbClr", { val: format.color.replace(/^#/, "").toUpperCase() })]));
+  }
+  for (const paragraph of descendants(root, "p")) {
+    let pPr = directChild(paragraph, "pPr");
+    if (!pPr) {
+      pPr = el("a:pPr");
+      paragraph.children.unshift(pPr);
+    }
+    pPr.attrs.algn = format.alignment === "center" ? "ctr" : format.alignment === "right" ? "r" : "l";
+  }
+}
+
+/** Read one visible node fill from a SmartArt cached drawing. */
+export function smartArtFillColor(doc: DocxDocument, drawing: XmlElement, nodeIndex = 0): string | null {
+  const part = smartArtDrawingPart(doc, drawing);
+  const xml = part ? doc.pkg.text(part) : undefined;
+  if (!xml) return null;
+  const spPr = smartArtNodeShapeProperties(parseXml(xml))[nodeIndex];
+  if (!spPr || spPr.children.some((child) => localName(child.name) === "noFill")) return null;
+  const solidFill = spPr.children.find((child) => localName(child.name) === "solidFill");
+  if (!solidFill) return null;
+  const color = attr(descendant(solidFill, "srgbClr"), "val")
+    ?? attr(descendant(solidFill, "sysClr"), "lastClr");
+  return `#${(color ?? COLORS[0]).toUpperCase()}`;
+}
+
+/** Apply a fill to one visible SmartArt node, or every node when omitted. */
+export function setSmartArtFill(doc: DocxDocument, drawing: XmlElement, color: string | null, nodeIndex?: number): boolean {
+  const part = smartArtDrawingPart(doc, drawing);
+  const xml = part ? doc.pkg.text(part) : undefined;
+  if (!part || !xml) return false;
+  const root = parseXml(xml);
+  const allNodes = smartArtNodeShapeProperties(root);
+  const nodes = nodeIndex === undefined ? allNodes : allNodes.slice(nodeIndex, nodeIndex + 1);
+  if (!nodes.length) return false;
+  for (const spPr of nodes) {
+    spPr.children = spPr.children.filter((child) => {
+      const name = localName(child.name);
+      return !["solidFill", "noFill", "gradFill", "pattFill", "blipFill", "grpFill"].includes(name);
+    });
+    const fill = color
+      ? el("a:solidFill", {}, [el("a:srgbClr", { val: color.replace(/^#/, "").toUpperCase() })])
+      : el("a:noFill");
+    const lineIndex = spPr.children.findIndex((child) => localName(child.name) === "ln");
+    spPr.children.splice(lineIndex === -1 ? spPr.children.length : lineIndex, 0, fill);
+  }
+  doc.pkg.raw()[part] = strToU8(serializeXml(root, true));
+  doc.markPackageResourceChanged();
+  doc.refresh();
+  return true;
+}
+
+/** Replace one visible SmartArt node's text in both its editable data model and cached drawing. */
+export function setSmartArtNodeText(doc: DocxDocument, drawing: XmlElement, nodeIndex: number, value: string): boolean {
+  const relIds = descendant(drawing, "relIds");
+  const dataRel = relIds ? doc.documentRels.get(attr(relIds, "dm") ?? "") : undefined;
+  const drawingPart = smartArtDrawingPart(doc, drawing);
+  const dataXml = dataRel && !dataRel.external ? doc.pkg.text(dataRel.target) : undefined;
+  const drawingXml = drawingPart ? doc.pkg.text(drawingPart) : undefined;
+  if (!dataRel || dataRel.external || !drawingPart || !dataXml || !drawingXml) return false;
+
+  const drawingRoot = parseXml(drawingXml);
+  const shape = smartArtNodeShapes(drawingRoot)[nodeIndex];
+  const modelId = shape ? attr(shape, "modelId") : undefined;
+  if (!shape || !modelId) return false;
+
+  const dataRoot = parseXml(dataXml);
+  const point = descendants(dataRoot, "pt").find((candidate) => attr(candidate, "modelId") === modelId);
+  if (!point || !replaceTextLeaves(shape, value) || !replaceTextLeaves(point, value)) return false;
+
+  doc.pkg.raw()[drawingPart] = strToU8(serializeXml(drawingRoot, true));
+  doc.pkg.raw()[dataRel.target] = strToU8(serializeXml(dataRoot, true));
+  doc.markPackageResourceChanged();
+  doc.refresh();
+  return true;
+}
+
+/** Read the visible text formatting for a SmartArt node. */
+export function smartArtTextFormat(doc: DocxDocument, drawing: XmlElement, nodeIndex = 0): SmartArtTextFormat | null {
+  const part = smartArtDrawingPart(doc, drawing);
+  const xml = part ? doc.pkg.text(part) : undefined;
+  if (!xml) return null;
+  const shape = smartArtNodeShapes(parseXml(xml))[nodeIndex];
+  const rPr = shape ? descendant(shape, "rPr") : undefined;
+  if (!shape || !rPr) return null;
+  const alignment = attr(descendant(shape, "pPr"), "algn");
+  return {
+    fontFamily: attr(descendant(rPr, "latin"), "typeface") ?? "Calibri",
+    fontSizePt: Number(attr(rPr, "sz") ?? "1200") / 100,
+    color: textColor(rPr),
+    bold: attr(rPr, "b") === "1",
+    italic: attr(rPr, "i") === "1",
+    alignment: alignment === "r" ? "right" : alignment === "ctr" ? "center" : "left",
+  };
+}
+
+/** Apply text formatting to one SmartArt node, or every node when omitted. */
+export function setSmartArtTextFormat(
+  doc: DocxDocument,
+  drawing: XmlElement,
+  format: SmartArtTextFormat,
+  nodeIndex?: number,
+): boolean {
+  const relIds = descendant(drawing, "relIds");
+  const dataRel = relIds ? doc.documentRels.get(attr(relIds, "dm") ?? "") : undefined;
+  const drawingPart = smartArtDrawingPart(doc, drawing);
+  const dataXml = dataRel && !dataRel.external ? doc.pkg.text(dataRel.target) : undefined;
+  const drawingXml = drawingPart ? doc.pkg.text(drawingPart) : undefined;
+  if (!dataRel || dataRel.external || !drawingPart || !dataXml || !drawingXml) return false;
+
+  const drawingRoot = parseXml(drawingXml);
+  const allShapes = smartArtNodeShapes(drawingRoot);
+  const shapes = nodeIndex === undefined ? allShapes : allShapes.slice(nodeIndex, nodeIndex + 1);
+  if (!shapes.length) return false;
+  const modelIds = new Set(shapes.map((shape) => attr(shape, "modelId")).filter((value): value is string => !!value));
+  const dataRoot = parseXml(dataXml);
+  const points = descendants(dataRoot, "pt").filter((point) => modelIds.has(attr(point, "modelId") ?? ""));
+  for (const shape of shapes) applyTextFormat(shape, format);
+  for (const point of points) applyTextFormat(point, format);
+
+  doc.pkg.raw()[drawingPart] = strToU8(serializeXml(drawingRoot, true));
+  doc.pkg.raw()[dataRel.target] = strToU8(serializeXml(dataRoot, true));
+  doc.markPackageResourceChanged();
+  doc.refresh();
+  return true;
+}
+
 function escapeXml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 export function normalizeSmartArtData(data: SmartArtData): SmartArtData {
   const items = data.items.map((item) => item.trim()).filter(Boolean);
-  return { layout: data.layout, items: items.length ? items : ["First idea", "Second idea", "Third idea"] };
+  return { layout: data.layout, items: items.length ? items : [""] };
 }
 
 function line(modelId: string, x1: number, y1: number, x2: number, y2: number): DiagramShape {
@@ -150,11 +372,14 @@ export function buildSmartArtDataXml(input: SmartArtData, drawingRelId: string):
     `<a:r><a:rPr lang="en-US"/><a:t>${escapeXml(text)}</a:t></a:r></a:p></dgm:t></dgm:pt>`,
   ).join("");
   const connections = data.items.map((_, index) =>
-    `<dgm:cxn modelId="${data.items.length + index + 1}" srcId="0" destId="${index + 1}" srcOrd="${index}" destOrd="0"/>`,
+    `<dgm:cxn modelId="${data.items.length + index + 1}" type="parOf" srcId="0" destId="${index + 1}" ` +
+    `srcOrd="${index}" destOrd="0" presId=""/>`,
   ).join("");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
     `<dgm:dataModel xmlns:dgm="${NS_DGM}" xmlns:a="${NS_A}"><dgm:ptLst>` +
-    `<dgm:pt modelId="0" type="doc"><dgm:prSet loTypeId="urn:wordinweb:smartart:${data.layout}" loCatId="${data.layout}"/>` +
+    `<dgm:pt modelId="0" type="doc"><dgm:prSet loTypeId="urn:wordinweb:smartart:${data.layout}" loCatId="${data.layout}" ` +
+    `qsTypeId="urn:wordinweb:smartart:style" qsCatId="simple" ` +
+    `csTypeId="urn:wordinweb:smartart:colors" csCatId="accent1"/>` +
     `<dgm:spPr/><dgm:t><a:bodyPr/><a:lstStyle/><a:p/></dgm:t></dgm:pt>${points}</dgm:ptLst>` +
     `<dgm:cxnLst>${connections}</dgm:cxnLst><dgm:bg/><dgm:whole/><dgm:extLst>` +
     `<a:ext uri="http://schemas.microsoft.com/office/drawing/2008/diagram"><dsp:dataModelExt xmlns:dsp="${NS_DSP}" ` +
@@ -167,7 +392,18 @@ export function buildSmartArtLayoutXml(input: SmartArtData): string {
     `<dgm:layoutDef xmlns:dgm="${NS_DGM}" xmlns:a="${NS_A}" uniqueId="urn:wordinweb:smartart:${data.layout}">` +
     `<dgm:title val="${data.layout}"/><dgm:desc val="WordInWeb ${data.layout} diagram"/>` +
     `<dgm:catLst><dgm:cat type="${data.layout}" pri="1000"/></dgm:catLst>` +
-    `<dgm:layoutNode name="root"><dgm:alg type="composite"/></dgm:layoutNode></dgm:layoutDef>`;
+    `<dgm:layoutNode name="diagram"><dgm:alg type="lin"/><dgm:shape/><dgm:presOf/>` +
+    `<dgm:constrLst><dgm:constr type="w" for="ch" forName="node" refType="w"/>` +
+    `<dgm:constr op="equ" type="h" for="ch" forName="node"/>` +
+    `<dgm:constr op="equ" type="primFontSz" for="ch" forName="node" val="65"/></dgm:constrLst><dgm:ruleLst/>` +
+    `<dgm:forEach axis="ch" ptType="node"><dgm:layoutNode name="node" styleLbl="node0">` +
+    `<dgm:varLst><dgm:bulletEnabled val="true"/></dgm:varLst><dgm:alg type="tx"/>` +
+    `<dgm:shape type="roundRect"/><dgm:presOf axis="desOrSelf" ptType="node"/>` +
+    `<dgm:constrLst><dgm:constr type="tMarg" refType="primFontSz" fact="0.3"/>` +
+    `<dgm:constr type="bMarg" refType="primFontSz" fact="0.3"/><dgm:constr type="lMarg" refType="primFontSz" fact="0.3"/>` +
+    `<dgm:constr type="rMarg" refType="primFontSz" fact="0.3"/></dgm:constrLst>` +
+    `<dgm:ruleLst><dgm:rule type="primFontSz" val="5"/></dgm:ruleLst>` +
+    `</dgm:layoutNode></dgm:forEach></dgm:layoutNode></dgm:layoutDef>`;
 }
 
 export function buildSmartArtStyleXml(): string {
@@ -244,12 +480,12 @@ export function setSmartArtData(doc: DocxDocument, drawing: XmlElement, input: S
   const dataRootXml = doc.pkg.text(dataRel.target);
   if (!dataRootXml) return false;
   const drawingRelId = attr(descendant(parseXml(dataRootXml), "dataModelExt"), "relId");
-  const drawingRel = drawingRelId ? doc.documentRels.get(drawingRelId) : undefined;
-  if (!drawingRel || drawingRel.external) return false;
+  const drawingPart = smartArtDrawingPart(doc, drawing);
+  if (!drawingRelId || !drawingPart) return false;
   const data = normalizeSmartArtData(input);
-  doc.pkg.raw()[dataRel.target] = strToU8(buildSmartArtDataXml(data, drawingRel.id));
+  doc.pkg.raw()[dataRel.target] = strToU8(buildSmartArtDataXml(data, drawingRelId));
   doc.pkg.raw()[layoutRel.target] = strToU8(buildSmartArtLayoutXml(data));
-  doc.pkg.raw()[drawingRel.target] = strToU8(buildSmartArtDrawingXml(data));
+  doc.pkg.raw()[drawingPart] = strToU8(buildSmartArtDrawingXml(data));
   doc.markPackageResourceChanged();
   doc.refresh();
   return true;

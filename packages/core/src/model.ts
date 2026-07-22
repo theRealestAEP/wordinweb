@@ -25,6 +25,7 @@ export type BorderStyle =
   | "wave"
   | "dotDash"
   | "dotDotDash"
+  | "thinThickSmallGap"
   | "triple";
 
 export interface Border {
@@ -569,6 +570,7 @@ export interface DrawingLine {
   y2: number;
   color: string;
   weight: number;
+  style?: "single" | "dotted" | "dashed";
 }
 
 export interface DrawingImage {
@@ -670,6 +672,8 @@ export interface DrawingPath {
   viewH: number;
   fill?: string;
   stroke?: { color: string; width: number; opacity?: number };
+  /** Zero-based visible SmartArt node this path paints. */
+  smartArtNodeIndex?: number;
 }
 
 /**
