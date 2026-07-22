@@ -4,9 +4,7 @@ import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , Dr
 import { cssFont, cambriaMathDescentShare } from "../layout/measure.js";
 import { Border } from "../model.js";
 import { XmlElement } from "../xml.js";
-import { convertEmfToDataUrl } from "emf-converter";
 import { decodeTiff } from "./tiff.js";
-import { renderWmf } from "./wmf.js";
 import { extractOlePackage } from "../parse/ole.js";
 
 export interface RenderOptions {
@@ -1539,8 +1537,18 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
         }
       } else if (ext === "wmf") {
         const wmfKey = `wmf:${item.part}:${Math.round(item.width)}x${Math.round(item.height)}`;
-        decoded = docDerivedSrc(doc, wmfKey) ?? renderWmf(bytes, item.width, item.height);
-        if (decoded) setDocDerivedSrc(doc, wmfKey, decoded);
+        const cachedWmf = docDerivedSrc(doc, wmfKey);
+        if (cachedWmf) {
+          decoded = cachedWmf;
+        } else {
+          void import("./wmf.js").then(({ renderWmf }) => {
+            const url = renderWmf(bytes, item.width, item.height);
+            if (url) {
+              setDocDerivedSrc(doc, wmfKey, url);
+              img.src = url;
+            }
+          });
+        }
       } else if (ext === "emf") {
         const emfKey = `emf:${item.part}`;
         const cachedEmf = docDerivedSrc(doc, emfKey);
@@ -1548,12 +1556,14 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
           decoded = cachedEmf;
         } else {
           const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-          void convertEmfToDataUrl(buf).then((url) => {
-            if (url) {
-              setDocDerivedSrc(doc, emfKey, url);
-              img.src = url;
-            }
-          });
+          void import("emf-converter")
+            .then(({ convertEmfToDataUrl }) => convertEmfToDataUrl(buf))
+            .then((url) => {
+              if (url) {
+                setDocDerivedSrc(doc, emfKey, url);
+                img.src = url;
+              }
+            });
         }
       }
       if (decoded) {
