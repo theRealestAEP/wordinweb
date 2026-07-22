@@ -1765,20 +1765,27 @@ describe("setListType", () => {
     expect((doc.sections[0].blocks[0] as Paragraph).props.numbering).toBeUndefined();
   });
 
-  it("reparses an ordinary paragraph locally when a matching list definition already exists", () => {
-    const numbering = `<?xml version="1.0"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
-    const doc = loadDoc(p("alpha") + p("beta"), { "word/numbering.xml": numbering });
-    const { run } = firstRun(doc);
-    const t = run.content.find((c): c is TextContent => c.kind === "text")!.srcT!;
+  it("starts a new list sequence and reparses the paragraph locally", () => {
+    const numbering = `<?xml version="1.0"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+    const numbered = (text: string) => `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const doc = loadDoc(numbered("one") + numbered("two") + numbered("three") + p("alpha"), { "word/numbering.xml": numbering });
+    const target = firstRun(doc, 3).run;
+    const t = target.content.find((c): c is TextContent => c.kind === "text")!.srcT!;
     const version = doc.modelVersion;
 
-    expect(setListType(doc, [t], "bullet")).toBe(true);
+    expect(setListType(doc, [t], "number")).toBe(true);
     expect(doc.modelVersion).toBe(version);
-    expect((doc.sections[0].blocks[0] as Paragraph).props.numbering?.numId).toBe(1);
+    const added = doc.sections[0].blocks[3] as Paragraph;
+    expect(added.props.numbering?.numId).not.toBe(1);
+    expect(doc.numberingInstance(added.props.numbering!.numId)?.abstractNumId).not.toBe(0);
+    const labels = layoutDocument(doc).pages.flatMap((page) => page.items)
+      .filter((item) => item.kind === "text" && /^\d+\.$/.test(item.text))
+      .map((item) => item.kind === "text" ? item.text : "");
+    expect(labels).toEqual(["1.", "2.", "3.", "1."]);
 
     expect(setListType(doc, [t], null)).toBe(true);
     expect(doc.modelVersion).toBe(version);
-    expect((doc.sections[0].blocks[0] as Paragraph).props.numbering).toBeUndefined();
+    expect((doc.sections[0].blocks[3] as Paragraph).props.numbering).toBeUndefined();
   });
 });
 

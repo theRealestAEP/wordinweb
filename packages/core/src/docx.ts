@@ -1004,6 +1004,8 @@ export class DocxDocument {
 
   markNumberingChanged(): void {
     this.numberingDirty = true;
+    this.numbering = parseNumbering(this.numberingRoot ?? undefined, this.ctxBase);
+    this._layoutGlobalSig = null;
   }
 
   /**

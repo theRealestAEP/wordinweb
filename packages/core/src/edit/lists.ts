@@ -36,19 +36,11 @@ export function listTypeAt(doc: DocxDocument, target: XmlElement): ListKind | nu
 }
 
 /**
- * Find (or create) a single-level numbering definition of the given kind and
- * return its numId. Reuses a matching definition when the file already has
- * one so repeated toggles don't pile up abstractNums.
+ * Create an independent numbering definition of the given kind and return its
+ * numId. A toolbar-created list starts a new sequence instead of continuing an
+ * unrelated list elsewhere in the document.
  */
-function ensureListNum(doc: DocxDocument, kind: ListKind): { numId: number; created: boolean } | null {
-  for (const [numId, inst] of doc.numbering.instances) {
-    const lvl = doc.numberingLevel(numId, 0);
-    if (!lvl) continue;
-    if (kind === "bullet" ? lvl.format === "bullet" : lvl.format === "decimal") {
-      return { numId, created: false };
-    }
-    void inst;
-  }
+function createListNum(doc: DocxDocument, kind: ListKind): number | null {
   const root = doc.numberingTree(true);
   if (!root) return null;
   const w = prefixOf(root);
@@ -87,7 +79,7 @@ function ensureListNum(doc: DocxDocument, kind: ListKind): { numId: number; crea
     el(`${w}num`, { [`${w}numId`]: String(numId) }, [el(`${w}abstractNumId`, { [`${w}val`]: absId })]),
   );
   doc.markNumberingChanged();
-  return { numId, created: true };
+  return numId;
 }
 
 /** Step the list level of the target paragraphs (Tab / Shift-Tab), 0..8. */
@@ -131,9 +123,8 @@ export function setListType(doc: DocxDocument, targets: XmlElement[], kind: List
   }
   if (paragraphs.size === 0) return false;
 
-  const numbering = kind === null ? null : ensureListNum(doc, kind);
-  if (kind !== null && numbering === null) return false;
-  const numId = numbering?.numId ?? null;
+  const numId = kind === null ? null : createListNum(doc, kind);
+  if (kind !== null && numId === null) return false;
 
   let touched = false;
   for (const pEl of paragraphs) {
@@ -165,15 +156,13 @@ export function setListType(doc: DocxDocument, targets: XmlElement[], kind: List
     touched = true;
   }
   if (touched) {
-    let reparsed = !numbering?.created;
-    if (reparsed) {
-      for (const paragraph of paragraphs) {
-        if (!doc.reparseBodyParagraph(paragraph)) {
-          reparsed = false;
-          break;
-        }
-        invalidateParagraphSignature(paragraph);
+    let reparsed = true;
+    for (const paragraph of paragraphs) {
+      if (!doc.reparseBodyParagraph(paragraph)) {
+        reparsed = false;
+        break;
       }
+      invalidateParagraphSignature(paragraph);
     }
     if (!reparsed) doc.refresh();
   }
