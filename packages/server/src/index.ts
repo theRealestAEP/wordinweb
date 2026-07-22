@@ -7,6 +7,6 @@
  * no sockets, so it is unit-testable with in-memory connections.
  */
 export { CollabHub, type Connection, type DocProvider } from "./hub.js";
-export { PROTOCOL_VERSION, type ClientMessage, type ServerMessage, type PresencePosition } from "./protocol.js";
+export { PROTOCOL_VERSION, type ClientMessage, type ServerMessage, type PresencePosition } from "@wordinweb/collab/server";
 export { attachWebSocketServer, type WsServer, type WsSocket } from "./ws.js";
 export { InMemoryStorage, type StorageDriver } from "./storage.js";

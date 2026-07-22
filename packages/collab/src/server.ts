@@ -8,3 +8,9 @@ export { DocumentSession, type Broadcast, type IdSidecar } from "./session.js";
 export { applyIntent } from "./apply.js";
 export * from "./intents.js";
 export * from "./transform.js";
+export {
+  PROTOCOL_VERSION,
+  type ClientMessage,
+  type ServerMessage,
+  type PresencePosition,
+} from "./protocol.js";

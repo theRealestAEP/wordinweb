@@ -1,5 +1,5 @@
 import { CollabHub } from "./hub.js";
-import { ClientMessage, ServerMessage } from "./protocol.js";
+import { ClientMessage, ServerMessage } from "@wordinweb/collab/server";
 
 /**
  * Minimal structural shapes for a `ws`-style server and socket, so this

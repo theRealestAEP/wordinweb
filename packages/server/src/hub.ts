@@ -1,6 +1,6 @@
 import { DocxDocument } from "@wordinweb/core";
 import { DocumentSession } from "@wordinweb/collab/server";
-import { ClientMessage, ServerMessage, PROTOCOL_VERSION } from "./protocol.js";
+import { ClientMessage, ServerMessage, PROTOCOL_VERSION } from "@wordinweb/collab/server";
 import { StorageDriver } from "./storage.js";
 
 /**

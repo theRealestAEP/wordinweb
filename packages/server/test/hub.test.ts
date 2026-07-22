@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { zipSync, strToU8 } from "fflate";
 import { CollabHub, Connection, DocProvider } from "../src/hub.js";
-import { ServerMessage, PROTOCOL_VERSION } from "../src/protocol.js";
+import { ServerMessage, PROTOCOL_VERSION } from "@wordinweb/collab/server";
 import type { InsertTextIntent } from "@wordinweb/collab/server";
 
 function blankDoc(text: string): Uint8Array {
@@ -191,7 +191,7 @@ describe("CollabHub persistence + rehydration", () => {
   });
 });
 
-import type { PresencePosition } from "../src/protocol.js";
+import type { PresencePosition } from "@wordinweb/collab/server";
 
 describe("CollabHub presence", () => {
   const pos: PresencePosition = { anchor: { blockId: 1, runId: 2, offset: 3 } };

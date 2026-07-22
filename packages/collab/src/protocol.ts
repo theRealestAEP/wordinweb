@@ -1,4 +1,4 @@
-import type { Intent, LogEntry } from "@wordinweb/collab/server";
+import type { Intent, LogEntry } from "./intents.js";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-

@@ -1,8 +1,15 @@
 /**
- * Client entry surface for @wordinweb/collab. Currently exposes the shared
- * wire types and the transform (used by reconciliation replay); the
- * optimistic client engine (pending queue, confirmed snapshot,
- * rollback-replay — plan doc 03 Stage B) lands in a later phase.
+ * Client entry surface for @wordinweb/collab: the optimistic replica, the
+ * client-side connection that drives it over a transport, the wire types, and
+ * the transform (used by reconciliation replay).
  */
+export { ClientReplica } from "./replica.js";
+export { CollabConnection, type ClientTransport, type ConnectionCallbacks } from "./connection.js";
 export * from "./intents.js";
+export {
+  PROTOCOL_VERSION,
+  type ClientMessage,
+  type ServerMessage,
+  type PresencePosition,
+} from "./protocol.js";
 export { transformIntent, transformPosition } from "./transform.js";
