@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { checkboxStateElement } from "../checkbox.js";
+import { isSafeUrl } from "../url-safety.js";
 import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem, WarpTextItem, ChartItem } from "../layout/types.js";
 import { cssFont, cambriaMathDescentShare } from "../layout/measure.js";
 import { Border } from "../model.js";
@@ -1837,7 +1838,10 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
       if (item.webVideo) {
         node.dataset.dxwWebVideo = "1";
         node.addEventListener("dblclick", () => {
-          window.open(item.webVideo!.url, "_blank", "noopener,noreferrer");
+          // Web-video URL is authored content — allowlist the scheme.
+          if (isSafeUrl(item.webVideo!.url)) {
+            window.open(item.webVideo!.url, "_blank", "noopener,noreferrer");
+          }
         });
       }
       if (item.embeddedObject) {
@@ -2363,7 +2367,10 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
   if (item.href) {
     const anchor = el as HTMLAnchorElement;
     const bookmark = item.href.startsWith("#") ? item.href.slice(1) : undefined;
-    anchor.href = item.href;
+    // User-authored URL: never assign a non-allowlisted scheme to href or
+    // navigate to it (javascript:/data:/vbscript: would be stored XSS).
+    const safe = isSafeUrl(item.href);
+    anchor.href = safe ? item.href : "about:blank";
     if (!bookmark) {
       anchor.target = "_blank";
       anchor.rel = "noreferrer noopener";
@@ -2377,8 +2384,8 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
         event.preventDefault();
         if (bookmark && (!interactive || event.metaKey || event.ctrlKey)) {
           scrollToBookmark(anchor, bookmark);
-        } else if (!bookmark && (event.metaKey || event.ctrlKey)) {
-          window.open(anchor.href, "_blank", "noopener,noreferrer");
+        } else if (!bookmark && safe && (event.metaKey || event.ctrlKey)) {
+          window.open(item.href, "_blank", "noopener,noreferrer");
         }
       });
     }
