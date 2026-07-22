@@ -27,6 +27,7 @@ import {
   tableCondOrder,
 } from "./parse/styles.js";
 import { parseNumbering } from "./parse/numbering.js";
+import { StableIds } from "./edit/ids.js";
 import { parseBody, parseBlocks, parseParagraph, DocParseContext } from "./parse/document.js";
 import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
@@ -566,6 +567,28 @@ export class DocxDocument {
       for (const [id, blocks] of notes) this.footnotes.set(id, blocks);
     }
     this._modelVersion++;
+    if (this.stableIds) {
+      // In-place XML mutation preserves element identity across refresh, so
+      // survivors keep their ids; this fills ids for newly created nodes and
+      // retires ids for deleted ones. Opt-in (collab only) — see stableIds.
+      this.stableIds.assignFromRoots(this.editableRoots());
+      this.stableIds.prune(this.editableRoots());
+    }
+  }
+
+  /** Stable node-id side table for replicated editing. Null (and zero cost)
+   * for local-only documents; call `enableStableIds()` to populate and
+   * maintain it. Kept in memory only — never serialized into the XML. */
+  stableIds: StableIds | null = null;
+
+  /** Populate the stable-id table from current content and keep it updated
+   * on every subsequent refresh(). Idempotent. */
+  enableStableIds(): StableIds {
+    if (!this.stableIds) {
+      this.stableIds = new StableIds();
+      this.stableIds.assignFromRoots(this.editableRoots());
+    }
+    return this.stableIds;
   }
 
   /** Reparse the two sibling body-story paragraphs created by Enter without

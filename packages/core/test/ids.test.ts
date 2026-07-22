@@ -203,3 +203,37 @@ describe("save() is side-effect-free (N1 checkpoint-purity invariant)", () => {
     expect(strFromU8(unzipSync(saved)["[Content_Types].xml"])).toContain("/docProps/custom.xml");
   });
 });
+
+describe("DocxDocument stable-id lifecycle (opt-in)", () => {
+  it("is null by default (zero cost for local-only docs)", () => {
+    const doc = loadDoc(THREE_PARAS);
+    expect(doc.stableIds).toBeNull();
+    doc.refresh();
+    expect(doc.stableIds).toBeNull(); // refresh does nothing when disabled
+  });
+
+  it("maintains the table across refresh once enabled: survivors keep ids, new nodes get ids, deleted retire", () => {
+    const doc = loadDoc(THREE_PARAS);
+    const ids = doc.enableStableIds();
+    const beta = (doc.sections[0].blocks[1] as Paragraph).src;
+    const betaId = ids.idOf(beta)!;
+    const sizeBefore = ids.size();
+
+    // In-place text edit + refresh: beta keeps its id.
+    const run = (doc.sections[0].blocks[1] as Paragraph).children[0] as Run;
+    const t = (run.content.find((c) => c.kind === "text") as TextContent).srcT!;
+    t.text = "beta!";
+    doc.refresh();
+    expect(ids.idOf(beta)).toBe(betaId);
+    expect(ids.size()).toBe(sizeBefore);
+
+    // Delete gamma + refresh: its id retires, survivors unchanged.
+    const body = doc.docRoot.children.find((c) => localName(c.name) === "body")!;
+    const gamma = (doc.sections[0].blocks[2] as Paragraph).src!;
+    const gammaId = ids.idOf(gamma)!;
+    body.children.splice(body.children.indexOf(gamma), 1);
+    doc.refresh();
+    expect(ids.elOf(gammaId)).toBeUndefined();
+    expect(ids.idOf(beta)).toBe(betaId);
+  });
+});
