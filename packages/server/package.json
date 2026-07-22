@@ -11,7 +11,13 @@
       "import": "./dist/index.js"
     }
   },
+  "bin": {
+    "wordinweb-collab-server": "./dist/cli.js"
+  },
   "files": ["dist"],
+  "peerDependenciesMeta": {
+    "ws": { "optional": true }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",

@@ -229,3 +229,31 @@ describe("CollabHub presence", () => {
     expect(await storage.readLog("d", 0)).toHaveLength(0);
   });
 });
+
+import { blankDocxBytes, blankProvider } from "../src/blank.js";
+import { DocxDocument } from "@wordinweb/core";
+
+describe("blank document provider", () => {
+  it("produces a loadable one-paragraph docx", () => {
+    const doc = DocxDocument.load(blankDocxBytes());
+    expect(doc.sections[0].blocks.length).toBe(1);
+    // Round-trips (save is side-effect-free / valid).
+    expect(doc.save().length).toBeGreaterThan(0);
+  });
+
+  it("blankProvider serves fresh bytes per docId", () => {
+    const a = blankProvider.load("x");
+    const b = blankProvider.load("y");
+    expect(a.length).toBeGreaterThan(0);
+    expect(b.length).toBeGreaterThan(0);
+  });
+
+  it("a hub using blankProvider welcomes a client with a blank doc", async () => {
+    const hub = new CollabHub(blankProvider, new InMemoryStorage());
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "fresh", sinceSeq: 0 });
+    const w = c.last();
+    expect(w.t).toBe("welcome");
+    if (w.t === "welcome") expect(w.seq).toBe(0);
+  });
+});

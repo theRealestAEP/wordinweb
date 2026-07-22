@@ -10,3 +10,5 @@ export { CollabHub, type Connection, type DocProvider } from "./hub.js";
 export { PROTOCOL_VERSION, type ClientMessage, type ServerMessage, type PresencePosition } from "@wordinweb/collab/server";
 export { attachWebSocketServer, type WsServer, type WsSocket } from "./ws.js";
 export { InMemoryStorage, type StorageDriver } from "./storage.js";
+export { blankDocxBytes, blankProvider } from "./blank.js";
+export { startDevServer } from "./cli.js";
