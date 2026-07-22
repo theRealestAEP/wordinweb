@@ -387,14 +387,6 @@ export function DocxView({
   const onPageCountChangeRef = useRef(onPageCountChange);
   onPageCountChangeRef.current = onPageCountChange;
 
-  // Register the browser 3D viewport only for editable documents. Unknown
-  // <model-viewer> elements upgrade in place if a document renders first.
-  useEffect(() => {
-    if (editable && typeof window !== "undefined" && !customElements.get("model-viewer")) {
-      void import("@google/model-viewer");
-    }
-  }, [editable]);
-
   const recomputeFit = useCallback(() => {
     const c = containerRef.current;
     if (!c) return;
@@ -528,6 +520,13 @@ export function DocxView({
       paintedModelVersion = doc.modelVersion;
       const container = containerRef.current;
       if (!container) return 0;
+      if (
+        editable
+        && !customElements.get("model-viewer")
+        && layout.pages.some((page) => page.items.some((item) => item.kind === "image" && item.model3D))
+      ) {
+        void import("@google/model-viewer");
+      }
       // Re-rendering replaces the page DOM; keep the user's scroll position
       // (destroy-then-append clamps scrollTop to 0 otherwise). The previous
       // handle is handed to renderToDom so it can adopt the DOM of unchanged
