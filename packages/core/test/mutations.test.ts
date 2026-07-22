@@ -130,3 +130,54 @@ describe("applySplitParagraph", () => {
     expect(run()).toBe(run());
   });
 });
+
+import { applyDeleteRange } from "../src/edit/mutations.js";
+
+describe("applyDeleteRange", () => {
+  it("removes [from,to) and places the caret at from", () => {
+    const doc = loadDoc(p("abcdef"));
+    const c = caretAt(doc, 0, 5);
+    const nc = applyDeleteRange(c, 1, 4); // remove "bcd"
+    expect(nc.offset).toBe(1);
+    expect(nc.bias).toBe("end");
+    expect(bodyXml(doc)).toContain("aef");
+  });
+
+  it("normalizes reversed and out-of-range bounds", () => {
+    const doc = loadDoc(p("hello"));
+    const c = caretAt(doc, 0, 0);
+    applyDeleteRange(c, 4, 2); // reversed -> remove [2,4) = "ll"
+    expect(bodyXml(doc)).toContain("heo");
+    const doc2 = loadDoc(p("hi"));
+    const t2 = caretAt(doc2, 0, 0).t;
+    applyDeleteRange(caretAt(doc2, 0, 0), 0, 99); // clamps to length
+    expect(t2.text).toBe(""); // whole run text removed
+  });
+
+  it("is a no-op for an empty range", () => {
+    const doc = loadDoc(p("keep"));
+    const before = bodyXml(doc);
+    applyDeleteRange(caretAt(doc, 0, 2), 2, 2);
+    expect(bodyXml(doc)).toBe(before);
+  });
+
+  it("is a no-op on a checkbox glyph run", () => {
+    const checkbox =
+      `<w:p><w:sdt><w:sdtPr><w14:checkbox xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">` +
+      `<w14:checked w14:val="0"/></w14:checkbox></w:sdtPr>` +
+      `<w:sdtContent><w:r><w:t xml:space="preserve">☐</w:t></w:r></w:sdtContent></w:sdt></w:p>`;
+    const doc = loadDoc(checkbox);
+    const before = bodyXml(doc);
+    applyDeleteRange(caretAt(doc, 0, 0), 0, 1);
+    expect(bodyXml(doc)).toBe(before);
+  });
+
+  it("determinism: identical XML across two runs", () => {
+    const run = () => {
+      const doc = loadDoc(p("abcdefgh"));
+      applyDeleteRange(caretAt(doc, 0, 0), 2, 6);
+      return bodyXml(doc);
+    };
+    expect(run()).toBe(run());
+  });
+});

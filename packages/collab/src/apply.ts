@@ -3,6 +3,7 @@ import {
   StableIds,
   applyInsertText,
   applySplitParagraph,
+  applyDeleteRange,
   type EditCaret,
   type Run,
   type Block,
@@ -37,9 +38,10 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       if (intent.end <= intent.start) return false;
       const caret = resolveCaret(ids, runMap, { blockId: intent.blockId, runId: intent.runId, offset: intent.start });
       if (!caret) return false;
-      const t = caret.t;
-      if (intent.end > t.text.length) return false;
-      t.text = t.text.slice(0, intent.start) + t.text.slice(intent.end);
+      if (intent.end > caret.t.text.length) return false;
+      // Engine-independent splice via the shared core mutation (offsets were
+      // resolved client-side, so no Intl.Segmenter dependency here).
+      applyDeleteRange(caret, intent.start, intent.end);
       return true;
     }
     case "splitParagraph": {

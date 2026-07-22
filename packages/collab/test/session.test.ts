@@ -136,3 +136,22 @@ describe("DocumentSession convergence", () => {
     expect(build()).toBe(build());
   });
 });
+
+describe("DocumentSession deleteText", () => {
+  it("applies a delete and transforms a concurrent delete in the same run", () => {
+    const session = new DocumentSession(makeDoc(["abcdefgh"]));
+    const { blockId, runId } = runIdOf(session, 0);
+    // Delete "cd" (2..4). Then a concurrent delete of "gh" (6..8) from base 0
+    // must shift left by the 2 chars the first delete removed → 4..6.
+    session.submit({ kind: "deleteText", clientId: "a", clientSeq: 1, base: 0, blockId, runId, start: 2, end: 4 });
+    session.submit({ kind: "deleteText", clientId: "b", clientSeq: 1, base: 0, blockId, runId, start: 6, end: 8 });
+    expect(docText(session.doc)).toBe("abef");
+  });
+
+  it("rejects an out-of-range delete", () => {
+    const session = new DocumentSession(makeDoc(["hi"]));
+    const { blockId, runId } = runIdOf(session, 0);
+    const e = session.submit({ kind: "deleteText", clientId: "a", clientSeq: 1, base: 0, blockId, runId, start: 0, end: 99 });
+    expect(e.kind).toBe("rejected");
+  });
+});

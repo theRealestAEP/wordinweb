@@ -59,6 +59,27 @@ export function applyInsertText(
   return { t, run: caret.run, offset: caret.offset + text.length, bias: "end" };
 }
 
+/**
+ * Delete `[from, to)` characters within the caret's single w:t. Mirrors the
+ * text-removal half of DocxEditor.deleteContents (the grapheme-cluster
+ * boundary is resolved by the caller and passed as explicit offsets — so the
+ * replicated form carries engine-independent offsets and never re-derives
+ * `Intl.Segmenter` boundaries that vary across runtimes, plan doc 05 M2).
+ * Returns the caret at `from`. A checkbox glyph is atomic (no-op).
+ */
+export function applyDeleteRange(
+  caret: EditCaret,
+  from: number,
+  to: number,
+): EditCaret {
+  if (checkboxStateElement(caret.run, caret.t)) return caret;
+  const lo = Math.max(0, Math.min(from, to));
+  const hi = Math.min(caret.t.text.length, Math.max(from, to));
+  if (lo >= hi) return caret;
+  caret.t.text = caret.t.text.slice(0, lo) + caret.t.text.slice(hi);
+  return { t: caret.t, run: caret.run, offset: lo, bias: "end" };
+}
+
 /** Result of a paragraph split: the two sibling paragraph elements and the
  * caret placed at the start of the second. */
 export interface SplitResult {

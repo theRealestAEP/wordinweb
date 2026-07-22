@@ -84,7 +84,7 @@ export type SelectedObjectCommand =
   | "delete";
 import { graphemeStep } from "./grapheme.js";
 import { EditProvenance, defaultProvenance } from "./provenance.js";
-import { applyInsertText, applySplitParagraph, MutationCtx } from "./mutations.js";
+import { applyInsertText, applySplitParagraph, applyDeleteRange, MutationCtx } from "./mutations.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
 import { resolveParagraphStyleChain } from "../parse/styles.js";
 import {
@@ -5313,11 +5313,10 @@ export class DocxEditor {
       if (checkboxStateElement(caret.run, caret.t)) return;
       // Delete the whole grapheme cluster before the caret (a Devanagari
       // conjunct, an Arabic base+harakāt, a surrogate pair) — never a lone
-      // combining mark that would leave a broken cluster.
+      // combining mark that would leave a broken cluster. The boundary is
+      // resolved here; the extracted core does the engine-independent splice.
       const from = graphemeStep(caret.t.text, caret.offset, -1) ?? caret.offset - 1;
-      caret.t.text = caret.t.text.slice(0, from) + caret.t.text.slice(caret.offset);
-      caret.offset = from;
-      caret.bias = "end";
+      this.caret = applyDeleteRange(caret, from, caret.offset);
     } else {
       if (caret.offset >= caret.t.text.length) {
         const pEl = paragraphOf(this.host.doc, caret.t);
@@ -5340,9 +5339,9 @@ export class DocxEditor {
       if (checkboxStateElement(caret.run, caret.t)) return;
       // Forward-delete the whole grapheme cluster after the caret.
       const to = graphemeStep(caret.t.text, caret.offset, 1) ?? caret.offset + 1;
-      caret.t.text = caret.t.text.slice(0, caret.offset) + caret.t.text.slice(to);
+      this.caret = applyDeleteRange(caret, caret.offset, to);
     }
-    this.commit(caret.t.text.length > 0);
+    this.commit(this.caret !== null && this.caret.t.text.length > 0);
   }
 
   /** Backspace/Delete in suggesting mode: mark one character (or a paragraph

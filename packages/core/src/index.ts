@@ -41,7 +41,7 @@ export type { RevisionMeta, RevisionRef, RevisionKind, CaretTarget, DeleteRange 
 export { EditHistory } from "./edit/history.js";
 export { StableIds } from "./edit/ids.js";
 export type { EncodedCaret } from "./edit/ids.js";
-export { applyInsertText, applySplitParagraph } from "./edit/mutations.js";
+export { applyInsertText, applySplitParagraph, applyDeleteRange } from "./edit/mutations.js";
 export type { EditCaret, MutationCtx, SplitResult } from "./edit/mutations.js";
 export { defaultProvenance, recordedProvenance } from "./edit/provenance.js";
 export type { EditProvenance } from "./edit/provenance.js";
