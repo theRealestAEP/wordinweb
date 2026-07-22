@@ -39,6 +39,12 @@ export {
 } from "./edit/suggest.js";
 export type { RevisionMeta, RevisionRef, RevisionKind, CaretTarget, DeleteRange } from "./edit/suggest.js";
 export { EditHistory } from "./edit/history.js";
+export { StableIds } from "./edit/ids.js";
+export type { EncodedCaret } from "./edit/ids.js";
+export { applyInsertText, applySplitParagraph } from "./edit/mutations.js";
+export type { EditCaret, MutationCtx, SplitResult } from "./edit/mutations.js";
+export { defaultProvenance, recordedProvenance } from "./edit/provenance.js";
+export type { EditProvenance } from "./edit/provenance.js";
 export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, paragraphOf, topLevelBlockOf, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";
 export { applyTableOp, cellContextOf } from "./edit/tables.js";
 export {
