@@ -1027,6 +1027,22 @@ class Engine {
     return lastUse;
   }
 
+  private numberingCountersAffectLabels(abstractNumId: number): boolean {
+    const abstract = this.doc.numbering.abstract.get(abstractNumId);
+    if (!abstract) return true;
+    for (const level of abstract.levels.values()) {
+      if (level.format !== "bullet" && level.format !== "none") return true;
+    }
+    for (const instance of this.doc.numbering.instances.values()) {
+      if (instance.abstractNumId !== abstractNumId) continue;
+      for (const override of instance.overrides.values()) {
+        const format = override.level?.format;
+        if (format && format !== "bullet" && format !== "none") return true;
+      }
+    }
+    return false;
+  }
+
   /** PAGEREF rewrite: replace stale cached field text with the bookmark's real
    * page. The right edge stays fixed so TOC right-tab page numbers keep align. */
   private rewritePageRefs(pages: InternalPage[]): void {
@@ -1164,7 +1180,8 @@ class Engine {
       return false;
     }
     const numberingActive = (abstractNumId: number): boolean =>
-      !this.incrLastNumberingUse || (this.incrLastNumberingUse.get(abstractNumId) ?? -1) >= blockIdx;
+      this.numberingCountersAffectLabels(abstractNumId) &&
+      (!this.incrLastNumberingUse || (this.incrLastNumberingUse.get(abstractNumId) ?? -1) >= blockIdx);
     const numIdActive = (numId: number): boolean => {
       const instance = this.doc.numberingInstance(numId);
       return !instance || numberingActive(instance.abstractNumId);

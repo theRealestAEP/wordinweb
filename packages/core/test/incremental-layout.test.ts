@@ -3,6 +3,7 @@ import { DocxDocument } from "../src/docx.js";
 import { __incrStats, layoutDocument } from "../src/layout/engine.js";
 import { invalidateParagraphSignature } from "../src/layout/inline.js";
 import { ApproxMeasurer } from "../src/layout/measure.js";
+import { setListType } from "../src/edit/lists.js";
 import type { Paragraph, Run, TextContent } from "../src/model.js";
 import type { XmlElement } from "../src/xml.js";
 import { localName } from "../src/xml.js";
@@ -127,6 +128,34 @@ describe("incremental same-page block checkpoints", () => {
     expect(incremental._incremental).toBe(true);
     expect(paintProjection(incremental)).toBe(paintProjection(full));
     expect(__incrStats.convergedBlock).toBeGreaterThan(1);
+    expect(__incrStats.blocksLaid).toBeLessThanOrEqual(16);
+  });
+
+  it("converges after toggling a bullet when later bullets share the definition", () => {
+    const numbering = `<?xml version="1.0"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+    const bullet = (text: string) =>
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const body = Array.from({ length: 96 }, (_, index) =>
+      index > 16 && index % 10 === 0 ? bullet(`bullet-${index}`) : p(`block-${index} alpha bravo charlie delta`),
+    ).join("");
+    const doc = DocxDocument.load(makeDocx({
+      "word/document.xml": wrapDocument(body + section),
+      "word/numbering.xml": numbering,
+    }));
+    const first = layoutDocument(doc, { measurer });
+    const block = doc.sections[0].blocks[1] as Paragraph;
+    const text = (block.children[0] as Run).content[0] as TextContent;
+    expect(setListType(doc, [text.srcT!], "bullet")).toBe(true);
+
+    const incremental = layoutDocument(doc, {
+      measurer,
+      prev: first,
+      dirtyHint: block.src,
+      dirtySource: text.srcT,
+    });
+    const full = layoutDocument(doc, { measurer });
+    expect(incremental._incremental).toBe(true);
+    expect(paintProjection(incremental)).toBe(paintProjection(full));
     expect(__incrStats.blocksLaid).toBeLessThanOrEqual(16);
   });
 

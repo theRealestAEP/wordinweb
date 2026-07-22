@@ -1,4 +1,5 @@
 import { DocxDocument } from "../docx.js";
+import { invalidateParagraphSignature } from "../layout/inline.js";
 import { XmlElement, attr, localName } from "../xml.js";
 import { paragraphOf } from "./blocks.js";
 
@@ -39,11 +40,13 @@ export function listTypeAt(doc: DocxDocument, target: XmlElement): ListKind | nu
  * return its numId. Reuses a matching definition when the file already has
  * one so repeated toggles don't pile up abstractNums.
  */
-function ensureListNum(doc: DocxDocument, kind: ListKind): number | null {
+function ensureListNum(doc: DocxDocument, kind: ListKind): { numId: number; created: boolean } | null {
   for (const [numId, inst] of doc.numbering.instances) {
     const lvl = doc.numberingLevel(numId, 0);
     if (!lvl) continue;
-    if (kind === "bullet" ? lvl.format === "bullet" : lvl.format === "decimal") return numId;
+    if (kind === "bullet" ? lvl.format === "bullet" : lvl.format === "decimal") {
+      return { numId, created: false };
+    }
     void inst;
   }
   const root = doc.numberingTree(true);
@@ -84,7 +87,7 @@ function ensureListNum(doc: DocxDocument, kind: ListKind): number | null {
     el(`${w}num`, { [`${w}numId`]: String(numId) }, [el(`${w}abstractNumId`, { [`${w}val`]: absId })]),
   );
   doc.markNumberingChanged();
-  return numId;
+  return { numId, created: true };
 }
 
 /** Step the list level of the target paragraphs (Tab / Shift-Tab), 0..8. */
@@ -128,8 +131,9 @@ export function setListType(doc: DocxDocument, targets: XmlElement[], kind: List
   }
   if (paragraphs.size === 0) return false;
 
-  const numId = kind === null ? null : ensureListNum(doc, kind);
-  if (kind !== null && numId === null) return false;
+  const numbering = kind === null ? null : ensureListNum(doc, kind);
+  if (kind !== null && numbering === null) return false;
+  const numId = numbering?.numId ?? null;
 
   let touched = false;
   for (const pEl of paragraphs) {
@@ -160,6 +164,18 @@ export function setListType(doc: DocxDocument, targets: XmlElement[], kind: List
     }
     touched = true;
   }
-  if (touched) doc.refresh();
+  if (touched) {
+    let reparsed = !numbering?.created;
+    if (reparsed) {
+      for (const paragraph of paragraphs) {
+        if (!doc.reparseBodyParagraph(paragraph)) {
+          reparsed = false;
+          break;
+        }
+        invalidateParagraphSignature(paragraph);
+      }
+    }
+    if (!reparsed) doc.refresh();
+  }
   return touched;
 }
