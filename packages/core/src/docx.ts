@@ -1412,10 +1412,29 @@ export class DocxDocument {
    * grid. The cached widths follow the same content-dominant shape and do not
    * change Word's autofit result.
    */
+  /** Undo closures recorded by save-time fixups while `saveJournal` is
+   * active, so `save()` can revert every live-tree mutation and remain
+   * side-effect-free. Collaborative checkpoints re-serialize the
+   * authoritative document repeatedly; a save that mutated the tree would
+   * change its hash outside the intent stream and desync the fleet. */
+  private saveJournal: (() => void)[] | null = null;
+
+  private journalSetAttr(element: XmlElement, key: string, value: string): void {
+    if (this.saveJournal) {
+      const had = Object.prototype.hasOwnProperty.call(element.attrs, key);
+      const prev = element.attrs[key];
+      this.saveJournal.push(() => {
+        if (had) element.attrs[key] = prev;
+        else delete element.attrs[key];
+      });
+    }
+    element.attrs[key] = value;
+  }
+
   private normalizePercentageTableGrids(): void {
     const setAttr = (element: XmlElement, name: string, value: string): void => {
       const key = Object.keys(element.attrs).find((item) => localName(item) === name);
-      element.attrs[key ?? `${element.name.includes(":") ? element.name.split(":")[0] + ":" : ""}${name}`] = value;
+      this.journalSetAttr(element, key ?? `${element.name.includes(":") ? element.name.split(":")[0] + ":" : ""}${name}`, value);
     };
     const textLength = (blocks: Block[]): number => {
       let length = 0;
@@ -1501,6 +1520,19 @@ export class DocxDocument {
   }
 
   save(): Uint8Array {
+    const journal: (() => void)[] = [];
+    this.saveJournal = journal;
+    try {
+      return this.buildPackage();
+    } finally {
+      // Revert save-time fixups in reverse so the live tree is byte-identical
+      // to before the save (the collab-checkpoint purity invariant).
+      for (let i = journal.length - 1; i >= 0; i--) journal[i]();
+      this.saveJournal = null;
+    }
+  }
+
+  private buildPackage(): Uint8Array {
     this.normalizePercentageTableGrids();
     const files: Record<string, Uint8Array> = { ...this.pkg.raw() };
     if (files["docProps/custom.xml"] && this.contentTypesRoot && !this.contentTypesRoot.children.some(
@@ -1508,7 +1540,8 @@ export class DocxDocument {
     )) {
       const prefixEnd = this.contentTypesRoot.name.indexOf(":") + 1;
       const prefix = prefixEnd > 0 ? this.contentTypesRoot.name.slice(0, prefixEnd) : "";
-      this.contentTypesRoot.children.push({
+      const ctRoot = this.contentTypesRoot;
+      ctRoot.children.push({
         name: `${prefix}Override`,
         attrs: {
           PartName: "/docProps/custom.xml",
@@ -1517,6 +1550,7 @@ export class DocxDocument {
         children: [],
         text: "",
       });
+      if (this.saveJournal) this.saveJournal.push(() => ctRoot.children.pop());
     }
     this.writeModeledXml(files, this.docPart, this.docRoot);
     for (const part of this.hfParts) {

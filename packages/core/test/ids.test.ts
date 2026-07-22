@@ -165,3 +165,41 @@ describe("deterministic provenance (Phase 1 determinism fixes)", () => {
     expect(fresh.nextDrawingId()).toBe(1000);
   });
 });
+
+describe("save() is side-effect-free (N1 checkpoint-purity invariant)", () => {
+  const pctTable =
+    `<w:tbl><w:tblPr><w:tblW w:w="100%" w:type="pct"/></w:tblPr>` +
+    `<w:tblGrid><w:gridCol w:w="5"/><w:gridCol w:w="5"/></w:tblGrid>` +
+    `<w:tr>` +
+    `<w:tc><w:p><w:r><w:t xml:space="preserve">left cell content</w:t></w:r></w:p></w:tc>` +
+    `<w:tc><w:p><w:r><w:t xml:space="preserve">right</w:t></w:r></w:p></w:tc>` +
+    `</w:tr></w:tbl>`;
+
+  it("leaves the live tree byte-identical across repeated saves (percentage grid)", () => {
+    const doc = loadDoc(pctTable + p("after"));
+    const before = doc.editableRoots().map((r) => serializeXml(r)).join("\n");
+    const s1 = doc.save();
+    const afterFirst = doc.editableRoots().map((r) => serializeXml(r)).join("\n");
+    expect(afterFirst).toBe(before); // save did not mutate authoritative state
+    const s2 = doc.save();
+    // Deterministic checkpoint output: same live state → same bytes.
+    expect(strFromU8(unzipSync(s2)["word/document.xml"])).toBe(
+      strFromU8(unzipSync(s1)["word/document.xml"]),
+    );
+  });
+
+  it("leaves content-types byte-identical when a custom-properties Override would be added", () => {
+    const customProps =
+      `<?xml version="1.0"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" ` +
+      `xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"/>`;
+    const doc = DocxDocument.load(
+      makeDocx({ "word/document.xml": wrapDocument(p("x")), "docProps/custom.xml": customProps }),
+    );
+    const beforeCt = serializeXml((doc as unknown as { contentTypesRoot: XmlElement }).contentTypesRoot ?? { name: "", attrs: {}, children: [], text: "" });
+    const saved = doc.save();
+    const afterCt = serializeXml((doc as unknown as { contentTypesRoot: XmlElement }).contentTypesRoot ?? { name: "", attrs: {}, children: [], text: "" });
+    expect(afterCt).toBe(beforeCt); // live content-types not mutated
+    // But the SAVED bytes do contain the Override.
+    expect(strFromU8(unzipSync(saved)["[Content_Types].xml"])).toContain("/docProps/custom.xml");
+  });
+});
