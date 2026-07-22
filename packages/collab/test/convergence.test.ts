@@ -132,3 +132,35 @@ describe("sidecar: split-created ids survive a reconciliation restore (round-2 F
     expect(serializeXml(b.doc.docRoot)).toBe(serverXml);
   });
 });
+
+
+describe("one-in-flight interleave (the correct multi-round model)", () => {
+  it("a remote edit interleaving a client's single in-flight intent converges", () => {
+    const initial = docBytes(["mid"]);
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const a = new ClientReplica(initial);
+    const b = new ClientReplica(initial);
+    const addr = runAddr(server);
+
+    // A has ONE in-flight insert at the end; B inserts at the start; both base 0.
+    const pa: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: addr.blockId, runId: addr.runId, offset: addr.len }, text: "A" };
+    const rb: InsertTextIntent = { kind: "insertText", clientId: "b", clientSeq: 1, base: 0, at: { blockId: addr.blockId, runId: addr.runId, offset: 0 }, text: "B" };
+    a.submitLocal(pa);
+    b.submitLocal(rb);
+    expect(a.pendingCount).toBe(1); // one in flight
+
+    const eB = server.submit(rb);
+    const eA = server.submit(pa);
+
+    // A gets B's remote edit first (interleave), then its own echo.
+    a.receive([eB]);
+    a.receive([eA]);
+    b.receive([eB, eA]);
+
+    const serverXml = serializeXml(server.doc.docRoot);
+    expect(serializeXml(a.doc.docRoot)).toBe(serverXml);
+    expect(serializeXml(b.doc.docRoot)).toBe(serverXml);
+    expect(paraText(server.doc)).toBe("BmidA");
+    expect(a.pendingCount).toBe(0); // drained after echo
+  });
+});

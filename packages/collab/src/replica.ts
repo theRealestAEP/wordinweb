@@ -3,6 +3,8 @@ import { Intent, LogEntry, idempotencyKey } from "./intents.js";
 import { transformIntent } from "./transform.js";
 import { applyIntent } from "./apply.js";
 
+// transformIntent is used in replayPending below.
+
 /**
  * A client-side replica with optimistic apply and rollback-replay (plan doc
  * 03 Stage B). It applies local intents immediately against its live
@@ -36,35 +38,54 @@ export class ClientReplica {
     this.confirmedSidecar = this.ids.exportSidecar(this.doc.editableRoots());
   }
 
-  /** Apply a locally produced intent optimistically and enqueue it as pending.
-   * The intent's `base` must be the current confirmed seq. */
+  /**
+   * Apply a locally produced intent optimistically and enqueue it as pending.
+   * The intent's `base` must be the current confirmed seq.
+   *
+   * CONSTRAINT (one-in-flight): a client should hold at most one un-confirmed
+   * pending intent at a time — submit the next only after the previous is
+   * confirmed. This is the model production OT servers use (e.g. ShareDB).
+   * Multiple concurrent same-client pending whose offsets assume each other
+   * cannot be correctly rebased against an interleaved remote edit without
+   * operation inverses, which the OT-lite transform deliberately does not
+   * implement (plan doc 03 marks adjusted-sibling replay a scoped next step).
+   * The transform below is correct for the single-in-flight case; the replay
+   * still stores transformed forms so a burst that stays same-client-only
+   * (no remote interleave) also composes.
+   */
   submitLocal(intent: Intent): void {
     applyIntent(this.doc, this.ids, intent);
     if (intent.kind === "splitParagraph") this.resync();
     this.pending.push(intent);
   }
 
-  /** Receive the server's canonical broadcast entries (in seq order) and
-   * reconcile. Idempotent for already-seen seqs. */
+  /** Number of un-confirmed local intents (for the one-in-flight discipline). */
+  get pendingCount(): number {
+    return this.pending.length;
+  }
+
+  /**
+   * Receive the server's canonical broadcast entries (in seq order) and
+   * reconcile. The invariant is: live doc = confirmed baseline + remaining
+   * pending. So every receive restores to the confirmed baseline, applies the
+   * canonical batch (advancing the baseline and dropping matched pending),
+   * then replays the still-pending intents transformed against the remote
+   * intents in the batch (plan doc 03). Idempotent for already-seen seqs.
+   */
   receive(entries: LogEntry[]): void {
     const fresh = entries.filter((e) => e.seq > this.confirmedSeq);
     if (fresh.length === 0) return;
 
-    const ownAhead = fresh.some((e) => !isOurs(e, this.pending));
-    if (!ownAhead) {
-      // Every fresh entry is the canonical echo of our own pending, in order:
-      // fast-forward the confirmed baseline, drop matching pending.
-      for (const e of fresh) this.advanceConfirmed(e);
-      this.snapshotConfirmed();
-      return;
-    }
+    const remoteAhead = fresh
+      .filter((e): e is Extract<LogEntry, { kind: "applied" }> => e.kind === "applied" && !isOurs(e, this.pending))
+      .map((e) => e.intent);
 
-    // A remote edit interleaves: restore to confirmed, apply the canonical
-    // entries, then replay remaining pending on top.
+    // Rebuild the live doc from the confirmed baseline so optimistic pending
+    // edits don't get double-applied when their canonical echoes arrive.
     this.restoreConfirmed();
     for (const e of fresh) this.advanceConfirmed(e);
     this.snapshotConfirmed();
-    this.replayPending();
+    this.replayPending(remoteAhead);
   }
 
   private advanceConfirmed(e: LogEntry): void {
@@ -78,15 +99,20 @@ export class ClientReplica {
     this.confirmedSeq = e.seq;
   }
 
-  private replayPending(): void {
-    // Each pending intent was produced against the pre-broadcast state; replay
-    // it transformed against the entries confirmed since its base.
+  private replayPending(remoteAhead: Intent[]): void {
+    // Each remaining pending intent is transformed through the shared function
+    // against the interleaved remote intents (the same transform the server
+    // applied), then re-applied on the restored baseline. The TRANSFORMED form
+    // is stored back so successive remote batches compose cumulatively; its
+    // idempotency key is unchanged, so the eventual canonical echo still drops
+    // it. A pending that no longer applies is dropped (clean failure).
     const stillPending = this.pending;
     this.pending = [];
     for (const p of stillPending) {
-      const applied = applyIntent(this.doc, this.ids, p);
-      if (p.kind === "splitParagraph") this.resync();
-      if (applied) this.pending.push(p);
+      const transformed = transformIntent(p, remoteAhead);
+      const applied = applyIntent(this.doc, this.ids, transformed);
+      if (transformed.kind === "splitParagraph") this.resync();
+      if (applied) this.pending.push(transformed);
     }
   }
 
