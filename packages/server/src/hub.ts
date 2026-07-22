@@ -82,6 +82,15 @@ export class CollabHub {
         for (const c of room.conns) c.send(out);
         return;
       }
+      case "presence": {
+        const docId = this.connDoc.get(conn.id);
+        if (!docId) return; // presence before join is ignored, not refused
+        const room = this.rooms.get(docId)!;
+        // Ephemeral: fan out to every OTHER participant, never logged/persisted.
+        const out: ServerMessage = { t: "presence", participant: conn.id, position: msg.position };
+        for (const c of room.conns) if (c.id !== conn.id) c.send(out);
+        return;
+      }
     }
   }
 

@@ -190,3 +190,42 @@ describe("CollabHub persistence + rehydration", () => {
     expect(log).toHaveLength(1); // deduped
   });
 });
+
+import type { PresencePosition } from "../src/protocol.js";
+
+describe("CollabHub presence", () => {
+  const pos: PresencePosition = { anchor: { blockId: 1, runId: 2, offset: 3 } };
+
+  it("fans a presence update out to other participants but not the sender", async () => {
+    const hub = new CollabHub(provider);
+    const a = new FakeConn("a");
+    const b = new FakeConn("b");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    const aBefore = a.received.length;
+    await hub.handle(a, { t: "presence", position: pos });
+    expect(a.received.length).toBe(aBefore); // sender does not echo
+    const msg = b.last();
+    expect(msg.t).toBe("presence");
+    if (msg.t === "presence") {
+      expect(msg.participant).toBe("a");
+      expect(msg.position).toEqual(pos);
+    }
+  });
+
+  it("ignores presence from a connection that has not joined", async () => {
+    const hub = new CollabHub(provider);
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "presence", position: pos });
+    expect(c.received).toHaveLength(0); // ignored, not refused
+  });
+
+  it("does not persist presence (storage untouched)", async () => {
+    const storage = new InMemoryStorage();
+    const hub = new CollabHub(provider, storage);
+    const a = new FakeConn("a");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(a, { t: "presence", position: pos });
+    expect(await storage.readLog("d", 0)).toHaveLength(0);
+  });
+});
