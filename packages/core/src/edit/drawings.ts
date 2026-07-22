@@ -6,8 +6,9 @@ const NS_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDr
 const NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const NS_WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
 
-export type ShapePreset = "line" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox";
+export type ShapePreset = "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox";
 export type WordArtPreset = "plain" | "archUp" | "archDown" | "wave" | "chevron";
+export type DrawingLineDash = "solid" | "dashed" | "dotted";
 export interface InkPoint { x: number; y: number }
 export type DrawingTool =
   | { kind?: "pen"; color: string; width: number }
@@ -45,23 +46,25 @@ export function insertShapeAt(
 
   const w = prefixOf(caretRun);
   const id = String(doc.nextDrawingId());
-  const isLine = preset === "line";
-  const width = isLine ? 240 : preset === "textBox" ? 240 : 192;
-  const height = isLine ? 2 : preset === "textBox" ? 72 : 96;
+  const isLine = preset === "line" || preset === "verticalLine";
+  const isVerticalLine = preset === "verticalLine";
+  const width = isVerticalLine ? 2 : isLine ? 240 : preset === "textBox" ? 240 : 192;
+  const height = isVerticalLine ? 240 : isLine ? 2 : preset === "textBox" ? 72 : 96;
   const cx = String(Math.round(width * EMU_PER_PX));
   const cy = String(Math.round(height * EMU_PER_PX));
   // Keep the line geometry horizontal while the outer extent retains enough
   // height to provide a usable selection target and resize handles.
-  const shapeCy = isLine ? "0" : cy;
+  const shapeCx = isVerticalLine ? "0" : cx;
+  const shapeCy = isLine && !isVerticalLine ? "0" : cy;
   const geometry =
-    preset === "roundedRectangle" ? "roundRect" : preset === "rectangle" || preset === "textBox" ? "rect" : preset;
+    isLine ? "line" : preset === "roundedRectangle" ? "roundRect" : preset === "rectangle" || preset === "textBox" ? "rect" : preset;
   const isTextBox = preset === "textBox";
   const shapeName = isLine ? `Line ${id}` : isTextBox ? `Text Box ${id}` : `Shape ${id}`;
 
   const spPr = [
     el("a:xfrm", {}, [
       el("a:off", { x: "0", y: "0" }),
-      el("a:ext", { cx, cy: shapeCy }),
+      el("a:ext", { cx: shapeCx, cy: shapeCy }),
     ]),
     el("a:prstGeom", { prst: geometry }, [el("a:avLst")]),
     isTextBox || isLine
@@ -192,14 +195,20 @@ export function setDrawingWordArtText(doc: DocxDocument, drawing: XmlElement, te
   return true;
 }
 
-export function drawingLineStyle(drawing: XmlElement): { color: string; width: number } | null {
+export function drawingLineStyle(drawing: XmlElement): { color: string; width: number; dash: DrawingLineDash } | null {
   const spPr = descendant(drawing, "spPr");
   if (!spPr) return null;
   const line = descendant(drawing, "ln");
-  if (!line) return { color: "#000000", width: 0.75 };
+  if (!line) return { color: "#000000", width: 0.75, dash: "solid" };
   const color = descendant(line, "srgbClr")?.attrs.val ?? "000000";
   const width = Math.max((parseInt(line.attrs.w ?? "0", 10) || 0) / EMU_PER_PX, 0.75);
-  return { color: `#${color.toUpperCase()}`, width };
+  const dashValue = line.children.find((child) => localName(child.name) === "prstDash")?.attrs.val;
+  const dash = dashValue === "dot" || dashValue === "sysDot"
+    ? "dotted"
+    : dashValue && dashValue !== "solid"
+      ? "dashed"
+      : "solid";
+  return { color: `#${color.toUpperCase()}`, width, dash };
 }
 
 export function drawingFillColor(drawing: XmlElement): string | null {
@@ -231,6 +240,7 @@ export function setDrawingLineStyle(
   drawing: XmlElement,
   color: string,
   widthPx: number,
+  dash: DrawingLineDash = "solid",
 ): boolean {
   const spPr = descendant(drawing, "spPr");
   if (!spPr) return false;
@@ -242,9 +252,10 @@ export function setDrawingLineStyle(
   line.attrs.w = String(Math.max(1, Math.round(widthPx * EMU_PER_PX)));
   line.children = line.children.filter((child) => {
     const name = localName(child.name);
-    return name !== "solidFill" && name !== "noFill";
+    return name !== "solidFill" && name !== "noFill" && name !== "prstDash";
   });
   line.children.unshift(el("a:solidFill", {}, [el("a:srgbClr", { val: color.replace(/^#/, "").toUpperCase() })]));
+  line.children.splice(1, 0, el("a:prstDash", { val: dash === "dotted" ? "dot" : dash === "dashed" ? "dash" : "solid" }));
   doc.refresh();
   return true;
 }

@@ -130,6 +130,7 @@ const BORDER_STYLE_MAP: Record<string, BorderStyle> = {
   dashed: "dashed",
   dotDash: "dotDash",
   dotDotDash: "dotDotDash",
+  thinThickSmallGap: "thinThickSmallGap",
   triple: "triple",
   wave: "wave",
   none: "none",

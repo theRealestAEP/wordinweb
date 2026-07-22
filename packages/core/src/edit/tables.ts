@@ -73,6 +73,15 @@ export function cellContextOf(doc: DocxDocument, target: XmlElement): CellContex
   return null;
 }
 
+/** Current cell fill, undefined outside a table and null for no direct fill. */
+export function cellShadingAt(doc: DocxDocument, target: XmlElement): string | null | undefined {
+  const ctx = cellContextOf(doc, target);
+  if (!ctx) return undefined;
+  const shd = child(child(ctx.tc, "tcPr"), "shd");
+  const fill = shd ? attr(shd, "fill") : undefined;
+  return fill && fill.toLowerCase() !== "auto" ? `#${fill.replace(/^#/, "").toUpperCase()}` : null;
+}
+
 function emptyCellLike(tc: XmlElement, w: string): XmlElement {
   const tcPr = tc.children.find((c) => localName(c.name) === "tcPr");
   return {
@@ -656,6 +665,9 @@ export function resizeDrawing(
     for (const childNode of node.children) findLineExtent(childNode);
   };
   findLineExtent(drawingEl);
+  const keepVertical = lineExtent
+    ? parseInt(lineExtent.attrs[Object.keys(lineExtent.attrs).find((key) => localName(key) === "cx") ?? "cx"] ?? "0", 10) === 0
+    : false;
   const keepHorizontal = lineExtent
     ? parseInt(lineExtent.attrs[Object.keys(lineExtent.attrs).find((key) => localName(key) === "cy") ?? "cy"] ?? "0", 10) === 0
     : false;
@@ -663,7 +675,7 @@ export function resizeDrawing(
   const setExt = (el: XmlElement) => {
     const cxKey = Object.keys(el.attrs).find((k) => localName(k) === "cx") ?? "cx";
     const cyKey = Object.keys(el.attrs).find((k) => localName(k) === "cy") ?? "cy";
-    el.attrs[cxKey] = cx;
+    el.attrs[cxKey] = el === lineExtent && keepVertical ? "0" : cx;
     el.attrs[cyKey] = el === lineExtent && keepHorizontal ? "0" : cy;
     touched = true;
   };

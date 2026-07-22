@@ -718,6 +718,10 @@ export function printPages(root: HTMLElement, pageWidthPx: number, pageHeightPx:
     @page { size: ${pageWidthPx / 96}in ${pageHeightPx / 96}in; margin: 0; }
     html, body { margin: 0; padding: 0; }
     .dxw-pages { display: block !important; padding: 0 !important; gap: 0 !important; }
+    .dxw-pages, .dxw-pages * {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
     .dxw-page { box-shadow: none !important; margin: 0 !important; break-after: page; }
     .dxw-comment-card, .dxw-hf-marker { display: none !important; }
   `;
@@ -1480,10 +1484,20 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
       hit.dataset.dxwDrawing = "1";
       if (item.ink) hit.dataset.dxwInk = "1";
       if (item.smartArt) hit.dataset.dxwSmartArt = "1";
-      if (item.height < 12) {
+      for (const node of item.smartArtNodes ?? []) {
+        const nodeHit = document.createElement("div");
+        nodeHit.dataset.dxwSmartArtNode = String(node.index);
+        nodeHit.style.cssText =
+          `position:absolute;left:${node.x}px;top:${node.y}px;width:${node.width}px;height:${node.height}px;cursor:move;`;
+        hit.appendChild(nodeHit);
+      }
+      if (item.width < 12 || item.height < 12) {
         const target = document.createElement("div");
+        const targetWidth = Math.max(item.width, 12);
+        const targetHeight = Math.max(item.height, 12);
         target.style.cssText =
-          `position:absolute;left:0;top:${-(12 - item.height) / 2}px;width:100%;height:12px;cursor:move;`;
+          `position:absolute;left:${-(targetWidth - item.width) / 2}px;top:${-(targetHeight - item.height) / 2}px;` +
+          `width:${targetWidth}px;height:${targetHeight}px;cursor:move;`;
         hit.appendChild(target);
       }
       return hit;
@@ -2416,6 +2430,8 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     stroke.style.transformOrigin = "0 50%";
     if (border.style === "double") {
       stroke.style.background = `linear-gradient(180deg, ${border.color} 0 ${w}px, transparent ${w}px ${w * 2}px, ${border.color} ${w * 2}px ${w * 3}px)`;
+    } else if (border.style === "thinThickSmallGap") {
+      stroke.style.background = `linear-gradient(180deg, ${border.color} 0 25%, transparent 25% 50%, ${border.color} 50% 100%)`;
     } else if (dashPattern) {
       const on = Math.max(dashPattern[0] * border.width, 2);
       const period = on + Math.max(dashPattern[1] * border.width, 1);
@@ -2440,6 +2456,9 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     if (border.style === "double") {
       el.style.height = `${w * 3}px`;
       el.style.background = `linear-gradient(180deg, ${border.color} 0 ${w}px, transparent ${w}px ${w * 2}px, ${border.color} ${w * 2}px ${w * 3}px)`;
+    } else if (border.style === "thinThickSmallGap") {
+      el.style.height = `${w}px`;
+      el.style.background = `linear-gradient(180deg, ${border.color} 0 25%, transparent 25% 50%, ${border.color} 50% 100%)`;
     } else if (dashPattern) {
       const on = Math.max(dashPattern[0] * border.width, 2);
       const period = on + Math.max(dashPattern[1] * border.width, 1);
@@ -2470,6 +2489,9 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     if (border.style === "double") {
       el.style.width = `${w * 3}px`;
       el.style.background = `linear-gradient(90deg, ${border.color} 0 ${w}px, transparent ${w}px ${w * 2}px, ${border.color} ${w * 2}px ${w * 3}px)`;
+    } else if (border.style === "thinThickSmallGap") {
+      el.style.width = `${w}px`;
+      el.style.background = `linear-gradient(90deg, ${border.color} 0 25%, transparent 25% 50%, ${border.color} 50% 100%)`;
     } else if (dashPattern) {
       const on = Math.max(dashPattern[0] * border.width, 2);
       const period = on + Math.max(dashPattern[1] * border.width, 1);

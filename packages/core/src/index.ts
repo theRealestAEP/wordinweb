@@ -22,9 +22,9 @@ export { applyRunFormat, summarizeSelection } from "./edit/commands.js";
 export type { RunFormatPatch, SelectionSegment, SelectionFormat } from "./edit/commands.js";
 export { selectionToSegments } from "./edit/selection.js";
 export { DocxEditor } from "./edit/editor.js";
-export type { ObjectArrangeAction } from "./edit/editor.js";
-export { requestTextInputDialog } from "./edit/dialog.js";
-export type { TextInputDialogOptions } from "./edit/dialog.js";
+export type { ObjectArrangeAction, SelectedObjectCommand, SelectedObjectKind } from "./edit/editor.js";
+export { requestColorDialog, requestLineStyleDialog, requestNumberPairDialog, requestTextInputDialog } from "./edit/dialog.js";
+export type { ColorDialogOptions, LineStyleDialogValue, NumberPairDialogOptions, NumberPairDialogValue, TextInputDialogOptions } from "./edit/dialog.js";
 export {
   insertSuggestedText,
   deleteSuggestedRange,
@@ -54,8 +54,8 @@ export { addComment, deleteComment, replyToComment } from "./edit/comments.js";
 export { setListType, listTypeAt, setListLevel } from "./edit/lists.js";
 export type { ListKind } from "./edit/lists.js";
 export { setLink, removeLink, linkAt } from "./edit/links.js";
-export { adjustIndent, setParagraphSpacing, setDropCapAt } from "./edit/paragraph.js";
-export type { ParagraphSpacingPatch, DropCapMode } from "./edit/paragraph.js";
+export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpacing, setDropCapAt } from "./edit/paragraph.js";
+export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode } from "./edit/paragraph.js";
 export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertFootnote } from "./edit/notes.js";
@@ -72,9 +72,10 @@ export {
   setDrawingLineStyle,
   setDrawingWordArtText,
 } from "./edit/drawings.js";
-export type { DrawingTool, InkPoint, ShapePreset, WordArtPreset } from "./edit/drawings.js";
+export type { DrawingLineDash, DrawingTool, InkPoint, ShapePreset, WordArtPreset } from "./edit/drawings.js";
 export { buildChartWorkbook, buildChartXml, insertChartAt, normalizeChartData, setChartData } from "./edit/charts.js";
-export { buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, normalizeSmartArtData, setSmartArtData } from "./edit/smartart.js";
+export { buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, normalizeSmartArtData, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "./edit/smartart.js";
+export type { SmartArtTextFormat } from "./edit/smartart.js";
 export { insertModel3DAt, setModel3DRotation, insertWebVideoAt, insertEmbeddedObjectAt, normalizeWebVideoUrl } from "./edit/objects.js";
 export type { Model3DInsert, Model3DRotation, WebVideoInsert, EmbeddedObjectInsert } from "./edit/objects.js";
 export { buildOlePackage, extractOlePackage } from "./parse/ole.js";
@@ -85,6 +86,7 @@ export type { BreakInsertion, CoverPageContent, LineNumberingPatch } from "./edi
 export { linearizeMath, parseMathLinear, setMathLinear, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages } from "./render/dom.js";
 export type { FindMatch } from "./edit/find.js";
+export { cellShadingAt } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";
 export type { ParagraphAlignment, PageLayoutPatch } from "./edit/blocks.js";
 export type { EditorHost } from "./edit/editor.js";

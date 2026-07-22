@@ -1,5 +1,5 @@
 import { Border, EmbeddedObjectReference, Model3DReference, Run, RunProps, WebVideoReference } from "../model.js";
-import type { ChartData } from "../model.js";
+import type { ChartData, SmartArtData } from "../model.js";
 import type { XmlElement } from "../xml.js";
 
 /** Maps a rendered text item back to its source XML for editing. */
@@ -213,6 +213,10 @@ export interface DrawingHitItem {
   ink?: boolean;
   /** Native SmartArt diagram selection target. */
   smartArt?: boolean;
+  /** Node hit boxes inside the SmartArt drawing, relative to this item. */
+  smartArtNodes?: Array<{ index: number; x: number; y: number; width: number; height: number }>;
+  chartData?: ChartData;
+  smartArtData?: SmartArtData;
   /** A shape fill hit that sits UNDER the shape's own text spans (same z): a
    * click on bare fill selects or drags the shape, while clicks on its text
    * glyphs still reach the text editor. */

@@ -39,8 +39,16 @@ import {
   setImageWrap,
 } from "./images.js";
 import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
-import { requestTextInputDialog } from "./dialog.js";
+import { requestColorDialog, requestLineStyleDialog, requestNumberPairDialog, requestTextInputDialog } from "./dialog.js";
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
+import {
+  setSmartArtFill,
+  setSmartArtNodeText,
+  setSmartArtTextFormat,
+  smartArtFillColor,
+  smartArtTextFormat,
+  type SmartArtTextFormat,
+} from "./smartart.js";
 
 export type ObjectArrangeAction =
   | "alignLeft"
@@ -53,6 +61,27 @@ export type ObjectArrangeAction =
   | "rotateRight"
   | "bringToFront"
   | "sendToBack";
+
+export type SelectedObjectKind = "shape" | "line" | "smartArt" | "chart" | "image" | "model3d";
+
+export type SelectedObjectCommand =
+  | "altText"
+  | "editText"
+  | "fill"
+  | "outline"
+  | "lineStyle"
+  | "rotate"
+  | "size"
+  | "position"
+  | "wrapInline"
+  | "wrapSquare"
+  | "wrapTopAndBottom"
+  | "wrapFront"
+  | "wrapBehind"
+  | "bringForward"
+  | "sendBackward"
+  | "reset3d"
+  | "delete";
 import { graphemeStep } from "./grapheme.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
 import { resolveParagraphStyleChain } from "../parse/styles.js";
@@ -159,6 +188,20 @@ function textElements(el: XmlElement): XmlElement[] {
   };
   walk(el);
   return out;
+}
+
+function clearListParagraphFormatting(doc: DocxDocument, paragraph: XmlElement): boolean {
+  const pPr = paragraph.children.find((child) => localName(child.name) === "pPr");
+  if (!pPr) return false;
+  const style = pPr.children.find((child) => localName(child.name) === "pStyle");
+  const styleHasNumbering = !!resolveParagraphStyleChain(doc.styles, attr(style, "val"), false).pPr.numbering;
+  const hasDirectNumbering = pPr.children.some((child) => localName(child.name) === "numPr");
+  if (!hasDirectNumbering && !styleHasNumbering) return false;
+  pPr.children = pPr.children.filter((child) => {
+    const name = localName(child.name);
+    return name !== "numPr" && !(name === "pStyle" && styleHasNumbering);
+  });
+  return true;
 }
 
 function emptyParagraphLike(el: XmlElement): { paragraph: XmlElement; text: XmlElement } {
@@ -1059,6 +1102,232 @@ export class DocxEditor {
     return this.selectedImage?.src ?? null;
   }
 
+  getSelectedChartData() {
+    const src = this.selectedImage?.src;
+    if (!src) return null;
+    return this.host.getHandle()?.drawings.find((binding) => binding.item.src === src)?.item.chartData ?? null;
+  }
+
+  getSelectedSmartArtData() {
+    const src = this.selectedImage?.src;
+    if (!src) return null;
+    return this.host.getHandle()?.drawings.find((binding) => binding.item.src === src)?.item.smartArtData ?? null;
+  }
+
+  getSelectedSmartArtTextFormat(): SmartArtTextFormat | null {
+    const src = this.selectedImage?.src;
+    if (!src || this.getSelectedObjectContext()?.kind !== "smartArt") return null;
+    return smartArtTextFormat(this.host.doc, src, this.selectedSmartArtNodeIndex ?? 0);
+  }
+
+  setSelectedSmartArtTextFormat(patch: Partial<SmartArtTextFormat>): boolean {
+    const src = this.selectedImage?.src;
+    if (!src || this.getSelectedObjectContext()?.kind !== "smartArt") return false;
+    const current = smartArtTextFormat(this.host.doc, src, this.selectedSmartArtNodeIndex ?? 0);
+    if (!current) return false;
+    const nodeIndex = this.selectedSmartArtNodeIndex;
+    this.host.history?.checkpoint();
+    if (!setSmartArtTextFormat(this.host.doc, src, { ...current, ...patch }, nodeIndex ?? undefined)) return false;
+    this.host.rerender();
+    this.reselectImage(src, undefined, nodeIndex);
+    return true;
+  }
+
+  getSelectedObjectContext(): { kind: SelectedObjectKind; canEditText: boolean; smartArtNodeSelected?: boolean; smartArtNodeIndex?: number } | null {
+    const selected = this.selectedImage;
+    if (!selected) return null;
+    if (selected.kind === "image") {
+      return { kind: selected.el.dataset.dxwModel3d ? "model3d" : "image", canEditText: false };
+    }
+    const binding = this.host.getHandle()?.drawings.find((item) => item.item.src === selected.src);
+    if (binding?.item.smartArtData) {
+      return {
+        kind: "smartArt",
+        canEditText: this.selectedSmartArtNodeIndex !== null,
+        smartArtNodeSelected: this.selectedSmartArtNodeIndex !== null,
+        smartArtNodeIndex: this.selectedSmartArtNodeIndex ?? undefined,
+      };
+    }
+    if (binding?.item.chartData) return { kind: "chart", canEditText: false };
+    const kind = isDrawingLine(selected.src) ? "line" : "shape";
+    return {
+      kind,
+      canEditText: kind === "shape" && !!binding?.item.textboxStory && !isDrawingWordArt(selected.src),
+    };
+  }
+
+  runSelectedObjectCommand(command: SelectedObjectCommand): boolean {
+    const selected = this.selectedImage;
+    const context = this.getSelectedObjectContext();
+    if (!selected || !context) return false;
+    const { src, el } = selected;
+    const selectedSmartArtNodeIndex = this.selectedSmartArtNodeIndex;
+    const reselect = () => this.reselectImage(src, undefined, selectedSmartArtNodeIndex);
+    if (command === "delete") {
+      this.deleteSelectedImage();
+      return true;
+    }
+    if (command === "bringForward" || command === "sendBackward") {
+      return this.arrangeSelectedObject(command === "bringForward" ? "bringToFront" : "sendToBack");
+    }
+    if (command.startsWith("wrap")) {
+      const mode = command === "wrapInline" ? "inline"
+        : command === "wrapSquare" ? "square"
+          : command === "wrapTopAndBottom" ? "topAndBottom"
+            : command === "wrapBehind" ? "behind" : "none";
+      this.host.history?.checkpoint();
+      const handle = this.host.getHandle();
+      const binding = selected.kind === "image"
+        ? handle?.images.find((item) => item.item.src === src)
+        : handle?.drawings.find((item) => item.item.src === src);
+      const marginLeft = this.host.doc.sections[0]?.props.marginLeft ?? 96;
+      const position = binding ? { x: binding.item.x - marginLeft, y: 0 } : undefined;
+      if (!setImageWrap(this.host.doc, src, mode, position)) return false;
+      this.host.rerender(undefined, "global");
+      reselect();
+      return true;
+    }
+    if (command === "size") {
+      void requestNumberPairDialog(this.host.container, {
+        title: "Exact size",
+        firstLabel: "Width (pixels)",
+        secondLabel: "Height (pixels)",
+        value: {
+          first: Math.round(parseFloat(el.style.width) || 0),
+          second: Math.round(parseFloat(el.style.height) || 0),
+        },
+        min: 1,
+        step: 1,
+      }).then((next) => {
+        if (!next) return;
+        this.host.history?.checkpoint();
+        if (resizeDrawing(this.host.doc, src, next.first, next.second)) {
+          this.host.rerender();
+          reselect();
+        }
+      });
+      return true;
+    }
+    if (command === "position") {
+      void requestNumberPairDialog(this.host.container, {
+        title: "Page position",
+        firstLabel: "X (pixels)",
+        secondLabel: "Y (pixels)",
+        value: {
+          first: Math.round(parseFloat(el.style.left) || 0),
+          second: Math.round(parseFloat(el.style.top) || 0),
+        },
+        step: 1,
+      }).then((next) => {
+        if (!next) return;
+        this.host.history?.checkpoint();
+        if (!isFloatingDrawing(src)) setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
+        if (setFloatingPagePosition(this.host.doc, src, next.first, next.second)) {
+          this.host.rerender();
+          reselect();
+        }
+      });
+      return true;
+    }
+    if (command === "rotate") {
+      if (!["shape", "line", "image", "model3d"].includes(context.kind)) return false;
+      void requestTextInputDialog(this.host.container, {
+        title: "Rotation",
+        label: "Degrees clockwise",
+        value: String(drawingRotation(src)),
+        inputType: "number",
+        step: 1,
+      }).then((next) => {
+        if (next === null) return;
+        const degrees = parseFloat(next);
+        if (!Number.isFinite(degrees)) return;
+        this.host.history?.checkpoint();
+        if (setDrawingRotation(this.host.doc, src, degrees)) {
+          this.host.rerender(undefined, "global");
+          reselect();
+        }
+      });
+      return true;
+    }
+    if (command === "altText") {
+      if (context.kind !== "image" && context.kind !== "model3d") return false;
+      void requestTextInputDialog(this.host.container, {
+        title: "Alternative text",
+        label: "Describe this object for screen readers",
+        value: imageAltText(src),
+      }).then((next) => {
+        if (next === null) return;
+        this.host.history?.checkpoint();
+        if (setImageAltText(this.host.doc, src, next)) {
+          this.host.rerender();
+          reselect();
+        }
+      });
+      return true;
+    }
+    if (command === "editText") {
+      if (!context.canEditText) return false;
+      if (context.kind === "smartArt" && selectedSmartArtNodeIndex !== null) {
+        this.editSmartArtNodeText(src, selectedSmartArtNodeIndex);
+        return true;
+      }
+      const binding = this.host.getHandle()?.drawings.find((item) => item.item.src === src);
+      if (!binding) return false;
+      const rect = binding.el.getBoundingClientRect();
+      this.enterTextboxStory(src, rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return true;
+    }
+    if (command === "fill") {
+      if (context.kind !== "shape" && context.kind !== "smartArt") return false;
+      void requestColorDialog(this.host.container, {
+        title: "Fill",
+        value: context.kind === "smartArt"
+          ? smartArtFillColor(this.host.doc, src, selectedSmartArtNodeIndex ?? 0)
+          : drawingFillColor(src),
+        allowNone: true,
+      }).then((next) => {
+        if (next === undefined) return;
+        this.host.history?.checkpoint();
+        const changed = context.kind === "smartArt"
+          ? setSmartArtFill(this.host.doc, src, next, selectedSmartArtNodeIndex ?? undefined)
+          : setDrawingFill(this.host.doc, src, next);
+        if (changed) {
+          this.host.rerender();
+          reselect();
+        }
+      });
+      return true;
+    }
+    if (command === "outline" || command === "lineStyle") {
+      if ((command === "outline" && context.kind !== "shape") || (command === "lineStyle" && context.kind !== "line")) return false;
+      const style = drawingLineStyle(src);
+      if (!style) return false;
+      const title = command === "lineStyle" ? "Line style" : "Outline";
+      void requestLineStyleDialog(this.host.container, {
+        color: style.color,
+        width: style.width,
+        style: style.dash,
+      }, title).then((next) => {
+        if (!next) return;
+        this.host.history?.checkpoint();
+        if (setDrawingLineStyle(this.host.doc, src, next.color, next.width, next.style)) {
+          this.host.rerender();
+          reselect();
+        }
+      });
+      return true;
+    }
+    if (command === "reset3d") {
+      if (context.kind !== "model3d") return false;
+      this.host.history?.checkpoint();
+      if (!setModel3DRotation(this.host.doc, src, { x: 0, y: 0, z: 0 })) return false;
+      this.host.rerender(undefined, "local");
+      reselect();
+      return true;
+    }
+    return false;
+  }
+
   /** Whether Layout's contextual object commands currently have a target. */
   hasSelectedObject(): boolean {
     return this.selectedImage !== null || this.selectedInkGroup !== null;
@@ -1311,6 +1580,7 @@ export class DocxEditor {
   private onGripMouseDown = (e: MouseEvent): void => {
     const target = e.target as HTMLElement;
     if (this.wordArtTextEditor?.input.contains(target)) return;
+    if (this.smartArtTextEditor?.input.contains(target)) return;
     if (this.startInkGroupInteraction(e, target)) return;
     if (this.startInkInteraction(e, target)) return;
     if (this.startCheckboxInteraction(e, target)) return;
@@ -2139,9 +2409,11 @@ export class DocxEditor {
   // ---------- images: select, resize, drag-move ----------
 
   private selectedImage: { el: HTMLElement; src: XmlElement; kind: "image" | "drawing" } | null = null;
+  private selectedSmartArtNodeIndex: number | null = null;
   private imageOverlay: HTMLDivElement | null = null;
   private imageToolbar: HTMLDivElement | null = null;
   private wordArtTextEditor: { input: HTMLInputElement; finish: (commit: boolean, reselect: boolean) => void } | null = null;
+  private smartArtTextEditor: { input: HTMLInputElement; finish: (commit: boolean, reselect: boolean) => void } | null = null;
 
   private model3DBinding(target: EventTarget | null): ImageBinding | undefined {
     const viewer = (target as HTMLElement | null)?.closest?.("[data-dxw-model3d-viewer]");
@@ -2209,11 +2481,13 @@ export class DocxEditor {
   private deselectImage(): void {
     const changed = this.selectedImage !== null;
     this.wordArtTextEditor?.finish(true, false);
+    this.smartArtTextEditor?.finish(true, false);
     this.imageOverlay?.remove();
     this.imageToolbar?.remove();
     this.imageOverlay = null;
     this.imageToolbar = null;
     this.selectedImage = null;
+    this.selectedSmartArtNodeIndex = null;
     if (changed) this.notifyObjectSelection();
   }
 
@@ -2221,7 +2495,11 @@ export class DocxEditor {
    * A header/footer drawing paints one instance per page from the same src;
    * `near` (client px) picks the instance the user is actually working on
    * instead of the first page's copy. */
-  private reselectImage(src: XmlElement, near?: { x: number; y: number }): void {
+  private reselectImage(
+    src: XmlElement,
+    near?: { x: number; y: number },
+    smartArtNodeIndex: number | null = this.selectedSmartArtNodeIndex,
+  ): void {
     const handle = this.host.getHandle();
     if (!handle) return;
     const img = nearestInstance(handle.images.filter((b) => b.item.src === src), near);
@@ -2230,7 +2508,7 @@ export class DocxEditor {
       return;
     }
     const drw = nearestInstance(handle.drawings.filter((b) => b.item.src === src), near);
-    if (drw) this.selectImage(drw.el, src, undefined, "drawing");
+    if (drw) this.selectImage(drw.el, src, undefined, "drawing", smartArtNodeIndex);
   }
 
   /** Word-style handle set: corners resize aspect-locked, edges stretch. */
@@ -2255,13 +2533,15 @@ export class DocxEditor {
   private selectImage(
     el: HTMLElement,
     src: XmlElement,
-    item?: { x: number; y: number },
+    _item?: { x: number; y: number },
     kind: "image" | "drawing" = "image",
+    smartArtNodeIndex: number | null = null,
   ): void {
     this.deselectInkGroup();
     this.deselectImage();
     this.hideCaret();
     this.selectedImage = { el, src, kind };
+    this.selectedSmartArtNodeIndex = smartArtNodeIndex;
     const overlay = document.createElement("div");
     overlay.dataset.dxwObjectSelection = "1";
     overlay.style.position = "absolute";
@@ -2275,6 +2555,19 @@ export class DocxEditor {
     overlay.style.boxSizing = "border-box";
     overlay.style.pointerEvents = "none";
     overlay.style.zIndex = "2147483647";
+    if (smartArtNodeIndex !== null) {
+      const node = this.host.getHandle()?.drawings
+        .find((binding) => binding.item.src === src && binding.el === el)
+        ?.item.smartArtNodes?.find((candidate) => candidate.index === smartArtNodeIndex);
+      if (node) {
+        const nodeOutline = document.createElement("div");
+        nodeOutline.dataset.dxwSmartArtNodeSelection = String(node.index);
+        nodeOutline.style.cssText =
+          `position:absolute;left:${node.x}px;top:${node.y}px;width:${node.width}px;height:${node.height}px;` +
+          "box-sizing:border-box;border:2px solid #1a73e8;border-radius:3px;background:rgba(26,115,232,.08);";
+        overlay.appendChild(nodeOutline);
+      }
+    }
     const line = kind === "drawing" && isDrawingLine(src);
     if (line) {
       const move = document.createElement("div");
@@ -2343,15 +2636,11 @@ export class DocxEditor {
       });
       b.addEventListener("click", (ce) => {
         ce.stopPropagation();
-        this.host.history?.checkpoint();
-        const sp = this.host.doc.sections[0]?.props;
-        const pos = item ? { x: item.x - (sp?.marginLeft ?? 96), y: 0 } : undefined;
-        if (setImageWrap(this.host.doc, src, mode, pos)) {
-          this.host.rerender();
-          this.reselectImage(src);
-        } else {
-          this.deselectImage();
-        }
+        const command: SelectedObjectCommand = mode === "inline" ? "wrapInline"
+          : mode === "square" ? "wrapSquare"
+            : mode === "topAndBottom" ? "wrapTopAndBottom"
+              : mode === "behind" ? "wrapBehind" : "wrapFront";
+        if (!this.runSelectedObjectCommand(command)) this.deselectImage();
       });
       bar.appendChild(b);
     }
@@ -2373,122 +2662,41 @@ export class DocxEditor {
       });
       bar.appendChild(b);
     };
-    extra("Alt", "Alternative text", () => {
-      const cur = imageAltText(src);
-      void requestTextInputDialog(this.host.container, {
-        title: "Alternative text",
-        label: "Describe this object for screen readers",
-        value: cur,
-      }).then((next) => {
-        if (next === null) return;
-        this.host.history?.checkpoint();
-        if (setImageAltText(this.host.doc, src, next)) this.host.rerender();
-        this.deselectImage();
-      });
-    });
-    extra("Size", "Exact size (px)", () => {
-      const curW = parseFloat(el.style.width) || 0;
-      const curH = parseFloat(el.style.height) || 0;
-      const cur = `${Math.round(curW)}x${Math.round(curH)}`;
-      void requestTextInputDialog(this.host.container, {
-        title: "Exact size",
-        label: "Width × height in pixels",
-        value: cur,
-        placeholder: "640 × 360",
-      }).then((next) => {
-        const match = next && /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/i.exec(next);
-        if (!match) return;
-        this.host.history?.checkpoint();
-        if (resizeDrawing(this.host.doc, src, parseInt(match[1], 10), parseInt(match[2], 10))) this.host.rerender();
-        this.deselectImage();
-      });
-    });
-    extra("Position", "Exact page position (px)", () => {
-      const curX = parseFloat(el.style.left) || 0;
-      const curY = parseFloat(el.style.top) || 0;
-      void requestTextInputDialog(this.host.container, {
-        title: "Page position",
-        label: "X, Y in pixels",
-        value: `${Math.round(curX)}, ${Math.round(curY)}`,
-        placeholder: "120, 80",
-      }).then((next) => {
-        const match = next && /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/.exec(next);
-        if (!match) return;
-        this.host.history?.checkpoint();
-        if (!isFloatingDrawing(src)) setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
-        if (setFloatingPagePosition(this.host.doc, src, parseFloat(match[1]), parseFloat(match[2]))) {
-          this.host.rerender();
-          this.reselectImage(src);
-        }
-      });
-    });
-    if (kind === "drawing") {
-      extra("Rotate", "Set rotation (degrees)", () => {
-        void requestTextInputDialog(this.host.container, {
-          title: "Rotation",
-          label: "Degrees clockwise",
-          value: String(drawingRotation(src)),
-          placeholder: "90",
-        }).then((next) => {
-          if (next === null) return;
-          const degrees = parseFloat(next);
-          if (!Number.isFinite(degrees)) return;
-          this.host.history?.checkpoint();
-          if (setDrawingRotation(this.host.doc, src, degrees)) {
-            this.host.rerender(undefined, "global");
-            this.reselectImage(src);
-          }
-        });
-      });
-      if (!isDrawingLine(src)) {
-        extra("Fill", "Shape fill color", () => {
-          void requestTextInputDialog(this.host.container, {
-            title: "Fill",
-            label: "Color or none",
-            value: drawingFillColor(src) ?? "none",
-            placeholder: "#4472C4 or none",
-          }).then((next) => {
-            if (next === null) return;
-            const color = /^\s*none\s*$/i.test(next)
-              ? null
-              : /^\s*#?([0-9a-f]{6})\s*$/i.exec(next)?.[1];
-            if (color === undefined) return;
-            this.host.history?.checkpoint();
-            if (setDrawingFill(this.host.doc, src, color ? `#${color}` : null)) {
-              this.host.rerender();
-              this.reselectImage(src);
-            }
-          });
-        });
-      }
-      extra("Outline", "Outline color and weight", () => {
-        const style = drawingLineStyle(src);
-        if (!style) return;
-        void requestTextInputDialog(this.host.container, {
-          title: "Outline",
-          label: "Color and width in pixels",
-          value: `${style.color}, ${Number(style.width.toFixed(2))}`,
-          placeholder: "#1a73e8, 1.5",
-        }).then((next) => {
-          const match = next && /^\s*#?([0-9a-f]{6})\s*,\s*(\d+(?:\.\d+)?)\s*$/i.exec(next);
-          if (!match) return;
-          this.host.history?.checkpoint();
-          if (setDrawingLineStyle(this.host.doc, src, `#${match[1]}`, parseFloat(match[2]))) {
-            this.host.rerender();
-            this.reselectImage(src);
-          }
-        });
-      });
-      extra("Delete", "Delete shape", () => this.deleteSelectedImage());
+    const context = this.getSelectedObjectContext();
+    if (context?.kind === "image" || context?.kind === "model3d") {
+      extra("Alt", "Alternative text", () => { this.runSelectedObjectCommand("altText"); });
     }
+    extra("Size", "Exact size (px)", () => { this.runSelectedObjectCommand("size"); });
+    extra("Position", "Exact page position (px)", () => { this.runSelectedObjectCommand("position"); });
     const drawingBinding = kind === "drawing"
       ? this.host.getHandle()?.drawings.find((binding) => binding.item.src === src)
       : undefined;
+    if (kind === "drawing") {
+      const drawingIsLine = isDrawingLine(src);
+      if (context?.kind === "shape" || context?.kind === "line") {
+        extra("Rotate", "Set rotation (degrees)", () => { this.runSelectedObjectCommand("rotate"); });
+      }
+      if (!drawingIsLine) {
+        if (context?.kind === "shape" || context?.kind === "smartArt") {
+          extra(
+            context.kind === "smartArt" ? (context.smartArtNodeSelected ? "Node fill" : "Fill all") : "Fill",
+            context.kind === "smartArt" ? (context.smartArtNodeSelected ? "Selected SmartArt node fill" : "All SmartArt node fills") : "Shape fill color",
+            () => { this.runSelectedObjectCommand("fill"); },
+          );
+        }
+      }
+      if (context?.kind === "line") {
+        extra("Line style", "Line color, weight, and style", () => { this.runSelectedObjectCommand("lineStyle"); });
+      } else if (context?.kind === "shape") {
+        extra("Outline", "Outline color, weight, and style", () => { this.runSelectedObjectCommand("outline"); });
+      }
+      extra("Delete", "Delete shape", () => { this.runSelectedObjectCommand("delete"); });
+    }
     if (drawingBinding?.item.textboxStory && !isDrawingWordArt(src)) {
-      extra("Edit text", "Edit shape text with the Home font controls", () => {
-        const rect = drawingBinding.el.getBoundingClientRect();
-        this.enterTextboxStory(src, rect.left + rect.width / 2, rect.top + rect.height / 2);
-      });
+      extra("Edit text", "Edit shape text with the Home font controls", () => { this.runSelectedObjectCommand("editText"); });
+    }
+    if (context?.kind === "smartArt" && this.selectedSmartArtNodeIndex !== null) {
+      extra("Edit text", "Edit selected SmartArt node text", () => { this.runSelectedObjectCommand("editText"); });
     }
     if (kind === "drawing" && isDrawingWordArt(src)) {
       extra("Edit text", "Edit WordArt text", () => this.editDrawingWordArt(src));
@@ -2514,13 +2722,7 @@ export class DocxEditor {
       });
     }
     if (el.dataset.dxwModel3d) {
-      extra("Reset 3D", "Reset 3D rotation", () => {
-        this.host.history?.checkpoint();
-        if (setModel3DRotation(this.host.doc, src, { x: 0, y: 0, z: 0 })) {
-          this.host.rerender(undefined, "local");
-          this.reselectImage(src);
-        }
-      });
+      extra("Reset 3D", "Reset 3D rotation", () => { this.runSelectedObjectCommand("reset3d"); });
     }
     const surface = el.parentElement!;
     surface.appendChild(overlay);
@@ -2707,6 +2909,8 @@ export class DocxEditor {
         title: "Watermark rotation",
         label: "Degrees clockwise",
         value: String(cur),
+        inputType: "number",
+        step: 1,
       }).then((next) => {
         if (next === null) return;
         const degrees = parseFloat(next);
@@ -2894,6 +3098,10 @@ export class DocxEditor {
     let drawingBinding = drawingTarget
       ? handle?.drawings.find((b) => b.el === drawingTarget)
       : undefined;
+    const smartArtNodeTarget = target.closest?.("[data-dxw-smart-art-node]") as HTMLElement | null;
+    const smartArtNodeIndex = smartArtNodeTarget
+      ? Number.parseInt(smartArtNodeTarget.dataset.dxwSmartArtNode ?? "", 10)
+      : null;
     if (!drawingBinding && !target.closest("button")) {
       const pointCaret = this.caretFromPoint(e.clientX, e.clientY);
       if (!pointCaret || !this.inActiveRegion(pointCaret.t)) {
@@ -2918,6 +3126,11 @@ export class DocxEditor {
       e.stopPropagation();
       this.suppressNextMouseUp = true;
       if (e.detail >= 2) {
+        if (binding.item.smartArtData && smartArtNodeIndex !== null && Number.isFinite(smartArtNodeIndex)) {
+          this.selectImage(binding.el, binding.item.src, undefined, "drawing", smartArtNodeIndex);
+          this.editSmartArtNodeText(binding.item.src, smartArtNodeIndex);
+          return true;
+        }
         if (textboxStory) {
           this.enterTextboxStory(binding.item.src, e.clientX, e.clientY);
           return true;
@@ -2941,7 +3154,7 @@ export class DocxEditor {
           moved = true;
           if (binding.item.anchored) {
             if (this.selectedImage?.src !== binding.item.src) {
-              this.selectImage(el, binding.item.src, undefined, "drawing");
+              this.selectImage(el, binding.item.src, undefined, "drawing", Number.isFinite(smartArtNodeIndex) ? smartArtNodeIndex : null);
             }
             toolbarLeft0 = parseFloat(this.imageToolbar?.style.left ?? "") || 0;
             toolbarTop0 = parseFloat(this.imageToolbar?.style.top ?? "") || 0;
@@ -2971,7 +3184,7 @@ export class DocxEditor {
         this.hideDropIndicator();
         this.suppressNextMouseUp = false;
         if (!moved) {
-          this.selectImage(binding.el, binding.item.src, undefined, "drawing");
+          this.selectImage(binding.el, binding.item.src, undefined, "drawing", Number.isFinite(smartArtNodeIndex) ? smartArtNodeIndex : null);
           return;
         }
         if (binding.item.anchored) {
@@ -3236,6 +3449,67 @@ export class DocxEditor {
     return false;
   }
 
+  private editSmartArtNodeText(src: XmlElement, nodeIndex: number, replacement?: string): void {
+    if (this.smartArtTextEditor) {
+      this.smartArtTextEditor.input.focus();
+      this.smartArtTextEditor.input.select();
+      return;
+    }
+    const binding = this.host.getHandle()?.drawings.find((item) => item.item.src === src);
+    const node = binding?.item.smartArtNodes?.find((item) => item.index === nodeIndex);
+    const surface = binding?.el.parentElement;
+    const original = binding?.item.smartArtData?.items[nodeIndex];
+    if (!binding || !node || !surface || original === undefined) return;
+
+    const zoom = this.host.zoom ?? 1;
+    const surfaceRect = surface.getBoundingClientRect();
+    const drawingRect = binding.el.getBoundingClientRect();
+    const input = document.createElement("input");
+    input.dataset.dxwSmartArtNodeEditor = String(nodeIndex);
+    input.value = replacement ?? original;
+    input.setAttribute("aria-label", `Edit SmartArt node ${nodeIndex + 1}`);
+    input.style.cssText =
+      `position:absolute;left:${(drawingRect.left - surfaceRect.left) / zoom + node.x}px;` +
+      `top:${(drawingRect.top - surfaceRect.top) / zoom + node.y}px;width:${node.width}px;height:${node.height}px;` +
+      "box-sizing:border-box;border:2px solid #1a73e8;border-radius:4px;background:rgba(255,255,255,.96);" +
+      "color:#202124;font:600 14px/1.2 system-ui,sans-serif;text-align:center;padding:4px 8px;" +
+      "z-index:2147483647;outline:none;";
+
+    const near = {
+      x: drawingRect.left + (node.x + node.width / 2) * zoom,
+      y: drawingRect.top + (node.y + node.height / 2) * zoom,
+    };
+    const finish = (commit: boolean, reselect: boolean) => {
+      if (this.smartArtTextEditor?.input !== input) return;
+      this.smartArtTextEditor = null;
+      const next = input.value;
+      input.remove();
+      if (commit && next !== original) {
+        this.host.history?.checkpoint();
+        if (setSmartArtNodeText(this.host.doc, src, nodeIndex, next)) this.host.rerender();
+      }
+      if (reselect) this.reselectImage(src, near, nodeIndex);
+      this.focusText();
+    };
+    this.smartArtTextEditor = { input, finish };
+    input.addEventListener("mousedown", (event) => event.stopPropagation());
+    input.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        finish(true, true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false, true);
+      }
+    });
+    input.addEventListener("blur", () => finish(true, true));
+    surface.appendChild(input);
+    input.focus();
+    if (replacement === undefined) input.select();
+    else input.setSelectionRange(input.value.length, input.value.length);
+  }
+
   private editDrawingWordArt(src: XmlElement): void {
     if (this.wordArtTextEditor) {
       this.wordArtTextEditor.input.focus();
@@ -3314,6 +3588,7 @@ export class DocxEditor {
     if (this.imageOverlay?.contains(e.target as Node) || this.imageToolbar?.contains(e.target as Node)) return;
     if (this.wordArtOverlay?.contains(e.target as Node)) return;
     if (this.wordArtTextEditor?.input.contains(e.target as Node)) return;
+    if (this.smartArtTextEditor?.input.contains(e.target as Node)) return;
     if (this.selectedInkGroup?.overlay.contains(e.target as Node)) return;
     if ((e.target as HTMLElement | null)?.closest?.("[data-dxw-model3d-viewer]")) return;
     this.deselectInkGroup();
@@ -4209,8 +4484,15 @@ export class DocxEditor {
       offset: endText.text.length,
       bias: endText.text.length > 0 ? "end" : undefined,
     };
+    const splitWasList = (() => {
+      const pPr = paragraph.children.find((child) => localName(child.name) === "pPr");
+      const style = pPr?.children.find((child) => localName(child.name) === "pStyle");
+      return !!pPr?.children.some((child) => localName(child.name) === "numPr") ||
+        !!resolveParagraphStyleChain(this.host.doc.styles, attr(style, "val"), false).pPr.numbering;
+    })();
     const split = this.splitParagraphCore();
     if (!split) return null;
+    if (splitWasList) clearListParagraphFormatting(this.host.doc, split.after);
     const hasPageBreak = (element: XmlElement): boolean =>
       (localName(element.name) === "br" && attr(element, "type") === "page") ||
       element.children.some(hasPageBreak);
@@ -4461,6 +4743,18 @@ export class DocxEditor {
       e.preventDefault();
       this.exitHeaderFooter();
       return;
+    }
+    if (this.selectedImage && this.selectedSmartArtNodeIndex !== null && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.editSmartArtNodeText(this.selectedImage.src, this.selectedSmartArtNodeIndex);
+        return;
+      }
+      if (e.key.length === 1) {
+        e.preventDefault();
+        this.editSmartArtNodeText(this.selectedImage.src, this.selectedSmartArtNodeIndex, e.key);
+        return;
+      }
     }
     // A handled caret command should make the insertion point visible even
     // when it becomes a no-op at a document or line boundary.
@@ -5262,6 +5556,14 @@ export class DocxEditor {
   }
 
   private splitParagraphNoHistory(): void {
+    if (this.caret) {
+      const paragraph = paragraphOf(this.host.doc, this.caret.t);
+      if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && clearListParagraphFormatting(this.host.doc, paragraph)) {
+        this.commit();
+        this.focusText();
+        return;
+      }
+    }
     const split = this.splitParagraphCore();
     const reparsed = split
       ? this.host.doc.reparseDirectBodyParagraphSplit(split.before, split.after)

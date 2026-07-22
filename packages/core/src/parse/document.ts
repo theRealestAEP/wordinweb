@@ -1225,6 +1225,10 @@ function parseDrawing(
           y2: emuToPx(y2),
           color,
           weight: Math.max((weightEmu / EMU_PER_PT) * (4 / 3), 0.75),
+          style: (() => {
+            const dash = attr(child(lnEl, "prstDash"), "val");
+            return dash === "dot" || dash === "sysDot" ? "dotted" : dash && dash !== "solid" ? "dashed" : "single";
+          })(),
         });
       }
       // Freeform template art (icons, decorative bands) is a:custGeom -
@@ -1921,6 +1925,7 @@ function collectDiagramShapes(
 ): void {
   const spTree = findDescendant(dspRoot, "spTree");
   if (!spTree) return;
+  let smartArtNodeIndex = 0;
 
   const emitShape = (sp: XmlElement, ox: number, oy: number, sx: number, sy: number): void => {
     const spPr = child(sp, "spPr");
@@ -1954,9 +1959,14 @@ function collectDiagramShapes(
           y2: dy + emuToPx(y2),
           color: stroke.color,
           weight: Math.max(stroke.width, 0.75),
+          style: (() => {
+            const dash = attr(child(lnEl, "prstDash"), "val");
+            return dash === "dot" || dash === "sysDot" ? "dotted" : dash && dash !== "solid" ? "dashed" : "single";
+          })(),
         });
       }
     } else {
+      const nodeIndex = smartArtNodeIndex++;
       const fill = child(spPr, "noFill") ? undefined : solidFillColor(spPr, ctx.theme);
       if ((fill || stroke) && w > 0 && h > 0) {
         const d = presetPathD(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
@@ -1971,6 +1981,7 @@ function collectDiagramShapes(
             viewH: h,
             fill,
             stroke,
+            smartArtNodeIndex: nodeIndex,
           });
         }
       }
