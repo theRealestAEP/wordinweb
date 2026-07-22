@@ -213,6 +213,30 @@ export function setMathLinear(doc: DocxDocument, oMathEl: XmlElement, text: stri
   return true;
 }
 
+/** Remove one complete OMML equation from the document. */
+export function deleteMath(doc: DocxDocument, oMathEl: XmlElement): boolean {
+  const parent = doc.findParentOf(oMathEl);
+  if (!parent) return false;
+
+  let container = parent;
+  let target = oMathEl;
+  if (localName(parent.name) === "oMathPara") {
+    const equations = parent.children.filter((child) => localName(child.name) === "oMath");
+    if (equations.length === 1) {
+      const grandparent = doc.findParentOf(parent);
+      if (!grandparent) return false;
+      container = grandparent;
+      target = parent;
+    }
+  }
+
+  const index = container.children.indexOf(target);
+  if (index < 0) return false;
+  container.children.splice(index, 1);
+  doc.refresh();
+  return true;
+}
+
 /** Insert a new inline OMML equation at a text position. */
 export function insertMathAt(
   doc: DocxDocument,

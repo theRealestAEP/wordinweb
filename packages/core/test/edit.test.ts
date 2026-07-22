@@ -26,7 +26,7 @@ import { buildSmartArtDataXml, buildSmartArtDrawingXml, insertSmartArtAt, setSma
 import { insertEmbeddedObjectAt, insertModel3DAt, insertWebVideoAt } from "../src/edit/objects.js";
 import { buildOlePackage, extractOlePackage } from "../src/parse/ole.js";
 import { insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, listBookmarks, validBookmarkName } from "../src/edit/references.js";
-import { linearizeMath, parseMathLinear, setMathLinear, insertMathAt, mathLinearOf, isLinearSafe } from "../src/edit/math.js";
+import { deleteMath, linearizeMath, parseMathLinear, setMathLinear, insertMathAt, mathLinearOf, isLinearSafe } from "../src/edit/math.js";
 import { XmlElement, localName } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, makeDocxWithMedia, wrapDocument, p, W_NS } from "./helpers.js";
@@ -2289,6 +2289,37 @@ describe("math editing", () => {
     const math = para.children.flatMap((child) => child.type === "run" ? child.content : child.runs.flatMap((oneRun) => oneRun.content))
       .find((content) => content.kind === "math");
     expect(math && math.kind === "math" ? mathLinearOf(reloaded, math.src!) : "").toBe("x^2+y/2");
+  });
+
+  it("deletes inline and display equations completely", () => {
+    const inline = loadDoc(
+      `<w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">` +
+      `<w:r><w:t>Before</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>` +
+      `<w:r><w:t>After</w:t></w:r></w:p>`,
+    );
+    const inlineMath = (inline.sections[0].blocks[0] as Paragraph).children
+      .flatMap((child) => child.type === "run" ? child.content : child.runs.flatMap((run) => run.content))
+      .find((content) => content.kind === "math")?.src;
+    if (!inlineMath) throw new Error("inline equation missing");
+    expect(deleteMath(inline, inlineMath)).toBe(true);
+    expect(serializeXml(inline.editableRoots()[0])).not.toContain("<m:oMath>");
+    expect(serializeXml(inline.editableRoots()[0])).toContain(">Before<");
+    expect(serializeXml(inline.editableRoots()[0])).toContain(">After<");
+    expect(DocxDocument.load(inline.save()).pkg.text("word/document.xml")).not.toContain("<m:oMath>");
+
+    const display = loadDoc(
+      `<w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">` +
+      `<m:oMathPara><m:oMath><m:r><m:t>y</m:t></m:r></m:oMath></m:oMathPara></w:p>`,
+    );
+    const displayMath = (display.sections[0].blocks[0] as Paragraph).children
+      .flatMap((child) => child.type === "run" ? child.content : child.runs.flatMap((run) => run.content))
+      .find((content) => content.kind === "math")?.src;
+    if (!displayMath) throw new Error("display equation missing");
+    expect(deleteMath(display, displayMath)).toBe(true);
+    const xml = serializeXml(display.editableRoots()[0]);
+    expect(xml).not.toContain("<m:oMath");
+    expect(xml).not.toContain("<m:oMathPara");
+    expect(DocxDocument.load(display.save()).pkg.text("word/document.xml")).not.toContain("<m:oMath");
   });
 
   it("declares the math namespace on the edited header part", () => {
