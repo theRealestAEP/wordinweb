@@ -357,6 +357,12 @@ function renderPageShell(page: LaidOutPage, zoom: number, options: RenderOptions
   el.dataset.bodyTop = String(page.bodyTop);
   el.dataset.bodyBottom = String(page.bodyBottom);
   el.dataset.columnBands = JSON.stringify(page.columnBands);
+  const bookmarks: Record<string, number> = {};
+  for (const item of page.items) {
+    if (item.kind !== "text" || !item.bookmarks) continue;
+    for (const name of item.bookmarks) bookmarks[name] = (item.glyphTop ?? item.lineTop) * zoom;
+  }
+  if (Object.keys(bookmarks).length > 0) el.dataset.bookmarks = JSON.stringify(bookmarks);
   return el;
 }
 
@@ -2356,17 +2362,22 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
   }
   if (item.href) {
     const anchor = el as HTMLAnchorElement;
+    const bookmark = item.href.startsWith("#") ? item.href.slice(1) : undefined;
     anchor.href = item.href;
-    anchor.target = "_blank";
-    anchor.rel = "noreferrer noopener";
+    if (!bookmark) {
+      anchor.target = "_blank";
+      anchor.rel = "noreferrer noopener";
+    }
     anchor.title = item.href;
-    if (interactive) {
+    if (interactive || bookmark) {
       anchor.addEventListener("mouseup", (event) => {
         if (event.metaKey || event.ctrlKey) event.stopPropagation();
       });
       anchor.addEventListener("click", (event) => {
         event.preventDefault();
-        if (event.metaKey || event.ctrlKey) {
+        if (bookmark && (!interactive || event.metaKey || event.ctrlKey)) {
+          scrollToBookmark(anchor, bookmark);
+        } else if (!bookmark && (event.metaKey || event.ctrlKey)) {
           window.open(anchor.href, "_blank", "noopener,noreferrer");
         }
       });
@@ -2380,6 +2391,22 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
   }
   setItemLayer(el, item);
   return el;
+}
+
+function scrollToBookmark(anchor: HTMLAnchorElement, bookmark: string): void {
+  const root = anchor.closest<HTMLElement>(".dxw-pages");
+  const container = root?.parentElement;
+  if (!root || !container) return;
+
+  for (const page of Array.from(root.children)) {
+    if (!(page instanceof HTMLElement) || !page.dataset.bookmarks) continue;
+    const bookmarks = JSON.parse(page.dataset.bookmarks) as Record<string, number>;
+    const y = bookmarks[bookmark];
+    if (y === undefined) continue;
+    const pageTop = page.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
+    container.scrollTo({ top: Math.max(0, pageTop + y - 24) });
+    return;
+  }
 }
 
 function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Border, rotate?: { deg: number; ox: number; oy: number }): HTMLElement {

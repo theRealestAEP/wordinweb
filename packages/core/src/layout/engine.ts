@@ -4296,6 +4296,7 @@ class Engine {
       floatOffset = clearBannerForLine(line, li, floatOffset);
 
       this.y += floatOffset;
+      const lineItemStart = this.cur.items.length;
       this.emitLine(line, this.cur, this.colX, this.y);
       // w:tab val="bar": not a tab stop — a vertical rule painted at the bar
       // position on EVERY line of the paragraph, spanning the line box, and
@@ -4327,12 +4328,19 @@ class Engine {
       if (li === 0 && para.bookmarks) {
         const pg = this.cur.physIndex === -1 ? this.lastRealPage : this.cur;
         if (pg) {
+          const target =
+            this.cur.physIndex === -1
+              ? undefined
+              : this.cur.items.slice(lineItemStart).find((item): item is TextItem => item.kind === "text");
+          const targets: string[] = [];
           for (const bm of para.bookmarks) {
             if (!this.bookmarkPages.has(bm)) {
               this.bookmarkPages.set(bm, formatNumber(pg.displayNumber, PAGE_FMT[pg.sp.pageNumberFormat ?? "decimal"] ?? "decimal"));
               this.bookmarkPageIndices.set(bm, pg.physIndex - 1);
+              targets.push(bm);
             }
           }
+          if (target && targets.length > 0) target.bookmarks = targets;
         }
       }
       // STYLEREF page-awareness: record the physical page carrying this
