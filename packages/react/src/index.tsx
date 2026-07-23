@@ -87,6 +87,7 @@ import {
   type LayoutResult,
   listTypeAt,
   topLevelBlockOf,
+  paragraphOf,
   printPages,
   setListType,
   paragraphStyleIdOf,
@@ -633,6 +634,22 @@ export function DocxView({
         layoutTimer = setTimeout(start, delayMs);
       } else {
         start();
+      }
+    };
+
+    // Collaboration: emit a block-addressed intent (formatParagraph/setListType)
+    // for each distinct paragraph the given text targets belong to.
+    const emitBlockIntents = (targets: XmlElement[], make: (blockId: number) => EditorIntent): void => {
+      const d = docCacheRef.current?.doc;
+      if (!collab || !d?.stableIds) return;
+      const seen = new Set<number>();
+      for (const t of targets) {
+        const p = paragraphOf(d, t);
+        const blockId = p ? d.stableIds.idOf(p) : undefined;
+        if (blockId !== undefined && !seen.has(blockId)) {
+          seen.add(blockId);
+          collab.submit(make(blockId));
+        }
       }
     };
 
@@ -1199,6 +1216,7 @@ export function DocxView({
             if (targets.length === 0) return;
             history.checkpoint();
             if (setParagraphAlignment(doc, targets as Parameters<typeof setParagraphAlignment>[1], align)) {
+              emitBlockIntents(targets, (blockId) => ({ kind: "formatParagraph", blockId, align }));
               pages = rerender(doc);
             }
           },
@@ -1364,7 +1382,9 @@ export function DocxView({
             const current = listTypeAt(doc, targets[0]);
             const dirtyBlock = targets.length === 1 ? topLevelBlockOf(doc, targets[0]) ?? undefined : undefined;
             history.checkpoint();
-            if (setListType(doc, targets as Parameters<typeof setListType>[1], current === kind ? null : kind)) {
+            const listKind = current === kind ? null : kind;
+            if (setListType(doc, targets as Parameters<typeof setListType>[1], listKind)) {
+              emitBlockIntents(targets, (blockId) => ({ kind: "setListType", blockId, listKind }));
               pages = rerender(doc, dirtyBlock);
               document.dispatchEvent(new CustomEvent("dxw-selection"));
             }
