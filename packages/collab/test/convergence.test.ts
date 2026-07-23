@@ -164,3 +164,69 @@ describe("one-in-flight interleave (the correct multi-round model)", () => {
     expect(a.pendingCount).toBe(0); // drained after echo
   });
 });
+
+import { Intent } from "../src/intents.js";
+
+describe("seeded multi-intent convergence (mixed intent types)", () => {
+  // Deterministic LCG (no Math.random — reproducible across runs).
+  function lcg(seed: number) {
+    let s = seed >>> 0;
+    return () => {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 0x100000000;
+    };
+  }
+
+  function runScenario(seed: number): string {
+    const initial = docBytes(["alpha", "beta", "gamma"]);
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const clients = [new ClientReplica(initial), new ClientReplica(initial)];
+    const rand = lcg(seed);
+
+    for (let step = 0; step < 12; step++) {
+      const ci = Math.floor(rand() * clients.length);
+      const client = clients[ci];
+      const blocks = server.doc.sections[0].blocks.filter((b) => b.type === "paragraph") as Paragraph[];
+      const bi = Math.floor(rand() * blocks.length);
+      const para = blocks[bi];
+      const run = para.children[0] as Run;
+      const blockId = server.ids.idOf(para.src!)!;
+      const runId = server.ids.idOf(run.src!)!;
+      const t = run.content.find((c) => c.kind === "text")!.srcT!;
+      const len = t.text.length;
+
+      const clientId = `c${ci}`;
+      const clientSeq = step + 1;
+      const base = server.seq;
+      const kindRoll = rand();
+      let intent: Intent;
+      if (kindRoll < 0.4) {
+        intent = { kind: "insertText", clientId, clientSeq, base, at: { blockId, runId, offset: Math.floor(rand() * (len + 1)) }, text: "x" };
+      } else if (kindRoll < 0.6 && len > 0) {
+        const s0 = Math.floor(rand() * len);
+        intent = { kind: "deleteText", clientId, clientSeq, base, blockId, runId, start: s0, end: Math.min(len, s0 + 1) };
+      } else if (kindRoll < 0.8) {
+        intent = { kind: "formatRun", clientId, clientSeq, base, blockId, runId, patch: { bold: true } };
+      } else {
+        intent = { kind: "formatParagraph", clientId, clientSeq, base, blockId, align: "center" };
+      }
+
+      // One-in-flight: submit locally then immediately reconcile through the server.
+      client.submitLocal(intent);
+      const entry = server.submit(intent);
+      for (const c of clients) c.receive([entry]);
+    }
+
+    const serverXml = serializeXml(server.doc.docRoot);
+    for (const c of clients) expect(serializeXml(c.doc.docRoot)).toBe(serverXml);
+    return serverXml;
+  }
+
+  it("converges for several seeds and is deterministic per seed", () => {
+    for (const seed of [1, 7, 42, 100, 2024]) {
+      const first = runScenario(seed);
+      const second = runScenario(seed);
+      expect(first).toBe(second); // same seed → same result
+    }
+  });
+});
