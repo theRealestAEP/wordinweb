@@ -6,6 +6,7 @@ export type IdSidecar = ReturnType<StableIds["exportSidecar"]>;
 import { transformIntent } from "./transform.js";
 import { applyIntent } from "./apply.js";
 import { invertIntent } from "./invert.js";
+import { validateIntent } from "./validate.js";
 
 /**
  * The authoritative document session (plan doc 06), transport-free. It owns
@@ -120,6 +121,11 @@ export class DocumentSession {
       if (prior) return prior;
     }
     this.seen.add(key);
+
+    // Cheap structural validation before any work (doc 06 / doc 11 F9): reject
+    // malformed/oversized intents on the hot path, before transform/apply.
+    const invalid = validateIntent(intent);
+    if (invalid) return this.reject(intent, invalid);
 
     if (intent.base < 0 || intent.base > this.seq) {
       return this.reject(intent, "invalid base");

@@ -6,6 +6,7 @@
  */
 export { DocumentSession, type Broadcast, type IdSidecar } from "./session.js";
 export { applyIntent } from "./apply.js";
+export { validateIntent, DEFAULT_INTENT_LIMITS, type IntentLimits } from "./validate.js";
 export * from "./intents.js";
 export * from "./transform.js";
 export {
