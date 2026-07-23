@@ -1,5 +1,5 @@
 import { DocxDocument } from "@wordinweb/core";
-import { DocumentSession } from "@wordinweb/collab/server";
+import { DocumentSession, type IdSidecar } from "@wordinweb/collab/server";
 import { ClientMessage, ServerMessage, PROTOCOL_VERSION } from "@wordinweb/collab/server";
 import { StorageDriver } from "./storage.js";
 
@@ -47,6 +47,11 @@ export interface TokenVerifier {
 interface Room {
   session: DocumentSession;
   conns: Set<Connection>;
+  /** The session EPOCH id (plan doc 12): minted fresh at every seed/re-seed
+   * (and at provider-based creation). Rejoining clients compare it against
+   * their bundle's stored epoch to distinguish seamless resume from
+   * someone-re-seeded-while-I-was-away — epochs never merge. */
+  genesisId: string;
   /** Epoch-ms timestamp of when the room last became empty, or undefined
    * while anyone is connected. Drives zero-custody eviction (plan doc 12
    * §2): after the last-disconnect grace elapses the room — doc, log,
@@ -89,7 +94,15 @@ export class CollabHub {
   private connClient = new Map<string, string>();
 
   constructor(
-    private provider: DocProvider,
+    /**
+     * Template source for auto-created rooms (party/dev mode: a hello to an
+     * unknown docId gets a fresh doc from here). Pass `null` for the
+     * zero-custody magic-link posture (plan doc 12 §5 case 3): rooms then
+     * exist ONLY via seed()/re-seed, and a hello to an unknown docId is
+     * refused `no-session` — the client offers "Bring it back live" from its
+     * bundle instead.
+     */
+    private provider: DocProvider | null,
     private storage?: StorageDriver,
     /** Optional token verifier. When set, every hello must present a token
      * that authorizes the requested docId; without it the hub is auth-off
@@ -98,6 +111,9 @@ export class CollabHub {
     /** Injectable clock (epoch ms) for token-expiry checks; defaults to
      * Date.now. Injected in tests for determinism. */
     private now: () => number = () => Date.now(),
+    /** Injectable epoch-id generator (fresh 128-bit hex per seed). Injected
+     * in tests for determinism; production default uses crypto randomness. */
+    private genGenesisId: () => string = defaultGenesisId,
   ) {}
 
   /** True if the connection's token has expired (live-socket enforcement). */
@@ -174,6 +190,15 @@ export class CollabHub {
             return;
           }
         }
+        // Zero-custody posture (no provider): rooms exist only while seeded
+        // and live. An unknown docId is not an error the server can fix —
+        // the DOCUMENT lives in participants' bundles, so the answer is
+        // `no-session`: the client offers "Bring it back live" (doc 12 §5.3)
+        // and re-seeds from its own copy.
+        if (!this.rooms.has(msg.docId) && !this.provider) {
+          conn.send({ t: "refused", reason: "no-session" });
+          return;
+        }
         this.connClient.set(conn.id, msg.clientId);
         const room = await this.room(msg.docId);
         room.conns.add(conn);
@@ -194,6 +219,8 @@ export class CollabHub {
           snapshot: bytesToBase64(cp.docx),
           sidecar: cp.sidecar,
           tail: room.session.entriesSince(cp.seq),
+          genesisId: room.genesisId,
+          mode: "plaintext", // E2EE mode lands with doc 13 items 1-2.
         });
         return;
       }
@@ -311,17 +338,60 @@ export class CollabHub {
     return [...this.rooms.keys()];
   }
 
+  /**
+   * Seed (or re-seed) a session from client-supplied bytes — the transport-
+   * free core of `POST/PUT /docs` (plan doc 12 §3/§5.3). The bytes come from
+   * a participant's bundle: under zero custody the browsers are the durable
+   * copies, so "bring it back live" means any holder re-uploads theirs.
+   *
+   * First-wins atomically (single-threaded create-if-missing, per process —
+   * doc 12 §5 notes a multi-node demo needs a real lock): if the room already
+   * exists the seed is REFUSED and the caller gets the incumbent epoch's
+   * genesisId — the HTTP layer maps that to 409 and the losing client lands
+   * in resume case 2 (join the winner's session; keep its own copy as a
+   * draft/lineage decision, never a silent merge).
+   *
+   * The sidecar is part of the seed bundle (round-4 F10): a bundle's docx
+   * with split-created carried ids cannot re-derive its id table from parse
+   * order. Callers seeding a FRESH doc (no history) may omit it.
+   *
+   * A freshly seeded room starts EMPTY with the eviction clock running — a
+   * seed nobody joins evicts after the grace like any abandoned room, so an
+   * unauthenticated seed endpoint cannot accrete unbounded RAM.
+   */
+  seed(
+    docId: string,
+    docx: Uint8Array,
+    sidecar?: IdSidecar,
+  ): { ok: true; genesisId: string } | { ok: false; reason: "exists"; genesisId: string } {
+    const existing = this.rooms.get(docId);
+    if (existing) return { ok: false, reason: "exists", genesisId: existing.genesisId };
+    const session = new DocumentSession(DocxDocument.load(docx));
+    if (sidecar) session.installSidecar(sidecar);
+    const room: Room = {
+      session,
+      conns: new Set(),
+      genesisId: this.genGenesisId(),
+      emptySince: this.now(), // eviction clock runs until someone joins
+    };
+    this.rooms.set(docId, room);
+    return { ok: true, genesisId: room.genesisId };
+  }
+
   private async room(docId: string): Promise<Room> {
     let room = this.rooms.get(docId);
     if (!room) {
       const session = await this.startSession(docId);
-      room = { session, conns: new Set() };
+      room = { session, conns: new Set(), genesisId: this.genGenesisId() };
       this.rooms.set(docId, room);
     }
     return room;
   }
 
   private async startSession(docId: string): Promise<DocumentSession> {
+    // Reached only from room(), which the hello path gates: with no provider
+    // an unknown docId was already refused `no-session` before this point.
+    if (!this.provider) throw new Error("no provider (zero-custody hub) — rooms exist only via seed()");
     if (this.storage) {
       const snap = await this.storage.loadSnapshot(docId);
       if (snap) {
@@ -341,6 +411,17 @@ export class CollabHub {
     }
     return new DocumentSession(DocxDocument.load(this.provider.load(docId)));
   }
+}
+
+/** Fresh 128-bit hex epoch id. Server-side identifier generation is exempt
+ * from the intent-path determinism rule (doc 05 — that rule governs values
+ * that feed serialized XML or apply behavior; epoch ids are bookkeeping). */
+function defaultGenesisId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  let hex = "";
+  for (const b of bytes) hex += b.toString(16).padStart(2, "0");
+  return `g_${hex}`;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {

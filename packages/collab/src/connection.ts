@@ -47,6 +47,16 @@ export class CollabConnection {
   private idCounter = 0;
   private idBase = -1;
 
+  /** The epoch id of the session this connection joined (from the welcome).
+   * The resume layer compares it against the bundle's stored genesisId:
+   * same ⇒ seamless rejoin; different ⇒ someone re-seeded while away
+   * (doc 12 §5 case 2 — take server state, keep the local copy; the doc-15
+   * lineage check decides fast-forward vs draft). Null until welcomed. */
+  genesisId: string | null = null;
+  /** Session encryption mode from the welcome (doc 13 §6). The E2EE layer
+   * hard-refuses a value contradicting the link's `#k` fragment. */
+  mode: "plaintext" | "encrypted" | null = null;
+
   constructor(
     private transport: ClientTransport,
     private clientId: string,
@@ -149,6 +159,8 @@ export class CollabConnection {
         // id table matches the server's even across split-created ids.
         this.replica = new ClientReplica(base64ToBytes(msg.snapshot), msg.sidecar);
         this.replica.confirmedSeq = msg.seq;
+        this.genesisId = msg.genesisId;
+        this.mode = msg.mode;
         if (msg.tail.length) this.replica.receive(msg.tail);
         this.cb.onChange?.();
         return;

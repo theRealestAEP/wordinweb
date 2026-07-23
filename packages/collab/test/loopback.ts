@@ -61,6 +61,8 @@ export class CollabHubLoopback {
           snapshot: bytesToBase64(cp.docx),
           sidecar: cp.sidecar,
           tail: this.session.entriesSince(cp.seq),
+          genesisId: "g_loopback",
+          mode: "plaintext",
         });
         return;
       }

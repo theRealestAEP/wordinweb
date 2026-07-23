@@ -515,3 +515,140 @@ describe("CollabHub welcome sidecar (round-4 F10 / round-2 F1)", () => {
     expect(Buffer.from(replica.doc.save()).equals(Buffer.from(serverXml))).toBe(true);
   });
 });
+
+describe("CollabHub seed / re-seed / no-session (doc 12 §3/§5)", () => {
+  // Deterministic epoch ids for assertions; production uses crypto randomness.
+  let epochN = 0;
+  const nextEpoch = () => `g_test_${epochN++}`;
+  const zeroCustodyHub = (now: () => number = () => 0) =>
+    new CollabHub(/*provider*/ null, undefined, undefined, now, nextEpoch);
+
+  it("hello to an unseeded doc on a zero-custody hub is refused no-session", async () => {
+    const hub = zeroCustodyHub();
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "ghost", clientId: "a", sinceSeq: 0 });
+    expect(c.last()).toEqual({ t: "refused", reason: "no-session" });
+    expect(hub.activeDocs()).toEqual([]); // the refused hello created nothing
+  });
+
+  it("seed creates the session; joiners get the seeded bytes, its genesisId, and plaintext mode", async () => {
+    const hub = zeroCustodyHub();
+    const seeded = hub.seed("d", blankDoc("seeded"));
+    expect(seeded.ok).toBe(true);
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+    const w = c.last();
+    expect(w.t).toBe("welcome");
+    if (w.t !== "welcome") return;
+    expect(w.genesisId).toBe(seeded.ok ? seeded.genesisId : "");
+    expect(w.mode).toBe("plaintext");
+    // The session IS the seeded document (contains the seeded text).
+    const replica = new ClientReplica(b64ToBytes(w.snapshot), w.sidecar);
+    expect(new TextDecoder().decode(replica.doc.save()).length).toBeGreaterThan(0);
+    const xml = serializeSnapshotText(replica);
+    expect(xml).toContain("seeded");
+  });
+
+  it("first re-seeder wins; the loser gets the incumbent genesisId (HTTP 409 semantics)", async () => {
+    const hub = zeroCustodyHub();
+    const first = hub.seed("d", blankDoc("mine"));
+    const second = hub.seed("d", blankDoc("theirs"));
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(false);
+    if (first.ok && !second.ok) {
+      expect(second.reason).toBe("exists");
+      // The loser learns the WINNER's epoch — its client lands in resume
+      // case 2 (join the winner; local copy becomes a lineage decision).
+      expect(second.genesisId).toBe(first.genesisId);
+    }
+  });
+
+  it("session end → no-session → re-seed mints a NEW epoch (doc 12 lifecycle end-to-end)", async () => {
+    let now = 0;
+    const hub = zeroCustodyHub(() => now);
+    const g1 = hub.seed("d", blankDoc("v1"));
+    const a = new FakeConn("a");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+    // Everyone leaves; grace passes; the room is deleted — server holds nothing.
+    hub.disconnect(a);
+    now += EVICTION_GRACE_MS;
+    expect(hub.sweepRooms()).toEqual(["d"]);
+    // The same link now resolves to no-session…
+    const b = new FakeConn("b");
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+    expect(b.last()).toEqual({ t: "refused", reason: "no-session" });
+    // …until any bundle-holder brings it back: same docId, NEW epoch.
+    const g2 = hub.seed("d", blankDoc("v1"));
+    expect(g2.ok && g1.ok && g2.genesisId !== g1.genesisId).toBe(true);
+  });
+
+  it("a seeded room nobody joins evicts after the grace (no RAM accretion via seed)", () => {
+    let now = 0;
+    const hub = zeroCustodyHub(() => now);
+    hub.seed("d", blankDoc("x"));
+    now += EVICTION_GRACE_MS - 1;
+    expect(hub.sweepRooms()).toEqual([]);
+    now += 1;
+    expect(hub.sweepRooms()).toEqual(["d"]);
+  });
+
+  it("re-seed fidelity: a checkpoint bundle with split-created carried ids revives byte-identically (doc 12 test plan)", async () => {
+    // Session 1 (old server): a split creates carried ids, then the "server
+    // dies" — we keep only what a CLIENT would hold: the checkpoint bundle.
+    const hub1 = zeroCustodyHub();
+    hub1.seed("d", blankDoc("hi"));
+    const a = new FakeConn("a");
+    await hub1.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+    const split: SplitParagraphIntent = {
+      kind: "splitParagraph", clientId: "a", clientSeq: 1, base: 0,
+      at: { blockId: 1, runId: 2, offset: 1 }, newBlockId: 7000, newRunId: 7001,
+    };
+    await hub1.handle(a, { t: "submit", intent: split });
+    const bundle = hub1["rooms"].get("d")!.session.checkpoint();
+
+    // Session 2 (fresh server process): re-seed from the bundle — docx AND
+    // sidecar (round-4 F10: the sidecar is not optional for split history).
+    const hub2 = zeroCustodyHub();
+    const g = hub2.seed("d", bundle.docx, bundle.sidecar);
+    expect(g.ok).toBe(true);
+    const b = new FakeConn("b");
+    await hub2.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "b", sinceSeq: 0 });
+    const w = b.last();
+    expect(w.t).toBe("welcome");
+    if (w.t !== "welcome") return;
+    const replica = new ClientReplica(b64ToBytes(w.snapshot), w.sidecar);
+    replica.confirmedSeq = w.seq;
+
+    // An edit addressed INTO the split-created run (carried id 7001) must
+    // apply in the revived session — the pin that the id table survived the
+    // server's death via the bundle, not via any server-side state.
+    const intoSplit: InsertTextIntent = {
+      kind: "insertText", clientId: "b", clientSeq: 1, base: w.seq,
+      at: { blockId: 7000, runId: 7001, offset: 1 }, text: "X",
+    };
+    await hub2.handle(b, { t: "submit", intent: intoSplit });
+    const bc = b.last();
+    expect(bc.t).toBe("broadcast");
+    if (bc.t !== "broadcast") return;
+    expect(bc.entries[0].kind).toBe("applied");
+    replica.receive(bc.entries);
+    const serverXml = hub2["rooms"].get("d")!.session.doc.save();
+    expect(Buffer.from(replica.doc.save()).equals(Buffer.from(serverXml))).toBe(true);
+  });
+
+  it("provider-created rooms (party/dev mode) also carry an epoch id", async () => {
+    const hub = new CollabHub(provider, undefined, undefined, () => 0, nextEpoch);
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "party_0", clientId: "a", sinceSeq: 0 });
+    const w = c.last();
+    expect(w.t).toBe("welcome");
+    if (w.t === "welcome") expect(w.genesisId).toMatch(/^g_test_/);
+  });
+});
+
+/** Concatenated w:t text of a replica's doc (assert helper). */
+function serializeSnapshotText(replica: ClientReplica): string {
+  const walk = (el: { name: string; text: string; children: unknown[] }): string =>
+    (el.name.endsWith(":t") ? el.text : "") + (el.children as never[]).map(walk).join("");
+  return walk(replica.doc.docRoot as never);
+}

@@ -40,6 +40,11 @@ export type ClientMessage =
       takeover?: boolean;
       token?: string;
       sinceSeq: number;
+      /** The epoch id from the client's stored bundle, when resuming (plan
+       * doc 12 §5). Informational to the server today — epoch comparison is
+       * client-side (welcome.genesisId vs the bundle's) — but carried so the
+       * server can log resume-vs-fresh joins and future-proof case handling. */
+      genesisId?: string;
     }
   | { t: "submit"; intent: Intent }
   | { t: "presence"; position: PresencePosition | null };
@@ -59,6 +64,18 @@ export type ServerMessage =
        */
       sidecar: IdSidecar;
       tail: LogEntry[];
+      /**
+       * The session EPOCH id (plan doc 12): minted fresh every time a doc is
+       * seeded/re-seeded. A resuming client compares it against its bundle's
+       * stored genesisId — same ⇒ seamless rejoin (case 1); different ⇒
+       * someone re-seeded while it was away (case 2: take server state, keep
+       * the local copy per doc 15 lineage — NEVER silently merge epochs).
+       */
+      genesisId: string;
+      /** Session encryption mode (plan doc 13 §6). Clients derive the truth
+       * from their link (#k present ⇒ encrypted) and HARD-REFUSE a welcome
+       * that contradicts it — the wire value must never downgrade a client. */
+      mode: "plaintext" | "encrypted";
     }
   | { t: "broadcast"; entries: LogEntry[] }
   /** `participant` is the sender's bound clientId (round-4 F14) — the same
