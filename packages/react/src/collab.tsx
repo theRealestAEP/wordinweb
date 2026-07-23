@@ -123,7 +123,8 @@ export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): R
 
   return createElement(DocxView, {
     source: bytes,
-    collab: session,
+    // Pass submit + live presence; DocxView draws remote carets over the page.
+    collab: { submit: session.submit, presence: session.presence },
     editable: opts.editable ?? true,
     // Re-key on version so the reconciled document is re-rendered.
     key: session.version,

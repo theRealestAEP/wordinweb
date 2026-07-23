@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EditorIntent } from "@wordinweb/core";
+import { computePresenceCarets, drawPresenceCarets } from "./presence-cursors.js";
+import type { PresencePosition } from "@wordinweb/collab/client";
 import {
   collectRevisions,
   DocxDocument,
@@ -327,7 +329,12 @@ export interface DocxViewProps {
    * the app imports the session from the separate `wordinweb/collab` entry and
    * injects it here.
    */
-  collab?: { submit: (intent: EditorIntent) => void };
+  collab?: {
+    submit: (intent: EditorIntent) => void;
+    /** Remote participants' cursor/selection positions, drawn as colored
+     * carets over the page (see presence-cursors). */
+    presence?: Record<string, PresencePosition | null>;
+  };
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
   /** Render review comments (range highlights + margin balloons). Default true. */
@@ -462,6 +469,18 @@ export function DocxView({
   // numbers, close) surface right where the user is editing.
   const [hfMode, setHfMode] = useState(false);
   const apiRef = useRef<DocxViewApi | null>(null);
+  const handleRef = useRef<RenderHandle | null>(null);
+  const presenceOverlayRef = useRef<HTMLDivElement | null>(null);
+  const redrawPresenceRef = useRef<(() => void) | null>(null);
+  // Current presence, read by the imperative draw (which closes over an older
+  // render's props otherwise).
+  const presenceRef = useRef<Record<string, PresencePosition | null> | undefined>(undefined);
+  presenceRef.current = collab?.presence;
+
+  // Redraw remote presence carets whenever the presence prop changes.
+  useEffect(() => {
+    redrawPresenceRef.current?.();
+  }, [collab?.presence]);
   // The parsed document (and its undo history) survives re-runs of the main
   // effect: toggling `editable` (Editing↔Viewing), `revisions` (markup/final)
   // or `commentAuthor` must re-render the SAME document, not re-parse the
@@ -555,6 +574,8 @@ export function DocxView({
         onReplyComment,
         onViewportChange: () => editor?.afterViewportChange(),
       }, prev ?? undefined);
+      handleRef.current = handle;
+      if (presenceRef.current) drawCollabPresence();
       container.scrollTop = scrollTop;
       container.scrollLeft = scrollLeft;
       const t3 = perf ? performance.now() : 0;
@@ -614,6 +635,26 @@ export function DocxView({
         start();
       }
     };
+
+    // Draw remote participants' carets over the current render (collab mode).
+    const drawCollabPresence = (): void => {
+      const handle = handleRef.current;
+      const d = docCacheRef.current?.doc;
+      const presence = presenceRef.current;
+      if (!handle || !d || !presence) return;
+      let overlay = presenceOverlayRef.current;
+      if (!overlay || overlay.parentElement !== handle.root) {
+        overlay = handle.root.ownerDocument.createElement("div");
+        overlay.className = "dxw-presence-overlay";
+        overlay.style.position = "absolute";
+        overlay.style.inset = "0";
+        overlay.style.pointerEvents = "none";
+        handle.root.appendChild(overlay);
+        presenceOverlayRef.current = overlay;
+      }
+      drawPresenceCarets(overlay, computePresenceCarets(handle, d, presence));
+    };
+    redrawPresenceRef.current = drawCollabPresence;
 
     const rerender = (
       doc: DocxDocument,

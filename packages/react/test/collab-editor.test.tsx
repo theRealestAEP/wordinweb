@@ -75,3 +75,29 @@ describe("CollabEditor repaints on a remote edit (full inbound loop)", () => {
     await act(async () => { root.unmount(); });
   });
 });
+
+describe("CollabEditor draws remote presence carets (jsdom)", () => {
+  it("renders a caret bar for a remote participant's cursor", async () => {
+    const hub = new CollabHub(provider);
+    const factory = factoryFor(hub);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(CollabEditor, { url: "ws://x", docId: "shared", clientId: "viewer", createSocket: factory }));
+    });
+    for (let i = 0; i < 15 && !container.textContent?.includes("HELLO"); i++) await tick();
+
+    // A remote editor joins and broadcasts a cursor position in the run (ids 1/2).
+    const editor = new CollabConnection(createWebSocketTransport(factory("ws://x") as never), "peer");
+    editor.join("shared");
+    await tick();
+    await act(async () => { editor.setPresence({ anchor: { blockId: 1, runId: 2, offset: 5 } }); });
+    for (let i = 0; i < 15 && !container.querySelector(".dxw-presence-caret"); i++) await tick();
+
+    const caret = container.querySelector<HTMLElement>(".dxw-presence-caret");
+    expect(caret).toBeTruthy(); // a remote cursor is painted on the page
+    expect(caret!.dataset.participant).toBeTruthy();
+    await act(async () => { root.unmount(); });
+  });
+});
