@@ -36,7 +36,7 @@ describe("demo intent allowlist (doc 11)", () => {
     expect(DEMO_INTENT_ALLOWLIST.party).not.toContain("insertHyperlink");
   });
   it("magic-link mode allows the full implemented feature set", () => {
-    for (const k of ["insertText", "deleteText", "splitParagraph", "formatRun", "formatParagraph", "setListType"]) {
+    for (const k of ["insertText", "deleteText", "splitParagraph", "mergeParagraph", "formatRun", "formatParagraph", "formatRange", "setListType", "tableOp"]) {
       expect(intentAllowedInDemo("magicLink", k)).toBe(true);
     }
   });

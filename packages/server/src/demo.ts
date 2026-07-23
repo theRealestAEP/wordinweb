@@ -45,19 +45,23 @@ export class PartyPool {
  * is not a control"; the list is explicit). The frontend disables toolbar
  * actions not in the set; a hardened server would also reject them. */
 export const DEMO_INTENT_ALLOWLIST = {
-  // Full feature set once each intent's validation ships. Authored-URL
-  // intents (hyperlink/webVideo) stay OFF until the scheme-allowlist gate.
+  // Full implemented feature set. Authored-URL intents (hyperlink/webVideo)
+  // stay OFF until the scheme-allowlist gate; media/import stay off in the demo.
   magicLink: [
     "insertText",
     "deleteText",
     "splitParagraph",
+    "mergeParagraph",
     "formatRun",
     "formatParagraph",
+    "formatRange",
     "setListType",
+    "tableOp",
   ],
-  // Minimal surface: text + presence only, so the highest-exposure anonymous
-  // mode is structurally XSS-free (no authored-URL/media/import sink enabled).
-  party: ["insertText", "deleteText", "splitParagraph"],
+  // Minimal surface: text-structural + presence only, so the highest-exposure
+  // anonymous mode is structurally XSS-free (no formatting/table/authored-URL/
+  // media/import sink enabled — only plain text editing).
+  party: ["insertText", "deleteText", "splitParagraph", "mergeParagraph"],
 } as const;
 
 export type DemoMode = keyof typeof DEMO_INTENT_ALLOWLIST;
