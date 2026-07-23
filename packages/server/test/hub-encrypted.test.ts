@@ -14,7 +14,8 @@ class FakeConn implements Connection {
   }
   last(): ServerMessage {
     for (let i = this.received.length - 1; i >= 0; i--) {
-      if (this.received[i].t !== "roster") return this.received[i];
+      const t = this.received[i].t;
+      if (t !== "roster" && t !== "checkpointer") return this.received[i]; // ambient designations
     }
     return this.received[this.received.length - 1];
   }
@@ -142,3 +143,72 @@ function plaintextDoc(): Uint8Array {
     "word/document.xml": strToU8(documentXml),
   });
 }
+
+describe("server-assigned checkpointer (doc 13 §3, blocker 2)", () => {
+  it("first joiner is designated; rotation on disconnect; only the designee's checkpoints count", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    const b = new FakeConn("b");
+    await hub.handle(a, hello("alice"));
+    await hub.handle(b, hello("bob"));
+    expect(a.received.some((m) => m.t === "checkpointer" && m.active)).toBe(true);
+    expect(b.received.some((m) => m.t === "checkpointer")).toBe(false);
+
+    // An edit sequences; a volunteer (bob) uploads at the log head — ignored.
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) });
+    const forged = { seq: 1, iv: "aXY=", ciphertext: "Zm9yZ2Vk" };
+    await hub.handle(b, { t: "checkpoint", checkpoint: forged });
+    const c1 = new FakeConn("c1");
+    await hub.handle(c1, hello("carol"));
+    const w1 = c1.last();
+    if (w1.t === "welcome-enc") expect(w1.checkpoint).toEqual(CP); // still the seed
+
+    // The DESIGNEE's quiescent checkpoint is adopted; the log prunes; a
+    // fresh joiner gets it with an empty tail.
+    await hub.handle(a, { t: "checkpoint", checkpoint: forged });
+    const c2 = new FakeConn("c2");
+    await hub.handle(c2, hello("dave"));
+    const w2 = c2.last();
+    expect(w2.t).toBe("welcome-enc");
+    if (w2.t === "welcome-enc") {
+      expect(w2.checkpoint).toEqual(forged);
+      expect(w2.tail).toEqual([]);
+    }
+
+    // Rotation: the designee leaves; someone else is designated.
+    hub.disconnect(a);
+    expect(b.received.some((m) => m.t === "checkpointer" && m.active)).toBe(true);
+  });
+
+  it("non-quiescent checkpoints are ignored (blocker-1 discipline)", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice"));
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) });
+    await hub.handle(a, { t: "submit-enc", envelope: { ...env("alice", 2), base: 1 } });
+    // Checkpoint at seq 1 while the log head is 2: straddled — ignored.
+    await hub.handle(a, { t: "checkpoint", checkpoint: { seq: 1, iv: "aXY=", ciphertext: "eA==" } });
+    const c = new FakeConn("c");
+    await hub.handle(c, hello("carol"));
+    const w = c.last();
+    if (w.t === "welcome-enc") {
+      expect(w.checkpoint).toEqual(CP); // unadopted
+      expect(w.tail).toHaveLength(2); // full tail still served
+    }
+  });
+
+  it("stale-base submits are refused after a checkpoint (joiner tails stay transformable)", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice"));
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) });
+    await hub.handle(a, { t: "checkpoint", checkpoint: { seq: 1, iv: "aXY=", ciphertext: "eA==" } });
+    // base 0 < checkpoint seq 1 → the entry's transform context is pruned;
+    // the guard refuses instead of stranding future joiners.
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 2) }); // base: 0
+    expect(a.last()).toEqual({ t: "refused", reason: "stale-base" });
+    // Rebased resubmit (same clientSeq) sequences fine.
+    await hub.handle(a, { t: "submit-enc", envelope: { ...env("alice", 2), base: 1 } });
+    expect(a.last().t).toBe("broadcast-enc");
+  });
+});

@@ -37,24 +37,40 @@ function docxBytes(text: string): Uint8Array {
 /** A blind sequencer: everything it touches is recorded for the blindness
  * assertion. Mirrors hub.ts submit-enc semantics exactly. */
 function blindServer(genesisId: string, checkpoint: SealedCheckpoint) {
-  const log: EnvelopeEntry[] = [];
+  let log: EnvelopeEntry[] = [];
   const seen = new Set<string>();
   const everything: string[] = [JSON.stringify(checkpoint)]; // all bytes the server ever held
   const peers: { deliver: (m: ServerMessage) => void }[] = [];
+  const state = { checkpoint };
+  let designated = false;
   const attach = () => {
     const peer = { deliver: (_m: ServerMessage) => {} };
     peers.push(peer);
+    const first = !designated;
+    designated = true;
     return {
       send: (msg: ClientMessage) => {
         everything.push(JSON.stringify(msg));
         if (msg.t === "hello") {
-          peer.deliver({ t: "welcome-enc", docId: "d", genesisId, checkpoint, tail: log.filter((e) => e.seq > checkpoint.seq), mode: "encrypted" });
+          peer.deliver({ t: "welcome-enc", docId: "d", genesisId, checkpoint: state.checkpoint, tail: log.filter((e) => e.seq > state.checkpoint.seq), mode: "encrypted" });
+          if (first) peer.deliver({ t: "checkpointer", active: true });
+        } else if (msg.t === "checkpoint") {
+          // Mirror hub.ts: quiescent-only adoption, prune on accept.
+          const head = log.length === 0 ? state.checkpoint.seq : log[log.length - 1].seq;
+          if (msg.checkpoint.seq === head && msg.checkpoint.seq > state.checkpoint.seq) {
+            state.checkpoint = msg.checkpoint;
+            log = [];
+          }
         } else if (msg.t === "submit-enc") {
+          if (msg.envelope.base < state.checkpoint.seq) {
+            peer.deliver({ t: "refused", reason: "stale-base" });
+            return;
+          }
           const key = `${msg.envelope.clientId}:${msg.envelope.clientSeq}`;
           let entry = seen.has(key) ? log.find((e) => `${e.clientId}:${e.clientSeq}` === key) : undefined;
           if (!entry) {
             seen.add(key);
-            entry = { ...msg.envelope, seq: log.length === 0 ? 1 : log[log.length - 1].seq + 1 };
+            entry = { ...msg.envelope, seq: log.length === 0 ? state.checkpoint.seq + 1 : log[log.length - 1].seq + 1 };
             log.push(entry);
           }
           for (const p of peers) p.deliver({ t: "broadcast-enc", entries: [entry!] });
@@ -63,7 +79,7 @@ function blindServer(genesisId: string, checkpoint: SealedCheckpoint) {
       onMessage: (cb: (m: ServerMessage) => void) => { peer.deliver = cb; },
     };
   };
-  return { attach, log, everything, injectRaw: (env: EnvelopeEntry) => { log.push(env); for (const p of peers) p.deliver({ t: "broadcast-enc", entries: [env] }); } };
+  return { attach, log: () => log, state, everything, injectRaw: (env: EnvelopeEntry) => { log.push(env); for (const p of peers) p.deliver({ t: "broadcast-enc", entries: [env] }); } };
 }
 
 /** Seed helper: what a go-live client does (doc 13) — mint key, derive epoch
@@ -115,7 +131,7 @@ describe("blind-sequencer session (doc 13 §2/§8)", () => {
     // SERVER BLINDNESS (doc 13 §8, lint-style): across every byte the
     // server ever received or stored — hellos, envelopes, its log — the
     // document content never appears.
-    const all = srv.everything.join("\n") + JSON.stringify(srv.log);
+    const all = srv.everything.join("\n") + JSON.stringify(srv.log());
     expect(all).not.toContain("SECRET-ALPHA");
     expect(all).not.toContain("CONFIDENTIAL-BETA");
     expect(all).not.toContain("insertText"); // not even intent SHAPES leak
@@ -270,4 +286,40 @@ describe("encrypted hash gossip (doc 13 §2 / blocker-3 detection)", () => {
     await flush();
     expect(aliceDiverged || bobDiverged).toBe(true);
   });
+});
+
+describe("mid-session client checkpoints (doc 13 item 6)", () => {
+  it("the designated client checkpoints; a late joiner rehydrates from it with a SHORT tail and converges", async () => {
+    const docKey = mintDocKey();
+    const { checkpoint } = await seedEncrypted("hi", "g1", docKey);
+    const srv = blindServer("g1", checkpoint);
+
+    // alice joins first → designated checkpointer.
+    const alice = new EncryptedCollabConnection(srv.attach(), "alice", docKey);
+    alice.join("d");
+    await flush();
+
+    // 52 edits: the cadence point (seq 50) triggers her upload; the server
+    // adopts it quiescently and prunes the log.
+    for (let i = 0; i < 52; i++) {
+      alice.submit(ins(0, "x"));
+      await flush();
+    }
+    expect(srv.state.checkpoint.seq).toBeGreaterThanOrEqual(50); // adopted
+    expect(srv.log().length).toBeLessThanOrEqual(2); // pruned to the post-checkpoint tail
+
+    // A late joiner rehydrates from the ADOPTED mid-session checkpoint —
+    // not the seed — replaying only the short tail, and converges.
+    const carol = new EncryptedCollabConnection(srv.attach(), "carol", docKey);
+    carol.join("d");
+    await flush();
+    expect(serializeXml(carol.doc!.docRoot)).toBe(serializeXml(alice.doc!.docRoot));
+
+    // Both keep editing; convergence holds across the checkpoint boundary.
+    carol.submit(ins(0, "c"));
+    await flush();
+    alice.submit(ins(0, "a"));
+    await flush();
+    expect(text(alice)).toBe(text(carol));
+  }, 30000);
 });

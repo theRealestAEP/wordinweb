@@ -32,6 +32,10 @@ export class DocumentSession {
   readonly ids: StableIds;
   private log: LogEntry[] = [];
   private seen = new Set<string>();
+  /** Base sequence number when the session was seeded from a mid-history
+   * checkpoint (E2EE mirrors, doc 13 §3): entries 1..floor are baked into
+   * the seed bytes; numbering continues from here. */
+  private seqFloor = 0;
   /** Undo stack per client: applied intents (seq + their pre-computed inverse)
    * not yet undone. Enables selective per-user undo (plan doc 03 Phase 8). */
   private undoStacks = new Map<string, { seq: number; inverse: IntentBody }[]>();
@@ -46,7 +50,13 @@ export class DocumentSession {
    * last log entry so it stays correct after a snapshot prunes the log
    * prefix (rehydration). */
   get seq(): number {
-    return this.log.length === 0 ? 0 : this.log[this.log.length - 1].seq;
+    return this.log.length === 0 ? this.seqFloor : this.log[this.log.length - 1].seq;
+  }
+
+  /** Declare that this session's document already reflects seqs 1..n (it
+   * was seeded from a checkpoint at n) — numbering continues from there. */
+  setSeqFloor(n: number): void {
+    this.seqFloor = n;
   }
 
   entriesSince(base: number): LogEntry[] {

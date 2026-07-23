@@ -58,6 +58,10 @@ interface EncryptedState {
   checkpoint: SealedCheckpoint;
   log: EnvelopeEntry[];
   seen: Set<string>;
+  /** conn.id of the server-ASSIGNED checkpointer (doc 13 §3, blocker 2:
+   * assignment replaces the riggable lowest-clientId election — rigging
+   * now requires being picked). Rotated when that socket leaves. */
+  checkpointerConnId?: string;
   /** The engine version the epoch's FIRST participant registered; everyone
    * after must match (client-derived canonical forms diverge across
    * transform-semantics versions with no arbiter — doc 13 §2). */
@@ -296,7 +300,11 @@ export class CollabHub {
             docId: msg.docId,
             genesisId: room.genesisId,
             checkpoint: room.enc.checkpoint,
-            tail: room.enc.log.filter((e) => e.seq > room.enc!.checkpoint.seq),
+            // BASE-COMPLETE tail (blocker 1): quiescent checkpoints prune
+            // to empty, and the stale-base guard keeps every later entry's
+            // base ≥ the checkpoint — so the retained log is exactly what a
+            // joiner needs, always.
+            tail: room.enc.log,
             mode: "encrypted",
           });
           room.roster.set(msg.clientId, {
@@ -304,6 +312,7 @@ export class CollabHub {
             connected: true,
           });
           this.broadcastRoster(room);
+          this.assignCheckpointer(room);
           return;
         }
         // The welcome is a checkpoint bundle (plan doc 12 §2, round-4 F10):
@@ -424,6 +433,16 @@ export class CollabHub {
           conn.send({ t: "refused", reason: "too-large" });
           return;
         }
+        // Stale-base guard (pairs with quiescent checkpoints): an envelope
+        // whose base precedes the adopted checkpoint would be untransformable
+        // by future joiners (its context is baked-and-pruned). Refuse it —
+        // the submitter has, by then, received broadcasts past the
+        // checkpoint and resubmits rebased with the SAME (clientId,
+        // clientSeq), so dedup semantics are unchanged.
+        if (msg.envelope.base < room.enc.checkpoint.seq) {
+          conn.send({ t: "refused", reason: "stale-base" });
+          return;
+        }
         // Dedup by plaintext bookkeeping; re-sends return the prior entry.
         const key = `${msg.envelope.clientId}:${msg.envelope.clientSeq}`;
         let entry = room.enc.seen.has(key)
@@ -437,6 +456,29 @@ export class CollabHub {
         }
         const outEnc: ServerMessage = { t: "broadcast-enc", entries: [entry] };
         for (const c of room.conns) c.send(outEnc);
+        return;
+      }
+      case "checkpoint": {
+        const docId = this.connDoc.get(conn.id);
+        if (!docId) return;
+        const room = this.rooms.get(docId)!;
+        // Only the ASSIGNED connection's checkpoints are accepted — a
+        // volunteer (or attacker) can't insist on the role (blocker 2).
+        if (!room.enc || room.enc.checkpointerConnId !== conn.id) return;
+        if (msg.checkpoint.ciphertext.length > 16 * 1024 * 1024) return; // size cap
+        if (msg.checkpoint.seq <= room.enc.checkpoint.seq) return; // stale
+        // QUIESCENT acceptance (doc 13 / round-4 blocker 1, fix direction
+        // (b)): a checkpoint is adopted only when NO retained entry sits
+        // beyond it and none straddles it — i.e. it is exactly the log
+        // head. Then everything ≤ its seq is baked into its bytes and can
+        // prune, and future joiner tails are trivially base-complete when
+        // combined with the stale-base guard on submits (below). A
+        // non-quiescent checkpoint is simply ignored — the checkpointer
+        // retries at the next cadence point.
+        const head = room.enc.log.length === 0 ? 0 : room.enc.log[room.enc.log.length - 1].seq;
+        if (msg.checkpoint.seq !== head) return;
+        room.enc.checkpoint = msg.checkpoint;
+        room.enc.log = [];
         return;
       }
       case "gossip": {
@@ -501,8 +543,25 @@ export class CollabHub {
           }
         }
         if (room.conns.size === 0) room.emptySince = this.now();
+        // Rotate the checkpointer if the assigned socket just left.
+        if (room.enc?.checkpointerConnId === conn.id) {
+          room.enc.checkpointerConnId = undefined;
+          this.assignCheckpointer(room);
+        }
       }
     }
+  }
+
+  /** (Re)assign the encrypted room's checkpointer (doc 13 §3): keep the
+   * incumbent while its socket lives; otherwise pick the first connection
+   * (arrival order — effectively round-robin as sockets churn). */
+  private assignCheckpointer(room: Room): void {
+    if (!room.enc) return;
+    const current = room.enc.checkpointerConnId;
+    if (current && [...room.conns].some((c) => c.id === current)) return;
+    const next = [...room.conns][0];
+    room.enc.checkpointerConnId = next?.id;
+    if (next) next.send({ t: "checkpointer", active: true });
   }
 
   /** Fan the full roster snapshot to everyone in the room (doc 14 §2). */

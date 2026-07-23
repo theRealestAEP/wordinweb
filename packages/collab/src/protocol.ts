@@ -134,6 +134,9 @@ export type ClientMessage =
    * The hub refuses this on plaintext rooms and refuses plaintext `submit`
    * on encrypted rooms — no mixed-mode documents, enforced both ways. */
   | { t: "submit-enc"; envelope: IntentEnvelope }
+  /** Upload a sealed checkpoint (doc 13 §3) — accepted ONLY from the
+   * connection the server currently designates as checkpointer. */
+  | { t: "checkpoint"; checkpoint: SealedCheckpoint }
   /** Encrypted hash gossip (doc 13 §2): an OPAQUE sealed {seq, hash} blob
    * the server relays without reading — divergence detection must not leak
    * even document hashes to a blind server (a hash is a stable content
@@ -195,6 +198,11 @@ export type ServerMessage =
   | { t: "broadcast-enc"; entries: EnvelopeEntry[] }
   /** Relayed gossip blob; `from` is the sender's BOUND clientId. */
   | { t: "gossip"; from: string; iv: string; ciphertext: string }
+  /** Checkpointer designation (doc 13 §3): the SERVER assigns the role —
+   * the v1 lowest-clientId election was riggable (round-4 blocker 2); an
+   * assigned role can only be held by an authenticated connection the
+   * server picked. Rotated on disconnect. */
+  | { t: "checkpointer"; active: boolean }
   /** `participant` is the sender's bound clientId (round-4 F14) — the same
    * identifier intents carry — so presence joins the roster/attribution
    * keyspace and survives the sender reconnecting on a new socket. */

@@ -14,7 +14,7 @@ import {
 import type { ClientTransport, ConnectionCallbacks } from "./connection.js";
 import type { RosterEntry } from "./protocol.js";
 import type { DocBundle } from "./bundle.js";
-import { deriveEpochKeys, openCheckpoint, openIntent, sealIntent, b64ToBytes, bytesToB64, type EpochKeys } from "./e2ee.js";
+import { deriveEpochKeys, openCheckpoint, openIntent, sealIntent, sealCheckpoint, b64ToBytes, bytesToB64, type EpochKeys } from "./e2ee.js";
 import { docHash } from "./hash.js";
 
 /**
@@ -63,6 +63,12 @@ export class EncryptedCollabConnection {
   private ownHashes = new Map<number, string>();
   /** Every K ingested seqs, hash + gossip (doc 13 §2). */
   private static GOSSIP_EVERY = 20;
+  /** Server-designated checkpointer flag (doc 13 §3) + cadence. */
+  private isCheckpointer = false;
+  private static CHECKPOINT_EVERY = 50;
+  /** The last intent this connection sealed+sent (one-in-flight makes this
+   * the only candidate a `stale-base` refusal can refer to). */
+  private lastSent: Intent | null = null;
 
   constructor(
     private transport: ClientTransport,
@@ -175,6 +181,7 @@ export class EncryptedCollabConnection {
     // Seal + send ride the serial queue so a fast second keystroke can't
     // overtake the first one's async encryption (order = correctness).
     this.enqueue(async () => {
+      this.lastSent = full;
       const env = await sealIntent(this.keys!.kContent, this.docId, this.genesisId!, full);
       this.transport.send({ t: "submit-enc", envelope: env } as ClientMessage);
     });
@@ -204,6 +211,7 @@ export class EncryptedCollabConnection {
           // rehydrating plaintext server would be — bytes, then sidecar,
           // then the tail replayed through the canonical pipeline.
           this.mirror = new DocumentSession(DocxDocument.load(bytes));
+          this.mirror.setSeqFloor(msg.checkpoint.seq); // numbering continues from the checkpoint
           if (cp.sidecar) this.mirror.installSidecar(cp.sidecar as never);
           this.replica = new ClientReplica(bytes, (cp.sidecar ?? undefined) as never);
           this.replica.confirmedSeq = msg.checkpoint.seq;
@@ -254,7 +262,28 @@ export class EncryptedCollabConnection {
         this.enqueue(() => this.onGossip(msg.iv, msg.ciphertext));
         return;
       }
+      case "checkpointer": {
+        this.isCheckpointer = msg.active;
+        return;
+      }
       case "refused": {
+        if (msg.reason === "stale-base") {
+          // The server adopted a checkpoint past our envelope's base
+          // (quiescent-checkpoint guard). By the time this refusal arrives
+          // the broadcasts up to that checkpoint have been processed, so
+          // re-seal the SAME intent (same clientId/clientSeq — dedup-safe)
+          // with a fresh base and resubmit. One-in-flight discipline makes
+          // lastSent the only possible referent.
+          const retry = this.lastSent;
+          if (retry && this.replica && this.keys && this.genesisId) {
+            this.enqueue(async () => {
+              const rebased = { ...retry, base: this.replica!.confirmedSeq } as Intent;
+              const env = await sealIntent(this.keys!.kContent, this.docId, this.genesisId!, rebased);
+              this.transport.send({ t: "submit-enc", envelope: env } as ClientMessage);
+            });
+          }
+          return;
+        }
         this.cb.onRefused?.(msg.reason);
         return;
       }
@@ -283,6 +312,21 @@ export class EncryptedCollabConnection {
     if (entry.kind === "applied") {
       this.activity.push({ seq: entry.seq, clientId: entry.intent.clientId, kind: entry.intent.kind });
       if (this.activity.length > 100) this.activity.splice(0, this.activity.length - 100);
+    }
+
+    // Checkpoint duty (doc 13 §3): the designated client uploads its
+    // mirror's canonical state every K seqs. The mirror is confirmed-only
+    // by construction (no optimistic edits ever touch it), satisfying the
+    // round-4 F17 rule structurally; the server adopts it only if it is
+    // quiescent (exactly at the log head) — a miss just retries next round.
+    if (this.isCheckpointer && env.seq % EncryptedCollabConnection.CHECKPOINT_EVERY === 0) {
+      const cp = this.mirror!.checkpoint();
+      const sealed = await sealCheckpoint(this.keys!.kContent, this.docId, this.genesisId!, cp.seq, {
+        docx: bytesToB64(cp.docx),
+        sidecar: cp.sidecar,
+        docHash: await docHash(this.mirror!.doc),
+      });
+      this.transport.send({ t: "checkpoint", checkpoint: { seq: cp.seq, ...sealed } } as ClientMessage);
     }
 
     // Divergence DETECTION (doc 13 §2 / round-4 blocker 3): every K seqs,
