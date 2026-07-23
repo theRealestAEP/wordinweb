@@ -1,6 +1,8 @@
 import { createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./src/app";
+import { goLiveEncrypted } from "./src/e2ee-flows";
+import { docKeyFromFragment } from "wordinweb/collab";
 
 /**
  * Dev harness for the zero-custody demo (Vite). The browser URL carries the
@@ -45,6 +47,9 @@ const name = persistent("wordinweb-name", () => "");
 function Harness() {
   const [docId, setDocId] = useState<string | null>(() => params.get("doc"));
   const [creating, setCreating] = useState(false);
+  const [newCode, setNewCode] = useState("");
+  // E2EE (doc 13 §1): the key rides the fragment — browsers never send it.
+  const [docKey, setDocKey] = useState<string | null>(() => docKeyFromFragment(location.hash));
 
   if (!docId) {
     return createElement(
@@ -57,14 +62,45 @@ function Harness() {
         "Create a document and share its URL. The server hosts the live session only — ",
         "your browser keeps the document, and any participant can bring the same link back to life later.",
       ),
+      createElement("p", { className: "hint" }, "Optional share code (told to people separately — a leaked link alone can't enter or decrypt):"),
+      createElement("input", {
+        value: newCode,
+        placeholder: "e.g. 6 digits (optional)",
+        maxLength: 12,
+        onChange: (e: { target: { value: string } }) => setNewCode(e.target.value),
+      }),
       createElement(
         "button",
         {
           disabled: creating,
+          style: { marginLeft: 8 },
           onClick: () => {
             setCreating(true);
-            // Go-live (doc 12 §3): the server mints the unguessable docId —
-            // the URL IS the capability (doc 11).
+            // Encrypted go-live (doc 13 §6 — the demo DEFAULT for magic
+            // links): mint id+key client-side, seal the blank template,
+            // PUT. The key goes into the FRAGMENT: shareable, never sent.
+            void goLiveEncrypted(HTTP, newCode || undefined)
+              .then(({ docId: id, docKey: key }) => {
+                const url = new URL(location.href);
+                url.searchParams.set("doc", id);
+                url.hash = `k=${key}`;
+                history.replaceState(null, "", url.toString());
+                setDocKey(key);
+                setDocId(id);
+              })
+              .catch(() => setCreating(false));
+          },
+        },
+        creating ? "Creating…" : "New encrypted document",
+      ),
+      createElement(
+        "button",
+        {
+          disabled: creating,
+          style: { marginLeft: 8 },
+          onClick: () => {
+            setCreating(true);
+            // Plaintext go-live (doc 12 §3): the server mints the docId.
             void fetch(`${HTTP}/docs`, {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -80,7 +116,7 @@ function Harness() {
               .catch(() => setCreating(false));
           },
         },
-        creating ? "Creating…" : "New document",
+        creating ? "Creating…" : "New plaintext document",
       ),
       createElement("p", { className: "hint", style: { marginTop: 20 } }, `Server: ${HTTP} (zero-custody — sessions are not persisted)`),
     );
@@ -95,13 +131,14 @@ function Harness() {
       null,
       createElement("b", null, "wordinweb collab"),
       createElement("span", { className: "pill" }, `doc ${docId.slice(0, 10)}…`),
+      docKey ? createElement("span", { className: "pill", style: { background: "#1a7f37", color: "#fff" } }, "encrypted") : null,
       createElement("span", { className: "hint" }, "Share this URL / open on another device:"),
       createElement("input", { readOnly: true, value: shareUrl, onFocus: (e: { target: { select(): void } }) => e.target.select() }),
     ),
     createElement(
       "div",
       { id: "root-editor" },
-      createElement(App, { url: WS, httpBase: HTTP, docId, clientId, name }),
+      createElement(App, { url: WS, httpBase: HTTP, docId, clientId, name, docKey: docKey ?? undefined }),
     ),
   );
 }

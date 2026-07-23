@@ -130,3 +130,38 @@ describe("blank go-live (the demo's New document flow)", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("encrypted seed over HTTP (doc 13)", () => {
+  const CP = { seq: 0, iv: "aXY=", ciphertext: "b3BhcXVl" };
+  it("PUT with an encrypted body seeds a blind room; second PUT gets 409 with the winner's epoch", () => {
+    const hub = zeroCustodyHub();
+    const first = handleSeedRequest(hub, { method: "PUT", docId: "d_x", body: { encrypted: { genesisId: "g_a", checkpoint: CP } } });
+    expect(first.status).toBe(200);
+    expect(first.body.genesisId).toBe("g_a"); // client-minted epoch honored
+    const second = handleSeedRequest(hub, { method: "PUT", docId: "d_x", body: { encrypted: { genesisId: "g_b", checkpoint: CP } } });
+    expect(second.status).toBe(409);
+    expect(second.body.genesisId).toBe("g_a");
+  });
+
+  it("malformed encrypted bodies 400; oversized ciphertext 413; nothing is created", () => {
+    const hub = zeroCustodyHub();
+    expect(handleSeedRequest(hub, { method: "PUT", docId: "d", body: { encrypted: { genesisId: "", checkpoint: CP } } }).status).toBe(400);
+    expect(handleSeedRequest(hub, { method: "PUT", docId: "d", body: { encrypted: { genesisId: "g", checkpoint: { seq: 0, iv: "x", ciphertext: "" } } } }).status).toBe(400);
+    expect(
+      handleSeedRequest(
+        hub,
+        { method: "PUT", docId: "d", body: { encrypted: { genesisId: "g", checkpoint: { seq: 0, iv: "x", ciphertext: "A".repeat(200) } } } },
+        { maxDocxBytes: 100 },
+      ).status,
+    ).toBe(413);
+    expect(hub.activeDocs()).toEqual([]);
+  });
+
+  it("encrypted seed registers a share-code verifier too", async () => {
+    const hub = zeroCustodyHub();
+    handleSeedRequest(hub, { method: "PUT", docId: "d", body: { encrypted: { genesisId: "g", checkpoint: CP }, codeVerifier: "V" } });
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0, engineVersion: "e1" });
+    expect(c.last()).toEqual({ t: "refused", reason: "code-required" });
+  });
+});

@@ -53,6 +53,7 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
   };
   const http = await import("node:http");
   const { handleSeedRequest } = await import("./seed-http.js");
+  const { blankDocxBytes } = await import("./blank.js");
 
   const hub = new CollabHub(/*provider*/ null); // zero-custody: seed-only rooms
   const wss = new wsMod.WebSocketServer({ noServer: true });
@@ -60,6 +61,13 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
 
   const server = http.createServer((req, res) => {
     const url = req.url ?? "";
+    if (req.method === "GET" && url === "/blank") {
+      // Template bytes for client-side sealing (encrypted go-live, doc 13):
+      // the server CANNOT seal a blank doc itself — it has no keys — so the
+      // creating browser fetches the template, seals, and POSTs the blob.
+      res.writeHead(200, { "content-type": "application/octet-stream" }).end(Buffer.from(blankDocxBytes()));
+      return;
+    }
     const put = req.method === "PUT" && /^\/docs\/[^/]+$/.test(url);
     const post = req.method === "POST" && url === "/docs";
     if (!put && !post) {

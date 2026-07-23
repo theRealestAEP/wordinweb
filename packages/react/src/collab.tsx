@@ -4,6 +4,8 @@ import { DocxView, type DocxViewApi } from "./index.js";
 import { DocxToolbar, type ToolbarFeature, type ToolbarMode } from "./toolbar.js";
 import {
   CollabConnection,
+  EncryptedCollabConnection,
+  stretchShareCode,
   createWebSocketTransport,
   BundlePersister,
   type BundleStore,
@@ -48,6 +50,15 @@ export interface UseCollabOptions {
   /** Claim the identity from an existing live connection (doc 12 §7 "use
    * here instead"): set after an `already-open` refusal and remount. */
   takeover?: boolean;
+  /**
+   * E2EE mode (doc 13): the document master key from the link's `#k=`
+   * fragment. Its PRESENCE selects the encrypted connection — mode is
+   * derived from the link, never the wire; a plaintext welcome is
+   * hard-refused (`mode-downgrade`). */
+  docKey?: string;
+  /** Share code (doc 13 §7) when the doc has one — stretched client-side
+   * and mixed into key derivation + sent as the hello proof. */
+  shareCode?: string;
   /** Display profile sent at join (doc 14 §2) — self-asserted; persist it in
    * localStorage next to the clientId so identity is stable per browser. */
   profile?: ParticipantProfile;
@@ -102,7 +113,7 @@ export interface CollabSession {
  * runtime dependency on this module).
  */
 export function useCollab(opts: UseCollabOptions): CollabSession {
-  const { url, docId, clientId, token, createSocket, store, profile, takeover } = opts;
+  const { url, docId, clientId, token, createSocket, store, profile, takeover, docKey, shareCode } = opts;
   const connRef = useRef<CollabConnection | null>(null);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
   const [version, setVersion] = useState(0);
@@ -117,12 +128,14 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     const socket = (createSocket ?? ((u: string) => new WebSocket(u)))(url);
     const transport = createWebSocketTransport(socket);
     let persister: BundlePersister | null = null; // assigned below iff store
-    const conn = new CollabConnection(transport, clientId, {
+    const callbacks: import("@wordinweb/collab/client").ConnectionCallbacks = {
       onChange: () => {
-        setDoc(conn.doc);
-        setReady(conn.ready);
+        const c = connRef.current;
+        if (!c) return;
+        setDoc(c.doc);
+        setReady(c.ready);
         setVersion((v) => v + 1); // signal a re-render on every reconciled change
-        setDocEpoch(conn.docEpoch); // bumps only on a reload (true conflict)
+        setDocEpoch(c.docEpoch); // bumps only on a reload (true conflict)
         persister?.notify(); // throttled bundle write (doc 12 §4)
       },
       onPresence: (participant, pos) =>
@@ -144,30 +157,39 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         }
         setEpochChanged({ from, to });
       },
-    });
-    connRef.current = conn;
-
-    // pagehide/hidden flush: best-effort narrowing of the throttle tail —
-    // IndexedDB has no synchronous API, so the throttle is the real
-    // durability mechanism (round-4 F6/F8); this just shrinks the window.
+    };
+    // Mode from the LINK (doc 13 §6): a docKey selects the encrypted
+    // connection; both classes expose the same session surface, so the rest
+    // of the hook (and DocxView) is mode-blind. Construction is async only
+    // when a share code must be stretched (PBKDF2, once per join).
+    let disposed = false;
     const flush = () => void persister?.flush();
-    if (store) {
-      persister = new BundlePersister(conn, store, docId);
-      if (typeof window !== "undefined") {
-        window.addEventListener("pagehide", flush);
-        document.addEventListener("visibilitychange", flush);
+    void (async () => {
+      const stretched = docKey && shareCode ? await stretchShareCode(shareCode, docId) : undefined;
+      const codeProof = stretched ? btoa(String.fromCharCode(...stretched)) : undefined;
+      if (disposed) return;
+      const conn: CollabConnection = docKey
+        ? (new EncryptedCollabConnection(transport, clientId, docKey, callbacks, stretched) as unknown as CollabConnection)
+        : new CollabConnection(transport, clientId, callbacks);
+      connRef.current = conn;
+      if (store) {
+        persister = new BundlePersister(conn, store, docId);
+        if (typeof window !== "undefined") {
+          window.addEventListener("pagehide", flush);
+          document.addEventListener("visibilitychange", flush);
+        }
+        // Resume if a bundle exists, else join cold. The get() is async;
+        // the editor stays !ready (input disabled) until the welcome.
+        const bundle = await store.get(docId);
+        if (disposed || connRef.current !== conn) return;
+        if (bundle) conn.resume(bundle, token, { profile, codeProof });
+        else conn.join(docId, token, { profile, takeover, codeProof });
+      } else {
+        conn.join(docId, token, { profile, takeover, codeProof });
       }
-      // Resume if a bundle exists, else join cold. The get() is async; the
-      // editor stays !ready (input disabled) until the welcome either way.
-      void store.get(docId).then((bundle) => {
-        if (connRef.current !== conn) return; // effect re-ran while loading
-        if (bundle) conn.resume(bundle, token, { profile });
-        else conn.join(docId, token, { profile, takeover });
-      });
-    } else {
-      conn.join(docId, token, { profile, takeover });
-    }
+    })();
     return () => {
+      disposed = true;
       if (store && typeof window !== "undefined") {
         window.removeEventListener("pagehide", flush);
         document.removeEventListener("visibilitychange", flush);
@@ -177,10 +199,10 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       connRef.current = null;
     };
     // Reconnect when the target document or endpoint changes.
-  // profile intentionally omitted from deps (an inline object literal would
+    // profile intentionally omitted from deps (an inline object literal would
     // reconnect every render); renames go through setProfile, not re-join.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, docId, clientId, token, createSocket, store, takeover]);
+  }, [url, docId, clientId, token, createSocket, store, takeover, docKey, shareCode]);
 
   return {
     doc,
@@ -342,4 +364,5 @@ export type { CollabSession as InjectedCollabSession };
 // entry has no path to any of this (doc 07 tree-shaking rule).
 export { IndexedDbBundleStore } from "./bundle-store.js";
 export { InMemoryBundleStore, BundlePersister } from "@wordinweb/collab/client";
+export { mintDocKey, docKeyFromFragment, deriveEpochKeys, sealCheckpoint, stretchShareCode, bytesToB64, docHash } from "@wordinweb/collab/client";
 export type { BundleStore, DocBundle } from "@wordinweb/collab/client";

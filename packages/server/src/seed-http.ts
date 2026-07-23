@@ -1,7 +1,7 @@
 import { CollabHub } from "./hub.js";
 import { makeDocId } from "./demo.js";
 import { blankDocxBytes } from "./blank.js";
-import type { IdSidecar } from "@wordinweb/collab/server";
+import type { IdSidecar, SealedCheckpoint } from "@wordinweb/collab/server";
 
 /**
  * Transport-free core of the go-live / bring-it-back HTTP endpoints (plan
@@ -31,7 +31,17 @@ export interface SeedHttpRequest {
    * `codeVerifier` (doc 13 §7) registers a share-code gate for the epoch —
    * a PBKDF2 output computed client-side; the code itself never crosses
    * the wire. */
-  body: { docx?: string; sidecar?: IdSidecar; codeVerifier?: string; blank?: boolean };
+  body: {
+    docx?: string;
+    sidecar?: IdSidecar;
+    codeVerifier?: string;
+    blank?: boolean;
+    /** Encrypted seed (doc 13): the client-sealed checkpoint + the epoch id
+     * it was sealed under (client-minted for encrypted epochs — the keys
+     * derive from (K_doc, genesisId), so the id must exist before sealing).
+     * The server stores the blob opaquely; size caps still apply. */
+    encrypted?: { genesisId: string; checkpoint: SealedCheckpoint };
+  };
 }
 
 export interface SeedHttpResponse {
@@ -57,6 +67,25 @@ export function handleSeedRequest(
   opts: SeedHttpOptions = {},
 ): SeedHttpResponse {
   const maxBytes = opts.maxDocxBytes ?? 10 * 1024 * 1024;
+
+  // Encrypted go-live / revival (doc 13): opaque checkpoint, no content
+  // validation possible server-side (clients validate on decrypt — doc 11
+  // E2EE amendment); size cap enforced on the ciphertext.
+  if (req.body?.encrypted) {
+    const { genesisId, checkpoint } = req.body.encrypted;
+    if (!genesisId || !checkpoint?.ciphertext || typeof checkpoint.seq !== "number") {
+      return { status: 400, body: { error: "bad-encrypted-seed" } };
+    }
+    if (checkpoint.ciphertext.length > maxBytes) {
+      return { status: 413, body: { error: "too-large", maxBytes } };
+    }
+    const docId = req.method === "POST" ? (opts.mintDocId ?? defaultMintDocId)() : req.docId;
+    if (!docId) return { status: 400, body: { error: "missing-doc-id" } };
+    const result = hub.seedEncrypted(docId, genesisId, checkpoint, req.body.codeVerifier);
+    if (!result.ok) return { status: 409, body: { error: "exists", genesisId: result.genesisId } };
+    return { status: req.method === "POST" ? 201 : 200, body: { docId, genesisId: result.genesisId } };
+  }
+
   let docx: Uint8Array;
   if (req.body?.blank && req.method === "POST") {
     // "New document" go-live (doc 12 §1): the landing page starts a blank

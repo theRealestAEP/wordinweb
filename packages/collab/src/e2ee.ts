@@ -95,12 +95,15 @@ export async function deriveEpochKeys(
 }
 
 /** PBKDF2-SHA256 stretch of the share code (doc 13 §7): 600k iterations,
- * WebCrypto-native (no WASM dep), salt bound to (docId, genesisId) so a
- * precomputed table for one doc is useless for another. */
-export async function stretchShareCode(code: string, docId: string, genesisId: string): Promise<Uint8Array> {
+ * WebCrypto-native (no WASM dep), salt bound to the docId so a precomputed
+ * table for one doc is useless for another. Deliberately NOT epoch-salted:
+ * the hello must carry the proof BEFORE the welcome reveals the epoch id
+ * (chicken-and-egg otherwise); epoch-binding of the KEYS happens in
+ * deriveEpochKeys' HKDF salt instead, which is where it matters. */
+export async function stretchShareCode(code: string, docId: string): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey("raw", te.encode(code) as BufferSource, "PBKDF2", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt: te.encode(`wordinweb-code:${docId}:${genesisId}`) as BufferSource, iterations: 600_000 },
+    { name: "PBKDF2", hash: "SHA-256", salt: te.encode(`wordinweb-code:${docId}`) as BufferSource, iterations: 600_000 },
     key,
     256,
   );

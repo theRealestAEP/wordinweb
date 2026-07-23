@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { CollabEditor, IndexedDbBundleStore, type CollabSession, type DocBundle } from "wordinweb/collab";
+import { reviveEncrypted } from "./e2ee-flows";
 
 /**
  * The zero-custody demo app (plan doc 12): everything around the editor —
@@ -21,17 +22,24 @@ function b64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-export function App({ url, httpBase, docId, clientId, name }: {
+export function App({ url, httpBase, docId, clientId, name, docKey }: {
   url: string;
   httpBase: string;
   docId: string;
   clientId: string;
   name: string;
+  /** E2EE mode (doc 13): present iff the link carried `#k=` — the mode is
+   * the LINK's fact; the editor hard-refuses a contradicting welcome. */
+  docKey?: string;
 }) {
   const store = useMemo(() => new IndexedDbBundleStore(), []);
   const [session, setSession] = useState<CollabSession | null>(null);
   const [takeover, setTakeover] = useState(false);
   const [reviveState, setReviveState] = useState<"idle" | "reviving" | "no-copy">("idle");
+  // Share code (doc 13 §7): entered on a code-required/invalid refusal;
+  // remounting with it retries (and in E2EE mode mixes into key derivation).
+  const [shareCode, setShareCode] = useState<string | undefined>(undefined);
+  const [codeDraft, setCodeDraft] = useState("");
   // Remount key: bumps to retry the connection after takeover/revival.
   const [attempt, setAttempt] = useState(0);
 
@@ -44,11 +52,17 @@ export function App({ url, httpBase, docId, clientId, name }: {
       setReviveState("no-copy");
       return;
     }
-    await fetch(`${httpBase}/docs/${docId}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ docx: b64(bundle.confirmedBytes), sidecar: bundle.confirmedSidecar }),
-    });
+    if (docKey) {
+      // Encrypted revival: seal the bundle under a fresh epoch client-side
+      // (the server can't — no keys). 409 = someone else won; join theirs.
+      await reviveEncrypted(httpBase, bundle, docKey, shareCode);
+    } else {
+      await fetch(`${httpBase}/docs/${docId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ docx: b64(bundle.confirmedBytes), sidecar: bundle.confirmedSidecar }),
+      });
+    }
     // Whether we won or someone else did (409), a session now exists — join it.
     setReviveState("idle");
     setAttempt((a) => a + 1);
@@ -90,7 +104,30 @@ export function App({ url, httpBase, docId, clientId, name }: {
       );
     }
     if (reason === "code-required" || reason === "code-invalid" || reason === "code-locked") {
-      return <p>This document needs its share code ({reason === "code-locked" ? "too many tries — wait a minute" : "ask whoever shared it"}). Code entry UI: next up.</p>;
+      return (
+        <div>
+          <p>
+            {reason === "code-locked"
+              ? "Too many tries — wait a minute, then re-enter the share code."
+              : reason === "code-invalid"
+                ? "That code didn't match — ask whoever shared the document."
+                : "This document needs its share code (sent separately from the link)."}
+          </p>
+          <input
+            value={codeDraft}
+            onChange={(e) => setCodeDraft(e.target.value)}
+            placeholder="6-digit share code"
+            inputMode="numeric"
+            maxLength={12}
+          />{" "}
+          <button
+            disabled={!codeDraft || reason === "code-locked"}
+            onClick={() => { setShareCode(codeDraft); setAttempt((a) => a + 1); }}
+          >
+            Join
+          </button>
+        </div>
+      );
     }
     return <p>Connection refused: {reason}. Refresh to retry.</p>;
   };
@@ -130,6 +167,8 @@ export function App({ url, httpBase, docId, clientId, name }: {
           clientId={clientId}
           store={store}
           takeover={takeover}
+          docKey={docKey}
+          shareCode={shareCode}
           profile={{ name, color: "" /* server assigns a palette color */ }}
           onSession={setSession}
           refusedContent={refusedContent}

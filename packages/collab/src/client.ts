@@ -24,3 +24,5 @@ export {
 } from "./protocol.js";
 export { transformIntent, transformPosition } from "./transform.js";
 export { sealIntent, openIntent, sealCheckpoint, openCheckpoint, deriveEpochKeys, stretchShareCode, mintDocKey, docKeyFromFragment, type IntentEnvelope, type EpochKeys } from "./e2ee.js";
+export { docHash } from "./hash.js";
+export { bytesToB64, b64ToBytes } from "./e2ee.js";

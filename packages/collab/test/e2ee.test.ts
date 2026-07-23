@@ -48,17 +48,17 @@ describe("e2ee — keys and fragments", () => {
 
   it("share code mixes into derivation: without it (or with the wrong one) nothing opens", async () => {
     const kDoc = mintDocKey();
-    const code = await stretchShareCode("123456", "d", "g1");
+    const code = await stretchShareCode("123456", "d");
     const withCode = await deriveEpochKeys(kDoc, "g1", code);
     const env = await sealIntent(withCode.kContent, "d", "g1", intent);
     // Link alone (no code): undecryptable — the doc-13 §7 guarantee that a
     // leaked link without the out-of-band code is not merely bounced but blind.
     const linkOnly = await deriveEpochKeys(kDoc, "g1");
     await expect(openIntent(linkOnly.kContent, "d", "g1", env)).rejects.toThrow();
-    const wrongCode = await deriveEpochKeys(kDoc, "g1", await stretchShareCode("654321", "d", "g1"));
+    const wrongCode = await deriveEpochKeys(kDoc, "g1", await stretchShareCode("654321", "d"));
     await expect(openIntent(wrongCode.kContent, "d", "g1", env)).rejects.toThrow();
     // Right code independently derived: opens.
-    const again = await deriveEpochKeys(kDoc, "g1", await stretchShareCode("123456", "d", "g1"));
+    const again = await deriveEpochKeys(kDoc, "g1", await stretchShareCode("123456", "d"));
     expect(await openIntent(again.kContent, "d", "g1", env)).toEqual(intent);
   }, 30000);
 });

@@ -12,6 +12,8 @@ import {
   ParticipantProfile,
 } from "./protocol.js";
 import type { ClientTransport, ConnectionCallbacks } from "./connection.js";
+import type { RosterEntry } from "./protocol.js";
+import type { DocBundle } from "./bundle.js";
 import { deriveEpochKeys, openCheckpoint, openIntent, sealIntent, b64ToBytes, bytesToB64, type EpochKeys } from "./e2ee.js";
 import { docHash } from "./hash.js";
 
@@ -74,7 +76,7 @@ export class EncryptedCollabConnection {
     this.transport.onMessage((msg) => this.onServer(msg));
   }
 
-  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile }): void {
+  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string }): void {
     this.docId = docId;
     this.transport.send({
       t: "hello",
@@ -85,6 +87,7 @@ export class EncryptedCollabConnection {
       token,
       sinceSeq: 0,
       profile: opts?.profile,
+      codeProof: opts?.codeProof,
       engineVersion: ENGINE_VERSION, // the fence for client-derived canon (doc 13 §2)
     });
   }
@@ -94,6 +97,46 @@ export class EncryptedCollabConnection {
   }
   get ready(): boolean {
     return this.replica !== null;
+  }
+
+  /** Roster + activity parity with the plaintext connection (doc 14). */
+  roster: RosterEntry[] = [];
+  activity: { seq: number; clientId: string; kind: string }[] = [];
+
+  setProfile(profile: ParticipantProfile): void {
+    this.transport.send({ t: "profile", profile } as ClientMessage);
+  }
+
+  /** Bundle being resumed from (consumed after the welcome replay). */
+  private resuming: DocBundle | null = null;
+
+  /**
+   * Rejoin from a persisted bundle (doc 12 §5, encrypted flavor). Identical
+   * contract to the plaintext connection: clientSeq watermark restored
+   * FIRST; pending replayed fire-and-observe on same-epoch welcomes (the
+   * sequencer's plaintext-bookkeeping dedup gives exactly-once, and the
+   * whole-epoch welcome-enc replay already reconstructed everything that
+   * was sequenced pre-crash); different epoch ⇒ onEpochChange, pending
+   * withheld (fork rule). The bundle's confirmed bytes are NOT loaded here
+   * — encrypted joiners always rebuild from the sealed checkpoint + tail,
+   * which is both simpler and verifiable (hash gossip).
+   */
+  resume(bundle: DocBundle, token?: string, opts?: { profile?: ParticipantProfile; codeProof?: string }): void {
+    this.clientSeq = Math.max(this.clientSeq, bundle.clientSeq);
+    this.resuming = bundle;
+    this.join(bundle.docId, token, { ...opts, takeover: true });
+  }
+
+  /** Durable state as a doc-12 bundle (kDoc rides in it for revival). */
+  exportBundle(docId: string): DocBundle | null {
+    if (!this.replica || this.genesisId === null) return null;
+    return {
+      docId,
+      genesisId: this.genesisId,
+      ...this.replica.exportBundleState(),
+      clientSeq: this.clientSeq,
+      savedAt: 0,
+    };
   }
 
   /** Same disjoint carried-id allocation as the plaintext connection. */
@@ -160,10 +203,23 @@ export class EncryptedCollabConnection {
           // rehydrating plaintext server would be — bytes, then sidecar,
           // then the tail replayed through the canonical pipeline.
           this.mirror = new DocumentSession(DocxDocument.load(bytes));
-          this.mirror.installSidecar(cp.sidecar as never);
-          this.replica = new ClientReplica(bytes, cp.sidecar as never);
+          if (cp.sidecar) this.mirror.installSidecar(cp.sidecar as never);
+          this.replica = new ClientReplica(bytes, (cp.sidecar ?? undefined) as never);
           this.replica.confirmedSeq = msg.checkpoint.seq;
           for (const env of msg.tail) await this.ingest(env);
+          // Resume epilogue — same semantics as the plaintext connection.
+          const resumed = this.resuming;
+          this.resuming = null;
+          if (resumed) {
+            if (resumed.genesisId === msg.genesisId) {
+              for (const intent of resumed.pending) {
+                const env2 = await sealIntent(this.keys!.kContent, this.docId, msg.genesisId, intent as Intent);
+                this.transport.send({ t: "submit-enc", envelope: env2 } as ClientMessage);
+              }
+            } else {
+              this.cb.onEpochChange?.(resumed.genesisId, msg.genesisId);
+            }
+          }
           this.cb.onChange?.();
         });
         return;
@@ -189,6 +245,7 @@ export class EncryptedCollabConnection {
         return;
       }
       case "roster": {
+        this.roster = msg.roster;
         this.cb.onRoster?.(msg.roster);
         return;
       }
@@ -222,6 +279,10 @@ export class EncryptedCollabConnection {
       return;
     }
     this.replica!.receive([entry]);
+    if (entry.kind === "applied") {
+      this.activity.push({ seq: entry.seq, clientId: entry.intent.clientId, kind: entry.intent.kind });
+      if (this.activity.length > 100) this.activity.splice(0, this.activity.length - 100);
+    }
 
     // Divergence DETECTION (doc 13 §2 / round-4 blocker 3): every K seqs,
     // hash the mirror's canonical doc, remember it, and gossip it sealed.

@@ -112,7 +112,7 @@ export class CollabConnection {
    * (the doc-12 §7 "use here instead" path for a second same-profile tab);
    * without it, a duplicate join is refused `already-open`.
    */
-  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile }): void {
+  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string }): void {
     this.transport.send({
       t: "hello",
       protocolVersion: PROTOCOL_VERSION,
@@ -122,6 +122,7 @@ export class CollabConnection {
       token,
       sinceSeq: 0,
       profile: opts?.profile,
+      codeProof: opts?.codeProof,
     });
   }
 
@@ -168,11 +169,12 @@ export class CollabConnection {
    * the case: same epoch ⇒ replay pending (below); different ⇒
    * onEpochChange, pending withheld.
    */
-  resume(bundle: DocBundle, token?: string, opts?: { profile?: ParticipantProfile }): void {
+  resume(bundle: DocBundle, token?: string, opts?: { profile?: ParticipantProfile; codeProof?: string }): void {
     this.clientSeq = Math.max(this.clientSeq, bundle.clientSeq);
     this.resuming = bundle;
     this.transport.send({
       profile: opts?.profile,
+      codeProof: opts?.codeProof,
       t: "hello",
       protocolVersion: PROTOCOL_VERSION,
       docId: bundle.docId,
