@@ -107,6 +107,12 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "insertField":
     case "setDrawingRotation":
     case "setDrawingFill":
+    case "setChartData":
+    case "setSmartArtNodeText":
+    case "setDrawingWordArtText":
+    case "setDrawingLineStyle":
+    case "setImageAltText":
+    case "removeLink":
       // Run/block/document-level; no existing run's text offsets shift.
       return [];
   }
@@ -245,6 +251,12 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "insertField":
     case "setDrawingRotation":
     case "setDrawingFill":
+    case "setChartData":
+    case "setSmartArtNodeText":
+    case "setDrawingWordArtText":
+    case "setDrawingLineStyle":
+    case "setImageAltText":
+    case "removeLink":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

@@ -30,6 +30,12 @@ import {
   insertField,
   setDrawingRotation,
   setDrawingFill,
+  setChartData,
+  setSmartArtNodeText,
+  setDrawingWordArtText,
+  setDrawingLineStyle,
+  setImageAltText,
+  removeLink,
   isSafeUrl,
   applyTableOp,
   mergeParagraphBackward,
@@ -388,6 +394,48 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       const drawing = firstDrawingIn(runEl);
       if (!drawing) return false;
       return setDrawingFill(doc, drawing, intent.color);
+    }
+    case "setChartData": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setChartData(doc, drawing, intent.chart as never);
+    }
+    case "setSmartArtNodeText": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setSmartArtNodeText(doc, drawing, intent.index, intent.text);
+    }
+    case "setDrawingWordArtText": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setDrawingWordArtText(doc, drawing, intent.text);
+    }
+    case "setDrawingLineStyle": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setDrawingLineStyle(doc, drawing, intent.color, intent.widthPx, intent.dash);
+    }
+    case "setImageAltText": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setImageAltText(doc, drawing, intent.alt);
+    }
+    case "removeLink": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      return removeLink(doc, entry.firstT);
     }
     case "setLink": {
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.

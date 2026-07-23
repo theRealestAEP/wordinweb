@@ -27,6 +27,25 @@ export const DEFAULT_INTENT_LIMITS: IntentLimits = {
   maxPasteBytes: 2_000_000,
 };
 
+interface ChartShape {
+  type: unknown; title?: unknown; categories: unknown; series: unknown;
+}
+/** Shared chart-payload validation (insertChart + setChartData carry the same
+ * shape): a positive type allowlist plus size/element bounds. */
+function chartError(c: ChartShape, who: string): string | null {
+  if (typeof c !== "object" || c === null) return `${who}: bad chart`;
+  if (!["column", "bar", "line", "pie"].includes(c.type as string)) return `${who}: bad type`;
+  if (!Array.isArray(c.categories) || c.categories.length === 0 || c.categories.length > 100) return `${who}: bad categories`;
+  if (c.categories.some((x) => typeof x !== "string" || x.length > 200)) return `${who}: bad category`;
+  if (c.title !== undefined && (typeof c.title !== "string" || c.title.length > 200)) return `${who}: bad title`;
+  if (!Array.isArray(c.series) || c.series.length === 0 || c.series.length > 24) return `${who}: bad series`;
+  for (const s of c.series as { name: unknown; values: unknown }[]) {
+    if (typeof s !== "object" || s === null || typeof s.name !== "string" || s.name.length > 200) return `${who}: bad series name`;
+    if (!Array.isArray(s.values) || s.values.length > 100 || s.values.some((v) => typeof v !== "number" || !Number.isFinite(v))) return `${who}: bad series values`;
+  }
+  return null;
+}
+
 /** Returns a rejection reason, or null if the intent is well-formed. */
 export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_INTENT_LIMITS): string | null {
   const nonNegInt = (n: number) => Number.isInteger(n) && n >= 0;
@@ -155,20 +174,27 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (!["plain", "archUp", "archDown", "wave", "chevron"].includes(intent.preset)) return "insertWordArt: bad preset";
       return null;
     }
-    case "insertChart": {
-      const c = intent.chart;
-      if (typeof c !== "object" || c === null) return "insertChart: bad chart";
-      if (!["column", "bar", "line", "pie"].includes(c.type)) return "insertChart: bad type";
-      if (!Array.isArray(c.categories) || c.categories.length === 0 || c.categories.length > 100) return "insertChart: bad categories";
-      if (c.categories.some((x) => typeof x !== "string" || x.length > 200)) return "insertChart: bad category";
-      if (c.title !== undefined && (typeof c.title !== "string" || c.title.length > 200)) return "insertChart: bad title";
-      if (!Array.isArray(c.series) || c.series.length === 0 || c.series.length > 24) return "insertChart: bad series";
-      for (const s of c.series) {
-        if (typeof s !== "object" || s === null || typeof s.name !== "string" || s.name.length > 200) return "insertChart: bad series name";
-        if (!Array.isArray(s.values) || s.values.length > 100 || s.values.some((v) => typeof v !== "number" || !Number.isFinite(v))) return "insertChart: bad series values";
-      }
+    case "insertChart":
+      return chartError(intent.chart, "insertChart");
+    case "setChartData":
+      return chartError(intent.chart, "setChartData");
+    case "setSmartArtNodeText":
+      if (typeof intent.index !== "number" || !Number.isInteger(intent.index) || intent.index < 0 || intent.index > 1000) return "setSmartArtNodeText: bad index";
+      if (typeof intent.text !== "string" || intent.text.length > 500) return "setSmartArtNodeText: bad text";
       return null;
-    }
+    case "setDrawingWordArtText":
+      if (typeof intent.text !== "string" || intent.text.length === 0 || intent.text.length > 500) return "setDrawingWordArtText: bad text";
+      return null;
+    case "setDrawingLineStyle":
+      if (!/^[0-9a-fA-F]{6}$/.test(intent.color)) return "setDrawingLineStyle: bad color";
+      if (typeof intent.widthPx !== "number" || !Number.isFinite(intent.widthPx) || intent.widthPx <= 0 || intent.widthPx > 100) return "setDrawingLineStyle: bad width";
+      if (!["solid", "dashed", "dotted"].includes(intent.dash)) return "setDrawingLineStyle: bad dash";
+      return null;
+    case "setImageAltText":
+      if (typeof intent.alt !== "string" || intent.alt.length > 1000) return "setImageAltText: bad alt";
+      return null;
+    case "removeLink":
+      return null;
     case "insertSmartArt": {
       const a = intent.smartArt;
       if (typeof a !== "object" || a === null) return "insertSmartArt: bad smartArt";

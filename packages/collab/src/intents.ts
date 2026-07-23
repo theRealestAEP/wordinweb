@@ -384,7 +384,13 @@ export type Intent =
   | InsertDateTimeFieldIntent
   | InsertFieldIntent
   | SetDrawingRotationIntent
-  | SetDrawingFillIntent;
+  | SetDrawingFillIntent
+  | SetChartDataIntent
+  | SetSmartArtNodeTextIntent
+  | SetDrawingWordArtTextIntent
+  | SetDrawingLineStyleIntent
+  | SetImageAltTextIntent
+  | RemoveLinkIntent;
 
 /** Insert a blank page at the end of a run. */
 export interface InsertBlankPageIntent extends IntentBase {
@@ -510,6 +516,57 @@ export interface SetDrawingFillIntent extends IntentBase {
   kind: "setDrawingFill";
   runId: StableId;
   color: string | null;
+}
+
+/** Replace the data of the chart carried by a run (same shape as insertChart's
+ * chart). Edits an existing chart in place. */
+export interface SetChartDataIntent extends IntentBase {
+  kind: "setChartData";
+  runId: StableId;
+  chart: {
+    type: "column" | "bar" | "line" | "pie";
+    title?: string;
+    categories: string[];
+    series: { name: string; values: number[] }[];
+  };
+}
+
+/** Set the text of one node of the SmartArt diagram carried by a run. */
+export interface SetSmartArtNodeTextIntent extends IntentBase {
+  kind: "setSmartArtNodeText";
+  runId: StableId;
+  index: number;
+  text: string;
+}
+
+/** Replace the text of the WordArt drawing carried by a run. */
+export interface SetDrawingWordArtTextIntent extends IntentBase {
+  kind: "setDrawingWordArtText";
+  runId: StableId;
+  text: string;
+}
+
+/** Set the outline (line) style of the drawing carried by a run. */
+export interface SetDrawingLineStyleIntent extends IntentBase {
+  kind: "setDrawingLineStyle";
+  runId: StableId;
+  color: string; // 6-hex RGB (no #)
+  widthPx: number;
+  dash: "solid" | "dashed" | "dotted";
+}
+
+/** Set/clear the alt text (accessibility description) of the image/drawing
+ * carried by a run. Empty string clears it. */
+export interface SetImageAltTextIntent extends IntentBase {
+  kind: "setImageAltText";
+  runId: StableId;
+  alt: string;
+}
+
+/** Remove the hyperlink wrapping a run's text (inverse of setLink). */
+export interface RemoveLinkIntent extends IntentBase {
+  kind: "removeLink";
+  runId: StableId;
 }
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
