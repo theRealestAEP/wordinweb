@@ -71,6 +71,15 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "insertBreak":
       if (intent.breakKind !== "page" && intent.breakKind !== "column") return "insertBreak: bad kind";
       return null;
+    case "insertMath":
+      if (typeof intent.mathText !== "string" || intent.mathText.length === 0) return "insertMath: empty";
+      if (intent.mathText.length > 10_000) return "insertMath: too long";
+      return null;
+    case "insertShape": {
+      const presets = ["line", "verticalLine", "rectangle", "roundedRectangle", "ellipse", "diamond", "textBox"];
+      if (!presets.includes(intent.preset)) return "insertShape: bad preset";
+      return null;
+    }
     case "formatRun":
     case "formatParagraph":
     case "setListType":

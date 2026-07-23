@@ -240,6 +240,27 @@ export interface InsertBreakIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
+/**
+ * Insert a math (OMML) formula from a linear expression at the end of a run
+ * (sibling insertion — identity transform). `nodeIds` for any new tracked
+ * nodes.
+ */
+export interface InsertMathIntent extends IntentBase {
+  kind: "insertMath";
+  runId: StableId;
+  mathText: string;
+  nodeIds: StableId[];
+}
+
+/** Insert a shape/textbox drawing at the end of a run (sibling — identity). */
+export interface InsertShapeIntent extends IntentBase {
+  kind: "insertShape";
+  runId: StableId;
+  preset: "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox";
+  text?: string;
+  nodeIds: StableId[];
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -253,7 +274,9 @@ export type Intent =
   | CommentRunIntent
   | PasteBlocksIntent
   | InsertImageIntent
-  | InsertBreakIntent;
+  | InsertBreakIntent
+  | InsertMathIntent
+  | InsertShapeIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

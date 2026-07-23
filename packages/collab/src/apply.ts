@@ -17,6 +17,8 @@ import {
   localName,
   insertImageAt,
   insertBreakAt,
+  insertMathAt,
+  insertShapeAt,
   type EditCaret,
   type Run,
   type Block,
@@ -253,7 +255,36 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       }
       return true;
     }
+    case "insertMath": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const res = insertMathAt(doc, entry.firstT, entry.firstT.text.length, intent.mathText);
+      if (!res) return false;
+      assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return true;
+    }
+    case "insertShape": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const res = insertShapeAt(doc, entry.firstT, intent.preset, intent.text ?? "");
+      if (!res) return false;
+      assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return true;
+    }
   }
+}
+
+/** Assign carried ids to tracked nodes created since `before`, in doc order. */
+function assignFreshTracked(ids: StableIds, doc: DocxDocument, before: Set<XmlElement>, nodeIds: number[]): void {
+  const fresh: XmlElement[] = [];
+  walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
+  for (let k = 0; k < fresh.length && k < nodeIds.length; k++) ids.reassign(fresh[k], nodeIds[k]);
 }
 
 function base64ToBytes(b64: string): Uint8Array {

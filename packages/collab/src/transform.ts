@@ -74,6 +74,10 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "insertBreak":
       // Break at end-of-run inserts sibling runs; no text offsets shift.
       return [];
+    case "insertMath":
+    case "insertShape":
+      // Sibling insertion at end of run; no text offsets shift.
+      return [];
   }
 }
 
@@ -182,6 +186,9 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "insertImage":
       return { ...intent, base: newBase };
     case "insertBreak":
+      return { ...intent, base: newBase };
+    case "insertMath":
+    case "insertShape":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);
