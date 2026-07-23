@@ -8,6 +8,9 @@ import {
   setParagraphAlignment,
   setParagraphStyle,
   setListType,
+  adjustIndent,
+  setParagraphSpacing,
+  insertPageField,
   applyTableOp,
   mergeParagraphBackward,
   addComment,
@@ -249,6 +252,29 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       for (let k = 0; k < fresh.length && k < intent.nodeIds.length; k++) {
         ids.reassign(fresh[k], intent.nodeIds[k]);
       }
+      return true;
+    }
+    case "adjustIndent": {
+      const blockEl = ids.elOf(intent.blockId);
+      if (!blockEl) return false;
+      const target = firstTextDescendant(blockEl) ?? blockEl;
+      return adjustIndent(doc, [target], intent.direction);
+    }
+    case "setSpacing": {
+      const blockEl = ids.elOf(intent.blockId);
+      if (!blockEl) return false;
+      const target = firstTextDescendant(blockEl) ?? blockEl;
+      return setParagraphSpacing(doc, [target], intent.patch as never);
+    }
+    case "insertPageField": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const ok = insertPageField(doc, entry.firstT, entry.firstT.text.length, intent.fieldKind);
+      if (!ok) return false;
+      assignFreshTracked(ids, doc, before, intent.nodeIds);
       return true;
     }
     case "replyComment": {

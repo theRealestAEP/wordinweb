@@ -283,6 +283,30 @@ export interface ReplyCommentIntent extends IntentBase {
   paraIds: string[];
 }
 
+/** Adjust a paragraph's indent (Tab/Shift-Tab). Block-level, identity. */
+export interface AdjustIndentIntent extends IntentBase {
+  kind: "adjustIndent";
+  blockId: StableId;
+  direction: 1 | -1;
+}
+
+/** Set paragraph line/before/after spacing. Block-level, identity. */
+export interface SetSpacingIntent extends IntentBase {
+  kind: "setSpacing";
+  blockId: StableId;
+  /** ParagraphSpacingPatch (before/after/line/lineRule) — carried verbatim. */
+  patch: Record<string, unknown>;
+}
+
+/** Insert a page-number field at the end of a run (sibling insertion,
+ * identity). Page fields are deterministic (no clock). */
+export interface InsertPageFieldIntent extends IntentBase {
+  kind: "insertPageField";
+  runId: StableId;
+  fieldKind: "page" | "pageOfTotal";
+  nodeIds: StableId[];
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -299,7 +323,10 @@ export type Intent =
   | InsertBreakIntent
   | InsertMathIntent
   | InsertShapeIntent
-  | ReplyCommentIntent;
+  | ReplyCommentIntent
+  | AdjustIndentIntent
+  | SetSpacingIntent
+  | InsertPageFieldIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

@@ -81,6 +81,13 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "replyComment":
       // Comment-part change; no document run offsets shift.
       return [];
+    case "adjustIndent":
+    case "setSpacing":
+      // Block-level; no text offsets shift.
+      return [];
+    case "insertPageField":
+      // Sibling field run at end of run; no text offsets shift.
+      return [];
   }
 }
 
@@ -194,6 +201,10 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "insertShape":
       return { ...intent, base: newBase };
     case "replyComment":
+      return { ...intent, base: newBase };
+    case "adjustIndent":
+    case "setSpacing":
+    case "insertPageField":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

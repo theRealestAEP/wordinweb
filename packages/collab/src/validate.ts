@@ -85,6 +85,15 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (intent.text.length > 20_000) return "replyComment: too long";
       if (typeof intent.parentId !== "string" || !Array.isArray(intent.paraIds) || typeof intent.date !== "string") return "replyComment: bad fields";
       return null;
+    case "adjustIndent":
+      if (intent.direction !== 1 && intent.direction !== -1) return "adjustIndent: bad direction";
+      return null;
+    case "setSpacing":
+      if (typeof intent.patch !== "object" || intent.patch === null) return "setSpacing: bad patch";
+      return null;
+    case "insertPageField":
+      if (intent.fieldKind !== "page" && intent.fieldKind !== "pageOfTotal") return "insertPageField: bad kind";
+      return null;
     case "formatRun":
     case "formatParagraph":
     case "setListType":
