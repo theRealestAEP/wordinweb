@@ -94,6 +94,19 @@ export class CollabConnection {
    * the current confirmed seq and applies it optimistically before sending.
    */
   submit(intent: Omit<Intent, "clientId" | "clientSeq" | "base">): void {
+    this.submitFull(intent, /*preApplied*/ false);
+  }
+
+  /** Submit an intent whose mutation the caller ALREADY performed on this
+   * connection's live doc (the editor-driven path: DocxEditor applies the
+   * command to `conn.doc` and then emits the intent). Skips the optimistic
+   * re-apply — applying twice doubled every keystroke — but tracks pending and
+   * sends identically, so echoes and reconciliation work unchanged. */
+  submitPreApplied(intent: Omit<Intent, "clientId" | "clientSeq" | "base">): void {
+    this.submitFull(intent, /*preApplied*/ true);
+  }
+
+  private submitFull(intent: Omit<Intent, "clientId" | "clientSeq" | "base">, preApplied: boolean): void {
     if (!this.replica) return;
     const full = {
       ...intent,
@@ -101,7 +114,8 @@ export class CollabConnection {
       clientSeq: ++this.clientSeq,
       base: this.replica.confirmedSeq,
     } as Intent;
-    this.replica.submitLocal(full);
+    if (preApplied) this.replica.trackLocal(full);
+    else this.replica.submitLocal(full);
     this.transport.send({ t: "submit", intent: full });
     this.cb.onChange?.();
   }

@@ -59,6 +59,15 @@ export class ClientReplica {
     this.pending.push(intent);
   }
 
+  /** Track an intent the caller ALREADY applied to this replica's live doc
+   * (the editor-driven path: DocxEditor mutates `doc` through its own command
+   * and emits the intent afterwards). Applying it again here would double it —
+   * the demo typed "Hello" and got "Hello" + its reversal. Pending tracking
+   * and reconciliation behave exactly as for submitLocal. */
+  trackLocal(intent: Intent): void {
+    this.pending.push(intent);
+  }
+
   /** Number of un-confirmed local intents (for the one-in-flight discipline). */
   get pendingCount(): number {
     return this.pending.length;
@@ -85,6 +94,23 @@ export class ClientReplica {
     const remoteAhead = fresh
       .filter((e): e is Extract<LogEntry, { kind: "applied" }> => e.kind === "applied" && !isOurs(e, this.pending))
       .map((e) => e.intent);
+
+    // A REJECTION of one of our own pending intents means our optimistic doc
+    // contains a mutation the canonical history never will. Dropping the
+    // pending entry alone (the old behavior) left that mutation in the doc
+    // forever — the client diverged permanently from the server. Roll back:
+    // restore the confirmed snapshot, advance through the fresh entries, and
+    // replay the surviving pending intents.
+    const rejectedOurs = fresh.some((e) => e.kind === "rejected" && isOurs(e, this.pending));
+    if (rejectedOurs) {
+      this.restoreConfirmed();
+      this.reloaded = true;
+      for (const e of fresh) this.advanceConfirmed(e, e.kind === "applied");
+      this.snapshotConfirmed();
+      this.replayPending(remoteAhead);
+      this.resync(); // model consistent with the replayed XML for the renderer
+      return;
+    }
 
     // FAST PATH — no reload, doc object stays stable (production real-time
     // behavior: apply in place, repaint incrementally, no re-mount/flash):
@@ -117,6 +143,7 @@ export class ClientReplica {
     for (const e of fresh) this.advanceConfirmed(e, true);
     this.snapshotConfirmed();
     this.replayPending(remoteAhead);
+    this.resync(); // model consistent with the replayed XML for the renderer
   }
 
   private advanceConfirmed(e: LogEntry, applyToDoc: boolean): void {

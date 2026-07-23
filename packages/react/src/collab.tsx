@@ -96,7 +96,12 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     version,
     docEpoch,
     ready,
-    submit: (intent) => connRef.current?.submit(intent),
+    // DocxView's editor applies every command to the live doc BEFORE emitting
+    // its intent, so the connection must not optimistically re-apply it (that
+    // doubled each keystroke: "Hello" rendered as "Hello" + its reversal, and
+    // the corrupted offsets got everything after the first char rejected
+    // server-side). Pre-applied semantics track pending + send only.
+    submit: (intent) => connRef.current?.submitPreApplied(intent),
     setPresence: (pos) => connRef.current?.setPresence(pos),
     allocIds: (n) => connRef.current?.allocIds(n) ?? [],
     presence,
@@ -129,7 +134,12 @@ export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): R
   );
 
   if (session.refused) return createElement("div", { className: "dxw-collab-refused" }, `Please refresh — ${session.refused}.`);
-  if (!session.ready || !bytes || !session.doc) return createElement("div", { className: "dxw-collab-connecting" }, "Connecting…");
+  if (!session.ready || !bytes || !session.doc) {
+    // Surface a dead server instead of spinning forever: if the welcome hasn't
+    // arrived after a grace period, say so (the socket errored or nothing is
+    // listening — the demo's most common local failure is a stopped server).
+    return createElement(ConnectingNotice, null);
+  }
 
   return createElement(DocxView, {
     source: bytes,
@@ -148,6 +158,23 @@ export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): R
     // so DocxView repaints in place instead of re-mounting (no flash/jump).
     key: session.docEpoch,
   });
+}
+
+/** "Connecting…" that upgrades to a clear failure message after 5s — a demo
+ * pointed at a stopped server previously spun forever with no signal. */
+function ConnectingNotice(): ReactNode {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setSlow(true), 5000);
+    return () => clearTimeout(t);
+  }, []);
+  return createElement(
+    "div",
+    { className: "dxw-collab-connecting", style: { padding: 16, font: "14px system-ui" } },
+    slow
+      ? "Still connecting — is the collab server running? (start it, then reload this page)"
+      : "Connecting…",
+  );
 }
 
 /** Structural type for the DocxView `collab` prop — mirrors CollabSession so

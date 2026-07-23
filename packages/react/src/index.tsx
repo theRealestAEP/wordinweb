@@ -1533,16 +1533,28 @@ export function DocxView({
   // renderSignal; repaint that instance directly rather than re-running the
   // load effect. No bytes, no parse, no editor re-attach — the remote edit
   // shows up as a single relayout of the live tree.
+  //
+  // Coalesced through rAF: a typing burst raises one signal per submit AND one
+  // per echo (2× per keystroke), and painting each synchronously both wasted
+  // work and could interleave so a mid-burst paint landed LAST, leaving stale
+  // text on screen until the next event. One deferred repaint always runs
+  // after the latest mutation, reading the doc's current state.
   const renderSignal = collab?.renderSignal;
+  const repaintRafRef = useRef(0);
   useEffect(() => {
     if (renderSignal === undefined) return;
-    const d = docCacheRef.current?.doc;
-    const r = rerenderRef.current;
-    if (d && r && d === collab?.doc) r(d);
+    if (repaintRafRef.current) return; // a repaint is already scheduled
+    repaintRafRef.current = requestAnimationFrame(() => {
+      repaintRafRef.current = 0;
+      const d = docCacheRef.current?.doc;
+      const r = rerenderRef.current;
+      if (d && r && d === collab?.doc) r(d);
+    });
     // Intentionally keyed only on renderSignal: collab.doc is stable between
     // reloads, and a reload re-runs the main effect above instead.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renderSignal]);
+  useEffect(() => () => { if (repaintRafRef.current) cancelAnimationFrame(repaintRafRef.current); }, []);
 
   const hotBtn = (label: string, title: string, onClick: () => void) => (
     <button

@@ -130,8 +130,19 @@ export class DocumentSession {
     if (intent.base < 0 || intent.base > this.seq) {
       return this.reject(intent, "invalid base");
     }
+    // Transform against CONCURRENT intents only: entries after the client's
+    // base authored by OTHER clients. The client's own later-sequenced intents
+    // are not concurrent — it authored this intent on a doc that already
+    // contained them (client-FIFO order), so transforming against them would
+    // double-count every one of its own edits. This is what broke burst
+    // typing over a real socket: keystroke N carried base = last echo, the
+    // server shifted it by the client's own N-1 in-flight inserts, and
+    // offsets drifted until every subsequent apply failed.
     const ahead = this.log
-      .filter((e): e is Extract<LogEntry, { kind: "applied" }> => e.kind === "applied" && e.seq > intent.base)
+      .filter(
+        (e): e is Extract<LogEntry, { kind: "applied" }> =>
+          e.kind === "applied" && e.seq > intent.base && e.intent.clientId !== intent.clientId,
+      )
       .map((e) => e.intent);
     const canonical = transformIntent(intent, ahead);
 
