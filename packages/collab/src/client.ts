@@ -6,6 +6,7 @@
 export { ClientReplica } from "./replica.js";
 export { InMemoryBundleStore, BundlePersister, type DocBundle, type BundleStore } from "./bundle.js";
 export { CollabConnection, type ClientTransport, type ConnectionCallbacks } from "./connection.js";
+export { EncryptedCollabConnection } from "./enc-connection.js";
 export { bindEditor, type EditorBridge, type EditorBinding } from "./binding.js";
 export { createWebSocketTransport, type SocketLike } from "./ws-transport.js";
 export * from "./intents.js";
@@ -16,5 +17,9 @@ export {
   type PresencePosition,
   type ParticipantProfile,
   type RosterEntry,
+  type EnvelopeEntry,
+  type SealedCheckpoint,
+  ENGINE_VERSION,
 } from "./protocol.js";
 export { transformIntent, transformPosition } from "./transform.js";
+export { sealIntent, openIntent, sealCheckpoint, openCheckpoint, deriveEpochKeys, stretchShareCode, mintDocKey, docKeyFromFragment, type IntentEnvelope, type EpochKeys } from "./e2ee.js";

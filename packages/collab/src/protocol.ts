@@ -1,5 +1,29 @@
 import type { Intent, LogEntry } from "./intents.js";
 import type { IdSidecar } from "./session.js";
+import type { IntentEnvelope } from "./e2ee.js";
+
+/** A sequenced envelope in an encrypted room's log (doc 13 §2): the
+ * server-assigned seq plus the opaque envelope. The server can read only
+ * the bookkeeping; clients derive the canonical form themselves. */
+export type EnvelopeEntry = IntentEnvelope & { seq: number };
+
+/** A sealed checkpoint blob as the wire carries it (doc 13 §3). */
+export interface SealedCheckpoint {
+  seq: number;
+  iv: string;
+  ciphertext: string;
+}
+
+/**
+ * The engine version fence for E2EE rooms (doc 13 §2): canonical forms are
+ * CLIENT-derived in encrypted mode, so a room with mixed transform/apply
+ * semantics can diverge with no arbiter. Bump whenever those semantics
+ * change; the sequencer refuses a hello whose engineVersion mismatches the
+ * room's (the stale client gets the download/draft path). Plaintext rooms
+ * ignore it (the server's own apply is the arbiter there, and
+ * PROTOCOL_VERSION already gates wire compatibility).
+ */
+export const ENGINE_VERSION = "e1";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-
@@ -77,10 +101,17 @@ export type ClientMessage =
        * derived server-side. In E2EE mode this becomes an opaque encrypted
        * blob (doc 13/14) — the shape change rides that protocol bump. */
       profile?: ParticipantProfile;
+      /** Engine (transform/apply semantics) version — REQUIRED for encrypted
+       * rooms, where the fence prevents mixed-semantics divergence. */
+      engineVersion?: string;
     }
   /** Update this connection's profile mid-session (rename / recolor). */
   | { t: "profile"; profile: ParticipantProfile }
   | { t: "submit"; intent: Intent }
+  /** Encrypted-mode submit (doc 13 §2): opaque body, plaintext bookkeeping.
+   * The hub refuses this on plaintext rooms and refuses plaintext `submit`
+   * on encrypted rooms — no mixed-mode documents, enforced both ways. */
+  | { t: "submit-enc"; envelope: IntentEnvelope }
   | { t: "presence"; position: PresencePosition | null };
 
 /** Server → client. */
@@ -112,6 +143,25 @@ export type ServerMessage =
       mode: "plaintext" | "encrypted";
     }
   | { t: "broadcast"; entries: LogEntry[] }
+  /**
+   * Encrypted-mode welcome (doc 13 §3): the seed checkpoint (sealed by the
+   * epoch's seeder) + the epoch's envelope log after it. BASE-COMPLETE by
+   * construction (round-4 blocker 1): the demo server retains the WHOLE
+   * epoch log in RAM (doc 12 — rooms are session-scoped), so every entry a
+   * joiner needs to re-derive canonical forms is present; client-produced
+   * mid-session checkpoints (doc 13 item 6) are a RAM optimization on top,
+   * not a correctness requirement, and land with the retention rule.
+   */
+  | {
+      t: "welcome-enc";
+      docId: string;
+      genesisId: string;
+      checkpoint: SealedCheckpoint;
+      tail: EnvelopeEntry[];
+      mode: "encrypted";
+    }
+  /** Encrypted-mode broadcast: sequenced opaque envelopes. */
+  | { t: "broadcast-enc"; entries: EnvelopeEntry[] }
   /** `participant` is the sender's bound clientId (round-4 F14) — the same
    * identifier intents carry — so presence joins the roster/attribution
    * keyspace and survives the sender reconnecting on a new socket. */

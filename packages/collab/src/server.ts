@@ -16,4 +16,8 @@ export {
   type PresencePosition,
   type ParticipantProfile,
   type RosterEntry,
+  type EnvelopeEntry,
+  type SealedCheckpoint,
+  ENGINE_VERSION,
 } from "./protocol.js";
+export { sealIntent, openIntent, sealCheckpoint, openCheckpoint, deriveEpochKeys, stretchShareCode, mintDocKey, docKeyFromFragment, type IntentEnvelope, type EpochKeys } from "./e2ee.js";

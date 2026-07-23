@@ -1,5 +1,6 @@
 import { DocxDocument } from "@wordinweb/core";
 import { DocumentSession, type IdSidecar, type ParticipantProfile } from "@wordinweb/collab/server";
+import type { EnvelopeEntry, SealedCheckpoint, IntentEnvelope } from "@wordinweb/collab/server";
 import { ClientMessage, ServerMessage, PROTOCOL_VERSION } from "@wordinweb/collab/server";
 import { StorageDriver } from "./storage.js";
 
@@ -44,8 +45,29 @@ export interface TokenVerifier {
   verify(token: string | undefined, docId: string): AuthResult | null;
 }
 
+/**
+ * State of an ENCRYPTED room (doc 13 §2): the server is a blind sequencer —
+ * it cannot parse, transform, validate, or apply anything here. It holds the
+ * seeder's sealed checkpoint, assigns seqs to opaque envelopes in arrival
+ * order, dedups by the plaintext (clientId, clientSeq) bookkeeping, and
+ * retains the epoch's whole envelope log in RAM (which makes joiner tails
+ * base-complete by construction — round-4 blocker 1; client-produced
+ * checkpoints are a later RAM optimization, doc 13 item 6).
+ */
+interface EncryptedState {
+  checkpoint: SealedCheckpoint;
+  log: EnvelopeEntry[];
+  seen: Set<string>;
+  /** The engine version the epoch's FIRST participant registered; everyone
+   * after must match (client-derived canonical forms diverge across
+   * transform-semantics versions with no arbiter — doc 13 §2). */
+  engineVersion?: string;
+}
+
 interface Room {
-  session: DocumentSession;
+  /** The authoritative session — PLAINTEXT rooms only (null when `enc`). */
+  session: DocumentSession | null;
+  enc: EncryptedState | null;
   conns: Set<Connection>;
   /** The session EPOCH id (plan doc 12): minted fresh at every seed/re-seed
    * (and at provider-based creation). Rejoining clients compare it against
@@ -204,26 +226,62 @@ export class CollabHub {
           conn.send({ t: "refused", reason: "no-session" });
           return;
         }
+        // Encrypted rooms enforce the ENGINE fence before admission
+        // (doc 13 §2): canonical forms are client-derived there, so mixed
+        // transform semantics would diverge with no arbiter. First joiner
+        // registers the epoch's version; later mismatches are refused with
+        // the download/draft path client-side.
+        const encRoom = this.rooms.get(msg.docId)?.enc ?? null;
+        if (encRoom) {
+          if (!msg.engineVersion) {
+            conn.send({ t: "refused", reason: "engine-version-required" });
+            return;
+          }
+          if (encRoom.engineVersion && encRoom.engineVersion !== msg.engineVersion) {
+            conn.send({ t: "refused", reason: "engine-version-mismatch" });
+            return;
+          }
+          encRoom.engineVersion = msg.engineVersion;
+        }
         this.connClient.set(conn.id, msg.clientId);
         const room = await this.room(msg.docId);
         room.conns.add(conn);
         room.emptySince = undefined; // occupied: the eviction clock stops.
         this.connDoc.set(conn.id, msg.docId);
         this.connById.set(conn.id, conn);
+        if (room.enc) {
+          // Blind welcome (doc 13 §3): sealed seed checkpoint + the WHOLE
+          // epoch envelope log after it — base-complete by construction
+          // because nothing is ever pruned within an epoch (blocker 1).
+          conn.send({
+            t: "welcome-enc",
+            docId: msg.docId,
+            genesisId: room.genesisId,
+            checkpoint: room.enc.checkpoint,
+            tail: room.enc.log.filter((e) => e.seq > room.enc!.checkpoint.seq),
+            mode: "encrypted",
+          });
+          room.roster.set(msg.clientId, {
+            profile: sanitizeProfile(msg.profile, msg.clientId),
+            connected: true,
+          });
+          this.broadcastRoster(room);
+          return;
+        }
         // The welcome is a checkpoint bundle (plan doc 12 §2, round-4 F10):
         // snapshot + the id sidecar, never the bytes alone — a joiner cannot
         // re-derive the id table from parse order once history contains
         // split-created carried ids. The snapshot is the CURRENT document
         // (at room.session.seq), so the tail after it is empty — sending
         // entries the snapshot already contains would double-apply them.
-        const cp = room.session.checkpoint();
+        const cp = room.session!.checkpoint();
         conn.send({
           t: "welcome",
           docId: msg.docId,
           seq: cp.seq,
           snapshot: bytesToBase64(cp.docx),
           sidecar: cp.sidecar,
-          tail: room.session.entriesSince(cp.seq),
+          tail: room.session!.entriesSince(cp.seq),
           genesisId: room.genesisId,
           mode: "plaintext", // E2EE mode lands with doc 13 items 1-2.
         });
@@ -278,14 +336,68 @@ export class CollabHub {
           return;
         }
         const room = this.rooms.get(docId)!;
-        const before = room.session.seq;
-        const entry = room.session.submit(msg.intent);
+        if (room.enc) {
+          // No mixed-mode documents (doc 13 §6): a plaintext submit into an
+          // encrypted room is refused outright — a blind server could not
+          // validate it, and honest clients derive mode from their link.
+          conn.send({ t: "refused", reason: "wrong-mode" });
+          return;
+        }
+        const before = room.session!.seq;
+        const entry = room.session!.submit(msg.intent);
         // A deduplicated re-send returns an already-sequenced entry (seq <=
         // before); persist only genuinely new entries so the log stays
         // append-once. Durability before ack (plan doc 06), then broadcast.
         if (this.storage && entry.seq > before) await this.storage.appendEntries(docId, [entry]);
         const out: ServerMessage = { t: "broadcast", entries: [entry] };
         for (const c of room.conns) c.send(out);
+        return;
+      }
+      case "submit-enc": {
+        const docId = this.connDoc.get(conn.id);
+        if (!docId) {
+          conn.send({ t: "refused", reason: "not-joined" });
+          return;
+        }
+        if (this.expired(conn.id)) {
+          this.kick(conn, "token-expired");
+          return;
+        }
+        if (this.verifier && this.auth.get(conn.id)?.role !== "editor") {
+          conn.send({ t: "refused", reason: "read-only" });
+          return;
+        }
+        // Identity binding applies identically in encrypted mode — the
+        // bookkeeping is plaintext precisely so the server can enforce it
+        // (doc 13 §2 precondition #1).
+        if (msg.envelope.clientId !== this.connClient.get(conn.id)) {
+          conn.send({ t: "refused", reason: "client-id-mismatch" });
+          return;
+        }
+        const room = this.rooms.get(docId)!;
+        if (!room.enc) {
+          conn.send({ t: "refused", reason: "wrong-mode" });
+          return;
+        }
+        // Ciphertext size cap (doc 13 §2: one of the few things a blind
+        // server CAN enforce). 256 KB covers any real intent incl. paste.
+        if (msg.envelope.ciphertext.length > 256 * 1024) {
+          conn.send({ t: "refused", reason: "too-large" });
+          return;
+        }
+        // Dedup by plaintext bookkeeping; re-sends return the prior entry.
+        const key = `${msg.envelope.clientId}:${msg.envelope.clientSeq}`;
+        let entry = room.enc.seen.has(key)
+          ? room.enc.log.find((e) => `${e.clientId}:${e.clientSeq}` === key)
+          : undefined;
+        if (!entry) {
+          room.enc.seen.add(key);
+          const seq = room.enc.log.length === 0 ? 1 : room.enc.log[room.enc.log.length - 1].seq + 1;
+          entry = { ...msg.envelope, seq };
+          room.enc.log.push(entry);
+        }
+        const outEnc: ServerMessage = { t: "broadcast-enc", entries: [entry] };
+        for (const c of room.conns) c.send(outEnc);
         return;
       }
       case "presence": {
@@ -420,6 +532,7 @@ export class CollabHub {
     if (sidecar) session.installSidecar(sidecar);
     const room: Room = {
       session,
+      enc: null,
       conns: new Set(),
       genesisId: this.genGenesisId(),
       roster: new Map(),
@@ -429,11 +542,42 @@ export class CollabHub {
     return { ok: true, genesisId: room.genesisId };
   }
 
+  /**
+   * Seed an ENCRYPTED session (doc 13): the body is the seeder's SEALED
+   * checkpoint — the server stores it opaquely and can validate nothing but
+   * size (content validation happens on every client at decrypt, doc 11
+   * E2EE amendment). The seeder supplies the genesisId it sealed under:
+   * epoch keys derive from (K_doc, genesisId), so the id must exist before
+   * sealing — client-minted for encrypted epochs, server-minted for
+   * plaintext ones. A hostile key-holder gaining anything from reusing an
+   * old epoch id would need powers (content injection) the key already
+   * grants legitimately; honest seeders mint fresh 128-bit ids.
+   * First-wins semantics identical to plaintext seed().
+   */
+  seedEncrypted(
+    docId: string,
+    genesisId: string,
+    checkpoint: SealedCheckpoint,
+  ): { ok: true; genesisId: string } | { ok: false; reason: "exists"; genesisId: string } {
+    const existing = this.rooms.get(docId);
+    if (existing) return { ok: false, reason: "exists", genesisId: existing.genesisId };
+    const room: Room = {
+      session: null,
+      enc: { checkpoint, log: [], seen: new Set() },
+      conns: new Set(),
+      genesisId,
+      roster: new Map(),
+      emptySince: this.now(),
+    };
+    this.rooms.set(docId, room);
+    return { ok: true, genesisId };
+  }
+
   private async room(docId: string): Promise<Room> {
     let room = this.rooms.get(docId);
     if (!room) {
       const session = await this.startSession(docId);
-      room = { session, conns: new Set(), genesisId: this.genGenesisId(), roster: new Map() };
+      room = { session, enc: null, conns: new Set(), genesisId: this.genGenesisId(), roster: new Map() };
       this.rooms.set(docId, room);
     }
     return room;

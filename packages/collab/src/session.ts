@@ -211,6 +211,20 @@ export class DocumentSession {
     return this.undoStacks.get(clientId)?.length ?? 0;
   }
 
+  /**
+   * E2EE mode (doc 13 §2): an envelope that fails to open (garbage from a
+   * malicious participant, or any tamper) still consumed a sequence number
+   * — every honest client must agree that seq is a no-op, deterministically,
+   * because the applied/rejected verdict feeds the transform's `ahead` set.
+   * GCM authentication IS deterministic (same bytes fail for everyone), so
+   * ingesting the failure as a sequenced rejection keeps all mirrors
+   * byte-identical. Client-side use only; the blind server never calls this.
+   */
+  ingestOpaqueFailure(clientId: string, clientSeq: number): LogEntry {
+    this.seen.add(`${clientId}:${clientSeq}`);
+    return this.reject({ clientId, clientSeq } as Intent, "undecryptable");
+  }
+
   private reject(intent: Intent, reason: string): LogEntry {
     const entry: LogEntry = {
       seq: this.seq + 1,
