@@ -89,6 +89,8 @@ export { buildOlePackage, extractOlePackage } from "./parse/ole.js";
 export { validBookmarkName, listBookmarks, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference } from "./edit/references.js";
 export { checkboxStateElement, checkboxChecked, toggleCheckbox } from "./checkbox.js";
 export { isSafeUrl, safeUrlOrBlank } from "./url-safety.js";
+export { validatePastedOoxml, DEFAULT_OOXML_LIMITS } from "./ooxml-validate.js";
+export type { OoxmlValidationResult, OoxmlValidationLimits } from "./ooxml-validate.js";
 export { sectPrAt, sectionContextAt, insertBreakAt, insertBlankPageAt, insertCoverPage, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
 export type { BreakInsertion, CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, insertMathAt, mathLinearOf } from "./edit/math.js";
