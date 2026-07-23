@@ -434,6 +434,23 @@ export class CollabHub {
         for (const c of room.conns) c.send(outEnc);
         return;
       }
+      case "gossip": {
+        const docId = this.connDoc.get(conn.id);
+        if (!docId) return; // like presence: ignored before join
+        const room = this.rooms.get(docId)!;
+        if (!room.enc) return; // gossip is an encrypted-mode channel
+        // Opaque relay (doc 13 §2): the server moves the blob and learns
+        // nothing — not even the hash (a content fingerprint is
+        // confirmable-by-guess and therefore secret from a blind server).
+        const out: ServerMessage = {
+          t: "gossip",
+          from: this.connClient.get(conn.id)!,
+          iv: msg.iv,
+          ciphertext: msg.ciphertext,
+        };
+        for (const c of room.conns) if (c.id !== conn.id) c.send(out);
+        return;
+      }
       case "presence": {
         const docId = this.connDoc.get(conn.id);
         if (!docId) return; // presence before join is ignored, not refused

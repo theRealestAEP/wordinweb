@@ -12,7 +12,8 @@ import {
   ParticipantProfile,
 } from "./protocol.js";
 import type { ClientTransport, ConnectionCallbacks } from "./connection.js";
-import { deriveEpochKeys, openCheckpoint, openIntent, sealIntent, b64ToBytes, type EpochKeys } from "./e2ee.js";
+import { deriveEpochKeys, openCheckpoint, openIntent, sealIntent, b64ToBytes, bytesToB64, type EpochKeys } from "./e2ee.js";
+import { docHash } from "./hash.js";
 
 /**
  * The E2EE client connection (plan doc 13 §2) — the counterpart of a BLIND
@@ -54,6 +55,12 @@ export class EncryptedCollabConnection {
   private queue: Promise<void> = Promise.resolve();
   private idCounter = 0;
   private idBase = -1;
+  /** Own doc hashes at gossip points (seq → hash), a small ring — peers'
+   * gossip for a seq we also hashed is comparable; anything else is skipped
+   * (clients hash at the SAME seq cadence, so overlap is the common case). */
+  private ownHashes = new Map<number, string>();
+  /** Every K ingested seqs, hash + gossip (doc 13 §2). */
+  private static GOSSIP_EVERY = 20;
 
   constructor(
     private transport: ClientTransport,
@@ -185,6 +192,10 @@ export class EncryptedCollabConnection {
         this.cb.onRoster?.(msg.roster);
         return;
       }
+      case "gossip": {
+        this.enqueue(() => this.onGossip(msg.iv, msg.ciphertext));
+        return;
+      }
       case "refused": {
         this.cb.onRefused?.(msg.reason);
         return;
@@ -211,5 +222,53 @@ export class EncryptedCollabConnection {
       return;
     }
     this.replica!.receive([entry]);
+
+    // Divergence DETECTION (doc 13 §2 / round-4 blocker 3): every K seqs,
+    // hash the mirror's canonical doc, remember it, and gossip it sealed.
+    // Every honest client hashes at the same seq points, so peers' blobs
+    // are directly comparable; a mismatch means an engine bug or a
+    // tampered history — surfaced as `divergence` (the resync path:
+    // rejoin from the welcome, which is always available).
+    if (env.seq % EncryptedCollabConnection.GOSSIP_EVERY === 0) {
+      const hash = await docHash(this.mirror!.doc);
+      this.ownHashes.set(env.seq, hash);
+      if (this.ownHashes.size > 5) {
+        this.ownHashes.delete(Math.min(...this.ownHashes.keys()));
+      }
+      const iv = new Uint8Array(12);
+      crypto.getRandomValues(iv);
+      const body = new TextEncoder().encode(JSON.stringify({ seq: env.seq, hash }));
+      const aad = new TextEncoder().encode(`gs:${this.docId}:${this.genesisId}`);
+      const ct = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: iv as BufferSource, additionalData: aad as BufferSource },
+        (this.keys as unknown as { kContent: CryptoKey }).kContent,
+        body as BufferSource,
+      );
+      this.transport.send({ t: "gossip", iv: bytesToB64(iv), ciphertext: bytesToB64(new Uint8Array(ct)) } as ClientMessage);
+    }
+  }
+
+  /** Verify a peer's gossiped hash against our own at the same seq. */
+  private async onGossip(iv: string, ciphertext: string): Promise<void> {
+    if (!this.keys || !this.genesisId) return;
+    let claim: { seq: number; hash: string };
+    try {
+      const aad = new TextEncoder().encode(`gs:${this.docId}:${this.genesisId}`);
+      const pt = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: b64ToBytes(iv) as BufferSource, additionalData: aad as BufferSource },
+        (this.keys as unknown as { kContent: CryptoKey }).kContent,
+        b64ToBytes(ciphertext) as BufferSource,
+      );
+      claim = JSON.parse(new TextDecoder().decode(pt));
+    } catch {
+      return; // garbage gossip: ignorable (unlike intents, it holds no seq)
+    }
+    const own = this.ownHashes.get(claim.seq);
+    if (own !== undefined && own !== claim.hash) {
+      // Two honest clients disagreeing on canonical state at the same seq:
+      // the round-4 blocker-3 detection case. Telemetry-worthy always;
+      // recovery is a rejoin (fresh welcome-enc replay).
+      this.cb.onRefused?.("divergence");
+    }
   }
 }

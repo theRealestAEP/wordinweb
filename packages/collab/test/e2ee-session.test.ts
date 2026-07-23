@@ -201,3 +201,73 @@ describe("blind-sequencer session (doc 13 §2/§8)", () => {
     expect(conn.ready).toBe(false); // never adopted the plaintext session
   });
 });
+
+describe("encrypted hash gossip (doc 13 §2 / blocker-3 detection)", () => {
+  it("agreeing clients gossip silently; a diverged client detects the mismatch", async () => {
+    const docKey = mintDocKey();
+    const { checkpoint } = await seedEncrypted("hi", "g1", docKey);
+    const srv = blindServer("g1", checkpoint);
+    // Wire the gossip relay into the test server (same shape as hub.ts).
+    const origAttach = srv.attach;
+    const peers: { deliver: (m: ServerMessage) => void; clientId: string }[] = [];
+    const attach = (clientId: string) => {
+      const t = origAttach();
+      const peer = { deliver: (_m: ServerMessage) => {}, clientId };
+      peers.push(peer);
+      const inner = t.onMessage.bind(t);
+      return {
+        send: (msg: ClientMessage) => {
+          if (msg.t === "gossip") {
+            for (const p of peers) if (p !== peer) p.deliver({ t: "gossip", from: clientId, iv: msg.iv, ciphertext: msg.ciphertext });
+            return;
+          }
+          t.send(msg);
+        },
+        onMessage: (cb: (m: ServerMessage) => void) => {
+          peer.deliver = cb;
+          inner(cb);
+        },
+      };
+    };
+
+    let aliceDiverged = false;
+    let bobDiverged = false;
+    const alice = new EncryptedCollabConnection(attach("alice"), "alice", docKey, {
+      onRefused: (r) => { if (r === "divergence") aliceDiverged = true; },
+    });
+    const bob = new EncryptedCollabConnection(attach("bob"), "bob", docKey, {
+      onRefused: (r) => { if (r === "divergence") bobDiverged = true; },
+    });
+    alice.join("d");
+    bob.join("d");
+    await flush();
+
+    // 20 edits → one gossip round at seq 20. Converged clients: silence.
+    for (let i = 0; i < 20; i++) {
+      alice.submit(ins(0, "x"));
+      await flush();
+    }
+    expect(text(alice)).toBe(text(bob));
+    expect(aliceDiverged || bobDiverged).toBe(false);
+
+    // Force divergence: corrupt bob's mirror doc directly (simulating an
+    // engine bug — the thing gossip exists to CATCH, since prevention
+    // arguments can't cover unknown bugs).
+    const bobMirror = (bob as never as { mirror: { doc: { editableRoots(): { children: unknown[] }[] } } }).mirror;
+    const root = bobMirror.doc.editableRoots()[0] as never as { children: { text: string; name: string; children: never[] }[] };
+    const findT = (el: { name: string; text: string; children: never[] }): { text: string } | null => {
+      if (el.name.endsWith(":t")) return el;
+      for (const c of el.children) { const r = findT(c); if (r) return r; }
+      return null;
+    };
+    findT(root as never)!.text = "CORRUPTED";
+
+    // Next gossip round (seq 40): the mismatch surfaces on at least one side.
+    for (let i = 0; i < 20; i++) {
+      alice.submit(ins(0, "y"));
+      await flush();
+    }
+    await flush();
+    expect(aliceDiverged || bobDiverged).toBe(true);
+  });
+});

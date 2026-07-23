@@ -120,6 +120,11 @@ export type ClientMessage =
    * The hub refuses this on plaintext rooms and refuses plaintext `submit`
    * on encrypted rooms — no mixed-mode documents, enforced both ways. */
   | { t: "submit-enc"; envelope: IntentEnvelope }
+  /** Encrypted hash gossip (doc 13 §2): an OPAQUE sealed {seq, hash} blob
+   * the server relays without reading — divergence detection must not leak
+   * even document hashes to a blind server (a hash is a stable content
+   * fingerprint: confirmable by anyone holding a guess). */
+  | { t: "gossip"; iv: string; ciphertext: string }
   | { t: "presence"; position: PresencePosition | null };
 
 /** Server → client. */
@@ -170,6 +175,8 @@ export type ServerMessage =
     }
   /** Encrypted-mode broadcast: sequenced opaque envelopes. */
   | { t: "broadcast-enc"; entries: EnvelopeEntry[] }
+  /** Relayed gossip blob; `from` is the sender's BOUND clientId. */
+  | { t: "gossip"; from: string; iv: string; ciphertext: string }
   /** `participant` is the sender's bound clientId (round-4 F14) — the same
    * identifier intents carry — so presence joins the roster/attribution
    * keyspace and survives the sender reconnecting on a new socket. */
