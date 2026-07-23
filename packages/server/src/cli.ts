@@ -68,6 +68,34 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
       res.writeHead(200, { "content-type": "application/octet-stream" }).end(Buffer.from(blankDocxBytes()));
       return;
     }
+    // Media relay (doc 16 §3): bytes over HTTP, never the WS sequencer.
+    const media = /^\/docs\/([^/]+)\/media\/([0-9a-f]{64})$/.exec(url);
+    if (media) {
+      const [, mDoc, mSha] = media;
+      if (req.method === "GET") {
+        const bytes = hub.mediaDownload(decodeURIComponent(mDoc), mSha);
+        if (!bytes) res.writeHead(404, { "content-type": "application/json" }).end(`{"state":"absent"}`);
+        else res.writeHead(200, { "content-type": "application/octet-stream" }).end(Buffer.from(bytes));
+        return;
+      }
+      if (req.method === "PUT") {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        req.on("data", (c: Buffer) => {
+          size += c.length;
+          if (size > 12 * 1024 * 1024) req.destroy();
+          else chunks.push(c);
+        });
+        req.on("end", () => {
+          void hub.mediaUpload(decodeURIComponent(mDoc), mSha, new Uint8Array(Buffer.concat(chunks))).then((status) => {
+            res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ status }));
+          });
+        });
+        return;
+      }
+      res.writeHead(405).end();
+      return;
+    }
     const put = req.method === "PUT" && /^\/docs\/[^/]+$/.test(url);
     const post = req.method === "POST" && url === "/docs";
     if (!put && !post) {
@@ -104,6 +132,7 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
   const sweeper = setInterval(() => {
     hub.sweepRooms();
     hub.sweepExpired();
+    hub.sweepMedia();
   }, 10_000);
   server.listen(port);
   // eslint-disable-next-line no-console

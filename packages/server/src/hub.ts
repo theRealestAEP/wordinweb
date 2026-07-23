@@ -92,6 +92,18 @@ interface Room {
   lineage?: LineageHead[];
   /** Online-guess budget: consecutive failures + lockout deadline. */
   codeGuard?: { failures: number; lockedUntil: number };
+  /** Media relay state (doc 16 §4): the RAM hot tier of the locker. The
+   * locker is a CACHE, not a store — every promoted blob is recoverable
+   * from participants via re-supply, so eviction costs latency, never
+   * data. (The disk spill tier of doc 16 §4 is capacity engineering on
+   * top of this same state machine; RAM-only is correct by the same
+   * cache-not-store argument.) */
+  media: {
+    blobs: Map<string, { bytes: Uint8Array; lastDownloadAt: number; staged: boolean }>;
+    waiters: Map<string, Set<string>>; // sha -> conn.ids awaiting media-ready
+    resupply: Map<string, { chosenConnId: string; deadline: number }>;
+    totalBytes: number;
+  };
   /** Epoch-ms timestamp of when the room last became empty, or undefined
    * while anyone is connected. Drives zero-custody eviction (plan doc 12
    * §2): after the last-disconnect grace elapses the room — doc, log,
@@ -332,6 +344,7 @@ export class CollabHub {
           genesisId: room.genesisId,
           mode: "plaintext", // E2EE mode lands with doc 13 items 1-2.
           lineage: room.lineage,
+          mediaNeeded: [...room.media.waiters.keys()],
         });
         // Roster upsert + fan-out (doc 14 §2): keyed by the BOUND clientId,
         // so a reconnect resumes the same entry. Sanitization is server-side
@@ -481,6 +494,48 @@ export class CollabHub {
         room.enc.log = [];
         return;
       }
+      case "media-need": {
+        const docId = this.connDoc.get(conn.id);
+        if (!docId) return;
+        const room = this.rooms.get(docId)!;
+        const blob = room.media.blobs.get(msg.sha);
+        if (blob) {
+          // Needing a present blob promotes it (an authenticated peer can
+          // only know the sha from the referencing intent) and refreshes
+          // the TTL — same semantics as an HTTP download.
+          blob.staged = false;
+          blob.lastDownloadAt = this.now();
+          conn.send({ t: "media-ready", sha: msg.sha });
+          return;
+        }
+        // Relay miss (doc 16 §4): register the waiter; the FIRST need for a
+        // sha starts the one coalesced re-supply round (a single upload
+        // serves all waiters; later needs just join the waiter set).
+        const firstNeed = !room.media.waiters.has(msg.sha);
+        const waiters = room.media.waiters.get(msg.sha) ?? new Set<string>();
+        waiters.add(conn.id);
+        room.media.waiters.set(msg.sha, waiters);
+        if (firstNeed) {
+          const out: ServerMessage = { t: "media-request", sha: msg.sha };
+          for (const c of room.conns) if (c.id !== conn.id) c.send(out);
+        }
+        return;
+      }
+      case "media-have": {
+        const docId = this.connDoc.get(conn.id);
+        if (!docId) return;
+        const room = this.rooms.get(docId)!;
+        for (const sha of msg.shas.slice(0, 64)) {
+          // First volunteer per needed sha is chosen (rotation happens
+          // naturally as sockets churn); the deadline lets sweepMedia try
+          // the next volunteer if this one stalls.
+          if (room.media.waiters.has(sha) && !room.media.resupply.has(sha) && !room.media.blobs.has(sha)) {
+            room.media.resupply.set(sha, { chosenConnId: conn.id, deadline: this.now() + MEDIA_LIMITS.tUploadMs });
+            conn.send({ t: "media-upload", sha });
+          }
+        }
+        return;
+      }
       case "gossip": {
         const docId = this.connDoc.get(conn.id);
         if (!docId) return; // like presence: ignored before join
@@ -588,6 +643,93 @@ export class CollabHub {
   }
 
   /**
+   * Media upload (doc 16 §4, the PUT handler's core). The server's ONLY
+   * content-touching operation is sha256: the address IS the verification
+   * (doc 16 §1.1) — a body that doesn't hash to `sha` is rejected no
+   * matter who sent it, which is the entire swap-proofing story, and it
+   * works identically for E2EE ciphertext blobs. New blobs enter STAGED
+   * (upload-then-intent, doc 05); promotion happens when the plaintext
+   * session applies the referencing intent, or on first peer download in
+   * encrypted rooms (the download IS the observable claim).
+   */
+  async mediaUpload(docId: string, sha: string, bytes: Uint8Array): Promise<number> {
+    const room = this.rooms.get(docId);
+    if (!room) return 404;
+    if (bytes.length > MEDIA_LIMITS.maxBlobBytes) return 413;
+    if (room.media.blobs.has(sha)) return 200; // content-addressed dedup
+    if (room.media.totalBytes + bytes.length > MEDIA_LIMITS.roomMediaBytes) return 507;
+    const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
+    let hex = "";
+    for (const b of new Uint8Array(digest)) hex += b.toString(16).padStart(2, "0");
+    if (hex !== sha) return 400; // the sha check — never trust the label
+    room.media.blobs.set(sha, { bytes, lastDownloadAt: this.now(), staged: true });
+    room.media.totalBytes += bytes.length;
+    // A re-supply round for this sha completes here: serve every waiter.
+    const waiters = room.media.waiters.get(sha);
+    if (waiters) {
+      for (const cid of waiters) this.connById.get(cid)?.send({ t: "media-ready", sha });
+      room.media.waiters.delete(sha);
+      room.media.resupply.delete(sha);
+      room.media.blobs.get(sha)!.staged = false; // re-supplied ⇒ referenced
+    }
+    return 201;
+  }
+
+  /** Media download (the GET handler's core). A peer download PROMOTES a
+   * staged blob (doc 16 §4: in encrypted rooms the server can't read the
+   * referencing intent, but only someone who saw it can know the sha) and
+   * refreshes the TTL. */
+  mediaDownload(docId: string, sha: string): Uint8Array | null {
+    const room = this.rooms.get(docId);
+    const blob = room?.media.blobs.get(sha);
+    if (!room || !blob) return null;
+    blob.staged = false;
+    blob.lastDownloadAt = this.now();
+    return blob.bytes;
+  }
+
+  /** Media sweep (doc 16 §4): staged-unreferenced past T_STAGE and
+   * promoted-idle past T_MEDIA evict (never with waiters — a waiter
+   * blocks eviction); stalled re-supply rounds re-broadcast the request
+   * so another holder can volunteer. Call on the same timer as
+   * sweepRooms. */
+  sweepMedia(): void {
+    const now = this.now();
+    for (const room of this.rooms.values()) {
+      for (const [sha, blob] of [...room.media.blobs]) {
+        if (room.media.waiters.has(sha)) continue;
+        const ttl = blob.staged ? MEDIA_LIMITS.tStageMs : MEDIA_LIMITS.tMediaMs;
+        if (now - blob.lastDownloadAt >= ttl) {
+          room.media.blobs.delete(sha);
+          room.media.totalBytes -= blob.bytes.length;
+        }
+      }
+      for (const [sha, r] of [...room.media.resupply]) {
+        if (now >= r.deadline) {
+          room.media.resupply.delete(sha);
+          if (room.media.waiters.has(sha)) {
+            let anyPeer = false;
+            for (const c of room.conns) {
+              if (!room.media.waiters.get(sha)!.has(c.id)) {
+                anyPeer = true;
+                c.send({ t: "media-request", sha });
+              }
+            }
+            if (!anyPeer) {
+              // Nobody left to ask (doc 16 §7 honest failure mode): tell the
+              // waiters; the registration stays so a joining holder revives
+              // it via welcome.mediaNeeded.
+              for (const cid of room.media.waiters.get(sha)!) {
+                this.connById.get(cid)?.send({ t: "media-unavailable", sha });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * Zero-custody eviction (plan doc 12 §2): delete every room that has been
    * empty for at least the grace period. Deletion is total — document, log,
    * dedup state, undo stacks all go with the Room object; with no storage
@@ -656,6 +798,7 @@ export class CollabHub {
       codeVerifier,
       lineage,
       emptySince: this.now(), // eviction clock runs until someone joins
+      media: emptyMedia(),
     };
     this.rooms.set(docId, room);
     return { ok: true, genesisId: room.genesisId };
@@ -689,6 +832,7 @@ export class CollabHub {
       roster: new Map(),
       codeVerifier,
       emptySince: this.now(),
+      media: emptyMedia(),
     };
     this.rooms.set(docId, room);
     return { ok: true, genesisId };
@@ -698,7 +842,7 @@ export class CollabHub {
     let room = this.rooms.get(docId);
     if (!room) {
       const session = await this.startSession(docId);
-      room = { session, enc: null, conns: new Set(), genesisId: this.genGenesisId(), roster: new Map() };
+      room = { session, enc: null, conns: new Set(), genesisId: this.genGenesisId(), roster: new Map(), media: emptyMedia() };
       this.rooms.set(docId, room);
     }
     return room;
@@ -729,6 +873,19 @@ export class CollabHub {
   }
 }
 
+/** Media relay limits (doc 16 §8; RAM tier). */
+export const MEDIA_LIMITS = {
+  maxBlobBytes: 10 * 1024 * 1024,
+  roomMediaBytes: 100 * 1024 * 1024,
+  tMediaMs: 5 * 60_000, // TTL after last download
+  tStageMs: 60_000, // staged-unreferenced eviction
+  tUploadMs: 15_000, // chosen holder's deadline
+};
+
+function emptyMedia(): Room["media"] {
+  return { blobs: new Map(), waiters: new Map(), resupply: new Map(), totalBytes: 0 };
+}
+
 /** Fixed presence palette (doc 11 XSS vector 7: colors are validated
  * against a palette or a strict hex shape — never arbitrary CSS). */
 const PROFILE_PALETTE = ["#e05252", "#e0a952", "#7fbf5a", "#52b3e0", "#7d6ee0", "#d05fb8", "#4fc2a2", "#c2b04f"];
@@ -746,7 +903,7 @@ function sanitizeProfile(p: ParticipantProfile | undefined, clientId: string): P
   for (let i = 0; i < clientId.length; i++) h = (h * 31 + clientId.charCodeAt(i)) >>> 0;
   const fallbackColor = PROFILE_PALETTE[h % PROFILE_PALETTE.length];
   // eslint-disable-next-line no-control-regex
-  const name = (p?.name ?? "").replace(/[ -]/g, "").trim().slice(0, 40);
+  const name = (p?.name ?? "").replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 40);
   const color = /^#[0-9a-f]{6}$/i.test(p?.color ?? "") ? p!.color.toLowerCase() : fallbackColor;
   return { name: name || `Guest ${(h % 900) + 100}`, color };
 }

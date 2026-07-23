@@ -137,6 +137,11 @@ export type ClientMessage =
   /** Upload a sealed checkpoint (doc 13 §3) — accepted ONLY from the
    * connection the server currently designates as checkpointer. */
   | { t: "checkpoint"; checkpoint: SealedCheckpoint }
+  /** Media re-supply (doc 16 §3): "I need blob <sha>" (relay miss). */
+  | { t: "media-need"; sha: string }
+  /** "I hold these blobs" — reply to media-request, or unsolicited right
+   * after a welcome whose mediaNeeded intersects local holdings (§5.4). */
+  | { t: "media-have"; shas: string[] }
   /** Encrypted hash gossip (doc 13 §2): an OPAQUE sealed {seq, hash} blob
    * the server relays without reading — divergence detection must not leak
    * even document hashes to a blind server (a hash is a stable content
@@ -175,6 +180,10 @@ export type ServerMessage =
        * fast-forward vs fork CLIENT-side. Absent for provider-created and
        * legacy rooms (⇒ every epoch mismatch is a fork, the safe default). */
       lineage?: LineageHead[];
+      /** Shas with waiters / outstanding unavailability (doc 16 §3): a
+       * joining holder intersects with its local media and volunteers —
+       * the mechanism behind "reappears when a holder rejoins". */
+      mediaNeeded?: string[];
     }
   | { t: "broadcast"; entries: LogEntry[] }
   /**
@@ -193,11 +202,18 @@ export type ServerMessage =
       checkpoint: SealedCheckpoint;
       tail: EnvelopeEntry[];
       mode: "encrypted";
+      mediaNeeded?: string[];
     }
   /** Encrypted-mode broadcast: sequenced opaque envelopes. */
   | { t: "broadcast-enc"; entries: EnvelopeEntry[] }
   /** Relayed gossip blob; `from` is the sender's BOUND clientId. */
   | { t: "gossip"; from: string; iv: string; ciphertext: string }
+  /** Media re-supply control (doc 16 §4). request = broadcast "who has
+   * it"; upload = to ONE chosen holder; ready/unavailable = to waiters. */
+  | { t: "media-request"; sha: string }
+  | { t: "media-upload"; sha: string }
+  | { t: "media-ready"; sha: string }
+  | { t: "media-unavailable"; sha: string }
   /** Checkpointer designation (doc 13 §3): the SERVER assigns the role —
    * the v1 lowest-clientId election was riggable (round-4 blocker 2); an
    * assigned role can only be held by an authenticated connection the
