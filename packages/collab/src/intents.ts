@@ -199,3 +199,8 @@ export type LogEntry =
 export function idempotencyKey(i: { clientId: string; clientSeq: number }): string {
   return `${i.clientId}:${i.clientSeq}`;
 }
+
+/** An intent minus its wire bookkeeping — distributive over the union so each
+ * variant keeps its own fields (a plain Omit<Intent,…> would collapse to the
+ * shared keys only). Used by the editor producer and the undo inverse. */
+export type IntentBody = Intent extends infer T ? (T extends Intent ? Omit<T, "clientId" | "clientSeq" | "base"> : never) : never;

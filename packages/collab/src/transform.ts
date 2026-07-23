@@ -68,8 +68,11 @@ export function runEditsOf(intent: Intent): RunEdit[] {
   }
 }
 
-/** Adjust a single position against one prior run edit. */
-export function transformPositionAgainstEdit(pos: Position, edit: RunEdit): Position {
+/** Adjust a single position against one prior run edit. `leftGravity` is for
+ * a position that should NOT move when an insert lands exactly on it (e.g. the
+ * END of a delete range — text inserted at the end stays outside the range).
+ * Default (right gravity) shifts a position right when an insert is at it. */
+export function transformPositionAgainstEdit(pos: Position, edit: RunEdit, leftGravity = false): Position {
   if (pos.runId !== edit.runId) return pos;
 
   if (edit.formatSplit) {
@@ -100,6 +103,11 @@ export function transformPositionAgainstEdit(pos: Position, edit: RunEdit): Posi
   }
 
   const delEnd = edit.at + edit.del;
+  // A pure insert (del==0) exactly at the position: right gravity shifts the
+  // position after the inserted text; left gravity keeps it before.
+  if (edit.del === 0 && edit.at === pos.offset) {
+    return leftGravity ? pos : { ...pos, offset: pos.offset + edit.ins };
+  }
   if (delEnd <= pos.offset) {
     // Edit lies fully before the position: shift by the net length change.
     return { ...pos, offset: pos.offset + edit.ins - edit.del };
@@ -116,11 +124,11 @@ export function transformPositionAgainstEdit(pos: Position, edit: RunEdit): Posi
 /** Adjust a position against an ordered list of prior intents (oldest first).
  * `movedRunId` mapping composes: a position remapped into a new run by a split
  * is then transformed against later edits addressed to that new run. */
-export function transformPosition(pos: Position, ahead: Intent[]): Position {
+export function transformPosition(pos: Position, ahead: Intent[], leftGravity = false): Position {
   let out = pos;
   for (const intent of ahead) {
     for (const edit of runEditsOf(intent)) {
-      out = transformPositionAgainstEdit(out, edit);
+      out = transformPositionAgainstEdit(out, edit, leftGravity);
     }
   }
   return out;
@@ -162,7 +170,10 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);
-      const e = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.end }, ahead);
+      // The delete's END uses left gravity: text inserted exactly at the end
+      // stays OUTSIDE the deleted range (so an undo of an insert doesn't
+      // swallow content a concurrent insert placed right after it).
+      const e = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.end }, ahead, true);
       // A delete whose endpoints were split into different runs no longer
       // describes a single-run range; callers treat a collapsed/cross-run
       // range as a no-op rather than corrupting text.

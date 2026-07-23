@@ -1,10 +1,11 @@
 import { DocxDocument, StableIds } from "@wordinweb/core";
-import { Intent, LogEntry, idempotencyKey } from "./intents.js";
+import { Intent, IntentBody, LogEntry, idempotencyKey } from "./intents.js";
 
 /** The ID sidecar carried in a checkpoint bundle (plan doc 03). */
 export type IdSidecar = ReturnType<StableIds["exportSidecar"]>;
 import { transformIntent } from "./transform.js";
 import { applyIntent } from "./apply.js";
+import { invertIntent } from "./invert.js";
 
 /**
  * The authoritative document session (plan doc 06), transport-free. It owns
@@ -21,11 +22,19 @@ export interface Broadcast {
   entries: LogEntry[];
 }
 
+/** Undo-issued intents use clientSeq at or above this so they aren't
+ * re-pushed onto the undo stack (avoids undo-of-undo growth). */
+const UNDO_CLIENT_SEQ_BASE = 1_000_000_000;
+
 export class DocumentSession {
   readonly doc: DocxDocument;
   readonly ids: StableIds;
   private log: LogEntry[] = [];
   private seen = new Set<string>();
+  /** Undo stack per client: applied intents (seq + their pre-computed inverse)
+   * not yet undone. Enables selective per-user undo (plan doc 03 Phase 8). */
+  private undoStacks = new Map<string, { seq: number; inverse: IntentBody }[]>();
+  private undoSeq = new Map<string, number>();
 
   constructor(doc: DocxDocument) {
     this.doc = doc;
@@ -120,6 +129,10 @@ export class DocumentSession {
       .map((e) => e.intent);
     const canonical = transformIntent(intent, ahead);
 
+    // Compute the inverse BEFORE applying, while the pre-state is intact
+    // (e.g. a delete's removed text is still present). Null when not undoable.
+    const inverse = invertIntent(this.doc, this.ids, canonical);
+
     let applied: boolean;
     try {
       applied = applyIntent(this.doc, this.ids, canonical);
@@ -136,7 +149,49 @@ export class DocumentSession {
 
     const entry: LogEntry = { seq: this.seq + 1, kind: "applied", intent: canonical };
     this.log.push(entry);
+    // Record the inverse on the originating client's undo stack (skip intents
+    // that are themselves undo/redo — tracked via clientSeq marker below).
+    if (inverse && !this.isUndoIntent(intent)) {
+      const stack = this.undoStacks.get(intent.clientId) ?? [];
+      stack.push({ seq: entry.seq, inverse });
+      this.undoStacks.set(intent.clientId, stack);
+    }
     return entry;
+  }
+
+  private isUndoIntent(intent: Intent): boolean {
+    // Undo-issued intents use clientSeq in a reserved high range so they don't
+    // themselves get pushed onto the undo stack (no undo-of-undo here).
+    return intent.clientSeq >= UNDO_CLIENT_SEQ_BASE;
+  }
+
+  /**
+   * Selective per-user undo (plan doc 03 Phase 8): revert the given client's
+   * most recent not-yet-undone intent by submitting its inverse with `base`
+   * set to the ORIGINAL intent's seq — the canonical transform then rebases
+   * the inverse against everything sequenced since, which is what makes undo
+   * correct under concurrency. Returns the resulting log entry, or null if the
+   * client has nothing undoable. The inverse is applied through the normal
+   * pipeline, so it converges and broadcasts like any intent.
+   */
+  undo(clientId: string): LogEntry | null {
+    const stack = this.undoStacks.get(clientId);
+    if (!stack || stack.length === 0) return null;
+    const { seq, inverse } = stack.pop()!;
+    const n = (this.undoSeq.get(clientId) ?? 0) + 1;
+    this.undoSeq.set(clientId, n);
+    const undoIntent = {
+      ...inverse,
+      clientId,
+      clientSeq: UNDO_CLIENT_SEQ_BASE + n,
+      base: seq, // rebase the inverse through everything applied since.
+    } as Intent;
+    return this.submit(undoIntent);
+  }
+
+  /** Number of undoable intents for a client (for tests/UI). */
+  undoDepth(clientId: string): number {
+    return this.undoStacks.get(clientId)?.length ?? 0;
   }
 
   private reject(intent: Intent, reason: string): LogEntry {
