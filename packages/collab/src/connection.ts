@@ -134,6 +134,12 @@ export class CollabConnection {
       protocolVersion: PROTOCOL_VERSION,
       docId: bundle.docId,
       clientId: this.clientId,
+      // Resume IS the zombie-takeover case (doc 12 §7): after a crash or
+      // refresh, the previous socket for this identity may still be inside
+      // the 60s grace window server-side. This connection is that identity's
+      // continuation — claiming it is correct, and the incumbent (if any)
+      // is a dead tab by definition of "we are resuming from the bundle".
+      takeover: true,
       token,
       sinceSeq: bundle.confirmedSeq,
       genesisId: bundle.genesisId,

@@ -5,6 +5,8 @@ import { DocxToolbar, type ToolbarFeature, type ToolbarMode } from "./toolbar.js
 import {
   CollabConnection,
   createWebSocketTransport,
+  BundlePersister,
+  type BundleStore,
   type Intent,
   type PresencePosition,
 } from "@wordinweb/collab/client";
@@ -28,6 +30,19 @@ export interface UseCollabOptions {
   /** Construct the socket. Defaults to `new WebSocket(url)`; injectable for
    * tests / custom transports. */
   createSocket?: (url: string) => WebSocket;
+  /**
+   * Bundle persistence + resume (plan doc 12 §4/§5). When set, the hook:
+   * resumes from a stored bundle if one exists (replaying pending intents,
+   * idempotently) instead of joining cold; persists the confirmed state on a
+   * ~1s throttle after every change, plus a best-effort flush on pagehide/
+   * hidden; and on an epoch change (someone re-seeded while away) preserves
+   * the superseded bundle as a draft (`<docId>#draft-<oldGenesis>`) before
+   * adopting the server's state — the fork rule made visible, never a silent
+   * merge. Browser apps pass an `IndexedDbBundleStore` (from `wordinweb`);
+   * tests inject the in-memory store. Without it, behavior is unchanged
+   * (join cold, keep nothing).
+   */
+  store?: BundleStore;
 }
 
 export interface CollabSession {
@@ -58,6 +73,13 @@ export interface CollabSession {
   presence: Record<string, PresencePosition | null>;
   /** Set if the server refused the connection (e.g. version mismatch). */
   refused: string | null;
+  /**
+   * Set when a resume landed in a different epoch than the stored bundle
+   * (doc 12 §5 case 2): the session took the server's state; the old copy
+   * was saved as a draft. UI copy: "restored by another participant — your
+   * offline copy is saved as a draft." Null otherwise.
+   */
+  epochChanged: { from: string; to: string } | null;
 }
 
 /**
@@ -67,7 +89,7 @@ export interface CollabSession {
  * runtime dependency on this module).
  */
 export function useCollab(opts: UseCollabOptions): CollabSession {
-  const { url, docId, clientId, token, createSocket } = opts;
+  const { url, docId, clientId, token, createSocket, store } = opts;
   const connRef = useRef<CollabConnection | null>(null);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
   const [version, setVersion] = useState(0);
@@ -75,28 +97,72 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const [ready, setReady] = useState(false);
   const [presence, setPresence] = useState<Record<string, PresencePosition | null>>({});
   const [refused, setRefused] = useState<string | null>(null);
+  const [epochChanged, setEpochChanged] = useState<{ from: string; to: string } | null>(null);
 
   useEffect(() => {
     const socket = (createSocket ?? ((u: string) => new WebSocket(u)))(url);
     const transport = createWebSocketTransport(socket);
+    let persister: BundlePersister | null = null; // assigned below iff store
     const conn = new CollabConnection(transport, clientId, {
       onChange: () => {
         setDoc(conn.doc);
         setReady(conn.ready);
         setVersion((v) => v + 1); // signal a re-render on every reconciled change
         setDocEpoch(conn.docEpoch); // bumps only on a reload (true conflict)
+        persister?.notify(); // throttled bundle write (doc 12 §4)
       },
       onPresence: (participant, pos) =>
         setPresence((prev) => ({ ...prev, [participant]: pos })),
       onRefused: (reason) => setRefused(reason),
+      onEpochChange: (from, to) => {
+        // Someone re-seeded while we were away (doc 12 §5 case 2): the
+        // connection already took the server's state and withheld our
+        // old-epoch pending. Preserve the superseded bundle as a DRAFT
+        // before the persister overwrites the main slot — this is the
+        // "your offline copy is saved as a draft" guarantee.
+        if (store) {
+          void store.get(docId).then((old) => {
+            if (old && old.genesisId === from) {
+              return store.put({ ...old, docId: `${docId}#draft-${from}` });
+            }
+          });
+        }
+        setEpochChanged({ from, to });
+      },
     });
     connRef.current = conn;
-    conn.join(docId, token);
+
+    // pagehide/hidden flush: best-effort narrowing of the throttle tail —
+    // IndexedDB has no synchronous API, so the throttle is the real
+    // durability mechanism (round-4 F6/F8); this just shrinks the window.
+    const flush = () => void persister?.flush();
+    if (store) {
+      persister = new BundlePersister(conn, store, docId);
+      if (typeof window !== "undefined") {
+        window.addEventListener("pagehide", flush);
+        document.addEventListener("visibilitychange", flush);
+      }
+      // Resume if a bundle exists, else join cold. The get() is async; the
+      // editor stays !ready (input disabled) until the welcome either way.
+      void store.get(docId).then((bundle) => {
+        if (connRef.current !== conn) return; // effect re-ran while loading
+        if (bundle) conn.resume(bundle, token);
+        else conn.join(docId, token);
+      });
+    } else {
+      conn.join(docId, token);
+    }
     return () => {
+      if (store && typeof window !== "undefined") {
+        window.removeEventListener("pagehide", flush);
+        document.removeEventListener("visibilitychange", flush);
+      }
+      void persister?.flush(); // last write on unmount…
+      persister?.stop(); // …then detach (no timers left behind)
       connRef.current = null;
     };
     // Reconnect when the target document or endpoint changes.
-  }, [url, docId, clientId, token, createSocket]);
+  }, [url, docId, clientId, token, createSocket, store]);
 
   return {
     doc,
@@ -115,6 +181,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     allocIds: (n) => connRef.current?.allocIds(n) ?? [],
     presence,
     refused,
+    epochChanged,
   };
 }
 
@@ -232,3 +299,10 @@ function ConnectingNotice(): ReactNode {
  * DocxView can accept an injected session via a type-only import (no runtime
  * dependency on the collab engine). */
 export type { CollabSession as InjectedCollabSession };
+
+// Browser bundle store (IndexedDB) + the seams apps need to wire persistence
+// themselves. Exported from the collab entry only — the local-only `wordinweb`
+// entry has no path to any of this (doc 07 tree-shaking rule).
+export { IndexedDbBundleStore } from "./bundle-store.js";
+export { InMemoryBundleStore, BundlePersister } from "@wordinweb/collab/client";
+export type { BundleStore, DocBundle } from "@wordinweb/collab/client";
