@@ -12,6 +12,9 @@ import {
   mergeParagraphBackward,
   addComment,
   recordedProvenance,
+  validatePastedOoxml,
+  parseXml,
+  localName,
   type EditCaret,
   type Run,
   type Block,
@@ -157,6 +160,41 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       // id table filled for them (parse-order, consistent across live replicas).
       if (ok && doc.stableIds) doc.stableIds.assignFromRoots(doc.editableRoots());
       return ok;
+    }
+    case "pasteBlocks": {
+      const afterEl = ids.elOf(intent.afterBlockId);
+      if (!afterEl) return false;
+      const parent = doc.findParentOf(afterEl);
+      if (!parent) return false;
+      // Parse + VALIDATE the client-supplied OOXML before it enters the tree
+      // (doc 11 gate 2). Reject on any violation.
+      let blocks: XmlElement[];
+      try {
+        const root = parseXml(`<w:root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${intent.blocksXml}</w:root>`);
+        blocks = root.children.filter((c) => localName(c.name) === "p" || localName(c.name) === "tbl");
+      } catch {
+        return false;
+      }
+      if (blocks.length === 0) return false;
+      const check = validatePastedOoxml(blocks);
+      if (!check.ok) return false;
+      // Splice after the target paragraph.
+      const at = parent.children.indexOf(afterEl);
+      parent.children.splice(at + 1, 0, ...blocks);
+      doc.refresh();
+      // Assign carried ids to the new tracked nodes in document order,
+      // overriding any parse-order ids refresh() gave them.
+      const newTracked: XmlElement[] = [];
+      const walk = (el: XmlElement): void => {
+        const ln = localName(el.name);
+        if (ln === "p" || ln === "tbl" || ln === "r") newTracked.push(el);
+        el.children.forEach(walk);
+      };
+      blocks.forEach(walk);
+      for (let k = 0; k < newTracked.length && k < intent.nodeIds.length; k++) {
+        ids.reassign(newTracked[k], intent.nodeIds[k]);
+      }
+      return true;
     }
   }
 }

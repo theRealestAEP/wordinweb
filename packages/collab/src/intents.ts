@@ -177,6 +177,26 @@ export interface CommentRunIntent extends IntentBase {
   paraId: string;
 }
 
+/**
+ * Rich paste: splice validated OOXML paragraph blocks after a target
+ * paragraph. The pasting client converts clipboard HTML to OOXML locally
+ * (browser-only, engine-dependent — doc 02 M4) and carries the serialized
+ * blocks; the server VALIDATES them against the positive allowlist before
+ * applying (doc 11 gate 2). `nodeIds` are carried ids for the new tracked
+ * nodes (p / r) in document order, so every replica addresses them alike.
+ * Inserting separate blocks shifts no existing run's offsets — identity
+ * transform.
+ */
+export interface PasteBlocksIntent extends IntentBase {
+  kind: "pasteBlocks";
+  /** Paragraph after which to insert the pasted blocks. */
+  afterBlockId: StableId;
+  /** Serialized OOXML block list (w:p elements), validated at apply. */
+  blocksXml: string;
+  /** Carried ids for the new p/r nodes, in document order. */
+  nodeIds: StableId[];
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -187,7 +207,8 @@ export type Intent =
   | FormatRangeIntent
   | TableOpIntent
   | MergeParagraphIntent
-  | CommentRunIntent;
+  | CommentRunIntent
+  | PasteBlocksIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

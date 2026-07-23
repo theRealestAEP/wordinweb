@@ -65,6 +65,9 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "commentRun":
       // Comment markers are run siblings; no run's text offsets shift.
       return [];
+    case "pasteBlocks":
+      // Separate new blocks inserted after a paragraph; no existing offsets shift.
+      return [];
   }
 }
 
@@ -167,6 +170,8 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "mergeParagraph":
       return { ...intent, base: newBase };
     case "commentRun":
+      return { ...intent, base: newBase };
+    case "pasteBlocks":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

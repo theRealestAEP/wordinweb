@@ -16,12 +16,15 @@ export interface IntentLimits {
   maxDeleteLength: number;
   /** Max length of a comment body. */
   maxCommentLength: number;
+  /** Max serialized length of pasted OOXML (before the structural validator). */
+  maxPasteBytes: number;
 }
 
 export const DEFAULT_INTENT_LIMITS: IntentLimits = {
   maxInsertLength: 100_000,
   maxDeleteLength: 1_000_000,
   maxCommentLength: 20_000,
+  maxPasteBytes: 2_000_000,
 };
 
 /** Returns a rejection reason, or null if the intent is well-formed. */
@@ -51,6 +54,13 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (typeof intent.text !== "string" || intent.text.length === 0) return "commentRun: empty";
       if (intent.text.length > limits.maxCommentLength) return "commentRun: too long";
       if (typeof intent.paraId !== "string" || typeof intent.date !== "string") return "commentRun: bad provenance";
+      return null;
+    case "pasteBlocks":
+      if (typeof intent.blocksXml !== "string" || intent.blocksXml.length === 0) return "pasteBlocks: empty";
+      if (intent.blocksXml.length > limits.maxPasteBytes) return "pasteBlocks: too large";
+      if (!Array.isArray(intent.nodeIds)) return "pasteBlocks: bad nodeIds";
+      // Deep structural validation (element allowlist) happens at apply via
+      // validatePastedOoxml; this only bounds the raw size on the hot path.
       return null;
     case "formatRun":
     case "formatParagraph":
