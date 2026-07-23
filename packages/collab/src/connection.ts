@@ -37,6 +37,10 @@ function base64ToBytes(b64: string): Uint8Array {
 export class CollabConnection {
   private replica: ClientReplica | null = null;
   private clientSeq = 0;
+  /** Bumps only when reconciliation RELOADED the document (a true conflict) —
+   * the renderer re-mounts on this, but updates in place otherwise (no flash
+   * for the common non-conflicting edits). */
+  docEpoch = 0;
 
   constructor(
     private transport: ClientTransport,
@@ -98,6 +102,7 @@ export class CollabConnection {
       }
       case "broadcast": {
         this.replica?.receive(msg.entries);
+        if (this.replica?.reloaded) this.docEpoch++;
         this.cb.onChange?.();
         return;
       }

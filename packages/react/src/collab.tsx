@@ -35,6 +35,10 @@ export interface CollabSession {
   /** Monotonically increases on every reconciled change — a cheap re-render
    * signal (the doc object may be reloaded by reconciliation). */
   version: number;
+  /** Increases only when reconciliation RELOADED the document (a true
+   * conflict). The editor re-mounts on this; between reloads it updates in
+   * place (no flash for the common non-conflicting edits). */
+  docEpoch: number;
   /** True once joined and the snapshot is loaded. */
   ready: boolean;
   /** Submit a local edit (bookkeeping filled by the connection). */
@@ -58,6 +62,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const connRef = useRef<CollabConnection | null>(null);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
   const [version, setVersion] = useState(0);
+  const [docEpoch, setDocEpoch] = useState(0);
   const [ready, setReady] = useState(false);
   const [presence, setPresence] = useState<Record<string, PresencePosition | null>>({});
   const [refused, setRefused] = useState<string | null>(null);
@@ -70,6 +75,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         setDoc(conn.doc);
         setReady(conn.ready);
         setVersion((v) => v + 1); // signal a re-render on every reconciled change
+        setDocEpoch(conn.docEpoch); // bumps only on a reload (true conflict)
       },
       onPresence: (participant, pos) =>
         setPresence((prev) => ({ ...prev, [participant]: pos })),
@@ -86,6 +92,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   return {
     doc,
     version,
+    docEpoch,
     ready,
     submit: (intent) => connRef.current?.submit(intent),
     setPresence: (pos) => connRef.current?.setPresence(pos),
@@ -126,8 +133,11 @@ export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): R
     // Pass submit + live presence; DocxView draws remote carets over the page.
     collab: { submit: session.submit, presence: session.presence },
     editable: opts.editable ?? true,
-    // Re-key on version so the reconciled document is re-rendered.
-    key: session.version,
+    // Re-key only on docEpoch (a true-conflict reload) — NOT on every change.
+    // Between reloads the source bytes change but the key is stable, so
+    // DocxView re-renders in place (stays mounted) instead of re-mounting,
+    // avoiding the flash/cursor-jump of a full remount on each broadcast.
+    key: session.docEpoch,
   });
 }
 

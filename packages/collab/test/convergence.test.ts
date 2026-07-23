@@ -269,3 +269,50 @@ describe("undo convergence (undo propagates to all replicas)", () => {
     expect(paraText(server.doc)).toBe("ab"); // insert undone everywhere
   });
 })
+
+describe("in-place updates (no reload/re-mount for non-conflicting edits)", () => {
+  it("a viewer applies remote edits in place — the doc object stays stable (no flash)", () => {
+    const initial = docBytes(["seed"]);
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const viewer = new ClientReplica(initial); // no local edits (pending empty)
+    const docBefore = viewer.doc;
+    const addr = runAddr(server);
+    // A remote client edits; the viewer receives and applies IN PLACE.
+    const ins = { kind: "insertText" as const, clientId: "a", clientSeq: 1, base: 0, at: { blockId: addr.blockId, runId: addr.runId, offset: 4 }, text: "!" };
+    const e = server.submit(ins);
+    viewer.receive([e]);
+    expect(viewer.reloaded).toBe(false); // fast path: no reload
+    expect(viewer.doc).toBe(docBefore); // same doc object — no re-mount needed
+    expect(paraText(viewer.doc)).toBe("seed!");
+  });
+
+  it("an editor's own echo advances in place (doc stable), no reload", () => {
+    const initial = docBytes(["ab"]);
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const a = new ClientReplica(initial);
+    const docBefore = a.doc;
+    const addr = runAddr(server);
+    const ins = { kind: "insertText" as const, clientId: "a", clientSeq: 1, base: 0, at: { blockId: addr.blockId, runId: addr.runId, offset: 2 }, text: "C" };
+    a.submitLocal(ins); // optimistic
+    const e = server.submit(ins);
+    a.receive([e]); // own echo
+    expect(a.reloaded).toBe(false);
+    expect(a.doc).toBe(docBefore); // stable
+    expect(paraText(a.doc)).toBe("abC");
+  });
+
+  it("a true conflict (pending + interleaved remote) reloads, and still converges", () => {
+    const initial = docBytes(["mid"]);
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const a = new ClientReplica(initial);
+    const addr = runAddr(server);
+    a.submitLocal({ kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: addr.blockId, runId: addr.runId, offset: addr.len }, text: "A" });
+    const rb = { kind: "insertText" as const, clientId: "b", clientSeq: 1, base: 0, at: { blockId: addr.blockId, runId: addr.runId, offset: 0 }, text: "B" };
+    const eB = server.submit(rb);
+    a.receive([eB]); // remote interleaves our pending -> slow path
+    expect(a.reloaded).toBe(true);
+    const eA = server.submit({ kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: addr.blockId, runId: addr.runId, offset: addr.len }, text: "A" });
+    a.receive([eA]);
+    expect(serializeXml(a.doc.docRoot)).toBe(serializeXml(server.doc.docRoot));
+  });
+});

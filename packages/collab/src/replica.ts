@@ -72,7 +72,13 @@ export class ClientReplica {
    * then replays the still-pending intents transformed against the remote
    * intents in the batch (plan doc 03). Idempotent for already-seen seqs.
    */
+  /** True after a receive() that reloaded the doc object (a true conflict
+   * reconciliation) — the renderer must re-key/rebind. Stays false for the
+   * in-place fast paths so the editor updates without a re-mount. */
+  reloaded = false;
+
   receive(entries: LogEntry[]): void {
+    this.reloaded = false;
     const fresh = entries.filter((e) => e.seq > this.confirmedSeq);
     if (fresh.length === 0) return;
 
@@ -80,16 +86,33 @@ export class ClientReplica {
       .filter((e): e is Extract<LogEntry, { kind: "applied" }> => e.kind === "applied" && !isOurs(e, this.pending))
       .map((e) => e.intent);
 
-    // Rebuild the live doc from the confirmed baseline so optimistic pending
-    // edits don't get double-applied when their canonical echoes arrive.
+    // FAST PATH — no reload, doc object stays stable (production real-time
+    // behavior: apply in place, repaint incrementally, no re-mount/flash):
+    //  (a) every fresh entry is our OWN echo: the optimistic doc already has
+    //      them — just advance confirmed and drop the matched pending;
+    //  (b) nothing is pending: apply the remote entries in place (no risk of
+    //      double-applying an optimistic edit).
+    if (remoteAhead.length === 0 || this.pending.length === 0) {
+      for (const e of fresh) {
+        // Own echoes are already applied optimistically; only apply entries
+        // that aren't our own pending, to avoid double-apply.
+        this.advanceConfirmed(e, /*applyToDoc*/ remoteAhead.length > 0);
+      }
+      this.snapshotConfirmed();
+      return;
+    }
+
+    // SLOW PATH (true conflict: pending + interleaved remote) — reload the
+    // confirmed baseline and replay pending transformed against the remote.
     this.restoreConfirmed();
-    for (const e of fresh) this.advanceConfirmed(e);
+    this.reloaded = true;
+    for (const e of fresh) this.advanceConfirmed(e, true);
     this.snapshotConfirmed();
     this.replayPending(remoteAhead);
   }
 
-  private advanceConfirmed(e: LogEntry): void {
-    if (e.kind === "applied") {
+  private advanceConfirmed(e: LogEntry, applyToDoc: boolean): void {
+    if (e.kind === "applied" && applyToDoc) {
       applyIntent(this.doc, this.ids, e.intent);
       if (e.intent.kind === "splitParagraph") this.resync();
     }
