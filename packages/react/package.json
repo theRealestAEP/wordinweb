@@ -33,7 +33,9 @@
   ],
   "scripts": {
     "build": "tsup",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@google/model-viewer": "^4.3.1",
@@ -52,6 +54,8 @@
     "@wordinweb/core": "0.1.0",
     "@wordinweb/collab": "0.1.0",
     "react": "^18.3.0",
-    "react-dom": "^18.3.0"
+    "react-dom": "^18.3.0",
+    "jsdom": "^25.0.0",
+    "vitest": "^2.1.0"
   }
 }
