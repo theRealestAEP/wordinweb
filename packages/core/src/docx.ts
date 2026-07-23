@@ -1993,6 +1993,54 @@ export class DocxDocument {
     return this.pkg.binary(part);
   }
 
+  /**
+   * Pending-media registry (plan doc 05 change 1 / doc 16 §6): parts whose
+   * XML registration (rels + content-type + extent geometry) exists but
+   * whose BYTES have not arrived yet — the out-of-band media model. Layout
+   * needs no bytes (extents live in the XML), so a doc with pending parts
+   * lays out pixel-identically; the renderer shows a placeholder until
+   * `installMedia`. Keyed by part name; the value is the doc-16 §5.3
+   * metadata (declared sha + optional E2EE iv/epoch for re-supply).
+   */
+  readonly pendingMedia = new Map<string, { sha: string; iv?: string; genesisId?: string }>();
+
+  /** "ready" = bytes present; "pending" = registered, bytes absent (doc 05).
+   * Unregistered parts report "pending" too — a rel pointing at a missing
+   * zip entry after a save/parse round-trip IS the pending state (a hole is
+   * detectable, never corrupt — doc 16 §6 round-trip rule). */
+  mediaStatus(part: string): "ready" | "pending" {
+    return this.pkg.binary(part) ? "ready" : "pending";
+  }
+
+  /**
+   * Register an image part + relationship WITHOUT bytes (doc 16 §2: the
+   * intent carries the sha; bytes travel out of band). Same deterministic
+   * naming/rId scan as addImageResource so every replica applying the same
+   * canonical intent derives identical registration.
+   */
+  registerPendingImage(sha: string, ext: string, meta?: { iv?: string; genesisId?: string }): string {
+    // Register with a 0-byte placeholder entry so part-name scanning and
+    // content-type bookkeeping behave identically to a real image…
+    const relId = this.addImageResource(new Uint8Array(0), ext);
+    const part = this.documentRels.get(relId)!.target;
+    // …then remove the placeholder bytes: the zip entry must be ABSENT for
+    // a pending part (doc 16 §6 — absence is the unambiguous hole).
+    delete this.pkg.raw()[part];
+    this.pendingMedia.set(part, { sha, ...meta });
+    return relId;
+  }
+
+  /** Install fetched bytes into a pending part (doc 05). The caller has
+   * ALREADY verified the sha against the intent's declaration (the
+   * reservation is the hash commitment — doc 16 §1.1); this installs and
+   * clears the pending record. Returns false for unknown parts. */
+  installMedia(part: string, bytes: Uint8Array): boolean {
+    if (!this.pendingMedia.has(part) && this.pkg.binary(part)) return false; // already ready
+    this.pkg.raw()[part] = bytes;
+    this.pendingMedia.delete(part);
+    return true;
+  }
+
   /** Effective paragraph properties: docDefaults → table style → style chain → direct. */
   effectiveParaProps(para: Paragraph): ParaProps {
     let pPr: ParaProps;

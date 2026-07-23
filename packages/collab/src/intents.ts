@@ -222,10 +222,22 @@ export interface PasteBlocksIntent extends IntentBase {
 export interface InsertImageIntent extends IntentBase {
   kind: "insertImage";
   runId: StableId;
-  /** base64-encoded image bytes. */
-  imageBase64: string;
+  /**
+   * sha256 hex of the BLOB (plan doc 16 §2): plaintext bytes in plaintext
+   * mode, ciphertext in E2EE mode. This is the reservation's hash
+   * COMMITMENT — every replica registers the part pending and verifies any
+   * later-arriving bytes against it (the swap-proofing trust chain, doc 16
+   * §1.1). Bytes NEVER ride the intent (doc 06: sequencer bandwidth is
+   * proportional to typing, not content).
+   */
+  blobSha: string;
+  /** Blob length in bytes — validate.ts bounds it (doc 13 blocker 3). */
+  bytesLen: number;
   /** File extension without dot (png/jpg/gif…) — drives the content type. */
   ext: string;
+  /** E2EE only: base64 12-byte GCM IV, recorded so any holder can re-seal
+   * byte-identically for re-supply (doc 16 §5.3). */
+  iv?: string;
   widthPx: number;
   heightPx: number;
   nodeIds: StableId[];

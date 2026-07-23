@@ -91,9 +91,11 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       // validatePastedOoxml; this only bounds the raw size on the hot path.
       return null;
     case "insertImage":
-      if (typeof intent.imageBase64 !== "string" || intent.imageBase64.length === 0) return "insertImage: empty";
-      if (intent.imageBase64.length > 20_000_000) return "insertImage: too large";
-      if (!/^[a-z0-9]{1,8}$/i.test(intent.ext)) return "insertImage: bad ext";
+      if (!/^[0-9a-f]{64}$/.test(intent.blobSha)) return "insertImage: bad sha";
+      if (!nonNegInt(intent.bytesLen) || intent.bytesLen === 0 || intent.bytesLen > 10 * 1024 * 1024)
+        return "insertImage: bad size"; // MAX_BLOB_BYTES (doc 16 §8)
+      if (!["png", "jpg", "jpeg", "gif", "bmp", "webp"].includes(intent.ext)) return "insertImage: bad ext";
+      if (intent.iv !== undefined && !/^[A-Za-z0-9+/]{16}$/.test(intent.iv)) return "insertImage: bad iv";
       if (!Number.isFinite(intent.widthPx) || !Number.isFinite(intent.heightPx)) return "insertImage: bad size";
       return null;
     case "insertBreak":

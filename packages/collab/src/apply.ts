@@ -287,16 +287,13 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
       if (!runEl) return false;
       const entry = runMap.get(runEl);
       if (!entry || !entry.firstT) return false;
-      let bytes: Uint8Array;
-      try {
-        bytes = base64ToBytes(intent.imageBase64);
-      } catch {
-        return false;
-      }
-      // Register the media part (rId/part name are scan-max, deterministic
-      // across replicas applying the same canonical intent) and splice the
-      // drawing run. Client-measured px are carried so layout is deterministic.
-      const relId = doc.addImageResource(bytes, intent.ext);
+      // Doc 16 §2: apply performs the REGISTRATION half only — part + rel +
+      // content-type + the drawing run with client-measured extents (layout
+      // reserves exact space from XML alone, doc 05). Bytes arrive out of
+      // band and install via installMedia when fetched; until then the part
+      // is pending and renders as a placeholder. The sha/iv metadata is
+      // recorded on the doc for verification + E2EE re-supply (doc 16 §5.3).
+      const relId = doc.registerPendingImage(intent.blobSha, intent.ext, { iv: intent.iv });
       const before = trackedSet(ids, doc);
       const newRun = insertImageAt(doc, entry.firstT, relId, intent.widthPx, intent.heightPx);
       if (!newRun) return false;
