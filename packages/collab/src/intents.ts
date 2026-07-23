@@ -377,7 +377,14 @@ export type Intent =
   | InsertCoverPageIntent
   | SetPageLayoutIntent
   | SetListLevelIntent
-  | InsertWordArtIntent;
+  | InsertWordArtIntent
+  | InsertChartIntent
+  | InsertSmartArtIntent
+  | SetLineNumberingIntent
+  | InsertDateTimeFieldIntent
+  | InsertFieldIntent
+  | SetDrawingRotationIntent
+  | SetDrawingFillIntent;
 
 /** Insert a blank page at the end of a run. */
 export interface InsertBlankPageIntent extends IntentBase {
@@ -434,6 +441,75 @@ export interface InsertWordArtIntent extends IntentBase {
   text: string;
   preset: "plain" | "archUp" | "archDown" | "wave" | "chevron";
   nodeIds: StableId[];
+}
+
+/** Insert a data chart (column/bar/line/pie) at the end of a run. The chart
+ * data is carried verbatim; the workbook part is generated deterministically. */
+export interface InsertChartIntent extends IntentBase {
+  kind: "insertChart";
+  runId: StableId;
+  chart: {
+    type: "column" | "bar" | "line" | "pie";
+    title?: string;
+    categories: string[];
+    series: { name: string; values: number[] }[];
+  };
+  nodeIds: StableId[];
+}
+
+/** Insert a SmartArt diagram (process/cycle/hierarchy/list) at end of a run. */
+export interface InsertSmartArtIntent extends IntentBase {
+  kind: "insertSmartArt";
+  runId: StableId;
+  smartArt: { layout: "process" | "cycle" | "hierarchy" | "list"; items: string[] };
+  nodeIds: StableId[];
+}
+
+/** Toggle/configure margin line numbering for the section(s). Document-level. */
+export interface SetLineNumberingIntent extends IntentBase {
+  kind: "setLineNumbering";
+  patch: {
+    enabled: boolean;
+    countBy?: number;
+    restart?: "continuous" | "newPage" | "newSection";
+    start?: number;
+  };
+}
+
+/** Insert an auto-updating DATE or TIME field at the end of a run. The picture
+ * (format string) is carried so every replica renders identical field XML. */
+export interface InsertDateTimeFieldIntent extends IntentBase {
+  kind: "insertDateTimeField";
+  runId: StableId;
+  dtKind: "date" | "time";
+  picture: string;
+  nodeIds: StableId[];
+}
+
+/** Insert a Word field (e.g. PAGE, NUMPAGES, REF) at the end of a run. The
+ * instruction is restricted to a safe positive allowlist (no INCLUDETEXT/DDE/
+ * LINK external-content fields). */
+export interface InsertFieldIntent extends IntentBase {
+  kind: "insertField";
+  runId: StableId;
+  instruction: string;
+  cachedResult?: string;
+  nodeIds: StableId[];
+}
+
+/** Rotate the drawing carried by a run. Identity transform (run-addressed). */
+export interface SetDrawingRotationIntent extends IntentBase {
+  kind: "setDrawingRotation";
+  runId: StableId;
+  degrees: number;
+}
+
+/** Set/clear the solid fill of the drawing carried by a run. `color` is a
+ * 6-hex-digit RGB (no #) or null to clear. */
+export interface SetDrawingFillIntent extends IntentBase {
+  kind: "setDrawingFill";
+  runId: StableId;
+  color: string | null;
 }
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a

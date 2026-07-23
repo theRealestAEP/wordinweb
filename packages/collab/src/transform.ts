@@ -100,6 +100,13 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "setPageLayout":
     case "setListLevel":
     case "insertWordArt":
+    case "insertChart":
+    case "insertSmartArt":
+    case "setLineNumbering":
+    case "insertDateTimeField":
+    case "insertField":
+    case "setDrawingRotation":
+    case "setDrawingFill":
       // Run/block/document-level; no existing run's text offsets shift.
       return [];
   }
@@ -231,6 +238,13 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "setPageLayout":
     case "setListLevel":
     case "insertWordArt":
+    case "insertChart":
+    case "insertSmartArt":
+    case "setLineNumbering":
+    case "insertDateTimeField":
+    case "insertField":
+    case "setDrawingRotation":
+    case "setDrawingFill":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

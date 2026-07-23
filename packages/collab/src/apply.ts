@@ -23,6 +23,13 @@ import {
   setPageLayout,
   setListLevel,
   insertWordArtAt,
+  insertChartAt,
+  insertSmartArtAt,
+  setLineNumbering,
+  insertDateTimeField,
+  insertField,
+  setDrawingRotation,
+  setDrawingFill,
   isSafeUrl,
   applyTableOp,
   mergeParagraphBackward,
@@ -323,6 +330,65 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       assignFreshTracked(ids, doc, before, intent.nodeIds);
       return true;
     }
+    case "insertChart": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const drawing = insertChartAt(doc, entry.firstT, intent.chart as never);
+      if (!drawing) return false;
+      assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return true;
+    }
+    case "insertSmartArt": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const drawing = insertSmartArtAt(doc, entry.firstT, intent.smartArt as never);
+      if (!drawing) return false;
+      assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return true;
+    }
+    case "setLineNumbering":
+      // Document-level (all sections). No new nodes to id.
+      return setLineNumbering(doc, intent.patch as never);
+    case "insertDateTimeField": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const ok = insertDateTimeField(doc, entry.firstT, entry.firstT.text.length, intent.dtKind, intent.picture);
+      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return ok;
+    }
+    case "insertField": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const ok = insertField(doc, entry.firstT, entry.firstT.text.length, intent.instruction, intent.cachedResult ?? "");
+      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return ok;
+    }
+    case "setDrawingRotation": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setDrawingRotation(doc, drawing, intent.degrees);
+    }
+    case "setDrawingFill": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setDrawingFill(doc, drawing, intent.color);
+    }
     case "setLink": {
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.
       const runEl = ids.elOf(intent.runId);
@@ -476,6 +542,17 @@ function firstTextDescendant(el: XmlElement): XmlElement | null {
   if (el.name === "w:t" || el.name.endsWith(":t")) return el;
   for (const c of el.children) {
     const found = firstTextDescendant(c);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** The w:drawing element inside a run's subtree (drawing-edit intents address
+ * a drawing via the run that carries it — drawings aren't tracked/id'd). */
+function firstDrawingIn(el: XmlElement): XmlElement | null {
+  if (localName(el.name) === "drawing") return el;
+  for (const c of el.children) {
+    const found = firstDrawingIn(c);
     if (found) return found;
   }
   return null;

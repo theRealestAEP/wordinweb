@@ -155,6 +155,67 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (!["plain", "archUp", "archDown", "wave", "chevron"].includes(intent.preset)) return "insertWordArt: bad preset";
       return null;
     }
+    case "insertChart": {
+      const c = intent.chart;
+      if (typeof c !== "object" || c === null) return "insertChart: bad chart";
+      if (!["column", "bar", "line", "pie"].includes(c.type)) return "insertChart: bad type";
+      if (!Array.isArray(c.categories) || c.categories.length === 0 || c.categories.length > 100) return "insertChart: bad categories";
+      if (c.categories.some((x) => typeof x !== "string" || x.length > 200)) return "insertChart: bad category";
+      if (c.title !== undefined && (typeof c.title !== "string" || c.title.length > 200)) return "insertChart: bad title";
+      if (!Array.isArray(c.series) || c.series.length === 0 || c.series.length > 24) return "insertChart: bad series";
+      for (const s of c.series) {
+        if (typeof s !== "object" || s === null || typeof s.name !== "string" || s.name.length > 200) return "insertChart: bad series name";
+        if (!Array.isArray(s.values) || s.values.length > 100 || s.values.some((v) => typeof v !== "number" || !Number.isFinite(v))) return "insertChart: bad series values";
+      }
+      return null;
+    }
+    case "insertSmartArt": {
+      const a = intent.smartArt;
+      if (typeof a !== "object" || a === null) return "insertSmartArt: bad smartArt";
+      if (!["process", "cycle", "hierarchy", "list"].includes(a.layout)) return "insertSmartArt: bad layout";
+      if (!Array.isArray(a.items) || a.items.length === 0 || a.items.length > 50) return "insertSmartArt: bad items";
+      if (a.items.some((x) => typeof x !== "string" || x.length > 500)) return "insertSmartArt: bad item";
+      return null;
+    }
+    case "setLineNumbering": {
+      const p = intent.patch;
+      if (typeof p !== "object" || p === null || typeof p.enabled !== "boolean") return "setLineNumbering: bad patch";
+      if (p.countBy !== undefined && (typeof p.countBy !== "number" || !Number.isInteger(p.countBy) || p.countBy < 1 || p.countBy > 100)) return "setLineNumbering: bad countBy";
+      if (p.restart !== undefined && !["continuous", "newPage", "newSection"].includes(p.restart)) return "setLineNumbering: bad restart";
+      if (p.start !== undefined && (typeof p.start !== "number" || !Number.isInteger(p.start) || p.start < 0 || p.start > 100000)) return "setLineNumbering: bad start";
+      return null;
+    }
+    case "insertDateTimeField": {
+      if (intent.dtKind !== "date" && intent.dtKind !== "time") return "insertDateTimeField: bad kind";
+      if (typeof intent.picture !== "string" || intent.picture.length === 0 || intent.picture.length > 100) return "insertDateTimeField: bad picture";
+      // A date/time picture is a format mask; reject field-code control chars.
+      if (/[\\{}"]/.test(intent.picture)) return "insertDateTimeField: illegal picture char";
+      return null;
+    }
+    case "insertField": {
+      if (typeof intent.instruction !== "string" || intent.instruction.length === 0 || intent.instruction.length > 200) return "insertField: bad instruction";
+      if (intent.cachedResult !== undefined && (typeof intent.cachedResult !== "string" || intent.cachedResult.length > 1000)) return "insertField: bad cachedResult";
+      // Positive allowlist on the field TYPE (first token). Blocks external-
+      // content / code fields (INCLUDETEXT, INCLUDEPICTURE, DDE, DDEAUTO, LINK,
+      // HYPERLINK, IMPORT, …) that could exfiltrate or execute (plan doc 11).
+      const SAFE_FIELDS = new Set([
+        "PAGE", "NUMPAGES", "SECTIONPAGES", "SECTION", "DATE", "TIME",
+        "CREATEDATE", "SAVEDATE", "PRINTDATE", "AUTHOR", "TITLE", "SUBJECT",
+        "KEYWORDS", "COMMENTS", "FILENAME", "NUMWORDS", "NUMCHARS", "PAGEREF",
+        "REF", "SEQ", "STYLEREF", "TOC", "INDEX", "LISTNUM", "QUOTE",
+      ]);
+      const type = intent.instruction.trim().split(/\s+/)[0]?.toUpperCase();
+      if (!type || !SAFE_FIELDS.has(type)) return "insertField: field type not allowed";
+      // The whole instruction must be printable ASCII (no control/format chars).
+      if (!/^[\x20-\x7e]+$/.test(intent.instruction)) return "insertField: illegal instruction char";
+      return null;
+    }
+    case "setDrawingRotation":
+      if (typeof intent.degrees !== "number" || !Number.isFinite(intent.degrees)) return "setDrawingRotation: bad degrees";
+      return null;
+    case "setDrawingFill":
+      if (intent.color !== null && !/^[0-9a-fA-F]{6}$/.test(intent.color)) return "setDrawingFill: bad color";
+      return null;
     case "formatRun":
     case "formatParagraph":
     case "setListType":
