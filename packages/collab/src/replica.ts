@@ -93,11 +93,19 @@ export class ClientReplica {
     //  (b) nothing is pending: apply the remote entries in place (no risk of
     //      double-applying an optimistic edit).
     if (remoteAhead.length === 0 || this.pending.length === 0) {
+      const applyToDoc = remoteAhead.length > 0;
       for (const e of fresh) {
         // Own echoes are already applied optimistically; only apply entries
         // that aren't our own pending, to avoid double-apply.
-        this.advanceConfirmed(e, /*applyToDoc*/ remoteAhead.length > 0);
+        this.advanceConfirmed(e, /*applyToDoc*/ applyToDoc);
       }
+      // apply.ts mutates the XML tree only; the parsed model (Run.content, the
+      // line-break inputs the renderer reads) is rebuilt by refresh(). The old
+      // render path reloaded from bytes so it never saw the stale model, but
+      // rendering the live doc object directly does — so refresh once here when
+      // we mutated in place, keeping the model consistent with the XML (and
+      // bumping modelVersion so the view repaints).
+      if (applyToDoc) this.resync();
       this.snapshotConfirmed();
       return;
     }

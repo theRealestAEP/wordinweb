@@ -98,6 +98,33 @@ describe("multi-client convergence (optimistic apply + reconciliation)", () => {
   });
 });
 
+describe("in-place receive keeps the parsed model consistent with the XML", () => {
+  // apply.ts mutates the XML tree; the parsed model (Run.content) is rebuilt by
+  // refresh(). The old render path reloaded from bytes and never saw a stale
+  // model, but rendering the live doc object directly does — so the fast path
+  // must refresh(). This asserts the model the renderer reads matches the XML.
+  it("a remote insert updates Run.content.text, not just the XML w:t", () => {
+    const initial = docBytes(["HELLOWORLD"]);
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const client = new ClientReplica(initial); // a pure receiver (no pending)
+    const addr = runAddr(server);
+
+    const ins: InsertTextIntent = {
+      kind: "insertText", clientId: "editor", clientSeq: 1, base: 0,
+      at: { blockId: addr.blockId, runId: addr.runId, offset: 5 }, text: "-X-",
+    };
+    const broadcast = server.submit(ins);
+    client.receive([broadcast]);
+
+    const run = client.doc.sections[0].blocks[0].children[0] as Run;
+    const modelText = run.content.filter((c) => c.kind === "text").map((c) => (c as { text: string }).text).join("");
+    // The parsed model the layout reads reflects the edit (was the bug: the XML
+    // said HELLO-X-WORLD while content.text was still HELLOWORLD).
+    expect(modelText).toBe("HELLO-X-WORLD");
+    expect(paraText(client.doc)).toBe("HELLO-X-WORLD");
+  });
+});
+
 import { SplitParagraphIntent } from "../src/intents.js";
 
 describe("sidecar: split-created ids survive a reconciliation restore (round-2 F1)", () => {

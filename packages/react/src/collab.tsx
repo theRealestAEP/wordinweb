@@ -110,36 +110,42 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
  * is the inbound + outbound integration composed for you — the app supplies
  * only the connection params.
  *
- * Rendering strategy: `DocxView` renders the reconciled document (serialized
- * to bytes) and re-renders on every reconciled change (keyed on `version`),
- * while local edits flow out through the injected `collab` prop. This is the
- * simple, correct binding; an incremental in-place variant is a later
- * optimization. The visual rendering runs in the browser (as all of DocxView
- * does); the protocol/convergence/binding it rides on are covered by the
- * headless test suites.
+ * Rendering strategy: DocxView renders the replica's LIVE document object
+ * directly (`collab.doc`). Broadcasts mutate that same instance in place and
+ * bump `version`, which DocxView receives as `renderSignal` and turns into a
+ * single in-place repaint — no per-broadcast serialize/parse round-trip. The
+ * `source` bytes are computed only on a true-conflict reload (keyed on
+ * `docEpoch`) as the placeholder/fallback. The visual rendering runs in the
+ * browser (as all of DocxView does); the protocol/convergence/binding it rides
+ * on are covered by the headless test suites.
  */
 export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): ReactNode {
   const session = useCollab(opts);
-  // Serialize the reconciled doc so DocxView can render the current state; keyed
-  // on version so a broadcast re-renders. save() is side-effect-free, so
-  // snapshotting on each change never perturbs the live doc.
+  // Placeholder bytes only — DocxView renders session.doc directly (below), so
+  // this is re-serialized ONLY on a reload (docEpoch), never per broadcast.
   const bytes = useMemo(
     () => (session.doc ? session.doc.save() : null),
-    [session.doc, session.version],
+    [session.doc, session.docEpoch],
   );
 
   if (session.refused) return createElement("div", { className: "dxw-collab-refused" }, `Please refresh — ${session.refused}.`);
-  if (!session.ready || !bytes) return createElement("div", { className: "dxw-collab-connecting" }, "Connecting…");
+  if (!session.ready || !bytes || !session.doc) return createElement("div", { className: "dxw-collab-connecting" }, "Connecting…");
 
   return createElement(DocxView, {
     source: bytes,
-    // Pass submit + live presence + id allocator; DocxView draws remote carets.
-    collab: { submit: session.submit, presence: session.presence, allocIds: session.allocIds },
+    // Render the live doc object directly; repaint in place on each version
+    // bump. submit + presence + id allocator flow out; DocxView draws carets.
+    collab: {
+      submit: session.submit,
+      presence: session.presence,
+      allocIds: session.allocIds,
+      doc: session.doc,
+      renderSignal: session.version,
+    },
     editable: opts.editable ?? true,
     // Re-key only on docEpoch (a true-conflict reload) — NOT on every change.
-    // Between reloads the source bytes change but the key is stable, so
-    // DocxView re-renders in place (stays mounted) instead of re-mounting,
-    // avoiding the flash/cursor-jump of a full remount on each broadcast.
+    // Between reloads the live doc mutates in place and the key stays stable,
+    // so DocxView repaints in place instead of re-mounting (no flash/jump).
     key: session.docEpoch,
   });
 }

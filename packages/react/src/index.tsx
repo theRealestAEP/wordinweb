@@ -338,6 +338,15 @@ export interface DocxViewProps {
     /** Allocate `n` fresh carried node ids (for sub-range format / split /
      * insert intents). Injected from the collab connection. */
     allocIds?: (n: number) => number[];
+    /** The live reconciled document object to render DIRECTLY (skip the
+     * bytes → parse round-trip). The collab replica mutates this same instance
+     * in place on each broadcast; DocxView repaints it when `renderSignal`
+     * bumps, so a remote edit costs one repaint — no re-serialize, no re-parse,
+     * no caret reset. When present, `source` is only a placeholder. */
+    doc?: DocxDocument;
+    /** Monotonic counter that bumps whenever `doc` was mutated in place; a
+     * change triggers an in-place repaint of `doc`. */
+    renderSignal?: number;
   };
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
@@ -474,6 +483,9 @@ export function DocxView({
   const [hfMode, setHfMode] = useState(false);
   const apiRef = useRef<DocxViewApi | null>(null);
   const handleRef = useRef<RenderHandle | null>(null);
+  // Set by the main effect so the live-collab-doc repaint effect can trigger an
+  // in-place re-render without re-running the whole load effect.
+  const rerenderRef = useRef<((doc: DocxDocument) => void) | null>(null);
   const presenceOverlayRef = useRef<HTMLDivElement | null>(null);
   const redrawPresenceRef = useRef<(() => void) | null>(null);
   // Current presence, read by the imperative draw (which closes over an older
@@ -714,9 +726,15 @@ export function DocxView({
       return paintLayout(doc, layout, performance.now() - started);
     };
 
+    rerenderRef.current = null;
+
     (async () => {
-      const cached = docCacheRef.current?.source === source ? docCacheRef.current : null;
-      const bytes = cached ? null : await toBytes(source);
+      // Live-collab path: render the replica's own document object directly.
+      const liveDoc = collab?.doc ?? null;
+      const cached = liveDoc
+        ? (docCacheRef.current?.doc === liveDoc ? docCacheRef.current : null)
+        : (docCacheRef.current?.source === source ? docCacheRef.current : null);
+      const bytes = cached || liveDoc ? null : await toBytes(source);
       if (cancelled) return;
       if (!cached && typeof document !== "undefined" && document.fonts?.ready) {
         try {
@@ -769,8 +787,12 @@ export function DocxView({
         }
       }
       if (cancelled) return;
-      const doc = cached ? cached.doc : DocxDocument.load(bytes!);
+      const doc = liveDoc ?? (cached ? cached.doc : DocxDocument.load(bytes!));
       if (!cached) docCacheRef.current = { source, doc, history: new EditHistory(doc) };
+      // Expose an in-place repaint for the live-collab renderSignal effect.
+      // Force modelChanged (the collab apply may not bump modelVersion) so the
+      // body — not just headers/footers — is relaid out against the mutated tree.
+      rerenderRef.current = (d) => { paintedModelVersion = -1; rerender(d, undefined, "global"); };
       // Collaboration: populate the stable-id side table so the editor can
       // encode intent positions and emit them (no-op / zero-cost otherwise).
       if (collab) doc.enableStableIds();
@@ -1505,6 +1527,22 @@ export function DocxView({
       handle = null;
     };
   }, [source, editable, commentAuthor, showComments, revisions]);
+
+  // Live-collab in-place repaint. When the replica applies a broadcast it
+  // mutates the SAME doc object we already rendered (collab.doc) and bumps
+  // renderSignal; repaint that instance directly rather than re-running the
+  // load effect. No bytes, no parse, no editor re-attach — the remote edit
+  // shows up as a single relayout of the live tree.
+  const renderSignal = collab?.renderSignal;
+  useEffect(() => {
+    if (renderSignal === undefined) return;
+    const d = docCacheRef.current?.doc;
+    const r = rerenderRef.current;
+    if (d && r && d === collab?.doc) r(d);
+    // Intentionally keyed only on renderSignal: collab.doc is stable between
+    // reloads, and a reload re-runs the main effect above instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderSignal]);
 
   const hotBtn = (label: string, title: string, onClick: () => void) => (
     <button
