@@ -126,6 +126,25 @@ export interface FormatRangeIntent extends IntentBase {
   afterId?: StableId;
 }
 
+/**
+ * A table operation that does NOT create new tracked nodes (so no carried ids
+ * are needed and the transform is identity): delete row/column/table, cell
+ * shading, cell vertical align. The target cell is addressed by the stable id
+ * of a paragraph inside it. Row/column INSERTION (which creates cells with new
+ * paragraphs and runs needing carried ids) is a documented harder extension.
+ */
+export interface TableOpIntent extends IntentBase {
+  /** Stable id of a paragraph inside the target cell. */
+  cellParagraphId: StableId;
+  kind: "tableOp";
+  op:
+    | "deleteRow"
+    | "deleteCol"
+    | "deleteTable"
+    | { kind: "cellShading"; fill: string | null }
+    | { kind: "cellVAlign"; v: "top" | "center" | "bottom" };
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -133,7 +152,8 @@ export type Intent =
   | FormatRunIntent
   | FormatParagraphIntent
   | SetListTypeIntent
-  | FormatRangeIntent;
+  | FormatRangeIntent
+  | TableOpIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

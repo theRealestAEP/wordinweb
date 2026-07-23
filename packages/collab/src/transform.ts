@@ -54,6 +54,10 @@ export function runEditsOf(intent: Intent): RunEdit[] {
         runId: intent.runId, at: intent.start, del: 0, ins: 0,
         formatSplit: { start: intent.start, end: intent.end, beforeId: intent.beforeId, middleId: intent.middleId, afterId: intent.afterId },
       }];
+    case "tableOp":
+      // Non-node-creating table ops don't shift any surviving run's offsets;
+      // concurrent edits to deleted cells fail cleanly at apply (retired ids).
+      return [];
   }
 }
 
@@ -142,6 +146,9 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       if (e.runId !== s.runId) return { ...intent, runId: s.runId, blockId: s.blockId, start: s.offset, end: s.offset, base: newBase };
       return { ...intent, runId: s.runId, blockId: s.blockId, start: s.offset, end: e.offset, base: newBase };
     }
+    case "tableOp":
+      // Addressed by a stable paragraph id; nothing to transform.
+      return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);
       const e = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.end }, ahead);

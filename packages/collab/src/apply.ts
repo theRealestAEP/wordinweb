@@ -8,6 +8,7 @@ import {
   setParagraphAlignment,
   setParagraphStyle,
   setListType,
+  applyTableOp,
   type EditCaret,
   type Run,
   type Block,
@@ -121,6 +122,16 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
         if (after && localRun(after)) ids.reassign(after, intent.afterId);
       }
       return true;
+    }
+    case "tableOp": {
+      const paraEl = ids.elOf(intent.cellParagraphId);
+      if (!paraEl) return false;
+      const target = firstTextDescendant(paraEl) ?? paraEl;
+      const ok = applyTableOp(doc, target, intent.op as never);
+      // Structural table ops removed nodes; retire their stale ids so the
+      // table stops resolving deleted content.
+      if (ok) ids.prune(doc.editableRoots());
+      return ok;
     }
   }
 }
