@@ -5187,6 +5187,13 @@ export class DocxEditor {
    * revision and the view switches to markup so the suggestion shows live;
    * turning off restores the prior revision view. `author` stamps w:author. */
   setSuggesting(on: boolean, author?: string): void {
+    // Collab gate (plan doc 14 §3 L2): suggesting-mode mutations (revision
+    // marks, glyph strikes, suggested inserts) do not yet EMIT intents —
+    // enabling the mode in a live session would take mutation branches
+    // no peer ever sees, the exact silent-divergence class the fidelity
+    // suite hunts ("no mutation branch without an emission"). Refused
+    // until the suggest-intent lifecycle ships; local mode is unaffected.
+    if (on && this.host.onIntent) return;
     if (author) this.revisionAuthor = author;
     if (on === this.suggesting) return;
     this.suggesting = on;
