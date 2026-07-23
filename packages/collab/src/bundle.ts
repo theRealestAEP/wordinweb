@@ -42,6 +42,14 @@ export interface DocBundle {
    * fast-forward instead of forking. Capped; ancestry checks are O(chain).
    */
   lineage: LineageHead[];
+  /**
+   * Local intents recorded while NO session was live (doc 15 §2): the user
+   * kept editing their bundle after the room ended. On rejoin these are the
+   * offline tail the arrival ladder reconciles — replayed as suggestions
+   * (default) or a gated destructive rebase, or parked in a draft. Distinct
+   * from `pending` (in-flight when a LIVE session was interrupted).
+   */
+  offlineTail?: Intent[];
   /** Per-part media metadata (doc 16 §5.3): the sha (and E2EE iv/epoch)
    * of every media part this copy knows. The docx bytes carry the PIXELS;
    * this carries the ADDRESSES — without it a resumed holder couldn't
@@ -99,6 +107,11 @@ export class BundlePersister {
   private lastWrite = -Infinity;
   private trailing: unknown = null;
   private stopped = false;
+  /** Writes are async (digest + store I/O) and must not overlap on one
+   * store; a serial chain guarantees ordering and lets flush() await
+   * every in-flight write (round-4 F8: the flush is only meaningful if it
+   * durably lands the latest state before pagehide). */
+  private chain: Promise<void> = Promise.resolve();
 
   constructor(
     private conn: CollabConnection,
@@ -126,26 +139,37 @@ export class BundlePersister {
     if (this.stopped) return;
     const elapsed = this.now() - this.lastWrite;
     if (elapsed >= this.throttleMs) {
-      void this.write();
-      return;
+      this.lastWrite = this.now(); // claim the slot SYNCHRONOUSLY so a
+      this.enqueueWrite();         // second notify in the same tick arms
+      return;                      // the trailing timer, not a 2nd write
     }
     if (this.trailing === null) {
       const set = this.opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
       this.trailing = set(() => {
         this.trailing = null;
-        void this.write();
+        this.lastWrite = this.now();
+        this.enqueueWrite();
       }, this.throttleMs - elapsed);
     }
   }
 
-  /** Immediate best-effort write (pagehide/visibilitychange/session-end). */
+  /** Immediate best-effort write (pagehide/visibilitychange/session-end).
+   * Awaits ALL in-flight writes plus this one so the latest state is
+   * durably landed before the tab goes away. */
   async flush(): Promise<void> {
     if (this.stopped) return;
     if (this.trailing !== null) {
       (this.opts.clearTimer ?? clearTimeout)(this.trailing as never);
       this.trailing = null;
     }
-    await this.write();
+    this.lastWrite = this.now();
+    this.enqueueWrite();
+    await this.chain;
+  }
+
+  /** Append a write to the serial chain (never overlapping). */
+  private enqueueWrite(): void {
+    this.chain = this.chain.then(() => this.write()).catch(() => {});
   }
 
   /** Detach (unmount): cancel the trailing timer; no further writes. */
@@ -160,7 +184,6 @@ export class BundlePersister {
   private async write(): Promise<void> {
     const bundle = this.conn.exportBundle(this.docId);
     if (!bundle) return; // not welcomed yet — nothing durable to say
-    this.lastWrite = this.now();
     bundle.savedAt = this.lastWrite;
     // Maintain the lineage chain (doc 15 §1): the PREVIOUS bundle's chain
     // carries forward; the head for the current epoch is refreshed in

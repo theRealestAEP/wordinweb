@@ -93,8 +93,8 @@ describe("BundlePersister throttle (round-4 F8: throttle, not debounce)", () => 
     const { conn, store, p, advance } = harness();
     const settle = () => new Promise((r) => setTimeout(r, 20)); // write() awaits a real async digest
     conn.submit(ins(0, "a"));
-    p.notify(); // leading edge: writes immediately (async digest inside)
-    await settle();
+    p.notify(); // leading edge: slot claimed synchronously, write enqueued
+    await settle(); // let the (real-async) leading write's chain drain
     expect(store.writes).toBe(1);
     for (let i = 1; i <= 30; i++) { conn.submit(ins(i, "x")); p.notify(); advance(20); }
     await settle();

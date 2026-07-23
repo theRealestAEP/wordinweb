@@ -193,11 +193,25 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
           </span>
         ))}
         <span style={{ flex: 1 }} />
-        {session?.epochChanged && (
+        {session?.arrival ? (
+          <span style={{ fontSize: 12, background: "#d1ecf1", padding: "2px 8px", borderRadius: 6 }}>
+            You edited offline ({session.arrival.tailLength} change{session.arrival.tailLength === 1 ? "" : "s"}).{" "}
+            {session.arrival.mode === "suggest" ? (
+              <>
+                <button onClick={() => session.reconcile("suggest")}>Add my changes as suggestions</button>{" "}
+                <button onClick={() => session.reconcile("draft")}>Keep as draft</button>
+              </>
+            ) : (
+              <>
+                Too many to suggest cleanly — <button onClick={() => session.reconcile("draft")}>keep as a draft</button>.
+              </>
+            )}
+          </span>
+        ) : session?.epochChanged ? (
           <span style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
             Restored by another participant — your offline copy is saved as a draft.
           </span>
-        )}
+        ) : null}
         {/* The escape hatch (doc 12 §4): your copy is as durable as this
             browser; one click makes it a file. */}
         <button onClick={download} disabled={!session?.ready}>Download .docx</button>

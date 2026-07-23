@@ -6,6 +6,8 @@ import {
   CollabConnection,
   EncryptedCollabConnection,
   stretchShareCode,
+  toSuggestions,
+  arrivalMode,
   createWebSocketTransport,
   BundlePersister,
   type BundleStore,
@@ -117,6 +119,14 @@ export interface CollabSession {
     | { op: "kick"; clientId: string }
     | { op: "readOnly"; on: boolean }
     | { op: "setRole"; clientId: string; role: "editor" | "viewer" }) => void;
+  /**
+   * Offline reconciliation (doc 15 arrival ladder). When a resume lands in
+   * a diverged epoch and the bundle has an offline tail, the recommended
+   * mode is `suggest` (replay as tracked changes). Null when there's
+   * nothing to reconcile. `reconcile()` runs the chosen mode.
+   */
+  arrival: { mode: "suggest" | "draft"; tailLength: number } | null;
+  reconcile: (mode: "suggest" | "draft") => void;
 }
 
 /**
@@ -136,6 +146,8 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const [refused, setRefused] = useState<string | null>(null);
   const [epochChanged, setEpochChanged] = useState<{ from: string; to: string } | null>(null);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
+  const [arrival, setArrival] = useState<{ mode: "suggest" | "draft"; tailLength: number } | null>(null);
+  const offlineTailRef = useRef<import("@wordinweb/collab/client").DocBundle["offlineTail"]>(undefined);
 
   useEffect(() => {
     const socket = (createSocket ?? ((u: string) => new WebSocket(u)))(url);
@@ -156,6 +168,13 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       onRefused: (reason) => setRefused(reason),
       onRoster: (r) => setRoster(r),
       onEpochChange: (from, to) => {
+        // Arrival ladder (doc 15): a diverged rejoin with a recorded offline
+        // tail offers rebase-as-suggestions (small) or draft (large).
+        const tail = offlineTailRef.current ?? [];
+        if (tail.length) {
+          const mode = arrivalMode(tail.length, true);
+          if (mode !== "fast-forward") setArrival({ mode, tailLength: tail.length });
+        }
         // Someone re-seeded while we were away (doc 12 §5 case 2): the
         // connection already took the server's state and withheld our
         // old-epoch pending. Preserve the superseded bundle as a DRAFT
@@ -207,6 +226,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         // the editor stays !ready (input disabled) until the welcome.
         const bundle = await store.get(docId);
         if (disposed || connRef.current !== conn) return;
+        offlineTailRef.current = bundle?.offlineTail;
         if (bundle) conn.resume(bundle, token, { profile, codeProof, ownerToken });
         else conn.join(docId, token, { profile, takeover, codeProof, ownerToken });
       } else {
@@ -251,6 +271,33 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     setProfile: (p) => connRef.current?.setProfile(p),
     activity: connRef.current?.activity ?? [],
     admin: (action) => connRef.current?.admin(action),
+    arrival,
+    reconcile: (mode) => {
+      const conn = connRef.current;
+      const tail = offlineTailRef.current ?? [];
+      if (!conn || !tail.length) { setArrival(null); return; }
+      if (mode === "suggest") {
+        // Replay the offline tail as tracked changes on the crowd's doc
+        // (drained one-in-flight — the supported discipline). The author
+        // is this participant's display name (doc 14 attribution).
+        const author = profile?.name || clientId;
+        const date = new Date().toISOString();
+        const { suggestions } = toSuggestions(tail as never, author, date);
+        let i = 0;
+        const step = () => {
+          if (i >= suggestions.length) { offlineTailRef.current = undefined; setArrival(null); return; }
+          conn.submit(suggestions[i++] as never);
+          // Drain: the loopback/echo advances confirmedSeq; poll a tick.
+          setTimeout(step, 30);
+        };
+        step();
+      } else {
+        // Draft: the superseded bundle is already banked by onEpochChange;
+        // just dismiss (the offline edits live in the draft slot).
+        offlineTailRef.current = undefined;
+        setArrival(null);
+      }
+    },
   };
 }
 
