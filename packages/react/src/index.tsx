@@ -347,6 +347,10 @@ export interface DocxViewProps {
     /** Monotonic counter that bumps whenever `doc` was mutated in place; a
      * change triggers an in-place repaint of `doc`. */
     renderSignal?: number;
+    /** Broadcast the local caret so remote participants draw this user's
+     * cursor. Called with the caret's stable-id address on every caret move
+     * (null when the caret leaves id-tracked content). */
+    setPresence?: (pos: PresencePosition | null) => void;
   };
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
@@ -833,35 +837,61 @@ export function DocxView({
               kind === "italic" ? { italic: !fmt?.italic } :
               { underline: !fmt?.underline };
             history.checkpoint();
+            // Collaboration: capture each selected run's stable ids BEFORE
+            // formatting. A sub-range format SPLITS the run — the original
+            // element is retired and its id pruned, so looking ids up after
+            // the mutation silently found nothing and the intent was never
+            // emitted (local-only bold: this client saw it, nobody else did).
+            const preIds = collab && doc.stableIds
+              ? segs.map((seg) => ({
+                  runId: seg.run.src ? doc.stableIds!.idOf(seg.run.src) : undefined,
+                  blockId: seg.run.srcParent ? doc.stableIds!.idOf(seg.run.srcParent) : undefined,
+                  runLen: seg.t ? seg.t.text.length : 0,
+                }))
+              : [];
             const formatted = applyRunFormat(doc, segs, patch);
-            // Collaboration: emit a format intent per selected run — formatRun
-            // for a whole run, formatRange (with carried piece ids) for a
-            // partial run — so the format converges to all participants.
+            // Emit a format intent per selected run — formatRun for a whole
+            // run, formatRange (with carried piece ids) for a partial run —
+            // so the format converges to all participants.
             if (collab && doc.stableIds) {
               const seenRuns = new Set<number>();
-              for (const seg of segs) {
-                const runId = seg.run.src ? doc.stableIds.idOf(seg.run.src) : undefined;
-                const blockId = seg.run.srcParent ? doc.stableIds.idOf(seg.run.srcParent) : undefined;
-                if (runId === undefined || blockId === undefined || seenRuns.has(runId)) continue;
+              segs.forEach((seg, i) => {
+                const { runId, blockId, runLen } = preIds[i] ?? {};
+                if (runId === undefined || blockId === undefined || seenRuns.has(runId)) return;
                 seenRuns.add(runId);
-                const runLen = seg.t ? seg.t.text.length : 0;
                 const whole = !seg.t || (seg.start <= 0 && seg.end >= runLen);
                 if (whole) {
                   collab.submit({ kind: "formatRun", blockId, runId, patch });
-                } else {
-                  // Sub-range: allocate carried ids for the split pieces.
-                  const before = seg.start > 0;
-                  const after = seg.end < runLen;
-                  const alloc = collab.allocIds?.((before ? 1 : 0) + 1 + (after ? 1 : 0)) ?? [];
-                  let k = 0;
-                  const beforeId = before ? alloc[k++] : undefined;
-                  const middleId = alloc[k++];
-                  const afterId = after ? alloc[k++] : undefined;
-                  if (middleId !== undefined) {
-                    collab.submit({ kind: "formatRange", blockId, runId, start: seg.start, end: seg.end, patch, beforeId, middleId, afterId });
+                  return;
+                }
+                // Sub-range: allocate carried ids for the split pieces.
+                const before = seg.start > 0;
+                const after = seg.end < runLen;
+                const alloc = collab.allocIds?.((before ? 1 : 0) + 1 + (after ? 1 : 0)) ?? [];
+                let k = 0;
+                const beforeId = before ? alloc[k++] : undefined;
+                const middleId = alloc[k++];
+                const afterId = after ? alloc[k++] : undefined;
+                if (middleId === undefined) return;
+                collab.submit({ kind: "formatRange", blockId, runId, start: seg.start, end: seg.end, patch, beforeId, middleId, afterId });
+                // Re-key the LOCAL split pieces to the carried ids (the same
+                // walk the server's apply performs), so this replica addresses
+                // the pieces identically to every other one. formatted[] maps
+                // 1:1 to segs in order.
+                const middleT = formatted[i]?.t;
+                const middleRun = middleT ? doc.findParentOf(middleT) : null;
+                const parent = middleRun ? doc.findParentOf(middleRun) : null;
+                if (middleRun && parent && doc.stableIds) {
+                  const mIdx = parent.children.indexOf(middleRun);
+                  doc.stableIds.reassign(middleRun, middleId);
+                  if (before && beforeId !== undefined && parent.children[mIdx - 1]) {
+                    doc.stableIds.reassign(parent.children[mIdx - 1], beforeId);
+                  }
+                  if (after && afterId !== undefined && parent.children[mIdx + 1]) {
+                    doc.stableIds.reassign(parent.children[mIdx + 1], afterId);
                   }
                 }
-              }
+              });
             }
             pages = rerender(doc);
             if (selectedAll) editor?.selectAll();
@@ -872,6 +902,11 @@ export function DocxView({
           // Collaboration: forward each local edit as an intent. The editor
           // emits only when doc.stableIds is populated, so enable it here.
           onIntent: collab ? (intent) => collab.submit(intent) : undefined,
+          // Presence: broadcast the local caret so remote participants can
+          // draw this user's cursor (the anchor mirrors the intent addressing).
+          onCaretMove: collab?.setPresence
+            ? (pos) => collab.setPresence?.(pos ? { anchor: pos } : null)
+            : undefined,
           onTextCommand: (command) => {
             const current = apiRef.current;
             if (!current) return;

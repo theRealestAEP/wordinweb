@@ -151,6 +151,9 @@ export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): R
       allocIds: session.allocIds,
       doc: session.doc,
       renderSignal: session.version,
+      // Outbound presence: the editor reports caret moves; remote tabs draw
+      // this user's cursor (inbound presence above draws theirs here).
+      setPresence: session.setPresence,
     },
     editable: opts.editable ?? true,
     // Re-key only on docEpoch (a true-conflict reload) — NOT on every change.

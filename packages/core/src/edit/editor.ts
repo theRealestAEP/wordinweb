@@ -161,6 +161,12 @@ export interface EditorHost {
    * forwards it to the collab connection. Local-only editors leave it unset.
    */
   onIntent?: (intent: EditorIntent) => void;
+  /** Collaboration presence hook: called when the local caret moves, with its
+   * stable-id address (null when the caret leaves id-tracked content). The
+   * host forwards it to the collab connection's setPresence so remote
+   * participants can draw this user's cursor. Fires only in collab mode
+   * (doc.stableIds populated); deduplicated against the last sent position. */
+  onCaretMove?: (pos: { blockId: number; runId: number; offset: number } | null) => void;
 }
 
 /** A local edit expressed as a replicable intent, emitted by the editor for
@@ -427,8 +433,27 @@ export class DocxEditor {
     this.notifySelection();
   }
 
+  /** Last presence position sent, as a cheap dedup key. */
+  private lastPresenceKey: string | null = null;
+
+  /** Report the caret's stable-id address to the collab presence hook when it
+   * changed. Called from both selection notifications and caret positioning —
+   * a plain click places a caret without a selection change, and remote
+   * participants must see that cursor too. Deduped, so repeated positioning
+   * (e.g. after every repaint) sends nothing new. */
+  private reportPresence(): void {
+    if (!this.host.onCaretMove || !this.host.doc.stableIds) return;
+    const pos = this.caret ? this.encodeCaretForIntent() : null;
+    const key = pos ? `${pos.blockId}:${pos.runId}:${pos.offset}` : "null";
+    if (key !== this.lastPresenceKey) {
+      this.lastPresenceKey = key;
+      this.host.onCaretMove(pos);
+    }
+  }
+
   private notifySelection(): void {
     document.dispatchEvent(new CustomEvent("dxw-selection"));
+    this.reportPresence();
   }
 
   /** Ordinal position of a selection point in paint order. */
@@ -5884,6 +5909,9 @@ export class DocxEditor {
   positionCaret(): void {
     const caret = this.caret;
     const handle = this.host.getHandle();
+    // A plain click positions a caret without a selection change; presence
+    // must still broadcast it (deduped inside).
+    this.reportPresence();
     if (!caret || !handle) return;
     // Prefer the binding containing the offset; at boundaries prefer the one
     // whose range ends exactly at the caret (keeps the caret after the char).
