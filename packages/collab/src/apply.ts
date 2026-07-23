@@ -9,6 +9,7 @@ import {
   setParagraphStyle,
   setListType,
   applyTableOp,
+  mergeParagraphBackward,
   type EditCaret,
   type Run,
   type Block,
@@ -131,6 +132,13 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       // Structural table ops removed nodes; retire their stale ids so the
       // table stops resolving deleted content.
       if (ok) ids.prune(doc.editableRoots());
+      return ok;
+    }
+    case "mergeParagraph": {
+      const pEl = ids.elOf(intent.blockId);
+      if (!pEl) return false;
+      const ok = mergeParagraphBackward(doc, pEl);
+      if (ok) ids.prune(doc.editableRoots()); // retire the merged paragraph's id
       return ok;
     }
   }

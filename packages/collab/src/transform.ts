@@ -58,6 +58,10 @@ export function runEditsOf(intent: Intent): RunEdit[] {
       // Non-node-creating table ops don't shift any surviving run's offsets;
       // concurrent edits to deleted cells fail cleanly at apply (retired ids).
       return [];
+    case "mergeParagraph":
+      // Runs move (identity preserved) into the previous paragraph; run-
+      // addressed offsets are unchanged.
+      return [];
   }
 }
 
@@ -148,6 +152,8 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     }
     case "tableOp":
       // Addressed by a stable paragraph id; nothing to transform.
+      return { ...intent, base: newBase };
+    case "mergeParagraph":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

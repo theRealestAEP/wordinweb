@@ -145,6 +145,18 @@ export interface TableOpIntent extends IntentBase {
     | { kind: "cellVAlign"; v: "top" | "center" | "bottom" };
 }
 
+/**
+ * Merge a paragraph into its predecessor (Backspace at paragraph start). The
+ * paragraph's runs MOVE into the previous paragraph (element identity
+ * preserved), so run-addressed positions survive unchanged — an identity
+ * transform. The merged paragraph's block id is retired.
+ */
+export interface MergeParagraphIntent extends IntentBase {
+  kind: "mergeParagraph";
+  /** The paragraph to merge into the one before it. */
+  blockId: StableId;
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -153,7 +165,8 @@ export type Intent =
   | FormatParagraphIntent
   | SetListTypeIntent
   | FormatRangeIntent
-  | TableOpIntent;
+  | TableOpIntent
+  | MergeParagraphIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order
