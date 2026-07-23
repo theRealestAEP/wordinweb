@@ -95,7 +95,10 @@ export class CollabConnection {
   private onServer(msg: ServerMessage): void {
     switch (msg.t) {
       case "welcome": {
+        // The snapshot represents seq `msg.seq`; the replica's confirmed
+        // baseline is that seq, and any tail entries are strictly after it.
         this.replica = new ClientReplica(base64ToBytes(msg.snapshot));
+        this.replica.confirmedSeq = msg.seq;
         if (msg.tail.length) this.replica.receive(msg.tail);
         this.cb.onChange?.();
         return;

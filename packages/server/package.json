@@ -14,9 +14,13 @@
   "bin": {
     "wordinweb-collab-server": "./dist/cli.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "peerDependenciesMeta": {
-    "ws": { "optional": true }
+    "ws": {
+      "optional": true
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -28,6 +32,8 @@
     "@wordinweb/core": "0.1.0"
   },
   "devDependencies": {
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.0",
+    "ws": "^8",
+    "@types/ws": "^8"
   }
 }

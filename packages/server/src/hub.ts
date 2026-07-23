@@ -139,8 +139,11 @@ export class CollabHub {
           t: "welcome",
           docId: msg.docId,
           seq: room.session.seq,
+          // The snapshot is the CURRENT document (at room.session.seq), so the
+          // tail after it is empty — sending entries the snapshot already
+          // contains would double-apply them on the joiner.
           snapshot: bytesToBase64(room.session.doc.save()),
-          tail: room.session.entriesSince(Math.max(0, msg.sinceSeq)),
+          tail: room.session.entriesSince(room.session.seq),
         });
         return;
       }
