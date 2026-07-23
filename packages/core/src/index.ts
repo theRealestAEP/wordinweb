@@ -22,6 +22,7 @@ export { applyRunFormat, summarizeSelection } from "./edit/commands.js";
 export type { RunFormatPatch, SelectionSegment, SelectionFormat, FormattedRange } from "./edit/commands.js";
 export { selectionToSegments } from "./edit/selection.js";
 export { DocxEditor } from "./edit/editor.js";
+export type { EditorIntent } from "./edit/editor.js";
 export type { ObjectArrangeAction, SelectedObjectCommand, SelectedObjectKind } from "./edit/editor.js";
 export { requestColorDialog, requestLineStyleDialog, requestNumberPairDialog, requestTextInputDialog } from "./edit/dialog.js";
 export type { ColorDialogOptions, LineStyleDialogValue, NumberPairDialogOptions, NumberPairDialogValue, TextInputDialogOptions } from "./edit/dialog.js";

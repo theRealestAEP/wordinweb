@@ -153,7 +153,24 @@ export interface EditorHost {
   onTextCommand?: (
     command: "link" | "comment" | "alignLeft" | "alignCenter" | "alignRight" | "justify" | "bullet" | "number",
   ) => void;
+  /**
+   * Collaboration hook (plan doc 06): called after a local edit that maps to a
+   * replicable intent, with the intent's kind, its position(s) as stable ids
+   * (from doc.stableIds), and any payload. Only fires when doc.stableIds is
+   * populated (collab mode) and the edit position is id-addressable. The host
+   * forwards it to the collab connection. Local-only editors leave it unset.
+   */
+  onIntent?: (intent: EditorIntent) => void;
 }
+
+/** A local edit expressed as a replicable intent, emitted by the editor for
+ * the collab layer. Positions are stable ids; the connection adds wire
+ * bookkeeping (clientId/clientSeq/base). Mirrors the @wordinweb/collab intent
+ * shapes without a dependency on that package. */
+export type EditorIntent =
+  | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string }
+  | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
+  | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number };
 
 interface Caret {
   t: XmlElement;
@@ -5254,10 +5271,23 @@ export class DocxEditor {
     this.pendingClickTypeCheckpoint = false;
     this.clickTypeCheckpointUntil = joinsClickPlacement ? now + 1000 : 0;
     const textOnly = !this.hasSelection() && !this.suggesting && !!this.caret;
+    // Capture the pre-edit position for the collab intent (a plain text insert
+    // at the caret; selection-replacing or suggesting inserts are not emitted
+    // as simple intents yet).
+    const emitPos = textOnly && this.host.onIntent ? this.encodeCaretForIntent() : null;
     if (this.hasSelection()) this.removeSelectedText();
     this.insertTextCore(text);
     this.commit(textOnly);
+    if (emitPos) this.host.onIntent?.({ kind: "insertText", at: emitPos, text });
     return true;
+  }
+
+  /** Encode the current caret as stable-id addresses for a collab intent, or
+   * null when there is no caret or it isn't inside id-tracked content. */
+  private encodeCaretForIntent(): { blockId: number; runId: number; offset: number } | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids || !this.caret) return null;
+    return ids.encodeCaret(this.caret.t, this.caret.offset, (el) => this.host.doc.findParentOf(el) ?? null);
   }
 
   /** Insert text at the caret (suggesting-aware) without touching history or
@@ -5316,7 +5346,9 @@ export class DocxEditor {
       // combining mark that would leave a broken cluster. The boundary is
       // resolved here; the extracted core does the engine-independent splice.
       const from = graphemeStep(caret.t.text, caret.offset, -1) ?? caret.offset - 1;
+      const del = this.host.onIntent ? this.encodeCaretForIntent() : null;
       this.caret = applyDeleteRange(caret, from, caret.offset);
+      if (del) this.emitDelete(del.blockId, del.runId, from, del.offset);
     } else {
       if (caret.offset >= caret.t.text.length) {
         const pEl = paragraphOf(this.host.doc, caret.t);
@@ -5339,9 +5371,15 @@ export class DocxEditor {
       if (checkboxStateElement(caret.run, caret.t)) return;
       // Forward-delete the whole grapheme cluster after the caret.
       const to = graphemeStep(caret.t.text, caret.offset, 1) ?? caret.offset + 1;
+      const del = this.host.onIntent ? this.encodeCaretForIntent() : null;
       this.caret = applyDeleteRange(caret, caret.offset, to);
+      if (del) this.emitDelete(del.blockId, del.runId, del.offset, to);
     }
     this.commit(this.caret !== null && this.caret.t.text.length > 0);
+  }
+
+  private emitDelete(blockId: number, runId: number, start: number, end: number): void {
+    if (end > start) this.host.onIntent?.({ kind: "deleteText", blockId, runId, start, end });
   }
 
   /** Backspace/Delete in suggesting mode: mark one character (or a paragraph
@@ -5611,7 +5649,18 @@ export class DocxEditor {
       this.focusText();
       return;
     }
+    // Capture the pre-split position for a collab intent before the caret moves.
+    const splitPos = this.host.onIntent ? this.encodeCaretForIntent() : null;
     const split = this.splitParagraphCore();
+    if (split && splitPos && this.host.doc.stableIds && this.host.onIntent) {
+      // Allocate carried ids for the new paragraph and its moved-tail run so
+      // every replica addresses them identically (plan doc 03).
+      const ids = this.host.doc.stableIds;
+      const newBlockId = ids.assign(split.after);
+      const newRunEl = split.after.children.find((c) => localName(c.name) === "r");
+      const newRunId = newRunEl ? ids.assign(newRunEl) : newBlockId;
+      this.host.onIntent({ kind: "splitParagraph", at: splitPos, newBlockId, newRunId });
+    }
     const reparsed = split
       ? this.host.doc.reparseDirectBodyParagraphSplit(split.before, split.after)
       : null;
