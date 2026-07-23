@@ -1,0 +1,21 @@
+{
+  "name": "wordinweb-anon-share-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "node ../../packages/server/dist/cli.js",
+    "dev": "vite"
+  },
+  "comment": "Local run/test harness — not published. `npm run server` (in one terminal) starts the collab dev server; `npm run dev` (in another) serves this app. Both resolve dependencies from the repo-root node_modules.",
+  "dependencies": {
+    "wordinweb": "*",
+    "@wordinweb/collab": "*",
+    "@wordinweb/core": "*",
+    "react": "*",
+    "react-dom": "*"
+  },
+  "devDependencies": {
+    "vite": "*",
+    "ws": "*"
+  }
+}

@@ -32,19 +32,40 @@ tested end to end headlessly (multi-client convergence, presence,
 persistence). The client binding (`bindEditor`, `useCollab`) is tested via the
 in-process loopback.
 
-## Running it (needs a browser + `ws`)
+## Running it (two terminals)
+
+From the **repo root**, build the packages once (and re-run after any package
+change):
 
 ```
-npm i ws                       # optional peer dep of @wordinweb/server
-npx wordinweb-collab-server    # ws://localhost:1234, ephemeral (not durable)
-# then serve this app (Vite) and open two tabs on the same magic link
+npm run build            # builds core + wordinweb (react)
+# collab/server are built via their own tsconfig if needed:
+( cd packages/collab && npm run build ) && ( cd packages/server && npm run build )
 ```
 
-`src/app.tsx` shows the wiring: `useCollab({ url, docId, clientId })` →
-`<DocxView collab={session} editable />`. The frontend and the visual editor
-integration are browser-verified (the headless test suite covers the
-protocol, convergence, and binding logic; the DOM rendering and the
-DocxEditor↔EditorBridge adapter run only in a browser).
+Then, in this directory (`examples/anon-share/`):
+
+```
+# terminal 1 — the collab dev server (ws://localhost:1234, auth-off, ephemeral)
+npm run server
+
+# terminal 2 — the Vite app (opens a browser tab)
+npm run dev
+```
+
+Vite prints a `http://localhost:5173/` (or next free port) URL. Open it, click
+**New document** — the page adopts an unguessable `?doc=<id>` URL (the
+magic-link capability). **Copy that URL into a second browser tab** (or send it
+to a friend) and type in either: edits and cursors sync live between tabs.
+
+Override the server with `?server=ws://host:port` if you started it elsewhere
+(e.g. `PORT=3000 npm run server`).
+
+`src/app.tsx` shows the wiring: `<CollabEditor url docId clientId editable />`
+composes `useCollab({ url, docId, clientId })` → the live `DocxView`. The
+harness (`main.tsx` + `index.html` + `vite.config.ts`) is dev-only and not
+shipped to npm. The headless test suite covers the protocol, convergence, and
+binding logic; the DOM rendering runs here in the browser.
 
 ## Security posture (doc 11)
 

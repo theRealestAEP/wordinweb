@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>wordinweb collab — anon-share demo</title>
+    <style>
+      body { margin: 0; font: 14px system-ui, sans-serif; background: #f1f3f4; color: #202124; }
+      header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+        padding: 10px 16px; background: #fff; border-bottom: 1px solid #dadce0; }
+      header b { font-size: 15px; }
+      header .pill { background: #e8f0fe; color: #1a73e8; border-radius: 12px; padding: 3px 10px; }
+      header input { font: 12px ui-monospace, monospace; width: 320px; max-width: 50vw;
+        padding: 4px 8px; border: 1px solid #dadce0; border-radius: 6px; }
+      header button { font: 13px system-ui; padding: 5px 12px; border: 1px solid #dadce0;
+        background: #1a73e8; color: #fff; border-radius: 6px; cursor: pointer; }
+      header a { color: #1a73e8; }
+      .hint { color: #5f6368; font-size: 12px; }
+      #root { padding: 16px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>
