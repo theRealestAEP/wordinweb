@@ -128,6 +128,27 @@ export class CollabConnection {
   /** The latest roster snapshot (doc 14 §2); empty until the first fan-out. */
   roster: RosterEntry[] = [];
 
+  /**
+   * Attribution layer 1 (doc 14 §3): the canonical log IS the attribution
+   * record — every applied entry carries its author's bound clientId. This
+   * is the bounded client-side derivation an activity panel renders
+   * (clientId → roster name/color). Newest last, capped, derived state:
+   * never persisted, dies with the connection (zero custody).
+   */
+  activity: { seq: number; clientId: string; kind: string }[] = [];
+  private static ACTIVITY_CAP = 100;
+
+  private recordActivity(entries: { seq: number; kind: string; intent?: Intent }[]): void {
+    for (const e of entries) {
+      if (e.kind === "applied" && e.intent) {
+        this.activity.push({ seq: e.seq, clientId: e.intent.clientId, kind: e.intent.kind });
+      }
+    }
+    if (this.activity.length > CollabConnection.ACTIVITY_CAP) {
+      this.activity.splice(0, this.activity.length - CollabConnection.ACTIVITY_CAP);
+    }
+  }
+
   /** Rename/recolor this participant mid-session. The server sanitizes and
    * fans out the updated roster; the local copy updates on that echo (no
    * optimistic roster — a 1-RTT lag on your own rename is imperceptible and
@@ -242,6 +263,7 @@ export class CollabConnection {
         this.genesisId = msg.genesisId;
         this.mode = msg.mode;
         if (msg.tail.length) this.replica.receive(msg.tail);
+        this.recordActivity(msg.tail as never);
 
         // Resume epilogue (doc 12 §5). Case 1 — same epoch: replay the
         // bundle's pending intents by RE-SENDING them, untracked. This is
@@ -270,6 +292,7 @@ export class CollabConnection {
       }
       case "broadcast": {
         this.replica?.receive(msg.entries);
+        this.recordActivity(msg.entries as never);
         if (this.replica?.reloaded) this.docEpoch++;
         this.cb.onChange?.();
         return;

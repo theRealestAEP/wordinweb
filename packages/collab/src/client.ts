@@ -5,6 +5,7 @@
  */
 export { ClientReplica } from "./replica.js";
 export { InMemoryBundleStore, BundlePersister, type DocBundle, type BundleStore } from "./bundle.js";
+export { VersionRing, InMemoryVersionStore, type DocVersion, type VersionStore } from "./versions.js";
 export { CollabConnection, type ClientTransport, type ConnectionCallbacks } from "./connection.js";
 export { EncryptedCollabConnection } from "./enc-connection.js";
 export { bindEditor, type EditorBridge, type EditorBinding } from "./binding.js";
