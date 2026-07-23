@@ -321,3 +321,119 @@ describe("demo features: toolbar API ops route through the canonical apply", () 
     await b.unmount();
   });
 });
+
+describe("demo features: paragraph merges + Enter fast paths (the desync bugs)", () => {
+  // Each of these was a SILENT LOCAL-ONLY mutation before the fix: the editor
+  // took a fast path that never emitted an intent, so the client's structure
+  // diverged from every other participant ("hitting Enter and typing more
+  // don't work"). Byte-identical client==server is the assertion throughout.
+  async function editorOn(hub: CollabHub, doc: string) {
+    const ed = await mountEditor(hub, doc, "alice");
+    await ed.click();
+    return ed;
+  }
+  const xmlEq = async (ed: Awaited<ReturnType<typeof mountEditor>>, doc: string, hub: CollabHub) => {
+    const server = await spyState(ed.factory, doc);
+    expect(ed.clientXml()).toBe(server.xml);
+    return server;
+  };
+
+  it("Backspace at paragraph start merges and converges", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await editorOn(hub, "merge-back");
+    await ed.typed("ab");
+    await ed.keys(["Enter"]);
+    await ed.typed("cd");
+    await settle();
+    // Caret is at end of "cd": Home to reach paragraph start, then Backspace merges.
+    await ed.keys(["Home", "Backspace"]);
+    await settle();
+    const server = await xmlEq(ed, "merge-back", hub);
+    expect(server.paragraphs).toBe(1);
+    expect(server.text).toBe("abcd");
+    await ed.unmount();
+  });
+
+  it("Delete at paragraph end merges the next paragraph and converges", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await editorOn(hub, "merge-fwd");
+    await ed.typed("ab");
+    await ed.keys(["Enter"]);
+    await ed.typed("cd");
+    await settle();
+    // Move to end of first paragraph structurally: Home (start of "cd") then
+    // ArrowLeft steps across the paragraph boundary to the end of "ab"
+    // (vertical arrows need real geometry, which jsdom lacks). Delete merges.
+    await ed.keys(["Home", "ArrowLeft", "Delete"]);
+    await settle();
+    const server = await xmlEq(ed, "merge-fwd", hub);
+    expect(server.paragraphs).toBe(1);
+    expect(server.text).toBe("abcd");
+    await ed.unmount();
+  });
+
+  it("Enter at paragraph START converges (the blank-before fast path bug)", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await editorOn(hub, "enter-start");
+    await ed.typed("xy");
+    await settle();
+    await ed.keys(["Home", "Enter"]);
+    await settle();
+    const server = await xmlEq(ed, "enter-start", hub);
+    expect(server.paragraphs).toBe(2);
+    expect(server.text).toBe("|xy");
+    // And typing afterwards still works + reaches the server (the user's bug:
+    // everything after this Enter went silently local-only).
+    await ed.typed("z");
+    await settle();
+    const after = await spyState(ed.factory, "enter-start");
+    expect(after.text.includes("z")).toBe(true);
+    expect(ed.clientXml()).toBe(after.xml);
+    await ed.unmount();
+  });
+
+  it("Enter on an EMPTY list item exits the list and converges", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await editorOn(hub, "list-exit");
+    await ed.typed("item");
+    await settle();
+    // Make it a bullet via Ctrl+Shift+L (the editor's list shortcut), add an
+    // empty item, then Enter on the empty item exits the list.
+    await ed.keys([{ key: "l", ctrl: true, shift: true } as never]);
+    await settle();
+    await ed.keys(["End", "Enter"]); // new empty list item
+    await settle();
+    await ed.keys(["Enter"]); // exit list (setListType null — was local-only)
+    await settle();
+    const server = await xmlEq(ed, "list-exit", hub);
+    // The exited paragraph carries no numbering; the first still does.
+    expect(server.xml).toContain("numPr");
+    await ed.unmount();
+  });
+
+  it("CONCURRENT Enter from two editors converges (split-id collision regression)", async () => {
+    const hub = new CollabHub(provider);
+    const a = await mountEditor(hub, "dual-enter", "alice");
+    const b = await mountEditor(hub, "dual-enter", "bob");
+    await settle();
+    await a.click();
+    await a.typed("aa");
+    await settle(20);
+    await b.click();
+    // Both split in the same tick — before either echo lands. Pre-fix, both
+    // editors minted the SAME carried ids from their local counters and the
+    // second split was rejected on every replica (dead typing after Enter).
+    await act(async () => {
+      (a.container.querySelector("textarea") as HTMLElement).dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      (b.container.querySelector("textarea") as HTMLElement).dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    await settle(40);
+    await a.typed("z");
+    await settle(30);
+    expect(a.clientXml()).toBe(b.clientXml());
+    const server = await spyState(a.factory, "dual-enter");
+    expect(a.clientXml()).toBe(server.xml);
+    await a.unmount();
+    await b.unmount();
+  });
+});

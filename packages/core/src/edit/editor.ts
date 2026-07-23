@@ -8,7 +8,7 @@ import { selectionToSegments } from "./selection.js";
 import { EditHistory } from "./history.js";
 import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
 import { pxToTwips } from "../units.js";
-import { listTypeAt, setListLevel } from "./lists.js";
+import { listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
 import { deleteMath, isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
 import {
@@ -167,6 +167,13 @@ export interface EditorHost {
    * participants can draw this user's cursor. Fires only in collab mode
    * (doc.stableIds populated); deduplicated against the last sent position. */
   onCaretMove?: (pos: { blockId: number; runId: number; offset: number } | null) => void;
+  /** Collaboration id allocator: returns n fresh ids from this client's
+   * DISJOINT id block (from the collab connection). The editor uses it for
+   * carried ids on node-creating intents (paragraph split). Without it the
+   * split fell back to the local table's sequential counter — two clients
+   * would mint the SAME ids and the second split was rejected everywhere
+   * (typing after Enter went dead in the demo). */
+  allocIds?: (n: number) => number[];
 }
 
 /** A local edit expressed as a replicable intent, emitted by the editor for
@@ -180,7 +187,8 @@ export type EditorIntent =
   | { kind: "formatRun"; blockId: number; runId: number; patch: Record<string, unknown> }
   | { kind: "formatRange"; blockId: number; runId: number; start: number; end: number; patch: Record<string, unknown>; beforeId?: number; middleId: number; afterId?: number }
   | { kind: "formatParagraph"; blockId: number; align?: "left" | "center" | "right" | "justify"; styleId?: string | null }
-  | { kind: "setListType"; blockId: number; listKind: "bullet" | "number" | null };
+  | { kind: "setListType"; blockId: number; listKind: "bullet" | "number" | null }
+  | { kind: "mergeParagraph"; blockId: number };
 
 interface Caret {
   t: XmlElement;
@@ -5355,7 +5363,15 @@ export class DocxEditor {
           if (!prev) return;
           const junction = lastTextOf(prev);
           this.host.history?.checkpoint();
+          // Collab: capture the merged paragraph's stable id BEFORE the merge
+          // retires it, and emit the intent so every replica merges too (this
+          // was a silent local-only mutation — Backspace across a paragraph
+          // boundary desynced the doc).
+          const mergeBlockId = this.host.onIntent && this.host.doc.stableIds
+            ? this.host.doc.stableIds.idOf(pEl)
+            : undefined;
           if (mergeParagraphBackward(this.host.doc, pEl)) {
+            if (mergeBlockId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeBlockId });
             const target = junction && paragraphOf(this.host.doc, junction) ? junction : caret.t;
             this.caret = { t: target, run: caret.run, offset: target === junction ? target.text.length : 0 };
             invalidateParagraphSignature(paragraphOf(this.host.doc, target) ?? pEl);
@@ -5386,7 +5402,11 @@ export class DocxEditor {
           const next = siblingParagraph(this.host.doc, pEl, 1);
           if (!next) return;
           this.host.history?.checkpoint();
+          const mergeNextId = this.host.onIntent && this.host.doc.stableIds
+            ? this.host.doc.stableIds.idOf(next)
+            : undefined;
           if (mergeParagraphBackward(this.host.doc, next)) {
+            if (mergeNextId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeNextId });
             invalidateParagraphSignature(pEl);
             this.commit(false, "local", true);
           }
@@ -5640,6 +5660,21 @@ export class DocxEditor {
   }
 
   private splitParagraphNoHistory(): void {
+    if (this.caret && this.host.onIntent && this.host.doc.stableIds) {
+      // Collab: Enter on an empty list item exits the list via the CANONICAL
+      // setListType(null) mutation + intent (clearListParagraphFormatting is
+      // editor-local and was never replicated — the exit desynced the doc).
+      const paragraph = paragraphOf(this.host.doc, this.caret.t);
+      if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && listTypeAt(this.host.doc, this.caret.t) !== null) {
+        const blockId = this.host.doc.stableIds.idOf(paragraph);
+        if (blockId !== undefined && setListType(this.host.doc, [this.caret.t], null)) {
+          this.host.onIntent({ kind: "setListType", blockId, listKind: null });
+          this.commit(false, "global");
+          this.focusText();
+          return;
+        }
+      }
+    }
     if (this.caret) {
       const paragraph = paragraphOf(this.host.doc, this.caret.t);
       if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && clearListParagraphFormatting(this.host.doc, paragraph)) {
@@ -5662,7 +5697,7 @@ export class DocxEditor {
         return;
       }
     }
-    const insertedBefore = this.insertBlankParagraphBeforeAtStart();
+    const insertedBefore = this.host.onIntent ? null : this.insertBlankParagraphBeforeAtStart();
     if (insertedBefore) {
       const reparsed = this.host.doc.insertDirectBodyParagraphBefore(insertedBefore.reference, insertedBefore.blank);
       if (reparsed) {
@@ -5683,11 +5718,15 @@ export class DocxEditor {
     const split = this.splitParagraphCore();
     if (split && splitPos && this.host.doc.stableIds && this.host.onIntent) {
       // Allocate carried ids for the new paragraph and its moved-tail run so
-      // every replica addresses them identically (plan doc 03).
+      // every replica addresses them identically (plan doc 03). MUST come from
+      // the collab connection's disjoint per-client block — the local table's
+      // sequential counter mints identical ids on every client, and colliding
+      // carried ids get the second client's split rejected on every replica.
       const ids = this.host.doc.stableIds;
-      const newBlockId = ids.assign(split.after);
+      const alloc = this.host.allocIds?.(2) ?? [];
+      const newBlockId = ids.assign(split.after, alloc[0]);
       const newRunEl = split.after.children.find((c) => localName(c.name) === "r");
-      const newRunId = newRunEl ? ids.assign(newRunEl) : newBlockId;
+      const newRunId = newRunEl ? ids.assign(newRunEl, alloc[1]) : newBlockId;
       this.host.onIntent({ kind: "splitParagraph", at: splitPos, newBlockId, newRunId });
     }
     const reparsed = split

@@ -865,6 +865,9 @@ export function DocxView({
           onCaretMove: collab?.setPresence
             ? (pos) => collab.setPresence?.(pos ? { anchor: pos } : null)
             : undefined,
+          // Disjoint carried-id blocks for the editor's node-creating intents
+          // (paragraph split); see EditorHost.allocIds.
+          allocIds: collab?.allocIds,
           onTextCommand: (command) => {
             const current = apiRef.current;
             if (!current) return;

@@ -85,6 +85,17 @@ import { Intent, Position } from "./intents.js";
  * position (the caller records a rejection, doc 03).
  */
 export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): boolean {
+  try {
+    return applyIntentInner(doc, ids, intent);
+  } catch {
+    // Any throw (e.g. a carried-id collision from a buggy/hostile client)
+    // becomes a clean rejection: the session logs a reject entry and every
+    // replica's receive loop keeps running instead of dying mid-broadcast.
+    return false;
+  }
+}
+
+function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): boolean {
   const runMap = buildRunMap(doc);
   // Headless apply does not yet support suggesting mode (needs provenance
   // threaded through the intent); the session forbids it upstream.
