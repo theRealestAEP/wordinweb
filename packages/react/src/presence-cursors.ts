@@ -79,7 +79,11 @@ export function computePresenceCarets(
  * paint surface). Clears and repaints; returns the overlay so callers can
  * remove it. Each caret is a thin colored bar with a small name flag.
  */
-export function drawPresenceCarets(overlay: HTMLElement, carets: PresenceCaret[]): void {
+export function drawPresenceCarets(
+  overlay: HTMLElement,
+  carets: PresenceCaret[],
+  names?: Record<string, string>,
+): void {
   overlay.textContent = "";
   for (const c of carets) {
     const bar = overlay.ownerDocument.createElement("div");
@@ -93,5 +97,27 @@ export function drawPresenceCarets(overlay: HTMLElement, carets: PresenceCaret[]
     bar.style.background = c.color;
     bar.style.pointerEvents = "none";
     overlay.appendChild(bar);
+    // Name flag (doc 14 §2): roster display name above the bar. Rendered
+    // TEXT-NODE-ONLY — names are attacker-controlled content (doc 11 XSS
+    // vector 7); the color was palette-validated server-side and is used
+    // as a background, never parsed as markup.
+    const name = names?.[c.participant];
+    if (name) {
+      const flag = overlay.ownerDocument.createElement("div");
+      flag.className = "dxw-presence-name";
+      flag.textContent = name; // text node — never innerHTML
+      flag.style.position = "absolute";
+      flag.style.left = `${c.x}px`;
+      flag.style.top = `${c.top - 14}px`;
+      flag.style.font = "10px sans-serif";
+      flag.style.lineHeight = "12px";
+      flag.style.padding = "0 4px";
+      flag.style.borderRadius = "3px";
+      flag.style.color = "#fff";
+      flag.style.background = c.color;
+      flag.style.pointerEvents = "none";
+      flag.style.whiteSpace = "nowrap";
+      overlay.appendChild(flag);
+    }
   }
 }

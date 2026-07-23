@@ -332,6 +332,8 @@ export interface DocxViewProps {
    * injects it here.
    */
   collab?: {
+    /** clientId → display name for caret flags (doc 14 §2); text-node rendered. */
+    participantNames?: Record<string, string>;
     submit: (intent: EditorIntent) => void;
     /** Remote participants' cursor/selection positions, drawn as colored
      * carets over the page (see presence-cursors). */
@@ -696,7 +698,7 @@ export function DocxView({
         handle.root.appendChild(overlay);
         presenceOverlayRef.current = overlay;
       }
-      drawPresenceCarets(overlay, computePresenceCarets(handle, d, presence));
+      drawPresenceCarets(overlay, computePresenceCarets(handle, d, presence), collab?.participantNames);
     };
     redrawPresenceRef.current = drawCollabPresence;
 

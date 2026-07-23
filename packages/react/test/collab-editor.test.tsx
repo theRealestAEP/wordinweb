@@ -101,3 +101,20 @@ describe("CollabEditor draws remote presence carets (jsdom)", () => {
     await act(async () => { root.unmount(); });
   });
 });
+
+describe("name-on-caret (doc 14 §2)", () => {
+  it("drawPresenceCarets renders roster names as TEXT NODES with palette colors", async () => {
+    const { drawPresenceCarets } = await import("../src/presence-cursors.js");
+    const overlay = document.createElement("div");
+    drawPresenceCarets(
+      overlay,
+      [{ participant: "alice", x: 10, top: 20, height: 14, anchorEl: overlay, color: "#e05252" } as never],
+      { alice: "<img src=x onerror=alert(1)>" }, // hostile name — must render inert
+    );
+    const flag = overlay.querySelector(".dxw-presence-name")!;
+    expect(flag).toBeTruthy();
+    expect(flag.textContent).toBe("<img src=x onerror=alert(1)>"); // literal text
+    expect(flag.querySelector("img")).toBeNull(); // never parsed as markup (doc 11 vector 7)
+    expect(overlay.querySelector(".dxw-presence-caret")).toBeTruthy();
+  });
+});

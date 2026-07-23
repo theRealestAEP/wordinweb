@@ -104,6 +104,9 @@ export interface CollabSession {
   roster: RosterEntry[];
   /** Rename/recolor this participant (server sanitizes + fans out). */
   setProfile: (profile: ParticipantProfile) => void;
+  /** Attribution layer 1 (doc 14 §3): recent applied entries
+   * {seq, clientId, kind} — join clientId to `roster` for names/colors. */
+  activity: { seq: number; clientId: string; kind: string }[];
 }
 
 /**
@@ -236,6 +239,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     epochChanged,
     roster,
     setProfile: (p) => connRef.current?.setProfile(p),
+    activity: connRef.current?.activity ?? [],
   };
 }
 
@@ -328,6 +332,9 @@ export function CollabEditor(opts: UseCollabOptions & {
       // Outbound presence: the editor reports caret moves; remote tabs draw
       // this user's cursor (inbound presence above draws theirs here).
       setPresence: session.setPresence,
+      // Name flags on remote carets (doc 14 §2): presence and roster share
+      // the bound-clientId keyspace, so this join is exact.
+      participantNames: Object.fromEntries(session.roster.map((r) => [r.clientId, r.profile.name])),
     },
     editable: opts.editable ?? true,
     // Re-key only on docEpoch (a true-conflict reload) — NOT on every change.

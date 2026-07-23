@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { CollabEditor, IndexedDbBundleStore, type CollabSession, type DocBundle } from "wordinweb/collab";
+import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, type CollabSession, type DocBundle } from "wordinweb/collab";
 import { reviveEncrypted } from "./e2ee-flows";
 
 /**
@@ -42,6 +42,35 @@ export function App({ url, httpBase, docId, clientId, name, docKey }: {
   const [codeDraft, setCodeDraft] = useState("");
   // Remount key: bumps to retry the connection after takeover/revival.
   const [attempt, setAttempt] = useState(0);
+  const [showActivity, setShowActivity] = useState(false);
+  // Versions (doc 14 §1): frozen restore points beside the live bundle.
+  // Stored in the same IndexedDB db under version-suffixed keys — a
+  // DocVersion is bundle-shaped enough for the demo (docx + sidecar).
+  const [versions, setVersions] = useState<{ label: string; savedAt: number }[]>([]);
+
+  const saveVersion = async () => {
+    if (!session?.doc) return;
+    const label = window.prompt("Version label (optional):") ?? "";
+    const savedAt = Date.now();
+    const bundle = await store.get(docId);
+    if (!bundle) return;
+    await store.put({ ...bundle, docId: `${docId}#version-${savedAt}${label ? `-${label}` : ""}` });
+    setVersions((v) => [...v, { label: label || "(auto)", savedAt }].slice(-25));
+  };
+  const downloadVersion = async (savedAt: number, label: string) => {
+    const v = await store.get(`${docId}#version-${savedAt}${label !== "(auto)" ? `-${label}` : ""}`);
+    if (!v) return;
+    const blob = new Blob([v.confirmedBytes as BlobPart], {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    // Restore-as-DRAFT (doc 14 §1): a version opens as a new file, never
+    // mutates the live doc — "back to then", not "merge then into now".
+    a.download = `${docId.slice(0, 8)}-${label}-${savedAt}.docx`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
 
   const revive = async () => {
     setReviveState("reviving");
@@ -158,7 +187,34 @@ export function App({ url, httpBase, docId, clientId, name, docKey }: {
         {/* The escape hatch (doc 12 §4): your copy is as durable as this
             browser; one click makes it a file. */}
         <button onClick={download} disabled={!session?.ready}>Download .docx</button>
+        <button onClick={() => void saveVersion()} disabled={!session?.ready}>Save version</button>
+        <button onClick={() => setShowActivity((v) => !v)}>{showActivity ? "Hide" : "Show"} activity</button>
       </div>
+      {versions.length > 0 && (
+        <div style={{ display: "flex", gap: 6, padding: "0 8px 4px", fontSize: 12, flexWrap: "wrap" }}>
+          {versions.map((v) => (
+            <button key={v.savedAt} title="Opens as a new file — never merges into the live doc"
+              onClick={() => void downloadVersion(v.savedAt, v.label)}>
+              ⏱ {v.label} · {new Date(v.savedAt).toLocaleTimeString()}
+            </button>
+          ))}
+        </div>
+      )}
+      {showActivity && (
+        <div style={{ maxHeight: 120, overflowY: "auto", padding: "0 8px 4px", fontSize: 12, fontFamily: "monospace" }}>
+          {/* Attribution L1 (doc 14 §3): the canonical log IS the record —
+              clientId joins the roster for a name + color. */}
+          {[...(session?.activity ?? [])].reverse().map((a) => {
+            const who = session?.roster.find((r) => r.clientId === a.clientId);
+            return (
+              <div key={a.seq}>
+                <span style={{ color: who?.profile.color ?? "#888" }}>{who?.profile.name ?? a.clientId}</span>
+                {" "}#{a.seq} {a.kind}
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div style={{ flex: 1, minHeight: 0 }}>
         <CollabEditor
           key={attempt}
