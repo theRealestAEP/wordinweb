@@ -12,3 +12,11 @@ export { attachWebSocketServer, type WsServer, type WsSocket } from "./ws.js";
 export { InMemoryStorage, type StorageDriver } from "./storage.js";
 export { blankDocxBytes, blankProvider } from "./blank.js";
 export { startDevServer } from "./cli.js";
+export {
+  makeDocId,
+  PartyPool,
+  RateLimiter,
+  DEMO_INTENT_ALLOWLIST,
+  intentAllowedInDemo,
+  type DemoMode,
+} from "./demo.js";
