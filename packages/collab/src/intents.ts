@@ -93,12 +93,24 @@ export interface FormatParagraphIntent extends IntentBase {
   styleId?: string | null;
 }
 
+/**
+ * Turn a paragraph into a bullet/numbered list item, or clear its list
+ * formatting (kind null). Block-level: mutates w:pPr/numbering, preserves the
+ * block id, moves no text — transform identity.
+ */
+export interface SetListTypeIntent extends IntentBase {
+  kind: "setListType";
+  blockId: StableId;
+  listKind: "bullet" | "number" | null;
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
   | SplitParagraphIntent
   | FormatRunIntent
-  | FormatParagraphIntent;
+  | FormatParagraphIntent
+  | SetListTypeIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

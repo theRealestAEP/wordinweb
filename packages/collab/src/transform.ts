@@ -42,6 +42,9 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "formatParagraph":
       // Block-level; moves no text, preserves ids.
       return [];
+    case "setListType":
+      // Block-level; moves no text, preserves ids.
+      return [];
   }
 }
 
@@ -101,6 +104,8 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       return { ...intent, base: newBase };
     case "formatParagraph":
       // Addressed by block id only; nothing to transform.
+      return { ...intent, base: newBase };
+    case "setListType":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

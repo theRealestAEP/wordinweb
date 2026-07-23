@@ -225,3 +225,26 @@ describe("DocumentSession formatParagraph (block-level formatting)", () => {
     expect(serializeXml(session.doc.docRoot)).toContain(`w:val="right"`);
   });
 });
+
+describe("DocumentSession setListType (list formatting)", () => {
+  it("turns a paragraph into a bullet then a numbered list, preserving block id", () => {
+    const session = new DocumentSession(makeDoc(["item"]));
+    const { blockId } = runIdOf(session, 0);
+    expect(session.submit({ kind: "setListType", clientId: "a", clientSeq: 1, base: 0, blockId, listKind: "bullet" }).kind).toBe("applied");
+    const para = session.doc.sections[0].blocks[0] as Paragraph;
+    expect(session.ids.idOf(para.src!)).toBe(blockId);
+    expect(serializeXml(session.doc.docRoot)).toContain("numId");
+    // Switch to numbered.
+    expect(session.submit({ kind: "setListType", clientId: "a", clientSeq: 2, base: session.seq, blockId, listKind: "number" }).kind).toBe("applied");
+  });
+
+  it("determinism across two sessions", () => {
+    const build = () => {
+      const s = new DocumentSession(makeDoc(["a", "b"]));
+      const b0 = s.ids.idOf((s.doc.sections[0].blocks[0] as Paragraph).src!)!;
+      s.submit({ kind: "setListType", clientId: "a", clientSeq: 1, base: 0, blockId: b0, listKind: "bullet" });
+      return serializeXml(s.doc.docRoot);
+    };
+    expect(build()).toBe(build());
+  });
+});

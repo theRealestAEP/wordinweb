@@ -7,6 +7,7 @@ import {
   applyRunFormat,
   setParagraphAlignment,
   setParagraphStyle,
+  setListType,
   type EditCaret,
   type Run,
   type Block,
@@ -79,6 +80,12 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       if (intent.align) changed = setParagraphAlignment(doc, [target], intent.align) || changed;
       if (intent.styleId !== undefined) changed = setParagraphStyle(doc, [target], intent.styleId) || changed;
       return changed;
+    }
+    case "setListType": {
+      const blockEl = ids.elOf(intent.blockId);
+      if (!blockEl) return false;
+      const target = firstTextDescendant(blockEl) ?? blockEl;
+      return setListType(doc, [target], intent.listKind);
     }
   }
 }
