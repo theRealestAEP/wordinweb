@@ -80,7 +80,8 @@ function Harness() {
             // links): mint id+key client-side, seal the blank template,
             // PUT. The key goes into the FRAGMENT: shareable, never sent.
             void goLiveEncrypted(HTTP, newCode || undefined)
-              .then(({ docId: id, docKey: key }) => {
+              .then(({ docId: id, docKey: key, ownerToken }: { docId: string; docKey: string; ownerToken?: string }) => {
+                if (ownerToken) localStorage.setItem(`wordinweb-owner-${id}`, ownerToken);
                 const url = new URL(location.href);
                 url.searchParams.set("doc", id);
                 url.hash = `k=${key}`;
@@ -107,7 +108,8 @@ function Harness() {
               body: JSON.stringify({ blank: true }),
             })
               .then((r) => r.json())
-              .then(({ docId: id }: { docId: string }) => {
+              .then(({ docId: id, ownerToken }: { docId: string; ownerToken?: string }) => {
+                if (ownerToken) localStorage.setItem(`wordinweb-owner-${id}`, ownerToken);
                 const url = new URL(location.href);
                 url.searchParams.set("doc", id);
                 history.replaceState(null, "", url.toString());
@@ -138,7 +140,7 @@ function Harness() {
     createElement(
       "div",
       { id: "root-editor" },
-      createElement(App, { url: WS, httpBase: HTTP, docId, clientId, name, docKey: docKey ?? undefined }),
+      createElement(App, { url: WS, httpBase: HTTP, docId, clientId, name, docKey: docKey ?? undefined, ownerToken: localStorage.getItem(`wordinweb-owner-${docId}`) ?? undefined }),
     ),
   );
 }

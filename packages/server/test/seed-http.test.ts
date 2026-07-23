@@ -165,3 +165,18 @@ describe("encrypted seed over HTTP (doc 13)", () => {
     expect(c.last()).toEqual({ t: "refused", reason: "code-required" });
   });
 });
+
+describe("owner token in seed responses (doc 14 §2.5)", () => {
+  it("POST and PUT return an owner token ONLY to the seeder", () => {
+    const hub = zeroCustodyHub();
+    const post = handleSeedRequest(hub, { method: "POST", body: { blank: true } });
+    expect(post.status).toBe(201);
+    expect(post.body.ownerToken).toMatch(/^o_[0-9a-f]{32}$/);
+    const put = handleSeedRequest(hub, { method: "PUT", docId: "d2", body: { docx: b64(docxBytes("x")) } });
+    expect(put.body.ownerToken).toMatch(/^o_/);
+    // A 409 (someone else won) returns NO owner token — the winner holds it.
+    const race = handleSeedRequest(hub, { method: "PUT", docId: "d2", body: { docx: b64(docxBytes("y")) } });
+    expect(race.status).toBe(409);
+    expect(race.body.ownerToken).toBeUndefined();
+  });
+});

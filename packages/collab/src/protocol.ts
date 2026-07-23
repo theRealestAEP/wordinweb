@@ -126,9 +126,29 @@ export type ClientMessage =
        * derivation, so even a server bypass yields undecryptable content.
        */
       codeProof?: string;
+      /**
+       * Owner-capability proof (doc 14 §2.5): the token minted at seed and
+       * returned ONLY to the seeder — never part of the shared link. A
+       * matching token flags this connection as the epoch's owner
+       * (read-only bypass + admin channel). Roles are capabilities, not
+       * accounts: lose the bundle, lose the crown; re-seed to reclaim.
+       */
+      ownerToken?: string;
     }
   /** Update this connection's profile mid-session (rename / recolor). */
   | { t: "profile"; profile: ParticipantProfile }
+  /**
+   * Owner admin channel (doc 14 §2.5) — only honored from a connection
+   * whose hello proved the owner token. All enforceable by a BLIND server
+   * (identity/role are plaintext bookkeeping). Honest limits: kick/demote
+   * key by clientId (a determined user can mint a fresh id — a nudge, not
+   * a wall, without accounts), and in E2EE mode an owner controls WRITES,
+   * never reads (re-key is the only read fence).
+   */
+  | { t: "admin"; action:
+        | { op: "kick"; clientId: string }
+        | { op: "readOnly"; on: boolean }
+        | { op: "setRole"; clientId: string; role: "editor" | "viewer" } }
   | { t: "submit"; intent: Intent }
   /** Encrypted-mode submit (doc 13 §2): opaque body, plaintext bookkeeping.
    * The hub refuses this on plaintext rooms and refuses plaintext `submit`

@@ -128,7 +128,7 @@ export class CollabConnection {
    * (the doc-12 §7 "use here instead" path for a second same-profile tab);
    * without it, a duplicate join is refused `already-open`.
    */
-  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string }): void {
+  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string; ownerToken?: string }): void {
     this.transport.send({
       t: "hello",
       protocolVersion: PROTOCOL_VERSION,
@@ -139,7 +139,17 @@ export class CollabConnection {
       sinceSeq: 0,
       profile: opts?.profile,
       codeProof: opts?.codeProof,
+      ownerToken: opts?.ownerToken,
     });
+  }
+
+  /** Owner admin op (doc 14 §2.5): honored only if this connection proved
+   * the owner token at hello — otherwise the server refuses `not-owner`. */
+  admin(action:
+    | { op: "kick"; clientId: string }
+    | { op: "readOnly"; on: boolean }
+    | { op: "setRole"; clientId: string; role: "editor" | "viewer" }): void {
+    this.transport.send({ t: "admin", action });
   }
 
   /** The latest roster snapshot (doc 14 §2); empty until the first fan-out. */
@@ -206,7 +216,7 @@ export class CollabConnection {
    * the case: same epoch ⇒ replay pending (below); different ⇒
    * onEpochChange, pending withheld.
    */
-  resume(bundle: DocBundle, token?: string, opts?: { profile?: ParticipantProfile; codeProof?: string }): void {
+  resume(bundle: DocBundle, token?: string, opts?: { profile?: ParticipantProfile; codeProof?: string; ownerToken?: string }): void {
     this.clientSeq = Math.max(this.clientSeq, bundle.clientSeq);
     this.resuming = bundle;
     this.transport.send({
@@ -225,6 +235,7 @@ export class CollabConnection {
       token,
       sinceSeq: bundle.confirmedSeq,
       genesisId: bundle.genesisId,
+      ownerToken: opts?.ownerToken,
     });
   }
 

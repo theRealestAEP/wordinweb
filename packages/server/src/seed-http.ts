@@ -86,7 +86,7 @@ export function handleSeedRequest(
     if (!docId) return { status: 400, body: { error: "missing-doc-id" } };
     const result = hub.seedEncrypted(docId, genesisId, checkpoint, req.body.codeVerifier);
     if (!result.ok) return { status: 409, body: { error: "exists", genesisId: result.genesisId } };
-    return { status: req.method === "POST" ? 201 : 200, body: { docId, genesisId: result.genesisId } };
+    return { status: req.method === "POST" ? 201 : 200, body: { docId, genesisId: result.genesisId, ownerToken: result.ownerToken } };
   }
 
   let docx: Uint8Array;
@@ -125,7 +125,9 @@ export function handleSeedRequest(
     // losing client can join it and make its lineage decision (case 2).
     return { status: 409, body: { error: "exists", genesisId: result.genesisId } };
   }
-  return { status: req.method === "POST" ? 201 : 200, body: { docId, genesisId: result.genesisId } };
+  // The owner token (doc 14 §2.5) goes ONLY to the seeder in this response;
+  // it is never in the shared link and never broadcast.
+  return { status: req.method === "POST" ? 201 : 200, body: { docId, genesisId: result.genesisId, ownerToken: result.ownerToken } };
 }
 
 function defaultMintDocId(): string {

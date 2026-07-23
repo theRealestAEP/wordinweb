@@ -31,7 +31,7 @@ async function sealSeed(
   docx: Uint8Array,
   sidecar: unknown,
   shareCode?: string,
-): Promise<{ status: number; genesisId: string }> {
+): Promise<{ status: number; genesisId: string; ownerToken?: string }> {
   const genesisId = `g_${randHex(16)}`;
   const stretched = shareCode ? await stretchShareCode(shareCode, docId) : undefined;
   const keys = await deriveEpochKeys(docKey, genesisId, stretched);
@@ -47,8 +47,8 @@ async function sealSeed(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ encrypted: { genesisId, checkpoint: { seq: 0, ...sealed } }, codeVerifier }),
   });
-  const body = (await res.json()) as { genesisId: string };
-  return { status: res.status, genesisId: body.genesisId };
+  const body = (await res.json()) as { genesisId: string; ownerToken?: string };
+  return { status: res.status, genesisId: body.genesisId, ownerToken: body.ownerToken };
 }
 
 /** Encrypted "New document": fetch the blank template, mint id + key, seal,
@@ -56,14 +56,14 @@ async function sealSeed(
 export async function goLiveEncrypted(
   httpBase: string,
   shareCode?: string,
-): Promise<{ docId: string; docKey: string }> {
+): Promise<{ docId: string; docKey: string; ownerToken?: string }> {
   const blank = new Uint8Array(await (await fetch(`${httpBase}/blank`)).arrayBuffer());
   const docId = `d_${randHex(16)}`;
   const docKey = mintDocKey();
   // A fresh blank doc's id table IS parse order — no sidecar needed (null
   // is honest here; a REVIVAL below always carries the bundle's sidecar).
-  await sealSeed(httpBase, docId, docKey, blank, null, shareCode);
-  return { docId, docKey };
+  const seeded = await sealSeed(httpBase, docId, docKey, blank, null, shareCode);
+  return { docId, docKey, ownerToken: seeded.ownerToken };
 }
 
 /** Encrypted "Bring it back live": re-seed from this browser's bundle under

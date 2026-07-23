@@ -22,7 +22,7 @@ function b64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-export function App({ url, httpBase, docId, clientId, name, docKey }: {
+export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }: {
   url: string;
   httpBase: string;
   docId: string;
@@ -31,6 +31,9 @@ export function App({ url, httpBase, docId, clientId, name, docKey }: {
   /** E2EE mode (doc 13): present iff the link carried `#k=` — the mode is
    * the LINK's fact; the editor hard-refuses a contradicting welcome. */
   docKey?: string;
+  /** Owner capability (doc 14 §2.5): held by the doc's creator; unlocks
+   * the admin controls below. Never in the shared link. */
+  ownerToken?: string;
 }) {
   const store = useMemo(() => new IndexedDbBundleStore(), []);
   const [session, setSession] = useState<CollabSession | null>(null);
@@ -40,6 +43,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey }: {
   // remounting with it retries (and in E2EE mode mixes into key derivation).
   const [shareCode, setShareCode] = useState<string | undefined>(undefined);
   const [codeDraft, setCodeDraft] = useState("");
+  const [readOnly, setReadOnly] = useState(false);
+  const isOwner = !!ownerToken;
   // Remount key: bumps to retry the connection after takeover/revival.
   const [attempt, setAttempt] = useState(0);
   const [showActivity, setShowActivity] = useState(false);
@@ -167,15 +172,24 @@ export function App({ url, httpBase, docId, clientId, name, docKey }: {
         {/* Roster chips (doc 14 §2): everyone in the session, greyed when
             offline; names are self-asserted — the UI says so in the title. */}
         {(session?.roster ?? []).map((r) => (
-          <span
-            key={r.clientId}
-            title="Names are chosen by participants"
-            style={{
-              padding: "2px 10px", borderRadius: 999, fontSize: 12, color: "#fff",
-              background: r.profile.color, opacity: r.connected ? 1 : 0.35,
-            }}
-          >
-            {r.profile.name}
+          <span key={r.clientId} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+            <span
+              title="Names are chosen by participants"
+              style={{
+                padding: "2px 10px", borderRadius: 999, fontSize: 12, color: "#fff",
+                background: r.profile.color, opacity: r.connected ? 1 : 0.35,
+              }}
+            >
+              {r.profile.name}
+            </span>
+            {isOwner && r.clientId !== clientId && (
+              <>
+                <button title="Demote to viewer" style={{ fontSize: 10, padding: "0 3px" }}
+                  onClick={() => session?.admin({ op: "setRole", clientId: r.clientId, role: "viewer" })}>👁</button>
+                <button title="Kick" style={{ fontSize: 10, padding: "0 3px" }}
+                  onClick={() => session?.admin({ op: "kick", clientId: r.clientId })}>✕</button>
+              </>
+            )}
           </span>
         ))}
         <span style={{ flex: 1 }} />
@@ -189,6 +203,14 @@ export function App({ url, httpBase, docId, clientId, name, docKey }: {
         <button onClick={download} disabled={!session?.ready}>Download .docx</button>
         <button onClick={() => void saveVersion()} disabled={!session?.ready}>Save version</button>
         <button onClick={() => setShowActivity((v) => !v)}>{showActivity ? "Hide" : "Show"} activity</button>
+        {isOwner && (
+          <button
+            title="Owner: block all editors (you keep writing)"
+            onClick={() => { const on = !readOnly; setReadOnly(on); session?.admin({ op: "readOnly", on }); }}
+          >
+            {readOnly ? "🔒 Read-only ON" : "🔓 Make read-only"}
+          </button>
+        )}
       </div>
       {versions.length > 0 && (
         <div style={{ display: "flex", gap: 6, padding: "0 8px 4px", fontSize: 12, flexWrap: "wrap" }}>
@@ -225,6 +247,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey }: {
           takeover={takeover}
           docKey={docKey}
           shareCode={shareCode}
+          ownerToken={ownerToken}
           profile={{ name, color: "" /* server assigns a palette color */ }}
           onSession={setSession}
           refusedContent={refusedContent}

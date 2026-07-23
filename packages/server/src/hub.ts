@@ -86,6 +86,13 @@ interface Room {
   /** Share-code verifier registered at seed (doc 13 §7) — a PBKDF2 output,
    * NOT the code. Optional; rotation happens naturally at re-seed. */
   codeVerifier?: string;
+  /** Owner capability token (doc 14 §2.5): minted at seed, returned only
+   * to the seeder. 256-bit — direct compare, no stretching needed. */
+  ownerToken?: string;
+  /** Owner-imposed write controls (integrity, not confidentiality). */
+  readOnly?: boolean;
+  demoted?: Set<string>;
+  banned?: Set<string>;
   /** The seeder's lineage chain (doc 15) — held OPAQUELY and echoed in
    * welcomes so rejoining holders can decide fast-forward vs fork.
    * Ephemeral like everything else in the room. */
@@ -144,6 +151,9 @@ export class CollabHub {
    * against it.
    */
   private connClient = new Map<string, string>();
+  /** conn.id set of proven owners (doc 14 §2.5) — flagged at hello by
+   * token match, consumed by the admin channel + read-only bypass. */
+  private ownerConns = new Set<string>();
 
   constructor(
     /**
@@ -271,6 +281,16 @@ export class CollabHub {
             g.failures = 0; // success resets the budget
           }
         }
+        // Owner controls (doc 14 §2.5): banned clientIds stay out; a hello
+        // proving the owner token flags this socket as the epoch's owner.
+        {
+          const r0 = this.rooms.get(msg.docId);
+          if (r0?.banned?.has(msg.clientId)) {
+            conn.send({ t: "refused", reason: "kicked" });
+            return;
+          }
+          if (r0?.ownerToken && msg.ownerToken === r0.ownerToken) this.ownerConns.add(conn.id);
+        }
         // Zero-custody posture (no provider): rooms exist only while seeded
         // and live. An unknown docId is not an error the server can fix —
         // the DOCUMENT lives in participants' bundles, so the answer is
@@ -357,6 +377,26 @@ export class CollabHub {
         this.broadcastRoster(room);
         return;
       }
+      case "admin": {
+        const docId = this.connDoc.get(conn.id);
+        if (!docId || !this.ownerConns.has(conn.id)) {
+          conn.send({ t: "refused", reason: "not-owner" });
+          return;
+        }
+        const room = this.rooms.get(docId)!;
+        const a = msg.action;
+        if (a.op === "readOnly") {
+          room.readOnly = a.on;
+        } else if (a.op === "setRole") {
+          (room.demoted ??= new Set()).delete(a.clientId);
+          if (a.role === "viewer") room.demoted!.add(a.clientId);
+        } else if (a.op === "kick") {
+          (room.banned ??= new Set()).add(a.clientId);
+          const target = this.findClientConn(docId, a.clientId);
+          if (target) this.kick(target, "kicked");
+        }
+        return;
+      }
       case "profile": {
         const docId2 = this.connDoc.get(conn.id);
         if (!docId2) return; // ignore before join, like presence
@@ -397,6 +437,13 @@ export class CollabHub {
           return;
         }
         const room = this.rooms.get(docId)!;
+        // Owner write controls (doc 14 §2.5): doc-wide read-only (owner
+        // bypasses) and per-clientId demotion — integrity controls a blind
+        // server can enforce.
+        if ((room.readOnly && !this.ownerConns.has(conn.id)) || room.demoted?.has(msg.intent.clientId)) {
+          conn.send({ t: "refused", reason: "read-only" });
+          return;
+        }
         if (room.enc) {
           // No mixed-mode documents (doc 13 §6): a plaintext submit into an
           // encrypted room is refused outright — a blind server could not
@@ -436,6 +483,10 @@ export class CollabHub {
           return;
         }
         const room = this.rooms.get(docId)!;
+        if ((room.readOnly && !this.ownerConns.has(conn.id)) || room.demoted?.has(msg.envelope.clientId)) {
+          conn.send({ t: "refused", reason: "read-only" });
+          return;
+        }
         if (!room.enc) {
           conn.send({ t: "refused", reason: "wrong-mode" });
           return;
@@ -581,6 +632,7 @@ export class CollabHub {
     this.auth.delete(conn.id);
     this.connById.delete(conn.id);
     this.connClient.delete(conn.id);
+    this.ownerConns.delete(conn.id);
     if (docId) {
       const room = this.rooms.get(docId);
       if (room) {
@@ -784,7 +836,7 @@ export class CollabHub {
     sidecar?: IdSidecar,
     codeVerifier?: string,
     lineage?: LineageHead[],
-  ): { ok: true; genesisId: string } | { ok: false; reason: "exists"; genesisId: string } {
+  ): { ok: true; genesisId: string; ownerToken: string } | { ok: false; reason: "exists"; genesisId: string } {
     const existing = this.rooms.get(docId);
     if (existing) return { ok: false, reason: "exists", genesisId: existing.genesisId };
     const session = new DocumentSession(DocxDocument.load(docx));
@@ -797,11 +849,12 @@ export class CollabHub {
       roster: new Map(),
       codeVerifier,
       lineage,
+      ownerToken: defaultGenesisId().replace("g_", "o_"),
       emptySince: this.now(), // eviction clock runs until someone joins
       media: emptyMedia(),
     };
     this.rooms.set(docId, room);
-    return { ok: true, genesisId: room.genesisId };
+    return { ok: true, genesisId: room.genesisId, ownerToken: room.ownerToken! };
   }
 
   /**
@@ -821,7 +874,7 @@ export class CollabHub {
     genesisId: string,
     checkpoint: SealedCheckpoint,
     codeVerifier?: string,
-  ): { ok: true; genesisId: string } | { ok: false; reason: "exists"; genesisId: string } {
+  ): { ok: true; genesisId: string; ownerToken: string } | { ok: false; reason: "exists"; genesisId: string } {
     const existing = this.rooms.get(docId);
     if (existing) return { ok: false, reason: "exists", genesisId: existing.genesisId };
     const room: Room = {
@@ -831,11 +884,12 @@ export class CollabHub {
       genesisId,
       roster: new Map(),
       codeVerifier,
+      ownerToken: defaultGenesisId().replace("g_", "o_"),
       emptySince: this.now(),
       media: emptyMedia(),
     };
     this.rooms.set(docId, room);
-    return { ok: true, genesisId };
+    return { ok: true, genesisId, ownerToken: room.ownerToken! };
   }
 
   private async room(docId: string): Promise<Room> {

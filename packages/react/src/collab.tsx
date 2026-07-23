@@ -59,6 +59,10 @@ export interface UseCollabOptions {
   /** Share code (doc 13 §7) when the doc has one — stretched client-side
    * and mixed into key derivation + sent as the hello proof. */
   shareCode?: string;
+  /** Owner capability token (doc 14 §2.5): held by the seeder (returned by
+   * go-live, kept in their bundle), never in the shared link. Presence of
+   * a valid token unlocks the admin controls. */
+  ownerToken?: string;
   /** Display profile sent at join (doc 14 §2) — self-asserted; persist it in
    * localStorage next to the clientId so identity is stable per browser. */
   profile?: ParticipantProfile;
@@ -107,6 +111,12 @@ export interface CollabSession {
   /** Attribution layer 1 (doc 14 §3): recent applied entries
    * {seq, clientId, kind} — join clientId to `roster` for names/colors. */
   activity: { seq: number; clientId: string; kind: string }[];
+  /** Owner admin ops (doc 14 §2.5) — no-op unless this connection proved
+   * the owner token; the server refuses `not-owner` otherwise. */
+  admin: (action:
+    | { op: "kick"; clientId: string }
+    | { op: "readOnly"; on: boolean }
+    | { op: "setRole"; clientId: string; role: "editor" | "viewer" }) => void;
 }
 
 /**
@@ -116,7 +126,7 @@ export interface CollabSession {
  * runtime dependency on this module).
  */
 export function useCollab(opts: UseCollabOptions): CollabSession {
-  const { url, docId, clientId, token, createSocket, store, profile, takeover, docKey, shareCode } = opts;
+  const { url, docId, clientId, token, createSocket, store, profile, takeover, docKey, shareCode, ownerToken } = opts;
   const connRef = useRef<CollabConnection | null>(null);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
   const [version, setVersion] = useState(0);
@@ -197,8 +207,8 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         // the editor stays !ready (input disabled) until the welcome.
         const bundle = await store.get(docId);
         if (disposed || connRef.current !== conn) return;
-        if (bundle) conn.resume(bundle, token, { profile, codeProof });
-        else conn.join(docId, token, { profile, takeover, codeProof });
+        if (bundle) conn.resume(bundle, token, { profile, codeProof, ownerToken });
+        else conn.join(docId, token, { profile, takeover, codeProof, ownerToken });
       } else {
         conn.join(docId, token, { profile, takeover, codeProof });
       }
@@ -217,7 +227,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // profile intentionally omitted from deps (an inline object literal would
     // reconnect every render); renames go through setProfile, not re-join.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, docId, clientId, token, createSocket, store, takeover, docKey, shareCode]);
+  }, [url, docId, clientId, token, createSocket, store, takeover, docKey, shareCode, ownerToken]);
 
   return {
     doc,
@@ -240,6 +250,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     roster,
     setProfile: (p) => connRef.current?.setProfile(p),
     activity: connRef.current?.activity ?? [],
+    admin: (action) => connRef.current?.admin(action),
   };
 }
 
