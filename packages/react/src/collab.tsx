@@ -7,6 +7,8 @@ import {
   createWebSocketTransport,
   BundlePersister,
   type BundleStore,
+  type ParticipantProfile,
+  type RosterEntry,
   type Intent,
   type PresencePosition,
 } from "@wordinweb/collab/client";
@@ -43,6 +45,9 @@ export interface UseCollabOptions {
    * (join cold, keep nothing).
    */
   store?: BundleStore;
+  /** Display profile sent at join (doc 14 §2) — self-asserted; persist it in
+   * localStorage next to the clientId so identity is stable per browser. */
+  profile?: ParticipantProfile;
 }
 
 export interface CollabSession {
@@ -80,6 +85,11 @@ export interface CollabSession {
    * offline copy is saved as a draft." Null otherwise.
    */
   epochChanged: { from: string; to: string } | null;
+  /** Session roster (doc 14 §2): everyone who joined this session, with
+   * connection state — the identity keyspace presence/attribution share. */
+  roster: RosterEntry[];
+  /** Rename/recolor this participant (server sanitizes + fans out). */
+  setProfile: (profile: ParticipantProfile) => void;
 }
 
 /**
@@ -89,7 +99,7 @@ export interface CollabSession {
  * runtime dependency on this module).
  */
 export function useCollab(opts: UseCollabOptions): CollabSession {
-  const { url, docId, clientId, token, createSocket, store } = opts;
+  const { url, docId, clientId, token, createSocket, store, profile } = opts;
   const connRef = useRef<CollabConnection | null>(null);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
   const [version, setVersion] = useState(0);
@@ -98,6 +108,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const [presence, setPresence] = useState<Record<string, PresencePosition | null>>({});
   const [refused, setRefused] = useState<string | null>(null);
   const [epochChanged, setEpochChanged] = useState<{ from: string; to: string } | null>(null);
+  const [roster, setRoster] = useState<RosterEntry[]>([]);
 
   useEffect(() => {
     const socket = (createSocket ?? ((u: string) => new WebSocket(u)))(url);
@@ -114,6 +125,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       onPresence: (participant, pos) =>
         setPresence((prev) => ({ ...prev, [participant]: pos })),
       onRefused: (reason) => setRefused(reason),
+      onRoster: (r) => setRoster(r),
       onEpochChange: (from, to) => {
         // Someone re-seeded while we were away (doc 12 §5 case 2): the
         // connection already took the server's state and withheld our
@@ -146,11 +158,11 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       // editor stays !ready (input disabled) until the welcome either way.
       void store.get(docId).then((bundle) => {
         if (connRef.current !== conn) return; // effect re-ran while loading
-        if (bundle) conn.resume(bundle, token);
-        else conn.join(docId, token);
+        if (bundle) conn.resume(bundle, token, { profile });
+        else conn.join(docId, token, { profile });
       });
     } else {
-      conn.join(docId, token);
+      conn.join(docId, token, { profile });
     }
     return () => {
       if (store && typeof window !== "undefined") {
@@ -162,6 +174,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       connRef.current = null;
     };
     // Reconnect when the target document or endpoint changes.
+  // profile intentionally omitted from deps (an inline object literal would
+    // reconnect every render); renames go through setProfile, not re-join.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, docId, clientId, token, createSocket, store]);
 
   return {
@@ -182,6 +197,8 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     presence,
     refused,
     epochChanged,
+    roster,
+    setProfile: (p) => connRef.current?.setProfile(p),
   };
 }
 

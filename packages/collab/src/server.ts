@@ -14,4 +14,6 @@ export {
   type ClientMessage,
   type ServerMessage,
   type PresencePosition,
+  type ParticipantProfile,
+  type RosterEntry,
 } from "./protocol.js";

@@ -1,6 +1,13 @@
 import { ClientReplica } from "./replica.js";
 import { Intent } from "./intents.js";
-import { ClientMessage, ServerMessage, PROTOCOL_VERSION, PresencePosition } from "./protocol.js";
+import {
+  ClientMessage,
+  ServerMessage,
+  PROTOCOL_VERSION,
+  PresencePosition,
+  ParticipantProfile,
+  RosterEntry,
+} from "./protocol.js";
 import type { DocBundle } from "./bundle.js";
 
 /**
@@ -31,6 +38,8 @@ export interface ConnectionCallbacks {
    * pre-lineage, "your offline copy is saved as a draft".
    */
   onEpochChange?: (storedGenesisId: string, currentGenesisId: string) => void;
+  /** The session roster changed (join/leave/rename) — full snapshot. */
+  onRoster?: (roster: RosterEntry[]) => void;
 }
 
 function base64ToBytes(b64: string): Uint8Array {
@@ -103,7 +112,7 @@ export class CollabConnection {
    * (the doc-12 §7 "use here instead" path for a second same-profile tab);
    * without it, a duplicate join is refused `already-open`.
    */
-  join(docId: string, token?: string, opts?: { takeover?: boolean }): void {
+  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile }): void {
     this.transport.send({
       t: "hello",
       protocolVersion: PROTOCOL_VERSION,
@@ -112,7 +121,19 @@ export class CollabConnection {
       takeover: opts?.takeover,
       token,
       sinceSeq: 0,
+      profile: opts?.profile,
     });
+  }
+
+  /** The latest roster snapshot (doc 14 §2); empty until the first fan-out. */
+  roster: RosterEntry[] = [];
+
+  /** Rename/recolor this participant mid-session. The server sanitizes and
+   * fans out the updated roster; the local copy updates on that echo (no
+   * optimistic roster — a 1-RTT lag on your own rename is imperceptible and
+   * keeps one code path). */
+  setProfile(profile: ParticipantProfile): void {
+    this.transport.send({ t: "profile", profile });
   }
 
   /** Bundle being resumed from (set by resume(), consumed at welcome). */
@@ -126,10 +147,11 @@ export class CollabConnection {
    * the case: same epoch ⇒ replay pending (below); different ⇒
    * onEpochChange, pending withheld.
    */
-  resume(bundle: DocBundle, token?: string): void {
+  resume(bundle: DocBundle, token?: string, opts?: { profile?: ParticipantProfile }): void {
     this.clientSeq = Math.max(this.clientSeq, bundle.clientSeq);
     this.resuming = bundle;
     this.transport.send({
+      profile: opts?.profile,
       t: "hello",
       protocolVersion: PROTOCOL_VERSION,
       docId: bundle.docId,
@@ -254,6 +276,11 @@ export class CollabConnection {
       }
       case "presence": {
         this.cb.onPresence?.(msg.participant, msg.position);
+        return;
+      }
+      case "roster": {
+        this.roster = msg.roster;
+        this.cb.onRoster?.(msg.roster);
         return;
       }
       case "refused": {

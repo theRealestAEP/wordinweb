@@ -14,6 +14,34 @@ export interface PresencePosition {
   focus?: { blockId: number; runId: number; offset: number };
 }
 
+/**
+ * A participant's self-asserted display profile (plan doc 14 §2). No
+ * accounts: anyone with the link can claim any name — stated in the UI
+ * ("names are chosen by participants") — but the F4 clientId binding
+ * guarantees CONTINUITY: one name maps to one actor per session and nobody
+ * can impersonate an existing participant mid-session. The server sanitizes
+ * (length, control chars, color shape) and clients still render text-node-
+ * only with palette-validated colors (doc 11 XSS vector 7 — defense in
+ * depth, since a hostile server or E2EE mode moves sanitization client-side).
+ */
+export interface ParticipantProfile {
+  /** 1–40 chars after server sanitization. */
+  name: string;
+  /** Hex color `#rrggbb`; invalid values are replaced server-side by a
+   * palette color derived from the clientId hash. */
+  color: string;
+}
+
+/** One roster row (doc 14 §2): keyed by the BOUND clientId — the same
+ * identity intents carry, so attribution, presence, and roster share one
+ * keyspace. Disconnected participants stay listed (greyed) for the session's
+ * lifetime; a reconnect under the same clientId resumes the entry. */
+export interface RosterEntry {
+  clientId: string;
+  profile: ParticipantProfile;
+  connected: boolean;
+}
+
 /** Client → server. */
 export type ClientMessage =
   | {
@@ -45,7 +73,13 @@ export type ClientMessage =
        * client-side (welcome.genesisId vs the bundle's) — but carried so the
        * server can log resume-vs-fresh joins and future-proof case handling. */
       genesisId?: string;
+      /** Display profile (doc 14 §2) — optional; omitted = anonymous default
+       * derived server-side. In E2EE mode this becomes an opaque encrypted
+       * blob (doc 13/14) — the shape change rides that protocol bump. */
+      profile?: ParticipantProfile;
     }
+  /** Update this connection's profile mid-session (rename / recolor). */
+  | { t: "profile"; profile: ParticipantProfile }
   | { t: "submit"; intent: Intent }
   | { t: "presence"; position: PresencePosition | null };
 
@@ -82,6 +116,10 @@ export type ServerMessage =
    * identifier intents carry — so presence joins the roster/attribution
    * keyspace and survives the sender reconnecting on a new socket. */
   | { t: "presence"; participant: string; position: PresencePosition | null }
+  /** Full roster snapshot, fanned out on every join/leave/profile change
+   * (rooms are small; a snapshot beats delta bookkeeping). Ephemeral like
+   * presence: never logged, never persisted, dies with the room. */
+  | { t: "roster"; roster: RosterEntry[] }
   | { t: "refused"; reason: string };
 
 /** Bump when the intent apply/transform semantics change in a way that makes

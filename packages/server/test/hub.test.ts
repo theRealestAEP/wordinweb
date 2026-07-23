@@ -33,6 +33,11 @@ class FakeConn implements Connection {
     this.received.push(msg);
   }
   last(): ServerMessage {
+    // Roster fan-outs are ambient (fired on every join/leave/rename) —
+    // skip them so assertions target the response to the acted-on message.
+    for (let i = this.received.length - 1; i >= 0; i--) {
+      if (this.received[i].t !== "roster") return this.received[i];
+    }
     return this.received[this.received.length - 1];
   }
 }
@@ -137,8 +142,10 @@ describe("attachWebSocketServer", () => {
     onConn!(socket);
     onMsg!(JSON.stringify({ t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "w", sinceSeq: 0 }));
     await new Promise((r) => setTimeout(r, 0)); // flush the fire-and-forget handle()
-    expect(sent).toHaveLength(1);
+    // welcome + the ambient roster fan-out, both serialized over the socket.
+    expect(sent).toHaveLength(2);
     expect(JSON.parse(sent[0]).t).toBe("welcome");
+    expect(JSON.parse(sent[1]).t).toBe("roster");
   });
 
   it("ignores a malformed frame without crashing", async () => {

@@ -35,6 +35,11 @@ class FakeConn implements Connection {
     this.received.push(msg);
   }
   last(): ServerMessage {
+    // Roster fan-outs are ambient (fired on every join/leave/rename) —
+    // skip them so assertions target the response to the acted-on message.
+    for (let i = this.received.length - 1; i >= 0; i--) {
+      if (this.received[i].t !== "roster") return this.received[i];
+    }
     return this.received[this.received.length - 1];
   }
 }

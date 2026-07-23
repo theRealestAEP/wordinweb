@@ -1,5 +1,5 @@
 import { DocxDocument } from "@wordinweb/core";
-import { DocumentSession, type IdSidecar } from "@wordinweb/collab/server";
+import { DocumentSession, type IdSidecar, type ParticipantProfile } from "@wordinweb/collab/server";
 import { ClientMessage, ServerMessage, PROTOCOL_VERSION } from "@wordinweb/collab/server";
 import { StorageDriver } from "./storage.js";
 
@@ -52,6 +52,11 @@ interface Room {
    * their bundle's stored epoch to distinguish seamless resume from
    * someone-re-seeded-while-I-was-away — epochs never merge. */
   genesisId: string;
+  /** Session roster (doc 14 §2): clientId → sanitized profile + liveness.
+   * Ephemeral like presence — never persisted, dies with the room.
+   * Disconnected entries stay (greyed in UI) so attribution keeps a name
+   * for everyone who touched the session; reconnects resume the entry. */
+  roster: Map<string, { profile: ParticipantProfile; connected: boolean }>;
   /** Epoch-ms timestamp of when the room last became empty, or undefined
    * while anyone is connected. Drives zero-custody eviction (plan doc 12
    * §2): after the last-disconnect grace elapses the room — doc, log,
@@ -222,6 +227,27 @@ export class CollabHub {
           genesisId: room.genesisId,
           mode: "plaintext", // E2EE mode lands with doc 13 items 1-2.
         });
+        // Roster upsert + fan-out (doc 14 §2): keyed by the BOUND clientId,
+        // so a reconnect resumes the same entry. Sanitization is server-side
+        // here (plaintext mode); clients still render defensively (doc 11
+        // vector 7), which is also what E2EE mode will rely on entirely.
+        room.roster.set(msg.clientId, {
+          profile: sanitizeProfile(msg.profile, msg.clientId),
+          connected: true,
+        });
+        this.broadcastRoster(room);
+        return;
+      }
+      case "profile": {
+        const docId2 = this.connDoc.get(conn.id);
+        if (!docId2) return; // ignore before join, like presence
+        const room2 = this.rooms.get(docId2)!;
+        const clientId = this.connClient.get(conn.id)!;
+        const entry = room2.roster.get(clientId);
+        if (entry) {
+          entry.profile = sanitizeProfile(msg.profile, clientId);
+          this.broadcastRoster(room2);
+        }
         return;
       }
       case "submit": {
@@ -285,6 +311,7 @@ export class CollabHub {
    * when this was the last participant (plan doc 12 §2). */
   disconnect(conn: Connection): void {
     const docId = this.connDoc.get(conn.id);
+    const clientId = this.connClient.get(conn.id); // read BEFORE the deletes below
     this.connDoc.delete(conn.id);
     this.auth.delete(conn.id);
     this.connById.delete(conn.id);
@@ -293,9 +320,32 @@ export class CollabHub {
       const room = this.rooms.get(docId);
       if (room) {
         room.conns.delete(conn);
+        // Roster: mark disconnected (entry survives for session-lifetime
+        // attribution; a reconnect under the same clientId resumes it) —
+        // unless another live socket still holds this clientId (takeover
+        // races: the NEW socket's binding must not be marked dead by the
+        // OLD socket's teardown).
+        if (clientId && !this.findClientConn(docId, clientId)) {
+          const entry = room.roster.get(clientId);
+          if (entry && entry.connected) {
+            entry.connected = false;
+            this.broadcastRoster(room);
+          }
+        }
         if (room.conns.size === 0) room.emptySince = this.now();
       }
     }
+  }
+
+  /** Fan the full roster snapshot to everyone in the room (doc 14 §2). */
+  private broadcastRoster(room: Room): void {
+    const roster = [...room.roster].map(([clientId, e]) => ({
+      clientId,
+      profile: e.profile,
+      connected: e.connected,
+    }));
+    const out: ServerMessage = { t: "roster", roster };
+    for (const c of room.conns) c.send(out);
   }
 
   /** The live connection currently bound to (docId, clientId), if any —
@@ -372,6 +422,7 @@ export class CollabHub {
       session,
       conns: new Set(),
       genesisId: this.genGenesisId(),
+      roster: new Map(),
       emptySince: this.now(), // eviction clock runs until someone joins
     };
     this.rooms.set(docId, room);
@@ -382,7 +433,7 @@ export class CollabHub {
     let room = this.rooms.get(docId);
     if (!room) {
       const session = await this.startSession(docId);
-      room = { session, conns: new Set(), genesisId: this.genGenesisId() };
+      room = { session, conns: new Set(), genesisId: this.genGenesisId(), roster: new Map() };
       this.rooms.set(docId, room);
     }
     return room;
@@ -411,6 +462,28 @@ export class CollabHub {
     }
     return new DocumentSession(DocxDocument.load(this.provider.load(docId)));
   }
+}
+
+/** Fixed presence palette (doc 11 XSS vector 7: colors are validated
+ * against a palette or a strict hex shape — never arbitrary CSS). */
+const PROFILE_PALETTE = ["#e05252", "#e0a952", "#7fbf5a", "#52b3e0", "#7d6ee0", "#d05fb8", "#4fc2a2", "#c2b04f"];
+
+/**
+ * Server-side profile sanitization (doc 14 §2, plaintext mode): name
+ * trimmed, control characters stripped, 1–40 chars (empty → generated
+ * default); color must be exactly `#rrggbb` or is replaced by a palette
+ * color hashed from the clientId (stable across rejoins). Rendering clients
+ * sanitize AGAIN (text-node-only, palette check) — this is defense in
+ * depth, and in E2EE mode (opaque profiles) the client side is all there is.
+ */
+function sanitizeProfile(p: ParticipantProfile | undefined, clientId: string): ParticipantProfile {
+  let h = 0;
+  for (let i = 0; i < clientId.length; i++) h = (h * 31 + clientId.charCodeAt(i)) >>> 0;
+  const fallbackColor = PROFILE_PALETTE[h % PROFILE_PALETTE.length];
+  // eslint-disable-next-line no-control-regex
+  const name = (p?.name ?? "").replace(/[ -]/g, "").trim().slice(0, 40);
+  const color = /^#[0-9a-f]{6}$/i.test(p?.color ?? "") ? p!.color.toLowerCase() : fallbackColor;
+  return { name: name || `Guest ${(h % 900) + 100}`, color };
 }
 
 /** Fresh 128-bit hex epoch id. Server-side identifier generation is exempt
