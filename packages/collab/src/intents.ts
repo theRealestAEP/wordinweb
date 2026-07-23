@@ -390,7 +390,11 @@ export type Intent =
   | SetDrawingWordArtTextIntent
   | SetDrawingLineStyleIntent
   | SetImageAltTextIntent
-  | RemoveLinkIntent;
+  | RemoveLinkIntent
+  | SetImageWrapIntent
+  | SetDrawingOrderIntent
+  | SetSmartArtDataIntent
+  | SetSmartArtFillIntent;
 
 /** Insert a blank page at the end of a run. */
 export interface InsertBlankPageIntent extends IntentBase {
@@ -567,6 +571,37 @@ export interface SetImageAltTextIntent extends IntentBase {
 export interface RemoveLinkIntent extends IntentBase {
   kind: "removeLink";
   runId: StableId;
+}
+
+/** Set the text-wrap mode of the drawing carried by a run. A floating mode
+ * converts an inline drawing to an anchor. */
+export interface SetImageWrapIntent extends IntentBase {
+  kind: "setImageWrap";
+  runId: StableId;
+  mode: "inline" | "square" | "topAndBottom" | "none" | "behind";
+}
+
+/** Bring the (floating) drawing carried by a run to front/back. */
+export interface SetDrawingOrderIntent extends IntentBase {
+  kind: "setDrawingOrder";
+  runId: StableId;
+  order: "front" | "back";
+}
+
+/** Replace the whole SmartArt diagram (layout + items) carried by a run. */
+export interface SetSmartArtDataIntent extends IntentBase {
+  kind: "setSmartArtData";
+  runId: StableId;
+  smartArt: { layout: "process" | "cycle" | "hierarchy" | "list"; items: string[] };
+}
+
+/** Set/clear the fill of a SmartArt node (or all nodes when nodeIndex omitted).
+ * `color` is 6-hex RGB (no #) or null to clear. */
+export interface SetSmartArtFillIntent extends IntentBase {
+  kind: "setSmartArtFill";
+  runId: StableId;
+  color: string | null;
+  nodeIndex?: number;
 }
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a

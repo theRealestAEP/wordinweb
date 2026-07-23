@@ -46,6 +46,15 @@ function chartError(c: ChartShape, who: string): string | null {
   return null;
 }
 
+/** Shared SmartArt-payload validation (insertSmartArt + setSmartArtData). */
+function smartArtError(a: { layout: unknown; items: unknown }, who: string): string | null {
+  if (typeof a !== "object" || a === null) return `${who}: bad smartArt`;
+  if (!["process", "cycle", "hierarchy", "list"].includes(a.layout as string)) return `${who}: bad layout`;
+  if (!Array.isArray(a.items) || a.items.length === 0 || a.items.length > 50) return `${who}: bad items`;
+  if (a.items.some((x) => typeof x !== "string" || x.length > 500)) return `${who}: bad item`;
+  return null;
+}
+
 /** Returns a rejection reason, or null if the intent is well-formed. */
 export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_INTENT_LIMITS): string | null {
   const nonNegInt = (n: number) => Number.isInteger(n) && n >= 0;
@@ -195,14 +204,20 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null;
     case "removeLink":
       return null;
-    case "insertSmartArt": {
-      const a = intent.smartArt;
-      if (typeof a !== "object" || a === null) return "insertSmartArt: bad smartArt";
-      if (!["process", "cycle", "hierarchy", "list"].includes(a.layout)) return "insertSmartArt: bad layout";
-      if (!Array.isArray(a.items) || a.items.length === 0 || a.items.length > 50) return "insertSmartArt: bad items";
-      if (a.items.some((x) => typeof x !== "string" || x.length > 500)) return "insertSmartArt: bad item";
+    case "insertSmartArt":
+      return smartArtError(intent.smartArt, "insertSmartArt");
+    case "setSmartArtData":
+      return smartArtError(intent.smartArt, "setSmartArtData");
+    case "setImageWrap":
+      if (!["inline", "square", "topAndBottom", "none", "behind"].includes(intent.mode)) return "setImageWrap: bad mode";
       return null;
-    }
+    case "setDrawingOrder":
+      if (intent.order !== "front" && intent.order !== "back") return "setDrawingOrder: bad order";
+      return null;
+    case "setSmartArtFill":
+      if (intent.color !== null && !/^[0-9a-fA-F]{6}$/.test(intent.color)) return "setSmartArtFill: bad color";
+      if (intent.nodeIndex !== undefined && (typeof intent.nodeIndex !== "number" || !Number.isInteger(intent.nodeIndex) || intent.nodeIndex < 0 || intent.nodeIndex > 1000)) return "setSmartArtFill: bad nodeIndex";
+      return null;
     case "setLineNumbering": {
       const p = intent.patch;
       if (typeof p !== "object" || p === null || typeof p.enabled !== "boolean") return "setLineNumbering: bad patch";

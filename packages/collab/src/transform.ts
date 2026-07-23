@@ -113,6 +113,10 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "setDrawingLineStyle":
     case "setImageAltText":
     case "removeLink":
+    case "setImageWrap":
+    case "setDrawingOrder":
+    case "setSmartArtData":
+    case "setSmartArtFill":
       // Run/block/document-level; no existing run's text offsets shift.
       return [];
   }
@@ -257,6 +261,10 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "setDrawingLineStyle":
     case "setImageAltText":
     case "removeLink":
+    case "setImageWrap":
+    case "setDrawingOrder":
+    case "setSmartArtData":
+    case "setSmartArtFill":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

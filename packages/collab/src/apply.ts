@@ -36,6 +36,10 @@ import {
   setDrawingLineStyle,
   setImageAltText,
   removeLink,
+  setImageWrap,
+  setDrawingOrder,
+  setSmartArtData,
+  setSmartArtFill,
   isSafeUrl,
   applyTableOp,
   mergeParagraphBackward,
@@ -436,6 +440,34 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       const entry = runMap.get(runEl);
       if (!entry || !entry.firstT) return false;
       return removeLink(doc, entry.firstT);
+    }
+    case "setImageWrap": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setImageWrap(doc, drawing, intent.mode);
+    }
+    case "setDrawingOrder": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setDrawingOrder(doc, drawing, intent.order);
+    }
+    case "setSmartArtData": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setSmartArtData(doc, drawing, intent.smartArt as never);
+    }
+    case "setSmartArtFill": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setSmartArtFill(doc, drawing, intent.color, intent.nodeIndex);
     }
     case "setLink": {
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.
