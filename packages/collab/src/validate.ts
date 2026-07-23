@@ -68,6 +68,9 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (!/^[a-z0-9]{1,8}$/i.test(intent.ext)) return "insertImage: bad ext";
       if (!Number.isFinite(intent.widthPx) || !Number.isFinite(intent.heightPx)) return "insertImage: bad size";
       return null;
+    case "insertBreak":
+      if (intent.breakKind !== "page" && intent.breakKind !== "column") return "insertBreak: bad kind";
+      return null;
     case "formatRun":
     case "formatParagraph":
     case "setListType":

@@ -16,6 +16,7 @@ import {
   parseXml,
   localName,
   insertImageAt,
+  insertBreakAt,
   type EditCaret,
   type Run,
   type Block,
@@ -229,6 +230,22 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       const newRun = insertImageAt(doc, entry.firstT, relId, intent.widthPx, intent.heightPx);
       if (!newRun) return false;
       doc.refresh();
+      const fresh: XmlElement[] = [];
+      walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
+      for (let k = 0; k < fresh.length && k < intent.nodeIds.length; k++) {
+        ids.reassign(fresh[k], intent.nodeIds[k]);
+      }
+      return true;
+    }
+    case "insertBreak": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      // At END of the run: inserts sibling break + tail runs, no text split.
+      const before = trackedSet(ids, doc);
+      const res = insertBreakAt(doc, entry.firstT, entry.firstT.text.length, intent.breakKind);
+      if (!res) return false;
       const fresh: XmlElement[] = [];
       walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
       for (let k = 0; k < fresh.length && k < intent.nodeIds.length; k++) {

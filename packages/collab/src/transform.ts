@@ -71,6 +71,9 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "insertImage":
       // Image is a sibling drawing run; no run's text offsets shift.
       return [];
+    case "insertBreak":
+      // Break at end-of-run inserts sibling runs; no text offsets shift.
+      return [];
   }
 }
 
@@ -177,6 +180,8 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "pasteBlocks":
       return { ...intent, base: newBase };
     case "insertImage":
+      return { ...intent, base: newBase };
+    case "insertBreak":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

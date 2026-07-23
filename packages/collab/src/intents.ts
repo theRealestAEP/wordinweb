@@ -227,6 +227,19 @@ export interface InsertImageIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
+/**
+ * Insert a page/column break at the END of a run (inserts sibling break + tail
+ * runs — no text split, identity transform). Mid-run breaks (which split the
+ * run) follow the carried-id-split pattern (formatRange) and are the
+ * documented extension. `nodeIds` are carried ids for the new runs.
+ */
+export interface InsertBreakIntent extends IntentBase {
+  kind: "insertBreak";
+  runId: StableId;
+  breakKind: "page" | "column";
+  nodeIds: StableId[];
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -239,7 +252,8 @@ export type Intent =
   | MergeParagraphIntent
   | CommentRunIntent
   | PasteBlocksIntent
-  | InsertImageIntent;
+  | InsertImageIntent
+  | InsertBreakIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order
