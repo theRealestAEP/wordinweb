@@ -93,8 +93,11 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "setDropCap":
     case "setDivider":
     case "insertBookmark":
-      // Run/block-level; no text offsets shift (wraps/annotates in place or
-      // inserts sibling markers).
+    case "insertBlankPage":
+    case "insertSectionBreak":
+    case "insertCrossRef":
+    case "insertCoverPage":
+      // Run/block/document-level; no existing run's text offsets shift.
       return [];
   }
 }
@@ -218,6 +221,10 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "setDropCap":
     case "setDivider":
     case "insertBookmark":
+    case "insertBlankPage":
+    case "insertSectionBreak":
+    case "insertCrossRef":
+    case "insertCoverPage":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

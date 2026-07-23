@@ -370,7 +370,43 @@ export type Intent =
   | InsertFootnoteIntent
   | SetDropCapIntent
   | SetDividerIntent
-  | InsertBookmarkIntent;
+  | InsertBookmarkIntent
+  | InsertBlankPageIntent
+  | InsertSectionBreakIntent
+  | InsertCrossRefIntent
+  | InsertCoverPageIntent;
+
+/** Insert a blank page at the end of a run. */
+export interface InsertBlankPageIntent extends IntentBase {
+  kind: "insertBlankPage";
+  runId: StableId;
+  nodeIds: StableId[];
+}
+
+/** Insert a section break at the end of a run. */
+export interface InsertSectionBreakIntent extends IntentBase {
+  kind: "insertSectionBreak";
+  runId: StableId;
+  breakType: "nextPage" | "continuous";
+  nodeIds: StableId[];
+}
+
+/** Insert a cross-reference to a bookmark at the end of a run. */
+export interface InsertCrossRefIntent extends IntentBase {
+  kind: "insertCrossRef";
+  runId: StableId;
+  bookmark: string;
+  refKind: "text" | "page";
+  nodeIds: StableId[];
+}
+
+/** Insert a cover page (document-level). */
+export interface InsertCoverPageIntent extends IntentBase {
+  kind: "insertCoverPage";
+  /** CoverPageContent ({title, subtitle?, author?, …}) — carried verbatim. */
+  content: Record<string, unknown>;
+  nodeIds: StableId[];
+}
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

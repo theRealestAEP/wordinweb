@@ -16,6 +16,10 @@ import {
   setDropCapAt,
   setParagraphDivider,
   insertBookmarkAt,
+  insertBlankPageAt,
+  insertSectionBreak,
+  insertCrossReference,
+  insertCoverPage,
   isSafeUrl,
   applyTableOp,
   mergeParagraphBackward,
@@ -259,6 +263,42 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
         ids.reassign(fresh[k], intent.nodeIds[k]);
       }
       return true;
+    }
+    case "insertBlankPage": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const ok = insertBlankPageAt(doc, entry.firstT, entry.firstT.text.length);
+      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return ok;
+    }
+    case "insertSectionBreak": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const ok = insertSectionBreak(doc, entry.firstT, intent.breakType);
+      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return ok;
+    }
+    case "insertCrossRef": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const ok = insertCrossReference(doc, entry.firstT, entry.firstT.text.length, intent.bookmark, intent.refKind);
+      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return ok;
+    }
+    case "insertCoverPage": {
+      const before = trackedSet(ids, doc);
+      const ok = insertCoverPage(doc, intent.content as never);
+      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return ok;
     }
     case "setLink": {
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.

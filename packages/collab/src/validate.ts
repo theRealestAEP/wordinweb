@@ -110,6 +110,18 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "insertBookmark":
       if (typeof intent.name !== "string" || intent.name.length === 0 || intent.name.length > 400) return "insertBookmark: bad name";
       return null;
+    case "insertBlankPage":
+      return null;
+    case "insertSectionBreak":
+      if (intent.breakType !== "nextPage" && intent.breakType !== "continuous") return "insertSectionBreak: bad type";
+      return null;
+    case "insertCrossRef":
+      if (typeof intent.bookmark !== "string" || intent.bookmark.length === 0) return "insertCrossRef: bad bookmark";
+      if (intent.refKind !== "text" && intent.refKind !== "page") return "insertCrossRef: bad kind";
+      return null;
+    case "insertCoverPage":
+      if (typeof intent.content !== "object" || intent.content === null) return "insertCoverPage: bad content";
+      return null;
     case "formatRun":
     case "formatParagraph":
     case "setListType":
