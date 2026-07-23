@@ -20,6 +20,9 @@ import {
   insertSectionBreak,
   insertCrossReference,
   insertCoverPage,
+  setPageLayout,
+  setListLevel,
+  insertWordArtAt,
   isSafeUrl,
   applyTableOp,
   mergeParagraphBackward,
@@ -299,6 +302,26 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       const ok = insertCoverPage(doc, intent.content as never);
       if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
       return ok;
+    }
+    case "setPageLayout":
+      // Document-level page setup (all sections). No new nodes to id.
+      return setPageLayout(doc, intent.patch as never);
+    case "setListLevel": {
+      const blockEl = ids.elOf(intent.blockId);
+      if (!blockEl) return false;
+      const target = firstTextDescendant(blockEl) ?? blockEl;
+      return setListLevel(doc, [target], intent.delta);
+    }
+    case "insertWordArt": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const drawing = insertWordArtAt(doc, entry.firstT, intent.text, intent.preset);
+      if (!drawing) return false;
+      assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return true;
     }
     case "setLink": {
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.

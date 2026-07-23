@@ -374,7 +374,10 @@ export type Intent =
   | InsertBlankPageIntent
   | InsertSectionBreakIntent
   | InsertCrossRefIntent
-  | InsertCoverPageIntent;
+  | InsertCoverPageIntent
+  | SetPageLayoutIntent
+  | SetListLevelIntent
+  | InsertWordArtIntent;
 
 /** Insert a blank page at the end of a run. */
 export interface InsertBlankPageIntent extends IntentBase {
@@ -405,6 +408,31 @@ export interface InsertCoverPageIntent extends IntentBase {
   kind: "insertCoverPage";
   /** CoverPageContent ({title, subtitle?, author?, …}) — carried verbatim. */
   content: Record<string, unknown>;
+  nodeIds: StableId[];
+}
+
+/** Update page setup: margins/size/orientation/columns/borders. When target is
+ * omitted it applies to every section; document-level, identity transform. */
+export interface SetPageLayoutIntent extends IntentBase {
+  kind: "setPageLayout";
+  /** PageLayoutPatch ({margins?, size?, orientation?, columns?, …}) — carried
+   * verbatim; validated against a shape+range allowlist. */
+  patch: Record<string, unknown>;
+}
+
+/** Indent (+1) or outdent (-1) a paragraph's list nesting level. Block-level. */
+export interface SetListLevelIntent extends IntentBase {
+  kind: "setListLevel";
+  blockId: StableId;
+  delta: 1 | -1;
+}
+
+/** Insert decorative WordArt (a text drawing) at the end of a run. */
+export interface InsertWordArtIntent extends IntentBase {
+  kind: "insertWordArt";
+  runId: StableId;
+  text: string;
+  preset: "plain" | "archUp" | "archDown" | "wave" | "chevron";
   nodeIds: StableId[];
 }
 

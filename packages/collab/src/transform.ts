@@ -97,6 +97,9 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "insertSectionBreak":
     case "insertCrossRef":
     case "insertCoverPage":
+    case "setPageLayout":
+    case "setListLevel":
+    case "insertWordArt":
       // Run/block/document-level; no existing run's text offsets shift.
       return [];
   }
@@ -225,6 +228,9 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "insertSectionBreak":
     case "insertCrossRef":
     case "insertCoverPage":
+    case "setPageLayout":
+    case "setListLevel":
+    case "insertWordArt":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

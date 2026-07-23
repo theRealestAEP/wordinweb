@@ -122,6 +122,39 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "insertCoverPage":
       if (typeof intent.content !== "object" || intent.content === null) return "insertCoverPage: bad content";
       return null;
+    case "setPageLayout": {
+      // Positive allowlist + numeric bounds: the patch is free-form, so reject
+      // any unknown key or out-of-range scalar rather than pass it to core.
+      const p = intent.patch;
+      if (typeof p !== "object" || p === null) return "setPageLayout: bad patch";
+      const rec = p as Record<string, unknown>;
+      const allowed = ["margins", "mirrorMargins", "size", "orientation", "columns", "columnSeparator", "pageBorders"];
+      for (const k of Object.keys(rec)) if (!allowed.includes(k)) return `setPageLayout: unknown key ${k}`;
+      const inRange = (v: unknown, lo: number, hi: number) => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
+      if (rec.orientation !== undefined && rec.orientation !== "portrait" && rec.orientation !== "landscape") return "setPageLayout: bad orientation";
+      if (rec.columns !== undefined && !inRange(rec.columns, 1, 12)) return "setPageLayout: bad columns";
+      if (rec.margins !== undefined) {
+        if (typeof rec.margins !== "object" || rec.margins === null) return "setPageLayout: bad margins";
+        for (const [mk, mv] of Object.entries(rec.margins as Record<string, unknown>)) {
+          if (!["top", "right", "bottom", "left"].includes(mk)) return `setPageLayout: bad margin ${mk}`;
+          if (!inRange(mv, 0, 22)) return "setPageLayout: margin out of range";
+        }
+      }
+      if (rec.size !== undefined) {
+        const s = rec.size as Record<string, unknown>;
+        if (typeof s !== "object" || s === null || !inRange(s.width, 1, 22) || !inRange(s.height, 1, 22)) return "setPageLayout: bad size";
+      }
+      return null;
+    }
+    case "setListLevel":
+      if (intent.delta !== 1 && intent.delta !== -1) return "setListLevel: bad delta";
+      return null;
+    case "insertWordArt": {
+      if (typeof intent.text !== "string" || intent.text.length === 0) return "insertWordArt: empty text";
+      if (intent.text.length > 500) return "insertWordArt: text too long";
+      if (!["plain", "archUp", "archDown", "wave", "chevron"].includes(intent.preset)) return "insertWordArt: bad preset";
+      return null;
+    }
     case "formatRun":
     case "formatParagraph":
     case "setListType":
