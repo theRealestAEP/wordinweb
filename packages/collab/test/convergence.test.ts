@@ -198,17 +198,30 @@ describe("seeded multi-intent convergence (mixed intent types)", () => {
       const clientId = `c${ci}`;
       const clientSeq = step + 1;
       const base = server.seq;
+      // Unique id block per step so carried ids never collide across steps.
+      const idBase = 10000 + step * 10;
       const kindRoll = rand();
       let intent: Intent;
-      if (kindRoll < 0.4) {
+      if (kindRoll < 0.3) {
         intent = { kind: "insertText", clientId, clientSeq, base, at: { blockId, runId, offset: Math.floor(rand() * (len + 1)) }, text: "x" };
-      } else if (kindRoll < 0.6 && len > 0) {
+      } else if (kindRoll < 0.45 && len > 0) {
         const s0 = Math.floor(rand() * len);
         intent = { kind: "deleteText", clientId, clientSeq, base, blockId, runId, start: s0, end: Math.min(len, s0 + 1) };
-      } else if (kindRoll < 0.8) {
+      } else if (kindRoll < 0.6) {
         intent = { kind: "formatRun", clientId, clientSeq, base, blockId, runId, patch: { bold: true } };
-      } else {
+      } else if (kindRoll < 0.72) {
         intent = { kind: "formatParagraph", clientId, clientSeq, base, blockId, align: "center" };
+      } else if (kindRoll < 0.82 && len >= 2) {
+        // Sub-range format (F3): split into up to 3 pieces with carried ids.
+        const s0 = Math.floor(rand() * (len - 1));
+        const e0 = s0 + 1 + Math.floor(rand() * (len - s0 - 1));
+        intent = { kind: "formatRange", clientId, clientSeq, base, blockId, runId, start: s0, end: e0, patch: { italic: true }, beforeId: s0 > 0 ? idBase : undefined, middleId: idBase + 1, afterId: e0 < len ? idBase + 2 : undefined };
+      } else if (kindRoll < 0.9 && blocks.length > 1 && bi > 0) {
+        intent = { kind: "mergeParagraph", clientId, clientSeq, base, blockId };
+      } else {
+        // Split (carried ids); avoid splitting an empty run.
+        const off = len > 0 ? Math.floor(rand() * (len + 1)) : 0;
+        intent = { kind: "splitParagraph", clientId, clientSeq, base, at: { blockId, runId, offset: off }, newBlockId: idBase + 5, newRunId: idBase + 6 };
       }
 
       // One-in-flight: submit locally then immediately reconcile through the server.
