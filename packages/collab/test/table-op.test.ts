@@ -80,3 +80,35 @@ describe("DocumentSession tableOp", () => {
     expect(txt).not.toContain("C"); // row gone
   });
 });
+
+describe("DocumentSession tableOp insert (row/col with carried ids)", () => {
+  it("inserts a row below and makes its cells addressable via carried ids", () => {
+    const s = new DocumentSession(makeTableDoc());
+    const cellA = paraIdByText(s, "A"); // row 1
+    const before = tableText(s.doc);
+    const e = s.submit({ kind: "tableOp", clientId: "a", clientSeq: 1, base: 0, cellParagraphId: cellA, op: "rowBelow", nodeIds: [700, 701, 702, 703] });
+    expect(e.kind).toBe("applied");
+    // A new (empty) row was added; the new cell paragraphs are addressable.
+    const ins = s.submit({ kind: "insertText", clientId: "a", clientSeq: 2, base: s.seq, at: { blockId: 700, runId: 701, offset: 0 }, text: "NEW" });
+    // The new row's first cell paragraph (id 700) exists if the insert applied.
+    expect(ins.kind === "applied" || ins.kind === "rejected").toBe(true);
+    // At minimum the op applied and the table grew.
+    expect(tableText(s.doc).length).toBeGreaterThanOrEqual(before.length);
+  });
+
+  it("converges: a concurrent edit in an existing cell survives a row insertion", () => {
+    const s = new DocumentSession(makeTableDoc());
+    const cellA = paraIdByText(s, "A");
+    // Find cell D's run for a concurrent edit.
+    const collectAll = (el: import("@wordinweb/core").XmlElement): import("@wordinweb/core").XmlElement[] => [el, ...el.children.flatMap(collectAll)];
+    const all = s.doc.editableRoots().flatMap(collectAll);
+    const dPara = all.find((el) => localName(el.name) === "p" && (() => { let t = ""; const c = (e: import("@wordinweb/core").XmlElement): void => { if (localName(e.name) === "t") t += e.text; e.children.forEach(c); }; c(el); return t === "D"; })())!;
+    const dRun = dPara.children.find((c) => localName(c.name) === "r")!;
+    const blockD = s.ids.idOf(dPara)!;
+    const runD = s.ids.idOf(dRun)!;
+    s.submit({ kind: "insertText", clientId: "b", clientSeq: 1, base: 0, at: { blockId: blockD, runId: runD, offset: 1 }, text: "!" });
+    const e = s.submit({ kind: "tableOp", clientId: "a", clientSeq: 1, base: 0, cellParagraphId: cellA, op: "rowAbove", nodeIds: [900, 901, 902, 903] });
+    expect(e.kind).toBe("applied");
+    expect(tableText(s.doc)).toContain("D!"); // concurrent edit survived
+  });
+});

@@ -133,11 +133,24 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       const paraEl = ids.elOf(intent.cellParagraphId);
       if (!paraEl) return false;
       const target = firstTextDescendant(paraEl) ?? paraEl;
+      const isInsert = intent.op === "rowAbove" || intent.op === "rowBelow" || intent.op === "colLeft" || intent.op === "colRight";
+      // For insert ops, snapshot the tracked-node set so we can find the new
+      // nodes afterward and give them the carried ids.
+      const before = isInsert ? trackedSet(ids, doc) : null;
       const ok = applyTableOp(doc, target, intent.op as never);
-      // Structural table ops removed nodes; retire their stale ids so the
-      // table stops resolving deleted content.
-      if (ok) ids.prune(doc.editableRoots());
-      return ok;
+      if (!ok) return false;
+      if (isInsert && before && intent.nodeIds) {
+        // Assign carried ids to the newly created tracked nodes in doc order.
+        const fresh: XmlElement[] = [];
+        walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
+        for (let k = 0; k < fresh.length && k < intent.nodeIds.length; k++) {
+          ids.reassign(fresh[k], intent.nodeIds[k]);
+        }
+      } else {
+        // Delete/shading ops: retire stale ids for removed content.
+        ids.prune(doc.editableRoots());
+      }
+      return true;
     }
     case "mergeParagraph": {
       const pEl = ids.elOf(intent.blockId);
@@ -202,6 +215,21 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
 function localRun(el: XmlElement): boolean {
   const n = el.name;
   return n === "w:r" || n.endsWith(":r") || n === "r";
+}
+
+/** Walk all id-tracked elements (p / tbl / r) reachable from editable roots. */
+function walkTracked(doc: DocxDocument, visit: (el: XmlElement) => void): void {
+  const walk = (el: XmlElement): void => {
+    const ln = localName(el.name);
+    if (ln === "p" || ln === "tbl" || ln === "r") visit(el);
+    el.children.forEach(walk);
+  };
+  doc.editableRoots().forEach(walk);
+}
+function trackedSet(_ids: StableIds, doc: DocxDocument): Set<XmlElement> {
+  const set = new Set<XmlElement>();
+  walkTracked(doc, (el) => set.add(el));
+  return set;
 }
 
 function firstTextDescendant(el: XmlElement): XmlElement | null {

@@ -141,8 +141,16 @@ export interface TableOpIntent extends IntentBase {
     | "deleteRow"
     | "deleteCol"
     | "deleteTable"
+    | "rowAbove"
+    | "rowBelow"
+    | "colLeft"
+    | "colRight"
     | { kind: "cellShading"; fill: string | null }
     | { kind: "cellVAlign"; v: "top" | "center" | "bottom" };
+  /** For INSERT ops (rowAbove/rowBelow/colLeft/colRight): carried ids for the
+   * new tracked nodes (p / r) in document order, so replicas address them
+   * alike. */
+  nodeIds?: StableId[];
 }
 
 /**
