@@ -197,3 +197,85 @@ describe("resume from bundle (doc 12 §5)", () => {
     expect(srv2.session.seq).toBe(1); // the old-epoch pending never reached the sequencer
   });
 });
+
+describe("fuzz teardown round (doc 12 §10): seeded bursts → server death → re-seed → convergence", () => {
+  /** mulberry32 — same seeded PRNG discipline as the react fuzz harness. */
+  function rng(seed: number) {
+    let a = seed >>> 0;
+    return () => {
+      a |= 0; a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  for (const seed of [11, 23, 47]) {
+    it(`seed ${seed}: pre-kill state survives via a bundle; all parties converge in the new epoch`, () => {
+      const rand = rng(seed);
+      // Epoch 1: alice + bob trade random drained bursts (the supported
+      // one-in-flight discipline — each submit echoes synchronously here).
+      const srv1 = miniServer("g_epoch1");
+      const alice = new CollabConnection(srv1.attach(), "alice");
+      const bob = new CollabConnection(srv1.attach(), "bob");
+      alice.join("d");
+      bob.join("d");
+      const who = [alice, bob];
+      for (let i = 0; i < 40; i++) {
+        const c = who[Math.floor(rand() * 2)];
+        const len = text(c).length;
+        c.submit(ins(Math.floor(rand() * (len + 1)), String.fromCharCode(97 + Math.floor(rand() * 26))));
+      }
+      expect(text(alice)).toBe(text(bob)); // converged pre-kill
+      const preKill = Buffer.from(alice.doc!.save());
+      const aliceBundle = alice.exportBundle("d")!;
+      const bobBundle = bob.exportBundle("d")!;
+
+      // Server dies. Zero custody: srv2 starts knowing NOTHING; alice's
+      // bundle re-seeds a NEW epoch (doc 12 §5.3 — the browsers are the
+      // recovery machinery).
+      const srv2 = new DocumentSession(DocxDocument.load(aliceBundle.confirmedBytes));
+      srv2.installSidecar(aliceBundle.confirmedSidecar);
+      const peers2: { deliver: (m: ServerMessage) => void }[] = [];
+      const attach2 = () => {
+        const peer = { deliver: (_m: ServerMessage) => {} };
+        peers2.push(peer);
+        return {
+          send: (msg: ClientMessage) => {
+            if (msg.t === "hello") {
+              const cp = srv2.checkpoint();
+              peer.deliver({ t: "welcome", docId: "d", seq: cp.seq, snapshot: Buffer.from(cp.docx).toString("base64"),
+                sidecar: cp.sidecar, tail: srv2.entriesSince(cp.seq), genesisId: "g_epoch2", mode: "plaintext" });
+            } else if (msg.t === "submit") {
+              const entry = srv2.submit(msg.intent);
+              for (const p of peers2) p.deliver({ t: "broadcast", entries: [entry] });
+            }
+          },
+          onMessage: (cb: (m: ServerMessage) => void) => { peer.deliver = cb; },
+        };
+      };
+
+      // The revived session equals the pre-kill confirmed state byte-for-byte.
+      expect(Buffer.from(srv2.checkpoint().docx).equals(preKill)).toBe(true);
+
+      // Alice rejoins her own re-seed (epoch changed for her too — fine);
+      // bob resumes with his old-epoch bundle and lands in case 2.
+      let bobForked = false;
+      const alice2 = new CollabConnection(attach2(), "alice");
+      alice2.resume(aliceBundle);
+      const bob2 = new CollabConnection(attach2(), "bob", { onEpochChange: () => (bobForked = true) });
+      bob2.resume(bobBundle);
+      expect(bobForked).toBe(true);
+      expect(Buffer.from(bob2.doc!.save()).equals(preKill)).toBe(true); // same content — nothing lost
+
+      // Post-revival editing converges across both + the server.
+      for (let i = 0; i < 20; i++) {
+        const c = [alice2, bob2][Math.floor(rand() * 2)];
+        const len = text(c).length;
+        c.submit(ins(Math.floor(rand() * (len + 1)), String.fromCharCode(97 + Math.floor(rand() * 26))));
+      }
+      expect(text(alice2)).toBe(text(bob2));
+      expect(Buffer.from(alice2.doc!.save()).equals(Buffer.from(srv2.checkpoint().docx))).toBe(true);
+    });
+  }
+});
