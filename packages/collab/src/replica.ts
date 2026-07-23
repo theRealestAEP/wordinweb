@@ -84,6 +84,29 @@ export class ClientReplica {
   }
 
   /**
+   * The replica's durable state — exactly the fields the doc-12 §4 bundle
+   * persists (the persistence layer is a thin observer over this). The bytes
+   * and sidecar are the CONFIRMED baseline, never the live optimistic doc:
+   * a bundle must be replayable (confirmed + pending re-submit), and
+   * snapshotting optimistic state would bake unsequenced edits into what a
+   * re-seed later presents as canonical (doc 03 re-capture rule).
+   * `pending` is a copy — callers can't mutate reconciliation state.
+   */
+  exportBundleState(): {
+    confirmedSeq: number;
+    confirmedBytes: Uint8Array;
+    confirmedSidecar: ReturnType<StableIds["exportSidecar"]>;
+    pending: Intent[];
+  } {
+    return {
+      confirmedSeq: this.confirmedSeq,
+      confirmedBytes: this.confirmedBytes,
+      confirmedSidecar: this.confirmedSidecar,
+      pending: [...this.pending],
+    };
+  }
+
+  /**
    * Receive the server's canonical broadcast entries (in seq order) and
    * reconcile. The invariant is: live doc = confirmed baseline + remaining
    * pending. So every receive restores to the confirmed baseline, applies the

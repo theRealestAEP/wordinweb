@@ -1,6 +1,7 @@
 import { ClientReplica } from "./replica.js";
 import { Intent } from "./intents.js";
 import { ClientMessage, ServerMessage, PROTOCOL_VERSION, PresencePosition } from "./protocol.js";
+import type { DocBundle } from "./bundle.js";
 
 /**
  * A transport the connection drives: send a client message, and register a
@@ -20,6 +21,16 @@ export interface ConnectionCallbacks {
   onPresence?: (participant: string, position: PresencePosition | null) => void;
   /** The server refused the connection (e.g. version mismatch). */
   onRefused?: (reason: string) => void;
+  /**
+   * Resume landed in a DIFFERENT epoch than the bundle's (doc 12 §5 case 2):
+   * someone re-seeded while this client was away. The connection has taken
+   * the server's state and did NOT replay the bundle's pending intents
+   * (they belong to the old epoch — replaying them would be a silent
+   * cross-epoch merge, which the fork rule forbids). The consumer decides
+   * what to do with the old bundle: doc-15 lineage fast-forward/draft, or
+   * pre-lineage, "your offline copy is saved as a draft".
+   */
+  onEpochChange?: (storedGenesisId: string, currentGenesisId: string) => void;
 }
 
 function base64ToBytes(b64: string): Uint8Array {
@@ -104,6 +115,47 @@ export class CollabConnection {
     });
   }
 
+  /** Bundle being resumed from (set by resume(), consumed at welcome). */
+  private resuming: DocBundle | null = null;
+
+  /**
+   * Rejoin a document from a persisted bundle (doc 12 §5). Restores the
+   * clientSeq watermark FIRST — a fresh counter would reuse already-
+   * sequenced (clientId, clientSeq) keys and the server would dedup this
+   * client's NEW edits as re-sends (silent edit loss). The welcome decides
+   * the case: same epoch ⇒ replay pending (below); different ⇒
+   * onEpochChange, pending withheld.
+   */
+  resume(bundle: DocBundle, token?: string): void {
+    this.clientSeq = Math.max(this.clientSeq, bundle.clientSeq);
+    this.resuming = bundle;
+    this.transport.send({
+      t: "hello",
+      protocolVersion: PROTOCOL_VERSION,
+      docId: bundle.docId,
+      clientId: this.clientId,
+      token,
+      sinceSeq: bundle.confirmedSeq,
+      genesisId: bundle.genesisId,
+    });
+  }
+
+  /**
+   * The current durable state as a doc-12 bundle, or null before welcome.
+   * `savedAt` is stamped by the persister at write time (clock injection —
+   * this module never reads Date.now itself).
+   */
+  exportBundle(docId: string): DocBundle | null {
+    if (!this.replica || this.genesisId === null) return null;
+    return {
+      docId,
+      genesisId: this.genesisId,
+      ...this.replica.exportBundleState(),
+      clientSeq: this.clientSeq,
+      savedAt: 0,
+    };
+  }
+
   /** The live document (null until welcome). The editor renders this. */
   get doc() {
     return this.replica?.doc ?? null;
@@ -162,6 +214,29 @@ export class CollabConnection {
         this.genesisId = msg.genesisId;
         this.mode = msg.mode;
         if (msg.tail.length) this.replica.receive(msg.tail);
+
+        // Resume epilogue (doc 12 §5). Case 1 — same epoch: replay the
+        // bundle's pending intents by RE-SENDING them, untracked. This is
+        // deliberately fire-and-observe: an intent the server already
+        // sequenced pre-crash dedups to its old entry (seq ≤ welcome.seq,
+        // filtered as stale — it's already inside the snapshot); one it
+        // never saw sequences fresh and arrives as an ordinary remote
+        // broadcast this replica applies in place. Either way the edit ends
+        // up in the doc exactly once, with zero client-side bookkeeping —
+        // the (clientId, clientSeq) dedup is the whole mechanism.
+        // Case 2 — different epoch: someone re-seeded while we were away;
+        // pending belongs to the OLD epoch and is withheld (replaying it
+        // would silently merge across epochs — the fork rule forbids it);
+        // the consumer is told and decides (draft / doc-15 lineage).
+        const resumed = this.resuming;
+        this.resuming = null;
+        if (resumed) {
+          if (resumed.genesisId === msg.genesisId) {
+            for (const intent of resumed.pending) this.transport.send({ t: "submit", intent });
+          } else {
+            this.cb.onEpochChange?.(resumed.genesisId, msg.genesisId);
+          }
+        }
         this.cb.onChange?.();
         return;
       }
