@@ -80,6 +80,11 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (!presets.includes(intent.preset)) return "insertShape: bad preset";
       return null;
     }
+    case "replyComment":
+      if (typeof intent.text !== "string" || intent.text.length === 0) return "replyComment: empty";
+      if (intent.text.length > 20_000) return "replyComment: too long";
+      if (typeof intent.parentId !== "string" || !Array.isArray(intent.paraIds) || typeof intent.date !== "string") return "replyComment: bad fields";
+      return null;
     case "formatRun":
     case "formatParagraph":
     case "setListType":

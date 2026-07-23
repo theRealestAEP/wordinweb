@@ -11,6 +11,7 @@ import {
   applyTableOp,
   mergeParagraphBackward,
   addComment,
+  replyToComment,
   recordedProvenance,
   validatePastedOoxml,
   parseXml,
@@ -47,6 +48,17 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
     case "insertText": {
       const caret = resolveCaret(ids, runMap, intent.at);
       if (!caret) return false;
+      if (intent.suggest) {
+        // Tracked change: record the insertion as a w:ins with carried
+        // author/date; the revision w:id is scan-based (deterministic).
+        const s = intent.suggest;
+        const suggestCtx = { suggesting: true, revMeta: () => ({ author: s.author, date: s.date, nextId: () => doc.nextRevisionId() }) };
+        const before = trackedSet(ids, doc);
+        applyInsertText(doc, caret, intent.text, suggestCtx);
+        if (doc.stableIds) { doc.refresh(); ids.assignFromRoots(doc.editableRoots()); }
+        void before;
+        return true;
+      }
       applyInsertText(doc, caret, intent.text, ctx);
       return true;
     }
@@ -238,6 +250,12 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
         ids.reassign(fresh[k], intent.nodeIds[k]);
       }
       return true;
+    }
+    case "replyComment": {
+      const prov = recordedProvenance({ dates: [intent.date], paraIds: intent.paraIds });
+      const ok = replyToComment(doc, intent.parentId, intent.text, intent.author, intent.initials, prov);
+      if (ok && doc.stableIds) doc.stableIds.assignFromRoots(doc.editableRoots());
+      return ok;
     }
     case "insertBreak": {
       const runEl = ids.elOf(intent.runId);

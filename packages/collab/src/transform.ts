@@ -78,6 +78,9 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "insertShape":
       // Sibling insertion at end of run; no text offsets shift.
       return [];
+    case "replyComment":
+      // Comment-part change; no document run offsets shift.
+      return [];
   }
 }
 
@@ -189,6 +192,8 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       return { ...intent, base: newBase };
     case "insertMath":
     case "insertShape":
+      return { ...intent, base: newBase };
+    case "replyComment":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

@@ -33,11 +33,15 @@ interface IntentBase {
   base: number;
 }
 
-/** Insert `text` at a position. */
+/** Insert `text` at a position. With `suggest`, the insertion is recorded as
+ * a tracked change (w:ins) carrying the author + date (revision tracking /
+ * suggesting mode), rather than a plain insert. */
 export interface InsertTextIntent extends IntentBase {
   kind: "insertText";
   at: Position;
   text: string;
+  /** Tracked-change (suggesting) metadata; omit for a plain insert. */
+  suggest?: { author: string; date: string };
 }
 
 /** Delete `[start, end)` characters within a single run. */
@@ -261,6 +265,24 @@ export interface InsertShapeIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
+/**
+ * Reply to an existing comment (threading). Addressed by the parent comment's
+ * id (a deterministic string). Carries provenance (w14:paraId candidates in
+ * consumption order + the w:date) so every replica writes identical XML. No
+ * document run's text moves — identity transform.
+ */
+export interface ReplyCommentIntent extends IntentBase {
+  kind: "replyComment";
+  parentId: string;
+  text: string;
+  author: string;
+  initials?: string;
+  date: string;
+  /** paraId candidates in the order replyToComment consumes them: the reply's
+   * paraId, preceded by the parent's if the parent lacks one. */
+  paraIds: string[];
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -276,7 +298,8 @@ export type Intent =
   | InsertImageIntent
   | InsertBreakIntent
   | InsertMathIntent
-  | InsertShapeIntent;
+  | InsertShapeIntent
+  | ReplyCommentIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order
