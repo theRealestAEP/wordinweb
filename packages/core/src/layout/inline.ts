@@ -64,6 +64,10 @@ export interface FieldContext {
    * (Word recomputes REF on open; cached results are stale). undefined when
    * the bookmark is unknown — the caller then keeps the cache. */
   refText?: (bookmark: string) => string | undefined;
+  /** Clock for DATE/TIME field evaluation. Injectable so layout is
+   * deterministic under test/harness (plan doc 09 M3 — layout-time new Date()
+   * otherwise makes field rendering wall-clock-dependent). Defaults to now. */
+  now?: Date;
   /** REF `\p`: the referenced bookmark's position relative to this field
    * occurrence ("above"/"below"), or undefined when the target is unknown. */
   refPosition?: (fieldKey: object) => "above" | "below" | undefined;
@@ -3716,7 +3720,7 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       // live clock (the parity harness freezes it to the reference PDF's
       // creation instant, so both sides evaluate the same moment).
       const picture = /\\@\s+"([^"]*)"/.exec(instr)?.[1];
-      return formatDatePicture(new Date(), picture ?? (keyword === "TIME" ? "h:mm am/pm" : "M/d/yyyy"));
+      return formatDatePicture(ctx.now ?? new Date(), picture ?? (keyword === "TIME" ? "h:mm am/pm" : "M/d/yyyy"));
     }
     case "STYLEREF": {
       // Word recomputes STYLEREF on open (the docx cache reflects the style's
