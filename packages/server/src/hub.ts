@@ -33,6 +33,10 @@ export interface DocProvider {
 export interface AuthResult {
   userId: string;
   role: "editor" | "viewer";
+  /** Token expiry in epoch ms (from the JWT `exp`). When set, the hub enforces
+   * it on the LIVE socket — not just at connect — so a short-lived token
+   * actually limits the session (plan doc 06/11 gate 5). Omit for no expiry. */
+  expiresAt?: number;
 }
 export interface TokenVerifier {
   /** Verify a token for a docId. Return the authorized identity, or null to
@@ -60,6 +64,7 @@ export class CollabHub {
    * rehydrate from snapshot+log on first access and every sequenced entry is
    * durably appended before broadcast. */
   private auth = new Map<string, AuthResult>();
+  private connById = new Map<string, Connection>();
 
   constructor(
     private provider: DocProvider,
@@ -68,7 +73,46 @@ export class CollabHub {
      * that authorizes the requested docId; without it the hub is auth-off
      * (dev/demo only). */
     private verifier?: TokenVerifier,
+    /** Injectable clock (epoch ms) for token-expiry checks; defaults to
+     * Date.now. Injected in tests for determinism. */
+    private now: () => number = () => Date.now(),
   ) {}
+
+  /** True if the connection's token has expired (live-socket enforcement). */
+  private expired(connId: string): boolean {
+    const a = this.auth.get(connId);
+    return a?.expiresAt !== undefined && a.expiresAt <= this.now();
+  }
+
+  /** Force-disconnect a connection with a refusal (expiry/revocation). */
+  private kick(conn: Connection, reason: string): void {
+    conn.send({ t: "refused", reason });
+    this.disconnect(conn);
+  }
+
+  /**
+   * Revoke all live sessions for a user (the app's backend calls this when it
+   * deprovisions/downgrades someone — plan doc 06 gate 5). They are refused
+   * and disconnected immediately, not at next reconnect.
+   */
+  revoke(userId: string): void {
+    for (const [connId, a] of [...this.auth]) {
+      if (a.userId === userId) {
+        const conn = this.connById.get(connId);
+        if (conn) this.kick(conn, "revoked");
+      }
+    }
+  }
+
+  /** Sweep expired sessions (call periodically from the transport). */
+  sweepExpired(): void {
+    for (const [connId] of [...this.auth]) {
+      if (this.expired(connId)) {
+        const conn = this.connById.get(connId);
+        if (conn) this.kick(conn, "token-expired");
+      }
+    }
+  }
 
   /** Handle an inbound message from a connection. Async because a storage-
    * backed hello rehydrates and a submit persists before broadcast. */
@@ -90,6 +134,7 @@ export class CollabHub {
         const room = await this.room(msg.docId);
         room.conns.add(conn);
         this.connDoc.set(conn.id, msg.docId);
+        this.connById.set(conn.id, conn);
         conn.send({
           t: "welcome",
           docId: msg.docId,
@@ -103,6 +148,12 @@ export class CollabHub {
         const docId = this.connDoc.get(conn.id);
         if (!docId) {
           conn.send({ t: "refused", reason: "not-joined" });
+          return;
+        }
+        // Live-socket token-expiry enforcement (gate 5): a session outlives
+        // its token only until the next action, then is cut.
+        if (this.expired(conn.id)) {
+          this.kick(conn, "token-expired");
           return;
         }
         // Role enforcement at the sequencer (doc 06): a viewer's edits are
@@ -139,6 +190,7 @@ export class CollabHub {
     const docId = this.connDoc.get(conn.id);
     this.connDoc.delete(conn.id);
     this.auth.delete(conn.id);
+    this.connById.delete(conn.id);
     if (docId) this.rooms.get(docId)?.conns.delete(conn);
   }
 

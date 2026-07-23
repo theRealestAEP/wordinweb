@@ -301,3 +301,43 @@ describe("CollabHub auth (token verifier)", () => {
     expect(c.last()).toEqual({ t: "refused", reason: "read-only" });
   });
 });
+
+describe("CollabHub JWT live-expiry + revocation (gate 5)", () => {
+  it("cuts a session whose token has expired at the next action", async () => {
+    let now = 1000;
+    const verifier: TokenVerifier = { verify: () => ({ userId: "u", role: "editor", expiresAt: 5000 }) };
+    const hub = new CollabHub(provider, undefined, verifier, () => now);
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "t", sinceSeq: 0 });
+    expect(c.last().t).toBe("welcome");
+    now = 6000; // token now expired
+    await hub.handle(c, { t: "submit", intent: { kind: "insertText", clientId: "u", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" } });
+    expect(c.last()).toEqual({ t: "refused", reason: "token-expired" });
+  });
+
+  it("sweepExpired kicks expired sessions proactively", async () => {
+    let now = 1000;
+    const verifier: TokenVerifier = { verify: () => ({ userId: "u", role: "editor", expiresAt: 2000 }) };
+    const hub = new CollabHub(provider, undefined, verifier, () => now);
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "t", sinceSeq: 0 });
+    now = 3000;
+    hub.sweepExpired();
+    expect(c.last()).toEqual({ t: "refused", reason: "token-expired" });
+  });
+
+  it("revoke(userId) disconnects that user's live sessions immediately", async () => {
+    const verifier: TokenVerifier = { verify: (tok) => tok === "alice" ? { userId: "alice", role: "editor" } : { userId: "bob", role: "editor" } };
+    const hub = new CollabHub(provider, undefined, verifier);
+    const a = new FakeConn("a");
+    const b = new FakeConn("b");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "alice", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "bob", sinceSeq: 0 });
+    hub.revoke("alice");
+    expect(a.last()).toEqual({ t: "refused", reason: "revoked" });
+    // bob is untouched; his edit still broadcasts.
+    const beforeB = b.received.length;
+    await hub.handle(b, { t: "submit", intent: { kind: "insertText", clientId: "bob", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" } });
+    expect(b.received.length).toBeGreaterThan(beforeB);
+  });
+});
