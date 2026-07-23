@@ -22,6 +22,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./collab": {
+      "types": "./dist/collab.d.ts",
+      "import": "./dist/collab.js"
     }
   },
   "files": [
@@ -46,6 +50,7 @@
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@wordinweb/core": "0.1.0",
+    "@wordinweb/collab": "0.1.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0"
   }

@@ -46,6 +46,11 @@ export class CollabConnection {
     this.transport.onMessage((msg) => this.onServer(msg));
   }
 
+  /** Replace the callbacks (used by bindEditor to attach after construction). */
+  setCallbacks(cb: ConnectionCallbacks): void {
+    this.cb = cb;
+  }
+
   /** Join a document. The server replies with a welcome (snapshot + tail). */
   join(docId: string, token?: string): void {
     this.transport.send({ t: "hello", protocolVersion: PROTOCOL_VERSION, docId, token, sinceSeq: 0 });

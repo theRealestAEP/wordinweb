@@ -5,6 +5,8 @@
  */
 export { ClientReplica } from "./replica.js";
 export { CollabConnection, type ClientTransport, type ConnectionCallbacks } from "./connection.js";
+export { bindEditor, type EditorBridge, type EditorBinding } from "./binding.js";
+export { createWebSocketTransport, type SocketLike } from "./ws-transport.js";
 export * from "./intents.js";
 export {
   PROTOCOL_VERSION,
