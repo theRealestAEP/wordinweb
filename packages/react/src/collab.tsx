@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, createElement, type ReactNode } from "react";
 import type { DocxDocument } from "@wordinweb/core";
+import { DocxView } from "./index.js";
 import {
   CollabConnection,
   createWebSocketTransport,
@@ -31,6 +32,9 @@ export interface UseCollabOptions {
 export interface CollabSession {
   /** The live document to render (null until the welcome arrives). */
   doc: DocxDocument | null;
+  /** Monotonically increases on every reconciled change — a cheap re-render
+   * signal (the doc object may be reloaded by reconciliation). */
+  version: number;
   /** True once joined and the snapshot is loaded. */
   ready: boolean;
   /** Submit a local edit (bookkeeping filled by the connection). */
@@ -53,6 +57,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const { url, docId, clientId, token, createSocket } = opts;
   const connRef = useRef<CollabConnection | null>(null);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
+  const [version, setVersion] = useState(0);
   const [ready, setReady] = useState(false);
   const [presence, setPresence] = useState<Record<string, PresencePosition | null>>({});
   const [refused, setRefused] = useState<string | null>(null);
@@ -64,6 +69,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       onChange: () => {
         setDoc(conn.doc);
         setReady(conn.ready);
+        setVersion((v) => v + 1); // signal a re-render on every reconciled change
       },
       onPresence: (participant, pos) =>
         setPresence((prev) => ({ ...prev, [participant]: pos })),
@@ -79,12 +85,49 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
 
   return {
     doc,
+    version,
     ready,
     submit: (intent) => connRef.current?.submit(intent),
     setPresence: (pos) => connRef.current?.setPresence(pos),
     presence,
     refused,
   };
+}
+
+/**
+ * A complete collaborative editor: joins a document over the collab server and
+ * renders its live, reconciled state, forwarding local edits as intents. This
+ * is the inbound + outbound integration composed for you — the app supplies
+ * only the connection params.
+ *
+ * Rendering strategy: `DocxView` renders the reconciled document (serialized
+ * to bytes) and re-renders on every reconciled change (keyed on `version`),
+ * while local edits flow out through the injected `collab` prop. This is the
+ * simple, correct binding; an incremental in-place variant is a later
+ * optimization. The visual rendering runs in the browser (as all of DocxView
+ * does); the protocol/convergence/binding it rides on are covered by the
+ * headless test suites.
+ */
+export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): ReactNode {
+  const session = useCollab(opts);
+  // Serialize the reconciled doc so DocxView can render the current state; keyed
+  // on version so a broadcast re-renders. save() is side-effect-free, so
+  // snapshotting on each change never perturbs the live doc.
+  const bytes = useMemo(
+    () => (session.doc ? session.doc.save() : null),
+    [session.doc, session.version],
+  );
+
+  if (session.refused) return createElement("div", { className: "dxw-collab-refused" }, `Please refresh — ${session.refused}.`);
+  if (!session.ready || !bytes) return createElement("div", { className: "dxw-collab-connecting" }, "Connecting…");
+
+  return createElement(DocxView, {
+    source: bytes,
+    collab: session,
+    editable: opts.editable ?? true,
+    // Re-key on version so the reconciled document is re-rendered.
+    key: session.version,
+  });
 }
 
 /** Structural type for the DocxView `collab` prop — mirrors CollabSession so
