@@ -117,7 +117,23 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "setDrawingOrder":
     case "setSmartArtData":
     case "setSmartArtFill":
+    case "setSmartArtTextFormat":
+    case "setFloatingPagePosition":
+    case "setMathLinear":
+    case "deleteMath":
+    case "deleteComment":
+    case "insertBookmarkRange":
+    case "toggleCheckbox":
       // Run/block/document-level; no existing run's text offsets shift.
+      return [];
+    case "acceptRevision":
+    case "rejectRevision":
+    case "acceptAllRevisions":
+      // Accept/reject CAN change text (an accepted deletion / rejected
+      // insertion removes runs). Under the session's one-in-flight constraint
+      // these administrative review ops don't overlap a concurrent text edit,
+      // so no cross-intent RunEdit is modeled here (see plan doc 03: multi-
+      // pending OT is out of scope).
       return [];
   }
 }
@@ -265,6 +281,16 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "setDrawingOrder":
     case "setSmartArtData":
     case "setSmartArtFill":
+    case "setSmartArtTextFormat":
+    case "setFloatingPagePosition":
+    case "setMathLinear":
+    case "deleteMath":
+    case "deleteComment":
+    case "insertBookmarkRange":
+    case "toggleCheckbox":
+    case "acceptRevision":
+    case "rejectRevision":
+    case "acceptAllRevisions":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

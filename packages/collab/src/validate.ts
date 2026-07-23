@@ -218,6 +218,43 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (intent.color !== null && !/^[0-9a-fA-F]{6}$/.test(intent.color)) return "setSmartArtFill: bad color";
       if (intent.nodeIndex !== undefined && (typeof intent.nodeIndex !== "number" || !Number.isInteger(intent.nodeIndex) || intent.nodeIndex < 0 || intent.nodeIndex > 1000)) return "setSmartArtFill: bad nodeIndex";
       return null;
+    case "setSmartArtTextFormat": {
+      const f = intent.format;
+      if (typeof f !== "object" || f === null) return "setSmartArtTextFormat: bad format";
+      if (typeof f.fontFamily !== "string" || f.fontFamily.length === 0 || f.fontFamily.length > 100) return "setSmartArtTextFormat: bad fontFamily";
+      if (typeof f.fontSizePt !== "number" || !Number.isFinite(f.fontSizePt) || f.fontSizePt < 1 || f.fontSizePt > 1638) return "setSmartArtTextFormat: bad fontSizePt";
+      if (!/^[0-9a-fA-F]{6}$/.test(f.color)) return "setSmartArtTextFormat: bad color";
+      if (typeof f.bold !== "boolean" || typeof f.italic !== "boolean") return "setSmartArtTextFormat: bad bold/italic";
+      if (!["left", "center", "right"].includes(f.alignment)) return "setSmartArtTextFormat: bad alignment";
+      if (intent.nodeIndex !== undefined && (typeof intent.nodeIndex !== "number" || !Number.isInteger(intent.nodeIndex) || intent.nodeIndex < 0 || intent.nodeIndex > 1000)) return "setSmartArtTextFormat: bad nodeIndex";
+      return null;
+    }
+    case "setFloatingPagePosition": {
+      const ok = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= -5000 && v <= 5000;
+      if (!ok(intent.xPx) || !ok(intent.yPx)) return "setFloatingPagePosition: bad position";
+      return null;
+    }
+    case "setMathLinear":
+      if (typeof intent.mathText !== "string" || intent.mathText.length === 0 || intent.mathText.length > 1000) return "setMathLinear: bad mathText";
+      return null;
+    case "deleteMath":
+      return null;
+    case "deleteComment":
+      if (typeof intent.commentId !== "string" || intent.commentId.length === 0 || intent.commentId.length > 64) return "deleteComment: bad id";
+      return null;
+    case "insertBookmarkRange":
+      // Bookmark names: letters/digits/underscore, must start with letter/_.
+      if (typeof intent.name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,39}$/.test(intent.name)) return "insertBookmarkRange: bad name";
+      if (!nonNegInt(intent.start) || !nonNegInt(intent.end) || intent.end <= intent.start) return "insertBookmarkRange: bad range";
+      return null;
+    case "toggleCheckbox":
+      return null;
+    case "acceptRevision":
+    case "rejectRevision":
+      if (!nonNegInt(intent.index) || intent.index > 100000) return `${intent.kind}: bad index`;
+      return null;
+    case "acceptAllRevisions":
+      return null;
     case "setLineNumbering": {
       const p = intent.patch;
       if (typeof p !== "object" || p === null || typeof p.enabled !== "boolean") return "setLineNumbering: bad patch";

@@ -394,7 +394,17 @@ export type Intent =
   | SetImageWrapIntent
   | SetDrawingOrderIntent
   | SetSmartArtDataIntent
-  | SetSmartArtFillIntent;
+  | SetSmartArtFillIntent
+  | SetSmartArtTextFormatIntent
+  | SetFloatingPagePositionIntent
+  | SetMathLinearIntent
+  | DeleteMathIntent
+  | DeleteCommentIntent
+  | InsertBookmarkRangeIntent
+  | ToggleCheckboxIntent
+  | AcceptRevisionIntent
+  | RejectRevisionIntent
+  | AcceptAllRevisionsIntent;
 
 /** Insert a blank page at the end of a run. */
 export interface InsertBlankPageIntent extends IntentBase {
@@ -602,6 +612,82 @@ export interface SetSmartArtFillIntent extends IntentBase {
   runId: StableId;
   color: string | null;
   nodeIndex?: number;
+}
+
+/** Set the text format of a SmartArt node (or all nodes). */
+export interface SetSmartArtTextFormatIntent extends IntentBase {
+  kind: "setSmartArtTextFormat";
+  runId: StableId;
+  format: {
+    fontFamily: string;
+    fontSizePt: number;
+    color: string; // 6-hex
+    bold: boolean;
+    italic: boolean;
+    alignment: "left" | "center" | "right";
+  };
+  nodeIndex?: number;
+}
+
+/** Position the (floating) drawing carried by a run relative to the page. */
+export interface SetFloatingPagePositionIntent extends IntentBase {
+  kind: "setFloatingPagePosition";
+  runId: StableId;
+  xPx: number;
+  yPx: number;
+}
+
+/** Replace the equation of the math object in a paragraph (linear syntax).
+ * Math (m:oMath) lives at paragraph level, so this is block-addressed. */
+export interface SetMathLinearIntent extends IntentBase {
+  kind: "setMathLinear";
+  blockId: StableId;
+  mathText: string;
+}
+
+/** Delete the math object in a paragraph. */
+export interface DeleteMathIntent extends IntentBase {
+  kind: "deleteMath";
+  blockId: StableId;
+}
+
+/** Delete a comment (and its reply thread) by id. */
+export interface DeleteCommentIntent extends IntentBase {
+  kind: "deleteComment";
+  commentId: string;
+}
+
+/** Wrap a sub-range of a run's text in a named bookmark. */
+export interface InsertBookmarkRangeIntent extends IntentBase {
+  kind: "insertBookmarkRange";
+  runId: StableId;
+  name: string;
+  start: number;
+  end: number;
+}
+
+/** Toggle the checkbox content control carried by a run. */
+export interface ToggleCheckboxIntent extends IntentBase {
+  kind: "toggleCheckbox";
+  runId: StableId;
+}
+
+/** Accept one tracked change, addressed by its position in document order
+ * (collectRevisions order — deterministic across replicas). */
+export interface AcceptRevisionIntent extends IntentBase {
+  kind: "acceptRevision";
+  index: number;
+}
+
+/** Reject one tracked change, addressed by document-order index. */
+export interface RejectRevisionIntent extends IntentBase {
+  kind: "rejectRevision";
+  index: number;
+}
+
+/** Accept every tracked change in the document. */
+export interface AcceptAllRevisionsIntent extends IntentBase {
+  kind: "acceptAllRevisions";
 }
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a

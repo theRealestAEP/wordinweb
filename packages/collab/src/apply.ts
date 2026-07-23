@@ -40,6 +40,18 @@ import {
   setDrawingOrder,
   setSmartArtData,
   setSmartArtFill,
+  setSmartArtTextFormat,
+  setFloatingPagePosition,
+  setMathLinear,
+  deleteMath,
+  deleteComment,
+  insertBookmarkAroundSelection,
+  checkboxStateElement,
+  toggleCheckbox,
+  collectRevisions,
+  acceptRevision,
+  rejectRevision,
+  acceptAllRevisions,
   isSafeUrl,
   applyTableOp,
   mergeParagraphBackward,
@@ -469,6 +481,67 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       if (!drawing) return false;
       return setSmartArtFill(doc, drawing, intent.color, intent.nodeIndex);
     }
+    case "setSmartArtTextFormat": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setSmartArtTextFormat(doc, drawing, intent.format as never, intent.nodeIndex);
+    }
+    case "setFloatingPagePosition": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return setFloatingPagePosition(doc, drawing, intent.xPx, intent.yPx);
+    }
+    case "setMathLinear": {
+      const blockEl = ids.elOf(intent.blockId);
+      if (!blockEl) return false;
+      const math = firstMathIn(blockEl);
+      if (!math) return false;
+      return setMathLinear(doc, math, intent.mathText);
+    }
+    case "deleteMath": {
+      const blockEl = ids.elOf(intent.blockId);
+      if (!blockEl) return false;
+      const math = firstMathIn(blockEl);
+      if (!math) return false;
+      return deleteMath(doc, math);
+    }
+    case "deleteComment":
+      return deleteComment(doc, intent.commentId);
+    case "insertBookmarkRange": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      if (intent.end > entry.firstT.text.length) return false;
+      const seg: SelectionSegment = { run: entry.run, t: entry.firstT, start: intent.start, end: intent.end, props: entry.run.props };
+      return insertBookmarkAroundSelection(doc, [seg], intent.name);
+    }
+    case "toggleCheckbox": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry) return false;
+      const cbEl = checkboxStateElement(entry.run, entry.firstT);
+      if (!cbEl) return false;
+      toggleCheckbox(doc, cbEl);
+      return true;
+    }
+    case "acceptRevision": {
+      const refs = collectRevisions(doc);
+      if (intent.index >= refs.length) return false;
+      return acceptRevision(doc, refs[intent.index]);
+    }
+    case "rejectRevision": {
+      const refs = collectRevisions(doc);
+      if (intent.index >= refs.length) return false;
+      return rejectRevision(doc, refs[intent.index]);
+    }
+    case "acceptAllRevisions":
+      return acceptAllRevisions(doc) > 0;
     case "setLink": {
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.
       const runEl = ids.elOf(intent.runId);
@@ -633,6 +706,17 @@ function firstDrawingIn(el: XmlElement): XmlElement | null {
   if (localName(el.name) === "drawing") return el;
   for (const c of el.children) {
     const found = firstDrawingIn(c);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** The m:oMath element inside a run's subtree (math-edit intents address a math
+ * object via the run that carries it). */
+function firstMathIn(el: XmlElement): XmlElement | null {
+  if (localName(el.name) === "oMath") return el;
+  for (const c of el.children) {
+    const found = firstMathIn(c);
     if (found) return found;
   }
   return null;
