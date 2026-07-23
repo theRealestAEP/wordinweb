@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { EditorIntent } from "@wordinweb/core";
 import {
   collectRevisions,
   DocxDocument,
@@ -318,6 +319,15 @@ export interface DocxViewProps {
   /** Fires when the document is ready; the api is only usable while mounted. */
   onReady?: (api: DocxViewApi) => void;
   onError?: (error: Error) => void;
+  /**
+   * Optional collaborative session (from `wordinweb/collab`'s `useCollab`).
+   * When provided, the editor forwards each local edit as an intent via
+   * `collab.submit`. Typed structurally so the main `wordinweb` bundle carries
+   * no runtime dependency on the collab engine (plan doc 07 tree-shaking) —
+   * the app imports the session from the separate `wordinweb/collab` entry and
+   * injects it here.
+   */
+  collab?: { submit: (intent: EditorIntent) => void };
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
   /** Render review comments (range highlights + margin balloons). Default true. */
@@ -367,6 +377,7 @@ export function DocxView({
   showComments = true,
   revisions = "final",
   onMissingFonts,
+  collab,
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -699,6 +710,9 @@ export function DocxView({
       if (cancelled) return;
       const doc = cached ? cached.doc : DocxDocument.load(bytes!);
       if (!cached) docCacheRef.current = { source, doc, history: new EditHistory(doc) };
+      // Collaboration: populate the stable-id side table so the editor can
+      // encode intent positions and emit them (no-op / zero-cost otherwise).
+      if (collab) doc.enableStableIds();
       const wantView = revisions === "markup" ? "markup" : "final";
       if (doc.revisionView !== wantView) doc.setRevisionView(wantView);
       // Feed the real page width into fit-to-width now that we know it, then
@@ -743,6 +757,9 @@ export function DocxView({
             document.dispatchEvent(new CustomEvent("dxw-selection"));
           },
           onStyleShortcut: (styleId) => applyStyleShortcut?.(styleId),
+          // Collaboration: forward each local edit as an intent. The editor
+          // emits only when doc.stableIds is populated, so enable it here.
+          onIntent: collab ? (intent) => collab.submit(intent) : undefined,
           onTextCommand: (command) => {
             const current = apiRef.current;
             if (!current) return;
