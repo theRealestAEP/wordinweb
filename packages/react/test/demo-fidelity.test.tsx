@@ -41,9 +41,10 @@ function factoryFor(hub: CollabHub, opts: { delayMs?: number } = {}) {
 }
 async function tick(ms = 5) { await act(async () => { await new Promise<void>((r) => setTimeout(r, ms)); }); }
 
+let spySeq = 0; // fresh identity per spy: a reused clientId is refused `already-open` (doc 12 §7)
 /** Paragraph count + concatenated text of a hub-side doc, via a spy client. */
 async function spyState(hub: CollabHub, factory: (u: string) => WebSocket, doc: string) {
-  const spy = new CollabConnection(createWebSocketTransport(factory("ws://spy") as never), "spy");
+  const spy = new CollabConnection(createWebSocketTransport(factory("ws://spy") as never), `spy-${spySeq++}`);
   spy.join(doc);
   // The hub handles the hello asynchronously; wait for the welcome.
   for (let i = 0; i < 40 && !spy.doc; i++) await new Promise((r) => setTimeout(r, 5));

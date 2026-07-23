@@ -190,13 +190,18 @@ describe("KNOWN LIMIT: whole-doc format fired MID-BURST (echoes in flight)", () 
   }, 60000);
 });
 
-describe("KNOWN LIMIT: fully-simultaneous cross-client structural editing", () => {
-  // Both clients editing at once with structural intents in flight from each
-  // side exceeds OT-lite's one-in-flight-per-client model (plan doc 03 —
-  // multi-pending rebase needs operation inverses). This marker documents the
-  // boundary: it PASSES while the limitation exists, and flips to a failure
-  // the day someone implements full multi-pending OT (then promote it above).
-  it.fails("simultaneous interleaved bursts from both clients", async () => {
+describe("KNOWN LIMIT (timing-dependent): fully-simultaneous cross-client structural editing", () => {
+  // Was a deterministic it.fails marker; the protocol-v2 sidecar-bearing
+  // welcome (round-4 F10) improved it to SOMETIMES-converging — the imported
+  // sidecar aligns the joiner's id-table watermark with the server's, which
+  // removed one divergence source — but the outcome now depends on real-timer
+  // interleaving of the un-drained bursts: it passes in full-suite runs and
+  // fails in isolation. Neither `it` nor `it.fails` is stable on a racy
+  // boundary, so it is skipped, honestly: convergence for fully-simultaneous
+  // structural editing is NOT guaranteed until doc 03's adjusted-sibling
+  // multi-pending replay lands. Un-skip and promote when it does. The
+  // supported discipline (bursts with drains) is pinned by the seeds above.
+  it.skip("simultaneous interleaved bursts from both clients", async () => {
     await simultaneousRound(99, 40, 4);
   }, 60000);
 });

@@ -47,7 +47,18 @@ export interface TokenVerifier {
 interface Room {
   session: DocumentSession;
   conns: Set<Connection>;
+  /** Epoch-ms timestamp of when the room last became empty, or undefined
+   * while anyone is connected. Drives zero-custody eviction (plan doc 12
+   * §2): after the last-disconnect grace elapses the room — doc, log,
+   * everything — is deleted. Idle-with-people never evicts (round-4 F7);
+   * only the empty state starts this clock. */
+  emptySince?: number;
 }
+
+/** Last-disconnect grace before an empty room is deleted (plan doc 12 §1):
+ * long enough to survive a page refresh or a flaky reconnect, short enough
+ * that "everyone left" promptly means "the server holds nothing". */
+export const EVICTION_GRACE_MS = 60_000;
 
 /**
  * Routes clients to per-document sessions and fans out broadcasts. This is the
@@ -65,6 +76,17 @@ export class CollabHub {
    * durably appended before broadcast. */
   private auth = new Map<string, AuthResult>();
   private connById = new Map<string, Connection>();
+  /**
+   * conn.id → the clientId bound at hello (plan doc 11 decision 8, round-4
+   * F4). The SECURITY-load-bearing map: `(clientId, clientSeq)` is the
+   * session's idempotency key, so an unbound claimed id would let any
+   * participant submit under a victim's identity — the victim's own next
+   * intent then dedups against the forgery and is silently swallowed, and
+   * every attribution/roster/election feature inherits the forged identity.
+   * Bound once per socket; every submit and presence message is checked
+   * against it.
+   */
+  private connClient = new Map<string, string>();
 
   constructor(
     private provider: DocProvider,
@@ -123,6 +145,12 @@ export class CollabHub {
           conn.send({ t: "refused", reason: "version-mismatch" });
           return;
         }
+        if (!msg.clientId) {
+          // The bound identity is not optional — every security property
+          // downstream (dedup, attribution, single-tab) hangs off it.
+          conn.send({ t: "refused", reason: "client-id-required" });
+          return;
+        }
         if (this.verifier) {
           const authed = this.verifier.verify(msg.token, msg.docId);
           if (!authed) {
@@ -131,19 +159,41 @@ export class CollabHub {
           }
           this.auth.set(conn.id, authed);
         }
+        // Single-live-connection rule (plan doc 12 §7): one socket per
+        // (docId, clientId). Same-profile tabs share the persistent clientId
+        // and would collide clientSeq counters — self-inflicted dedup
+        // poisoning — so the duplicate is refused. `takeover` inverts the
+        // outcome (the old socket may be a zombie tab): the incumbent is
+        // kicked and the new connection claims the identity. A different
+        // browser/profile/device mints a different clientId and is untouched.
+        const holder = this.findClientConn(msg.docId, msg.clientId);
+        if (holder && holder.id !== conn.id) {
+          if (msg.takeover) this.kick(holder, "taken-over");
+          else {
+            conn.send({ t: "refused", reason: "already-open" });
+            return;
+          }
+        }
+        this.connClient.set(conn.id, msg.clientId);
         const room = await this.room(msg.docId);
         room.conns.add(conn);
+        room.emptySince = undefined; // occupied: the eviction clock stops.
         this.connDoc.set(conn.id, msg.docId);
         this.connById.set(conn.id, conn);
+        // The welcome is a checkpoint bundle (plan doc 12 §2, round-4 F10):
+        // snapshot + the id sidecar, never the bytes alone — a joiner cannot
+        // re-derive the id table from parse order once history contains
+        // split-created carried ids. The snapshot is the CURRENT document
+        // (at room.session.seq), so the tail after it is empty — sending
+        // entries the snapshot already contains would double-apply them.
+        const cp = room.session.checkpoint();
         conn.send({
           t: "welcome",
           docId: msg.docId,
-          seq: room.session.seq,
-          // The snapshot is the CURRENT document (at room.session.seq), so the
-          // tail after it is empty — sending entries the snapshot already
-          // contains would double-apply them on the joiner.
-          snapshot: bytesToBase64(room.session.doc.save()),
-          tail: room.session.entriesSince(room.session.seq),
+          seq: cp.seq,
+          snapshot: bytesToBase64(cp.docx),
+          sidecar: cp.sidecar,
+          tail: room.session.entriesSince(cp.seq),
         });
         return;
       }
@@ -165,6 +215,15 @@ export class CollabHub {
           conn.send({ t: "refused", reason: "read-only" });
           return;
         }
+        // Identity binding (doc 11 decision 8): the intent must carry the
+        // clientId this socket registered at hello. Anything else is a
+        // forgery attempt (or a client bug) — refused BEFORE the session
+        // sees it, so a forged (clientId, clientSeq) can never enter the
+        // dedup set and swallow the victim's real intent.
+        if (msg.intent.clientId !== this.connClient.get(conn.id)) {
+          conn.send({ t: "refused", reason: "client-id-mismatch" });
+          return;
+        }
         const room = this.rooms.get(docId)!;
         const before = room.session.seq;
         const entry = room.session.submit(msg.intent);
@@ -181,20 +240,70 @@ export class CollabHub {
         if (!docId) return; // presence before join is ignored, not refused
         const room = this.rooms.get(docId)!;
         // Ephemeral: fan out to every OTHER participant, never logged/persisted.
-        const out: ServerMessage = { t: "presence", participant: conn.id, position: msg.position };
+        // `participant` is the sender's BOUND clientId (round-4 F14), not the
+        // socket id: it joins presence to the identity intents carry (roster,
+        // attribution) and survives the sender reconnecting on a new socket.
+        const out: ServerMessage = {
+          t: "presence",
+          participant: this.connClient.get(conn.id)!,
+          position: msg.position,
+        };
         for (const c of room.conns) if (c.id !== conn.id) c.send(out);
         return;
       }
     }
   }
 
-  /** Drop a connection (socket closed). */
+  /** Drop a connection (socket closed). Starts the room's eviction clock
+   * when this was the last participant (plan doc 12 §2). */
   disconnect(conn: Connection): void {
     const docId = this.connDoc.get(conn.id);
     this.connDoc.delete(conn.id);
     this.auth.delete(conn.id);
     this.connById.delete(conn.id);
-    if (docId) this.rooms.get(docId)?.conns.delete(conn);
+    this.connClient.delete(conn.id);
+    if (docId) {
+      const room = this.rooms.get(docId);
+      if (room) {
+        room.conns.delete(conn);
+        if (room.conns.size === 0) room.emptySince = this.now();
+      }
+    }
+  }
+
+  /** The live connection currently bound to (docId, clientId), if any —
+   * the single-tab rule's lookup (doc 12 §7). Scanned, not indexed: rooms
+   * are small and hellos are rare. */
+  private findClientConn(docId: string, clientId: string): Connection | undefined {
+    const room = this.rooms.get(docId);
+    if (!room) return undefined;
+    for (const c of room.conns) {
+      if (this.connClient.get(c.id) === clientId) return c;
+    }
+    return undefined;
+  }
+
+  /**
+   * Zero-custody eviction (plan doc 12 §2): delete every room that has been
+   * empty for at least the grace period. Deletion is total — document, log,
+   * dedup state, undo stacks all go with the Room object; with no storage
+   * driver the server then holds NOTHING for that docId (the browsers are
+   * the recovery machinery). Deliberately a method the transport calls on a
+   * timer (like sweepExpired) rather than a self-armed setTimeout: the hub
+   * stays timer-free and eviction is deterministic in tests via the
+   * injected clock. Only EMPTY rooms are eligible — an idle room with
+   * people connected is never deleted out from under them (round-4 F7).
+   * Returns the evicted docIds (for logging/metrics).
+   */
+  sweepRooms(graceMs: number = EVICTION_GRACE_MS): string[] {
+    const evicted: string[] = [];
+    for (const [docId, room] of [...this.rooms]) {
+      if (room.conns.size === 0 && room.emptySince !== undefined && this.now() - room.emptySince >= graceMs) {
+        this.rooms.delete(docId);
+        evicted.push(docId);
+      }
+    }
+    return evicted;
   }
 
   /** Sessions currently held in memory (for eviction/metrics). */
@@ -217,6 +326,11 @@ export class CollabHub {
       const snap = await this.storage.loadSnapshot(docId);
       if (snap) {
         const session = new DocumentSession(DocxDocument.load(snap.docx));
+        // Restore the snapshot's exact id table BEFORE replaying the tail —
+        // tail entries address nodes by the ids the session had when they
+        // were sequenced, which parse order alone cannot reproduce once
+        // splits happened pre-snapshot (round-2 F1 / round-4 F10).
+        session.installSidecar(snap.sidecar);
         session.loadCanonical(await this.storage.readLog(docId, snap.seq));
         return session;
       }

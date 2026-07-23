@@ -31,9 +31,16 @@ export class ClientReplica {
   private confirmedSidecar: ReturnType<StableIds["exportSidecar"]>;
   private pending: Intent[] = [];
 
-  constructor(bytes: Uint8Array) {
+  constructor(bytes: Uint8Array, sidecar?: ReturnType<StableIds["exportSidecar"]>) {
     this.doc = DocxDocument.load(bytes);
     this.ids = this.doc.enableStableIds();
+    // A snapshot from a session whose history contains splits carries
+    // non-sequential ids that parse-order assignment cannot reproduce
+    // (round-2 F1) — when the welcome supplies the session's sidecar, install
+    // it so every later intent's carried ids resolve to the same nodes here
+    // as on the server. Without one (fresh doc, legacy tests) parse order is
+    // exact by construction.
+    if (sidecar) this.ids.importSidecar(this.doc.editableRoots(), sidecar);
     this.confirmedBytes = this.doc.save();
     this.confirmedSidecar = this.ids.exportSidecar(this.doc.editableRoots());
   }

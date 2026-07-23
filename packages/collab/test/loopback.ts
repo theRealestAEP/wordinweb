@@ -49,12 +49,18 @@ export class CollabHubLoopback {
           return;
         }
         peer.joined = true;
+        // Mirror the real hub (protocol v2): the welcome is a checkpoint
+        // bundle — snapshot + id sidecar, tail strictly after the snapshot's
+        // seq (a tail from sinceSeq with a current-doc snapshot double-applies
+        // pre-join entries; the live-e2e suite caught the hub doing that).
+        const cp = this.session.checkpoint();
         peer.deliver({
           t: "welcome",
           docId: msg.docId,
-          seq: this.session.seq,
-          snapshot: bytesToBase64(this.session.doc.save()),
-          tail: this.session.entriesSince(msg.sinceSeq),
+          seq: cp.seq,
+          snapshot: bytesToBase64(cp.docx),
+          sidecar: cp.sidecar,
+          tail: this.session.entriesSince(cp.seq),
         });
         return;
       }

@@ -74,9 +74,24 @@ export class CollabConnection {
     return out;
   }
 
-  /** Join a document. The server replies with a welcome (snapshot + tail). */
-  join(docId: string, token?: string): void {
-    this.transport.send({ t: "hello", protocolVersion: PROTOCOL_VERSION, docId, token, sinceSeq: 0 });
+  /**
+   * Join a document. The server replies with a welcome (snapshot + sidecar +
+   * tail). The hello carries this connection's clientId — the hub binds it to
+   * the socket and refuses submits under any other id (doc 11 decision 8).
+   * `takeover: true` claims the identity from an existing live connection
+   * (the doc-12 §7 "use here instead" path for a second same-profile tab);
+   * without it, a duplicate join is refused `already-open`.
+   */
+  join(docId: string, token?: string, opts?: { takeover?: boolean }): void {
+    this.transport.send({
+      t: "hello",
+      protocolVersion: PROTOCOL_VERSION,
+      docId,
+      clientId: this.clientId,
+      takeover: opts?.takeover,
+      token,
+      sinceSeq: 0,
+    });
   }
 
   /** The live document (null until welcome). The editor renders this. */
@@ -130,7 +145,9 @@ export class CollabConnection {
       case "welcome": {
         // The snapshot represents seq `msg.seq`; the replica's confirmed
         // baseline is that seq, and any tail entries are strictly after it.
-        this.replica = new ClientReplica(base64ToBytes(msg.snapshot));
+        // The sidecar rides with the snapshot (round-4 F10) so the replica's
+        // id table matches the server's even across split-created ids.
+        this.replica = new ClientReplica(base64ToBytes(msg.snapshot), msg.sidecar);
         this.replica.confirmedSeq = msg.seq;
         if (msg.tail.length) this.replica.receive(msg.tail);
         this.cb.onChange?.();

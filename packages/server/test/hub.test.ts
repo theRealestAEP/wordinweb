@@ -41,14 +41,14 @@ describe("CollabHub", () => {
   it("refuses a version-mismatched client at hello", async () => {
     const hub = new CollabHub(provider);
     const c = new FakeConn("c1");
-    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION + 1, docId: "d", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION + 1, docId: "d", clientId: "c1", sinceSeq: 0 });
     expect(c.last()).toEqual({ t: "refused", reason: "version-mismatch" });
   });
 
   it("welcomes a joining client with a snapshot and the current seq", async () => {
     const hub = new CollabHub(provider);
     const c = new FakeConn("c1");
-    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "c1", sinceSeq: 0 });
     const w = c.last();
     expect(w.t).toBe("welcome");
     if (w.t === "welcome") {
@@ -71,8 +71,8 @@ describe("CollabHub", () => {
     const hub = new CollabHub(provider);
     const a = new FakeConn("a");
     const b = new FakeConn("b");
-    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
-    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "b", sinceSeq: 0 });
 
     // Address paragraph 0's run using ids the session assigned (1 = para, 2 = run
     // in deterministic parse order for a single-paragraph doc).
@@ -94,8 +94,8 @@ describe("CollabHub", () => {
     const hub = new CollabHub(provider);
     const a = new FakeConn("a");
     const b = new FakeConn("b");
-    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "docA", sinceSeq: 0 });
-    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "docB", sinceSeq: 0 });
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "docA", clientId: "a", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "docB", clientId: "b", sinceSeq: 0 });
     const before = b.received.length;
     const intent: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" };
     await hub.handle(a, { t: "submit", intent });
@@ -107,8 +107,8 @@ describe("CollabHub", () => {
     const hub = new CollabHub(provider);
     const a = new FakeConn("a");
     const b = new FakeConn("b");
-    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
-    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "b", sinceSeq: 0 });
     hub.disconnect(b);
     const beforeB = b.received.length;
     const intent: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" };
@@ -135,7 +135,7 @@ describe("attachWebSocketServer", () => {
       },
     };
     onConn!(socket);
-    onMsg!(JSON.stringify({ t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 }));
+    onMsg!(JSON.stringify({ t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "w", sinceSeq: 0 }));
     await new Promise((r) => setTimeout(r, 0)); // flush the fire-and-forget handle()
     expect(sent).toHaveLength(1);
     expect(JSON.parse(sent[0]).t).toBe("welcome");
@@ -159,7 +159,7 @@ describe("CollabHub persistence + rehydration", () => {
     const storage = new InMemoryStorage();
     const hub1 = new CollabHub(provider, storage);
     const a = new FakeConn("a");
-    await hub1.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub1.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
     const intent: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" };
     await hub1.handle(a, { t: "submit", intent });
 
@@ -172,7 +172,7 @@ describe("CollabHub persistence + rehydration", () => {
     // the joining client's welcome reports the persisted seq.
     const hub2 = new CollabHub(provider, storage);
     const b = new FakeConn("b");
-    await hub2.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub2.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "b", sinceSeq: 0 });
     const w = b.last();
     expect(w.t).toBe("welcome");
     if (w.t === "welcome") expect(w.seq).toBe(1);
@@ -182,7 +182,7 @@ describe("CollabHub persistence + rehydration", () => {
     const storage = new InMemoryStorage();
     const hub = new CollabHub(provider, storage);
     const a = new FakeConn("a");
-    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
     const intent: InsertTextIntent = { kind: "insertText", clientId: "a", clientSeq: 5, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "X" };
     await hub.handle(a, { t: "submit", intent });
     await hub.handle(a, { t: "submit", intent }); // resend
@@ -200,8 +200,8 @@ describe("CollabHub presence", () => {
     const hub = new CollabHub(provider);
     const a = new FakeConn("a");
     const b = new FakeConn("b");
-    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
-    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "b", sinceSeq: 0 });
     const aBefore = a.received.length;
     await hub.handle(a, { t: "presence", position: pos });
     expect(a.received.length).toBe(aBefore); // sender does not echo
@@ -224,7 +224,7 @@ describe("CollabHub presence", () => {
     const storage = new InMemoryStorage();
     const hub = new CollabHub(provider, storage);
     const a = new FakeConn("a");
-    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
     await hub.handle(a, { t: "presence", position: pos });
     expect(await storage.readLog("d", 0)).toHaveLength(0);
   });
@@ -251,7 +251,7 @@ describe("blank document provider", () => {
   it("a hub using blankProvider welcomes a client with a blank doc", async () => {
     const hub = new CollabHub(blankProvider, new InMemoryStorage());
     const c = new FakeConn("c");
-    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "fresh", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "fresh", clientId: "c", sinceSeq: 0 });
     const w = c.last();
     expect(w.t).toBe("welcome");
     if (w.t === "welcome") expect(w.seq).toBe(0);
@@ -272,21 +272,21 @@ describe("CollabHub auth (token verifier)", () => {
   it("refuses a hello with no/invalid token when a verifier is set", async () => {
     const hub = new CollabHub(provider, undefined, verifier);
     const c = new FakeConn("c");
-    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "c", sinceSeq: 0 });
     expect(c.last()).toEqual({ t: "refused", reason: "unauthorized" });
   });
 
   it("refuses a token minted for a different doc (cross-tenant isolation)", async () => {
     const hub = new CollabHub(provider, undefined, verifier);
     const c = new FakeConn("c");
-    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "edit-OTHER", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "c", token: "edit-OTHER", sinceSeq: 0 });
     expect(c.last()).toEqual({ t: "refused", reason: "unauthorized" });
   });
 
   it("admits an editor and accepts their edits", async () => {
     const hub = new CollabHub(provider, undefined, verifier);
     const c = new FakeConn("c");
-    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "edit-d", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "u", token: "edit-d", sinceSeq: 0 });
     expect(c.last().t).toBe("welcome");
     await hub.handle(c, { t: "submit", intent: { kind: "insertText", clientId: "u", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" } });
     expect(c.last().t).toBe("broadcast");
@@ -295,7 +295,7 @@ describe("CollabHub auth (token verifier)", () => {
   it("refuses a viewer's edit at the sequencer (read-only enforced server-side)", async () => {
     const hub = new CollabHub(provider, undefined, verifier);
     const c = new FakeConn("c");
-    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "view-d", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "v", token: "view-d", sinceSeq: 0 });
     expect(c.last().t).toBe("welcome");
     await hub.handle(c, { t: "submit", intent: { kind: "insertText", clientId: "v", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" } });
     expect(c.last()).toEqual({ t: "refused", reason: "read-only" });
@@ -308,7 +308,7 @@ describe("CollabHub JWT live-expiry + revocation (gate 5)", () => {
     const verifier: TokenVerifier = { verify: () => ({ userId: "u", role: "editor", expiresAt: 5000 }) };
     const hub = new CollabHub(provider, undefined, verifier, () => now);
     const c = new FakeConn("c");
-    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "t", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "u", token: "t", sinceSeq: 0 });
     expect(c.last().t).toBe("welcome");
     now = 6000; // token now expired
     await hub.handle(c, { t: "submit", intent: { kind: "insertText", clientId: "u", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" } });
@@ -320,7 +320,7 @@ describe("CollabHub JWT live-expiry + revocation (gate 5)", () => {
     const verifier: TokenVerifier = { verify: () => ({ userId: "u", role: "editor", expiresAt: 2000 }) };
     const hub = new CollabHub(provider, undefined, verifier, () => now);
     const c = new FakeConn("c");
-    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "t", sinceSeq: 0 });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "c", token: "t", sinceSeq: 0 });
     now = 3000;
     hub.sweepExpired();
     expect(c.last()).toEqual({ t: "refused", reason: "token-expired" });
@@ -331,13 +331,187 @@ describe("CollabHub JWT live-expiry + revocation (gate 5)", () => {
     const hub = new CollabHub(provider, undefined, verifier);
     const a = new FakeConn("a");
     const b = new FakeConn("b");
-    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "alice", sinceSeq: 0 });
-    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "bob", sinceSeq: 0 });
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "alice", token: "alice", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "bob", token: "bob", sinceSeq: 0 });
     hub.revoke("alice");
     expect(a.last()).toEqual({ t: "refused", reason: "revoked" });
     // bob is untouched; his edit still broadcasts.
     const beforeB = b.received.length;
     await hub.handle(b, { t: "submit", intent: { kind: "insertText", clientId: "bob", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" } });
     expect(b.received.length).toBeGreaterThan(beforeB);
+  });
+});
+
+import { ClientReplica } from "@wordinweb/collab/client";
+import type { SplitParagraphIntent } from "@wordinweb/collab/server";
+import { EVICTION_GRACE_MS } from "../src/hub.js";
+
+function b64ToBytes(b64: string): Uint8Array {
+  return new Uint8Array(Buffer.from(b64, "base64"));
+}
+
+describe("CollabHub identity binding (doc 11 decision 8 / round-4 F4)", () => {
+  it("refuses a submit whose intent.clientId differs from the bound identity", async () => {
+    const hub = new CollabHub(provider);
+    const attacker = new FakeConn("atk");
+    await hub.handle(attacker, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "mallory", sinceSeq: 0 });
+    // Forgery: an intent claiming the victim's identity. Pre-fix this entered
+    // the dedup set as (alice, 1) and swallowed alice's real next intent.
+    const forged: InsertTextIntent = { kind: "insertText", clientId: "alice", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" };
+    await hub.handle(attacker, { t: "submit", intent: forged });
+    expect(attacker.last()).toEqual({ t: "refused", reason: "client-id-mismatch" });
+    // The forgery never reached the session: alice's real (alice, 1) applies.
+    const alice = new FakeConn("al");
+    await hub.handle(alice, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "alice", sinceSeq: 0 });
+    await hub.handle(alice, { t: "submit", intent: { ...forged, text: "hi" } });
+    const msg = alice.last();
+    expect(msg.t).toBe("broadcast");
+    if (msg.t === "broadcast") expect(msg.entries[0].kind).toBe("applied");
+  });
+
+  it("refuses a hello with no clientId", async () => {
+    const hub = new CollabHub(provider);
+    const c = new FakeConn("c");
+    // Cast: simulates an out-of-spec client omitting the field at runtime.
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 } as never);
+    expect(c.last()).toEqual({ t: "refused", reason: "client-id-required" });
+  });
+
+  it("presence is keyed by the bound clientId, not the socket id (round-4 F14)", async () => {
+    const hub = new CollabHub(provider);
+    const a = new FakeConn("socket-1");
+    const b = new FakeConn("socket-2");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "alice", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "bob", sinceSeq: 0 });
+    await hub.handle(a, { t: "presence", position: { anchor: { blockId: 1, runId: 2, offset: 0 } } });
+    const msg = b.last();
+    expect(msg.t).toBe("presence");
+    if (msg.t === "presence") expect(msg.participant).toBe("alice"); // not "socket-1"
+  });
+});
+
+describe("CollabHub single-live-connection rule (doc 12 §7)", () => {
+  it("refuses a second connection binding the same (docId, clientId)", async () => {
+    const hub = new CollabHub(provider);
+    const tab1 = new FakeConn("t1");
+    const tab2 = new FakeConn("t2");
+    await hub.handle(tab1, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "alice", sinceSeq: 0 });
+    await hub.handle(tab2, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "alice", sinceSeq: 0 });
+    expect(tab2.last()).toEqual({ t: "refused", reason: "already-open" });
+    // tab1 is untouched and still live.
+    await hub.handle(tab1, { t: "submit", intent: { kind: "insertText", clientId: "alice", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" } });
+    expect(tab1.last().t).toBe("broadcast");
+  });
+
+  it("takeover kicks the incumbent and admits the new connection", async () => {
+    const hub = new CollabHub(provider);
+    const zombie = new FakeConn("t1");
+    const fresh = new FakeConn("t2");
+    await hub.handle(zombie, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "alice", sinceSeq: 0 });
+    await hub.handle(fresh, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "alice", takeover: true, sinceSeq: 0 });
+    expect(zombie.received.some((m) => m.t === "refused" && m.reason === "taken-over")).toBe(true);
+    expect(fresh.last().t).toBe("welcome");
+    // The identity transferred: the fresh tab edits, the zombie is out.
+    await hub.handle(fresh, { t: "submit", intent: { kind: "insertText", clientId: "alice", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" } });
+    expect(fresh.last().t).toBe("broadcast");
+  });
+
+  it("the same clientId on a DIFFERENT doc is not blocked (per-doc rule)", async () => {
+    const hub = new CollabHub(provider);
+    const c1 = new FakeConn("t1");
+    const c2 = new FakeConn("t2");
+    await hub.handle(c1, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "docA", clientId: "alice", sinceSeq: 0 });
+    await hub.handle(c2, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "docB", clientId: "alice", sinceSeq: 0 });
+    expect(c2.last().t).toBe("welcome");
+  });
+});
+
+describe("CollabHub zero-custody eviction (doc 12 §2)", () => {
+  it("deletes a room after the last disconnect + grace; occupied rooms never evict", async () => {
+    let now = 0;
+    const hub = new CollabHub(provider, undefined, undefined, () => now);
+    const a = new FakeConn("a");
+    const b = new FakeConn("b");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "b", sinceSeq: 0 });
+
+    // Idle-with-people: hours pass, nobody types — the room survives (F7).
+    now = 10 * 60 * 60 * 1000;
+    expect(hub.sweepRooms()).toEqual([]);
+    expect(hub.activeDocs()).toEqual(["d"]);
+
+    // One leaves: still occupied, still immune.
+    hub.disconnect(a);
+    now += EVICTION_GRACE_MS * 2;
+    expect(hub.sweepRooms()).toEqual([]);
+
+    // Last one leaves: the grace clock starts. Just before grace: alive.
+    hub.disconnect(b);
+    now += EVICTION_GRACE_MS - 1;
+    expect(hub.sweepRooms()).toEqual([]);
+    // At grace: gone — the server holds NOTHING for this doc anymore.
+    now += 1;
+    expect(hub.sweepRooms()).toEqual(["d"]);
+    expect(hub.activeDocs()).toEqual([]);
+  });
+
+  it("a rejoin during grace stops the eviction clock", async () => {
+    let now = 0;
+    const hub = new CollabHub(provider, undefined, undefined, () => now);
+    const a = new FakeConn("a");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+    hub.disconnect(a);
+    now += EVICTION_GRACE_MS - 1000; // refresh lands just inside grace
+    const a2 = new FakeConn("a2");
+    await hub.handle(a2, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+    now += EVICTION_GRACE_MS * 10; // long after — but the room is occupied
+    expect(hub.sweepRooms()).toEqual([]);
+    expect(hub.activeDocs()).toEqual(["d"]);
+  });
+});
+
+describe("CollabHub welcome sidecar (round-4 F10 / round-2 F1)", () => {
+  it("a late joiner into a session with split-created carried ids converges byte-identically", async () => {
+    const hub = new CollabHub(provider);
+    const a = new FakeConn("a");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0 });
+
+    // "a" splits the only paragraph ("hi" → "h" | "i"): the new block/run get
+    // CARRIED ids (7000/7001) that parse order can never re-derive — this is
+    // exactly the state that used to poison late joiners.
+    const split: SplitParagraphIntent = {
+      kind: "splitParagraph", clientId: "a", clientSeq: 1, base: 0,
+      at: { blockId: 1, runId: 2, offset: 1 }, newBlockId: 7000, newRunId: 7001,
+    };
+    await hub.handle(a, { t: "submit", intent: split });
+
+    // Late joiner: builds its replica from the welcome bundle (snapshot +
+    // sidecar), exactly as CollabConnection does.
+    const b = new FakeConn("b");
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "b", sinceSeq: 0 });
+    const w = b.last();
+    expect(w.t).toBe("welcome");
+    if (w.t !== "welcome") return;
+    expect(w.sidecar).toBeTruthy();
+    const replica = new ClientReplica(b64ToBytes(w.snapshot), w.sidecar);
+    replica.confirmedSeq = w.seq;
+
+    // "a" now edits INSIDE the split-created run, addressed by its carried id.
+    const intoSplit: InsertTextIntent = {
+      kind: "insertText", clientId: "a", clientSeq: 2, base: w.seq,
+      at: { blockId: 7000, runId: 7001, offset: 1 }, text: "X",
+    };
+    await hub.handle(a, { t: "submit", intent: intoSplit });
+    const bc = b.last();
+    expect(bc.t).toBe("broadcast");
+    if (bc.t !== "broadcast") return;
+    expect(bc.entries[0].kind).toBe("applied");
+    replica.receive(bc.entries);
+
+    // The pin: the joiner's document is byte-identical to the server's.
+    // Without the sidecar its id table would misplace runId 7001 and the
+    // insert would silently no-op or land in the wrong run.
+    const serverXml = hub["rooms"].get("d")!.session.doc.save();
+    expect(Buffer.from(replica.doc.save()).equals(Buffer.from(serverXml))).toBe(true);
   });
 });
