@@ -257,3 +257,47 @@ describe("blank document provider", () => {
     if (w.t === "welcome") expect(w.seq).toBe(0);
   });
 });
+
+import type { TokenVerifier } from "../src/hub.js";
+
+describe("CollabHub auth (token verifier)", () => {
+  const verifier: TokenVerifier = {
+    verify: (token, docId) => {
+      if (token === `edit-${docId}`) return { userId: "u", role: "editor" };
+      if (token === `view-${docId}`) return { userId: "v", role: "viewer" };
+      return null; // wrong doc / no token / bad token
+    },
+  };
+
+  it("refuses a hello with no/invalid token when a verifier is set", async () => {
+    const hub = new CollabHub(provider, undefined, verifier);
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", sinceSeq: 0 });
+    expect(c.last()).toEqual({ t: "refused", reason: "unauthorized" });
+  });
+
+  it("refuses a token minted for a different doc (cross-tenant isolation)", async () => {
+    const hub = new CollabHub(provider, undefined, verifier);
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "edit-OTHER", sinceSeq: 0 });
+    expect(c.last()).toEqual({ t: "refused", reason: "unauthorized" });
+  });
+
+  it("admits an editor and accepts their edits", async () => {
+    const hub = new CollabHub(provider, undefined, verifier);
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "edit-d", sinceSeq: 0 });
+    expect(c.last().t).toBe("welcome");
+    await hub.handle(c, { t: "submit", intent: { kind: "insertText", clientId: "u", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" } });
+    expect(c.last().t).toBe("broadcast");
+  });
+
+  it("refuses a viewer's edit at the sequencer (read-only enforced server-side)", async () => {
+    const hub = new CollabHub(provider, undefined, verifier);
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", token: "view-d", sinceSeq: 0 });
+    expect(c.last().t).toBe("welcome");
+    await hub.handle(c, { t: "submit", intent: { kind: "insertText", clientId: "v", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 2 }, text: "!" } });
+    expect(c.last()).toEqual({ t: "refused", reason: "read-only" });
+  });
+});
