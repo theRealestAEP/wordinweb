@@ -94,3 +94,39 @@ describe("useCollab (jsdom React integration)", () => {
     await act(async () => { rootA.unmount(); rootB.unmount(); });
   });
 });
+
+describe("useCollab presence (jsdom)", () => {
+  it("a remote participant's cursor position reaches another hook's presence state", async () => {
+    const hub = new CollabHub(blankProvider);
+    const factory = makeFakeSocketFactory(hub);
+    let setPresenceA: ((p: unknown) => void) | null = null;
+    let readyA = false;
+    const bPresence: Record<string, unknown>[] = [];
+
+    function A() {
+      const s = useCollab({ url: "ws://x", docId: "shared", clientId: "a", createSocket: factory });
+      setPresenceA = s.setPresence as unknown as (p: unknown) => void;
+      readyA = s.ready;
+      return null;
+    }
+    function B() {
+      const s = useCollab({ url: "ws://x", docId: "shared", clientId: "b", createSocket: factory });
+      bPresence.push(s.presence);
+      return null;
+    }
+    const rootA = createRoot(document.createElement("div"));
+    const rootB = createRoot(document.createElement("div"));
+    await act(async () => { rootA.render(createElement(A)); rootB.render(createElement(B)); });
+    for (let i = 0; i < 10 && !readyA; i++) await tick();
+
+    // A broadcasts a cursor position; B's presence state should reflect it.
+    await act(async () => { setPresenceA!({ anchor: { blockId: 1, runId: 2, offset: 3 } }); });
+    for (let i = 0; i < 10 && !bPresence.some((p) => Object.keys(p).length > 0); i++) await tick();
+
+    const latest = bPresence[bPresence.length - 1];
+    expect(Object.keys(latest).length).toBeGreaterThan(0); // B knows a remote cursor exists
+    const pos = Object.values(latest)[0] as { anchor?: { offset: number } } | null;
+    expect(pos?.anchor?.offset).toBe(3);
+    await act(async () => { rootA.unmount(); rootB.unmount(); });
+  });
+});
