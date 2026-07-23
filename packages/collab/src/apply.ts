@@ -10,6 +10,8 @@ import {
   setListType,
   applyTableOp,
   mergeParagraphBackward,
+  addComment,
+  recordedProvenance,
   type EditCaret,
   type Run,
   type Block,
@@ -139,6 +141,21 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       if (!pEl) return false;
       const ok = mergeParagraphBackward(doc, pEl);
       if (ok) ids.prune(doc.editableRoots()); // retire the merged paragraph's id
+      return ok;
+    }
+    case "commentRun": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry) return false;
+      // Whole-run comment (t=null covers the run, so no run split). Carried
+      // provenance makes the w14:paraId and w:date identical on every replica.
+      const seg: SelectionSegment = { run: entry.run, t: null, start: 0, end: 0, props: entry.run.props };
+      const prov = recordedProvenance({ dates: [intent.date], paraIds: [intent.paraId] });
+      const ok = addComment(doc, [seg], intent.text, intent.author, intent.initials, prov);
+      // addComment created a commentReference run + comment paragraph; keep the
+      // id table filled for them (parse-order, consistent across live replicas).
+      if (ok && doc.stableIds) doc.stableIds.assignFromRoots(doc.editableRoots());
       return ok;
     }
   }

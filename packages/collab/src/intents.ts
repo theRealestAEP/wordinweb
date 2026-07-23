@@ -157,6 +157,26 @@ export interface MergeParagraphIntent extends IntentBase {
   blockId: StableId;
 }
 
+/**
+ * Add a review comment anchored to an entire run. Comment markers
+ * (commentRangeStart/End + a commentReference run) are inserted as run
+ * siblings and the comment body goes into comments.xml — no commented run's
+ * text moves, so the transform is identity. The nondeterministic values
+ * (w14:paraId, w:date) are generated once by the originating client and
+ * carried here (plan doc 05) so every replica writes identical XML. Sub-range
+ * comments (splitting the run) are the documented harder extension.
+ */
+export interface CommentRunIntent extends IntentBase {
+  kind: "commentRun";
+  runId: StableId;
+  text: string;
+  author: string;
+  initials?: string;
+  /** Carried provenance for deterministic XML across replicas. */
+  date: string;
+  paraId: string;
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -166,7 +186,8 @@ export type Intent =
   | SetListTypeIntent
   | FormatRangeIntent
   | TableOpIntent
-  | MergeParagraphIntent;
+  | MergeParagraphIntent
+  | CommentRunIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

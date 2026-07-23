@@ -62,6 +62,9 @@ export function runEditsOf(intent: Intent): RunEdit[] {
       // Runs move (identity preserved) into the previous paragraph; run-
       // addressed offsets are unchanged.
       return [];
+    case "commentRun":
+      // Comment markers are run siblings; no run's text offsets shift.
+      return [];
   }
 }
 
@@ -154,6 +157,8 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       // Addressed by a stable paragraph id; nothing to transform.
       return { ...intent, base: newBase };
     case "mergeParagraph":
+      return { ...intent, base: newBase };
+    case "commentRun":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);
