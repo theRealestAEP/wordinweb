@@ -15,6 +15,7 @@ import {
   validatePastedOoxml,
   parseXml,
   localName,
+  insertImageAt,
   type EditCaret,
   type Run,
   type Block,
@@ -209,7 +210,40 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       }
       return true;
     }
+    case "insertImage": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      let bytes: Uint8Array;
+      try {
+        bytes = base64ToBytes(intent.imageBase64);
+      } catch {
+        return false;
+      }
+      // Register the media part (rId/part name are scan-max, deterministic
+      // across replicas applying the same canonical intent) and splice the
+      // drawing run. Client-measured px are carried so layout is deterministic.
+      const relId = doc.addImageResource(bytes, intent.ext);
+      const before = trackedSet(ids, doc);
+      const newRun = insertImageAt(doc, entry.firstT, relId, intent.widthPx, intent.heightPx);
+      if (!newRun) return false;
+      doc.refresh();
+      const fresh: XmlElement[] = [];
+      walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
+      for (let k = 0; k < fresh.length && k < intent.nodeIds.length; k++) {
+        ids.reassign(fresh[k], intent.nodeIds[k]);
+      }
+      return true;
+    }
   }
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = typeof atob === "function" ? atob(b64) : Buffer.from(b64, "base64").toString("binary");
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 function localRun(el: XmlElement): boolean {

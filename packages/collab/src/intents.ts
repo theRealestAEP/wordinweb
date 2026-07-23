@@ -205,6 +205,28 @@ export interface PasteBlocksIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
+/**
+ * Insert an image at a run (as a sibling drawing run — no text split, identity
+ * transform). The plan's media design carries bytes out-of-band via presigned
+ * upload with the intent carrying (part, extents, sha) — modeled here with the
+ * bytes inline (base64), which is correct for small images and keeps the whole
+ * flow testable headlessly; the out-of-band path is a transport optimization
+ * over the same convergence. Client-measured dimensions (widthPx/heightPx) are
+ * carried so layout reserves space deterministically. `nodeIds` are carried
+ * ids for the new drawing run(s).
+ */
+export interface InsertImageIntent extends IntentBase {
+  kind: "insertImage";
+  runId: StableId;
+  /** base64-encoded image bytes. */
+  imageBase64: string;
+  /** File extension without dot (png/jpg/gif…) — drives the content type. */
+  ext: string;
+  widthPx: number;
+  heightPx: number;
+  nodeIds: StableId[];
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -216,7 +238,8 @@ export type Intent =
   | TableOpIntent
   | MergeParagraphIntent
   | CommentRunIntent
-  | PasteBlocksIntent;
+  | PasteBlocksIntent
+  | InsertImageIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

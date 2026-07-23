@@ -68,6 +68,9 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "pasteBlocks":
       // Separate new blocks inserted after a paragraph; no existing offsets shift.
       return [];
+    case "insertImage":
+      // Image is a sibling drawing run; no run's text offsets shift.
+      return [];
   }
 }
 
@@ -172,6 +175,8 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "commentRun":
       return { ...intent, base: newBase };
     case "pasteBlocks":
+      return { ...intent, base: newBase };
+    case "insertImage":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

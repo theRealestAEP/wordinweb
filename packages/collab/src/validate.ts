@@ -62,6 +62,12 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       // Deep structural validation (element allowlist) happens at apply via
       // validatePastedOoxml; this only bounds the raw size on the hot path.
       return null;
+    case "insertImage":
+      if (typeof intent.imageBase64 !== "string" || intent.imageBase64.length === 0) return "insertImage: empty";
+      if (intent.imageBase64.length > 20_000_000) return "insertImage: too large";
+      if (!/^[a-z0-9]{1,8}$/i.test(intent.ext)) return "insertImage: bad ext";
+      if (!Number.isFinite(intent.widthPx) || !Number.isFinite(intent.heightPx)) return "insertImage: bad size";
+      return null;
     case "formatRun":
     case "formatParagraph":
     case "setListType":
