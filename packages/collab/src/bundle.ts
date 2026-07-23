@@ -1,5 +1,6 @@
 import type { Intent } from "./intents.js";
 import type { IdSidecar } from "./session.js";
+import type { LineageHead } from "./protocol.js";
 import type { CollabConnection } from "./connection.js";
 
 /**
@@ -34,6 +35,13 @@ export interface DocBundle {
    */
   clientSeq: number;
   savedAt: number;
+  /**
+   * The lineage chain (doc 15 §1): every epoch this copy has passed
+   * through, newest last — `[..., {this bundle's genesisId, seq, hash}]`.
+   * Rides with re-seeds so returning holders can prove ancestry and
+   * fast-forward instead of forking. Capped; ancestry checks are O(chain).
+   */
+  lineage: LineageHead[];
 }
 
 /**
@@ -148,6 +156,18 @@ export class BundlePersister {
     if (!bundle) return; // not welcomed yet — nothing durable to say
     this.lastWrite = this.now();
     bundle.savedAt = this.lastWrite;
+    // Maintain the lineage chain (doc 15 §1): the PREVIOUS bundle's chain
+    // carries forward; the head for the current epoch is refreshed in
+    // place (same genesisId) or appended (first write in a new epoch).
+    const prior = await this.store.get(this.docId);
+    const chain = [...(prior?.lineage ?? [])];
+    const digest = await crypto.subtle.digest("SHA-256", bundle.confirmedBytes as BufferSource);
+    let hash = "";
+    for (const b of new Uint8Array(digest)) hash += b.toString(16).padStart(2, "0");
+    const head = { genesisId: bundle.genesisId, seq: bundle.confirmedSeq, docHash: hash };
+    if (chain.length && chain[chain.length - 1].genesisId === bundle.genesisId) chain[chain.length - 1] = head;
+    else chain.push(head);
+    bundle.lineage = chain.slice(-50); // bounded; ancient epochs age out
     await this.store.put(bundle);
   }
 }

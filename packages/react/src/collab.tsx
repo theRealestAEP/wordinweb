@@ -157,6 +157,18 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         }
         setEpochChanged({ from, to });
       },
+      onFastForward: (from, _to) => {
+        // Doc 15 fast-forward: nothing was lost, so no draft banner — but
+        // the superseded state is BANKED recoverable-not-gone (the
+        // fabricated-lineage mitigation: worst case is restorable).
+        if (store) {
+          void store.get(docId).then((old) => {
+            if (old && old.genesisId === from) {
+              return store.put({ ...old, docId: `${docId}#superseded-${from}` });
+            }
+          });
+        }
+      },
     };
     // Mode from the LINK (doc 13 §6): a docKey selects the encrypted
     // connection; both classes expose the same session surface, so the rest

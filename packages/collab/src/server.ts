@@ -18,6 +18,7 @@ export {
   type RosterEntry,
   type EnvelopeEntry,
   type SealedCheckpoint,
+  type LineageHead,
   ENGINE_VERSION,
 } from "./protocol.js";
 export { sealIntent, openIntent, sealCheckpoint, openCheckpoint, deriveEpochKeys, stretchShareCode, mintDocKey, docKeyFromFragment, type IntentEnvelope, type EpochKeys } from "./e2ee.js";

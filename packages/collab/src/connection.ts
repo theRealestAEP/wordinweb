@@ -40,6 +40,15 @@ export interface ConnectionCallbacks {
   onEpochChange?: (storedGenesisId: string, currentGenesisId: string) => void;
   /** The session roster changed (join/leave/rename) — full snapshot. */
   onRoster?: (roster: RosterEntry[]) => void;
+  /**
+   * Resume landed in a different epoch that is a STRICT DESCENDANT of this
+   * client's stored head (doc 15 §1 fast-forward): the seed's lineage
+   * contains our (genesisId, hash) at ≥ our seq, so adopting the server's
+   * state loses nothing — no draft, no banner noise. The consumer should
+   * still bank the superseded bundle recoverable-not-gone (version ring /
+   * a superseded slot) per doc 15's fabricated-lineage mitigation.
+   */
+  onFastForward?: (fromGenesisId: string, toGenesisId: string) => void;
 }
 
 function base64ToBytes(b64: string): Uint8Array {
@@ -204,6 +213,7 @@ export class CollabConnection {
       ...this.replica.exportBundleState(),
       clientSeq: this.clientSeq,
       savedAt: 0,
+      lineage: [], // the persister maintains the chain across writes
     };
   }
 
@@ -285,6 +295,13 @@ export class CollabConnection {
         if (resumed) {
           if (resumed.genesisId === msg.genesisId) {
             for (const intent of resumed.pending) this.transport.send({ t: "submit", intent });
+          } else if (isAncestorOf(resumed, msg.lineage)) {
+            // Doc 15 fast-forward: our head is in the seed's chain at >= our
+            // seq with a MATCHING hash — the new epoch strictly extends what
+            // we have; adopt silently. (Hash equality is the ancestry proof;
+            // a fabricated chain without our real hash fails this check and
+            // falls through to the fork path below.)
+            this.cb.onFastForward?.(resumed.genesisId, msg.genesisId);
           } else {
             this.cb.onEpochChange?.(resumed.genesisId, msg.genesisId);
           }
@@ -314,4 +331,19 @@ export class CollabConnection {
       }
     }
   }
+}
+
+/** Doc 15 §1 ancestry check: the rejoiner's own recorded head must appear
+ * in the seed's lineage — same epoch, at least our seq, and the HASH of the
+ * state we hold. O(chain), no dates involved (clocks are untrusted). */
+function isAncestorOf(
+  bundle: DocBundle,
+  seedLineage: { genesisId: string; seq: number; docHash: string }[] | undefined,
+): boolean {
+  if (!seedLineage) return false;
+  const ownHead = bundle.lineage?.[bundle.lineage.length - 1];
+  if (!ownHead) return false;
+  return seedLineage.some(
+    (h) => h.genesisId === ownHead.genesisId && h.seq >= ownHead.seq && h.docHash === ownHead.docHash,
+  );
 }

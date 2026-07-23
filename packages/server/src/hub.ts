@@ -1,6 +1,6 @@
 import { DocxDocument } from "@wordinweb/core";
 import { DocumentSession, type IdSidecar, type ParticipantProfile } from "@wordinweb/collab/server";
-import type { EnvelopeEntry, SealedCheckpoint, IntentEnvelope } from "@wordinweb/collab/server";
+import type { EnvelopeEntry, SealedCheckpoint, IntentEnvelope, LineageHead } from "@wordinweb/collab/server";
 import { ClientMessage, ServerMessage, PROTOCOL_VERSION } from "@wordinweb/collab/server";
 import { StorageDriver } from "./storage.js";
 
@@ -82,6 +82,10 @@ interface Room {
   /** Share-code verifier registered at seed (doc 13 §7) — a PBKDF2 output,
    * NOT the code. Optional; rotation happens naturally at re-seed. */
   codeVerifier?: string;
+  /** The seeder's lineage chain (doc 15) — held OPAQUELY and echoed in
+   * welcomes so rejoining holders can decide fast-forward vs fork.
+   * Ephemeral like everything else in the room. */
+  lineage?: LineageHead[];
   /** Online-guess budget: consecutive failures + lockout deadline. */
   codeGuard?: { failures: number; lockedUntil: number };
   /** Epoch-ms timestamp of when the room last became empty, or undefined
@@ -318,6 +322,7 @@ export class CollabHub {
           tail: room.session!.entriesSince(cp.seq),
           genesisId: room.genesisId,
           mode: "plaintext", // E2EE mode lands with doc 13 items 1-2.
+          lineage: room.lineage,
         });
         // Roster upsert + fan-out (doc 14 §2): keyed by the BOUND clientId,
         // so a reconnect resumes the same entry. Sanitization is server-side
@@ -577,6 +582,7 @@ export class CollabHub {
     docx: Uint8Array,
     sidecar?: IdSidecar,
     codeVerifier?: string,
+    lineage?: LineageHead[],
   ): { ok: true; genesisId: string } | { ok: false; reason: "exists"; genesisId: string } {
     const existing = this.rooms.get(docId);
     if (existing) return { ok: false, reason: "exists", genesisId: existing.genesisId };
@@ -589,6 +595,7 @@ export class CollabHub {
       genesisId: this.genGenesisId(),
       roster: new Map(),
       codeVerifier,
+      lineage,
       emptySince: this.now(), // eviction clock runs until someone joins
     };
     this.rooms.set(docId, room);

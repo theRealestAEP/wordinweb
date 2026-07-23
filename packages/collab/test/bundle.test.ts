@@ -89,16 +89,20 @@ describe("BundlePersister throttle (round-4 F8: throttle, not debounce)", () => 
     return { conn, store, p, advance, timers };
   }
 
-  it("a sustained burst coalesces to one leading + one trailing write — never a deferred-forever debounce", () => {
+  it("a sustained burst coalesces to one leading + one trailing write — never a deferred-forever debounce", async () => {
     const { conn, store, p, advance } = harness();
+    const settle = () => new Promise((r) => setTimeout(r, 20)); // write() awaits a real async digest
     conn.submit(ins(0, "a"));
-    p.notify(); // leading edge: writes immediately
+    p.notify(); // leading edge: writes immediately (async digest inside)
+    await settle();
     expect(store.writes).toBe(1);
     for (let i = 1; i <= 30; i++) { conn.submit(ins(i, "x")); p.notify(); advance(20); }
+    await settle();
     // 600ms of continuous typing: a debounce would still be waiting; the
     // throttle has armed exactly one trailing write inside the window.
     expect(store.writes).toBe(1);
     advance(1000); // window closes → the trailing write fires
+    await settle();
     expect(store.writes).toBe(2);
   });
 
@@ -278,4 +282,92 @@ describe("fuzz teardown round (doc 12 §10): seeded bursts → server death → 
       expect(Buffer.from(alice2.doc!.save()).equals(Buffer.from(srv2.checkpoint().docx))).toBe(true);
     });
   }
+});
+
+describe("lineage + fast-forward (doc 15 phase 1)", () => {
+  /** sha256 hex of bytes (what the persister records per head). */
+  async function hashOf(bytes: Uint8Array): Promise<string> {
+    const d = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+    let hex = "";
+    for (const b of new Uint8Array(d)) hex += b.toString(16).padStart(2, "0");
+    return hex;
+  }
+  /** miniServer whose welcome carries a lineage chain (like a real seed). */
+  function lineageServer(genesisId: string, lineage: { genesisId: string; seq: number; docHash: string }[]) {
+    const srv = miniServer(genesisId);
+    const origAttach = srv.attach;
+    return {
+      ...srv,
+      attach: () => {
+        const t = origAttach();
+        return {
+          send: t.send,
+          onMessage: (cb: (m: ServerMessage) => void) =>
+            t.onMessage((m) => cb(m.t === "welcome" ? { ...m, lineage } : m)),
+        };
+      },
+    };
+  }
+
+  it("a strict descendant fast-forwards: no draft, no fork callback, superseded state bankable", async () => {
+    // Epoch 1: alice works; her bundle records head (g1, seq 1, hash).
+    const srv1 = miniServer("g1");
+    const conn1 = new CollabConnection(srv1.attach(), "alice");
+    conn1.join("d");
+    conn1.submit(ins(0, "hello"));
+    const bundle = conn1.exportBundle("d")!;
+    bundle.lineage = [{ genesisId: "g1", seq: bundle.confirmedSeq, docHash: await hashOf(bundle.confirmedBytes) }];
+
+    // Epoch 2 seeded by someone whose chain CONTAINS alice's exact head
+    // (they carried on from her state — she is a strict ancestor).
+    const srv2 = lineageServer("g2", [
+      ...bundle.lineage,
+      { genesisId: "g2", seq: 0, docHash: "whatever-newer" },
+    ]);
+    let fastForwarded: [string, string] | null = null;
+    let forked = false;
+    const conn2 = new CollabConnection(srv2.attach(), "alice", {
+      onFastForward: (a, b) => (fastForwarded = [a, b]),
+      onEpochChange: () => (forked = true),
+    });
+    conn2.resume(bundle);
+    expect(fastForwarded).toEqual(["g1", "g2"]);
+    expect(forked).toBe(false); // silent adoption — the doc-15 churn fix
+    expect(conn2.ready).toBe(true);
+  });
+
+  it("a FABRICATED lineage (right epoch id, wrong hash) does NOT fast-forward — falls to the fork path", async () => {
+    const srv1 = miniServer("g1");
+    const conn1 = new CollabConnection(srv1.attach(), "alice");
+    conn1.join("d");
+    conn1.submit(ins(0, "hello"));
+    const bundle = conn1.exportBundle("d")!;
+    bundle.lineage = [{ genesisId: "g1", seq: bundle.confirmedSeq, docHash: await hashOf(bundle.confirmedBytes) }];
+
+    // Mallory claims ancestry with alice's epoch id but not her real hash.
+    const srv2 = lineageServer("g2", [{ genesisId: "g1", seq: 99, docHash: "forged" }]);
+    let fastForwarded = false;
+    let forked = false;
+    const conn2 = new CollabConnection(srv2.attach(), "alice", {
+      onFastForward: () => (fastForwarded = true),
+      onEpochChange: () => (forked = true),
+    });
+    conn2.resume(bundle);
+    expect(fastForwarded).toBe(false);
+    expect(forked).toBe(true); // treated as divergence → draft preserved path
+  });
+
+  it("no lineage in the welcome (legacy/provider rooms) ⇒ every epoch change is a fork (safe default)", () => {
+    const srv1 = miniServer("g1");
+    const conn1 = new CollabConnection(srv1.attach(), "alice");
+    conn1.join("d");
+    conn1.submit(ins(0, "hello"));
+    const bundle = conn1.exportBundle("d")!;
+    bundle.lineage = [{ genesisId: "g1", seq: 1, docHash: "x" }];
+    const srv2 = miniServer("g2"); // welcome carries no lineage
+    let forked = false;
+    const conn2 = new CollabConnection(srv2.attach(), "alice", { onEpochChange: () => (forked = true) });
+    conn2.resume(bundle);
+    expect(forked).toBe(true);
+  });
 });

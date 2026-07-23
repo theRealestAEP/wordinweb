@@ -7,6 +7,20 @@ import type { IntentEnvelope } from "./e2ee.js";
  * the bookkeeping; clients derive the canonical form themselves. */
 export type EnvelopeEntry = IntentEnvelope & { seq: number };
 
+/**
+ * One head in a document's LINEAGE chain (doc 15 §1): the identity of the
+ * confirmed state a session epoch ended at. Ancestry is decided by hash
+ * membership — never by dates (clocks are self-asserted). A rejoiner whose
+ * own head appears in the seed's lineage is a strict ancestor and can
+ * FAST-FORWARD silently; anything else is true divergence (draft/fork).
+ */
+export interface LineageHead {
+  genesisId: string;
+  seq: number;
+  /** sha256 hex of the confirmed docx bytes at (genesisId, seq). */
+  docHash: string;
+}
+
 /** A sealed checkpoint blob as the wire carries it (doc 13 §3). */
 export interface SealedCheckpoint {
   seq: number;
@@ -154,6 +168,10 @@ export type ServerMessage =
        * from their link (#k present ⇒ encrypted) and HARD-REFUSE a welcome
        * that contradicts it — the wire value must never downgrade a client. */
       mode: "plaintext" | "encrypted";
+      /** The seed's lineage chain (doc 15): lets a rejoining holder decide
+       * fast-forward vs fork CLIENT-side. Absent for provider-created and
+       * legacy rooms (⇒ every epoch mismatch is a fork, the safe default). */
+      lineage?: LineageHead[];
     }
   | { t: "broadcast"; entries: LogEntry[] }
   /**

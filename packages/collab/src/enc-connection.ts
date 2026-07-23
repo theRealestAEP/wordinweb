@@ -136,6 +136,7 @@ export class EncryptedCollabConnection {
       ...this.replica.exportBundleState(),
       clientSeq: this.clientSeq,
       savedAt: 0,
+      lineage: [], // the persister maintains the chain across writes
     };
   }
 

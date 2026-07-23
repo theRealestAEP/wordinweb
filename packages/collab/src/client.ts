@@ -20,6 +20,7 @@ export {
   type RosterEntry,
   type EnvelopeEntry,
   type SealedCheckpoint,
+  type LineageHead,
   ENGINE_VERSION,
 } from "./protocol.js";
 export { transformIntent, transformPosition } from "./transform.js";

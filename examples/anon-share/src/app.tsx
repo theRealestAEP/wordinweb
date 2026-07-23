@@ -60,7 +60,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey }: {
       await fetch(`${httpBase}/docs/${docId}`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ docx: b64(bundle.confirmedBytes), sidecar: bundle.confirmedSidecar }),
+        body: JSON.stringify({ docx: b64(bundle.confirmedBytes), sidecar: bundle.confirmedSidecar, lineage: bundle.lineage }),
       });
     }
     // Whether we won or someone else did (409), a session now exists — join it.

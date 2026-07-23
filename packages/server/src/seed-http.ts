@@ -1,7 +1,7 @@
 import { CollabHub } from "./hub.js";
 import { makeDocId } from "./demo.js";
 import { blankDocxBytes } from "./blank.js";
-import type { IdSidecar, SealedCheckpoint } from "@wordinweb/collab/server";
+import type { IdSidecar, SealedCheckpoint, LineageHead } from "@wordinweb/collab/server";
 
 /**
  * Transport-free core of the go-live / bring-it-back HTTP endpoints (plan
@@ -36,6 +36,9 @@ export interface SeedHttpRequest {
     sidecar?: IdSidecar;
     codeVerifier?: string;
     blank?: boolean;
+    /** The seeder's lineage chain (doc 15) — echoed in welcomes for
+     * client-side fast-forward/fork decisions. */
+    lineage?: LineageHead[];
     /** Encrypted seed (doc 13): the client-sealed checkpoint + the epoch id
      * it was sealed under (client-minted for encrypted epochs — the keys
      * derive from (K_doc, genesisId), so the id must exist before sealing).
@@ -112,7 +115,7 @@ export function handleSeedRequest(
   // CALLER's error, reported as 400, and no room is created.
   let result: ReturnType<CollabHub["seed"]>;
   try {
-    result = hub.seed(docId, docx, req.body.sidecar, req.body.codeVerifier);
+    result = hub.seed(docId, docx, req.body.sidecar, req.body.codeVerifier, req.body.lineage);
   } catch {
     return { status: 400, body: { error: "invalid-docx" } };
   }
