@@ -94,6 +94,22 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "insertPageField":
       if (intent.fieldKind !== "page" && intent.fieldKind !== "pageOfTotal") return "insertPageField: bad kind";
       return null;
+    case "setLink":
+      // URL scheme validated at apply via isSafeUrl; bound the length here.
+      if (typeof intent.url !== "string" || intent.url.length === 0 || intent.url.length > 4000) return "setLink: bad url";
+      return null;
+    case "insertFootnote":
+      if (typeof intent.text !== "string" || intent.text.trim().length === 0) return "insertFootnote: empty";
+      if (intent.text.length > 20_000) return "insertFootnote: too long";
+      return null;
+    case "setDropCap":
+      if (intent.mode !== null && intent.mode !== "drop" && intent.mode !== "margin") return "setDropCap: bad mode";
+      return null;
+    case "setDivider":
+      return null;
+    case "insertBookmark":
+      if (typeof intent.name !== "string" || intent.name.length === 0 || intent.name.length > 400) return "insertBookmark: bad name";
+      return null;
     case "formatRun":
     case "formatParagraph":
     case "setListType":

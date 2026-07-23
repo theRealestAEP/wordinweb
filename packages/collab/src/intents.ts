@@ -307,6 +307,45 @@ export interface InsertPageFieldIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
+/** Wrap a run in a hyperlink to `url`. The url is scheme-validated at apply
+ * (rejects javascript:/data: etc. — doc 11 gate 1). Run-level, identity. */
+export interface SetLinkIntent extends IntentBase {
+  kind: "setLink";
+  runId: StableId;
+  url: string;
+  nodeIds: StableId[];
+}
+
+/** Insert a footnote reference at the end of a run + its footnote text. */
+export interface InsertFootnoteIntent extends IntentBase {
+  kind: "insertFootnote";
+  runId: StableId;
+  text: string;
+  nodeIds: StableId[];
+}
+
+/** Set/clear a drop cap on a paragraph. Block-level. */
+export interface SetDropCapIntent extends IntentBase {
+  kind: "setDropCap";
+  blockId: StableId;
+  mode: "drop" | "margin" | null;
+  nodeIds: StableId[];
+}
+
+/** Set/clear a paragraph divider (horizontal rule). Block-level, identity. */
+export interface SetDividerIntent extends IntentBase {
+  kind: "setDivider";
+  blockId: StableId;
+  divider: Record<string, unknown> | null;
+}
+
+/** Insert a bookmark anchor at the end of a run. */
+export interface InsertBookmarkIntent extends IntentBase {
+  kind: "insertBookmark";
+  runId: StableId;
+  name: string;
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -326,7 +365,12 @@ export type Intent =
   | ReplyCommentIntent
   | AdjustIndentIntent
   | SetSpacingIntent
-  | InsertPageFieldIntent;
+  | InsertPageFieldIntent
+  | SetLinkIntent
+  | InsertFootnoteIntent
+  | SetDropCapIntent
+  | SetDividerIntent
+  | InsertBookmarkIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

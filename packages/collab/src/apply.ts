@@ -11,6 +11,12 @@ import {
   adjustIndent,
   setParagraphSpacing,
   insertPageField,
+  setLink,
+  insertFootnote,
+  setDropCapAt,
+  setParagraphDivider,
+  insertBookmarkAt,
+  isSafeUrl,
   applyTableOp,
   mergeParagraphBackward,
   addComment,
@@ -253,6 +259,51 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
         ids.reassign(fresh[k], intent.nodeIds[k]);
       }
       return true;
+    }
+    case "setLink": {
+      if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const seg: SelectionSegment = { run: entry.run, t: entry.firstT, start: 0, end: entry.firstT.text.length, props: entry.run.props };
+      const before = trackedSet(ids, doc);
+      const ok = setLink(doc, [seg], intent.url);
+      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return ok;
+    }
+    case "insertFootnote": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const id = insertFootnote(doc, entry.firstT, entry.firstT.text.length, intent.text);
+      if (id === null) return false;
+      assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return true;
+    }
+    case "setDropCap": {
+      const blockEl = ids.elOf(intent.blockId);
+      if (!blockEl) return false;
+      const target = firstTextDescendant(blockEl) ?? blockEl;
+      const before = trackedSet(ids, doc);
+      const ok = setDropCapAt(doc, target, intent.mode as never);
+      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return ok;
+    }
+    case "setDivider": {
+      const blockEl = ids.elOf(intent.blockId);
+      if (!blockEl) return false;
+      const target = firstTextDescendant(blockEl) ?? blockEl;
+      return setParagraphDivider(doc, [target], intent.divider as never);
+    }
+    case "insertBookmark": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      return insertBookmarkAt(doc, entry.firstT, entry.firstT.text.length, intent.name);
     }
     case "adjustIndent": {
       const blockEl = ids.elOf(intent.blockId);

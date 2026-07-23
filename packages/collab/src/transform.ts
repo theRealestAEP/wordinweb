@@ -88,6 +88,14 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "insertPageField":
       // Sibling field run at end of run; no text offsets shift.
       return [];
+    case "setLink":
+    case "insertFootnote":
+    case "setDropCap":
+    case "setDivider":
+    case "insertBookmark":
+      // Run/block-level; no text offsets shift (wraps/annotates in place or
+      // inserts sibling markers).
+      return [];
   }
 }
 
@@ -205,6 +213,11 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "adjustIndent":
     case "setSpacing":
     case "insertPageField":
+    case "setLink":
+    case "insertFootnote":
+    case "setDropCap":
+    case "setDivider":
+    case "insertBookmark":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);
