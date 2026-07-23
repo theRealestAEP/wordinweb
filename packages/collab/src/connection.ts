@@ -1,4 +1,5 @@
 import { ClientReplica } from "./replica.js";
+import { DocxDocument } from "@wordinweb/core";
 import { Intent } from "./intents.js";
 import {
   ClientMessage,
@@ -49,6 +50,12 @@ export interface ConnectionCallbacks {
    * a superseded slot) per doc 15's fabricated-lineage mitigation.
    */
   onFastForward?: (fromGenesisId: string, toGenesisId: string) => void;
+  /** Media re-supply control (doc 16 §5): the room asks who holds `sha`;
+   * a holder answers via `mediaHave` and uploads over HTTP when chosen. */
+  onMediaRequest?: (sha: string) => void;
+  /** A needed blob became fetchable / definitively unavailable. */
+  onMediaReady?: (sha: string) => void;
+  onMediaUnavailable?: (sha: string) => void;
 }
 
 function base64ToBytes(b64: string): Uint8Array {
@@ -157,6 +164,27 @@ export class CollabConnection {
     if (this.activity.length > CollabConnection.ACTIVITY_CAP) {
       this.activity.splice(0, this.activity.length - CollabConnection.ACTIVITY_CAP);
     }
+  }
+
+  /** Ask the room for a blob this replica needs (doc 16 §5.2). */
+  mediaNeed(sha: string): void {
+    this.transport.send({ t: "media-need", sha });
+  }
+  /** Volunteer holdings (reply to a request, or after a welcome whose
+   * mediaNeeded intersects local media — §5.4). */
+  mediaHave(shas: string[]): void {
+    if (shas.length) this.transport.send({ t: "media-have", shas });
+  }
+  /** Shas this replica can re-supply: metadata of parts whose bytes are
+   * PRESENT (pending parts are exactly what we can't serve). */
+  heldMediaShas(): string[] {
+    const doc = this.replica?.doc;
+    if (!doc) return [];
+    const out: string[] = [];
+    for (const [part, meta] of doc.mediaMeta) {
+      if (doc.mediaStatus(part) === "ready") out.push(meta.sha);
+    }
+    return out;
   }
 
   /** Rename/recolor this participant mid-session. The server sanitizes and
@@ -275,6 +303,31 @@ export class CollabConnection {
         this.genesisId = msg.genesisId;
         this.mode = msg.mode;
         if (msg.tail.length) this.replica.receive(msg.tail);
+        // Doc 16 §5.3: restore media ADDRESSES from the resumed bundle —
+        // the welcome snapshot carries pixels but not shas (metadata is
+        // in-memory on the doc); without this a resumed holder could not
+        // volunteer or verify. Imported before the §5.4 intersection below.
+        if (this.resuming?.mediaMeta) {
+          // The welcome snapshot carries the REGISTRATION; the relay may
+          // long since have evicted the bytes (that's the re-supply
+          // premise) — but this holder's bundle has them. Restore pixels
+          // from the bundle's own zip so this client renders immediately
+          // AND can serve re-supply for everyone else.
+          const held = DocxDocument.load(this.resuming.confirmedBytes);
+          for (const [part, meta] of this.resuming.mediaMeta) {
+            this.replica.doc.mediaMeta.set(part, meta);
+            const bytes = held.media(part);
+            if (bytes && this.replica.doc.mediaStatus(part) === "pending") {
+              this.replica.doc.installMedia(part, bytes);
+            }
+          }
+        }
+        // §5.4: a joining holder resurrects "unavailable" media — intersect
+        // the room's needs with local holdings and volunteer.
+        if (msg.mediaNeeded?.length) {
+          const held = new Set(this.heldMediaShas());
+          this.mediaHave(msg.mediaNeeded.filter((sha) => held.has(sha)));
+        }
         this.recordActivity(msg.tail as never);
 
         // Resume epilogue (doc 12 §5). Case 1 — same epoch: replay the
@@ -323,6 +376,24 @@ export class CollabConnection {
       case "roster": {
         this.roster = msg.roster;
         this.cb.onRoster?.(msg.roster);
+        return;
+      }
+      case "media-request": {
+        this.cb.onMediaRequest?.(msg.sha);
+        return;
+      }
+      case "media-ready": {
+        this.cb.onMediaReady?.(msg.sha);
+        return;
+      }
+      case "media-unavailable": {
+        this.cb.onMediaUnavailable?.(msg.sha);
+        return;
+      }
+      case "media-upload": {
+        // Chosen as the re-supplier: surface as a request for THIS sha —
+        // the app's holder duty uploads over HTTP (bytes never ride the WS).
+        this.cb.onMediaRequest?.(msg.sha);
         return;
       }
       case "refused": {

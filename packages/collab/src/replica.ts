@@ -97,12 +97,14 @@ export class ClientReplica {
     confirmedBytes: Uint8Array;
     confirmedSidecar: ReturnType<StableIds["exportSidecar"]>;
     pending: Intent[];
+    mediaMeta: [string, { sha: string; iv?: string; genesisId?: string }][];
   } {
     return {
       confirmedSeq: this.confirmedSeq,
       confirmedBytes: this.confirmedBytes,
       confirmedSidecar: this.confirmedSidecar,
       pending: [...this.pending],
+      mediaMeta: [...this.doc.mediaMeta] as [string, { sha: string; iv?: string; genesisId?: string }][],
     };
   }
 

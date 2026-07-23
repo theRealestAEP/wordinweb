@@ -208,3 +208,36 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   out.set(b, a.length);
   return out;
 }
+
+/**
+ * Seal a media blob under K_media (doc 13 §4 / doc 16 §6). The IV is
+ * RETURNED (it rides in the insertImage intent) so any holder can later
+ * re-seal the same plaintext byte-identically for re-supply — deterministic
+ * re-encryption of the SAME message, not nonce reuse; a fresh IV would
+ * change the ciphertext and break the sha address (do NOT "fix" this).
+ * The sha the intent commits to is over the CIPHERTEXT — verifiable by the
+ * blind relay without opening anything.
+ */
+export async function sealMediaBlob(
+  kMedia: CryptoKey,
+  plaintext: Uint8Array,
+  ivB64?: string,
+): Promise<{ blob: Uint8Array; iv: string }> {
+  let iv: Uint8Array;
+  if (ivB64) iv = b64ToBytes(ivB64);
+  else {
+    iv = new Uint8Array(12);
+    crypto.getRandomValues(iv);
+  }
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv as BufferSource }, kMedia, plaintext as BufferSource),
+  );
+  return { blob: ct, iv: bytesToB64(iv) };
+}
+
+/** Open a media blob (GCM tag failure throws — reject, keep the skeleton). */
+export async function openMediaBlob(kMedia: CryptoKey, blob: Uint8Array, ivB64: string): Promise<Uint8Array> {
+  return new Uint8Array(
+    await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64ToBytes(ivB64) as BufferSource }, kMedia, blob as BufferSource),
+  );
+}

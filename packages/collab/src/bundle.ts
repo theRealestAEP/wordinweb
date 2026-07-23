@@ -42,6 +42,12 @@ export interface DocBundle {
    * fast-forward instead of forking. Capped; ancestry checks are O(chain).
    */
   lineage: LineageHead[];
+  /** Per-part media metadata (doc 16 §5.3): the sha (and E2EE iv/epoch)
+   * of every media part this copy knows. The docx bytes carry the PIXELS;
+   * this carries the ADDRESSES — without it a resumed holder couldn't
+   * answer re-supply requests or verify fetches (metadata is in-memory on
+   * the doc and would otherwise die with the session). */
+  mediaMeta?: [string, { sha: string; iv?: string; genesisId?: string }][];
 }
 
 /**

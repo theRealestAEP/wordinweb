@@ -2004,6 +2004,11 @@ export class DocxDocument {
    */
   readonly pendingMedia = new Map<string, { sha: string; iv?: string; genesisId?: string }>();
 
+  /** Per-part media metadata that PERSISTS after install (doc 16 §5.3):
+   * holder duty needs the sha (and E2EE iv/epoch) of READY parts to answer
+   * re-supply requests; pendingMedia above only tracks not-yet-arrived. */
+  readonly mediaMeta = new Map<string, { sha: string; iv?: string; genesisId?: string }>();
+
   /** "ready" = bytes present; "pending" = registered, bytes absent (doc 05).
    * Unregistered parts report "pending" too — a rel pointing at a missing
    * zip entry after a save/parse round-trip IS the pending state (a hole is
@@ -2027,6 +2032,7 @@ export class DocxDocument {
     // a pending part (doc 16 §6 — absence is the unambiguous hole).
     delete this.pkg.raw()[part];
     this.pendingMedia.set(part, { sha, ...meta });
+    this.mediaMeta.set(part, { sha, ...meta });
     return relId;
   }
 
