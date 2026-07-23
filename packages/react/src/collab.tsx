@@ -45,6 +45,8 @@ export interface CollabSession {
   submit: (intent: Omit<Intent, "clientId" | "clientSeq" | "base">) => void;
   /** Broadcast this client's cursor/selection. */
   setPresence: (pos: PresencePosition | null) => void;
+  /** Allocate carried node ids (sub-range format / split / insert). */
+  allocIds: (n: number) => number[];
   /** Remote participants' latest cursor/selection positions. */
   presence: Record<string, PresencePosition | null>;
   /** Set if the server refused the connection (e.g. version mismatch). */
@@ -96,6 +98,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     ready,
     submit: (intent) => connRef.current?.submit(intent),
     setPresence: (pos) => connRef.current?.setPresence(pos),
+    allocIds: (n) => connRef.current?.allocIds(n) ?? [],
     presence,
     refused,
   };
@@ -130,8 +133,8 @@ export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): R
 
   return createElement(DocxView, {
     source: bytes,
-    // Pass submit + live presence; DocxView draws remote carets over the page.
-    collab: { submit: session.submit, presence: session.presence },
+    // Pass submit + live presence + id allocator; DocxView draws remote carets.
+    collab: { submit: session.submit, presence: session.presence, allocIds: session.allocIds },
     editable: opts.editable ?? true,
     // Re-key only on docEpoch (a true-conflict reload) — NOT on every change.
     // Between reloads the source bytes change but the key is stable, so

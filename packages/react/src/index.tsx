@@ -335,6 +335,9 @@ export interface DocxViewProps {
     /** Remote participants' cursor/selection positions, drawn as colored
      * carets over the page (see presence-cursors). */
     presence?: Record<string, PresencePosition | null>;
+    /** Allocate `n` fresh carried node ids (for sub-range format / split /
+     * insert intents). Injected from the collab connection. */
+    allocIds?: (n: number) => number[];
   };
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
@@ -809,16 +812,32 @@ export function DocxView({
               { underline: !fmt?.underline };
             history.checkpoint();
             const formatted = applyRunFormat(doc, segs, patch);
-            // Collaboration: emit a formatRun intent for each whole run the
-            // selection covers, so the format converges to all participants.
+            // Collaboration: emit a format intent per selected run — formatRun
+            // for a whole run, formatRange (with carried piece ids) for a
+            // partial run — so the format converges to all participants.
             if (collab && doc.stableIds) {
               const seenRuns = new Set<number>();
               for (const seg of segs) {
                 const runId = seg.run.src ? doc.stableIds.idOf(seg.run.src) : undefined;
                 const blockId = seg.run.srcParent ? doc.stableIds.idOf(seg.run.srcParent) : undefined;
-                if (runId !== undefined && blockId !== undefined && !seenRuns.has(runId)) {
-                  seenRuns.add(runId);
+                if (runId === undefined || blockId === undefined || seenRuns.has(runId)) continue;
+                seenRuns.add(runId);
+                const runLen = seg.t ? seg.t.text.length : 0;
+                const whole = !seg.t || (seg.start <= 0 && seg.end >= runLen);
+                if (whole) {
                   collab.submit({ kind: "formatRun", blockId, runId, patch });
+                } else {
+                  // Sub-range: allocate carried ids for the split pieces.
+                  const before = seg.start > 0;
+                  const after = seg.end < runLen;
+                  const alloc = collab.allocIds?.((before ? 1 : 0) + 1 + (after ? 1 : 0)) ?? [];
+                  let k = 0;
+                  const beforeId = before ? alloc[k++] : undefined;
+                  const middleId = alloc[k++];
+                  const afterId = after ? alloc[k++] : undefined;
+                  if (middleId !== undefined) {
+                    collab.submit({ kind: "formatRange", blockId, runId, start: seg.start, end: seg.end, patch, beforeId, middleId, afterId });
+                  }
                 }
               }
             }

@@ -172,6 +172,7 @@ export type EditorIntent =
   | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
   | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number }
   | { kind: "formatRun"; blockId: number; runId: number; patch: Record<string, unknown> }
+  | { kind: "formatRange"; blockId: number; runId: number; start: number; end: number; patch: Record<string, unknown>; beforeId?: number; middleId: number; afterId?: number }
   | { kind: "formatParagraph"; blockId: number; align?: "left" | "center" | "right" | "justify"; styleId?: string | null }
   | { kind: "setListType"; blockId: number; listKind: "bullet" | "number" | null };
 

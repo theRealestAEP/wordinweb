@@ -83,3 +83,17 @@ describe("CollabConnection over an in-process hub", () => {
     void serializeXml; // keep import used across builds
   });
 });
+
+describe("CollabConnection.allocIds", () => {
+  it("allocates fresh unique ids, and two clients get disjoint blocks", () => {
+    const hub = new CollabHubLoopback(() => docBytes("x"));
+    const a = new CollabConnection(hub.connect(), "alice");
+    const b = new CollabConnection(hub.connect(), "bob");
+    const aIds = [...a.allocIds(3), ...a.allocIds(2)];
+    const bIds = b.allocIds(3);
+    expect(new Set(aIds).size).toBe(5); // all unique within a client
+    // No overlap between the two clients' allocations.
+    const overlap = aIds.filter((id) => bIds.includes(id));
+    expect(overlap).toHaveLength(0);
+  });
+});

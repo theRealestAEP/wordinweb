@@ -41,6 +41,11 @@ export class CollabConnection {
    * the renderer re-mounts on this, but updates in place otherwise (no flash
    * for the common non-conflicting edits). */
   docEpoch = 0;
+  /** Per-client id allocator for carried node ids (split/format-range/insert):
+   * a client-specific base block keeps concurrently-allocated ids disjoint
+   * across clients so they never collide. */
+  private idCounter = 0;
+  private idBase = -1;
 
   constructor(
     private transport: ClientTransport,
@@ -53,6 +58,20 @@ export class CollabConnection {
   /** Replace the callbacks (used by bindEditor to attach after construction). */
   setCallbacks(cb: ConnectionCallbacks): void {
     this.cb = cb;
+  }
+
+  /** Allocate `n` fresh carried node ids in this client's disjoint block. */
+  allocIds(n: number): number[] {
+    if (this.idBase < 0) {
+      // A large per-client base derived from the client id, so two clients'
+      // allocations never overlap (blocks of 1e7 ids each).
+      let h = 0;
+      for (let i = 0; i < this.clientId.length; i++) h = (h * 31 + this.clientId.charCodeAt(i)) >>> 0;
+      this.idBase = 1_000_000_000 + (h % 100_000) * 10_000_000;
+    }
+    const out: number[] = [];
+    for (let i = 0; i < n; i++) out.push(this.idBase + this.idCounter++);
+    return out;
   }
 
   /** Join a document. The server replies with a welcome (snapshot + tail). */
