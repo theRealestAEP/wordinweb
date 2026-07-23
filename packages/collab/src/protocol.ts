@@ -104,6 +104,14 @@ export type ClientMessage =
       /** Engine (transform/apply semantics) version — REQUIRED for encrypted
        * rooms, where the fence prevents mixed-semantics divergence. */
       engineVersion?: string;
+      /**
+       * Share-code proof (doc 13 §7): the PBKDF2-stretched code, base64.
+       * The server compares against the verifier registered at seed time and
+       * enforces an attempt budget — 10^6 combinations is plenty against 5
+       * online tries, and in E2EE mode the code ALSO mixes into key
+       * derivation, so even a server bypass yields undecryptable content.
+       */
+      codeProof?: string;
     }
   /** Update this connection's profile mid-session (rename / recolor). */
   | { t: "profile"; profile: ParticipantProfile }

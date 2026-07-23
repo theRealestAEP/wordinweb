@@ -26,8 +26,11 @@ export interface SeedHttpRequest {
   method: "POST" | "PUT";
   /** Required for PUT (the docId being revived); ignored for POST. */
   docId?: string;
-  /** Parsed JSON body. `docx` is base64 (JSON has no binary type). */
-  body: { docx?: string; sidecar?: IdSidecar };
+  /** Parsed JSON body. `docx` is base64 (JSON has no binary type).
+   * `codeVerifier` (doc 13 §7) registers a share-code gate for the epoch —
+   * a PBKDF2 output computed client-side; the code itself never crosses
+   * the wire. */
+  body: { docx?: string; sidecar?: IdSidecar; codeVerifier?: string };
 }
 
 export interface SeedHttpResponse {
@@ -74,7 +77,7 @@ export function handleSeedRequest(
   // CALLER's error, reported as 400, and no room is created.
   let result: ReturnType<CollabHub["seed"]>;
   try {
-    result = hub.seed(docId, docx, req.body.sidecar);
+    result = hub.seed(docId, docx, req.body.sidecar, req.body.codeVerifier);
   } catch {
     return { status: 400, body: { error: "invalid-docx" } };
   }

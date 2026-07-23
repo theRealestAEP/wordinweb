@@ -79,6 +79,11 @@ interface Room {
    * Disconnected entries stay (greyed in UI) so attribution keeps a name
    * for everyone who touched the session; reconnects resume the entry. */
   roster: Map<string, { profile: ParticipantProfile; connected: boolean }>;
+  /** Share-code verifier registered at seed (doc 13 §7) — a PBKDF2 output,
+   * NOT the code. Optional; rotation happens naturally at re-seed. */
+  codeVerifier?: string;
+  /** Online-guess budget: consecutive failures + lockout deadline. */
+  codeGuard?: { failures: number; lockedUntil: number };
   /** Epoch-ms timestamp of when the room last became empty, or undefined
    * while anyone is connected. Drives zero-custody eviction (plan doc 12
    * §2): after the last-disconnect grace elapses the room — doc, log,
@@ -215,6 +220,35 @@ export class CollabHub {
           else {
             conn.send({ t: "refused", reason: "already-open" });
             return;
+          }
+        }
+        // Share-code gate (doc 13 §7): server-side attempt budget makes a
+        // 6-digit space adequate (5 tries/lockout vs 10^6). Checked before
+        // any state is bound for this socket. In E2EE mode this is only the
+        // OUTER wall — the code also mixes into key derivation, so a
+        // hypothetically bypassed gate still yields ciphertext.
+        {
+          const guarded = this.rooms.get(msg.docId);
+          if (guarded?.codeVerifier) {
+            const g = (guarded.codeGuard ??= { failures: 0, lockedUntil: 0 });
+            if (g.lockedUntil > this.now()) {
+              conn.send({ t: "refused", reason: "code-locked" });
+              return;
+            }
+            if (!msg.codeProof) {
+              conn.send({ t: "refused", reason: "code-required" });
+              return;
+            }
+            if (msg.codeProof !== guarded.codeVerifier) {
+              g.failures++;
+              if (g.failures >= 5) {
+                g.failures = 0;
+                g.lockedUntil = this.now() + 60_000; // 1-min lockout window
+              }
+              conn.send({ t: "refused", reason: "code-invalid" });
+              return;
+            }
+            g.failures = 0; // success resets the budget
           }
         }
         // Zero-custody posture (no provider): rooms exist only while seeded
@@ -525,6 +559,7 @@ export class CollabHub {
     docId: string,
     docx: Uint8Array,
     sidecar?: IdSidecar,
+    codeVerifier?: string,
   ): { ok: true; genesisId: string } | { ok: false; reason: "exists"; genesisId: string } {
     const existing = this.rooms.get(docId);
     if (existing) return { ok: false, reason: "exists", genesisId: existing.genesisId };
@@ -536,6 +571,7 @@ export class CollabHub {
       conns: new Set(),
       genesisId: this.genGenesisId(),
       roster: new Map(),
+      codeVerifier,
       emptySince: this.now(), // eviction clock runs until someone joins
     };
     this.rooms.set(docId, room);
@@ -558,6 +594,7 @@ export class CollabHub {
     docId: string,
     genesisId: string,
     checkpoint: SealedCheckpoint,
+    codeVerifier?: string,
   ): { ok: true; genesisId: string } | { ok: false; reason: "exists"; genesisId: string } {
     const existing = this.rooms.get(docId);
     if (existing) return { ok: false, reason: "exists", genesisId: existing.genesisId };
@@ -567,6 +604,7 @@ export class CollabHub {
       conns: new Set(),
       genesisId,
       roster: new Map(),
+      codeVerifier,
       emptySince: this.now(),
     };
     this.rooms.set(docId, room);
