@@ -792,6 +792,19 @@ export function DocxView({
               { underline: !fmt?.underline };
             history.checkpoint();
             const formatted = applyRunFormat(doc, segs, patch);
+            // Collaboration: emit a formatRun intent for each whole run the
+            // selection covers, so the format converges to all participants.
+            if (collab && doc.stableIds) {
+              const seenRuns = new Set<number>();
+              for (const seg of segs) {
+                const runId = seg.run.src ? doc.stableIds.idOf(seg.run.src) : undefined;
+                const blockId = seg.run.srcParent ? doc.stableIds.idOf(seg.run.srcParent) : undefined;
+                if (runId !== undefined && blockId !== undefined && !seenRuns.has(runId)) {
+                  seenRuns.add(runId);
+                  collab.submit({ kind: "formatRun", blockId, runId, patch });
+                }
+              }
+            }
             pages = rerender(doc);
             if (selectedAll) editor?.selectAll();
             else if (formatted.length > 0) editor?.selectRanges(formatted);
