@@ -49,6 +49,7 @@ import {
   checkboxStateElement,
   toggleCheckbox,
   collectRevisions,
+  insertTableAfter,
   acceptRevision,
   rejectRevision,
   acceptAllRevisions,
@@ -542,6 +543,16 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
     }
     case "acceptAllRevisions":
       return acceptAllRevisions(doc) > 0;
+    case "insertTable": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const before = trackedSet(ids, doc);
+      const ok = insertTableAfter(doc, entry.firstT, intent.rows, intent.cols);
+      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
+      return ok;
+    }
     case "setLink": {
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.
       const runEl = ids.elOf(intent.runId);

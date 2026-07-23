@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, createElement, type ReactNode } from "react";
 import type { DocxDocument } from "@wordinweb/core";
-import { DocxView } from "./index.js";
+import { DocxView, type DocxViewApi } from "./index.js";
+import { DocxToolbar, type ToolbarFeature, type ToolbarMode } from "./toolbar.js";
 import {
   CollabConnection,
   createWebSocketTransport,
@@ -41,8 +42,14 @@ export interface CollabSession {
   docEpoch: number;
   /** True once joined and the snapshot is loaded. */
   ready: boolean;
-  /** Submit a local edit (bookkeeping filled by the connection). */
+  /** Submit a local edit the editor ALREADY applied to the live doc
+   * (bookkeeping filled by the connection; no local re-apply). */
   submit: (intent: Omit<Intent, "clientId" | "clientSeq" | "base">) => void;
+  /** Submit an operation NOT yet applied locally: it is applied optimistically
+   * through the same canonical applyIntent code the server runs, so the local
+   * result is byte-identical to every replica by construction. Used for
+   * toolbar/API commands (insert chart, set link, page layout, ...). */
+  submitOp: (intent: Omit<Intent, "clientId" | "clientSeq" | "base">) => void;
   /** Broadcast this client's cursor/selection. */
   setPresence: (pos: PresencePosition | null) => void;
   /** Allocate carried node ids (sub-range format / split / insert). */
@@ -102,6 +109,8 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // the corrupted offsets got everything after the first char rejected
     // server-side). Pre-applied semantics track pending + send only.
     submit: (intent) => connRef.current?.submitPreApplied(intent),
+    // Toolbar/API ops: canonical-apply optimistic path (see CollabSession).
+    submitOp: (intent) => connRef.current?.submit(intent),
     setPresence: (pos) => connRef.current?.setPresence(pos),
     allocIds: (n) => connRef.current?.allocIds(n) ?? [],
     presence,
@@ -124,8 +133,33 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
  * browser (as all of DocxView does); the protocol/convergence/binding it rides
  * on are covered by the headless test suites.
  */
-export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): ReactNode {
+/** Toolbar groups OFF by default in the collab editor. Uploads (image/icon/
+ * screenshot/3D/media/object) are excluded per the demo threat model (no
+ * object upload → no stored-payload surface); the rest are commands not yet
+ * routed through intents — showing them would make local-only edits that
+ * silently diverge from other participants. Flip any of these on explicitly
+ * via `toolbarFeatures` once wired. */
+const COLLAB_TOOLBAR_DEFAULTS: Partial<Record<ToolbarFeature, boolean>> = {
+  image: false, icon: false, screenshot: false, model3D: false, media: false, object: false,
+  history: false, // toolbar undo/redo drives the LOCAL history; collaborative undo is server-side
+  drawing: false, // ink strokes have no intent yet
+  arrange: false, // selected-object arrange ops are not collab-anchored yet
+  headerFooter: false, // no header/footer intents yet
+};
+
+export function CollabEditor(opts: UseCollabOptions & {
+  editable?: boolean;
+  /** Render the Word-style ribbon toolbar above the page (default true). */
+  toolbar?: boolean;
+  /** Ribbon mode: "simple" (Home only) or "advanced" (default). */
+  toolbarMode?: ToolbarMode;
+  /** Per-group overrides merged over the collab-safe defaults. */
+  toolbarFeatures?: Partial<Record<ToolbarFeature, boolean>>;
+  /** Observe the imperative document API (find/replace, inserts, ...). */
+  onReady?: (api: DocxViewApi) => void;
+}): ReactNode {
   const session = useCollab(opts);
+  const [api, setApi] = useState<DocxViewApi | null>(null);
   // Placeholder bytes only — DocxView renders session.doc directly (below), so
   // this is re-serialized ONLY on a reload (docEpoch), never per broadcast.
   const bytes = useMemo(
@@ -141,12 +175,14 @@ export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): R
     return createElement(ConnectingNotice, null);
   }
 
-  return createElement(DocxView, {
+  const view = createElement(DocxView, {
     source: bytes,
+    onReady: (a: DocxViewApi) => { setApi(a); opts.onReady?.(a); },
     // Render the live doc object directly; repaint in place on each version
     // bump. submit + presence + id allocator flow out; DocxView draws carets.
     collab: {
       submit: session.submit,
+      submitOp: session.submitOp as (intent: { kind: string } & Record<string, unknown>) => void,
       presence: session.presence,
       allocIds: session.allocIds,
       doc: session.doc,
@@ -161,6 +197,18 @@ export function CollabEditor(opts: UseCollabOptions & { editable?: boolean }): R
     // so DocxView repaints in place instead of re-mounting (no flash/jump).
     key: session.docEpoch,
   });
+
+  if (opts.toolbar === false) return view;
+  return createElement(
+    "div",
+    { className: "dxw-collab-shell", style: { display: "flex", flexDirection: "column", height: "100%" } },
+    createElement(DocxToolbar, {
+      api,
+      mode: opts.toolbarMode ?? "advanced",
+      features: { ...COLLAB_TOOLBAR_DEFAULTS, ...opts.toolbarFeatures },
+    }),
+    createElement("div", { style: { flex: 1, minHeight: 0 } }, view),
+  );
 }
 
 /** "Connecting…" that upgrades to a clear failure message after 5s — a demo

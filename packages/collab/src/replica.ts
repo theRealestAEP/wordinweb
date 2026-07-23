@@ -55,7 +55,10 @@ export class ClientReplica {
    */
   submitLocal(intent: Intent): void {
     applyIntent(this.doc, this.ids, intent);
-    if (intent.kind === "splitParagraph") this.resync();
+    // Keep the parsed model consistent with the mutated XML: op-style
+    // optimistic submits (toolbar commands routed through the canonical
+    // apply) are rendered directly from this replica's live model.
+    this.resync();
     this.pending.push(intent);
   }
 

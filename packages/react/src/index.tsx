@@ -3,6 +3,7 @@ import type { EditorIntent } from "@wordinweb/core";
 import { computePresenceCarets, drawPresenceCarets } from "./presence-cursors.js";
 import type { PresencePosition } from "@wordinweb/collab/client";
 import {
+  type SelectionSegment,
   collectRevisions,
   DocxDocument,
   DocxEditor,
@@ -351,6 +352,13 @@ export interface DocxViewProps {
      * cursor. Called with the caret's stable-id address on every caret move
      * (null when the caret leaves id-tracked content). */
     setPresence?: (pos: PresencePosition | null) => void;
+    /** Submit a toolbar/API operation NOT yet applied locally. The connection
+     * applies it optimistically through the same canonical code the server
+     * runs, so the local result is byte-identical to every replica. When set,
+     * DocxView routes its imperative commands (insert chart/table/equation,
+     * set link/page layout, comments, ...) through this instead of mutating
+     * the document itself. */
+    submitOp?: (intent: { kind: string } & Record<string, unknown>) => void;
   };
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
@@ -837,62 +845,12 @@ export function DocxView({
               kind === "italic" ? { italic: !fmt?.italic } :
               { underline: !fmt?.underline };
             history.checkpoint();
-            // Collaboration: capture each selected run's stable ids BEFORE
-            // formatting. A sub-range format SPLITS the run — the original
-            // element is retired and its id pruned, so looking ids up after
-            // the mutation silently found nothing and the intent was never
-            // emitted (local-only bold: this client saw it, nobody else did).
-            const preIds = collab && doc.stableIds
-              ? segs.map((seg) => ({
-                  runId: seg.run.src ? doc.stableIds!.idOf(seg.run.src) : undefined,
-                  blockId: seg.run.srcParent ? doc.stableIds!.idOf(seg.run.srcParent) : undefined,
-                  runLen: seg.t ? seg.t.text.length : 0,
-                }))
-              : [];
+            // Capture ids BEFORE the mutation (a sub-range format splits the
+            // run and prunes the original id), then emit via the shared
+            // helper so the shortcut and the toolbar behave identically.
+            const preIds = captureFormatIds(segs);
             const formatted = applyRunFormat(doc, segs, patch);
-            // Emit a format intent per selected run — formatRun for a whole
-            // run, formatRange (with carried piece ids) for a partial run —
-            // so the format converges to all participants.
-            if (collab && doc.stableIds) {
-              const seenRuns = new Set<number>();
-              segs.forEach((seg, i) => {
-                const { runId, blockId, runLen } = preIds[i] ?? {};
-                if (runId === undefined || blockId === undefined || seenRuns.has(runId)) return;
-                seenRuns.add(runId);
-                const whole = !seg.t || (seg.start <= 0 && seg.end >= runLen);
-                if (whole) {
-                  collab.submit({ kind: "formatRun", blockId, runId, patch });
-                  return;
-                }
-                // Sub-range: allocate carried ids for the split pieces.
-                const before = seg.start > 0;
-                const after = seg.end < runLen;
-                const alloc = collab.allocIds?.((before ? 1 : 0) + 1 + (after ? 1 : 0)) ?? [];
-                let k = 0;
-                const beforeId = before ? alloc[k++] : undefined;
-                const middleId = alloc[k++];
-                const afterId = after ? alloc[k++] : undefined;
-                if (middleId === undefined) return;
-                collab.submit({ kind: "formatRange", blockId, runId, start: seg.start, end: seg.end, patch, beforeId, middleId, afterId });
-                // Re-key the LOCAL split pieces to the carried ids (the same
-                // walk the server's apply performs), so this replica addresses
-                // the pieces identically to every other one. formatted[] maps
-                // 1:1 to segs in order.
-                const middleT = formatted[i]?.t;
-                const middleRun = middleT ? doc.findParentOf(middleT) : null;
-                const parent = middleRun ? doc.findParentOf(middleRun) : null;
-                if (middleRun && parent && doc.stableIds) {
-                  const mIdx = parent.children.indexOf(middleRun);
-                  doc.stableIds.reassign(middleRun, middleId);
-                  if (before && beforeId !== undefined && parent.children[mIdx - 1]) {
-                    doc.stableIds.reassign(parent.children[mIdx - 1], beforeId);
-                  }
-                  if (after && afterId !== undefined && parent.children[mIdx + 1]) {
-                    doc.stableIds.reassign(parent.children[mIdx + 1], afterId);
-                  }
-                }
-              });
-            }
+            emitFormatIntents(segs, preIds, formatted, patch as Record<string, unknown>);
             pages = rerender(doc);
             if (selectedAll) editor?.selectAll();
             else if (formatted.length > 0) editor?.selectRanges(formatted);
@@ -957,10 +915,16 @@ export function DocxView({
           }
         };
         onDeleteComment = (id) => {
+          if (collabDocOp(() => ({ kind: "deleteComment", commentId: id }))) return;
           history.checkpoint();
           if (deleteComment(doc, id)) pages = rerender(doc);
         };
         onReplyComment = (id, text) => {
+          if (collabDocOp(() => ({
+            kind: "replyComment", parentId: id, text, author: commentAuthor,
+            initials: commentAuthor.split(/\s+/).map((part) => part[0] ?? "").join("").slice(0, 2).toUpperCase() || undefined,
+            date: new Date().toISOString(), paraIds: [hex8()],
+          }))) return;
           history.checkpoint();
           const initials = commentAuthor
             .split(/\s+/)
@@ -993,6 +957,125 @@ export function DocxView({
           const last = [...(editor?.getSelectionSegments() ?? [])].reverse().find((segment) => segment.t);
           return last?.t ? { t: last.t, offset: last.end } : null;
         };
+        // ---- Collaborative op routing (toolbar/API commands) ----
+        // In collab mode these commands are routed through the CANONICAL
+        // intent apply (collab.submitOp → the same applyIntent code every
+        // replica and the server run) instead of the local core mutation:
+        // the optimistic local result is byte-identical everywhere by
+        // construction, with no per-command convergence analysis. The repaint
+        // arrives via renderSignal (submit → onChange → coalesced repaint).
+        const collabAnchor = (t: XmlElement, offset: number) =>
+          doc.stableIds ? doc.stableIds.encodeCaret(t, offset, (el) => doc.findParentOf(el) ?? null) : null;
+        const collabOp = (
+          make: (
+            anchor: { blockId: number; runId: number; offset: number },
+            alloc: (n: number) => number[],
+          ) => ({ kind: string } & Record<string, unknown>) | null,
+          at?: { t: XmlElement; offset: number } | null,
+        ): boolean => {
+          if (!collab?.submitOp || !doc.stableIds) return false;
+          const target = at !== undefined ? at : insertionTarget();
+          if (!target) return false;
+          const anchor = collabAnchor(target.t, target.offset);
+          if (!anchor) return false;
+          const intent = make(anchor, (n) => collab.allocIds?.(n) ?? []);
+          if (!intent) return false;
+          history.checkpoint();
+          collab.submitOp(intent);
+          return true;
+        };
+        /** Document-level ops (page layout, line numbering, cover page). */
+        const collabDocOp = (
+          make: (alloc: (n: number) => number[]) => ({ kind: string } & Record<string, unknown>) | null,
+        ): boolean => {
+          if (!collab?.submitOp || !doc.stableIds) return false;
+          const intent = make((n) => collab.allocIds?.(n) ?? []);
+          if (!intent) return false;
+          history.checkpoint();
+          collab.submitOp(intent);
+          return true;
+        };
+        /** Per-block ops over the current selection/caret paragraphs. */
+        const collabBlockOp = (
+          targets: XmlElement[],
+          make: (blockId: number) => ({ kind: string } & Record<string, unknown>) | null,
+        ): boolean => {
+          if (!collab?.submitOp || !doc.stableIds || targets.length === 0) return false;
+          const submitted = new Set<number>();
+          let any = false;
+          for (const t of targets) {
+            const a = collabAnchor(t, 0);
+            if (!a || submitted.has(a.blockId)) continue;
+            submitted.add(a.blockId);
+            const intent = make(a.blockId);
+            if (!intent) continue;
+            if (!any) history.checkpoint();
+            any = true;
+            collab.submitOp(intent);
+          }
+          return any;
+        };
+        /** Capture per-seg stable ids BEFORE a run format (a sub-range format
+         * splits the run — the original id is pruned by the mutation). */
+        const captureFormatIds = (segs: SelectionSegment[]) =>
+          collab && doc.stableIds
+            ? segs.map((seg) => ({
+                runId: seg.run.src ? doc.stableIds!.idOf(seg.run.src) : undefined,
+                blockId: seg.run.srcParent ? doc.stableIds!.idOf(seg.run.srcParent) : undefined,
+                runLen: seg.t ? seg.t.text.length : 0,
+              }))
+            : [];
+        /** Emit formatRun/formatRange intents for an applied run format and
+         * re-key the local split pieces to the carried ids (the same walk the
+         * server's apply performs). Shared by the Ctrl+B/I/U shortcut and the
+         * toolbar's applyFormat. */
+        const emitFormatIntents = (
+          segs: SelectionSegment[],
+          preIds: { runId?: number; blockId?: number; runLen: number }[],
+          formatted: { t: XmlElement | null }[],
+          patch: Record<string, unknown>,
+        ): void => {
+          if (!collab || !doc.stableIds) return;
+          const seenRuns = new Set<number>();
+          segs.forEach((seg, i) => {
+            const { runId, blockId, runLen } = preIds[i] ?? { runLen: 0 };
+            if (runId === undefined || blockId === undefined || seenRuns.has(runId)) return;
+            seenRuns.add(runId);
+            const whole = !seg.t || (seg.start <= 0 && seg.end >= runLen);
+            if (whole) {
+              collab.submit({ kind: "formatRun", blockId, runId, patch } as never);
+              return;
+            }
+            const before = seg.start > 0;
+            const after = seg.end < runLen;
+            const alloc = collab.allocIds?.((before ? 1 : 0) + 1 + (after ? 1 : 0)) ?? [];
+            let k = 0;
+            const beforeId = before ? alloc[k++] : undefined;
+            const middleId = alloc[k++];
+            const afterId = after ? alloc[k++] : undefined;
+            if (middleId === undefined) return;
+            collab.submit({ kind: "formatRange", blockId, runId, start: seg.start, end: seg.end, patch, beforeId, middleId, afterId } as never);
+            const middleT = formatted[i]?.t;
+            const middleRun = middleT ? doc.findParentOf(middleT) : null;
+            const parent = middleRun ? doc.findParentOf(middleRun) : null;
+            if (middleRun && parent && doc.stableIds) {
+              const mIdx = parent.children.indexOf(middleRun);
+              doc.stableIds.reassign(middleRun, middleId);
+              if (before && beforeId !== undefined && parent.children[mIdx - 1]) {
+                doc.stableIds.reassign(parent.children[mIdx - 1], beforeId);
+              }
+              if (after && afterId !== undefined && parent.children[mIdx + 1]) {
+                doc.stableIds.reassign(parent.children[mIdx + 1], afterId);
+              }
+            }
+          });
+        };
+        /** Word-style 8-hex provenance token (comment paraId). */
+        const hex8 = () => {
+          const b = new Uint8Array(4);
+          crypto.getRandomValues(b);
+          return [...b].map((x) => x.toString(16).padStart(2, "0")).join("").toUpperCase();
+        };
         const api: DocxViewApi = {
           document: doc,
           pageCount: () => pages,
@@ -1007,13 +1090,16 @@ export function DocxView({
             if (segments.length === 0) return;
             const selectedAll = editor?.isEntireDocumentSelected() ?? false;
             history.checkpoint();
+            const preIds = captureFormatIds(segments);
             const formatted = applyRunFormat(doc, segments, patch);
+            emitFormatIntents(segments, preIds, formatted, patch as Record<string, unknown>);
             pages = rerender(doc);
             // Keep the formatted text selected so toolbar actions compose.
             if (selectedAll) editor?.selectAll();
             else if (formatted.length > 0) editor?.selectRanges(formatted);
           },
           addFootnote: (text) => {
+            if (collabOp((a, ids) => ({ kind: "insertFootnote", runId: a.runId, text, nodeIds: ids(8) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1024,6 +1110,7 @@ export function DocxView({
             return false;
           },
           insertPageNumber: (kind = "page") => {
+            if (collabOp((a, ids) => ({ kind: "insertPageField", runId: a.runId, fieldKind: kind, nodeIds: ids(8) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1034,6 +1121,7 @@ export function DocxView({
             return false;
           },
           insertField: (instruction, cachedResult) => {
+            if (collabOp((a, ids) => ({ kind: "insertField", runId: a.runId, instruction, cachedResult, nodeIds: ids(8) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1042,16 +1130,30 @@ export function DocxView({
             return true;
           },
           insertDateTime: (kind, picture) => {
+            const fmt = picture ?? (kind === "time" ? "h:mm am/pm" : "M/d/yyyy");
+            if (collabOp((a, ids) => ({ kind: "insertDateTimeField", runId: a.runId, dtKind: kind, picture: fmt, nodeIds: ids(8) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
-            const format = picture ?? (kind === "time" ? "h:mm am/pm" : "M/d/yyyy");
+            const format = fmt;
             if (!insertDateTimeField(doc, target.t, target.offset, kind, format)) return false;
             pages = rerender(doc);
             return true;
           },
           listBookmarks: () => listBookmarks(doc),
           addBookmark: (name) => {
+            {
+              // Collab: a selection becomes a range bookmark on its first
+              // segment; a bare caret becomes a point bookmark.
+              const segs0 = editor?.getSelectionSegments() ?? [];
+              const rangeSeg = segs0.find((sg) => sg.t && sg.end > sg.start);
+              if (rangeSeg?.t) {
+                if (collabOp(
+                  (a) => ({ kind: "insertBookmarkRange", runId: a.runId, name, start: rangeSeg.start, end: rangeSeg.end }),
+                  { t: rangeSeg.t, offset: rangeSeg.start },
+                )) return true;
+              } else if (collabOp((a) => ({ kind: "insertBookmark", runId: a.runId, name }))) return true;
+            }
             const segments = editor?.getSelectionSegments() ?? [];
             const target = editor?.getCaretTarget();
             history.checkpoint();
@@ -1064,6 +1166,7 @@ export function DocxView({
             return done;
           },
           insertCrossReference: (bookmark, kind) => {
+            if (collabOp((a, ids) => ({ kind: "insertCrossRef", runId: a.runId, bookmark, refKind: kind, nodeIds: ids(8) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1072,6 +1175,7 @@ export function DocxView({
             return true;
           },
           insertEquation: (linear) => {
+            if (collabOp((a, ids) => ({ kind: "insertMath", runId: a.runId, mathText: linear, nodeIds: ids(24) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1081,6 +1185,9 @@ export function DocxView({
           },
           insertSymbol: (symbol) => editor?.insertText(symbol) ?? false,
           insertShape: (preset, text, lineStyle) => {
+            // Collab: the line style is not carried by the intent yet — the
+            // shape lands with its default outline everywhere (consistent).
+            if (collabOp((a, ids) => ({ kind: "insertShape", runId: a.runId, preset, text, nodeIds: ids(12) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1092,6 +1199,7 @@ export function DocxView({
             return true;
           },
           insertWordArt: (text, preset = "plain") => {
+            if (collabOp((a, ids) => ({ kind: "insertWordArt", runId: a.runId, text, preset, nodeIds: ids(12) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1100,6 +1208,7 @@ export function DocxView({
             return true;
           },
           insertChart: (data) => {
+            if (collabOp((a, ids) => ({ kind: "insertChart", runId: a.runId, chart: data, nodeIds: ids(24) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1108,6 +1217,9 @@ export function DocxView({
             return true;
           },
           updateSelectedChart: (data) => {
+            // Collab: selected-object updates are not intent-anchored yet;
+            // no-op rather than make a local-only (diverging) edit.
+            if (collab?.submitOp) return false;
             const source = editor?.getSelectedDrawingSource();
             if (!source) return false;
             history.checkpoint();
@@ -1118,6 +1230,7 @@ export function DocxView({
           },
           getSelectedChart: () => editor?.getSelectedChartData() ?? null,
           insertSmartArt: (data) => {
+            if (collabOp((a, ids) => ({ kind: "insertSmartArt", runId: a.runId, smartArt: data, nodeIds: ids(24) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1126,6 +1239,9 @@ export function DocxView({
             return true;
           },
           updateSelectedSmartArt: (data) => {
+            // Collab: selected-object updates are not intent-anchored yet;
+            // no-op rather than make a local-only (diverging) edit.
+            if (collab?.submitOp) return false;
             const source = editor?.getSelectedDrawingSource();
             if (!source) return false;
             history.checkpoint();
@@ -1177,9 +1293,22 @@ export function DocxView({
           getSelectedSmartArtTextFormat: () => editor?.getSelectedSmartArtTextFormat() ?? null,
           setSelectedSmartArtTextFormat: (patch) => editor?.setSelectedSmartArtTextFormat(patch) ?? false,
           addComment: (text) => {
+            // Collab: selected-object updates are not intent-anchored yet;
+            // no-op rather than make a local-only (diverging) edit.
+            if (collab?.submitOp) return false;
             const segs = editor?.getSelectionSegments() ?? [];
             const segments = segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : [];
             if (segments.length === 0) return false;
+            {
+              // Collab: whole-run comment on the first selected run, with
+              // carried provenance so every replica writes identical XML.
+              const seg0 = segments.find((sg) => sg.t);
+              const initials0 = commentAuthor.split(/\s+/).map((part) => part[0] ?? "").join("").slice(0, 2).toUpperCase();
+              if (seg0?.t && collabOp(
+                (a) => ({ kind: "commentRun", runId: a.runId, text, author: commentAuthor, initials: initials0 || undefined, date: new Date().toISOString(), paraId: hex8() }),
+                { t: seg0.t, offset: seg0.start },
+              )) return true;
+            }
             const initials = commentAuthor
               .split(/\s+/)
               .map((part) => part[0] ?? "")
@@ -1198,6 +1327,7 @@ export function DocxView({
           canUndo: () => history.canUndo,
           canRedo: () => history.canRedo,
           insertTable: (rows, cols) => {
+            if (collabOp((a, ids) => ({ kind: "insertTable", runId: a.runId, rows, cols, nodeIds: ids(rows * cols * 2 + 8) }))) return;
             const caret = editor?.getCaretTarget();
             if (!caret) return;
             history.checkpoint();
@@ -1206,6 +1336,7 @@ export function DocxView({
           tableOp: (op) => {
             const caret = editor?.getCaretTarget();
             if (!caret) return;
+            if (collabOp((a, ids) => ({ kind: "tableOp", cellParagraphId: a.blockId, op, nodeIds: ids(16) }), { t: caret.t, offset: 0 })) return;
             history.checkpoint();
             if (applyTableOp(doc, caret.t, op)) pages = rerender(doc);
           },
@@ -1306,6 +1437,9 @@ export function DocxView({
               if (last?.t) target = { t: last.t, offset: last.end };
             }
             if (!target) return false;
+            if (kind === "page" || kind === "column"
+              ? collabOp((a, ids) => ({ kind: "insertBreak", runId: a.runId, breakKind: kind, nodeIds: ids(8) }), target)
+              : collabOp((a, ids) => ({ kind: "insertSectionBreak", runId: a.runId, breakType: kind === "sectionNextPage" ? "nextPage" : "continuous", nodeIds: ids(8) }), target)) return true;
             history.checkpoint();
             const done =
               kind === "page" || kind === "column"
@@ -1315,6 +1449,7 @@ export function DocxView({
             return !!done;
           },
           insertBlankPage: () => {
+            if (collabOp((a, ids) => ({ kind: "insertBlankPage", runId: a.runId, nodeIds: ids(8) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1323,12 +1458,16 @@ export function DocxView({
             return true;
           },
           insertCoverPage: (content) => {
+            if (collabDocOp((ids) => ({ kind: "insertCoverPage", content: content as unknown as Record<string, unknown>, nodeIds: ids(24) }))) return true;
             history.checkpoint();
             if (!insertCoverPage(doc, content)) return false;
             pages = rerender(doc);
             return true;
           },
           setPageLayout: (patch, scope) => {
+            // Collab: the intent is document-level; a "section" scope falls
+            // back to all sections (consistent everywhere, demo limitation).
+            if (collabDocOp(() => ({ kind: "setPageLayout", patch: patch as Record<string, unknown> }))) return;
             history.checkpoint();
             let target: XmlElement | undefined;
             if (scope === "section") {
@@ -1342,6 +1481,7 @@ export function DocxView({
             return t ? sectionContextAt(doc, t) : null;
           },
           setLineNumbering: (patch, scope) => {
+            if (collabDocOp(() => ({ kind: "setLineNumbering", patch: patch as unknown as Record<string, unknown> }))) return;
             history.checkpoint();
             let target: XmlElement | undefined;
             if (scope === "section") {
@@ -1357,6 +1497,9 @@ export function DocxView({
           setLink: (url) => {
             const segs = editor?.getSelectionSegments() ?? [];
             const t = segs.find((sg) => sg.t)?.t ?? editor?.getCaretTarget()?.t;
+            if (t && (url === null
+              ? collabOp((a) => ({ kind: "removeLink", runId: a.runId }), { t, offset: 0 })
+              : collabOp((a, ids) => ({ kind: "setLink", runId: a.runId, url, nodeIds: ids(4) }), { t, offset: 0 }))) return;
             history.checkpoint();
             const changed = url === null ? (t ? removeLink(doc, t) : false) : setLink(doc, segs, url);
             if (changed) pages = rerender(doc);
@@ -1370,6 +1513,7 @@ export function DocxView({
             const segs = editor?.getSelectionSegments() ?? [];
             const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : editor?.getCaretTarget() ? [editor.getCaretTarget()!.t] : [];
             if (targets.length === 0) return;
+            if (collabBlockOp(targets, (blockId) => ({ kind: "adjustIndent", blockId, direction }))) return;
             history.checkpoint();
             if (adjustIndent(doc, targets as Parameters<typeof adjustIndent>[1], direction)) pages = rerender(doc);
           },
@@ -1377,6 +1521,7 @@ export function DocxView({
             const segs = editor?.getSelectionSegments() ?? [];
             const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : editor?.getCaretTarget() ? [editor.getCaretTarget()!.t] : [];
             if (targets.length === 0) return;
+            if (collabBlockOp(targets, (blockId) => ({ kind: "setSpacing", blockId, patch: patch as Record<string, unknown> }))) return;
             history.checkpoint();
             if (setParagraphSpacing(doc, targets as Parameters<typeof setParagraphSpacing>[1], patch)) pages = rerender(doc);
           },
@@ -1389,6 +1534,7 @@ export function DocxView({
                 ? [caret.t]
                 : [];
             if (targets.length === 0) return false;
+            if (collabBlockOp(targets, (blockId) => ({ kind: "setDivider", blockId, divider: divider as Record<string, unknown> | null }))) return true;
             history.checkpoint();
             if (!setParagraphDivider(doc, targets, divider)) return false;
             pages = rerender(doc);
@@ -1399,6 +1545,7 @@ export function DocxView({
             return target ? paragraphDividerAt(doc, target) : null;
           },
           setDropCap: (mode, lines = 3) => {
+            if (collabOp((a, ids) => ({ kind: "setDropCap", blockId: a.blockId, mode, nodeIds: ids(8) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -1475,6 +1622,7 @@ export function DocxView({
             const segs = editor?.getSelectionSegments() ?? [];
             const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
             if (targets.length === 0) return;
+            if (collabBlockOp(targets, (blockId) => ({ kind: "formatParagraph", blockId, styleId }))) return;
             history.checkpoint();
             if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId)) {
               pages = rerender(doc);

@@ -255,6 +255,11 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null;
     case "acceptAllRevisions":
       return null;
+    case "insertTable": {
+      const okDim = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 50;
+      if (!okDim(intent.rows) || !okDim(intent.cols)) return "insertTable: bad dimensions";
+      return null;
+    }
     case "setLineNumbering": {
       const p = intent.patch;
       if (typeof p !== "object" || p === null || typeof p.enabled !== "boolean") return "setLineNumbering: bad patch";

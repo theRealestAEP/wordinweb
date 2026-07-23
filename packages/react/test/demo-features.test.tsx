@@ -241,3 +241,83 @@ describe("demo features: presence carets flow editor-to-editor", () => {
     await b.unmount();
   });
 });
+
+describe("demo features: toolbar API ops route through the canonical apply", () => {
+  /** Mount CollabEditor WITH its api observable (toolbar disabled to keep the
+   * DOM minimal — the api methods are exactly what the toolbar buttons call). */
+  async function mountWithApi(hub: CollabHub, docId: string, clientId: string) {
+    const factory = factoryFor(hub);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let api: import("../src/index.js").DocxViewApi | null = null;
+    await act(async () => {
+      root.render(createElement(CollabEditor, {
+        url: "ws://x", docId, clientId, createSocket: factory,
+        toolbar: false, onReady: (a) => { api = a; },
+      }));
+    });
+    for (let i = 0; i < 30 && !container.querySelector(".dxw-page"); i++) await tick();
+    expect(api).toBeTruthy();
+    const clientXml = (): string => {
+      const key = Object.keys(container).find((k) => k.startsWith("__reactContainer$"))!;
+      const stack: unknown[] = [(container as unknown as Record<string, unknown>)[key]];
+      let guard = 0;
+      while (stack.length && guard++ < 5000) {
+        const f = stack.pop() as { memoizedProps?: { collab?: { doc?: { docRoot: unknown } } }; child?: unknown; sibling?: unknown } | null;
+        if (!f) continue;
+        const d = f.memoizedProps?.collab?.doc;
+        if (d) return serializeXml(d.docRoot as never);
+        if (f.child) stack.push(f.child);
+        if (f.sibling) stack.push(f.sibling);
+      }
+      throw new Error("no collab doc");
+    };
+    const click = async () => {
+      const page = container.querySelector<HTMLElement>(".dxw-page")!;
+      const span = page.querySelector("span") ?? page;
+      await act(async () => {
+        const o = { bubbles: true, cancelable: true, clientX: 10, clientY: 10, button: 0 };
+        span.dispatchEvent(new MouseEvent("mousedown", o));
+        span.dispatchEvent(new MouseEvent("mouseup", o));
+      });
+      await tick();
+    };
+    return { api: api as unknown as import("../src/index.js").DocxViewApi, factory, container, root, clientXml, click,
+      unmount: async () => { await act(async () => { root.unmount(); }); } };
+  }
+
+  it("insertTable / insertEquation / setParagraphSpacing converge byte-identically", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountWithApi(hub, "api-doc", "alice");
+    await ed.click(); // place a caret (the ops anchor at it)
+    await act(async () => {
+      expect(ed.api.insertEquation("a+b")).toBe(true);
+      ed.api.insertTable(2, 2);
+      ed.api.setParagraphSpacing({ beforePt: 12 });
+    });
+    await settle();
+
+    const server = await spyState(ed.factory, "api-doc");
+    expect(server.xml).toContain("<w:tbl");   // table landed on the server
+    expect(server.xml).toContain("oMath");    // equation landed
+    expect(server.xml).toContain("w:spacing"); // spacing landed
+    expect(ed.clientXml()).toBe(server.xml);  // and the client is byte-identical
+    await ed.unmount();
+  });
+
+  it("a second editor receives toolbar-inserted content", async () => {
+    const hub = new CollabHub(provider);
+    const a = await mountWithApi(hub, "api-duo", "alice");
+    const b = await mountWithApi(hub, "api-duo", "bob");
+    await settle();
+    await a.click();
+    await act(async () => { a.api.insertTable(2, 2); });
+    await settle();
+    // Bob's replica applied the broadcast table; both docs byte-identical.
+    expect(b.clientXml()).toContain("<w:tbl");
+    expect(b.clientXml()).toBe(a.clientXml());
+    await a.unmount();
+    await b.unmount();
+  });
+});

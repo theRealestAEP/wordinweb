@@ -404,7 +404,8 @@ export type Intent =
   | ToggleCheckboxIntent
   | AcceptRevisionIntent
   | RejectRevisionIntent
-  | AcceptAllRevisionsIntent;
+  | AcceptAllRevisionsIntent
+  | InsertTableIntent;
 
 /** Insert a blank page at the end of a run. */
 export interface InsertBlankPageIntent extends IntentBase {
@@ -688,6 +689,15 @@ export interface RejectRevisionIntent extends IntentBase {
 /** Accept every tracked change in the document. */
 export interface AcceptAllRevisionsIntent extends IntentBase {
   kind: "acceptAllRevisions";
+}
+
+/** Insert a rows×cols table after the paragraph containing the anchor run. */
+export interface InsertTableIntent extends IntentBase {
+  kind: "insertTable";
+  runId: StableId;
+  rows: number;
+  cols: number;
+  nodeIds: StableId[];
 }
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
