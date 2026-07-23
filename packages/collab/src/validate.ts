@@ -65,6 +65,22 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (intent.text.length > limits.maxInsertLength) return "insertText: too long";
       if (!nonNegInt(intent.at.offset)) return "insertText: bad offset";
       return null;
+    case "suggestRevision": {
+      const nRanges = intent.ranges?.length ?? 0;
+      const nMarks = intent.marks?.length ?? 0;
+      if (nRanges + nMarks === 0) return "suggestRevision: empty";
+      if (nRanges > 100 || nMarks > 20) return "suggestRevision: too many";
+      for (const r of intent.ranges ?? []) {
+        if (!nonNegInt(r.start) || !nonNegInt(r.end) || r.end <= r.start) return "suggestRevision: bad range";
+        if (r.end - r.start > limits.maxDeleteLength) return "suggestRevision: too large";
+      }
+      for (const m of intent.marks ?? []) {
+        if (m.glyph !== "ins" && m.glyph !== "del") return "suggestRevision: bad glyph";
+      }
+      if (typeof intent.suggest?.author !== "string" || intent.suggest.author.length > 100) return "suggestRevision: bad author";
+      if (typeof intent.suggest?.date !== "string" || intent.suggest.date.length > 40) return "suggestRevision: bad date";
+      return null;
+    }
     case "deleteText":
       if (!nonNegInt(intent.start) || !nonNegInt(intent.end)) return "deleteText: bad range";
       if (intent.end <= intent.start) return "deleteText: empty range";

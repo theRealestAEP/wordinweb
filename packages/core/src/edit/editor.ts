@@ -181,14 +181,20 @@ export interface EditorHost {
  * bookkeeping (clientId/clientSeq/base). Mirrors the @wordinweb/collab intent
  * shapes without a dependency on that package. */
 export type EditorIntent =
-  | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string }
+  | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string; suggest?: { author: string; date: string } }
   | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
   | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number }
   | { kind: "formatRun"; blockId: number; runId: number; patch: Record<string, unknown> }
   | { kind: "formatRange"; blockId: number; runId: number; start: number; end: number; patch: Record<string, unknown>; beforeId?: number; middleId: number; afterId?: number }
   | { kind: "formatParagraph"; blockId: number; align?: "left" | "center" | "right" | "justify"; styleId?: string | null }
   | { kind: "setListType"; blockId: number; listKind: "bullet" | "number" | null }
-  | { kind: "mergeParagraph"; blockId: number };
+  | { kind: "mergeParagraph"; blockId: number }
+  | {
+      kind: "suggestRevision";
+      ranges?: { blockId: number; runId: number; start: number; end: number }[];
+      marks?: { blockId: number; glyph: "ins" | "del" }[];
+      suggest: { author: string; date: string };
+    };
 
 interface Caret {
   t: XmlElement;
@@ -1536,6 +1542,15 @@ export class DocxEditor {
     if (!this.suggesting && chunks.length > 1) {
       this.insertPlainTextParagraphs(chunks);
       this.commit(false, large ? "background" : "global");
+      return;
+    }
+    if (this.suggesting && this.host.onIntent) {
+      // Collab gate (narrow): paste in suggesting mode routes through
+      // insertTextCore/splitParagraphCore DIRECTLY (no emission), so in a
+      // live session it would mutate locally with no peer ever seeing it —
+      // refused per the standing audit rule (no mutation branch without an
+      // emission). Suggesting TYPING emits fine; suggesting PASTE is the
+      // tracked follow-on. Local mode is unaffected.
       return;
     }
     for (let i = 0; i < chunks.length; i++) {
@@ -4586,7 +4601,12 @@ export class DocxEditor {
     let previous = insertBeforeTrailingBreak ? split.before : split.after;
     let caretSource = split.after;
     for (let i = 1; i < lineCount; i++) {
-      if (this.suggesting && previous !== split.before) markParagraphGlyph(previous, "ins", this.revMeta());
+      if (this.suggesting && previous !== split.before) {
+        const meta = this.frozenRevMeta();
+        markParagraphGlyph(previous, "ins", meta);
+        const blockId = this.host.doc.stableIds?.idOf(previous);
+        if (blockId !== undefined) this.emitSuggestRevision(meta, undefined, [{ blockId, glyph: "ins" }]);
+      }
       const t: XmlElement = {
         name: this.caret!.t.name,
         attrs: { ...this.caret!.t.attrs, "xml:space": "preserve" },
@@ -5187,13 +5207,6 @@ export class DocxEditor {
    * revision and the view switches to markup so the suggestion shows live;
    * turning off restores the prior revision view. `author` stamps w:author. */
   setSuggesting(on: boolean, author?: string): void {
-    // Collab gate (plan doc 14 §3 L2): suggesting-mode mutations (revision
-    // marks, glyph strikes, suggested inserts) do not yet EMIT intents —
-    // enabling the mode in a live session would take mutation branches
-    // no peer ever sees, the exact silent-divergence class the fidelity
-    // suite hunts ("no mutation branch without an emission"). Refused
-    // until the suggest-intent lifecycle ships; local mode is unaffected.
-    if (on && this.host.onIntent) return;
     if (author) this.revisionAuthor = author;
     if (on === this.suggesting) return;
     this.suggesting = on;
@@ -5222,6 +5235,32 @@ export class DocxEditor {
       date: this.provenance.date().replace(/\.\d+Z$/, "Z"),
       nextId: () => this.host.doc.nextRevisionId(),
     };
+  }
+
+  /**
+   * Revision meta FROZEN for one gesture (collab, doc 05 rule a): the same
+   * author+date must be used by the LOCAL mutation (this editor is the
+   * pre-applied path) AND carried in the emitted intent — revMeta()'s
+   * per-call date could straddle a second boundary and silently diverge
+   * the local tree from every peer's canonical apply.
+   */
+  private frozenRevMeta(): RevisionMeta {
+    const author = this.revisionAuthor;
+    const date = this.provenance.date().replace(/\.\d+Z$/, "Z");
+    return { author, date, nextId: () => this.host.doc.nextRevisionId() };
+  }
+
+  /** Emit a suggestRevision intent for locally-applied revision marks (the
+   * suggesting counterparts of deleteText/mergeParagraph — nothing moves,
+   * Word keeps both sides until accept/reject). */
+  private emitSuggestRevision(
+    meta: RevisionMeta,
+    ranges?: { blockId: number; runId: number; start: number; end: number }[],
+    marks?: { blockId: number; glyph: "ins" | "del" }[],
+  ): void {
+    if (!this.host.onIntent || !this.host.doc.stableIds) return;
+    if (!ranges?.length && !marks?.length) return;
+    this.host.onIntent({ kind: "suggestRevision", ranges, marks, suggest: { author: meta.author, date: meta.date } });
   }
 
   /** True when `t` sits inside a w:del authored by the current suggester
@@ -5315,15 +5354,30 @@ export class DocxEditor {
     this.pendingClickTypeCheckpoint = false;
     this.clickTypeCheckpointUntil = joinsClickPlacement ? now + 1000 : 0;
     const textOnly = !this.hasSelection() && !this.suggesting && !!this.caret;
-    // Capture the pre-edit position for the collab intent (a plain text insert
-    // at the caret; selection-replacing or suggesting inserts are not emitted
-    // as simple intents yet).
-    const emitPos = textOnly && this.host.onIntent ? this.encodeCaretForIntent() : null;
+    // Suggesting inserts emit too (doc 14 §3 L2): the SAME frozen
+    // author/date drives the local w:ins AND rides the intent, so the
+    // pre-applied local tree equals every peer's canonical apply.
+    const suggestEmit = this.suggesting && !this.hasSelection() && !!this.caret && !!this.host.onIntent;
+    const frozen = suggestEmit ? this.frozenRevMeta() : null;
+    const emitPos = (textOnly || suggestEmit) && this.host.onIntent ? this.encodeCaretForIntent() : null;
     if (this.hasSelection()) this.removeSelectedText();
-    this.insertTextCore(text);
+    this.insertTextCore(text, frozen ?? undefined);
     this.commit(textOnly);
-    if (emitPos) this.host.onIntent?.({ kind: "insertText", at: emitPos, text });
+    if (emitPos) {
+      this.host.onIntent?.(
+        frozen
+          ? { kind: "insertText", at: emitPos, text, suggest: { author: frozen.author, date: frozen.date } }
+          : { kind: "insertText", at: emitPos, text },
+      );
+    }
     return true;
+  }
+
+  /** Encode an arbitrary text position as stable-id addresses (collab). */
+  private encodeTextPos(t: XmlElement, offset: number): { blockId: number; runId: number; offset: number } | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids) return null;
+    return ids.encodeCaret(t, offset, (el) => this.host.doc.findParentOf(el) ?? null);
   }
 
   /** Encode the current caret as stable-id addresses for a collab intent, or
@@ -5336,9 +5390,10 @@ export class DocxEditor {
 
   /** Insert text at the caret (suggesting-aware) without touching history or
    * committing — shared by typing and multi-chunk paste. */
-  private insertTextCore(text: string): void {
+  private insertTextCore(text: string, meta?: RevisionMeta): void {
     if (!this.caret) return;
-    this.caret = applyInsertText(this.host.doc, this.caret, text, this.mutationCtx());
+    const ctx = meta ? { suggesting: this.suggesting, revMeta: () => meta } : this.mutationCtx();
+    this.caret = applyInsertText(this.host.doc, this.caret, text, ctx);
   }
 
   /** Context the extracted mutation core needs from the editor. */
@@ -5467,7 +5522,12 @@ export class DocxEditor {
             this.positionCaret();
             return;
           }
-          markParagraphGlyph(prev, "del", this.revMeta());
+          {
+            const meta = this.frozenRevMeta();
+            markParagraphGlyph(prev, "del", meta);
+            const blockId = this.host.doc.stableIds?.idOf(prev);
+            if (blockId !== undefined) this.emitSuggestRevision(meta, undefined, [{ blockId, glyph: "del" }]);
+          }
           this.commit();
           return;
         }
@@ -5475,7 +5535,10 @@ export class DocxEditor {
         this.suggestDelete(-1);
         return;
       }
-      const c = deleteSuggestedRange(doc, [{ t: caret.t, start: caret.offset - 1, end: caret.offset }], this.revMeta());
+      const meta = this.frozenRevMeta();
+      const pos = this.encodeTextPos(caret.t, caret.offset - 1);
+      const c = deleteSuggestedRange(doc, [{ t: caret.t, start: caret.offset - 1, end: caret.offset }], meta);
+      if (pos) this.emitSuggestRevision(meta, [{ blockId: pos.blockId, runId: pos.runId, start: caret.offset - 1, end: caret.offset }]);
       if (c) this.caret = { t: c.t, run: caret.run, offset: c.offset, bias: "end" };
       this.commit();
       return;
@@ -5490,7 +5553,12 @@ export class DocxEditor {
           this.positionCaret();
           return;
         }
-        markParagraphGlyph(pEl, "del", this.revMeta());
+        {
+          const meta = this.frozenRevMeta();
+          markParagraphGlyph(pEl, "del", meta);
+          const blockId = this.host.doc.stableIds?.idOf(pEl);
+          if (blockId !== undefined) this.emitSuggestRevision(meta, undefined, [{ blockId, glyph: "del" }]);
+        }
         this.commit();
         return;
       }
@@ -5498,7 +5566,10 @@ export class DocxEditor {
       this.suggestDelete(1);
       return;
     }
-    const c = deleteSuggestedRange(doc, [{ t: caret.t, start: caret.offset, end: caret.offset + 1 }], this.revMeta());
+    const meta2 = this.frozenRevMeta();
+    const pos2 = this.encodeTextPos(caret.t, caret.offset);
+    const c = deleteSuggestedRange(doc, [{ t: caret.t, start: caret.offset, end: caret.offset + 1 }], meta2);
+    if (pos2) this.emitSuggestRevision(meta2, [{ blockId: pos2.blockId, runId: pos2.runId, start: caret.offset, end: caret.offset + 1 }]);
     if (c) this.caret = { t: c.t, run: caret.run, offset: c.offset };
     this.commit();
   }
@@ -5530,7 +5601,17 @@ export class DocxEditor {
       const ranges = segments
         .filter((s) => s.t)
         .map((s) => ({ t: s.t as XmlElement, start: s.start, end: s.end }));
-      const c = deleteSuggestedRange(this.host.doc, ranges, this.revMeta());
+      const meta = this.frozenRevMeta();
+      const c = deleteSuggestedRange(this.host.doc, ranges, meta);
+      this.emitSuggestRevision(
+        meta,
+        ranges
+          .map((r) => {
+            const pos = this.encodeTextPos(r.t, r.start);
+            return pos ? { blockId: pos.blockId, runId: pos.runId, start: r.start, end: r.end } : null;
+          })
+          .filter((r): r is NonNullable<typeof r> => r !== null),
+      );
       this.clearSelection();
       const run = segments[0]?.run;
       if (c && run) this.caret = { t: c.t, run, offset: c.offset };

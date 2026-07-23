@@ -1,6 +1,8 @@
 import {
   DocxDocument,
   StableIds,
+  deleteSuggestedRange,
+  markParagraphGlyph,
   applyInsertText,
   applySplitParagraph,
   applyDeleteRange,
@@ -280,6 +282,36 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
       for (let k = 0; k < newTracked.length && k < intent.nodeIds.length; k++) {
         ids.reassign(newTracked[k], intent.nodeIds[k]);
       }
+      return true;
+    }
+    case "suggestRevision": {
+      // Resolve ranges to text elements via stable ids (offsets were
+      // client-resolved — rule b); drop unresolvable/empty ranges as clean
+      // no-ops. Marks resolve block elements directly.
+      const meta = {
+        author: intent.suggest.author,
+        date: intent.suggest.date,
+        nextId: () => doc.nextRevisionId(),
+      };
+      const resolved: { t: XmlElement; start: number; end: number }[] = [];
+      for (const r of intent.ranges ?? []) {
+        const caret = resolveCaret(ids, runMap, { blockId: r.blockId, runId: r.runId, offset: r.start });
+        if (!caret) continue;
+        if (r.end > caret.t.text.length) continue;
+        resolved.push({ t: caret.t, start: r.start, end: r.end });
+      }
+      const markEls: { el: XmlElement; glyph: "ins" | "del" }[] = [];
+      for (const m of intent.marks ?? []) {
+        const el = ids.elOf(m.blockId);
+        if (el) markEls.push({ el, glyph: m.glyph });
+      }
+      if (resolved.length === 0 && markEls.length === 0) return false;
+      if (resolved.length) deleteSuggestedRange(doc, resolved, meta);
+      for (const m of markEls) markParagraphGlyph(m.el, m.glyph, meta);
+      // Strikes wrap runs in w:del (structure changed): refresh + re-key —
+      // deterministic across replicas (identical tree, identical counter).
+      doc.refresh();
+      ids.assignFromRoots(doc.editableRoots());
       return true;
     }
     case "insertImage": {

@@ -33,6 +33,24 @@ interface IntentBase {
   base: number;
 }
 
+/**
+ * Tracked-change marks (plan doc 14 §3 L2): strike text ranges as w:del
+ * revisions and/or mark paragraph glyphs (split "ins" marks, merge "del"
+ * suggestions) — the SUGGESTING counterparts of deleteText/mergeParagraph.
+ * Nothing is removed: Word keeps both sides until accept/reject (the
+ * already-collab-wired acceptRevision/rejectRevision/acceptAllRevisions).
+ * Author/date travel IN the intent (doc 05 rule a: nondeterministic values
+ * are generated once by the originator); revision w:ids are scan-derived
+ * from identical tree state on every replica. Positional offsets were
+ * client-resolved (rule b — no Intl re-derivation at apply).
+ */
+export interface SuggestRevisionIntent extends IntentBase {
+  kind: "suggestRevision";
+  ranges?: { blockId: StableId; runId: StableId; start: number; end: number }[];
+  marks?: { blockId: StableId; glyph: "ins" | "del" }[];
+  suggest: { author: string; date: string };
+}
+
 /** Insert `text` at a position. With `suggest`, the insertion is recorded as
  * a tracked change (w:ins) carrying the author + date (revision tracking /
  * suggesting mode), rather than a plain insert. */
@@ -371,6 +389,7 @@ export type Intent =
   | CommentRunIntent
   | PasteBlocksIntent
   | InsertImageIntent
+  | SuggestRevisionIntent
   | InsertBreakIntent
   | InsertMathIntent
   | InsertShapeIntent

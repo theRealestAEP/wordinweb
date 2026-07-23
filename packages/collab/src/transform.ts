@@ -68,6 +68,14 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "pasteBlocks":
       // Separate new blocks inserted after a paragraph; no existing offsets shift.
       return [];
+    case "suggestRevision":
+      // Strikes WRAP text (w:del) and marks annotate paragraph glyphs —
+      // no text moves, so concurrent intents' positions are unaffected.
+      // (The wrap does split runs at strike boundaries; a concurrent
+      // same-run edit past the boundary resolves-or-rejects IDENTICALLY on
+      // every replica — degraded concurrency fidelity, never divergence.
+      // The formatRange-style split remap is the designed follow-on.)
+      return [];
     case "insertImage":
       // Image is a sibling drawing run; no run's text offsets shift.
       return [];
@@ -241,6 +249,20 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       return { ...intent, base: newBase };
     case "pasteBlocks":
       return { ...intent, base: newBase };
+    case "suggestRevision": {
+      if (!intent.ranges?.length) return { ...intent, base: newBase };
+      const ranges = intent.ranges
+        .map((r) => {
+          const s2 = transformPosition({ blockId: r.blockId, runId: r.runId, offset: r.start }, ahead);
+          const e2 = transformPosition({ blockId: r.blockId, runId: r.runId, offset: r.end }, ahead);
+          // Endpoints scattered across a prior split: collapse to empty —
+          // apply drops empty ranges (clean no-op, identical everywhere).
+          if (s2.runId !== e2.runId || e2.offset <= s2.offset) return { ...r, start: 0, end: 0 };
+          return { blockId: s2.blockId, runId: s2.runId, start: s2.offset, end: e2.offset };
+        })
+        .filter((r) => r.end > r.start);
+      return { ...intent, ranges, base: newBase };
+    }
     case "insertImage":
       return { ...intent, base: newBase };
     case "insertBreak":
