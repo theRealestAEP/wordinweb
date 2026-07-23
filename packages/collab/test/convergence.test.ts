@@ -243,3 +243,29 @@ describe("seeded multi-intent convergence (mixed intent types)", () => {
     }
   });
 });
+
+describe("undo convergence (undo propagates to all replicas)", () => {
+  it("an undo issued at the server broadcasts and all clients converge", () => {
+    const initial = docBytes(["ab"]);
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const a = new ClientReplica(initial);
+    const b = new ClientReplica(initial);
+    const addr = runAddr(server);
+
+    // A inserts "CD" at the end; both clients see it.
+    const ins = { kind: "insertText" as const, clientId: "a", clientSeq: 1, base: 0, at: { blockId: addr.blockId, runId: addr.runId, offset: 2 }, text: "CD" };
+    a.submitLocal(ins);
+    const e1 = server.submit(ins);
+    a.receive([e1]); b.receive([e1]);
+    expect(paraText(a.doc)).toBe("abCD");
+    expect(paraText(b.doc)).toBe("abCD");
+
+    // Server-side undo of A's insert broadcasts to everyone.
+    const u = server.undo("a")!;
+    a.receive([u]); b.receive([u]);
+    const serverXml = serializeXml(server.doc.docRoot);
+    expect(serializeXml(a.doc.docRoot)).toBe(serverXml);
+    expect(serializeXml(b.doc.docRoot)).toBe(serverXml);
+    expect(paraText(server.doc)).toBe("ab"); // insert undone everywhere
+  });
+})
