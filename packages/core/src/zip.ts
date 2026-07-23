@@ -1,11 +1,31 @@
 import { unzipSync, strFromU8 } from "fflate";
 
+/** Decompression-bomb guards (plan doc 11, security F4): a crafted .docx must
+ * not exhaust memory via a huge uncompressed payload or a vast number of
+ * entries. Generous for real documents. */
+export const DEFAULT_ZIP_LIMITS = {
+  maxTotalUncompressed: 512 * 1024 * 1024, // 512 MB across all entries
+  maxEntries: 20_000,
+};
+
 /** A read-only view over the OPC (zip) package inside a .docx file. */
 export class Package {
   private files: Record<string, Uint8Array>;
 
   constructor(data: Uint8Array) {
     this.files = unzipSync(data);
+    let total = 0;
+    let entries = 0;
+    for (const name in this.files) {
+      entries++;
+      total += this.files[name].length;
+      if (entries > DEFAULT_ZIP_LIMITS.maxEntries) {
+        throw new Error(`zip has too many entries (> ${DEFAULT_ZIP_LIMITS.maxEntries})`);
+      }
+      if (total > DEFAULT_ZIP_LIMITS.maxTotalUncompressed) {
+        throw new Error(`zip uncompressed size exceeds ${DEFAULT_ZIP_LIMITS.maxTotalUncompressed} bytes`);
+      }
+    }
   }
 
   static from(data: ArrayBuffer | Uint8Array): Package {
