@@ -22,6 +22,9 @@ export interface RunEdit {
   ins: number;
   /** Present for splits: the run the tail (offset >= at) moved into. */
   movedToRunId?: number;
+  /** Present for a format-range split: the old run is replaced by up to three
+   * pieces and a position remaps by which piece it falls into. */
+  formatSplit?: { start: number; end: number; beforeId?: number; middleId: number; afterId?: number };
 }
 
 /** The run edits a prior intent imposes on the document (only same-run edits
@@ -45,12 +48,35 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "setListType":
       // Block-level; moves no text, preserves ids.
       return [];
+    case "formatRange":
+      // The old run is replaced by up to three pieces; positions remap.
+      return [{
+        runId: intent.runId, at: intent.start, del: 0, ins: 0,
+        formatSplit: { start: intent.start, end: intent.end, beforeId: intent.beforeId, middleId: intent.middleId, afterId: intent.afterId },
+      }];
   }
 }
 
 /** Adjust a single position against one prior run edit. */
 export function transformPositionAgainstEdit(pos: Position, edit: RunEdit): Position {
   if (pos.runId !== edit.runId) return pos;
+
+  if (edit.formatSplit) {
+    // The old run split into before[0,start) / middle[start,end) / after[end,).
+    // Remap the position into whichever piece it lands in (pieces absent when
+    // start==0 or end==runLen — positions can't fall in those ranges).
+    const { start, end, beforeId, middleId, afterId } = edit.formatSplit;
+    if (pos.offset < start && beforeId !== undefined) {
+      return { blockId: pos.blockId, runId: beforeId, offset: pos.offset };
+    }
+    if (pos.offset <= end) {
+      return { blockId: pos.blockId, runId: middleId, offset: pos.offset - start };
+    }
+    if (afterId !== undefined) {
+      return { blockId: pos.blockId, runId: afterId, offset: pos.offset - end };
+    }
+    return { blockId: pos.blockId, runId: middleId, offset: pos.offset - start };
+  }
 
   if (edit.movedToRunId !== undefined) {
     // Split: everything strictly after the split point moved to the new run.
@@ -107,6 +133,15 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       return { ...intent, base: newBase };
     case "setListType":
       return { ...intent, base: newBase };
+    case "formatRange": {
+      // Transform the [start,end) endpoints against prior edits in the run.
+      const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);
+      const e = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.end }, ahead);
+      // If the endpoints landed in different runs (a prior split), the range
+      // no longer describes one run — collapse to a no-op the apply rejects.
+      if (e.runId !== s.runId) return { ...intent, runId: s.runId, blockId: s.blockId, start: s.offset, end: s.offset, base: newBase };
+      return { ...intent, runId: s.runId, blockId: s.blockId, start: s.offset, end: e.offset, base: newBase };
+    }
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);
       const e = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.end }, ahead);

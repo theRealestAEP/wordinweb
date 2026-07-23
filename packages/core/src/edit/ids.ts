@@ -77,6 +77,19 @@ export class StableIds {
     return use;
   }
 
+  /** Force `el` to carry `id`, replacing any id it already has (e.g. one
+   * auto-assigned by a refresh() before a carried id could be installed).
+   * The previous id is retired. Throws if `id` is held by a different element. */
+  reassign(el: XmlElement, id: StableId): void {
+    const held = this.byId.get(id);
+    if (held !== undefined && held !== el) throw new Error(`StableIds: id ${id} already in use`);
+    const prev = this.byEl.get(el);
+    if (prev !== undefined && prev !== id) this.byId.delete(prev);
+    this.byEl.set(el, id);
+    this.byId.set(id, el);
+    if (id >= this.next) this.next = id + 1;
+  }
+
   private install(el: XmlElement, id: StableId): void {
     this.byEl.set(el, id);
     this.byId.set(id, el);

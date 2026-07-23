@@ -87,6 +87,41 @@ export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): 
       const target = firstTextDescendant(blockEl) ?? blockEl;
       return setListType(doc, [target], intent.listKind);
     }
+    case "formatRange": {
+      if (intent.end <= intent.start) return false;
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const entry = runMap.get(runEl);
+      if (!entry || !entry.firstT) return false;
+      const len = entry.firstT.text.length;
+      if (intent.start < 0 || intent.end > len) return false;
+      // Sub-range format: splits the run into before/middle/after (all new).
+      const seg: SelectionSegment = { run: entry.run, t: entry.firstT, start: intent.start, end: intent.end, props: entry.run.props };
+      const formatted = applyRunFormat(doc, [seg], intent.patch as never);
+      if (formatted.length === 0) return false;
+      // Locate the pieces via the returned middle w:t (robust to whatever
+      // parent applyRunFormat spliced into): middle run = parent of middleT;
+      // before/after are its previous/next run siblings.
+      const middleT = formatted[0].t;
+      const middleRun = doc.findParentOf(middleT);
+      if (!middleRun) return true; // formatted but not id-splittable; ids stay as-is
+      const container = doc.findParentOf(middleRun);
+      if (!container) return true;
+      const mIdx = container.children.indexOf(middleRun);
+      // reassign (not assign): applyRunFormat's internal refresh() may have
+      // auto-assigned parse-order ids to the pieces; override with the carried
+      // ones so every replica addresses them identically.
+      ids.reassign(middleRun, intent.middleId);
+      if (intent.start > 0 && intent.beforeId !== undefined) {
+        const before = container.children[mIdx - 1];
+        if (before && localRun(before)) ids.reassign(before, intent.beforeId);
+      }
+      if (intent.end < len && intent.afterId !== undefined) {
+        const after = container.children[mIdx + 1];
+        if (after && localRun(after)) ids.reassign(after, intent.afterId);
+      }
+      return true;
+    }
   }
 }
 

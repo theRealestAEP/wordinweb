@@ -104,13 +104,36 @@ export interface SetListTypeIntent extends IntentBase {
   listKind: "bullet" | "number" | null;
 }
 
+/**
+ * Format a character sub-range of a single run (plan doc 03 F3). The run is
+ * split into up to three pieces — before [0,start), middle [start,end)
+ * (formatted), after [end,len) — replacing the original run. The originating
+ * client allocates ids for the pieces that exist and carries them so every
+ * replica addresses the pieces identically; the transform remaps any
+ * concurrent position in the old run into the correct piece.
+ */
+export interface FormatRangeIntent extends IntentBase {
+  kind: "formatRange";
+  blockId: StableId;
+  runId: StableId;
+  start: number;
+  end: number;
+  patch: Record<string, unknown>;
+  /** Piece ids, present iff the piece exists: before when start>0, after when
+   * end<runLen. middle always. */
+  beforeId?: StableId;
+  middleId: StableId;
+  afterId?: StableId;
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
   | SplitParagraphIntent
   | FormatRunIntent
   | FormatParagraphIntent
-  | SetListTypeIntent;
+  | SetListTypeIntent
+  | FormatRangeIntent;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order
