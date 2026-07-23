@@ -45,6 +45,9 @@ export interface UseCollabOptions {
    * (join cold, keep nothing).
    */
   store?: BundleStore;
+  /** Claim the identity from an existing live connection (doc 12 §7 "use
+   * here instead"): set after an `already-open` refusal and remount. */
+  takeover?: boolean;
   /** Display profile sent at join (doc 14 §2) — self-asserted; persist it in
    * localStorage next to the clientId so identity is stable per browser. */
   profile?: ParticipantProfile;
@@ -99,7 +102,7 @@ export interface CollabSession {
  * runtime dependency on this module).
  */
 export function useCollab(opts: UseCollabOptions): CollabSession {
-  const { url, docId, clientId, token, createSocket, store, profile } = opts;
+  const { url, docId, clientId, token, createSocket, store, profile, takeover } = opts;
   const connRef = useRef<CollabConnection | null>(null);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
   const [version, setVersion] = useState(0);
@@ -159,10 +162,10 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       void store.get(docId).then((bundle) => {
         if (connRef.current !== conn) return; // effect re-ran while loading
         if (bundle) conn.resume(bundle, token, { profile });
-        else conn.join(docId, token, { profile });
+        else conn.join(docId, token, { profile, takeover });
       });
     } else {
-      conn.join(docId, token, { profile });
+      conn.join(docId, token, { profile, takeover });
     }
     return () => {
       if (store && typeof window !== "undefined") {
@@ -177,7 +180,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   // profile intentionally omitted from deps (an inline object literal would
     // reconnect every render); renames go through setProfile, not re-join.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, docId, clientId, token, createSocket, store]);
+  }, [url, docId, clientId, token, createSocket, store, takeover]);
 
   return {
     doc,
@@ -241,8 +244,21 @@ export function CollabEditor(opts: UseCollabOptions & {
   toolbarFeatures?: Partial<Record<ToolbarFeature, boolean>>;
   /** Observe the imperative document API (find/replace, inserts, ...). */
   onReady?: (api: DocxViewApi) => void;
+  /** Observe the live CollabSession (roster, activity, epochChanged,
+   * doc-for-download) — how an app shell renders chips/banners/buttons
+   * around the editor without re-implementing its composition. */
+  onSession?: (session: CollabSession) => void;
+  /** Custom refusal UI (e.g. already-open -> "use here instead",
+   * no-session -> "bring it back live"). Default: a refresh notice. */
+  refusedContent?: (reason: string) => ReactNode;
 }): ReactNode {
   const session = useCollab(opts);
+  useEffect(() => {
+    opts.onSession?.(session);
+    // The session object is a fresh literal each render; observing on
+    // version/ready/roster/refusal changes is what consumers need.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.version, session.ready, session.refused, session.roster, session.epochChanged]);
   const [api, setApi] = useState<DocxViewApi | null>(null);
   // Placeholder bytes only — DocxView renders session.doc directly (below), so
   // this is re-serialized ONLY on a reload (docEpoch), never per broadcast.
@@ -251,7 +267,11 @@ export function CollabEditor(opts: UseCollabOptions & {
     [session.doc, session.docEpoch],
   );
 
-  if (session.refused) return createElement("div", { className: "dxw-collab-refused" }, `Please refresh — ${session.refused}.`);
+  if (session.refused) {
+    return opts.refusedContent
+      ? createElement("div", { className: "dxw-collab-refused" }, opts.refusedContent(session.refused))
+      : createElement("div", { className: "dxw-collab-refused" }, `Please refresh — ${session.refused}.`);
+  }
   if (!session.ready || !bytes || !session.doc) {
     // Surface a dead server instead of spinning forever: if the welcome hasn't
     // arrived after a grace period, say so (the socket errored or nothing is

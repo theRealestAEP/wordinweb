@@ -1,5 +1,6 @@
 import { CollabHub } from "./hub.js";
 import { makeDocId } from "./demo.js";
+import { blankDocxBytes } from "./blank.js";
 import type { IdSidecar } from "@wordinweb/collab/server";
 
 /**
@@ -30,7 +31,7 @@ export interface SeedHttpRequest {
    * `codeVerifier` (doc 13 §7) registers a share-code gate for the epoch —
    * a PBKDF2 output computed client-side; the code itself never crosses
    * the wire. */
-  body: { docx?: string; sidecar?: IdSidecar; codeVerifier?: string };
+  body: { docx?: string; sidecar?: IdSidecar; codeVerifier?: string; blank?: boolean };
 }
 
 export interface SeedHttpResponse {
@@ -56,14 +57,19 @@ export function handleSeedRequest(
   opts: SeedHttpOptions = {},
 ): SeedHttpResponse {
   const maxBytes = opts.maxDocxBytes ?? 10 * 1024 * 1024;
-  if (!req.body?.docx || typeof req.body.docx !== "string") {
-    return { status: 400, body: { error: "missing-docx" } };
-  }
   let docx: Uint8Array;
-  try {
-    docx = base64ToBytes(req.body.docx);
-  } catch {
-    return { status: 400, body: { error: "bad-base64" } };
+  if (req.body?.blank && req.method === "POST") {
+    // "New document" go-live (doc 12 §1): the landing page starts a blank
+    // doc without shipping template bytes to the browser first.
+    docx = blankDocxBytes();
+  } else if (!req.body?.docx || typeof req.body.docx !== "string") {
+    return { status: 400, body: { error: "missing-docx" } };
+  } else {
+    try {
+      docx = base64ToBytes(req.body.docx);
+    } catch {
+      return { status: 400, body: { error: "bad-base64" } };
+    }
   }
   if (docx.length > maxBytes) {
     return { status: 413, body: { error: "too-large", maxBytes } };

@@ -3,51 +3,86 @@ import { createRoot } from "react-dom/client";
 import { App } from "./src/app";
 
 /**
- * Dev harness for the anon-share demo (Vite). Wires the browser URL to the
- * magic-link model from plan doc 11: the `?doc=<id>` query param IS the
- * capability. No id in the URL → mint an unguessable one and adopt it (a
- * "New document"); share the URL and open it in a second tab to collaborate.
+ * Dev harness for the zero-custody demo (Vite). The browser URL carries the
+ * magic-link capability (`?doc=<id>`, plan doc 11); the server is the
+ * zero-custody one:
  *
- * The collab server is the zero-config dev server:
- *   node packages/server/dist/cli.js        (ws://localhost:1234, auth-off)
- * Override with ?server=ws://host:port if you ran it on another port.
+ *   ZERO_CUSTODY=1 node packages/server/dist/cli.js   (:1234, HTTP+WS)
+ *
+ * "New document" is go-live (doc 12 §3): POST /docs {blank:true} seeds an
+ * in-RAM session and the URL becomes the share link. When the session ends
+ * the server forgets it; this browser's IndexedDB bundle revives it.
+ * Override the server with ?server=host:port if not on localhost:1234.
  */
 const params = new URLSearchParams(location.search);
-const SERVER = params.get("server") ?? "ws://localhost:1234";
+const HOSTPORT = params.get("server") ?? "localhost:1234";
+const WS = `ws://${HOSTPORT}`;
+const HTTP = `http://${HOSTPORT}`;
 
-function mintDocId(): string {
-  // 128-bit unguessable id — the magic-link capability (browser crypto).
+/**
+ * Identity (doc 12 §7): ONE persistent clientId per browser profile — the
+ * hub enforces a single live connection per (doc, clientId), so a second
+ * same-profile tab gets the "use here instead" takeover flow instead of
+ * silently colliding clientSeq counters. Incognito/other browsers mint
+ * their own id and join as ordinary extra participants.
+ */
+function persistent(key: string, mint: () => string): string {
+  let v = localStorage.getItem(key);
+  if (!v) {
+    v = mint();
+    localStorage.setItem(key, v);
+  }
+  return v;
+}
+const clientId = persistent("wordinweb-client-id", () => {
   const b = new Uint8Array(16);
   crypto.getRandomValues(b);
-  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
-}
-// A per-tab client id so two tabs are two distinct participants.
-const clientId = `tab-${mintDocId().slice(0, 8)}`;
+  return `c_${[...b].map((x) => x.toString(16).padStart(2, "0")).join("")}`;
+});
+// Display name (doc 14 §2): self-asserted, stable per browser, server-sanitized.
+const name = persistent("wordinweb-name", () => "");
 
 function Harness() {
   const [docId, setDocId] = useState<string | null>(() => params.get("doc"));
+  const [creating, setCreating] = useState(false);
 
   if (!docId) {
-    // Landing: create a magic-link document.
     return createElement(
       "div",
       { style: { maxWidth: 560, margin: "12vh auto", background: "#fff", padding: 28, borderRadius: 12, border: "1px solid #dadce0" } },
-      createElement("h2", { style: { marginTop: 0 } }, "wordinweb collaborative demo"),
-      createElement("p", { className: "hint" }, "Create a document, then share its URL (or just open it in a second tab) to edit together in real time."),
+      createElement("h2", { style: { marginTop: 0 } }, "wordinweb — zero-custody collab demo"),
+      createElement(
+        "p",
+        { className: "hint" },
+        "Create a document and share its URL. The server hosts the live session only — ",
+        "your browser keeps the document, and any participant can bring the same link back to life later.",
+      ),
       createElement(
         "button",
         {
+          disabled: creating,
           onClick: () => {
-            const id = mintDocId();
-            const url = new URL(location.href);
-            url.searchParams.set("doc", id);
-            history.replaceState(null, "", url.toString());
-            setDocId(id);
+            setCreating(true);
+            // Go-live (doc 12 §3): the server mints the unguessable docId —
+            // the URL IS the capability (doc 11).
+            void fetch(`${HTTP}/docs`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ blank: true }),
+            })
+              .then((r) => r.json())
+              .then(({ docId: id }: { docId: string }) => {
+                const url = new URL(location.href);
+                url.searchParams.set("doc", id);
+                history.replaceState(null, "", url.toString());
+                setDocId(id);
+              })
+              .catch(() => setCreating(false));
           },
         },
-        "New document",
+        creating ? "Creating…" : "New document",
       ),
-      createElement("p", { className: "hint", style: { marginTop: 20 } }, `Server: ${SERVER}`),
+      createElement("p", { className: "hint", style: { marginTop: 20 } }, `Server: ${HTTP} (zero-custody — sessions are not persisted)`),
     );
   }
 
@@ -59,16 +94,14 @@ function Harness() {
       "header",
       null,
       createElement("b", null, "wordinweb collab"),
-      createElement("span", { className: "pill" }, `doc ${docId.slice(0, 8)}…`),
-      createElement("span", { className: "pill" }, clientId),
-      createElement("span", { className: "hint" }, "Share this URL / open in another tab:"),
-      createElement("input", { readOnly: true, value: shareUrl, onFocus: (e: any) => e.target.select() }),
-      createElement("span", { className: "hint" }, `· ${SERVER}`),
+      createElement("span", { className: "pill" }, `doc ${docId.slice(0, 10)}…`),
+      createElement("span", { className: "hint" }, "Share this URL / open on another device:"),
+      createElement("input", { readOnly: true, value: shareUrl, onFocus: (e: { target: { select(): void } }) => e.target.select() }),
     ),
     createElement(
       "div",
       { id: "root-editor" },
-      createElement(App, { url: SERVER, docId, clientId }),
+      createElement(App, { url: WS, httpBase: HTTP, docId, clientId, name }),
     ),
   );
 }

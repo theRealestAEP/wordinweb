@@ -113,3 +113,20 @@ describe("handleSeedRequest (doc 12 §3 go-live / bring-back)", () => {
     expect(revived.body.genesisId).not.toBe(created.body.genesisId);
   });
 });
+
+describe("blank go-live (the demo's New document flow)", () => {
+  it("POST {blank:true} seeds a working blank session", async () => {
+    const hub = zeroCustodyHub();
+    const res = handleSeedRequest(hub, { method: "POST", body: { blank: true } });
+    expect(res.status).toBe(201);
+    const c = new FakeConn("c");
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: res.body.docId as string, clientId: "a", sinceSeq: 0 });
+    expect(c.last().t).toBe("welcome");
+  });
+
+  it("blank is POST-only (PUT revival must supply real bytes)", () => {
+    const hub = zeroCustodyHub();
+    const res = handleSeedRequest(hub, { method: "PUT", docId: "d", body: { blank: true } });
+    expect(res.status).toBe(400);
+  });
+});
