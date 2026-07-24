@@ -3,12 +3,11 @@ import { test, expect, type Page } from "@playwright/test";
 /**
  * Full-intent-surface browser CONVERGENCE test (plan doc 09, browser tier).
  *
- * Three real browser clients on one plaintext doc: A submits every intent
+ * Three real browser clients on one (encrypted) collab doc: A submits every intent
  * kind through the REAL connection (`session.submitOp` — the canonical-apply
  * path), and after each we assert A, B, and a receive-only spy C converge to
- * BYTE-IDENTICAL docx (`doc.save()`, deterministic by design). Since the
- * plaintext server is the authority that broadcasts to B and C, their
- * agreement with A's optimistic apply is also the server-state check.
+ * BYTE-IDENTICAL docx (`doc.save()`, deterministic by design). The server broadcasts to B and C; their agreement with A's optimistic
+ * apply is the multi-client + server-mediated convergence check.
  *
  * WHAT THIS PROVES for every one of the 62 kinds: wire serialization +
  * server sequencing + deterministic outcome → all clients AGREE (never
@@ -94,7 +93,10 @@ async function joinAll(browser: import("@playwright/test").Browser): Promise<{
   const [ca, cb, cc] = await Promise.all([browser.newContext(), browser.newContext(), browser.newContext()]);
   const [a, b, c] = await Promise.all([ca.newPage(), cb.newPage(), cc.newPage()]);
   await a.goto(`/?server=${SERVER}`);
-  await a.getByRole("button", { name: "New plaintext document" }).click();
+  await expect(a.getByTestId("local-editor")).toBeVisible();
+  await a.getByTestId("make-collaborative").click();
+  await expect(a).toHaveURL(/[?&]doc=/);
+  await expect(a.getByTestId("download")).toBeVisible(); // collab chrome mounted
   await expect(a.locator(".dxw-page")).toBeVisible();
   const url = a.url();
   await Promise.all([b.goto(url), c.goto(url)]);

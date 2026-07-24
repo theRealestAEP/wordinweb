@@ -1,20 +1,26 @@
-import { createElement, useState } from "react";
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./src/app";
+import { LocalEditor } from "./src/local-editor";
 import { goLiveEncrypted } from "./src/e2ee-flows";
 import { docKeyFromFragment } from "wordinweb/collab";
 
 /**
- * Dev harness for the zero-custody demo (Vite). The browser URL carries the
- * magic-link capability (`?doc=<id>`, plan doc 11); the server is the
- * zero-custody one:
+ * Dev harness for the zero-custody demo (Vite).
+ *
+ * The demo OPENS in the normal single-user editor (a local, editable document —
+ * no server, no collab). "Make collaborative" seals the CURRENT local document
+ * and goes live encrypted (doc 13 §6): the browser mints id + key, seals the
+ * bytes client-side, PUTs the genesis checkpoint, and the URL becomes the share
+ * link (`?doc=<id>#k=<key>`). The key rides the FRAGMENT — shareable, never
+ * sent. A URL that already carries `?doc=` is the "someone shared me a link"
+ * path: join that collaborative session directly.
  *
  *   ZERO_CUSTODY=1 node packages/server/dist/cli.js   (:1234, HTTP+WS)
  *
- * "New document" is go-live (doc 12 §3): POST /docs {blank:true} seeds an
- * in-RAM session and the URL becomes the share link. When the session ends
- * the server forgets it; this browser's IndexedDB bundle revives it.
- * Override the server with ?server=host:port if not on localhost:1234.
+ * When the session ends the server forgets it; this browser's IndexedDB bundle
+ * revives it. Override the server with ?server=host:port if not on
+ * localhost:1234.
  */
 const params = new URLSearchParams(location.search);
 const HOSTPORT = params.get("server") ?? "localhost:1234";
@@ -46,103 +52,54 @@ const name = persistent("wordinweb-name", () => "");
 
 function Harness() {
   const [docId, setDocId] = useState<string | null>(() => params.get("doc"));
-  const [creating, setCreating] = useState(false);
-  const [newCode, setNewCode] = useState("");
   // E2EE (doc 13 §1): the key rides the fragment — browsers never send it.
   const [docKey, setDocKey] = useState<string | null>(() => docKeyFromFragment(location.hash));
 
+  // Landing = the normal single-user editor (local, no server, no collab).
+  // "Make collaborative" seals the CURRENT local bytes and goes live.
   if (!docId) {
-    return createElement(
-      "div",
-      { style: { maxWidth: 560, margin: "12vh auto", background: "#fff", padding: 28, borderRadius: 12, border: "1px solid #dadce0" } },
-      createElement("h2", { style: { marginTop: 0 }, "data-testid": "landing" } as never, "wordinweb — zero-custody collab demo"),
-      createElement(
-        "p",
-        { className: "hint" },
-        "Create a document and share its URL. The server hosts the live session only — ",
-        "your browser keeps the document, and any participant can bring the same link back to life later.",
-      ),
-      createElement("p", { className: "hint" }, "Optional share code (told to people separately — a leaked link alone can't enter or decrypt):"),
-      createElement("input", {
-        value: newCode,
-        placeholder: "e.g. 6 digits (optional)",
-        maxLength: 12,
-        onChange: (e: { target: { value: string } }) => setNewCode(e.target.value),
-      }),
-      createElement(
-        "button",
-        {
-          disabled: creating,
-          style: { marginLeft: 8 },
-          onClick: () => {
-            setCreating(true);
-            // Encrypted go-live (doc 13 §6 — the demo DEFAULT for magic
-            // links): mint id+key client-side, seal the blank template,
-            // PUT. The key goes into the FRAGMENT: shareable, never sent.
-            void goLiveEncrypted(HTTP, newCode || undefined)
-              .then(({ docId: id, docKey: key, ownerToken }: { docId: string; docKey: string; ownerToken?: string }) => {
-                if (ownerToken) localStorage.setItem(`wordinweb-owner-${id}`, ownerToken);
-                const url = new URL(location.href);
-                url.searchParams.set("doc", id);
-                url.hash = `k=${key}`;
-                history.replaceState(null, "", url.toString());
-                setDocKey(key);
-                setDocId(id);
-              })
-              .catch(() => setCreating(false));
-          },
-        },
-        creating ? "Creating…" : "New encrypted document",
-      ),
-      createElement(
-        "button",
-        {
-          disabled: creating,
-          style: { marginLeft: 8 },
-          onClick: () => {
-            setCreating(true);
-            // Plaintext go-live (doc 12 §3): the server mints the docId.
-            void fetch(`${HTTP}/docs`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ blank: true }),
-            })
-              .then((r) => r.json())
-              .then(({ docId: id, ownerToken }: { docId: string; ownerToken?: string }) => {
-                if (ownerToken) localStorage.setItem(`wordinweb-owner-${id}`, ownerToken);
-                const url = new URL(location.href);
-                url.searchParams.set("doc", id);
-                history.replaceState(null, "", url.toString());
-                setDocId(id);
-              })
-              .catch(() => setCreating(false));
-          },
-        },
-        creating ? "Creating…" : "New plaintext document",
-      ),
-      createElement("p", { className: "hint", style: { marginTop: 20 } }, `Server: ${HTTP} (zero-custody — sessions are not persisted)`),
-    );
+    const goLive = async (bytes: Uint8Array, shareCode?: string) => {
+      const { docId: id, docKey: key, ownerToken } = await goLiveEncrypted(HTTP, bytes, shareCode);
+      // Owner capability (doc 14 §2.5): kept out of the shared link, in this
+      // browser's storage — same key the collab App reads back.
+      if (ownerToken) localStorage.setItem(`wordinweb-owner-${id}`, ownerToken);
+      const url = new URL(location.href);
+      url.searchParams.set("doc", id);
+      url.hash = `k=${key}`;
+      history.replaceState(null, "", url.toString());
+      // Switch into collaborative mode: the session already holds our sealed
+      // genesis checkpoint, so App's join opens to exactly this document.
+      setDocKey(key);
+      setDocId(id);
+    };
+    return <LocalEditor httpBase={HTTP} onGoLive={goLive} />;
   }
 
+  // Collaborative mode: either we just went live, or the URL carried `?doc=`
+  // (someone shared the link). App joins the live session over WS.
   const shareUrl = location.href;
-  return createElement(
-    "div",
-    null,
-    createElement(
-      "header",
-      null,
-      createElement("b", null, "wordinweb collab"),
-      createElement("span", { className: "pill" }, `doc ${docId.slice(0, 10)}…`),
-      docKey ? createElement("span", { className: "pill", style: { background: "#1a7f37", color: "#fff" } }, "encrypted") : null,
-      createElement("span", { className: "hint" }, "Share this URL / open on another device:"),
-      createElement("input", { readOnly: true, value: shareUrl, onFocus: (e: { target: { select(): void } }) => e.target.select() }),
-    ),
-    createElement(
-      "div",
-      { id: "root-editor" },
-      createElement(App, { url: WS, httpBase: HTTP, docId, clientId, name, docKey: docKey ?? undefined, ownerToken: localStorage.getItem(`wordinweb-owner-${docId}`) ?? undefined }),
-    ),
+  return (
+    <div>
+      <header>
+        <b>wordinweb collab</b>
+        <span className="pill">doc {docId.slice(0, 10)}…</span>
+        {docKey ? <span className="pill" style={{ background: "#1a7f37", color: "#fff" }}>encrypted</span> : null}
+        <span className="hint">Share this URL / open on another device:</span>
+        <input readOnly value={shareUrl} onFocus={(e) => e.currentTarget.select()} />
+      </header>
+      <div id="root-editor">
+        <App
+          url={WS}
+          httpBase={HTTP}
+          docId={docId}
+          clientId={clientId}
+          name={name}
+          docKey={docKey ?? undefined}
+          ownerToken={localStorage.getItem(`wordinweb-owner-${docId}`) ?? undefined}
+        />
+      </div>
+    </div>
   );
 }
 
-createRoot(document.getElementById("root")!).render(createElement(Harness));
+createRoot(document.getElementById("root")!).render(<Harness />);

@@ -18,14 +18,18 @@ const PAGE = ".dxw-page";
 const SERVER = "localhost:1399";
 const LANDING = `/?server=${SERVER}`;
 
-async function createDoc(page: Page, mode: "encrypted" | "plaintext"): Promise<string> {
+async function createDoc(page: Page): Promise<string> {
+  // The demo opens to the LOCAL editor; "Make collaborative" seals the
+  // current local doc and goes live (always encrypted — key in #k=).
   await page.goto(LANDING);
-  const label = mode === "encrypted" ? "New encrypted document" : "New plaintext document";
-  const createBtn = page.getByRole("button", { name: label });
-  await expect(createBtn).toBeVisible();
-  await createBtn.click();
-  await expect(page).toHaveURL(/[?&]doc=/); // the magic-link capability is in the URL
-  await expect(page.locator(PAGE)).toBeVisible(); // editor ready (past ConnectingNotice)
+  await expect(page.getByTestId("local-editor")).toBeVisible();
+  const goLive = page.getByTestId("make-collaborative");
+  await expect(goLive).toBeVisible();
+  await goLive.click();
+  await expect(page).toHaveURL(/[?&]doc=/); // the magic-link capability
+  await expect(page).toHaveURL(/#k=/); // collaborative = encrypted (doc 13 §1)
+  await expect(page.getByTestId("download")).toBeVisible(); // collab chrome mounted
+  await expect(page.locator(PAGE)).toBeVisible();
   return page.url();
 }
 
@@ -44,30 +48,52 @@ async function paintedText(page: Page): Promise<string> {
 }
 
 test.describe("zero-custody demo — browser E2E", () => {
-  test("create a plaintext doc: URL carries the capability, editor mounts, creator is owner", async ({ page }) => {
-    const url = await createDoc(page, "plaintext");
-    expect(url).toMatch(/[?&]doc=/);
-    expect(url).not.toContain("#k="); // plaintext: no key in the fragment
-    // The creator holds the owner token → the read-only control is present
-    // (the whole seed→owner-token→admin-UI wiring, exercised in the browser).
+  test("Make collaborative: seals the local doc, key rides the fragment, creator is owner", async ({ page }) => {
+    const url = await createDoc(page);
+    expect(url).toMatch(/[?&]doc=/); // the magic-link capability
+    expect(url).toMatch(/#k=[A-Za-z0-9_-]+/); // doc-13 §1 fragment key (never sent to the server)
+    await expect(page.getByText("encrypted", { exact: true })).toBeVisible();
+    // The creator holds the owner token → owner controls present.
     await expect(page.getByTestId("readonly-toggle")).toBeVisible();
     await expect(page.getByTestId("download")).toBeEnabled();
   });
 
-  test("create an encrypted doc: the key rides the URL fragment, encrypted badge shows", async ({ page }) => {
-    const url = await createDoc(page, "encrypted");
-    expect(url).toMatch(/#k=[A-Za-z0-9_-]+$/); // doc-13 §1 fragment key (never sent to the server)
-    await expect(page.getByText("encrypted", { exact: true })).toBeVisible();
+  test("local-first: type in the local editor, Make collaborative, the content is sealed and shared", async ({ browser }) => {
+    const ctxA = await browser.newContext();
+    const ctxB = await browser.newContext();
+    const a = await ctxA.newPage();
+    const b = await ctxB.newPage();
+    try {
+      // A edits LOCALLY first (no server), then goes live.
+      await a.goto(LANDING);
+      await expect(a.getByTestId("local-editor")).toBeVisible();
+      const box = await a.locator(PAGE).first().boundingBox();
+      if (box) await a.mouse.click(box.x + 30, box.y + 25);
+      await a.keyboard.type("LOCAL DRAFT", { delay: 15 });
+      await expect.poll(() => paintedText(a)).toContain("LOCAL DRAFT");
+      await a.getByTestId("make-collaborative").click();
+      await expect(a).toHaveURL(/#k=/);
+      await expect(a.getByTestId("download")).toBeVisible();
+      // The local draft survived into the collab session…
+      await expect.poll(() => paintedText(a)).toContain("LOCAL DRAFT");
+      // …and a participant opening the shared link sees it too.
+      await b.goto(a.url());
+      await expect(b.locator(PAGE)).toBeVisible();
+      await expect.poll(() => paintedText(b)).toContain("LOCAL DRAFT");
+    } finally {
+      await ctxA.close();
+      await ctxB.close();
+    }
   });
 
   test("typing paints in a real browser (editor apply over the real keydown path)", async ({ page }) => {
-    await createDoc(page, "encrypted");
+    await createDoc(page);
     await typeInEditor(page, "hello e2e");
     await expect.poll(() => paintedText(page), { message: "typed text should paint" }).toContain("hello e2e");
   });
 
   test("Enter then more typing keeps painting (the Enter-desync path)", async ({ page }) => {
-    await createDoc(page, "encrypted");
+    await createDoc(page);
     await typeInEditor(page, "line one");
     await page.keyboard.press("Enter");
     await page.keyboard.type("line two", { delay: 15 });
@@ -98,7 +124,7 @@ test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () 
     const a = await ctxA.newPage();
     const b = await ctxB.newPage();
     try {
-      const url = await createDoc(a, "encrypted");
+      const url = await createDoc(a);
       await b.goto(url);
       await expect(b.locator(PAGE)).toBeVisible();
       await expect.poll(async () => a.getByTestId("roster-chip").count()).toBe(2);
@@ -119,7 +145,7 @@ test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () 
     const owner = await ctxOwner.newPage();
     const editor = await ctxEditor.newPage();
     try {
-      const url = await createDoc(owner, "encrypted");
+      const url = await createDoc(owner);
       await editor.goto(url);
       await expect(editor.locator(PAGE)).toBeVisible();
       await expect(editor.getByTestId("readonly-toggle")).toHaveCount(0);

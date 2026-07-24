@@ -51,18 +51,20 @@ async function sealSeed(
   return { status: res.status, genesisId: body.genesisId, ownerToken: body.ownerToken };
 }
 
-/** Encrypted "New document": fetch the blank template, mint id + key, seal,
- * PUT. Returns what the URL needs: `?doc=<id>#k=<key>`. */
+/** Encrypted go-live: seal the CURRENT local document's bytes (the ones the
+ * user just edited in the local editor), mint id + key, PUT. Returns what the
+ * URL needs: `?doc=<id>#k=<key>`. The bytes are the genesis checkpoint (seq 0),
+ * so the id table IS this docx's parse order — no sidecar needed (null is
+ * honest here; a REVIVAL below always carries the bundle's sidecar). Callers
+ * that want a blank session pass the bytes from `GET {httpBase}/blank`. */
 export async function goLiveEncrypted(
   httpBase: string,
+  docx: Uint8Array,
   shareCode?: string,
 ): Promise<{ docId: string; docKey: string; ownerToken?: string }> {
-  const blank = new Uint8Array(await (await fetch(`${httpBase}/blank`)).arrayBuffer());
   const docId = `d_${randHex(16)}`;
   const docKey = mintDocKey();
-  // A fresh blank doc's id table IS parse order — no sidecar needed (null
-  // is honest here; a REVIVAL below always carries the bundle's sidecar).
-  const seeded = await sealSeed(httpBase, docId, docKey, blank, null, shareCode);
+  const seeded = await sealSeed(httpBase, docId, docKey, docx, null, shareCode);
   return { docId, docKey, ownerToken: seeded.ownerToken };
 }
 
