@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, type CollabSession, type DocBundle } from "wordinweb/collab";
 import { reviveEncrypted } from "./e2ee-flows";
 
@@ -37,6 +37,36 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
 }) {
   const store = useMemo(() => new IndexedDbBundleStore(), []);
   const [session, setSession] = useState<CollabSession | null>(null);
+  // E2E test hook (dev harness only — anon-share is never published): expose
+  // the live CollabSession so browser tests can inject intents through the
+  // REAL connection and read the converged doc, independent of the editor UI.
+  useEffect(() => {
+    const w = window as unknown as { __ww?: unknown };
+    w.__ww = session
+      ? {
+          submitOp: (i: unknown) => session.submitOp(i as never),
+          allocIds: (n: number) => session.allocIds(n),
+          ready: session.ready,
+          roster: () => session.roster,
+          // Base64 of the canonical docx — the byte-identical convergence
+          // check across clients (save() is deterministic by design).
+          saveB64: () => {
+            if (!session.doc) return null;
+            const bytes = session.doc.save();
+            let bin = "";
+            for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+            return btoa(bin);
+          },
+          // Concatenated text (readable diffs on failure).
+          text: () => {
+            if (!session.doc) return "";
+            const walk = (el: { name: string; text: string; children: unknown[] }): string =>
+              (el.name.endsWith(":t") ? el.text : "") + (el.children as never[]).map(walk).join("");
+            return walk(session.doc.docRoot as never);
+          },
+        }
+      : null;
+  }, [session]);
   const [takeover, setTakeover] = useState(false);
   const [reviveState, setReviveState] = useState<"idle" | "reviving" | "no-copy">("idle");
   // Share code (doc 13 §7): entered on a code-required/invalid refusal;
