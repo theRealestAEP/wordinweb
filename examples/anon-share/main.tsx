@@ -55,7 +55,7 @@ function Harness() {
     return createElement(
       "div",
       { style: { maxWidth: 560, margin: "12vh auto", background: "#fff", padding: 28, borderRadius: 12, border: "1px solid #dadce0" } },
-      createElement("h2", { style: { marginTop: 0 } }, "wordinweb — zero-custody collab demo"),
+      createElement("h2", { style: { marginTop: 0 }, "data-testid": "landing" } as never, "wordinweb — zero-custody collab demo"),
       createElement(
         "p",
         { className: "hint" },

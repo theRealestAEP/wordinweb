@@ -168,11 +168,11 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 8px", flexWrap: "wrap" }}>
+      <div data-testid="toolbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 8px", flexWrap: "wrap" }}>
         {/* Roster chips (doc 14 §2): everyone in the session, greyed when
             offline; names are self-asserted — the UI says so in the title. */}
         {(session?.roster ?? []).map((r) => (
-          <span key={r.clientId} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+          <span key={r.clientId} data-testid="roster-chip" data-connected={r.connected} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
             <span
               title="Names are chosen by participants"
               style={{
@@ -214,11 +214,12 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
         ) : null}
         {/* The escape hatch (doc 12 §4): your copy is as durable as this
             browser; one click makes it a file. */}
-        <button onClick={download} disabled={!session?.ready}>Download .docx</button>
+        <button data-testid="download" onClick={download} disabled={!session?.ready}>Download .docx</button>
         <button onClick={() => void saveVersion()} disabled={!session?.ready}>Save version</button>
         <button onClick={() => setShowActivity((v) => !v)}>{showActivity ? "Hide" : "Show"} activity</button>
         {isOwner && (
           <button
+            data-testid="readonly-toggle"
             title="Owner: block all editors (you keep writing)"
             onClick={() => { const on = !readOnly; setReadOnly(on); session?.admin({ op: "readOnly", on }); }}
           >

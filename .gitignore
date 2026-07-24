@@ -10,3 +10,5 @@ test-results/
 internal/
 __pycache__/
 *.py[cod]
+playwright-report/
+.vite/

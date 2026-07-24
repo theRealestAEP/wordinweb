@@ -61,6 +61,18 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
 
   const server = http.createServer((req, res) => {
     const url = req.url ?? "";
+    // CORS (doc 06 hosting): a deployed static app and this API live on
+    // different origins; the magic link (not a cookie) is the capability,
+    // so a permissive ACAO is safe — no credentials ever ride these
+    // requests. Preflight (OPTIONS) is answered for the seed/media routes.
+    res.setHeader("Access-Control-Allow-Origin", req.headers.origin ?? "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "content-type");
+    res.setHeader("Access-Control-Max-Age", "86400");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204).end();
+      return;
+    }
     if (req.method === "GET" && url === "/blank") {
       // Template bytes for client-side sealing (encrypted go-live, doc 13):
       // the server CANNOT seal a blank doc itself — it has no keys — so the
