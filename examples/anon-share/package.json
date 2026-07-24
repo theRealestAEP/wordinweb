@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node ../../packages/server/dist/cli.js & SERVER_PID=$!; trap 'kill $SERVER_PID 2>/dev/null' EXIT INT TERM; vite",
-    "server": "node ../../packages/server/dist/cli.js",
+    "start": "node ../../scripts/dev.mjs",
+    "server": "ZERO_CUSTODY=1 node ../../packages/server/dist/cli.js",
     "dev": "vite"
   },
   "comment": "Local run/test harness — not published. `npm start` runs BOTH the collab dev server and the Vite app in one command (Ctrl+C stops both). `npm run server` / `npm run dev` run them separately in two terminals. All deps resolve from the repo-root node_modules.",

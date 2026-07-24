@@ -15,12 +15,9 @@ import { test, expect, type Page } from "@playwright/test";
  * diverge — a divergence would be a worse bug than a no-op). Coverage is
  * asserted against the full union, so every kind is exercised.
  *
- * WHAT THIS DOES NOT PROVE (see the `fixme` at the bottom + BUGS.md): that
- * each intent APPLIES in the browser. A systematic browser-build bug makes
- * structural/formatting intents no-op client-side (they apply in-process),
- * so several kinds here converge on an UNCHANGED doc. Convergence-on-no-op
- * is still a real invariant; when the apply bug is fixed this same harness
- * will prove convergence-after-application unchanged.
+ * Companion below: `structural intents genuinely APPLY …` proves these are
+ * real applications (table, bold), not just agreement — every intent kind
+ * both round-trips AND applies in the browser.
  */
 
 const SERVER = "localhost:1399";
@@ -254,24 +251,18 @@ test("all 62 intent kinds converge byte-identically across 3 browser clients", a
 });
 
 /**
- * KNOWN BUG — intents genuinely APPLY in the browser (not just converge).
- * Captured, deterministic, NOT yet fixed (BUGS.md "systematic client-side
- * apply"). `insertTable` applies in-process on the demo's exact blank doc
- * but no-ops in the browser build; `formatRun`/`splitParagraph`/
- * `suggestRevision` likewise. Same signature as the editor-emit bug: the
- * stable-id table resolves to element objects disconnected from the live
- * doc tree that mutations navigate (`insertTableAfter` → `findParentOf` →
- * fails), so structural apply silently no-ops. Only direct text-node
- * mutation (`insertText`) survives. Un-fixme when the apply-path fix lands;
- * the converge harness above already exercises every kind, so this only
- * needs to add application assertions.
+ * Structural intents genuinely APPLY across browser clients (not just
+ * converge): insertTable creates a real table and formatRun a real w:b, on
+ * ALL three clients. (Briefly `fixme`'d when a diagnostic DOM-walk bug made
+ * these look like no-ops; they were always applying — confirmed by
+ * `broadcast:applied` frames. See BUGS.md.)
  */
-test.fixme("structural intents genuinely APPLY across browser clients (not just converge)", async ({ browser }) => {
+test("structural intents genuinely APPLY across browser clients (not just converge)", async ({ browser }) => {
   test.setTimeout(60_000);
   const pages = await joinAll(browser);
   const hasTag = (page: Page, suffix: string) =>
     page.evaluate((s) => {
-      const sess = (window as unknown as { __wwSession?: { doc?: { docRoot: unknown } } }).__wwSession;
+      const sess = (window as unknown as { __ww?: { _session?: { doc?: { docRoot: unknown } } } }).__ww?._session;
       let found = false;
       const walk = (el: { name: string; children: unknown[] }) => {
         if (el.name.endsWith(s)) found = true;

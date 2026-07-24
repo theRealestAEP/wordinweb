@@ -82,7 +82,7 @@ export class EncryptedCollabConnection {
     this.transport.onMessage((msg) => this.onServer(msg));
   }
 
-  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string }): void {
+  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string; ownerToken?: string }): void {
     this.docId = docId;
     this.transport.send({
       t: "hello",
@@ -94,6 +94,7 @@ export class EncryptedCollabConnection {
       sinceSeq: 0,
       profile: opts?.profile,
       codeProof: opts?.codeProof,
+      ownerToken: opts?.ownerToken, // owner-capability proof (doc 14 §2.5)
       engineVersion: ENGINE_VERSION, // the fence for client-derived canon (doc 13 §2)
     });
   }
@@ -127,7 +128,7 @@ export class EncryptedCollabConnection {
    * — encrypted joiners always rebuild from the sealed checkpoint + tail,
    * which is both simpler and verifiable (hash gossip).
    */
-  resume(bundle: DocBundle, token?: string, opts?: { profile?: ParticipantProfile; codeProof?: string }): void {
+  resume(bundle: DocBundle, token?: string, opts?: { profile?: ParticipantProfile; codeProof?: string; ownerToken?: string }): void {
     this.clientSeq = Math.max(this.clientSeq, bundle.clientSeq);
     this.resuming = bundle;
     this.join(bundle.docId, token, { ...opts, takeover: true });

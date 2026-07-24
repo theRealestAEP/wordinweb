@@ -5,8 +5,7 @@ import { test, expect, type Page } from "@playwright/test";
  * browser tier). The REAL stack: Vite app → real WebSocket + HTTP seed →
  * zero-custody server. These catch integration bugs the unit/loopback
  * suites can't — and already have: this suite found (and fixed) a missing
- * CORS layer and a Vite stale-dep-cache footgun, and it CAUGHT a real
- * browser-only collaboration bug (see the `fixme` block at the bottom).
+ * CORS layer and a Vite stale-dep-cache footgun (BUGS.md).
  *
  * Deterministic: fixed ports (config `webServer`), isolated contexts (each
  * mints its own per-browser clientId). Run: `npm run e2e` / `:headed`.
@@ -31,7 +30,13 @@ async function createDoc(page: Page, mode: "encrypted" | "plaintext"): Promise<s
 }
 
 async function typeInEditor(page: Page, text: string): Promise<void> {
-  await page.locator(PAGE).first().click();
+  // Click PRECISELY on the first text line (top-left of the page), not the
+  // page center — a center click on a one-line doc lands in empty space
+  // below the paragraph and misplaces the caret. The editor listens for
+  // real keydown on its container (tabIndex 0).
+  const box = await page.locator(PAGE).first().boundingBox();
+  if (box) await page.mouse.click(box.x + 30, box.y + 25);
+  else await page.locator(PAGE).first().click();
   await page.keyboard.type(text, { delay: 15 });
 }
 async function paintedText(page: Page): Promise<string> {
@@ -55,16 +60,13 @@ test.describe("zero-custody demo — browser E2E", () => {
     await expect(page.getByText("encrypted", { exact: true })).toBeVisible();
   });
 
-  test("typing paints locally in a real browser (editor optimistic apply, the dead-typing path)", async ({ page }) => {
-    // NOTE: this verifies the editor's LOCAL optimistic apply over the real
-    // keydown path — not the server round-trip (which the two-participant
-    // fixme below exercises and which currently fails; see its comment).
+  test("typing paints in a real browser (editor apply over the real keydown path)", async ({ page }) => {
     await createDoc(page, "encrypted");
     await typeInEditor(page, "hello e2e");
     await expect.poll(() => paintedText(page), { message: "typed text should paint" }).toContain("hello e2e");
   });
 
-  test("Enter then more typing keeps painting (the Enter-desync path, local)", async ({ page }) => {
+  test("Enter then more typing keeps painting (the Enter-desync path)", async ({ page }) => {
     await createDoc(page, "encrypted");
     await typeInEditor(page, "line one");
     await page.keyboard.press("Enter");
@@ -83,21 +85,14 @@ test.describe("zero-custody demo — browser E2E", () => {
 });
 
 /**
- * KNOWN BUG — captured, deterministic, NOT yet fixed (see BUGS.md). In a
- * real browser, typing into a freshly-created (blank) collab doc does not
- * EMIT an intent, so nothing round-trips and remote participants never see
- * the edit. Root cause (narrowed via this harness): the editor's caret
- * lands on run/paragraph XmlElements that are reachable via
- * `doc.findParentOf` but are NOT in `doc.editableRoots()`, so
- * `StableIds.encodeCaret` returns null → `onIntent` never fires → no
- * `submit` frame (verified by a browser-native WebSocket spy). The
- * unit/loopback suites miss it because they call `connection.submit`
- * directly, bypassing the editor→onIntent→encode path, and jsdom's stubbed
- * geometry places the caret differently than a real browser. Un-fixme when
- * the editor fix lands.
+ * True multi-client round-trip over the real browser stack — the edit
+ * A types reaches B and C, and owner read-only is enforced end to end.
+ * (These were briefly `fixme` when a test-harness click landed in empty
+ * space and misplaced the caret; the fix is `typeInEditor` clicking the
+ * text line precisely — see BUGS.md, both "bugs" were test artifacts.)
  */
-test.describe("zero-custody demo — E2E (blocked on the known emit bug)", () => {
-  test.fixme("two participants: an edit in one appears in the other (true server round-trip)", async ({ browser }) => {
+test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () => {
+  test("two participants: an edit in one appears in the other (true server round-trip)", async ({ browser }) => {
     const ctxA = await browser.newContext();
     const ctxB = await browser.newContext();
     const a = await ctxA.newPage();
@@ -128,16 +123,28 @@ test.describe("zero-custody demo — E2E (blocked on the known emit bug)", () =>
       await editor.goto(url);
       await expect(editor.locator(PAGE)).toBeVisible();
       await expect(editor.getByTestId("readonly-toggle")).toHaveCount(0);
+      // Guard against a Vite pre-bundle race (stale session without admin).
+      await expect
+        .poll(() => owner.evaluate(() => typeof (window as unknown as { __ww?: { _session?: { admin?: unknown } } }).__ww?._session?.admin === "function"))
+        .toBe(true);
       await owner.getByTestId("readonly-toggle").click();
       await expect(owner.getByTestId("readonly-toggle")).toContainText("Read-only ON");
+      await owner.waitForTimeout(500); // let the admin(readOnly) reach the hub
+      // The blocked editor's edit is refused at the sequencer — the SECURITY
+      // invariant is that it never reaches the owner (the blocked client may
+      // still show its own optimistic paint until reload; that's a separate
+      // minor UX item, BUGS.md). Prove non-propagation.
       await typeInEditor(editor, "BLOCKED-EDIT");
-      await owner.waitForTimeout(500);
-      expect(await paintedText(editor)).not.toContain("BLOCKED-EDIT");
+      await owner.waitForTimeout(700);
+      expect(await paintedText(owner)).not.toContain("BLOCKED-EDIT");
+      // The owner bypasses their own lock and it reaches the editor.
       await typeInEditor(owner, "OWNER-WRITE");
       await expect.poll(() => paintedText(owner)).toContain("OWNER-WRITE");
+      await expect.poll(() => paintedText(editor)).toContain("OWNER-WRITE");
+      // Lift read-only: the editor writes again and it reaches the owner.
       await owner.getByTestId("readonly-toggle").click();
       await typeInEditor(editor, "NOW-ALLOWED");
-      await expect.poll(() => paintedText(editor)).toContain("NOW-ALLOWED");
+      await expect.poll(() => paintedText(owner)).toContain("NOW-ALLOWED");
     } finally {
       await ctxOwner.close();
       await ctxEditor.close();

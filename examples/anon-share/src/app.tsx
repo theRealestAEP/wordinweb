@@ -44,7 +44,9 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
     const w = window as unknown as { __ww?: unknown };
     w.__ww = session
       ? {
+          _session: session, // raw session for E2E deep inspection (dev only)
           submitOp: (i: unknown) => session.submitOp(i as never),
+          admin: (act: unknown) => session.admin(act as never),
           allocIds: (n: number) => session.allocIds(n),
           ready: session.ready,
           roster: () => session.roster,
