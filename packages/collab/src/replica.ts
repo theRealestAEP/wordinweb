@@ -1,7 +1,7 @@
 import { DocxDocument, StableIds } from "@wordinweb/core";
 import { Intent, LogEntry, idempotencyKey } from "./intents.js";
 import { transformIntent } from "./transform.js";
-import { applyIntent } from "./apply.js";
+import { applyIntentScoped, resyncScope } from "./apply.js";
 
 // transformIntent is used in replayPending below.
 
@@ -30,6 +30,16 @@ export class ClientReplica {
   private confirmedBytes: Uint8Array;
   private confirmedSidecar: ReturnType<StableIds["exportSidecar"]>;
   private pending: Intent[] = [];
+  /** Confirmed entries NOT yet folded into confirmedBytes: own-echoes
+   * deferred mid-burst (the original role) AND — since the lazy-baseline
+   * change — every fast-path confirmed entry, so the O(doc) save() stays
+   * off the receive hot path entirely. restoreConfirmed replays the tail
+   * onto the baseline; exportBundleState folds it for persistence; the
+   * fast path folds eagerly once the tail reaches FOLD_TAIL_AT (bounding
+   * conflict-replay cost while amortizing saves to ~1/FOLD_TAIL_AT ops). */
+  private confirmedTail: LogEntry[] = [];
+  /** Fold cadence for the lazy confirmed baseline (see confirmedTail). */
+  private static FOLD_TAIL_AT = 100;
 
   constructor(bytes: Uint8Array, sidecar?: ReturnType<StableIds["exportSidecar"]>) {
     this.doc = DocxDocument.load(bytes);
@@ -61,11 +71,10 @@ export class ClientReplica {
    * (no remote interleave) also composes.
    */
   submitLocal(intent: Intent): void {
-    applyIntent(this.doc, this.ids, intent);
     // Keep the parsed model consistent with the mutated XML: op-style
     // optimistic submits (toolbar commands routed through the canonical
     // apply) are rendered directly from this replica's live model.
-    this.resync();
+    this.applyAndResync(intent);
     this.pending.push(intent);
   }
 
@@ -81,6 +90,33 @@ export class ClientReplica {
   /** Number of un-confirmed local intents (for the one-in-flight discipline). */
   get pendingCount(): number {
     return this.pending.length;
+  }
+
+  /** Identity of the OLDEST un-confirmed local intent — the delivery-retry
+   * probe (a stuck front pending means the op or its echo was lost). */
+  firstPending(): { clientId: string; clientSeq: number } | null {
+    const p = this.pending[0];
+    return p ? { clientId: p.clientId, clientSeq: p.clientSeq } : null;
+  }
+
+  /** Copies of every pending intent in submit order (their reconciliation-
+   * transformed forms) — the rate-limit re-drive resends the WHOLE queue:
+   * chained bursts (each op addressing ids a previous op allocated) strand
+   * everything behind one refused op, and dedup makes resends free. */
+  pendingCopies(): Intent[] {
+    return [...this.pending];
+  }
+
+  /** The current pending copy of an intent by idempotency key, or null if it
+   * was confirmed or dropped. This is the RECONCILIATION-TRANSFORMED form —
+   * replayPending rewrites pending against every remote entry ingested since
+   * submission — and therefore the only correct body to re-seal on a
+   * stale-base retry: resealing the raw original resubmits untransformed
+   * coordinates that the server then applies verbatim, while the optimistic
+   * doc holds the transformed form — a silently divergent baseline once the
+   * own-echo fast path snapshots it (the checkpoint-boundary divergence). */
+  pendingIntent(clientId: string, clientSeq: number): Intent | null {
+    return this.pending.find((p) => p.clientId === clientId && p.clientSeq === clientSeq) ?? null;
   }
 
   /**
@@ -99,10 +135,44 @@ export class ClientReplica {
     pending: Intent[];
     mediaMeta: [string, { sha: string; iv?: string; genesisId?: string }][];
   } {
+    // Fold any deferred confirmed entries into the baseline so the bundle's
+    // confirmedBytes is COMPLETE — they are already confirmed and are not in
+    // `pending`, so without this a bundle exported mid-burst would silently
+    // drop them (they'd be recoverable from neither field).
+    let confirmedBytes = this.confirmedBytes;
+    let confirmedSidecar = this.confirmedSidecar;
+    if (this.confirmedTail.length) {
+      if (this.pending.length === 0) {
+        // Quiescent: the live doc IS baseline+tail exactly — save IT. This
+        // also preserves out-of-band state no intent stream can rebuild
+        // (installed media pixels live on the doc, not in the log).
+        confirmedBytes = this.doc.save();
+        confirmedSidecar = this.ids.exportSidecar(this.doc.editableRoots());
+      } else {
+        const base = DocxDocument.load(this.confirmedBytes);
+        const baseIds = base.enableStableIds();
+        baseIds.importSidecar(base.editableRoots(), this.confirmedSidecar);
+        for (const e of this.confirmedTail) {
+          if (e.kind !== "applied") continue;
+          // Reconcile after each one, exactly as the live paths do: a tail
+          // that splits a paragraph and then edits the new one needs the
+          // split's nodes in THIS doc's model before the next intent resolves
+          // them, or the entry silently fails to apply and the exported
+          // baseline is missing a confirmed edit.
+          const res = applyIntentScoped(base, baseIds, e.intent);
+          if (res.applied) resyncScope(base, baseIds, res);
+        }
+        // Replay re-REGISTERS media (the intent half) but cannot restore
+        // PIXELS — carry every installed part over from the live doc.
+        this.carryInstalledMedia(this.doc, base);
+        confirmedBytes = base.save();
+        confirmedSidecar = baseIds.exportSidecar(base.editableRoots());
+      }
+    }
     return {
       confirmedSeq: this.confirmedSeq,
-      confirmedBytes: this.confirmedBytes,
-      confirmedSidecar: this.confirmedSidecar,
+      confirmedBytes,
+      confirmedSidecar,
       pending: [...this.pending],
       mediaMeta: [...this.doc.mediaMeta] as [string, { sha: string; iv?: string; genesisId?: string }][],
     };
@@ -153,26 +223,85 @@ export class ClientReplica {
     //      them — just advance confirmed and drop the matched pending;
     //  (b) nothing is pending: apply the remote entries in place (no risk of
     //      double-applying an optimistic edit).
-    if (remoteAhead.length === 0 || this.pending.length === 0) {
+    // Do these fresh own-echoes confirm EVERY pending op? A fast typing burst
+    // puts several ops in flight; an echo batch confirms only the oldest, so
+    // the optimistic doc still holds the un-confirmed tail. The fast path below
+    // snapshots the optimistic doc as the confirmed baseline — correct ONLY
+    // when the doc equals the new baseline (nothing pending, or these echoes
+    // drain it). If a burst leaves pending un-confirmed, snapshotting here would
+    // bake that tail into the baseline and replay it AGAIN on the next remote
+    // batch — the duplication/divergence real typing hits ("SABABAB" on the
+    // server vs "SABABABAAA" locally). Route that to the reload path, which
+    // rebuilds the baseline from the true confirmed state.
+    const freshKeys = new Set(
+      fresh.map((e) => (e.kind === "applied" ? idempotencyKey(e.intent) : `${e.clientId}:${e.clientSeq}`)),
+    );
+    const drainsAllPending = this.pending.every((p) => freshKeys.has(idempotencyKey(p)));
+    // FAST PATH — no reload, doc object stays stable (and out-of-band state like
+    // installed media pixels, which live on the doc and can't be rebuilt from
+    // intents, is preserved by snapshotting the live doc):
+    //  (b) nothing pending: apply the remote entries in place; or
+    //  (a) every fresh entry is our own echo AND drains all pending: the
+    //      optimistic doc already equals the new confirmed baseline.
+    if (this.pending.length === 0 || (remoteAhead.length === 0 && drainsAllPending)) {
       const applyToDoc = remoteAhead.length > 0;
       for (const e of fresh) {
         // Own echoes are already applied optimistically; only apply entries
         // that aren't our own pending, to avoid double-apply.
         this.advanceConfirmed(e, /*applyToDoc*/ applyToDoc);
+        // LAZY BASELINE (perf B9/B10): the entry is confirmed and lives in
+        // the optimistic doc, but is NOT re-serialized into confirmedBytes
+        // here — snapshotConfirmed() ran doc.save() on EVERY drain, an
+        // O(document) serialize per receive batch that made per-edit cost
+        // grow with document size (the 6× seeding curve) and starved the
+        // UI under floods. The tail records it; restoreConfirmed replays
+        // it on the (rare) conflict path, exportBundleState folds it for
+        // persistence, and the periodic fold below bounds both.
+        if (e.kind === "applied") this.confirmedTail.push(e);
       }
-      // apply.ts mutates the XML tree only; the parsed model (Run.content, the
-      // line-break inputs the renderer reads) is rebuilt by refresh(). The old
-      // render path reloaded from bytes so it never saw the stale model, but
-      // rendering the live doc object directly does — so refresh once here when
-      // we mutated in place, keeping the model consistent with the XML (and
-      // bumping modelVersion so the view repaints).
-      if (applyToDoc) this.resync();
-      this.snapshotConfirmed();
+      // There is deliberately no full resync() here. It used to close this
+      // loop — one O(document) model reparse per incoming batch, the stall a
+      // flood of remote edits produced (B10). advanceConfirmed now reconciles
+      // each entry against what THAT entry touched, so the full refresh is
+      // paid only by entries that actually report document scope.
+      //
+      // Pending is empty on both fast-path shapes, so live == baseline+tail
+      // exactly — folding here (an O(doc) save) is CORRECT whenever we
+      // choose to pay it; paying it every FOLD_TAIL_AT entries amortizes
+      // the save to ~1% of ops instead of every drain.
+      if (this.confirmedTail.length >= ClientReplica.FOLD_TAIL_AT) this.snapshotConfirmed();
       return;
     }
 
-    // SLOW PATH (true conflict: pending + interleaved remote) — reload the
-    // confirmed baseline and replay pending transformed against the remote.
+    // OWN ECHOES ONLY, but a typing burst left later ops un-confirmed. The
+    // optimistic doc already holds every pending op and stays correct as-is —
+    // so DON'T reload it (a reload swaps the doc object mid-typing, breaking the
+    // editor's live binding and dropping the caret). Advance only the CONFIRMED
+    // BASELINE by the echoed ops, in place: apply them to a copy of the baseline
+    // and re-snapshot, leaving the un-confirmed tail solely in the optimistic
+    // doc. (Snapshotting the optimistic doc here — the old bug — baked that tail
+    // into the baseline and replayed it again on the next remote → duplication.)
+    if (remoteAhead.length === 0) {
+      // DEFER these confirmed own-echoes: this.doc already holds them (applied
+      // optimistically) and MUST NOT be reloaded mid-typing (a reload swaps the
+      // doc object, breaking the editor binding + caret). Record them in
+      // confirmedTail — restoreConfirmed replays them onto the baseline, and the
+      // next snapshot (when the burst drains) folds them into confirmedBytes.
+      // Snapshotting the optimistic doc here (the old bug) baked the STILL-
+      // pending tail into the baseline and replayed it again on the next remote
+      // batch → the duplication/divergence real typing hit.
+      for (const e of fresh) {
+        if (e.kind === "applied") this.confirmedTail.push(e);
+        const key = e.kind === "applied" ? idempotencyKey(e.intent) : `${e.clientId}:${e.clientSeq}`;
+        this.pending = this.pending.filter((p) => idempotencyKey(p) !== key);
+        this.confirmedSeq = e.seq;
+      }
+      return; // this.doc untouched — no reload, no re-mount, caret kept
+    }
+
+    // SLOW PATH — a true conflict (pending + interleaved remote): reload the
+    // confirmed baseline, advance through the fresh entries, then replay the
+    // still-pending intents transformed against the remote ones.
     this.restoreConfirmed();
     this.reloaded = true;
     for (const e of fresh) this.advanceConfirmed(e, true);
@@ -181,11 +310,24 @@ export class ClientReplica {
     this.resync(); // model consistent with the replayed XML for the renderer
   }
 
+  /**
+   * Apply one intent to the live doc and reconcile ONLY what it touched
+   * (perf B9/B10). Every applied intent used to cost a full model reparse plus
+   * a full id walk somewhere on this path, so a keystroke arriving into a
+   * 600-paragraph document cost 600 paragraphs of work — the seeding curve and
+   * the stall under an incoming flood. Text-level intents now reparse their
+   * own paragraph; anything structural or unverifiable still takes the full
+   * refresh (see resyncScope). Returns false when the intent didn't apply.
+   */
+  private applyAndResync(intent: Intent): boolean {
+    const res = applyIntentScoped(this.doc, this.ids, intent);
+    if (!res.applied) return false;
+    resyncScope(this.doc, this.ids, res);
+    return true;
+  }
+
   private advanceConfirmed(e: LogEntry, applyToDoc: boolean): void {
-    if (e.kind === "applied" && applyToDoc) {
-      applyIntent(this.doc, this.ids, e.intent);
-      if (e.intent.kind === "splitParagraph") this.resync();
-    }
+    if (e.kind === "applied" && applyToDoc) this.applyAndResync(e.intent);
     // Drop a matching pending intent (ours, now confirmed).
     const key = e.kind === "applied" ? idempotencyKey(e.intent) : `${e.clientId}:${e.clientSeq}`;
     this.pending = this.pending.filter((p) => idempotencyKey(p) !== key);
@@ -203,24 +345,54 @@ export class ClientReplica {
     this.pending = [];
     for (const p of stillPending) {
       const transformed = transformIntent(p, remoteAhead);
-      const applied = applyIntent(this.doc, this.ids, transformed);
-      if (transformed.kind === "splitParagraph") this.resync();
-      if (applied) this.pending.push(transformed);
+      if (this.applyAndResync(transformed)) this.pending.push(transformed);
+    }
+  }
+
+  /** Copy installed media pixels (out-of-band state — bytes arrive via the
+   * relay, not the intent log) from one doc into another whose matching
+   * parts are still pending. */
+  private carryInstalledMedia(from: DocxDocument, to: DocxDocument): void {
+    for (const [part] of from.mediaMeta) {
+      if (from.pendingMedia.has(part)) continue; // no pixels held locally
+      const bytes = from.pkg.binary(part);
+      if (bytes) to.installMedia(part, bytes);
     }
   }
 
   private restoreConfirmed(): void {
+    // The lazy baseline can be up to FOLD_TAIL_AT entries stale, so pixels
+    // installed during the tail window exist only on the LIVE doc — capture
+    // them before it is replaced, re-install after the replay.
+    const pixelSource = this.doc;
     this.doc = DocxDocument.load(this.confirmedBytes);
     this.ids = this.doc.enableStableIds();
     // Reproduce the exact id table via the sidecar — parse-order alone would
     // renumber split-created carried ids and break address resolution
     // (plan round-2 F1).
     this.ids.importSidecar(this.doc.editableRoots(), this.confirmedSidecar);
+    // Fold in own-echoes confirmed since the last snapshot (deferred to avoid
+    // reloading during a typing burst). These are already confirmed, so they
+    // belong to the baseline before pending is replayed on top. A replayed
+    // split mutates the raw XML without reparsing doc.sections, so resync —
+    // exactly like advanceConfirmed/replayPending — or the NEXT apply in this
+    // same receive() builds its run map from the stale model and silently
+    // drops a remote edit addressing the split's new run (permanent, silent
+    // divergence under fast-typing+Enter bursts).
+    for (const e of this.confirmedTail) {
+      if (e.kind === "applied") this.applyAndResync(e.intent);
+    }
+    // Re-install pixels held by the replaced live doc (see pixelSource note).
+    this.carryInstalledMedia(pixelSource, this.doc);
   }
 
   private snapshotConfirmed(): void {
     this.confirmedBytes = this.doc.save();
     this.confirmedSidecar = this.ids.exportSidecar(this.doc.editableRoots());
+    // this.doc == the full confirmed baseline here (callers snapshot only when
+    // nothing pending remains, or after a restore+advance), so the deferred
+    // tail is now baked into confirmedBytes — clear it.
+    this.confirmedTail = [];
   }
 
   private resync(): void {

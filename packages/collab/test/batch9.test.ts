@@ -79,6 +79,50 @@ describe("more intents batch 9 (smartart format / floating / math / comment / bo
     expect(serializeXml(s.doc.docRoot)).not.toContain("oMath");
   });
 
+  it("moveMath re-parents an equation to a text position", () => {
+    // Drag-move of an equation used to be a LOCAL-ONLY mutation (checkpoint
+    // A17 class): the drop replicated to nobody.
+    const s = mathDoc();
+    const before = serializeXml(s.doc.docRoot);
+    const e = s.submit({
+      kind: "moveMath", clientId: "a", clientSeq: 2, base: s.seq,
+      blockId: mathBlockId(s), at: { blockId: mathBlockId(s), runId: firstRunId(s), offset: 2 }, nodeIds: seq(4, 2000),
+    });
+    expect(e.kind).toBe("applied");
+    const after = serializeXml(s.doc.docRoot);
+    expect(after).toContain("oMath");   // still one equation…
+    expect(after).not.toBe(before);     // …in a different place
+  });
+
+  it("moveMath drops cleanly when the destination is unresolvable", () => {
+    const s = mathDoc();
+    const before = serializeXml(s.doc.docRoot);
+    const e = s.submit({
+      kind: "moveMath", clientId: "a", clientSeq: 2, base: s.seq,
+      blockId: mathBlockId(s), at: { blockId: mathBlockId(s), runId: 99999, offset: 0 }, nodeIds: seq(4, 2100),
+    });
+    expect(e.kind).toBe("rejected");
+    expect(serializeXml(s.doc.docRoot)).toBe(before);
+  });
+
+  it("moveMath applies identically on two replicas (carried tail-run id)", () => {
+    // Dropping MID-text splits the destination run; the tail must take the
+    // carried id on every replica or later intents address different runs.
+    const a = mathDoc();
+    const b = mathDoc();
+    const op = {
+      kind: "moveMath", clientId: "c", clientSeq: 9, base: a.seq,
+      blockId: mathBlockId(a), at: { blockId: mathBlockId(a), runId: firstRunId(a), offset: 2 }, nodeIds: seq(4, 2200),
+    } as const;
+    expect(a.submit(op as never).kind).toBe("applied");
+    expect(b.submit(op as never).kind).toBe("applied");
+    expect(serializeXml(a.doc.docRoot)).toBe(serializeXml(b.doc.docRoot));
+    // The tail run carries the id on BOTH, so a follow-up edit lands in the
+    // same place everywhere.
+    expect(a.ids.elOf(2200)).toBeTruthy();
+    expect(b.ids.elOf(2200)).toBeTruthy();
+  });
+
   it("deleteComment removes a comment thread", () => {
     const s = new DocumentSession(makeDoc("commented"));
     expect(s.submit({ kind: "commentRun", clientId: "a", clientSeq: 1, base: 0, runId: firstRunId(s), text: "Note", author: "Reviewer", date: "2020-01-01T00:00:00Z", paraId: "11111111" }).kind).toBe("applied");

@@ -1,4 +1,4 @@
-import { DocxDocument, StableIds } from "@wordinweb/core";
+import { DocxDocument, StableIds, resolveRunOffset } from "@wordinweb/core";
 import { Intent, IntentBody } from "./intents.js";
 
 /**
@@ -30,11 +30,15 @@ export function invertIntent(doc: DocxDocument, ids: StableIds, intent: Intent):
     case "deleteText": {
       // Inverse: re-insert the removed text — capture it from the live run
       // BEFORE the delete applies (the caller invokes invert pre-apply).
+      // Wire offsets are cumulative within the run (checkpoint B1): resolve
+      // to the concrete w:t and slice locally.
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return null;
-      const t = firstText(runEl);
-      if (!t) return null;
-      const removed = t.text.slice(intent.start, intent.end);
+      const hit = resolveRunOffset(runEl, intent.start);
+      if (!hit) return null;
+      const localEnd = hit.offset + (intent.end - intent.start);
+      if (localEnd > hit.t.text.length) return null; // cross-w:t range: apply rejects it too
+      const removed = hit.t.text.slice(hit.offset, localEnd);
       if (removed.length === 0) return null;
       return {
         kind: "insertText",
@@ -46,19 +50,24 @@ export function invertIntent(doc: DocxDocument, ids: StableIds, intent: Intent):
       // Inverse: merge the newly created paragraph back into its predecessor.
       return { kind: "mergeParagraph", blockId: intent.newBlockId };
     }
+    case "insertImage": {
+      // Inverse: remove the drawing's carrier run. The apply gives the newly
+      // created carrier the FIRST carried id (the same shape insertShape
+      // produces), so the inverse addresses it without a new wire kind.
+      //
+      // The media PART stays registered and its bytes stay in the package —
+      // undo is a document edit, not a relay operation. Re-doing the same
+      // insert would re-upload to the same content address and hit the
+      // relay's already-present path, so the orphaned registration costs a
+      // dead relationship, never a wrong image.
+      const carrier = intent.nodeIds?.[0];
+      if (carrier === undefined) return null;
+      return { kind: "removeDrawing", runId: carrier };
+    }
     // Formatting / table / comment / merge inverses need prior-state capture
     // (was-bold?, the merged paragraph's structure, …) — a documented
     // extension; not undoable yet.
     default:
       return null;
   }
-}
-
-function firstText(runEl: import("@wordinweb/core").XmlElement): import("@wordinweb/core").XmlElement | null {
-  if (runEl.name === "w:t" || runEl.name.endsWith(":t")) return runEl;
-  for (const c of runEl.children) {
-    const f = firstText(c);
-    if (f) return f;
-  }
-  return null;
 }

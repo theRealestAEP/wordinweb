@@ -46,6 +46,7 @@ import {
   setFloatingPagePosition,
   setMathLinear,
   deleteMath,
+  moveMath,
   deleteComment,
   insertBookmarkAroundSelection,
   checkboxStateElement,
@@ -57,6 +58,13 @@ import {
   acceptAllRevisions,
   isSafeUrl,
   applyTableOp,
+  runWireLength,
+  resolveRunOffset,
+  resizeDrawing,
+  resizeTableColumn,
+  resizeTableRow,
+  moveTableTo,
+  removeDrawingRun,
   mergeParagraphBackward,
   addComment,
   replyToComment,
@@ -77,35 +85,101 @@ import {
 import { Intent, Position } from "./intents.js";
 
 /**
+ * How much of the document an applied intent disturbed — the input to
+ * dirty-scoped reconciliation (perf B9/B10). Reconciling an edit used to cost
+ * O(document) on every path (full model reparse + full id walk), so per-op
+ * cost grew with the document; the scope lets the caller pay for THE EDIT.
+ *
+ * `doc` is the conservative default and means exactly today's behavior: full
+ * refresh() + assignFromRoots(). Only intents whose blast radius is provably
+ * one paragraph (or the two sides of a split) report a narrower scope; every
+ * structural, document-level, or exotic intent keeps the document scope.
+ */
+export type Scope =
+  | { kind: "doc" }
+  /** Only these paragraphs' contents changed. */
+  | { kind: "block"; blocks: XmlElement[] }
+  /** `before` was split; `after` is the new sibling that follows it. */
+  | { kind: "split"; before: XmlElement; after: XmlElement };
+
+export type ApplyScope = Scope & { applied: boolean };
+
+const DOC_SCOPE: Scope = { kind: "doc" };
+
+/**
  * Bridge from wire intents to the core mutation functions. Resolves stable
  * ids to model positions, applies the mutation headlessly (no DOM), and
  * assigns carried ids to newly created nodes so every replica agrees on ids
- * (plan doc 03). Callers refresh() and re-run the id table afterward; this
- * function performs the tree mutation only.
+ * (plan doc 03). Callers reconcile the parsed model afterward — see
+ * resyncScope; this function performs the tree mutation only.
  *
  * Returns true if the intent applied, false for a clean no-op / unresolvable
  * position (the caller records a rejection, doc 03).
  */
 export function applyIntent(doc: DocxDocument, ids: StableIds, intent: Intent): boolean {
+  return applyIntentScoped(doc, ids, intent).applied;
+}
+
+/** applyIntent plus the dirty scope of what it touched. */
+export function applyIntentScoped(doc: DocxDocument, ids: StableIds, intent: Intent): ApplyScope {
+  const out = { scope: DOC_SCOPE };
   try {
-    return applyIntentInner(doc, ids, intent);
+    const applied = applyIntentInner(doc, ids, intent, out);
+    return { ...out.scope, applied };
   } catch {
     // Any throw (e.g. a carried-id collision from a buggy/hostile client)
     // becomes a clean rejection: the session logs a reject entry and every
     // replica's receive loop keeps running instead of dying mid-broadcast.
-    return false;
+    // A throw can leave a half-applied tree, so the scope is not trustworthy —
+    // report document scope, which is what a recovering caller must assume.
+    return { kind: "doc", applied: false };
   }
 }
 
-function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): boolean {
-  const runMap = buildRunMap(doc);
+/**
+ * Reconcile the parsed model and the id table with a tree the given intent
+ * just mutated, doing work proportional to the intent's scope. Falls back to
+ * the full refresh whenever a targeted reparse cannot handle the container
+ * (paragraph outside the body story, a paragraph carrying section breaks or
+ * bookmark ranges, a split whose halves aren't plain adjacent siblings) —
+ * correctness beats speed, and the fallback is exactly the old behavior.
+ */
+export function resyncScope(doc: DocxDocument, ids: StableIds, scope: Scope): void {
+  if (scope.kind === "block") {
+    let ok = true;
+    for (const block of scope.blocks) ok = doc.reparseBodyParagraph(block) !== null && ok;
+    if (ok) {
+      // Scoped assignment is id-table-identical to the full walk here: a
+      // block-scoped intent creates tracked nodes only inside these
+      // paragraphs, and everything outside already carries an id. See
+      // StableIds.assignFromSubtrees.
+      ids.assignFromSubtrees(scope.blocks);
+      return;
+    }
+  } else if (scope.kind === "split") {
+    if (doc.reparseDirectBodyParagraphSplit(scope.before, scope.after)) {
+      ids.assignFromSubtrees([scope.before, scope.after]);
+      return;
+    }
+  }
+  doc.refresh();
+  ids.assignFromRoots(doc.editableRoots());
+}
+
+function applyIntentInner(
+  doc: DocxDocument,
+  ids: StableIds,
+  intent: Intent,
+  out: { scope: Scope },
+): boolean {
+  const runOf = makeRunLookup(doc, ids);
   // Headless apply does not yet support suggesting mode (needs provenance
   // threaded through the intent); the session forbids it upstream.
   const ctx = { suggesting: false, revMeta: () => { throw new Error("suggesting mode unsupported headlessly"); } };
 
   switch (intent.kind) {
     case "insertText": {
-      const caret = resolveCaret(ids, runMap, intent.at);
+      const caret = resolveCaret(ids, runOf, intent.at);
       if (!caret) return false;
       if (intent.suggest) {
         // Tracked change: record the insertion as a w:ins with carried
@@ -119,32 +193,46 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
         return true;
       }
       applyInsertText(doc, caret, intent.text, ctx);
+      // Plain typing splices characters into one w:t — the whole blast radius
+      // is the addressed paragraph (perf B9/B10: this is THE hot path).
+      out.scope = blockScope(ids, intent.at.blockId, intent.at.runId);
       return true;
     }
     case "deleteText": {
       if (intent.end <= intent.start) return false;
-      const caret = resolveCaret(ids, runMap, { blockId: intent.blockId, runId: intent.runId, offset: intent.start });
+      const caret = resolveCaret(ids, runOf, { blockId: intent.blockId, runId: intent.runId, offset: intent.start });
       if (!caret) return false;
-      if (intent.end > caret.t.text.length) return false;
+      // Wire offsets are cumulative within the run; the resolved caret is
+      // local to its w:t. A range that would cross into the NEXT w:t is not
+      // emitted by any sender (deletes are per-grapheme within one w:t) —
+      // reject it as a clean no-op rather than corrupting a neighbor.
+      const localEnd = caret.offset + (intent.end - intent.start);
+      if (localEnd > caret.t.text.length) return false;
       // Engine-independent splice via the shared core mutation (offsets were
       // resolved client-side, so no Intl.Segmenter dependency here).
-      applyDeleteRange(caret, intent.start, intent.end);
+      applyDeleteRange(caret, caret.offset, localEnd);
+      // A delete only shortens one w:t's text: no tracked node is removed, so
+      // no id retires and the paragraph is the whole blast radius.
+      out.scope = blockScope(ids, intent.blockId, intent.runId);
       return true;
     }
     case "splitParagraph": {
-      const caret = resolveCaret(ids, runMap, intent.at);
+      const caret = resolveCaret(ids, runOf, intent.at);
       if (!caret) return false;
       const res = applySplitParagraph(doc, caret, ctx);
       if (!res) return false;
       ids.assign(res.after, intent.newBlockId);
       const newRun = res.after.children.find((c) => localRun(c));
       if (newRun) ids.assign(newRun, intent.newRunId);
+      // Both halves of the split carry their ids explicitly (above), so the
+      // scoped reparse below has only the two paragraphs' MODEL to rebuild.
+      out.scope = { kind: "split", before: res.before, after: res.after };
       return true;
     }
     case "formatRun": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry) return false;
       // Whole-run format: a segment with t=null covers the entire run, so
       // applyRunFormat takes the in-place (no-split) path — run id preserved.
@@ -173,12 +261,20 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
       if (intent.end <= intent.start) return false;
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
-      const len = entry.firstT.text.length;
+      const len = runWireLength(runEl);
       if (intent.start < 0 || intent.end > len) return false;
+      // Wire offsets are cumulative within the run; the segment applyRunFormat
+      // takes is local to one w:t. A range crossing a w:t boundary has no
+      // single-segment form — reject it as a clean no-op (senders emit
+      // per-segment ranges, each within one w:t).
+      const hit = resolveRunOffset(runEl, intent.start);
+      if (!hit) return false;
+      const localEnd = hit.offset + (intent.end - intent.start);
+      if (localEnd > hit.t.text.length) return false;
       // Sub-range format: splits the run into before/middle/after (all new).
-      const seg: SelectionSegment = { run: entry.run, t: entry.firstT, start: intent.start, end: intent.end, props: entry.run.props };
+      const seg: SelectionSegment = { run: entry.run, t: hit.t, start: hit.offset, end: localEnd, props: entry.run.props };
       const formatted = applyRunFormat(doc, [seg], intent.patch as never);
       if (formatted.length === 0) return false;
       // Locate the pieces via the returned middle w:t (robust to whatever
@@ -237,7 +333,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "commentRun": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry) return false;
       // Whole-run comment (t=null covers the run, so no run split). Carried
       // provenance makes the w14:paraId and w:date identical on every replica.
@@ -295,10 +391,11 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
       };
       const resolved: { t: XmlElement; start: number; end: number }[] = [];
       for (const r of intent.ranges ?? []) {
-        const caret = resolveCaret(ids, runMap, { blockId: r.blockId, runId: r.runId, offset: r.start });
+        const caret = resolveCaret(ids, runOf, { blockId: r.blockId, runId: r.runId, offset: r.start });
         if (!caret) continue;
-        if (r.end > caret.t.text.length) continue;
-        resolved.push({ t: caret.t, start: r.start, end: r.end });
+        const localEnd = caret.offset + (r.end - r.start);
+        if (localEnd > caret.t.text.length) continue;
+        resolved.push({ t: caret.t, start: caret.offset, end: localEnd });
       }
       const markEls: { el: XmlElement; glyph: "ins" | "del" }[] = [];
       for (const m of intent.marks ?? []) {
@@ -317,7 +414,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertImage": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       // Doc 16 §2: apply performs the REGISTRATION half only — part + rel +
       // content-type + the drawing run with client-measured extents (layout
@@ -340,7 +437,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertBlankPage": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const ok = insertBlankPageAt(doc, entry.firstT, entry.firstT.text.length);
@@ -350,7 +447,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertSectionBreak": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const ok = insertSectionBreak(doc, entry.firstT, intent.breakType);
@@ -360,7 +457,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertCrossRef": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const ok = insertCrossReference(doc, entry.firstT, entry.firstT.text.length, intent.bookmark, intent.refKind);
@@ -385,7 +482,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertWordArt": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const drawing = insertWordArtAt(doc, entry.firstT, intent.text, intent.preset);
@@ -396,7 +493,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertChart": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const drawing = insertChartAt(doc, entry.firstT, intent.chart as never);
@@ -407,7 +504,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertSmartArt": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const drawing = insertSmartArtAt(doc, entry.firstT, intent.smartArt as never);
@@ -421,7 +518,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertDateTimeField": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const ok = insertDateTimeField(doc, entry.firstT, entry.firstT.text.length, intent.dtKind, intent.picture);
@@ -431,7 +528,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertField": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const ok = insertField(doc, entry.firstT, entry.firstT.text.length, intent.instruction, intent.cachedResult ?? "");
@@ -490,7 +587,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "removeLink": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       return removeLink(doc, entry.firstT);
     }
@@ -536,6 +633,37 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
       if (!drawing) return false;
       return setFloatingPagePosition(doc, drawing, intent.xPx, intent.yPx);
     }
+    case "resizeDrawing": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      return resizeDrawing(doc, drawing, intent.widthPx, intent.heightPx);
+    }
+    case "resizeTableColumn": {
+      const tbl = tableOfParagraph(doc, ids, intent.cellParagraphId);
+      if (!tbl) return false;
+      return resizeTableColumn(doc, tbl, intent.boundary, intent.deltaPx, intent.renderedWidths);
+    }
+    case "resizeTableRow": {
+      const tbl = tableOfParagraph(doc, ids, intent.cellParagraphId);
+      if (!tbl) return false;
+      return resizeTableRow(doc, tbl, intent.rowIdx, intent.heightPx);
+    }
+    case "moveTable": {
+      const tbl = tableOfParagraph(doc, ids, intent.cellParagraphId);
+      if (!tbl) return false;
+      return moveTableTo(doc, tbl, intent.xPx, intent.yPx, intent.preservePageStart, intent.pageDelta);
+    }
+    case "removeDrawing": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = firstDrawingIn(runEl);
+      if (!drawing) return false;
+      const ok = removeDrawingRun(doc, drawing);
+      if (ok) ids.prune(doc.editableRoots()); // retire the removed run's ids
+      return ok;
+    }
     case "setMathLinear": {
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
@@ -550,21 +678,54 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
       if (!math) return false;
       return deleteMath(doc, math);
     }
+    case "moveMath": {
+      const blockEl = ids.elOf(intent.blockId);
+      if (!blockEl) return false;
+      const math = firstMathIn(blockEl);
+      if (!math) return false;
+      const dest = resolveCaret(ids, runOf, intent.at);
+      if (!dest) return false;
+      const before = trackedSet(ids, doc);
+      if (!moveMath(doc, math, dest.t, dest.offset)) return false;
+      // A mid-text drop splits the destination run; the tail takes the
+      // carried id so every replica addresses it identically. (reassign, not
+      // assign: moveMath's internal refresh() may already have auto-numbered
+      // it in parse order.)
+      const fresh: XmlElement[] = [];
+      walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
+      for (let k = 0; k < fresh.length && k < intent.nodeIds.length; k++) ids.reassign(fresh[k], intent.nodeIds[k]);
+      return true;
+    }
+    case "ensureHeaderFooter": {
+      // Already there: a clean no-op, so two participants opening the header
+      // at the same moment can't create two parts.
+      if (doc.hasHfPart(intent.hfKind)) return false;
+      const before = trackedSet(ids, doc);
+      doc.ensureHfPart(intent.hfKind);
+      const fresh: XmlElement[] = [];
+      walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
+      for (let k = 0; k < fresh.length && k < intent.nodeIds.length; k++) ids.reassign(fresh[k], intent.nodeIds[k]);
+      return true;
+    }
     case "deleteComment":
       return deleteComment(doc, intent.commentId);
     case "insertBookmarkRange": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
-      if (intent.end > entry.firstT.text.length) return false;
-      const seg: SelectionSegment = { run: entry.run, t: entry.firstT, start: intent.start, end: intent.end, props: entry.run.props };
+      if (intent.end > runWireLength(runEl)) return false;
+      const hit = resolveRunOffset(runEl, intent.start);
+      if (!hit) return false;
+      const localEnd = hit.offset + (intent.end - intent.start);
+      if (localEnd > hit.t.text.length) return false;
+      const seg: SelectionSegment = { run: entry.run, t: hit.t, start: hit.offset, end: localEnd, props: entry.run.props };
       return insertBookmarkAroundSelection(doc, [seg], intent.name);
     }
     case "toggleCheckbox": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry) return false;
       const cbEl = checkboxStateElement(entry.run, entry.firstT);
       if (!cbEl) return false;
@@ -586,7 +747,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertTable": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const ok = insertTableAfter(doc, entry.firstT, intent.rows, intent.cols);
@@ -597,7 +758,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const seg: SelectionSegment = { run: entry.run, t: entry.firstT, start: 0, end: entry.firstT.text.length, props: entry.run.props };
       const before = trackedSet(ids, doc);
@@ -608,7 +769,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertFootnote": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const id = insertFootnote(doc, entry.firstT, entry.firstT.text.length, intent.text);
@@ -634,7 +795,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertBookmark": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       return insertBookmarkAt(doc, entry.firstT, entry.firstT.text.length, intent.name);
     }
@@ -653,7 +814,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertPageField": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const ok = insertPageField(doc, entry.firstT, entry.firstT.text.length, intent.fieldKind);
@@ -670,7 +831,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertBreak": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       // At END of the run: inserts sibling break + tail runs, no text split.
       const before = trackedSet(ids, doc);
@@ -686,7 +847,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertMath": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const res = insertMathAt(doc, entry.firstT, entry.firstT.text.length, intent.mathText);
@@ -697,7 +858,7 @@ function applyIntentInner(doc: DocxDocument, ids: StableIds, intent: Intent): bo
     case "insertShape": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const entry = runMap.get(runEl);
+      const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
       const res = insertShapeAt(doc, entry.firstT, intent.preset, intent.text ?? "");
@@ -751,6 +912,18 @@ function firstTextDescendant(el: XmlElement): XmlElement | null {
   return null;
 }
 
+/** The table containing an id-addressed cell paragraph — the NEAREST tbl
+ * ancestor, so a nested table's paragraph addresses the inner table (senders
+ * pick a paragraph whose nearest tbl is the intended one). */
+function tableOfParagraph(doc: DocxDocument, ids: StableIds, cellParagraphId: number): XmlElement | null {
+  const paraEl = ids.elOf(cellParagraphId);
+  if (!paraEl) return null;
+  for (let cur: XmlElement | null = paraEl; cur; cur = doc.findParentOf(cur) ?? null) {
+    if (localName(cur.name) === "tbl") return cur;
+  }
+  return null;
+}
+
 /** The w:drawing element inside a run's subtree (drawing-edit intents address
  * a drawing via the run that carries it — drawings aren't tracked/id'd). */
 function firstDrawingIn(el: XmlElement): XmlElement | null {
@@ -778,15 +951,89 @@ interface RunEntry {
   firstT: XmlElement | undefined;
 }
 
-/** Map a run's source XML element to its model Run (needed for the checkbox
- * guard in applyInsertText and to locate the run's first w:t). Rebuilt per
- * apply — cheap relative to refresh(); a batching session can hoist it. */
+/** Look up a run's source XML element in the model (needed for the checkbox
+ * guard in applyInsertText and to locate the run's first w:t). */
+type RunLookup = (runEl: XmlElement, blockIdHint?: number) => RunEntry | undefined;
+
+function runEntry(run: Run): RunEntry {
+  return { run, firstT: run.content.find((c) => c.kind === "text")?.srcT };
+}
+
+/**
+ * A run lookup that resolves ONE run instead of indexing the whole model.
+ *
+ * The old form built a Map over every run in the document on every apply — an
+ * O(document) walk to answer a single-character insert (perf B9). Nearly every
+ * intent addresses a run whose paragraph the intent also names, so the hinted
+ * path indexes just that paragraph. Anything else (drawing/table/comment
+ * intents that carry only a run id, or a hint that doesn't hold the run) falls
+ * back to the full index, built at most once per apply — same answers as
+ * before, off the same model, just not paid for by every keystroke.
+ */
+function makeRunLookup(doc: DocxDocument, ids: StableIds): RunLookup {
+  let full: Map<XmlElement, RunEntry> | null = null;
+  const scoped = new Map<XmlElement, RunEntry>();
+  return (runEl, blockIdHint) => {
+    if (!full) {
+      const cached = scoped.get(runEl);
+      if (cached) return cached;
+      if (blockIdHint !== undefined) {
+        const blockEl = ids.elOf(blockIdHint);
+        const para = blockEl ? doc.paragraphBySource(blockEl) : null;
+        if (para) {
+          for (const item of para.children) {
+            for (const run of item.type === "run" ? [item] : item.runs) {
+              if (run.src) scoped.set(run.src, runEntry(run));
+            }
+          }
+          const hit = scoped.get(runEl);
+          if (hit) return hit;
+        }
+      }
+      full = buildRunMap(doc);
+    }
+    return full.get(runEl);
+  };
+}
+
+/** True when `needle` is `el` or sits somewhere under it. */
+function contains(el: XmlElement, needle: XmlElement): boolean {
+  if (el === needle) return true;
+  for (const c of el.children) if (contains(c, needle)) return true;
+  return false;
+}
+
+/**
+ * Block scope for a text-level intent: the paragraph it addressed, but only
+ * once that paragraph is CONFIRMED to hold the addressed run. The two ids
+ * arrive together on the wire from a sender that may be buggy or hostile, and
+ * a scope naming the wrong paragraph would leave the real one's model stale —
+ * a silent, permanent divergence. Anything unverifiable (the block id resolves
+ * to a table, to nothing, or to a paragraph that doesn't hold the run) falls
+ * back to document scope, which is always correct.
+ */
+function blockScope(ids: StableIds, blockId: number, runId: number): Scope {
+  const blockEl = ids.elOf(blockId);
+  const runEl = ids.elOf(runId);
+  if (!blockEl || !runEl || localName(blockEl.name) !== "p") return DOC_SCOPE;
+  return contains(blockEl, runEl) ? { kind: "block", blocks: [blockEl] } : DOC_SCOPE;
+}
+
+/** Index every run in the model by its source element — body story AND the
+ * header/footer parts.
+ *
+ * The hf half is not an optimization: header paragraphs carry stable ids (they
+ * ride in doc.editableRoots(), so the id table and the checkpoint sidecar have
+ * always covered them) but they are parsed into doc.headers/doc.footers, NOT
+ * into doc.sections. Walking sections alone left every run in a header
+ * unresolvable, so resolveCaret returned null and EVERY text/format intent
+ * aimed at a header was a clean reject on the server and on every peer — while
+ * the originator, which applies locally before emitting, kept the edit. That is
+ * the silent fork the header/footer toolbar group was gated off to avoid. */
 function buildRunMap(doc: DocxDocument): Map<XmlElement, RunEntry> {
   const map = new Map<XmlElement, RunEntry>();
   const visitRun = (run: Run): void => {
-    if (!run.src) return;
-    const firstT = run.content.find((c) => c.kind === "text")?.srcT;
-    map.set(run.src, { run, firstT });
+    if (run.src) map.set(run.src, runEntry(run));
   };
   const visitBlocks = (blocks: Block[]): void => {
     for (const b of blocks) {
@@ -801,14 +1048,23 @@ function buildRunMap(doc: DocxDocument): Map<XmlElement, RunEntry> {
     }
   };
   for (const section of doc.sections) visitBlocks(section.blocks);
+  for (const hf of doc.headers.values()) visitBlocks(hf.blocks);
+  for (const hf of doc.footers.values()) visitBlocks(hf.blocks);
   return map;
 }
 
-function resolveCaret(ids: StableIds, runMap: Map<XmlElement, RunEntry>, pos: Position): EditCaret | null {
+/** Resolve a wire position (offset in the run's WIRE space — cumulative with
+ * separators counted, checkpoint B1 rev 2) to the concrete (w:t, local
+ * offset) it falls in. Strict bounds: a position past the run's wire length
+ * is unresolvable (clean rejection), unlike the caret-restore decodeCaret
+ * which clamps. */
+function resolveCaret(ids: StableIds, runOf: RunLookup, pos: Position): EditCaret | null {
   const runEl = ids.elOf(pos.runId);
   if (!runEl) return null;
-  const entry = runMap.get(runEl);
+  const entry = runOf(runEl, pos.blockId);
   if (!entry || !entry.firstT) return null;
-  if (pos.offset < 0 || pos.offset > entry.firstT.text.length) return null;
-  return { t: entry.firstT, run: entry.run, offset: pos.offset };
+  if (pos.offset < 0 || pos.offset > runWireLength(runEl)) return null;
+  const hit = resolveRunOffset(runEl, pos.offset);
+  if (!hit) return null;
+  return { t: hit.t, run: entry.run, offset: hit.offset };
 }

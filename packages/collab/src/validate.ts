@@ -252,10 +252,47 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (!ok(intent.xPx) || !ok(intent.yPx)) return "setFloatingPagePosition: bad position";
       return null;
     }
+    case "resizeDrawing": {
+      const ok = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 1 && v <= 5000;
+      if (!ok(intent.widthPx) || !ok(intent.heightPx)) return "resizeDrawing: bad extent";
+      return null;
+    }
+    case "resizeTableColumn": {
+      const num = (v: unknown, lo: number, hi: number) => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
+      if (!Number.isInteger(intent.boundary) || intent.boundary < 1 || intent.boundary > 200) return "resizeTableColumn: bad boundary";
+      if (!num(intent.deltaPx, -5000, 5000)) return "resizeTableColumn: bad delta";
+      if (intent.renderedWidths !== undefined) {
+        if (!Array.isArray(intent.renderedWidths) || intent.renderedWidths.length > 200 ||
+            !intent.renderedWidths.every((w) => num(w, 0, 20000))) return "resizeTableColumn: bad widths";
+      }
+      return null;
+    }
+    case "resizeTableRow": {
+      if (!Number.isInteger(intent.rowIdx) || intent.rowIdx < 0 || intent.rowIdx > 5000) return "resizeTableRow: bad row";
+      if (typeof intent.heightPx !== "number" || !Number.isFinite(intent.heightPx) || intent.heightPx < 1 || intent.heightPx > 20000) return "resizeTableRow: bad height";
+      return null;
+    }
+    case "moveTable": {
+      const num = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= -5000 && v <= 20000;
+      if (!num(intent.xPx) || !num(intent.yPx)) return "moveTable: bad position";
+      if (typeof intent.preservePageStart !== "boolean") return "moveTable: bad flag";
+      if (!Number.isInteger(intent.pageDelta) || Math.abs(intent.pageDelta) > 500) return "moveTable: bad pageDelta";
+      return null;
+    }
+    case "removeDrawing":
+      return null; // run-addressed only; resolution is the whole check
     case "setMathLinear":
       if (typeof intent.mathText !== "string" || intent.mathText.length === 0 || intent.mathText.length > 1000) return "setMathLinear: bad mathText";
       return null;
     case "deleteMath":
+      return null;
+    case "moveMath":
+      if (!nonNegInt(intent.at?.offset)) return "moveMath: bad offset";
+      if (!Array.isArray(intent.nodeIds) || intent.nodeIds.length > 64) return "moveMath: bad nodeIds";
+      return null;
+    case "ensureHeaderFooter":
+      if (intent.hfKind !== "header" && intent.hfKind !== "footer") return "ensureHeaderFooter: bad kind";
+      if (!Array.isArray(intent.nodeIds) || intent.nodeIds.length > 64) return "ensureHeaderFooter: bad nodeIds";
       return null;
     case "deleteComment":
       if (typeof intent.commentId !== "string" || intent.commentId.length === 0 || intent.commentId.length > 64) return "deleteComment: bad id";

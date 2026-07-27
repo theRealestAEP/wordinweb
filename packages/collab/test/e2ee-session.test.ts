@@ -98,6 +98,15 @@ async function seedEncrypted(text: string, genesisId: string, docKey: string) {
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 25));
+/** Poll for a condition instead of sleeping a fixed amount (see the late-join
+ * test): keeps the assertion honest while removing the CPU-load flake. */
+async function until(cond: () => boolean, label: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (cond()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
 const text = (c: EncryptedCollabConnection): string => {
   const walk = (el: { name: string; text: string; children: unknown[] }): string =>
     (el.name.endsWith(":t") ? el.text : "") + (el.children as never[]).map(walk).join("");
@@ -115,7 +124,10 @@ describe("blind-sequencer session (doc 13 §2/§8)", () => {
     const bob = new EncryptedCollabConnection(srv.attach(), "bob", docKey);
     alice.join("d");
     bob.join("d");
-    await flush();
+    // Condition-wait, not a fixed sleep: two joins are two chains of
+    // WebCrypto awaits, and under load 25ms is not enough (see the late-join
+    // test). Still fails if a join genuinely never completes.
+    await until(() => alice.ready && bob.ready, "both clients to rehydrate");
     expect(alice.ready && bob.ready).toBe(true);
 
     alice.submit(ins(0, "SECRET-ALPHA "));
@@ -152,7 +164,13 @@ describe("blind-sequencer session (doc 13 §2/§8)", () => {
 
     const carol = new EncryptedCollabConnection(srv.attach(), "carol", docKey);
     carol.join("d");
-    await flush();
+    // A join is a chain of WebCrypto awaits on the serial queue, so a FIXED
+    // sleep is a load-sensitive flake — it passed alone and failed roughly one
+    // run in three once the suite grew busier. Waiting on the CONDITION cannot
+    // hide a real divergence: if the two never agree this still fails, just
+    // after a real budget instead of an arbitrary 25ms.
+    await until(() => carol.doc !== null && serializeXml(carol.doc.docRoot) === serializeXml(alice.doc!.docRoot),
+      "carol to rehydrate and match alice");
     expect(serializeXml(carol.doc!.docRoot)).toBe(serializeXml(alice.doc!.docRoot));
     // And she can edit immediately.
     carol.submit(ins(0, "three "));
@@ -312,7 +330,13 @@ describe("mid-session client checkpoints (doc 13 item 6)", () => {
     // not the seed — replaying only the short tail, and converges.
     const carol = new EncryptedCollabConnection(srv.attach(), "carol", docKey);
     carol.join("d");
-    await flush();
+    // A join is a chain of WebCrypto awaits on the serial queue, so a FIXED
+    // sleep is a load-sensitive flake — it passed alone and failed roughly one
+    // run in three once the suite grew busier. Waiting on the CONDITION cannot
+    // hide a real divergence: if the two never agree this still fails, just
+    // after a real budget instead of an arbitrary 25ms.
+    await until(() => carol.doc !== null && serializeXml(carol.doc.docRoot) === serializeXml(alice.doc!.docRoot),
+      "carol to rehydrate and match alice");
     expect(serializeXml(carol.doc!.docRoot)).toBe(serializeXml(alice.doc!.docRoot));
 
     // Both keep editing; convergence holds across the checkpoint boundary.

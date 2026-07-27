@@ -1,6 +1,6 @@
 import type { Intent, LogEntry } from "./intents.js";
 import type { IdSidecar } from "./session.js";
-import type { IntentEnvelope } from "./e2ee.js";
+import type { IntentEnvelope, SealedPresence } from "./e2ee.js";
 
 /** A sequenced envelope in an encrypted room's log (doc 13 §2): the
  * server-assigned seq plus the opaque envelope. The server can read only
@@ -36,8 +36,30 @@ export interface SealedCheckpoint {
  * room's (the stale client gets the download/draft path). Plaintext rooms
  * ignore it (the server's own apply is the arbiter there, and
  * PROTOCOL_VERSION already gates wire compatibility).
+ *
+ * THE FENCE ONLY WORKS IF THIS ACTUALLY GETS BUMPED. A live fork was traced
+ * to two same-"e1" builds with different apply semantics (a stale tab across
+ * the offset-basis migration): 63 ops sequenced, zero refusals, silent
+ * canonical divergence — the exact failure this constant exists to prevent.
+ * Bump ledger (append a line for every semantics change):
+ *   e1  initial E2EE ship
+ *   e2  separator-inclusive wire offset basis (B1 rev 2); new intents
+ *       resizeDrawing/resizeTableColumn/resizeTableRow/moveTable/
+ *       removeDrawing; extender/selection-delete emission changes;
+ *       canonical insertBreak
+ *   e3  header/footer editing: the apply's run index now covers the
+ *       header/footer parts (hf paragraphs were addressable by id but
+ *       unresolvable, so every hf text intent silently rejected); new
+ *       intents ensureHeaderFooter and moveMath
+ *   e4  sealed presence in encrypted rooms (#20). A DELIBERATE OVER-
+ *       APPLICATION of the rule above: presence is NOT canonical, so a mixed
+ *       room would degrade to missing remote carets rather than forking the
+ *       document, and the strict rule would not demand a bump. Bumped anyway
+ *       to keep dev rooms homogeneous while this lands, after a live fork was
+ *       traced to two same-version builds with different semantics. Do NOT
+ *       read this line as evidence that presence is canonical — it is not.
  */
-export const ENGINE_VERSION = "e1";
+export const ENGINE_VERSION = "e4";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-
@@ -45,11 +67,57 @@ export const ENGINE_VERSION = "e1";
  * adapter serializes them. Kept deliberately small (plan doc 06).
  */
 
+/** One highlighted stretch of a remote participant's selection: a half-open
+ * `[start, end)` inside ONE run, in the same WIRE offset basis carets and
+ * suggestRevision use (cumulative within the run, inline separators counting
+ * one unit each — see core `EncodedCaret`). The sender emits one entry per
+ * selection segment, and a segment never straddles a w:t, so a range stays
+ * inside a single run by construction. */
+export interface PresenceRange {
+  blockId: number;
+  runId: number;
+  start: number;
+  end: number;
+}
+
+/** Cap on `PresencePosition.ranges`. Presence crosses a trust boundary (any
+ * participant can hand-craft it, and in E2EE mode the server never validates
+ * it), so receivers clamp instead of trusting the sender's array length. A
+ * selection with more than this many segments renders its first 64. */
+export const PRESENCE_MAX_RANGES = 64;
+
 /** An ephemeral cursor/selection position on the presence channel: stable-id
  * addresses (plan doc 03). Never logged, never persisted. */
 export interface PresencePosition {
   anchor: { blockId: number; runId: number; offset: number };
   focus?: { blockId: number; runId: number; offset: number };
+  /** Selection highlight (Google-Docs style): the stretches the participant
+   * has selected, drawn in their presence color under the remote caret.
+   * OPTIONAL and additive — a payload from an older client carries only the
+   * anchor and still renders a caret. Absent/empty ⇒ no selection. */
+  ranges?: PresenceRange[];
+}
+
+/** Ignore-what-you-can't-trust filter for an inbound presence payload: drops
+ * non-finite/negative/inverted ranges and clamps the list to
+ * PRESENCE_MAX_RANGES, leaving the caret (the pre-ranges shape) untouched.
+ * Applied client-side on receive because the hub RELAYS presence verbatim —
+ * it has never validated caret coordinates either, and in encrypted rooms it
+ * couldn't be the arbiter anyway. Returns the payload unchanged when there is
+ * nothing to strip, so the common path allocates nothing. */
+export function sanitizePresencePosition(pos: PresencePosition | null): PresencePosition | null {
+  if (!pos || !pos.ranges) return pos;
+  const int = (n: unknown): boolean => typeof n === "number" && Number.isFinite(n) && n >= 0;
+  const clean: PresenceRange[] = [];
+  for (const r of Array.isArray(pos.ranges) ? pos.ranges : []) {
+    if (clean.length >= PRESENCE_MAX_RANGES) break;
+    if (!r || typeof r !== "object") continue;
+    if (!int(r.blockId) || !int(r.runId) || !int(r.start) || !int(r.end)) continue;
+    if (r.end <= r.start) continue;
+    clean.push({ blockId: r.blockId, runId: r.runId, start: r.start, end: r.end });
+  }
+  if (clean.length === pos.ranges.length) return pos;
+  return clean.length > 0 ? { ...pos, ranges: clean } : { ...pos, ranges: undefined };
 }
 
 /**
@@ -167,7 +235,11 @@ export type ClientMessage =
    * even document hashes to a blind server (a hash is a stable content
    * fingerprint: confirmable by anyone holding a guess). */
   | { t: "gossip"; iv: string; ciphertext: string }
-  | { t: "presence"; position: PresencePosition | null };
+  /** Presence. In an ENCRYPTED room this is a `SealedPresence` blob and the
+   * hub relays it without looking (#20): the server learns who is pointing,
+   * never where. Plaintext rooms keep the structured position, which the hub
+   * still clamps at the relay. */
+  | { t: "presence"; position: PresencePosition | SealedPresence | null };
 
 /** Server → client. */
 export type ServerMessage =
@@ -204,6 +276,15 @@ export type ServerMessage =
        * joining holder intersects with its local media and volunteers —
        * the mechanism behind "reappears when a holder rejoins". */
       mediaNeeded?: string[];
+      /** Per-part media ADDRESSES (doc 16 §6 late-join): the declared sha
+       * (+ E2EE iv) for every registered media part, so a joiner can fetch
+       * pixels its snapshot references but does not contain — without this
+       * the address lives only in the already-folded insertImage intent and
+       * late-join media is unfetchable. Plaintext rooms only; encrypted
+       * rooms carry the same map INSIDE the sealed checkpoint body (the
+       * server must not learn part structure beyond what PUT addresses
+       * already reveal). Parse-derived holes with unknown sha are omitted. */
+      media?: { part: string; sha: string; iv?: string }[];
     }
   | { t: "broadcast"; entries: LogEntry[] }
   /**
@@ -242,7 +323,7 @@ export type ServerMessage =
   /** `participant` is the sender's bound clientId (round-4 F14) — the same
    * identifier intents carry — so presence joins the roster/attribution
    * keyspace and survives the sender reconnecting on a new socket. */
-  | { t: "presence"; participant: string; position: PresencePosition | null }
+  | { t: "presence"; participant: string; position: PresencePosition | SealedPresence | null }
   /** Full roster snapshot, fanned out on every join/leave/profile change
    * (rooms are small; a snapshot beats delta bookkeeping). Ephemeral like
    * presence: never logged, never persisted, dies with the room. */

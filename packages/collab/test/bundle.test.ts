@@ -68,6 +68,49 @@ const text = (conn: CollabConnection): string => {
 const ins = (at: number, t: string) =>
   ({ kind: "insertText", at: { blockId: 1, runId: 2, offset: at }, text: t }) as never;
 
+/**
+ * A FAILED WRITE MUST NOT BE SILENT. In a zero-custody design the browser's
+ * stored bundle IS the durable copy — the server keeps nothing — so a
+ * swallowed quota/blocked-storage error means the user's only copy quietly
+ * stops updating while the editor looks perfectly healthy. This used to be
+ * `.catch(() => {})`.
+ */
+describe("BundlePersister write failures are reported", () => {
+  it("reports the error and keeps the chain alive for the next write", async () => {
+    const srv = miniServer("gErr");
+    const conn = new CollabConnection(srv.attach(), "alice");
+    conn.join("d");
+    let fail = true;
+    const errors: unknown[] = [];
+    const store = {
+      writes: 0,
+      async get() {
+        return null;
+      },
+      async put() {
+        if (fail) throw new Error("QuotaExceededError");
+        this.writes++;
+      },
+    };
+    const p = new BundlePersister(conn, store as never, "d", {
+      throttleMs: 0,
+      onError: (err) => errors.push(err),
+    });
+
+    conn.submit(ins(0, "a"));
+    p.notify();
+    await expect.poll(() => errors.length, { timeout: 5000 }).toBeGreaterThan(0);
+    expect((errors[0] as Error).message).toContain("QuotaExceeded");
+
+    // THE OTHER HALF: a failure must not wedge the chain. Storage recovers
+    // (the user freed space, left private mode) and the next write lands.
+    fail = false;
+    conn.submit(ins(1, "b"));
+    p.notify();
+    await expect.poll(() => store.writes, { timeout: 5000 }).toBeGreaterThan(0);
+  });
+});
+
 describe("BundlePersister throttle (round-4 F8: throttle, not debounce)", () => {
   function harness() {
     const srv = miniServer("g1");
@@ -91,19 +134,23 @@ describe("BundlePersister throttle (round-4 F8: throttle, not debounce)", () => 
 
   it("a sustained burst coalesces to one leading + one trailing write — never a deferred-forever debounce", async () => {
     const { conn, store, p, advance } = harness();
-    const settle = () => new Promise((r) => setTimeout(r, 20)); // write() awaits a real async digest
+    // write() awaits a REAL async digest while the throttle clock is fake, so
+    // completed-write assertions must POLL — a fixed sleep flakes under
+    // machine load (seen live: leading write unfinished after 20ms → 0 ≠ 1).
+    const untilWrites = (n: number) => expect.poll(() => store.writes, { timeout: 5000 }).toBe(n);
+    const settle = () => new Promise((r) => setTimeout(r, 20));
     conn.submit(ins(0, "a"));
     p.notify(); // leading edge: slot claimed synchronously, write enqueued
-    await settle(); // let the (real-async) leading write's chain drain
-    expect(store.writes).toBe(1);
+    await untilWrites(1); // the (real-async) leading write's chain drains
     for (let i = 1; i <= 30; i++) { conn.submit(ins(i, "x")); p.notify(); advance(20); }
     await settle();
     // 600ms of continuous typing: a debounce would still be waiting; the
-    // throttle has armed exactly one trailing write inside the window.
+    // throttle has armed exactly one trailing write inside the window. This
+    // absence assertion is race-free: the leading write already completed
+    // (polled above) and the trailing timer is FAKE — only advance() fires it.
     expect(store.writes).toBe(1);
     advance(1000); // window closes → the trailing write fires
-    await settle();
-    expect(store.writes).toBe(2);
+    await untilWrites(2);
   });
 
   it("flush() writes immediately and cancels the trailing timer", async () => {

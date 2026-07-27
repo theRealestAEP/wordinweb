@@ -35,6 +35,15 @@ export interface IntentEnvelope {
 export interface EpochKeys {
   kContent: CryptoKey;
   kMedia: CryptoKey;
+  /**
+   * Presence (carets/selections). A THIRD domain-separated key rather than
+   * kContent, because presence is high-frequency, low-value material with a
+   * completely different exposure profile: it is sealed and opened on every
+   * caret move, so it burns IVs fastest and is the likeliest place for a
+   * future mistake. Key separation costs one HKDF call at join and means a
+   * presence-side compromise cannot touch document content.
+   */
+  kPresence: CryptoKey;
 }
 
 const te = new TextEncoder();
@@ -91,7 +100,11 @@ export async function deriveEpochKeys(
       false,
       ["encrypt", "decrypt"],
     );
-  return { kContent: await derive("content"), kMedia: await derive("media") };
+  return {
+    kContent: await derive("content"),
+    kMedia: await derive("media"),
+    kPresence: await derive("presence"),
+  };
 }
 
 /** PBKDF2-SHA256 stretch of the share code (doc 13 §7): 600k iterations,
@@ -164,12 +177,34 @@ export async function openIntent(
  * so a stored checkpoint cannot be replayed at another position (F5c). The
  * body carries the docx + sidecar + the canonical docHash for joiner
  * cross-checking (blocker-2 verification). */
+/**
+ * The sealed checkpoint's plaintext body (doc 13 §3). `mediaMeta` is the
+ * doc-16 §6 late-join map: the declared sha (+ IV) of every registered media
+ * part, so a joiner whose snapshot contains the REGISTRATIONS can also fetch
+ * the bytes — the addresses live only in already-folded intents otherwise,
+ * which is what made late-join media unfetchable.
+ *
+ * It rides INSIDE the sealed body on purpose: in an encrypted room the server
+ * must not learn the document's part structure. It learns which shas exist
+ * only when someone PUTs or GETs one, and nothing more.
+ *
+ * OPTIONAL and tolerantly read — a checkpoint sealed by an older build simply
+ * has no map, and such a joiner degrades to reserving the box without being
+ * able to fill it (the prior behavior). Additive, so no engine bump.
+ */
+export interface CheckpointBody {
+  docx: string;
+  sidecar: unknown;
+  docHash: string;
+  mediaMeta?: { part: string; sha: string; iv?: string }[];
+}
+
 export async function sealCheckpoint(
   kContent: CryptoKey,
   docId: string,
   genesisId: string,
   seq: number,
-  body: { docx: string; sidecar: unknown; docHash: string },
+  body: CheckpointBody,
 ): Promise<{ iv: string; ciphertext: string }> {
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
@@ -188,7 +223,7 @@ export async function openCheckpoint(
   genesisId: string,
   seq: number,
   sealed: { iv: string; ciphertext: string },
-): Promise<{ docx: string; sidecar: unknown; docHash: string }> {
+): Promise<CheckpointBody> {
   const aad = te.encode(`cp:${docId}:${genesisId}:${seq}`);
   const pt = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: b64ToBytes(sealed.iv) as BufferSource, additionalData: aad as BufferSource },
@@ -200,6 +235,95 @@ export async function openCheckpoint(
 
 function intentAad(docId: string, genesisId: string, clientId: string, clientSeq: number, base: number): Uint8Array {
   return te.encode(`in:${docId}:${genesisId}:${clientId}:${clientSeq}:${base}`);
+}
+
+/**
+ * Presence AAD. The `pr:` prefix is DOMAIN SEPARATION on top of key
+ * separation: even if some future change accidentally sealed presence under
+ * kContent, an intent's AAD (`in:…`) and a presence AAD could never be
+ * confused for one another, so a sealed intent could not be replayed as a
+ * caret or vice versa. Two independent barriers, one line.
+ *
+ * Binds the sender because the RECEIVER builds this AAD from the server's
+ * `participant` stamp — the hub's bound clientId. A server that re-attributes
+ * a blob to a different participant therefore produces a decryption failure,
+ * not a mislabelled caret.
+ *
+ * WHAT IT DELIBERATELY DOES NOT PREVENT: a same-doc, same-epoch, same-sender
+ * REPLAY. A server that re-sends an older blob paints a stale caret for that
+ * participant until their next update. Preventing it needs a counter or clock
+ * inside the sealed body and per-sender state on every receiver; presence is
+ * ephemeral, last-write-wins UI where the cost of being briefly stale is a
+ * cursor in the wrong place. Accepted deliberately, not overlooked.
+ */
+function presenceAad(docId: string, genesisId: string, clientId: string): Uint8Array {
+  return te.encode(`pr:${docId}:${genesisId}:${clientId}`);
+}
+
+/** A presence payload as it crosses a BLIND relay: an opaque blob. The
+ * server sees two base64 strings and the sender's id — never a coordinate. */
+export interface SealedPresence {
+  iv: string;
+  ciphertext: string;
+}
+
+/** True for a payload that is sealed rather than a plaintext position. Used
+ * to stay tolerant of a peer on the other side of the version fence. */
+export function isSealedPresence(pos: unknown): pos is SealedPresence {
+  return (
+    !!pos &&
+    typeof pos === "object" &&
+    typeof (pos as SealedPresence).iv === "string" &&
+    typeof (pos as SealedPresence).ciphertext === "string"
+  );
+}
+
+/** Seal a presence position under K_presence (doc 13 / #20). */
+export async function sealPresence(
+  kPresence: CryptoKey,
+  docId: string,
+  genesisId: string,
+  clientId: string,
+  position: unknown,
+): Promise<SealedPresence> {
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  const ct = await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: iv as BufferSource,
+      additionalData: presenceAad(docId, genesisId, clientId) as BufferSource,
+    },
+    kPresence,
+    te.encode(JSON.stringify(position)) as BufferSource,
+  );
+  return { iv: bytesToB64(iv), ciphertext: bytesToB64(new Uint8Array(ct)) };
+}
+
+/**
+ * Open a sealed presence payload. Throws on any tamper, wrong epoch, wrong
+ * document, or re-attribution to a different sender — callers treat a throw
+ * as "drop this participant's caret", never as a session-level failure: a
+ * hostile participant sealing garbage must cost its own cursor and nobody
+ * else's.
+ */
+export async function openPresence(
+  kPresence: CryptoKey,
+  docId: string,
+  genesisId: string,
+  clientId: string,
+  sealed: SealedPresence,
+): Promise<unknown> {
+  const pt = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: b64ToBytes(sealed.iv) as BufferSource,
+      additionalData: presenceAad(docId, genesisId, clientId) as BufferSource,
+    },
+    kPresence,
+    b64ToBytes(sealed.ciphertext) as BufferSource,
+  );
+  return JSON.parse(td.decode(pt));
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {

@@ -127,12 +127,25 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "setSmartArtFill":
     case "setSmartArtTextFormat":
     case "setFloatingPagePosition":
+    case "resizeDrawing":
+    case "resizeTableColumn":
+    case "resizeTableRow":
+    case "moveTable":
+    case "removeDrawing":
     case "setMathLinear":
     case "deleteMath":
+    case "ensureHeaderFooter":
     case "deleteComment":
     case "insertBookmarkRange":
     case "toggleCheckbox":
       // Run/block/document-level; no existing run's text offsets shift.
+      return [];
+    case "moveMath":
+      // Same shape as insertMath above: dropping the equation mid-text splits
+      // the destination run, and that split is not modeled here — a concurrent
+      // edit into the tail half of that run resolves-or-rejects identically on
+      // every replica (degraded concurrency fidelity, never divergence). The
+      // movedToRunId remap is the designed follow-on for both.
       return [];
     case "insertTable":
     case "acceptRevision":
@@ -270,6 +283,10 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "insertMath":
     case "insertShape":
       return { ...intent, base: newBase };
+    case "moveMath":
+      // The equation is block-addressed, but the DROP is an ordinary caret and
+      // shifts with prior edits in the destination run.
+      return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
     case "replyComment":
       return { ...intent, base: newBase };
     case "adjustIndent":
@@ -306,8 +323,14 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "setSmartArtFill":
     case "setSmartArtTextFormat":
     case "setFloatingPagePosition":
+    case "resizeDrawing":
+    case "resizeTableColumn":
+    case "resizeTableRow":
+    case "moveTable":
+    case "removeDrawing":
     case "setMathLinear":
     case "deleteMath":
+    case "ensureHeaderFooter":
     case "deleteComment":
     case "insertBookmarkRange":
     case "toggleCheckbox":

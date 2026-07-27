@@ -17,6 +17,9 @@ export {
   type ClientMessage,
   type ServerMessage,
   type PresencePosition,
+  type PresenceRange,
+  PRESENCE_MAX_RANGES,
+  sanitizePresencePosition,
   type ParticipantProfile,
   type RosterEntry,
   type EnvelopeEntry,
@@ -25,6 +28,21 @@ export {
   ENGINE_VERSION,
 } from "./protocol.js";
 export { transformIntent, transformPosition } from "./transform.js";
-export { sealIntent, openIntent, sealCheckpoint, openCheckpoint, deriveEpochKeys, stretchShareCode, mintDocKey, docKeyFromFragment, type IntentEnvelope, type EpochKeys } from "./e2ee.js";
+export { sealIntent, openIntent, sealCheckpoint, openCheckpoint, type CheckpointBody, deriveEpochKeys, stretchShareCode, mintDocKey, docKeyFromFragment, type IntentEnvelope, type EpochKeys } from "./e2ee.js";
 export { docHash } from "./hash.js";
+export type { UndoOutcome, UndoCandidate } from "./session.js";
 export { bytesToB64, b64ToBytes, sealMediaBlob, openMediaBlob } from "./e2ee.js";
+export { sealPresence, openPresence, isSealedPresence, type SealedPresence } from "./e2ee.js";
+export {
+  MediaClient,
+  applyMediaAddresses,
+  mediaAddressesOf,
+  type MediaAddress,
+  sha256Hex,
+  putBlob,
+  getBlob,
+  type MediaTransportOptions,
+  type MediaState,
+  type MediaCrypto,
+  type FetchLike,
+} from "./media.js";

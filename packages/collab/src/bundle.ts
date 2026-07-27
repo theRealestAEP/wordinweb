@@ -122,6 +122,15 @@ export class BundlePersister {
       now?: () => number;
       setTimer?: (fn: () => void, ms: number) => unknown;
       clearTimer?: (t: unknown) => void;
+      /**
+       * A persistence write FAILED. Wire this — in a zero-custody design the
+       * browser's stored bundle IS the durable copy, so a swallowed quota or
+       * blocked-storage error means the user's only durable copy silently
+       * stops updating while the editor looks perfectly healthy. That is the
+       * most dangerous silence in this codebase, which is why it is now a
+       * callback instead of an empty catch.
+       */
+      onError?: (err: unknown) => void;
     } = {},
   ) {}
 
@@ -169,7 +178,15 @@ export class BundlePersister {
 
   /** Append a write to the serial chain (never overlapping). */
   private enqueueWrite(): void {
-    this.chain = this.chain.then(() => this.write()).catch(() => {});
+    this.chain = this.chain
+      .then(() => this.write())
+      .catch((err: unknown) => {
+        // The chain must not wedge — a failed write cannot block every later
+        // one — but it must not be SILENT either (see onError above). The
+        // next throttled write retries naturally; what the caller needs is to
+        // know that "saved" is currently a lie.
+        this.opts.onError?.(err);
+      });
   }
 
   /** Detach (unmount): cancel the trailing timer; no further writes. */

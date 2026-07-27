@@ -428,8 +428,15 @@ export type Intent =
   | SetSmartArtFillIntent
   | SetSmartArtTextFormatIntent
   | SetFloatingPagePositionIntent
+  | ResizeDrawingIntent
+  | ResizeTableColumnIntent
+  | ResizeTableRowIntent
+  | MoveTableIntent
+  | RemoveDrawingIntent
   | SetMathLinearIntent
   | DeleteMathIntent
+  | MoveMathIntent
+  | EnsureHeaderFooterIntent
   | DeleteCommentIntent
   | InsertBookmarkRangeIntent
   | ToggleCheckboxIntent
@@ -669,6 +676,50 @@ export interface SetFloatingPagePositionIntent extends IntentBase {
   yPx: number;
 }
 
+/** Resize the drawing carried by a run (extent in px; the mutation clamps to
+ * a 1px-EMU floor and keeps line geometry degenerate on its minor axis). */
+export interface ResizeDrawingIntent extends IntentBase {
+  kind: "resizeDrawing";
+  runId: StableId;
+  widthPx: number;
+  heightPx: number;
+}
+
+/** Drag-resize a table column boundary. Addressed like tableOp: a paragraph
+ * inside the table. `renderedWidths` (the dragger's measured column widths)
+ * rides as DATA so every replica applies the identical mutation. */
+export interface ResizeTableColumnIntent extends IntentBase {
+  kind: "resizeTableColumn";
+  cellParagraphId: StableId;
+  boundary: number;
+  deltaPx: number;
+  renderedWidths?: number[];
+}
+
+/** Drag-resize a table row's height (trHeight atLeast). */
+export interface ResizeTableRowIntent extends IntentBase {
+  kind: "resizeTableRow";
+  cellParagraphId: StableId;
+  rowIdx: number;
+  heightPx: number;
+}
+
+/** Position a table at page coordinates (converts inline to float). */
+export interface MoveTableIntent extends IntentBase {
+  kind: "moveTable";
+  cellParagraphId: StableId;
+  xPx: number;
+  yPx: number;
+  preservePageStart: boolean;
+  pageDelta: number;
+}
+
+/** Delete the drawing carried by a run (removes the carrier run). */
+export interface RemoveDrawingIntent extends IntentBase {
+  kind: "removeDrawing";
+  runId: StableId;
+}
+
 /** Replace the equation of the math object in a paragraph (linear syntax).
  * Math (m:oMath) lives at paragraph level, so this is block-addressed. */
 export interface SetMathLinearIntent extends IntentBase {
@@ -681,6 +732,30 @@ export interface SetMathLinearIntent extends IntentBase {
 export interface DeleteMathIntent extends IntentBase {
   kind: "deleteMath";
   blockId: StableId;
+}
+
+/** Drag-move the equation out of `blockId` to the text position `at`. The
+ * equation is addressed like the other math intents (block + firstMathIn); the
+ * destination is an ordinary wire caret. Dropping mid-text splits the
+ * destination run, so the split-off tail run takes a carried id. */
+export interface MoveMathIntent extends IntentBase {
+  kind: "moveMath";
+  blockId: StableId;
+  at: Position;
+  nodeIds: StableId[];
+}
+
+/** Create the document's header (or footer) part the way Word does on first
+ * entry into the margin band: a new part + relationship + content-type
+ * override, referenced from every sectPr (one is materialized when a minimal
+ * document has none). Applies as a clean no-op when the part already exists,
+ * so it is safe for two participants to open the header at the same moment.
+ * The created paragraph and run take carried ids — every later edit in the
+ * header addresses them. */
+export interface EnsureHeaderFooterIntent extends IntentBase {
+  kind: "ensureHeaderFooter";
+  hfKind: "header" | "footer";
+  nodeIds: StableId[];
 }
 
 /** Delete a comment (and its reply thread) by id. */

@@ -8,8 +8,11 @@ import {
   PresencePosition,
   ParticipantProfile,
   RosterEntry,
+  sanitizePresencePosition,
 } from "./protocol.js";
 import type { DocBundle } from "./bundle.js";
+import { MediaClient, applyMediaAddresses, type MediaTransportOptions, type MediaState } from "./media.js";
+import { isSealedPresence } from "./e2ee.js";
 
 /**
  * A transport the connection drives: send a client message, and register a
@@ -42,6 +45,47 @@ export interface ConnectionCallbacks {
   /** The session roster changed (join/leave/rename) — full snapshot. */
   onRoster?: (roster: RosterEntry[]) => void;
   /**
+   * The connection detected that the local OPTIMISTIC replica drifted from
+   * the canonical document at quiescence and rebuilt it in place (encrypted
+   * mode: the mirror is local ground truth, so the check costs no network).
+   * The doc object was swapped and docEpoch bumped — the renderer remounts
+   * exactly like any true-conflict reload. Informational: the heal already
+   * happened; consumers surface/telemeter it (the B6a typist-drift class).
+   */
+  onSelfHeal?: (info: { seq: number; liveHash: string; canonicalHash: string }) => void;
+  /**
+   * A submit was DROPPED instead of sent, and the caller needs to know.
+   *
+   * Today the only reason is "not-ready": a submit arriving before the
+   * welcome has nothing to apply against, no confirmed seq to base itself on,
+   * and (encrypted) no key to seal with, so it cannot be honoured or queued.
+   * It used to return silently — no error, no callback, no counter, no
+   * replay — which made lost edits indistinguishable from edits that were
+   * never made. B13 measured 403 submits, 172 envelopes on the wire and 172
+   * in the document, with a completely clean server log; a channel that
+   * consumes intents without a trace is what that requires.
+   *
+   * NOT `onRefused`: that one means the SERVER refused the connection and the
+   * demo renders a "please refresh" screen on it. This is non-fatal and
+   * per-intent — the connection stays perfectly usable.
+   */
+  onSubmitDropped?: (reason: "not-ready") => void;
+  /**
+   * Something threw on an async path that has nowhere to return an error —
+   * a seal, a transport send, a persistence write. These used to die in a
+   * serial chain's `.catch(() => {})`, which is how B13's lost edits and a
+   * silently-failing durable copy both stayed invisible.
+   *
+   * DELIBERATELY SEPARATE from onRefused ("the server refused the
+   * connection", which tears the session down) and onSubmitDropped ("an edit
+   * was lost before it could be sent"). Each of the three now means exactly
+   * one thing; conflating failure channels is precisely how the bugs this
+   * arc is cleaning up managed to hide.
+   *
+   * `where` is a fixed code-site label, never interpolated with session data.
+   */
+  onError?: (info: { where: string; error: unknown }) => void;
+  /**
    * Resume landed in a different epoch that is a STRICT DESCENDANT of this
    * client's stored head (doc 15 §1 fast-forward): the seed's lineage
    * contains our (genesisId, hash) at ≥ our seq, so adopting the server's
@@ -56,6 +100,9 @@ export interface ConnectionCallbacks {
   /** A needed blob became fetchable / definitively unavailable. */
   onMediaReady?: (sha: string) => void;
   onMediaUnavailable?: (sha: string) => void;
+  /** A pending part's placeholder state changed (fetching/waiting/
+   * unavailable) — the renderer shows the "unavailable" affordance off this. */
+  onMediaState?: (part: string, state: MediaState) => void;
 }
 
 function base64ToBytes(b64: string): Uint8Array {
@@ -93,12 +140,35 @@ export class CollabConnection {
    * hard-refuses a value contradicting the link's `#k` fragment. */
   mode: "plaintext" | "encrypted" | null = null;
 
+  /** Out-of-band media transfer (doc 16 §5). Null until `httpBase` is
+   * supplied — without a relay origin a client simply has no media duties
+   * (every existing caller keeps working unchanged). */
+  media: MediaClient | null = null;
+  /** The room this connection joined; media URLs are per-doc. */
+  private docId = "";
+
   constructor(
     private transport: ClientTransport,
     private clientId: string,
     private cb: ConnectionCallbacks = {},
+    /** Origin serving the doc-16 §3 media routes; enables media transfer. */
+    mediaOpts?: MediaTransportOptions,
   ) {
     this.transport.onMessage((msg) => this.onServer(msg));
+    if (mediaOpts) {
+      this.media = new MediaClient(mediaOpts, () => this.replica?.doc ?? null, {
+        onChange: () => this.cb.onChange?.(),
+        onState: (part, state) => this.cb.onMediaState?.(part, state),
+        need: (sha) => this.mediaNeed(sha),
+        have: (shas) => this.mediaHave(shas),
+      });
+    }
+  }
+
+  /** Upload bytes and get the intent's media fields, or null if the relay
+   * refused — the caller must not emit an insertImage in that case. */
+  async uploadMedia(plaintext: Uint8Array): Promise<{ blobSha: string; bytesLen: number; iv?: string } | null> {
+    return this.media ? this.media.upload(this.docId, plaintext) : null;
   }
 
   /** Replace the callbacks (used by bindEditor to attach after construction). */
@@ -129,6 +199,7 @@ export class CollabConnection {
    * without it, a duplicate join is refused `already-open`.
    */
   join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string; ownerToken?: string }): void {
+    this.docId = docId;
     this.transport.send({
       t: "hello",
       protocolVersion: PROTOCOL_VERSION,
@@ -219,6 +290,7 @@ export class CollabConnection {
   resume(bundle: DocBundle, token?: string, opts?: { profile?: ParticipantProfile; codeProof?: string; ownerToken?: string }): void {
     this.clientSeq = Math.max(this.clientSeq, bundle.clientSeq);
     this.resuming = bundle;
+    this.docId = bundle.docId;
     this.transport.send({
       profile: opts?.profile,
       codeProof: opts?.codeProof,
@@ -283,8 +355,27 @@ export class CollabConnection {
     this.submitFull(intent, /*preApplied*/ true);
   }
 
+  /** Submits dropped because the connection was not ready (see
+   * onSubmitDropped). Exposed like `selfHeals` so a harness or a UI can read
+   * it: when a run loses intents, this number says how many died HERE rather
+   * than anywhere else on the path. */
+  droppedPreReady = 0;
+
   private submitFull(intent: Omit<Intent, "clientId" | "clientSeq" | "base">, preApplied: boolean): void {
-    if (!this.replica) return;
+    if (!this.replica) {
+      // LOUD, NOT LOSSY. Nothing can be done with this intent — there is no
+      // replica to apply it to and no confirmed seq to base it on — but
+      // vanishing silently is what made this class invisible. Buffering was
+      // considered and rejected: a pre-welcome intent's `base` is meaningless
+      // until the welcome sets confirmedSeq, and its carried ids come from an
+      // allocation the connection cannot make yet, so a "queue" would really
+      // be a rebase. The product answer is upstream — the editor stays
+      // read-only until ready — and this is the backstop that makes a
+      // violation of that impossible to miss.
+      this.droppedPreReady++;
+      this.cb.onSubmitDropped?.("not-ready");
+      return;
+    }
     const full = {
       ...intent,
       clientId: this.clientId,
@@ -297,9 +388,11 @@ export class CollabConnection {
     this.cb.onChange?.();
   }
 
-  /** Broadcast this client's cursor/selection (ephemeral). */
+  /** Broadcast this client's cursor/selection (ephemeral). Selection ranges
+   * are clamped on the way OUT too, so an over-long selection costs the room
+   * a bounded payload rather than every receiver a discard. */
   setPresence(position: PresencePosition | null): void {
-    this.transport.send({ t: "presence", position });
+    this.transport.send({ t: "presence", position: sanitizePresencePosition(position) });
   }
 
   private onServer(msg: ServerMessage): void {
@@ -333,9 +426,17 @@ export class CollabConnection {
             }
           }
         }
+        // Doc 16 §6 late-join: the snapshot carries the registrations, this
+        // carries their ADDRESSES — without it a joiner reserves each image's
+        // box and can never fill it. Applied before the eager fetch below.
+        if (this.replica) applyMediaAddresses(this.replica.doc, msg.media);
         // §5.4: a joining holder resurrects "unavailable" media — intersect
-        // the room's needs with local holdings and volunteer.
-        if (msg.mediaNeeded?.length) {
+        // the room's needs with local holdings and volunteer. Routed through
+        // the MediaClient so the plaintext and encrypted connections share
+        // ONE implementation of every media duty (they had drifted to fully
+        // built and entirely absent).
+        if (this.media) this.media.volunteer(msg.mediaNeeded);
+        else if (msg.mediaNeeded?.length) {
           const held = new Set(this.heldMediaShas());
           this.mediaHave(msg.mediaNeeded.filter((sha) => held.has(sha)));
         }
@@ -371,6 +472,9 @@ export class CollabConnection {
           }
         }
         this.cb.onChange?.();
+        // Doc 16 §5.2: a welcome snapshot can arrive with pending parts
+        // (the relay may have evicted bytes the registration still names).
+        void this.media?.fetchPending(this.docId);
         return;
       }
       case "broadcast": {
@@ -378,10 +482,23 @@ export class CollabConnection {
         this.recordActivity(msg.entries as never);
         if (this.replica?.reloaded) this.docEpoch++;
         this.cb.onChange?.();
+        // EAGER FETCH (doc 16 §5.2 step 2): an applied insertImage leaves a
+        // hole; pulling it immediately is what keeps bundles complete and
+        // makes re-supply the rare path rather than the normal one.
+        void this.media?.fetchPending(this.docId);
         return;
       }
       case "presence": {
-        this.cb.onPresence?.(msg.participant, msg.position);
+        // A SEALED payload in a plaintext room (#20). Unreachable in a
+        // consistent room — sealing is what the encrypted connection does —
+        // so this is a peer on the wrong side of the mode boundary. Ignore it
+        // rather than hand a blob to the renderer: there is no key here to
+        // open it with, and rendering `{iv, ciphertext}` as coordinates would
+        // be a crash or a cursor at NaN.
+        if (isSealedPresence(msg.position)) return;
+        // Another participant's coordinates, relayed unvalidated by the hub:
+        // strip malformed selection ranges before anything renders them.
+        this.cb.onPresence?.(msg.participant, sanitizePresencePosition(msg.position));
         return;
       }
       case "roster": {
@@ -390,29 +507,59 @@ export class CollabConnection {
         return;
       }
       case "media-request": {
+        // "Who has this?" — volunteer if we do (doc 16 §5.3).
+        this.media?.answerRequest(msg.sha);
         this.cb.onMediaRequest?.(msg.sha);
         return;
       }
       case "media-ready": {
+        void this.media?.onReady(this.docId, msg.sha);
         this.cb.onMediaReady?.(msg.sha);
         return;
       }
       case "media-unavailable": {
+        this.media?.onUnavailable(msg.sha);
         this.cb.onMediaUnavailable?.(msg.sha);
         return;
       }
       case "media-upload": {
-        // Chosen as the re-supplier: surface as a request for THIS sha —
-        // the app's holder duty uploads over HTTP (bytes never ride the WS).
+        // Chosen as the re-supplier: PUT our copy over HTTP (bytes never
+        // ride the WS). Plaintext mode uploads the stored pixels as-is.
+        void this.media?.resupply(this.docId, msg.sha);
         this.cb.onMediaRequest?.(msg.sha);
         return;
       }
       case "refused": {
+        if (msg.reason === "rate-limit") {
+          // Throttled, not failed: re-drive the WHOLE pending queue after
+          // backoff — chained bursts strand everything behind one refused
+          // op, and dedup by (clientId, clientSeq) makes full-queue
+          // resends harmless. One timer at a time; backoff doubles per
+          // refusal, resets on drain (checked at fire time).
+          if (this.rlRedriveTimer !== null) return;
+          this.rlRedriveBackoffMs = Math.min(this.rlRedriveBackoffMs === 0 ? 300 : this.rlRedriveBackoffMs * 2, 5000);
+          this.rlRedriveTimer = setTimeout(() => {
+            this.rlRedriveTimer = null;
+            if (!this.replica) return;
+            const queue = this.replica.pendingCopies();
+            if (queue.length === 0) {
+              this.rlRedriveBackoffMs = 0;
+              return;
+            }
+            for (const body of queue) {
+              this.transport.send({ t: "submit", intent: { ...body, base: this.replica.confirmedSeq } as Intent });
+            }
+          }, this.rlRedriveBackoffMs);
+          return;
+        }
         this.cb.onRefused?.(msg.reason);
         return;
       }
     }
   }
+
+  private rlRedriveTimer: ReturnType<typeof setTimeout> | null = null;
+  private rlRedriveBackoffMs = 0;
 }
 
 /** Doc 15 §1 ancestry check: the rejoiner's own recorded head must appear
