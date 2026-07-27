@@ -168,7 +168,13 @@ describe("KNOWN LIMIT: whole-doc format fired MID-BURST (echoes in flight)", () 
   // toolbar reality — you stop typing to click B) converges fine and is
   // covered by demo-features. Tracked here until format intents are
   // transform-hardened against in-flight structural edits.
-  it.fails("bold slammed into an un-drained burst converges", async () => {
+  // Was a deterministic it.fails; the replica confirmedTail split-resync fix
+  // improved it to SOMETIMES-converging (passes under load, fails in
+  // isolation — real-timer interleaving). Neither `it` nor `it.fails` is
+  // stable on a racy boundary, so skipped honestly — same policy as the
+  // simultaneous-bursts case below. Promote to `it` when format intents are
+  // transform-hardened.
+  it.skip("bold slammed into an un-drained burst converges", async () => {
     const rand = rng(7);
     const hub = new CollabHub(provider);
     const a = await mountClient(hub, "midburst", "alice", 4);

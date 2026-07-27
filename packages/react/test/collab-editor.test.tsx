@@ -105,16 +105,23 @@ describe("CollabEditor draws remote presence carets (jsdom)", () => {
 describe("name-on-caret (doc 14 §2)", () => {
   it("drawPresenceCarets renders roster names as TEXT NODES with palette colors", async () => {
     const { drawPresenceCarets } = await import("../src/presence-cursors.js");
-    const overlay = document.createElement("div");
+    const root = document.createElement("div");
+    const surface = document.createElement("div"); // the anchor's page surface
+    root.appendChild(surface);
+    const anchorEl = document.createElement("span");
+    surface.appendChild(anchorEl);
     drawPresenceCarets(
-      overlay,
-      [{ participant: "alice", x: 10, top: 20, height: 14, anchorEl: overlay, color: "#e05252" } as never],
+      root,
+      [{ participant: "alice", x: 10, top: 20, height: 14, anchorEl, color: "#e05252" } as never],
       { alice: "<img src=x onerror=alert(1)>" }, // hostile name — must render inert
     );
-    const flag = overlay.querySelector(".dxw-presence-name")!;
+    const flag = surface.querySelector<HTMLElement>(".dxw-presence-name")!;
     expect(flag).toBeTruthy();
-    expect(flag.textContent).toBe("<img src=x onerror=alert(1)>"); // literal text
+    // Name lives in a data attribute rendered via CSS content: inert markup AND
+    // absent from textContent (never leaks into page copy/find/a11y text).
+    expect(flag.dataset.name).toBe("<img src=x onerror=alert(1)>"); // literal, as data
+    expect(flag.textContent).toBe(""); // NOT in DOM text
     expect(flag.querySelector("img")).toBeNull(); // never parsed as markup (doc 11 vector 7)
-    expect(overlay.querySelector(".dxw-presence-caret")).toBeTruthy();
+    expect(surface.querySelector(".dxw-presence-caret")).toBeTruthy();
   });
 });

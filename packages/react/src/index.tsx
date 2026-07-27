@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EditorIntent } from "@wordinweb/core";
-import { computePresenceCarets, drawPresenceCarets } from "./presence-cursors.js";
+import {
+  computePresenceCarets,
+  computePresenceSelections,
+  drawPresenceCarets,
+  drawPresenceSelections,
+} from "./presence-cursors.js";
 import type { PresencePosition } from "@wordinweb/collab/client";
 import {
   type SelectionSegment,
@@ -65,6 +70,7 @@ import {
   setLineNumbering,
   lineNumberingAt,
   type XmlElement,
+  type EncodedCaret,
   type ShapePreset,
   type WordArtPreset,
   type DrawingTool,
@@ -98,6 +104,8 @@ import {
   setParagraphAlignment,
   setParagraphStyle,
   summarizeSelection,
+  runWireLength,
+  wireOffsetOf,
 } from "@wordinweb/core";
 
 async function objectPoster(title: string, subtitle: string, glyph: string): Promise<Blob> {
@@ -286,6 +294,13 @@ export interface DocxViewApi {
   acceptAllRevisions(): number;
   /** Reject every tracked change (one undo step). Returns how many applied. */
   rejectAllRevisions(): number;
+  /** Current caret as stable-id addresses (collab), or null. The encoding
+   * survives a reconciliation reload, so it can be captured from a view
+   * about to remount and restored into its replacement. */
+  getEncodedCaret(): EncodedCaret | null;
+  /** Restore a caret captured by getEncodedCaret. False when the position no
+   * longer resolves (or outside collab mode). */
+  setCaretFromEncoded(pos: EncodedCaret): boolean;
   document: DocxDocument;
 }
 
@@ -361,6 +376,17 @@ export interface DocxViewProps {
      * set link/page layout, comments, ...) through this instead of mutating
      * the document itself. */
     submitOp?: (intent: { kind: string } & Record<string, unknown>) => void;
+    /** Upload image bytes to the media relay and return the address fields
+     * the insertImage intent must carry (plan doc 16 §5.1). Null means the
+     * relay REFUSED — the caller must then not reserve anything, or the room
+     * gets a skeleton nobody can ever fill. Absent when the app supplied no
+     * relay origin, in which case images stay a local-only feature. */
+    uploadMedia?: (bytes: Uint8Array) => Promise<{ blobSha: string; bytesLen: number; iv?: string } | null>;
+    /** Reverse this user's last SEQUENCED action (plan doc 03 Phase 8). The
+     * editor routes Cmd+Z here in a room, because replaying the LOCAL history
+     * stack would edit this replica with nothing on the wire. Absent ⇒ undo
+     * declines rather than mutating. */
+    undoLast?: () => void;
   };
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
@@ -500,7 +526,6 @@ export function DocxView({
   // Set by the main effect so the live-collab-doc repaint effect can trigger an
   // in-place re-render without re-running the whole load effect.
   const rerenderRef = useRef<((doc: DocxDocument) => void) | null>(null);
-  const presenceOverlayRef = useRef<HTMLDivElement | null>(null);
   const redrawPresenceRef = useRef<(() => void) | null>(null);
   // Current presence, read by the imperative draw (which closes over an older
   // render's props otherwise).
@@ -529,6 +554,7 @@ export function DocxView({
     let cancelled = false;
     let handle: RenderHandle | null = null;
     let editor: DocxEditor | null = null;
+    let detachPresenceSender: (() => void) | null = null;
     let onDeleteComment: ((id: string) => void) | undefined;
     let onReplyComment: ((id: string, text: string) => void) | undefined;
     let applyStyleShortcut: ((styleId: string | null) => void) | undefined;
@@ -688,17 +714,11 @@ export function DocxView({
       const d = docCacheRef.current?.doc;
       const presence = presenceRef.current;
       if (!handle || !d || !presence) return;
-      let overlay = presenceOverlayRef.current;
-      if (!overlay || overlay.parentElement !== handle.root) {
-        overlay = handle.root.ownerDocument.createElement("div");
-        overlay.className = "dxw-presence-overlay";
-        overlay.style.position = "absolute";
-        overlay.style.inset = "0";
-        overlay.style.pointerEvents = "none";
-        handle.root.appendChild(overlay);
-        presenceOverlayRef.current = overlay;
-      }
-      drawPresenceCarets(overlay, computePresenceCarets(handle, d, presence), collab?.participantNames);
+      // Presence carets are drawn INTO each page surface (see drawPresenceCarets),
+      // so their surface-local geometry aligns and scales like the local caret.
+      // Highlights first, carets on top (each draw clears only its own class).
+      drawPresenceSelections(handle.root, computePresenceSelections(handle, d, presence));
+      drawPresenceCarets(handle.root, computePresenceCarets(handle, d, presence), collab?.participantNames);
     };
     redrawPresenceRef.current = drawCollabPresence;
 
@@ -828,6 +848,71 @@ export function DocxView({
       if (editable && containerRef.current) {
         // Undo history survives mode switches with the cached document.
         const history = docCacheRef.current?.doc === doc ? docCacheRef.current.history : new EditHistory(doc);
+
+        // ---- Outbound presence: caret + selection highlight, one payload ----
+        // Two triggers feed it: the editor's onCaretMove (deduped upstream, so
+        // it fires only when the caret actually moved) and the document-level
+        // "dxw-selection" event (fires for every selection change, including
+        // the ones that leave the caret put, e.g. select-all). Both land in the
+        // SAME task — notifySelection dispatches the event and then reports the
+        // caret — so the send is coalesced onto a microtask: remote tabs get one
+        // payload per settled state, never a caret-without-its-highlight flash.
+        const MAX_SENT_RANGES = 64;
+        let presenceCaret: { blockId: number; runId: number; offset: number } | null = null;
+        // Seeded with the empty payload's key so a mount (or another mounted
+        // view's dxw-selection — the event is document-level) never emits a
+        // redundant "I have no cursor" message.
+        let presenceKey: string | null = "null";
+        let presenceQueued = false;
+
+        /** The local selection as wire ranges: one per selection segment, each
+         * inside a single w:t (and therefore a single run) by construction.
+         * `encodeCaret` converts the segment START to the run's wire basis
+         * (cumulative, separators counted), and the segment's own length —
+         * which is w:t-local and separator-free — extends it to the end. */
+        const selectionRanges = (): { blockId: number; runId: number; start: number; end: number }[] | undefined => {
+          const ids = doc.stableIds;
+          if (!ids || !editor) return undefined;
+          const segs = editor.getSelectionSegments();
+          if (segs.length === 0) return undefined;
+          const out: { blockId: number; runId: number; start: number; end: number }[] = [];
+          for (const seg of segs) {
+            if (out.length >= MAX_SENT_RANGES) break;
+            if (!seg.t || seg.end <= seg.start) continue;
+            const enc = ids.encodeCaret(seg.t, seg.start, (el) => doc.findParentOf(el) ?? null);
+            if (!enc) continue; // not id-tracked (math internals): not addressable
+            out.push({ blockId: enc.blockId, runId: enc.runId, start: enc.offset, end: enc.offset + (seg.end - seg.start) });
+          }
+          return out.length > 0 ? out : undefined;
+        };
+
+        const flushPresence = (): void => {
+          presenceQueued = false;
+          if (!collab?.setPresence) return;
+          const ranges = selectionRanges();
+          // A drag-selection can leave the editor without a caret; the payload
+          // still needs an anchor (the pre-ranges shape old clients read), so
+          // fall back to the selection's end — where the focus visually is.
+          const last = ranges?.[ranges.length - 1];
+          const anchor =
+            presenceCaret ?? (last ? { blockId: last.blockId, runId: last.runId, offset: last.end } : null);
+          const pos: PresencePosition | null = anchor ? (ranges ? { anchor, ranges } : { anchor }) : null;
+          const key = pos ? JSON.stringify(pos) : "null";
+          if (key === presenceKey) return; // dedup, like the caret path
+          presenceKey = key;
+          collab.setPresence(pos);
+        };
+        const queuePresence = (): void => {
+          if (presenceQueued) return;
+          presenceQueued = true;
+          queueMicrotask(flushPresence);
+        };
+        if (collab?.setPresence && typeof document !== "undefined") {
+          const onSelectionEvent = () => queuePresence();
+          document.addEventListener("dxw-selection", onSelectionEvent);
+          detachPresenceSender = () => document.removeEventListener("dxw-selection", onSelectionEvent);
+        }
+
         editorConfig = {
           doc,
           container: containerRef.current,
@@ -862,10 +947,19 @@ export function DocxView({
           // Collaboration: forward each local edit as an intent. The editor
           // emits only when doc.stableIds is populated, so enable it here.
           onIntent: collab ? (intent) => collab.submit(intent) : undefined,
+          // Cmd+Z in a room reverses the last SEQUENCED action over the wire;
+          // without this hook the editor declines rather than replaying local
+          // history (which would fork the room silently).
+          onCollabUndo: collab?.undoLast,
           // Presence: broadcast the local caret so remote participants can
           // draw this user's cursor (the anchor mirrors the intent addressing).
+          // The caret is recorded here and sent by flushPresence together with
+          // the current selection ranges — one payload, one highlight+cursor.
           onCaretMove: collab?.setPresence
-            ? (pos) => collab.setPresence?.(pos ? { anchor: pos } : null)
+            ? (pos) => {
+                presenceCaret = pos;
+                queuePresence();
+              }
             : undefined,
           // Disjoint carried-id blocks for the editor's node-creating intents
           // (paragraph split); see EditorHost.allocIds.
@@ -962,6 +1056,25 @@ export function DocxView({
           const last = [...(editor?.getSelectionSegments() ?? [])].reverse().find((segment) => segment.t);
           return last?.t ? { t: last.t, offset: last.end } : null;
         };
+        /** The very start of the document's text, as a last-resort insertion
+         * position. Reaching for the toolbar BEFORE clicking into the page is
+         * the obvious first move, and every insert command used to answer it
+         * with silence — the shape of the "images don't work at all" report.
+         * Only a document with no text at all is genuinely unaddressable. */
+        const documentStart = (): { t: XmlElement; offset: number } | null => {
+          for (const section of doc.sections) {
+            for (const block of section.blocks) {
+              if (block.type !== "paragraph") continue;
+              for (const item of block.children) {
+                for (const run of item.type === "run" ? [item] : item.runs) {
+                  const text = run.content.find((c) => c.kind === "text");
+                  if (text?.srcT) return { t: text.srcT, offset: text.srcT.text.length };
+                }
+              }
+            }
+          }
+          return null;
+        };
         // ---- Collaborative op routing (toolbar/API commands) ----
         // In collab mode these commands are routed through the CANONICAL
         // intent apply (collab.submitOp → the same applyIntent code every
@@ -979,12 +1092,19 @@ export function DocxView({
           at?: { t: XmlElement; offset: number } | null,
         ): boolean => {
           if (!collab?.submitOp || !doc.stableIds) return false;
+          // Past this gate we are IN collab mode and must return true no
+          // matter what: returning false would drop the caller into its
+          // LOCAL mutation fallback, which never rides the wire — a silent
+          // permanent divergence that even poisons the persisted bundle
+          // (found live: an unaddressable insert-shape landed locally,
+          // desynced the room, and survived reload). An unaddressable
+          // command in collab mode is an honest no-op instead.
           const target = at !== undefined ? at : insertionTarget();
-          if (!target) return false;
+          if (!target) return true;
           const anchor = collabAnchor(target.t, target.offset);
-          if (!anchor) return false;
+          if (!anchor) return true;
           const intent = make(anchor, (n) => collab.allocIds?.(n) ?? []);
-          if (!intent) return false;
+          if (!intent) return true;
           history.checkpoint();
           collab.submitOp(intent);
           return true;
@@ -994,8 +1114,9 @@ export function DocxView({
           make: (alloc: (n: number) => number[]) => ({ kind: string } & Record<string, unknown>) | null,
         ): boolean => {
           if (!collab?.submitOp || !doc.stableIds) return false;
+          // In collab mode never fall through to the local path (see collabOp).
           const intent = make((n) => collab.allocIds?.(n) ?? []);
-          if (!intent) return false;
+          if (!intent) return true;
           history.checkpoint();
           collab.submitOp(intent);
           return true;
@@ -1005,7 +1126,9 @@ export function DocxView({
           targets: XmlElement[],
           make: (blockId: number) => ({ kind: string } & Record<string, unknown>) | null,
         ): boolean => {
-          if (!collab?.submitOp || !doc.stableIds || targets.length === 0) return false;
+          if (!collab?.submitOp || !doc.stableIds) return false;
+          // In collab mode never fall through to the local path (see collabOp):
+          // even with zero addressable targets this returns true (honest no-op).
           const submitted = new Set<number>();
           let any = false;
           for (const t of targets) {
@@ -1018,16 +1141,20 @@ export function DocxView({
             any = true;
             collab.submitOp(intent);
           }
-          return any;
+          return true;
         };
         /** Capture per-seg stable ids BEFORE a run format (a sub-range format
-         * splits the run — the original id is pruned by the mutation). */
+         * splits the run — the original id is pruned by the mutation). Wire
+         * offsets are in the run's WIRE space (cumulative, separators counted
+         * — checkpoint B1 rev 2): capture the segment's start in that basis
+         * plus the run's total wire length. */
         const captureFormatIds = (segs: SelectionSegment[]) =>
           collab && doc.stableIds
             ? segs.map((seg) => ({
                 runId: seg.run.src ? doc.stableIds!.idOf(seg.run.src) : undefined,
                 blockId: seg.run.srcParent ? doc.stableIds!.idOf(seg.run.srcParent) : undefined,
-                runLen: seg.t ? seg.t.text.length : 0,
+                runLen: seg.run.src ? runWireLength(seg.run.src) : 0,
+                cumStart: seg.run.src && seg.t ? (wireOffsetOf(seg.run.src, seg.t, seg.start) ?? seg.start) : seg.start,
               }))
             : [];
         /** Emit formatRun/formatRange intents for an applied run format and
@@ -1036,40 +1163,71 @@ export function DocxView({
          * toolbar's applyFormat. */
         const emitFormatIntents = (
           segs: SelectionSegment[],
-          preIds: { runId?: number; blockId?: number; runLen: number }[],
+          preIds: { runId?: number; blockId?: number; runLen: number; cumStart: number }[],
           formatted: { t: XmlElement | null }[],
           patch: Record<string, unknown>,
         ): void => {
           if (!collab || !doc.stableIds) return;
+          // A selection over a run with several w:t yields one seg PER w:t,
+          // all sharing the runId. Group them: the whole-run check must use
+          // the COMBINED cumulative span (each seg alone is partial), else a
+          // plain Ctrl+B over such a run would emit a partial formatRange and
+          // silently drop the later w:t's formatting on the wire.
+          const spanByRun = new Map<number, { lo: number; hi: number }>();
+          segs.forEach((seg, i) => {
+            const pre = preIds[i];
+            if (!pre || pre.runId === undefined) return;
+            const lo = pre.cumStart;
+            const hi = pre.cumStart + (seg.end - seg.start);
+            const cur = spanByRun.get(pre.runId);
+            spanByRun.set(pre.runId, cur ? { lo: Math.min(cur.lo, lo), hi: Math.max(cur.hi, hi) } : { lo, hi });
+          });
+          const segCountByRun = new Map<number, number>();
+          for (const pre of preIds) {
+            if (pre?.runId !== undefined) segCountByRun.set(pre.runId, (segCountByRun.get(pre.runId) ?? 0) + 1);
+          }
           const seenRuns = new Set<number>();
           segs.forEach((seg, i) => {
-            const { runId, blockId, runLen } = preIds[i] ?? { runLen: 0 };
+            const { runId, blockId, runLen, cumStart } = preIds[i] ?? { runLen: 0, cumStart: 0 };
             if (runId === undefined || blockId === undefined || seenRuns.has(runId)) return;
             seenRuns.add(runId);
-            const whole = !seg.t || (seg.start <= 0 && seg.end >= runLen);
+            const span = spanByRun.get(runId) ?? { lo: cumStart, hi: cumStart + (seg.end - seg.start) };
+            const cumEnd = cumStart + (seg.end - seg.start);
+            // Whole-run when the segs cover the run — AND when the selection
+            // spans SEVERAL w:t of one run: applyRunFormat's local fallback
+            // (tTargets.size !== 1) formats the whole run IN PLACE with no
+            // split, so a partial formatRange here would diverge (remote
+            // splits, local doesn't — and the reassign below would stamp the
+            // UNSPLIT run + an unrelated sibling; review bug 2). formatRun
+            // matches the local mutation exactly.
+            const whole = !seg.t || (span.lo <= 0 && span.hi >= runLen) || (segCountByRun.get(runId) ?? 1) > 1;
             if (whole) {
               collab.submit({ kind: "formatRun", blockId, runId, patch } as never);
               return;
             }
-            const before = seg.start > 0;
-            const after = seg.end < runLen;
+            const before = cumStart > 0;
+            const after = cumEnd < runLen;
             const alloc = collab.allocIds?.((before ? 1 : 0) + 1 + (after ? 1 : 0)) ?? [];
             let k = 0;
             const beforeId = before ? alloc[k++] : undefined;
             const middleId = alloc[k++];
             const afterId = after ? alloc[k++] : undefined;
             if (middleId === undefined) return;
-            collab.submit({ kind: "formatRange", blockId, runId, start: seg.start, end: seg.end, patch, beforeId, middleId, afterId } as never);
+            collab.submit({ kind: "formatRange", blockId, runId, start: cumStart, end: cumEnd, patch, beforeId, middleId, afterId } as never);
             const middleT = formatted[i]?.t;
             const middleRun = middleT ? doc.findParentOf(middleT) : null;
             const parent = middleRun ? doc.findParentOf(middleRun) : null;
             if (middleRun && parent && doc.stableIds) {
+              // Guard the neighbors like the server's apply does (localRun):
+              // with mIdx 0 the preceding sibling can be w:pPr — stamping it
+              // with a run id retires an unrelated element's identity.
+              const isRun = (el: XmlElement | undefined) => !!el && (el.name === "w:r" || el.name.endsWith(":r") || el.name === "r");
               const mIdx = parent.children.indexOf(middleRun);
               doc.stableIds.reassign(middleRun, middleId);
-              if (before && beforeId !== undefined && parent.children[mIdx - 1]) {
+              if (before && beforeId !== undefined && isRun(parent.children[mIdx - 1])) {
                 doc.stableIds.reassign(parent.children[mIdx - 1], beforeId);
               }
-              if (after && afterId !== undefined && parent.children[mIdx + 1]) {
+              if (after && afterId !== undefined && isRun(parent.children[mIdx + 1])) {
                 doc.stableIds.reassign(parent.children[mIdx + 1], afterId);
               }
             }
@@ -1153,8 +1311,10 @@ export function DocxView({
               const segs0 = editor?.getSelectionSegments() ?? [];
               const rangeSeg = segs0.find((sg) => sg.t && sg.end > sg.start);
               if (rangeSeg?.t) {
+                // a.offset is the segment start in the wire basis (cumulative
+                // within the run); the range keeps its local length.
                 if (collabOp(
-                  (a) => ({ kind: "insertBookmarkRange", runId: a.runId, name, start: rangeSeg.start, end: rangeSeg.end }),
+                  (a) => ({ kind: "insertBookmarkRange", runId: a.runId, name, start: a.offset, end: a.offset + (rangeSeg.end - rangeSeg.start) }),
                   { t: rangeSeg.t, offset: rangeSeg.start },
                 )) return true;
               } else if (collabOp((a) => ({ kind: "insertBookmark", runId: a.runId, name }))) return true;
@@ -1350,7 +1510,11 @@ export function DocxView({
             return caret ? cellShadingAt(doc, caret.t) : undefined;
           },
           insertImage: async (file) => {
-            const caret = editor?.getCaretTarget();
+            // Caret, else the selection's end, else the start of the document
+            // (see documentStart): picking a file is an unambiguous request to
+            // insert one, so answering it with silence because no caret has
+            // been placed yet is a bug, not a safeguard.
+            const caret = insertionTarget() ?? documentStart();
             if (!caret) return;
             const bytes = new Uint8Array(await file.arrayBuffer());
             const isSvg = file.type === "image/svg+xml";
@@ -1365,6 +1529,46 @@ export function DocxView({
             const maxW = sp ? sp.pageWidth - sp.marginLeft - sp.marginRight : 624;
             const scale = Math.min(1, maxW / naturalWidth);
             const ext = file.type === "image/svg+xml" ? "svg" : (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
+            // COLLAB (plan doc 16 §5.1): bytes travel out of band and the
+            // intent carries only their address, so the ORDER is load-bearing
+            // — upload first, reserve only on success. Reserving first would
+            // leave every other replica with a skeleton pointing at a blob
+            // that was refused and will never exist.
+            if (collab?.submitOp && doc.stableIds) {
+              bmp?.close();
+              // Past the collab gate this NEVER falls through to the local
+              // mutation (checkpoint A18): an app that wired submitOp but no
+              // relay has no way to place an image, and inserting one locally
+              // would fork the room the moment anyone else typed. Honest
+              // no-op instead. Caught by INVARIANT C, which mounts exactly
+              // that configuration.
+              if (!collab.uploadMedia) return;
+              // The wire allowlist is raster-only (validate.ts): an SVG would
+              // be refused by every replica, so decline it here rather than
+              // inserting something only this client can see.
+              if (!["png", "jpg", "jpeg", "gif", "bmp", "webp"].includes(ext)) return;
+              const media = await collab.uploadMedia(bytes);
+              if (!media) return; // relay refused — no reservation, nothing forked
+              const w = naturalWidth * scale;
+              const h2 = naturalHeight * scale;
+              collabOp((a, ids) => ({
+                kind: "insertImage",
+                runId: a.runId,
+                blobSha: media.blobSha,
+                bytesLen: media.bytesLen,
+                ext,
+                ...(media.iv ? { iv: media.iv } : {}),
+                widthPx: w,
+                heightPx: h2,
+                nodeIds: ids(8),
+              }), { t: caret.t, offset: caret.offset });
+              // The placer's own pixels install with no round trip — the
+              // media client kept the plaintext it just uploaded and fills the
+              // part from memory the moment the reservation applies (which in
+              // an encrypted room is asynchronous, after this returns).
+              pages = rerender(doc);
+              return;
+            }
             history.checkpoint();
             const relId = doc.addImageResource(bytes, ext === "jpg" ? "jpeg" : ext);
             const h = naturalHeight * scale;
@@ -1672,6 +1876,8 @@ export function DocxView({
           revisionCount: () => collectRevisions(doc).length,
           acceptAllRevisions: () => editor?.acceptAllRevisions() ?? 0,
           rejectAllRevisions: () => editor?.rejectAllRevisions() ?? 0,
+          getEncodedCaret: () => editor?.getEncodedCaret() ?? null,
+          setCaretFromEncoded: (pos) => editor?.setCaretFromEncoded(pos) ?? false,
         };
         apiRef.current = api;
         onReady?.(api);
@@ -1709,6 +1915,8 @@ export function DocxView({
       }
       setLayoutBusy(false);
       applyZoomRef.current = null;
+      detachPresenceSender?.();
+      detachPresenceSender = null;
       editor?.detach();
       editor = null;
       handle?.destroy();
@@ -1728,21 +1936,40 @@ export function DocxView({
   // text on screen until the next event. One deferred repaint always runs
   // after the latest mutation, reading the doc's current state.
   const renderSignal = collab?.renderSignal;
+  const repaintScheduledRef = useRef(false);
   const repaintRafRef = useRef(0);
+  const repaintTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
     if (renderSignal === undefined) return;
-    if (repaintRafRef.current) return; // a repaint is already scheduled
-    repaintRafRef.current = requestAnimationFrame(() => {
-      repaintRafRef.current = 0;
+    if (repaintScheduledRef.current) return; // a repaint is already scheduled
+    repaintScheduledRef.current = true;
+    const paint = () => {
+      if (!repaintScheduledRef.current) return; // the other scheduler already ran
+      repaintScheduledRef.current = false;
+      if (repaintRafRef.current) { cancelAnimationFrame(repaintRafRef.current); repaintRafRef.current = 0; }
+      if (repaintTimerRef.current !== undefined) { clearTimeout(repaintTimerRef.current); repaintTimerRef.current = undefined; }
       const d = docCacheRef.current?.doc;
       const r = rerenderRef.current;
       if (d && r && d === collab?.doc) r(d);
-    });
+    };
+    // rAF coalesces to vsync when THIS window is the foreground one — but the
+    // browser PAUSES rAF in a hidden tab and THROTTLES it in a visible-but-
+    // unfocused window (e.g. two docs side by side). Relying on rAF alone froze
+    // a remote collaborator's view — and their remote carets — on every edit
+    // until the window regained focus (the on-screen divergence users hit; the
+    // session data had already converged). A timer fallback guarantees the
+    // repaint still runs off-foreground; whichever of the two fires first does
+    // the (idempotent) paint and cancels the other.
+    repaintRafRef.current = requestAnimationFrame(paint);
+    repaintTimerRef.current = setTimeout(paint, 60);
     // Intentionally keyed only on renderSignal: collab.doc is stable between
     // reloads, and a reload re-runs the main effect above instead.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renderSignal]);
-  useEffect(() => () => { if (repaintRafRef.current) cancelAnimationFrame(repaintRafRef.current); }, []);
+  useEffect(() => () => {
+    if (repaintRafRef.current) cancelAnimationFrame(repaintRafRef.current);
+    if (repaintTimerRef.current !== undefined) clearTimeout(repaintTimerRef.current);
+  }, []);
 
   const hotBtn = (label: string, title: string, onClick: () => void) => (
     <button
@@ -1861,9 +2088,10 @@ export function DocxView({
 
 export { DocxDocument, layoutDocument, renderToDom, printPages } from "@wordinweb/core";
 export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset } from "@wordinweb/core";
-export { DocxToolbar, ToolbarMenuSelect } from "./toolbar.js";
+export { DocxToolbar, ToolbarMenuSelect, INSERT_COMMANDS } from "./toolbar.js";
 export type {
   DocxToolbarProps,
+  InsertCommandSpec,
   ToolbarFeature,
   ToolbarMenuSelectOption,
   ToolbarMenuSelectProps,

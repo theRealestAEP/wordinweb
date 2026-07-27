@@ -16,11 +16,17 @@ function makeDoc(text: string): DocxDocument {
 /** Build a render handle whose bindingsByText maps the run's w:t to a text
  * item with known geometry (x=100, width=80, lineTop=50, lineHeight=16). */
 function handleFor(doc: DocxDocument, t: XmlElement, text: string): RenderHandle {
+  // Mirror the real DOM nesting: root > page surface > text span. Presence
+  // carets are drawn INTO the anchor span's surface (its parentElement).
+  const root = document.createElement("div");
+  const surface = document.createElement("div");
+  root.appendChild(surface);
   const el = document.createElement("span");
+  surface.appendChild(el);
   const item = { kind: "text", x: 100, baseline: 62, width: 80, text, props: {}, font: {}, lineTop: 50, lineHeight: 16 } as never;
   const bindingsByText = new Map<XmlElement, { el: HTMLElement; item: never }[]>();
   bindingsByText.set(t, [{ el, item }]);
-  return { root: document.createElement("div"), bindings: [], bindingsByText, grips: [], images: [], drawings: [], wordarts: [], destroy: () => {} } as unknown as RenderHandle;
+  return { root, bindings: [], bindingsByText, grips: [], images: [], drawings: [], wordarts: [], destroy: () => {} } as unknown as RenderHandle;
 }
 
 function runInfo(doc: DocxDocument) {
@@ -68,14 +74,15 @@ describe("computePresenceCarets", () => {
     expect(presenceColor("alice")).toBe(presenceColor("alice"));
   });
 
-  it("drawPresenceCarets renders positioned caret bars into an overlay", () => {
+  it("drawPresenceCarets renders positioned caret bars into the anchor's surface", () => {
     const doc = makeDoc("HELLOWORLD"); doc.enableStableIds();
     const { blockId, runId, t } = runInfo(doc);
     const handle = handleFor(doc, t, "HELLOWORLD");
     const carets = computePresenceCarets(handle, doc, { alice: { anchor: { blockId, runId, offset: 3 } } });
-    const overlay = document.createElement("div");
-    drawPresenceCarets(overlay, carets);
-    const bar = overlay.querySelector<HTMLElement>(".dxw-presence-caret")!;
+    drawPresenceCarets(handle.root, carets);
+    // The bar lands in the anchor's page surface (surface-local coords), not the root.
+    const surface = carets[0].anchorEl.parentElement!;
+    const bar = surface.querySelector<HTMLElement>(".dxw-presence-caret")!;
     expect(bar).toBeTruthy();
     expect(bar.dataset.participant).toBe("alice");
     expect(bar.style.left).toBe("124px"); // 100 + 0.3*80
