@@ -10,12 +10,13 @@
   "scripts": {
     "build": "npm run build -w @wordinweb/core -w wordinweb",
     "build:packages": "npm run build -w @wordinweb/core -w @wordinweb/collab -w @wordinweb/server -w wordinweb",
-    "typecheck": "tsc --noEmit -p packages/core/tsconfig.json && tsc --noEmit -p packages/collab/tsconfig.json && tsc --noEmit -p packages/server/tsconfig.json && tsc --noEmit -p packages/react/tsconfig.json",
+    "typecheck": "tsc --noEmit -p packages/core/tsconfig.json && tsc --noEmit -p packages/collab/tsconfig.json && tsc --noEmit -p packages/server/tsconfig.json && tsc --noEmit -p packages/react/tsconfig.json && tsc --noEmit -p examples/anon-share/tsconfig.json",
     "test": "npm run test -w @wordinweb/core",
     "test:all": "vitest run --root packages/core && vitest run --root packages/collab && vitest run --root packages/server && vitest run --root packages/react",
     "demo": "node scripts/dev.mjs",
     "e2e": "playwright test",
-    "e2e:headed": "playwright test --headed"
+    "e2e:headed": "playwright test --headed",
+    "perf:report": "node scripts/perf-report.mjs run"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

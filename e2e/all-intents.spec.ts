@@ -28,7 +28,8 @@ const ALL_KINDS = [
   "formatParagraph", "formatRange", "setListType", "setListLevel", "adjustIndent",
   "setSpacing", "tableOp", "cellShading", "cellVAlign", "insertTable", "commentRun",
   "replyComment", "deleteComment", "pasteBlocks", "insertImage", "insertBreak",
-  "insertMath", "setMathLinear", "deleteMath", "insertShape", "setDrawingRotation",
+  "insertMath", "setMathLinear", "moveMath", "deleteMath", "ensureHeaderFooter",
+  "insertShape", "setDrawingRotation",
   "setDrawingFill", "setDrawingLineStyle", "setDrawingOrder", "setDrawingWordArtText",
   "setFloatingPagePosition", "insertChart", "setChartData", "insertSmartArt",
   "setSmartArtData", "setSmartArtNodeText", "setSmartArtFill", "setSmartArtTextFormat",
@@ -222,7 +223,13 @@ test("all 62 intent kinds converge byte-identically across 3 browser clients", a
     const mathIds = await step(pages, "insertMath", { kind: "insertMath", runId: 2, mathText: "x^2" }, { nodeIds: 2 }); cover("insertMath");
     void mathIds;
     await step(pages, "setMathLinear", { kind: "setMathLinear", blockId: 1, mathText: "y^2" }); cover("setMathLinear");
+    // Drop at offset 0 of the anchor run: re-parents the equation without
+    // splitting the destination run.
+    await step(pages, "moveMath", { kind: "moveMath", blockId: 1, at: { blockId: 1, runId: 2, offset: 0 } }, { nodeIds: 4 }); cover("moveMath");
     await step(pages, "deleteMath", { kind: "deleteMath", blockId: 1 }); cover("deleteMath");
+
+    // --- header/footer part creation (a whole new package part) ---
+    await step(pages, "ensureHeaderFooter", { kind: "ensureHeaderFooter", hfKind: "header" }, { nodeIds: 8 }); cover("ensureHeaderFooter");
 
     // --- checkbox ---
     await step(pages, "toggleCheckbox", { kind: "toggleCheckbox", runId: 2 }); cover("toggleCheckbox");

@@ -3,7 +3,7 @@
  * Single-command local launch for the zero-custody collab demo (plan
  * doc 12). Builds the workspace packages, then runs BOTH halves of the
  * stack — the zero-custody server (HTTP seed + WebSocket on :1234) and the
- * Vite demo app (:5173) — under one process. Ctrl+C stops both.
+ * Vite demo app (:5817) — under one process. Ctrl+C stops both.
  *
  *   npm run demo            # build + serve, opens the browser
  *   npm run demo -- --no-build   # skip the build (packages already built)
@@ -20,7 +20,7 @@ import { dirname, resolve } from "node:path";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = new Set(process.argv.slice(2));
 const SERVER_PORT = process.env.PORT ?? "1234";
-const VITE_PORT = process.env.VITE_PORT ?? "5173";
+const VITE_PORT = process.env.VITE_PORT ?? "5817";
 const OPEN = !args.has("--no-open");
 
 const children = [];
@@ -43,9 +43,14 @@ async function main() {
     if (code !== 0) shutdown(code);
   }
 
-  console.log(`[dev] zero-custody server → http://localhost:${SERVER_PORT}`);
+  console.log(`[dev] zero-custody server → http://localhost:${SERVER_PORT}  (obs: GET /stats, structured events on stderr)`);
+  // WW_OBS on for the demo: the server prints one structured JSON line per
+  // connection lifecycle event (conn-open / refused / kick / conn-close) to
+  // stderr, and exposes GET /stats — so a "why aren't two windows syncing?"
+  // question is answerable from the terminal (are both connecting to the SAME
+  // docId? any refusal? see observability.ts — no doc content is ever logged).
   const server = run("node", ["packages/server/dist/cli.js"], {
-    env: { ...process.env, ZERO_CUSTODY: "1", PORT: SERVER_PORT },
+    env: { ...process.env, ZERO_CUSTODY: "1", PORT: SERVER_PORT, WW_OBS: "1" },
   });
   server.on("exit", (c) => shutdown(c ?? 0));
 
@@ -57,9 +62,21 @@ async function main() {
   // workspace packages' freshly-built dist, and Vite's dep cache would
   // otherwise serve a STALE pre-bundle after a rebuild (a footgun that
   // masked package fixes until the cache was cleared).
-  const viteArgs = ["vite", "--force", "--port", VITE_PORT, ...(OPEN ? ["--open"] : [])];
+  // --strictPort: FAIL LOUDLY if VITE_PORT is taken instead of silently
+  // drifting to :5174 — a drift left a stale, still-running Vite serving the
+  // OLD pre-bundle while the fresh one sat on another port, so edits looked
+  // "not live" because the tab was on the stale bundle. Better to error than
+  // to serve stale.
+  const viteArgs = ["vite", "--force", "--strictPort", "--port", VITE_PORT, ...(OPEN ? ["--open"] : [])];
   const vite = run("npx", viteArgs, {
     cwd: resolve(ROOT, "examples/anon-share"),
+    // VITE_COLLAB_SERVER: tells the app where THIS stack's API lives. The
+    // app's production default is SAME-ORIGIN (one Caddy origin), which is
+    // wrong under the two-port dev split (Vite :5817 / API :1234) — without
+    // this, GET /blank hits Vite, returns index.html, and the local editor
+    // shows "invalid zip data". The e2e board never caught that because
+    // every spec passes ?server=; the bare-URL dev flow is pinned now.
+    env: { ...process.env, VITE_COLLAB_SERVER: `localhost:${SERVER_PORT}` },
   });
   vite.on("exit", (c) => shutdown(c ?? 0));
 }

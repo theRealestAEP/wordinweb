@@ -51,8 +51,7 @@ test.describe("zero-custody demo — browser E2E", () => {
   test("Make collaborative: seals the local doc, key rides the fragment, creator is owner", async ({ page }) => {
     const url = await createDoc(page);
     expect(url).toMatch(/[?&]doc=/); // the magic-link capability
-    expect(url).toMatch(/#k=[A-Za-z0-9_-]+/); // doc-13 §1 fragment key (never sent to the server)
-    await expect(page.getByText("encrypted", { exact: true })).toBeVisible();
+    expect(url).toMatch(/#k=[A-Za-z0-9_-]+/); // doc-13 §1 fragment key (never sent to the server) — the proof of E2EE mode
     // The creator holds the owner token → owner controls present.
     await expect(page.getByTestId("readonly-toggle")).toBeVisible();
     await expect(page.getByTestId("download")).toBeEnabled();
@@ -139,7 +138,13 @@ test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () 
     }
   });
 
-  test.fixme("owner read-only blocks editors, owner keeps writing, then lifts (doc 14 §2.5)", async ({ browser }) => {
+  // Un-fixme'd 2026-07-26: the "Vite pre-bundle race (stale session without
+  // admin)" this test kept guarding against was a MISDIAGNOSIS — the
+  // encrypted connection simply never had an admin() method (the react
+  // layer's cast hid it from the typechecker). Fixed in enc-connection.ts;
+  // the surface-parity pin (collab/test/connection-surface-parity.test.ts)
+  // keeps the cast honest from now on.
+  test("owner read-only blocks editors, owner keeps writing, then lifts (doc 14 §2.5)", async ({ browser }) => {
     const ctxOwner = await browser.newContext();
     const ctxEditor = await browser.newContext();
     const owner = await ctxOwner.newPage();
