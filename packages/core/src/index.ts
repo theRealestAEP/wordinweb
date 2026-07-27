@@ -2,7 +2,7 @@ export * from "./model.js";
 export * from "./units.js";
 export { parseXml, localName, child, children, attr } from "./xml.js";
 export type { XmlElement } from "./xml.js";
-export { Package, resolvePartPath } from "./zip.js";
+export { Package, resolvePartPath, FIXED_ZIP_MTIME } from "./zip.js";
 export { DocxDocument } from "./docx.js";
 export { layoutDocument, layoutDocumentAsync, relayoutHeadersFooters } from "./layout/engine.js";
 export type { LayoutOptions, AsyncLayoutOptions } from "./layout/engine.js";
@@ -23,7 +23,8 @@ export type { RunFormatPatch, SelectionSegment, SelectionFormat, FormattedRange 
 export { selectionToSegments } from "./edit/selection.js";
 export { DocxEditor } from "./edit/editor.js";
 export type { EditorIntent } from "./edit/editor.js";
-export type { ObjectArrangeAction, SelectedObjectCommand, SelectedObjectKind } from "./edit/editor.js";
+export type { ObjectArrangeAction, SelectedObjectCommand, SelectedObjectContext, SelectedObjectKind } from "./edit/editor.js";
+export { SELECTED_OBJECT_COMMANDS, availableObjectCommands, removeDrawingRun } from "./edit/editor.js";
 export { requestColorDialog, requestLineStyleDialog, requestNumberPairDialog, requestTextInputDialog } from "./edit/dialog.js";
 export type { ColorDialogOptions, LineStyleDialogValue, NumberPairDialogOptions, NumberPairDialogValue, TextInputDialogOptions } from "./edit/dialog.js";
 export {
@@ -40,14 +41,14 @@ export {
 } from "./edit/suggest.js";
 export type { RevisionMeta, RevisionRef, RevisionKind, CaretTarget, DeleteRange } from "./edit/suggest.js";
 export { EditHistory } from "./edit/history.js";
-export { StableIds } from "./edit/ids.js";
+export { StableIds, textsUnderRun, resolveRunOffset, runContentItems, runWireLength, wireOffsetOf } from "./edit/ids.js";
 export type { EncodedCaret } from "./edit/ids.js";
 export { applyInsertText, applySplitParagraph, applyDeleteRange } from "./edit/mutations.js";
 export type { EditCaret, MutationCtx, SplitResult } from "./edit/mutations.js";
 export { defaultProvenance, recordedProvenance } from "./edit/provenance.js";
 export type { EditProvenance } from "./edit/provenance.js";
 export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, paragraphOf, topLevelBlockOf, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";
-export { applyTableOp, cellContextOf } from "./edit/tables.js";
+export { applyTableOp, cellContextOf, resizeDrawing, resizeTableColumn, resizeTableRow, moveTableTo } from "./edit/tables.js";
 export {
   setImageWrap,
   adjustFloatingPosition,
@@ -93,7 +94,7 @@ export { validatePastedOoxml, DEFAULT_OOXML_LIMITS } from "./ooxml-validate.js";
 export type { OoxmlValidationResult, OoxmlValidationLimits } from "./ooxml-validate.js";
 export { sectPrAt, sectionContextAt, insertBreakAt, insertBlankPageAt, insertCoverPage, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
 export type { BreakInsertion, CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
-export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, insertMathAt, mathLinearOf } from "./edit/math.js";
+export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages } from "./render/dom.js";
 export type { FindMatch } from "./edit/find.js";
 export { cellShadingAt } from "./edit/tables.js";

@@ -1209,6 +1209,11 @@ function ensureStylesheet(): void {
   style.id = "dxw-style";
   style.textContent = `
 .dxw-page span { font-kerning: none; font-variant-ligatures: none; }
+/* Remote presence name flag: the display name renders via CSS content from a
+   data attribute — inert (never parsed as markup, doc 11 XSS vector 7) AND
+   absent from the page's textContent, so cursor labels never leak into copy,
+   find-in-page, or accessibility text. The caret bar itself is an empty div. */
+.dxw-presence-name::after { content: attr(data-name); }
 .dxw-hf-mode .dxw-page span:not([data-dxw-hf]),
 .dxw-hf-mode .dxw-page a:not([data-dxw-hf]),
 .dxw-hf-mode .dxw-page img:not([data-dxw-hf]) { opacity: .45; }
@@ -1280,6 +1285,38 @@ function ensureStylesheet(): void {
 .dxw-narrow .dxw-comment-card.dxw-open .dxw-comment-delete { display: none; }
 `;
   document.head.appendChild(style);
+}
+
+/**
+ * The placeholder for a registered image whose bytes are still travelling
+ * (plan doc 05 change 2 / doc 16 §5.2). It occupies the part's real laid-out
+ * box, so filling it later changes pixels inside the frame and never reflows
+ * the page.
+ *
+ * The "unavailable" wording is deliberately about people, not errors: doc 16
+ * §7 makes this state recoverable by definition — the registration survives,
+ * and any participant holding the bytes restores it just by coming back.
+ */
+function renderMediaSkeleton(item: ImageItem, doc: DocxDocument): HTMLElement {
+  // A hole DERIVED from the package (rel to a missing part) carries no
+  // declared address, so no transfer can ever be in flight for it — never
+  // show it as "loading".
+  const addressless = doc.pendingMedia.get(item.part)?.sha === "";
+  const state = doc.mediaTransferState.get(item.part) ?? (addressless ? "unavailable" : "fetching");
+  const box = document.createElement("div");
+  box.className = "dxw-media-skeleton";
+  box.dataset.dxwMediaState = state;
+  const unavailable = state === "unavailable";
+  box.style.cssText =
+    `position:absolute;left:${item.x}px;top:${item.y}px;width:${item.width}px;height:${item.height}px;` +
+    `box-sizing:border-box;border:1px dashed ${unavailable ? "#e0a800" : "#c6cbd1"};border-radius:4px;` +
+    `background:${unavailable ? "#fffaf0" : "#f5f6f7"};display:flex;align-items:center;justify-content:center;` +
+    `text-align:center;padding:4px;font:11px system-ui,sans-serif;color:#5f6368;overflow:hidden;`;
+  box.textContent = unavailable
+    ? "Image unavailable — it reappears when someone who has it is online"
+    : "Loading image…";
+  box.title = box.textContent;
+  return box;
 }
 
 const CHART_COLORS = ["#4472c4", "#ed7d31", "#a5a5a5", "#ffc000", "#5b9bd5", "#70ad47"];
@@ -1516,7 +1553,13 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
       return renderChart(item);
     case "image": {
       const bytes = doc.media(item.part);
-      if (!bytes) return null;
+      // SKELETON (plan doc 05 change 2 / doc 16 §5.2): a registered part
+      // whose bytes haven't arrived reserves its exact laid-out box — the
+      // extents live in the XML, so a document full of skeletons paginates
+      // pixel-identically to the filled one. Rendering nothing (the old
+      // behavior) made an in-flight image look like a document that had
+      // silently lost it.
+      if (!bytes) return doc.pendingMedia.has(item.part) ? renderMediaSkeleton(item, doc) : null;
       const ext = item.part.slice(item.part.lastIndexOf(".") + 1).toLowerCase();
       const img = document.createElement("img");
       let splashOffset = false;

@@ -26,7 +26,7 @@ import { buildSmartArtDataXml, buildSmartArtDrawingXml, insertSmartArtAt, setSma
 import { insertEmbeddedObjectAt, insertModel3DAt, insertWebVideoAt } from "../src/edit/objects.js";
 import { buildOlePackage, extractOlePackage } from "../src/parse/ole.js";
 import { insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, listBookmarks, validBookmarkName } from "../src/edit/references.js";
-import { deleteMath, linearizeMath, parseMathLinear, setMathLinear, insertMathAt, mathLinearOf, isLinearSafe } from "../src/edit/math.js";
+import { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf, isLinearSafe } from "../src/edit/math.js";
 import { XmlElement, localName } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, makeDocxWithMedia, wrapDocument, p, W_NS } from "./helpers.js";
@@ -2570,5 +2570,131 @@ describe("selectionTextLogical (clipboard copy order)", () => {
   it("returns empty string for an empty selection", () => {
     const doc = loadDoc(p("x"));
     expect(selectionTextLogical(doc, [])).toBe("");
+  });
+});
+
+describe("ensureHfPart", () => {
+  // A minimal document has no sectPr, and a header part is only rendered
+  // through a sectPr's headerReference — so without materializing one the
+  // created part was dangling: never laid out, no caret target, "the header
+  // won't open". Same shape of bug (and same fix) as the layout controls on
+  // a sectPr-less blank document.
+  const body = `<w:p><w:r><w:t xml:space="preserve">text</w:t></w:r></w:p>`;
+
+  it("creates a referenced header on a document with NO sectPr", () => {
+    const doc = loadDoc(body);
+    expect(serializeXml(doc.docRoot)).not.toContain("sectPr");
+    expect(doc.hasHfPart("header")).toBe(false);
+    const root = doc.ensureHfPart("header");
+    expect(localName(root.name)).toBe("hdr");
+    expect(doc.hasHfPart("header")).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain("sectPr");
+    expect(xml).toContain("headerReference");
+  });
+
+  it("reuses an existing sectPr rather than adding a second one", () => {
+    const doc = loadDoc(`${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>`);
+    doc.ensureHfPart("footer");
+    const xml = serializeXml(doc.docRoot);
+    expect(xml.match(/<w:sectPr/g)?.length).toBe(1);
+    expect(xml).toContain("footerReference");
+  });
+
+  it("is idempotent: a second call returns the same part", () => {
+    const doc = loadDoc(body);
+    const first = doc.ensureHfPart("header");
+    expect(doc.ensureHfPart("header")).toBe(first);
+    expect(serializeXml(doc.docRoot).match(/headerReference/g)?.length).toBe(1);
+  });
+});
+
+describe("moveMath part boundaries", () => {
+  // Each editable root declares xmlns:m for itself, so an equation carried
+  // into a part that never declared it would be invalid OOXML — and in a room
+  // every replica would generate the same invalid bytes. Refused at the
+  // mutation, so the local drag and the replicated moveMath agree by
+  // construction.
+  const bodyWithMath = `<w:p><w:r><w:t xml:space="preserve">body text</w:t></w:r><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath></w:p>`;
+
+  function docWithHeader() {
+    const doc = loadDoc(bodyWithMath);
+    doc.ensureHfPart("header");
+    return doc;
+  }
+  const findMath = (doc: DocxDocument): XmlElement => {
+    const walk = (e: XmlElement): XmlElement | null =>
+      localName(e.name) === "oMath" ? e : e.children.reduce<XmlElement | null>((a, c) => a ?? walk(c), null);
+    return walk(doc.docRoot)!;
+  };
+  const firstTextIn = (root: XmlElement): XmlElement => {
+    const walk = (e: XmlElement): XmlElement | null =>
+      localName(e.name) === "t" ? e : e.children.reduce<XmlElement | null>((a, c) => a ?? walk(c), null);
+    return walk(root)!;
+  };
+
+  it("moves within the same part", () => {
+    const doc = docWithHeader();
+    const math = findMath(doc);
+    const bodyT = firstTextIn(doc.docRoot);
+    expect(moveMath(doc, math, bodyT, 0)).toBe(true);
+  });
+
+  it("refuses a move from the body into a header part", () => {
+    const doc = docWithHeader();
+    const math = findMath(doc);
+    const hdr = doc.editableRoots().find((r) => localName(r.name) === "hdr")!;
+    const before = serializeXml(doc.docRoot);
+    expect(moveMath(doc, math, firstTextIn(hdr), 0)).toBe(false);
+    expect(serializeXml(doc.docRoot)).toBe(before);
+    expect(serializeXml(hdr)).not.toContain("oMath");
+  });
+});
+
+describe("pending media round-trip (plan doc 16 §6)", () => {
+  // The rule: a relationship pointing at a media part that is ABSENT from the
+  // package is a HOLE, not corruption — that is exactly the shape a document
+  // carrying out-of-band media saves and reloads as. Only half of this was
+  // built (registerPendingImage); the parse side derived nothing, so a
+  // reloaded replica had a dangling rel and the renderer drew nothing at all.
+  const body = `<w:p><w:r><w:t xml:space="preserve">text</w:t></w:r></w:p>`;
+
+  it("registers a part with no bytes and reports it pending", () => {
+    const doc = loadDoc(body);
+    const relId = doc.registerPendingImage("a".repeat(64), "png");
+    expect(relId).toBeTruthy();
+    const part = [...doc.pendingMedia.keys()][0];
+    expect(part).toMatch(/^word\/media\//);
+    expect(doc.mediaStatus(part)).toBe("pending");
+    // The zip entry must be ABSENT — absence is the unambiguous hole.
+    expect(doc.pkg.names()).not.toContain(part);
+  });
+
+  it("survives save() and reload as a pending part, not an error", () => {
+    const doc = loadDoc(body);
+    doc.registerPendingImage("b".repeat(64), "png");
+    const part = [...doc.pendingMedia.keys()][0];
+
+    const back = DocxDocument.load(doc.save());
+    expect([...back.pendingMedia.keys()]).toEqual([part]);
+    expect(back.mediaStatus(part)).toBe("pending");
+    // The declared address is NOT recoverable from the package (it lives in
+    // the sequenced intent), so a derived hole carries an empty sha — the
+    // signal that there is nothing to fetch. See the arc's late-join note.
+    expect(back.pendingMedia.get(part)!.sha).toBe("");
+  });
+
+  it("installing bytes clears the pending state", () => {
+    const doc = loadDoc(body);
+    doc.registerPendingImage("c".repeat(64), "png");
+    const part = [...doc.pendingMedia.keys()][0];
+    const pixels = new Uint8Array([1, 2, 3, 4]);
+    expect(doc.installMedia(part, pixels)).toBe(true);
+    expect(doc.mediaStatus(part)).toBe("ready");
+    expect(doc.pendingMedia.has(part)).toBe(false);
+    expect(doc.media(part)).toEqual(pixels);
+    // The metadata PERSISTS after install — holder duty needs it to answer
+    // re-supply requests for a part it already filled.
+    expect(doc.mediaMeta.get(part)!.sha).toBe("c".repeat(64));
   });
 });

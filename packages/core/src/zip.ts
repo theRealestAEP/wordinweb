@@ -1,5 +1,11 @@
 import { unzipSync, strFromU8 } from "fflate";
 
+/** Fixed mtime for every zip entry we write (2020-01-01T00:00:00Z). Without
+ * it fflate stamps `new Date()` at 2-second DOS granularity, so two save()
+ * calls straddling a boundary differ in bytes — breaking byte-identity
+ * checks (docHash self-heal, checkpoint dedup, byte-compare tests). B11. */
+export const FIXED_ZIP_MTIME = new Date(1577836800000);
+
 /** Decompression-bomb guards (plan doc 11, security F4): a crafted .docx must
  * not exhaust memory via a huge uncompressed payload or a vast number of
  * entries. Generous for real documents. */

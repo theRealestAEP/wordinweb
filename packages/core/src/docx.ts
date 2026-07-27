@@ -1,4 +1,4 @@
-import { Package } from "./zip.js";
+import { Package, FIXED_ZIP_MTIME } from "./zip.js";
 import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName, cyrb53 } from "./xml.js";
 import { strToU8, zipSync } from "fflate";
 import { pxToTwips, twipsToPx } from "./units.js";
@@ -270,6 +270,21 @@ export class DocxDocument {
     if (commentsExtRoot) {
       this.commentsExtPart = docDir + "commentsExtended.xml";
       this.commentsExtRoot = commentsExtRoot;
+    }
+
+    // PENDING MEDIA ROUND-TRIP (plan doc 16 §6): an image relationship whose
+    // target is absent from the package is a HOLE, not corruption — that is
+    // exactly the shape a document carrying out-of-band media saves and
+    // reloads as. Deriving it here is what lets a reloaded (or newly joined)
+    // replica render a skeleton in the reserved box instead of silently
+    // nothing. The declared sha is NOT recoverable from the package — it
+    // lives in the sequenced intent — so the address is left empty and the
+    // transfer layer treats such a part as unfetchable-but-known.
+    for (const rel of this.documentRels.values()) {
+      if (rel.type !== "image" && !rel.type.endsWith("/image")) continue;
+      if (rel.external || this.pkg.binary(rel.target)) continue;
+      this.pendingMedia.set(rel.target, { sha: "" });
+      this.mediaMeta.set(rel.target, { sha: "" });
     }
 
     // Collect header/footer parts referenced from the document rels.
@@ -603,6 +618,66 @@ export class DocxDocument {
     return parsed ? { before: parsed[0], after: parsed[1] } : null;
   }
 
+  /**
+   * The parsed body-story block list holding the paragraph parsed from
+   * `source`, and its index in it — searching sections and, recursively,
+   * table cells. Null when the model doesn't hold that paragraph (it lives in
+   * a header/footer/footnote part, or the model predates its creation), which
+   * is every targeted-reparse helper's signal to fall back to a full
+   * refresh(). Shared by those helpers and by paragraphBySource.
+   */
+  private locateParagraph(source: XmlElement): { blocks: Block[]; index: number } | null {
+    // Memoized so a targeted reparse costs the paragraph rather than a scan of
+    // every block in the document (perf B9 — this runs twice per edit). Two
+    // guards make a stale entry impossible to use: the model VERSION, because
+    // refresh() is the only thing that replaces these block-list arrays and a
+    // remembered array would otherwise be a detached list a reparse could
+    // splice into invisibly; and the paragraph at the remembered index, which
+    // catches the index shifting under an insert or delete.
+    const hit = this._paraLoc.get(source);
+    if (hit && hit.version === this._modelVersion) {
+      const block = hit.blocks[hit.index];
+      if (block && block.type === "paragraph" && block.src === source) {
+        return { blocks: hit.blocks, index: hit.index };
+      }
+    }
+    const search = (blocks: Block[]): { blocks: Block[]; index: number } | null => {
+      const index = blocks.findIndex((block) => block.type === "paragraph" && block.src === source);
+      if (index >= 0) return { blocks, index };
+      for (const block of blocks) {
+        if (block.type !== "table") continue;
+        for (const row of block.rows) {
+          for (const cell of row.cells) {
+            const found = search(cell.blocks);
+            if (found) return found;
+          }
+        }
+      }
+      return null;
+    };
+    for (const section of this.sections) {
+      const found = search(section.blocks);
+      if (found) {
+        this._paraLoc.set(source, { ...found, version: this._modelVersion });
+        return found;
+      }
+    }
+    return null;
+  }
+
+  private _paraLoc = new WeakMap<XmlElement, { blocks: Block[]; index: number; version: number }>();
+
+  /** The parsed Paragraph for a retained w:p in the body story (table cells
+   * included), or null when the model doesn't hold it. Lets a caller that
+   * already knows which paragraph an edit addresses reach that paragraph's
+   * runs without walking the whole model. */
+  paragraphBySource(source: XmlElement): Paragraph | null {
+    const at = this.locateParagraph(source);
+    if (!at) return null;
+    const block = at.blocks[at.index];
+    return block.type === "paragraph" ? block : null;
+  }
+
   /** Insert a new paragraph immediately before a retained body paragraph
    * without rebuilding the complete document model. Used by Enter at the
    * exact paragraph start, where the existing paragraph itself is unchanged. */
@@ -616,25 +691,7 @@ export class DocxDocument {
     if (referenceIndex < 1 || parent.children[referenceIndex - 1] !== insertedSource) return null;
     if (localName(referenceSource.name) !== "p" || localName(insertedSource.name) !== "p") return null;
 
-    const findBlockList = (blocks: Block[]): { blocks: Block[]; index: number } | null => {
-      const index = blocks.findIndex((block) => block.type === "paragraph" && block.src === referenceSource);
-      if (index >= 0) return { blocks, index };
-      for (const block of blocks) {
-        if (block.type !== "table") continue;
-        for (const row of block.rows) {
-          for (const cell of row.cells) {
-            const found = findBlockList(cell.blocks);
-            if (found) return found;
-          }
-        }
-      }
-      return null;
-    };
-    let location: { blocks: Block[]; index: number } | null = null;
-    for (const section of this.sections) {
-      location = findBlockList(section.blocks);
-      if (location) break;
-    }
+    const location = this.locateParagraph(referenceSource);
     if (!location || location.blocks.some((block) => block.src === insertedSource)) return null;
 
     const paragraph = parseParagraph(insertedSource, {
@@ -665,25 +722,7 @@ export class DocxDocument {
       return null;
     }
 
-    const findBlockList = (blocks: Block[]): { blocks: Block[]; index: number } | null => {
-      const index = blocks.findIndex((block) => block.type === "paragraph" && block.src === beforeSource);
-      if (index >= 0) return { blocks, index };
-      for (const block of blocks) {
-        if (block.type !== "table") continue;
-        for (const row of block.rows) {
-          for (const cell of row.cells) {
-            const found = findBlockList(cell.blocks);
-            if (found) return found;
-          }
-        }
-      }
-      return null;
-    };
-    let location: { blocks: Block[]; index: number } | null = null;
-    for (const section of this.sections) {
-      location = findBlockList(section.blocks);
-      if (location) break;
-    }
+    const location = this.locateParagraph(beforeSource);
     if (!location) return null;
     const { blocks, index: blockIndex } = location;
     if (afterSources.some((source) => blocks.some((block) => block.src === source))) return null;
@@ -726,25 +765,7 @@ export class DocxDocument {
    * leaves its surrounding block list unchanged, such as inserting ink. */
   reparseBodyParagraph(source: XmlElement): Paragraph | null {
     if (localName(source.name) !== "p") return null;
-    const findBlockList = (blocks: Block[]): { blocks: Block[]; index: number } | null => {
-      const index = blocks.findIndex((block) => block.type === "paragraph" && block.src === source);
-      if (index >= 0) return { blocks, index };
-      for (const block of blocks) {
-        if (block.type !== "table") continue;
-        for (const row of block.rows) {
-          for (const cell of row.cells) {
-            const found = findBlockList(cell.blocks);
-            if (found) return found;
-          }
-        }
-      }
-      return null;
-    };
-    let location: { blocks: Block[]; index: number } | null = null;
-    for (const section of this.sections) {
-      location = findBlockList(section.blocks);
-      if (location) break;
-    }
+    const location = this.locateParagraph(source);
     if (!location) return null;
     const old = location.blocks[location.index];
     if (old.type !== "paragraph" || old.sectionBreak) return null;
@@ -1104,6 +1125,22 @@ export class DocxDocument {
    * every sectPr) when the document has none - Word does this implicitly the
    * first time you edit the header area. Returns the part's root.
    */
+  /** Whether the document declares any section properties at all. A blank
+   * minimal document has none; see ensureHfPart. */
+  private hasSectPr(): boolean {
+    const walk = (e: XmlElement): boolean =>
+      localName(e.name) === "sectPr" || e.children.some(walk);
+    return walk(this.docRoot);
+  }
+
+  /** Whether a header (or footer) part already exists — the precondition
+   * `ensureHfPart` tests internally, exposed so a caller can tell a real
+   * creation from a no-op before mutating (the collab apply needs to know
+   * whether an ensureHeaderFooter intent has anything to do). */
+  hasHfPart(kind: "header" | "footer"): boolean {
+    return this.hfParts.some((p) => p.isHeader === (kind === "header"));
+  }
+
   ensureHfPart(kind: "header" | "footer"): XmlElement {
     const isHeader = kind === "header";
     const existing = this.hfParts.find((p2) => p2.isHeader === isHeader);
@@ -1165,6 +1202,18 @@ export class DocxDocument {
       }
     }
     this.hfParts.push({ relId, target, root, isHeader, rels: new Map() });
+    // A minimal document (the blank the demo starts from) has NO sectPr at
+    // all, so the reference walk below had nowhere to put the reference: the
+    // part was created, never referenced, never laid out, and the caller found
+    // no caret target — "the header won't open". Materialize the default body
+    // section first, exactly as setPageLayout/setLineNumbering do for the same
+    // shape of document.
+    const bodyEl = child(this.docRoot, "body");
+    if (bodyEl && !this.hasSectPr()) {
+      const w = bodyEl.name.includes(":") ? bodyEl.name.slice(0, bodyEl.name.indexOf(":") + 1) : "";
+      // Schema: the body's sectPr is its LAST child.
+      bodyEl.children.push({ name: `${w}sectPr`, attrs: {}, children: [], text: "" });
+    }
     // Reference from every sectPr (schema: hf references lead the sectPr).
     const refName = isHeader ? "w:headerReference" : "w:footerReference";
     const addRef = (e: XmlElement): void => {
@@ -1396,22 +1445,65 @@ export class DocxDocument {
     return roots;
   }
 
+  /**
+   * Memoized child→parent links. Nothing invalidates this map — the tree is
+   * spliced constantly — so every answer is RE-DERIVED before it is returned:
+   * the memoized parent must still list the target among its children, and
+   * must still hang off a root (see memoIsLive). A stale entry can then only
+   * cost a cache miss, never a wrong answer.
+   *
+   * Both halves are needed. Containment alone is not proof of a live parent:
+   * a run split for formatting is spliced OUT of its paragraph while its own
+   * `children` array still lists the elements that moved into the replacement
+   * runs, so a containment-only check would hand back the detached run where a
+   * walk from the roots finds the new one.
+   */
+  private _parentMemo = new WeakMap<XmlElement, XmlElement>();
+
+  private memoIsLive(parent: XmlElement, roots: XmlElement[]): boolean {
+    // Walk memoized links up to a root. Bounded because each hop must be a
+    // verified parent link, and a cycle or a gap ends the walk as "not live",
+    // which just falls through to the authoritative tree walk.
+    for (let cur = parent, hops = 0; hops < 128; hops++) {
+      if (roots.includes(cur)) return true;
+      const up = this._parentMemo.get(cur);
+      if (!up || !up.children.includes(cur)) return false;
+      cur = up;
+    }
+    return false;
+  }
+
   findParentOf(target: XmlElement): XmlElement | undefined {
     const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
     if (this.footnotesRoot) roots.push(this.footnotesRoot);
+    const memo = this._parentMemo.get(target);
+    if (memo && memo.children.includes(target) && this.memoIsLive(memo, roots)) return memo;
+    // A miss walks the tree anyway, so record EVERY link the walk passes, not
+    // just the target's: the ops that call this call it several times in a row
+    // (split resolves run → paragraph → parent), and the neighbours are then
+    // free. This is what keeps a structural edit from paying one full-document
+    // walk per lookup (perf B9).
     const walk = (el: XmlElement): XmlElement | undefined => {
       for (const c of el.children) {
+        this._parentMemo.set(c, el);
         if (c === target) return el;
-        const found = walk(c);
-        if (found) return found;
+        const hit = walk(c);
+        if (hit) return hit;
       }
       return undefined;
     };
     for (const root of roots) {
-      const found = walk(root);
-      if (found) return found;
+      const hit = walk(root);
+      if (hit) return hit;
     }
     return undefined;
+  }
+
+  /** Record a parent link the caller just created (a splice), so the next
+   * lookup skips the full-document walk. Advisory only — findParentOf
+   * verifies every memo against the live tree before trusting it. */
+  noteParent(child: XmlElement, parent: XmlElement): void {
+    this._parentMemo.set(child, parent);
   }
 
   /**
@@ -1597,7 +1689,7 @@ export class DocxDocument {
     if (this.settingsDirty) files[this.settingsPart] = strToU8(serializeXml(this.settingsRoot, true));
     if (this.relsRoot) this.writeModeledXml(files, this.relsPath, this.relsRoot);
     if (this.contentTypesRoot) this.writeModeledXml(files, "[Content_Types].xml", this.contentTypesRoot);
-    return zipSync(files);
+    return zipSync(files, { mtime: FIXED_ZIP_MTIME });
   }
 
   /** Fresh unique docPr id for inserted drawings. Seeded once past the
@@ -2004,6 +2096,12 @@ export class DocxDocument {
    */
   readonly pendingMedia = new Map<string, { sha: string; iv?: string; genesisId?: string }>();
 
+  /** DISPLAY-ONLY transfer state for a pending part (doc 16 §5.2 step 4), so
+   * the skeleton can say "fetching" versus "nobody online has this yet".
+   * Written by the media transfer layer, read by the renderer; never part of
+   * the document's identity and never serialized. */
+  readonly mediaTransferState = new Map<string, "fetching" | "waiting" | "unavailable">();
+
   /** Per-part media metadata that PERSISTS after install (doc 16 §5.3):
    * holder duty needs the sha (and E2EE iv/epoch) of READY parts to answer
    * re-supply requests; pendingMedia above only tracks not-yet-arrived. */
@@ -2044,6 +2142,15 @@ export class DocxDocument {
     if (!this.pendingMedia.has(part) && this.pkg.binary(part)) return false; // already ready
     this.pkg.raw()[part] = bytes;
     this.pendingMedia.delete(part);
+    // Arriving bytes change what the page SHOWS without changing the model —
+    // and nothing downstream would otherwise notice. Incremental layout
+    // reuses its pages when the model version is unchanged, and the repaint
+    // differ rebuilds a node only when an ITEM FIELD changes, so the skeleton
+    // painted while the bytes were in flight would stay on screen forever
+    // (observed in a real browser: pixels installed, placeholder still
+    // showing). This bump is what makes "the image finally arrived" a
+    // repaintable event; one image arriving is rare, so it costs nothing.
+    this._modelVersion++;
     return true;
   }
 

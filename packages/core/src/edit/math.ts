@@ -381,6 +381,12 @@ function buildOmml(node: MathNode, m: string): XmlElement {
  * Move an equation to a text position: detach the m:oMath from its
  * paragraph and re-insert it at `offset` inside the w:t `t` (splitting the
  * destination run when the drop lands mid-text).
+ *
+ * CROSS-PART moves are refused. Each editable root declares the `m` namespace
+ * for itself (insertMathAt adds `xmlns:m` to the root it inserts into), so
+ * carrying an equation from the body into a header would land OMML in a part
+ * that never declared the namespace — invalid XML, and in a room every replica
+ * would produce it identically. Same-part only, in both editing modes.
  */
 export function moveMath(doc: DocxDocument, oMathEl: XmlElement, t: XmlElement, offset: number): boolean {
   const curParent = doc.findParentOf(oMathEl);
@@ -388,6 +394,10 @@ export function moveMath(doc: DocxDocument, oMathEl: XmlElement, t: XmlElement, 
   const pEl = rEl && doc.findParentOf(rEl);
   if (!curParent || !rEl || !pEl || localName(rEl.name) !== "r") return false;
   if (rEl === oMathEl || curParent === oMathEl) return false;
+  const holds = (root: XmlElement, needle: XmlElement): boolean =>
+    root === needle || root.children.some((c) => holds(c, needle));
+  const roots = doc.editableRoots();
+  if (roots.find((r) => holds(r, oMathEl)) !== roots.find((r) => holds(r, t))) return false;
   curParent.children.splice(curParent.children.indexOf(oMathEl), 1);
   const rw = rEl.name.includes(":") ? rEl.name.slice(0, rEl.name.indexOf(":") + 1) : "";
   const rIdx = pEl.children.indexOf(rEl);

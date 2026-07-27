@@ -148,6 +148,14 @@ export function applySplitParagraph(
   };
   const pIdx = pParent.children.indexOf(pEl);
   pParent.children.splice(pIdx + 1, 0, newP);
+  // Hand the tree's new links to the parent memo. Enter at the end of the
+  // document is the seeding shape (each split addresses the paragraph the
+  // previous one created), and without this every one of those splits pays a
+  // full-document walk to rediscover what we just spliced (perf B9).
+  doc.noteParent(newP, pParent);
+  doc.noteParent(afterRun, newP);
+  doc.noteParent(afterT, afterRun);
+  for (const child of moved) doc.noteParent(child, newP);
 
   // Suggesting mode: the split introduces a new paragraph mark at the end of
   // the FIRST paragraph — record it as an inserted glyph (pPr/rPr/w:ins).
