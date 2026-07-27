@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, type CollabSession, type DocBundle } from "wordinweb/collab";
 import { reviveEncrypted } from "./e2ee-flows";
+import { PerfHud } from "./perf/hud";
+import { perfMonitor, type DocStats } from "./perf/metrics";
 
 /**
  * The zero-custody demo app (plan doc 12): everything around the editor —
@@ -22,7 +24,7 @@ function b64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }: {
+export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, initialShareCode, onNewDocument }: {
   url: string;
   httpBase: string;
   docId: string;
@@ -34,6 +36,13 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
   /** Owner capability (doc 14 §2.5): held by the doc's creator; unlocks
    * the admin controls below. Never in the shared link. */
   ownerToken?: string;
+  /** Share code already known on THIS device (the creator's own code, or a
+   * joiner's previously-entered one). Seeds the join so a code-gated doc
+   * connects without re-prompting. Never comes from the shared link. */
+  initialShareCode?: string;
+  /** Leave this document and start a fresh one — the "I forgot the code"
+   * escape (a code-locked session can't be entered, but a new one can). */
+  onNewDocument?: () => void;
 }) {
   const store = useMemo(() => new IndexedDbBundleStore(), []);
   const [session, setSession] = useState<CollabSession | null>(null);
@@ -59,6 +68,21 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
             for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
             return btoa(bin);
           },
+          // Live perf snapshot (null unless the perf HUD is open) — lets the
+          // stress suite log the same numbers the HUD shows.
+          perf: () => perfMonitor.snapshot(),
+          // Times the connection self-healed a drifted optimistic replica
+          // (B6a catch-and-resync) — the swarm harness reads this to tell
+          // "drifted then healed" from "still drifted".
+          selfHeals: () => session.selfHeals,
+          // Submits the connection dropped because it was not ready (B13).
+          // Should always read 0 — the editor is gated on `ready`, so a
+          // non-zero value means edits are being lost before the wire.
+          droppedPreReady: () => session.droppedPreReady,
+          // Submits lost when their seal/send threw (B13 family). With
+          // droppedPreReady this partitions edit loss: refused-before-applied
+          // vs applied-then-lost-on-the-way-out.
+          sendFailures: () => session.sendFailures,
           // Concatenated text (readable diffs on failure).
           text: () => {
             if (!session.doc) return "";
@@ -69,12 +93,27 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
         }
       : null;
   }, [session]);
+  // Document facts for the perf HUD: a paragraph COUNT and the serialized
+  // byte length — never text. Called at most every 2s, on idle (see metrics.ts).
+  const docStats = useCallback((): DocStats | null => {
+    const doc = session?.doc;
+    if (!doc) return null;
+    let paragraphs = 0;
+    const count = (el: { name: string; children: unknown[] }): void => {
+      if (el.name === "w:p") paragraphs++;
+      for (const c of el.children as { name: string; children: unknown[] }[]) count(c);
+    };
+    count(doc.docRoot as never);
+    return { paragraphs, bytes: doc.save().byteLength };
+  }, [session]);
   const [takeover, setTakeover] = useState(false);
   const [reviveState, setReviveState] = useState<"idle" | "reviving" | "no-copy">("idle");
-  // Share code (doc 13 §7): entered on a code-required/invalid refusal;
-  // remounting with it retries (and in E2EE mode mixes into key derivation).
-  const [shareCode, setShareCode] = useState<string | undefined>(undefined);
-  const [codeDraft, setCodeDraft] = useState("");
+  // Share code (doc 13 §7): seeded from this device's known code (creator's own,
+  // or a previously-entered one) so a code-gated join doesn't re-prompt; also
+  // entered on a code-required/invalid refusal. Remounting with it retries (and
+  // in E2EE mode mixes into key derivation).
+  const [shareCode, setShareCode] = useState<string | undefined>(() => initialShareCode);
+  const [codeDraft, setCodeDraft] = useState(initialShareCode ?? "");
   const [readOnly, setReadOnly] = useState(false);
   const isOwner = !!ownerToken;
   // Remount key: bumps to retry the connection after takeover/revival.
@@ -188,10 +227,33 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
           />{" "}
           <button
             disabled={!codeDraft || reason === "code-locked"}
-            onClick={() => { setShareCode(codeDraft); setAttempt((a) => a + 1); }}
+            onClick={() => {
+              // Remember it on this device so a reload doesn't re-prompt (a
+              // wrong code just gets refused again and overwritten next try).
+              try { localStorage.setItem(`wordinweb-code-${docId}`, codeDraft); } catch { /* private mode */ }
+              setShareCode(codeDraft);
+              setAttempt((a) => a + 1);
+            }}
           >
             Join
           </button>
+          {onNewDocument && (
+            <p style={{ marginTop: 8, fontSize: 13 }}>
+              Forgot the code?{" "}
+              <button data-testid="refused-new-document" onClick={onNewDocument}>Start a new document</button>
+            </p>
+          )}
+        </div>
+      );
+    }
+    if (reason === "room-full") {
+      return <p>This document already has the maximum number of participants (10). Ask someone to leave, then refresh.</p>;
+    }
+    if (reason === "engine-version-mismatch" || reason === "engine-version-required") {
+      return (
+        <div>
+          <p>This tab is running a different version of the editor than the session — joining would silently corrupt the document.</p>
+          <button data-testid="refused-reload" onClick={() => window.location.reload()}>Reload this tab</button>
         </div>
       );
     }
@@ -238,6 +300,23 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
                 Too many to suggest cleanly — <button onClick={() => session.reconcile("draft")}>keep as a draft</button>.
               </>
             )}
+          </span>
+        ) : (session?.persistErrors ?? 0) > 0 ? (
+          // DATA-LOSS WARNING, deliberately ahead of the other banners. This
+          // browser's stored bundle IS the durable copy (doc 12 §4) — the
+          // server keeps nothing — so a failed write means the document may
+          // exist nowhere but this tab's memory. Quota exceeded, private
+          // mode, or storage blocked all land here. The download button
+          // beside this banner is the escape hatch, which is why the copy
+          // points at it rather than just apologising.
+          <span data-testid="persist-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
+            This document may not be saved in this browser — download a copy.
+          </span>
+        ) : session?.readOnlyBlocked ? (
+          // Owner lock (doc 14 §2.5): per-edit refusal, NOT a dead session —
+          // the doc stays live and readable; edits resume when the owner lifts.
+          <span data-testid="readonly-banner" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            The owner made this document read-only — you can read along; edits are paused.
           </span>
         ) : session?.epochChanged ? (
           <span style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
@@ -295,12 +374,18 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken }
           docKey={docKey}
           shareCode={shareCode}
           ownerToken={ownerToken}
+          // Media relay origin (doc 16 §3) — the same server the socket
+          // points at. Image bytes ride these HTTP routes, never the
+          // sequencer; without it the image button stays inert.
+          httpBase={httpBase}
           profile={{ name, color: "" /* server assigns a palette color */ }}
           onSession={setSession}
           refusedContent={refusedContent}
           editable
         />
       </div>
+      {/* Dev perf menu (Ctrl+Shift+P / ?perf=1) — inert until opened. */}
+      <PerfHud clientId={clientId} docStats={docStats} />
     </div>
   );
 }

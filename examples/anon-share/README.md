@@ -53,7 +53,7 @@ npm run server
 npm run dev
 ```
 
-Vite prints a `http://localhost:5173/` (or next free port) URL. Open it, click
+Vite prints a `http://localhost:5817/` (or next free port) URL. Open it, click
 **New document** — the page adopts an unguessable `?doc=<id>` URL (the
 magic-link capability). **Copy that URL into a second browser tab** (or send it
 to a friend) and type in either: edits and cursors sync live between tabs.

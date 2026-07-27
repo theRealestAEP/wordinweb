@@ -76,6 +76,7 @@ export function LocalEditor({
         <span className="hint">Editing locally — nothing leaves your browser until you share it.</span>
         <span style={{ flex: 1 }} />
         <input
+          data-testid="share-code"
           value={code}
           placeholder="share code (optional)"
           maxLength={12}

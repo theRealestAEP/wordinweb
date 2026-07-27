@@ -5,12 +5,13 @@ import {
   stretchShareCode,
   bytesToB64,
   docHash,
+  mediaAddressesOf,
   type DocBundle,
 } from "wordinweb/collab";
 import { DocxDocument } from "wordinweb";
 
 /**
- * The demo's encrypted go-live / bring-it-back flows (plan doc 13). Both
+ * The demo's encrypted go-live / bring-it-back flows. Both
  * seal CLIENT-side — the server cannot (it has no keys) — and both use PUT
  * with a CLIENT-minted docId: the checkpoint AAD binds the docId, so the id
  * must exist before sealing (same reason the epoch id is client-minted in
@@ -40,6 +41,11 @@ async function sealSeed(
     docx: bytesToB64(docx),
     sidecar,
     docHash: await docHash(doc as never), // duplicate d.ts identities across entries; same runtime class
+    // Doc 16 §6 late-join: carry the addresses of any media the seeded
+    // document already registers, so joiners can fetch bytes the seed bytes
+    // themselves may not contain (a revival's bundle can hold registrations
+    // whose pixels only participants have).
+    mediaMeta: mediaAddressesOf(doc as never),
   });
   const codeVerifier = stretched ? btoa(String.fromCharCode(...stretched)) : undefined;
   const res = await fetch(`${httpBase}/docs/${docId}`, {
