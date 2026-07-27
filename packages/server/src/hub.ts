@@ -1,8 +1,9 @@
 import { DocxDocument } from "@wordinweb/core";
 import { DocumentSession, type IdSidecar, type ParticipantProfile } from "@wordinweb/collab/server";
 import type { EnvelopeEntry, SealedCheckpoint, IntentEnvelope, LineageHead } from "@wordinweb/collab/server";
-import { ClientMessage, ServerMessage, PROTOCOL_VERSION } from "@wordinweb/collab/server";
+import { ClientMessage, ServerMessage, PROTOCOL_VERSION, sanitizePresencePosition, type PresencePosition } from "@wordinweb/collab/server";
 import { StorageDriver } from "./storage.js";
+import { type Observability, NO_OP_OBSERVABILITY } from "./observability.js";
 
 /**
  * A connection the hub can send to, abstracting the transport (WebSocket in
@@ -176,7 +177,62 @@ export class CollabHub {
     /** Injectable epoch-id generator (fresh 128-bit hex per seed). Injected
      * in tests for determinism; production default uses crypto randomness. */
     private genGenesisId: () => string = defaultGenesisId,
+    /** Passive observability sink (counters/events). Constructor-injected
+     * with a no-op default so it never changes behavior and tests can assert
+     * on it, mirroring the clock/provider pattern above. Records shapes and
+     * counts only — never content (zero-custody). */
+    private obs: Observability = NO_OP_OBSERVABILITY,
   ) {}
+
+  /** Send a refusal and tally it by reason (the one place `{t:"refused"}` is
+   * emitted outside `kick`), so the refused-by-reason counter always tracks
+   * the wire exactly. Behavior is byte-identical to sending the frame inline. */
+  private refuse(conn: Connection, reason: string): void {
+    conn.send({ t: "refused", reason });
+    this.obs.refused(reason);
+  }
+
+  /** Refuse an intent in a submit/submit-enc handler: same as {@link refuse}
+   * plus the submits-rejected tally. (Token-expiry cuts go through `kick` and
+   * count as session cuts, not submit rejections.) */
+  private refuseSubmit(conn: Connection, reason: string): void {
+    this.refuse(conn, reason);
+    this.obs.submitRejected();
+  }
+
+  /** Per-connection submit token bucket (flood guard, perf B10): generous
+   * for humans (fast typing ≈ 10 ops/s) AND for well-behaved ack-paced
+   * bulk clients, but caps a pathological flooder. Tuned an order of
+   * magnitude above humans and ABOVE the fastest legitimate ack-paced
+   * client (post-scoped-resync seeding sustains ~210 ops/s locally) —
+   * re-measure after every perf arc; every legit-client speedup so far
+   * has re-tripped a cap tuned to the previous generation (25 → 80 →
+   * 400). A rate-limited submit is NOT sequenced and the refusal is
+   * NON-FATAL by contract: honest clients keep the op pending and
+   * re-drive the whole queue after backoff — no lost work. */
+  private buckets = new Map<string, { tokens: number; last: number }>();
+  private static RATE_PER_SEC = 400;
+  private static BURST = 800;
+  /** Room participant cap (live sockets, distinct clientIds). Refusal
+   * reason "room-full"; reconnect/takeover of an in-room identity is
+   * exempt. 10 for now per owner decision — raise deliberately, with the
+   * swarm suite re-run at the new number first. WW_ROOM_CAP env override
+   * exists for the stress harnesses (scripts/swarm.mjs drives up to 30
+   * clients into one room), NOT for production tuning. */
+  private static MAX_ROOM_CLIENTS = Number(process.env.WW_ROOM_CAP ?? 10) || 10;
+  private rateLimited(connId: string): boolean {
+    const now = this.now();
+    let b = this.buckets.get(connId);
+    if (!b) {
+      b = { tokens: CollabHub.BURST, last: now };
+      this.buckets.set(connId, b);
+    }
+    b.tokens = Math.min(CollabHub.BURST, b.tokens + ((now - b.last) / 1000) * CollabHub.RATE_PER_SEC);
+    b.last = now;
+    if (b.tokens < 1) return true;
+    b.tokens -= 1;
+    return false;
+  }
 
   /** True if the connection's token has expired (live-socket enforcement). */
   private expired(connId: string): boolean {
@@ -184,9 +240,14 @@ export class CollabHub {
     return a?.expiresAt !== undefined && a.expiresAt <= this.now();
   }
 
-  /** Force-disconnect a connection with a refusal (expiry/revocation). */
+  /** Force-disconnect a connection with a refusal (expiry/revocation). A kick
+   * sends a refusal frame, so it tallies BOTH the kick-by-reason and the
+   * refused-by-reason counter — a `taken-over` kick shows up in each, which
+   * is the single-tab regression signal. */
   private kick(conn: Connection, reason: string): void {
     conn.send({ t: "refused", reason });
+    this.obs.kicked(reason);
+    this.obs.refused(reason);
     this.disconnect(conn);
   }
 
@@ -220,19 +281,19 @@ export class CollabHub {
     switch (msg.t) {
       case "hello": {
         if (msg.protocolVersion !== PROTOCOL_VERSION) {
-          conn.send({ t: "refused", reason: "version-mismatch" });
+          this.refuse(conn, "version-mismatch");
           return;
         }
         if (!msg.clientId) {
           // The bound identity is not optional — every security property
           // downstream (dedup, attribution, single-tab) hangs off it.
-          conn.send({ t: "refused", reason: "client-id-required" });
+          this.refuse(conn, "client-id-required");
           return;
         }
         if (this.verifier) {
           const authed = this.verifier.verify(msg.token, msg.docId);
           if (!authed) {
-            conn.send({ t: "refused", reason: "unauthorized" });
+            this.refuse(conn, "unauthorized");
             return;
           }
           this.auth.set(conn.id, authed);
@@ -248,8 +309,26 @@ export class CollabHub {
         if (holder && holder.id !== conn.id) {
           if (msg.takeover) this.kick(holder, "taken-over");
           else {
-            conn.send({ t: "refused", reason: "already-open" });
+            this.refuse(conn, "already-open");
             return;
+          }
+        }
+        // Room capacity (owner decision 2026-07-27: "max 10 editors per
+        // document for now"). Counted as LIVE SOCKETS holding a DIFFERENT
+        // clientId — a reconnect/takeover of an identity already in the
+        // room must never be blocked by the cap (the zombie it replaces
+        // may still linger in conns until its close fires).
+        {
+          const existing = this.rooms.get(msg.docId);
+          if (existing) {
+            let others = 0;
+            for (const c of existing.conns) {
+              if (this.connClient.get(c.id) !== msg.clientId) others++;
+            }
+            if (others >= CollabHub.MAX_ROOM_CLIENTS) {
+              this.refuse(conn, "room-full");
+              return;
+            }
           }
         }
         // Share-code gate (doc 13 §7): server-side attempt budget makes a
@@ -262,11 +341,11 @@ export class CollabHub {
           if (guarded?.codeVerifier) {
             const g = (guarded.codeGuard ??= { failures: 0, lockedUntil: 0 });
             if (g.lockedUntil > this.now()) {
-              conn.send({ t: "refused", reason: "code-locked" });
+              this.refuse(conn, "code-locked");
               return;
             }
             if (!msg.codeProof) {
-              conn.send({ t: "refused", reason: "code-required" });
+              this.refuse(conn, "code-required");
               return;
             }
             if (msg.codeProof !== guarded.codeVerifier) {
@@ -275,7 +354,7 @@ export class CollabHub {
                 g.failures = 0;
                 g.lockedUntil = this.now() + 60_000; // 1-min lockout window
               }
-              conn.send({ t: "refused", reason: "code-invalid" });
+              this.refuse(conn, "code-invalid");
               return;
             }
             g.failures = 0; // success resets the budget
@@ -286,7 +365,7 @@ export class CollabHub {
         {
           const r0 = this.rooms.get(msg.docId);
           if (r0?.banned?.has(msg.clientId)) {
-            conn.send({ t: "refused", reason: "kicked" });
+            this.refuse(conn, "kicked");
             return;
           }
           if (r0?.ownerToken && msg.ownerToken === r0.ownerToken) this.ownerConns.add(conn.id);
@@ -297,7 +376,7 @@ export class CollabHub {
         // `no-session`: the client offers "Bring it back live" (doc 12 §5.3)
         // and re-seeds from its own copy.
         if (!this.rooms.has(msg.docId) && !this.provider) {
-          conn.send({ t: "refused", reason: "no-session" });
+          this.refuse(conn, "no-session");
           return;
         }
         // Encrypted rooms enforce the ENGINE fence before admission
@@ -308,11 +387,11 @@ export class CollabHub {
         const encRoom = this.rooms.get(msg.docId)?.enc ?? null;
         if (encRoom) {
           if (!msg.engineVersion) {
-            conn.send({ t: "refused", reason: "engine-version-required" });
+            this.refuse(conn, "engine-version-required");
             return;
           }
           if (encRoom.engineVersion && encRoom.engineVersion !== msg.engineVersion) {
-            conn.send({ t: "refused", reason: "engine-version-mismatch" });
+            this.refuse(conn, "engine-version-mismatch");
             return;
           }
           encRoom.engineVersion = msg.engineVersion;
@@ -323,6 +402,7 @@ export class CollabHub {
         room.emptySince = undefined; // occupied: the eviction clock stops.
         this.connDoc.set(conn.id, msg.docId);
         this.connById.set(conn.id, conn);
+        this.obs.helloAccepted();
         if (room.enc) {
           // Blind welcome (doc 13 §3): sealed seed checkpoint + the WHOLE
           // epoch envelope log after it — base-complete by construction
@@ -365,6 +445,13 @@ export class CollabHub {
           mode: "plaintext", // E2EE mode lands with doc 13 items 1-2.
           lineage: room.lineage,
           mediaNeeded: [...room.media.waiters.keys()],
+          // Late-join media addresses (doc 16 §6): the snapshot registers
+          // the parts but the sha/iv live only in already-folded intents —
+          // without this map a joiner can reserve the box yet never fetch.
+          // Parse-derived holes with unknown sha (sha === "") are omitted.
+          media: [...room.session!.doc.mediaMeta.entries()]
+            .filter(([, m]) => m.sha !== "")
+            .map(([part, m]) => ({ part, sha: m.sha, ...(m.iv ? { iv: m.iv } : {}) })),
         });
         // Roster upsert + fan-out (doc 14 §2): keyed by the BOUND clientId,
         // so a reconnect resumes the same entry. Sanitization is server-side
@@ -380,7 +467,7 @@ export class CollabHub {
       case "admin": {
         const docId = this.connDoc.get(conn.id);
         if (!docId || !this.ownerConns.has(conn.id)) {
-          conn.send({ t: "refused", reason: "not-owner" });
+          this.refuse(conn, "not-owner");
           return;
         }
         const room = this.rooms.get(docId)!;
@@ -412,7 +499,7 @@ export class CollabHub {
       case "submit": {
         const docId = this.connDoc.get(conn.id);
         if (!docId) {
-          conn.send({ t: "refused", reason: "not-joined" });
+          this.refuseSubmit(conn, "not-joined");
           return;
         }
         // Live-socket token-expiry enforcement (gate 5): a session outlives
@@ -421,10 +508,14 @@ export class CollabHub {
           this.kick(conn, "token-expired");
           return;
         }
+        if (this.rateLimited(conn.id)) {
+          this.refuseSubmit(conn, "rate-limit");
+          return;
+        }
         // Role enforcement at the sequencer (doc 06): a viewer's edits are
         // refused, not merely hidden in the UI.
         if (this.verifier && this.auth.get(conn.id)?.role !== "editor") {
-          conn.send({ t: "refused", reason: "read-only" });
+          this.refuseSubmit(conn, "read-only");
           return;
         }
         // Identity binding (doc 11 decision 8): the intent must carry the
@@ -433,7 +524,7 @@ export class CollabHub {
         // sees it, so a forged (clientId, clientSeq) can never enter the
         // dedup set and swallow the victim's real intent.
         if (msg.intent.clientId !== this.connClient.get(conn.id)) {
-          conn.send({ t: "refused", reason: "client-id-mismatch" });
+          this.refuseSubmit(conn, "client-id-mismatch");
           return;
         }
         const room = this.rooms.get(docId)!;
@@ -441,14 +532,14 @@ export class CollabHub {
         // bypasses) and per-clientId demotion — integrity controls a blind
         // server can enforce.
         if ((room.readOnly && !this.ownerConns.has(conn.id)) || room.demoted?.has(msg.intent.clientId)) {
-          conn.send({ t: "refused", reason: "read-only" });
+          this.refuseSubmit(conn, "read-only");
           return;
         }
         if (room.enc) {
           // No mixed-mode documents (doc 13 §6): a plaintext submit into an
           // encrypted room is refused outright — a blind server could not
           // validate it, and honest clients derive mode from their link.
-          conn.send({ t: "refused", reason: "wrong-mode" });
+          this.refuseSubmit(conn, "wrong-mode");
           return;
         }
         const before = room.session!.seq;
@@ -459,42 +550,48 @@ export class CollabHub {
         if (this.storage && entry.seq > before) await this.storage.appendEntries(docId, [entry]);
         const out: ServerMessage = { t: "broadcast", entries: [entry] };
         for (const c of room.conns) c.send(out);
+        this.obs.submitAccepted();
+        this.obs.broadcast();
         return;
       }
       case "submit-enc": {
         const docId = this.connDoc.get(conn.id);
         if (!docId) {
-          conn.send({ t: "refused", reason: "not-joined" });
+          this.refuseSubmit(conn, "not-joined");
           return;
         }
         if (this.expired(conn.id)) {
           this.kick(conn, "token-expired");
           return;
         }
+        if (this.rateLimited(conn.id)) {
+          this.refuseSubmit(conn, "rate-limit");
+          return;
+        }
         if (this.verifier && this.auth.get(conn.id)?.role !== "editor") {
-          conn.send({ t: "refused", reason: "read-only" });
+          this.refuseSubmit(conn, "read-only");
           return;
         }
         // Identity binding applies identically in encrypted mode — the
         // bookkeeping is plaintext precisely so the server can enforce it
         // (doc 13 §2 precondition #1).
         if (msg.envelope.clientId !== this.connClient.get(conn.id)) {
-          conn.send({ t: "refused", reason: "client-id-mismatch" });
+          this.refuseSubmit(conn, "client-id-mismatch");
           return;
         }
         const room = this.rooms.get(docId)!;
         if ((room.readOnly && !this.ownerConns.has(conn.id)) || room.demoted?.has(msg.envelope.clientId)) {
-          conn.send({ t: "refused", reason: "read-only" });
+          this.refuseSubmit(conn, "read-only");
           return;
         }
         if (!room.enc) {
-          conn.send({ t: "refused", reason: "wrong-mode" });
+          this.refuseSubmit(conn, "wrong-mode");
           return;
         }
         // Ciphertext size cap (doc 13 §2: one of the few things a blind
         // server CAN enforce). 256 KB covers any real intent incl. paste.
         if (msg.envelope.ciphertext.length > 256 * 1024) {
-          conn.send({ t: "refused", reason: "too-large" });
+          this.refuseSubmit(conn, "too-large");
           return;
         }
         // Stale-base guard (pairs with quiescent checkpoints): an envelope
@@ -504,22 +601,55 @@ export class CollabHub {
         // checkpoint and resubmits rebased with the SAME (clientId,
         // clientSeq), so dedup semantics are unchanged.
         if (msg.envelope.base < room.enc.checkpoint.seq) {
-          conn.send({ t: "refused", reason: "stale-base" });
+          this.refuseSubmit(conn, "stale-base");
           return;
         }
         // Dedup by plaintext bookkeeping; re-sends return the prior entry.
         const key = `${msg.envelope.clientId}:${msg.envelope.clientSeq}`;
-        let entry = room.enc.seen.has(key)
-          ? room.enc.log.find((e) => `${e.clientId}:${e.clientSeq}` === key)
-          : undefined;
+        let entry: EnvelopeEntry | undefined;
+        if (room.enc.seen.has(key)) {
+          entry = room.enc.log.find((e) => `${e.clientId}:${e.clientSeq}` === key);
+          if (!entry) {
+            // PRUNED KEY: `seen` outlives the log (a checkpoint adoption bakes
+            // entries into the sealed bytes and drops them), so a resubmit of an
+            // already-sequenced (clientId, clientSeq) at a base >= checkpoint.seq
+            // clears the stale-base guard and finds NOTHING to return. Minting a
+            // fresh seq here would put the same key on the wire under TWO seqs,
+            // and every honest mirror — which re-derives seqs in arrival order
+            // and dedups by the same key — hard-refuses `sequence-desync`, i.e.
+            // one client's malformed resend takes down the whole room. So treat
+            // it as what it is: already sequenced. Idempotent no-op, no seq, no
+            // fan-out. That is exactly the normal-duplicate outcome minus the
+            // wire traffic: a re-broadcast of the prior entry is a dedup no-op at
+            // every mirror anyway, and this entry is already baked into the
+            // checkpoint every participant holds. No honest client is left
+            // waiting on an echo either — claiming base >= checkpoint.seq means
+            // it has confirmed everything up to and including its own pruned
+            // entry, so it cannot still hold that intent pending.
+            this.obs.submitRejected(); // not sequenced; no `refused` frame to tally
+            return;
+          }
+        }
         if (!entry) {
           room.enc.seen.add(key);
-          const seq = room.enc.log.length === 0 ? 1 : room.enc.log[room.enc.log.length - 1].seq + 1;
+          // Continue numbering from the log head, or — when the log has been
+          // pruned by an adopted checkpoint (log empty, checkpoint.seq > 0) —
+          // from the checkpoint seq. Resetting to 1 here was a crash bug: after
+          // the first checkpoint every client's mirror expects checkpoint.seq+1,
+          // so a seq of 1 fails the mirror's `entry.seq === env.seq` check and
+          // hard-refuses ALL clients with `sequence-desync` (fires ~CHECKPOINT_
+          // EVERY edits into any session, right after a quiescent pause).
+          const seq =
+            room.enc.log.length === 0
+              ? room.enc.checkpoint.seq + 1
+              : room.enc.log[room.enc.log.length - 1].seq + 1;
           entry = { ...msg.envelope, seq };
           room.enc.log.push(entry);
         }
         const outEnc: ServerMessage = { t: "broadcast-enc", entries: [entry] };
         for (const c of room.conns) c.send(outEnc);
+        this.obs.submitAccepted();
+        this.obs.broadcast();
         return;
       }
       case "checkpoint": {
@@ -612,10 +742,26 @@ export class CollabHub {
         // `participant` is the sender's BOUND clientId (round-4 F14), not the
         // socket id: it joins presence to the identity intents carry (roster,
         // attribution) and survives the sender reconnecting on a new socket.
+        // Structural clamp at the relay: presence now carries selection
+        // ranges, and a hostile sender could otherwise spend every peer's
+        // bandwidth on an unbounded payload (clients sanitize too, but the
+        // fan-out multiplier lives HERE).
         const out: ServerMessage = {
           t: "presence",
           participant: this.connClient.get(conn.id)!,
-          position: msg.position,
+          position:
+            msg.position === null
+              ? null
+              // Encrypted rooms (doc 13/#20): the payload is a SEALED blob the
+              // server cannot parse — and must not touch. Do not rely on the
+              // sanitizer's early-return happening to pass blobs through: any
+              // future hardening of it would silently corrupt sealed presence
+              // ("remote carets vanish in encrypted rooms only"). The
+              // client-side sanitizer runs after decryption, where the
+              // coordinates actually exist.
+              : room.enc
+                ? msg.position
+                : sanitizePresencePosition(msg.position as PresencePosition),
         };
         for (const c of room.conns) if (c.id !== conn.id) c.send(out);
         return;
@@ -628,6 +774,7 @@ export class CollabHub {
   disconnect(conn: Connection): void {
     const docId = this.connDoc.get(conn.id);
     const clientId = this.connClient.get(conn.id); // read BEFORE the deletes below
+    this.buckets.delete(conn.id);
     this.connDoc.delete(conn.id);
     this.auth.delete(conn.id);
     this.connById.delete(conn.id);
@@ -680,6 +827,7 @@ export class CollabHub {
     }));
     const out: ServerMessage = { t: "roster", roster };
     for (const c of room.conns) c.send(out);
+    this.obs.rosterObserved(room.roster.size);
   }
 
   /** The live connection currently bound to (docId, clientId), if any —
@@ -724,6 +872,7 @@ export class CollabHub {
       room.media.resupply.delete(sha);
       room.media.blobs.get(sha)!.staged = false; // re-supplied ⇒ referenced
     }
+    this.obs.mediaUp();
     return 201;
   }
 
@@ -737,6 +886,7 @@ export class CollabHub {
     if (!room || !blob) return null;
     blob.staged = false;
     blob.lastDownloadAt = this.now();
+    this.obs.mediaDown();
     return blob.bytes;
   }
 
@@ -799,6 +949,7 @@ export class CollabHub {
       if (room.conns.size === 0 && room.emptySince !== undefined && this.now() - room.emptySince >= graceMs) {
         this.rooms.delete(docId);
         evicted.push(docId);
+        this.obs.roomEvicted();
       }
     }
     return evicted;
@@ -854,6 +1005,7 @@ export class CollabHub {
       media: emptyMedia(),
     };
     this.rooms.set(docId, room);
+    this.obs.roomCreated();
     return { ok: true, genesisId: room.genesisId, ownerToken: room.ownerToken! };
   }
 
@@ -889,6 +1041,7 @@ export class CollabHub {
       media: emptyMedia(),
     };
     this.rooms.set(docId, room);
+    this.obs.roomCreated();
     return { ok: true, genesisId, ownerToken: room.ownerToken! };
   }
 
@@ -898,6 +1051,7 @@ export class CollabHub {
       const session = await this.startSession(docId);
       room = { session, enc: null, conns: new Set(), genesisId: this.genGenesisId(), roster: new Map(), media: emptyMedia() };
       this.rooms.set(docId, room);
+      this.obs.roomCreated();
     }
     return room;
   }

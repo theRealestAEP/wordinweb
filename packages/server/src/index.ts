@@ -14,6 +14,15 @@ export { InMemoryStorage, type StorageDriver } from "./storage.js";
 export { blankDocxBytes, blankProvider } from "./blank.js";
 export { startDevServer, startZeroCustodyServer } from "./cli.js";
 export {
+  MetricsObservability,
+  NO_OP_OBSERVABILITY,
+  createObservability,
+  observabilityEnabled,
+  type Observability,
+  type ObsSnapshot,
+  type ObservabilityOptions,
+} from "./observability.js";
+export {
   makeDocId,
   PartyPool,
   RateLimiter,

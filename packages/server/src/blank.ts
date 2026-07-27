@@ -1,4 +1,5 @@
 import { zipSync, strToU8 } from "fflate";
+import { FIXED_ZIP_MTIME } from "@wordinweb/core";
 import type { DocProvider } from "./hub.js";
 
 /** The minimal valid .docx: one empty paragraph. The demo/dev tier starts
@@ -21,7 +22,7 @@ export function blankDocxBytes(): Uint8Array {
         `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
     ),
     "word/document.xml": strToU8(documentXml),
-  });
+  }, { mtime: FIXED_ZIP_MTIME });
 }
 
 /** DocProvider that starts every document blank. */

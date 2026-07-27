@@ -2,6 +2,7 @@ import { CollabHub } from "./hub.js";
 import { attachWebSocketServer, WsServer } from "./ws.js";
 import { InMemoryStorage } from "./storage.js";
 import { blankProvider } from "./blank.js";
+import { createObservability, observabilityEnabled } from "./observability.js";
 
 /**
  * Zero-config dev server (plan Tier 1: `npx wordinweb server`). Uses blank-doc
@@ -39,6 +40,51 @@ export async function startDevServer(opts: { port?: number } = {}): Promise<{ cl
  * bundle-holding browser re-seeds (doc 12 §2 "the browsers ARE the recovery
  * machinery") — which is why this process needs no volumes and no drain.
  */
+/**
+ * Where log lines go. Default STDERR — one JSON object per line, which any
+ * collector (vector, fluent-bit, journald, `docker logs`) already knows how
+ * to tail, with no vendor coupling anywhere in this codebase.
+ *
+ * WW_LOG_FILE appends to a path instead, for the zero-dependency case where
+ * something ships files rather than streams. DELIBERATELY DUMB: no rotation,
+ * no size cap, no reopen-on-SIGHUP. Rotation is a solved problem owned by
+ * logrotate and every collector on the planet, and a half-implemented
+ * rotator inside an app is how logs get silently truncated. If the file
+ * cannot be opened we fall back to stderr and say so — losing logs because
+ * of a bad path is exactly the silent failure this arc exists to end.
+ */
+async function makeLogSink(): Promise<((line: string) => void) | undefined> {
+  const path = typeof process !== "undefined" ? process.env.WW_LOG_FILE : undefined;
+  if (!path) return undefined; // default (stderr) is applied by observability.ts
+  try {
+    // Dynamic import so the default path pulls in no fs at all (and because
+    // this module is ESM — `require` does not exist here).
+    const fs = await import("node:fs");
+    const fd = fs.openSync(path, "a");
+    return (line: string) => {
+      try {
+        fs.writeSync(fd, line + "\n");
+      } catch {
+        // The file went away (unlinked, full, unmounted). Fall back rather
+        // than throw inside a log call — a logger that can crash its caller
+        // is worse than one that loses a line.
+        process.stderr.write(line + "\n");
+      }
+    };
+  } catch (err) {
+    process.stderr.write(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        level: "error",
+        ev: "log-file-open-failed",
+        where: "cli.makeLogSink",
+        message: err instanceof Error ? err.message : String(err),
+      }) + "\n",
+    );
+    return undefined;
+  }
+}
+
 export async function startZeroCustodyServer(opts: { port?: number } = {}): Promise<{ close: () => void }> {
   const port = opts.port ?? 1234;
   const spec = "ws";
@@ -55,9 +101,36 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
   const { handleSeedRequest } = await import("./seed-http.js");
   const { blankDocxBytes } = await import("./blank.js");
 
-  const hub = new CollabHub(/*provider*/ null); // zero-custody: seed-only rooms
+  // Passive observability (counters + structured stderr logging). The LEVEL
+  // is WW_LOG_LEVEL (default info; WW_OBS=1 still means the old firehose —
+  // see envLogLevel); the /stats READ PATH stays gated on WW_OBS alone,
+  // because raising a log level must never open an HTTP surface. Records
+  // shapes and counts only — never content (zero-custody).
+  const obs = createObservability({ out: await makeLogSink() });
+
+  // PROCESS-LEVEL GUARDS. Without these, an async throw nobody caught prints
+  // Node's default trace to stderr as unstructured text — invisible to a
+  // collector parsing JSON lines — and, for unhandled rejections, KILLS the
+  // process on Node ≥15 with no record in our own stream. One structured
+  // error line first, then the deliberate part:
+  //  - unhandledRejection: LOG AND CONTINUE. Every one seen in this codebase
+  //    came from a per-connection async path (a seal, a storage write); the
+  //    room's other participants are unaffected, and taking the whole server
+  //    down over one socket's bad day is the worse failure.
+  //  - uncaughtException: LOG AND EXIT(1). The process state is unknown after
+  //    one of these, and a zero-custody server holds every live room in RAM —
+  //    continuing risks serving corrupted state, and a supervisor restart
+  //    loses nothing durable (clients hold the bundles).
+  process.on("unhandledRejection", (reason) => {
+    obs.error("cli.unhandledRejection", reason);
+  });
+  process.on("uncaughtException", (err) => {
+    obs.error("cli.uncaughtException", err, { exiting: true });
+    process.exit(1);
+  });
+  const hub = new CollabHub(/*provider*/ null, undefined, undefined, undefined, undefined, obs); // zero-custody: seed-only rooms
   const wss = new wsMod.WebSocketServer({ noServer: true });
-  attachWebSocketServer(wss, hub);
+  attachWebSocketServer(wss, hub, obs);
 
   const server = http.createServer((req, res) => {
     const url = req.url ?? "";
@@ -71,6 +144,33 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
     res.setHeader("Access-Control-Max-Age", "86400");
     if (req.method === "OPTIONS") {
       res.writeHead(204).end();
+      return;
+    }
+    if (req.method === "GET" && url === "/healthz") {
+      // Liveness probe — UNGATED on purpose, and the contrast with /stats
+      // below is the point: a load balancer, a compose healthcheck or an
+      // uptime monitor must be able to ask "is this process answering?"
+      // without anyone opening the metrics surface to make it work. Gating
+      // health behind WW_OBS would push operators to set WW_OBS in production
+      // just to get a probe, which is exactly how a dev-only read path ends
+      // up permanently exposed. Carries NO state: not a room count, not a
+      // version — just proof the listener is alive.
+      res.writeHead(200, { "content-type": "application/json" }).end(`{"ok":true}`);
+      return;
+    }
+    if (req.method === "GET" && url === "/stats") {
+      // Dev-only metrics read path (doc: observability). Gated on WW_OBS —
+      // deliberately NOT on the log level: raising verbosity to investigate
+      // something must never silently OPEN AN HTTP READ SURFACE. They were the
+      // same flag before levels existed; keeping /stats on the explicit flag
+      // is what stops `WW_LOG_LEVEL=debug` from also exposing an endpoint.
+      // 404 when unset so it never leaks in a default run. Returns ONLY safe
+      // aggregate numbers, never per-doc content or identifiers.
+      if (!observabilityEnabled()) {
+        res.writeHead(404, { "content-type": "application/json" }).end(`{"error":"not-found"}`);
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(obs.snapshot()));
       return;
     }
     if (req.method === "GET" && url === "/blank") {
@@ -147,10 +247,9 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
     hub.sweepMedia();
   }, 10_000);
   server.listen(port);
-  // eslint-disable-next-line no-console
-  console.log(
-    `wordinweb zero-custody server on :${port} — storage: none (sessions are not persisted; browsers hold the documents)`,
-  );
+  // No startup chatter on stdout by design: `scripts/dev.mjs` prints the demo's
+  // own ready line, and the zero-custody server keeps stdout clean (structured
+  // observability, when enabled via WW_OBS, goes to stderr — see observability.ts).
   return {
     close: () => {
       clearInterval(sweeper);
@@ -160,10 +259,13 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
   };
 }
 
-// Allow `node dist/cli.js` to run it directly. ZERO_CUSTODY=1 selects the
-// seed-only server; default remains the blank-doc dev server.
+// Allow `node dist/cli.js` to run it directly. The zero-custody server is the
+// default: it is a strict superset (HTTP seed + CORS + WS) and the only one
+// the demo can talk to — a bare `node cli.js` serving the ws-only dev server
+// was a footgun (plain GET → 426, no CORS → the demo can't create a doc).
+// Opt into the legacy blank-doc ws-only server with WW_DEV_WS=1.
 if (typeof process !== "undefined" && process.argv[1] && process.argv[1].endsWith("cli.js")) {
   const port = Number(process.env.PORT ?? 1234);
-  if (process.env.ZERO_CUSTODY === "1") void startZeroCustodyServer({ port });
-  else void startDevServer({ port });
+  if (process.env.WW_DEV_WS === "1") void startDevServer({ port });
+  else void startZeroCustodyServer({ port });
 }

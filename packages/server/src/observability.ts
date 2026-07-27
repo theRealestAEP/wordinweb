@@ -1,0 +1,452 @@
+/**
+ * Server-side observability for the zero-custody collab host.
+ *
+ * ZERO-CUSTODY INVARIANT (non-negotiable): this module records SHAPES and
+ * COUNTS, never content. Nothing here ever touches plaintext, ciphertext
+ * bodies, keys, tokens, share-codes, owner tokens, docIds, or clientIds — the
+ * only strings it stores or logs are the fixed protocol vocabulary of refusal/
+ * kick reasons (`taken-over`, `already-open`, `unauthorized`, …), which carry
+ * no session content. Everything is in-memory and ephemeral: a process restart
+ * resets all metrics, which is correct — the server persists nothing, ever.
+ *
+ * The sink is injected into the hub (constructor, no-op default) so the hub's
+ * control flow, timing, and wire output stay byte-identical — observability is
+ * strictly passive. One-line JSON events go to STDERR (stdout carries the
+ * startup lines scripts parse — this module must never write there).
+ *
+ * DEFAULT VERBOSITY FLIPPED (2026-07-27, the log-shipping arc). This module
+ * used to document "OFF by default so normal runs stay quiet" as a rule, and
+ * that rule was load-bearing while the only consumer was a human watching a
+ * terminal. It no longer holds: a server whose default is silence cannot be
+ * shipped to a collector, which is the entire point of structured logs. The
+ * default is now `info` — lifecycle only, not the per-op firehose — and the
+ * old behavior is one env var away (`WW_LOG_LEVEL=silent`). See envLogLevel
+ * for the full migration, including how the pre-existing `WW_OBS` flag maps.
+ */
+
+/** Fields safe to log/expose: aggregate primitives only, never identifiers or
+ * content. The type is intentionally narrow so a stray object can't smuggle a
+ * payload into a log line. */
+export type SafeFields = Record<string, string | number | boolean | undefined>;
+
+/**
+ * Log levels, ordered. A line is emitted when its level is at or above the
+ * configured threshold; `silent` emits nothing at all.
+ *
+ * The split is by OPERATIONAL MEANING, not by how interesting the code
+ * thought it was:
+ *  - debug  per-op traffic (submit-ok, broadcast) — 400/s under load, useful
+ *           when reconstructing an incident, ruinous as a default
+ *  - info   lifecycle: sockets, rooms, joins, checkpoints, media
+ *  - warn   refusals and kicks — someone was told no, and the reason matters
+ *  - error  something threw; carries a serialized stack
+ */
+export type LogLevel = "silent" | "debug" | "info" | "warn" | "error";
+
+const LEVEL_ORDER: Record<LogLevel, number> = { silent: 99, debug: 10, info: 20, warn: 30, error: 40 };
+
+/**
+ * An error flattened to safe primitives. Stacks are the point of this arc —
+ * three bugs in one session survived because a `catch {}` ate the only
+ * evidence — but they are also the one field that can carry arbitrary text
+ * into a log, so it is depth-capped and the CAUSE CHAIN is walked explicitly
+ * rather than by serializing an unknown object graph.
+ */
+export interface SerializedError {
+  name: string;
+  message: string;
+  stack?: string;
+  /** `cause` chain, flattened outward-in, capped (see serializeError). */
+  causes?: string[];
+}
+
+/** Maximum characters of a stack retained. Long enough for the frames that
+ * matter, short enough that a pathological stack cannot flood a collector. */
+const STACK_CAP = 4000;
+/** Maximum links of a `cause` chain followed. */
+const CAUSE_CAP = 3;
+
+/**
+ * Flatten an unknown throw into safe primitives. Accepts `unknown` because
+ * that is what `catch` gives you and non-Error throws are real (a string, a
+ * DOMException, `undefined` from a rejected promise with no reason).
+ */
+export function serializeError(err: unknown): SerializedError {
+  if (!(err instanceof Error)) {
+    return { name: typeof err, message: String(err).slice(0, 500) };
+  }
+  const out: SerializedError = {
+    name: err.name,
+    message: err.message.slice(0, 500),
+    stack: err.stack?.slice(0, STACK_CAP),
+  };
+  const causes: string[] = [];
+  let cause: unknown = (err as { cause?: unknown }).cause;
+  for (let i = 0; i < CAUSE_CAP && cause !== undefined && cause !== null; i++) {
+    causes.push(cause instanceof Error ? `${cause.name}: ${cause.message}`.slice(0, 300) : String(cause).slice(0, 300));
+    cause = cause instanceof Error ? (cause as { cause?: unknown }).cause : undefined;
+  }
+  if (causes.length) out.causes = causes;
+  return out;
+}
+
+/**
+ * The passive metrics/event sink the hub (and WS adapter) call at lifecycle
+ * points. Every method is fire-and-forget and side-effect-free w.r.t. the
+ * caller's state. Implemented by {@link MetricsObservability}; the no-op
+ * {@link NO_OP_OBSERVABILITY} is the default so an un-wired hub costs nothing.
+ */
+export interface Observability {
+  /** A transport socket opened (WS `connection`). Bumps the live-connection
+   * gauge; pairs with {@link connectionClosed}. */
+  connectionOpened(): void;
+  /** A transport socket closed (WS `close`). Drops the live-connection gauge.
+   * Counted at the transport layer (exactly once per socket) rather than in
+   * the hub's `disconnect`, which a takeover kick can invoke twice. */
+  connectionClosed(): void;
+  /** A hello passed every gate and joined a room. */
+  helloAccepted(): void;
+  /** A `{t:"refused"}` frame was sent, tallied by its (fixed-vocabulary)
+   * reason. A spike in `taken-over`/`already-open` is the exact single-tab
+   * bug class this instrumentation exists to surface. Kicks that send a
+   * refusal count here too (see {@link kicked}). */
+  refused(reason: string): void;
+  /** A connection was force-disconnected (`kick`), tallied by reason. A kick
+   * also sends a refusal, so it additionally lands in {@link refused}. */
+  kicked(reason: string): void;
+  /** A submit (plaintext or encrypted) was sequenced and broadcast. */
+  submitAccepted(): void;
+  /** A submit (plaintext or encrypted) was refused before sequencing. */
+  submitRejected(): void;
+  /** A sequenced-content fan-out happened (one per submit/submit-enc). */
+  broadcast(): void;
+  /** A room was created (seed, encrypted seed, or provider auto-create). */
+  roomCreated(): void;
+  /** Rooms were evicted by the sweep (defaults to one). */
+  roomEvicted(count?: number): void;
+  /** A media blob was accepted by the relay (HTTP PUT, 201). */
+  mediaUp(): void;
+  /** A media blob was served by the relay (HTTP GET hit). */
+  mediaDown(): void;
+  /** A roster fan-out happened with `size` entries; feeds the roster-size
+   * peak gauge. */
+  rosterObserved(size: number): void;
+  /**
+   * An inbound frame could not be parsed as JSON. Counted, never logged with
+   * a body: the sender is untrusted, so the interesting signal is the RATE,
+   * not any one malformed frame.
+   */
+  badFrame(): void;
+  /**
+   * Something threw where it should not have. The ONE event that carries a
+   * stack, and the reason this interface exists beyond counting: a server
+   * that cannot say what failed is a server nobody can operate.
+   *
+   * `where` is a fixed code-site label from the caller's own vocabulary
+   * (`ws.handle`, `cli.uncaught`, …) — never interpolated with session data.
+   * `fields` follows the same shapes-and-counts rule as everything else.
+   */
+  error(where: string, err: unknown, fields?: SafeFields): void;
+  /** Current aggregate state — safe numbers only, for the dev `/stats` route
+   * and tests. */
+  snapshot(): ObsSnapshot;
+}
+
+/** The shape returned by {@link Observability.snapshot} and the `/stats`
+ * route — aggregate numbers only. */
+export interface ObsSnapshot {
+  /** Monotonic count of structured events emitted (0 when logging is off). */
+  seq: number;
+  /** Wall-clock ms since this sink was constructed. */
+  uptimeMs: number;
+  counters: {
+    connectionsOpened: number;
+    connectionsClosed: number;
+    hellosAccepted: number;
+    submitsAccepted: number;
+    submitsRejected: number;
+    broadcasts: number;
+    roomsCreated: number;
+    roomsEvicted: number;
+    mediaUp: number;
+    mediaDown: number;
+    /** Throws caught and reported via {@link Observability.error}. The first
+     * number to look at after an incident. */
+    errors: number;
+    /** Unparseable inbound frames (untrusted senders; rate is the signal). */
+    badFrames: number;
+  };
+  /** Refusals tallied by protocol reason (the primary signal). */
+  refusedByReason: Record<string, number>;
+  /** Kicks tallied by protocol reason. */
+  kicksByReason: Record<string, number>;
+  gauges: {
+    /** Sockets currently open (opened − closed). */
+    liveConnections: number;
+    /** Rooms currently held (created − evicted). */
+    rooms: number;
+    /** Largest roster size observed on any fan-out since start. */
+    rosterMax: number;
+  };
+}
+
+/** A sink that records nothing — the hub's default, so observability is
+ * strictly opt-in and an un-wired hub pays zero cost. */
+export const NO_OP_OBSERVABILITY: Observability = {
+  error() {},
+  badFrame() {},
+  connectionOpened() {},
+  connectionClosed() {},
+  helloAccepted() {},
+  refused() {},
+  kicked() {},
+  submitAccepted() {},
+  submitRejected() {},
+  broadcast() {},
+  roomCreated() {},
+  roomEvicted() {},
+  mediaUp() {},
+  mediaDown() {},
+  rosterObserved() {},
+  snapshot: () => emptySnapshot(),
+};
+
+function emptySnapshot(): ObsSnapshot {
+  return {
+    seq: 0,
+    uptimeMs: 0,
+    counters: {
+      connectionsOpened: 0,
+      connectionsClosed: 0,
+      hellosAccepted: 0,
+      submitsAccepted: 0,
+      submitsRejected: 0,
+      broadcasts: 0,
+      roomsCreated: 0,
+      roomsEvicted: 0,
+      mediaUp: 0,
+      mediaDown: 0,
+      errors: 0,
+      badFrames: 0,
+    },
+    refusedByReason: {},
+    kicksByReason: {},
+    gauges: { liveConnections: 0, rooms: 0, rosterMax: 0 },
+  };
+}
+
+/** Construction knobs — injected in tests for determinism, defaulted from the
+ * environment in production. */
+export interface ObservabilityOptions {
+  /** Threshold for emitted lines. Default: {@link envLogLevel}. Counters are
+   * always collected regardless of level — only the WRITING is gated, so
+   * `/stats` stays accurate even at `silent`. */
+  level?: LogLevel;
+  /** Where a log line goes. Default: STDERR (stdout is reserved for the
+   * startup lines run-scripts parse). */
+  out?: (line: string) => void;
+  /** Wall-clock source (epoch ms). Default `Date.now`. The zero-custody
+   * server is normal Node — plain `Date.now()` for event timestamps is fine
+   * here (the intent-path determinism rule governs apply/serialize values,
+   * not observability wall-clock). */
+  now?: () => number;
+}
+
+/**
+ * The real, in-memory metrics collector + structured logger.
+ *
+ * Counters and gauges are plain numbers/maps mutated in place — no allocation
+ * on the hot path beyond first-seen reason keys. Structured logging (when
+ * enabled) writes exactly one JSON object per line to `out`, each carrying a
+ * monotonic `seq` and a wall-clock `t`, plus a handful of safe fields.
+ */
+export class MetricsObservability implements Observability {
+  private readonly level: LogLevel;
+  private readonly out: (line: string) => void;
+  private readonly now: () => number;
+  private readonly startedAt: number;
+  private seq = 0;
+
+  private c = {
+    connectionsOpened: 0,
+    connectionsClosed: 0,
+    hellosAccepted: 0,
+    submitsAccepted: 0,
+    submitsRejected: 0,
+    broadcasts: 0,
+    roomsCreated: 0,
+    roomsEvicted: 0,
+    mediaUp: 0,
+    mediaDown: 0,
+    errors: 0,
+    badFrames: 0,
+  };
+  private refusedReasons = new Map<string, number>();
+  private kickReasons = new Map<string, number>();
+  private g = { liveConnections: 0, rooms: 0, rosterMax: 0 };
+
+  constructor(opts: ObservabilityOptions = {}) {
+    this.level = opts.level ?? envLogLevel();
+    this.out = opts.out ?? ((line) => process.stderr.write(line + "\n"));
+    this.now = opts.now ?? Date.now;
+    this.startedAt = this.now();
+  }
+
+  /**
+   * Emit one structured JSON line, gated by level. `ev` is the short event
+   * name; `fields` must be safe aggregates — this method never receives
+   * content, which is the invariant presence-blindness-style greps pin.
+   *
+   * Field order is deliberate: ts, level, ev first, so a human tailing the
+   * stream reads left to right and a collector's cheap prefix match works.
+   */
+  private emit(level: Exclude<LogLevel, "silent">, ev: string, fields?: SafeFields): void {
+    if (LEVEL_ORDER[level] < LEVEL_ORDER[this.level]) return;
+    const record: SafeFields = {
+      ts: new Date(this.now()).toISOString(),
+      level,
+      ev,
+      // Monotonic per process: how a collector notices it DROPPED lines,
+      // which matters for a server whose logs are the only account of what
+      // happened (it persists nothing else).
+      seq: ++this.seq,
+    };
+    if (fields) for (const k in fields) if (fields[k] !== undefined) record[k] = fields[k];
+    this.out(JSON.stringify(record));
+  }
+
+  badFrame(): void {
+    this.c.badFrames++;
+    this.emit("debug", "bad-frame", { total: this.c.badFrames });
+  }
+
+  error(where: string, err: unknown, fields?: SafeFields): void {
+    this.c.errors++;
+    const e = serializeError(err);
+    this.emit("error", "error", { ...fields, where, name: e.name, message: e.message, stack: e.stack, causes: e.causes?.join(" <- ") });
+  }
+
+  connectionOpened(): void {
+    this.c.connectionsOpened++;
+    this.g.liveConnections++;
+    this.emit("info", "conn-open", { live: this.g.liveConnections });
+  }
+  connectionClosed(): void {
+    this.c.connectionsClosed++;
+    if (this.g.liveConnections > 0) this.g.liveConnections--;
+    this.emit("info", "conn-close", { live: this.g.liveConnections });
+  }
+  helloAccepted(): void {
+    this.c.hellosAccepted++;
+    this.emit("info", "hello", { rooms: this.g.rooms });
+  }
+  refused(reason: string): void {
+    this.refusedReasons.set(reason, (this.refusedReasons.get(reason) ?? 0) + 1);
+    this.emit("warn", "refused", { reason });
+  }
+  kicked(reason: string): void {
+    this.kickReasons.set(reason, (this.kickReasons.get(reason) ?? 0) + 1);
+    this.emit("warn", "kick", { reason });
+  }
+  submitAccepted(): void {
+    this.c.submitsAccepted++;
+    this.emit("debug", "submit-ok");
+  }
+  submitRejected(): void {
+    this.c.submitsRejected++;
+    this.emit("warn", "submit-reject");
+  }
+  broadcast(): void {
+    this.c.broadcasts++;
+    // Deliberately unlogged per-event: broadcasts are the highest-frequency
+    // signal; the counter is enough and a line per fan-out would drown the log.
+  }
+  roomCreated(): void {
+    this.c.roomsCreated++;
+    this.g.rooms++;
+    this.emit("info", "room-open", { rooms: this.g.rooms });
+  }
+  roomEvicted(count = 1): void {
+    if (count <= 0) return;
+    this.c.roomsEvicted += count;
+    this.g.rooms = Math.max(0, this.g.rooms - count);
+    this.emit("info", "room-evict", { count, rooms: this.g.rooms });
+  }
+  mediaUp(): void {
+    this.c.mediaUp++;
+    this.emit("info", "media-up");
+  }
+  mediaDown(): void {
+    this.c.mediaDown++;
+    this.emit("info", "media-down");
+  }
+  rosterObserved(size: number): void {
+    if (size > this.g.rosterMax) this.g.rosterMax = size;
+  }
+
+  snapshot(): ObsSnapshot {
+    return {
+      seq: this.seq,
+      uptimeMs: this.now() - this.startedAt,
+      counters: { ...this.c },
+      refusedByReason: Object.fromEntries(this.refusedReasons),
+      kicksByReason: Object.fromEntries(this.kickReasons),
+      gauges: { ...this.g },
+    };
+  }
+}
+
+/** True when the `WW_OBS` env flag is set to a truthy value. */
+export function envLogEnabled(): boolean {
+  const v = (typeof process !== "undefined" ? process.env.WW_OBS : undefined)?.toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+/**
+ * THE DEFAULT LEVEL when nothing is configured.
+ *
+ * Deliberately one constant, because it is the arc's one behavior change: the
+ * server used to emit NOTHING unless WW_OBS was set, and a server whose
+ * default is silence cannot be shipped to a collector — which is the whole
+ * point of structured logs. Lifecycle at `info` is what an operator needs to
+ * answer "is it up, who joined, what got refused" without being handed the
+ * 400/s per-op firehose.
+ *
+ * Flip this to "silent" to restore the pre-arc behavior exactly.
+ */
+const DEFAULT_LEVEL: LogLevel = "info";
+
+/**
+ * Resolve the level from the environment.
+ *
+ * MIGRATION from the WW_OBS flag, which predates levels:
+ *  - WW_LOG_LEVEL set  ⇒ wins outright (silent|debug|info|warn|error)
+ *  - else WW_OBS truthy ⇒ `debug`, reproducing the old flag's firehose
+ *    exactly (it emitted every event including per-op submit-ok)
+ *  - else               ⇒ DEFAULT_LEVEL
+ * An unrecognized WW_LOG_LEVEL falls back to the default rather than throwing:
+ * a typo in an env var must not stop a server from booting.
+ */
+export function envLogLevel(): LogLevel {
+  const raw = (typeof process !== "undefined" ? process.env.WW_LOG_LEVEL : undefined)?.toLowerCase();
+  if (raw && raw in LEVEL_ORDER) return raw as LogLevel;
+  if (envLogEnabled()) return "debug";
+  return DEFAULT_LEVEL;
+}
+
+/**
+ * Whether the dev `/stats` READ PATH is enabled. Still `WW_OBS`, deliberately
+ * NOT the log level: `/stats` is an HTTP surface, and raising a log level to
+ * see more lines must never silently open a network endpoint.
+ */
+export function observabilityEnabled(): boolean {
+  return envLogEnabled();
+}
+
+/** Build the production sink from the environment. Logging follows `WW_OBS`;
+ * a fresh {@link MetricsObservability} is returned either way so `/stats` can
+ * read counters even when logging is quiet — the route itself is what the env
+ * flag gates in `cli.ts`. */
+export function createObservability(opts: ObservabilityOptions = {}): MetricsObservability {
+  return new MetricsObservability(opts);
+}

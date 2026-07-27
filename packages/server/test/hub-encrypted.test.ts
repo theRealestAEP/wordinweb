@@ -180,6 +180,25 @@ describe("server-assigned checkpointer (doc 13 §3, blocker 2)", () => {
     expect(b.received.some((m) => m.t === "checkpointer" && m.active)).toBe(true);
   });
 
+  it("seq numbering continues from the checkpoint after the log prunes (no reset-to-1 desync)", async () => {
+    // Regression: after an adopted checkpoint pruned room.enc.log to empty, the
+    // next submit computed seq = (log empty ? 1 : ...) and RESET to 1. Every
+    // client's mirror numbers continuously from the checkpoint, so it expects
+    // checkpoint.seq+1 and hard-refuses seq 1 with `sequence-desync` — crashing
+    // ALL clients ~CHECKPOINT_EVERY edits into a session, right after a pause.
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice")); // first joiner = designated checkpointer
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) }); // seq 1
+    // Designee adopts a quiescent checkpoint at the log head; the log prunes.
+    await hub.handle(a, { t: "checkpoint", checkpoint: { seq: 1, iv: "aXY=", ciphertext: "eA==" } });
+    // The next edit MUST be seq 2 (checkpoint.seq + 1), not a reset to 1.
+    a.received = [];
+    await hub.handle(a, { t: "submit-enc", envelope: { ...env("alice", 2), base: 1 } });
+    const bcast = a.received.find((m) => m.t === "broadcast-enc");
+    expect(bcast?.t === "broadcast-enc" && bcast.entries[0].seq).toBe(2);
+  });
+
   it("non-quiescent checkpoints are ignored (blocker-1 discipline)", async () => {
     const hub = encHub();
     const a = new FakeConn("a");

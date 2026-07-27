@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { zipSync, strToU8 } from "fflate";
 import { CollabHub, EVICTION_GRACE_MS } from "../src/hub.js";
 import { handleSeedRequest } from "../src/seed-http.js";
-import { PROTOCOL_VERSION } from "@wordinweb/collab/server";
+import { PROTOCOL_VERSION, ENGINE_VERSION } from "@wordinweb/collab/server";
 import type { ServerMessage } from "@wordinweb/collab/server";
 import type { Connection } from "../src/hub.js";
 
@@ -161,7 +161,7 @@ describe("encrypted seed over HTTP (doc 13)", () => {
     const hub = zeroCustodyHub();
     handleSeedRequest(hub, { method: "PUT", docId: "d", body: { encrypted: { genesisId: "g", checkpoint: CP }, codeVerifier: "V" } });
     const c = new FakeConn("c");
-    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0, engineVersion: "e1" });
+    await hub.handle(c, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "a", sinceSeq: 0, engineVersion: ENGINE_VERSION });
     expect(c.last()).toEqual({ t: "refused", reason: "code-required" });
   });
 });
