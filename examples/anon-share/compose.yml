@@ -1,20 +1,100 @@
-# Minimal anon-share demo stack (plan doc 10 ephemeral tier): the collab
-# server on a volume, nothing else. "Restart wipes it" IS the contract for
-# the demo — no external database or blob store.
+# wordinweb collab demo — the whole deployable stack.
 #
-#   docker compose up
+#   DOMAIN=docs.example.com docker compose up -d      (public, real TLS)
+#   docker compose up                                  (localhost, Caddy's
+#                                                       internal CA)
 #
-# The frontend (Vite dev server / static build of examples/anon-share) points
-# its useCollab url at ws://localhost:1234.
+# ZERO CUSTODY IS THE CONTRACT, not a limitation to work around: rooms live in
+# the collab server's memory and die with it. A restart wipes every live
+# session and loses NOTHING DURABLE — each browser holds its own document in
+# IndexedDB and revives it on reconnect. That is why there is no database
+# service here and no volume for document state; adding one would break the
+# claim the demo is built on. The only volumes are Caddy's certificates, which
+# are infrastructure, not user content.
 services:
   collab:
     build:
       context: ../..
       dockerfile: packages/server/Dockerfile
-    ports:
-      - "1234:1234"
+    # NOT published to the host: the only way in is through Caddy, on the same
+    # origin as the app. Exposing 1234 directly would reintroduce the
+    # cross-origin (and plain-http) path this stack exists to remove.
+    expose:
+      - "1234"
     environment:
+      # ── the server's whole env surface ──────────────────────────────────
       PORT: "1234"
-    # Ephemeral by contract: in-memory storage, no volume needed. Add a volume
-    # here only if you swap the entrypoint for a SQLite-per-doc driver.
+      # info | debug | silent. Structured lines on stderr; `debug` is the
+      # per-op firehose and is not a production setting.
+      WW_LOG_LEVEL: "info"
+      # Optional: also append logs to a file inside the container. Usually
+      # leave unset and let the container runtime collect stderr (below).
+      # WW_LOG_FILE: "/var/log/wordinweb.log"
+      # Max concurrent rooms; further joins are refused rather than degrading
+      # everyone. 10 suits one small droplet.
+      WW_ROOM_CAP: "10"
+      # WW_OBS=1 additionally EXPOSES GET /stats. Left unset deliberately —
+      # Caddy does not proxy /stats either, so enabling it is a two-step,
+      # conscious act. /healthz is ungated and is what probes should use.
+      # WW_OBS: "1"
+    healthcheck:
+      # The ungated liveness route (see cli.ts): proves the listener answers
+      # without requiring the metrics surface to be open.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1234/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     restart: unless-stopped
+    # ── LOG SHIPPING ──────────────────────────────────────────────────────
+    # The server writes structured lines to stderr, which is already the shape
+    # a collector wants. The json-file driver below just bounds disk on the
+    # droplet; point any collector (Vector, Promtail, the Datadog agent, …) at
+    # the Docker socket or these files and nothing in the app changes. Do NOT
+    # raise WW_LOG_LEVEL to debug to "get more into the collector" — that is
+    # the per-op firehose and it will bury the signal.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - collab
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Your hostname. Unset ⇒ the Caddyfile falls back to `localhost` and
+      # Caddy issues a cert from its own internal CA, which is enough to make
+      # `crypto.subtle` available for a local `docker compose up` smoke test.
+      DOMAIN: "${DOMAIN:-localhost}"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # The built app, produced by the frontend image's `dist` stage.
+      - app-dist:/srv:ro
+      # Certificates and ACME account keys. THE ONE THING WORTH PERSISTING:
+      # losing it means re-requesting certificates on every restart, which
+      # Let's Encrypt rate-limits.
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+  # Builds the static bundle into the shared volume, then exits. Compose runs
+  # it on every `up`, so a rebuilt image republishes the app.
+  app:
+    build:
+      context: ../..
+      dockerfile: examples/anon-share/Dockerfile
+      target: build
+    command: sh -c "rm -rf /out/* && cp -r /app/examples/anon-share/dist/. /out/"
+    volumes:
+      - app-dist:/out
+    restart: "no"
+
+volumes:
+  app-dist:
+  caddy-data:
+  caddy-config:

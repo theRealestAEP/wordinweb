@@ -1,0 +1,62 @@
+# Reverse proxy + automatic TLS for the wordinweb collab demo.
+#
+# WHY CADDY IS LOAD-BEARING, not convenience: the demo's E2EE flows call
+# WebCrypto (key derivation, sealing intents, sealing media). `crypto.subtle`
+# is only defined in a SECURE CONTEXT — https, or localhost. A deployment
+# served over plain http on a real hostname therefore cannot encrypt anything:
+# the app does not degrade, it fails. TLS is part of the feature.
+#
+# Everything on ONE ORIGIN: the static bundle at /, the collab server's HTTP
+# and WebSocket routes proxied beneath it. That also removes CORS from the
+# production picture entirely — the browser never makes a cross-origin request,
+# so the server's permissive dev CORS headers stop being load-bearing.
+#
+# {$DOMAIN} comes from the environment (compose passes it through). Set it to
+# your hostname and Caddy provisions a Let's Encrypt certificate on first boot;
+# the DNS A record must already point here and 80/443 must be reachable, since
+# the ACME challenge runs over them.
+{$DOMAIN:localhost} {
+	# ── collab server ────────────────────────────────────────────────────
+	# The WebSocket upgrade and the HTTP seed/media routes are the same
+	# origin as the app, so no CORS and no ?server= override is needed.
+	#
+	# NOTE the path list is EXPLICIT rather than a catch-all: it is the
+	# deployed surface of the server, and writing it out means adding a
+	# route to the server is a deliberate act here too. /stats is absent on
+	# purpose — it is the WW_OBS-gated metrics read path and has no business
+	# being reachable from the internet even when someone enables the flag.
+	@collab path /docs /docs/* /blank /healthz
+	handle @collab {
+		reverse_proxy collab:1234
+	}
+
+	# The WebSocket endpoint the client connects to (same host, upgraded).
+	@ws {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	handle @ws {
+		reverse_proxy collab:1234
+	}
+
+	# ── static app ───────────────────────────────────────────────────────
+	handle {
+		root * /srv
+		# The demo is a single page; unknown paths are the app's own routes
+		# (?doc=… links), not 404s.
+		try_files {path} /index.html
+		file_server
+	}
+
+	# Modest hardening for a static, same-origin app. No CSP here: the demo
+	# renders user document content and the right policy needs a pass of its
+	# own (recorded as a follow-on rather than shipped half-right).
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		# The share link's #k= fragment is never sent to a server, but a
+		# referrer leak would still disclose the doc id.
+	}
+
+	encode gzip zstd
+}

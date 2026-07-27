@@ -297,6 +297,92 @@ when a host needs a narrowly scoped style override.
 
 WordInWeb never converts the document to flowing HTML. It parses the OOXML into a typed model, runs a layout engine that breaks lines with real canvas metrics and paginates like Word, and renders each primitive as one absolutely-positioned element, so the browser does zero reflow. Editing mutates the retained XML tree and re-serializes only the parts it models, leaving everything else byte-for-byte intact.
 
+## Collaboration — zero-custody, end-to-end encrypted
+
+Real-time collaboration ships as a separate entry (`wordinweb/collab`). The server is a **blind sequencer**: it orders opaque encrypted envelopes and relays bytes, but never holds a key, never parses a document, and keeps **nothing at rest** — every browser holds the durable copy, and the document key rides the share link's `#fragment`, which browsers never send to a server.
+
+```mermaid
+flowchart LR
+  subgraph A["Browser A — owner"]
+    direction TB
+    AE["DocxView editor + toolbar<br/>every local mutation = canonical apply + emitted intent"]
+    AR["ClientReplica<br/>optimistic doc (instant typing)"]
+    AM["DocumentSession mirror<br/>canonical doc — the same authority code<br/>a plaintext server would run"]
+    AC["EncryptedCollabConnection<br/>seals/opens AES-GCM envelopes (K_content)<br/>self-heal · stuck-op watchdog · rate-limit re-drive"]
+    AB[("IndexedDB bundle<br/>confirmed bytes + id sidecar + pending ops<br/>the ONLY durable copy — can revive a dead session")]
+    AE --> AR
+    AR --> AC
+    AM --> AC
+    AC --> AB
+  end
+
+  subgraph S["Server — blind sequencer (RAM only, nothing at rest)"]
+    direction TB
+    SQ["Sequencer<br/>orders opaque envelopes per epoch<br/>dedup · rate limit · engine-version fence"]
+    SR["Room state<br/>sealed checkpoint + envelope log (pruned at client checkpoints)<br/>roster · presence relay · owner admin (read-only / kick / roles)"]
+    SM["Media relay<br/>sha-addressed ciphertext blobs<br/>staged, TTL-evicted — pixels never persist"]
+    SO["Observability<br/>GET /stats counters"]
+    SQ --- SR
+    SR --- SM
+    SR --- SO
+  end
+
+  subgraph B["Browser B — participant (same stack)"]
+    direction TB
+    BC["EncryptedCollabConnection"]
+    BM["mirror"]
+    BR["replica"]
+    BE["DocxView"]
+    BC --> BM
+    BM --> BR
+    BR --> BE
+  end
+
+  K["Share link<br/>https://…?doc=id#k=KEY<br/>the #k fragment NEVER reaches the server"]
+
+  AC <-->|"WebSocket: submit-enc / broadcast-enc<br/>presence · roster · hash gossip"| SQ
+  SQ <-->|"WebSocket: ordered opaque envelopes"| BC
+  AC -.->|"HTTP PUT: sealed seed checkpoint (go-live / revival)<br/>PUT/GET media ciphertext by sha"| SM
+  SR -.->|"welcome-enc: sealed checkpoint + tail<br/>(late join, media addresses included)"| BC
+  K -.-> AE
+  K -.-> BE
+```
+
+What the server can see: envelope sizes, timing, participant count, sha addresses of media ciphertext. What it cannot see: document content, media pixels, part structure, or the key. Every client re-derives the canonical history by running the identical transform/validate/apply pipeline over the same ordered log — convergence is by construction, guarded by an engine-version fence (mixed client builds are refused rather than allowed to fork) and per-client self-healing.
+
+### Deploy
+
+A droplet with Docker, a DNS A record, and ports 80/443 open:
+
+```sh
+git clone <repo> && cd wordinweb/examples/anon-share
+DOMAIN=docs.example.com docker compose up -d
+```
+
+Caddy provisions a Let's Encrypt certificate on first boot, serves the built
+app at `/`, and proxies the collab server's routes (`/docs*`, `/blank`,
+`/healthz`, and the WebSocket upgrade) on the same origin. Without `DOMAIN` it
+falls back to `localhost` with Caddy's internal CA, which is enough to run the
+whole stack locally.
+
+**TLS is not optional here.** The E2EE flows use WebCrypto, and
+`crypto.subtle` is undefined outside a [secure context][sc] — served over plain
+`http` on a real hostname, the app cannot encrypt at all. That is also why the
+proxy puts everything on one origin: the browser never makes a cross-origin
+request, so CORS stops being part of the production picture.
+
+[sc]: https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts
+
+Operational shape, stated plainly:
+
+| | |
+|---|---|
+| **Restarts** | Wipe every live room and lose nothing durable — browsers hold the documents and revive them on reconnect. There is no database and no document volume, by design. |
+| **Scale** | One process, one core. Rooms are in-memory, so there is no sharding story yet; `WW_ROOM_CAP` (default 10) refuses new rooms rather than degrading the ones running. |
+| **Health** | `GET /healthz` is ungated and is what probes should use. `GET /stats` requires `WW_OBS=1` **and** is not proxied — enabling metrics is deliberately two steps. |
+| **Logs** | Structured lines on stderr, collector-ready as-is; compose bounds them with the json-file driver. `WW_LOG_LEVEL=debug` is a per-op firehose, not a production setting. |
+| **Media routes are unauthenticated** | Anyone who can reach the origin can `PUT`/`GET` blobs within the size and room caps. In an encrypted room those blobs are ciphertext, but this is a recorded launch gate, not a solved problem. |
+
 ## Fonts
 
 Text is measured on a canvas before layout, so line breaks depend on the real font metrics. For Word parity, register the bundled OFL substitutes in your app entry:
