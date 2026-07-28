@@ -216,6 +216,36 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
         return;
       }
       if (req.method === "PUT") {
+        // ADMISSION FIRST — no open room, or no budget left, means no body is
+        // ever read. Deciding this after buffering (which is what asking
+        // `mediaUpload` alone would force) makes every refusal cost a full
+        // body in memory, so the refusals themselves become the attack.
+        const admit = hub.mediaUploadAdmission(decodeURIComponent(mDoc));
+        if (admit !== 200) {
+          const body =
+            admit === 429
+              ? { status: admit, error: "room-upload-rate", retryAfterMs: 60_000 }
+              : { status: admit, error: "no-room" };
+          // `connection: close` because the body is deliberately never read:
+          // this socket cannot be safely reused for a following request when
+          // an unconsumed body is still queued on it.
+          //
+          // Teardown waits for `finish` to avoid racing the response out the
+          // door: destroying inline can discard writes the socket has not
+          // flushed yet, which would turn a clean 404 into a dead connection
+          // the caller cannot distinguish from a crash. Small bodies like
+          // these usually survive an inline destroy — which is the problem
+          // with relying on it, not a reason to.
+          res.on("finish", () => req.destroy());
+          res
+            .writeHead(admit, {
+              "content-type": "application/json",
+              connection: "close",
+              ...(admit === 429 ? { "retry-after": "60" } : {}),
+            })
+            .end(JSON.stringify(body));
+          return;
+        }
         const chunks: Buffer[] = [];
         let size = 0;
         // SOCKET-LEVEL GUARD, DERIVED from the configured blob cap rather than

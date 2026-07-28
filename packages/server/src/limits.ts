@@ -223,6 +223,22 @@ export interface MediaLimits {
   /** How long a chosen holder has to answer a re-supply request before the
    * round is offered to someone else. */
   uploadDeadlineMs: number;
+  /** PER-ROOM upload admission: sustained uploads per minute, and the burst
+   * a room may spend at once.
+   *
+   * `maxRoomBytes` caps how much a room STORES; it does not cap how fast a
+   * room is asked to store it. Those are different exposures: once a room is
+   * full every further upload is refused with 507, and a refusal is still a
+   * request the server accepted a body for. This is the rate half.
+   *
+   * BURST IS NOT DECORATION — it is sized for re-supply. When a joiner needs
+   * a document's images, the hub asks a holder for each missing sha, so an
+   * image-heavy document legitimately produces a burst of uploads with no
+   * human pacing them at all. A limiter with no burst allowance would throttle
+   * exactly that, and the symptom would be images that never arrive for the
+   * person who just joined — the failure this relay exists to prevent. */
+  roomUploadsPerMin: number;
+  roomUploadBurst: number;
 }
 
 export interface HubLimits {
@@ -288,6 +304,20 @@ export const DEFAULT_MEDIA_LIMITS: MediaLimits = {
   stageTtlMs: 60_000,
   ttlMs: 5 * 60_000,
   uploadDeadlineMs: 15_000,
+  // 60/min sustained, burst 64. Sized against RE-SUPPLY, not against typing:
+  // a joiner needing a document's images makes the hub ask holders for each
+  // missing sha at once, so the burst has to cover a whole document's image
+  // count or those uploads are refused, the hub rotates holders on its
+  // uploadDeadlineMs, and the joiner sees "image unavailable" for pictures
+  // that exist. 64 covers realistic documents; note the room byte cap
+  // (100 MB) is the binding limit well before then for large images.
+  //
+  // A document with MORE images than the burst still resolves — the client
+  // re-requests holes it can still see, so the tail arrives as tokens refill
+  // rather than being lost. It is slower, which is the intended shape of a
+  // limit. Raise the burst before the rate if that tail is being felt.
+  roomUploadsPerMin: 60,
+  roomUploadBurst: 64,
 };
 
 export const DEFAULT_LIMITS: HubLimits = {
@@ -356,6 +386,8 @@ export function envLimits(): HubLimits {
       stageTtlMs: envInt("WW_MEDIA_STAGE_TTL_MS", DEFAULT_MEDIA_LIMITS.stageTtlMs),
       ttlMs: envInt("WW_MEDIA_TTL_MS", DEFAULT_MEDIA_LIMITS.ttlMs),
       uploadDeadlineMs: envInt("WW_MEDIA_UPLOAD_DEADLINE_MS", DEFAULT_MEDIA_LIMITS.uploadDeadlineMs),
+      roomUploadsPerMin: envInt("WW_MEDIA_ROOM_UPLOADS_PER_MIN", DEFAULT_MEDIA_LIMITS.roomUploadsPerMin),
+      roomUploadBurst: envInt("WW_MEDIA_ROOM_UPLOAD_BURST", DEFAULT_MEDIA_LIMITS.roomUploadBurst),
     },
   });
 }
@@ -414,6 +446,12 @@ export function normalizeLimits(partial: {
   // straight here), so enforcing the relationship at this point makes it
   // structural rather than a property of one entry point.
   if (media.maxBlobBytes > MAX_IMAGE_BYTES) media.maxBlobBytes = MAX_IMAGE_BYTES;
+  // A rate with no burst admits NOTHING: the bucket starts at `burst` tokens
+  // and a request needs one, so burst 0 refuses the first upload of every
+  // room and every image in the deployment silently stops arriving. Zero rate
+  // means "disabled" (the convention the per-IP limits already use); a rate
+  // that is on therefore needs at least one token to spend.
+  if (media.roomUploadsPerMin > 0 && media.roomUploadBurst < 1) media.roomUploadBurst = 1;
   return { lifecycle, ip, surge, media };
 }
 

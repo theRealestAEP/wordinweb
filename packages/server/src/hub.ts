@@ -121,6 +121,12 @@ interface Room {
     waiters: Map<string, Set<string>>; // sha -> conn.ids awaiting media-ready
     resupply: Map<string, { chosenConnId: string; deadline: number }>;
     totalBytes: number;
+    /** Per-room upload admission bucket (see MediaLimits.roomUploadsPerMin).
+     * Lives ON THE ROOM so it is freed when the room is, rather than in a
+     * hub-level map keyed by docId — that map would accumulate an entry per
+     * docId anyone ever probed, which is a slow leak an attacker controls the
+     * size of, in the one component whose whole promise is holding nothing. */
+    uploadBucket: { tokens: number; last: number };
   };
   /** Epoch-ms timestamp of when the room last became empty, or undefined
    * while anyone is connected. Drives zero-custody eviction (plan doc 12
@@ -1014,6 +1020,64 @@ export class CollabHub {
   }
 
   /**
+   * UPLOAD ADMISSION — answered BEFORE the request body is read.
+   *
+   * This is the half of upload control that `mediaUpload` structurally cannot
+   * do. That method judges bytes, so calling it requires having received the
+   * bytes: an upload to a room that does not exist still costs a full body in
+   * memory before it earns its 404, and N concurrent such requests cost N
+   * bodies. Unauthenticated, unpaced, and on the one route that accepts
+   * megabytes, that is a memory amplifier rather than a rate limit.
+   *
+   * So admission asks the two questions that need no body at all:
+   *
+   *   1. Is there an OPEN ROOM to upload to? Rooms are deleted when they end
+   *      (see endRoom), so presence in `this.rooms` IS openness — there is no
+   *      separate closed state to miss.
+   *   2. Has this room spent its upload budget? Per room, because a room is
+   *      the unit a document and its participants share; a per-IP bucket
+   *      would punish an office behind one address for collaborating, and a
+   *      global one would let any single room starve every other.
+   *
+   * THE TOKEN IS SPENT HERE, not on completion, and that ordering is the
+   * whole point. Charging on completion lets an attacker open a thousand
+   * concurrent uploads that every one pass admission before any of them
+   * finishes — the limit would be perfectly enforced against a caller
+   * polite enough to wait its turn, and no defence at all against the
+   * traffic it exists to stop.
+   *
+   * The cost of spending early is that a refused upload (413/507/400) still
+   * consumed a token and is not refunded. That is deliberate: a client whose
+   * uploads keep failing is either broken or hostile, and neither should get
+   * an unmetered retry loop. Legitimate clients pre-check `mediaMaxBlobBytes`
+   * from the welcome and do not send bodies they know are oversized.
+   *
+   * CONSIDERED AND REJECTED: exempting SOLICITED uploads — a sha the room is
+   * actively waiting for or has an open re-supply round on — since the server
+   * asked for those itself. It reads well and reopens the hole: `media-need`
+   * is what creates a waiter, so anyone in the room could name arbitrary shas
+   * to mint exemptions and then PUT unmetered bodies against them. The sha
+   * mismatch that would reject those bodies is checked in `mediaUpload`,
+   * AFTER buffering, so the exemption would buy back the exact amplifier this
+   * function exists to close. The burst is sized for re-supply instead, which
+   * gets the same outcome without a caller-controlled bypass.
+   */
+  mediaUploadAdmission(docId: string): number {
+    const room = this.rooms.get(docId);
+    if (!room) return 404;
+    const perMin = this.limits.media.roomUploadsPerMin;
+    if (perMin <= 0) return 200; // 0 = disabled, matching the per-IP convention
+    const burst = this.limits.media.roomUploadBurst;
+    const b = room.media.uploadBucket;
+    const now = this.now();
+    b.tokens = Math.min(burst, b.tokens + ((now - b.last) / 60_000) * perMin);
+    b.last = now;
+    if (b.tokens < 1) return 429;
+    b.tokens -= 1;
+    return 200;
+  }
+
+  /**
    * Media upload (doc 16 §4, the PUT handler's core). The server's ONLY
    * content-touching operation is sha256: the address IS the verification
    * (doc 16 §1.1) — a body that doesn't hash to `sha` is rejected no
@@ -1344,7 +1408,7 @@ export class CollabHub {
       createdAt: this.now(),
       lastActivityAt: this.now(),
       creatorIp,
-      media: emptyMedia(),
+      media: emptyMedia(this.limits.media.roomUploadBurst, this.now()),
     };
     this.rooms.set(docId, room);
     if (creatorIp) this.ipGuard.noteRoom(creatorIp, docId);
@@ -1392,7 +1456,7 @@ export class CollabHub {
       createdAt: this.now(),
       lastActivityAt: this.now(),
       creatorIp,
-      media: emptyMedia(),
+      media: emptyMedia(this.limits.media.roomUploadBurst, this.now()),
     };
     this.rooms.set(docId, room);
     if (creatorIp) this.ipGuard.noteRoom(creatorIp, docId);
@@ -1412,7 +1476,7 @@ export class CollabHub {
         roster: new Map(),
         createdAt: this.now(),
         lastActivityAt: this.now(),
-        media: emptyMedia(),
+        media: emptyMedia(this.limits.media.roomUploadBurst, this.now()),
       };
       this.rooms.set(docId, room);
       this.obs.roomCreated();
@@ -1463,8 +1527,12 @@ export const MEDIA_LIMITS = {
   tUploadMs: DEFAULT_LIMITS.media.uploadDeadlineMs,
 };
 
-function emptyMedia(): Room["media"] {
-  return { blobs: new Map(), waiters: new Map(), resupply: new Map(), totalBytes: 0 };
+function emptyMedia(uploadBurst: number, now: number): Room["media"] {
+  // A new room starts with a FULL bucket: the first thing a real room does is
+  // receive the images of the document that was just seeded into it, and
+  // making that first burst wait for tokens to accrue would delay the one
+  // upload pattern that is always legitimate.
+  return { blobs: new Map(), waiters: new Map(), resupply: new Map(), totalBytes: 0, uploadBucket: { tokens: uploadBurst, last: now } };
 }
 
 /** Fixed presence palette (doc 11 XSS vector 7: colors are validated

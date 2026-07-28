@@ -97,6 +97,20 @@ services:
       # (+2MB headroom) — do not add a second constant beside it.
       WW_MEDIA_MAX_BLOB_BYTES: "5242880"
       WW_MEDIA_MAX_ROOM_BYTES: "104857600"
+      # PER-ROOM UPLOAD RATE. The byte caps above bound what a room STORES;
+      # these bound how fast it can be ASKED to. Both are needed: once a room
+      # is full every further upload is refused, and a refusal is still a
+      # request whose body the server would otherwise have accepted. Checked
+      # BEFORE the body is read, together with "is there an open room at all",
+      # so neither a flood nor an upload to a nonexistent room costs memory.
+      #
+      # Sized against re-supply, not typing: a joiner needing a document's
+      # images makes the hub ask holders for every missing sha at once, so the
+      # burst must cover a document's image count or those uploads are refused
+      # and the joiner sees "image unavailable" for pictures that exist. Raise
+      # the burst before the rate. 0 disables the limit.
+      WW_MEDIA_ROOM_UPLOADS_PER_MIN: "60"
+      WW_MEDIA_ROOM_UPLOAD_BURST: "64"
       # Unpromoted upload lifetime, and TTL after last download. The relay is
       # a CACHE, not a store: every blob is recoverable from participants by
       # re-supply, so expiry costs latency, never data.
