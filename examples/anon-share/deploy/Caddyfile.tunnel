@@ -1,0 +1,79 @@
+# Caddy behind a Cloudflare Tunnel (compose.cloudflare.yml).
+#
+# DIFFERENCE FROM ./Caddyfile, which is the direct-to-internet stack: there,
+# Caddy owns the hostname, provisions a Let's Encrypt certificate, and is the
+# thing the internet talks to. Here it owns none of that. `cloudflared` dials
+# OUT to Cloudflare and forwards requests in over the internal Docker network,
+# so this server is never reachable from the internet, has no hostname of its
+# own, and needs no certificate.
+#
+# The site address is `:80`, not a domain, which also switches Caddy's
+# automatic HTTPS off — there is nothing for it to get a certificate FOR, and
+# an origin certificate here would be a second TLS termination behind one that
+# already happened at Cloudflare's edge.
+#
+# TLS IS STILL LOAD-BEARING, just not here: the demo's E2EE flows call
+# WebCrypto, and `crypto.subtle` exists only in a secure context. The browser
+# gets that from Cloudflare's edge certificate. Plain HTTP inside this compose
+# network never reaches a browser.
+:80 {
+	# ── client identity ──────────────────────────────────────────────────
+	# X-Forwarded-For is REPLACED with a single entry, not appended to.
+	#
+	# The server reads the entry `WW_TRUST_PROXY` hops from the right, so it
+	# needs to know exactly how many proxies appended to the chain. Behind a
+	# tunnel that count is genuinely hard to be sure of: Cloudflare's edge
+	# contributes one, cloudflared may contribute another, and Caddy appends
+	# the address IT saw — which here is a Docker-internal address that is
+	# useless as an identity. Guessing wrong does not fail loudly; it makes
+	# every per-IP limit bucket on the wrong address.
+	#
+	# So rather than count hops, collapse them: CF-Connecting-IP is set by
+	# Cloudflare and is the real client address. Overwriting XFF with it
+	# leaves a chain of exactly one, which makes WW_TRUST_PROXY=1 correct BY
+	# CONSTRUCTION rather than by a count that drifts when infrastructure
+	# changes underneath it.
+	#
+	# This is only safe because the origin cannot be reached except through
+	# the tunnel (no published ports, firewall closed) — a header a client
+	# could set directly would otherwise be a spoofing primitive. If you ever
+	# publish ports on this stack, this line becomes a vulnerability.
+	#
+	# A request arriving WITHOUT the header (which should be impossible here)
+	# leaves XFF empty, and the server falls back to the socket peer — every
+	# such request then shares one bucket. That over-limits rather than
+	# under-limits, which is the direction this codebase already chose.
+	@collab path /docs /docs/* /blank /healthz
+	handle @collab {
+		reverse_proxy collab:1234 {
+			header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
+		}
+	}
+
+	# The WebSocket upgrade needs the same treatment: the per-IP CONNECTION
+	# cap is enforced at socket open, so a WS route without the rewrite would
+	# cap every participant against one Docker-internal address.
+	@ws {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	handle @ws {
+		reverse_proxy collab:1234 {
+			header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
+		}
+	}
+
+	# ── static app ───────────────────────────────────────────────────────
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+
+	encode gzip zstd
+}
