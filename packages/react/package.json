@@ -33,7 +33,7 @@
   ],
   "scripts": {
     "build": "tsup",
-    "prepack": "npm run build",
+    "prepack": "npm run build && node ../../scripts/check-dts-selfcontained.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

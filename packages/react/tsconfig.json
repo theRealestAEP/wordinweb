@@ -3,7 +3,9 @@
   "compilerOptions": {
     "jsx": "react-jsx",
     "paths": {
-      "@wordinweb/core": ["../core/src/index.ts"]
+      "@wordinweb/core": ["../core/src/index.ts"],
+      "@wordinweb/collab/client": ["../collab/src/client.ts"],
+      "@wordinweb/collab/server": ["../collab/src/server.ts"]
     }
   },
   "include": ["src", "../core/src/wmf.d.ts"]
