@@ -399,7 +399,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           <span data-testid="persist-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
             This document may not be saved in this browser — download a copy.
           </span>
-        ) : session?.readOnlyBlocked ? (
+        ) : session?.writesBlocked ? (
           // Owner lock (doc 14 §2.5): NOT a dead session — the doc stays live
           // and readable; editing returns when the owner lifts.
           //
