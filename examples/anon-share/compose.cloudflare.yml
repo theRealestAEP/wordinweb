@@ -30,6 +30,9 @@ services:
     environment:
       PORT: "1234"
       WW_LOG_LEVEL: "info"
+      # Participants in ONE room, not the number of rooms — the name invites
+      # the opposite reading and compose.yml documented it wrongly until it
+      # was caught. Room count is WW_MAX_ROOMS_GLOBAL below.
       WW_ROOM_CAP: "10"
       # ── session lifecycle (see compose.yml for the full rationale) ──────
       WW_EMPTY_ROOM_TTL_MS: "60000"

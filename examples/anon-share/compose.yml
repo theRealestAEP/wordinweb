@@ -30,8 +30,18 @@ services:
       # Optional: also append logs to a file inside the container. Usually
       # leave unset and let the container runtime collect stderr (below).
       # WW_LOG_FILE: "/var/log/wordinweb.log"
-      # Max concurrent rooms; further joins are refused rather than degrading
-      # everyone. 10 suits one small droplet.
+      # PARTICIPANTS IN ONE ROOM — not the number of rooms. The name reads
+      # like a cap on rooms and this file said exactly that until it was
+      # caught; limits.ts calls the confusion out by name because it had
+      # already sprung once. The number of ROOMS is WW_MAX_ROOMS_GLOBAL
+      # (below, 2000). Believing this line capped rooms would size a droplet
+      # for 10 documents when the server will happily accept two thousand.
+      #
+      # Note also that hub.ts describes this override as existing for the
+      # stress harnesses (swarm.mjs drives 30 clients into one room) rather
+      # than for production tuning, and says to re-run the swarm suite at any
+      # new value first. 10 is the owner-decided default; raising it is a
+      # deliberate act with a test run attached, not a config tweak.
       WW_ROOM_CAP: "10"
       # ── SESSION LIFECYCLE ────────────────────────────────────────────────
       # Empty room (everyone disconnected) → deleted after this long. The
