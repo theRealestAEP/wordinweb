@@ -12,3 +12,10 @@ __pycache__/
 *.py[cod]
 playwright-report/
 .vite/
+# Deployment credentials. examples/anon-share/.env holds TUNNEL_TOKEN, which
+# is enough on its own for anyone to run a connector for the tunnel — so this
+# rule exists BEFORE the file does, rather than after someone runs `git add -A`
+# and rewrites history to take it back.
+.env
+.env.*
+!.env.example
