@@ -301,6 +301,30 @@ WordInWeb never converts the document to flowing HTML. It parses the OOXML into 
 
 Real-time collaboration ships as a separate entry (`wordinweb/collab`). The server is a **blind sequencer**: it orders opaque encrypted envelopes and relays bytes, but never holds a key, never parses a document, and keeps **nothing at rest** — every browser holds the durable copy, and the document key rides the share link's `#fragment`, which browsers never send to a server.
 
+```tsx
+import { CollabEditor, IndexedDbBundleStore } from "wordinweb/collab";
+
+export function Room({ docId, clientId, docKey, shareCode }) {
+  return (
+    <CollabEditor
+      url="wss://collab.example.com"
+      docId={docId}
+      clientId={clientId}
+      docKey={docKey}        // from the link's #k= fragment; presence selects E2EE
+      shareCode={shareCode}  // optional passphrase, mixed into key derivation
+      httpBase="https://collab.example.com"  // enables images
+      store={new IndexedDbBundleStore()}     // resume across reloads
+    />
+  );
+}
+```
+
+`useCollab(opts)` returns the same `CollabSession` if you want to build the UI
+yourself. Render the editor read-only whenever `session.writesBlocked` is true:
+the server refuses writes from a locked, demoted, or viewer-role client, and an
+editable surface over those refusals applies each keystroke locally and then
+discards it.
+
 ```mermaid
 flowchart LR
   subgraph A["Browser A — owner"]
@@ -373,6 +397,22 @@ request, so CORS stops being part of the production picture.
 
 [sc]: https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts
 
+`compose.cloudflare.yml` is an alternative stack that runs the same services
+behind a [Cloudflare Tunnel][cft]. `cloudflared` dials outbound, so the host
+publishes no ports and the origin is unreachable from the internet; TLS
+terminates at Cloudflare's edge instead of Caddy. Use it when the host is a
+home machine or a droplet you would rather keep off the public internet:
+
+```sh
+TUNNEL_TOKEN=… docker compose -f compose.cloudflare.yml up -d
+```
+
+Point the tunnel's public hostname at `caddy:80` over HTTP. Caddy rewrites
+`X-Forwarded-For` from Cloudflare's `CF-Connecting-IP`, which leaves a
+single-entry chain, so `WW_TRUST_PROXY` stays 1 on this stack too.
+
+[cft]: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+
 Operational shape, stated plainly:
 
 | | |
@@ -381,11 +421,11 @@ Operational shape, stated plainly:
 | **Scale** | One process, one core. Rooms are in-memory, so there is no sharding story yet; `WW_ROOM_CAP` (default 10) caps **participants per room** — the 11th joiner is refused rather than degrading the session. |
 | **Session lifecycle** | Empty rooms are deleted after `WW_EMPTY_ROOM_TTL_MS` (60s). Rooms with no qualifying activity (edits/admin/media/joins — deliberately not cursor presence) are warned, then ended at `WW_IDLE_TIMEOUT_MS` (10min). Every room hits an absolute wall at `WW_ROOM_MAX_LIFETIME_MS` (12h) that nothing resets — the cap keepalive scripts cannot defeat. Ending a session loses no documents: any holder re-seeds from their browser bundle into a new epoch. |
 | **Surge valves** | Bound what an already-admitted session can spend, as opposed to the per-IP row below, which bounds what one address can start. `WW_WS_MAX_PAYLOAD` (512KB) caps inbound frames — `ws` otherwise defaults to 100MiB, so a hostile peer could make the server buffer and parse a huge frame before any hub check ran. `WW_WS_MAX_BUFFERED` (4MB) terminates a socket whose owner has stopped reading, rather than letting Node hold every broadcast for it. `WW_ROOM_LOG_MAX_BYTES` (64MB) ends a room whose envelope log runs away — pruning only happens at quiescent checkpoints, which a hostile room never reaches. `WW_MAX_ROOMS_GLOBAL` (2000) and `WW_MAX_CONNS_GLOBAL` (5000) are the global ceilings: new sessions get 503, existing ones are untouched. The `_GLOBAL` suffix is load-bearing — `WW_IP_MAX_CONNS` caps one address and `WW_ROOM_CAP` caps participants in one room, so the families have to read differently at a glance. |
-| **Media** | `WW_MEDIA_MAX_BLOB_BYTES` (5MB) is the number users see — a 413 carries it so the UI can say "images must be under 5 MB"; the socket-level guard derives from it (+2MB) rather than duplicating it. `WW_MEDIA_MAX_ROOM_BYTES` (100MB) caps one room's blobs. `WW_MEDIA_STAGE_TTL_MS` (60s) and `WW_MEDIA_TTL_MS` (5min) are lifecycles, not deletions of record: the relay is a **cache**, so an evicted blob is re-supplied by any participant who holds it — expiry costs latency, never data. |
+| **Media** | `WW_MEDIA_MAX_BLOB_BYTES` (5MB) is the number users see — a 413 carries it so the UI can say "images must be under 5 MB"; the socket-level guard derives from it (+2MB) rather than duplicating it. `WW_MEDIA_MAX_ROOM_BYTES` (100MB) caps how much one room holds at a time. `WW_MEDIA_ROOM_UPLOADS_PER_MIN` (60) and `WW_MEDIA_ROOM_UPLOAD_BURST` (64) cap how fast a room can be asked to hold it; the burst is sized for re-supply, since a joiner's images are requested from holders all at once. `WW_MEDIA_STAGE_TTL_MS` (60s) and `WW_MEDIA_TTL_MS` (5min) are lifecycles, not deletions of record: the relay is a **cache**, so an evicted blob is re-supplied by any participant who holds it — expiry costs latency, never data. |
 | **Per-IP limits** | `WW_IP_SEED_PER_MIN` (10), `WW_IP_MAX_DOCS` (25), `WW_IP_MAX_CONNS` (50) — deliberately generous because NAT/CGNAT makes an office look like one address; raise them if real users get refused. **`WW_TRUST_PROXY` is a hop count, not a boolean**: 1 is correct behind this compose file's Caddy; set it to 0 if the server is ever exposed without a proxy, or per-IP protection silently switches off while appearing configured. Every limit is parsed in `packages/server/src/limits.ts`; 0 disables any of them. |
 | **Health** | `GET /healthz` is ungated and is what probes should use. `GET /stats` requires `WW_OBS=1` **and** is not proxied — enabling metrics is deliberately two steps. |
 | **Logs** | Structured lines on stderr, collector-ready as-is; compose bounds them with the json-file driver. `WW_LOG_LEVEL=debug` is a per-op firehose, not a production setting. |
-| **Media routes are unauthenticated** | Anyone who can reach the origin can `PUT`/`GET` blobs within the size and room caps. In an encrypted room those blobs are ciphertext, but this is a recorded launch gate, not a solved problem. |
+| **Media routes are unauthenticated** | Anyone who can reach the origin can `PUT`/`GET` blobs within the size and room caps. In an encrypted room those blobs are ciphertext. Uploads require an open room and are rate limited per room, both decided before the request body is read, so a refused upload costs no memory — but per-user auth is a recorded launch gate. |
 
 ## Fonts
 
