@@ -207,8 +207,19 @@ export interface DocxViewApi {
   tableOp(op: TableOp): void;
   /** Current table-cell fill, undefined when the caret is outside a table. */
   getTableCellFill(): string | null | undefined;
-  /** Insert an image file at the caret (inline, natural size clamped to column). */
-  insertImage(file: Blob): Promise<void>;
+  /** Insert an image file at the caret (inline, natural size clamped to column).
+   * The result is REPORTED rather than swallowed: a picker that accepts a file
+   * and then does nothing is indistinguishable from a broken button. */
+  insertImage(file: Blob): Promise<ImageInsertResult>;
+  /** What this document's image picker should ADVERTISE, as a file-input
+   * `accept` string — narrower in a shared document, where the format has to
+   * survive the wire. Derived from the same list the insert guard consults, so
+   * the picker cannot offer something the insert will refuse. */
+  imageAccept(): string;
+  /** The relay's published per-image byte limit, or null when there is none to
+   * show (a local document, or a server that publishes no limit). Null means
+   * "say nothing about size" — never substitute a default. */
+  imageMaxBytes(): number | null;
   /** Capture a screen, window, or browser tab and insert the current frame as a PNG picture. */
   insertScreenshot(): Promise<ScreenshotInsertResult>;
   /** Align the paragraph(s) under the caret or selection. */
@@ -306,6 +317,47 @@ export interface DocxViewApi {
 
 export type ScreenshotInsertResult = "inserted" | "unsupported" | "cancelled" | "error" | "no-caret";
 
+/**
+ * Image formats a SHARED document accepts, and the single source of truth for
+ * both halves of that promise: the guard that declines an intent and the
+ * `accept` attribute of the file picker that offers one.
+ *
+ * They were separately written constants once, and drifted — the picker
+ * advertised SVG while the guard refused it, so choosing an SVG in a shared
+ * document did nothing at all, with no skeleton, no message and no log. The
+ * user's report was "it just didn't work and then disappeared". Deriving the
+ * offer from the acceptance is what makes that drift unrepresentable.
+ *
+ * Raster-only because the wire allowlist is (collab/src/validate.ts): widening
+ * it is an intent-shape change with an ENGINE_VERSION bump, not a UI edit.
+ */
+export const COLLAB_IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "bmp", "webp"] as const;
+const COLLAB_IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/bmp,image/webp";
+/** Local documents additionally take SVG — nothing has to agree with them. */
+const LOCAL_IMAGE_ACCEPT = `${COLLAB_IMAGE_ACCEPT},image/svg+xml`;
+
+/**
+ * Why an image insert did not happen, so the caller can SAY so. Every one of
+ * these was a bare `return` until a user hit the `unsupported-format` path and
+ * had no way to tell a rejected file from a broken button.
+ */
+export type ImageInsertResult =
+  | "inserted"
+  | "no-caret"
+  /** Not a format a shared document can carry (SVG today). */
+  | "unsupported-format"
+  /** Bigger than the relay's published per-blob limit. Refused BEFORE any
+   * bytes were read, sealed, hashed or sent — see `imageMaxBytes()` for the
+   * number to show the user. */
+  | "too-large"
+  /** Collab is wired but no media relay is configured — nothing can be
+   * uploaded, and inserting locally would fork the room. */
+  | "no-relay"
+  /** The relay refused the bytes; nothing was reserved, nothing forked. */
+  | "upload-failed"
+  /** The bytes did not decode as an image at all. */
+  | "error";
+
 export interface DocxViewProps {
   /** The document: raw bytes, a File/Blob, or a URL to fetch. */
   source: ArrayBuffer | Uint8Array | Blob | string;
@@ -382,6 +434,18 @@ export interface DocxViewProps {
      * gets a skeleton nobody can ever fill. Absent when the app supplied no
      * relay origin, in which case images stay a local-only feature. */
     uploadMedia?: (bytes: Uint8Array) => Promise<{ blobSha: string; bytesLen: number; iv?: string } | null>;
+    /**
+     * Largest single upload the RELAY will accept, in bytes, as published in
+     * the welcome. Lets the insert refuse an oversized file locally instead of
+     * discovering it after sealing, hashing and a full upload.
+     *
+     * NULL MEANS SKIP THE CHECK — not "no limit" and not "use a default". An
+     * older server publishes nothing, and a client that invents a number
+     * either blocks uploads the server would have taken or promises the user
+     * one it will refuse. The server enforces the real limit either way, so
+     * skipping is safe and guessing is not.
+     */
+    mediaMaxBlobBytes?: number | null;
     /** Reverse this user's last SEQUENCED action (plan doc 03 Phase 8). The
      * editor routes Cmd+Z here in a room, because replaying the LOCAL history
      * stack would edit this replica with nothing on the wire. Absent ⇒ undo
@@ -1509,13 +1573,28 @@ export function DocxView({
             const caret = editor?.getCaretTarget();
             return caret ? cellShadingAt(doc, caret.t) : undefined;
           },
+          imageAccept: () => (collab?.submitOp && doc.stableIds ? COLLAB_IMAGE_ACCEPT : LOCAL_IMAGE_ACCEPT),
+          imageMaxBytes: () => (collab?.submitOp && doc.stableIds ? collab.mediaMaxBlobBytes ?? null : null),
           insertImage: async (file) => {
             // Caret, else the selection's end, else the start of the document
             // (see documentStart): picking a file is an unambiguous request to
             // insert one, so answering it with silence because no caret has
             // been placed yet is a bug, not a safeguard.
             const caret = insertionTarget() ?? documentStart();
-            if (!caret) return;
+            if (!caret) return "no-caret";
+            // SIZE PRE-CHECK, before a single byte is read. The relay would
+            // refuse this file anyway, but only after the browser had read it,
+            // decoded it, sealed it, hashed it and pushed it over the network —
+            // so the user waits out a whole upload to be told no. `file.size`
+            // is known immediately and costs nothing.
+            //
+            // ONE BRANCH, and the null case is the important half: no published
+            // limit means SKIP, never substitute a default. The server enforces
+            // the real number regardless, so skipping risks nothing, while
+            // guessing would either block uploads it would have accepted or
+            // promise a size it will refuse.
+            const maxBytes = collab?.submitOp && doc.stableIds ? collab.mediaMaxBlobBytes ?? null : null;
+            if (typeof maxBytes === "number" && file.size > maxBytes) return "too-large";
             const bytes = new Uint8Array(await file.arrayBuffer());
             const isSvg = file.type === "image/svg+xml";
             const bmp = isSvg ? null : await createImageBitmap(new Blob([bytes.buffer as ArrayBuffer], { type: file.type }));
@@ -1542,13 +1621,16 @@ export function DocxView({
               // would fork the room the moment anyone else typed. Honest
               // no-op instead. Caught by INVARIANT C, which mounts exactly
               // that configuration.
-              if (!collab.uploadMedia) return;
+              if (!collab.uploadMedia) return "no-relay";
               // The wire allowlist is raster-only (validate.ts): an SVG would
               // be refused by every replica, so decline it here rather than
-              // inserting something only this client can see.
-              if (!["png", "jpg", "jpeg", "gif", "bmp", "webp"].includes(ext)) return;
+              // inserting something only this client can see. The picker is
+              // built from this same list (imageAccept) so this is the last
+              // line of defence, not the first — a user should never reach it
+              // through the toolbar, only through the API.
+              if (!(COLLAB_IMAGE_EXTS as readonly string[]).includes(ext)) return "unsupported-format";
               const media = await collab.uploadMedia(bytes);
-              if (!media) return; // relay refused — no reservation, nothing forked
+              if (!media) return "upload-failed"; // relay refused — nothing reserved, nothing forked
               const w = naturalWidth * scale;
               const h2 = naturalHeight * scale;
               collabOp((a, ids) => ({
@@ -1567,7 +1649,7 @@ export function DocxView({
               // part from memory the moment the reservation applies (which in
               // an encrypted room is asynchronous, after this returns).
               pages = rerender(doc);
-              return;
+              return "inserted";
             }
             history.checkpoint();
             const relId = doc.addImageResource(bytes, ext === "jpg" ? "jpeg" : ext);
@@ -1583,6 +1665,9 @@ export function DocxView({
               pages = rerender(doc);
             }
             bmp?.close();
+            // No drawing means the caret's paragraph could not carry one — an
+            // outcome, not a non-event.
+            return drawing ? "inserted" : "error";
           },
           insertScreenshot: async () => {
             if (!editor?.getCaretTarget()) return "no-caret";
@@ -1612,8 +1697,12 @@ export function DocxView({
               context.drawImage(video, 0, 0);
               const image = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
               if (!image) return "error";
-              await api.insertImage(image);
-              return "inserted";
+              // Never claim a success the insert didn't have: the capture can
+              // work and the PLACEMENT still fail (no relay in a shared
+              // document, a paragraph that can't carry a drawing). Reporting
+              // "inserted" here regardless is the same silence one layer up.
+              const placed = await api.insertImage(image);
+              return placed === "inserted" ? "inserted" : placed === "no-caret" ? "no-caret" : "error";
             } catch (error) {
               return error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")
                 ? "cancelled"

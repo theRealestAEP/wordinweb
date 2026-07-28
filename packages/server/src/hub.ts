@@ -1,9 +1,11 @@
 import { DocxDocument } from "@wordinweb/core";
 import { DocumentSession, type IdSidecar, type ParticipantProfile } from "@wordinweb/collab/server";
 import type { EnvelopeEntry, SealedCheckpoint, IntentEnvelope, LineageHead } from "@wordinweb/collab/server";
-import { ClientMessage, ServerMessage, PROTOCOL_VERSION, sanitizePresencePosition, type PresencePosition } from "@wordinweb/collab/server";
+import { ClientMessage, ServerMessage, PROTOCOL_VERSION, sanitizePresencePosition, type PresencePosition, type WriteStatus } from "@wordinweb/collab/server";
 import { StorageDriver } from "./storage.js";
 import { type Observability, NO_OP_OBSERVABILITY } from "./observability.js";
+import { type HubLimits, DEFAULT_LIMITS } from "./limits.js";
+import { IpGuard, NO_OP_IP_GUARD, type IpLimitReason } from "./ip-guard.js";
 
 /**
  * A connection the hub can send to, abstracting the transport (WebSocket in
@@ -67,6 +69,14 @@ interface EncryptedState {
    * after must match (client-derived canonical forms diverge across
    * transform-semantics versions with no arbiter — doc 13 §2). */
   engineVersion?: string;
+  /**
+   * Running total of retained ciphertext bytes in {@link log}, maintained
+   * incrementally rather than recomputed: the whole point of the budget is to
+   * bound a room under sustained submission, and summing the log on every
+   * submit would itself become the quadratic cost the attack is looking for.
+   * Reset to 0 when a checkpoint prunes the log.
+   */
+  logBytes: number;
 }
 
 interface Room {
@@ -115,15 +125,69 @@ interface Room {
   /** Epoch-ms timestamp of when the room last became empty, or undefined
    * while anyone is connected. Drives zero-custody eviction (plan doc 12
    * §2): after the last-disconnect grace elapses the room — doc, log,
-   * everything — is deleted. Idle-with-people never evicts (round-4 F7);
-   * only the empty state starts this clock. */
+   * everything — is deleted. Only the empty state starts THIS clock; a room
+   * with people in it is governed by the idle/lifetime deadlines below
+   * instead (round-4 F7 said "idle-with-people never evicts", which was the
+   * right call while eviction had no warning and no countdown — the server
+   * lifecycle arc supersedes it with a graceful, announced ending rather
+   * than a silent disappearance). */
   emptySince?: number;
+  /** When this room was created (seed, re-seed, or provider auto-create) —
+   * the fixed origin of the ABSOLUTE lifetime cap. Nothing resets it: that
+   * is the entire point, since an activity-based clock is exactly what a
+   * keepalive script defeats. */
+  createdAt: number;
+  /** Last QUALIFYING activity (see LIFECYCLE_NOTES.activity in limits.ts):
+   * accepted submits, admin actions, media transfers, and joins — never
+   * presence. Drives the idle deadline. */
+  lastActivityAt: number;
+  /** True once the idle warning has been sent for the CURRENT idle stretch,
+   * so it goes out once rather than on every sweep. Cleared by activity,
+   * which also sends the cancellation. */
+  idleWarned?: boolean;
+  /** True once the lifetime warning has been sent. Never cleared — the
+   * deadline it announces cannot move. */
+  lifetimeWarned?: boolean;
+  /** Normalized address of whoever seeded this room, for the per-IP live-doc
+   * cap. Held ONLY as a guard-internal bucket key (see ip-guard.ts): never
+   * logged, never sent, never in a snapshot. */
+  creatorIp?: string;
 }
 
 /** Last-disconnect grace before an empty room is deleted (plan doc 12 §1):
  * long enough to survive a page refresh or a flaky reconnect, short enough
  * that "everyone left" promptly means "the server holds nothing". */
 export const EVICTION_GRACE_MS = 60_000;
+
+/**
+ * A room's death certificate. Fixed vocabulary (safe to log and tally by),
+ * and distinct per cause because "rooms are evicting" is a useless signal
+ * while "rooms are evicting by `session-expired`" says a keepalive script is
+ * hitting the 12h wall.
+ *
+ *  - `empty`           everyone left and the grace elapsed (the zero-custody
+ *                      promise's normal enforcement path)
+ *  - `idle-timeout`    nobody did anything for the idle window
+ *  - `session-expired` the absolute lifetime cap
+ */
+export type EvictionReason = "empty" | "idle-timeout" | "session-expired" | "log-overflow";
+
+/**
+ * Outcome of a seed attempt. Three distinct failures, kept distinct because
+ * the caller maps them to different HTTP statuses and the client to different
+ * user-facing stories: `exists` is first-wins (join the incumbent epoch — it
+ * carries the genesisId to join), while the ip-limit reasons are throttles
+ * that carry no epoch because no epoch was consulted.
+ */
+export type SeedResult =
+  | { ok: true; genesisId: string; ownerToken: string }
+  | { ok: false; reason: "exists"; genesisId: string }
+  | { ok: false; reason: IpLimitReason }
+  /** The GLOBAL room ceiling — the whole server is at capacity, not this
+   * address. Distinct from the ip-limit reasons because it is not the
+   * caller's fault and the honest client answer is "try again shortly"
+   * rather than "you are doing too much". Maps to 503, not 429. */
+  | { ok: false; reason: "server-full" };
 
 /**
  * Routes clients to per-document sessions and fans out broadcasts. This is the
@@ -182,6 +246,15 @@ export class CollabHub {
      * on it, mirroring the clock/provider pattern above. Records shapes and
      * counts only — never content (zero-custody). */
     private obs: Observability = NO_OP_OBSERVABILITY,
+    /** Lifecycle + abuse limits (see limits.ts for the whole config surface
+     * and its env overrides). Resolved ONCE at startup and injected, so no
+     * code path below reads process.env and tests hand over exact numbers
+     * to drive against the injected clock. */
+    private limits: HubLimits = DEFAULT_LIMITS,
+    /** Per-IP abuse guard. Defaults to the permissive no-op, so a hub built
+     * without one behaves exactly as it did before this arc — same pattern
+     * as the observability sink above. */
+    private ipGuard: IpGuard = NO_OP_IP_GUARD,
   ) {}
 
   /** Send a refusal and tally it by reason (the one place `{t:"refused"}` is
@@ -403,6 +476,14 @@ export class CollabHub {
         this.connDoc.set(conn.id, msg.docId);
         this.connById.set(conn.id, conn);
         this.obs.helloAccepted();
+        // A JOIN counts as activity (LIFECYCLE_NOTES.activity). Without this,
+        // someone opening a link into a room that has been quiet for nine
+        // minutes gets a 60-second countdown and watches the session evict
+        // under them before they type a character. Keepalive-by-rejoin is
+        // bounded by the absolute lifetime cap and the per-IP connection
+        // limit, so admitting joins here does not reopen the hole the idle
+        // timeout closes.
+        this.noteActivity(room);
         if (room.enc) {
           // Blind welcome (doc 13 §3): sealed seed checkpoint + the WHOLE
           // epoch envelope log after it — base-complete by construction
@@ -418,6 +499,10 @@ export class CollabHub {
             // joiner needs, always.
             tail: room.enc.log,
             mode: "encrypted",
+            // The CONFIGURED value, never the default constant: a client that
+            // pre-checks against a number this server does not enforce is
+            // worse than one that does not pre-check at all.
+            mediaMaxBlobBytes: this.limits.media.maxBlobBytes,
           });
           room.roster.set(msg.clientId, {
             profile: sanitizeProfile(msg.profile, msg.clientId),
@@ -425,6 +510,7 @@ export class CollabHub {
           });
           this.broadcastRoster(room);
           this.assignCheckpointer(room);
+          this.sendPendingWarning(room, conn);
           return;
         }
         // The welcome is a checkpoint bundle (plan doc 12 §2, round-4 F10):
@@ -452,6 +538,7 @@ export class CollabHub {
           media: [...room.session!.doc.mediaMeta.entries()]
             .filter(([, m]) => m.sha !== "")
             .map(([part, m]) => ({ part, sha: m.sha, ...(m.iv ? { iv: m.iv } : {}) })),
+          mediaMaxBlobBytes: this.limits.media.maxBlobBytes,
         });
         // Roster upsert + fan-out (doc 14 §2): keyed by the BOUND clientId,
         // so a reconnect resumes the same entry. Sanitization is server-side
@@ -462,6 +549,7 @@ export class CollabHub {
           connected: true,
         });
         this.broadcastRoster(room);
+        this.sendPendingWarning(room, conn);
         return;
       }
       case "admin": {
@@ -482,6 +570,15 @@ export class CollabHub {
           const target = this.findClientConn(docId, a.clientId);
           if (target) this.kick(target, "kicked");
         }
+        // RE-FAN THE ROSTER: every admin action changes somebody's write
+        // status, and the transition has to reach clients WITHOUT them
+        // attempting a write to discover it. That is the whole point of the
+        // signal — a lift used to be undiscoverable (a blocked client stayed
+        // in viewer mode until reload, because the only evidence of the lock
+        // was a per-edit refusal and nothing announced its removal).
+        this.broadcastRoster(room);
+        // An owner administering the room is unmistakably a live human.
+        this.noteActivity(room);
         return;
       }
       case "profile": {
@@ -512,12 +609,6 @@ export class CollabHub {
           this.refuseSubmit(conn, "rate-limit");
           return;
         }
-        // Role enforcement at the sequencer (doc 06): a viewer's edits are
-        // refused, not merely hidden in the UI.
-        if (this.verifier && this.auth.get(conn.id)?.role !== "editor") {
-          this.refuseSubmit(conn, "read-only");
-          return;
-        }
         // Identity binding (doc 11 decision 8): the intent must carry the
         // clientId this socket registered at hello. Anything else is a
         // forgery attempt (or a client bug) — refused BEFORE the session
@@ -528,10 +619,12 @@ export class CollabHub {
           return;
         }
         const room = this.rooms.get(docId)!;
-        // Owner write controls (doc 14 §2.5): doc-wide read-only (owner
-        // bypasses) and per-clientId demotion — integrity controls a blind
-        // server can enforce.
-        if ((room.readOnly && !this.ownerConns.has(conn.id)) || room.demoted?.has(msg.intent.clientId)) {
+        // Write controls, ALL THREE through the one predicate the roster also
+        // advertises (see writeBlock): role, demotion, and the room-wide lock
+        // with its owner bypass. Two copies of this rule is how the advertised
+        // status and the enforced one drift apart, and a client told "you may
+        // write" while the server refuses is worse off than one told nothing.
+        if (this.writeBlock(room, conn, msg.intent.clientId)) {
           this.refuseSubmit(conn, "read-only");
           return;
         }
@@ -544,6 +637,14 @@ export class CollabHub {
         }
         const before = room.session!.seq;
         const entry = room.session!.submit(msg.intent);
+        // A canonical REJECTION is an edit dying, and it is the quietest way
+        // that can happen: the entry is sequenced, every replica agrees, and
+        // nothing diverges — which is precisely how a stale image-size bound
+        // ate large photos without a single error anywhere. Counted by reason
+        // so the next wrong bound shows up as a spike instead of a mystery.
+        // (Encrypted rooms have no equivalent here: the server is blind, so
+        // the client mirror reports it via onIntentRejected.)
+        if (entry.kind === "rejected") this.obs.intentRejected(entry.reason);
         // A deduplicated re-send returns an already-sequenced entry (seq <=
         // before); persist only genuinely new entries so the log stays
         // append-once. Durability before ack (plan doc 06), then broadcast.
@@ -552,6 +653,7 @@ export class CollabHub {
         for (const c of room.conns) c.send(out);
         this.obs.submitAccepted();
         this.obs.broadcast();
+        this.noteActivity(room); // an ACCEPTED edit — the canonical activity
         return;
       }
       case "submit-enc": {
@@ -568,10 +670,6 @@ export class CollabHub {
           this.refuseSubmit(conn, "rate-limit");
           return;
         }
-        if (this.verifier && this.auth.get(conn.id)?.role !== "editor") {
-          this.refuseSubmit(conn, "read-only");
-          return;
-        }
         // Identity binding applies identically in encrypted mode — the
         // bookkeeping is plaintext precisely so the server can enforce it
         // (doc 13 §2 precondition #1).
@@ -580,7 +678,8 @@ export class CollabHub {
           return;
         }
         const room = this.rooms.get(docId)!;
-        if ((room.readOnly && !this.ownerConns.has(conn.id)) || room.demoted?.has(msg.envelope.clientId)) {
+        // Same single predicate as the plaintext path and the roster.
+        if (this.writeBlock(room, conn, msg.envelope.clientId)) {
           this.refuseSubmit(conn, "read-only");
           return;
         }
@@ -645,11 +744,39 @@ export class CollabHub {
               : room.enc.log[room.enc.log.length - 1].seq + 1;
           entry = { ...msg.envelope, seq };
           room.enc.log.push(entry);
+          room.enc.logBytes += msg.envelope.ciphertext.length;
         }
         const outEnc: ServerMessage = { t: "broadcast-enc", entries: [entry] };
         for (const c of room.conns) c.send(outEnc);
         this.obs.submitAccepted();
         this.obs.broadcast();
+        // Encrypted rooms count activity identically: the server cannot read
+        // the edit, but "an envelope was sequenced" is plaintext bookkeeping
+        // and is exactly the signal the timeout needs. A blind server can
+        // still tell the difference between working and abandoned.
+        this.noteActivity(room);
+        // PER-ROOM LOG BUDGET, checked after the broadcast so the entry that
+        // crossed the line is still delivered — the room is ending either way,
+        // and a half-sequenced tail helps nobody.
+        //
+        // This is the one hole every other limit leaves open: 256 KB envelopes
+        // at the per-connection rate cap, from a room's worth of connections,
+        // satisfies the frame cap, the rate cap, the IP caps and the room cap
+        // simultaneously while growing this log at roughly a gigabyte per
+        // second. Pruning happens only at a QUIESCENT checkpoint, which a room
+        // under sustained submission never reaches — so the mechanism that
+        // would bound it is precisely the one the traffic prevents.
+        //
+        // A sealed keystroke is ~500 bytes, so the default budget is on the
+        // order of a hundred thousand real edits within a single epoch, far
+        // past where a checkpoint would have pruned. Crossing it means the room
+        // is not being used as a document.
+        {
+          const budget = this.limits.surge.roomLogMaxBytes;
+          if (budget > 0 && room.enc.logBytes > budget) {
+            this.endSession(docId, room, "log-overflow");
+          }
+        }
         return;
       }
       case "checkpoint": {
@@ -673,6 +800,7 @@ export class CollabHub {
         if (msg.checkpoint.seq !== head) return;
         room.enc.checkpoint = msg.checkpoint;
         room.enc.log = [];
+        room.enc.logBytes = 0; // pruned: the budget starts over with the epoch's new base
         return;
       }
       case "media-need": {
@@ -711,7 +839,7 @@ export class CollabHub {
           // naturally as sockets churn); the deadline lets sweepMedia try
           // the next volunteer if this one stalls.
           if (room.media.waiters.has(sha) && !room.media.resupply.has(sha) && !room.media.blobs.has(sha)) {
-            room.media.resupply.set(sha, { chosenConnId: conn.id, deadline: this.now() + MEDIA_LIMITS.tUploadMs });
+            room.media.resupply.set(sha, { chosenConnId: conn.id, deadline: this.now() + this.limits.media.uploadDeadlineMs });
             conn.send({ t: "media-upload", sha });
           }
         }
@@ -819,12 +947,55 @@ export class CollabHub {
   }
 
   /** Fan the full roster snapshot to everyone in the room (doc 14 §2). */
+  /**
+   * THE ONE PREDICATE. Returns why this connection's writes would be refused,
+   * or null if they will be sequenced.
+   *
+   * Used by the submit paths (both modes) AND by the roster that advertises
+   * write status, which is the entire point: a client told "you may write"
+   * while the sequencer refuses is worse off than a client told nothing, and
+   * two copies of a three-condition rule is precisely how the image-size
+   * ceiling silently rotted. Enforcement and advertisement cannot disagree
+   * because there is only one of them.
+   *
+   * ORDER IS THE ENFORCEMENT ORDER, not preference:
+   *  - role first, and NOT owner-bypassed — a viewer token stays a viewer
+   *    token even for the epoch's owner (the token is the capability; the
+   *    owner crown does not mint write access the token withheld);
+   *  - demotion next, also not owner-bypassed;
+   *  - the room-wide lock last, which the owner DOES bypass — that bypass is
+   *    why this is per-connection and cannot be a room flag broadcast
+   *    identically to everyone.
+   */
+  private writeBlock(room: Room, conn: Connection, clientId: string): Exclude<WriteStatus, "allowed"> | null {
+    if (this.verifier && this.auth.get(conn.id)?.role !== "editor") return "viewer-role";
+    if (room.demoted?.has(clientId)) return "demoted";
+    if (room.readOnly && !this.ownerConns.has(conn.id)) return "owner-lock";
+    return null;
+  }
+
   private broadcastRoster(room: Room): void {
-    const roster = [...room.roster].map(([clientId, e]) => ({
-      clientId,
-      profile: e.profile,
-      connected: e.connected,
-    }));
+    // Map each roster identity back to its LIVE socket: write status depends
+    // on the connection (the owner bypass is a property of the socket that
+    // proved the owner token), not on the clientId alone.
+    const connOf = new Map<string, Connection>();
+    for (const c of room.conns) {
+      const cid = this.connClient.get(c.id);
+      if (cid) connOf.set(cid, c);
+    }
+    const roster = [...room.roster].map(([clientId, e]) => {
+      const conn = connOf.get(clientId);
+      // A DISCONNECTED participant has no socket to evaluate the owner bypass
+      // against. Report the identity-only conditions and omit the room lock
+      // rather than guess: they are not writing anything right now, and the
+      // status is recomputed the moment they rejoin.
+      const write: WriteStatus = conn
+        ? (this.writeBlock(room, conn, clientId) ?? "allowed")
+        : room.demoted?.has(clientId)
+          ? "demoted"
+          : "allowed";
+      return { clientId, profile: e.profile, connected: e.connected, write };
+    });
     const out: ServerMessage = { t: "roster", roster };
     for (const c of room.conns) c.send(out);
     this.obs.rosterObserved(room.roster.size);
@@ -855,9 +1026,9 @@ export class CollabHub {
   async mediaUpload(docId: string, sha: string, bytes: Uint8Array): Promise<number> {
     const room = this.rooms.get(docId);
     if (!room) return 404;
-    if (bytes.length > MEDIA_LIMITS.maxBlobBytes) return 413;
+    if (bytes.length > this.limits.media.maxBlobBytes) return 413;
     if (room.media.blobs.has(sha)) return 200; // content-addressed dedup
-    if (room.media.totalBytes + bytes.length > MEDIA_LIMITS.roomMediaBytes) return 507;
+    if (room.media.totalBytes + bytes.length > this.limits.media.maxRoomBytes) return 507;
     const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
     let hex = "";
     for (const b of new Uint8Array(digest)) hex += b.toString(16).padStart(2, "0");
@@ -873,6 +1044,10 @@ export class CollabHub {
       room.media.blobs.get(sha)!.staged = false; // re-supplied ⇒ referenced
     }
     this.obs.mediaUp();
+    // Media transfers are work in the room even when no intent is sequenced
+    // (a paste of a large image is one submit and many seconds of upload) —
+    // a session must not idle out mid-transfer.
+    this.noteActivity(room);
     return 201;
   }
 
@@ -887,6 +1062,7 @@ export class CollabHub {
     blob.staged = false;
     blob.lastDownloadAt = this.now();
     this.obs.mediaDown();
+    this.noteActivity(room);
     return blob.bytes;
   }
 
@@ -900,7 +1076,7 @@ export class CollabHub {
     for (const room of this.rooms.values()) {
       for (const [sha, blob] of [...room.media.blobs]) {
         if (room.media.waiters.has(sha)) continue;
-        const ttl = blob.staged ? MEDIA_LIMITS.tStageMs : MEDIA_LIMITS.tMediaMs;
+        const ttl = blob.staged ? this.limits.media.stageTtlMs : this.limits.media.ttlMs;
         if (now - blob.lastDownloadAt >= ttl) {
           room.media.blobs.delete(sha);
           room.media.totalBytes -= blob.bytes.length;
@@ -943,21 +1119,170 @@ export class CollabHub {
    * people connected is never deleted out from under them (round-4 F7).
    * Returns the evicted docIds (for logging/metrics).
    */
-  sweepRooms(graceMs: number = EVICTION_GRACE_MS): string[] {
+  sweepRooms(graceMs: number = this.limits.lifecycle.emptyRoomTtlMs): string[] {
     const evicted: string[] = [];
+    if (graceMs <= 0) return evicted; // 0 disables (limits.ts convention)
     for (const [docId, room] of [...this.rooms]) {
       if (room.conns.size === 0 && room.emptySince !== undefined && this.now() - room.emptySince >= graceMs) {
-        this.rooms.delete(docId);
+        this.evictRoom(docId, "empty");
         evicted.push(docId);
-        this.obs.roomEvicted();
       }
     }
     return evicted;
   }
 
+  /**
+   * Mark QUALIFYING ACTIVITY in a room and cancel any idle countdown.
+   *
+   * The definition of "qualifying" is the load-bearing decision (see
+   * LIFECYCLE_NOTES.activity in limits.ts): accepted submits, owner admin
+   * actions, media transfers, and joins — deliberately NOT presence. A
+   * forgotten tab emits presence whenever the mouse moves or the window
+   * regains focus, so counting it would let any abandoned laptop hold a room
+   * open forever and the idle timeout would be dead letter.
+   *
+   * Cancelling is announced: a client that was shown a countdown must be told
+   * it is over, or the UI sits at "ending in 12s" while the session is
+   * perfectly healthy.
+   */
+  private noteActivity(room: Room): void {
+    room.lastActivityAt = this.now();
+    if (!room.idleWarned) return;
+    room.idleWarned = false;
+    const out: ServerMessage = { t: "session-warning-cleared", reason: "idle" };
+    for (const c of room.conns) c.send(out);
+  }
+
+  /** Delete a room and everything in it, releasing the creator's per-IP doc
+   * slot. The ONE place a room leaves `this.rooms`, so the eviction counter,
+   * the reason tally and the IP release can never drift apart from the
+   * deletion itself. */
+  private evictRoom(docId: string, reason: EvictionReason): void {
+    this.rooms.delete(docId);
+    this.ipGuard.releaseRoom(docId);
+    this.obs.roomEvicted(1, reason);
+  }
+
+  /**
+   * Sweep the TIME-BASED session deadlines: the idle timeout and the absolute
+   * lifetime cap, each with its warning. Called on the same timer as
+   * {@link sweepRooms} (the hub stays timer-free — deadlines are deterministic
+   * in tests via the injected clock).
+   *
+   * WARNING TIMING: a warning is sent when the remaining time first drops
+   * below the configured lead, which — because this runs on a periodic sweep
+   * — happens up to one sweep interval EARLY. The frame therefore carries the
+   * measured remainder rather than the configured lead, so a client's
+   * countdown matches when the session actually ends.
+   *
+   * ORDER MATTERS: lifetime is checked before idle, so a room that has hit
+   * both deadlines in the same sweep dies of the one that cannot be argued
+   * with, and the reason an operator sees is the true cause.
+   *
+   * Returns what it ended, for logging/metrics and for tests to assert on.
+   */
+  sweepLifecycle(): { docId: string; reason: EvictionReason }[] {
+    const now = this.now();
+    const { idleTimeoutMs, idleWarningMs, roomMaxLifetimeMs, lifetimeWarningMs } = this.limits.lifecycle;
+    const ended: { docId: string; reason: EvictionReason }[] = [];
+    for (const [docId, room] of [...this.rooms]) {
+      // ── absolute lifetime cap ────────────────────────────────────────
+      if (roomMaxLifetimeMs > 0) {
+        const remaining = room.createdAt + roomMaxLifetimeMs - now;
+        if (remaining <= 0) {
+          this.endSession(docId, room, "session-expired");
+          ended.push({ docId, reason: "session-expired" });
+          continue;
+        }
+        if (!room.lifetimeWarned && lifetimeWarningMs > 0 && remaining <= lifetimeWarningMs) {
+          room.lifetimeWarned = true;
+          this.warn(room, "lifetime", remaining);
+        }
+      }
+      // ── idle timeout ─────────────────────────────────────────────────
+      if (idleTimeoutMs > 0) {
+        const remaining = room.lastActivityAt + idleTimeoutMs - now;
+        if (remaining <= 0) {
+          this.endSession(docId, room, "idle-timeout");
+          ended.push({ docId, reason: "idle-timeout" });
+          continue;
+        }
+        if (!room.idleWarned && idleWarningMs > 0 && remaining <= idleWarningMs) {
+          room.idleWarned = true;
+          this.warn(room, "idle", remaining);
+        }
+      }
+    }
+    return ended;
+  }
+
+  /**
+   * Bring a just-joined connection up to date on an ALREADY-ANNOUNCED
+   * deadline, right after its welcome. Only the lifetime cap can be in this
+   * state: a join is activity, so it has just cleared any idle warning.
+   *
+   * Without this, someone joining inside the final five minutes sees no
+   * countdown at all and the session simply ends on them — the warning is a
+   * room property, and a client that missed the broadcast still deserves it.
+   */
+  private sendPendingWarning(room: Room, conn: Connection): void {
+    if (!room.lifetimeWarned || this.limits.lifecycle.roomMaxLifetimeMs <= 0) return;
+    const remaining = room.createdAt + this.limits.lifecycle.roomMaxLifetimeMs - this.now();
+    if (remaining > 0) conn.send({ t: "session-warning", reason: "lifetime", inMs: remaining });
+  }
+
+  /** Announce an approaching deadline to everyone in the room. */
+  private warn(room: Room, reason: "idle" | "lifetime", remainingMs: number): void {
+    const out: ServerMessage = { t: "session-warning", reason, inMs: Math.max(0, remainingMs) };
+    for (const c of room.conns) c.send(out);
+    this.obs.sessionWarned(reason);
+  }
+
+  /**
+   * End a live session: every participant is kicked with a distinct reason,
+   * then the room is deleted outright.
+   *
+   * The room is NOT left to the empty-room grace afterwards. That grace
+   * exists so a refresh or a flaky reconnect can resume a session that is
+   * still meant to exist; a session the server has just decided to END is a
+   * different thing, and leaving a 60-second window in which a reconnecting
+   * client rejoins a room already declared dead would make the timeout
+   * advisory rather than enforced.
+   *
+   * Iterating a COPY of `conns` is required, not stylistic: `kick` calls
+   * `disconnect`, which mutates the set being walked.
+   */
+  private endSession(
+    docId: string,
+    room: Room,
+    reason: Extract<EvictionReason, "idle-timeout" | "session-expired" | "log-overflow">,
+  ): void {
+    for (const conn of [...room.conns]) this.kick(conn, reason);
+    this.evictRoom(docId, reason);
+  }
+
   /** Sessions currently held in memory (for eviction/metrics). */
   activeDocs(): string[] {
     return [...this.rooms.keys()];
+  }
+
+  /**
+   * The GLOBAL room ceiling. Per-IP caps bound one address; they do not bound
+   * a thousand cooperating addresses, and a botnet is exactly that — every
+   * member individually impeccable.
+   *
+   * A FAIL-FAST VALVE, and the tradeoff is deliberate: briefly refusing NEW
+   * sessions is a far better failure than an out-of-memory kill that takes
+   * every EXISTING session down with it. Rooms already live are untouched, and
+   * capacity returns on its own as they evict.
+   */
+  private atCapacity(): { ok: false; reason: "server-full" } | null {
+    const max = this.limits.surge.maxRooms;
+    if (max > 0 && this.rooms.size >= max) {
+      this.obs.capacityRefused("server-full");
+      return { ok: false, reason: "server-full" };
+    }
+    return null;
   }
 
   /**
@@ -987,9 +1312,23 @@ export class CollabHub {
     sidecar?: IdSidecar,
     codeVerifier?: string,
     lineage?: LineageHead[],
-  ): { ok: true; genesisId: string; ownerToken: string } | { ok: false; reason: "exists"; genesisId: string } {
+    /** Normalized creator address for the per-IP limits (see ip-guard.ts).
+     * Omitted by callers that have no transport (tests, embedders), which
+     * simply skips the per-IP accounting. */
+    creatorIp?: string,
+  ): SeedResult {
     const existing = this.rooms.get(docId);
     if (existing) return { ok: false, reason: "exists", genesisId: existing.genesisId };
+    const full = this.atCapacity();
+    if (full) return full;
+    // Per-IP gate BEFORE the parse: seeding is the expensive unauthenticated
+    // operation (it decodes a docx and allocates a room), so the limit has to
+    // land in front of the work, not after it.
+    const allowed = this.ipGuard.allowSeed(creatorIp ?? "");
+    if (!allowed.ok) {
+      this.obs.ipLimited(allowed.reason);
+      return { ok: false, reason: allowed.reason };
+    }
     const session = new DocumentSession(DocxDocument.load(docx));
     if (sidecar) session.installSidecar(sidecar);
     const room: Room = {
@@ -1002,9 +1341,13 @@ export class CollabHub {
       lineage,
       ownerToken: defaultGenesisId().replace("g_", "o_"),
       emptySince: this.now(), // eviction clock runs until someone joins
+      createdAt: this.now(),
+      lastActivityAt: this.now(),
+      creatorIp,
       media: emptyMedia(),
     };
     this.rooms.set(docId, room);
+    if (creatorIp) this.ipGuard.noteRoom(creatorIp, docId);
     this.obs.roomCreated();
     return { ok: true, genesisId: room.genesisId, ownerToken: room.ownerToken! };
   }
@@ -1026,21 +1369,33 @@ export class CollabHub {
     genesisId: string,
     checkpoint: SealedCheckpoint,
     codeVerifier?: string,
-  ): { ok: true; genesisId: string; ownerToken: string } | { ok: false; reason: "exists"; genesisId: string } {
+    creatorIp?: string,
+  ): SeedResult {
     const existing = this.rooms.get(docId);
     if (existing) return { ok: false, reason: "exists", genesisId: existing.genesisId };
+    const full = this.atCapacity();
+    if (full) return full;
+    const allowed = this.ipGuard.allowSeed(creatorIp ?? "");
+    if (!allowed.ok) {
+      this.obs.ipLimited(allowed.reason);
+      return { ok: false, reason: allowed.reason };
+    }
     const room: Room = {
       session: null,
-      enc: { checkpoint, log: [], seen: new Set() },
+      enc: { checkpoint, log: [], seen: new Set(), logBytes: 0 },
       conns: new Set(),
       genesisId,
       roster: new Map(),
       codeVerifier,
       ownerToken: defaultGenesisId().replace("g_", "o_"),
       emptySince: this.now(),
+      createdAt: this.now(),
+      lastActivityAt: this.now(),
+      creatorIp,
       media: emptyMedia(),
     };
     this.rooms.set(docId, room);
+    if (creatorIp) this.ipGuard.noteRoom(creatorIp, docId);
     this.obs.roomCreated();
     return { ok: true, genesisId, ownerToken: room.ownerToken! };
   }
@@ -1049,7 +1404,16 @@ export class CollabHub {
     let room = this.rooms.get(docId);
     if (!room) {
       const session = await this.startSession(docId);
-      room = { session, enc: null, conns: new Set(), genesisId: this.genGenesisId(), roster: new Map(), media: emptyMedia() };
+      room = {
+        session,
+        enc: null,
+        conns: new Set(),
+        genesisId: this.genGenesisId(),
+        roster: new Map(),
+        createdAt: this.now(),
+        lastActivityAt: this.now(),
+        media: emptyMedia(),
+      };
       this.rooms.set(docId, room);
       this.obs.roomCreated();
     }
@@ -1081,13 +1445,22 @@ export class CollabHub {
   }
 }
 
-/** Media relay limits (doc 16 §8; RAM tier). */
+/**
+ * Media relay limits (doc 16 §8; RAM tier) — DEPRECATED as a source of truth.
+ *
+ * These are now configuration (`limits.media`, parsed in limits.ts with the
+ * rest of the table) because the right blob size is a deployment decision: a
+ * public demo wants a few megabytes, a local test wants room to paste a camera
+ * image without thinking about it. The hub reads `this.limits.media`; this
+ * object survives only as the legacy shape for existing importers and mirrors
+ * the defaults. New code should take a `MediaLimits`.
+ */
 export const MEDIA_LIMITS = {
-  maxBlobBytes: 10 * 1024 * 1024,
-  roomMediaBytes: 100 * 1024 * 1024,
-  tMediaMs: 5 * 60_000, // TTL after last download
-  tStageMs: 60_000, // staged-unreferenced eviction
-  tUploadMs: 15_000, // chosen holder's deadline
+  maxBlobBytes: DEFAULT_LIMITS.media.maxBlobBytes,
+  roomMediaBytes: DEFAULT_LIMITS.media.maxRoomBytes,
+  tMediaMs: DEFAULT_LIMITS.media.ttlMs,
+  tStageMs: DEFAULT_LIMITS.media.stageTtlMs,
+  tUploadMs: DEFAULT_LIMITS.media.uploadDeadlineMs,
 };
 
 function emptyMedia(): Room["media"] {

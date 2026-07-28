@@ -1,6 +1,6 @@
 import { ClientReplica } from "./replica.js";
 import { DocxDocument } from "@wordinweb/core";
-import { Intent } from "./intents.js";
+import { Intent, type LogEntry } from "./intents.js";
 import {
   ClientMessage,
   ServerMessage,
@@ -94,6 +94,58 @@ export interface ConnectionCallbacks {
    * a superseded slot) per doc 15's fabricated-lineage mitigation.
    */
   onFastForward?: (fromGenesisId: string, toGenesisId: string) => void;
+  /**
+   * The SERVER is going to end this session, and this is the grace period
+   * before it does (server lifecycle arc). Render a countdown from `inMs`.
+   *
+   *  - `idle`     nobody has done anything for the idle window. Cancellable:
+   *               any qualifying activity — an accepted edit, an admin
+   *               action, a media transfer, someone joining, but NEVER
+   *               presence — resets the clock and fires
+   *               {@link onSessionWarningCleared}. Typing genuinely saves the
+   *               session, so the countdown is worth showing prominently.
+   *  - `lifetime` the room hit its absolute age cap. NOT cancellable by
+   *               anything: the deadline was fixed when the room was created,
+   *               which is the point (an activity-based clock is exactly what
+   *               a keepalive script defeats). The document is not lost — the
+   *               local bundle re-seeds it into a new epoch.
+   *
+   * `inMs` is the measured remainder at send time, not a configured constant,
+   * so counting down from it lands on the real ending.
+   *
+   * NOT `onRefused`: nothing has been refused yet and the session is fully
+   * usable during the grace. The kick that eventually follows arrives as
+   * `onRefused("idle-timeout")` / `onRefused("session-expired")`.
+   */
+  onSessionWarning?: (info: { reason: "idle" | "lifetime"; inMs: number }) => void;
+  /**
+   * A previously announced deadline is no longer approaching — take the
+   * countdown down. Only ever `idle`, because the lifetime cap cannot be
+   * cancelled; the narrow type means a consumer cannot write a branch the
+   * server is incapable of producing.
+   */
+  onSessionWarningCleared?: (info: { reason: "idle" }) => void;
+  /**
+   * ONE OF THIS CLIENT'S OWN INTENTS WAS REJECTED by canonical validation —
+   * it will never apply, anywhere, and the edit is gone.
+   *
+   * This channel exists because of a bug that cost a user their photos. The
+   * validator carried a stale image-size bound, so every large image was
+   * rejected as "bad size" — and the failure was completely invisible. The
+   * reason is worth stating exactly, because it inverts the usual assumption:
+   * a rejection is sequenced, so EVERY REPLICA AGREES the intent is dead.
+   * Nothing diverges, nothing throws, no upload fails. Our entire invariant
+   * arsenal is built to detect disagreement, and this bug's signature was
+   * agreement. The image simply never appeared.
+   *
+   * A wrong bound can happen again; next time somebody should SEE it. Fired
+   * only for intents THIS client authored — another participant's rejection is
+   * their business and not actionable here.
+   *
+   * `reason` is the validator's fixed vocabulary (`insertImage: bad size`,
+   * `invalid base`, …) — never session content, so it is safe to surface.
+   */
+  onIntentRejected?: (info: { reason: string; clientSeq: number }) => void;
   /** Media re-supply control (doc 16 §5): the room asks who holds `sha`;
    * a holder answers via `mediaHave` and uploads over HTTP when chosen. */
   onMediaRequest?: (sha: string) => void;
@@ -139,6 +191,17 @@ export class CollabConnection {
   /** Session encryption mode from the welcome (doc 13 §6). The E2EE layer
    * hard-refuses a value contradicting the link's `#k` fragment. */
   mode: "plaintext" | "encrypted" | null = null;
+  /**
+   * The relay's per-blob upload limit in bytes, from the welcome — so a file
+   * can be checked BEFORE it is uploaded rather than after a 413.
+   *
+   * `null` means the server did not publish one (an older host). Callers must
+   * treat that as "skip the pre-check", NOT as "no limit" and not as a
+   * default they invent: the server still enforces its real limit either way,
+   * and a client guessing a larger number would promise the user an upload
+   * that cannot succeed.
+   */
+  mediaMaxBlobBytes: number | null = null;
 
   /** Out-of-band media transfer (doc 16 §5). Null until `httpBase` is
    * supplied — without a relay origin a client simply has no media duties
@@ -395,6 +458,22 @@ export class CollabConnection {
     this.transport.send({ t: "presence", position: sanitizePresencePosition(position) });
   }
 
+  /**
+   * Surface any of OUR OWN intents that canonical validation rejected.
+   *
+   * A rejection is sequenced and agreed by every replica, so it produces no
+   * divergence to notice — which is exactly how a stale image-size bound
+   * silently ate a user's photos. See ConnectionCallbacks.onIntentRejected.
+   */
+  private reportRejections(entries: LogEntry[]): void {
+    if (!this.cb.onIntentRejected) return;
+    for (const e of entries) {
+      if (e.kind === "rejected" && e.clientId === this.clientId) {
+        this.cb.onIntentRejected({ reason: e.reason, clientSeq: e.clientSeq });
+      }
+    }
+  }
+
   private onServer(msg: ServerMessage): void {
     switch (msg.t) {
       case "welcome": {
@@ -406,6 +485,7 @@ export class CollabConnection {
         this.replica.confirmedSeq = msg.seq;
         this.genesisId = msg.genesisId;
         this.mode = msg.mode;
+        this.mediaMaxBlobBytes = msg.mediaMaxBlobBytes ?? null;
         if (msg.tail.length) this.replica.receive(msg.tail);
         // Doc 16 §5.3: restore media ADDRESSES from the resumed bundle —
         // the welcome snapshot carries pixels but not shas (metadata is
@@ -479,6 +559,7 @@ export class CollabConnection {
       }
       case "broadcast": {
         this.replica?.receive(msg.entries);
+        this.reportRejections(msg.entries);
         this.recordActivity(msg.entries as never);
         if (this.replica?.reloaded) this.docEpoch++;
         this.cb.onChange?.();
@@ -504,6 +585,14 @@ export class CollabConnection {
       case "roster": {
         this.roster = msg.roster;
         this.cb.onRoster?.(msg.roster);
+        return;
+      }
+      case "session-warning": {
+        this.cb.onSessionWarning?.({ reason: msg.reason, inMs: msg.inMs });
+        return;
+      }
+      case "session-warning-cleared": {
+        this.cb.onSessionWarningCleared?.({ reason: msg.reason });
         return;
       }
       case "media-request": {

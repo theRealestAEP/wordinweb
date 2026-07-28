@@ -20,6 +20,40 @@ export interface IntentLimits {
   maxPasteBytes: number;
 }
 
+/**
+ * ABSOLUTE ceiling on an `insertImage`'s declared byte length.
+ *
+ * DELIBERATELY NOT A FIELD OF {@link IntentLimits}, unlike every other bound
+ * here, and that asymmetry is the point. `validateIntent` runs on BOTH sides:
+ * the server's DocumentSession is the plaintext authority, and an encrypted
+ * client instantiates the same DocumentSession as its local mirror. The single
+ * production call site passes no limits argument, so both sides evaluate
+ * identical bounds — that structural equality, not discipline, is why
+ * canonical forms agree.
+ *
+ * A per-deployment bound would put a CONFIG VALUE on both sides of that
+ * equality. A client that joined an older server, or across a config change,
+ * would disagree with the sequencer about whether an intent is `applied` or
+ * `rejected`, and in an encrypted room — where every client derives canon
+ * locally — that is a silent fork. A module constant has no parameter anyone
+ * can get wrong.
+ *
+ * So this is a PROTOCOL-LEVEL SANITY BOUND, not deployment policy. The policy
+ * is the relay's `WW_MEDIA_MAX_BLOB_BYTES`, which the server clamps to this
+ * ceiling so it is always the binding limit.
+ *
+ * HISTORY, because the failure hid for an instructive reason: this was
+ * `10 * 1024 * 1024`, correct while the media cap was a fixed 10 MB. When the
+ * cap became configurable the two were never reconciled, and every image
+ * between them died in an invisible window — the intent was REJECTED
+ * identically on every replica, so nothing diverged, no upload failed, and no
+ * error surfaced. The image just never appeared. Production's 5 MB cap sat
+ * below the old ceiling, so the window was empty there; it opened only in dev,
+ * where the cap was raised to 50 MB, and it swallowed the owner's 16-26 MB
+ * photos.
+ */
+export const MAX_IMAGE_BYTES = 256 * 1024 * 1024;
+
 export const DEFAULT_INTENT_LIMITS: IntentLimits = {
   maxInsertLength: 100_000,
   maxDeleteLength: 1_000_000,
@@ -108,8 +142,8 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null;
     case "insertImage":
       if (!/^[0-9a-f]{64}$/.test(intent.blobSha)) return "insertImage: bad sha";
-      if (!nonNegInt(intent.bytesLen) || intent.bytesLen === 0 || intent.bytesLen > 10 * 1024 * 1024)
-        return "insertImage: bad size"; // MAX_BLOB_BYTES (doc 16 §8)
+      if (!nonNegInt(intent.bytesLen) || intent.bytesLen === 0 || intent.bytesLen > MAX_IMAGE_BYTES)
+        return "insertImage: bad size";
       if (!["png", "jpg", "jpeg", "gif", "bmp", "webp"].includes(intent.ext)) return "insertImage: bad ext";
       if (intent.iv !== undefined && !/^[A-Za-z0-9+/]{16}$/.test(intent.iv)) return "insertImage: bad iv";
       if (!Number.isFinite(intent.widthPx) || !Number.isFinite(intent.heightPx)) return "insertImage: bad size";

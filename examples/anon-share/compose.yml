@@ -33,6 +33,75 @@ services:
       # Max concurrent rooms; further joins are refused rather than degrading
       # everyone. 10 suits one small droplet.
       WW_ROOM_CAP: "10"
+      # ── SESSION LIFECYCLE ────────────────────────────────────────────────
+      # Empty room (everyone disconnected) → deleted after this long. The
+      # zero-custody promise's actual enforcement point.
+      WW_EMPTY_ROOM_TTL_MS: "60000"
+      # No QUALIFYING ACTIVITY from anyone → the room is warned, then ended.
+      # Activity = accepted edits, admin actions, media transfers and joins —
+      # deliberately NOT presence, or one forgotten tab keeps a room alive
+      # forever and the timeout does nothing.
+      WW_IDLE_TIMEOUT_MS: "600000"
+      WW_IDLE_WARNING_MS: "60000"
+      # ABSOLUTE cap on a room's age, reset by nothing. The idle timeout can
+      # be held off indefinitely by a script editing every nine minutes; this
+      # is the wall it hits. Ending a session does not lose the document —
+      # any holder re-seeds from their bundle into a new epoch.
+      WW_ROOM_MAX_LIFETIME_MS: "43200000"
+      WW_LIFETIME_WARNING_MS: "300000"
+      # ── PER-IP LIMITS ────────────────────────────────────────────────────
+      # Seeds per minute, live rooms, and concurrent sockets per address.
+      # NAT CAVEAT: an office, a school and a carrier's CGNAT pool each look
+      # like ONE address, so these are deliberately generous. If real users
+      # are being refused, raise them — the cost is RAM proportional to live
+      # rooms, nothing more.
+      WW_IP_SEED_PER_MIN: "10"
+      WW_IP_MAX_DOCS: "25"
+      WW_IP_MAX_CONNS: "50"
+      # TRUSTED PROXY HOP COUNT — not a boolean. 1 = the Caddy in this file.
+      # X-Forwarded-For is read ONLY when this is set, and only the entry this
+      # many from the RIGHT (each hop appends the address it saw, so the
+      # left-most entry is whatever the client typed). Setting it higher than
+      # the real hop count re-opens spoofing; copying this service OUT from
+      # behind the proxy requires setting it back to 0, or per-IP protection
+      # silently switches off while still appearing configured.
+      WW_TRUST_PROXY: "1"
+      # ── SURGE VALVES ─────────────────────────────────────────────────────
+      # Largest inbound WS frame. Must stay above the 256KB envelope cap plus
+      # base64/JSON overhead. `ws` defaults to 100MiB, which lets a hostile
+      # peer make the server buffer and parse a huge frame before any
+      # hub-level check runs — this is the first wall and has to be.
+      WW_WS_MAX_PAYLOAD: "524288"
+      # Per-socket outbound buffer ceiling. A client that never reads makes
+      # Node hold every broadcast for it in server memory; past this the
+      # socket is terminated. Costs that peer a reconnect, costs the room
+      # nothing.
+      WW_WS_MAX_BUFFERED: "4194304"
+      # One room's retained envelope log. The multiplicative hole: 256KB
+      # envelopes at the rate cap from a room's worth of connections is
+      # inside every other limit and still grows this at ~1GB/s, and pruning
+      # only happens at a quiescent checkpoint a hostile room never reaches.
+      # A sealed keystroke is ~500 bytes, so nobody real comes near this.
+      WW_ROOM_LOG_MAX_BYTES: "67108864"
+      # Global ceilings. Per-IP caps bound one address, not a botnet. New
+      # sessions are refused (503 / server-busy); existing ones are untouched.
+      # _GLOBAL suffix is deliberate: WW_MAX_CONNS would sit one character
+      # from the per-IP WW_IP_MAX_CONNS and mean something entirely
+      # different — confusing them either throttles the whole server to one
+      # address's budget or opens the per-IP cap to the global one.
+      WW_MAX_ROOMS_GLOBAL: "2000"
+      WW_MAX_CONNS_GLOBAL: "5000"
+      # ── MEDIA ────────────────────────────────────────────────────────────
+      # Largest single upload. 5MB is the public number; a 413 carries this
+      # value so the UI can name it. The socket-level guard derives from it
+      # (+2MB headroom) — do not add a second constant beside it.
+      WW_MEDIA_MAX_BLOB_BYTES: "5242880"
+      WW_MEDIA_MAX_ROOM_BYTES: "104857600"
+      # Unpromoted upload lifetime, and TTL after last download. The relay is
+      # a CACHE, not a store: every blob is recoverable from participants by
+      # re-supply, so expiry costs latency, never data.
+      WW_MEDIA_STAGE_TTL_MS: "60000"
+      WW_MEDIA_TTL_MS: "300000"
       # WW_OBS=1 additionally EXPOSES GET /stats. Left unset deliberately —
       # Caddy does not proxy /stats either, so enabling it is a two-step,
       # conscious act. /healthz is ungated and is what probes should use.

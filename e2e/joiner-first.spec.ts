@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { createCollabDoc, joinCollab, converge, docText, typeInEditor, waitHook, PAGE } from "./_helpers.js";
+import { createCollabDoc, joinCollab, converge, docText, enterCodeIfPrompted, typeInEditor, waitHook, PAGE } from "./_helpers.js";
 
 /**
  * USER-REPORTED (2026-07-24, live demo): "make a doc collaborative and then
@@ -122,6 +122,9 @@ test.describe("joiner types first after make-collaborative", () => {
     // Deliberately NOT joinCollab(): race the session — type as soon as the
     // page paints, without waiting for the __ww hook / ready.
     await joiner.goto(url);
+    // The code still has to be supplied (a fresh context has none) — the race
+    // under test is paint-vs-ready, which begins once the document appears.
+    await enterCodeIfPrompted(joiner);
     await expect(joiner.locator(PAGE)).toBeVisible();
     await typeInEditor(joiner, "early");
     await joiner.keyboard.press("Enter");

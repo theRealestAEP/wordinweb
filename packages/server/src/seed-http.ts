@@ -62,6 +62,34 @@ export interface SeedHttpOptions {
   /** Injectable docId minting (tests); production default is crypto-random
    * ≥128-bit via makeDocId (doc 11 — unguessable IS the access control). */
   mintDocId?: () => string;
+  /**
+   * Normalized creator address for the per-IP seed limits (see ip-guard.ts).
+   * Supplied by the HTTP layer, which is the only place an address exists.
+   * Omitted ⇒ no per-IP accounting, which is what every transport-free test
+   * and embedder wants.
+   */
+  creatorIp?: string;
+}
+
+/**
+ * Map a hub seed refusal to an HTTP status. `exists` is 409 first-wins and
+ * carries the incumbent epoch so the loser can join it; the per-IP throttles
+ * are 429 with a Retry-After-shaped story and NO epoch, because no epoch was
+ * consulted — the request was refused before any room was looked at.
+ */
+function seedRefusalResponse(result: { reason: string; genesisId?: string }): SeedHttpResponse {
+  if (result.reason === "exists") {
+    return { status: 409, body: { error: "exists", genesisId: result.genesisId } };
+  }
+  // 503, not 429: the global room ceiling is not the caller's fault and not
+  // something backing off harder fixes for them specifically. The distinction
+  // matters to the client ("try again shortly" vs "you are doing too much")
+  // and to whoever is paged — one says add capacity, the other says find the
+  // abuser.
+  if (result.reason === "server-full") {
+    return { status: 503, body: { error: "server-full" } };
+  }
+  return { status: 429, body: { error: result.reason } };
 }
 
 export function handleSeedRequest(
@@ -84,8 +112,8 @@ export function handleSeedRequest(
     }
     const docId = req.method === "POST" ? (opts.mintDocId ?? defaultMintDocId)() : req.docId;
     if (!docId) return { status: 400, body: { error: "missing-doc-id" } };
-    const result = hub.seedEncrypted(docId, genesisId, checkpoint, req.body.codeVerifier);
-    if (!result.ok) return { status: 409, body: { error: "exists", genesisId: result.genesisId } };
+    const result = hub.seedEncrypted(docId, genesisId, checkpoint, req.body.codeVerifier, opts.creatorIp);
+    if (!result.ok) return seedRefusalResponse(result);
     return { status: req.method === "POST" ? 201 : 200, body: { docId, genesisId: result.genesisId, ownerToken: result.ownerToken } };
   }
 
@@ -115,7 +143,7 @@ export function handleSeedRequest(
   // CALLER's error, reported as 400, and no room is created.
   let result: ReturnType<CollabHub["seed"]>;
   try {
-    result = hub.seed(docId, docx, req.body.sidecar, req.body.codeVerifier, req.body.lineage);
+    result = hub.seed(docId, docx, req.body.sidecar, req.body.codeVerifier, req.body.lineage, opts.creatorIp);
   } catch {
     return { status: 400, body: { error: "invalid-docx" } };
   }
@@ -123,7 +151,8 @@ export function handleSeedRequest(
   if (!result.ok) {
     // First-wins (doc 12 §5.3): the incumbent's epoch is returned so the
     // losing client can join it and make its lineage decision (case 2).
-    return { status: 409, body: { error: "exists", genesisId: result.genesisId } };
+    // Per-IP throttles come back through the same door as 429s.
+    return seedRefusalResponse(result);
   }
   // The owner token (doc 14 §2.5) goes ONLY to the seeder in this response;
   // it is never in the shared link and never broadcast.

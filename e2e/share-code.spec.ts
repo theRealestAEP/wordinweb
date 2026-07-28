@@ -4,8 +4,13 @@ import { LANDING, PAGE, waitHook } from "./_helpers";
 /**
  * Share-code UX (doc 13 §7). The code is a second factor beyond the magic
  * link: it mixes into key derivation AND gates the hub, so a leaked link alone
- * can neither enter nor decrypt. Two UX rules this exercises:
+ * can neither enter nor decrypt. It is now MANDATORY — a session cannot be
+ * started without one — so what this spec covers is the three UX rules that
+ * makes load-bearing:
  *
+ *  0. There is no way to go live without a code (the first test): the enforcement
+ *     is a disabled button, so it is worth pinning that the button is really
+ *     disabled and that whitespace does not satisfy it.
  *  1. The CREATOR, who just typed the code, must NOT be asked to re-enter it —
  *     their own code is remembered on their device and seeds the join.
  *  2. Anyone can always START A NEW document — a forgotten code locks you out
@@ -18,16 +23,42 @@ const CODE = "246810";
 async function goLiveWithCode(page: Page, code: string): Promise<string> {
   await page.goto(LANDING);
   await expect(page.getByTestId("local-editor")).toBeVisible();
-  await page.getByTestId("share-code").fill(code);
+  // The code field moved INTO the collab dialog, where the explanation of
+  // what a code does sits next to it.
   await page.getByTestId("make-collaborative").click();
+  await expect(page.getByTestId("collab-modal")).toBeVisible();
+  await page.getByTestId("share-code").fill(code);
+  await page.getByTestId("start-collab").click();
   await expect(page).toHaveURL(/[?&]doc=/);
   await expect(page).toHaveURL(/#k=/);
   return page.url();
 }
 
-const codeInput = (page: Page) => page.getByPlaceholder("6-digit share code");
+// The JOIN prompt's field (the refusal screen), not the modal's — they are
+// separate controls with separate testids. Selected by testid rather than by
+// placeholder text: the placeholder is user-facing copy, and the last time it
+// was the selector, correcting the copy would have silently broken the specs
+// that depend on this prompt appearing.
+const codeInput = (page: Page) => page.getByTestId("join-share-code");
 
 test.describe("zero-custody demo — share code UX", () => {
+  test("a code is REQUIRED — Start Collab stays disabled until one is typed", async ({ page }) => {
+    await page.goto(LANDING);
+    await expect(page.getByTestId("local-editor")).toBeVisible();
+    await page.getByTestId("make-collaborative").click();
+    await expect(page.getByTestId("collab-modal")).toBeVisible();
+    // The disabled button IS the enforcement — there is no validation behind
+    // it to fall back on, so if it ever enables while empty, a session can be
+    // created that a leaked link opens on its own.
+    await expect(page.getByTestId("start-collab")).toBeDisabled();
+    // Whitespace is not a code (the field is trimmed before it is used, so a
+    // spaces-only value would otherwise go live with an EMPTY one).
+    await page.getByTestId("share-code").fill("   ");
+    await expect(page.getByTestId("start-collab")).toBeDisabled();
+    await page.getByTestId("share-code").fill(CODE);
+    await expect(page.getByTestId("start-collab")).toBeEnabled();
+  });
+
   test("the creator is NOT re-prompted for the code they just set", async ({ page }) => {
     await goLiveWithCode(page, CODE);
     // Lands straight in the live editor — no code prompt for the creator.
@@ -59,7 +90,7 @@ test.describe("zero-custody demo — share code UX", () => {
 
       // The correct code lets the joiner in.
       await codeInput(b).fill(CODE);
-      await b.getByRole("button", { name: "Join" }).click();
+      await b.getByTestId("join-submit").click();
       await expect(b.locator(PAGE)).toBeVisible();
       await expect(codeInput(b), "prompt clears once joined").toHaveCount(0);
     } finally {

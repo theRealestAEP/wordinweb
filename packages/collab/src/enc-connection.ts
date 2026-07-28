@@ -54,6 +54,11 @@ export class EncryptedCollabConnection {
   private clientSeq = 0;
   private docId = "";
   genesisId: string | null = null;
+  /** Relay per-blob upload limit from the welcome, or `null` when the server
+   * published none (an older host) — in which case callers SKIP the
+   * pre-check rather than inventing a limit. See the plaintext connection's
+   * field of the same name. */
+  mediaMaxBlobBytes: number | null = null;
   docEpoch = 0;
   /** Envelope processing is async (WebCrypto) but MUST be strictly ordered
    * (seq order is the convergence contract) — a serial promise chain. */
@@ -504,6 +509,10 @@ export class EncryptedCollabConnection {
   private onServer(msg: ServerMessage): void {
     switch (msg.t) {
       case "welcome-enc": {
+        // Read OUTSIDE the serial chain: it is a plain number with no
+        // dependency on keys or the mirror, and a consumer asking "how big may
+        // this file be" should not wait on a rehydrate to find out.
+        this.mediaMaxBlobBytes = msg.mediaMaxBlobBytes ?? null;
         this.enqueue(async () => {
           this.genesisId = msg.genesisId;
           this.keys = await deriveEpochKeys(this.docKey, msg.genesisId, this.stretchedCode);
@@ -645,6 +654,19 @@ export class EncryptedCollabConnection {
       case "roster": {
         this.roster = msg.roster;
         this.cb.onRoster?.(msg.roster);
+        return;
+      }
+      // Session lifecycle warnings are PLAINTEXT bookkeeping and identical in
+      // both modes: the deadline is the server's own policy, not document
+      // content, so a blind sequencer announces it in the clear. Dispatched
+      // directly rather than through the serial queue — nothing here touches
+      // keys, the mirror, or the replica.
+      case "session-warning": {
+        this.cb.onSessionWarning?.({ reason: msg.reason, inMs: msg.inMs });
+        return;
+      }
+      case "session-warning-cleared": {
+        this.cb.onSessionWarningCleared?.({ reason: msg.reason });
         return;
       }
       case "gossip": {
@@ -849,6 +871,15 @@ export class EncryptedCollabConnection {
       return;
     }
     this.replica!.receive([entry]);
+    // A rejection is where an edit DIES, and in encrypted rooms this mirror is
+    // the only place it happens — the server is blind and cannot validate, so
+    // there is no server-side signal at all. Surfacing it here is the whole
+    // reason the channel exists: the stale image-size bound rejected every
+    // large photo identically on every replica, which means nothing diverged
+    // and nothing complained. See ConnectionCallbacks.onIntentRejected.
+    if (entry.kind === "rejected" && entry.clientId === this.clientId) {
+      this.cb.onIntentRejected?.({ reason: entry.reason, clientSeq: entry.clientSeq });
+    }
     if (entry.kind === "applied") {
       this.activity.push({ seq: entry.seq, clientId: entry.intent.clientId, kind: entry.intent.kind });
       if (this.activity.length > 100) this.activity.splice(0, this.activity.length - 100);

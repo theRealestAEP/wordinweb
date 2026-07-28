@@ -1,6 +1,8 @@
 import { CollabHub } from "./hub.js";
 import { ClientMessage, ServerMessage } from "@wordinweb/collab/server";
 import { type Observability, NO_OP_OBSERVABILITY } from "./observability.js";
+import { IpGuard, NO_OP_IP_GUARD } from "./ip-guard.js";
+import { clientIp } from "./limits.js";
 
 /**
  * Minimal structural shapes for a `ws`-style server and socket, so this
@@ -12,9 +14,48 @@ export interface WsSocket {
   send(data: string): void;
   on(event: "message", cb: (data: unknown) => void): void;
   on(event: "close", cb: () => void): void;
+  /** Optional so in-memory test fakes need not implement it; the real `ws`
+   * socket always has it. Used to hang up on a connection refused by the
+   * per-IP cap — a refusal frame the peer can ignore is not a limit. */
+  close?(): void;
+  /** Bytes queued for this peer that Node has not managed to write yet. The
+   * slow-consumer signal: a client that never reads makes this climb without
+   * bound while every other limit stays satisfied. */
+  readonly bufferedAmount?: number;
+  /** Hard close, skipping the closing handshake — the right tool for a peer
+   * that is already not draining, since a graceful close would just add more
+   * to a buffer it is not reading. */
+  terminate?(): void;
+}
+/**
+ * The upgrade request behind a socket. `ws` passes it as the second argument
+ * to the `connection` event (cli.ts already forwards it: `wss.emit(
+ * "connection", client, req)`), and it is the ONLY place the peer address is
+ * available — a WebSocket frame carries no addressing. Optional throughout so
+ * every existing test fake, which emits a socket alone, still type-checks.
+ */
+export interface WsRequest {
+  socket?: { remoteAddress?: string | null } | null;
+  headers?: Record<string, string | string[] | undefined>;
 }
 export interface WsServer {
-  on(event: "connection", cb: (socket: WsSocket) => void): void;
+  on(event: "connection", cb: (socket: WsSocket, req?: WsRequest) => void): void;
+}
+
+/** Per-IP plumbing for the transport. Both fields optional: omitted ⇒ the
+ * adapter behaves exactly as it did before this arc. */
+export interface WsGuardOptions {
+  guard?: IpGuard;
+  /** Trusted proxy HOP COUNT — see clientIp in limits.ts, which documents
+   * why this is a count and why reading the wrong end of X-Forwarded-For
+   * produces a limiter anyone bypasses with one header. */
+  trustProxyHops?: number;
+  /** Per-socket outbound buffer ceiling; 0 disables. Over it, the socket is
+   * terminated (`backpressure`). */
+  maxBufferedBytes?: number;
+  /** Global socket ceiling; 0 disables. Over it, new sockets are refused
+   * (`server-busy`) — per-IP caps cannot bound a many-address botnet. */
+  maxConns?: number;
 }
 
 /**
@@ -32,13 +73,81 @@ export function attachWebSocketServer(
   wss: WsServer,
   hub: CollabHub,
   obs: Observability = NO_OP_OBSERVABILITY,
+  opts: WsGuardOptions = {},
 ): void {
   let nextId = 0;
-  wss.on("connection", (socket) => {
+  let liveSockets = 0;
+  const guard = opts.guard ?? NO_OP_IP_GUARD;
+  const maxBuffered = opts.maxBufferedBytes ?? 0;
+  const maxConns = opts.maxConns ?? 0;
+  wss.on("connection", (socket, req) => {
+    let dead = false;
     const conn = {
       id: `ws${nextId++}`,
-      send: (msg: ServerMessage) => socket.send(JSON.stringify(msg)),
+      send: (msg: ServerMessage) => {
+        if (dead) return;
+        // SLOW-CONSUMER BACKPRESSURE. A client can open a socket, join a busy
+        // room, and simply never read: every broadcast still gets queued for
+        // it, and Node holds all of it in THIS server's memory with no bound.
+        // Nothing else notices — the peer is inside its connection limit, its
+        // rate limit and its frame size; it is just not draining.
+        //
+        // Checked before the write rather than after, so the queue cannot grow
+        // by one more fan-out past the ceiling, and enforced per socket at the
+        // transport for the same reason the connection cap is: this is where
+        // the memory is actually spent.
+        //
+        // `terminate` rather than a graceful close: a peer that is not reading
+        // will not read a close handshake either. The cost is one reconnect —
+        // their bundle is intact and rejoining is cheap.
+        if (maxBuffered > 0 && (socket.bufferedAmount ?? 0) > maxBuffered) {
+          dead = true;
+          obs.kicked("backpressure");
+          (socket.terminate ?? socket.close)?.call(socket);
+          return;
+        }
+        socket.send(JSON.stringify(msg));
+      },
     };
+    // GLOBAL SOCKET CEILING. The per-IP cap below bounds one address; it does
+    // nothing about a thousand addresses each opening a polite handful. Refuse
+    // at accept — a new connection turned away beats an OOM that drops every
+    // session already in progress.
+    if (maxConns > 0 && liveSockets >= maxConns) {
+      obs.capacityRefused("server-busy");
+      try {
+        socket.send(JSON.stringify({ t: "refused", reason: "server-busy" } satisfies ServerMessage));
+      } catch {
+        // Already gone; the close is what matters.
+      }
+      socket.close?.();
+      return;
+    }
+    // PER-IP CONNECTION CAP, enforced HERE rather than at hello. The resource
+    // a flood spends is the socket itself — an fd, a slot in the event loop,
+    // a TLS session — and all of that is consumed before any protocol message
+    // arrives. A check at hello would leave connect-and-say-nothing entirely
+    // unbounded, which is the cheapest attack there is.
+    //
+    // Refused sockets are NOT counted as opened/closed: the gauge tracks
+    // sockets this server is actually serving, and a connection hung up at
+    // the door was never one. It is counted as an ip-limit instead, which is
+    // where the signal belongs.
+    const ip = clientIp(req, opts.trustProxyHops ?? 0);
+    const admitted = guard.openConn(ip, conn.id);
+    if (!admitted.ok) {
+      obs.ipLimited(admitted.reason);
+      // Tell the peer why before hanging up — an honest client can back off,
+      // and a silent drop is indistinguishable from a network fault.
+      try {
+        socket.send(JSON.stringify({ t: "refused", reason: admitted.reason } satisfies ServerMessage));
+      } catch {
+        // The socket may already be gone; the close below is what matters.
+      }
+      socket.close?.();
+      return;
+    }
+    liveSockets++;
     obs.connectionOpened();
     socket.on("message", (data: unknown) => {
       let msg: ClientMessage;
@@ -68,7 +177,14 @@ export function attachWebSocketServer(
       }
     });
     socket.on("close", () => {
+      // Fires exactly once per admitted socket, including when `ws` closes it
+      // itself for an oversized frame (status 1009, the maxPayload cap) or
+      // when the backpressure guard terminated it — so every valve unwinds
+      // through this one path and no counter can drift.
+      dead = true;
+      liveSockets = Math.max(0, liveSockets - 1);
       hub.disconnect(conn);
+      guard.closeConn(conn.id);
       obs.connectionClosed();
     });
   });

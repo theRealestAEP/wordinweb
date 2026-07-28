@@ -90,10 +90,15 @@ const clientId = persist(sessionStorage, "wordinweb-client-id", () => {
 });
 // Display name (doc 14 §2): self-asserted, stable per browser (localStorage,
 // shared across tabs is fine — it's just a label), server-sanitized.
-const name = persist(localStorage, "wordinweb-name", () => "");
+const storedName = persist(localStorage, "wordinweb-name", () => "");
 
 function Harness() {
   const [docId, setDocId] = useState<string | null>(() => params.get("doc"));
+  const [name, setName] = useState(storedName);
+  // Bytes carried back out of a session by Disconnect, so the local editor
+  // reopens the document you were editing rather than a blank one.
+  const [localBytes, setLocalBytes] = useState<Uint8Array | undefined>(undefined);
+  const [copied, setCopied] = useState(false);
   // E2EE (doc 13 §1): the key rides the fragment — browsers never send it.
   const [docKey, setDocKey] = useState<string | null>(() => docKeyFromFragment(location.hash));
 
@@ -132,20 +137,66 @@ function Harness() {
       setDocKey(key);
       setDocId(id);
     };
-    return <LocalEditor httpBase={HTTP} onGoLive={goLive} />;
+    return <LocalEditor httpBase={HTTP} initialBytes={localBytes} onGoLive={goLive} />;
   }
 
   // Collaborative mode: either we just went live, or the URL carried `?doc=`
   // (someone shared the link). App joins the live session over WS.
-  const shareUrl = location.href;
+  //
+  // THE SHARE LINK IS NEVER RENDERED. It carries the decryption key in its
+  // fragment, so putting it on screen puts it in every screenshot, screen
+  // share, and shoulder-glance. Copying it to the clipboard is the whole
+  // interaction — the string only ever exists in the DOM for as long as
+  // navigator.clipboard needs it.
+  const copyShareLink = () => {
+    void navigator.clipboard.writeText(location.href).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1600);
+      },
+      () => setCopied(false),
+    );
+  };
+
+  // Leave the room, keep the copy. The session's current bytes come back with
+  // us into the local editor and the socket is closed, so the server sees a
+  // departure rather than a phantom participant. Nothing durable is lost —
+  // that is the zero-custody contract, made into a button.
+  const disconnect = (bytes: Uint8Array | null) => {
+    if (bytes) setLocalBytes(bytes);
+    const u = new URL(location.href);
+    u.searchParams.delete("doc");
+    u.hash = "";
+    history.replaceState(null, "", u.toString());
+    setDocKey(null);
+    setDocId(null);
+  };
+
   return (
     <div>
       <header>
-        <b>wordinweb collab</b>
+        <span className="brand">
+          <b>Word in Web Collaborative</b>
+          <span className="sub">E2EE · Non-Custodial</span>
+        </span>
         <span className="pill">doc {docId.slice(0, 10)}…</span>
-        <span className="hint">Share this URL / open on another device:</span>
-        <input readOnly value={shareUrl} onFocus={(e) => e.currentTarget.select()} />
-        <button data-testid="new-document" onClick={newDocument} title="Leave this document and start a fresh one">
+        <span className="spacer" />
+        <input
+          className="alias"
+          data-testid="alias"
+          value={name}
+          placeholder="Your name"
+          maxLength={40}
+          title="The name other participants see. Anyone can pick any name — it is a label, not an account."
+          onChange={(e) => {
+            setName(e.target.value);
+            localStorage.setItem("wordinweb-name", e.target.value);
+          }}
+        />
+        <button data-testid="share-collab" onClick={copyShareLink} title="Copy the share link to your clipboard">
+          {copied ? "Copied!" : "Share Collab"}
+        </button>
+        <button className="ghost" data-testid="new-document" onClick={newDocument} title="Leave this document and start a fresh one">
           New document
         </button>
       </header>
@@ -156,6 +207,7 @@ function Harness() {
           docId={docId}
           clientId={clientId}
           name={name}
+          onDisconnect={disconnect}
           docKey={docKey ?? undefined}
           ownerToken={localStorage.getItem(`wordinweb-owner-${docId}`) ?? undefined}
           // Creator's own code (this device) — seeds App so it joins without a

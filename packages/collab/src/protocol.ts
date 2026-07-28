@@ -142,10 +142,46 @@ export interface ParticipantProfile {
  * identity intents carry, so attribution, presence, and roster share one
  * keyspace. Disconnected participants stay listed (greyed) for the session's
  * lifetime; a reconnect under the same clientId resumes the entry. */
+/**
+ * Whether a participant's edits will be SEQUENCED, and if not, why.
+ *
+ * A POSITIVE signal, which is the entire point. Until this existed a client
+ * could only discover it was blocked by making an edit and being refused —
+ * which cost the user their first keystrokes every time (optimistic local
+ * mutation, refusal, heal: a burst of text that appears and vanishes), and
+ * left them stuck in viewer mode after a lock was LIFTED, because nothing
+ * announced the good news either.
+ *
+ * The three blocked states arrive as one `read-only` refusal on the wire, so
+ * they are separated here — the difference is what a UI can honestly say:
+ *  - `owner-lock`  the owner paused editing for the whole room; it may lift
+ *  - `demoted`     the owner made THIS participant a viewer
+ *  - `viewer-role` the access token grants read access only; nothing the
+ *                  owner does in-session changes it
+ */
+export type WriteStatus = "allowed" | "owner-lock" | "demoted" | "viewer-role";
+
+/** One roster row (doc 14 §2): keyed by the BOUND clientId — the same
+ * identity intents carry, so attribution, presence, and roster share one
+ * keyspace. Disconnected participants stay listed (greyed) for the session's
+ * lifetime; a reconnect under the same clientId resumes the entry. */
 export interface RosterEntry {
   clientId: string;
   profile: ParticipantProfile;
   connected: boolean;
+  /**
+   * Whether this participant may write, re-fanned on every transition.
+   *
+   * OPTIONAL because it is additive: an older server omits it. A client that
+   * sees `undefined` must NOT assume "allowed" — it should fall back to the
+   * refusal-driven behaviour it had before, exactly as the published media
+   * limit's `null` means "skip the pre-check". Inventing a permissive default
+   * would put the user back in the first-edit-lost loop this removes.
+   *
+   * PER-CLIENT, not a room flag: an owner keeps writing through their own
+   * room-wide lock, so a single broadcast value would be wrong for them.
+   */
+  write?: WriteStatus;
 }
 
 /** Client → server. */
@@ -285,6 +321,28 @@ export type ServerMessage =
        * server must not learn part structure beyond what PUT addresses
        * already reveal). Parse-derived holes with unknown sha are omitted. */
       media?: { part: string; sha: string; iv?: string }[];
+      /**
+       * The relay's configured per-blob size limit, in bytes, so a client can
+       * CHECK A FILE BEFORE UPLOADING IT rather than discovering the limit
+       * from a 413 afterwards.
+       *
+       * The number flows FORWARD — server to client, once per session — which
+       * is why it lives here rather than being threaded back through the
+       * upload's return type. A refusal has to travel up through every layer
+       * between the relay and the file picker, and each of those layers has
+       * its own idea of what failure looks like; a value published at join
+       * time has no such path to get lost on.
+       *
+       * NOT A SECRET, and nothing is gated on it: the same number already
+       * appears in a 413 body, and anyone can discover it by uploading
+       * something large. It is per-SERVER-CONFIG, not per-room, so it carries
+       * nothing about the room's contents or participants.
+       *
+       * Optional and additive: an older server omits it, and a client that
+       * gets nothing should skip the pre-check rather than invent a limit —
+       * the server still enforces the real one.
+       */
+      mediaMaxBlobBytes?: number;
     }
   | { t: "broadcast"; entries: LogEntry[] }
   /**
@@ -304,6 +362,10 @@ export type ServerMessage =
       tail: EnvelopeEntry[];
       mode: "encrypted";
       mediaNeeded?: string[];
+      /** Relay per-blob size limit — see the `welcome` field of the same
+       * name. Published identically in encrypted rooms: it is server config,
+       * not room content, so a blind sequencer can state it in the clear. */
+      mediaMaxBlobBytes?: number;
     }
   /** Encrypted-mode broadcast: sequenced opaque envelopes. */
   | { t: "broadcast-enc"; entries: EnvelopeEntry[] }
@@ -328,6 +390,35 @@ export type ServerMessage =
    * (rooms are small; a snapshot beats delta bookkeeping). Ephemeral like
    * presence: never logged, never persisted, dies with the room. */
   | { t: "roster"; roster: RosterEntry[] }
+  /**
+   * The session is going to END, and this is the grace period before it does
+   * (server lifecycle arc). Sent once per armed deadline to every connection
+   * in the room so the UI can run a countdown — a session that vanishes
+   * without warning is indistinguishable from a crash, and the whole point of
+   * these timeouts is that they are POLICY, visibly applied.
+   *
+   *  - `idle`     nobody has done anything for the idle window. CANCELLABLE:
+   *               any qualifying activity (a submit, an admin action, a media
+   *               transfer, someone joining — never presence) resets the clock
+   *               and produces `session-warning-cleared`.
+   *  - `lifetime` the room has reached its absolute age cap. NOT cancellable
+   *               by anything; the deadline was fixed when the room was
+   *               created. Ending it does not end the document — any holder
+   *               re-seeds from their bundle into a NEW epoch.
+   *
+   * `inMs` is the ACTUAL remaining time when the frame was built, not the
+   * configured lead time: warnings are emitted by a periodic sweep, so the
+   * real remainder is up to one sweep interval less than the configured
+   * value, and a client counting down from the constant would lie.
+   */
+  | { t: "session-warning"; reason: "idle" | "lifetime"; inMs: number }
+  /**
+   * A previously warned deadline is no longer approaching — the countdown
+   * should disappear. Only ever `idle`: the lifetime cap cannot be cancelled,
+   * and narrowing the type here means a consumer cannot write a branch the
+   * server is incapable of producing.
+   */
+  | { t: "session-warning-cleared"; reason: "idle" }
   | { t: "refused"; reason: string };
 
 /** Bump when the intent apply/transform semantics change in a way that makes

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { BOARD_CODE, enterCodeIfPrompted } from "./_helpers";
 
 /**
  * Full-intent-surface browser CONVERGENCE test (plan doc 09, browser tier).
@@ -96,11 +97,17 @@ async function joinAll(browser: import("@playwright/test").Browser): Promise<{
   await a.goto(`/?server=${SERVER}`);
   await expect(a.getByTestId("local-editor")).toBeVisible();
   await a.getByTestId("make-collaborative").click();
+  await expect(a.getByTestId("collab-modal")).toBeVisible();
+  await a.getByTestId("share-code").fill(BOARD_CODE); // required — see _helpers
+  await a.getByTestId("start-collab").click();
   await expect(a).toHaveURL(/[?&]doc=/);
   await expect(a.getByTestId("download")).toBeVisible(); // collab chrome mounted
   await expect(a.locator(".dxw-page")).toBeVisible();
   const url = a.url();
   await Promise.all([b.goto(url), c.goto(url)]);
+  // Fresh contexts hold no code, so the link alone refuses them — that is the
+  // point of the code, and the joiners supply it exactly as a person would.
+  await Promise.all([enterCodeIfPrompted(b), enterCodeIfPrompted(c)]);
   await Promise.all([
     expect(b.locator(".dxw-page")).toBeVisible(),
     expect(c.locator(".dxw-page")).toBeVisible(),

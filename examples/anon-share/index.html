@@ -15,8 +15,61 @@
       header button { font: 13px system-ui; padding: 5px 12px; border: 1px solid #dadce0;
         background: #1a73e8; color: #fff; border-radius: 6px; cursor: pointer; }
       header a { color: #1a73e8; }
+      header button.ghost { background: #fff; color: #202124; }
+      header button.ghost:hover { background: #f8f9fa; }
+      header button:focus-visible, .modal button:focus-visible,
+      header input:focus-visible, .modal input:focus-visible {
+        outline: 2px solid #1a73e8; outline-offset: 2px;
+      }
       .hint { color: #5f6368; font-size: 12px; }
       #root { padding: 16px; }
+
+      /* Wordmark: one line + a small subtitle. The subtitle is the product's
+         actual claim, not a tagline — letterspaced small caps so it reads as a
+         property of the thing rather than marketing copy. */
+      .brand { display: flex; flex-direction: column; line-height: 1.15; margin-right: 4px; }
+      .brand b { font-size: 15px; letter-spacing: -0.01em; }
+      .brand .sub { font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+        text-transform: uppercase; color: #5f6368; }
+      .spacer { flex: 1 1 auto; }
+
+      /* Name control sits inline in the header; it is a text field, not a
+         dialog, because changing your display name should cost one click. */
+      header input.alias { font: 13px system-ui; width: 132px; }
+
+      .modal-scrim { position: fixed; inset: 0; background: rgba(32,33,36,.45);
+        display: flex; align-items: center; justify-content: center; z-index: 60; padding: 16px; }
+      .modal { background: #fff; border-radius: 12px; padding: 20px; width: 420px; max-width: 100%;
+        box-shadow: 0 8px 32px rgba(0,0,0,.24); }
+      .modal h2 { margin: 0 0 6px; font-size: 17px; }
+      .modal p { margin: 0 0 14px; color: #5f6368; font-size: 13px; line-height: 1.5; }
+      .modal label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 5px; }
+      .modal input { font: 13px system-ui; width: 100%; box-sizing: border-box;
+        padding: 7px 10px; border: 1px solid #dadce0; border-radius: 6px; }
+      .modal .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+      .modal button { font: 13px system-ui; padding: 7px 14px; border-radius: 6px; cursor: pointer;
+        border: 1px solid #dadce0; background: #1a73e8; color: #fff; }
+      .modal button.ghost { background: #fff; color: #202124; }
+      .modal button[disabled] { opacity: .6; cursor: default; }
+
+      /* Countdown toward an announced session ending. DELIBERATELY NOT A
+         MODAL: the session stays fully usable through the grace period, and
+         for the idle deadline typing is what cancels it — a dialog that stole
+         the caret would prevent the one action that saves the session. It sits
+         out of the text column instead and lets editing continue underneath. */
+      .countdown { position: fixed; right: 16px; bottom: 16px; z-index: 50;
+        width: 320px; max-width: calc(100vw - 32px); background: #fff;
+        border: 1px solid #dadce0; border-left: 4px solid #f9ab00; border-radius: 10px;
+        padding: 12px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
+      /* Red for the deadline nothing can cancel, amber for the one editing
+         resets — the color says which kind of ending this is before the text. */
+      .countdown[data-reason="lifetime"] { border-left-color: #d93025; }
+      .countdown b { display: block; font-size: 13px; margin-bottom: 3px; }
+      .countdown .clock { font: 600 16px ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+      .countdown p { margin: 5px 0 0; font-size: 12px; color: #5f6368; line-height: 1.45; }
+      .countdown button { margin-top: 10px; font: 13px system-ui; padding: 6px 12px;
+        border-radius: 6px; border: 1px solid #dadce0; background: #fff; color: #202124; cursor: pointer; }
+      .countdown button:hover { background: #f8f9fa; }
     </style>
   </head>
   <body>

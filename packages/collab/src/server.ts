@@ -6,7 +6,7 @@
  */
 export { DocumentSession, type Broadcast, type IdSidecar } from "./session.js";
 export { applyIntent } from "./apply.js";
-export { validateIntent, DEFAULT_INTENT_LIMITS, type IntentLimits } from "./validate.js";
+export { validateIntent, DEFAULT_INTENT_LIMITS, MAX_IMAGE_BYTES, type IntentLimits } from "./validate.js";
 export * from "./intents.js";
 export * from "./transform.js";
 export {
@@ -19,6 +19,7 @@ export {
   sanitizePresencePosition,
   type ParticipantProfile,
   type RosterEntry,
+  type WriteStatus,
   type EnvelopeEntry,
   type SealedCheckpoint,
   type LineageHead,

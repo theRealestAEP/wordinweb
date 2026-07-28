@@ -22,6 +22,7 @@ export {
   sanitizePresencePosition,
   type ParticipantProfile,
   type RosterEntry,
+  type WriteStatus,
   type EnvelopeEntry,
   type SealedCheckpoint,
   type LineageHead,

@@ -12,10 +12,13 @@ import { createElement, act } from "react";
 import { createRoot } from "react-dom/client";
 import { DocxView, type DocxViewApi } from "../src/index.js";
 import { CollabEditor } from "../src/collab.js";
-import { CollabHub, blankDocxBytes, type DocProvider, type Connection, type ServerMessage } from "@wordinweb/server";
+import { CollabHub, blankDocxBytes, DEFAULT_LIMITS, type DocProvider, type Connection, type ServerMessage } from "@wordinweb/server";
 import type { DocxDocument } from "@wordinweb/core";
 
 const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
+const SVG = new TextEncoder().encode(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32"/></svg>`,
+);
 
 const glob = globalThis as unknown as Record<string, unknown>;
 // jsdom has no image decoder; insertImage measures the bitmap. And rendering
@@ -82,6 +85,22 @@ describe("image insert — LOCAL mode (the pre-existing path)", () => {
     const hasDrawing = (e: { name: string; children: unknown[] }): boolean =>
       e.name.endsWith(":drawing") || (e.children as typeof e[]).some(hasDrawing);
     expect(hasDrawing(ed.doc().docRoot as never)).toBe(true);
+    await ed.unmount();
+  });
+
+  it("still takes an SVG — the collab restriction must not leak into local documents", async () => {
+    // The fix narrows what a SHARED document offers, because the wire
+    // allowlist is raster-only. A local document has nothing to agree with,
+    // so it keeps SVG; asserting this is what stops the narrowing from being
+    // applied everywhere as the easy fix.
+    const ed = await mountLocal();
+    expect(ed.api().imageAccept()).toContain("svg");
+    await ed.click();
+    let outcome: string | undefined;
+    await act(async () => { outcome = await ed.api().insertImage(new Blob([SVG], { type: "image/svg+xml" })); });
+    await tick();
+    expect(outcome).toBe("inserted");
+    expect(ed.mediaParts().length).toBe(1);
     await ed.unmount();
   });
 
@@ -193,6 +212,82 @@ async function mountCollab(hub: CollabHub, docId: string, clientId: string) {
   };
 }
 
+/**
+ * A DocxView mounted with a HAND-BUILT collab object, so the published-limit
+ * field can be set to each of the three things a real session can hand it:
+ * a number, an explicit null (a server that publishes no limit), and absent
+ * entirely (a client built before the field existed).
+ */
+async function mountLimitBed(mediaMaxBlobBytes: number | null | undefined) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const uploads: number[] = [];
+  let nextId = 900_000;
+  const seen: { api: DocxViewApi | null } = { api: null };
+  const collab: Record<string, unknown> = {
+    submit: () => {},
+    submitOp: () => {},
+    allocIds: (n: number) => Array.from({ length: n }, () => nextId++),
+    uploadMedia: async (bytes: Uint8Array) => {
+      uploads.push(bytes.length);
+      return { blobSha: "a".repeat(64), bytesLen: bytes.length };
+    },
+  };
+  // ABSENT vs null is the distinction under test — only assign when the case
+  // says the field exists at all.
+  if (mediaMaxBlobBytes !== undefined) collab.mediaMaxBlobBytes = mediaMaxBlobBytes;
+  await act(async () => {
+    root.render(createElement(DocxView, {
+      source: blankDocxBytes(),
+      editable: true,
+      onReady: (api: DocxViewApi) => { seen.api = api; },
+      collab,
+    }));
+  });
+  for (let i = 0; i < 30 && !container.querySelector(".dxw-page"); i++) await tick();
+  return {
+    uploads,
+    api: () => seen.api!,
+    unmount: async () => { await act(async () => { root.unmount(); }); },
+  };
+}
+
+describe("the published size limit — the null contract", () => {
+  it("NO published limit means SKIP the check, never substitute a default", async () => {
+    // The branch that must stay a no-op. A client that invented a default
+    // would refuse uploads the server would have accepted, and the user could
+    // not tell a real limit from one the client made up. Skipping is safe
+    // precisely because the server still enforces its own number.
+    for (const absent of [null, undefined] as const) {
+      const ed = await mountLimitBed(absent);
+      expect(ed.api().imageMaxBytes()).toBeNull();
+      const outcome = await act(async () => ed.api().insertImage(new Blob([PNG], { type: "image/png" })));
+      expect(outcome, `limit ${String(absent)} must not block the upload`).toBe("inserted");
+      expect(ed.uploads).toEqual([PNG.length]);
+      await ed.unmount();
+    }
+  });
+
+  it("a published limit is enforced as a THRESHOLD, and reported as the configured number", async () => {
+    const LIMIT = 8;
+    const ed = await mountLimitBed(LIMIT);
+    // What the UI will name — read from the session, not from a constant.
+    expect(ed.api().imageMaxBytes()).toBe(LIMIT);
+    // Over: refused with nothing sent.
+    const over = await act(async () => ed.api().insertImage(new Blob([PNG], { type: "image/png" })));
+    expect(over).toBe("too-large");
+    expect(ed.uploads, "an oversized file must not reach the relay at all").toEqual([]);
+    // Exactly at the limit: allowed (the check is `>`, not `>=` — a file the
+    // server would accept must not be refused by the client).
+    const atLimit = await act(async () => ed.api().insertImage(new Blob([PNG.slice(0, LIMIT)], { type: "image/png" })));
+    expect(atLimit).toBe("inserted");
+    expect(ed.uploads).toEqual([LIMIT]);
+    await ed.unmount();
+  });
+});
+
+
 describe("image insert — COLLAB mode (doc 16 media relay)", () => {
   it("uploads the blob, reserves it on the wire, and a peer eager-fetches the pixels", async () => {
     const hub = new CollabHub(provider);
@@ -268,6 +363,233 @@ describe("image insert — COLLAB mode (doc 16 media relay)", () => {
       expect(late.container.querySelector(".dxw-media-skeleton")).toBeNull();
       await a.unmount();
       await late.unmount();
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it("an SVG is DECLINED OUT LOUD, and the picker no longer offers one", async () => {
+    // USER-HIT BUG. The Pictures picker advertised `image/svg+xml` while the
+    // collab insert refused that exact extension with a bare `return`, so
+    // choosing an SVG in a shared document did nothing at all — no skeleton,
+    // no message, no log. Reported as "it just didn't work and then
+    // disappeared", which is precisely what a silent guard looks like from
+    // the outside.
+    //
+    // Two halves, both asserted here because either alone can regress:
+    // the picker must not OFFER what the insert refuses, and the insert must
+    // still SAY something when it refuses (the API path remains reachable).
+    const hub = new CollabHub(provider);
+    const relay = installRelayFetch(hub);
+    try {
+      const a = await mountCollab(hub, "img-svg", "alice");
+      await settle();
+
+      // THE OFFER. Read off the live attribute the file dialog actually uses,
+      // not the constant behind it — the drift was between exactly those two.
+      const picker = a.container.querySelector<HTMLInputElement>('input[type="file"][accept*="image/png"]');
+      expect(picker, "the Pictures file input should be mounted").toBeTruthy();
+      expect(picker!.accept).not.toContain("svg");
+      expect(picker!.accept).toContain("image/png");
+      expect(a.api().imageAccept()).not.toContain("svg");
+
+      // THE REFUSAL, still reachable through the API — and now audible.
+      await a.click();
+      const before = Buffer.from(a.liveDoc().save());
+      let outcome: string | undefined;
+      await act(async () => { outcome = await a.api().insertImage(new Blob([SVG], { type: "image/svg+xml" })); });
+      await settle();
+      expect(outcome).toBe("unsupported-format");
+      // Nothing was uploaded, reserved, or forked.
+      expect(relay.calls.put).toBe(0);
+      expect(a.liveDoc().mediaMeta.size).toBe(0);
+      expect(Buffer.from(a.liveDoc().save())).toEqual(before);
+      await a.unmount();
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it("picking an unsupported file through the TOOLBAR produces a visible notice, never a no-op", async () => {
+    // The user's actual path: the file dialog, not the API. Whatever the
+    // guard decides, the person who picked the file has to be told — a
+    // control that accepts a click and answers with nothing is the failure
+    // this whole class keeps reproducing.
+    const hub = new CollabHub(provider);
+    const relay = installRelayFetch(hub);
+    try {
+      const a = await mountCollab(hub, "img-svg-ui", "alice");
+      await settle();
+      await a.click();
+      // The user's route to the picker: the Insert tab, where the Pictures
+      // button lives — and where its answer has to appear.
+      const insertTab = a.container.querySelector<HTMLButtonElement>('button[data-tab="insert"]');
+      expect(insertTab, "the Insert tab should be present").toBeTruthy();
+      await act(async () => { insertTab!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+      await tick();
+      const picker = a.container.querySelector<HTMLInputElement>('input[type="file"][accept*="image/png"]')!;
+      // A file dialog can still hand back an SVG (drag-drop, "All files",
+      // a stale dialog) — `accept` is a filter, never a guarantee.
+      const file = new File([SVG], "logo.svg", { type: "image/svg+xml" });
+      Object.defineProperty(picker, "files", { value: [file], configurable: true });
+      await act(async () => { picker.dispatchEvent(new Event("change", { bubbles: true })); });
+      await settle();
+
+      const notice = a.container.querySelector("[data-dxw-image-status]");
+      expect(notice, "an unsupported pick must produce a visible notice").toBeTruthy();
+      expect(notice!.textContent).toMatch(/PNG/i);
+      expect(relay.calls.put).toBe(0);
+      await a.unmount();
+    } finally {
+      relay.restore();
+    }
+  });
+
+  it("a PENDING image is selectable and deletable — the skeleton is not a dead box", async () => {
+    // OWNER-REPORTED: "users should actually be able to delete an image before
+    // it even finishes downloading from the server."
+    //
+    // A participant looking at "Image unavailable" has a reservation whose
+    // bytes may never arrive (nobody holding them is online). Before this, that
+    // box could not be selected at all, so it could not be removed either — the
+    // document had a permanent hole only a re-share could clear.
+    //
+    // NOT auto-invalidation: the bytes are fine for everyone else and come back
+    // when a holder reconnects (doc 16 §7). This is the USER choosing to remove
+    // it, which is an ordinary removeDrawing and converges like any other edit.
+    const hub = new CollabHub(provider);
+    const relay = installRelayFetch(hub);
+    let a: Awaited<ReturnType<typeof mountCollab>> | null = null;
+    let b: Awaited<ReturnType<typeof mountCollab>> | null = null;
+    try {
+      a = await mountCollab(hub, "img-del", "alice");
+      await settle();
+      await a.click();
+      await act(async () => { await a!.api().insertImage(new Blob([PNG], { type: "image/png" })); });
+      await settle();
+      expect(a.container.querySelector(".dxw-page img")).toBeTruthy();
+
+      // B joins into a relay that will not serve the bytes, so B holds the
+      // reservation and paints the skeleton — the state the user reported.
+      relay.restore();
+      const prior = globalThis.fetch;
+      (globalThis as unknown as { fetch: unknown }).fetch = async () => ({
+        ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0),
+      });
+      try {
+        b = await mountCollab(hub, "img-del", "bob");
+        await settle();
+        const skeleton = b.container.querySelector<HTMLElement>("[data-dxw-media-state]");
+        expect(skeleton, "B should paint a skeleton for the image it cannot fetch").toBeTruthy();
+        // There are THREE skeleton states, not two: "fetching", "waiting" and
+        // "unavailable" (collab/src/media.ts). This scenario produces
+        // "waiting" — the bytes are gone from the relay and B is waiting for a
+        // holder to volunteer. The hit test below matches on the ATTRIBUTE'S
+        // PRESENCE rather than its value, so it is state-independent by
+        // construction and a fourth state would be covered the day it exists.
+        expect(["fetching", "waiting", "unavailable"]).toContain(skeleton!.dataset.dxwMediaState);
+        expect(b.container.querySelector(".dxw-page img")).toBeNull();
+
+        // CLICK IT. The skeleton is a div, not an <img> — the whole bug.
+        await act(async () => {
+          const opts = { bubbles: true, cancelable: true, clientX: 5, clientY: 5, button: 0 };
+          skeleton!.dispatchEvent(new MouseEvent("mousedown", opts));
+          skeleton!.dispatchEvent(new MouseEvent("mouseup", opts));
+        });
+        await tick();
+        expect(
+          b.container.querySelector("[data-dxw-object-selection]"),
+          "clicking a pending image should select it like any other drawing",
+        ).toBeTruthy();
+
+        // DELETE IT, and the removal must reach the other participant — a
+        // local-only delete would be a silent fork.
+        const target = (b.container.contains(document.activeElement)
+          ? (document.activeElement as HTMLElement)
+          : b.container.querySelector<HTMLElement>("textarea")) ?? b.container;
+        await act(async () => {
+          target.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true }));
+        });
+        await settle();
+        expect(b.container.querySelector("[data-dxw-media-state]"), "the skeleton should be gone on B").toBeNull();
+        await expect
+          .poll(() => a!.container.querySelectorAll(".dxw-page img").length, { timeout: 4000 })
+          .toBe(0);
+        // THE MODEL is what has to agree — the drawing is gone on both sides.
+        //
+        // Whole-package byte-identity is deliberately NOT the oracle here, and
+        // this is the one scenario where using it would be wrong rather than
+        // merely strict: A holds `word/media/image1.png` and B never received
+        // those bytes at all, so the packages differ for a reason that has
+        // nothing to do with convergence (measured: A ['word/media/image1.png'],
+        // B []). Media parts are outside the byte-identity oracle for exactly
+        // this reason — pixel arrival is asynchronous and per-replica.
+        const hasDrawing = (e: { name: string; children: unknown[] }): boolean =>
+          e.name.endsWith(":drawing") || (e.children as typeof e[]).some(hasDrawing);
+        expect(hasDrawing(a.liveDoc().docRoot as never), "the drawing should be gone on A").toBe(false);
+        expect(hasDrawing(b.liveDoc().docRoot as never), "the drawing should be gone on B").toBe(false);
+
+        // UNDO, and the ordering worry it raises. `removeDrawing` has NO
+        // inverse — invert.ts falls through to `default: return null` — so
+        // undoing this delete is a documented cannot-undo, not a restore.
+        // That is what makes "the bytes might arrive mid-undo" moot rather
+        // than merely unlikely: there is no window in which the reservation
+        // comes back to race them. Pinned because if an inverse is ever added,
+        // this assertion is where the race has to be thought about again.
+        await act(async () => {
+          target.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+        });
+        await settle();
+        expect(hasDrawing(b.liveDoc().docRoot as never), "undo must not resurrect a drawing that has no inverse").toBe(false);
+        expect(hasDrawing(a.liveDoc().docRoot as never), "and must not fork the room trying").toBe(false);
+      } finally {
+        (globalThis as unknown as { fetch: unknown }).fetch = prior;
+      }
+    } finally {
+      await a?.unmount();
+      await b?.unmount();
+      relay.restore();
+    }
+  });
+
+  it("an OVERSIZED image is refused locally, before a single byte is uploaded", async () => {
+    // The limit travels FORWARD (published in the welcome) rather than being
+    // read backward out of a 413, so the refusal can happen before the file is
+    // read, decoded, sealed, hashed or sent — the user finds out immediately
+    // instead of after waiting out a whole upload that was always going to
+    // fail.
+    //
+    // THE LIMIT HERE IS INJECTED, never a literal. A test written against a
+    // hardcoded 5MB passes just as happily when the client ignores the
+    // published number and uses its own default — which is the bug this
+    // design exists to prevent, and the dev stack (50MB) would expose it in
+    // production only.
+    const TINY = 4; // bytes — smaller than PNG, so PNG is "oversized" here
+    const limits = { ...DEFAULT_LIMITS, media: { ...DEFAULT_LIMITS.media, maxBlobBytes: TINY } };
+    const hub = new CollabHub(provider, undefined, undefined, undefined, undefined, undefined, limits);
+    const relay = installRelayFetch(hub);
+    try {
+      const a = await mountCollab(hub, "img-big", "alice");
+      await settle();
+      // The client learned the server's number — not a default of its own.
+      expect(a.api().imageMaxBytes()).toBe(TINY);
+      await a.click();
+      const before = Buffer.from(a.liveDoc().save());
+      let outcome: string | undefined;
+      await act(async () => { outcome = await a.api().insertImage(new Blob([PNG], { type: "image/png" })); });
+      await settle();
+      expect(outcome).toBe("too-large");
+      // NOTHING went out: no PUT attempted, no reservation, document untouched.
+      expect(relay.calls.put).toBe(0);
+      expect(a.liveDoc().mediaMeta.size).toBe(0);
+      expect(Buffer.from(a.liveDoc().save())).toEqual(before);
+      // …and a file INSIDE the injected limit still goes through the same path,
+      // so the check is a threshold and not a blanket refusal.
+      await act(async () => { outcome = await a.api().insertImage(new Blob([PNG.slice(0, TINY)], { type: "image/png" })); });
+      await settle();
+      expect(outcome).toBe("inserted");
+      expect(relay.calls.put).toBe(1);
+      await a.unmount();
     } finally {
       relay.restore();
     }

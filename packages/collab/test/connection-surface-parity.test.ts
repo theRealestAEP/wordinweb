@@ -23,6 +23,15 @@ describe("connection surface parity (the react cast must be honest)", () => {
       // TS-private helper on the plaintext class — runtime-visible only
       // because TS privacy is compile-time; not part of the public surface.
       "recordActivity",
+      // Same shape as recordActivity: a private helper that walks a BATCH of
+      // broadcast entries looking for this client's rejections. The encrypted
+      // connection needs no equivalent because it ingests one envelope at a
+      // time and reports the rejection inline in `ingest` — so the BEHAVIOUR
+      // is present on both (pinned in image-size-ceiling.test.ts and
+      // media-e2ee-connection), only the helper's shape differs. Listed rather
+      // than mirrored, because adding a batch method to the encrypted class
+      // that nothing calls would be worse than this line.
+      "reportRejections",
       // Media-duty plumbing the plaintext connection's own message handler
       // invokes on itself; the encrypted connection delegates these to its
       // internal MediaClient. No external caller goes through the cast.

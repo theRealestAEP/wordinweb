@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { BOARD_CODE } from "./_helpers";
 
 /**
  * THE BARE-URL FLOW — the one the user actually types. Every other spec
@@ -20,6 +21,9 @@ test("bare URL (no ?server=) boots the local editor and can go live", async ({ p
   await expect(page.locator(".dxw-page")).toBeVisible();
   // And the full go-live path resolves HTTP + WS without the override.
   await page.getByTestId("make-collaborative").click();
+  await expect(page.getByTestId("collab-modal")).toBeVisible();
+  await page.getByTestId("share-code").fill(BOARD_CODE); // a code is required to go live
+  await page.getByTestId("start-collab").click();
   await expect(page).toHaveURL(/[?&]doc=/);
   await expect(page.getByTestId("download")).toBeVisible();
 });

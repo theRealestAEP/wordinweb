@@ -5,6 +5,7 @@ import {
   clickTextStart,
   createCollabDoc,
   docText,
+  enterCodeIfPrompted,
   goLive,
   joinCollab,
   newClients,
@@ -145,6 +146,7 @@ function tailClickPoint(): { x: number; y: number } | null {
  * page only. */
 async function joinBigDoc(page: Page, url: string): Promise<void> {
   await page.goto(url);
+  await enterCodeIfPrompted(page);
   await expect(page.locator(PAGE).first()).toBeVisible();
   await waitHook(page);
 }

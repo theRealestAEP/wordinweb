@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, type CollabSession, type DocBundle } from "wordinweb/collab";
 import { reviveEncrypted } from "./e2ee-flows";
 import { PerfHud } from "./perf/hud";
@@ -24,7 +24,7 @@ function b64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, initialShareCode, onNewDocument }: {
+export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, initialShareCode, onNewDocument, onDisconnect }: {
   url: string;
   httpBase: string;
   docId: string;
@@ -43,9 +43,59 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   /** Leave this document and start a fresh one — the "I forgot the code"
    * escape (a code-locked session can't be entered, but a new one can). */
   onNewDocument?: () => void;
+  /** Leave the session and hand the CURRENT document bytes back to the local
+   * editor. Null bytes when the session never became ready — there is simply
+   * nothing to carry out, and the caller reopens the blank template. */
+  onDisconnect?: (bytes: Uint8Array | null) => void;
 }) {
   const store = useMemo(() => new IndexedDbBundleStore(), []);
   const [session, setSession] = useState<CollabSession | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  /**
+   * The demo builds its own socket so Disconnect can CLOSE it: the hook's
+   * teardown flushes the bundle and drops its reference but never closes the
+   * transport, so without this the server would keep counting a participant
+   * who had already left, and the room would stay alive on a phantom.
+   *
+   * STABLE IDENTITY IS LOAD-BEARING — `createSocket` is in useCollab's effect
+   * deps, so an inline arrow is a new function every render and the session
+   * reconnects in a loop. It never stabilises, the editor never mounts, and
+   * the symptom is simply "no page" (measured: 6 of 7 browser scenarios
+   * failed, including every joiner, until this was hoisted).
+   */
+  const makeSocket = useCallback((u: string) => {
+    const sock = new WebSocket(u);
+    socketRef.current = sock;
+    return sock;
+  }, []);
+
+  /**
+   * Push a rename to the room. The `profile` prop is READ ONLY AT JOIN — the
+   * hook deliberately keeps it out of its effect deps so an inline object
+   * literal can't reconnect the session on every render — so without this an
+   * edited name would sit in localStorage and never reach anyone else's
+   * roster. Debounced because the control is a text field: one frame per
+   * keystroke would be one roster fan-out per keystroke.
+   */
+  const joinedName = useRef(name);
+  useEffect(() => {
+    if (!session?.ready || name === joinedName.current) return;
+    const t = setTimeout(() => {
+      joinedName.current = name;
+      session.setProfile({ name, color: "" }); // server assigns the palette color
+    }, 400);
+    return () => clearTimeout(t);
+  }, [name, session]);
+
+  /** Leave the room, keep the copy: snapshot the live document, close the
+   * socket, and hand the bytes up. Nothing durable is lost — the server was
+   * never holding it. */
+  const leaveSession = () => {
+    const bytes = session?.doc ? session.doc.save() : null;
+    try { socketRef.current?.close(); } catch { /* already closed */ }
+    socketRef.current = null;
+    onDisconnect?.(bytes);
+  };
   // E2E test hook (dev harness only — anon-share is never published): expose
   // the live CollabSession so browser tests can inject intents through the
   // REAL connection and read the converged doc, independent of the editor UI.
@@ -219,13 +269,19 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
                 : "This document needs its share code (sent separately from the link)."}
           </p>
           <input
+            data-testid="join-share-code"
             value={codeDraft}
             onChange={(e) => setCodeDraft(e.target.value)}
-            placeholder="6-digit share code"
-            inputMode="numeric"
-            maxLength={12}
+            // Mirrors the field that CREATED the code (local-editor's modal):
+            // codes are free-form text, not digits. `inputMode="numeric"` used
+            // to live here and popped a NUMBER PAD on phones, so a passphrase
+            // code was literally untypeable on the device most likely to be
+            // reading a link someone sent them.
+            placeholder="e.g. redwood"
+            maxLength={64}
           />{" "}
           <button
+            data-testid="join-submit"
             disabled={!codeDraft || reason === "code-locked"}
             onClick={() => {
               // Remember it on this device so a reload doesn't re-prompt (a
@@ -243,6 +299,37 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
               <button data-testid="refused-new-document" onClick={onNewDocument}>Start a new document</button>
             </p>
           )}
+        </div>
+      );
+    }
+    if (reason === "idle-timeout" || reason === "session-expired") {
+      // THE DEADLINE ARRIVING, not a refusal. The countdown that preceded it
+      // explained what was about to happen, so this must read as the ending
+      // it announced — "refresh to retry" would be both wrong (there is
+      // nothing to retry) and a lie about where the document lives.
+      return (
+        <div data-testid="session-ended">
+          <p>
+            {reason === "idle-timeout"
+              ? "This session ended after a long stretch with no edits. Rooms close when nobody is using them — the server keeps nothing between sessions."
+              : "This session reached its time limit and ended. Every room has a maximum age, so none of them lives on the server indefinitely."}
+          </p>
+          {reviveState === "no-copy" ? (
+            <p>This browser has no saved copy of the document, so it can’t bring it back. Any participant who edited here before can.</p>
+          ) : (
+            <p>Your copy is still here in this browser — nothing was lost.</p>
+          )}
+          {reviveState !== "no-copy" && (
+            <>
+              <button data-testid="bring-back" disabled={reviveState === "reviving"} onClick={() => void revive()}>
+                {reviveState === "reviving" ? "Bringing it back…" : "Bring it back live"}
+              </button>{" "}
+              {onDisconnect && (
+                <button data-testid="ended-keep-local" onClick={leaveSession}>Keep editing on your own</button>
+              )}{" "}
+            </>
+          )}
+          {onNewDocument && <button data-testid="ended-new-document" onClick={onNewDocument}>Start fresh</button>}
         </div>
       );
     }
@@ -313,10 +400,42 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             This document may not be saved in this browser — download a copy.
           </span>
         ) : session?.readOnlyBlocked ? (
-          // Owner lock (doc 14 §2.5): per-edit refusal, NOT a dead session —
-          // the doc stays live and readable; edits resume when the owner lifts.
-          <span data-testid="readonly-banner" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
-            The owner made this document read-only — you can read along; edits are paused.
+          // Owner lock (doc 14 §2.5): NOT a dead session — the doc stays live
+          // and readable; editing returns when the owner lifts.
+          //
+          // Keyed to `writesBlocked`, the SAME predicate that gates the editor,
+          // rather than to `readOnlyBlocked`. That is now load-bearing: the
+          // gate engages from the roster signal BEFORE any edit is attempted,
+          // so no refusal ever arrives and the refusal-driven flag stays false.
+          // Keying the banner to it would leave the editor correctly frozen
+          // with nothing on screen explaining why — the worst of both.
+          <span data-testid="readonly-banner" data-reason={session.writeStatus ?? "unknown"}
+            style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            {/* The three causes need different words because they imply
+                different things to WAIT for. Telling a view-only link holder
+                that the owner paused editing tells them to wait for something
+                that will never happen. Where the server publishes no status
+                (older build) the copy stays deliberately vague rather than
+                naming a cause we were not told. */}
+            {session.writeStatus === "owner-lock"
+              ? "The owner paused editing for everyone — you can read along, and editing returns by itself when they lift it."
+              : session.writeStatus === "demoted"
+                ? "The owner set you to view-only in this session — you can read along."
+                : session.writeStatus === "viewer-role"
+                  ? "Your link is view-only. You can read and download this document, but editing isn’t part of this link."
+                  : "This document is read-only for you right now."}
+            {" "}The editor is in view mode, so nothing you type can be silently lost.{" "}
+            {/* Only offered where trying could actually change the answer. A
+                viewer-role link is a property of the link itself — no amount of
+                retrying alters it, and a button that cannot work is the same
+                false promise as the copy above. Against an older server (no
+                status) this is the ONLY escape, because the block is sticky and
+                no lift is announced. */}
+            {session.writeStatus !== "viewer-role" && (
+              <button data-testid="retry-writes" onClick={() => session?.retryWrites()}>
+                Try editing again
+              </button>
+            )}
           </span>
         ) : session?.epochChanged ? (
           <span style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
@@ -326,6 +445,15 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         {/* The escape hatch (doc 12 §4): your copy is as durable as this
             browser; one click makes it a file. */}
         <button data-testid="download" onClick={download} disabled={!session?.ready}>Download .docx</button>
+        {onDisconnect && (
+          <button
+            data-testid="disconnect"
+            title="Leave this session and keep editing your copy locally"
+            onClick={leaveSession}
+          >
+            Disconnect
+          </button>
+        )}
         <button onClick={() => void saveVersion()} disabled={!session?.ready}>Save version</button>
         <button onClick={() => setShowActivity((v) => !v)}>{showActivity ? "Hide" : "Show"} activity</button>
         {isOwner && (
@@ -367,6 +495,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         <CollabEditor
           key={attempt}
           url={url}
+          createSocket={makeSocket}
           docId={docId}
           clientId={clientId}
           store={store}
@@ -384,8 +513,66 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           editable
         />
       </div>
+      {session?.sessionWarning && (
+        <SessionCountdown warning={session.sessionWarning} onDownload={download} />
+      )}
       {/* Dev perf menu (Ctrl+Shift+P / ?perf=1) — inert until opened. */}
       <PerfHud clientId={clientId} docStats={docStats} />
+    </div>
+  );
+}
+
+/**
+ * The grace period before an announced session ending, shown as a live clock.
+ *
+ * TICKS LOCALLY from the `inMs` the server measured when it sent the warning:
+ * the wire carries ONE message per deadline, not a stream of refreshed
+ * remainders, so a component waiting to be told the new number would display a
+ * frozen one for the entire grace period.
+ *
+ * The two endings are genuinely different and the copy says so rather than
+ * sharing a euphemism:
+ *
+ *  - `idle`     is cancellable, and typing is what cancels it — so the popup
+ *               asks for the one action that works, and DISAPPEARS on its own
+ *               when the server clears the deadline. That vanishing IS the
+ *               confirmation; there is deliberately no dismiss button, because
+ *               dismissing it would hide the only signal that it worked.
+ *  - `lifetime` cannot be cancelled by anything, so the copy makes no
+ *               suggestion at all. It points at the document's durability
+ *               instead (the browser's copy, the download beside it) because
+ *               that is the true reassurance — the session ends, the document
+ *               does not.
+ */
+function SessionCountdown({ warning, onDownload }: {
+  warning: { reason: "idle" | "lifetime"; inMs: number };
+  onDownload: () => void;
+}) {
+  const idle = warning.reason === "idle";
+  const [remaining, setRemaining] = useState(warning.inMs);
+  useEffect(() => {
+    // Anchor on an absolute deadline, not a decrementing counter: a
+    // backgrounded tab throttles timers, and a counter would drift into
+    // promising time that had already passed.
+    const deadline = Date.now() + warning.inMs;
+    setRemaining(warning.inMs);
+    const id = setInterval(() => setRemaining(Math.max(0, deadline - Date.now())), 1000);
+    return () => clearInterval(id);
+    // A fresh warning object = a fresh deadline (the state holds the callback's
+    // object, so the identity is stable between warnings).
+  }, [warning]);
+  const secs = Math.ceil(remaining / 1000);
+  const clock = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+  return (
+    <div className="countdown" data-testid="session-countdown" data-reason={warning.reason} role="status" aria-live="polite">
+      <b>{idle ? "Session closing due to inactivity" : "This session is reaching its time limit"}</b>
+      <span className="clock" data-testid="countdown-clock">{clock}</span>
+      <p>
+        {idle
+          ? "Keep editing to stay connected — any edit resets the clock for everyone."
+          : "Your copy is safe in this browser; you can re-share it as a new session afterwards."}
+      </p>
+      {!idle && <button onClick={onDownload}>Download .docx</button>}
     </div>
   );
 }

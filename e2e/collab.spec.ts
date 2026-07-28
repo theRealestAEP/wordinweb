@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { BOARD_CODE, enterCodeIfPrompted } from "./_helpers";
 
 /**
  * End-to-end browser scenarios for the zero-custody demo (plan doc 09,
@@ -26,6 +27,10 @@ async function createDoc(page: Page): Promise<string> {
   const goLive = page.getByTestId("make-collaborative");
   await expect(goLive).toBeVisible();
   await goLive.click();
+  // "Collab" opens the dialog; "Start Collab" seals and goes live.
+  await expect(page.getByTestId("collab-modal")).toBeVisible();
+  await page.getByTestId("share-code").fill(BOARD_CODE); // required to go live
+  await page.getByTestId("start-collab").click();
   await expect(page).toHaveURL(/[?&]doc=/); // the magic-link capability
   await expect(page).toHaveURL(/#k=/); // collaborative = encrypted (doc 13 §1)
   await expect(page.getByTestId("download")).toBeVisible(); // collab chrome mounted
@@ -71,12 +76,16 @@ test.describe("zero-custody demo — browser E2E", () => {
       await a.keyboard.type("LOCAL DRAFT", { delay: 15 });
       await expect.poll(() => paintedText(a)).toContain("LOCAL DRAFT");
       await a.getByTestId("make-collaborative").click();
+      await expect(a.getByTestId("collab-modal")).toBeVisible();
+      await a.getByTestId("share-code").fill(BOARD_CODE);
+      await a.getByTestId("start-collab").click();
       await expect(a).toHaveURL(/#k=/);
       await expect(a.getByTestId("download")).toBeVisible();
       // The local draft survived into the collab session…
       await expect.poll(() => paintedText(a)).toContain("LOCAL DRAFT");
       // …and a participant opening the shared link sees it too.
       await b.goto(a.url());
+      await enterCodeIfPrompted(b);
       await expect(b.locator(PAGE)).toBeVisible();
       await expect.poll(() => paintedText(b)).toContain("LOCAL DRAFT");
     } finally {
@@ -125,6 +134,7 @@ test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () 
     try {
       const url = await createDoc(a);
       await b.goto(url);
+      await enterCodeIfPrompted(b);
       await expect(b.locator(PAGE)).toBeVisible();
       await expect.poll(async () => a.getByTestId("roster-chip").count()).toBe(2);
       await expect.poll(async () => b.getByTestId("roster-chip").count()).toBe(2);
@@ -144,6 +154,47 @@ test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () 
   // layer's cast hid it from the typechecker). Fixed in enc-connection.ts;
   // the surface-parity pin (collab/test/connection-surface-parity.test.ts)
   // keeps the cast honest from now on.
+  test("a joiner arriving into an ALREADY-LOCKED room is told so, without typing first", async ({ browser }) => {
+    // THE SIGNAL-ONLY PATH, and the one the other read-only scenario cannot
+    // cover: there, the blocked client types before the banner is checked, so
+    // a refusal has already fired and the refusal-driven flag is set. That
+    // assertion passes whether the banner is keyed to the roster status or to
+    // the old flag — it cannot tell the two implementations apart.
+    //
+    // Here nobody types. The block is known from the roster at join, so no
+    // refusal ever happens: if the banner were keyed to the refusal flag the
+    // editor would be correctly frozen with NOTHING on screen explaining why,
+    // which is worse than either half alone.
+    const ctxOwner = await browser.newContext();
+    const ctxJoiner = await browser.newContext();
+    const owner = await ctxOwner.newPage();
+    const joiner = await ctxJoiner.newPage();
+    try {
+      const url = await createDoc(owner);
+      await owner.getByTestId("readonly-toggle").click();
+      await expect(owner.getByTestId("readonly-toggle")).toContainText("Read-only ON");
+      await owner.waitForTimeout(500); // let admin(readOnly) reach the hub
+
+      // Join AFTER the lock. This client has never attempted an edit.
+      await joiner.goto(url);
+      await enterCodeIfPrompted(joiner);
+      await expect(joiner.locator(PAGE)).toBeVisible();
+      await expect(joiner.getByTestId("readonly-banner")).toBeVisible();
+      // …and it names the cause, which only the roster status can supply.
+      await expect(joiner.getByTestId("readonly-banner")).toHaveAttribute("data-reason", "owner-lock");
+      // Still no edit has been attempted: the refusal-driven flag must be
+      // untouched, proving the banner came from the signal and not from a
+      // keystroke that died to produce it.
+      const viaRefusal = await joiner.evaluate(
+        () => (window as unknown as { __ww: { _session: { readOnlyBlocked: boolean } } }).__ww._session.readOnlyBlocked,
+      );
+      expect(viaRefusal, "no edit should have had to die for the banner to appear").toBe(false);
+    } finally {
+      await ctxOwner.close();
+      await ctxJoiner.close();
+    }
+  });
+
   test("owner read-only blocks editors, owner keeps writing, then lifts (doc 14 §2.5)", async ({ browser }) => {
     const ctxOwner = await browser.newContext();
     const ctxEditor = await browser.newContext();
@@ -152,6 +203,7 @@ test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () 
     try {
       const url = await createDoc(owner);
       await editor.goto(url);
+      await enterCodeIfPrompted(editor);
       await expect(editor.locator(PAGE)).toBeVisible();
       await expect(editor.getByTestId("readonly-toggle")).toHaveCount(0);
       // Guard against a Vite pre-bundle race (stale session without admin).
@@ -162,18 +214,37 @@ test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () 
       await expect(owner.getByTestId("readonly-toggle")).toContainText("Read-only ON");
       await owner.waitForTimeout(500); // let the admin(readOnly) reach the hub
       // The blocked editor's edit is refused at the sequencer — the SECURITY
-      // invariant is that it never reaches the owner (the blocked client may
-      // still show its own optimistic paint until reload; that's a separate
-      // minor UX item, BUGS.md). Prove non-propagation.
+      // invariant is that it never reaches the owner. Prove non-propagation.
       await typeInEditor(editor, "BLOCKED-EDIT");
       await owner.waitForTimeout(700);
       expect(await paintedText(owner)).not.toContain("BLOCKED-EDIT");
+      // …and the blocked client is now in VIEWER MODE rather than an editable
+      // surface under a banner. That refused first edit is what raises the
+      // gate (there is no join-time write-status signal yet), and everything
+      // after it is refused input rather than a local mutation that gets
+      // healed away — the silent-loss shape this gate exists to remove.
+      await expect(editor.getByTestId("readonly-banner")).toBeVisible();
       // The owner bypasses their own lock and it reaches the editor.
       await typeInEditor(owner, "OWNER-WRITE");
       await expect.poll(() => paintedText(owner)).toContain("OWNER-WRITE");
       await expect.poll(() => paintedText(editor)).toContain("OWNER-WRITE");
-      // Lift read-only: the editor writes again and it reaches the owner.
+      // Lift read-only. THE BLOCKED CLIENT COMES BACK ON ITS OWN — no click,
+      // no reload. The roster carries a positive write status that is re-fanned
+      // on every transition, so the lift reaches this client without it having
+      // to attempt an edit to discover the good news.
+      //
+      // THE ABSENCE OF A CLICK HERE IS THE ASSERTION. This scenario briefly
+      // required pressing "Try editing again", which was an honest workaround
+      // for a missing signal — and a workaround that passes is a workaround
+      // nobody removes. If a future change makes this test need that click
+      // again, the signal has regressed; fix the signal, do not restore the
+      // click. (The affordance still exists as a fallback for servers that
+      // publish no status.)
       await owner.getByTestId("readonly-toggle").click();
+      // The banner clears on its own too — the visible half of the same claim.
+      // Without this, a build that left the banner up while quietly restoring
+      // input would still pass on the typing assertion below.
+      await expect(editor.getByTestId("readonly-banner")).toHaveCount(0);
       await typeInEditor(editor, "NOW-ALLOWED");
       await expect.poll(() => paintedText(owner)).toContain("NOW-ALLOWED");
     } finally {

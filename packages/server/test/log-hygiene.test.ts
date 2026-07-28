@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { CollabHub, type Connection, type DocProvider, type ServerMessage } from "../src/index.js";
 import { MetricsObservability, serializeError } from "../src/observability.js";
+import { IpGuard } from "../src/ip-guard.js";
+import { normalizeLimits } from "../src/limits.js";
+import { attachWebSocketServer } from "../src/ws.js";
+import { handleSeedRequest } from "../src/seed-http.js";
+import { blankDocxBytes } from "../src/blank.js";
 import { PROTOCOL_VERSION } from "@wordinweb/collab/server";
 import { zipSync, strToU8 } from "fflate";
 
@@ -26,7 +31,33 @@ const SECRETS = {
   ownerToken: "SECRETownerTokenMARKER",
   shareCode: "SECRETshareCodeMARKER",
   docKey: "SECRETdocKeyMARKER",
+  /**
+   * The CLIENT ADDRESS. Added with the lifecycle/bot-protection arc, which
+   * introduced the first code in this server that handles an IP at all.
+   *
+   * An address is personal data, and per-IP enforcement is exactly the kind
+   * of feature whose logs "helpfully" grow a `from` field the first time
+   * someone debugs a limit. The observability method that reports these
+   * refusals cannot even accept an address (`ipLimited(reason)`), and this
+   * marker is what keeps that true — a distinctive literal rather than a
+   * plausible address, so a match is unambiguous.
+   */
+  clientIp: "203.0.113.SECRETipMARKER",
 };
+
+/**
+ * Grep for a marker CASE-INSENSITIVELY.
+ *
+ * Not fussiness — a mutation test caught this pin passing while a leak was
+ * live. The address path normalizes to lowercase before it is used as a
+ * bucket key, so a mixed-case marker leaked into a log line as lowercase and
+ * a case-sensitive `toContain` sailed straight past it. Any normalizing path
+ * (lowercase, uppercase, trim) defeats an exact-match pin, and the question
+ * this file asks is whether the string reaches a log AT ALL.
+ */
+function assertAbsent(haystack: string, marker: string, label: string): void {
+  expect(haystack.toLowerCase(), `${label} must never appear in a log line`).not.toContain(marker.toLowerCase());
+}
 
 function docBytes(text: string): Uint8Array {
   const xml =
@@ -97,13 +128,72 @@ describe("structured logs never carry content or identifiers", () => {
 
     expect(lines.length, "the session did produce log lines").toBeGreaterThan(0);
     const all = lines.join("\n");
-    for (const [name, secret] of Object.entries(SECRETS)) {
-      expect(all, `${name} must never appear in a log line`).not.toContain(secret);
-    }
+    for (const [name, secret] of Object.entries(SECRETS)) assertAbsent(all, secret, name);
     // …and the safe vocabulary IS there, so this is not passing by logging
     // nothing at all.
     expect(all).toContain("taken-over");
     expect(all).toContain("hello");
+  });
+
+  it("per-IP enforcement and session lifecycle log reasons, never addresses", async () => {
+    // The paths introduced by the lifecycle/bot-protection arc, driven to
+    // REFUSAL on every limit — a refusal is precisely when someone is
+    // tempted to log who was refused.
+    const lines: string[] = [];
+    let now = 0;
+    const obs = new MetricsObservability({ level: "debug", out: (l) => lines.push(l), now: () => now });
+    const limits = normalizeLimits({
+      lifecycle: { idleTimeoutMs: 60_000, idleWarningMs: 10_000 },
+      ip: { seedPerMin: 1, maxDocsPerIp: 1, maxConnsPerIp: 1 },
+    });
+    const guard = new IpGuard(limits.ip, () => now);
+    const hub = new CollabHub(null, undefined, undefined, () => now, undefined, obs, limits, guard);
+    const docx = Buffer.from(blankDocxBytes()).toString("base64");
+
+    // Seed twice from the marked address: the second is refused by the cap.
+    let n = 0;
+    for (let i = 0; i < 2; i++) {
+      handleSeedRequest(
+        hub,
+        { method: "POST", body: { docx } },
+        { creatorIp: SECRETS.clientIp, mintDocId: () => `${SECRETS.docId}${n++}` },
+      );
+    }
+
+    // Two sockets from the marked address: the second is refused at open.
+    const sockets: { sent: string[]; closed: boolean }[] = [];
+    let onConn: ((s: unknown, r: unknown) => void) | undefined;
+    attachWebSocketServer(
+      { on: (_e: "connection", cb: never) => { onConn = cb; } } as never,
+      hub,
+      obs,
+      { guard, trustProxyHops: 1 },
+    );
+    for (let i = 0; i < 2; i++) {
+      const s = { sent: [] as string[], closed: false, send(d: string) { this.sent.push(d); }, on() {}, close() { this.closed = true; } };
+      sockets.push(s);
+      // The address arrives BOTH ways it can — as the socket peer and in a
+      // trusted forwarding header — so neither acquisition path can leak it.
+      onConn?.(s, { socket: { remoteAddress: SECRETS.clientIp }, headers: { "x-forwarded-for": SECRETS.clientIp } });
+    }
+    expect(sockets[1].closed, "the second socket from one address is refused").toBe(true);
+
+    // And a full session lifecycle: warning, then idle eviction.
+    now += 50_000;
+    hub.sweepLifecycle();
+    now += 10_000;
+    hub.sweepLifecycle();
+
+    const all = lines.join("\n");
+    expect(lines.length, "these paths did produce log lines").toBeGreaterThan(0);
+    for (const [name, secret] of Object.entries(SECRETS)) assertAbsent(all, secret, name);
+    // MUTENESS EXCLUSION (the lesson the presence-blindness pin taught): a
+    // blindness assertion that passes because nothing was emitted proves
+    // muteness, not blindness. The safe vocabulary must be present.
+    expect(all).toContain("ip-doc-limit");
+    expect(all).toContain("ip-conn-limit");
+    expect(all).toContain("session-warning");
+    expect(all).toContain("idle-timeout");
   });
 
   it("an error line carries a stack but still no session data", () => {

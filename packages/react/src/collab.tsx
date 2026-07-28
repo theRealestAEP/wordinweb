@@ -16,6 +16,7 @@ import {
   type Intent,
   type PresencePosition,
   type UndoOutcome,
+  type WriteStatus,
 } from "@wordinweb/collab/client";
 
 /**
@@ -107,11 +108,79 @@ export interface CollabSession {
   presence: Record<string, PresencePosition | null>;
   /** Set if the server refused the connection (e.g. version mismatch). */
   refused: string | null;
+  /**
+   * The server announced it will END this session, and this is the grace
+   * period before it does. `inMs` is the measured remainder at the moment the
+   * warning arrived — tick a countdown from it locally rather than expecting
+   * refreshed messages.
+   *
+   *  - `idle`     cancellable: any qualifying activity (an accepted edit, an
+   *               admin action, a media transfer, a join — never presence)
+   *               resets the clock and this goes back to null on its own.
+   *  - `lifetime` NOT cancellable by anything; it counts down to the ending.
+   *
+   * Null whenever no deadline is approaching — including after ANY session
+   * end (kick, refusal), because a countdown that outlived its session would
+   * keep promising an ending that already happened.
+   */
+  sessionWarning: { reason: "idle" | "lifetime"; inMs: number } | null;
   /** True after an edit was refused under the owner's read-only lock
-   * (doc 14 §2.5). NON-FATAL: the live view keeps working; the flag is
-   * advisory (banner UI) and sticky until reload — no lift signal exists
-   * on the wire yet, and typing simply works again once the owner lifts. */
+   * (doc 14 §2.5). NON-FATAL: the live view keeps working.
+   *
+   * LEGACY/FALLBACK now: sticky until reload or `retryWrites`, because a
+   * refusal can only ever say "blocked". Prefer {@link writesBlocked}, which
+   * reads the server's positive roster status when one is published and only
+   * falls back to this against an older server. */
   readOnlyBlocked: boolean;
+  /**
+   * THE SERVER WILL NOT ACCEPT THIS CLIENT'S WRITES. Consumers must render the
+   * editor READ-ONLY on this, never merely annotate it: an editable surface
+   * over a server that refuses the writes applies every keystroke locally and
+   * then loses it, which is silent data loss that looks like it worked.
+   *
+   * One predicate rather than a per-reason check, so a new blocking state
+   * inherits the gate instead of needing to remember it.
+   *
+   * NOW READS THE SERVER'S ROSTER STATUS (`RosterEntry.write`), which closed
+   * the seam this comment used to describe. That matters in both directions:
+   * the status is present AT JOIN, so edit 1 is gated rather than applied and
+   * then healed away; and it is POSITIVE, so a lift arrives on its own instead
+   * of leaving the client in viewer mode until reload. Against a server that
+   * publishes no status it falls back to the refusal-derived flag — never to
+   * "allowed", which would restore both bugs at once.
+   *
+   * The status also distinguishes the three server conditions the single
+   * `read-only` refusal could not (owner lock, per-client demotion, viewer
+   * token), so a UI can finally say which one applies rather than inventing a
+   * distinction it could not see.
+   */
+  writesBlocked: boolean;
+  /**
+   * WHY the server refuses this client's writes, straight from the roster.
+   *
+   * UNDEFINED means the server published nothing (an older build), NOT that
+   * writing is allowed — the same contract as the media limit's null. A
+   * consumer must keep its copy generic in that case rather than naming a
+   * cause it was never told.
+   *
+   * The three causes are genuinely different to the person reading the banner:
+   * `owner-lock` may lift at any moment, `demoted` is about them specifically,
+   * and `viewer-role` is a property of their link that nothing the owner does
+   * in-session will change. Telling that last group to wait for the owner is
+   * telling them to wait for something that will never happen.
+   */
+  writeStatus?: WriteStatus;
+  /**
+   * Optimistically clear the FALLBACK block and let the user try again.
+   *
+   * BELT AND BRACES now, not the primary escape: where the server publishes a
+   * write status, a lift arrives on its own and the editor becomes writable
+   * without anyone clicking anything. This remains for the older-server
+   * fallback path — where the block is sticky, no lift is announced, and
+   * attempting a write is the only way to discover the lock is gone — and as a
+   * manual override if a status update is ever missed.
+   */
+  retryWrites: () => void;
   /**
    * Set when a resume landed in a different epoch than the stored bundle
    * (doc 12 §5 case 2): the session took the server's state; the old copy
@@ -181,6 +250,17 @@ export interface CollabSession {
    * supplied no `httpBase`. */
   uploadMedia: (bytes: Uint8Array) => Promise<{ blobSha: string; bytesLen: number; iv?: string } | null>;
   /**
+   * Largest single upload the relay accepts, in bytes, as published in the
+   * welcome — so an oversized file can be refused locally instead of after a
+   * full seal-hash-upload round trip.
+   *
+   * NULL MEANS "NO PUBLISHED LIMIT", and the only correct response to it is to
+   * skip the check: a server that publishes nothing still enforces its real
+   * limit, so a client that invents a default either blocks uploads that
+   * would have succeeded or promises a size that will be refused.
+   */
+  mediaMaxBlobBytes: number | null;
+  /**
    * Reverse this participant's last SEQUENCED action (plan doc 03 Phase 8).
    * The inverse is computed locally and submitted as an ORDINARY intent, so
    * it converges, broadcasts, and — if the target has since been deleted or
@@ -211,6 +291,38 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const [ready, setReady] = useState(false);
   const [presence, setPresence] = useState<Record<string, PresencePosition | null>>({});
   const [refused, setRefused] = useState<string | null>(null);
+  /**
+   * Announced endings as ABSOLUTE deadlines, one slot per reason.
+   *
+   * Not a single slot, because the two deadlines can be pending at once (a
+   * room nearing its age cap that also goes quiet), and a single slot loses
+   * one of them: the idle warning would overwrite the lifetime warning, and
+   * the `cleared` that follows an edit would then take the lifetime countdown
+   * down with it — leaving no warning at all for an ending that is still
+   * minutes away and cannot be cancelled.
+   *
+   * Absolute rather than remaining, so the surviving deadline resumes with the
+   * time it actually has left rather than the remainder it was announced with.
+   */
+  const [deadlines, setDeadlines] = useState<{ idle: number | null; lifetime: number | null }>({ idle: null, lifetime: null });
+  /** Both slots empty, without re-rendering when they already are. */
+  const clearDeadlines = () =>
+    setDeadlines((d) => (d.idle === null && d.lifetime === null ? d : { idle: null, lifetime: null }));
+  /**
+   * The SOONEST pending ending — that is the one the user needs, and when it
+   * is the cancellable one, cancelling it reveals the other rather than
+   * clearing the screen. `inMs` is measured here and only here: the memo
+   * recomputes exactly when a deadline is set or cleared, so the number the
+   * consumer starts its countdown from is fresh at the moment it changes, and
+   * the object identity is stable in between (a consumer keying an interval on
+   * it must not be restarted by an unrelated render).
+   */
+  const sessionWarning = useMemo<{ reason: "idle" | "lifetime"; inMs: number } | null>(() => {
+    const { idle, lifetime } = deadlines;
+    const reason = idle !== null && (lifetime === null || idle <= lifetime) ? "idle" : lifetime !== null ? "lifetime" : null;
+    if (!reason) return null;
+    return { reason, inMs: Math.max(0, (reason === "idle" ? idle! : lifetime!) - Date.now()) };
+  }, [deadlines]);
   /** True after an edit was refused `read-only` (owner lock, doc 14 §2.5).
    * Sticky until reload — there is no lift signal on the wire yet, and the
    * lock only re-manifests per-edit; the banner is advisory while the live
@@ -226,6 +338,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const offlineTailRef = useRef<import("@wordinweb/collab/client").DocBundle["offlineTail"]>(undefined);
 
   useEffect(() => {
+    // Every dep change here means a DIFFERENT connection, so a deadline
+    // announced by the previous one no longer applies to anything.
+    clearDeadlines();
     const socket = (createSocket ?? ((u: string) => new WebSocket(u)))(url);
     const transport = createWebSocketTransport(socket);
     let persister: BundlePersister | null = null; // assigned below iff store
@@ -253,8 +368,17 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
           setReadOnlyBlocked(true);
           return;
         }
+        // The session is over, so any countdown toward its ending is now a
+        // lie — including the `idle-timeout` / `session-expired` kicks that
+        // ARE the deadline arriving. Cleared before the refusal so no render
+        // can ever show both.
+        clearDeadlines();
         setRefused(reason);
       },
+      onSessionWarning: ({ reason, inMs }) => setDeadlines((d) => ({ ...d, [reason]: Date.now() + inMs })),
+      // Only ever `idle` — the lifetime deadline cannot be cancelled, so
+      // there is deliberately no per-reason branch here to get wrong.
+      onSessionWarningCleared: () => setDeadlines((d) => (d.idle === null ? d : { ...d, idle: null })),
       onRoster: (r) => setRoster(r),
       onSelfHeal: () => setSelfHeals((n) => n + 1),
       // A submit that never left the client. Counted, never swallowed.
@@ -369,6 +493,13 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, docId, clientId, token, createSocket, store, takeover, docKey, shareCode, ownerToken, httpBase]);
 
+  /**
+   * This client's own write status from the roster, or undefined when the
+   * server publishes none. Read from the roster rather than tracked
+   * separately so there is exactly one source for it.
+   */
+  const myWrite = roster.find((r) => r.clientId === clientId)?.write;
+
   return {
     doc,
     version,
@@ -385,6 +516,12 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     setPresence: (pos) => connRef.current?.setPresence(pos),
     allocIds: (n) => connRef.current?.allocIds(n) ?? [],
     uploadMedia: async (bytes) => (await connRef.current?.uploadMedia(bytes)) ?? null,
+    // Read straight off the connection rather than mirrored into state: it is
+    // set once when the welcome lands and never changes for the session, and
+    // in the encrypted connection it is assigned OUTSIDE the serial rehydrate
+    // chain, so it is readable before `ready` — which is what lets the picker
+    // open and the pre-check run while the document is still rehydrating.
+    mediaMaxBlobBytes: connRef.current?.mediaMaxBlobBytes ?? null,
     // Collaborative undo lives on the ENCRYPTED connection: it needs the
     // mirror (a local re-derivation of the canonical log) to compute the
     // inverse. A plaintext room's authority is the server, so undo there
@@ -397,7 +534,26 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     undoLast: () => (connRef.current as Partial<{ undoLast: () => UndoOutcome }> | null)?.undoLast?.() ?? "unavailable",
     presence,
     refused,
+    sessionWarning,
     readOnlyBlocked,
+    // Derived, not stored: one place decides "writes won't land", so the gate
+    // and the banner can never disagree about whether the user may type.
+    //
+    // THE SERVER'S ROSTER SIGNAL WINS WHEN PRESENT, and that is the fix for a
+    // real user-visible bug: `readOnlyBlocked` is refusal-driven, so it can
+    // only ever say "blocked" — nothing tells it a lock was LIFTED. A blocked
+    // participant therefore sat in viewer mode until reload, and needed the
+    // "Try editing again" button to escape. The roster status is POSITIVE: it
+    // says `allowed` too, and it is re-fanned on every transition, so a lift
+    // reaches this client without anyone attempting an edit to discover it.
+    //
+    // `undefined` means an older server that publishes no status. Fall back to
+    // the refusal-driven flag rather than assuming `allowed` — a permissive
+    // default would put the user's first keystrokes straight back in the
+    // appear-then-vanish loop this exists to remove.
+    writesBlocked: myWrite !== undefined ? myWrite !== "allowed" : readOnlyBlocked,
+    writeStatus: myWrite,
+    retryWrites: () => setReadOnlyBlocked(false),
     epochChanged,
     roster,
     setProfile: (p) => connRef.current?.setProfile(p),
@@ -492,7 +648,11 @@ export function CollabEditor(opts: UseCollabOptions & {
     // The session object is a fresh literal each render; observing on
     // version/ready/roster/refusal changes is what consumers need.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.version, session.ready, session.refused, session.roster, session.epochChanged]);
+    // writesBlocked belongs here for the same reason `refused` does: the shell
+    // renders the banner and any retry affordance off it, and without it the
+    // observer only learns the editor went read-only when some UNRELATED
+    // change (the next version bump) happens to re-fire this effect.
+  }, [session.version, session.ready, session.refused, session.roster, session.epochChanged, session.sessionWarning, session.writesBlocked]);
   const [api, setApi] = useState<DocxViewApi | null>(null);
   // Caret survival across a true-conflict reload: the docEpoch key change
   // below remounts the whole DocxView, killing the caret's node references.
@@ -550,6 +710,7 @@ export function CollabEditor(opts: UseCollabOptions & {
       // Image bytes go out of band over the relay (doc 16); its presence is
       // what makes the toolbar's image button real in a room.
       uploadMedia: session.uploadMedia,
+      mediaMaxBlobBytes: session.mediaMaxBlobBytes,
       // Cmd+Z: reverse my last sequenced action over the wire.
       undoLast: () => { session.undoLast(); },
       doc: session.doc,
@@ -561,7 +722,11 @@ export function CollabEditor(opts: UseCollabOptions & {
       // the bound-clientId keyspace, so this join is exact.
       participantNames: Object.fromEntries(session.roster.map((r) => [r.clientId, r.profile.name])),
     },
-    editable: opts.editable ?? true,
+    // VIEWER MODE when the server will not take this client's writes. Not a
+    // banner over a live editor: that shape applied every keystroke locally
+    // and lost it, which is why the read-only banner could be on screen while
+    // the user's text appeared and then vanished.
+    editable: (opts.editable ?? true) && !session.writesBlocked,
     // Re-key only on docEpoch (a true-conflict reload) — NOT on every change.
     // Between reloads the live doc mutates in place and the key stays stable,
     // so DocxView repaints in place instead of re-mounting (no flash/jump).

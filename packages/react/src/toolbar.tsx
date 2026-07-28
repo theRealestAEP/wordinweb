@@ -1791,6 +1791,14 @@ function DrawTab({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/** Byte count as the size a person would say out loud ("5 MB", "512 KB"). */
+function formatBytes(n: number): string {
+  const mb = n / (1024 * 1024);
+  if (mb >= 1) return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`;
+  const kb = n / 1024;
+  return `${Math.max(1, Math.round(kb))} KB`;
+}
+
 function ScreenshotButton({ api }: { api: DocxViewApi | null }) {
   const [status, setStatus] = useState("");
   const capture = async () => {
@@ -3182,6 +3190,57 @@ export function DocxToolbar({
   // the last real range and restore it before applying their choice.
   const savedRange = useRef<Range | null>(null);
   const imageInput = useRef<HTMLInputElement | null>(null);
+  /**
+   * Why the picked image did not land, shown beside the Pictures button.
+   *
+   * Every one of these was a silent `return` in insertImage, and a user hit
+   * the format one: they chose an SVG through a picker that advertised SVG,
+   * and the document did nothing — no skeleton, no error, no log. The picker
+   * no longer offers what a shared document refuses (see `accept` below), so
+   * these are now the paths reachable through the API or through a genuine
+   * failure, and each of them says something.
+   */
+  const [imageStatus, setImageStatus] = useState("");
+  useEffect(() => {
+    if (!imageStatus) return;
+    const t = setTimeout(() => setImageStatus(""), 8000);
+    return () => clearTimeout(t);
+  }, [imageStatus]);
+  const insertPicture = async (file: File) => {
+    setImageStatus("");
+    const result = await api?.insertImage(file);
+    if (result === undefined || result === "inserted") return;
+    setImageStatus(
+      result === "too-large"
+        // The CONFIGURED number, never a constant: this deployment's cap is
+        // whatever the server published (5MB in the public compose file, 50MB
+        // in the dev stack), and a hardcoded figure would be wrong in one of
+        // them. If no limit was published there is no number to name, and the
+        // message says nothing about size rather than inventing one.
+        ? (() => {
+            const max = api?.imageMaxBytes() ?? null;
+            return max === null
+              ? "That image is too large for this document."
+              : `Images must be under ${formatBytes(max)}.`;
+          })()
+        : result === "unsupported-format"
+        ? "Images in a shared document must be PNG, JPEG, GIF, BMP or WebP."
+        : result === "no-relay"
+          ? "This shared document has no image relay, so images can’t be added to it."
+          : result === "upload-failed"
+            // DELIBERATELY DOES NOT NAME A SIZE. The relay's 413 carries the
+            // configured maxBytes, but that number does not reach this layer
+            // today (it would have to be threaded through the media client and
+            // both connection classes), and the cap differs per deployment —
+            // 5MB in the published compose file, 50MB in the dev stack. So the
+            // copy points at the likely cause and the action that fixes it
+            // without asserting a limit it cannot actually know.
+            ? "Upload failed — the image may be too large, or the connection dropped. Try a smaller image."
+            : result === "no-caret"
+              ? "Click in the document before inserting an image."
+              : "That file could not be read as an image.",
+    );
+  };
   // Responsive collapse: measure the toolbar width and pick a tier; the higher
   // the tier the more low-frequency Home groups fold into the ⋮ overflow menu,
   // so the strip stays single-row-clean on phones and tablets (Google Docs
@@ -3677,7 +3736,20 @@ export function DocxToolbar({
         <>
           {on("coverPage") && <CoverPageMenu api={api} />}
           {on("table") && <TableMenu api={api} />}
-          {on("image") && <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />}
+          {on("image") && (
+            <span style={{ position: "relative", display: "inline-flex" }}>
+              <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
+              {imageStatus && (
+                <span
+                  role="alert"
+                  data-dxw-image-status=""
+                  style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 230, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
+                >
+                  {imageStatus}
+                </span>
+              )}
+            </span>
+          )}
           {on("icon") && <Btn label="Icons" title="Insert SVG icon" onClick={() => iconInput.current?.click()} />}
           {on("screenshot") && <ScreenshotButton api={api} />}
           {tier === 0 ? (
@@ -3872,11 +3944,15 @@ export function DocxToolbar({
       <input
         ref={imageInput}
         type="file"
-        accept="image/png,image/jpeg,image/gif,image/svg+xml,image/webp"
+        // ASKED, not asserted: a shared document can't carry every format a
+        // local one can, and this picker used to advertise SVG that the
+        // collab insert then silently refused. The document answers for
+        // itself so the offer and the acceptance cannot drift apart again.
+        accept={api?.imageAccept() ?? "image/png,image/jpeg,image/gif,image/bmp,image/webp,image/svg+xml"}
         style={{ display: "none" }}
         onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f) void api?.insertImage(f);
+          if (f) void insertPicture(f);
           e.target.value = "";
         }}
       />
@@ -3887,7 +3963,7 @@ export function DocxToolbar({
         style={{ display: "none" }}
         onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f) void api?.insertImage(f);
+          if (f) void insertPicture(f);
           e.target.value = "";
         }}
       />

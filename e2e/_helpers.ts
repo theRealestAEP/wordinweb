@@ -23,6 +23,22 @@ export const SERVER = "localhost:1399";
 export const LANDING = `/?server=${SERVER}`;
 export const PAGE = ".dxw-page";
 
+/**
+ * The code every board scenario goes live with.
+ *
+ * A share code is MANDATORY now (owner's decision): a link is a capability,
+ * and the code is the second factor that stops a leaked link from being one.
+ * That makes it part of every scenario's setup rather than a feature one spec
+ * exercises, so it lives here — a spec that doesn't care about codes says
+ * nothing about them and gets this one.
+ *
+ * Deliberately NOT in the URL: putting it there would hand the board a
+ * document that opens from the link alone, which is precisely the property
+ * the code exists to remove, and every join-side assertion would then be
+ * passing for the wrong reason.
+ */
+export const BOARD_CODE = "board-code";
+
 export interface WwHook {
   _session: unknown;
   submitOp(i: unknown): void;
@@ -55,10 +71,22 @@ export async function openLocal(page: Page): Promise<void> {
   await expect(page.getByTestId("local-editor")).toBeVisible();
 }
 
-/** From the LOCAL editor, click "Make collaborative" and wait for the collab
- * session to mount. Returns the share URL (with `?doc=` and `#k=`). */
-export async function goLive(page: Page): Promise<string> {
+/**
+ * From the LOCAL editor, go collaborative and wait for the session to mount.
+ * Returns the share URL (with `?doc=` and `#k=`).
+ *
+ * The flow is: "Collab" opens a dialog (a REQUIRED share code + what a code
+ * does), then "Start Collab" seals and goes live. This helper is the single
+ * choke point every spec goes through, so the dialog lives here rather than in
+ * a dozen specs. Pass `shareCode` for a scenario that needs a specific one;
+ * everything else gets BOARD_CODE, because going live without a code is no
+ * longer a thing the product can do.
+ */
+export async function goLive(page: Page, shareCode: string = BOARD_CODE): Promise<string> {
   await page.getByTestId("make-collaborative").click();
+  await expect(page.getByTestId("collab-modal")).toBeVisible();
+  await page.getByTestId("share-code").fill(shareCode);
+  await page.getByTestId("start-collab").click();
   await expect(page).toHaveURL(/[?&]doc=/);
   await expect(page).toHaveURL(/#k=/);
   await expect(page.getByTestId("download")).toBeVisible(); // collab chrome mounted
@@ -68,14 +96,37 @@ export async function goLive(page: Page): Promise<string> {
 }
 
 /** Create a fresh collaborative doc from a blank local editor. */
-export async function createCollabDoc(page: Page): Promise<string> {
+export async function createCollabDoc(page: Page, shareCode: string = BOARD_CODE): Promise<string> {
   await openLocal(page);
-  return goLive(page);
+  return goLive(page, shareCode);
 }
 
-/** Join an existing collab doc via its share URL (the `?doc=#k=` link). */
-export async function joinCollab(page: Page, url: string): Promise<void> {
+/**
+ * Supply the share code IF this browser is asked for it.
+ *
+ * "If" is load-bearing and cannot be assumed either way: the creator's own
+ * browser (and any tab sharing its localStorage) already holds the code and
+ * joins straight through, while a fresh context is refused `code-required`
+ * and prompted. Both are correct, and which one a given spec produces depends
+ * on whether it opened a new context — so this waits for WHICHEVER arrives,
+ * the document or the prompt, instead of assuming.
+ */
+export async function enterCodeIfPrompted(page: Page, shareCode: string = BOARD_CODE): Promise<void> {
+  const prompt = page.getByTestId("join-share-code");
+  await expect
+    .poll(async () => (await prompt.count()) > 0 || (await page.locator(PAGE).first().count()) > 0,
+      { message: "neither the document nor the share-code prompt appeared", timeout: 15_000 })
+    .toBe(true);
+  if ((await prompt.count()) === 0) return;
+  await prompt.fill(shareCode);
+  await page.getByTestId("join-submit").click();
+}
+
+/** Join an existing collab doc via its share URL (the `?doc=#k=` link), and
+ * the code that link is not enough without. */
+export async function joinCollab(page: Page, url: string, shareCode: string = BOARD_CODE): Promise<void> {
   await page.goto(url);
+  await enterCodeIfPrompted(page, shareCode);
   await expect(page.locator(PAGE)).toBeVisible();
   await waitHook(page);
 }
@@ -283,8 +334,9 @@ export async function reloadClient(page: Page): Promise<void> {
 
 /** `joinCollab` waits on `.dxw-page` strictly, which a paginated (big)
  * document turns into a strict-mode violation. Same join, first page only. */
-export async function joinCollabBig(page: Page, url: string): Promise<void> {
+export async function joinCollabBig(page: Page, url: string, shareCode: string = BOARD_CODE): Promise<void> {
   await page.goto(url);
+  await enterCodeIfPrompted(page, shareCode);
   await expect(page.locator(PAGE).first()).toBeVisible();
   await waitHook(page);
 }

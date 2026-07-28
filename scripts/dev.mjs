@@ -50,7 +50,46 @@ async function main() {
   // question is answerable from the terminal (are both connecting to the SAME
   // docId? any refusal? see observability.ts — no doc content is ever logged).
   const server = run("node", ["packages/server/dist/cli.js"], {
-    env: { ...process.env, ZERO_CUSTODY: "1", PORT: SERVER_PORT, WW_OBS: "1" },
+    env: {
+      ...process.env,
+      ZERO_CUSTODY: "1",
+      PORT: SERVER_PORT,
+      WW_OBS: "1",
+      // PER-IP LIMITS OFF for the local stack (0 disables — see limits.ts).
+      //
+      // Not a workaround: dev and e2e are a trusted single-user context where
+      // every client shares ONE address (127.0.0.1), which is the NAT caveat
+      // in its most extreme form. The production default of 10 seeds/min is
+      // right for the internet and wrong here — the e2e board creates a
+      // document per test and tripped `ip-seed-limit` on 9 of 40 specs, which
+      // is the limit working correctly against a client it was never meant to
+      // describe. Anything that needs the limits EXERCISED tests them directly
+      // against an injected guard (packages/server/test/ip-limits.test.ts)
+      // rather than by driving a browser through them.
+      //
+      // The session TIMEOUTS are deliberately left at their defaults: they are
+      // long enough not to affect a demo session or a board run, and leaving
+      // them on means the dev stack behaves like production.
+      // An INHERITED value wins over these defaults. The e2e board sets them
+      // to a large-but-live number (playwright.config.ts) rather than 0, so
+      // the guard is still CONSTRUCTED, wired through cli.ts, and consulted
+      // on every connect and seed during a board run — a throw or a leak in
+      // that path fails the board. Disabling outright would make the wiring
+      // dead code in the only place it runs end to end. A plain
+      // `npm run demo` inherits nothing and gets 0, which is right for one
+      // developer hammering their own stack.
+      // Local testing means pasting a phone photo or a screenshot without
+      // thinking about it, so the blob cap is 50MB here versus the 5MB the
+      // public compose file sets. The socket-level wire guard DERIVES from
+      // this (+2MB), so there is nothing to keep in sync. The other media
+      // lifecycles stay at their defaults — they are short enough to
+      // exercise re-supply during a demo, which is the behaviour worth
+      // seeing locally.
+      WW_MEDIA_MAX_BLOB_BYTES: process.env.WW_MEDIA_MAX_BLOB_BYTES ?? "52428800",
+      WW_IP_SEED_PER_MIN: process.env.WW_IP_SEED_PER_MIN ?? "0",
+      WW_IP_MAX_DOCS: process.env.WW_IP_MAX_DOCS ?? "0",
+      WW_IP_MAX_CONNS: process.env.WW_IP_MAX_CONNS ?? "0",
+    },
   });
   server.on("exit", (c) => shutdown(c ?? 0));
 

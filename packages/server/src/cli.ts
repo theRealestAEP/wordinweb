@@ -3,6 +3,8 @@ import { attachWebSocketServer, WsServer } from "./ws.js";
 import { InMemoryStorage } from "./storage.js";
 import { blankProvider } from "./blank.js";
 import { createObservability, observabilityEnabled } from "./observability.js";
+import { envLimits, clientIp, mediaWireCap } from "./limits.js";
+import { IpGuard } from "./ip-guard.js";
 
 /**
  * Zero-config dev server (plan Tier 1: `npx wordinweb server`). Uses blank-doc
@@ -91,7 +93,7 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
   const wsMod = (await import(spec).catch(() => {
     throw new Error("startZeroCustodyServer needs the 'ws' package — run: npm i ws");
   })) as {
-    WebSocketServer: new (o: { noServer: true }) => WsServer & {
+    WebSocketServer: new (o: { noServer: true; maxPayload: number }) => WsServer & {
       close(): void;
       handleUpgrade(req: unknown, socket: unknown, head: unknown, cb: (client: unknown) => void): void;
       emit(ev: string, ...args: unknown[]): void;
@@ -128,9 +130,25 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
     obs.error("cli.uncaughtException", err, { exiting: true });
     process.exit(1);
   });
-  const hub = new CollabHub(/*provider*/ null, undefined, undefined, undefined, undefined, obs); // zero-custody: seed-only rooms
-  const wss = new wsMod.WebSocketServer({ noServer: true });
-  attachWebSocketServer(wss, hub, obs);
+  // Lifecycle + abuse limits, resolved from the environment ONCE (limits.ts
+  // documents every knob, its default, and the 0-disables convention). The
+  // guard and the hub share one clock so their deadlines cannot drift.
+  const limits = envLimits();
+  const ipGuard = new IpGuard(limits.ip);
+  const hub = new CollabHub(/*provider*/ null, undefined, undefined, undefined, undefined, obs, limits, ipGuard); // zero-custody: seed-only rooms
+  // INBOUND FRAME CAP — the first wall, and it has to be first: `ws` defaults
+  // maxPayload to 100 MiB, so without this a hostile peer makes the server
+  // buffer and PARSE a hundred-megabyte frame before any hub-level check —
+  // including the 256 KB envelope cap — ever runs. A violating connection is
+  // closed by `ws` with status 1009, which arrives at our ordinary `close`
+  // handler and unwinds like any other disconnect.
+  const wss = new wsMod.WebSocketServer({ noServer: true, maxPayload: limits.surge.wsMaxPayloadBytes });
+  attachWebSocketServer(wss, hub, obs, {
+    guard: ipGuard,
+    trustProxyHops: limits.ip.trustProxyHops,
+    maxBufferedBytes: limits.surge.wsMaxBufferedBytes,
+    maxConns: limits.surge.maxConns,
+  });
 
   const server = http.createServer((req, res) => {
     const url = req.url ?? "";
@@ -170,7 +188,14 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
         res.writeHead(404, { "content-type": "application/json" }).end(`{"error":"not-found"}`);
         return;
       }
-      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(obs.snapshot()));
+      // `ipBuckets` is a CARDINALITY, never an address — and it is the one
+      // signal that diagnoses a proxy misconfiguration: a deployment behind
+      // Caddy with WW_TRUST_PROXY unset attributes every socket to the proxy,
+      // so this reads 1 while ip-conn-limit refusals climb. That pair means
+      // "trust-proxy is wrong" and nothing else does.
+      res.writeHead(200, { "content-type": "application/json" }).end(
+        JSON.stringify({ ...obs.snapshot(), ipBuckets: ipGuard.distinctIps() }),
+      );
       return;
     }
     if (req.method === "GET" && url === "/blank") {
@@ -193,14 +218,33 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
       if (req.method === "PUT") {
         const chunks: Buffer[] = [];
         let size = 0;
+        // SOCKET-LEVEL GUARD, DERIVED from the configured blob cap rather than
+        // a constant beside it. It must stay strictly ABOVE that cap: if the
+        // two ever cross, a legal upload is destroyed mid-flight before the
+        // hub can answer 413, and the client sees a dropped connection instead
+        // of "that image is too big" — a failure invisible from both ends and
+        // one that only appears when somebody raises the cap. Deriving it
+        // makes the ordering structural instead of a promise two constants
+        // make to each other.
+        const wireCap = mediaWireCap(limits.media);
         req.on("data", (c: Buffer) => {
           size += c.length;
-          if (size > 12 * 1024 * 1024) req.destroy();
+          if (size > wireCap) req.destroy();
           else chunks.push(c);
         });
         req.on("end", () => {
           void hub.mediaUpload(decodeURIComponent(mDoc), mSha, new Uint8Array(Buffer.concat(chunks))).then((status) => {
-            res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ status }));
+            // A 413 carries the LIMIT, so the UI can say "images must be under
+            // 5 MB" instead of "upload failed". The number is the only thing
+            // that makes the message actionable, and the client has no other
+            // way to learn it.
+            const body =
+              status === 413
+                ? { status, error: "too-large", maxBytes: limits.media.maxBlobBytes }
+                : status === 507
+                  ? { status, error: "room-media-full", maxBytes: limits.media.maxRoomBytes }
+                  : { status };
+            res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
           });
         });
         return;
@@ -229,22 +273,36 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
         res.writeHead(400, { "content-type": "application/json" }).end(`{"error":"bad-json"}`);
         return;
       }
-      const out = handleSeedRequest(hub, {
-        method: put ? "PUT" : "POST",
-        docId: put ? decodeURIComponent(url.slice("/docs/".length)) : undefined,
-        body,
-      });
+      const out = handleSeedRequest(
+        hub,
+        {
+          method: put ? "PUT" : "POST",
+          docId: put ? decodeURIComponent(url.slice("/docs/".length)) : undefined,
+          body,
+        },
+        // The seed rate limit and the live-doc cap key off this. Extraction
+        // reads X-Forwarded-For only when WW_TRUST_PROXY says a proxy we
+        // control put it there — see clientIp, which documents why trusting
+        // the header by default would make every per-IP limit here bypassable
+        // with one line of curl.
+        { creatorIp: clientIp(req, limits.ip.trustProxyHops) },
+      );
       res.writeHead(out.status, { "content-type": "application/json" }).end(JSON.stringify(out.body));
     });
   });
   server.on("upgrade", (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, (client) => wss.emit("connection", client, req));
   });
-  // Eviction + token sweeps: coarse cadence is fine — grace is 60s.
+  // Eviction + token sweeps: coarse cadence is fine — the shortest deadline
+  // is the 60s empty-room grace, and warnings carry their MEASURED remainder
+  // so a countdown stays honest even though it may be armed up to one
+  // interval early (see sweepLifecycle).
   const sweeper = setInterval(() => {
     hub.sweepRooms();
+    hub.sweepLifecycle();
     hub.sweepExpired();
     hub.sweepMedia();
+    ipGuard.sweep();
   }, 10_000);
   server.listen(port);
   // No startup chatter on stdout by design: `scripts/dev.mjs` prints the demo's

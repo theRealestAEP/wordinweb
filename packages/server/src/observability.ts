@@ -122,8 +122,59 @@ export interface Observability {
   broadcast(): void;
   /** A room was created (seed, encrypted seed, or provider auto-create). */
   roomCreated(): void;
-  /** Rooms were evicted by the sweep (defaults to one). */
-  roomEvicted(count?: number): void;
+  /**
+   * Rooms were evicted (defaults to one), tallied by cause. "Rooms are
+   * evicting" is a useless signal on its own — every room evicts eventually;
+   * "rooms are evicting by `session-expired`" says a keepalive script is
+   * hitting the absolute-lifetime wall, and `idle-timeout` climbing says
+   * people are leaving tabs open. `reason` is the fixed EvictionReason
+   * vocabulary. */
+  roomEvicted(count?: number, reason?: string): void;
+  /**
+   * A session-ending deadline was ANNOUNCED to a room (idle or lifetime).
+   * Counted separately from the eviction it precedes, because the ratio is
+   * the interesting number: warnings that mostly do NOT become evictions mean
+   * the grace period is doing its job and people are coming back.
+   */
+  sessionWarned(reason: string): void;
+  /**
+   * A per-IP limit refused something, tallied by which limit
+   * (`ip-seed-limit` | `ip-doc-limit` | `ip-conn-limit`).
+   *
+   * THE ADDRESS IS NEVER PASSED HERE, and this signature is the enforcement:
+   * an IP is personal data, the zero-custody rule is shapes and counts, and a
+   * method that cannot accept an address cannot leak one. The rate and the
+   * reason are what an operator needs; identifying WHO is a job for the
+   * proxy's own logs, where that decision is made deliberately.
+   *
+   * Also note these are counted for BOTH transports — the WebSocket path,
+   * which additionally sends a refusal frame and so also lands in
+   * {@link refused}, and the HTTP seed path, which has no frame to tally.
+   * That makes this map the complete picture of per-IP enforcement.
+   */
+  ipLimited(reason: string): void;
+  /**
+   * A GLOBAL ceiling refused something (`server-full` for the room cap at
+   * seed, `server-busy` for the socket cap at accept).
+   *
+   * Deliberately NOT folded into {@link ipLimited}: those mean "this caller is
+   * doing too much" and these mean "the server is full", which is not the
+   * caller's fault and needs the opposite operational response — the first
+   * says look at an address, the second says add capacity. Conflating them
+   * would hide a saturated host inside an abuse counter.
+   */
+  capacityRefused(reason: string): void;
+  /**
+   * An intent was REJECTED by canonical validation (plaintext rooms; a blind
+   * server cannot see this in encrypted ones). Tallied by the validator's
+   * fixed reason vocabulary — never content.
+   *
+   * Worth its own counter because of how it fails: a rejection is sequenced
+   * and agreed by every replica, so it produces no divergence, no error and
+   * no refusal frame. The edit is simply gone. A wrong bound is invisible
+   * without this number.
+   */
+  intentRejected(reason: string): void;
   /** A media blob was accepted by the relay (HTTP PUT, 201). */
   mediaUp(): void;
   /** A media blob was served by the relay (HTTP GET hit). */
@@ -180,6 +231,19 @@ export interface ObsSnapshot {
   refusedByReason: Record<string, number>;
   /** Kicks tallied by protocol reason. */
   kicksByReason: Record<string, number>;
+  /** Room evictions tallied by cause (`empty`, `idle-timeout`,
+   * `session-expired`). */
+  evictionsByReason: Record<string, number>;
+  /** Session-ending warnings announced, by deadline (`idle`, `lifetime`). */
+  warningsByReason: Record<string, number>;
+  /** Per-IP limit refusals, by which limit fired. Never contains an
+   * address — only the fixed limit vocabulary. */
+  ipLimitsByReason: Record<string, number>;
+  /** Global-ceiling refusals (`server-full`, `server-busy`). A non-zero
+   * count here means ADD CAPACITY, not "find the abuser". */
+  capacityByReason: Record<string, number>;
+  /** Canonical validation rejections by reason — edits that died silently. */
+  rejectedByReason: Record<string, number>;
   gauges: {
     /** Sockets currently open (opened − closed). */
     liveConnections: number;
@@ -205,6 +269,10 @@ export const NO_OP_OBSERVABILITY: Observability = {
   broadcast() {},
   roomCreated() {},
   roomEvicted() {},
+  sessionWarned() {},
+  ipLimited() {},
+  capacityRefused() {},
+  intentRejected() {},
   mediaUp() {},
   mediaDown() {},
   rosterObserved() {},
@@ -231,6 +299,11 @@ function emptySnapshot(): ObsSnapshot {
     },
     refusedByReason: {},
     kicksByReason: {},
+    evictionsByReason: {},
+    warningsByReason: {},
+    ipLimitsByReason: {},
+    capacityByReason: {},
+    rejectedByReason: {},
     gauges: { liveConnections: 0, rooms: 0, rosterMax: 0 },
   };
 }
@@ -283,6 +356,11 @@ export class MetricsObservability implements Observability {
   };
   private refusedReasons = new Map<string, number>();
   private kickReasons = new Map<string, number>();
+  private evictionReasons = new Map<string, number>();
+  private warningReasons = new Map<string, number>();
+  private ipLimitReasons = new Map<string, number>();
+  private capacityReasons = new Map<string, number>();
+  private rejectedReasons = new Map<string, number>();
   private g = { liveConnections: 0, rooms: 0, rosterMax: 0 };
 
   constructor(opts: ObservabilityOptions = {}) {
@@ -366,11 +444,30 @@ export class MetricsObservability implements Observability {
     this.g.rooms++;
     this.emit("info", "room-open", { rooms: this.g.rooms });
   }
-  roomEvicted(count = 1): void {
+  roomEvicted(count = 1, reason = "empty"): void {
     if (count <= 0) return;
     this.c.roomsEvicted += count;
+    this.evictionReasons.set(reason, (this.evictionReasons.get(reason) ?? 0) + count);
     this.g.rooms = Math.max(0, this.g.rooms - count);
-    this.emit("info", "room-evict", { count, rooms: this.g.rooms });
+    this.emit("info", "room-evict", { count, reason, rooms: this.g.rooms });
+  }
+  sessionWarned(reason: string): void {
+    this.warningReasons.set(reason, (this.warningReasons.get(reason) ?? 0) + 1);
+    // `warn` level: a session is about to end. Not an error — it is policy
+    // working — but an operator scanning warnings should see it.
+    this.emit("warn", "session-warning", { reason });
+  }
+  ipLimited(reason: string): void {
+    this.ipLimitReasons.set(reason, (this.ipLimitReasons.get(reason) ?? 0) + 1);
+    this.emit("warn", "ip-limit", { reason });
+  }
+  capacityRefused(reason: string): void {
+    this.capacityReasons.set(reason, (this.capacityReasons.get(reason) ?? 0) + 1);
+    this.emit("warn", "capacity", { reason });
+  }
+  intentRejected(reason: string): void {
+    this.rejectedReasons.set(reason, (this.rejectedReasons.get(reason) ?? 0) + 1);
+    this.emit("warn", "intent-rejected", { reason });
   }
   mediaUp(): void {
     this.c.mediaUp++;
@@ -391,6 +488,11 @@ export class MetricsObservability implements Observability {
       counters: { ...this.c },
       refusedByReason: Object.fromEntries(this.refusedReasons),
       kicksByReason: Object.fromEntries(this.kickReasons),
+      evictionsByReason: Object.fromEntries(this.evictionReasons),
+      warningsByReason: Object.fromEntries(this.warningReasons),
+      ipLimitsByReason: Object.fromEntries(this.ipLimitReasons),
+      capacityByReason: Object.fromEntries(this.capacityReasons),
+      rejectedByReason: Object.fromEntries(this.rejectedReasons),
       gauges: { ...this.g },
     };
   }

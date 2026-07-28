@@ -2815,6 +2815,30 @@ export class DocxEditor {
     if (drw) this.selectImage(drw.el, src, undefined, "drawing", smartArtNodeIndex);
   }
 
+  /** Selection handle edge length, in px. The handle style below is built from
+   * this, so the two cannot drift. */
+  private static readonly HANDLE_PX = 9;
+  /**
+   * The smallest size a RESIZE DRAG may leave an object.
+   *
+   * THE FLOOR EXISTS SO THE OBJECT REMAINS GRABBABLE. Selection handles are
+   * HANDLE_PX square; once an object is smaller than about three handle-widths
+   * per axis there is nothing left to aim at, so it can no longer be selected
+   * or resized back — the shrink is a ONE-WAY TRIP. `resizeDrawing` has no
+   * inverse either (invert.ts covers only insertText/deleteText/
+   * splitParagraph/insertImage), so undo cannot rescue it and this floor is
+   * the only protection that exists.
+   *
+   * USER-REPORTED as "the image disappears when I move it": the handles sit on
+   * the image's edges, which is exactly where you aim to drag a picture, so a
+   * mis-grab collapsed a 624x351 photo to 624x8 in one gesture — measured, and
+   * indistinguishable from the image being gone.
+   *
+   * Derived from the handle size on purpose: making the handles bigger without
+   * moving the floor would silently re-open the hole.
+   */
+  private static readonly MIN_DRAG_SIZE_PX = DocxEditor.HANDLE_PX * 3;
+
   /** Word-style handle set: corners resize aspect-locked, edges stretch. */
   private static readonly HANDLE_DIRS: [string, number, number][] = [
     ["nw", 0, 0],
@@ -2887,7 +2911,7 @@ export class DocxEditor {
       const h = document.createElement("div");
       const corner = dir.length === 2;
       h.style.cssText =
-        `position:absolute;width:9px;height:9px;background:#fff;border:1.5px solid #1a73e8;` +
+        `position:absolute;width:${DocxEditor.HANDLE_PX}px;height:${DocxEditor.HANDLE_PX}px;background:#fff;border:1.5px solid #1a73e8;` +
         `box-sizing:border-box;border-radius:${corner ? "50%" : "2px"};pointer-events:auto;` +
         `left:calc(${fx * 100}% - 5px);top:calc(${fy * 100}% - 5px);cursor:${DocxEditor.handleCursor(dir)};` +
         `box-shadow:0 1px 2px rgba(0,0,0,.25);`;
@@ -3333,19 +3357,29 @@ export class DocxEditor {
         tgt.style.left = `${dir.includes("w") ? left0 + (w0 - w) : left0}px`;
         tgt.style.top = `${dir.includes("n") ? top0 + (h0 - h) : top0}px`;
       };
+      // The floor this drag may not cross (see MIN_DRAG_SIZE_PX). Capped at the
+      // object's CURRENT size so an already-tiny picture is never forcibly
+      // GROWN by grabbing its handle: the floor bounds what a drag may
+      // produce, not what the document is allowed to contain.
+      const floorW = Math.min(DocxEditor.MIN_DRAG_SIZE_PX, w0);
+      const floorH = Math.min(DocxEditor.MIN_DRAG_SIZE_PX, h0);
       const onMove = (me: MouseEvent) => {
         const dx = (me.clientX - startX) / zoom;
         const dy = (me.clientY - startY) / zoom;
         w = dir.includes("e") ? w0 + dx : dir.includes("w") ? w0 - dx : w0;
         h = dir.includes("s") ? h0 + dy : dir.includes("n") ? h0 - dy : h0;
         if (dir.length === 2) {
-          // Corner: aspect-locked, driven by the dominant cursor axis.
-          const scale = Math.max(0.05, Math.abs(dx) > Math.abs(dy) ? w / w0 : h / h0);
+          // Corner: aspect-locked, driven by the dominant cursor axis. The
+          // floor applies to the SCALE rather than to each axis, or clamping
+          // one side would silently break the aspect lock.
+          const minScale = Math.max(floorW / w0, floorH / h0);
+          const scale = Math.max(minScale, Math.abs(dx) > Math.abs(dy) ? w / w0 : h / h0);
           w = w0 * scale;
           h = h0 * scale;
+        } else {
+          w = Math.max(floorW, w);
+          h = line ? h0 : Math.max(floorH, h);
         }
-        w = Math.max(8, w);
-        h = line ? h0 : Math.max(8, h);
         apply(el);
         if (this.imageOverlay) apply(this.imageOverlay);
       };
@@ -3660,9 +3694,16 @@ export class DocxEditor {
       imageBinding = this.host.getHandle()?.images.find(
         (binding) => binding.el === selected.el && binding.item.src === selected.src,
       );
-    } else if (target.tagName === "IMG") {
+    } else if (target.tagName === "IMG" || target.closest("[data-dxw-media-state]")) {
+      // A PENDING image renders as a skeleton DIV, not an <img> (doc 16 §5.2),
+      // and it is already in the same `images` binding list — this branch was
+      // the only thing keeping it unselectable, and therefore undeletable. A
+      // participant whose bytes never arrive could not remove the box at all.
+      // Matching on the media-state marker covers BOTH skeleton states:
+      // "fetching" (still coming) and "unavailable" (nobody online has it).
       const handle = this.host.getHandle();
-      imageBinding = handle?.images.find((b) => b.el === target || b.el.contains(target));
+      const el = target.tagName === "IMG" ? target : target.closest<HTMLElement>("[data-dxw-media-state]")!;
+      imageBinding = handle?.images.find((b) => b.el === el || b.el.contains(el));
     } else if (
       !target.closest("button") &&
       !target.dataset.dxwImgHandle &&
