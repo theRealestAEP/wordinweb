@@ -63,6 +63,18 @@ export interface SeedHttpOptions {
    * ≥128-bit via makeDocId (doc 11 — unguessable IS the access control). */
   mintDocId?: () => string;
   /**
+   * Refuse plaintext seeds, so the only rooms this server can hold are ones
+   * it cannot read. Plaintext rooms stay fully supported by the library — a
+   * trusted-network deployment may not want key management — but a server
+   * that calls itself zero-custody must not hold a readable document, and
+   * before this flag the UI was the only thing keeping it from doing so.
+   * Nothing stops a crafted request from posting plain bytes to the same
+   * route the demo uses.
+   *
+   * `startZeroCustodyServer` sets this. `startDevServer` does not.
+   */
+  encryptedOnly?: boolean;
+  /**
    * Normalized creator address for the per-IP seed limits (see ip-guard.ts).
    * Supplied by the HTTP layer, which is the only place an address exists.
    * Omitted ⇒ no per-IP accounting, which is what every transport-free test
@@ -115,6 +127,13 @@ export function handleSeedRequest(
     const result = hub.seedEncrypted(docId, genesisId, checkpoint, req.body.codeVerifier, opts.creatorIp);
     if (!result.ok) return seedRefusalResponse(result);
     return { status: req.method === "POST" ? 201 : 200, body: { docId, genesisId: result.genesisId, ownerToken: result.ownerToken } };
+  }
+
+  // Everything below seeds a PLAINTEXT room, which this server may refuse.
+  // Checked before the body is decoded so a refused request never costs a
+  // base64 decode or a docx parse.
+  if (opts.encryptedOnly) {
+    return { status: 400, body: { error: "encrypted-only" } };
   }
 
   let docx: Uint8Array;

@@ -321,7 +321,15 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
         // control put it there — see clientIp, which documents why trusting
         // the header by default would make every per-IP limit here bypassable
         // with one line of curl.
-        { creatorIp: clientIp(req, limits.ip.trustProxyHops) },
+        {
+          creatorIp: clientIp(req, limits.ip.trustProxyHops),
+          // A plaintext room means this server holds and parses the actual
+          // document — the one thing zero custody says it never does. The
+          // demo UI only ever seeds encrypted, but the UI is not a gate:
+          // this is the same route, and plain bytes posted to it would have
+          // been accepted. Off unless a self-hoster explicitly asks for it.
+          encryptedOnly: process.env.WW_ALLOW_PLAINTEXT_SEED !== "1",
+        },
       );
       res.writeHead(out.status, { "content-type": "application/json" }).end(JSON.stringify(out.body));
     });

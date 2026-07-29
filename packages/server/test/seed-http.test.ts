@@ -179,4 +179,42 @@ describe("owner token in seed responses (doc 14 §2.5)", () => {
     expect(race.status).toBe(409);
     expect(race.body.ownerToken).toBeUndefined();
   });
+  // A plaintext room means the server holds and parses the real document.
+  // The demo UI only ever seeds encrypted, but the UI is not a gate: this is
+  // the same route, and plain bytes posted to it were accepted before this.
+  it("encryptedOnly refuses a plaintext seed and creates no room, but still takes an encrypted one", () => {
+    const hub = new CollabHub(null);
+
+    const plain = handleSeedRequest(
+      hub,
+      { method: "POST", body: { docx: b64(docxBytes("readable")) } },
+      { encryptedOnly: true },
+    );
+    expect(plain.status).toBe(400);
+    expect((plain.body as { error?: string }).error).toBe("encrypted-only");
+    // The refusal must be real, not merely a status code: no room may exist.
+    expect(hub.roomsSnapshot()).toHaveLength(0);
+
+    // `blank: true` takes a different branch to `docx` and must also refuse —
+    // it seeds a plaintext room from server-side template bytes.
+    const blank = handleSeedRequest(hub, { method: "POST", body: { blank: true } }, { encryptedOnly: true });
+    expect(blank.status).toBe(400);
+    expect(hub.roomsSnapshot()).toHaveLength(0);
+
+    // The mode the demo actually uses is unaffected.
+    const enc = handleSeedRequest(
+      hub,
+      { method: "POST", body: { encrypted: { genesisId: "g1", checkpoint: { seq: 0, iv: "aXY=", ciphertext: "Y3Q=" } } } },
+      { encryptedOnly: true },
+    );
+    expect(enc.status).toBe(201);
+    expect(hub.roomsSnapshot()).toHaveLength(1);
+  });
+
+  it("without the flag a plaintext seed still works (library default, unchanged)", () => {
+    const hub = new CollabHub(null);
+    const res = handleSeedRequest(hub, { method: "POST", body: { docx: b64(docxBytes("hello")) } });
+    expect(res.status).toBe(201);
+    expect(hub.roomsSnapshot()).toHaveLength(1);
+  });
 });
