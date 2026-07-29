@@ -159,7 +159,7 @@ export function LocalEditor({
           </span>
         </span>
         <nav className="app-links" aria-label="Project links">
-          <a className="other" href="https://word-in-web.com" target="_blank" rel="noreferrer">Viewer</a>
+          <a className="other" href="https://word-in-web.com" target="_blank" rel="noreferrer">WordInWeb</a>
           <a href="https://github.com/theRealestAEP/wordinweb" target="_blank" rel="noreferrer">GitHub</a>
           <a href="https://www.aepick.me/blog" target="_blank" rel="noreferrer">Blog</a>
           <a href="https://word-in-web.com/report/" target="_blank" rel="noreferrer">Parity report</a>
@@ -180,6 +180,7 @@ export function LocalEditor({
           onPrint={() => api?.print()}
           disabled={!api}
         />
+        <span className="bar-sep" aria-hidden="true" />
         {/* THE primary action on this screen, and the only one that changes
             what the app is — so it is sized like it and placed ahead of the
             spacer rather than tucked at the far right with the utilities.

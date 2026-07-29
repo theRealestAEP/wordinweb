@@ -12,10 +12,8 @@ const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingm
  * open, and how you leave it.
  *
  * An item whose handler is absent is not rendered. The ONE exception is Open,
- * which the collaborative screen has to refuse rather than hide: replacing the
- * document wholesale emits no intent describing the replacement, so the local
- * copy would silently fork from every peer. A missing item teaches nothing
- * about that; a disabled one carrying the reason does.
+ * which the collaborative screen shows greyed out rather than hides, so the
+ * menu holds still between the two screens.
  */
 export function FileMenu({
   onNew,
@@ -23,7 +21,7 @@ export function FileMenu({
   onDownload,
   onPrint,
   disabled,
-  openBlockedReason,
+  openDisabled,
 }: {
   onNew?: () => void;
   /** Receives the picked file's bytes and its name. */
@@ -31,8 +29,8 @@ export function FileMenu({
   onDownload?: () => void;
   onPrint?: () => void;
   disabled?: boolean;
-  /** When set, Open renders DISABLED with this string as the reason. */
-  openBlockedReason?: string;
+  /** Render Open greyed out. Wins over `onOpen` if both are passed. */
+  openDisabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -74,11 +72,11 @@ export function FileMenu({
     onOpen?.(new Uint8Array(buf), file.name);
   };
 
-  // The REASON is the gate, not the missing handler: a screen that passes both
-  // gets the refusal, never a live Open. The two are contradictory props and
-  // the safe reading of the contradiction is the one that cannot fork a
-  // document.
-  const blocked = !!openBlockedReason;
+  // `openDisabled` is the gate, not the missing handler: a screen that passes
+  // both gets the disabled item, never a live Open. The two are contradictory
+  // props and the safe reading of the contradiction is the one that cannot
+  // fork a document.
+  const blocked = !!openDisabled;
   const showOpen = blocked || !!onOpen;
 
   return (
@@ -91,7 +89,7 @@ export function FileMenu({
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
       >
-        File<span aria-hidden="true" className="filemenu-caret">▾</span>
+        File<span aria-hidden="true" className="filemenu-caret">⌄</span>
       </button>
       {onOpen && !blocked && (
         <input
@@ -115,12 +113,10 @@ export function FileMenu({
                 role="menuitem"
                 data-testid="file-open"
                 disabled={blocked}
-                title={openBlockedReason}
                 onClick={blocked ? undefined : item(() => fileRef.current?.click())}
               >
                 Open .docx…
               </button>
-              {blocked && <p className="filemenu-note">{openBlockedReason}</p>}
             </>
           )}
           {onDownload && (

@@ -110,21 +110,17 @@ describe("FileMenu", () => {
     expect(after.value, "the picker must be cleared after each pick").toBe("");
   });
 
-  it("openBlockedReason shows Open disabled, with the reason, and refuses to open a picker", async () => {
+  it("openDisabled greys Open out and refuses to open a picker", async () => {
     const onOpen = vi.fn();
-    const reason = "Opening a file replaces the whole document.";
     // BOTH props on purpose: a screen that contradicts itself must get the
-    // refusal, never a live Open.
-    const host = render(createElement(FileMenu, { onOpen, openBlockedReason: reason }));
+    // disabled item, never a live Open.
+    const host = render(createElement(FileMenu, { onOpen, openDisabled: true }));
 
     click(byId(host, "file-menu"));
     const open = byId(host, "file-open") as HTMLButtonElement;
-    // Present, not hidden — a missing item teaches nothing.
+    // Present, not hidden — the menu holds still between the two screens.
     expect(open).toBeTruthy();
     expect(open.disabled).toBe(true);
-    expect(open.title).toBe(reason);
-    // And the reason is VISIBLE, not only in a tooltip.
-    expect(host.querySelector(".filemenu-note")?.textContent).toBe(reason);
     // No picker is rendered at all while Open is blocked.
     expect(host.querySelector('input[type="file"]')).toBeNull();
 
@@ -212,10 +208,8 @@ describe("the collaborative screen", () => {
 
       click(trigger());
       const item = byId(host, "file-open") as HTMLButtonElement;
-      expect(item, "Open must be OFFERED and refused, not hidden").toBeTruthy();
+      expect(item, "Open must be OFFERED and greyed out, not hidden").toBeTruthy();
       expect(item.disabled, "Open must never be live in a session").toBe(true);
-      expect(item.title).toMatch(/disconnect first/i);
-      expect(host.querySelector(".filemenu-note")?.textContent).toMatch(/disconnect first/i);
       // No .docx picker on this screen — nothing to click through to. (Scoped
       // to the menu: the ribbon has its own picker for images, which DO ride
       // the wire as intents and are therefore fine.)

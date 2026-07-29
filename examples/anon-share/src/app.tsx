@@ -391,23 +391,18 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           header whose buttons are styled — the inconsistency reads as broken
           rather than plain. */}
       <div data-testid="toolbar" className="sessionbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "7px 14px", flexWrap: "wrap" }}>
-        {/* OPEN IS REFUSED HERE, and shown refused rather than hidden. Loading
-            a file replaces the whole document locally without emitting an
-            intent that describes the replacement, so this browser would fork
-            from every peer while both sides still believed they were in the
-            same room — the same failure as the three insert APIs that mutated
-            locally under collab without emitting (fixed in 1087298). The menu
-            says so where the person is standing when they want it.
+        {/* Open is disabled in a session. Loading a file replaces the whole
+            document locally without emitting an intent that describes the
+            replacement, so this browser would fork from every peer while both
+            sides still believed they were in the same room — the same failure
+            as the three insert APIs that mutated locally under collab without
+            emitting (fixed in 1087298).
 
             No Print: this screen holds a `CollabSession`, whose `doc` is a
             DocxDocument (save/docRoot) and not the view api that owns
             `print()`. An item that cannot work is worse than no item. */}
-        <FileMenu
-          onNew={onNewDocument}
-          onDownload={download}
-          disabled={!session?.ready}
-          openBlockedReason="Opening a file replaces the whole document, which the people you share it with would never see. Disconnect first to open a file."
-        />
+        <FileMenu onNew={onNewDocument} onDownload={download} disabled={!session?.ready} openDisabled />
+        <span className="bar-sep" aria-hidden="true" />
         <span style={{ flex: 1 }} />
         {session?.arrival ? (
           <span style={{ fontSize: 12, background: "#d1ecf1", padding: "2px 8px", borderRadius: 6 }}>

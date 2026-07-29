@@ -193,16 +193,25 @@
       .modal button.ghost { background: #fff; color: #202124; }
       .modal button[disabled] { opacity: .6; cursor: default; }
 
-      /* FILE MENU. The trigger takes the ordinary `.sessionbar button` look —
-         it is one of the row's controls, not a special one — so only the panel
-         is styled here.
+      /* FILE MENU. The trigger deliberately matches the main WordInWeb site's
+         `.file-menu-button` rather than this row's generic button — 32px tall,
+         70px wide, 7px radius, same border and text colour. The two apps share
+         a header and a wordmark, so a File menu that changes size between them
+         reads as two different products.
 
          Z-INDEX 150 sits in the gap the existing ladder leaves: above the
          ribbon and its dropdowns (--dxw-toolbar-z-index: 100, set on
          .sessionbar) so the panel is never painted behind the toolbar, and
          below the modal scrim (200) so a dialog still covers everything. */
-      .filemenu { position: relative; display: inline-flex; }
-      .filemenu-caret { margin-left: 6px; font-size: 10px; color: #5f6368; }
+      .filemenu { position: relative; display: inline-flex; flex: 0 0 auto; }
+      .sessionbar .filemenu > button.filemenu-trigger {
+        display: inline-flex; align-items: center; justify-content: center;
+        height: 32px; min-width: 70px; gap: 8px; padding: 0 11px;
+        border: 1px solid #bcc7d5; border-radius: 7px; color: #29405e; background: #fff;
+        box-shadow: 0 1px 1px rgba(20,36,55,.04); }
+      .sessionbar .filemenu > button.filemenu-trigger:hover:not([disabled]) {
+        border-color: #8fa1b6; background: #f4f7fb; }
+      .filemenu-caret { font-size: 11px; line-height: 1; }
       .filemenu-panel { position: absolute; top: calc(100% + 5px); left: 0; z-index: 150;
         min-width: 210px; padding: 4px; background: #fff; border: 1px solid #dadce0;
         border-radius: 6px; box-shadow: 0 4px 16px rgba(24,39,59,.18); }
@@ -214,9 +223,6 @@
         border-radius: 4px; background: transparent; color: #202124; cursor: pointer; }
       .filemenu .filemenu-panel button:hover:not([disabled]) { background: #f1f3f4; border-color: transparent; }
       .filemenu .filemenu-panel button[disabled] { opacity: .5; cursor: default; }
-      /* The reason a blocked item is blocked, stated where the item is. */
-      .filemenu-note { margin: 0; padding: 0 10px 6px; max-width: 250px;
-        font-size: 11.5px; line-height: 1.45; color: #5f6368; }
 
       /* Countdown toward an announced session ending. DELIBERATELY NOT A
          MODAL: the session stays fully usable through the grace period, and
