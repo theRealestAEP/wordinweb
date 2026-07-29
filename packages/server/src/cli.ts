@@ -193,8 +193,14 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
       // Caddy with WW_TRUST_PROXY unset attributes every socket to the proxy,
       // so this reads 1 while ip-conn-limit refusals climb. That pair means
       // "trust-proxy is wrong" and nothing else does.
+      // `rooms` ATTRIBUTES the aggregates: which room is consuming what, and
+      // how close each is to the limit that will end it. Same zero-custody
+      // rule as everything else here — each row is keyed by an opaque,
+      // freshly-random label (Room.obsLabel), never a docId, because a docId
+      // is the capability that opens the document and a metrics row carrying
+      // one would make this endpoint a way into other people's rooms.
       res.writeHead(200, { "content-type": "application/json" }).end(
-        JSON.stringify({ ...obs.snapshot(), ipBuckets: ipGuard.distinctIps() }),
+        JSON.stringify({ ...obs.snapshot(), ipBuckets: ipGuard.distinctIps(), rooms: hub.roomsSnapshot() }),
       );
       return;
     }
