@@ -101,7 +101,7 @@ async function joinAll(browser: import("@playwright/test").Browser): Promise<{
   await a.getByTestId("share-code").fill(BOARD_CODE); // required — see _helpers
   await a.getByTestId("start-collab").click();
   await expect(a).toHaveURL(/[?&]doc=/);
-  await expect(a.getByTestId("download")).toBeVisible(); // collab chrome mounted
+  await expect(a.getByTestId("toolbar")).toBeVisible(); // collab chrome mounted
   await expect(a.locator(".dxw-page")).toBeVisible();
   const url = a.url();
   await Promise.all([b.goto(url), c.goto(url)]);

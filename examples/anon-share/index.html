@@ -193,6 +193,31 @@
       .modal button.ghost { background: #fff; color: #202124; }
       .modal button[disabled] { opacity: .6; cursor: default; }
 
+      /* FILE MENU. The trigger takes the ordinary `.sessionbar button` look —
+         it is one of the row's controls, not a special one — so only the panel
+         is styled here.
+
+         Z-INDEX 150 sits in the gap the existing ladder leaves: above the
+         ribbon and its dropdowns (--dxw-toolbar-z-index: 100, set on
+         .sessionbar) so the panel is never painted behind the toolbar, and
+         below the modal scrim (200) so a dialog still covers everything. */
+      .filemenu { position: relative; display: inline-flex; }
+      .filemenu-caret { margin-left: 6px; font-size: 10px; color: #5f6368; }
+      .filemenu-panel { position: absolute; top: calc(100% + 5px); left: 0; z-index: 150;
+        min-width: 210px; padding: 4px; background: #fff; border: 1px solid #dadce0;
+        border-radius: 6px; box-shadow: 0 4px 16px rgba(24,39,59,.18); }
+      /* Two class levels so these beat the `.sessionbar button` rules the panel
+         inherits by sitting inside the session row (full-width rows, no border,
+         left-aligned — a menu item is not a bar button). */
+      .filemenu .filemenu-panel button { display: block; width: 100%; text-align: left;
+        font: 13px system-ui; padding: 7px 10px; border: 1px solid transparent;
+        border-radius: 4px; background: transparent; color: #202124; cursor: pointer; }
+      .filemenu .filemenu-panel button:hover:not([disabled]) { background: #f1f3f4; border-color: transparent; }
+      .filemenu .filemenu-panel button[disabled] { opacity: .5; cursor: default; }
+      /* The reason a blocked item is blocked, stated where the item is. */
+      .filemenu-note { margin: 0; padding: 0 10px 6px; max-width: 250px;
+        font-size: 11.5px; line-height: 1.45; color: #5f6368; }
+
       /* Countdown toward an announced session ending. DELIBERATELY NOT A
          MODAL: the session stays fully usable through the grace period, and
          for the idle deadline typing is what cancels it — a dialog that stole

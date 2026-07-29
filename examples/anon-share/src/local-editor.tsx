@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { DocxView, DocxToolbar, type DocxViewApi } from "wordinweb";
+import { FileMenu } from "./file-menu";
 
 /**
  * The demo's LANDING is the normal single-user editor: a local, editable
@@ -38,6 +39,8 @@ export function LocalEditor({
   const [going, setGoing] = useState(false);
   const [code, setCode] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  /** Name of the file the user opened, so Download gives it back unchanged. */
+  const [openedName, setOpenedName] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -70,6 +73,52 @@ export function LocalEditor({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [modalOpen, going]);
+
+  /**
+   * FILE MENU — New. Fetches its own blank rather than clearing state and
+   * letting the effect above re-run: that effect is keyed on `[httpBase,
+   * initialBytes]`, neither of which changes here, and it returns early
+   * forever once the caller handed us a document to reopen. Leaning on it
+   * would make New a no-op on exactly the path people reach it from — back
+   * from a session, or after opening a file.
+   */
+  const newDocument = () => {
+    void fetch(`${httpBase}/blank`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`blank ${r.status}`);
+        return r.arrayBuffer();
+      })
+      .then((buf) => {
+        setOpenedName(null);
+        setBlank(new Uint8Array(buf));
+      })
+      .catch(() => setLoadError(true));
+  };
+
+  /**
+   * FILE MENU — Open. `setBlank` alone re-sources the view: DocxView's load
+   * effect lists `source` in its deps and its document cache is keyed by the
+   * source's IDENTITY (`docCacheRef.current?.source === source`), so a fresh
+   * Uint8Array parses fresh and fires `onReady` with an api over the new
+   * document. No remount key is needed.
+   */
+  const openDocument = (bytes: Uint8Array, filename: string) => {
+    setOpenedName(filename);
+    setBlank(bytes);
+  };
+
+  /** FILE MENU — Download. The edited bytes, under the name they came in as. */
+  const downloadDocument = () => {
+    if (!api) return;
+    const blob = new Blob([api.save() as BlobPart], {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = openedName ?? "document.docx";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
 
   const startCollab = () => {
     // A code is REQUIRED (owner's call): a shared link is a capability, and
@@ -121,6 +170,16 @@ export function LocalEditor({
         className="sessionbar"
         style={{ display: "flex", gap: 10, alignItems: "center", padding: "7px 14px", flexWrap: "wrap" }}
       >
+        {/* File first, the way every editor puts it first — and every item is
+            live here. There is no session yet, so nothing can fork: opening a
+            file replaces a document only this browser has ever seen. */}
+        <FileMenu
+          onNew={newDocument}
+          onOpen={openDocument}
+          onDownload={downloadDocument}
+          onPrint={() => api?.print()}
+          disabled={!api}
+        />
         {/* THE primary action on this screen, and the only one that changes
             what the app is — so it is sized like it and placed ahead of the
             spacer rather than tucked at the far right with the utilities.

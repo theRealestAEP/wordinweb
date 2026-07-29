@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, type CollabSession, type DocBundle } from "wordinweb/collab";
 import { reviveEncrypted } from "./e2ee-flows";
+import { FileMenu } from "./file-menu";
 import { PerfHud } from "./perf/hud";
 import { perfMonitor, type DocStats } from "./perf/metrics";
 
@@ -14,8 +15,11 @@ import { perfMonitor, type DocStats } from "./perf/metrics";
  *                       the browsers ARE the recovery machinery)
  *
  * The server keeps nothing: this page's IndexedDB bundle is the durable
- * copy, which is why the download button is a first-class control and not
- * a menu item (doc 12 §4 durability honesty).
+ * copy, so getting a file out has to stay reachable (doc 12 §4 durability
+ * honesty). It now lives one click deep under File — the same place every
+ * other editor keeps it — and the two screens where the copy is actually AT
+ * RISK keep their own download button in reach: the ConnectionLost dialog and
+ * the lifetime countdown, both of which appear over the document.
  */
 
 function b64(bytes: Uint8Array): string {
@@ -387,6 +391,23 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           header whose buttons are styled — the inconsistency reads as broken
           rather than plain. */}
       <div data-testid="toolbar" className="sessionbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "7px 14px", flexWrap: "wrap" }}>
+        {/* OPEN IS REFUSED HERE, and shown refused rather than hidden. Loading
+            a file replaces the whole document locally without emitting an
+            intent that describes the replacement, so this browser would fork
+            from every peer while both sides still believed they were in the
+            same room — the same failure as the three insert APIs that mutated
+            locally under collab without emitting (fixed in 1087298). The menu
+            says so where the person is standing when they want it.
+
+            No Print: this screen holds a `CollabSession`, whose `doc` is a
+            DocxDocument (save/docRoot) and not the view api that owns
+            `print()`. An item that cannot work is worse than no item. */}
+        <FileMenu
+          onNew={onNewDocument}
+          onDownload={download}
+          disabled={!session?.ready}
+          openBlockedReason="Opening a file replaces the whole document, which the people you share it with would never see. Disconnect first to open a file."
+        />
         <span style={{ flex: 1 }} />
         {session?.arrival ? (
           <span style={{ fontSize: 12, background: "#d1ecf1", padding: "2px 8px", borderRadius: 6 }}>
@@ -407,8 +428,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // browser's stored bundle IS the durable copy (doc 12 §4) — the
           // server keeps nothing — so a failed write means the document may
           // exist nowhere but this tab's memory. Quota exceeded, private
-          // mode, or storage blocked all land here. The download button
-          // beside this banner is the escape hatch, which is why the copy
+          // mode, or storage blocked all land here. File > Download .docx at
+          // the head of this row is the escape hatch, which is why the copy
           // points at it rather than just apologising.
           <span data-testid="persist-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
             This document may not be saved in this browser — download a copy.
@@ -472,9 +493,6 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             Restored by another participant — your offline copy is saved as a draft.
           </span>
         ) : null}
-        {/* The escape hatch (doc 12 §4): your copy is as durable as this
-            browser; one click makes it a file. */}
-        <button data-testid="download" onClick={download} disabled={!session?.ready}>Download .docx</button>
         {onDisconnect && (
           <button
             data-testid="disconnect"

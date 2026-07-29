@@ -25,6 +25,11 @@ export default defineConfig({
       { find: "@wordinweb/collab/server", replacement: src("../collab/src/server.ts") },
       { find: "@wordinweb/core", replacement: src("../core/src/index.ts") },
       { find: "@wordinweb/server", replacement: src("../server/src/index.ts") },
+      // The DEMO app (examples/anon-share) imports this package by its public
+      // name, which node_modules resolves to dist. Tests that mount demo
+      // components need the same source-not-dist guarantee as everything else.
+      { find: "wordinweb/collab", replacement: src("./src/collab.tsx") },
+      { find: /^wordinweb$/, replacement: src("./src/index.tsx") },
     ],
   },
   test: {
