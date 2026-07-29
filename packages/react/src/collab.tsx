@@ -169,6 +169,20 @@ export interface CollabSession {
    * falls back to this against an older server. */
   readOnlyBlocked: boolean;
   /**
+   * The server has told this client it is NOT the owner of this document.
+   *
+   * Holding an `ownerToken` string is not the same as it being valid — a room
+   * re-seeded into a new epoch mints a fresh one, leaving the old token
+   * truthy in a browser that now has no admin rights. The welcome carries no
+   * owner flag, so until an admin op is attempted this is genuinely unknown;
+   * a `not-owner` refusal is the authoritative answer.
+   *
+   * Consumers should HIDE admin controls when this is true rather than
+   * disable them: an offered control that cannot work is worse than an absent
+   * one, and the refusal it produces is not a session failure.
+   */
+  notOwner: boolean;
+  /**
    * THE SERVER WILL NOT ACCEPT THIS CLIENT'S WRITES. Consumers must render the
    * editor READ-ONLY on this, never merely annotate it: an editable surface
    * over a server that refuses the writes applies every keystroke locally and
@@ -374,6 +388,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
    * lock only re-manifests per-edit; the banner is advisory while the live
    * view keeps working. */
   const [readOnlyBlocked, setReadOnlyBlocked] = useState(false);
+  const [notOwner, setNotOwner] = useState(false);
   const [epochChanged, setEpochChanged] = useState<{ from: string; to: string } | null>(null);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [arrival, setArrival] = useState<{ mode: "suggest" | "draft"; tailLength: number } | null>(null);
@@ -533,6 +548,26 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         // simply works again once the owner lifts the lock.
         if (reason === "read-only") {
           setReadOnlyBlocked(true);
+          return;
+        }
+        // NOT-OWNER is a REJECTED ACTION, not a dead session, and treating it
+        // as fatal was a real bug: the admin op bounced, the connection stayed
+        // perfectly healthy, and the whole editor was replaced by "Connection
+        // refused: not-owner. Refresh to retry." — losing the live document
+        // view over a button press that should simply have done nothing.
+        //
+        // It is reachable without anyone being devious. `ownerToken` is a
+        // string a client holds; holding one is not the same as it being
+        // VALID. A room re-seeded into a new epoch mints a fresh owner token,
+        // so the previous one stays truthy in this browser, keeps rendering
+        // the admin controls, and fails the moment it is used.
+        //
+        // The refusal is also the authoritative answer to a question the
+        // client cannot otherwise ask — the welcome carries no owner flag, so
+        // "am I the owner" is unknowable until an admin op is tried. Recording
+        // it lets the UI stop offering controls it now knows will fail.
+        if (reason === "not-owner") {
+          setNotOwner(true);
           return;
         }
         // The session is over, so any countdown toward its ending is now a
@@ -735,6 +770,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     refused,
     sessionWarning,
     readOnlyBlocked,
+    notOwner,
     // Derived, not stored: one place decides "writes won't land", so the gate
     // and the banner can never disagree about whether the user may type.
     //

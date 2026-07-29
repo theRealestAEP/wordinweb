@@ -165,7 +165,13 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   const [shareCode, setShareCode] = useState<string | undefined>(() => initialShareCode);
   const [codeDraft, setCodeDraft] = useState(initialShareCode ?? "");
   const [readOnly, setReadOnly] = useState(false);
-  const isOwner = !!ownerToken;
+  // HOLDING a token is not the same as it being VALID. A room re-seeded into
+  // a new epoch mints a fresh owner token, leaving the old one truthy here
+  // with no rights attached — which used to render the admin controls and
+  // then blow the whole editor away on the first click (a `not-owner`
+  // refusal was treated as a dead session). The server's refusal is the
+  // authoritative answer, so once it arrives the controls stop being offered.
+  const isOwner = !!ownerToken && !session?.notOwner;
   // Remount key: bumps to retry the connection after takeover/revival.
   const [attempt, setAttempt] = useState(0);
   const [showActivity, setShowActivity] = useState(false);
@@ -349,7 +355,11 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <div data-testid="toolbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 8px", flexWrap: "wrap" }}>
+      {/* `sessionbar` carries the button styling. Without it these controls
+          sit outside <header> and fall back to raw browser buttons, next to a
+          header whose buttons are styled — the inconsistency reads as broken
+          rather than plain. */}
+      <div data-testid="toolbar" className="sessionbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 8px", flexWrap: "wrap" }}>
         {/* Roster chips (doc 14 §2): everyone in the session, greyed when
             offline; names are self-asserted — the UI says so in the title. */}
         {(session?.roster ?? []).map((r) => (
@@ -365,9 +375,9 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             </span>
             {isOwner && r.clientId !== clientId && (
               <>
-                <button title="Demote to viewer" style={{ fontSize: 10, padding: "0 3px" }}
+                <button className="chip" title="Demote to viewer"
                   onClick={() => session?.admin({ op: "setRole", clientId: r.clientId, role: "viewer" })}>👁</button>
-                <button title="Kick" style={{ fontSize: 10, padding: "0 3px" }}
+                <button className="chip" title="Kick"
                   onClick={() => session?.admin({ op: "kick", clientId: r.clientId })}>✕</button>
               </>
             )}
@@ -475,6 +485,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         {isOwner && (
           <button
             data-testid="readonly-toggle"
+            className="owner"
+            aria-pressed={readOnly}
             title="Owner: block all editors (you keep writing)"
             onClick={() => { const on = !readOnly; setReadOnly(on); session?.admin({ op: "readOnly", on }); }}
           >

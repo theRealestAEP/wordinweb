@@ -21,6 +21,27 @@
       header input:focus-visible, .modal input:focus-visible {
         outline: 2px solid #1a73e8; outline-offset: 2px;
       }
+      /* The in-session control row (download, disconnect, versions, owner
+         controls). These are SECONDARY to the document, so they are outlined
+         rather than filled — a row of solid blue buttons competes with the
+         page content for attention, and none of them is the primary action.
+         The owner's read-only toggle is the one exception below: it changes
+         what everyone else can do, so it should not look like "Download". */
+      .sessionbar button { font: 13px system-ui; padding: 5px 11px; border: 1px solid #dadce0;
+        background: #fff; color: #202124; border-radius: 6px; cursor: pointer; }
+      .sessionbar button:hover:not([disabled]) { background: #f8f9fa; border-color: #c6cbd1; }
+      .sessionbar button:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
+      .sessionbar button[disabled] { opacity: .5; cursor: default; }
+      /* Owner-only, and destructive-ish: it silences everyone else. Amber
+         while ARMED so the person holding the lock can see they are holding
+         it — a lock you forget you set looks like a broken document to
+         everybody else in the room. */
+      .sessionbar button.owner[aria-pressed="true"] { background: #fef7e0; border-color: #f9ab00; color: #7a5900; }
+      /* Tiny per-participant actions (demote, kick) sitting inside a roster
+         chip. Square, quiet, and only ever rendered for the owner. */
+      .sessionbar button.chip { font-size: 10px; line-height: 1; padding: 2px 4px; border-radius: 4px;
+        border: 1px solid #dadce0; background: #fff; color: #5f6368; cursor: pointer; }
+      .sessionbar button.chip:hover { background: #f1f3f4; color: #202124; }
       .hint { color: #5f6368; font-size: 12px; }
       #root { padding: 16px; }
 
