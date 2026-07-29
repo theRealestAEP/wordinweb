@@ -428,11 +428,20 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // browser's stored bundle IS the durable copy (doc 12 §4) — the
           // server keeps nothing — so a failed write means the document may
           // exist nowhere but this tab's memory. Quota exceeded, private
-          // mode, or storage blocked all land here. File > Download .docx at
-          // the head of this row is the escape hatch, which is why the copy
-          // points at it rather than just apologising.
+          // mode, or storage blocked all land here.
+          //
+          // The button is INLINE rather than a pointer to File > Download,
+          // and it is the one place in this row that keeps its own. Moving
+          // Download into the menu is right everywhere else — but this banner
+          // fires exactly when the durable copy may not exist, and telling
+          // someone to go find a menu item is the wrong instruction to give at
+          // the moment their only copy is at risk. Same reasoning as the
+          // ConnectionLost and countdown screens, which also kept theirs.
           <span data-testid="persist-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
-            This document may not be saved in this browser — download a copy.
+            This document may not be saved in this browser — download a copy.{" "}
+            <button data-testid="persist-download" onClick={download} disabled={!session?.ready}>
+              Download .docx
+            </button>
           </span>
         ) : session && session.connection !== "live" ? (
           // MUST PRECEDE the writesBlocked banner below, because a non-live
