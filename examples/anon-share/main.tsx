@@ -174,20 +174,24 @@ function Harness() {
 
   return (
     <div>
-      <header>
-        <span className="brand">
-          <span>
-            <span className="word">Word in Web</span>
-            <span className="collab">Collaborative!</span>
+      <div className="app-header">
+        <span className="brand-lockup">
+          <span className="brand-mark">W</span>
+          <span className="brand-copy">
+            <strong>WordInWeb<span className="collab">Collaborative!</span></strong>
+            <span className="tag">End-to-end encrypted · non-custodial · nothing stored on the server</span>
           </span>
-          <span className="sub">E2EE · Non-Custodial</span>
         </span>
+        <nav className="app-links" aria-label="Project links">
+          <a className="other" href="https://word-in-web.com" target="_blank" rel="noreferrer">Viewer</a>
+          <a href="https://github.com/theRealestAEP/wordinweb" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://www.aepick.me/blog" target="_blank" rel="noreferrer">Blog</a>
+          <a href="https://word-in-web.com/report/" target="_blank" rel="noreferrer">Parity report</a>
+        </nav>
+      </div>
+      <header>
         <span className="pill">doc {docId.slice(0, 10)}…</span>
         <span className="spacer" />
-        <span className="brand-links">
-          <a href="https://github.com/theRealestAEP/wordinweb" target="_blank" rel="noopener noreferrer">GitHub</a>
-          <a href="https://word-in-web.com/report/" target="_blank" rel="noopener noreferrer">Parity report</a>
-        </span>
         <input
           className="alias"
           data-testid="alias"

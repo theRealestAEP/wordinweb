@@ -80,6 +80,33 @@
       .brand-links { display: flex; gap: 14px; align-items: center; }
       .brand-links a { font-size: 12px; color: #5f6368; text-decoration: none; white-space: nowrap; }
       .brand-links a:hover { color: #1a73e8; text-decoration: underline; }
+      /* PRODUCT HEADER, matched to the viewer demo at word-in-web.com so the
+         two read as one project rather than two unrelated sites. The dark bar
+         carries identity and cross-links only; everything session-specific
+         (doc id, your name, share, disconnect) stays in the light bar below,
+         because those change constantly and identity should not move. */
+      .app-header { display: flex; min-height: 48px; align-items: center;
+        justify-content: space-between; gap: 20px; padding: 8px 16px; color: #fff;
+        background: linear-gradient(110deg, #132640, #1b365d 58%, #224b7a);
+        border-bottom: 1px solid rgba(5,18,34,.24); flex-wrap: wrap; }
+      .brand-lockup { display: flex; align-items: center; gap: 9px; min-width: 0; }
+      .brand-mark { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center;
+        border: 1px solid rgba(255,255,255,.24); border-radius: 4px; background: #2f6fed;
+        font-family: Georgia, serif; font-size: 18px; font-weight: 700; color: #fff; }
+      .brand-copy { display: flex; align-items: flex-start; flex-direction: column; line-height: 1.15; }
+      .brand-copy strong { font-family: Georgia, "Times New Roman", serif; font-size: 17px; letter-spacing: -.01em; }
+      /* "Collaborative" in a handwritten face: this is the collab build, and
+         the header should say which of the two you are on at a glance. */
+      .brand-copy .collab { font-family: "Bradley Hand", "Segoe Print", "Comic Sans MS", cursive;
+        font-size: 17px; font-weight: 700; color: #8ab4f8; margin-left: 6px;
+        display: inline-block; transform: rotate(-2deg); }
+      .brand-copy span.tag { color: #b9cae0; font-size: 10.5px; }
+      .app-links { display: flex; align-items: center; gap: 4px; }
+      .app-links a { padding: 6px 9px; border-radius: 6px; color: #dbe7f7; font-size: 12.5px;
+        font-weight: 600; text-decoration: none; white-space: nowrap; }
+      .app-links a:hover { color: #fff; background: rgba(255,255,255,.1); }
+      /* The sibling surface, lifted like Collaborative is on the viewer side. */
+      .app-links a.other { border: 1px solid rgba(255,255,255,.28); background: rgba(255,255,255,.08); }
       .hint { color: #5f6368; font-size: 12px; }
       #root { padding: 16px; }
 

@@ -102,17 +102,14 @@ export function LocalEditor({
         data-testid="local-header"
         style={{ display: "flex", gap: 10, alignItems: "center", padding: "4px 8px", flexWrap: "wrap" }}
       >
-        <span className="brand">
-          <b>Word in Web</b>
-          <span className="sub">E2EE · Non-Custodial</span>
+        <span className="brand-lockup">
+          <span className="brand-mark">W</span>
+          <span className="brand-copy">
+            <strong style={{ color: "#202124" }}>WordInWeb</strong>
+            <span className="tag" style={{ color: "#5f6368" }}>Editing locally — nothing has left this browser</span>
+          </span>
         </span>
         <span style={{ flex: 1 }} />
-        {/* Same project links as the collaborative header — a visitor landing
-            on the local editor should be able to reach them too. */}
-        <span className="brand-links">
-          <a href="https://github.com/theRealestAEP/wordinweb" target="_blank" rel="noopener noreferrer">GitHub</a>
-          <a href="https://word-in-web.com/report/" target="_blank" rel="noopener noreferrer">Parity report</a>
-        </span>
         <button
           data-testid="make-collaborative"
           disabled={!api}
