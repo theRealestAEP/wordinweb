@@ -41,9 +41,13 @@ services:
       WW_ROOM_MAX_LIFETIME_MS: "43200000"
       WW_LIFETIME_WARNING_MS: "300000"
       # ── per-IP limits ───────────────────────────────────────────────────
-      WW_IP_SEED_PER_MIN: "10"
-      WW_IP_MAX_DOCS: "25"
-      WW_IP_MAX_CONNS: "50"
+      # Raised for a dedicated host. These bound what ONE address can consume;
+      # they are not a defence against a distributed attacker, and the global
+      # caps below are what stop the host falling over. Kept well under those
+      # so a single network still cannot take the server down on its own.
+      WW_IP_SEED_PER_MIN: "30"
+      WW_IP_MAX_DOCS: "100"
+      WW_IP_MAX_CONNS: "200"
       # ONE hop, and that is exact rather than estimated: Caddyfile.tunnel
       # REPLACES X-Forwarded-For with Cloudflare's CF-Connecting-IP, so the
       # chain reaching this server is always exactly one entry — the real
@@ -61,8 +65,13 @@ services:
       WW_WS_MAX_PAYLOAD: "524288"
       WW_WS_MAX_BUFFERED: "4194304"
       WW_ROOM_LOG_MAX_BYTES: "67108864"
-      WW_MAX_ROOMS_GLOBAL: "2000"
-      WW_MAX_CONNS_GLOBAL: "5000"
+      # Sized for a dedicated 16 GB / 10-core host. See `ulimits` below —
+      # WW_MAX_CONNS_GLOBAL is meaningless above the container's file-handle
+      # limit, because every connection needs one. It read 5000 here while the
+      # container allowed 1024, so the server would have failed to accept long
+      # before reaching its own configured cap.
+      WW_MAX_ROOMS_GLOBAL: "10000"
+      WW_MAX_CONNS_GLOBAL: "20000"
       # ── media ───────────────────────────────────────────────────────────
       WW_MEDIA_MAX_BLOB_BYTES: "5242880"
       WW_MEDIA_MAX_ROOM_BYTES: "104857600"
@@ -70,6 +79,13 @@ services:
       WW_MEDIA_ROOM_UPLOAD_BURST: "64"
       WW_MEDIA_STAGE_TTL_MS: "60000"
       WW_MEDIA_TTL_MS: "300000"
+    # Every WebSocket connection holds one file handle. The default of 1024
+    # was the real ceiling on concurrency, well below WW_MAX_CONNS_GLOBAL, and
+    # the server would hit EMFILE on accept rather than its own limit.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1234/healthz"]
       interval: 30s
