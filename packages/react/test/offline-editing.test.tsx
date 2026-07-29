@@ -354,6 +354,7 @@ describe("arrival outcomes 2+3 — diverged epoch: suggestions and draft", () =>
     await until(() => p2.session.arrival !== null, "arrival offered");
     expect(p2.session.arrival).toMatchObject({ mode: "suggest", tailLength: 2, structural: 1 });
     expect(p2.session.epochChanged, "the fork was surfaced, not merged").not.toBeNull();
+    const paragraphsBefore = (serializeXml(p2.session.doc!.docRoot).match(/<w:p[ >]/g) ?? []).length;
 
     await act(async () => p2.session.reconcile("suggest"));
     await until(() => docText(p2.session).includes("NOTE"), "suggested text landed");
@@ -373,9 +374,11 @@ describe("arrival outcomes 2+3 — diverged epoch: suggestions and draft", () =>
     const draft = await store.get(`d#draft-${old.genesisId}`);
     expect(draft, "draft slot banked on epoch change").toBeTruthy();
     expect(draft!.offlineTail?.some((i) => (i as { kind: string }).kind === "splitParagraph")).toBe(true);
-    // And the live doc does NOT contain an un-suggested split (it was
-    // dropped from the suggestion replay, as told).
-    expect(docText(p2.session).split("\n").length).toBe(docText(other.session).split("\n").length);
+    // And the live doc does NOT contain the split — a suggest replay must
+    // never apply a structural intent destructively (paragraph count is the
+    // observable: a leaked split would add one).
+    const paragraphsAfter = (serializeXml(p2.session.doc!.docRoot).match(/<w:p[ >]/g) ?? []).length;
+    expect(paragraphsAfter, "no un-suggested structural change leaked into the live doc").toBe(paragraphsBefore);
     await p2.unmount();
     await other.unmount();
   });
