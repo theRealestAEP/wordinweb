@@ -4,7 +4,19 @@
  * the transform (used by reconciliation replay).
  */
 export { ClientReplica } from "./replica.js";
-export { InMemoryBundleStore, BundlePersister, type DocBundle, type BundleStore } from "./bundle.js";
+export {
+  InMemoryBundleStore,
+  BundlePersister,
+  parseBundleKey,
+  versionKey,
+  draftKey,
+  supersededKey,
+  type DocBundle,
+  type BundleStore,
+  type StoredDocSummary,
+  type ParsedBundleKey,
+  type StoredDocKind,
+} from "./bundle.js";
 export { VersionRing, InMemoryVersionStore, type DocVersion, type VersionStore } from "./versions.js";
 export { toSuggestions, replayDrained, arrivalMode, OFFLINE_TAIL_CAP } from "./rebase.js";
 // The canonical apply, exposed for OFFLINE editing (doc 12 §5): with no

@@ -71,6 +71,71 @@ export interface DocBundle {
 }
 
 /**
+ * THE KEY CONVENTION, in one place. Everything a browser stores rides the
+ * bundle store under a key derived from the base docId:
+ *
+ *  - `<docId>`                          — the live bundle
+ *  - `<docId>#version-<ts>[-<label>]`   — a frozen restore point
+ *  - `<docId>#draft-<genesis>`          — an offline copy parked on divergence
+ *  - `<docId>#superseded-<genesis>`     — a banked copy after a fast-forward
+ *  - `local:…`                          — a document that never went live
+ *
+ * The builders and the parser below are the only code that knows these
+ * shapes; UIs render from `parseBundleKey` instead of re-deriving them.
+ */
+export type StoredDocKind = "live" | "version" | "draft" | "superseded" | "local" | "unknown";
+
+export interface ParsedBundleKey {
+  /** The base document id (the part before any `#` suffix). */
+  docId: string;
+  kind: StoredDocKind;
+  /** A version's human label, when the key carries one. */
+  label?: string;
+  /** A version's freeze time (ms), parsed from the key. */
+  versionSavedAt?: number;
+}
+
+export function versionKey(docId: string, savedAt: number, label?: string): string {
+  return `${docId}#version-${savedAt}${label ? `-${label}` : ""}`;
+}
+export function draftKey(docId: string, genesisId: string): string {
+  return `${docId}#draft-${genesisId}`;
+}
+export function supersededKey(docId: string, genesisId: string): string {
+  return `${docId}#superseded-${genesisId}`;
+}
+
+/** Parse any store key. An unrecognised `#` suffix degrades to `unknown`
+ * rather than throwing — a future key shape must not break today's listing. */
+export function parseBundleKey(key: string): ParsedBundleKey {
+  if (key.startsWith("local:")) return { docId: key, kind: "local" };
+  const hash = key.indexOf("#");
+  if (hash === -1) return { docId: key, kind: "live" };
+  const docId = key.slice(0, hash);
+  const suffix = key.slice(hash + 1);
+  const version = /^version-(\d+)(?:-(.*))?$/.exec(suffix);
+  if (version) return { docId, kind: "version", versionSavedAt: Number(version[1]), label: version[2] };
+  if (suffix.startsWith("draft-")) return { docId, kind: "draft" };
+  if (suffix.startsWith("superseded-")) return { docId, kind: "superseded" };
+  return { docId, kind: "unknown" };
+}
+
+/**
+ * One stored entry, as METADATA ONLY — everything a list needs to render
+ * (what it is, when, how big) without the document bytes. A 500-page doc is
+ * megabytes; listing ten of them must not deserialise all ten, so `list()`
+ * returns these and `get(key)` fetches bytes only when one is opened.
+ */
+export interface StoredDocSummary extends ParsedBundleKey {
+  /** The full store key — what `get()`/`delete()` take. */
+  key: string;
+  /** When this entry was written (bundle.savedAt, ms). */
+  savedAt: number;
+  /** Size of the stored document bytes. */
+  byteLength: number;
+}
+
+/**
  * Storage seam for bundles. The browser implementation is IndexedDB (the
  * only storage that fits multi-MB binary docs); tests and Node use the
  * in-memory implementation — the doc-12 test plan's "in-memory IndexedDB
@@ -80,6 +145,8 @@ export interface BundleStore {
   get(docId: string): Promise<DocBundle | null>;
   put(bundle: DocBundle): Promise<void>;
   delete(docId: string): Promise<void>;
+  /** Enumerate everything stored, metadata only (see StoredDocSummary). */
+  list(): Promise<StoredDocSummary[]>;
 }
 
 export class InMemoryBundleStore implements BundleStore {
@@ -96,6 +163,14 @@ export class InMemoryBundleStore implements BundleStore {
   }
   async delete(docId: string): Promise<void> {
     this.bundles.delete(docId);
+  }
+  async list(): Promise<StoredDocSummary[]> {
+    return [...this.bundles.values()].map((b) => ({
+      ...parseBundleKey(b.docId),
+      key: b.docId,
+      savedAt: b.savedAt,
+      byteLength: b.confirmedBytes.byteLength,
+    }));
   }
 }
 
