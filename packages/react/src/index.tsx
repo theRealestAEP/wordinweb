@@ -1481,6 +1481,11 @@ export function DocxView({
           },
           getSelectedSmartArt: () => editor?.getSelectedSmartArtData() ?? null,
           insertModel3D: async (file, poster) => {
+            // No model3D intent exists, so there is nothing to send. Refusing
+            // is the only honest answer: the toolbar hides this in collab, but
+            // the API is reachable directly, and mutating here would edit this
+            // replica alone and tell nobody — a silent fork.
+            if (collab?.submitOp) return false;
             const target = insertionTarget();
             if (!target) return false;
             const preview = poster ?? await objectPoster("3D model", "Double-click in Word to explore", "◇");
@@ -1492,6 +1497,9 @@ export function DocxView({
             return true;
           },
           insertOnlineVideo: async (url) => {
+            // Same as insertModel3D: no intent carries a web-video reference,
+            // so a local insert here would fork the room silently.
+            if (collab?.submitOp) return false;
             const target = insertionTarget();
             if (!target) return false;
             const preview = await objectPoster("Online video", url, "▶");
@@ -1502,6 +1510,9 @@ export function DocxView({
             return true;
           },
           insertEmbeddedObject: async (file, filename) => {
+            // Same as insertModel3D: no intent carries an OLE part, so a local
+            // insert here would fork the room silently.
+            if (collab?.submitOp) return false;
             const target = insertionTarget();
             if (!target) return false;
             const name = filename ?? (file instanceof File ? file.name : "embedded-file.bin");

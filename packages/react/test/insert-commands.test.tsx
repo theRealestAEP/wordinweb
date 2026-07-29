@@ -187,12 +187,17 @@ const NEEDS_SELECTION = new Set(["addComment", "addBookmark"]);
  * what a user can press. Recorded explicitly (the same idiom invariant A uses
  * for offered-but-inert) because each one is a landmine for the day someone
  * un-gates it: un-gating without wiring is precisely the insertImage bug.
+ *
+ * DELIBERATELY EMPTY. It held insertModel3D, insertOnlineVideo and
+ * insertEmbeddedObject, and "not reachable from the UI" turned out to be the
+ * wrong bar: the api is public, so an embedder calling the method directly
+ * forked the room with no toolbar involved. All three now refuse in collab,
+ * so the entries would assert a landmine that no longer exists.
+ *
+ * The map stays because the mechanism is the point — the next gated-but-
+ * mutating command must be recorded here with a reason, or wired.
  */
-const GATED_BUT_MUTATES: Record<string, string> = {
-  insertModel3D: "no model3D intent — media/3D upload is out of scope per the demo threat model",
-  insertOnlineVideo: "no online-video intent; the media group is gated for the same reason",
-  insertEmbeddedObject: "no embedded-object intent; object upload is gated (stored-payload surface)",
-};
+const GATED_BUT_MUTATES: Record<string, string> = {};
 
 describe("INVARIANT C — insert commands in collab either EMIT or are ABSENT", () => {
   it("the enumeration covers the api's whole insert surface", async () => {
