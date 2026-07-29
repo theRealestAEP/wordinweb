@@ -90,16 +90,19 @@ services:
       # ROOM, so enough rooms could exhaust the host; now it is capped
       # globally and the overflow spills to disk.
       #
-      # 8 GB, not the spec's 20 GB: this host has ~26 GB free and the budget
-      # must stay under the volume's real free space, or the filesystem
-      # becomes what binds instead of the budget.
+      # 4 GB, not the spec's 20 GB. This host's disk is 228 GB but 89% FULL —
+      # 184 GB used, ~25 GB free — so the budget has to fit in what is actually
+      # left, or the filesystem becomes what binds instead of the budget, and
+      # macOS starts misbehaving near zero free space. 4 GB leaves ~21 GB of
+      # headroom and still holds 40 rooms at their full media quota; overflow
+      # costs re-supply latency, never data.
       #
       # The spill path must be EPHEMERAL SCRATCH. The container's own writable
       # layer is exactly that — it dies with the container. Do NOT mount a
       # named volume here, and do NOT use tmpfs: tmpfs is RAM-backed, which
       # would put the disk tier in memory and defeat the entire point.
       WW_MEDIA_RAM_BYTES: "134217728"
-      WW_MEDIA_DISK_BYTES: "8589934592"
+      WW_MEDIA_DISK_BYTES: "4294967296"
       WW_MEDIA_ROOM_UPLOADS_PER_MIN: "60"
       WW_MEDIA_ROOM_UPLOAD_BURST: "64"
       WW_MEDIA_STAGE_TTL_MS: "60000"

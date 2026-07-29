@@ -17,6 +17,20 @@ import { MediaSpill, newRoomSpillId, SPILL_FILE_OVERHEAD } from "./media-spill.j
 export interface Connection {
   id: string;
   send(msg: ServerMessage): void;
+  /**
+   * Close the underlying transport. OPTIONAL so in-process transports (tests,
+   * the loopback harness) need not implement it.
+   *
+   * Without this the hub could refuse a client but not hang up on it. A kick —
+   * an idle timeout, a lifetime expiry, a ban — sent the `refused` frame and
+   * cleaned up the hub's own bookkeeping, and the socket then stayed open until
+   * the client or TCP gave up. Every one of those leaked sockets still counted
+   * toward the global and per-IP connection caps, so long-lived rooms ending
+   * naturally could exhaust them.
+   *
+   * Called AFTER the refusal is sent, so the client still learns why.
+   */
+  close?(): void;
 }
 
 /**
@@ -428,6 +442,18 @@ export class CollabHub {
     this.obs.kicked(reason);
     this.obs.refused(reason);
     this.disconnect(conn);
+    // HANG UP, not just refuse. `disconnect` clears the hub's bookkeeping but
+    // cannot touch the transport, so before this the socket outlived the
+    // session it belonged to — a room reaching its idle timeout left one open
+    // socket per participant, counting against the global and per-IP caps
+    // until the client noticed. Ordered after the refusal so the reason is
+    // delivered first, and after `disconnect` so the ws close handler finds
+    // the bookkeeping already clean and its own teardown is a no-op.
+    try {
+      conn.close?.();
+    } catch {
+      // Already gone. The refusal and the bookkeeping are what matter.
+    }
   }
 
   /**

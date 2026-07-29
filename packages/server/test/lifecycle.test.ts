@@ -39,9 +39,14 @@ const provider: DocProvider = { load: () => blankDoc("hi") };
 
 class FakeConn implements Connection {
   received: ServerMessage[] = [];
+  /** Times the hub hung up on this socket (see Connection.close). */
+  closes = 0;
   constructor(public id: string) {}
   send(msg: ServerMessage): void {
     this.received.push(msg);
+  }
+  close(): void {
+    this.closes++;
   }
   ofType<T extends ServerMessage["t"]>(t: T): Extract<ServerMessage, { t: T }>[] {
     return this.received.filter((m) => m.t === t) as Extract<ServerMessage, { t: T }>[];
@@ -310,5 +315,58 @@ describe("lifecycle configuration", () => {
     expect(snap.evictionsByReason).toEqual({ "idle-timeout": 1, empty: 1 });
     expect(snap.counters.roomsEvicted).toBe(2);
     expect(snap.gauges.rooms).toBe(0);
+  });
+});
+
+/**
+ * HANGING UP, not merely refusing. `disconnect` clears the hub's own
+ * bookkeeping and cannot reach the transport, so before `Connection.close`
+ * existed a room reaching a deadline left one OPEN SOCKET per participant —
+ * each still counting toward the global and per-IP connection caps until the
+ * client happened to notice. Reported from production as sockets shown open
+ * for documents that had already timed out.
+ */
+describe("a kicked socket is closed, not left open", () => {
+  it("idle timeout refuses AND hangs up on every participant", async () => {
+    let now = 1_000;
+    const hub = makeHub(() => now);
+    const a = new FakeConn("a");
+    const b = new FakeConn("b");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "ca", sinceSeq: 0 });
+    await hub.handle(b, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "cb", sinceSeq: 0 });
+    expect(a.closes, "nobody is hung up on while the room is healthy").toBe(0);
+
+    now += IDLE + 1;
+    hub.sweepLifecycle();
+
+    // The reason still arrives — hanging up must not cost the explanation.
+    expect(a.ofType("refused").at(-1)).toEqual({ t: "refused", reason: "idle-timeout" });
+    expect(b.ofType("refused").at(-1)).toEqual({ t: "refused", reason: "idle-timeout" });
+    // ...and the socket is actually released.
+    expect(a.closes, "the socket was closed, not left for the client to notice").toBe(1);
+    expect(b.closes).toBe(1);
+  });
+
+  it("the lifetime cap hangs up too", async () => {
+    let now = 1_000;
+    const hub = makeHub(() => now, LIFETIME_ONLY);
+    const a = new FakeConn("a");
+    await hub.handle(a, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "ca", sinceSeq: 0 });
+
+    now += LIFETIME + 1;
+    hub.sweepLifecycle();
+
+    expect(a.ofType("refused").at(-1)).toEqual({ t: "refused", reason: "session-expired" });
+    expect(a.closes).toBe(1);
+  });
+
+  it("a transport with no close() still works — close is optional", async () => {
+    let now = 1_000;
+    const hub = makeHub(() => now);
+    // Deliberately omits close(), like the loopback harness and older embedders.
+    const bare: Connection = { id: "bare", send: () => {} };
+    await hub.handle(bare, { t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId: "cx", sinceSeq: 0 });
+    now += IDLE + 1;
+    expect(() => hub.sweepLifecycle()).not.toThrow();
   });
 });

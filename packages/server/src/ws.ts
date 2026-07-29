@@ -108,6 +108,14 @@ export function attachWebSocketServer(
         }
         socket.send(JSON.stringify(msg));
       },
+      // Lets the hub hang up on a client it has refused (see Connection.close).
+      // Graceful rather than `terminate`: a kicked peer IS still draining, and
+      // the refusal frame queued immediately before this must reach it. A
+      // graceful close flushes what is already queued; terminate would not.
+      close: () => {
+        dead = true;
+        socket.close?.();
+      },
     };
     // GLOBAL SOCKET CEILING. The per-IP cap below bounds one address; it does
     // nothing about a thousand addresses each opening a polite handful. Refuse
