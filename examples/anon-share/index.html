@@ -5,9 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>wordinweb collab — anon-share demo</title>
     <style>
-      body { margin: 0; font: 14px system-ui, sans-serif; background: #f1f3f4; color: #202124; }
+      /* Page + control-bar chrome matched to the viewer demo. The stage is a
+         cool grey with a soft light source at the top, so the white page
+         floats on it instead of sitting on flat white-on-white — which is
+         what made this look unfinished next to the viewer. */
+      body { margin: 0; font: 14px system-ui, sans-serif; color: #17243a;
+        background: radial-gradient(circle at 50% -60px, rgba(255,255,255,.72), transparent 440px), #e6eaf0; }
+      /* The session control bar, styled like the viewer's: pale blue-grey
+         rather than white, with a hairline and a soft shadow so it reads as
+         chrome sitting above the document rather than part of the page. */
       header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
-        padding: 10px 16px; background: #fff; border-bottom: 1px solid #dadce0; }
+        min-height: 52px; padding: 7px 14px; background: #f8fafc;
+        border-bottom: 1px solid #cfd6e0; box-shadow: 0 1px 4px rgba(24,39,59,.07); }
       header b { font-size: 15px; }
       header .pill { background: #e8f0fe; color: #1a73e8; border-radius: 12px; padding: 3px 10px; }
       header input { font: 12px ui-monospace, monospace; width: 320px; max-width: 50vw;
@@ -27,6 +36,7 @@
          page content for attention, and none of them is the primary action.
          The owner's read-only toggle is the one exception below: it changes
          what everyone else can do, so it should not look like "Download". */
+      .sessionbar { background: #f8fafc; border-bottom: 1px solid #cfd6e0; }
       .sessionbar button { font: 13px system-ui; padding: 5px 11px; border: 1px solid #dadce0;
         background: #fff; color: #202124; border-radius: 6px; cursor: pointer; }
       .sessionbar button:hover:not([disabled]) { background: #f8f9fa; border-color: #c6cbd1; }
@@ -115,7 +125,11 @@
       button.cta[disabled] { opacity: .45; cursor: default; }
       button.cta:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
       .hint { color: #5f6368; font-size: 12px; }
-      #root { padding: 16px; }
+      /* NO padding here: the header and control bars are full-bleed chrome and
+         a padded root inset them from the viewport, leaving a grey gutter down
+         both sides that made the whole app look like a widget embedded in a
+         page. Content that needs breathing room asks for it itself. */
+      #root { padding: 0; }
 
       /* Wordmark: one line + a small subtitle. The subtitle is the product's
          actual claim, not a tagline — letterspaced small caps so it reads as a

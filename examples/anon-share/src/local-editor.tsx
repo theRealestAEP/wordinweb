@@ -98,17 +98,29 @@ export function LocalEditor({
 
   return (
     <div data-testid="local-editor" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <div
-        data-testid="local-header"
-        style={{ display: "flex", gap: 10, alignItems: "center", padding: "4px 8px", flexWrap: "wrap" }}
-      >
+      {/* Same product header as the collaborative screen. It was a light-text
+          variant here, which made the two halves of one app look like two
+          different products depending on whether you had shared yet. */}
+      <div className="app-header">
         <span className="brand-lockup">
           <span className="brand-mark">W</span>
           <span className="brand-copy">
-            <strong style={{ color: "#202124" }}>WordInWeb</strong>
-            <span className="tag" style={{ color: "#5f6368" }}>Editing locally — nothing has left this browser</span>
+            <strong>WordInWeb<span className="collab">Collaborative!</span></strong>
+            <span className="tag">Editing locally — nothing has left this browser yet</span>
           </span>
         </span>
+        <nav className="app-links" aria-label="Project links">
+          <a className="other" href="https://word-in-web.com" target="_blank" rel="noreferrer">Viewer</a>
+          <a href="https://github.com/theRealestAEP/wordinweb" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://www.aepick.me/blog" target="_blank" rel="noreferrer">Blog</a>
+          <a href="https://word-in-web.com/report/" target="_blank" rel="noreferrer">Parity report</a>
+        </nav>
+      </div>
+      <div
+        data-testid="local-header"
+        className="sessionbar"
+        style={{ display: "flex", gap: 10, alignItems: "center", padding: "7px 14px", flexWrap: "wrap" }}
+      >
         {/* THE primary action on this screen, and the only one that changes
             what the app is — so it is sized like it and placed ahead of the
             spacer rather than tucked at the far right with the utilities.
