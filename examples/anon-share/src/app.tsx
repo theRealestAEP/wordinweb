@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, type CollabSession, type DocBundle } from "wordinweb/collab";
+import { type DocxViewApi } from "wordinweb";
 import { reviveEncrypted } from "./e2ee-flows";
 import { FileMenu } from "./file-menu";
 import { PerfHud } from "./perf/hud";
@@ -253,6 +254,40 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     // Whether we won or someone else did (409), a session now exists — join it.
     setReviveState("idle");
     setAttempt((a) => a + 1);
+  };
+
+  /**
+   * Editing vs Suggesting, live (doc 05). Suggesting mode already replicates:
+   * typing emits `insertText` carrying `suggest{author,date}` (or a
+   * `suggestRevision`), and peers apply it as a real tracked change. All that
+   * was missing is the client-side control, so this is UI over an existing
+   * intent surface — no new intent kind, no changed apply semantics, so no
+   * ENGINE_VERSION bump (that fence guards canonical divergence).
+   *
+   * THE MODE IS THE EDITOR'S, NOT REACT'S. Every render reads it back with
+   * `api.isSuggesting()`. A mirrored React boolean would disagree with what
+   * typing actually does the moment anything else calls setSuggesting — and
+   * `writesBlocked` really does drop the editor and reset the mode, which a
+   * mirror would hide. `modeTick` exists only to ask for a repaint after a
+   * click; it is never the source of truth.
+   */
+  const [api, setApi] = useState<DocxViewApi | null>(null);
+  const [, setModeTick] = useState(0);
+  // writesBlocked is THE write gate in this codebase (it is what turns the
+  // editor read-only). View-only folds INTO it rather than sitting beside it.
+  const writesBlocked = !!session?.writesBlocked;
+  const suggesting = !writesBlocked && (api?.isSuggesting() ?? false);
+  const mode = writesBlocked ? "view" : suggesting ? "suggest" : "edit";
+  // A full tracked-change walk of the document, re-run whenever this shell
+  // re-renders (i.e. per broadcast). Cheap next to the layout each broadcast
+  // already triggers, and there is no incremental counter to read instead.
+  const pendingSuggestions = api?.revisionCount() ?? 0;
+  const toggleSuggesting = () => {
+    if (!api || writesBlocked) return;
+    // The participant alias is the revision author, so peers see WHO
+    // suggested rather than a generic "You" on everybody's screen.
+    api.setSuggesting(!api.isSuggesting(), name);
+    setModeTick((n) => n + 1);
   };
 
   const download = () => {
@@ -535,6 +570,45 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             {readOnly ? "🔒 Read-only ON" : "🔓 Make read-only"}
           </button>
         )}
+        {/* THREE honest states, because view-only is already real. Editing and
+            Suggesting are the two a person can pick; View only is what
+            writesBlocked forces, and the control says so instead of pretending
+            to offer a choice it cannot honour. The ON tint is the markup
+            renderer's revision ink, so the chip matches what suggestions look
+            like on the page. */}
+        <button
+          data-testid="suggest-toggle"
+          data-mode={mode}
+          aria-pressed={suggesting}
+          disabled={writesBlocked || !api}
+          title={
+            writesBlocked
+              ? "This session is view-only, so there is nothing to suggest into."
+              : suggesting
+                ? "You are suggesting. Your edits arrive as tracked changes for others to review."
+                : "Switch to suggesting: your edits arrive as tracked changes instead of changing the text."
+          }
+          style={suggesting ? { background: "#fce8e6", borderColor: "#d93025", color: "#a50e0e" } : undefined}
+          onClick={toggleSuggesting}
+        >
+          {mode === "view" ? "View only" : suggesting ? "✎ Suggesting" : "Editing"}
+        </button>
+        {pendingSuggestions > 0 && (
+          <span data-testid="suggestion-count" style={{ fontSize: 12, color: "#a50e0e" }}>
+            {pendingSuggestions} pending suggestion{pendingSuggestions === 1 ? "" : "s"}
+          </span>
+        )}
+        {suggesting && (
+          // KNOWN TRAP, stated where it bites. Paste in suggesting mode inside
+          // a session is a complete no-op (core editor.ts, the paste collab
+          // gate): Ctrl+V does nothing at all. A tooltip would only reach
+          // people who hover, and silently swallowing a paste is the same
+          // family as silent data loss — so it is on screen the whole time
+          // the mode is on.
+          <span data-testid="suggest-paste-warning" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            Paste is unavailable in this mode.
+          </span>
+        )}
         <span className="bar-sep" aria-hidden="true" />
         <input
           className="alias"
@@ -673,6 +747,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           httpBase={httpBase}
           profile={{ name, color: "" /* server assigns a palette color */ }}
           onSession={setSession}
+          onReady={setApi}
           refusedContent={refusedContent}
           editable
         />

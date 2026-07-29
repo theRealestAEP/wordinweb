@@ -959,3 +959,82 @@ describe("demo features: header/footer editing rides the wire", () => {
     await b.unmount();
   });
 });
+
+/**
+ * Live suggesting mode — the demo's Editing/Suggesting toggle drives exactly
+ * this API pair, so these pin the contract the chip reads and the wire it
+ * produces. The point is that a suggestion is not local decoration: it rides
+ * the wire as a real intent and lands on the peer as a real tracked change.
+ */
+describe("suggesting mode replicates as tracked changes", () => {
+  it("A types in suggest mode; B converges and the text is a w:ins, not plain text", async () => {
+    const hub = new CollabHub(provider);
+    const a = await mountEditor(hub, "suggest-live", "alice");
+    const b = await mountEditor(hub, "suggest-live", "bob");
+    await settle();
+
+    await a.click();
+    await a.typed("BASE");
+    await settle();
+
+    // The demo's toggle: the participant alias becomes the revision author.
+    await act(async () => { a.api().setSuggesting(true, "Priya"); });
+    expect(a.api().isSuggesting()).toBe(true); // the chip reads THIS, not a mirror
+    await a.typed("XY");
+    await settle(40);
+
+    const server = await spyState(a.factory, "suggest-live");
+    // Convergence: both replicas and the server hold the same bytes.
+    expect(a.clientXml()).toBe(server.xml);
+    expect(b.clientXml()).toBe(server.xml);
+
+    // …and it is a TRACKED insertion carrying the alias, not plain text.
+    expect(server.xml).toContain("<w:ins");
+    expect(server.xml).toContain('w:author="Priya"');
+    const ins = server.xml.slice(server.xml.indexOf("<w:ins"));
+    expect(ins).toContain("XY"); // the suggested text lives INSIDE the w:ins
+    // The pre-suggestion text stayed plain — only the new keys are tracked.
+    expect(server.xml.slice(0, server.xml.indexOf("<w:ins"))).toContain("BASE");
+    // B sees a pending suggestion to review; A's own chip counts it too.
+    expect(b.api().revisionCount()).toBeGreaterThan(0);
+    expect(a.api().revisionCount()).toBe(b.api().revisionCount());
+
+    // Turning it back off is real editor state again.
+    await act(async () => { a.api().setSuggesting(false); });
+    expect(a.api().isSuggesting()).toBe(false);
+    await a.unmount();
+    await b.unmount();
+  });
+
+  it("accept/reject refuses in the session rather than forking it", async () => {
+    const hub = new CollabHub(provider);
+    const a = await mountEditor(hub, "suggest-review", "alice");
+    const b = await mountEditor(hub, "suggest-review", "bob");
+    await settle();
+    await a.click();
+    await a.typed("BASE");
+    await settle();
+    await act(async () => { a.api().setSuggesting(true, "Priya"); });
+    await a.typed("XY");
+    await settle(40);
+    expect(a.clientXml()).toContain("<w:ins");
+
+    // B reviews. Accept/reject emits no intent yet, so it must refuse — the
+    // alternative is B resolving the suggestion on B's replica alone.
+    await act(async () => {
+      expect(b.api().acceptRevisionAtCaret()).toBe(false);
+      expect(b.api().rejectRevisionAtCaret()).toBe(false);
+      expect(b.api().acceptAllRevisions()).toBe(0);
+      expect(b.api().rejectAllRevisions()).toBe(0);
+    });
+    await settle();
+
+    // Nothing moved anywhere: the suggestion still stands on both replicas.
+    const server = await spyState(a.factory, "suggest-review");
+    expect(server.xml).toContain("<w:ins");
+    expect(a.clientXml()).toBe(server.xml);
+    expect(b.clientXml()).toBe(server.xml);
+    await a.unmount();
+    await b.unmount();
+  });
+});

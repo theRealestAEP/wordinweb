@@ -295,15 +295,20 @@ export interface DocxViewApi {
    */
   setSuggesting(on: boolean, author?: string): void;
   isSuggesting(): boolean;
-  /** Accept the tracked change at the caret (keep insertion / apply deletion). */
+  /** Accept the tracked change at the caret (keep insertion / apply deletion).
+   * Refuses (false, no mutation) in a live collab session — resolving a
+   * suggestion emits no intent yet, so it would fork the room. */
   acceptRevisionAtCaret(): boolean;
-  /** Reject the tracked change at the caret (drop insertion / restore deletion). */
+  /** Reject the tracked change at the caret (drop insertion / restore
+   * deletion). Refuses in a live collab session, like accept. */
   rejectRevisionAtCaret(): boolean;
   /** How many tracked changes (suggestions) the document currently holds. */
   revisionCount(): number;
-  /** Accept every tracked change (one undo step). Returns how many applied. */
+  /** Accept every tracked change (one undo step). Returns how many applied.
+   * Returns 0 without mutating in a live collab session, like accept. */
   acceptAllRevisions(): number;
-  /** Reject every tracked change (one undo step). Returns how many applied. */
+  /** Reject every tracked change (one undo step). Returns how many applied.
+   * Returns 0 without mutating in a live collab session, like accept. */
   rejectAllRevisions(): number;
   /** Current caret as stable-id addresses (collab), or null. The encoding
    * survives a reconciliation reload, so it can be captured from a view
