@@ -206,13 +206,14 @@ describe("the pressure ladder: RAM → disk → gone → re-supply recovers", ()
     await expectAccountingMatchesReality(hub, root);
   });
 
-  it("per-room quota stays tier-agnostic: spilling cannot let a room exceed maxRoomBytes", async () => {
-    // Room quota of 2.5 blobs; RAM of 2; ample disk. The third upload must
-    // die on the QUOTA (507) without the ladder even running — a disk tier
-    // buys process capacity, never per-room capacity.
+  it("per-room quota stays tier-agnostic: a DISK-resident blob still counts, so spilling cannot let a room exceed maxRoomBytes", async () => {
+    // RAM of ONE blob (the clamp floor), quota of 2.5, ample disk: the
+    // second upload demotes the first, so by the third upload the room holds
+    // one RAM blob and one DISK blob. The third must die on the QUOTA (507)
+    // — a disk tier buys process capacity, never per-room capacity.
     const { hub, clock } = makeHub(root, {
       maxBlobBytes: BLOB,
-      ramBytes: 2 * BLOB,
+      ramBytes: BLOB,
       diskBytes: 10 * FILE,
       maxRoomBytes: 2 * BLOB + 500,
     });
@@ -220,13 +221,18 @@ describe("the pressure ladder: RAM → disk → gone → re-supply recovers", ()
     const A = bytesOf(BLOB, 11);
     const B = bytesOf(BLOB, 12);
     const C = bytesOf(BLOB, 13);
-    expect(await hub.mediaUpload("d", await shaOf(A), A)).toBe(201);
+    const shaA = await shaOf(A);
+    expect(await hub.mediaUpload("d", shaA, A)).toBe(201);
     clock.now = 500;
-    expect(await hub.mediaUpload("d", await shaOf(B), B)).toBe(201);
+    expect(await hub.mediaUpload("d", await shaOf(B), B)).toBe(201); // A → disk
+    expect(entryOf(hub, "d", shaA).loc).toBe("disk");
     clock.now = 1000;
     expect(await hub.mediaUpload("d", await shaOf(C), C)).toBe(507);
-    // Nothing was demoted to "make room": the quota is not the RAM budget.
-    expect(hub.mediaTierBytes()).toEqual({ ram: 2 * BLOB, disk: 0 });
+    // The refusal came from the quota, with the disk blob COUNTED: the room
+    // still holds exactly A (disk) + B (ram).
+    expect(hub.roomsSnapshot()[0].mediaBytes).toBe(2 * BLOB);
+    expect(hub.mediaTierBytes()).toEqual({ ram: BLOB, disk: FILE });
+    await settle();
     await expectAccountingMatchesReality(hub, root);
   });
 });
