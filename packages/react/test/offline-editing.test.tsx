@@ -220,6 +220,47 @@ describe("offline capture is durable (the live data-loss bug)", () => {
     await p.unmount();
   });
 
+  it("edits captured WHILE the resume read is in flight survive it — the stored tail must not clobber memory", async () => {
+    // The narrow race the merge guard exists for: a reconnect's store read
+    // resolves AFTER the user typed another offline edit. The stored tail
+    // trails by the throttle window, so overwriting the in-memory tail with
+    // it would silently drop that edit.
+    const hub = seeded();
+    class GatedStore extends InMemoryBundleStore {
+      gate: Promise<void> | null = null;
+      async get(id: string) {
+        if (this.gate) await this.gate;
+        return super.get(id);
+      }
+    }
+    const store = new GatedStore();
+    const p = await mount(hub, store);
+    await act(async () => p.session.submitOp(insertAt(0, "S")));
+    await until(() => p.session.version > 1, "seed echoed");
+    await tick(30); // persister writes the confirmed state
+
+    let release!: () => void;
+    store.gate = new Promise<void>((r) => (release = r));
+    p.outage.value = true;
+    await until(() => p.session.offline !== null, "offline");
+    // Past the backoff: the reconnect effect has torn down (flushed) and is
+    // now parked on the GATED store read. This edit lands in memory only.
+    await tick(600);
+    await act(async () => p.session.submitOp(insertAt(1, "X")));
+    expect(p.session.offline!.editsHeld).toBe(1);
+
+    release();
+    store.gate = null;
+    await tick(50); // the resume-load runs against a store with NO tail
+    expect(p.session.offline!.editsHeld, "the in-flight read must not clobber the fresher memory").toBe(1);
+
+    // And it still replays: the edit was kept, not merely counted.
+    p.outage.value = false;
+    await until(() => p.session.connection === "live" && p.session.offline === null, "recovered");
+    await until(() => docText(p.session) === "SX", "the raced edit replayed");
+    await p.unmount();
+  });
+
   it("a reload (fresh mount, same store) still holds the tail and still offers/replays it", async () => {
     const hub = seeded();
     const store = new InMemoryBundleStore();
@@ -272,6 +313,24 @@ describe("arrival outcome 1 — same epoch: silent replay, byte-identical conver
     await until(() => docText(b.session) === "S123", "bob received the replayed tail");
     await until(() => Buffer.compare(bytes(a.session), bytes(b.session)) === 0, "byte-identical");
     expect(docText(a.session)).toBe("S123");
+
+    // THE DRAIN DISCIPLINE IS OBSERVABLE IN THE LOG (doc 03 one-in-flight /
+    // doc 15 §2 "replayed with drains"): each replayed intent must be BASED
+    // past its predecessor's sequenced entry — the client waited for the
+    // echo before submitting the next. A fire-all-at-once replay shares one
+    // base across the tail, which is exactly the multi-pending shape the
+    // gated sibling math exists for and this replay must never produce.
+    const entries = (hub as unknown as {
+      rooms: Map<string, { session: { entriesSince: (s: number) => { seq: number; kind: string; intent?: { text?: string; base: number } }[] } }>;
+    }).rooms.get("d")!.session.entriesSince(0);
+    const replayed = entries.filter((e) => e.kind === "applied" && ["1", "2", "3"].includes(e.intent?.text ?? ""));
+    expect(replayed).toHaveLength(3);
+    for (let i = 1; i < replayed.length; i++) {
+      expect(
+        replayed[i].intent!.base,
+        "each replayed intent is based past the previous one's seq (one-in-flight)",
+      ).toBeGreaterThanOrEqual(replayed[i - 1].seq);
+    }
     await a.unmount();
     await b.unmount();
   });
@@ -355,9 +414,15 @@ describe("arrival outcomes 2+3 — diverged epoch: suggestions and draft", () =>
     expect(p2.session.arrival).toMatchObject({ mode: "suggest", tailLength: 2, structural: 1 });
     expect(p2.session.epochChanged, "the fork was surfaced, not merged").not.toBeNull();
     const paragraphsBefore = (serializeXml(p2.session.doc!.docRoot).match(/<w:p[ >]/g) ?? []).length;
+    const hubSession = (hub2 as unknown as { rooms: Map<string, { session: { seq: number } }> }).rooms.get("d")!.session;
+    const seqBefore = hubSession.seq;
 
     await act(async () => p2.session.reconcile("suggest"));
     await until(() => docText(p2.session).includes("NOTE"), "suggested text landed");
+    // The replay must run the WHOLE tail (structural entries popped, not
+    // stalled) and erase it — otherwise the assertions below could pass on
+    // a half-finished replay.
+    await until(() => !storedTail(store)?.length, "tail fully drained and erased");
     // Landed as a TRACKED CHANGE attributed to the returning editor — the
     // crowd reviews it; nothing was bulldozed.
     const xml = serializeXml(p2.session.doc!.docRoot);
@@ -379,6 +444,10 @@ describe("arrival outcomes 2+3 — diverged epoch: suggestions and draft", () =>
     // observable: a leaked split would add one).
     const paragraphsAfter = (serializeXml(p2.session.doc!.docRoot).match(/<w:p[ >]/g) ?? []).length;
     expect(paragraphsAfter, "no un-suggested structural change leaked into the live doc").toBe(paragraphsBefore);
+    // Stronger: the structural intent never reached the sequencer AT ALL —
+    // exactly one entry (the suggested insert) was sequenced by the replay.
+    // A destructive submit would land a second entry (applied or rejected).
+    expect(hubSession.seq, "only the suggestion was sequenced; the split never left the client").toBe(seqBefore + 1);
     await p2.unmount();
     await other.unmount();
   });

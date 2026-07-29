@@ -627,11 +627,12 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       }
       const tail = offlineTailRef.current ?? [];
       if (!tail.length) {
+        // Done. The stored tail is already erased: the final step's flush
+        // (below) wrote the bundle after the last pop emptied the getter.
         offlineTailRef.current = undefined;
         offlineEpochRef.current = null;
         setOfflineHeld(0);
         setArrival(null);
-        void persisterRef.current?.flush(); // erase the stored tail
         return;
       }
       const next = tail[0];
