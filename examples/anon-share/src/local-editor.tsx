@@ -36,6 +36,20 @@ function localBundle(key: string, bytes: Uint8Array): DocBundle {
 const AUTOSAVE_MS = 10_000;
 
 /**
+ * IndexedDB can BLOCK without failing (an old tab holding the pre-upgrade
+ * schema open, a hung storage layer) — a promise that neither resolves nor
+ * rejects. Racing a generous deadline turns that silence into the same
+ * failure story a rejection gets: restore falls back to the blank template,
+ * a write raises the banner. 5s is far above any healthy IndexedDB op.
+ */
+function withDeadline<T>(p: Promise<T>, ms = 5000): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("storage timeout")), ms)),
+  ]);
+}
+
+/**
  * The demo's LANDING is the normal single-user editor: a local, editable
  * document with no server and no collab. It seeds from the zero-custody
  * server's blank template (`GET /blank`) purely to have bytes to edit — the
@@ -101,8 +115,7 @@ export function LocalEditor({
     // A failed read (blocked storage) falls through to the blank template —
     // nothing was lost, and the first autosave WRITE failing is what raises
     // the banner.
-    void store
-      .get(LOCAL_AUTOSAVE_KEY)
+    void withDeadline(store.get(LOCAL_AUTOSAVE_KEY))
       .catch(() => null)
       .then((saved) => {
         if (alive && saved) {
@@ -140,7 +153,7 @@ export function LocalEditor({
     if (!a || !dirtyRef.current) return;
     dirtyRef.current = false;
     try {
-      await store.put(localBundle(LOCAL_AUTOSAVE_KEY, a.save()));
+      await withDeadline(store.put(localBundle(LOCAL_AUTOSAVE_KEY, a.save())));
       setPersistError(null);
     } catch {
       dirtyRef.current = true;
