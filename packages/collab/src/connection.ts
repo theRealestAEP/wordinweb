@@ -400,6 +400,12 @@ export class CollabConnection {
     return this.replica !== null;
   }
 
+  /** Un-confirmed local intents in flight — the drained-replay discipline
+   * (doc 15 §2 / rebase.ts) polls this to submit one intent at a time. */
+  get pendingCount(): number {
+    return this.replica?.pendingCount ?? 0;
+  }
+
   /**
    * Submit a local edit. The caller supplies the intent minus its wire
    * bookkeeping (clientId/clientSeq/base) — the connection fills those from

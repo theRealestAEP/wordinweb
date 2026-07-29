@@ -43,13 +43,25 @@ export interface DocBundle {
    */
   lineage: LineageHead[];
   /**
-   * Local intents recorded while NO session was live (doc 15 §2): the user
-   * kept editing their bundle after the room ended. On rejoin these are the
-   * offline tail the arrival ladder reconciles — replayed as suggestions
-   * (default) or a gated destructive rebase, or parked in a draft. Distinct
-   * from `pending` (in-flight when a LIVE session was interrupted).
+   * Local intents recorded while the session was UNREACHABLE (doc 15 §2 /
+   * doc 12 §5 "offline mode is first-class"): the user kept editing after
+   * the socket died. On rejoin these are the offline tail the arrival
+   * ladder reconciles — replayed as ordinary intents (same epoch), as
+   * suggestions (diverged, small), or parked in a draft (diverged, large).
+   * Distinct from `pending` (in-flight when a LIVE session was
+   * interrupted): tail entries carry NO wire bookkeeping — clientId /
+   * clientSeq / base are assigned at replay time by the ordinary submit
+   * path, so the stored objects are the payload half of an Intent only.
    */
   offlineTail?: Intent[];
+  /**
+   * The genesisId of the epoch the offline tail was recorded AGAINST. This
+   * is what lets a resume decide the arrival rung without guessing: same
+   * epoch ⇒ the tail is morally a large pending queue and replays silently;
+   * different (or absent, for a tail written by an older build) ⇒ true
+   * divergence, offer suggest/draft — never silently bulldoze.
+   */
+  offlineTailEpoch?: string;
   /** Per-part media metadata (doc 16 §5.3): the sha (and E2EE iv/epoch)
    * of every media part this copy knows. The docx bytes carry the PIXELS;
    * this carries the ADDRESSES — without it a resumed holder couldn't
@@ -131,6 +143,15 @@ export class BundlePersister {
        * callback instead of an empty catch.
        */
       onError?: (err: unknown) => void;
+      /**
+       * The current offline tail (doc 15 §2), read at write time. The
+       * connection's exportBundle cannot know it (the tail is recorded by
+       * the layer ABOVE the connection, across connection rebuilds), so the
+       * owner of the tail injects a getter. Returning an empty tail (or
+       * omitting the getter) ERASES any stored tail — which is exactly
+       * right once a replay has drained it.
+       */
+      offlineTail?: () => { tail: Intent[]; epoch?: string } | null;
     } = {},
   ) {}
 
@@ -214,6 +235,14 @@ export class BundlePersister {
     if (chain.length && chain[chain.length - 1].genesisId === bundle.genesisId) chain[chain.length - 1] = head;
     else chain.push(head);
     bundle.lineage = chain.slice(-50); // bounded; ancient epochs age out
+    // Offline tail (doc 15 §2): rides every write so a refresh mid-offline
+    // (or mid-replay) keeps the un-replayed remainder. An empty tail clears
+    // the stored one — a drained replay must not be re-offered.
+    const off = this.opts.offlineTail?.();
+    if (off && off.tail.length) {
+      bundle.offlineTail = off.tail;
+      bundle.offlineTailEpoch = off.epoch;
+    }
     await this.store.put(bundle);
   }
 }
