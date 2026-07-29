@@ -58,8 +58,14 @@ export interface SealedCheckpoint {
  *       to keep dev rooms homogeneous while this lands, after a live fork was
  *       traced to two same-version builds with different semantics. Do NOT
  *       read this line as evidence that presence is canonical — it is not.
+ *   e5  text-box story editing: the apply's run index now descends into
+ *       w:txbxContent (the e3 gap one level deeper — story runs were
+ *       addressable by id but unresolvable, so every text intent aimed at a
+ *       text box silently rejected). Squarely canonical: an e4 peer rejects
+ *       the very intent an e5 peer applies, so a mixed room forks the
+ *       document on the first keystroke in a pleading number column.
  */
-export const ENGINE_VERSION = "e4";
+export const ENGINE_VERSION = "e5";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-
