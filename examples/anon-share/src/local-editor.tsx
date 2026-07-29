@@ -107,6 +107,12 @@ export function LocalEditor({
           <span className="sub">E2EE · Non-Custodial</span>
         </span>
         <span style={{ flex: 1 }} />
+        {/* Same project links as the collaborative header — a visitor landing
+            on the local editor should be able to reach them too. */}
+        <span className="brand-links">
+          <a href="https://github.com/theRealestAEP/wordinweb" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://word-in-web.com/report/" target="_blank" rel="noopener noreferrer">Parity report</a>
+        </span>
         <button
           data-testid="make-collaborative"
           disabled={!api}

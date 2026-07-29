@@ -68,6 +68,18 @@
          invited to, which is the wrong thing to click by accident. */
       .gate-foot { margin: 16px 0 0; padding-top: 14px; border-top: 1px solid #f1f3f4;
         font-size: 13px; color: #5f6368; display: flex; gap: 8px; align-items: center; }
+      /* Wordmark: the product name plain, "Collaborative" set apart. This is
+         the collab build of WordInWeb, and the header should say which of the
+         two you are looking at without reading the subtitle. */
+      .brand .word { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+      .brand .collab { font-family: "Bradley Hand", "Segoe Print", "Comic Sans MS", cursive;
+        font-size: 18px; font-weight: 700; color: #1a73e8; margin-left: 5px;
+        transform: rotate(-2deg); display: inline-block; }
+      /* Project links, pushed to the far side and quiet: useful to a visitor
+         evaluating the project, never competing with the session controls. */
+      .brand-links { display: flex; gap: 14px; align-items: center; }
+      .brand-links a { font-size: 12px; color: #5f6368; text-decoration: none; white-space: nowrap; }
+      .brand-links a:hover { color: #1a73e8; text-decoration: underline; }
       .hint { color: #5f6368; font-size: 12px; }
       #root { padding: 16px; }
 

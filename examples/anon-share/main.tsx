@@ -176,11 +176,18 @@ function Harness() {
     <div>
       <header>
         <span className="brand">
-          <b>Word in Web Collaborative</b>
+          <span>
+            <span className="word">Word in Web</span>
+            <span className="collab">Collaborative!</span>
+          </span>
           <span className="sub">E2EE · Non-Custodial</span>
         </span>
         <span className="pill">doc {docId.slice(0, 10)}…</span>
         <span className="spacer" />
+        <span className="brand-links">
+          <a href="https://github.com/theRealestAEP/wordinweb" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://word-in-web.com/report/" target="_blank" rel="noopener noreferrer">Parity report</a>
+        </span>
         <input
           className="alias"
           data-testid="alias"
