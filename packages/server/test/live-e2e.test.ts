@@ -109,6 +109,13 @@ describe("LIVE zero-custody server: HTTP seed + WS collab on one port (doc 12)",
         s.close(() => resolve(p));
       }));
     });
+    // This test drives the HTTP-seed + WS + crash-recovery path, and uses a
+    // PLAINTEXT seed to do it — which the zero-custody server now refuses by
+    // default, because holding a readable document is the thing it exists not
+    // to do. Opting in keeps the transport coverage without weakening the
+    // default; `seed-http.test.ts` pins the refusal itself.
+    const prevAllow = process.env.WW_ALLOW_PLAINTEXT_SEED;
+    process.env.WW_ALLOW_PLAINTEXT_SEED = "1";
     const server = await startZeroCustodyServer({ port: probe });
     const base = `http://127.0.0.1:${probe}`;
     try {
@@ -170,6 +177,10 @@ describe("LIVE zero-custody server: HTTP seed + WS collab on one port (doc 12)",
       }
     } finally {
       server.close();
+      // Restore, or every test that runs after this one in the same process
+      // inherits the opt-in and the refusal stops being tested at all.
+      if (prevAllow === undefined) delete process.env.WW_ALLOW_PLAINTEXT_SEED;
+      else process.env.WW_ALLOW_PLAINTEXT_SEED = prevAllow;
     }
   }, 20000);
 });
