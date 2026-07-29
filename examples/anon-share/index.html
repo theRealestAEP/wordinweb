@@ -171,13 +171,17 @@
          dialog said aria-modal while the toolbar underneath stayed live.
          200 clears the toolbar and its popovers together.
 
-         The countdown toast (z-index 50) is now below this, which costs
-         nothing today — the scrim is used in exactly one place, the
-         local-editor "Start Collab" dialog, which only exists BEFORE a
-         session starts, so there is no session deadline to bury. If a scrim
-         ever appears during a live session, revisit that: a lifetime warning
-         cannot be cancelled and offers a download, so hiding it would be the
-         wrong trade. */
+         The countdown toast (z-index 50) is below this, which still costs
+         nothing: the local-editor "Start Collab" dialog exists only BEFORE a
+         session starts; the Save-version dialog is user-opened and closes on
+         Escape; and the session-ended dialog appears only AFTER the session
+         is over — the hook clears any pending deadline before it reports the
+         refusal, so there is never a live countdown to bury.
+
+         The scrim stays SEMI-transparent on purpose: the session-ended
+         dialog sits over the still-rendered (read-only) document, and the
+         document reading through the scrim is what tells the user their copy
+         is still here. */
       .modal-scrim { position: fixed; inset: 0; background: rgba(32,33,36,.45);
         display: flex; align-items: center; justify-content: center; z-index: 200; padding: 16px; }
       .modal { background: #fff; border-radius: 12px; padding: 20px; width: 420px; max-width: 100%;
