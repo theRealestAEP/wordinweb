@@ -253,8 +253,17 @@
       /* A spinner that never stops is a lie about progress; respect the
          setting rather than animating regardless. */
       @media (prefers-reduced-motion: reduce) {
-        .document-loading-spinner { animation: none; border-top-color: #c7d5ea; }
+        .document-loading-spinner, .dxw-collab-spinner { animation: none; border-top-color: #c7d5ea; }
       }
+      /* Joining a session, styled to match the local screen's loader. The
+         package renders an empty span with this class and no styling of its
+         own, so the look belongs here. Centred, because this replaces the
+         whole document area rather than overlaying it. */
+      .dxw-collab-connecting { display: grid; place-content: center; justify-items: center;
+        gap: 10px; height: 100%; color: #29405e; font-size: 13px; text-align: center; }
+      .dxw-collab-spinner { width: 28px; height: 28px; border: 3px solid #c7d5ea;
+        border-top-color: #2f6fed; border-radius: 50%;
+        animation: document-loading-spin 700ms linear infinite; }
 
       /* SAVED VERSIONS. Its own quiet strip under the session row, labelled,
          so a row of timestamps reads as a list of restore points rather than

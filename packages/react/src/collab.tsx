@@ -1358,9 +1358,21 @@ function ConnectingNotice(): ReactNode {
     const t = setTimeout(() => setSlow(true), 5000);
     return () => clearTimeout(t);
   }, []);
+  // The spinner is an EMPTY element carrying a class, not inline styles: a host
+  // that styles it gets a spinner, a host that does not sees nothing extra
+  // (an empty span renders as nothing). The package should not ship an opinion
+  // about the look, and it must not require CSS to be legible either — hence
+  // the text stands on its own.
   return createElement(
     "div",
-    { className: "dxw-collab-connecting", style: { padding: 16, font: "14px system-ui" } },
+    {
+      className: "dxw-collab-connecting",
+      style: { padding: 16, font: "14px system-ui" },
+      role: "status",
+      "aria-live": "polite",
+      "aria-busy": "true",
+    },
+    createElement("span", { className: "dxw-collab-spinner", "aria-hidden": "true", key: "s" }),
     slow
       ? "Still connecting — is the collab server running? (start it, then reload this page)"
       : "Connecting…",
