@@ -110,7 +110,17 @@ export function LocalEditor({
     // paginating a large .docx takes real seconds, and a blank stage in the
     // meantime reads as a broken app rather than a busy one.
     setLoading(filename);
-    setBlank(bytes);
+    // THE SPINNER MUST PAINT BEFORE THE PARSE STARTS, and it does not get to
+    // if both state updates land in one batch: React commits them together,
+    // DocxView's effect then parses and lays out the document SYNCHRONOUSLY,
+    // and the browser reaches its first paint only after all of that — so the
+    // overlay is mounted and unmounted without ever being on screen. That is
+    // exactly what "still no spinner when loading a big document" was.
+    //
+    // Two frames, not one: a single requestAnimationFrame callback runs BEFORE
+    // the paint it is scheduled alongside, so the work would still beat the
+    // pixels. The second frame is what guarantees the spinner is actually up.
+    requestAnimationFrame(() => requestAnimationFrame(() => setBlank(bytes)));
   };
 
   /** FILE MENU — Download. The edited bytes, under the name they came in as. */
@@ -214,7 +224,17 @@ export function LocalEditor({
             <span>Preparing pages for editing…</span>
           </div>
         )}
-        <DocxView source={blank} editable onReady={setApi} onLoad={() => setLoading(null)} />
+        {/* onError as well as onLoad: a document that fails to parse would
+            otherwise leave the spinner up forever, which is a worse lie than
+            no spinner. Both paths clear it; the error surfaces through the
+            view's own handling. */}
+        <DocxView
+          source={blank}
+          editable
+          onReady={setApi}
+          onLoad={() => setLoading(null)}
+          onError={() => setLoading(null)}
+        />
       </div>
 
       {modalOpen && (
