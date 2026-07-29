@@ -10,6 +10,24 @@ COPY packages/core/package.json packages/core/
 COPY packages/collab/package.json packages/collab/
 COPY packages/server/package.json packages/server/
 RUN npm ci
+# ROLLUP'S NATIVE BINARY, installed explicitly because npm will not.
+#
+# The packages build with tsup, which loads rollup at startup, and rollup picks
+# a native binary through platform-specific OPTIONAL dependencies. A lockfile
+# records only the ones resolved on the machine that generated it — ours holds
+# @rollup/rollup-darwin-arm64 and nothing else — so inside this Alpine image
+# the build died on "Cannot find module @rollup/rollup-linux-arm64-musl".
+#
+# Two things that do NOT fix it, both tried:
+#  - `npm install` instead of `npm ci`: npm does not add the missing platform
+#    package while a lockfile is present. That IS the bug (npm/cli#4828).
+#  - skipping the type build: tsup loads rollup whether or not it emits .d.ts.
+#
+# So install it directly. The arch is derived rather than hardcoded, because
+# an x86 host would need a different package and a wrong pin would fail here
+# with the same confusing message. `--no-save` keeps the lockfile untouched.
+RUN ARCH="$(uname -m | sed 's/aarch64/arm64/; s/x86_64/x64/')" && \
+    npm i --no-save --no-audit --no-fund "@rollup/rollup-linux-${ARCH}-musl"
 COPY tsconfig.base.json ./
 COPY packages/core packages/core
 COPY packages/collab packages/collab
