@@ -134,6 +134,27 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
   // documents every knob, its default, and the 0-disables convention). The
   // guard and the hub share one clock so their deadlines cannot drift.
   const limits = envLimits();
+  // BOOT WIPE (doc 16 §4): when the spill tier is on, the spill root is
+  // removed and recreated BEFORE the port is bound — everything under it is a
+  // previous boot's orphans, already undecryptable (that key died with that
+  // process); the wipe just reclaims the disk. A host that cannot perform it
+  // cannot hold the tier's disk-space guarantee, so it must never serve a
+  // request: the failure is logged with the path and the underlying error
+  // (whose code distinguishes EACCES from ENOENT from EROFS) and thrown — the
+  // CLI entry below exits non-zero on it.
+  if (limits.media.diskBytes > 0) {
+    const { wipeSpillRoot } = await import("./media-spill.js");
+    try {
+      await wipeSpillRoot(limits.media.spillDir);
+    } catch (err) {
+      obs.error("cli.spillWipeFailed", err, { path: limits.media.spillDir });
+      // The underlying message carries the errno code (EACCES / ENOENT /
+      // EROFS), which is what makes the three failure modes distinguishable.
+      throw new Error(
+        `media spill wipe failed for ${limits.media.spillDir}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   const ipGuard = new IpGuard(limits.ip);
   const hub = new CollabHub(/*provider*/ null, undefined, undefined, undefined, undefined, obs, limits, ipGuard); // zero-custody: seed-only rooms
   // INBOUND FRAME CAP — the first wall, and it has to be first: `ws` defaults
@@ -216,9 +237,29 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
     if (media) {
       const [, mDoc, mSha] = media;
       if (req.method === "GET") {
-        const bytes = hub.mediaDownload(decodeURIComponent(mDoc), mSha);
-        if (!bytes) res.writeHead(404, { "content-type": "application/json" }).end(`{"state":"absent"}`);
-        else res.writeHead(200, { "content-type": "application/octet-stream" }).end(Buffer.from(bytes));
+        const hit = hub.mediaDownload(decodeURIComponent(mDoc), mSha);
+        if (!hit) res.writeHead(404, { "content-type": "application/json" }).end(`{"state":"absent"}`);
+        else if (hit instanceof Uint8Array) res.writeHead(200, { "content-type": "application/octet-stream" }).end(Buffer.from(hit));
+        else {
+          // Disk tier: stream straight from the spill to the socket — the
+          // whole point of the tier is that these bytes never re-enter RAM
+          // as a buffer. Two failure shapes:
+          //  - open() rejects: the file vanished between the index hit and
+          //    the open (a sweep unlink racing this request). Same outcome
+          //    as arriving one tick later — absent.
+          //  - the stream errors mid-flight: headers are already gone, so
+          //    the only honest signal left is destroying the socket; the
+          //    client's fetch fails and its ordinary re-request/re-supply
+          //    path recovers.
+          hit.open().then(
+            (stream) => {
+              res.writeHead(200, { "content-type": "application/octet-stream", "content-length": String(hit.len) });
+              stream.on("error", () => res.destroy());
+              stream.pipe(res);
+            },
+            () => res.writeHead(404, { "content-type": "application/json" }).end(`{"state":"absent"}`),
+          );
+        }
         return;
       }
       if (req.method === "PUT") {
@@ -373,6 +414,13 @@ if (
   (process.argv[1].endsWith("cli.js") || process.argv[1].endsWith("wordinweb-collab-server"))
 ) {
   const port = Number(process.env.PORT ?? 1234);
-  if (process.env.WW_DEV_WS === "1") void startDevServer({ port });
-  else void startZeroCustodyServer({ port });
+  const fail = (err: unknown) => {
+    // Startup failures (a spill root that cannot be wiped, a port in use)
+    // must exit NON-ZERO so a supervisor sees a crash, not a healthy boot.
+    // The structured line already went to the log sink; this is the exit.
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  };
+  if (process.env.WW_DEV_WS === "1") startDevServer({ port }).catch(fail);
+  else startZeroCustodyServer({ port }).catch(fail);
 }
