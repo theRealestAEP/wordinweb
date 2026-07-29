@@ -4327,7 +4327,6 @@ export class DocxEditor {
 
     const btnRow = document.createElement("div");
     btnRow.style.cssText = "display:flex;gap:8px;justify-content:flex-end;";
-    box.appendChild(btnRow);
 
     const mkBtn = (text: string, title: string, primary: boolean, fn: () => void): void => {
       const b = document.createElement("button");
@@ -4354,8 +4353,20 @@ export class DocxEditor {
       });
       btnRow.appendChild(b);
     };
-    mkBtn("✓ Accept", "Accept this suggestion", true, () => this.acceptRevisionRef(ref));
-    mkBtn("✗ Reject", "Reject this suggestion", false, () => this.rejectRevisionRef(ref));
+    if (this.reviewBlockedByCollab()) {
+      // Accept/reject refuses in a live session (see reviewBlockedByCollab).
+      // Render the reason instead of two buttons that silently do nothing —
+      // a dead button in a shared document reads as a broken app.
+      const note = document.createElement("div");
+      note.dataset.dxwReviewBlocked = "1";
+      note.style.cssText = "font-size:11.5px;color:#5f6368;line-height:1.35;";
+      note.textContent = "Accept and reject are not available in a shared session yet.";
+      box.appendChild(note);
+    } else {
+      box.appendChild(btnRow);
+      mkBtn("✓ Accept", "Accept this suggestion", true, () => this.acceptRevisionRef(ref));
+      mkBtn("✗ Reject", "Reject this suggestion", false, () => this.rejectRevisionRef(ref));
+    }
     document.body.appendChild(box);
     this.suggestionPopover = box;
   }
@@ -5914,9 +5925,24 @@ export class DocxEditor {
     return null;
   }
 
+  /** True in a live session, where accept/reject would fork the room.
+   *
+   * Collab gate (narrow): the four accept/reject entry points below mutate
+   * host.doc DIRECTLY (no emission), so in a live session they would resolve
+   * the suggestion locally with no peer ever seeing it — refused per the
+   * standing audit rule (no mutation branch without an emission). The
+   * acceptRevision/rejectRevision/acceptAllRevisions INTENTS exist and apply
+   * fine (collab/src/apply.ts), but they address a revision by its index in
+   * collectRevisions order, which the editor has no path to produce here.
+   * Wiring that is known follow-on work. Local mode is unaffected. */
+  private reviewBlockedByCollab(): boolean {
+    return !!this.host.onIntent;
+  }
+
   /** Accept (keep insertion / drop deletion) the given revision, or the one at
    * the caret. Re-renders and returns whether anything changed. */
   acceptRevisionRef(ref?: RevisionRef): boolean {
+    if (this.reviewBlockedByCollab()) return false;
     const target = ref ?? this.revisionAtCaret();
     if (!target) return false;
     this.host.history?.checkpoint();
@@ -5931,6 +5957,7 @@ export class DocxEditor {
   /** Reject (drop insertion / restore deletion) the given revision, or the one
    * at the caret. */
   rejectRevisionRef(ref?: RevisionRef): boolean {
+    if (this.reviewBlockedByCollab()) return false;
     const target = ref ?? this.revisionAtCaret();
     if (!target) return false;
     this.host.history?.checkpoint();
@@ -5949,6 +5976,7 @@ export class DocxEditor {
 
   /** Accept every tracked change (one undo step). Returns how many applied. */
   acceptAllRevisions(): number {
+    if (this.reviewBlockedByCollab()) return 0;
     this.host.history?.checkpoint();
     const n = acceptAllRevisions(this.host.doc);
     if (n === 0) return 0;
@@ -5961,6 +5989,7 @@ export class DocxEditor {
 
   /** Reject every tracked change (one undo step). Returns how many applied. */
   rejectAllRevisions(): number {
+    if (this.reviewBlockedByCollab()) return 0;
     this.host.history?.checkpoint();
     const n = rejectAllRevisions(this.host.doc);
     if (n === 0) return 0;
