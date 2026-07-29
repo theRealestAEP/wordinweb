@@ -1,4 +1,6 @@
 import { MAX_IMAGE_BYTES } from "@wordinweb/collab/server";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 /**
  * Server lifecycle + abuse-protection configuration.
  *
@@ -239,6 +241,27 @@ export interface MediaLimits {
    * person who just joined — the failure this relay exists to prevent. */
   roomUploadsPerMin: number;
   roomUploadBurst: number;
+  /**
+   * GLOBAL cap on media held in RAM across all rooms — the hot tier of the
+   * doc 16 §4 two-tier locker. Per-room caps alone do not bound the process:
+   * N rooms x maxRoomBytes can OOM any container. 0 disables (RAM-only,
+   * unbounded — today's behavior).
+   */
+  ramBytes: number;
+  /**
+   * GLOBAL cap on the disk spill tier. 0 (the current default) disables the
+   * spill entirely: media stays RAM-only and nothing is ever written to
+   * spillDir. Size it to what the host actually offers — the spec's 20 GB
+   * figure assumes more free disk than a small host has.
+   */
+  diskBytes: number;
+  /**
+   * Where spilled blobs live. Wants EPHEMERAL local scratch (container
+   * scratch dir / emptyDir) — the spill is crypto-shredded across restarts
+   * by design, so a persistent or backed-up volume here would be a bug, not
+   * a convenience.
+   */
+  spillDir: string;
 }
 
 export interface HubLimits {
@@ -318,6 +341,11 @@ export const DEFAULT_MEDIA_LIMITS: MediaLimits = {
   // limit. Raise the burst before the rate if that tail is being felt.
   roomUploadsPerMin: 60,
   roomUploadBurst: 64,
+  ramBytes: 128 * 1024 * 1024,
+  // Spill DISABLED by default until the eviction ladder lands — a budget
+  // with nothing consuming it would imply behavior that does not exist yet.
+  diskBytes: 0,
+  spillDir: join(tmpdir(), "wordinweb-spill"),
 };
 
 export const DEFAULT_LIMITS: HubLimits = {
@@ -338,6 +366,17 @@ export function envInt(name: string, def: number): number {
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 0) return def;
   return Math.floor(n);
+}
+
+/**
+ * Read a string from the environment, falling back to `def` when unset or
+ * blank. The trim matters: a path with stray whitespace from a compose file
+ * would otherwise silently create a differently-named directory.
+ */
+export function envStr(name: string, def: string): string {
+  const raw = typeof process !== "undefined" ? process.env[name] : undefined;
+  if (raw === undefined || raw.trim() === "") return def;
+  return raw.trim();
 }
 
 /**
@@ -388,6 +427,9 @@ export function envLimits(): HubLimits {
       uploadDeadlineMs: envInt("WW_MEDIA_UPLOAD_DEADLINE_MS", DEFAULT_MEDIA_LIMITS.uploadDeadlineMs),
       roomUploadsPerMin: envInt("WW_MEDIA_ROOM_UPLOADS_PER_MIN", DEFAULT_MEDIA_LIMITS.roomUploadsPerMin),
       roomUploadBurst: envInt("WW_MEDIA_ROOM_UPLOAD_BURST", DEFAULT_MEDIA_LIMITS.roomUploadBurst),
+      ramBytes: envInt("WW_MEDIA_RAM_BYTES", DEFAULT_MEDIA_LIMITS.ramBytes),
+      diskBytes: envInt("WW_MEDIA_DISK_BYTES", DEFAULT_MEDIA_LIMITS.diskBytes),
+      spillDir: envStr("WW_MEDIA_SPILL_DIR", DEFAULT_MEDIA_LIMITS.spillDir),
     },
   });
 }
@@ -452,6 +494,19 @@ export function normalizeLimits(partial: {
   // means "disabled" (the convention the per-IP limits already use); a rate
   // that is on therefore needs at least one token to spend.
   if (media.roomUploadsPerMin > 0 && media.roomUploadBurst < 1) media.roomUploadBurst = 1;
+  // The RAM tier must hold at least ONE legal blob, or a maximally-sized
+  // upload could never be admitted at all: raised to the blob cap rather
+  // than rejected, same shape as every clamp above. 0 stays 0 (cap
+  // disabled).
+  if (media.ramBytes > 0 && media.ramBytes < media.maxBlobBytes) media.ramBytes = media.maxBlobBytes;
+  // A spill smaller than one room's media budget still WORKS (the spill is
+  // a cache; over-budget evicts to re-supply), it is just probably not what
+  // the operator meant — so warn, don't clamp.
+  if (media.diskBytes > 0 && media.diskBytes < media.maxRoomBytes) {
+    console.warn(
+      `[limits] WW_MEDIA_DISK_BYTES (${media.diskBytes}) is below the per-room media cap (${media.maxRoomBytes}); one busy room can thrash the whole spill tier`,
+    );
+  }
   return { lifecycle, ip, surge, media };
 }
 
