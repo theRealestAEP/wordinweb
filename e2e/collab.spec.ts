@@ -253,3 +253,38 @@ test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () 
     }
   });
 });
+
+test("the collab dialog's scrim covers the TOOLBAR, not just the page", async ({ page }) => {
+  // The scrim sat at z-index 60 while the ribbon renders at
+  // var(--dxw-toolbar-z-index, 100), so opening the dialog dimmed the
+  // document and left the toolbar bright and clickable on top of it: a
+  // dialog marked aria-modal with a live toolbar underneath.
+  //
+  // Asserted as a RELATIONSHIP between the two computed values rather than
+  // against the literal 200. Pinning the number would pass while someone
+  // raised the toolbar's variable past it, which is the same bug again.
+  await page.goto(LANDING);
+  await expect(page.getByTestId("local-editor")).toBeVisible();
+  await page.getByTestId("make-collaborative").click();
+  const scrim = page.getByTestId("collab-modal");
+  await expect(scrim).toBeVisible();
+
+  const scrimZ = await scrim.evaluate((el) => Number(getComputedStyle(el).zIndex));
+  // The ribbon root is the element carrying data-dxw-toolbar-mode; that is
+  // where `zIndex: var(--dxw-toolbar-z-index, 100)` is declared (toolbar.tsx).
+  //
+  // Located by that attribute rather than a class guess. The first version of
+  // this test looked for a `dxw-toolbar` class, found nothing, skipped the
+  // comparison behind a null check, and passed against the ORIGINAL BUG —
+  // a test that proved only that it had found nothing to test.
+  const toolbar = page.locator("[data-dxw-toolbar-mode]").first();
+  await expect(toolbar, "the ribbon must be present to compare against").toBeVisible();
+  const toolbarZ = await toolbar.evaluate((el) => Number(getComputedStyle(el).zIndex));
+
+  expect(scrimZ, "the scrim must declare a stacking level").toBeGreaterThan(0);
+  expect(toolbarZ, "the toolbar must declare one too, or this proves nothing").toBeGreaterThan(0);
+  expect(
+    scrimZ,
+    `scrim z-index ${scrimZ} must sit above the toolbar's ${toolbarZ}, or the ribbon stays live under a modal dialog`,
+  ).toBeGreaterThan(toolbarZ);
+});
