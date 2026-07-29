@@ -224,6 +224,21 @@
       .filemenu .filemenu-panel button:hover:not([disabled]) { background: #f1f3f4; border-color: transparent; }
       .filemenu .filemenu-panel button[disabled] { opacity: .5; cursor: default; }
 
+      /* SAVED VERSIONS. Its own quiet strip under the session row, labelled,
+         so a row of timestamps reads as a list of restore points rather than
+         a loose button someone left behind. */
+      .versionbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+        padding: 6px 14px; background: #f8fafc; border-bottom: 1px solid #e6eaf0; }
+      .versionbar-label { font-size: 11px; font-weight: 600; letter-spacing: .04em;
+        text-transform: uppercase; color: #7a869a; margin-right: 2px; }
+      .versionbar button.version-chip { display: inline-flex; align-items: baseline; gap: 6px;
+        font: 12px system-ui; padding: 3px 9px; border: 1px solid #dbe2ea; border-radius: 999px;
+        background: #fff; color: #29405e; cursor: pointer; }
+      .versionbar button.version-chip:hover { border-color: #8fa1b6; background: #f4f7fb; }
+      .versionbar button.version-chip:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
+      .version-name { font-weight: 600; }
+      .version-time { color: #7a869a; font-variant-numeric: tabular-nums; }
+
       /* Countdown toward an announced session ending. DELIBERATELY NOT A
          MODAL: the session stays fully usable through the grace period, and
          for the idle deadline typing is what cancels it — a dialog that stole

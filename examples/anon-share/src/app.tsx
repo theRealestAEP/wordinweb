@@ -190,9 +190,25 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   // DocVersion is bundle-shaped enough for the demo (docx + sidecar).
   const [versions, setVersions] = useState<{ label: string; savedAt: number }[]>([]);
 
-  const saveVersion = async () => {
+  // `window.prompt` blocks the whole page — in a live session that stalls the
+  // socket pump behind a browser dialog we do not control, and it is the one
+  // piece of chrome here that cannot be styled. The modal below replaces it.
+  const [versionModal, setVersionModal] = useState(false);
+  const [versionLabel, setVersionLabel] = useState("");
+  const versionRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!versionModal) return;
+    versionRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setVersionModal(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [versionModal]);
+
+  const saveVersion = async (label: string) => {
     if (!session?.doc) return;
-    const label = window.prompt("Version label (optional):") ?? "";
     const savedAt = Date.now();
     const bundle = await store.get(docId);
     if (!bundle) return;
@@ -506,7 +522,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             Disconnect
           </button>
         )}
-        <button onClick={() => void saveVersion()} disabled={!session?.ready}>Save version</button>
+        <button onClick={() => { setVersionLabel(""); setVersionModal(true); }} disabled={!session?.ready}>Save version</button>
         <button onClick={() => setShowActivity((v) => !v)}>{showActivity ? "Hide" : "Show"} activity</button>
         {isOwner && (
           <button
@@ -568,13 +584,60 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         </span>
       </div>
       {versions.length > 0 && (
-        <div style={{ display: "flex", gap: 6, padding: "0 8px 4px", fontSize: 12, flexWrap: "wrap" }}>
+        <div className="versionbar" data-testid="versions">
+          <span className="versionbar-label">Saved versions</span>
           {versions.map((v) => (
-            <button key={v.savedAt} title="Opens as a new file — never merges into the live doc"
+            <button key={v.savedAt} className="version-chip"
+              title="Downloads as a new file — never merges into the live document"
               onClick={() => void downloadVersion(v.savedAt, v.label)}>
-              ⏱ {v.label} · {new Date(v.savedAt).toLocaleTimeString()}
+              {/* "(auto)" is the STORAGE sentinel for an unnamed version —
+                  downloadVersion keys the record off it — so it is renamed for
+                  display here rather than at the source. */}
+              <span className="version-name">{v.label === "(auto)" ? "Unnamed" : v.label}</span>
+              <time className="version-time">{new Date(v.savedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time>
             </button>
           ))}
+        </div>
+      )}
+      {versionModal && (
+        <div
+          className="modal-scrim"
+          data-testid="version-modal"
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setVersionModal(false); }}
+        >
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="version-modal-title">
+            <h2 id="version-modal-title">Save a version</h2>
+            <p>
+              A frozen copy of the document as it stands now, kept in this browser beside the
+              live one. Downloading a version never merges it back — it opens as its own file.
+            </p>
+            <label htmlFor="version-label-input">Name (optional)</label>
+            <input
+              id="version-label-input"
+              ref={versionRef}
+              data-testid="version-label"
+              value={versionLabel}
+              placeholder="e.g. before the edits"
+              maxLength={64}
+              onChange={(e) => setVersionLabel(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                setVersionModal(false);
+                void saveVersion(versionLabel.trim());
+              }}
+            />
+            <div className="row">
+              <button className="ghost" data-testid="version-cancel" onClick={() => setVersionModal(false)}>
+                Cancel
+              </button>
+              <button
+                data-testid="version-save"
+                onClick={() => { setVersionModal(false); void saveVersion(versionLabel.trim()); }}
+              >
+                Save version
+              </button>
+            </div>
+          </div>
         </div>
       )}
       {showActivity && (
