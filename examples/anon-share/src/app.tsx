@@ -384,30 +384,18 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
       // explained what was about to happen, so this must read as the ending
       // it announced — "refresh to retry" would be both wrong (there is
       // nothing to retry) and a lie about where the document lives.
+      //
+      // A MODAL over the (read-only) document rather than a replacement
+      // screen: the document is still right there, and the dialog forces the
+      // one decision that matters — where does editing continue?
       return (
-        <div data-testid="session-ended">
-          <p>
-            {reason === "idle-timeout"
-              ? "This session ended after a long stretch with no edits. Rooms close when nobody is using them — the server keeps nothing between sessions."
-              : "This session reached its time limit and ended. Every room has a maximum age, so none of them lives on the server indefinitely."}
-          </p>
-          {reviveState === "no-copy" ? (
-            <p>This browser has no saved copy of the document, so it can’t bring it back. Any participant who edited here before can.</p>
-          ) : (
-            <p>Your copy is still here in this browser — nothing was lost.</p>
-          )}
-          {reviveState !== "no-copy" && (
-            <>
-              <button data-testid="bring-back" disabled={reviveState === "reviving"} onClick={() => void revive()}>
-                {reviveState === "reviving" ? "Bringing it back…" : "Bring it back live"}
-              </button>{" "}
-              {onDisconnect && (
-                <button data-testid="ended-keep-local" onClick={leaveSession}>Keep editing on your own</button>
-              )}{" "}
-            </>
-          )}
-          {onNewDocument && <button data-testid="ended-new-document" onClick={onNewDocument}>Start fresh</button>}
-        </div>
+        <SessionEndedModal
+          reason={reason}
+          reviveState={reviveState}
+          onRevive={() => void revive()}
+          onKeepLocal={onDisconnect ? leaveSession : undefined}
+          onNewDocument={onNewDocument}
+        />
       );
     }
     if (reason === "room-full") {
@@ -767,6 +755,87 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
       )}
       {/* Dev perf menu (Ctrl+Shift+P / ?perf=1) — inert until opened. */}
       <PerfHud clientId={clientId} docStats={docStats} />
+    </div>
+  );
+}
+
+/**
+ * The session ended (idle timeout / lifetime cap), shown as a MODAL over the
+ * document — which is still on screen behind it, read-only (`writesBlocked`
+ * folds refusal in, so the editor gate handles that; this dialog only has to
+ * present the ways forward).
+ *
+ * GENUINELY BLOCKING, unlike the other dialogs here (Save-version, the
+ * local editor's share modal), which close on Escape and a scrim click.
+ * There is deliberately no dismiss: dismissing would strand the user on a
+ * dead document with the three ways forward gone. Every exit is one of the
+ * three buttons, so focus moves INTO the dialog on mount and Tab is trapped
+ * inside it — that trap is what makes swallowing Escape defensible for a
+ * keyboard user (the document behind is read-only; tabbing into it serves
+ * nothing).
+ *
+ * The `no-copy` state keeps only "Start fresh": with no stored bundle there
+ * is nothing to revive and nothing to keep editing. It stops being a ghost
+ * there — with one action, that action is the primary.
+ */
+function SessionEndedModal({ reason, reviveState, onRevive, onKeepLocal, onNewDocument }: {
+  reason: "idle-timeout" | "session-expired";
+  reviveState: "idle" | "reviving" | "no-copy";
+  onRevive: () => void;
+  onKeepLocal?: () => void;
+  onNewDocument?: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const buttons = () => Array.from(dialog.querySelectorAll<HTMLElement>("button:not([disabled])"));
+    buttons()[0]?.focus();
+    // Queried per keypress, not captured once: the button set changes when
+    // reviveState moves (reviving disables bring-back; no-copy removes it).
+    const onKeydown = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const els = buttons();
+      if (els.length === 0) return;
+      const idx = els.indexOf(document.activeElement as HTMLElement);
+      if (e.shiftKey && idx <= 0) { e.preventDefault(); els[els.length - 1].focus(); }
+      else if (!e.shiftKey && (idx === -1 || idx === els.length - 1)) { e.preventDefault(); els[0].focus(); }
+    };
+    window.addEventListener("keydown", onKeydown, true);
+    return () => window.removeEventListener("keydown", onKeydown, true);
+  }, []);
+  return (
+    <div className="modal-scrim" data-testid="session-ended">
+      <div ref={dialogRef} className="modal" role="dialog" aria-modal="true" aria-labelledby="session-ended-title">
+        <h2 id="session-ended-title">
+          {reason === "idle-timeout" ? "This session has ended" : "This session reached its time limit"}
+        </h2>
+        <p>
+          {reason === "idle-timeout"
+            ? "This session ended after a long stretch with no edits. Rooms close when nobody is using them — the server keeps nothing between sessions."
+            : "This session reached its time limit and ended. Every room has a maximum age, so none of them lives on the server indefinitely."}
+        </p>
+        {reviveState === "no-copy" ? (
+          <p>This browser has no saved copy of the document, so it can’t bring it back. Any participant who edited here before can.</p>
+        ) : (
+          <p>Your copy is still here in this browser — nothing was lost.</p>
+        )}
+        <div className="row">
+          {reviveState !== "no-copy" && onKeepLocal && (
+            <button className="ghost" data-testid="ended-keep-local" onClick={onKeepLocal}>Keep editing on your own</button>
+          )}
+          {onNewDocument && (
+            <button className={reviveState === "no-copy" ? undefined : "ghost"} data-testid="ended-new-document" onClick={onNewDocument}>
+              Start fresh
+            </button>
+          )}
+          {reviveState !== "no-copy" && (
+            <button data-testid="bring-back" disabled={reviveState === "reviving"} onClick={onRevive}>
+              {reviveState === "reviving" ? "Bringing it back…" : "Bring it back live"}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

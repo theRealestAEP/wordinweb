@@ -213,6 +213,12 @@ export interface CollabSession {
    * already renders viewer mode on this predicate gets the disconnected case
    * right without changing a line, which is exactly what the rule was written
    * to buy. {@link connection} says WHICH so the copy can differ.
+   *
+   * A REFUSED SESSION FOLDS IN TOO, by the same rule. A refusal ends the
+   * session — no socket, nothing to sequence against — so any document still
+   * on screen (e.g. behind a "session ended" dialog) must be read-only, and
+   * it inherits that from this predicate rather than from a refusal-specific
+   * gate someone could forget to compose.
    */
   writesBlocked: boolean;
   /**
@@ -793,8 +799,16 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // it in here — rather than adding a parallel gate at the editor — is what
     // makes the existing `editable: … && !session.writesBlocked` line cover
     // the dropped-socket case without being touched.
+    //
+    // A REFUSAL BLOCKS WRITES FIRST OF ALL: the session is dead, and note the
+    // hub does NOT close the socket after a kick, so `connection` can still
+    // read "live" and the roster can still hold a stale `allowed` — neither
+    // may win over a refusal. This is what keeps a document rendered behind a
+    // "session ended" dialog read-only through the same single predicate.
     writesBlocked:
-      connection !== "live" || (myWrite !== undefined ? myWrite !== "allowed" : readOnlyBlocked),
+      refused !== null ||
+      connection !== "live" ||
+      (myWrite !== undefined ? myWrite !== "allowed" : readOnlyBlocked),
     // Left UNSET by a disconnect on purpose. These four values describe what
     // the SERVER decided about this participant, and a client that cannot
     // reach the server has not been told anything new — reporting a stale
@@ -890,8 +904,17 @@ export function CollabEditor(opts: UseCollabOptions & {
    * around the editor without re-implementing its composition. */
   onSession?: (session: CollabSession) => void;
   /** Custom refusal UI (e.g. already-open -> "use here instead",
-   * no-session -> "bring it back live"). Default: a refresh notice. */
-  refusedContent?: (reason: string) => ReactNode;
+   * no-session -> "bring it back live"). Default: a refresh notice.
+   *
+   * `ctx.docVisible` says which surface the content lands on. False (the
+   * pre-live refusals: already-open, room-full, version mismatch, a code
+   * gate): the content IS the page, exactly as before — render a full
+   * screen. True (post-live refusals: idle-timeout, session-expired): the
+   * document is still in hand and stays on screen READ-ONLY behind the
+   * content, which is rendered in an overlay covering it — render a
+   * dialog/scrim, not a full page. Existing one-argument hosts keep their
+   * old markup untouched; the second argument only ADDS the information. */
+  refusedContent?: (reason: string, ctx?: { docVisible: boolean }) => ReactNode;
 }): ReactNode {
   const session = useCollab(opts);
   useEffect(() => {
@@ -932,9 +955,56 @@ export function CollabEditor(opts: UseCollabOptions & {
   );
 
   if (session.refused) {
-    return opts.refusedContent
-      ? createElement("div", { className: "dxw-collab-refused" }, opts.refusedContent(session.refused))
-      : createElement("div", { className: "dxw-collab-refused" }, `Please refresh — ${session.refused}.`);
+    // A refusal that arrives AFTER a live session (idle-timeout,
+    // session-expired) leaves the document in hand — keep it on screen
+    // behind the refusal content instead of replacing the page with it.
+    // Pre-live refusals (already-open, room-full, version mismatch, code
+    // gates) have nothing loaded, and faking an empty page behind a dialog
+    // would be a lie: those keep the full-screen refusal exactly as before.
+    const docVisible = !!(session.doc && bytes);
+    const content = opts.refusedContent
+      ? opts.refusedContent(session.refused, { docVisible })
+      : createElement(
+          "div",
+          // Legible over a rendered page in the overlay case; inert extra
+          // styling on the plain full-screen path costs nothing.
+          docVisible
+            ? { style: { margin: 16, padding: "10px 14px", width: "fit-content", background: "rgba(255,255,255,.95)", borderRadius: 8, font: "14px system-ui", boxShadow: "0 2px 8px rgba(0,0,0,.25)" } }
+            : undefined,
+          `Please refresh — ${session.refused}.`,
+        );
+    if (!docVisible) {
+      return createElement("div", { className: "dxw-collab-refused" }, content);
+    }
+    return createElement(
+      "div",
+      { className: "dxw-collab-refused-host", style: { position: "relative", height: "100%" } },
+      createElement(DocxView, {
+        source: bytes,
+        // NO `collab` prop: a refused session is dead — no socket, nothing to
+        // submit to — so this is a plain document view, not a live editor.
+        // And the SAME single gate as the live path below: refusal folds into
+        // writesBlocked (see CollabSession), so this is always false here —
+        // an editable surface over a dead session would apply keystrokes
+        // locally and lose them.
+        editable: (opts.editable ?? true) && !session.writesBlocked,
+        style: { height: "100%" },
+      }),
+      // The overlay covers the document (blocking pointer interaction with a
+      // dead page); the host's content styles itself on top of it. The
+      // load-bearing `dxw-collab-refused` class keeps its meaning — "the
+      // element holding the refusal content" — with the overlay placement
+      // carried by the additional class. DELIBERATELY NO z-index: it would
+      // create a stacking context that traps a host's `position: fixed`
+      // dialog/scrim at this layer, silently re-scoping the host's own
+      // z-values. DOM order (after the DocxView) already paints it above the
+      // document.
+      createElement(
+        "div",
+        { className: "dxw-collab-refused dxw-collab-refused-overlay", style: { position: "absolute", inset: 0 } },
+        content,
+      ),
+    );
   }
   if (!session.ready || !bytes || !session.doc) {
     // Surface a dead server instead of spinning forever: if the welcome hasn't
