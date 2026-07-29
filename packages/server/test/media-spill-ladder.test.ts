@@ -514,6 +514,45 @@ describe("demotion racing a download", () => {
 });
 
 describe("room eviction", () => {
+  it("a room evicted MID-demotion leaves no orphan file, no directory, no gauge bytes — and the upload answers 404", async () => {
+    const { hub, clock } = makeHub(root, { maxBlobBytes: BLOB, ramBytes: 2 * BLOB, diskBytes: 10 * FILE });
+    hub.seed("d", blankDoc());
+    const A = bytesOf(BLOB, 121);
+    const B = bytesOf(BLOB, 122);
+    const C = bytesOf(BLOB, 123);
+    const [shaA, shaB, shaC] = await Promise.all([A, B, C].map(shaOf));
+    expect(await hub.mediaUpload("d", shaA, A)).toBe(201);
+    clock.now = 500;
+    expect(await hub.mediaUpload("d", shaB, B)).toBe(201);
+
+    // Park the demotion's spill write behind a gate.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const spill = (hub as any).spill;
+    const origWrite = spill.write.bind(spill);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    spill.write = async (...args: unknown[]) => {
+      await gate;
+      return origWrite(...args);
+    };
+
+    clock.now = 1000;
+    const pending = hub.mediaUpload("d", shaC, C); // demotes A — parked
+    await new Promise((r) => setTimeout(r, 5));
+
+    // The room dies while the write is in flight (empty-room grace elapses).
+    clock.now = 200_000;
+    expect(hub.sweepRooms()).toEqual(["d"]);
+    release();
+    expect(await pending).toBe(404); // the room is gone; the upload cannot land
+
+    await settle();
+    const real = await diskReality(root);
+    expect(real.files).toBe(0); // the completed write was detected stale and removed
+    expect(real.dirs).toBe(0);
+    expect(hub.mediaTierBytes()).toEqual({ ram: 0, disk: 0 });
+  });
+
   it("removes the room's spill directory and returns every gauge byte", async () => {
     const { hub, clock } = makeHub(root, { maxBlobBytes: BLOB, ramBytes: 2 * BLOB, diskBytes: 10 * FILE });
     hub.seed("d", blankDoc());
