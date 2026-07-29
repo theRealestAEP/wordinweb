@@ -93,7 +93,7 @@ test.describe("user-reported: a photo inserted before go-live", () => {
       await a.getByTestId("share-code").fill(BOARD_CODE);
       await a.getByTestId("start-collab").click();
       await expect(a).toHaveURL(/[?&]doc=/);
-      await expect(a.getByTestId("download")).toBeVisible();
+      await expect(a.getByTestId("toolbar")).toBeVisible();
       await waitHook(a);
       // The photo survived the seal.
       await expect.poll(() => imgCount(a), { message: "the photo should survive go-live" }).toBe(1);
@@ -175,7 +175,7 @@ test.describe("user-reported: a photo inserted before go-live", () => {
     await expect(page.getByTestId("collab-modal")).toBeVisible();
     await page.getByTestId("share-code").fill(BOARD_CODE);
     await page.getByTestId("start-collab").click();
-    await expect(page.getByTestId("download")).toBeVisible();
+    await expect(page.getByTestId("toolbar")).toBeVisible();
     await waitHook(page);
 
     const before = (await page.locator(`${PAGE} img`).first().boundingBox())!;

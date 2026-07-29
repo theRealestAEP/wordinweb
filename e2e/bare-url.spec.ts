@@ -25,5 +25,5 @@ test("bare URL (no ?server=) boots the local editor and can go live", async ({ p
   await page.getByTestId("share-code").fill(BOARD_CODE); // a code is required to go live
   await page.getByTestId("start-collab").click();
   await expect(page).toHaveURL(/[?&]doc=/);
-  await expect(page.getByTestId("download")).toBeVisible();
+  await expect(page.getByTestId("toolbar")).toBeVisible();
 });

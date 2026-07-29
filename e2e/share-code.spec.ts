@@ -62,7 +62,7 @@ test.describe("zero-custody demo — share code UX", () => {
   test("the creator is NOT re-prompted for the code they just set", async ({ page }) => {
     await goLiveWithCode(page, CODE);
     // Lands straight in the live editor — no code prompt for the creator.
-    await expect(page.getByTestId("download")).toBeVisible();
+    await expect(page.getByTestId("toolbar")).toBeVisible();
     await expect(page.locator(PAGE)).toBeVisible();
     await expect(codeInput(page), "creator must not see the share-code prompt").toHaveCount(0);
     await waitHook(page);
@@ -78,7 +78,7 @@ test.describe("zero-custody demo — share code UX", () => {
     try {
       const a = await owner.newPage();
       const url = await goLiveWithCode(a, CODE);
-      await expect(a.getByTestId("download")).toBeVisible();
+      await expect(a.getByTestId("toolbar")).toBeVisible();
 
       // A different device/profile has no stored code → it is prompted.
       const b = await joiner.newPage();
@@ -105,7 +105,7 @@ test.describe("zero-custody demo — share code UX", () => {
     try {
       const a = await owner.newPage();
       const url = await goLiveWithCode(a, CODE);
-      await expect(a.getByTestId("download")).toBeVisible();
+      await expect(a.getByTestId("toolbar")).toBeVisible();
 
       const b = await joiner.newPage();
       await b.goto(url);
@@ -122,7 +122,7 @@ test.describe("zero-custody demo — share code UX", () => {
 
   test("the header 'New document' button returns to the local editor", async ({ page }) => {
     await goLiveWithCode(page, CODE);
-    await expect(page.getByTestId("download")).toBeVisible();
+    await expect(page.getByTestId("toolbar")).toBeVisible();
     await page.getByTestId("new-document").click();
     await expect(page.getByTestId("local-editor")).toBeVisible();
     await expect(page).not.toHaveURL(/[?&]doc=/);

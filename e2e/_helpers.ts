@@ -89,7 +89,7 @@ export async function goLive(page: Page, shareCode: string = BOARD_CODE): Promis
   await page.getByTestId("start-collab").click();
   await expect(page).toHaveURL(/[?&]doc=/);
   await expect(page).toHaveURL(/#k=/);
-  await expect(page.getByTestId("download")).toBeVisible(); // collab chrome mounted
+  await expect(page.getByTestId("toolbar")).toBeVisible(); // collab chrome mounted
   await expect(page.locator(PAGE)).toBeVisible();
   await waitHook(page);
   return page.url();

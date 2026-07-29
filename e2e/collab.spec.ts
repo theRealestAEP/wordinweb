@@ -33,7 +33,7 @@ async function createDoc(page: Page): Promise<string> {
   await page.getByTestId("start-collab").click();
   await expect(page).toHaveURL(/[?&]doc=/); // the magic-link capability
   await expect(page).toHaveURL(/#k=/); // collaborative = encrypted (doc 13 §1)
-  await expect(page.getByTestId("download")).toBeVisible(); // collab chrome mounted
+  await expect(page.getByTestId("toolbar")).toBeVisible(); // collab chrome mounted
   await expect(page.locator(PAGE)).toBeVisible();
   return page.url();
 }
@@ -59,7 +59,7 @@ test.describe("zero-custody demo — browser E2E", () => {
     expect(url).toMatch(/#k=[A-Za-z0-9_-]+/); // doc-13 §1 fragment key (never sent to the server) — the proof of E2EE mode
     // The creator holds the owner token → owner controls present.
     await expect(page.getByTestId("readonly-toggle")).toBeVisible();
-    await expect(page.getByTestId("download")).toBeEnabled();
+    await expect(page.getByTestId("file-menu")).toBeEnabled();
   });
 
   test("local-first: type in the local editor, Make collaborative, the content is sealed and shared", async ({ browser }) => {
@@ -80,7 +80,7 @@ test.describe("zero-custody demo — browser E2E", () => {
       await a.getByTestId("share-code").fill(BOARD_CODE);
       await a.getByTestId("start-collab").click();
       await expect(a).toHaveURL(/#k=/);
-      await expect(a.getByTestId("download")).toBeVisible();
+      await expect(a.getByTestId("toolbar")).toBeVisible();
       // The local draft survived into the collab session…
       await expect.poll(() => paintedText(a)).toContain("LOCAL DRAFT");
       // …and a participant opening the shared link sees it too.
