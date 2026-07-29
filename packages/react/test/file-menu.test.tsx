@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { CollabHub, blankDocxBytes, type DocProvider, type Connection, type ServerMessage } from "@wordinweb/server";
+import { InMemoryBundleStore } from "@wordinweb/collab/client";
 import { FileMenu } from "../../../examples/anon-share/src/file-menu";
 import { App } from "../../../examples/anon-share/src/app";
 
@@ -156,40 +157,13 @@ function hubSocketClass(hub: CollabHub) {
   };
 }
 
-/**
- * The demo's App hardwires IndexedDbBundleStore, and useCollab AWAITS
- * `store.get(docId)` before it joins — so with no indexedDB the session never
- * becomes ready and the File trigger never enables. This is the smallest fake
- * that lets the read resolve "no bundle".
- */
-function fakeIndexedDB() {
-  const request = (result: unknown) => {
-    const r: { result: unknown; onsuccess: null | (() => void); onerror: null | (() => void); onupgradeneeded: null | (() => void) } =
-      { result, onsuccess: null, onerror: null, onupgradeneeded: null };
-    setTimeout(() => r.onsuccess?.(), 0);
-    return r;
-  };
-  const objectStore = {
-    get: () => request(undefined),
-    put: () => request(undefined),
-    delete: () => request(undefined),
-  };
-  const db = {
-    createObjectStore: () => objectStore,
-    transaction: () => ({ objectStore: () => objectStore }),
-  };
-  return { open: () => request(db) };
-}
-
 async function tick(ms = 5) { await act(async () => { await new Promise<void>((r) => setTimeout(r, ms)); }); }
 
 describe("the collaborative screen", () => {
   it("never offers a live Open — File is enabled in a live session, and Open inside it is refused", async () => {
     const hub = new CollabHub(provider);
     const prevSocket = globalThis.WebSocket;
-    const prevIdb = (globalThis as { indexedDB?: unknown }).indexedDB;
     (globalThis as { WebSocket: unknown }).WebSocket = hubSocketClass(hub);
-    (globalThis as { indexedDB: unknown }).indexedDB = fakeIndexedDB();
     try {
       const host = render(createElement(App, {
         url: "ws://loopback/collab",
@@ -197,6 +171,9 @@ describe("the collaborative screen", () => {
         docId: "file-menu-doc",
         clientId: "file-menu-client",
         name: "Ada",
+        // useCollab AWAITS store.get(docId) before joining, so the App needs
+        // a working store to ever become ready; inject the in-memory one.
+        store: new InMemoryBundleStore(),
       }));
       const trigger = () => byId(host, "file-menu") as HTMLButtonElement | null;
       expect(trigger(), "the collaborative screen must have a File menu").toBeTruthy();
@@ -218,7 +195,6 @@ describe("the collaborative screen", () => {
       expect(byId(host, "file-download")).toBeTruthy();
     } finally {
       (globalThis as { WebSocket: unknown }).WebSocket = prevSocket;
-      (globalThis as { indexedDB: unknown }).indexedDB = prevIdb;
     }
   });
 });

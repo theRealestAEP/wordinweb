@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./src/app";
 import { LocalEditor } from "./src/local-editor";
 import { goLiveEncrypted } from "./src/e2ee-flows";
-import { docKeyFromFragment } from "wordinweb/collab";
+import { docKeyFromFragment, IndexedDbBundleStore } from "wordinweb/collab";
 import { installWsRegistry } from "./src/perf/ws-tap";
 
 // Perf HUD plumbing (Ctrl+Shift+P / ?perf=1): registers collab sockets so the
@@ -92,6 +92,11 @@ const clientId = persist(sessionStorage, "wordinweb-client-id", () => {
 // shared across tabs is fine — it's just a label), server-sanitized.
 const storedName = persist(localStorage, "wordinweb-name", () => "");
 
+// ONE store for both screens: local autosaves, collab bundles, versions and
+// drafts all live in the same IndexedDB, so the File menu can list them all
+// and switching between local and collaborative reuses one connection.
+const bundleStore = new IndexedDbBundleStore();
+
 function Harness() {
   const [docId, setDocId] = useState<string | null>(() => params.get("doc"));
   const [name, setName] = useState(storedName);
@@ -137,7 +142,7 @@ function Harness() {
       setDocKey(key);
       setDocId(id);
     };
-    return <LocalEditor httpBase={HTTP} initialBytes={localBytes} onGoLive={goLive} />;
+    return <LocalEditor httpBase={HTTP} initialBytes={localBytes} onGoLive={goLive} store={bundleStore} />;
   }
 
   // Collaborative mode: either we just went live, or the URL carried `?doc=`
@@ -200,6 +205,7 @@ function Harness() {
           docId={docId}
           clientId={clientId}
           name={name}
+          store={bundleStore}
           onDisconnect={disconnect}
           docKey={docKey ?? undefined}
           ownerToken={localStorage.getItem(`wordinweb-owner-${docId}`) ?? undefined}

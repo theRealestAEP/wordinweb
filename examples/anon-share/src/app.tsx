@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, type CollabSession, type DocBundle } from "wordinweb/collab";
+import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, versionKey, type BundleStore, type CollabSession, type DocBundle, type StoredDocSummary } from "wordinweb/collab";
 import { type DocxViewApi } from "wordinweb";
 import { reviveEncrypted } from "./e2ee-flows";
-import { FileMenu } from "./file-menu";
+import { FileMenu, savedDocName } from "./file-menu";
 import { PerfHud } from "./perf/hud";
 import { perfMonitor, type DocStats } from "./perf/metrics";
 
@@ -29,7 +29,7 @@ function b64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, initialShareCode, onNewDocument, onDisconnect, onNameChange, onShareLink, shareCopied }: {
+export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, initialShareCode, onNewDocument, onDisconnect, onNameChange, onShareLink, shareCopied, store: storeProp }: {
   url: string;
   httpBase: string;
   docId: string;
@@ -58,8 +58,11 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   onShareLink?: () => void;
   /** True briefly after a successful copy, for the button's confirmation. */
   shareCopied?: boolean;
+  /** Where bundles/versions/drafts persist (shared with the local editor).
+   * Defaults to this browser's IndexedDB; tests inject the in-memory store. */
+  store?: BundleStore;
 }) {
-  const store = useMemo(() => new IndexedDbBundleStore(), []);
+  const store = useMemo(() => storeProp ?? new IndexedDbBundleStore(), [storeProp]);
   const [session, setSession] = useState<CollabSession | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   /**
@@ -196,7 +199,33 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   // Versions (doc 14 §1): frozen restore points beside the live bundle.
   // Stored in the same IndexedDB db under version-suffixed keys — a
   // DocVersion is bundle-shaped enough for the demo (docx + sidecar).
-  const [versions, setVersions] = useState<{ label: string; savedAt: number }[]>([]);
+  const [versions, setVersions] = useState<{ key: string; label: string; savedAt: number }[]>([]);
+  /** A version save/read failed — surfaced in the version strip, because a
+   * swallowed quota error means the user believes a restore point exists
+   * when it does not (the browser is the only place it could exist). */
+  const [versionError, setVersionError] = useState<string | null>(null);
+
+  // Seed the strip FROM THE STORE, not from empty component state: saved
+  // versions are durable, so they must still be on screen after a reload.
+  useEffect(() => {
+    let alive = true;
+    store.list().then(
+      (all) => {
+        if (!alive) return;
+        setVersions(
+          all
+            .filter((s) => s.kind === "version" && s.docId === docId)
+            .map((s) => ({ key: s.key, label: s.label ?? "(auto)", savedAt: s.versionSavedAt ?? s.savedAt }))
+            .sort((a, b) => a.savedAt - b.savedAt)
+            .slice(-25),
+        );
+      },
+      () => {
+        if (alive) setVersionError("Saved versions couldn’t be read from this browser’s storage.");
+      },
+    );
+    return () => { alive = false; };
+  }, [store, docId]);
 
   // `window.prompt` blocks the whole page — in a live session that stalls the
   // socket pump behind a browser dialog we do not control, and it is the one
@@ -218,24 +247,59 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   const saveVersion = async (label: string) => {
     if (!session?.doc) return;
     const savedAt = Date.now();
-    const bundle = await store.get(docId);
-    if (!bundle) return;
-    await store.put({ ...bundle, docId: `${docId}#version-${savedAt}${label ? `-${label}` : ""}` });
-    setVersions((v) => [...v, { label: label || "(auto)", savedAt }].slice(-25));
+    try {
+      const bundle = await store.get(docId);
+      if (!bundle) {
+        // The persister has not landed a bundle — there is nothing durable
+        // to freeze, and pretending otherwise is the failure mode this
+        // feature exists to avoid.
+        setVersionError("Nothing is saved in this browser yet to freeze — storage may be blocked. Download a copy instead.");
+        return;
+      }
+      const key = versionKey(docId, savedAt, label);
+      await store.put({ ...bundle, docId: key, savedAt });
+      setVersionError(null);
+      setVersions((v) => [...v, { key, label: label || "(auto)", savedAt }].slice(-25));
+    } catch {
+      setVersionError("Couldn’t save this version — storage is full or blocked. Download a copy instead.");
+    }
   };
-  const downloadVersion = async (savedAt: number, label: string) => {
-    const v = await store.get(`${docId}#version-${savedAt}${label !== "(auto)" ? `-${label}` : ""}`);
-    if (!v) return;
-    const blob = new Blob([v.confirmedBytes as BlobPart], {
-      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    // Restore-as-DRAFT (doc 14 §1): a version opens as a new file, never
-    // mutates the live doc — "back to then", not "merge then into now".
-    a.download = `${docId.slice(0, 8)}-${label}-${savedAt}.docx`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+  const downloadVersion = async (key: string, label: string, savedAt: number) => {
+    try {
+      const v = await store.get(key);
+      if (!v) throw new Error("gone");
+      const blob = new Blob([v.confirmedBytes as BlobPart], {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      // Restore-as-DRAFT (doc 14 §1): a version opens as a new file, never
+      // mutates the live doc — "back to then", not "merge then into now".
+      a.download = `${label === "(auto)" ? "version" : label}-${savedAt}.docx`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      setVersionError("Couldn’t read that version from this browser’s storage.");
+    }
+  };
+
+  /** Download any saved entry from the File menu without opening it — the
+   * one honest way to get at a stored copy while the session is live. */
+  const downloadSaved = async (s: StoredDocSummary) => {
+    try {
+      const b = await store.get(s.key);
+      if (!b) throw new Error("gone");
+      const blob = new Blob([b.confirmedBytes as BlobPart], {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${savedDocName(s)}.docx`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch {
+      setVersionError("Couldn’t read that saved copy from this browser’s storage.");
+    }
   };
 
   const revive = async () => {
@@ -446,8 +510,23 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
 
             No Print: this screen holds a `CollabSession`, whose `doc` is a
             DocxDocument (save/docRoot) and not the view api that owns
-            `print()`. An item that cannot work is worse than no item. */}
-        <FileMenu onNew={onNewDocument} onDownload={download} disabled={!session?.ready} openDisabled />
+            `print()`. An item that cannot work is worse than no item.
+
+            Saved documents are LISTED here but never OPENABLE: opening a
+            stored copy replaces the whole document without an intent, which
+            forks the room exactly like Open would. Download-only is the
+            honest offer while the session is live. The current doc's live
+            bundle is excluded — it is the document on screen. */}
+        <FileMenu
+          onNew={onNewDocument}
+          onDownload={download}
+          disabled={!session?.ready}
+          openDisabled
+          listSaved={() => store.list().then((all) => all.filter((s) => s.key !== docId))}
+          savedOpenDisabled
+          onDownloadSaved={(s) => void downloadSaved(s)}
+          onDeleteSaved={(s) => store.delete(s.key)}
+        />
         <span className="bar-sep" aria-hidden="true" />
         <span style={{ flex: 1 }} />
         {session?.arrival ? (
@@ -686,20 +765,24 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           ))}
         </span>
       </div>
-      {versions.length > 0 && (
+      {(versions.length > 0 || versionError) && (
         <div className="versionbar" data-testid="versions">
           <span className="versionbar-label">Saved versions</span>
           {versions.map((v) => (
-            <button key={v.savedAt} className="version-chip"
+            <button key={v.key} className="version-chip"
               title="Downloads as a new file — never merges into the live document"
-              onClick={() => void downloadVersion(v.savedAt, v.label)}>
-              {/* "(auto)" is the STORAGE sentinel for an unnamed version —
-                  downloadVersion keys the record off it — so it is renamed for
-                  display here rather than at the source. */}
+              onClick={() => void downloadVersion(v.key, v.label, v.savedAt)}>
+              {/* "(auto)" is the STORAGE sentinel for an unnamed version, so
+                  it is renamed for display here rather than at the source. */}
               <span className="version-name">{v.label === "(auto)" ? "Unnamed" : v.label}</span>
               <time className="version-time">{new Date(v.savedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time>
             </button>
           ))}
+          {versionError && (
+            <span data-testid="version-error" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
+              {versionError}
+            </span>
+          )}
         </div>
       )}
       {versionModal && (
