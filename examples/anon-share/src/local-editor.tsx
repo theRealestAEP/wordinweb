@@ -41,6 +41,8 @@ export function LocalEditor({
   const [modalOpen, setModalOpen] = useState(false);
   /** Name of the file the user opened, so Download gives it back unchanged. */
   const [openedName, setOpenedName] = useState<string | null>(null);
+  /** Name of the file currently being parsed and laid out, or null. */
+  const [loading, setLoading] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -104,6 +106,10 @@ export function LocalEditor({
    */
   const openDocument = (bytes: Uint8Array, filename: string) => {
     setOpenedName(filename);
+    // Shown until DocxView reports the document laid out. Parsing and
+    // paginating a large .docx takes real seconds, and a blank stage in the
+    // meantime reads as a broken app rather than a busy one.
+    setLoading(filename);
     setBlank(bytes);
   };
 
@@ -196,8 +202,19 @@ export function LocalEditor({
         <span style={{ flex: 1 }} />
       </div>
       <DocxToolbar api={api} mode="advanced" />
-      <div style={{ flex: 1, minHeight: 0 }}>
-        <DocxView source={blank} editable onReady={setApi} />
+      {/* `position: relative` anchors the loading overlay's inset:0, and
+          `minHeight: 0` is what lets this flex child shrink below its content
+          so DocxView's container actually scrolls — which is what keeps it
+          mounting only the visible pages instead of the whole document. */}
+      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        {loading && (
+          <div className="document-loading" data-testid="doc-loading" role="status" aria-live="polite" aria-busy="true">
+            <span className="document-loading-spinner" aria-hidden="true" />
+            <strong>Loading {loading}…</strong>
+            <span>Preparing pages for editing…</span>
+          </div>
+        )}
+        <DocxView source={blank} editable onReady={setApi} onLoad={() => setLoading(null)} />
       </div>
 
       {modalOpen && (
