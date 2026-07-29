@@ -220,8 +220,25 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
       // freshly-random label (Room.obsLabel), never a docId, because a docId
       // is the capability that opens the document and a metrics row carrying
       // one would make this endpoint a way into other people's rooms.
+      // `mediaTier` is the live tier state paired with its budgets (the same
+      // measure-beside-limit convention as the per-room rows). All numbers:
+      // the spill DIR path is deliberately absent — /stats carries nothing
+      // path-shaped, so a spilled room's random directory name can never be
+      // correlated from here.
+      const tier = hub.mediaTierBytes();
       res.writeHead(200, { "content-type": "application/json" }).end(
-        JSON.stringify({ ...obs.snapshot(), ipBuckets: ipGuard.distinctIps(), rooms: hub.roomsSnapshot() }),
+        JSON.stringify({
+          ...obs.snapshot(),
+          ipBuckets: ipGuard.distinctIps(),
+          mediaTier: {
+            ramBytes: tier.ram,
+            ramLimitBytes: limits.media.ramBytes,
+            diskBytes: tier.disk,
+            diskLimitBytes: limits.media.diskBytes,
+            spillFiles: hub.mediaSpillFiles(),
+          },
+          rooms: hub.roomsSnapshot(),
+        }),
       );
       return;
     }
@@ -389,9 +406,27 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
     ipGuard.sweep();
   }, 10_000);
   server.listen(port);
-  // No startup chatter on stdout by design: `scripts/dev.mjs` prints the demo's
-  // own ready line, and the zero-custody server keeps stdout clean (structured
-  // observability, when enabled via WW_OBS, goes to stderr — see observability.ts).
+  // THE STARTUP BANNER (doc 16 §4, doc 12 §2), as one structured stderr line
+  // — stdout stays clean by design (`scripts/dev.mjs` prints the demo's own
+  // ready line and parses nothing else). It states the whole storage
+  // contract in one place: no document storage, both media budgets, and —
+  // when the spill is on — where it writes and the warning that the path
+  // must be ephemeral scratch. The dir is config echoed back (it came from
+  // the environment), never session data, and it appears here only — /stats
+  // carries nothing path-shaped.
+  obs.serverStarted({
+    port,
+    storage: "none (zero-custody)",
+    mediaRamBytes: limits.media.ramBytes,
+    mediaDiskBytes: limits.media.diskBytes,
+    ...(limits.media.diskBytes > 0
+      ? {
+          spillDir: limits.media.spillDir,
+          spillNote:
+            "ephemeral scratch — per-boot-key encrypted, wiped at boot, worthless across restarts; never a persistent or backed-up volume",
+        }
+      : { spillNote: "disk spill off (WW_MEDIA_DISK_BYTES=0)" }),
+  });
   return {
     close: () => {
       clearInterval(sweeper);

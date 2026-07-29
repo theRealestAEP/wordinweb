@@ -18,7 +18,7 @@ import { SPILL_FILE_OVERHEAD } from "../src/media-spill.js";
  * invariant below is only meaningful against actual files.
  *
  * THE INVARIANT (the accounting-drift hazard): at any settled moment,
- *   hub RAM gauge + Σ(on-disk file sizes − IV overhead) = Σ per-room mediaBytes
+ *   hub RAM gauge + Σ(on-disk file sizes − IV overhead) = Σ per-room (mediaRamBytes + mediaDiskBytes)
  *   hub disk gauge = Σ on-disk file sizes
  * i.e. the gauges match filesystem REALITY, not each other.
  */
@@ -99,8 +99,11 @@ async function expectAccountingMatchesReality(hub: CollabHub, root: string): Pro
   const { ram, disk } = hub.mediaTierBytes();
   const real = await diskReality(root);
   expect(disk).toBe(real.du);
-  const roomTotal = hub.roomsSnapshot().reduce((a, r) => a + r.mediaBytes, 0);
-  expect(ram + real.lenSum).toBe(roomTotal);
+  // The per-room split must tie out tier by tier, not just in total.
+  const rooms = hub.roomsSnapshot();
+  expect(ram).toBe(rooms.reduce((a, r) => a + r.mediaRamBytes, 0));
+  expect(real.lenSum).toBe(rooms.reduce((a, r) => a + r.mediaDiskBytes, 0));
+  expect(hub.mediaSpillFiles()).toBe(real.files);
   expect(ram).toBeGreaterThanOrEqual(0);
 }
 
@@ -229,8 +232,9 @@ describe("the pressure ladder: RAM → disk → gone → re-supply recovers", ()
     clock.now = 1000;
     expect(await hub.mediaUpload("d", await shaOf(C), C)).toBe(507);
     // The refusal came from the quota, with the disk blob COUNTED: the room
-    // still holds exactly A (disk) + B (ram).
-    expect(hub.roomsSnapshot()[0].mediaBytes).toBe(2 * BLOB);
+    // still holds exactly A (disk) + B (ram) — and the split says which.
+    expect(hub.roomsSnapshot()[0].mediaRamBytes).toBe(BLOB);
+    expect(hub.roomsSnapshot()[0].mediaDiskBytes).toBe(BLOB);
     expect(hub.mediaTierBytes()).toEqual({ ram: BLOB, disk: FILE });
     await settle();
     await expectAccountingMatchesReality(hub, root);
@@ -621,7 +625,7 @@ describe("accounting invariant under load", () => {
     await settle();
     await expectAccountingMatchesReality(hub, root);
     // And the per-room quota held throughout the churn (tier-agnostic).
-    for (const r of hub.roomsSnapshot()) expect(r.mediaBytes).toBeLessThanOrEqual(100_000);
+    for (const r of hub.roomsSnapshot()) expect(r.mediaRamBytes + r.mediaDiskBytes).toBeLessThanOrEqual(100_000);
     // The disk budget held too.
     expect(hub.mediaTierBytes().disk).toBeLessThanOrEqual(5 * FILE);
   });

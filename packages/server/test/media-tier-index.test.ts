@@ -48,7 +48,7 @@ describe("tiered media index — byte accounting through the length accessor", (
     expect(await hub.mediaUpload("d", sha, BYTES)).toBe(201);
 
     const before = hub.roomsSnapshot().find((r) => r.mediaBlobs === 1)!;
-    expect(before.mediaBytes).toBe(BYTES.length);
+    expect(before.mediaRamBytes + before.mediaDiskBytes).toBe(BYTES.length);
 
     // Staged and unreferenced past T_STAGE: the sweep evicts it, and the
     // accounting must return to zero — not stay stuck (accessor returning
@@ -57,6 +57,6 @@ describe("tiered media index — byte accounting through the length accessor", (
     hub.sweepMedia();
     const after = hub.roomsSnapshot()[0];
     expect(after.mediaBlobs).toBe(0);
-    expect(after.mediaBytes).toBe(0);
+    expect(after.mediaRamBytes + after.mediaDiskBytes).toBe(0);
   });
 });
