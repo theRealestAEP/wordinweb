@@ -41,13 +41,17 @@ services:
       WW_ROOM_MAX_LIFETIME_MS: "43200000"
       WW_LIFETIME_WARNING_MS: "300000"
       # ── per-IP limits ───────────────────────────────────────────────────
-      # Raised for a dedicated host. These bound what ONE address can consume;
-      # they are not a defence against a distributed attacker, and the global
-      # caps below are what stop the host falling over. Kept well under those
-      # so a single network still cannot take the server down on its own.
-      WW_IP_SEED_PER_MIN: "30"
-      WW_IP_MAX_DOCS: "100"
-      WW_IP_MAX_CONNS: "200"
+      # DELIBERATELY NOT RAISED alongside the global caps below. These bound
+      # what ONE address can consume, and the useful property is the RATIO to
+      # the global caps: at 50 per address against 20000 global, an attacker
+      # needs 400 distinct addresses to saturate the server. Raising these
+      # lowers that number in direct proportion and buys nothing, because
+      # nothing was hitting them. WW_IP_MAX_DOCS matters most now that a room
+      # holds a copy of its document in memory — it is the cap on the most
+      # expensive resource one address can claim.
+      WW_IP_SEED_PER_MIN: "10"
+      WW_IP_MAX_DOCS: "25"
+      WW_IP_MAX_CONNS: "50"
       # ONE hop, and that is exact rather than estimated: Caddyfile.tunnel
       # REPLACES X-Forwarded-For with Cloudflare's CF-Connecting-IP, so the
       # chain reaching this server is always exactly one entry — the real
