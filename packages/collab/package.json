@@ -1,9 +1,20 @@
 {
   "name": "@wordinweb/collab",
-  "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Transport-free collaborative-editing engine for wordinweb (intents, canonical transform, session state machine)",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theRealestAEP/wordinweb.git",
+    "directory": "packages/collab"
+  },
+  "homepage": "https://github.com/theRealestAEP/wordinweb#readme",
+  "bugs": {
+    "url": "https://github.com/theRealestAEP/wordinweb/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "exports": {
     "./client": {
@@ -17,14 +28,18 @@
   },
   "files": ["dist"],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsup",
+    "prepack": "npm run build && node ../../scripts/check-dts-selfcontained.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@wordinweb/core": "0.1.0"
+    "cfb": "^1.2.2",
+    "fflate": "^0.8.2",
+    "wmf": "^1.0.2"
   },
   "devDependencies": {
+    "@wordinweb/core": "0.1.0",
     "vitest": "^2.1.0"
   }
 }
