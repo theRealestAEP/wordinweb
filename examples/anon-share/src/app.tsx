@@ -380,7 +380,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           sit outside <header> and fall back to raw browser buttons, next to a
           header whose buttons are styled — the inconsistency reads as broken
           rather than plain. */}
-      <div data-testid="toolbar" className="sessionbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 8px", flexWrap: "wrap" }}>
+      <div data-testid="toolbar" className="sessionbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "7px 14px", flexWrap: "wrap" }}>
         {/* Roster chips (doc 14 §2): everyone in the session, greyed when
             offline; names are self-asserted — the UI says so in the title. */}
         {(session?.roster ?? []).map((r) => (

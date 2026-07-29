@@ -190,7 +190,11 @@ function Harness() {
         </nav>
       </div>
       <header>
-        <span className="pill">doc {docId.slice(0, 10)}…</span>
+        {/* The doc-id pill is gone. It was chrome that never earned its place:
+            the id is not something anyone types or reads out, the share link
+            is copied by a button rather than transcribed, and a truncated
+            capability prefix on screen is one more thing that ends up in a
+            screenshot for no benefit. */}
         <span className="spacer" />
         <input
           className="alias"
