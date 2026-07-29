@@ -1020,7 +1020,7 @@ function blockScope(ids: StableIds, blockId: number, runId: number): Scope {
 }
 
 /** Index every run in the model by its source element — body story AND the
- * header/footer parts.
+ * header/footer parts, including the text-box stories hanging off either.
  *
  * The hf half is not an optimization: header paragraphs carry stable ids (they
  * ride in doc.editableRoots(), so the id table and the checkpoint sidecar have
@@ -1029,11 +1029,25 @@ function blockScope(ids: StableIds, blockId: number, runId: number): Scope {
  * unresolvable, so resolveCaret returned null and EVERY text/format intent
  * aimed at a header was a clean reject on the server and on every peer — while
  * the originator, which applies locally before emitting, kept the edit. That is
- * the silent fork the header/footer toolbar group was gated off to avoid. */
+ * the silent fork the header/footer toolbar group was gated off to avoid.
+ *
+ * The text-box half is the SAME bug one level deeper, and it is how pleading
+ * paper draws its margin line numbers: the number column is a w:txbxContent
+ * story in the header, not w:lnNumType. Those story blocks hang off the RUN
+ * that carries the drawing (run.content anchor -> shape.blocks), which neither
+ * the section walk nor the hf walk descends into. The editor lets a caret into
+ * that story (parse marks it textboxStory, and its runs are id-tracked), so a
+ * user could type in the gutter and watch every keystroke get rejected by the
+ * server and every peer — "I can't change the number column". */
 function buildRunMap(doc: DocxDocument): Map<XmlElement, RunEntry> {
   const map = new Map<XmlElement, RunEntry>();
   const visitRun = (run: Run): void => {
     if (run.src) map.set(run.src, runEntry(run));
+    // A text box's story is a little document of its own. Recursing through
+    // visitBlocks also covers a text box nested inside another one's story.
+    for (const c of run.content) {
+      if (c.kind === "anchor" && c.shape.type === "textbox") visitBlocks(c.shape.blocks);
+    }
   };
   const visitBlocks = (blocks: Block[]): void => {
     for (const b of blocks) {
