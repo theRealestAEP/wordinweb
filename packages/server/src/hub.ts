@@ -110,6 +110,22 @@ export interface RoomSnapshot {
   lifetimeWarned: boolean;
 }
 
+/**
+ * One locker entry, discriminated by WHERE the bytes live (doc 16 §4
+ * two-tier index). This pass is scaffolding: every entry is `loc:"ram"`,
+ * and nothing creates a `loc:"disk"` entry yet — demotion arrives with the
+ * eviction ladder. A disk entry keeps only the blob length (for byte
+ * accounting); its bytes live in the spill, keyed by the same sha.
+ */
+type MediaBlobEntry =
+  | { loc: "ram"; bytes: Uint8Array; lastDownloadAt: number; staged: boolean }
+  | { loc: "disk"; len: number; lastDownloadAt: number; staged: boolean };
+
+/** Blob length regardless of tier — the number the room byte cap counts. */
+function mediaBlobLen(b: MediaBlobEntry): number {
+  return b.loc === "ram" ? b.bytes.length : b.len;
+}
+
 interface Room {
   /**
    * Opaque label for the OPS VIEW, and the reason per-room metrics can exist
@@ -163,7 +179,7 @@ interface Room {
    * top of this same state machine; RAM-only is correct by the same
    * cache-not-store argument.) */
   media: {
-    blobs: Map<string, { bytes: Uint8Array; lastDownloadAt: number; staged: boolean }>;
+    blobs: Map<string, MediaBlobEntry>;
     waiters: Map<string, Set<string>>; // sha -> conn.ids awaiting media-ready
     resupply: Map<string, { chosenConnId: string; deadline: number }>;
     totalBytes: number;
@@ -1171,7 +1187,7 @@ export class CollabHub {
     let hex = "";
     for (const b of new Uint8Array(digest)) hex += b.toString(16).padStart(2, "0");
     if (hex !== sha) return 400; // the sha check — never trust the label
-    room.media.blobs.set(sha, { bytes, lastDownloadAt: this.now(), staged: true });
+    room.media.blobs.set(sha, { loc: "ram", bytes, lastDownloadAt: this.now(), staged: true });
     room.media.totalBytes += bytes.length;
     // A re-supply round for this sha completes here: serve every waiter.
     const waiters = room.media.waiters.get(sha);
@@ -1201,6 +1217,9 @@ export class CollabHub {
     blob.lastDownloadAt = this.now();
     this.obs.mediaDown();
     this.noteActivity(room);
+    // UNREACHABLE this pass — nothing demotes to disk yet. The spill read
+    // path (a stream, not a buffer) replaces this arm with the ladder.
+    if (blob.loc !== "ram") return null;
     return blob.bytes;
   }
 
@@ -1217,7 +1236,7 @@ export class CollabHub {
         const ttl = blob.staged ? this.limits.media.stageTtlMs : this.limits.media.ttlMs;
         if (now - blob.lastDownloadAt >= ttl) {
           room.media.blobs.delete(sha);
-          room.media.totalBytes -= blob.bytes.length;
+          room.media.totalBytes -= mediaBlobLen(blob);
         }
       }
       for (const [sha, r] of [...room.media.resupply]) {
