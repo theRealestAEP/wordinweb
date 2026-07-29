@@ -179,6 +179,30 @@ export interface Observability {
   mediaUp(): void;
   /** A media blob was served by the relay (HTTP GET hit). */
   mediaDown(): void;
+  /** A RAM blob was demoted to the spill tier (the encrypted disk write
+   * completed). A climbing rate means the RAM budget is under pressure. */
+  spillWrite(): void;
+  /** A spilled blob was served (disk-tier GET hit). */
+  spillRead(): void;
+  /** A spilled blob was evicted ENTIRELY under disk pressure — the ladder's
+   * last rung (RAM → disk → gone; re-supply recovers it). A climbing rate
+   * means the disk budget is thrashing. */
+  spillEviction(): void;
+  /**
+   * A spill rm FAILED and the path was parked on the hub's retry list.
+   *
+   * THE signal that the retry list is not draining: the spill's byte
+   * accounting was already released, so a stuck file is invisible to the
+   * gauges — a monotonically climbing count here is a disk-space leak (never
+   * a retention leak; the per-boot key and the boot wipe still cover the
+   * bytes). Counted only — the call site's {@link error} already carries the
+   * line and the stack, so a second log line would double-report.
+   */
+  spillUnlinkFailure(): void;
+  /** Media tier gauges observed after a tier mutation: bytes resident in
+   * RAM, bytes on disk (IV overhead included), and spilled file count.
+   * Aggregate numbers only — never a path, sha, or identifier. */
+  mediaTierObserved(ramBytes: number, diskBytes: number, spillFiles: number): void;
   /** A roster fan-out happened with `size` entries; feeds the roster-size
    * peak gauge. */
   rosterObserved(size: number): void;
@@ -198,6 +222,18 @@ export interface Observability {
    * `fields` follows the same shapes-and-counts rule as everything else.
    */
   error(where: string, err: unknown, fields?: SafeFields): void;
+  /**
+   * The STARTUP BANNER (doc 16 §4 mandates it; doc 12 §2 names its wording):
+   * one `server-start` line stating the storage contract and the media
+   * budgets, emitted once after the port binds. Structured stderr rather
+   * than stdout, which run-scripts parse and which this server keeps clean.
+   *
+   * `fields` is CONFIG ECHOED BACK — values the operator set (or defaults),
+   * never anything derived from session data. That is why the spill dir path
+   * may appear here and never in {@link snapshot}: the path came from the
+   * environment, not from a room.
+   */
+  serverStarted(fields: SafeFields): void;
   /** Current aggregate state — safe numbers only, for the dev `/stats` route
    * and tests. */
   snapshot(): ObsSnapshot;
@@ -221,6 +257,14 @@ export interface ObsSnapshot {
     roomsEvicted: number;
     mediaUp: number;
     mediaDown: number;
+    /** RAM → disk demotions (completed spill writes). */
+    spillWrites: number;
+    /** Disk-tier GET hits. */
+    spillReads: number;
+    /** Disk-pressure evictions (spilled blobs gone entirely). */
+    spillEvictions: number;
+    /** Failed spill rms parked for retry — climbing = disk-space leak. */
+    spillUnlinkFailures: number;
     /** Throws caught and reported via {@link Observability.error}. The first
      * number to look at after an incident. */
     errors: number;
@@ -251,6 +295,12 @@ export interface ObsSnapshot {
     rooms: number;
     /** Largest roster size observed on any fan-out since start. */
     rosterMax: number;
+    /** Media bytes resident in RAM (last observed). */
+    mediaRamBytes: number;
+    /** Media bytes on disk in the spill tier (last observed, IV included). */
+    mediaDiskBytes: number;
+    /** Spilled files on disk (last observed). */
+    mediaSpillFiles: number;
   };
 }
 
@@ -275,7 +325,13 @@ export const NO_OP_OBSERVABILITY: Observability = {
   intentRejected() {},
   mediaUp() {},
   mediaDown() {},
+  spillWrite() {},
+  spillRead() {},
+  spillEviction() {},
+  spillUnlinkFailure() {},
+  mediaTierObserved() {},
   rosterObserved() {},
+  serverStarted() {},
   snapshot: () => emptySnapshot(),
 };
 
@@ -294,6 +350,10 @@ function emptySnapshot(): ObsSnapshot {
       roomsEvicted: 0,
       mediaUp: 0,
       mediaDown: 0,
+      spillWrites: 0,
+      spillReads: 0,
+      spillEvictions: 0,
+      spillUnlinkFailures: 0,
       errors: 0,
       badFrames: 0,
     },
@@ -304,7 +364,7 @@ function emptySnapshot(): ObsSnapshot {
     ipLimitsByReason: {},
     capacityByReason: {},
     rejectedByReason: {},
-    gauges: { liveConnections: 0, rooms: 0, rosterMax: 0 },
+    gauges: { liveConnections: 0, rooms: 0, rosterMax: 0, mediaRamBytes: 0, mediaDiskBytes: 0, mediaSpillFiles: 0 },
   };
 }
 
@@ -351,6 +411,10 @@ export class MetricsObservability implements Observability {
     roomsEvicted: 0,
     mediaUp: 0,
     mediaDown: 0,
+    spillWrites: 0,
+    spillReads: 0,
+    spillEvictions: 0,
+    spillUnlinkFailures: 0,
     errors: 0,
     badFrames: 0,
   };
@@ -361,7 +425,7 @@ export class MetricsObservability implements Observability {
   private ipLimitReasons = new Map<string, number>();
   private capacityReasons = new Map<string, number>();
   private rejectedReasons = new Map<string, number>();
-  private g = { liveConnections: 0, rooms: 0, rosterMax: 0 };
+  private g = { liveConnections: 0, rooms: 0, rosterMax: 0, mediaRamBytes: 0, mediaDiskBytes: 0, mediaSpillFiles: 0 };
 
   constructor(opts: ObservabilityOptions = {}) {
     this.level = opts.level ?? envLogLevel();
@@ -477,8 +541,34 @@ export class MetricsObservability implements Observability {
     this.c.mediaDown++;
     this.emit("info", "media-down");
   }
+  spillWrite(): void {
+    this.c.spillWrites++;
+    this.emit("info", "spill-write", { total: this.c.spillWrites });
+  }
+  spillRead(): void {
+    this.c.spillReads++;
+    this.emit("info", "spill-read", { total: this.c.spillReads });
+  }
+  spillEviction(): void {
+    this.c.spillEvictions++;
+    this.emit("info", "spill-evict", { total: this.c.spillEvictions });
+  }
+  spillUnlinkFailure(): void {
+    // Counter only, no line: the call site's obs.error already emitted the
+    // stack, and this counter exists so /stats shows the RATE without anyone
+    // parsing logs. Two lines per failure would double-report one event.
+    this.c.spillUnlinkFailures++;
+  }
+  mediaTierObserved(ramBytes: number, diskBytes: number, spillFiles: number): void {
+    this.g.mediaRamBytes = ramBytes;
+    this.g.mediaDiskBytes = diskBytes;
+    this.g.mediaSpillFiles = spillFiles;
+  }
   rosterObserved(size: number): void {
     if (size > this.g.rosterMax) this.g.rosterMax = size;
+  }
+  serverStarted(fields: SafeFields): void {
+    this.emit("info", "server-start", fields);
   }
 
   snapshot(): ObsSnapshot {

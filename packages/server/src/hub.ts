@@ -99,7 +99,13 @@ export interface RoomSnapshot {
   rosterTotal: number;
   rosterConnected: number;
   connLimit: number;
-  mediaBytes: number;
+  /** Media bytes resident in RAM for this room. Together with
+   * `mediaDiskBytes` these sum to the figure `mediaLimitBytes` caps — the
+   * per-room quota is tier-agnostic (spilling never buys a room capacity). */
+  mediaRamBytes: number;
+  /** Media bytes this room holds in the disk spill tier (blob lengths, not
+   * on-disk sizes — the same basis the room quota counts). */
+  mediaDiskBytes: number;
   mediaLimitBytes: number;
   mediaBlobs: number;
   mediaWaiting: number;
@@ -1232,7 +1238,10 @@ export class CollabHub {
     // at all — every remaining RAM blob has waiters.
     if (this.spill && this.limits.media.ramBytes > 0 && this.mediaRamBytes + bytes.length > this.limits.media.ramBytes) {
       const fits = await this.demoteForRam(bytes.length);
-      if (!fits) return 507;
+      if (!fits) {
+        this.noteMediaTier(); // the failed ladder may still have demoted some victims
+        return 507;
+      }
     }
     // RE-VALIDATE after the awaits above (digest + ladder): the room may have
     // evicted underneath us, and a concurrent upload of the same sha may have
@@ -1253,6 +1262,7 @@ export class CollabHub {
       room.media.blobs.get(sha)!.staged = false; // re-supplied ⇒ referenced
     }
     this.obs.mediaUp();
+    this.noteMediaTier();
     // Media transfers are work in the room even when no intent is sequenced
     // (a paste of a large image is one submit and many seconds of upload) —
     // a session must not idle out mid-transfer.
@@ -1281,6 +1291,10 @@ export class CollabHub {
     const spill = this.spill;
     const spillId = room.spillId;
     if (!spill || spillId === undefined) return null; // disk entry with no spill: cannot happen while wired
+    // Counted at the index hit, not the open(): a sweep unlink racing the
+    // request makes the open reject, but the serve was attempted — the rate
+    // is the signal either way.
+    this.obs.spillRead();
     return { len: blob.len, open: () => spill.openRead(spillId, sha) };
   }
 
@@ -1289,6 +1303,19 @@ export class CollabHub {
    * and ops; contains no content and no identifiers. */
   mediaTierBytes(): { ram: number; disk: number } {
     return { ram: this.mediaRamBytes, disk: this.spill?.totalBytes() ?? 0 };
+  }
+
+  /** Spilled files on disk right now — the `mediaSpillFiles` gauge. */
+  mediaSpillFiles(): number {
+    return this.spill?.fileCount() ?? 0;
+  }
+
+  /** Push the tier gauges to the observability sink. Called after every
+   * operation that can move bytes between tiers (upload/ladder, sweep, room
+   * eviction), so the sink's last-observed gauges track the ladder without
+   * the sink ever holding a reference to the hub. */
+  private noteMediaTier(): void {
+    this.obs.mediaTierObserved(this.mediaRamBytes, this.spill?.totalBytes() ?? 0, this.spill?.fileCount() ?? 0);
   }
 
   /**
@@ -1361,6 +1388,7 @@ export class CollabHub {
     if (this.evictDiskFor(len + SPILL_FILE_OVERHEAD)) {
       try {
         await spill.write(spillId, sha, entry.bytes);
+        this.obs.spillWrite();
         const live = this.rooms.get(docId) === room && room.media.blobs.get(sha) === entry;
         if (live) {
           room.media.blobs.set(sha, { loc: "disk", len, lastDownloadAt: entry.lastDownloadAt, staged: entry.staged });
@@ -1404,6 +1432,7 @@ export class CollabHub {
       if (!lru) return false;
       lru.room.media.blobs.delete(lru.sha);
       lru.room.media.totalBytes -= lru.entry.len;
+      this.obs.spillEviction();
       // The spill releases its byte accounting SYNCHRONOUSLY (see
       // MediaSpill.unlink), so the loop's totalBytes() re-read makes progress
       // even though the rm itself is still in flight.
@@ -1425,6 +1454,9 @@ export class CollabHub {
     const op = sha ? this.spill.unlink(roomSpillId, sha) : this.spill.removeRoom(roomSpillId);
     op.catch((err) => {
       this.obs.error(sha ? "hub.spillUnlink" : "hub.spillRemoveRoom", err);
+      // The disk-space-leak signal: the retry list grew. A re-parked retry
+      // counts again, so a NON-DRAINING list shows as a climbing rate.
+      this.obs.spillUnlinkFailure();
       this.spillRetry.push({ roomSpillId, sha });
     });
   }
@@ -1481,6 +1513,7 @@ export class CollabHub {
         }
       }
     }
+    this.noteMediaTier();
   }
 
   /**
@@ -1519,6 +1552,14 @@ export class CollabHub {
     for (const room of this.rooms.values()) {
       let connected = 0;
       for (const entry of room.roster.values()) if (entry.connected) connected++;
+      // Split the room's media figure by tier. Blob lengths in both tiers
+      // (the quota's basis), summing to the old single `mediaBytes`.
+      let mediaRam = 0;
+      let mediaDisk = 0;
+      for (const b of room.media.blobs.values()) {
+        if (b.loc === "ram") mediaRam += b.bytes.length;
+        else mediaDisk += b.len;
+      }
       out.push({
         room: room.obsLabel,
         mode: room.enc ? "encrypted" : "plaintext",
@@ -1533,7 +1574,8 @@ export class CollabHub {
         rosterTotal: room.roster.size,
         rosterConnected: connected,
         connLimit: CollabHub.MAX_ROOM_CLIENTS,
-        mediaBytes: room.media.totalBytes,
+        mediaRamBytes: mediaRam,
+        mediaDiskBytes: mediaDisk,
         mediaLimitBytes: this.limits.media.maxRoomBytes,
         mediaBlobs: room.media.blobs.size,
         mediaWaiting: room.media.waiters.size,
@@ -1600,6 +1642,7 @@ export class CollabHub {
         if (blob.loc === "ram") this.mediaRamBytes -= blob.bytes.length;
       }
       if (room.spillId !== undefined) this.spillRm(room.spillId);
+      this.noteMediaTier();
     }
     this.ipGuard.releaseRoom(docId);
     this.obs.roomEvicted(1, reason);

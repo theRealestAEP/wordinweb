@@ -88,6 +88,16 @@ export class MediaSpill {
     return this.bytes;
   }
 
+  /** Spilled files on disk right now (the `mediaSpillFiles` gauge). Follows
+   * the same synchronous accounting as {@link totalBytes}: released in the
+   * unlink/removeRoom prefix, so a failed rm leaves a file this no longer
+   * counts — the retry list's problem, not the gauge's. */
+  fileCount(): number {
+    let n = 0;
+    for (const room of this.sizes.values()) n += room.size;
+    return n;
+  }
+
   /**
    * Write a blob: stream through the cipher into `<sha>.tmp`, then rename
    * into place. The rename is what makes a reader race safe — the final path

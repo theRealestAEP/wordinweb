@@ -64,7 +64,8 @@ describe("per-room resource snapshot", () => {
       expect(r.mediaLimitBytes).toBe(100 * 1024 * 1024);
       expect(r.logLimitBytes).toBe(64 * 1024 * 1024);
       expect(r.uploadBurst).toBe(64);
-      expect(r.mediaBytes).toBe(0);
+      expect(r.mediaRamBytes).toBe(0);
+      expect(r.mediaDiskBytes).toBe(0);
       expect(r.conns).toBe(0);
       // Nobody has ever joined, so the eviction clock IS running.
       expect(r.emptyMs).toBe(30_000);
