@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Publish gate: the built `wordinweb` tarball must not reference a package
- * that consumers cannot install.
+ * Publish gate: a built tarball must not reference a package that consumers
+ * cannot install. Wired into `prepack` of every published package.
  *
  * The bug this exists for: `noExternal` bundles the JS, but the .d.ts rollup
  * resolves separately and inlines a workspace package only when tsconfig
@@ -24,9 +24,10 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { builtinModules } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const pkgDir = path.resolve(fileURLToPath(new URL("../packages/react", import.meta.url)));
+// Runs from any package's `prepack` (cwd is the package dir), or takes an
+// explicit package dir as the first argument.
+const pkgDir = process.argv[2] ? path.resolve(process.argv[2]) : process.cwd();
 const pkg = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
 const distDir = path.join(pkgDir, "dist");
 
@@ -63,7 +64,11 @@ const SPECIFIER = /(?:\bfrom[ \t]*|\bimport[ \t]*\([ \t]*|\brequire[ \t]*\([ \t]
 
 let files;
 try {
-  files = readdirSync(distDir).filter((f) => f.endsWith(".d.ts") || (f.endsWith(".js") && !f.endsWith(".map")));
+  // `recursive`: tsc-built packages (core, collab, server) mirror their src
+  // directory tree into dist; tsup-built ones (react) emit flat.
+  files = readdirSync(distDir, { recursive: true }).filter(
+    (f) => f.endsWith(".d.ts") || (f.endsWith(".js") && !f.endsWith(".map")),
+  );
 } catch {
   console.error(`check-dts-selfcontained: no build output at ${distDir} — run the build first.`);
   process.exit(1);
@@ -91,10 +96,11 @@ if (violations.length > 0) {
     console.error(`  ${v.file}: "${v.spec}"  (package "${v.name}" is not a dependency or peerDependency)`);
   }
   console.error(
-    "\nIf this is a workspace package, map its EXACT specifier (including any\n" +
-      "subpath) to source in packages/react/tsconfig.json `paths` so the .d.ts\n" +
-      "rollup inlines it. `dts.resolve` in tsup.config.ts looks like the knob but\n" +
-      "is not: tsup turns every `paths` key into an ignore-list for it.\n",
+    "\nEither declare the package as a dependency/peerDependency, or (for the\n" +
+      "tsup-bundled `wordinweb` package) map its EXACT specifier — including any\n" +
+      "subpath — to source in the package's tsconfig `paths` so the .d.ts rollup\n" +
+      "inlines it. `dts.resolve` in tsup.config.ts looks like the knob but is\n" +
+      "not: tsup turns every `paths` key into an ignore-list for it.\n",
   );
   process.exit(1);
 }

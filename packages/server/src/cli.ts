@@ -358,7 +358,13 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
 // the demo can talk to — a bare `node cli.js` serving the ws-only dev server
 // was a footgun (plain GET → 426, no CORS → the demo can't create a doc).
 // Opt into the legacy blank-doc ws-only server with WW_DEV_WS=1.
-if (typeof process !== "undefined" && process.argv[1] && process.argv[1].endsWith("cli.js")) {
+// The second suffix is the npm `bin` name: on POSIX installs argv[1] is the
+// `.bin/wordinweb-collab-server` symlink, which node does not realpath.
+if (
+  typeof process !== "undefined" &&
+  process.argv[1] &&
+  (process.argv[1].endsWith("cli.js") || process.argv[1].endsWith("wordinweb-collab-server"))
+) {
   const port = Number(process.env.PORT ?? 1234);
   if (process.env.WW_DEV_WS === "1") void startDevServer({ port });
   else void startZeroCustodyServer({ port });
