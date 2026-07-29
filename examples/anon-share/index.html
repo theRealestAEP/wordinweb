@@ -107,6 +107,13 @@
       .app-links a:hover { color: #fff; background: rgba(255,255,255,.1); }
       /* The sibling surface, lifted like Collaborative is on the viewer side. */
       .app-links a.other { border: 1px solid rgba(255,255,255,.28); background: rgba(255,255,255,.08); }
+      /* Primary call to action: bigger than the utility buttons around it,
+         because it is the one control that changes what the app is. */
+      button.cta { font: 600 14px system-ui; padding: 9px 18px; border: 1px solid transparent;
+        background: #1a73e8; color: #fff; border-radius: 7px; cursor: pointer; }
+      button.cta:hover:not([disabled]) { background: #1765cc; }
+      button.cta[disabled] { opacity: .45; cursor: default; }
+      button.cta:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
       .hint { color: #5f6368; font-size: 12px; }
       #root { padding: 16px; }
 

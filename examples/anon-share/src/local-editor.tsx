@@ -109,15 +109,19 @@ export function LocalEditor({
             <span className="tag" style={{ color: "#5f6368" }}>Editing locally — nothing has left this browser</span>
           </span>
         </span>
-        <span style={{ flex: 1 }} />
+        {/* THE primary action on this screen, and the only one that changes
+            what the app is — so it is sized like it and placed ahead of the
+            spacer rather than tucked at the far right with the utilities.
+            Everything else here is secondary to "share this document". */}
         <button
           data-testid="make-collaborative"
           disabled={!api}
           onClick={() => setModalOpen(true)}
-          style={{ font: "13px system-ui", padding: "5px 12px", border: "1px solid #dadce0", background: "#1a73e8", color: "#fff", borderRadius: 6, cursor: "pointer" }}
+          className="cta"
         >
-          Collab
+          Make collaborative
         </button>
+        <span style={{ flex: 1 }} />
       </div>
       <DocxToolbar api={api} mode="advanced" />
       <div style={{ flex: 1, minHeight: 0 }}>
