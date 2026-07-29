@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CollabHub, Connection } from "../src/hub.js";
-import { PROTOCOL_VERSION, ENGINE_VERSION } from "@wordinweb/collab/server";
+import { PROTOCOL_VERSION, ENGINE_VERSION, deriveEpochKeys, mintDocKey, sealIntent } from "@wordinweb/collab/server";
 import type { ServerMessage, IntentEnvelope } from "@wordinweb/collab/server";
 
 /** Hub as blind sequencer (doc 13 §2): encrypted rooms, engine fence,
@@ -229,5 +229,34 @@ describe("server-assigned checkpointer (doc 13 §3, blocker 2)", () => {
     // Rebased resubmit (same clientSeq) sequences fine.
     await hub.handle(a, { t: "submit-enc", envelope: { ...env("alice", 2), base: 1 } });
     expect(a.last().t).toBe("broadcast-enc");
+  });
+
+  it("log accounting counts the PADDED ciphertext length of real sealed envelopes", async () => {
+    // The room log budget must charge what actually crosses the wire. With
+    // sealed-body padding (e2ee.ts) every small intent seals to the 384-byte
+    // plaintext rung → 400 ct bytes → 536 base64 chars, so logBytes advances
+    // in 536-char steps for keystrokes — not the raw JSON's size.
+    const keys = await deriveEpochKeys(mintDocKey(), "g1");
+    const seal = (clientSeq: number, base: number) =>
+      sealIntent(keys.kContent, "d", "g1", {
+        kind: "insertText",
+        clientId: "alice",
+        clientSeq,
+        base,
+        at: { blockId: 1, runId: 2, offset: 0 },
+        text: "a",
+      } as never);
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice"));
+    const e1 = await seal(1, 0);
+    expect(e1.ciphertext.length).toBe(536); // the rung-1 envelope size
+    await hub.handle(a, { t: "submit-enc", envelope: e1 });
+    const snap1 = hub.roomsSnapshot();
+    expect(snap1).toHaveLength(1);
+    expect(snap1[0].logBytes).toBe(e1.ciphertext.length);
+    const e2 = await seal(2, 1);
+    await hub.handle(a, { t: "submit-enc", envelope: e2 });
+    expect(hub.roomsSnapshot()[0].logBytes).toBe(e1.ciphertext.length + e2.ciphertext.length); // 1072
   });
 });

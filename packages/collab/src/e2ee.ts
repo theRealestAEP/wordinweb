@@ -49,6 +49,85 @@ export interface EpochKeys {
 const te = new TextEncoder();
 const td = new TextDecoder();
 
+/**
+ * Sealed-body PADDING (traffic-analysis hardening). AES-GCM is length-
+ * preserving and the server orders envelopes it cannot open, so without
+ * padding the ciphertext length tracks the edit exactly: a 1-char keystroke,
+ * a suggesting keystroke, a paste and a table op each had a distinct sealed
+ * size, giving an observer a paste-length oracle (±3 chars) plus a
+ * "suggesting mode" signature — against a document it already holds.
+ *
+ * Wrapper format (below the intent system on purpose — a `pad` field inside
+ * the JSON would ride along in pending copies, undo inverses and mirror
+ * logs, and its tolerance through validate/transform/apply is unverified):
+ *
+ *   [4-byte big-endian body length][JSON bytes][zero fill to bucket]
+ *
+ * Every seal/open goes through pad/unpad here, so all call sites (submit,
+ * undo, resume replay, stale-base re-seal, stuck redrive) are covered by
+ * this one choke point. AAD and fresh-IV-per-envelope are untouched.
+ *
+ * Bucket ladders (plaintext bytes, prefix included):
+ *  - intents: {384, 1024, 4096}, then the next 4 KiB multiple. 384 is sized
+ *    so every single-edit operation — keystroke, backspace, Enter, format,
+ *    suggesting keystroke, table op, insertImage, sentence-sized paste —
+ *    lands in ONE size class (measured max ≈ 320 bytes of JSON).
+ *  - presence: {128, 1024}, then the next 1 KiB multiple (a 64-range
+ *    selection clamp can exceed 1024). Hides selection size; the
+ *    caret-versus-"has a selection" bit intentionally remains visible.
+ *  - checkpoints: 64 KiB multiples. One envelope per ~CHECKPOINT_EVERY
+ *    edits, so the overhead is noise; hides the fine-grained document-size
+ *    trajectory.
+ *
+ * The hard caps mirror the hub's refusal thresholds, which count BASE64
+ * chars of ciphertext (hub.ts): 256 KiB chars/envelope ⇒ 196 608 raw
+ * ciphertext bytes ⇒ minus the 16-byte GCM tag ⇒ 196 592 plaintext bytes;
+ * 16 MiB chars/checkpoint ⇒ 12 582 896. Padding NEVER pushes a body past
+ * its cap: the bucket target clamps to the cap, and a body already over the
+ * cap is left unpadded (the server refuses it exactly as it did before).
+ *
+ * ENGINE-VERSION COUPLING: an e5 client JSON.parses the RAW plaintext, so a
+ * length-prefixed body throws there — the padded edit would no-op on e5
+ * mirrors while applying on e6, a canonical fork on the first padded
+ * envelope. ENGINE_VERSION e6 fences the mixed room out; do not ship one
+ * side without the other.
+ *
+ * Media blobs stay UNPADDED (sealMediaBlob): re-supply requires
+ * byte-identical deterministic re-encryption, so padding new uploads would
+ * fork sha addresses against pre-e6 registrations.
+ */
+const INTENT_PAD_RUNGS = [384, 1024, 4096] as const;
+const INTENT_PAD_STEP = 4096;
+/** 256 KiB base64 chars (hub envelope cap) → 196 608 ct bytes − 16 tag. */
+const INTENT_PLAIN_CAP = (256 * 1024 * 3) / 4 - 16;
+const PRESENCE_PAD_RUNGS = [128, 1024] as const;
+const PRESENCE_PAD_STEP = 1024;
+/** Presence has no hub-side cap of its own; reuse the envelope cap as the
+ * guard so padding can never be the thing that makes a frame oversized. */
+const PRESENCE_PLAIN_CAP = INTENT_PLAIN_CAP;
+const CHECKPOINT_PAD_STEP = 64 * 1024;
+/** 16 MiB base64 chars (hub checkpoint cap) → 12 582 912 ct bytes − 16. */
+const CHECKPOINT_PLAIN_CAP = (16 * 1024 * 1024 * 3) / 4 - 16;
+
+function padBody(body: Uint8Array, rungs: readonly number[], step: number, cap: number): Uint8Array {
+  const need = 4 + body.length;
+  let target = rungs.find((r) => need <= r) ?? Math.ceil(need / step) * step;
+  if (target > cap) target = cap; // hard guard: padding never pushes past the cap
+  if (target < need) target = need; // over-cap body: leave unpadded; refused server-side as before
+  const out = new Uint8Array(target); // zero-filled
+  new DataView(out.buffer).setUint32(0, body.length);
+  out.set(body, 4);
+  return out;
+}
+
+function unpadBody(pt: ArrayBuffer): Uint8Array {
+  const bytes = new Uint8Array(pt);
+  if (bytes.length < 4) throw new Error("padded body: too short");
+  const len = new DataView(pt).getUint32(0);
+  if (len > bytes.length - 4) throw new Error("padded body: bad length prefix");
+  return bytes.subarray(4, 4 + len);
+}
+
 export function bytesToB64(bytes: Uint8Array): string {
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
@@ -134,10 +213,11 @@ export async function sealIntent(
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
   const aad = intentAad(docId, genesisId, intent.clientId, intent.clientSeq, intent.base);
+  const body = padBody(te.encode(JSON.stringify(intent)), INTENT_PAD_RUNGS, INTENT_PAD_STEP, INTENT_PLAIN_CAP);
   const ct = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv: iv as BufferSource, additionalData: aad as BufferSource },
     kContent,
-    te.encode(JSON.stringify(intent)) as BufferSource,
+    body as BufferSource,
   );
   return {
     clientId: intent.clientId,
@@ -164,7 +244,7 @@ export async function openIntent(
     kContent,
     b64ToBytes(env.ciphertext) as BufferSource,
   );
-  const intent = JSON.parse(td.decode(pt)) as Intent;
+  const intent = JSON.parse(td.decode(unpadBody(pt))) as Intent;
   // Belt-and-braces: the plaintext bookkeeping must MATCH the sealed body
   // (AAD already guarantees it — this catches a buggy honest client early).
   if (intent.clientId !== env.clientId || intent.clientSeq !== env.clientSeq || intent.base !== env.base) {
@@ -209,10 +289,11 @@ export async function sealCheckpoint(
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
   const aad = te.encode(`cp:${docId}:${genesisId}:${seq}`);
+  const padded = padBody(te.encode(JSON.stringify(body)), [], CHECKPOINT_PAD_STEP, CHECKPOINT_PLAIN_CAP);
   const ct = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv: iv as BufferSource, additionalData: aad as BufferSource },
     kContent,
-    te.encode(JSON.stringify(body)) as BufferSource,
+    padded as BufferSource,
   );
   return { iv: bytesToB64(iv), ciphertext: bytesToB64(new Uint8Array(ct)) };
 }
@@ -230,7 +311,7 @@ export async function openCheckpoint(
     kContent,
     b64ToBytes(sealed.ciphertext) as BufferSource,
   );
-  return JSON.parse(td.decode(pt));
+  return JSON.parse(td.decode(unpadBody(pt)));
 }
 
 function intentAad(docId: string, genesisId: string, clientId: string, clientSeq: number, base: number): Uint8Array {
@@ -295,7 +376,7 @@ export async function sealPresence(
       additionalData: presenceAad(docId, genesisId, clientId) as BufferSource,
     },
     kPresence,
-    te.encode(JSON.stringify(position)) as BufferSource,
+    padBody(te.encode(JSON.stringify(position)), PRESENCE_PAD_RUNGS, PRESENCE_PAD_STEP, PRESENCE_PLAIN_CAP) as BufferSource,
   );
   return { iv: bytesToB64(iv), ciphertext: bytesToB64(new Uint8Array(ct)) };
 }
@@ -323,7 +404,7 @@ export async function openPresence(
     kPresence,
     b64ToBytes(sealed.ciphertext) as BufferSource,
   );
-  return JSON.parse(td.decode(pt));
+  return JSON.parse(td.decode(unpadBody(pt)));
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
