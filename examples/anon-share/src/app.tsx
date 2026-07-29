@@ -244,9 +244,12 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   const refusedContent = (reason: string): ReactNode => {
     if (reason === "already-open") {
       return (
-        <div>
-          <p>This document is open in another tab.</p>
+        <div className="gate">
+          <div className="gate-card">
+          <h2>Already open in another tab</h2>
+          <p>A document can only be live in one tab at a time. Taking over here disconnects the other one.</p>
           <button onClick={() => { setTakeover(true); setAttempt((a) => a + 1); }}>Use here instead</button>
+          </div>
         </div>
       );
     }
@@ -266,14 +269,19 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     }
     if (reason === "code-required" || reason === "code-invalid" || reason === "code-locked") {
       return (
-        <div>
-          <p>
-            {reason === "code-locked"
-              ? "Too many tries — wait a minute, then re-enter the share code."
-              : reason === "code-invalid"
-                ? "That code didn't match — ask whoever shared the document."
-                : "This document needs its share code (sent separately from the link)."}
-          </p>
+        <div className="gate">
+          <div className="gate-card">
+            <h2>
+              {reason === "code-locked" ? "Too many tries" : reason === "code-invalid" ? "That code didn\u2019t match" : "Share code required"}
+            </h2>
+            <p>
+              {reason === "code-locked"
+                ? "Wait a minute, then re-enter the share code."
+                : reason === "code-invalid"
+                  ? "Ask whoever shared the document \u2014 the code is sent separately from the link."
+                  : "This document is locked with a code, sent separately from the link."}
+            </p>
+            <div className="gate-row">
           <input
             data-testid="join-share-code"
             value={codeDraft}
@@ -299,12 +307,14 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           >
             Join
           </button>
-          {onNewDocument && (
-            <p style={{ marginTop: 8, fontSize: 13 }}>
-              Forgot the code?{" "}
-              <button data-testid="refused-new-document" onClick={onNewDocument}>Start a new document</button>
-            </p>
-          )}
+            </div>
+            {onNewDocument && (
+              <p className="gate-foot">
+                <span>Forgot the code?</span>
+                <button className="ghost" data-testid="refused-new-document" onClick={onNewDocument}>Start a new document</button>
+              </p>
+            )}
+          </div>
         </div>
       );
     }
@@ -350,7 +360,18 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         </div>
       );
     }
-    return <p>Connection refused: {reason}. Refresh to retry.</p>;
+    return (
+      <div className="gate">
+        <div className="gate-card">
+          <h2>Can\u2019t open this document</h2>
+          {/* The reason is protocol vocabulary, not prose — shown because a
+              specific word someone can search or quote beats "something went
+              wrong", and these are the cases with no tailored screen yet. */}
+          <p>The server refused the connection: <code>{reason}</code>.</p>
+          <button onClick={() => window.location.reload()}>Reload this tab</button>
+        </div>
+      </div>
+    );
   };
 
   return (

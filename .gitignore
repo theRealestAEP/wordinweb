@@ -19,3 +19,9 @@ playwright-report/
 .env
 .env.*
 !.env.example
+
+# Ops dashboard for a specific deployment: host addresses, an SSH path, and a
+# view of live rooms. Useful locally, not part of the published project, and
+# it reads /stats which is deliberately never exposed publicly. Scoped to the
+# subdirectory rather than all of tools/ so a genuine repo tool can still land.
+/tools/dashboard/
