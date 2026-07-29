@@ -182,6 +182,12 @@ export class EncryptedCollabConnection {
     return this.replica !== null;
   }
 
+  /** Un-confirmed local intents in flight — drained-replay parity with the
+   * plaintext connection (doc 15 §2 / rebase.ts). */
+  get pendingCount(): number {
+    return this.replica?.pendingCount ?? 0;
+  }
+
   /** Roster + activity parity with the plaintext connection (doc 14). */
   roster: RosterEntry[] = [];
   activity: { seq: number; clientId: string; kind: string }[] = [];

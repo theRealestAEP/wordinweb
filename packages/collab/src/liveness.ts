@@ -12,12 +12,15 @@ import type { ClientTransport } from "./connection.js";
  *  - `lost`         the retries are exhausted. Needs a human: reconnect or
  *                   reload.
  *
- * CONSUMERS MUST GATE THE EDITOR ON ANYTHING BUT `live`, exactly as they gate
- * on `writesBlocked`, and for the identical reason. The two are the same bug
- * wearing different clothes: an editable surface whose writes cannot reach the
- * server applies every keystroke locally and then loses it, and it looks like
- * it worked the whole time. A banner over a still-typable page is not a fix —
- * it is the bug with a label on it.
+ * A NON-LIVE STATE IS NOT A WRITE GATE (doc 12 §5: offline editing is
+ * first-class). What consumers MUST guarantee on anything but `live` is that
+ * nothing typed can be LOST: edits apply locally and are recorded to the
+ * durable offline tail (doc 15 §2) for replay on reconnect — the react
+ * layer's capture path does exactly this. The write gate (`writesBlocked`)
+ * stays reserved for server REFUSALS, where accepting a keystroke really is
+ * accepting-then-losing it. An editable surface whose disconnected edits are
+ * neither kept nor gated remains the silent-loss bug this type was created
+ * to surface — keep them either captured or blocked, never dropped.
  */
 export type ConnectionState = "live" | "reconnecting" | "lost";
 

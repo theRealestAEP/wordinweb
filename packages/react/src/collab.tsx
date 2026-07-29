@@ -8,6 +8,9 @@ import {
   stretchShareCode,
   toSuggestions,
   arrivalMode,
+  OFFLINE_TAIL_CAP,
+  applyIntentScoped,
+  resyncScope,
   createWebSocketTransport,
   monitorTransport,
   BundlePersister,
@@ -88,6 +91,13 @@ export interface UseCollabOptions {
    * gives up and reports `lost` — the point at which a human has to act.
    */
   liveness?: LivenessOptions & { maxRetries?: number };
+  /**
+   * Bound on the offline tail (doc 15 §4.3) — how many intents may be
+   * recorded while disconnected before the editor gates read-only with an
+   * explicit "offline limit" state. Defaults to OFFLINE_TAIL_CAP; injectable
+   * so tests can reach the cap without recording thousands of edits.
+   */
+  offlineTailCap?: number;
 }
 
 export interface CollabSession {
@@ -132,11 +142,35 @@ export interface CollabSession {
    *  - `lost`         retries exhausted. Show something modal: the document is
    *                   safe but nothing further will sync until a human acts.
    *
-   * Anything but `live` FOLDS INTO {@link writesBlocked}, so the editor is
-   * already gated read-only and a consumer cannot forget to do it. See the
-   * note there — this state exists to be shown, not to be the gate.
+   * A NON-LIVE CONNECTION DOES NOT BLOCK WRITES (doc 12 §5: offline editing
+   * is first-class). "I cannot reach the server" is a different fact from
+   * "the server said no": nothing typed offline is doomed — it applies
+   * locally, is recorded to the offline tail, persists with the bundle, and
+   * replays on reconnect (doc 15's arrival ladder). {@link offline} is the
+   * state a consumer renders for it; {@link writesBlocked} stays reserved
+   * for genuine refusals, where accepting keystrokes would be a lie.
    */
   connection: ConnectionState;
+  /**
+   * OFFLINE EDITING IS ACTIVE (doc 15 §2 / doc 12 §5): the sequencer is
+   * unreachable, a document is in hand, and nothing has refused this
+   * client's writes — so edits apply locally and accumulate in the durable
+   * offline tail instead of being dropped.
+   *
+   *  - `editsHeld` how many intents the tail currently holds. Show it: the
+   *    difference between "editing is paused" and "your changes are being
+   *    kept (N so far)" is the whole point of the state.
+   *  - `capped` the tail hit its bound (doc 15 §4.3). Recording has STOPPED
+   *    and {@link writesBlocked} is raised — loudly, with this flag saying
+   *    why, never by silently discarding keystrokes. The escape hatches are
+   *    reconnecting or downloading a copy.
+   *
+   * Null while the connection is live, and null when a refusal already
+   * blocks writes (a viewer's link does not become writable by going
+   * through a tunnel). On reconnect the tail replays: silently as ordinary
+   * edits when the session is the same epoch, else via {@link arrival}.
+   */
+  offline: { editsHeld: number; capped: boolean } | null;
   /**
    * Retry the connection immediately, resetting the backoff and the attempt
    * budget. Wired to a "Try again" control on the `lost` UI — from `lost`
@@ -204,15 +238,17 @@ export interface CollabSession {
    * token), so a UI can finally say which one applies rather than inventing a
    * distinction it could not see.
    *
-   * A DEAD CONNECTION IS ALSO A BLOCK, and folding it in here rather than
-   * adding a second gate is the point of the "one predicate" rule above. A
-   * dropped socket is the same bug as an owner lock in every way that matters
-   * to the user: the writes will not be sequenced, the editor applies them
-   * anyway, and the text disappears on the next reconciliation. It arrives by
-   * a different route — silence instead of a refusal — but a consumer that
-   * already renders viewer mode on this predicate gets the disconnected case
-   * right without changing a line, which is exactly what the rule was written
-   * to buy. {@link connection} says WHICH so the copy can differ.
+   * A DEAD CONNECTION IS DELIBERATELY NOT A BLOCK — that is the refusal /
+   * unreachable split (doc 12 §5). This predicate means "nothing you type
+   * can ever land"; a dropped socket means "nothing you type can land YET",
+   * and the offline tail is what keeps the two honest: disconnected edits
+   * apply locally, persist durably, and replay on reconnect, so accepting
+   * them is not a lie. The one offline condition that does fold in is the
+   * tail CAP ({@link offline}.capped): past it an edit genuinely cannot be
+   * kept, so the gate closes loudly rather than recording silently stopping.
+   * An earlier revision folded every non-live connection in here; that
+   * over-reached — it was written for server refusals and extended to
+   * transport faults, which made first-class offline editing impossible.
    *
    * A REFUSED SESSION FOLDS IN TOO, by the same rule. A refusal ends the
    * session — no socket, nothing to sequence against — so any document still
@@ -269,12 +305,18 @@ export interface CollabSession {
     | { op: "readOnly"; on: boolean }
     | { op: "setRole"; clientId: string; role: "editor" | "viewer" }) => void;
   /**
-   * Offline reconciliation (doc 15 arrival ladder). When a resume lands in
-   * a diverged epoch and the bundle has an offline tail, the recommended
-   * mode is `suggest` (replay as tracked changes). Null when there's
-   * nothing to reconcile. `reconcile()` runs the chosen mode.
+   * Offline reconciliation (doc 15 arrival ladder). When a rejoin lands in
+   * a DIFFERENT epoch than the tail was recorded against, the recommended
+   * mode is `suggest` (replay as tracked changes; ≤ the suggest threshold)
+   * or `draft` (large tails). `structural` counts the tail intents that
+   * have no suggestion form (splits/merges/tables/format — rebase.ts):
+   * they are NOT replayed by `suggest` and survive in the banked draft
+   * slot instead — say so, or their absence reads as silent loss. A
+   * same-epoch rejoin never surfaces here: its tail replays silently
+   * through the ordinary submit path, like a large pending queue.
+   * Null when there's nothing to reconcile. `reconcile()` runs the choice.
    */
-  arrival: { mode: "suggest" | "draft"; tailLength: number } | null;
+  arrival: { mode: "suggest" | "draft"; tailLength: number; structural: number } | null;
   reconcile: (mode: "suggest" | "draft") => void;
   /** How many times the connection self-healed a drifted optimistic replica
    * (encrypted mode's quiescent mirror check — the B6a class). Telemetry;
@@ -397,12 +439,36 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const [notOwner, setNotOwner] = useState(false);
   const [epochChanged, setEpochChanged] = useState<{ from: string; to: string } | null>(null);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
-  const [arrival, setArrival] = useState<{ mode: "suggest" | "draft"; tailLength: number } | null>(null);
+  const [arrival, setArrival] = useState<{ mode: "suggest" | "draft"; tailLength: number; structural: number } | null>(null);
   const [selfHeals, setSelfHeals] = useState(0);
   const [droppedPreReady, setDroppedPreReady] = useState(0);
   const [persistErrors, setPersistErrors] = useState(0);
   const [sendFailures, setSendFailures] = useState(0);
+  /**
+   * THE OFFLINE TAIL (doc 15 §2): intents recorded while the sequencer was
+   * unreachable. The ref — not the connection — owns it, because the tail
+   * must survive the teardown-and-rebuild cycle every reconnect performs.
+   * Entries carry no wire bookkeeping; the replay's ordinary submit path
+   * assigns clientId/clientSeq/base when they finally go out.
+   */
   const offlineTailRef = useRef<import("@wordinweb/collab/client").DocBundle["offlineTail"]>(undefined);
+  /** The genesisId the tail was recorded against (bundle.offlineTailEpoch):
+   * same epoch on rejoin ⇒ silent replay; different ⇒ arrival ladder. */
+  const offlineEpochRef = useRef<string | null>(null);
+  /** Tail length mirrored into state so the UI re-renders as it grows. */
+  const [offlineHeld, setOfflineHeld] = useState(0);
+  /** The genesis of the state on screen — what a capture stamps the tail
+   * with when recording starts. Set on every welcomed onChange. */
+  const lastGenesisRef = useRef<string | null>(null);
+  /** The live persister, reachable from capture/replay code that outlives
+   * any single effect run. Null while no store or between effect runs. */
+  const persisterRef = useRef<BundlePersister | null>(null);
+  /** The connection whose welcome already resolved the tail (replay started
+   * or arrival offered) — the welcome-time decision must run once per
+   * connection, not once per broadcast. */
+  const tailConnRef = useRef<object | null>(null);
+  /** Trailing-throttle timer for the OFFLINE tail writer (below). */
+  const offlinePersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("live");
   /**
    * Bumped to force the connection effect to tear down and rebuild — the
@@ -450,6 +516,137 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     attemptRef.current = 0;
     setConnection("reconnecting");
     setReconnectNonce((n) => n + 1);
+  };
+
+  /**
+   * THE OFFLINE TAIL WRITER — persistence for the window where the
+   * BundlePersister cannot write (a rebuilt connection has no welcome yet,
+   * so exportBundle is null). Read-modify-write of the STORED bundle,
+   * chained on flushDoneRef so it serializes against teardown flushes and
+   * the next run's resume read. While a welcomed connection exists the
+   * persister carries the tail instead (via its offlineTail getter), so the
+   * two writers are never active at once.
+   */
+  const persistOfflineTail = (): void => {
+    if (!store) return;
+    flushDoneRef.current = flushDoneRef.current
+      .then(async () => {
+        const prev = await store.get(docId);
+        if (!prev) return; // never persisted: nothing durable to attach to
+        const tail = offlineTailRef.current ?? [];
+        const next = { ...prev };
+        if (tail.length) {
+          next.offlineTail = [...tail];
+          next.offlineTailEpoch = offlineEpochRef.current ?? undefined;
+        } else {
+          delete next.offlineTail;
+          delete next.offlineTailEpoch;
+        }
+        await store.put(next);
+      })
+      .catch((err: unknown) => {
+        // Same contract as the persister's onError: in a zero-custody design
+        // a failed write means the durable copy is stale — never silent.
+        setPersistErrors((n) => n + 1);
+        // eslint-disable-next-line no-console
+        console.error("[wordinweb] offline-tail-persist", err);
+      });
+  };
+  /** Throttled (trailing, 1s) — the doc 12 §4 discipline: bounds loss to
+   * the window without deferring forever under sustained typing. */
+  const scheduleOfflinePersist = (): void => {
+    if (!store || offlinePersistTimerRef.current !== null) return;
+    offlinePersistTimerRef.current = setTimeout(() => {
+      offlinePersistTimerRef.current = null;
+      persistOfflineTail();
+    }, 1000);
+  };
+  /** Run any armed offline write NOW (pagehide, teardown). */
+  const flushOfflinePersist = (): void => {
+    if (offlinePersistTimerRef.current === null) return;
+    clearTimeout(offlinePersistTimerRef.current);
+    offlinePersistTimerRef.current = null;
+    persistOfflineTail();
+  };
+
+  /**
+   * Record one offline edit (doc 15 §2): already applied to the live doc by
+   * the editor (`preApplied`), or applied here through the SAME canonical
+   * applyIntent code every replica runs (the toolbar/API path). The intent
+   * then joins the tail, the UI repaints, and the tail is persisted through
+   * whichever writer can currently reach the store.
+   */
+  const captureOffline = (intent: Omit<Intent, "clientId" | "clientSeq" | "base">, preApplied: boolean): void => {
+    if (!preApplied) {
+      if (!doc) return;
+      const ids = doc.enableStableIds();
+      const res = applyIntentScoped(doc, ids, intent as Intent);
+      if (!res.applied) return; // nothing changed ⇒ nothing to record
+      resyncScope(doc, ids, res);
+    }
+    const tail = offlineTailRef.current ?? [];
+    tail.push(intent as Intent);
+    offlineTailRef.current = tail;
+    // Stamp the epoch the tail is being recorded against, once per tail.
+    offlineEpochRef.current ??= lastGenesisRef.current;
+    setOfflineHeld(tail.length);
+    setVersion((v) => v + 1); // offline edits fire no onChange — repaint here
+    if (connRef.current?.ready) persisterRef.current?.notify();
+    else scheduleOfflinePersist();
+  };
+
+  /**
+   * Drain the offline tail through the ordinary submit path, one-in-flight
+   * (doc 03's supported discipline — the reason no sibling math is needed).
+   * `plain` replays entries as the ordinary edits they were (same-epoch
+   * rejoin: to the session this client is indistinguishable from one that
+   * was disconnected with a large pending queue — doc 15 §2). `suggest`
+   * converts each entry to its tracked-change form first (diverged rejoin,
+   * the owner-adopted default); structural entries have no suggestion form
+   * and are popped WITHOUT submitting — they survive in the banked draft
+   * slot, and `arrival.structural` told the user so.
+   *
+   * EXACTLY-ONCE across a kill: each step pops the entry from the tail,
+   * submits it (it becomes a pending intent with a clientSeq), and flushes
+   * the persister — so the stored bundle moves the intent from `offlineTail`
+   * to `pending` in one write. A resume then replays it from `pending`,
+   * verbatim, deduplicated by (clientId, clientSeq). A hard kill inside the
+   * sub-second flush window keeps the ordinary doc 12 §4 RPO bound.
+   */
+  const runTailReplay = (conn: CollabConnection, kind: "plain" | "suggest"): void => {
+    const author = profile?.name || clientId;
+    const date = new Date().toISOString();
+    const step = (): void => {
+      // Torn down or dropped again: stop. The remainder is persisted and
+      // resumes on the next welcome (same epoch now ⇒ silent continuation;
+      // suggest remainders re-offer via the arrival ladder).
+      if (connRef.current !== conn || !conn.ready) return;
+      if (conn.pendingCount > 0) {
+        setTimeout(step, 25);
+        return;
+      }
+      const tail = offlineTailRef.current ?? [];
+      if (!tail.length) {
+        offlineTailRef.current = undefined;
+        offlineEpochRef.current = null;
+        setOfflineHeld(0);
+        setArrival(null);
+        void persisterRef.current?.flush(); // erase the stored tail
+        return;
+      }
+      const next = tail[0];
+      offlineTailRef.current = tail.slice(1);
+      setOfflineHeld(tail.length - 1);
+      if (kind === "suggest") {
+        const { suggestions } = toSuggestions([next], author, date);
+        if (suggestions.length) conn.submit(suggestions[0]);
+      } else {
+        conn.submit(next);
+      }
+      void persisterRef.current?.flush();
+      setTimeout(step, 0);
+    };
+    step();
   };
 
   useEffect(() => {
@@ -540,6 +737,27 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
           backoffRef.current = 0;
           attemptRef.current = 0;
           setConnection((s) => (s === "live" ? s : "live"));
+          lastGenesisRef.current = c.genesisId;
+          // Resolve the offline tail ONCE per welcomed connection (doc 15
+          // arrival ladder). Same epoch as the tail was recorded against ⇒
+          // this client is just a rejoiner with a large pending queue:
+          // replay silently through the ordinary drained submit path.
+          // Different epoch (or a tail from a build that recorded none) ⇒
+          // true divergence: offer the choice, never silently bulldoze.
+          if (tailConnRef.current !== c) {
+            tailConnRef.current = c;
+            const tail = offlineTailRef.current ?? [];
+            if (tail.length) {
+              if (offlineEpochRef.current === c.genesisId) {
+                runTailReplay(c, "plain");
+              } else {
+                const structural = toSuggestions(tail, "", "").dropped.length;
+                // diverged=true never yields "fast-forward"; narrow for the type.
+                const mode = arrivalMode(tail.length, true) === "draft" ? "draft" as const : "suggest" as const;
+                setArrival({ mode, tailLength: tail.length, structural });
+              }
+            }
+          }
         }
       },
       onPresence: (participant, pos) =>
@@ -604,13 +822,10 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         console.error(`[wordinweb] ${info.where}`, info.error);
       },
       onEpochChange: (from, to) => {
-        // Arrival ladder (doc 15): a diverged rejoin with a recorded offline
-        // tail offers rebase-as-suggestions (small) or draft (large).
-        const tail = offlineTailRef.current ?? [];
-        if (tail.length) {
-          const mode = arrivalMode(tail.length, true);
-          if (mode !== "fast-forward") setArrival({ mode, tailLength: tail.length });
-        }
+        // A recorded offline tail is handled by the welcome-time resolution
+        // in onChange (the arrival ladder keys on the tail's RECORDED epoch
+        // vs the welcome's, which also covers a reload that lands after
+        // this callback already fired in a previous session).
         // Someone re-seeded while we were away (doc 12 §5 case 2): the
         // connection already took the server's state and withheld our
         // old-epoch pending. Preserve the superseded bundle as a DRAFT
@@ -642,7 +857,13 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // connection; both classes expose the same session surface, so the rest
     // of the hook (and DocxView) is mode-blind. Construction is async only
     // when a share code must be stretched (PBKDF2, once per join).
-    const flush = () => void persister?.flush();
+    const flush = () => {
+      void persister?.flush();
+      // The offline writer's armed write, if any (it is armed only while
+      // the persister cannot export a bundle, so at most one of these two
+      // produces a write).
+      flushOfflinePersist();
+    };
     /**
      * This run is a REJOIN after a detected drop, not a first join — so it
      * must claim the identity the way `resume()` already does.
@@ -681,7 +902,15 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
             // eslint-disable-next-line no-console
             console.error("[wordinweb] bundle-persist", err);
           },
+          // The offline tail rides every bundle write (doc 15 §4.3 "tail
+          // hygiene"): without this, the first post-resume write would
+          // ERASE a stored tail the user had not reconciled yet.
+          offlineTail: () => {
+            const tail = offlineTailRef.current ?? [];
+            return tail.length ? { tail: [...tail], epoch: offlineEpochRef.current ?? undefined } : null;
+          },
         });
+        persisterRef.current = persister;
         if (typeof window !== "undefined") {
           window.addEventListener("pagehide", flush);
           document.addEventListener("visibilitychange", flush);
@@ -697,7 +926,15 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         // the editor stays !ready (input disabled) until the welcome.
         const bundle = await store.get(docId);
         if (disposed || connRef.current !== conn) return;
-        offlineTailRef.current = bundle?.offlineTail;
+        // The stored tail seeds the in-memory one only when memory holds
+        // nothing (a fresh page). Within a page's lifetime the ref is always
+        // at least as fresh as the store (the store trails by the throttle
+        // window), so a reconnect must never clobber it with a stale read.
+        if (!offlineTailRef.current?.length) {
+          offlineTailRef.current = bundle?.offlineTail;
+          offlineEpochRef.current = bundle?.offlineTailEpoch ?? null;
+          setOfflineHeld(bundle?.offlineTail?.length ?? 0);
+        }
         // resume() already claims takeover for this exact reason (doc 12 §7).
         if (bundle) conn.resume(bundle, token, { profile, codeProof, ownerToken });
         else conn.join(docId, token, { profile, takeover: takeover || rejoining, codeProof, ownerToken });
@@ -713,10 +950,15 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         window.removeEventListener("pagehide", flush);
         document.removeEventListener("visibilitychange", flush);
       }
+      // The offline writer's armed write, if any, joins the flush handoff
+      // (it chains itself onto flushDoneRef; armed only while the persister
+      // cannot export, so the two flushes never both produce a write).
+      flushOfflinePersist();
       // Published so the NEXT run can await it before reading the store —
       // this is the handoff that makes a reconnect a resume (see above).
-      flushDoneRef.current = persister?.flush() ?? Promise.resolve();
+      flushDoneRef.current = Promise.all([flushDoneRef.current, persister?.flush() ?? Promise.resolve()]).then(() => {});
       persister?.stop(); // …then detach (no timers left behind)
+      if (persisterRef.current === persister) persisterRef.current = null;
       connRef.current = null;
     };
     // Reconnect when the target document or endpoint changes, or when
@@ -740,6 +982,24 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
    */
   const myWrite = roster.find((r) => r.clientId === clientId)?.write;
 
+  /**
+   * THE REFUSAL / UNREACHABLE SPLIT (doc 12 §5). `refusalBlocked` is "the
+   * server said no" — a dead session, an owner lock, a demotion, a viewer
+   * link — and it is the only thing that makes accepting keystrokes a lie.
+   * A merely unreachable server is `offlineActive`: edits apply locally and
+   * are recorded to the durable tail, EXCEPT past the tail cap, where
+   * recording genuinely cannot continue and the gate closes loudly.
+   *
+   * The refusal check stays live while offline on purpose: a viewer-role
+   * link (or a lock this client last heard was on) does not become writable
+   * by going through a tunnel — offline editing must not punch a hole in
+   * any refusal.
+   */
+  const refusalBlocked =
+    refused !== null || (myWrite !== undefined ? myWrite !== "allowed" : readOnlyBlocked);
+  const offlineActive = !refusalBlocked && connection !== "live" && ready;
+  const offlineCapped = offlineActive && offlineHeld >= (opts.offlineTailCap ?? OFFLINE_TAIL_CAP);
+
   return {
     doc,
     version,
@@ -750,9 +1010,24 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // doubled each keystroke: "Hello" rendered as "Hello" + its reversal, and
     // the corrupted offsets got everything after the first char rejected
     // server-side). Pre-applied semantics track pending + send only.
-    submit: (intent) => connRef.current?.submitPreApplied(intent),
+    //
+    // OFFLINE, the same intent is CAPTURED instead (doc 15 §2): the edit is
+    // already in the doc, so it only needs recording. Past the cap nothing
+    // routes here — writesBlocked has withdrawn the editor — and anything
+    // that slips to the connection anyway lands in the loud droppedPreReady
+    // backstop rather than vanishing.
+    submit: (intent) => {
+      if (offlineActive && !offlineCapped) return captureOffline(intent, /*preApplied*/ true);
+      connRef.current?.submitPreApplied(intent);
+    },
     // Toolbar/API ops: canonical-apply optimistic path (see CollabSession).
-    submitOp: (intent) => connRef.current?.submit(intent),
+    // Offline, the capture applies through the SAME canonical applyIntent
+    // code before recording, so the local result stays byte-identical to
+    // what every replica will derive when the tail replays.
+    submitOp: (intent) => {
+      if (offlineActive && !offlineCapped) return captureOffline(intent, /*preApplied*/ false);
+      connRef.current?.submit(intent);
+    },
     setPresence: (pos) => connRef.current?.setPresence(pos),
     allocIds: (n) => connRef.current?.allocIds(n) ?? [],
     uploadMedia: async (bytes) => (await connRef.current?.uploadMedia(bytes)) ?? null,
@@ -793,22 +1068,23 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // default would put the user's first keystrokes straight back in the
     // appear-then-vanish loop this exists to remove.
     //
-    // A NON-LIVE CONNECTION BLOCKS WRITES TOO, checked first because it
-    // outranks everything the roster could say: a lifted owner lock is
-    // irrelevant if the message announcing it could not have arrived. Folding
-    // it in here — rather than adding a parallel gate at the editor — is what
-    // makes the existing `editable: … && !session.writesBlocked` line cover
-    // the dropped-socket case without being touched.
+    // A NON-LIVE CONNECTION DOES NOT BLOCK: unreachable is not refused (see
+    // refusalBlocked above, and the field's own doc). What DOES fold in is
+    // the offline tail CAP — past it an edit cannot be durably kept, which
+    // is the same "cannot land" fact this predicate exists to gate, and
+    // folding it here is what keeps `editable: … && !writesBlocked` the one
+    // gate every editor surface already reads.
     //
     // A REFUSAL BLOCKS WRITES FIRST OF ALL: the session is dead, and note the
     // hub does NOT close the socket after a kick, so `connection` can still
     // read "live" and the roster can still hold a stale `allowed` — neither
     // may win over a refusal. This is what keeps a document rendered behind a
     // "session ended" dialog read-only through the same single predicate.
-    writesBlocked:
-      refused !== null ||
-      connection !== "live" ||
-      (myWrite !== undefined ? myWrite !== "allowed" : readOnlyBlocked),
+    writesBlocked: refusalBlocked || offlineCapped,
+    // Offline editing state (doc 15 §2) — see the CollabSession doc. Null
+    // whenever a refusal already owns the story: the two must never both
+    // claim the banner.
+    offline: offlineActive ? { editsHeld: offlineHeld, capped: offlineCapped } : null,
     // Left UNSET by a disconnect on purpose. These four values describe what
     // the SERVER decided about this participant, and a client that cannot
     // reach the server has not been told anything new — reporting a stale
@@ -832,27 +1108,29 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     reconcile: (mode) => {
       const conn = connRef.current;
       const tail = offlineTailRef.current ?? [];
-      if (!conn || !tail.length) { setArrival(null); return; }
-      if (mode === "suggest") {
-        // Replay the offline tail as tracked changes on the crowd's doc
-        // (drained one-in-flight — the supported discipline). The author
-        // is this participant's display name (doc 14 attribution).
-        const author = profile?.name || clientId;
-        const date = new Date().toISOString();
-        const { suggestions } = toSuggestions(tail as never, author, date);
-        let i = 0;
-        const step = () => {
-          if (i >= suggestions.length) { offlineTailRef.current = undefined; setArrival(null); return; }
-          conn.submit(suggestions[i++] as never);
-          // Drain: the loopback/echo advances confirmedSeq; poll a tick.
-          setTimeout(step, 30);
-        };
-        step();
-      } else {
-        // Draft: the superseded bundle is already banked by onEpochChange;
-        // just dismiss (the offline edits live in the draft slot).
+      if (!conn || !tail.length) {
         offlineTailRef.current = undefined;
+        offlineEpochRef.current = null;
+        setOfflineHeld(0);
         setArrival(null);
+        return;
+      }
+      setArrival(null); // the choice is made; the banner comes down now
+      if (mode === "suggest") {
+        // Replay the tail as tracked changes on the crowd's doc, drained
+        // one-in-flight, popping + persisting per intent (see runTailReplay
+        // — a kill mid-replay resumes from the store, and the remainder is
+        // re-OFFERED rather than silently replayed, because the tail keeps
+        // its recorded epoch until it fully drains).
+        runTailReplay(conn, "suggest");
+      } else {
+        // Draft: the offline copy (confirmed state + this tail) was banked
+        // to the draft/superseded slot when the epoch change surfaced;
+        // clear the live tail so it is not offered again.
+        offlineTailRef.current = undefined;
+        offlineEpochRef.current = null;
+        setOfflineHeld(0);
+        void persisterRef.current?.flush(); // erase the tail from the live slot
       }
     },
   };

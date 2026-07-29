@@ -4,6 +4,7 @@ import { BundlePersister, InMemoryBundleStore, type DocBundle } from "../src/bun
 import { DocumentSession } from "../src/session.js";
 import { DocxDocument, serializeXml } from "@wordinweb/core";
 import type { ClientMessage, ServerMessage } from "../src/protocol.js";
+import type { Intent } from "../src/intents.js";
 import { zipSync, strToU8 } from "fflate";
 
 /** Minimal one-paragraph docx ("hi") — same fixture shape as the batches. */
@@ -108,6 +109,36 @@ describe("BundlePersister write failures are reported", () => {
     conn.submit(ins(1, "b"));
     p.notify();
     await expect.poll(() => store.writes, { timeout: 5000 }).toBeGreaterThan(0);
+  });
+});
+
+describe("BundlePersister carries the offline tail (doc 15 §4.3 tail hygiene)", () => {
+  it("writes the injected tail + epoch, and ERASES a stored tail once the getter reports empty", async () => {
+    const srv = miniServer("gTail");
+    const conn = new CollabConnection(srv.attach(), "alice");
+    conn.join("d");
+    const store = new InMemoryBundleStore();
+    let tail: Intent[] = [{ kind: "insertText", at: { blockId: 1, runId: 2, offset: 0 }, text: "off" } as never];
+    const p = new BundlePersister(conn, store, "d", {
+      throttleMs: 0,
+      offlineTail: () => (tail.length ? { tail, epoch: "gOld" } : null),
+    });
+
+    conn.submit(ins(0, "a"));
+    await p.flush();
+    const withTail = (await store.get("d"))!;
+    expect(withTail.offlineTail, "the tail rides the bundle write").toHaveLength(1);
+    expect(withTail.offlineTail![0]).toMatchObject({ kind: "insertText", text: "off" });
+    expect(withTail.offlineTailEpoch, "with the epoch it was recorded against").toBe("gOld");
+
+    // Drained (replay finished / draft chosen): the next write must ERASE
+    // the stored tail — a replayed tail that survives the store is offered
+    // again on the next resume, i.e. a double-apply.
+    tail = [];
+    await p.flush();
+    const drained = (await store.get("d"))!;
+    expect(drained.offlineTail).toBeUndefined();
+    expect(drained.offlineTailEpoch).toBeUndefined();
   });
 });
 

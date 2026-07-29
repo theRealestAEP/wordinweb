@@ -15,12 +15,16 @@ import { useCollab, CollabEditor, type CollabSession } from "../src/collab.js";
  * is applied locally and then lost — silent data loss that looks exactly like
  * it worked.
  *
- * This is the same failure shape as the `writesBlocked` bug already fixed in
- * this codebase, so it gets the same remedy and the same standard of proof: it
- * is NOT enough to show a banner appears. The load-bearing assertion is that
- * the document BYTES DO NOT CHANGE while the connection is down — a weaker
- * "the editor says disconnected" test passes happily while the user's text is
- * still being applied and discarded underneath it.
+ * The remedy is CAPTURE, not a gate (doc 12 §5: offline editing is
+ * first-class; doc 15 §2: the offline tail). A dropped socket is "the server
+ * is unreachable", which is a different fact from "the server refused" — so
+ * the editor stays writable, every disconnected edit applies locally AND is
+ * recorded to the durable offline tail, and the tail replays on reconnect.
+ * The standard of proof matches the old gate's: it is NOT enough that a
+ * banner appears. The load-bearing assertions are that disconnected edits
+ * LAND IN THE TAIL (nothing typed is dropped) and that `writesBlocked`
+ * stays false — the gate stays reserved for genuine refusals, which
+ * write-gate.test.tsx pins separately.
  *
  * The half-open case gets its own test because it is the motivating scenario
  * and the one no close-handler can catch: the socket never fires `onclose`,
@@ -161,20 +165,22 @@ const insertAt = (offset: number, text: string) =>
   ({ kind: "insertText", at: { blockId: 1, runId: 2, offset }, text }) as never;
 
 describe("desync detection", () => {
-  it("a clean drop (onclose) surfaces as not-live and BLOCKS WRITES", async () => {
+  it("a clean drop (onclose) surfaces as not-live and enters OFFLINE editing — writes stay open", async () => {
     const hub = seeded();
     const p = await mount(hub);
     expect(p.session.connection).toBe("live");
     expect(p.session.writesBlocked, "a healthy session is writable").toBe(false);
+    expect(p.session.offline, "no offline state while live").toBeNull();
 
     p.sockets[0].kill();
     await until(() => p.session.connection !== "live", "drop detected");
 
     expect(p.session.connection).toBe("reconnecting");
-    // THE ASSERTION THAT MATTERS. Not "a banner appeared" — the editor must be
-    // gated, because an editable surface over a server that cannot receive the
-    // writes is the silent-data-loss bug this arc exists to close.
-    expect(p.session.writesBlocked, "a dead connection must gate the editor read-only").toBe(true);
+    // THE ASSERTION THAT MATTERS (doc 12 §5): unreachable is not refused.
+    // The editor stays writable and the offline state is reported so the UI
+    // can say "your changes are being kept" instead of "editing is paused".
+    expect(p.session.writesBlocked, "a dead connection must NOT gate the editor").toBe(false);
+    expect(p.session.offline, "offline editing is active and reportable").toEqual({ editsHeld: 0, capped: false });
     await p.unmount();
   });
 
@@ -195,11 +201,12 @@ describe("desync detection", () => {
     // catch. Zero close events means the heartbeat is the ONLY thing that
     // could have detected this.
     expect(p.closeFires(), "no close event was ever delivered — the probe is the sole detector").toBe(0);
-    expect(p.session.writesBlocked, "half-open is gated exactly like a clean drop").toBe(true);
+    expect(p.session.writesBlocked, "half-open enters offline editing exactly like a clean drop").toBe(false);
+    expect(p.session.offline).toEqual({ editsHeld: 0, capped: false });
     await p.unmount();
   });
 
-  it("keystrokes during a drop do not mutate the document", async () => {
+  it("keystrokes during a drop apply locally AND land in the offline tail", async () => {
     const hub = seeded();
     const store = new InMemoryBundleStore();
     const p = await mount(hub, store);
@@ -208,11 +215,15 @@ describe("desync detection", () => {
 
     const frozen = Buffer.from(p.session.doc!.save());
     p.sockets[0].blackhole();
-    await until(() => p.session.writesBlocked, "gate closed");
+    await until(() => p.session.offline !== null, "offline editing active");
 
-    // The gate is what stops the editor emitting these at all; this asserts
-    // the document itself is untouched even if something did try.
-    expect(Buffer.from(p.session.doc!.save()), "no local mutation while disconnected").toEqual(frozen);
+    // The other half of the no-silent-loss contract: the edit is ACCEPTED —
+    // it mutates the local document (visible) and is recorded (durable).
+    // Dropping it silently, OR applying it without recording it, are the two
+    // failure shapes this feature exists to close.
+    await act(async () => p.session.submitOp(insertAt(6, " OFFLINE")));
+    expect(Buffer.from(p.session.doc!.save()), "the offline edit is visible locally").not.toEqual(frozen);
+    expect(p.session.offline!.editsHeld, "and recorded in the tail").toBe(1);
     await p.unmount();
   });
 });
@@ -249,14 +260,15 @@ describe("reconnect", () => {
     await p.unmount();
   });
 
-  it("recovers to live and re-opens the editor", async () => {
+  it("recovers to live and clears the offline state", async () => {
     const hub = seeded();
     const store = new InMemoryBundleStore();
     const p = await mount(hub, store);
     p.sockets[0].blackhole();
-    await until(() => p.session.writesBlocked, "gated");
+    await until(() => p.session.offline !== null, "offline editing active");
     await until(() => p.session.connection === "live", "recovered");
-    expect(p.session.writesBlocked, "the gate lifts on its own once writes can land again").toBe(false);
+    expect(p.session.offline, "the offline state clears on its own").toBeNull();
+    expect(p.session.writesBlocked).toBe(false);
 
     // The recovered session is genuinely usable, not merely labelled live.
     await act(async () => p.session.submitOp(insertAt(0, "AFTER")));
@@ -272,7 +284,11 @@ describe("reconnect", () => {
     p.outage.value = true;
 
     await until(() => p.session.connection === "lost", "retries exhausted", 600);
-    expect(p.session.writesBlocked, "still gated while lost").toBe(true);
+    // `lost` means automatic RECOVERY stopped — not that editing must. The
+    // offline capture keeps working the whole time (that is what the demo's
+    // "keep editing offline" button relies on).
+    expect(p.session.writesBlocked, "lost still does not gate the editor").toBe(false);
+    expect(p.session.offline, "offline editing continues while lost").toEqual({ editsHeld: 0, capped: false });
 
     // `lost` means automatic recovery has STOPPED. Nothing will retry on its
     // own from here — which is the whole reason the demo shows a modal with a
@@ -284,13 +300,13 @@ describe("reconnect", () => {
     p.outage.value = false;
     await act(async () => p.session.reconnect());
     await until(() => p.session.connection === "live", "manual retry recovered the session", 600);
-    expect(p.session.writesBlocked, "and the editor is writable again").toBe(false);
+    expect(p.session.offline, "offline state clears on recovery").toBeNull();
     await p.unmount();
   });
 });
 
-describe("the editor surface is actually gated", () => {
-  it("CollabEditor drops its writable surface when the connection dies", async () => {
+describe("the editor surface stays open offline", () => {
+  it("CollabEditor KEEPS its writable surface when the connection dies (offline is first-class)", async () => {
     const hub = seeded();
     const f = factoryFor(hub);
     const container = document.createElement("div");
@@ -312,10 +328,10 @@ describe("the editor surface is actually gated", () => {
     await until(() => !!container.querySelector("textarea"), "editor mounted writable");
 
     f.sockets[0].blackhole();
-    // The DOM is the real contract: `writesBlocked` feeding `editable` is an
-    // implementation detail, but a user being unable to type is not.
-    await until(() => !container.querySelector("textarea"), "writable surface withdrawn");
-    expect(session!.connection).not.toBe("live");
+    // The DOM is the real contract: the user must be able to keep typing
+    // while disconnected, because those keystrokes are captured, not lost.
+    await until(() => session?.offline !== null && session?.connection !== "live", "offline state surfaced");
+    expect(container.querySelector("textarea"), "the writable surface stays").toBeTruthy();
     await act(async () => root.unmount());
   });
 });

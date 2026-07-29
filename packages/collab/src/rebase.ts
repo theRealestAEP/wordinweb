@@ -14,6 +14,26 @@ import type { CollabConnection } from "./connection.js";
  */
 
 /**
+ * How many intents the offline tail may hold before RECORDING STOPS AND THE
+ * EDITOR IS GATED (doc 15 §4.3: the tail must be bounded). The number:
+ *
+ *  - Anything past the suggest threshold (50) arrives as a draft anyway, so
+ *    the cap governs only how much offline work the draft can retain — not
+ *    the review burden, which the ladder already bounds.
+ *  - Each entry is a small JSON object (~100 bytes), and the tail rides
+ *    EVERY throttled bundle write, so the cap bounds write amplification to
+ *    ~200KB per write in the worst case.
+ *  - 2000 keystroke-grade intents is well past the feature's design target
+ *    (doc 15 §5: "the laptop-closed-on-the-train case — small tails, high
+ *    frequency"); at that scale the honest answer is a downloaded copy.
+ *
+ * AT THE CAP THE GATE CLOSES LOUDLY — the editor goes read-only and the UI
+ * says so — rather than recording silently stopping, which would be the
+ * exact accept-then-lose failure the write gate exists to prevent.
+ */
+export const OFFLINE_TAIL_CAP = 2000;
+
+/**
  * Convert an offline intent tail to its SUGGESTION form (doc 15: the
  * default reconciliation). Text-producing intents become tracked changes —
  * visible, attributed, non-destructive (Word keeps both sides), reviewable

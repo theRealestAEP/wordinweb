@@ -185,6 +185,13 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   const isOwner = !!ownerToken && !session?.notOwner;
   // Remount key: bumps to retry the connection after takeover/revival.
   const [attempt, setAttempt] = useState(0);
+  // "Keep editing offline" was chosen on the ConnectionLost dialog. Reset
+  // the moment the connection recovers, so a LATER loss re-raises the
+  // dialog rather than inheriting a dismissal from a different outage.
+  const [lostDismissed, setLostDismissed] = useState(false);
+  useEffect(() => {
+    if (session?.connection !== "lost") setLostDismissed(false);
+  }, [session?.connection]);
   const [showActivity, setShowActivity] = useState(false);
   // Versions (doc 14 §1): frozen restore points beside the live bundle.
   // Stored in the same IndexedDB db under version-suffixed keys — a
@@ -444,10 +451,19 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         <span className="bar-sep" aria-hidden="true" />
         <span style={{ flex: 1 }} />
         {session?.arrival ? (
-          <span style={{ fontSize: 12, background: "#d1ecf1", padding: "2px 8px", borderRadius: 6 }}>
+          <span data-testid="arrival-banner" style={{ fontSize: 12, background: "#d1ecf1", padding: "2px 8px", borderRadius: 6 }}>
             You edited offline ({session.arrival.tailLength} change{session.arrival.tailLength === 1 ? "" : "s"}).{" "}
             {session.arrival.mode === "suggest" ? (
               <>
+                {/* Structural edits (splits, tables, formatting) have no
+                    tracked-change form — they stay in the saved draft copy
+                    rather than replaying. Said up front, or their absence
+                    after "add as suggestions" reads as silent loss. */}
+                {session.arrival.structural > 0 && (
+                  <span data-testid="arrival-structural">
+                    {session.arrival.structural} of them {session.arrival.structural === 1 ? "is" : "are"} structural and will stay in your saved draft copy.{" "}
+                  </span>
+                )}
                 <button onClick={() => session.reconcile("suggest")}>Add my changes as suggestions</button>{" "}
                 <button onClick={() => session.reconcile("draft")}>Keep as draft</button>
               </>
@@ -477,13 +493,25 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
               Download .docx
             </button>
           </span>
-        ) : session && session.connection !== "live" ? (
-          // MUST PRECEDE the writesBlocked banner below, because a non-live
-          // connection now SETS writesBlocked (one predicate, one gate — see
-          // CollabSession). Without this branch a dropped socket would render
-          // the owner-lock copy with an unknown reason: "this document is
-          // read-only for you right now", which names the wrong cause entirely
-          // and tells the user to wait for an owner who did nothing.
+        ) : session?.offline?.capped ? (
+          // THE TAIL CAP (doc 15 §4.3): recording stopped and the editor is
+          // gated — loudly, with the way out, never by silently dropping
+          // keystrokes. Ahead of the generic offline chip because this is
+          // the moment the promise "your changes are being kept" ends.
+          <span data-testid="offline-cap-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
+            Offline change limit reached — editing is paused so nothing goes missing.
+            Your {session.offline.editsHeld} saved changes are safe in this browser;
+            reconnect to send them, or download a copy to keep working.{" "}
+            <button data-testid="offline-cap-download" onClick={download} disabled={!session?.ready}>
+              Download .docx
+            </button>
+          </span>
+        ) : session?.offline ? (
+          // OFFLINE, EDITING CONTINUES (doc 12 §5: offline is first-class).
+          // Not "editing is paused" — that copy became false the day the
+          // offline tail became real. The chip says what is actually
+          // happening: edits apply here, are saved here, and replay on
+          // reconnect (as suggestions if the document moved on — doc 15).
           //
           // `reconnecting` is deliberately a quiet chip rather than a modal:
           // most drops (a tunnel, a lid closed for ten seconds) heal in under
@@ -491,7 +519,20 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // dismiss the one that matters. `lost` gets the modal below.
           <span data-testid="reconnect-banner" data-state={session.connection}
             style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
-            Reconnecting… editing is paused so nothing you type is lost.
+            {session.connection === "lost" ? "Connection lost" : "Reconnecting…"} — you can keep
+            editing; your changes are saved in this browser
+            {session.offline.editsHeld > 0
+              ? ` (${session.offline.editsHeld} so far) `
+              : " "}
+            and will be added back when you reconnect — as suggestions to review if others edited meanwhile.
+          </span>
+        ) : session && session.connection !== "live" ? (
+          // Non-live with offline editing UNAVAILABLE (never welcomed, or a
+          // refusal-blocked participant — a viewer's link stays view-only in
+          // a tunnel too). Nothing is being recorded, so say the quiet thing.
+          <span data-testid="reconnect-banner" data-state={session.connection}
+            style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            Reconnecting…
           </span>
         ) : session?.writesBlocked ? (
           // Owner lock (doc 14 §2.5): NOT a dead session — the doc stays live
@@ -743,7 +784,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
       {session?.sessionWarning && (
         <SessionCountdown warning={session.sessionWarning} onDownload={download} />
       )}
-      {session?.connection === "lost" && (
+      {session?.connection === "lost" && !lostDismissed && (
         <ConnectionLost
           onRetry={() => session.reconnect()}
           onDownload={download}
@@ -751,6 +792,10 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // existing. Passing this rather than hardcoding "your work is safe"
           // is the whole point: see the copy in the component.
           saved={(session.persistErrors ?? 0) === 0}
+          // Offline editing is only offered when it is actually available
+          // (a document in hand, no refusal): dismissing into a page that
+          // cannot record anything would betray the button's promise.
+          onKeepEditing={session.offline ? () => setLostDismissed(true) : undefined}
         />
       )}
       {/* Dev perf menu (Ctrl+Shift+P / ?perf=1) — inert until opened. */}
@@ -855,8 +900,10 @@ function SessionEndedModal({ reason, reviveState, onRevive, onKeepLocal, onNewDo
  * edits made before the drop that the server had not yet acknowledged — and
  * those replay verbatim on rejoin, deduplicated by (clientId, clientSeq), so
  * reconnecting cannot double-apply them. Nothing typed AFTER the drop is at
- * risk either, because the editor went read-only the moment the connection
- * died; that gate is the reason this dialog can make a promise at all.
+ * risk either, because those edits are recorded to the durable offline tail
+ * (doc 15 §2) and replayed on reconnect; that capture is the reason this
+ * dialog can make a promise at all — and the reason it now offers "keep
+ * editing offline" instead of holding the document hostage.
  *
  * If the room was re-seeded while this browser was away, the rejoin lands in a
  * different epoch and doc 15's arrival ladder takes over — the offline edits
@@ -870,12 +917,15 @@ function SessionEndedModal({ reason, reviveState, onRevive, onKeepLocal, onNewDo
  * (quota, private mode, blocked storage) means the durable copy silently
  * stopped updating, and the copy MUST change rather than repeat a promise the
  * storage layer did not keep — the download button is the only true escape in
- * that case, so it is the one the dialog leads with.
+ * that case, so it is the one the dialog leads with. `onKeepEditing` is
+ * absent in that case too at the call site's discretion — and always absent
+ * when offline editing is unavailable (no document, refusal-blocked).
  */
-function ConnectionLost({ onRetry, onDownload, saved }: {
+function ConnectionLost({ onRetry, onDownload, saved, onKeepEditing }: {
   onRetry: () => void;
   onDownload: () => void;
   saved: boolean;
+  onKeepEditing?: () => void;
 }) {
   return (
     <div
@@ -897,12 +947,12 @@ function ConnectionLost({ onRetry, onDownload, saved }: {
         </h2>
         {saved ? (
           <p style={{ margin: "0 0 12px", lineHeight: 1.5 }}>
-            You’ve been disconnected, and editing is paused so nothing you type
-            goes missing. <strong>Your work is saved in this browser.</strong>{" "}
-            When you reconnect, the edits that hadn’t reached the server yet are
-            sent again automatically — and if someone restored the document
-            while you were away, yours come back as suggestions to review rather
-            than overwriting theirs.
+            You’ve been disconnected. <strong>Your work is saved in this
+            browser</strong> — and you can keep editing: changes you make while
+            offline are saved here too. When you reconnect, everything is sent
+            automatically — and if someone restored the document while you were
+            away, your changes come back as suggestions to review rather than
+            overwriting theirs.
           </p>
         ) : (
           <p style={{ margin: "0 0 12px", lineHeight: 1.5 }}>
@@ -916,6 +966,11 @@ function ConnectionLost({ onRetry, onDownload, saved }: {
           <button data-testid="lost-retry" onClick={onRetry} autoFocus>
             Try to reconnect
           </button>
+          {onKeepEditing && saved && (
+            <button data-testid="lost-keep-editing" onClick={onKeepEditing}>
+              Keep editing offline
+            </button>
+          )}
           <button data-testid="lost-reload" onClick={() => location.reload()}>
             Reload the page
           </button>

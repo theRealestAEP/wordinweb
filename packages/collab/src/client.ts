@@ -6,7 +6,11 @@
 export { ClientReplica } from "./replica.js";
 export { InMemoryBundleStore, BundlePersister, type DocBundle, type BundleStore } from "./bundle.js";
 export { VersionRing, InMemoryVersionStore, type DocVersion, type VersionStore } from "./versions.js";
-export { toSuggestions, replayDrained, arrivalMode } from "./rebase.js";
+export { toSuggestions, replayDrained, arrivalMode, OFFLINE_TAIL_CAP } from "./rebase.js";
+// The canonical apply, exposed for OFFLINE editing (doc 12 §5): with no
+// connection to route through, the react layer applies toolbar/API intents
+// to the in-hand document through the SAME code every replica runs.
+export { applyIntentScoped, resyncScope } from "./apply.js";
 export { CollabConnection, type ClientTransport, type ConnectionCallbacks } from "./connection.js";
 export { EncryptedCollabConnection } from "./enc-connection.js";
 export { bindEditor, type EditorBridge, type EditorBinding } from "./binding.js";
