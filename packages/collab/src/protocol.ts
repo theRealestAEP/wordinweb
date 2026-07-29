@@ -64,8 +64,17 @@ export interface SealedCheckpoint {
  *       text box silently rejected). Squarely canonical: an e4 peer rejects
  *       the very intent an e5 peer applies, so a mixed room forks the
  *       document on the first keystroke in a pleading number column.
+ *   e6  padded sealed bodies (traffic-analysis hardening, e2ee.ts): intent,
+ *       presence and checkpoint plaintexts now carry a 4-byte length prefix
+ *       and zero fill to fixed buckets, so ciphertext size no longer tracks
+ *       edit size. Squarely canonical for intents: an e5 openIntent
+ *       JSON.parses the RAW plaintext, so a padded body throws there — the
+ *       edit no-ops on every e5 mirror while applying on every e6 mirror, a
+ *       document fork on the FIRST padded envelope. (Presence and
+ *       checkpoints ride the same bump; sealed media is deliberately NOT
+ *       padded — its sha addresses require byte-identical re-encryption.)
  */
-export const ENGINE_VERSION = "e5";
+export const ENGINE_VERSION = "e6";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-
