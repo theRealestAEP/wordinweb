@@ -24,7 +24,7 @@ function b64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, initialShareCode, onNewDocument, onDisconnect }: {
+export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, initialShareCode, onNewDocument, onDisconnect, onNameChange, onShareLink, shareCopied }: {
   url: string;
   httpBase: string;
   docId: string;
@@ -47,6 +47,12 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
    * editor. Null bytes when the session never became ready — there is simply
    * nothing to carry out, and the caller reopens the blank template. */
   onDisconnect?: (bytes: Uint8Array | null) => void;
+  /** Rename this participant (persisted by the caller). */
+  onNameChange?: (name: string) => void;
+  /** Copy the share link — the URL is never rendered, only copied. */
+  onShareLink?: () => void;
+  /** True briefly after a successful copy, for the button's confirmation. */
+  shareCopied?: boolean;
 }) {
   const store = useMemo(() => new IndexedDbBundleStore(), []);
   const [session, setSession] = useState<CollabSession | null>(null);
@@ -381,29 +387,6 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           header whose buttons are styled — the inconsistency reads as broken
           rather than plain. */}
       <div data-testid="toolbar" className="sessionbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "7px 14px", flexWrap: "wrap" }}>
-        {/* Roster chips (doc 14 §2): everyone in the session, greyed when
-            offline; names are self-asserted — the UI says so in the title. */}
-        {(session?.roster ?? []).map((r) => (
-          <span key={r.clientId} data-testid="roster-chip" data-connected={r.connected} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
-            <span
-              title="Names are chosen by participants"
-              style={{
-                padding: "2px 10px", borderRadius: 999, fontSize: 12, color: "#fff",
-                background: r.profile.color, opacity: r.connected ? 1 : 0.35,
-              }}
-            >
-              {r.profile.name}
-            </span>
-            {isOwner && r.clientId !== clientId && (
-              <>
-                <button className="chip" title="Demote to viewer"
-                  onClick={() => session?.admin({ op: "setRole", clientId: r.clientId, role: "viewer" })}>👁</button>
-                <button className="chip" title="Kick"
-                  onClick={() => session?.admin({ op: "kick", clientId: r.clientId })}>✕</button>
-              </>
-            )}
-          </span>
-        ))}
         <span style={{ flex: 1 }} />
         {session?.arrival ? (
           <span style={{ fontSize: 12, background: "#d1ecf1", padding: "2px 8px", borderRadius: 6 }}>
@@ -514,6 +497,53 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             {readOnly ? "🔒 Read-only ON" : "🔓 Make read-only"}
           </button>
         )}
+        <span className="bar-sep" aria-hidden="true" />
+        <input
+          className="alias"
+          data-testid="alias"
+          value={name}
+          placeholder="Your name"
+          maxLength={40}
+          title="The name other participants see. Anyone can pick any name — it is a label, not an account."
+          onChange={(e) => onNameChange?.(e.target.value)}
+        />
+        {onShareLink && (
+          <button className="primary" data-testid="share-collab" onClick={onShareLink} title="Copy the share link to your clipboard">
+            {shareCopied ? "Copied!" : "Share Collab"}
+          </button>
+        )}
+        {onNewDocument && (
+          <button data-testid="new-document" onClick={onNewDocument} title="Leave this document and start a fresh one">
+            New document
+          </button>
+        )}
+        {/* Roster last and hard right. It is the only part of this bar whose
+            width is not ours to choose — a busy room can hold ten names of any
+            length — so it scrolls WITHIN itself rather than wrapping the row
+            or pushing the controls off the edge. */}
+        <span className="roster-scroll">
+          {(session?.roster ?? []).map((r) => (
+            <span key={r.clientId} data-testid="roster-chip" data-connected={r.connected} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+              <span
+                title="Names are chosen by participants"
+                style={{
+                  padding: "2px 10px", borderRadius: 999, fontSize: 12, color: "#fff",
+                  background: r.profile.color, opacity: r.connected ? 1 : 0.35, whiteSpace: "nowrap",
+                }}
+              >
+                {r.profile.name}
+              </span>
+              {isOwner && r.clientId !== clientId && (
+                <>
+                  <button className="chip" title="Demote to viewer"
+                    onClick={() => session?.admin({ op: "setRole", clientId: r.clientId, role: "viewer" })}>👁</button>
+                  <button className="chip" title="Kick"
+                    onClick={() => session?.admin({ op: "kick", clientId: r.clientId })}>✕</button>
+                </>
+              )}
+            </span>
+          ))}
+        </span>
       </div>
       {versions.length > 0 && (
         <div style={{ display: "flex", gap: 6, padding: "0 8px 4px", fontSize: 12, flexWrap: "wrap" }}>

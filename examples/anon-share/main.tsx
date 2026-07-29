@@ -189,32 +189,10 @@ function Harness() {
           <a href="https://word-in-web.com/report/" target="_blank" rel="noreferrer">Parity report</a>
         </nav>
       </div>
-      <header>
-        {/* The doc-id pill is gone. It was chrome that never earned its place:
-            the id is not something anyone types or reads out, the share link
-            is copied by a button rather than transcribed, and a truncated
-            capability prefix on screen is one more thing that ends up in a
-            screenshot for no benefit. */}
-        <span className="spacer" />
-        <input
-          className="alias"
-          data-testid="alias"
-          value={name}
-          placeholder="Your name"
-          maxLength={40}
-          title="The name other participants see. Anyone can pick any name — it is a label, not an account."
-          onChange={(e) => {
-            setName(e.target.value);
-            localStorage.setItem("wordinweb-name", e.target.value);
-          }}
-        />
-        <button data-testid="share-collab" onClick={copyShareLink} title="Copy the share link to your clipboard">
-          {copied ? "Copied!" : "Share Collab"}
-        </button>
-        <button className="ghost" data-testid="new-document" onClick={newDocument} title="Leave this document and start a fresh one">
-          New document
-        </button>
-      </header>
+      {/* The alias/share/new-document controls used to live in their own bar
+          here. They are session controls like download and disconnect, so they
+          now sit in App's single session row instead of a second strip of
+          chrome saying much the same thing one line higher. */}
       <div id="root-editor">
         <App
           url={WS}
@@ -229,6 +207,9 @@ function Harness() {
           // re-prompt; also carries a joiner's entered code across reloads.
           initialShareCode={localStorage.getItem(`wordinweb-code-${docId}`) ?? undefined}
           onNewDocument={newDocument}
+          onNameChange={(v) => { setName(v); localStorage.setItem("wordinweb-name", v); }}
+          onShareLink={copyShareLink}
+          shareCopied={copied}
         />
       </div>
     </div>

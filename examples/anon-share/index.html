@@ -130,6 +130,21 @@
       button.cta:hover:not([disabled]) { background: #1765cc; }
       button.cta[disabled] { opacity: .45; cursor: default; }
       button.cta:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
+      /* Group divider inside the session row: session actions on one side,
+         identity and sharing on the other. */
+      .bar-sep { width: 1px; align-self: stretch; margin: 0 4px; background: #d7dde6; }
+      .sessionbar input.alias { font: 13px system-ui; width: 128px; padding: 5px 9px;
+        border: 1px solid #dadce0; border-radius: 6px; }
+      .sessionbar input.alias:focus-visible { outline: 2px solid #1a73e8; outline-offset: 1px; }
+      .sessionbar button.primary { background: #1a73e8; color: #fff; border-color: transparent; }
+      .sessionbar button.primary:hover { background: #1765cc; }
+      /* The roster is the one element whose width is not ours to choose, so it
+         scrolls within itself: a busy room must not wrap the row or push the
+         controls off the edge. min-width:0 is what actually lets a flex child
+         shrink below its content — without it the scroll never engages. */
+      .roster-scroll { display: flex; align-items: center; gap: 6px; margin-left: auto;
+        max-width: 38vw; min-width: 0; overflow-x: auto; overflow-y: hidden;
+        scrollbar-width: thin; padding: 2px 0; }
       .hint { color: #5f6368; font-size: 12px; }
       /* NO padding here: the header and control bars are full-bleed chrome and
          a padded root inset them from the viewport, leaving a grey gutter down
