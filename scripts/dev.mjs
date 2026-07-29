@@ -35,12 +35,47 @@ function shutdown(code = 0) {
 }
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => shutdown(0));
 
+/**
+ * PIDs listening on `port`, or [] if none (and [] if `lsof` is unavailable —
+ * a missing tool must not block the dev server, it just loses the nicer error).
+ */
+async function portHolders(port) {
+  try {
+    const probe = spawn("lsof", ["-ti", `:${port}`], { stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    probe.stdout.on("data", (d) => (out += d));
+    await once(probe, "close");
+    return out.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 async function main() {
   if (!args.has("--no-build")) {
     console.log("[dev] building workspace packages…");
     const build = run("npm", ["run", "build:packages"]);
     const [code] = await once(build, "exit");
     if (code !== 0) shutdown(code);
+  }
+
+  // A LEFTOVER SERVER IS THE COMMON CASE, not an exceptional one: the previous
+  // run was killed, or a detached copy survived a closed terminal. Without this
+  // check the new server binds, fails with EADDRINUSE, and prints a JSON stack
+  // trace through the uncaughtException handler — which reads like the build
+  // broke, when nothing is wrong except an old process. Vite already fails
+  // loudly on its own port via --strictPort; this gives the API port the same
+  // courtesy, with the command to fix it.
+  const stale = await portHolders(SERVER_PORT);
+  if (stale.length) {
+    console.error(
+      `[dev] port ${SERVER_PORT} is already in use by pid ${stale.join(", ")} — ` +
+        `probably a server from an earlier run.\n` +
+        `[dev] stop it with:  kill ${stale.join(" ")}\n` +
+        `[dev] or run on another port:  PORT=1235 npm run demo`,
+    );
+    shutdown(1);
+    return;
   }
 
   console.log(`[dev] zero-custody server → http://localhost:${SERVER_PORT}  (obs: GET /stats, structured events on stderr)`);
