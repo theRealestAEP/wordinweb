@@ -79,7 +79,53 @@ interface EncryptedState {
   logBytes: number;
 }
 
+/**
+ * One room's resource usage, each measure beside the limit it runs against.
+ * See {@link CollabHub.roomsSnapshot}. Contains no identifier of any kind —
+ * `room` is the opaque, freshly-random `Room.obsLabel`.
+ */
+export interface RoomSnapshot {
+  room: string;
+  mode: "plaintext" | "encrypted";
+  ageMs: number;
+  ageLimitMs: number;
+  idleMs: number;
+  idleLimitMs: number;
+  emptyMs: number | null;
+  emptyLimitMs: number;
+  conns: number;
+  rosterTotal: number;
+  rosterConnected: number;
+  connLimit: number;
+  mediaBytes: number;
+  mediaLimitBytes: number;
+  mediaBlobs: number;
+  mediaWaiting: number;
+  uploadTokens: number;
+  uploadBurst: number;
+  logBytes: number;
+  logLimitBytes: number;
+  readOnly: boolean;
+  idleWarned: boolean;
+  lifetimeWarned: boolean;
+}
+
 interface Room {
+  /**
+   * Opaque label for the OPS VIEW, and the reason per-room metrics can exist
+   * at all.
+   *
+   * NOT derived from the docId, and not a hash of it — freshly random. The
+   * docId is the capability that opens the document, so a metrics row keyed by
+   * it turns an ops dashboard into a way into other people's documents, and a
+   * screenshot of that dashboard leaks them. A derived key would be safe in
+   * practice and still invites "we can reverse this if we need to"; unrelated
+   * randomness removes the question.
+   *
+   * It identifies a room only for as long as the room exists, which is the
+   * whole useful lifetime — rooms do not survive a restart by design.
+   */
+  obsLabel: string;
   /** The authoritative session — PLAINTEXT rooms only (null when `enc`). */
   session: DocumentSession | null;
   enc: EncryptedState | null;
@@ -868,6 +914,34 @@ export class CollabHub {
         for (const c of room.conns) if (c.id !== conn.id) c.send(out);
         return;
       }
+      case "ping": {
+        // LIVENESS ONLY. Answered before any room lookup, auth check or rate
+        // limit, and deliberately WITHOUT noteActivity.
+        //
+        // No room lookup / no auth: a ping asks "is this socket alive", not
+        // "may I do something", and every gate added here becomes a way for a
+        // pong to go missing on a connection that is in fact perfectly healthy
+        // — which the client is required to read as death. A liveness reply
+        // that can be refused cannot distinguish itself from the failure it
+        // exists to detect, so it is unconditional. It answers a socket that
+        // has not said hello too; that socket learns it is connected, which is
+        // true, and it is still refused everything else.
+        //
+        // No noteActivity: this is the load-bearing half. The idle timeout
+        // reaps rooms nobody is using, and its notes state plainly that an
+        // activity-based clock is exactly what a keepalive defeats. A
+        // heartbeat that counted as activity would make every abandoned tab
+        // immortal and turn the idle sweep into dead letter — so a ping proves
+        // the socket lives while leaving the room's idle clock running.
+        //
+        // No rate limit: consistent with `presence`, which is likewise
+        // unmetered. The reply is O(1) and strictly smaller than the broadcast
+        // fan-out this socket already provokes; a flood is bounded by the
+        // per-IP connection cap and the outbound backpressure guard in ws.ts,
+        // which are where socket-level abuse is actually handled.
+        conn.send({ t: "pong", nonce: msg.nonce });
+        return;
+      }
       case "presence": {
         const docId = this.connDoc.get(conn.id);
         if (!docId) return; // presence before join is ignored, not refused
@@ -1183,6 +1257,62 @@ export class CollabHub {
    * people connected is never deleted out from under them (round-4 F7).
    * Returns the evicted docIds (for logging/metrics).
    */
+  /**
+   * PER-ROOM RESOURCE SNAPSHOT for the ops view: which rooms are consuming
+   * what, and how close each is to the limit that will end it.
+   *
+   * This is shapes and counts, exactly like the aggregate metrics — the extra
+   * thing it does is ATTRIBUTE them, so an outlier room is visible instead of
+   * being averaged into a global gauge that looks fine. "Media is at 60% of
+   * the server" is not actionable; "one room is at 98% of its own cap" is.
+   *
+   * The zero-custody rule is unchanged and is why `obsLabel` exists: no docId,
+   * no clientId, no share code, no owner token, no participant name, no IP,
+   * and nothing derived from any of them. Every value below is a number, a
+   * boolean, or the fixed word "plaintext"/"encrypted".
+   *
+   * Each measure is paired with the limit it runs against, so a consumer never
+   * has to keep a second copy of the configuration in step with this one — the
+   * bug that shipped once already in the compose file.
+   */
+  roomsSnapshot(): RoomSnapshot[] {
+    const now = this.now();
+    const out: RoomSnapshot[] = [];
+    for (const room of this.rooms.values()) {
+      let connected = 0;
+      for (const entry of room.roster.values()) if (entry.connected) connected++;
+      out.push({
+        room: room.obsLabel,
+        mode: room.enc ? "encrypted" : "plaintext",
+        ageMs: now - room.createdAt,
+        ageLimitMs: this.limits.lifecycle.roomMaxLifetimeMs,
+        idleMs: now - room.lastActivityAt,
+        idleLimitMs: this.limits.lifecycle.idleTimeoutMs,
+        // null while anyone is connected — the eviction clock is not running.
+        emptyMs: room.emptySince === undefined ? null : now - room.emptySince,
+        emptyLimitMs: this.limits.lifecycle.emptyRoomTtlMs,
+        conns: room.conns.size,
+        rosterTotal: room.roster.size,
+        rosterConnected: connected,
+        connLimit: CollabHub.MAX_ROOM_CLIENTS,
+        mediaBytes: room.media.totalBytes,
+        mediaLimitBytes: this.limits.media.maxRoomBytes,
+        mediaBlobs: room.media.blobs.size,
+        mediaWaiting: room.media.waiters.size,
+        // Budget REMAINING, floored: a room being throttled reads 0 here,
+        // which is the signal worth seeing.
+        uploadTokens: Math.max(0, Math.floor(room.media.uploadBucket.tokens)),
+        uploadBurst: this.limits.media.roomUploadBurst,
+        logBytes: room.enc?.logBytes ?? 0,
+        logLimitBytes: this.limits.surge.roomLogMaxBytes,
+        readOnly: room.readOnly === true,
+        idleWarned: room.idleWarned === true,
+        lifetimeWarned: room.lifetimeWarned === true,
+      });
+    }
+    return out;
+  }
+
   sweepRooms(graceMs: number = this.limits.lifecycle.emptyRoomTtlMs): string[] {
     const evicted: string[] = [];
     if (graceMs <= 0) return evicted; // 0 disables (limits.ts convention)
@@ -1408,6 +1538,7 @@ export class CollabHub {
       createdAt: this.now(),
       lastActivityAt: this.now(),
       creatorIp,
+      obsLabel: newObsLabel(),
       media: emptyMedia(this.limits.media.roomUploadBurst, this.now()),
     };
     this.rooms.set(docId, room);
@@ -1456,6 +1587,7 @@ export class CollabHub {
       createdAt: this.now(),
       lastActivityAt: this.now(),
       creatorIp,
+      obsLabel: newObsLabel(),
       media: emptyMedia(this.limits.media.roomUploadBurst, this.now()),
     };
     this.rooms.set(docId, room);
@@ -1476,7 +1608,8 @@ export class CollabHub {
         roster: new Map(),
         createdAt: this.now(),
         lastActivityAt: this.now(),
-        media: emptyMedia(this.limits.media.roomUploadBurst, this.now()),
+        obsLabel: newObsLabel(),
+      media: emptyMedia(this.limits.media.roomUploadBurst, this.now()),
       };
       this.rooms.set(docId, room);
       this.obs.roomCreated();
@@ -1526,6 +1659,11 @@ export const MEDIA_LIMITS = {
   tStageMs: DEFAULT_LIMITS.media.stageTtlMs,
   tUploadMs: DEFAULT_LIMITS.media.uploadDeadlineMs,
 };
+
+/** Fresh opaque room label for the ops view — see `Room.obsLabel`. */
+function newObsLabel(): string {
+  return `r_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
+}
 
 function emptyMedia(uploadBurst: number, now: number): Room["media"] {
   // A new room starts with a FULL bucket: the first thing a real room does is

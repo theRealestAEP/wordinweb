@@ -399,6 +399,22 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           <span data-testid="persist-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
             This document may not be saved in this browser — download a copy.
           </span>
+        ) : session && session.connection !== "live" ? (
+          // MUST PRECEDE the writesBlocked banner below, because a non-live
+          // connection now SETS writesBlocked (one predicate, one gate — see
+          // CollabSession). Without this branch a dropped socket would render
+          // the owner-lock copy with an unknown reason: "this document is
+          // read-only for you right now", which names the wrong cause entirely
+          // and tells the user to wait for an owner who did nothing.
+          //
+          // `reconnecting` is deliberately a quiet chip rather than a modal:
+          // most drops (a tunnel, a lid closed for ten seconds) heal in under
+          // a second, and a dialog that flashes on every blip trains people to
+          // dismiss the one that matters. `lost` gets the modal below.
+          <span data-testid="reconnect-banner" data-state={session.connection}
+            style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            Reconnecting… editing is paused so nothing you type is lost.
+          </span>
         ) : session?.writesBlocked ? (
           // Owner lock (doc 14 §2.5): NOT a dead session — the doc stays live
           // and readable; editing returns when the owner lifts.
@@ -516,8 +532,106 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
       {session?.sessionWarning && (
         <SessionCountdown warning={session.sessionWarning} onDownload={download} />
       )}
+      {session?.connection === "lost" && (
+        <ConnectionLost
+          onRetry={() => session.reconnect()}
+          onDownload={download}
+          // The safety promise is CONDITIONAL on the durable copy actually
+          // existing. Passing this rather than hardcoding "your work is safe"
+          // is the whole point: see the copy in the component.
+          saved={(session.persistErrors ?? 0) === 0}
+        />
+      )}
       {/* Dev perf menu (Ctrl+Shift+P / ?perf=1) — inert until opened. */}
       <PerfHud clientId={clientId} docStats={docStats} />
+    </div>
+  );
+}
+
+/**
+ * The connection is gone and automatic recovery has stopped.
+ *
+ * MODAL, unlike the `reconnecting` chip, because the two states demand
+ * different things from the user. Reconnecting resolves itself; `lost` never
+ * will — the retry budget is exhausted, so nothing further happens unless a
+ * human acts. A quiet chip for that state would leave someone waiting forever
+ * for a recovery that has already given up.
+ *
+ * WHY THE REASSURANCE IS HONEST, and where its limits are. The server keeps
+ * nothing (zero custody, doc 12): this browser's IndexedDB bundle IS the
+ * durable copy. It holds the confirmed document plus the pending queue —
+ * edits made before the drop that the server had not yet acknowledged — and
+ * those replay verbatim on rejoin, deduplicated by (clientId, clientSeq), so
+ * reconnecting cannot double-apply them. Nothing typed AFTER the drop is at
+ * risk either, because the editor went read-only the moment the connection
+ * died; that gate is the reason this dialog can make a promise at all.
+ *
+ * If the room was re-seeded while this browser was away, the rejoin lands in a
+ * different epoch and doc 15's arrival ladder takes over — the offline edits
+ * come back as tracked-change SUGGESTIONS rather than overwriting the crowd's
+ * text, or as a saved draft when there are too many to review. Hence "as
+ * suggestions" below rather than a flat "your edits will be restored", which
+ * would over-promise the destructive-rebase behaviour the ladder deliberately
+ * does not do.
+ *
+ * `saved` is the one thing that can falsify all of it. A failed bundle write
+ * (quota, private mode, blocked storage) means the durable copy silently
+ * stopped updating, and the copy MUST change rather than repeat a promise the
+ * storage layer did not keep — the download button is the only true escape in
+ * that case, so it is the one the dialog leads with.
+ */
+function ConnectionLost({ onRetry, onDownload, saved }: {
+  onRetry: () => void;
+  onDownload: () => void;
+  saved: boolean;
+}) {
+  return (
+    <div
+      data-testid="lost-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="dxw-lost-title"
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+      }}
+    >
+      <div style={{
+        background: "#fff", borderRadius: 10, padding: 20, maxWidth: 420,
+        font: "14px system-ui", boxShadow: "0 8px 32px rgba(0,0,0,0.3)",
+      }}>
+        <h2 id="dxw-lost-title" style={{ margin: "0 0 8px", fontSize: 16 }}>
+          Connection lost
+        </h2>
+        {saved ? (
+          <p style={{ margin: "0 0 12px", lineHeight: 1.5 }}>
+            You’ve been disconnected, and editing is paused so nothing you type
+            goes missing. <strong>Your work is saved in this browser.</strong>{" "}
+            When you reconnect, the edits that hadn’t reached the server yet are
+            sent again automatically — and if someone restored the document
+            while you were away, yours come back as suggestions to review rather
+            than overwriting theirs.
+          </p>
+        ) : (
+          <p style={{ margin: "0 0 12px", lineHeight: 1.5 }}>
+            You’ve been disconnected, and{" "}
+            <strong>this browser could not save a copy of the document</strong>{" "}
+            (storage may be full or blocked). Download it now — that is the only
+            copy you can rely on.
+          </p>
+        )}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button data-testid="lost-retry" onClick={onRetry} autoFocus>
+            Try to reconnect
+          </button>
+          <button data-testid="lost-reload" onClick={() => location.reload()}>
+            Reload the page
+          </button>
+          <button data-testid="lost-download" onClick={onDownload}>
+            Download .docx
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

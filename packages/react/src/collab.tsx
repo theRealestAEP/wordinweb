@@ -9,7 +9,10 @@ import {
   toSuggestions,
   arrivalMode,
   createWebSocketTransport,
+  monitorTransport,
   BundlePersister,
+  type ConnectionState,
+  type LivenessOptions,
   type BundleStore,
   type ParticipantProfile,
   type RosterEntry,
@@ -78,6 +81,13 @@ export interface UseCollabOptions {
   /** Display profile sent at join (doc 14 §2) — self-asserted; persist it in
    * localStorage next to the clientId so identity is stable per browser. */
   profile?: ParticipantProfile;
+  /**
+   * Heartbeat + reconnect tuning. Defaults suit a real network (15s probe,
+   * 10s answer deadline, 6 retries); tests inject short values and a fake
+   * clock. `maxRetries` is how many backoff attempts run before the session
+   * gives up and reports `lost` — the point at which a human has to act.
+   */
+  liveness?: LivenessOptions & { maxRetries?: number };
 }
 
 export interface CollabSession {
@@ -108,6 +118,32 @@ export interface CollabSession {
   presence: Record<string, PresencePosition | null>;
   /** Set if the server refused the connection (e.g. version mismatch). */
   refused: string | null;
+  /**
+   * WHETHER THIS CLIENT CAN REACH THE SEQUENCER AT ALL.
+   *
+   * Distinct from `refused`, which means the server answered and said no —
+   * this means nobody answered. A refusal ends the session; this is a
+   * transport fault that usually heals by itself.
+   *
+   *  - `live`         the last heartbeat round trip completed.
+   *  - `reconnecting` the socket dropped; a backoff retry is scheduled. Most
+   *                   drops pass through here and back to `live` unnoticed,
+   *                   so UI should stay quiet or subtle here.
+   *  - `lost`         retries exhausted. Show something modal: the document is
+   *                   safe but nothing further will sync until a human acts.
+   *
+   * Anything but `live` FOLDS INTO {@link writesBlocked}, so the editor is
+   * already gated read-only and a consumer cannot forget to do it. See the
+   * note there — this state exists to be shown, not to be the gate.
+   */
+  connection: ConnectionState;
+  /**
+   * Retry the connection immediately, resetting the backoff and the attempt
+   * budget. Wired to a "Try again" control on the `lost` UI — from `lost`
+   * nothing else will ever retry, because exhausting the budget is precisely
+   * the statement that automatic recovery has stopped.
+   */
+  reconnect: () => void;
   /**
    * The server announced it will END this session, and this is the grace
    * period before it does. `inMs` is the measured remainder at the moment the
@@ -153,6 +189,16 @@ export interface CollabSession {
    * `read-only` refusal could not (owner lock, per-client demotion, viewer
    * token), so a UI can finally say which one applies rather than inventing a
    * distinction it could not see.
+   *
+   * A DEAD CONNECTION IS ALSO A BLOCK, and folding it in here rather than
+   * adding a second gate is the point of the "one predicate" rule above. A
+   * dropped socket is the same bug as an owner lock in every way that matters
+   * to the user: the writes will not be sequenced, the editor applies them
+   * anyway, and the text disappears on the next reconciliation. It arrives by
+   * a different route — silence instead of a refusal — but a consumer that
+   * already renders viewer mode on this predicate gets the disconnected case
+   * right without changing a line, which is exactly what the rule was written
+   * to buy. {@link connection} says WHICH so the copy can differ.
    */
   writesBlocked: boolean;
   /**
@@ -336,13 +382,124 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const [persistErrors, setPersistErrors] = useState(0);
   const [sendFailures, setSendFailures] = useState(0);
   const offlineTailRef = useRef<import("@wordinweb/collab/client").DocBundle["offlineTail"]>(undefined);
+  const [connection, setConnection] = useState<ConnectionState>("live");
+  /**
+   * Bumped to force the connection effect to tear down and rebuild — the
+   * reconnect itself.
+   *
+   * REBUILDING RATHER THAN RE-HANDSHAKING THE EXISTING CONNECTION is the
+   * whole design. The teardown flushes the bundle and the fresh run reads it
+   * back, so a reconnect travels the ORDINARY resume path — the one doc 12 §5
+   * specifies and the bundle-resume suite already covers — with
+   * `sinceSeq = bundle.confirmedSeq` and the pending queue replayed
+   * idempotently by (clientId, clientSeq). Swapping a socket underneath a live
+   * connection would instead need a second, bespoke rejoin path that no
+   * existing test exercises, to re-derive state the bundle already holds.
+   */
+  const [reconnectNonce, setReconnectNonce] = useState(0);
+  /** Backoff + attempt budget, in refs: they must survive the effect teardown
+   * that the reconnect itself performs. */
+  const backoffRef = useRef(0);
+  const attemptRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * The teardown's bundle flush, awaited by the next effect run before it
+   * reads the store.
+   *
+   * WITHOUT THIS THE RECONNECT RACES ITS OWN SAVE: `flush()` is async and the
+   * teardown cannot await it, so the rebuilt connection could call
+   * `store.get()` first and resume from a bundle up to one throttle window
+   * stale — re-sending confirmed intents and, on a store with nothing written
+   * yet, joining COLD when a resume was available.
+   */
+  const flushDoneRef = useRef<Promise<void>>(Promise.resolve());
+  const maxRetries = opts.liveness?.maxRetries ?? 6;
+  // Read through a ref so the effect does not list an options object literal
+  // (a fresh identity every render) in its deps and reconnect forever — the
+  // same hazard the `profile` note below records.
+  const livenessRef = useRef(opts.liveness);
+  livenessRef.current = opts.liveness;
+
+  /** Retry now: clear the budget and rebuild. Used by the `lost` UI and by
+   * the wake-up path, both of which mean "a human is here, try again". */
+  const reconnect = () => {
+    if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = null;
+    backoffRef.current = 0;
+    attemptRef.current = 0;
+    setConnection("reconnecting");
+    setReconnectNonce((n) => n + 1);
+  };
 
   useEffect(() => {
     // Every dep change here means a DIFFERENT connection, so a deadline
     // announced by the previous one no longer applies to anything.
     clearDeadlines();
     const socket = (createSocket ?? ((u: string) => new WebSocket(u)))(url);
-    const transport = createWebSocketTransport(socket);
+    let disposed = false;
+    /** One verdict per socket: close, error and heartbeat-timeout all funnel
+     * here and only the first is acted on. */
+    let dropHandled = false;
+    // Assigned immediately below; held in a `let` so `dropped` can stop it
+    // without a temporal-dead-zone reference to a const declared after it.
+    let monitor: { stop: () => void; start: () => void; probe: () => void } | null = null;
+    const dropped = (): void => {
+      if (dropHandled || disposed) return;
+      dropHandled = true;
+      monitor?.stop();
+      // Close it ourselves. A half-open socket is still OPEN as far as the
+      // browser is concerned, and leaving it around means the next reconnect
+      // adds a second live socket for the same clientId — which the hub's
+      // single-live-connection rule would refuse `already-open`.
+      try {
+        socket.close?.();
+      } catch {
+        // Already dead; the reconnect below is what matters.
+      }
+      // Budget exhausted ⇒ stop retrying and say so. Retrying forever would
+      // leave a phone in a tunnel burning battery on a socket that will not
+      // open, and would never give the user the modal that tells them their
+      // work is safe.
+      if (attemptRef.current >= maxRetries) {
+        setConnection("lost");
+        return;
+      }
+      attemptRef.current += 1;
+      // Backoff matching scheduleRateLimitRedrive (enc-connection.ts): 300ms
+      // doubling to a 5s ceiling, reset on success.
+      backoffRef.current = Math.min(backoffRef.current === 0 ? 300 : backoffRef.current * 2, 5000);
+      setConnection("reconnecting");
+      retryTimerRef.current = setTimeout(() => {
+        retryTimerRef.current = null;
+        setReconnectNonce((n) => n + 1);
+      }, backoffRef.current);
+    };
+    // ONCLOSE/ONERROR AS PROPERTIES, not addEventListener: the property form
+    // needs no matching removeEventListener in the teardown and cannot
+    // double-register if this effect ever re-runs against the same socket.
+    socket.onclose = () => dropped();
+    socket.onerror = () => dropped();
+    // The heartbeat catches what those two cannot — see LivenessMonitor: a
+    // suspended phone leaves a half-open socket where NEITHER handler ever
+    // fires and readyState still reads OPEN.
+    const monitored = monitorTransport(
+      createWebSocketTransport(socket),
+      () => dropped(),
+      livenessRef.current ?? {},
+    );
+    const transport = monitored.transport;
+    monitor = monitored.monitor;
+    // Probe the moment the tab wakes. This is the motivating scenario, and
+    // waiting up to a full probe interval to discover a socket that died
+    // during sleep is precisely the window in which the user types into a
+    // void. Registered unconditionally (the persister's own visibilitychange
+    // listener below is separate and store-gated).
+    const onVisible = (): void => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      monitor?.probe();
+    };
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
+    monitor.start();
     let persister: BundlePersister | null = null; // assigned below iff store
     const callbacks: import("@wordinweb/collab/client").ConnectionCallbacks = {
       onChange: () => {
@@ -353,6 +510,16 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         setVersion((v) => v + 1); // signal a re-render on every reconciled change
         setDocEpoch(c.docEpoch); // bumps only on a reload (true conflict)
         persister?.notify(); // throttled bundle write (doc 12 §4)
+        // A welcome that LANDED is the only proof a reconnect worked. Reset
+        // the budget here rather than when the socket opens: an open socket
+        // that is then refused (`already-open`, version mismatch) has not
+        // recovered anything, and crediting it would let a refusal loop retry
+        // forever without ever reaching `lost`.
+        if (c.ready) {
+          backoffRef.current = 0;
+          attemptRef.current = 0;
+          setConnection((s) => (s === "live" ? s : "live"));
+        }
       },
       onPresence: (participant, pos) =>
         setPresence((prev) => ({ ...prev, [participant]: pos })),
@@ -434,8 +601,20 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // connection; both classes expose the same session surface, so the rest
     // of the hook (and DocxView) is mode-blind. Construction is async only
     // when a share code must be stretched (PBKDF2, once per join).
-    let disposed = false;
     const flush = () => void persister?.flush();
+    /**
+     * This run is a REJOIN after a detected drop, not a first join — so it
+     * must claim the identity the way `resume()` already does.
+     *
+     * The dropped socket may still be registered server-side: a half-open
+     * connection is invisible to the server too, and it holds this clientId
+     * under the single-live-connection rule until its own timeout. Without the
+     * claim the rejoin is refused `already-open` and the session is stuck
+     * behind a socket that is provably dead — the failure this whole path
+     * exists to recover from. A reconnect IS that identity's continuation, by
+     * definition, which is the same argument resume() makes.
+     */
+    const rejoining = reconnectNonce > 0;
     void (async () => {
       const stretched = docKey && shareCode ? await stretchShareCode(shareCode, docId) : undefined;
       const codeProof = stretched ? btoa(String.fromCharCode(...stretched)) : undefined;
@@ -466,32 +645,52 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
           window.addEventListener("pagehide", flush);
           document.addEventListener("visibilitychange", flush);
         }
+        // A RECONNECT MUST NOT OVERTAKE THE SAVE THAT PRECEDED IT. The
+        // previous run's teardown started a flush it could not await; reading
+        // the store before that lands would resume from a stale bundle — or,
+        // on the very first save, find nothing and join COLD, discarding
+        // exactly the state the resume path exists to carry across the drop.
+        await flushDoneRef.current;
+        if (disposed || connRef.current !== conn) return;
         // Resume if a bundle exists, else join cold. The get() is async;
         // the editor stays !ready (input disabled) until the welcome.
         const bundle = await store.get(docId);
         if (disposed || connRef.current !== conn) return;
         offlineTailRef.current = bundle?.offlineTail;
+        // resume() already claims takeover for this exact reason (doc 12 §7).
         if (bundle) conn.resume(bundle, token, { profile, codeProof, ownerToken });
-        else conn.join(docId, token, { profile, takeover, codeProof, ownerToken });
+        else conn.join(docId, token, { profile, takeover: takeover || rejoining, codeProof, ownerToken });
       } else {
-        conn.join(docId, token, { profile, takeover, codeProof });
+        conn.join(docId, token, { profile, takeover: takeover || rejoining, codeProof });
       }
     })();
     return () => {
       disposed = true;
+      monitor?.stop(); // no probe may outlive the socket it was measuring
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible);
       if (store && typeof window !== "undefined") {
         window.removeEventListener("pagehide", flush);
         document.removeEventListener("visibilitychange", flush);
       }
-      void persister?.flush(); // last write on unmount…
+      // Published so the NEXT run can await it before reading the store —
+      // this is the handoff that makes a reconnect a resume (see above).
+      flushDoneRef.current = persister?.flush() ?? Promise.resolve();
       persister?.stop(); // …then detach (no timers left behind)
       connRef.current = null;
     };
-    // Reconnect when the target document or endpoint changes.
+    // Reconnect when the target document or endpoint changes, or when
+    // `reconnectNonce` is bumped by a detected drop — the reconnect IS a
+    // teardown-and-rebuild, which is what routes it through resume().
     // profile intentionally omitted from deps (an inline object literal would
     // reconnect every render); renames go through setProfile, not re-join.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, docId, clientId, token, createSocket, store, takeover, docKey, shareCode, ownerToken, httpBase]);
+  }, [url, docId, clientId, token, createSocket, store, takeover, docKey, shareCode, ownerToken, httpBase, reconnectNonce]);
+
+  /** Cancel a pending retry if the hook unmounts between attempts. */
+  useEffect(() => () => {
+    if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = null;
+  }, []);
 
   /**
    * This client's own write status from the roster, or undefined when the
@@ -551,8 +750,24 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // the refusal-driven flag rather than assuming `allowed` — a permissive
     // default would put the user's first keystrokes straight back in the
     // appear-then-vanish loop this exists to remove.
-    writesBlocked: myWrite !== undefined ? myWrite !== "allowed" : readOnlyBlocked,
+    //
+    // A NON-LIVE CONNECTION BLOCKS WRITES TOO, checked first because it
+    // outranks everything the roster could say: a lifted owner lock is
+    // irrelevant if the message announcing it could not have arrived. Folding
+    // it in here — rather than adding a parallel gate at the editor — is what
+    // makes the existing `editable: … && !session.writesBlocked` line cover
+    // the dropped-socket case without being touched.
+    writesBlocked:
+      connection !== "live" || (myWrite !== undefined ? myWrite !== "allowed" : readOnlyBlocked),
+    // Left UNSET by a disconnect on purpose. These four values describe what
+    // the SERVER decided about this participant, and a client that cannot
+    // reach the server has not been told anything new — reporting a stale
+    // `allowed` beside `writesBlocked: true` would be a straight
+    // contradiction, and inventing a fifth value would put a transport fault
+    // into a permissions vocabulary. `connection` is where that story lives.
     writeStatus: myWrite,
+    connection,
+    reconnect,
     retryWrites: () => setReadOnlyBlocked(false),
     epochChanged,
     roster,
@@ -652,7 +867,11 @@ export function CollabEditor(opts: UseCollabOptions & {
     // renders the banner and any retry affordance off it, and without it the
     // observer only learns the editor went read-only when some UNRELATED
     // change (the next version bump) happens to re-fire this effect.
-  }, [session.version, session.ready, session.refused, session.roster, session.epochChanged, session.sessionWarning, session.writesBlocked]);
+    // `connection` belongs here for the same reason `writesBlocked` does: the
+    // shell renders the disconnect modal off it, and without it the observer
+    // would only learn the socket died when some unrelated change happened to
+    // re-fire this effect — which, on a dead connection, may be never.
+  }, [session.version, session.ready, session.refused, session.roster, session.epochChanged, session.sessionWarning, session.writesBlocked, session.connection]);
   const [api, setApi] = useState<DocxViewApi | null>(null);
   // Caret survival across a true-conflict reload: the docEpoch key change
   // below remounts the whole DocxView, killing the caret's node references.

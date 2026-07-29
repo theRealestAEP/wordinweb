@@ -275,7 +275,31 @@ export type ClientMessage =
    * hub relays it without looking (#20): the server learns who is pointing,
    * never where. Plaintext rooms keep the structured position, which the hub
    * still clamps at the relay. */
-  | { t: "presence"; position: PresencePosition | SealedPresence | null };
+  | { t: "presence"; position: PresencePosition | SealedPresence | null }
+  /**
+   * APPLICATION-LEVEL LIVENESS PROBE (the reconnect arc). The server answers
+   * every one with {@link ServerMessage} `pong` carrying the same nonce.
+   *
+   * WHY THIS EXISTS AT ALL, given TCP and the WebSocket close handshake: a
+   * phone that sleeps mid-session leaves a HALF-OPEN connection. The peer is
+   * gone, but nothing tells this end — `onclose` never fires, `onerror` never
+   * fires, `readyState` still reads OPEN, and every `send()` succeeds into a
+   * socket whose bytes will never arrive. The only way to learn the truth is
+   * to ask for a reply and notice it did not come.
+   *
+   * `nonce` is an opaque round-trip token, echoed back unmodified. It exists
+   * so a pong can be matched to the ping it answers — without it a stale pong
+   * from before a reconnect could silently satisfy the CURRENT probe and mask
+   * a genuinely dead socket. It carries no meaning and is never persisted.
+   *
+   * DELIBERATELY NOT ACTIVITY. The hub answers this WITHOUT calling
+   * `noteActivity`, so a heartbeat cannot hold an abandoned room open — the
+   * exact hazard the idle-timeout notes call out ("an activity-based clock is
+   * what a keepalive script defeats"). A ping proves the socket is alive; it
+   * proves nothing about a human being present, and those are different
+   * questions with different consequences.
+   */
+  | { t: "ping"; nonce: number };
 
 /** Server → client. */
 export type ServerMessage =
@@ -419,11 +443,54 @@ export type ServerMessage =
    * server is incapable of producing.
    */
   | { t: "session-warning-cleared"; reason: "idle" }
+  /**
+   * The answer to a client `ping`, echoing its nonce. Proof that the socket is
+   * end-to-end alive RIGHT NOW — not merely that the local OS still believes
+   * in it, which is all `readyState === OPEN` ever establishes.
+   *
+   * Emitted unconditionally and statelessly: no room lookup, no auth check, no
+   * activity bookkeeping. A liveness answer that could itself be refused would
+   * be indistinguishable from the death it is supposed to detect.
+   */
+  | { t: "pong"; nonce: number }
   | { t: "refused"; reason: string };
 
 /** Bump when the intent apply/transform semantics change in a way that makes
  * mixed-version clients diverge (plan doc 03 version lockstep). A client whose
  * version differs is refused at hello with "please refresh".
  * v2: hello carries clientId (bound identity) + takeover; welcome carries the
- * id sidecar. */
-export const PROTOCOL_VERSION = 2;
+ * id sidecar.
+ *
+ * v3: ping/pong liveness (the reconnect arc).
+ *
+ * THIS ONE LOOKS ADDITIVE AND IS NOT, and the reason is worth stating because
+ * the instinct to skip the bump is strong and wrong. Neither dispatch switch
+ * has a `default:` clause — the hub's (hub.ts) and both clients'
+ * (connection.ts / enc-connection.ts) — so an unknown `t` is silently dropped
+ * at every hop. That cuts in opposite directions per side:
+ *
+ *  - An OLD CLIENT receiving `pong` ignores it. Harmless.
+ *  - An OLD SERVER receiving `ping` ignores it AND SENDS NOTHING BACK.
+ *
+ * The second case is fatal to the feature. The heartbeat's entire value is
+ * that a missing pong is CONCLUSIVE evidence the socket is dead — that is the
+ * only signal that catches the half-open sleeping phone, where onclose and
+ * onerror never fire. Against a v2 server every pong is missing, so a new
+ * client would diagnose a perfectly healthy session as lost and gate the
+ * editor read-only: a silent-data-loss bug traded for a can't-type-at-all bug.
+ * Weakening the client to treat silence as inconclusive would restore the very
+ * ambiguity the probe exists to remove.
+ *
+ * Because hello ALREADY hard-refuses a protocolVersion mismatch, bumping makes
+ * "I am connected" imply "my peer answers pings" by construction, and a missing
+ * pong stays unambiguous. The cost is that v2 clients are refused with "please
+ * refresh" — the mechanism working as designed, and the same price every prior
+ * bump paid.
+ *
+ * ENGINE_VERSION is deliberately NOT bumped. That fence guards CANONICAL
+ * DIVERGENCE in E2EE rooms, where clients derive document state themselves and
+ * no arbiter exists. Liveness frames are never sealed, never sequenced, never
+ * logged, and never reach apply or transform; two clients disagreeing about
+ * them cannot produce two different documents. Bumping it would force every
+ * live room to re-seed for a change that cannot affect a byte of content. */
+export const PROTOCOL_VERSION = 3;

@@ -11,6 +11,7 @@ export { CollabConnection, type ClientTransport, type ConnectionCallbacks } from
 export { EncryptedCollabConnection } from "./enc-connection.js";
 export { bindEditor, type EditorBridge, type EditorBinding } from "./binding.js";
 export { createWebSocketTransport, type SocketLike } from "./ws-transport.js";
+export { LivenessMonitor, monitorTransport, type ConnectionState, type LivenessOptions } from "./liveness.js";
 export * from "./intents.js";
 export {
   PROTOCOL_VERSION,
