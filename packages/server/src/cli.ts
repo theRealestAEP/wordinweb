@@ -323,12 +323,11 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
         // with one line of curl.
         {
           creatorIp: clientIp(req, limits.ip.trustProxyHops),
-          // A plaintext room means this server holds and parses the actual
-          // document — the one thing zero custody says it never does. The
-          // demo UI only ever seeds encrypted, but the UI is not a gate:
-          // this is the same route, and plain bytes posted to it would have
-          // been accepted. Off unless a self-hoster explicitly asks for it.
-          encryptedOnly: process.env.WW_ALLOW_PLAINTEXT_SEED !== "1",
+          // Both modes work by default; a deployment opts IN to refusing
+          // plaintext. Defaulting to refusal would change what this server
+          // does for everyone already running it, to solve a problem that
+          // belongs to one deployment's config rather than to the package.
+          encryptedOnly: process.env.WW_ENCRYPTED_ONLY === "1",
         },
       );
       res.writeHead(out.status, { "content-type": "application/json" }).end(JSON.stringify(out.body));

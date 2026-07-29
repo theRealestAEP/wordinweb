@@ -299,7 +299,22 @@ WordInWeb never converts the document to flowing HTML. It parses the OOXML into 
 
 ## Collaboration — zero-custody, end-to-end encrypted
 
-Real-time collaboration ships as a separate entry (`wordinweb/collab`). The server is a **blind sequencer**: it orders opaque encrypted envelopes and relays bytes, but never holds a key, never parses a document, and keeps **nothing at rest** — every browser holds the durable copy, and the document key rides the share link's `#fragment`, which browsers never send to a server.
+Real-time collaboration ships as a separate entry (`wordinweb/collab`). In its encrypted mode the server is a **blind sequencer**: it orders opaque encrypted envelopes and relays bytes, but never holds a key, never parses a document, and keeps **nothing at rest** — every browser holds the durable copy, and the document key rides the share link's `#fragment`, which browsers never send to a server.
+
+### Two modes
+
+A document is encrypted or not, decided when it is created, and it cannot be joined in the wrong mode.
+
+| | Encrypted | Plaintext |
+|---|---|---|
+| Where edits are applied | Every client, over an ordered log of sealed envelopes | On the server |
+| What the server holds | Ciphertext it has no key for | The document |
+| Key management | The doc key rides the link fragment; a share code can be mixed in | None |
+| Good for | Anything crossing a network you do not own | An internal tool on a trusted network |
+
+Both are supported and neither is deprecated. Plaintext is simpler — no keys, no fragments, no share codes — and is the right choice when the server is yours and the network is trusted.
+
+**A client cannot enforce the mode.** The two are created through the same `/docs` route, so a deployment whose whole claim is that it never holds a readable document must say so on the server: set `WW_ENCRYPTED_ONLY=1`, or pass `encryptedOnly: true` to `handleSeedRequest`. Without it, posting plain bytes to that route creates a plaintext room no matter what the app UI offers. It is off by default — turning it on is a deployment's choice.
 
 ```tsx
 import { CollabEditor, IndexedDbBundleStore } from "wordinweb/collab";
@@ -372,7 +387,7 @@ flowchart LR
   K -.-> BE
 ```
 
-What the server can see: envelope sizes, timing, participant count, sha addresses of media ciphertext. What it cannot see: document content, media pixels, part structure, or the key. Every client re-derives the canonical history by running the identical transform/validate/apply pipeline over the same ordered log — convergence is by construction, guarded by an engine-version fence (mixed client builds are refused rather than allowed to fork) and per-client self-healing.
+In encrypted mode, what the server can see: envelope sizes, timing, participant count, sha addresses of media ciphertext. What it cannot see: document content, media pixels, part structure, or the key. Sizes and timing are worth stating plainly — encryption is length-preserving and nothing is padded, so an edit's size tracks the text's, and one intent is sent per keystroke. Every client re-derives the canonical history by running the identical transform/validate/apply pipeline over the same ordered log — convergence is by construction, guarded by an engine-version fence (mixed client builds are refused rather than allowed to fork) and per-client self-healing.
 
 ### Deploy
 
@@ -424,6 +439,7 @@ Operational shape, stated plainly:
 | **Media** | `WW_MEDIA_MAX_BLOB_BYTES` (5MB) is the number users see — a 413 carries it so the UI can say "images must be under 5 MB"; the socket-level guard derives from it (+2MB) rather than duplicating it. `WW_MEDIA_MAX_ROOM_BYTES` (100MB) caps how much one room holds at a time. `WW_MEDIA_ROOM_UPLOADS_PER_MIN` (60) and `WW_MEDIA_ROOM_UPLOAD_BURST` (64) cap how fast a room can be asked to hold it; the burst is sized for re-supply, since a joiner's images are requested from holders all at once. `WW_MEDIA_STAGE_TTL_MS` (60s) and `WW_MEDIA_TTL_MS` (5min) are lifecycles, not deletions of record: the relay is a **cache**, so an evicted blob is re-supplied by any participant who holds it — expiry costs latency, never data. |
 | **Per-IP limits** | `WW_IP_SEED_PER_MIN` (10), `WW_IP_MAX_DOCS` (25), `WW_IP_MAX_CONNS` (50) — deliberately generous because NAT/CGNAT makes an office look like one address; raise them if real users get refused. **`WW_TRUST_PROXY` is a hop count, not a boolean**: 1 is correct behind this compose file's Caddy; set it to 0 if the server is ever exposed without a proxy, or per-IP protection silently switches off while appearing configured. Every limit is parsed in `packages/server/src/limits.ts`; 0 disables any of them. |
 | **Health** | `GET /healthz` is ungated and is what probes should use. `GET /stats` requires `WW_OBS=1` **and** is not proxied — enabling metrics is deliberately two steps. |
+| **Mode** | `WW_ENCRYPTED_ONLY=1` refuses plaintext seeds, so the only rooms this server can hold are ones it cannot read. Off by default — both modes work. The client cannot enforce this: encrypted and plaintext documents are created through the same `/docs` route, so a UI that only offers encryption is not a gate. |
 | **Logs** | Structured lines on stderr, collector-ready as-is; compose bounds them with the json-file driver. `WW_LOG_LEVEL=debug` is a per-op firehose, not a production setting. |
 | **Media routes are unauthenticated** | Anyone who can reach the origin can `PUT`/`GET` blobs within the size and room caps. In an encrypted room those blobs are ciphertext. Uploads require an open room and are rate limited per room, both decided before the request body is read, so a refused upload costs no memory — but per-user auth is a recorded launch gate. |
 

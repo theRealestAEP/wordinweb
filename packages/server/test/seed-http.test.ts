@@ -179,9 +179,10 @@ describe("owner token in seed responses (doc 14 §2.5)", () => {
     expect(race.status).toBe(409);
     expect(race.body.ownerToken).toBeUndefined();
   });
-  // A plaintext room means the server holds and parses the real document.
-  // The demo UI only ever seeds encrypted, but the UI is not a gate: this is
-  // the same route, and plain bytes posted to it were accepted before this.
+  // OPT-IN, not the default. A plaintext room means the server holds and
+  // parses the real document; a deployment whose claim is that it never does
+  // that sets this. The client UI cannot enforce it — this is the same route,
+  // and plain bytes posted to it create a plaintext room.
   it("encryptedOnly refuses a plaintext seed and creates no room, but still takes an encrypted one", () => {
     const hub = new CollabHub(null);
 
@@ -211,7 +212,7 @@ describe("owner token in seed responses (doc 14 §2.5)", () => {
     expect(hub.roomsSnapshot()).toHaveLength(1);
   });
 
-  it("without the flag a plaintext seed still works (library default, unchanged)", () => {
+  it("plaintext seeding is the DEFAULT — the flag is opt-in, not opt-out", () => {
     const hub = new CollabHub(null);
     const res = handleSeedRequest(hub, { method: "POST", body: { docx: b64(docxBytes("hello")) } });
     expect(res.status).toBe(201);

@@ -65,6 +65,13 @@ services:
       # cellular). If the second is also refused, every client is sharing one
       # bucket and this is wrong.
       WW_TRUST_PROXY: "1"
+      # This demo's whole claim is that the server never holds a document it
+      # can read. The app only ever creates encrypted documents — but the app
+      # is not a gate. Posting plain bytes to the same /docs route creates a
+      # plaintext room, where the server does hold and parse the file. This
+      # closes that. The server supports both modes; refusing one is this
+      # deployment's choice, not the package's default.
+      WW_ENCRYPTED_ONLY: "1"
       # ── surge valves ────────────────────────────────────────────────────
       WW_WS_MAX_PAYLOAD: "524288"
       WW_WS_MAX_BUFFERED: "4194304"

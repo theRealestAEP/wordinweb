@@ -76,6 +76,13 @@ services:
       # behind the proxy requires setting it back to 0, or per-IP protection
       # silently switches off while still appearing configured.
       WW_TRUST_PROXY: "1"
+      # This demo's whole claim is that the server never holds a document it
+      # can read. The app only ever creates encrypted documents — but the app
+      # is not a gate. Posting plain bytes to the same /docs route creates a
+      # plaintext room, where the server does hold and parse the file. This
+      # closes that. The server supports both modes; refusing one is this
+      # deployment's choice, not the package's default.
+      WW_ENCRYPTED_ONLY: "1"
       # ── SURGE VALVES ─────────────────────────────────────────────────────
       # Largest inbound WS frame. Must stay above the 256KB envelope cap plus
       # base64/JSON overhead. `ws` defaults to 100MiB, which lets a hostile

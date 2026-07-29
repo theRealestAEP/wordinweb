@@ -64,14 +64,16 @@ export interface SeedHttpOptions {
   mintDocId?: () => string;
   /**
    * Refuse plaintext seeds, so the only rooms this server can hold are ones
-   * it cannot read. Plaintext rooms stay fully supported by the library — a
-   * trusted-network deployment may not want key management — but a server
-   * that calls itself zero-custody must not hold a readable document, and
-   * before this flag the UI was the only thing keeping it from doing so.
-   * Nothing stops a crafted request from posting plain bytes to the same
-   * route the demo uses.
+   * it cannot read. OFF by default — both modes work.
    *
-   * `startZeroCustodyServer` sets this. `startDevServer` does not.
+   * Turn it on when a deployment's whole claim is that it never holds a
+   * readable document. Without it, the client UI is the only thing choosing
+   * the mode, and a UI is not a gate: plain bytes posted to this same route
+   * create a plaintext room where the server does hold and parse the file.
+   *
+   * Leave it off for a plain collaborative server on a trusted network,
+   * where the encryption's key management is overhead you do not want.
+   * The CLI reads `WW_ENCRYPTED_ONLY=1`.
    */
   encryptedOnly?: boolean;
   /**
