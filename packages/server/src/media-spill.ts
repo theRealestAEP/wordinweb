@@ -43,6 +43,11 @@ const ALG = "aes-256-ctr";
 const IV_BYTES = 16;
 const SHA_HEX = /^[0-9a-f]{64}$/;
 
+/** On-disk bytes a spilled file carries beyond the blob itself (the IV).
+ * Exported so the hub's disk-budget arithmetic can predict a file's size
+ * before writing it, instead of writing first and discovering it went over. */
+export const SPILL_FILE_OVERHEAD = IV_BYTES;
+
 /** Defence in depth on the path component. The HTTP route regex and upload
  * admission already enforce this shape, but a filename is where a bad value
  * would do the most damage, so the module refuses it independently. */
@@ -140,10 +145,18 @@ export class MediaSpill {
     return file.pipe(decipher);
   }
 
-  /** Remove one blob's file and release its bytes from the accounting. */
+  /**
+   * Remove one blob's file and release its bytes from the accounting.
+   *
+   * ACCOUNTING RELEASES FIRST, in the synchronous prefix, and the rm follows:
+   * the hub's disk-budget ladder frees space by unlinking and re-reads
+   * `totalBytes()` in the same tick, and a caller retrying a FAILED rm must
+   * not double-release. A failed rm therefore leaves a file the accounting no
+   * longer counts — a disk-space bug the hub's retry sweep repairs, never a
+   * retention bug (the per-boot key and the boot wipe still cover the bytes).
+   */
   async unlink(roomSpillId: string, sha: string): Promise<void> {
     assertSha(sha);
-    await fsp.rm(join(this.root, roomSpillId, sha), { force: true });
     const room = this.sizes.get(roomSpillId);
     const size = room?.get(sha);
     if (room && size !== undefined) {
@@ -151,15 +164,18 @@ export class MediaSpill {
       this.bytes -= size;
       if (room.size === 0) this.sizes.delete(roomSpillId);
     }
+    await fsp.rm(join(this.root, roomSpillId, sha), { force: true });
   }
 
-  /** Room death: remove the room's whole spill directory and its bytes. */
+  /** Room death: remove the room's whole spill directory and its bytes.
+   * Same ordering contract as {@link unlink}: bytes release synchronously,
+   * the rm follows, and a retry after a failed rm is a no-op release. */
   async removeRoom(roomSpillId: string): Promise<void> {
-    await fsp.rm(join(this.root, roomSpillId), { recursive: true, force: true });
     const room = this.sizes.get(roomSpillId);
     if (room) {
       for (const size of room.values()) this.bytes -= size;
       this.sizes.delete(roomSpillId);
     }
+    await fsp.rm(join(this.root, roomSpillId), { recursive: true, force: true });
   }
 }

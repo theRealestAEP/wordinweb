@@ -2,10 +2,12 @@ import { DocxDocument } from "@wordinweb/core";
 import { DocumentSession, type IdSidecar, type ParticipantProfile } from "@wordinweb/collab/server";
 import type { EnvelopeEntry, SealedCheckpoint, IntentEnvelope, LineageHead } from "@wordinweb/collab/server";
 import { ClientMessage, ServerMessage, PROTOCOL_VERSION, sanitizePresencePosition, type PresencePosition, type WriteStatus } from "@wordinweb/collab/server";
+import type { Readable } from "node:stream";
 import { StorageDriver } from "./storage.js";
 import { type Observability, NO_OP_OBSERVABILITY } from "./observability.js";
 import { type HubLimits, DEFAULT_LIMITS } from "./limits.js";
 import { IpGuard, NO_OP_IP_GUARD, type IpLimitReason } from "./ip-guard.js";
+import { MediaSpill, newRoomSpillId, SPILL_FILE_OVERHEAD } from "./media-spill.js";
 
 /**
  * A connection the hub can send to, abstracting the transport (WebSocket in
@@ -112,14 +114,27 @@ export interface RoomSnapshot {
 
 /**
  * One locker entry, discriminated by WHERE the bytes live (doc 16 §4
- * two-tier index). This pass is scaffolding: every entry is `loc:"ram"`,
- * and nothing creates a `loc:"disk"` entry yet — demotion arrives with the
- * eviction ladder. A disk entry keeps only the blob length (for byte
+ * two-tier index). A disk entry keeps only the blob length (for byte
  * accounting); its bytes live in the spill, keyed by the same sha.
+ *
+ * `demoting` marks a RAM entry whose spill write is in flight. The RAM
+ * buffer is HELD until the tmp-then-rename write completes and the index
+ * entry swaps — so a GET racing a demotion always finds either the buffer
+ * or a complete file, never a partial one. The flag only stops a second
+ * concurrent demotion from picking the same victim.
  */
 type MediaBlobEntry =
-  | { loc: "ram"; bytes: Uint8Array; lastDownloadAt: number; staged: boolean }
+  | { loc: "ram"; bytes: Uint8Array; lastDownloadAt: number; staged: boolean; demoting?: boolean }
   | { loc: "disk"; len: number; lastDownloadAt: number; staged: boolean };
+
+/**
+ * What a media GET serves: RAM blobs come back as the bytes themselves
+ * (today's shape, unchanged); disk blobs come back as a length plus a lazy
+ * decrypting stream so the transport pipes them without ever buffering the
+ * file — the spill tier is exactly the tier whose blobs should not re-enter
+ * RAM whole (the one-way ladder, doc 16 §4).
+ */
+export type MediaDownloadHit = Uint8Array | { len: number; open: () => Promise<Readable> };
 
 /** Blob length regardless of tier — the number the room byte cap counts. */
 function mediaBlobLen(b: MediaBlobEntry): number {
@@ -190,6 +205,10 @@ interface Room {
      * size of, in the one component whose whole promise is holding nothing. */
     uploadBucket: { tokens: number; last: number };
   };
+  /** This room's directory name in the spill tier — FRESH RANDOM, minted on
+   * the room's first demotion (see newRoomSpillId for why it is never
+   * derived from the docId). Unset until the room spills something. */
+  spillId?: string;
   /** Epoch-ms timestamp of when the room last became empty, or undefined
    * while anyone is connected. Drives zero-custody eviction (plan doc 12
    * §2): after the last-disconnect grace elapses the room — doc, log,
@@ -323,7 +342,26 @@ export class CollabHub {
      * without one behaves exactly as it did before this arc — same pattern
      * as the observability sink above. */
     private ipGuard: IpGuard = NO_OP_IP_GUARD,
-  ) {}
+  ) {
+    // The disk spill tier (doc 16 §4). `diskBytes: 0` — the default — means
+    // NO spill: no MediaSpill is constructed, nothing touches the filesystem,
+    // and the RAM-pressure ladder below never runs, so the default path is
+    // byte-for-byte the pre-spill behavior.
+    this.spill = this.limits.media.diskBytes > 0 ? new MediaSpill(this.limits.media.spillDir) : null;
+  }
+
+  /** The spill tier, or null when `diskBytes` is 0 (spill disabled). */
+  private readonly spill: MediaSpill | null;
+  /** Global gauge of media bytes RESIDENT IN RAM across all rooms — the
+   * number `limits.media.ramBytes` bounds. Maintained unconditionally (it is
+   * one integer), enforced only when the spill tier is on. */
+  private mediaRamBytes = 0;
+  /** Spill files/directories whose rm FAILED (EACCES, EIO, …): retried on
+   * every sweepMedia. Accounting was already released, so a stuck entry is a
+   * disk-space bug, never a retention bug — the boot wipe and the per-boot
+   * key both still cover the bytes. `sha` unset means the room's whole
+   * directory. */
+  private spillRetry: { roomSpillId: string; sha?: string }[] = [];
 
   /** Send a refusal and tally it by reason (the one place `{t:"refused"}` is
    * emitted outside `kick`), so the refused-by-reason counter always tracks
@@ -1187,8 +1225,25 @@ export class CollabHub {
     let hex = "";
     for (const b of new Uint8Array(digest)) hex += b.toString(16).padStart(2, "0");
     if (hex !== sha) return 400; // the sha check — never trust the label
+    // RAM-PRESSURE LADDER (doc 16 §4), only when the spill tier is on: if
+    // admitting these bytes would push global media RAM past the budget,
+    // demote LRU victims to disk (and beyond the disk budget, evict
+    // disk-LRU entirely) until it fits. 507 only when RAM cannot be freed
+    // at all — every remaining RAM blob has waiters.
+    if (this.spill && this.limits.media.ramBytes > 0 && this.mediaRamBytes + bytes.length > this.limits.media.ramBytes) {
+      const fits = await this.demoteForRam(bytes.length);
+      if (!fits) return 507;
+    }
+    // RE-VALIDATE after the awaits above (digest + ladder): the room may have
+    // evicted underneath us, and a concurrent upload of the same sha may have
+    // landed — inserting anyway would strand bytes in a dead room's map or
+    // double-count the blob, which is exactly the accounting drift the
+    // gauges must never have.
+    if (this.rooms.get(docId) !== room) return 404;
+    if (room.media.blobs.has(sha)) return 200;
     room.media.blobs.set(sha, { loc: "ram", bytes, lastDownloadAt: this.now(), staged: true });
     room.media.totalBytes += bytes.length;
+    this.mediaRamBytes += bytes.length;
     // A re-supply round for this sha completes here: serve every waiter.
     const waiters = room.media.waiters.get(sha);
     if (waiters) {
@@ -1208,8 +1263,13 @@ export class CollabHub {
   /** Media download (the GET handler's core). A peer download PROMOTES a
    * staged blob (doc 16 §4: in encrypted rooms the server can't read the
    * referencing intent, but only someone who saw it can know the sha) and
-   * refreshes the TTL. */
-  mediaDownload(docId: string, sha: string): Uint8Array | null {
+   * refreshes the TTL — in BOTH tiers, identically. A RAM hit returns the
+   * bytes (unchanged); a disk hit returns a lazy decrypting stream the
+   * transport pipes, so a spilled blob is never pulled back into RAM
+   * (one-way ladder). If the file vanishes between this index hit and
+   * `open()` (a sweep unlink racing the request), `open()` rejects and the
+   * transport answers absent — the same outcome as arriving one tick later. */
+  mediaDownload(docId: string, sha: string): MediaDownloadHit | null {
     const room = this.rooms.get(docId);
     const blob = room?.media.blobs.get(sha);
     if (!room || !blob) return null;
@@ -1217,10 +1277,156 @@ export class CollabHub {
     blob.lastDownloadAt = this.now();
     this.obs.mediaDown();
     this.noteActivity(room);
-    // UNREACHABLE this pass — nothing demotes to disk yet. The spill read
-    // path (a stream, not a buffer) replaces this arm with the ladder.
-    if (blob.loc !== "ram") return null;
-    return blob.bytes;
+    if (blob.loc === "ram") return blob.bytes;
+    const spill = this.spill;
+    const spillId = room.spillId;
+    if (!spill || spillId === undefined) return null; // disk entry with no spill: cannot happen while wired
+    return { len: blob.len, open: () => spill.openRead(spillId, sha) };
+  }
+
+  /** Current tier gauges — RAM-resident media bytes and spill disk bytes
+   * (on-disk sizes, IV included). For tests (the accounting-drift invariant)
+   * and ops; contains no content and no identifiers. */
+  mediaTierBytes(): { ram: number; disk: number } {
+    return { ram: this.mediaRamBytes, disk: this.spill?.totalBytes() ?? 0 };
+  }
+
+  /**
+   * Demote RAM-LRU victims to disk until `incomingLen` more bytes fit under
+   * the RAM budget. Returns false when no demotable victim remains — every
+   * RAM blob has waiters or is already mid-demotion — which is the ONLY
+   * situation an upload answers 507 for (doc 16 §4: full-ladder eviction
+   * couldn't make room).
+   */
+  private async demoteForRam(incomingLen: number): Promise<boolean> {
+    const budget = this.limits.media.ramBytes;
+    while (this.mediaRamBytes + incomingLen > budget) {
+      const victim = this.pickRamVictim();
+      if (!victim) return false;
+      await this.demote(victim.docId, victim.room, victim.sha, victim.entry);
+    }
+    return true;
+  }
+
+  /**
+   * Choose the next demotion victim, globally across rooms (the budget is a
+   * process budget). Order per the ladder spec: promoted-LRU by
+   * lastDownloadAt first, then staged-LRU. Never a blob with waiters, never
+   * one already mid-demotion. A blob whose body is still being received or
+   * hashed is structurally exempt: it is not in any room's map until
+   * `mediaUpload` finishes hashing it.
+   */
+  private pickRamVictim(): { docId: string; room: Room; sha: string; entry: Extract<MediaBlobEntry, { loc: "ram" }> } | null {
+    type Victim = { docId: string; room: Room; sha: string; entry: Extract<MediaBlobEntry, { loc: "ram" }> } | null;
+    let promoted: Victim = null;
+    let staged: Victim = null;
+    for (const [docId, room] of this.rooms) {
+      for (const [sha, entry] of room.media.blobs) {
+        if (entry.loc !== "ram" || entry.demoting || room.media.waiters.has(sha)) continue;
+        const slot = entry.staged ? staged : promoted;
+        if (!slot || entry.lastDownloadAt < slot.entry.lastDownloadAt) {
+          if (entry.staged) staged = { docId, room, sha, entry };
+          else promoted = { docId, room, sha, entry };
+        }
+      }
+    }
+    return promoted ?? staged;
+  }
+
+  /**
+   * Demote one RAM blob to the spill tier. The ONE-WAY LADDER's middle rung:
+   *
+   *  1. Make disk room first — beyond `diskBytes`, evict disk-LRU entries
+   *     ENTIRELY (gone; re-supply recovers them — the locker is a cache).
+   *  2. Stream the bytes to disk (tmp-then-rename inside the spill). The RAM
+   *     entry stays in the index UNTOUCHED throughout, so a GET racing the
+   *     write serves from the buffer; only after the rename does the index
+   *     swap to a disk entry and the buffer get released.
+   *  3. If disk cannot take it — budget even after full disk eviction, or a
+   *     real ENOSPC/EIO — the candidate is DROPPED ENTIRELY and counted
+   *     (obs.error). Degrading loses a cache entry re-supply recovers; it
+   *     must never surface as a failed upload.
+   *
+   * The swap copies `lastDownloadAt`/`staged` from the LIVE entry, so a GET
+   * that promoted or refreshed the blob mid-write carries into the disk
+   * entry. If the entry vanished mid-write (TTL sweep, room eviction), the
+   * freshly written file is an orphan and is removed — whoever removed the
+   * entry already released its RAM bytes.
+   */
+  private async demote(docId: string, room: Room, sha: string, entry: Extract<MediaBlobEntry, { loc: "ram" }>): Promise<void> {
+    entry.demoting = true;
+    const len = entry.bytes.length;
+    const spill = this.spill!;
+    const spillId = (room.spillId ??= newRoomSpillId());
+    if (this.evictDiskFor(len + SPILL_FILE_OVERHEAD)) {
+      try {
+        await spill.write(spillId, sha, entry.bytes);
+        const live = this.rooms.get(docId) === room && room.media.blobs.get(sha) === entry;
+        if (live) {
+          room.media.blobs.set(sha, { loc: "disk", len, lastDownloadAt: entry.lastDownloadAt, staged: entry.staged });
+          this.mediaRamBytes -= len;
+        } else if (this.rooms.get(docId) !== room) {
+          this.spillRm(spillId); // room died mid-write: the write may have recreated its directory
+        } else {
+          this.spillRm(spillId, sha); // entry swept mid-write: the file alone is the orphan
+        }
+        return;
+      } catch (err) {
+        // ENOSPC/EIO on the spill write: fall through to the drop below.
+        this.obs.error("hub.spillWrite", err);
+      }
+    }
+    // Disk cannot take it: RAM → gone, skipping the middle rung. Counted via
+    // the error above when a write failed; a budget-impossible victim (bigger
+    // than the whole disk tier) needs no line — the ladder simply ends.
+    if (this.rooms.get(docId) === room && room.media.blobs.get(sha) === entry) {
+      room.media.blobs.delete(sha);
+      room.media.totalBytes -= len;
+      this.mediaRamBytes -= len;
+    }
+  }
+
+  /** Evict disk-LRU entries (never with waiters) until `bytesNeeded` more
+   * fits under the disk budget. Eviction is total: index entry gone, room
+   * budget released, file removed. Returns false when it cannot fit even
+   * with the tier emptied of every evictable entry. */
+  private evictDiskFor(bytesNeeded: number): boolean {
+    const budget = this.limits.media.diskBytes;
+    const spill = this.spill!;
+    while (spill.totalBytes() + bytesNeeded > budget) {
+      let lru: { room: Room; sha: string; entry: Extract<MediaBlobEntry, { loc: "disk" }> } | null = null;
+      for (const room of this.rooms.values()) {
+        for (const [sha, entry] of room.media.blobs) {
+          if (entry.loc !== "disk" || room.media.waiters.has(sha)) continue;
+          if (!lru || entry.lastDownloadAt < lru.entry.lastDownloadAt) lru = { room, sha, entry };
+        }
+      }
+      if (!lru) return false;
+      lru.room.media.blobs.delete(lru.sha);
+      lru.room.media.totalBytes -= lru.entry.len;
+      // The spill releases its byte accounting SYNCHRONOUSLY (see
+      // MediaSpill.unlink), so the loop's totalBytes() re-read makes progress
+      // even though the rm itself is still in flight.
+      this.spillRm(lru.room.spillId!, lru.sha);
+    }
+    return true;
+  }
+
+  /**
+   * Remove a spilled file — or a room's whole spill directory when `sha` is
+   * omitted — without making the caller wait on the filesystem. On failure:
+   * log + count (obs.error), then park the path on the retry list swept
+   * alongside sweepMedia. The spill's byte accounting was already released
+   * in the call's synchronous prefix, so a stuck file is a DISK-SPACE bug,
+   * never a retention bug (per-boot key + boot wipe still cover it).
+   */
+  private spillRm(roomSpillId: string, sha?: string): void {
+    if (!this.spill) return;
+    const op = sha ? this.spill.unlink(roomSpillId, sha) : this.spill.removeRoom(roomSpillId);
+    op.catch((err) => {
+      this.obs.error(sha ? "hub.spillUnlink" : "hub.spillRemoveRoom", err);
+      this.spillRetry.push({ roomSpillId, sha });
+    });
   }
 
   /** Media sweep (doc 16 §4): staged-unreferenced past T_STAGE and
@@ -1230,6 +1436,14 @@ export class CollabHub {
    * sweepRooms. */
   sweepMedia(): void {
     const now = this.now();
+    // Retry rms that failed earlier (see spillRm). Re-attempted here — the
+    // same cadence as everything else time-based — and a still-failing rm
+    // re-parks itself, so nothing is dropped and nothing spins.
+    if (this.spillRetry.length > 0) {
+      const retry = this.spillRetry;
+      this.spillRetry = [];
+      for (const r of retry) this.spillRm(r.roomSpillId, r.sha);
+    }
     for (const room of this.rooms.values()) {
       for (const [sha, blob] of [...room.media.blobs]) {
         if (room.media.waiters.has(sha)) continue;
@@ -1237,6 +1451,11 @@ export class CollabHub {
         if (now - blob.lastDownloadAt >= ttl) {
           room.media.blobs.delete(sha);
           room.media.totalBytes -= mediaBlobLen(blob);
+          // Tier bookkeeping: a RAM eviction releases the global gauge; a
+          // disk eviction also removes its file (TTL'd bytes must not sit on
+          // disk until room death).
+          if (blob.loc === "ram") this.mediaRamBytes -= blob.bytes.length;
+          else if (room.spillId !== undefined) this.spillRm(room.spillId, sha);
         }
       }
       for (const [sha, r] of [...room.media.resupply]) {
@@ -1368,10 +1587,20 @@ export class CollabHub {
 
   /** Delete a room and everything in it, releasing the creator's per-IP doc
    * slot. The ONE place a room leaves `this.rooms`, so the eviction counter,
-   * the reason tally and the IP release can never drift apart from the
-   * deletion itself. */
+   * the reason tally, the IP release — and now the media tier bookkeeping —
+   * can never drift apart from the deletion itself: the RAM gauge gives back
+   * every resident blob, and the room's spill directory is removed (bytes
+   * subtracted and index dropped synchronously inside spillRm; a failed rm
+   * lands on the retry list — a disk-space bug, never a retention bug). */
   private evictRoom(docId: string, reason: EvictionReason): void {
+    const room = this.rooms.get(docId);
     this.rooms.delete(docId);
+    if (room) {
+      for (const blob of room.media.blobs.values()) {
+        if (blob.loc === "ram") this.mediaRamBytes -= blob.bytes.length;
+      }
+      if (room.spillId !== undefined) this.spillRm(room.spillId);
+    }
     this.ipGuard.releaseRoom(docId);
     this.obs.roomEvicted(1, reason);
   }

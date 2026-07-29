@@ -92,7 +92,9 @@ describe("media round through the real hub (doc 16 item 7)", () => {
     bob.mediaNeed(sha);
     await flush();
     expect(bobReady).toBe(sha);
-    const fetched = hub.mediaDownload("d", sha)!;
+    // RAM tier (spill disabled here), so the hit is the bytes themselves.
+    const fetched = hub.mediaDownload("d", sha) as Uint8Array;
+    expect(fetched).toBeInstanceOf(Uint8Array);
     expect(await shaOf(fetched)).toBe(sha); // the reservation IS the verifier
     bob.doc!.installMedia(bobPart, fetched);
 
