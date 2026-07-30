@@ -37,9 +37,20 @@ interface TypingProbe {
   busySeen: number;
 }
 
+/** WW_HUNT=1: in-page Z-count transition log (MutationObserver) — which round
+ * never painted, or painted then VANISHED, without changing the typing cadence. */
+const HUNT = !!process.env.WW_HUNT;
+
+interface ZTransition {
+  t: number;
+  z: number;
+}
+
 type PerfGlobals = typeof globalThis & {
   __typingProbe: TypingProbe;
   __dxwPerf?: { samples?: Record<string, number>[] };
+  __zlog?: ZTransition[];
+  __keylog?: number[];
 };
 
 function bigDocx(paras: number): Buffer {
@@ -213,6 +224,9 @@ async function typeRounds(page: Page, scenario: string, rounds: number): Promise
     probe.busySeen = 0;
     const perf = (globalThis as PerfGlobals).__dxwPerf;
     if (perf) perf.samples = [];
+    const g = globalThis as PerfGlobals;
+    if (g.__zlog) g.__zlog = [];
+    if (g.__keylog) g.__keylog = [];
   });
   for (let i = 0; i < rounds; i++) await clickThenType(page, i);
   const { times, busySeen, samples } = await page.evaluate(() => {
@@ -221,6 +235,34 @@ async function typeRounds(page: Page, scenario: string, rounds: number): Promise
     return { times: probe.times, busySeen: probe.busySeen, samples: perf?.samples ?? [] };
   });
   const landed = (await sentinelCount(page)) - sentinelsBefore;
+  if (HUNT) {
+    const hunt = await page.evaluate(() => {
+      const g = globalThis as PerfGlobals & {
+        __ww?: { text(): string; droppedPreReady(): number; sendFailures(): number; selfHeals(): number };
+      };
+      const w = g.__ww;
+      return {
+        zlog: g.__zlog ?? [],
+        keylog: g.__keylog ?? [],
+        modelZ: w ? (w.text().match(/Z/g) ?? []).length : -1,
+        dropped: w ? w.droppedPreReady() : -1,
+        sendFail: w ? w.sendFailures() : -1,
+        selfHeals: w ? w.selfHeals() : -1,
+      };
+    });
+    console.log(
+      `HUNT ${scenario} landed=${landed} modelZ=${hunt.modelZ} dropped=${hunt.dropped} ` +
+        `sendFail=${hunt.sendFail} selfHeals=${hunt.selfHeals} keys=${hunt.keylog.length} transitions=${hunt.zlog.length}`,
+    );
+    if (landed !== rounds) {
+      // Full transition + keydown timelines: which keydown got no +1, and
+      // whether any transition DECREASED the count (paint-then-vanish).
+      for (const k of hunt.keylog) console.log(`HUNT ${scenario} keydown t=${k.toFixed(1)}`);
+      for (const z of hunt.zlog) console.log(`HUNT ${scenario} ztrans t=${z.t.toFixed(1)} z=${z.z}`);
+      const drops = hunt.zlog.filter((z, i) => i > 0 && z.z < hunt.zlog[i - 1].z);
+      console.log(`HUNT ${scenario} decreases=${drops.length} times=${times.map((t) => t.toFixed(1)).join(",")}`);
+    }
+  }
   const percentile = (p: number) => percentileOf(times, p);
   metric(scenario, {
     paragraphs: PARAS,
@@ -320,6 +362,30 @@ test.describe("big document typing (>50 pages)", () => {
         attributeFilter: ["data-dxw-layout-busy"],
       });
     });
+
+    if (HUNT) {
+      await page.addInitScript(() => {
+        const g = globalThis as PerfGlobals;
+        g.__zlog = [];
+        g.__keylog = [];
+        let last = -1;
+        const read = (): void => {
+          const z = (document.querySelector(".dxw-pages")?.textContent?.match(/Z/g) ?? []).length;
+          if (z !== last) {
+            last = z;
+            g.__zlog!.push({ t: performance.now(), z });
+          }
+        };
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Z") g.__keylog!.push(performance.now());
+        });
+        new MutationObserver(() => read()).observe(document, {
+          subtree: true,
+          childList: true,
+          characterData: true,
+        });
+      });
+    }
 
     // ---- LOCAL: open the big docx in the landing editor ----
     await page.goto(LANDING);
