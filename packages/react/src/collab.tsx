@@ -1337,12 +1337,23 @@ export function CollabEditor(opts: UseCollabOptions & {
     seenEpochRef.current = session.docEpoch;
     pendingCaretRef.current = api?.getEncodedCaret() ?? null;
   }
-  // Placeholder bytes only — DocxView renders session.doc directly (below), so
-  // this is re-serialized ONLY on a reload (docEpoch), never per broadcast.
+  // Placeholder bytes for the REFUSED branch only — that dead-session view
+  // has no live `collab` prop, so it renders from real bytes. The LIVE view
+  // renders session.doc directly and its `source` is never parsed, so
+  // serializing here on the live path was pure waste — and it sat on the
+  // join-mount critical path: a full save() of a ~12 MB document is seconds
+  // of main thread between the welcome and the first paint, run again on
+  // every docEpoch reload. Computed only when a refusal actually surfaces.
   const bytes = useMemo(
-    () => (session.doc ? session.doc.save() : null),
-    [session.doc, session.docEpoch],
+    () => (session.refused && session.doc ? session.doc.save() : null),
+    [session.refused, session.doc, session.docEpoch],
   );
+  // The live view's `source` prop: a stable inert placeholder. DocxView
+  // ignores `source` entirely while `collab.doc` is set (the live-doc path),
+  // but the prop is required and its IDENTITY must be stable — a fresh
+  // object per render would re-run DocxView's load effect (a whole-document
+  // relayout) on every broadcast.
+  const liveSource = useMemo(() => new Uint8Array(0), []);
 
   if (session.refused) {
     // A refusal that arrives AFTER a live session (idle-timeout,
@@ -1396,7 +1407,7 @@ export function CollabEditor(opts: UseCollabOptions & {
       ),
     );
   }
-  if (!session.ready || !bytes || !session.doc) {
+  if (!session.ready || !session.doc) {
     // Surface a dead server instead of spinning forever: if the welcome hasn't
     // arrived after a grace period, say so (the socket errored or nothing is
     // listening — the demo's most common local failure is a stopped server).
@@ -1404,7 +1415,7 @@ export function CollabEditor(opts: UseCollabOptions & {
   }
 
   const view = createElement(DocxView, {
-    source: bytes,
+    source: liveSource,
     onReady: (a: DocxViewApi) => {
       setApi(a);
       opts.onReady?.(a);

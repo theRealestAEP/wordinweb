@@ -748,6 +748,11 @@ export function DocxView({
           render: t3 - t2,
           totalPages: layout.totalPages,
         };
+        // The FIRST paint on this page — the mount paint — recorded once, so
+        // a bench can read the mount's layout/render breakdown even after
+        // later incremental paints have overwritten `last`.
+        const p = perf as { mount?: Record<string, number> };
+        p.mount ??= { ...perf.last };
       }
       if (pages !== layout.totalPages) onPageCountChangeRef.current?.(layout.totalPages);
       pages = layout.totalPages;

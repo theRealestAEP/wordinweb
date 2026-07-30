@@ -145,7 +145,17 @@ export function LocalEditor({
       .catch(() => null)
       .then((saved) => {
         if (alive && saved) {
-          setBlank(saved.confirmedBytes);
+          // The same overlay Open shows: restoring a big autosaved document
+          // parses and lays out the whole thing synchronously, and a cold
+          // load that freezes for seconds with no feedback reads as a broken
+          // app (measured: ~5.6s to first page on a ~170-page document —
+          // e2e/coldload.spec.ts). Cleared by DocxView's onLoad/onError.
+          setLoading("your document");
+          // Two frames so the spinner PAINTS before the parse starts — the
+          // openDocument trap (fea7e44): one rAF still beats the paint.
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (alive) setBlank(saved.confirmedBytes);
+          }));
           return;
         }
         return fetch(`${httpBase}/blank`)
@@ -378,7 +388,26 @@ export function LocalEditor({
       </div>
     );
   }
-  if (!blank) return <div style={{ padding: 24 }}>Loading editor…</div>;
+  if (!blank) {
+    // A big autosaved document is about to parse + paginate synchronously
+    // (~5.6s to first page on ~170 pages — e2e/coldload.spec.ts), and the
+    // frame painted HERE is what stays on screen through that freeze. The
+    // styled spinner, not bare text, is that frame whenever a restore is in
+    // flight. `position: relative` anchors the overlay's inset:0.
+    return (
+      <div style={{ position: "relative", height: "100%", padding: 24 }}>
+        {loading ? (
+          <div className="document-loading" data-testid="doc-loading" role="status" aria-live="polite" aria-busy="true">
+            <span className="document-loading-spinner" aria-hidden="true" />
+            <strong>Loading {loading}…</strong>
+            <span>Preparing pages for editing…</span>
+          </div>
+        ) : (
+          "Loading editor…"
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
