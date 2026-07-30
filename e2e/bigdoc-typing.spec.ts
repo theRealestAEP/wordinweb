@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type CDPSession, type Page } from "@playwright/test";
 import { zipSync, strToU8 } from "fflate";
 import { LANDING, PAGE, goLive, waitHook } from "./_helpers";
 
@@ -155,11 +155,55 @@ async function typeRounds(page: Page, scenario: string, rounds: number): Promise
   expect(percentile(99), `${scenario}: p99 keystroke latency`).toBeLessThan(25);
 }
 
+async function memoryRounds(page: Page, cdp: CDPSession, scenario: string, rounds: number): Promise<void> {
+  await cdp.send("HeapProfiler.enable");
+  await cdp.send("HeapProfiler.collectGarbage");
+  const before = await cdp.send("Runtime.getHeapUsage") as {
+    usedSize: number;
+    embedderHeapUsedSize: number;
+  };
+  await cdp.send("HeapProfiler.startSampling", { samplingInterval: 32768 });
+  const started = performance.now();
+  for (let i = 0; i < rounds; i++) await clickThenType(page, i);
+  const elapsedMs = performance.now() - started;
+  const { profile } = await cdp.send("HeapProfiler.stopSampling") as {
+    profile: {
+      head: {
+        selfSize: number;
+        children?: unknown[];
+      };
+    };
+  };
+  const sampledBytes = (node: { selfSize: number; children?: unknown[] }): number =>
+    node.selfSize +
+    (node.children ?? []).reduce(
+      (sum, child) => sum + sampledBytes(child as { selfSize: number; children?: unknown[] }),
+      0,
+    );
+  await cdp.send("HeapProfiler.collectGarbage");
+  const after = await cdp.send("Runtime.getHeapUsage") as {
+    usedSize: number;
+    embedderHeapUsedSize: number;
+  };
+  const allocatedMB = sampledBytes(profile.head) / 1_000_000;
+  metric(`${scenario}-memory`, {
+    rounds,
+    jsHeapBeforeMB: before.usedSize / 1_000_000,
+    jsHeapAfterMB: after.usedSize / 1_000_000,
+    jsHeapGrowthMB: (after.usedSize - before.usedSize) / 1_000_000,
+    embedderHeapGrowthMB: (after.embedderHeapUsedSize - before.embedderHeapUsedSize) / 1_000_000,
+    sampledAllocMB: allocatedMB,
+    allocMBPerKey: allocatedMB / rounds,
+    allocMBps: allocatedMB / (elapsedMs / 1000),
+  });
+}
+
 test.use({ trace: "off" });
 
 test.describe("big document typing (>50 pages)", () => {
   test("local editor and collab editor stay interactive on a 60+ page document", async ({ page }) => {
     test.setTimeout(300_000);
+    const cdp = await page.context().newCDPSession(page);
     await page.addInitScript(() => {
       const probe: TypingProbe = { times: [], busySeen: 0 };
       const globals = globalThis as PerfGlobals;
@@ -204,6 +248,7 @@ test.describe("big document typing (>50 pages)", () => {
     metric("bigdoc-pages", { paragraphs: PARAS, pages });
 
     await typeRounds(page, "bigdoc-local-clicktype", 100);
+    await memoryRounds(page, cdp, "bigdoc-local-clicktype", 30);
 
     // ---- COLLAB: the same document, made collaborative ----
     const url = await goLive(page);
@@ -212,5 +257,6 @@ test.describe("big document typing (>50 pages)", () => {
     await expect.poll(() => layoutBusy(page), { timeout: 120_000 }).toBe(false);
 
     await typeRounds(page, "bigdoc-collab-clicktype", 100);
+    await memoryRounds(page, cdp, "bigdoc-collab-clicktype", 30);
   });
 });

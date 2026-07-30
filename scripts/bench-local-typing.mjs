@@ -189,6 +189,7 @@ let busySeen = 0;
 const perKey = [];
 const perKeyMeasures = [];
 const perKeyAllocMb = [];
+const typingHeapStartMb = process.memoryUsage().heapUsed / 1e6;
 for (let i = 0; i < KEYS; i++) {
   if (CLICK_EVERY && i > 0 && i % CLICK_EVERY === 0) await clickSpan((i * 7) % 40);
   const m0 = globalThis.__measureCalls;
@@ -217,6 +218,8 @@ const samples = globalThis.__dxwPerf.samples ?? [];
 const phase = (k) => samples.reduce((a, s) => a + (s[k] ?? 0), 0);
 const fmt = (n) => (Number.isInteger(n) ? n : n.toFixed(2));
 const allocSorted = [...perKeyAllocMb].sort((a, b) => a - b);
+const typingHeapEndMb = process.memoryUsage().heapUsed / 1e6;
+const positiveAllocMb = perKeyAllocMb.reduce((total, value) => total + value, 0);
 console.log(
   `STRESS-METRIC local-typing pkg=${pkg === "wordinweb" ? "worktree" : "custom"} paragraphs=${PARAS} pages=${pages} ` +
     `bookmarks=${BOOKMARKS} keystrokes=${KEYS} mountMs=${fmt(mountMs)} totalMs=${fmt(sum)} msPerKey=${fmt(sum / KEYS)} ` +
@@ -224,7 +227,10 @@ console.log(
     `measurePerKeyMedian=${[...perKeyMeasures].sort((a, b) => a - b)[Math.floor(perKeyMeasures.length / 2)]} ` +
     `measurePerKeyMax=${Math.max(...perKeyMeasures)} ` +
     `allocMbPerKeyMedian=${fmt(allocSorted[Math.floor(allocSorted.length / 2)])} ` +
-    `allocMbPerKeyMax=${fmt(Math.max(...perKeyAllocMb))}`,
+    `allocMbPerKeyMax=${fmt(Math.max(...perKeyAllocMb))} ` +
+    `heapStartMB=${fmt(typingHeapStartMb)} heapEndMB=${fmt(typingHeapEndMb)} ` +
+    `heapGrowthMB=${fmt(typingHeapEndMb - typingHeapStartMb)} ` +
+    `positiveAllocMB=${fmt(positiveAllocMb)} allocMBps=${fmt(positiveAllocMb / (sum / 1000))}`,
 );
 if (samples.length) {
   console.log(

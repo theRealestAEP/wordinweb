@@ -221,9 +221,12 @@ function watcherDoc() {
 /* ---- remote TEXT keystrokes (the hot path) ---- */
 const perKeyMs = [];
 const perKeyMeasures = [];
+const perKeyAllocMb = [];
+const keyHeapStartMb = process.memoryUsage().heapUsed / 1e6;
 for (let k = 0; k < KEYS; k++) {
   const marker = `X${k}Q`;
   const m0 = globalThis.__measureCalls;
+  const h0 = process.memoryUsage().heapUsed;
   const k0 = performance.now();
   await act(async () => {
     editor.submit({
@@ -235,15 +238,20 @@ for (let k = 0; k < KEYS; k++) {
   await until(() => !!container.textContent?.includes(marker), `watcher paints ${marker}`);
   perKeyMs.push(performance.now() - k0);
   perKeyMeasures.push(globalThis.__measureCalls - m0);
+  perKeyAllocMb.push(Math.max(0, (process.memoryUsage().heapUsed - h0) / 1e6));
 }
+const keyHeapEndMb = process.memoryUsage().heapUsed / 1e6;
 
 /* ---- remote STRUCTURAL edits (Enter far from the watcher) ---- */
 const perSplitMs = [];
 const perSplitMeasures = [];
+const perSplitAllocMb = [];
+const splitHeapStartMb = process.memoryUsage().heapUsed / 1e6;
 for (let s = 0; s < SPLITS; s++) {
   const [newBlockId, newRunId] = editor.allocIds(2);
   const before = watcherDoc().sections[0].blocks.length;
   const m0 = globalThis.__measureCalls;
+  const h0 = process.memoryUsage().heapUsed;
   const k0 = performance.now();
   await act(async () => {
     editor.submit({
@@ -257,7 +265,9 @@ for (let s = 0; s < SPLITS; s++) {
   await tick(80); // let any queued background layout land inside the window
   perSplitMs.push(performance.now() - k0);
   perSplitMeasures.push(globalThis.__measureCalls - m0);
+  perSplitAllocMb.push(Math.max(0, (process.memoryUsage().heapUsed - h0) / 1e6));
 }
+const splitHeapEndMb = process.memoryUsage().heapUsed / 1e6;
 await tick(120);
 
 /* ---- convergence: watcher == typist == fresh joiner (server canonical) ---- */
@@ -276,16 +286,24 @@ const fmt = (n) => (Number.isInteger(n) ? n : n.toFixed(2));
 const mode = FORCE_GLOBAL ? "remote-typing-forced-global" : "remote-typing";
 const ms = stats(perKeyMs);
 const mm = stats(perKeyMeasures);
+const keyAlloc = stats(perKeyAllocMb);
 console.log(
   `STRESS-METRIC ${mode} paragraphs=${PARAS} pages=${pages} keystrokes=${KEYS} mountMs=${fmt(mountMs)} ` +
     `mountMeasures=${mountMeasures} msPerKey=${fmt(ms.sum / KEYS)} p50=${fmt(ms.p50)} p90=${fmt(ms.p90)} max=${fmt(ms.max)} ` +
-    `measurePerKeyMedian=${mm.p50} measurePerKeyMax=${mm.max} busySeen=${busySeen} converged=${converged}`,
+    `measurePerKeyMedian=${mm.p50} measurePerKeyMax=${mm.max} ` +
+    `heapStartMB=${fmt(keyHeapStartMb)} heapEndMB=${fmt(keyHeapEndMb)} heapGrowthMB=${fmt(keyHeapEndMb - keyHeapStartMb)} ` +
+    `positiveAllocMB=${fmt(keyAlloc.sum)} allocMbPerKeyMedian=${fmt(keyAlloc.p50)} allocMbPerKeyMax=${fmt(keyAlloc.max)} ` +
+    `allocMBps=${fmt(keyAlloc.sum / (ms.sum / 1000))} busySeen=${busySeen} converged=${converged}`,
 );
 const sms = stats(perSplitMs);
 const smm = stats(perSplitMeasures);
+const splitAlloc = stats(perSplitAllocMb);
 console.log(
   `STRESS-METRIC ${mode}-structural paragraphs=${PARAS} splits=${SPLITS} msPerSplit=${fmt(sms.sum / SPLITS)} ` +
-    `p50=${fmt(sms.p50)} max=${fmt(sms.max)} measurePerSplitMedian=${smm.p50} measurePerSplitMax=${smm.max} busySeen=${busySeen} converged=${converged}`,
+    `p50=${fmt(sms.p50)} max=${fmt(sms.max)} measurePerSplitMedian=${smm.p50} measurePerSplitMax=${smm.max} ` +
+    `heapStartMB=${fmt(splitHeapStartMb)} heapEndMB=${fmt(splitHeapEndMb)} heapGrowthMB=${fmt(splitHeapEndMb - splitHeapStartMb)} ` +
+    `positiveAllocMB=${fmt(splitAlloc.sum)} allocMbPerSplitMedian=${fmt(splitAlloc.p50)} allocMbPerSplitMax=${fmt(splitAlloc.max)} ` +
+    `allocMBps=${fmt(splitAlloc.sum / (sms.sum / 1000))} busySeen=${busySeen} converged=${converged}`,
 );
 if (!converged) {
   console.error("DIVERGED: watcher/typist/late replicas are not byte-identical");
