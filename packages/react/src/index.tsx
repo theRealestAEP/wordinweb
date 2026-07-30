@@ -700,7 +700,8 @@ export function DocxView({
       if (
         editable
         && !customElements.get("model-viewer")
-        && layout.pages.some((page) => page.items.some((item) => item.kind === "image" && item.model3D))
+        && (layout._hasModel3D ||
+          layout.pages.some((page) => page.items.some((item) => item.kind === "image" && item.model3D)))
       ) {
         void import("@google/model-viewer");
       }
@@ -760,7 +761,11 @@ export function DocxView({
           }
         }
         setLayoutPending(true);
-        void layoutDocumentAsync(doc, { measurer, signal: abort.signal }).then((layout) => {
+        void layoutDocumentAsync(doc, {
+          measurer,
+          signal: abort.signal,
+          windowModel: true,
+        }).then((layout) => {
           if (cancelled || job !== layoutJob || abort.signal.aborted || doc.modelVersion !== modelVersion) return;
           paintLayout(doc, layout, performance.now() - started);
         }).catch((cause: unknown) => {
@@ -840,9 +845,11 @@ export function DocxView({
       const started = performance.now();
       const layout =
         headerFooterOnly && prevLayout
-          ? relayoutHeadersFooters(doc, prevLayout, measurer) ?? layoutDocument(doc, { measurer })
+          ? relayoutHeadersFooters(doc, prevLayout, measurer) ??
+            layoutDocument(doc, { measurer, windowModel: true })
           : layoutDocument(doc, {
               measurer,
+              windowModel: true,
               prev: globalChange ? undefined : prevLayout ?? undefined,
               dirtyHint: globalChange ? undefined : dirtyBlock,
               dirtySource: globalChange ? undefined : dirtySource,

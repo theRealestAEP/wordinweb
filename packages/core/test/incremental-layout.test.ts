@@ -51,16 +51,33 @@ function pageProjection(result: ReturnType<typeof layoutDocument>, pageIndex: nu
 }
 
 describe("page-model resume points", () => {
+  it("keeps the complete model below the virtualization threshold", () => {
+    const body = Array.from({ length: 20 }, (_, index) =>
+      p(`page-${index} alpha bravo charlie delta`) +
+      (index < 19 ? `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` : ""),
+    ).join("");
+    const doc = DocxDocument.load(
+      makeDocx({ "word/document.xml": wrapDocument(body + section) }),
+    );
+    const expected = layoutDocument(doc, { measurer });
+    const result = layoutDocument(doc, { measurer, windowModel: true });
+
+    expect(result.totalPages).toBe(20);
+    expect(result._window).toBeUndefined();
+    expect(paintProjection(result)).toBe(paintProjection(expected));
+  });
+
   it("reproduces every page-top point and detects altered resume state", () => {
     const body = Array.from({ length: 24 }, (_, index) =>
       p(`page-${index} alpha bravo charlie delta`) +
       (index < 23 ? `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` : ""),
     ).join("");
     const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body + section) }));
-    const result = layoutDocument(doc, { measurer });
+    const result = layoutDocument(doc, { measurer, windowModel: true });
     expect(result.totalPages).toBeGreaterThan(20);
     expect(result._window).toBeDefined();
 
+    result._window!.materialize(result.pages.keys());
     const expected = result.pages.map((_, index) => pageProjection(result, index));
     const points = (result._incr as {
       points: Array<{
@@ -90,6 +107,87 @@ describe("page-model resume points", () => {
     result._window!.materialize([changed.pageCount]);
     expect(pageProjection(result, changed.pageCount)).not.toBe(expected[changed.pageCount]);
     changed.state.page.colXs[0] = originalX;
+  });
+
+  it("reproduces the next page from every intra-page point", () => {
+    const shortSection =
+      `<w:sectPr><w:pgSz w:w="7200" w:h="3000"/>` +
+      `<w:pgMar w:top="360" w:right="360" w:bottom="360" w:left="360"/></w:sectPr>`;
+    const body = Array.from(
+      { length: 320 },
+      (_, index) => p(`block-${index} alpha bravo charlie delta`),
+    ).join("");
+    const doc = DocxDocument.load(
+      makeDocx({ "word/document.xml": wrapDocument(body + shortSection) }),
+    );
+    const expected = layoutDocument(doc, { measurer });
+    const result = layoutDocument(doc, { measurer, windowModel: true });
+    expect(result.totalPages).toBeGreaterThan(20);
+    expect(result._window).toBeDefined();
+
+    const data = result._incr as {
+      points: Array<{
+        pageCount: number;
+        pageItemCount: number;
+        state: { y: number };
+      }>;
+    };
+    const allPoints = data.points;
+    const intraPagePoints = allPoints.filter(
+      (point) => point.pageItemCount > 0 && point.pageCount + 1 < result.totalPages,
+    );
+    expect(intraPagePoints.length).toBeGreaterThan(5);
+
+    for (const point of intraPagePoints) {
+      data.points = allPoints.slice(0, allPoints.indexOf(point) + 1);
+      result._window!.releaseExcept([]);
+      result._window!.materialize([point.pageCount + 1]);
+      expect(pageProjection(result, point.pageCount + 1)).toBe(
+        pageProjection(expected, point.pageCount + 1),
+      );
+    }
+
+    const changed = intraPagePoints[Math.floor(intraPagePoints.length / 2)];
+    const originalY = changed.state.y;
+    changed.state.y += 200;
+    data.points = allPoints.slice(0, allPoints.indexOf(changed) + 1);
+    result._window!.releaseExcept([]);
+    result._window!.materialize([changed.pageCount + 1]);
+    expect(pageProjection(result, changed.pageCount + 1)).not.toBe(
+      pageProjection(expected, changed.pageCount + 1),
+    );
+    changed.state.y = originalY;
+    data.points = allPoints;
+  });
+
+  it("keeps offscreen pages rematerializable after an incremental edit", () => {
+    const body = Array.from({ length: 24 }, (_, index) =>
+      p(`page-${index} alpha bravo charlie delta`) +
+      (index < 23 ? `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` : ""),
+    ).join("");
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body + section) }));
+    const first = layoutDocument(doc, { measurer, windowModel: true });
+    const targetPage = 15;
+    first._window!.materialize([targetPage]);
+
+    const changed = editParagraph(doc, targetPage * 2, "x");
+    const incremental = layoutDocument(doc, {
+      measurer,
+      windowModel: true,
+      prev: first,
+      dirtyHint: changed.block.src,
+      dirtySource: changed.source,
+    });
+    expect(incremental._incremental).toBe(true);
+    expect(incremental._window).toBeDefined();
+
+    incremental._window!.materialize(incremental.pages.keys());
+    const full = layoutDocument(doc, { measurer });
+    expect(paintProjection(incremental)).toBe(paintProjection(full));
+
+    incremental._window!.releaseExcept([targetPage]);
+    incremental._window!.materialize([20]);
+    expect(pageProjection(incremental, 20)).toBe(pageProjection(full, 20));
   });
 });
 
