@@ -317,6 +317,22 @@ export interface DocxViewApi {
   /** Restore a caret captured by getEncodedCaret. False when the position no
    * longer resolves (or outside collab mode). */
   setCaretFromEncoded(pos: EncodedCaret): boolean;
+  /**
+   * Scroll the view so `participant`'s live presence caret is on screen —
+   * "jump to that person". A pure VIEW operation: it never relayouts, marks
+   * nothing dirty, and mutates no document state. The jump is instant, never
+   * smooth: the target can be hundreds of virtualized pages away, and a
+   * smooth scroll across that distance forces continuous page mounting;
+   * instant also satisfies prefers-reduced-motion by construction.
+   *
+   *  - "revealed"    scrolled to the caret (or, when the exact run was
+   *                  deleted since it was reported, to the start of its
+   *                  paragraph — the same fallback caret restore uses).
+   *  - "no-position" that participant has no broadcast cursor right now
+   *                  (never placed one, cleared it, or left).
+   *  - "unresolved"  the position no longer maps to content in this replica.
+   */
+  revealPresence(participant: string): "revealed" | "no-position" | "unresolved";
   document: DocxDocument;
 }
 
@@ -2037,6 +2053,40 @@ export function DocxView({
           rejectAllRevisions: () => editor?.rejectAllRevisions() ?? 0,
           getEncodedCaret: () => editor?.getEncodedCaret() ?? null,
           setCaretFromEncoded: (pos) => editor?.setCaretFromEncoded(pos) ?? false,
+          revealPresence: (participant) => {
+            // Read the CURRENT presence (presenceRef), not a render's snapshot:
+            // the person may have moved — or left — since the caller rendered.
+            const pos = presenceRef.current?.[participant];
+            if (!pos) return "no-position";
+            const ids = doc.stableIds;
+            if (!ids || !handle) return "unresolved";
+            // decodeCaret resolves the wire-basis anchor to a concrete w:t and
+            // falls back to the block's first text when the exact run is gone.
+            const hit = ids.decodeCaret(pos.anchor);
+            if (!hit) return "unresolved";
+            // A far caret lives on an unmounted (virtualized) page: mount all
+            // pages, scroll, restore the window — find navigation's pattern
+            // (selectMatch above). Mounting renders DOM from the RETAINED
+            // layout; no layout work happens.
+            const restore = handle._virtualized ? handle.materializeAll?.() : undefined;
+            const bindings = handle.bindingsByText.get(hit.t);
+            // The wrap segment containing the offset, like the presence caret
+            // draw — bindings[0] could be a different line (or page) for a
+            // long run.
+            const b =
+              bindings?.find((bd) => {
+                const s = bd.item.src?.offset ?? 0;
+                return hit.offset >= s && hit.offset <= s + bd.item.text.length;
+              }) ?? bindings?.[bindings.length - 1];
+            if (!b) {
+              restore?.();
+              return "unresolved";
+            }
+            b.el.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+            restore?.();
+            handle.updateViewport?.();
+            return "revealed";
+          },
         };
         apiRef.current = api;
         onReady?.(api);
