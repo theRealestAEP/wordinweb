@@ -25,3 +25,4 @@ playwright-report/
 # it reads /stats which is deliberately never exposed publicly. Scoped to the
 # subdirectory rather than all of tools/ so a genuine repo tool can still land.
 /tools/dashboard/
+.prefix-react-dist/
