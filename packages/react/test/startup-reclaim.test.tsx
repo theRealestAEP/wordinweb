@@ -167,10 +167,22 @@ function click(el: HTMLElement | null) {
   act(() => { el!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
 }
 async function tick(ms = 5) { await act(async () => { await new Promise<void>((r) => setTimeout(r, ms)); }); }
-async function until(cond: () => boolean, what: string) {
-  for (let i = 0; i < 200 && !cond(); i++) await tick();
+/**
+ * Poll for `cond`.
+ *
+ * The default budget is 200 x 5 ms = 1000 ms, which is EXACTLY the
+ * BundlePersister throttle — so anything waiting on a persisted write was a
+ * coin flip and failed roughly one run in three. Waits that depend on that
+ * throttle must pass a budget comfortably beyond it; the parameter exists so
+ * the reason is stated at the call site rather than by inflating every wait.
+ */
+async function until(cond: () => boolean, what: string, ticks = 200) {
+  for (let i = 0; i < ticks && !cond(); i++) await tick();
   expect(cond(), what).toBe(true);
 }
+
+/** ~3 s: three times the persister's 1 s throttle. */
+const PAST_PERSIST_THROTTLE = 600;
 
 const provider: DocProvider = { load: () => blankDocxBytes() };
 
@@ -280,8 +292,9 @@ describe("App startup reclaim", () => {
       put: async () => { throw new DOMException("quota", "QuotaExceededError"); },
     };
     const host = mountApp(store, "rdoc");
-    await until(() => byId(host, "persist-banner") !== null, "a failed persist write must raise the banner");
-    await until(() => byId(host, "persist-stored-summary") !== null, "the banner must say what is taking the space");
+    // Waits on the persister's throttled write actually being attempted.
+    await until(() => byId(host, "persist-banner") !== null, "a failed persist write must raise the banner", PAST_PERSIST_THROTTLE);
+    await until(() => byId(host, "persist-stored-summary") !== null, "the banner must say what is taking the space", PAST_PERSIST_THROTTLE);
     const summary = byId(host, "persist-stored-summary")!;
     expect(summary.textContent).toContain("3 saved copies");
     expect(summary.textContent).toContain("29 KB");
