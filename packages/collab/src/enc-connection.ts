@@ -911,6 +911,13 @@ export class EncryptedCollabConnection {
     if (this.replica.pendingCount !== 0) return; // burst resumed — next drain re-arms
     const seq = this.mirror.seq;
     if (seq === this.lastSelfCheckSeq) return; // this state already verified
+    // Macrotask hop (see the checkpoint duty in ingest): this task starts as
+    // a continuation of whatever the serial chain last awaited, which can
+    // drain inside an in-flight input dispatch — putting the first hash's
+    // full-doc serialization inside a keystroke's handler. The pending/seq
+    // recheck below covers state moving across the hop.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (this.replica.pendingCount !== 0 || this.mirror.seq !== seq) return; // raced a local submit
     const liveHash = await docHash(this.replica.doc);
     // Macrotask hop (see the checkpoint duty in ingest): the second hash's
     // full-doc serialization otherwise runs as a continuation of the first
