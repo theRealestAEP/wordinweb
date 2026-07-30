@@ -123,8 +123,8 @@ function Harness() {
   // Landing = the normal single-user editor (local, no server, no collab).
   // "Make collaborative" seals the CURRENT local bytes and goes live.
   if (!docId) {
-    const goLive = async (bytes: Uint8Array, shareCode?: string) => {
-      const { docId: id, docKey: key, ownerToken } = await goLiveEncrypted(HTTP, bytes, shareCode);
+    const goLive = async (bytes: Uint8Array, shareCode?: string, onPhase?: (phase: "encrypt" | "upload") => void) => {
+      const { docId: id, docKey: key, ownerToken } = await goLiveEncrypted(HTTP, bytes, shareCode, onPhase);
       // Owner capability (doc 14 §2.5): kept out of the shared link, in this
       // browser's storage — same key the collab App reads back.
       if (ownerToken) localStorage.setItem(`wordinweb-owner-${id}`, ownerToken);
