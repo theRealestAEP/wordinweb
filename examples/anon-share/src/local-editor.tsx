@@ -1,6 +1,53 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DocxView, DocxToolbar, type DocxViewApi } from "wordinweb";
-import { FileMenu } from "./file-menu";
+import { IndexedDbBundleStore, type BundleStore, type DocBundle, type StoredDocSummary } from "wordinweb/collab";
+import { FileMenu, savedDocName } from "./file-menu";
+
+/** The single autosave slot the local editor writes (key convention:
+ * `local:` marks documents that never went live — parseBundleKey knows it). */
+export const LOCAL_AUTOSAVE_KEY = "local:autosave";
+/** An archived local document (File > New banks the current one here). */
+const localDocKey = (ts: number) => `local:doc-${ts}`;
+
+/** Wrap plain local bytes in the bundle shape the shared store persists.
+ * The collab-only fields are inert placeholders — a local document has no
+ * epoch, no pending queue and no lineage until it goes live. */
+function localBundle(key: string, bytes: Uint8Array): DocBundle {
+  return {
+    docId: key,
+    genesisId: "local",
+    confirmedSeq: 0,
+    confirmedBytes: bytes,
+    confirmedSidecar: { next: 1, entries: [] },
+    pending: [],
+    clientSeq: 0,
+    savedAt: Date.now(),
+    lineage: [],
+  };
+}
+
+/**
+ * Autosave cadence. A full `api.save()` serialises the whole document — on a
+ * large one that is megabytes — so unlike the live bundle's 1s throttle this
+ * runs on a 10s interval gated by a dirty flag, with a best-effort flush on
+ * pagehide/hidden/unmount (the BundlePersister pattern: the interval is the
+ * durability guarantee, the flush narrows the tail). Injectable for tests.
+ */
+const AUTOSAVE_MS = 10_000;
+
+/**
+ * IndexedDB can BLOCK without failing (an old tab holding the pre-upgrade
+ * schema open, a hung storage layer) — a promise that neither resolves nor
+ * rejects. Racing a generous deadline turns that silence into the same
+ * failure story a rejection gets: restore falls back to the blank template,
+ * a write raises the banner. 5s is far above any healthy IndexedDB op.
+ */
+function withDeadline<T>(p: Promise<T>, ms = 5000): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("storage timeout")), ms)),
+  ]);
+}
 
 /**
  * The demo's LANDING is the normal single-user editor: a local, editable
@@ -23,16 +70,25 @@ export function LocalEditor({
   httpBase,
   initialBytes,
   onGoLive,
+  store: storeProp,
+  autosaveMs = AUTOSAVE_MS,
 }: {
   httpBase: string;
   /** Bytes to open instead of the blank template (returning from a session). */
   initialBytes?: Uint8Array;
   /** Seal + PUT the given local bytes, then switch the app into collab mode. */
   onGoLive: (bytes: Uint8Array, shareCode?: string) => Promise<void>;
+  /** Where local work persists (shared with the collab screen). Defaults to
+   * this browser's IndexedDB; tests inject the in-memory store. */
+  store?: BundleStore;
+  /** Autosave interval override (tests). */
+  autosaveMs?: number;
 }) {
+  const store = useMemo(() => storeProp ?? new IndexedDbBundleStore(), [storeProp]);
   // Blank template to start editing (bytes only — no session is created until
   // go-live). Fetched once; a failure surfaces inline. Skipped entirely when
-  // the caller handed us a document to reopen.
+  // the caller handed us a document to reopen, or when the autosave slot has
+  // one from a previous visit — refreshing must not lose local work.
   const [blank, setBlank] = useState<Uint8Array | null>(initialBytes ?? null);
   const [loadError, setLoadError] = useState(false);
   const [api, setApi] = useState<DocxViewApi | null>(null);
@@ -44,17 +100,36 @@ export function LocalEditor({
   /** Name of the file currently being parsed and laid out, or null. */
   const [loading, setLoading] = useState<string | null>(null);
   const codeRef = useRef<HTMLInputElement | null>(null);
+  /**
+   * The autosave failed — said out loud, with the escape hatch beside it.
+   * This browser's storage is the ONLY durable copy (zero custody), so a
+   * swallowed quota error here would let someone believe work is saved when
+   * it exists nowhere but this tab's memory.
+   */
+  const [persistError, setPersistError] = useState<string | null>(null);
 
   useEffect(() => {
     if (initialBytes) return; // reopening a document — nothing to fetch
     let alive = true;
-    void fetch(`${httpBase}/blank`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`blank ${r.status}`);
-        return r.arrayBuffer();
-      })
-      .then((buf) => {
-        if (alive) setBlank(new Uint8Array(buf));
+    // The autosave slot first: a refresh reopens the document being edited.
+    // A failed read (blocked storage) falls through to the blank template —
+    // nothing was lost, and the first autosave WRITE failing is what raises
+    // the banner.
+    void withDeadline(store.get(LOCAL_AUTOSAVE_KEY))
+      .catch(() => null)
+      .then((saved) => {
+        if (alive && saved) {
+          setBlank(saved.confirmedBytes);
+          return;
+        }
+        return fetch(`${httpBase}/blank`)
+          .then((r) => {
+            if (!r.ok) throw new Error(`blank ${r.status}`);
+            return r.arrayBuffer();
+          })
+          .then((buf) => {
+            if (alive) setBlank(new Uint8Array(buf));
+          });
       })
       .catch(() => {
         if (alive) setLoadError(true);
@@ -62,7 +137,42 @@ export function LocalEditor({
     return () => {
       alive = false;
     };
-  }, [httpBase, initialBytes]);
+  }, [httpBase, initialBytes, store]);
+
+  /**
+   * AUTOSAVE. Dirty is set by user input (captured at the root, so toolbar
+   * clicks count too) and by every document (re)load; the interval writes
+   * only when dirty, so an idle tab costs nothing. A failed write re-arms
+   * the flag — the next tick retries — and raises the banner.
+   */
+  const dirtyRef = useRef(false);
+  const apiRef = useRef<DocxViewApi | null>(null);
+  const markDirty = useCallback(() => { dirtyRef.current = true; }, []);
+  const saveNow = useCallback(async () => {
+    const a = apiRef.current;
+    if (!a || !dirtyRef.current) return;
+    dirtyRef.current = false;
+    try {
+      await withDeadline(store.put(localBundle(LOCAL_AUTOSAVE_KEY, a.save())));
+      setPersistError(null);
+    } catch {
+      dirtyRef.current = true;
+      setPersistError("This document may not be saved in this browser — storage is full or blocked. Download a copy.");
+    }
+  }, [store]);
+  useEffect(() => {
+    const id = setInterval(() => void saveNow(), autosaveMs);
+    const flush = () => void saveNow();
+    const onVis = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVis);
+      flush(); // leaving the screen (go-live, unmount) lands the last edits
+    };
+  }, [saveNow, autosaveMs]);
 
   // Focus the code field when the dialog opens, and let Escape dismiss it —
   // a dialog you cannot leave by keyboard is a dialog that traps people.
@@ -85,7 +195,26 @@ export function LocalEditor({
    * from a session, or after opening a file.
    */
   const newDocument = () => {
-    void fetch(`${httpBase}/blank`)
+    // Bank the CURRENT document under a dated key before blanking — "New"
+    // must never be how work disappears. The archive is what File > Saved
+    // lists as a historical local document. If the archive write fails the
+    // blanking is ABORTED: proceeding would let the next autosave overwrite
+    // the slot, and the banner + Download are the only honest exits then.
+    const archive = apiRef.current
+      ? store.put(localBundle(localDocKey(Date.now()), apiRef.current.save()))
+      : Promise.resolve();
+    void archive
+      .then(() => {
+        dirtyRef.current = false;
+        return store.delete(LOCAL_AUTOSAVE_KEY).catch(() => {
+          /* slot cleanup only — the archive already holds the document */
+        });
+      })
+      .catch(() => {
+        setPersistError("Couldn’t keep a copy of this document — storage is full or blocked. Download it before starting a new one.");
+        throw new Error("archive-failed");
+      })
+      .then(() => fetch(`${httpBase}/blank`))
       .then((r) => {
         if (!r.ok) throw new Error(`blank ${r.status}`);
         return r.arrayBuffer();
@@ -94,7 +223,39 @@ export function LocalEditor({
         setOpenedName(null);
         setBlank(new Uint8Array(buf));
       })
-      .catch(() => setLoadError(true));
+      .catch((e: Error) => {
+        if (e.message !== "archive-failed") setLoadError(true);
+      });
+  };
+
+  /** Open a saved entry from the File menu (replaces the current document —
+   * safe here: there is no session, so nothing can fork). */
+  const openSaved = (s: StoredDocSummary) => {
+    void store
+      .get(s.key)
+      .then((b) => {
+        if (!b) throw new Error("gone");
+        openDocument(b.confirmedBytes, `${savedDocName(s)}.docx`);
+      })
+      .catch(() => setPersistError("Couldn’t read that saved copy from this browser’s storage."));
+  };
+
+  /** Download a saved entry without opening it. */
+  const downloadSaved = (s: StoredDocSummary) => {
+    void store
+      .get(s.key)
+      .then((b) => {
+        if (!b) throw new Error("gone");
+        const blob = new Blob([b.confirmedBytes as BlobPart], {
+          type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${savedDocName(s)}.docx`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      })
+      .catch(() => setPersistError("Couldn’t read that saved copy from this browser’s storage."));
   };
 
   /**
@@ -162,7 +323,16 @@ export function LocalEditor({
   if (!blank) return <div style={{ padding: 24 }}>Loading editor…</div>;
 
   return (
-    <div data-testid="local-editor" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+    <div
+      data-testid="local-editor"
+      style={{ display: "flex", flexDirection: "column", height: "100%" }}
+      // Dirty tracking for autosave — capture phase so the editor and the
+      // toolbar both count, without either knowing about persistence.
+      onKeyDownCapture={markDirty}
+      onMouseUpCapture={markDirty}
+      onPasteCapture={markDirty}
+      onDropCapture={markDirty}
+    >
       {/* Same product header as the collaborative screen. It was a light-text
           variant here, which made the two halves of one app look like two
           different products depending on whether you had shared yet. */}
@@ -195,6 +365,13 @@ export function LocalEditor({
           onDownload={downloadDocument}
           onPrint={() => api?.print()}
           disabled={!api}
+          // Saved documents (versions, drafts, archived local docs) live in
+          // this browser's storage; the slot currently on screen is excluded
+          // — "open the document you are already editing" is not an item.
+          listSaved={() => store.list().then((all) => all.filter((s) => s.key !== LOCAL_AUTOSAVE_KEY))}
+          onOpenSaved={openSaved}
+          onDownloadSaved={downloadSaved}
+          onDeleteSaved={(s) => store.delete(s.key)}
         />
         <span className="bar-sep" aria-hidden="true" />
         {/* THE primary action on this screen, and the only one that changes
@@ -209,6 +386,17 @@ export function LocalEditor({
         >
           Make collaborative
         </button>
+        {persistError && (
+          // Same shape as the collab screen's persist banner, same reason: a
+          // failed write means the only durable copy stopped updating, and
+          // the download button belongs NEXT TO that sentence, not in a menu.
+          <span data-testid="local-persist-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
+            {persistError}{" "}
+            <button data-testid="local-persist-download" onClick={downloadDocument} disabled={!api}>
+              Download .docx
+            </button>
+          </span>
+        )}
         <span style={{ flex: 1 }} />
       </div>
       <DocxToolbar api={api} mode="advanced" />
@@ -231,7 +419,13 @@ export function LocalEditor({
         <DocxView
           source={blank}
           editable
-          onReady={setApi}
+          onReady={(a) => {
+            apiRef.current = a;
+            setApi(a);
+            // A (re)loaded document counts as unsaved until the next autosave
+            // writes it — covers the restored slot, an opened file, and New.
+            dirtyRef.current = true;
+          }}
           onLoad={() => setLoading(null)}
           onError={() => setLoading(null)}
         />

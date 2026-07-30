@@ -237,6 +237,19 @@
         border-radius: 4px; background: transparent; color: #202124; cursor: pointer; }
       .filemenu .filemenu-panel button:hover:not([disabled]) { background: #f1f3f4; border-color: transparent; }
       .filemenu .filemenu-panel button[disabled] { opacity: .5; cursor: default; }
+      /* Saved-in-this-browser section: a divided block under the items. */
+      .filemenu-saved { margin-top: 4px; padding-top: 4px; border-top: 1px solid #e8eaed;
+        max-height: 260px; overflow-y: auto; min-width: 250px; }
+      .filemenu-heading { font: 600 11px system-ui; color: #5f6368; text-transform: uppercase;
+        letter-spacing: .4px; padding: 5px 10px 3px; }
+      .filemenu-note { font: 12px system-ui; color: #5f6368; padding: 5px 10px 7px; max-width: 250px; }
+      .filemenu-saveditem { display: flex; align-items: stretch; gap: 2px; }
+      .filemenu-saveditem > button:first-child { flex: 1; min-width: 0; }
+      .filemenu-savedname { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .filemenu-savedmeta { display: block; font-size: 11px; color: #5f6368; }
+      .filemenu .filemenu-panel button.filemenu-mini { display: inline-flex; align-items: center;
+        width: auto; flex: 0 0 auto; padding: 4px 7px; font-size: 12px; color: #5f6368; }
+      .filemenu .filemenu-panel button.filemenu-mini.danger { color: #a50e0e; background: #fce8e6; white-space: nowrap; }
 
       /* DOCUMENT LOADING. Parsing and laying out a large .docx takes real
          seconds, and without this the app showed a blank stage — which reads

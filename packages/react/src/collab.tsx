@@ -14,6 +14,8 @@ import {
   createWebSocketTransport,
   monitorTransport,
   BundlePersister,
+  draftKey,
+  supersededKey,
   type ConnectionState,
   type LivenessOptions,
   type BundleStore,
@@ -835,7 +837,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         if (store) {
           void store.get(docId).then((old) => {
             if (old && old.genesisId === from) {
-              return store.put({ ...old, docId: `${docId}#draft-${from}` });
+              return store.put({ ...old, docId: draftKey(docId, from) });
             }
           });
         }
@@ -848,7 +850,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         if (store) {
           void store.get(docId).then((old) => {
             if (old && old.genesisId === from) {
-              return store.put({ ...old, docId: `${docId}#superseded-${from}` });
+              return store.put({ ...old, docId: supersededKey(docId, from) });
             }
           });
         }
@@ -1389,6 +1391,7 @@ export type { CollabSession as InjectedCollabSession };
 // entry has no path to any of this (doc 07 tree-shaking rule).
 export type { UndoOutcome } from "@wordinweb/collab/client";
 export { IndexedDbBundleStore } from "./bundle-store.js";
-export { InMemoryBundleStore, BundlePersister } from "@wordinweb/collab/client";
+export { InMemoryBundleStore, BundlePersister, parseBundleKey, versionKey, draftKey, supersededKey } from "@wordinweb/collab/client";
+export type { StoredDocSummary, ParsedBundleKey, StoredDocKind } from "@wordinweb/collab/client";
 export { mintDocKey, docKeyFromFragment, deriveEpochKeys, sealCheckpoint, stretchShareCode, bytesToB64, docHash, mediaAddressesOf } from "@wordinweb/collab/client";
 export type { BundleStore, DocBundle } from "@wordinweb/collab/client";

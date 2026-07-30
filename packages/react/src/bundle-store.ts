@@ -1,8 +1,23 @@
-import type { BundleStore, DocBundle } from "@wordinweb/collab/client";
+import { parseBundleKey, type BundleStore, type DocBundle, type StoredDocSummary } from "@wordinweb/collab/client";
+
+/** The tiny record `list()` reads instead of the bundle (see below). */
+interface MetaRecord {
+  docId: string;
+  savedAt: number;
+  byteLength: number;
+}
+
 /**
  * Browser BundleStore over IndexedDB — the only browser storage that fits
- * multi-MB binary documents (doc 12 §4). One object store keyed by docId;
- * bundles are stored structured-clone-ably (Uint8Array clones natively).
+ * multi-MB binary docs (doc 12 §4). Bundles are stored structured-clone-ably
+ * (Uint8Array clones natively) in `bundles`, keyed by docId. A second store,
+ * `meta`, holds a per-key {savedAt, byteLength} record written in the SAME
+ * transaction as each bundle: `list()` reads only key names and these tiny
+ * records, so enumerating ten multi-MB documents never deserialises their
+ * bytes. Bundles written by the v1 schema have no meta record; `list()`
+ * reads those once and backfills, so the cost is paid one time per legacy
+ * record, not per listing.
+ *
  * Every method opens lazily so constructing the store never touches the API
  * (SSR-safe); callers on platforms without IndexedDB should inject the
  * in-memory store instead.
@@ -11,7 +26,9 @@ import type { BundleStore, DocBundle } from "@wordinweb/collab/client";
  * `navigator.storage.persist()` is requested once per store on first write,
  * but browsers may deny it; Safari time-boxes script-writable storage and
  * private windows drop it on close. The download-.docx escape hatch in the
- * UI, not this class, is the user's guarantee.
+ * UI, not this class, is the user's guarantee. Failures here REJECT — a
+ * swallowed quota error would let the user believe work is saved when it is
+ * not, so surfacing them is the caller's contract, not an option.
  */
 export class IndexedDbBundleStore implements BundleStore {
   private db: Promise<IDBDatabase> | null = null;
@@ -22,8 +39,12 @@ export class IndexedDbBundleStore implements BundleStore {
   private open(): Promise<IDBDatabase> {
     if (!this.db) {
       this.db = new Promise((resolve, reject) => {
-        const req = indexedDB.open(this.dbName, 1);
-        req.onupgradeneeded = () => req.result.createObjectStore("bundles", { keyPath: "docId" });
+        const req = indexedDB.open(this.dbName, 2);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains("bundles")) db.createObjectStore("bundles", { keyPath: "docId" });
+          if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "docId" });
+        };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
@@ -31,20 +52,23 @@ export class IndexedDbBundleStore implements BundleStore {
     return this.db;
   }
 
-  private tx<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+  /** One request in one transaction, as a promise. */
+  private tx<T>(stores: string | string[], mode: IDBTransactionMode, run: (t: IDBTransaction) => IDBRequest<T>): Promise<T> {
     return this.open().then(
       (db) =>
         new Promise<T>((resolve, reject) => {
-          const t = db.transaction("bundles", mode);
-          const req = run(t.objectStore("bundles"));
+          const t = db.transaction(stores, mode);
+          const req = run(t);
           req.onsuccess = () => resolve(req.result);
           req.onerror = () => reject(req.error);
+          // Quota failures can abort the transaction without a request error.
+          t.onabort = () => reject(t.error ?? new Error("IndexedDB transaction aborted"));
         }),
     );
   }
 
   async get(docId: string): Promise<DocBundle | null> {
-    return (await this.tx("readonly", (s) => s.get(docId))) ?? null;
+    return (await this.tx("bundles", "readonly", (t) => t.objectStore("bundles").get(docId))) ?? null;
   }
 
   async put(bundle: DocBundle): Promise<void> {
@@ -53,10 +77,49 @@ export class IndexedDbBundleStore implements BundleStore {
       // Best-effort, once: ask the browser not to evict us (doc 12 §4).
       void globalThis.navigator?.storage?.persist?.();
     }
-    await this.tx("readwrite", (s) => s.put(bundle));
+    const db = await this.open();
+    // Bundle + meta land atomically: a listing must never describe a bundle
+    // that failed to write, or miss one that succeeded.
+    await new Promise<void>((resolve, reject) => {
+      const t = db.transaction(["bundles", "meta"], "readwrite");
+      t.objectStore("bundles").put(bundle);
+      const meta: MetaRecord = { docId: bundle.docId, savedAt: bundle.savedAt, byteLength: bundle.confirmedBytes.byteLength };
+      t.objectStore("meta").put(meta);
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error ?? new Error("IndexedDB transaction aborted"));
+    });
   }
 
   async delete(docId: string): Promise<void> {
-    await this.tx("readwrite", (s) => s.delete(docId));
+    const db = await this.open();
+    await new Promise<void>((resolve, reject) => {
+      const t = db.transaction(["bundles", "meta"], "readwrite");
+      t.objectStore("bundles").delete(docId);
+      t.objectStore("meta").delete(docId);
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error ?? new Error("IndexedDB transaction aborted"));
+    });
+  }
+
+  async list(): Promise<StoredDocSummary[]> {
+    const keys = (await this.tx("bundles", "readonly", (t) => t.objectStore("bundles").getAllKeys())) as string[];
+    const metas = (await this.tx("meta", "readonly", (t) => t.objectStore("meta").getAll())) as MetaRecord[];
+    const byKey = new Map(metas.map((m) => [m.docId, m]));
+    const out: StoredDocSummary[] = [];
+    for (const key of keys) {
+      let meta = byKey.get(key);
+      if (!meta) {
+        // v1 legacy record: read the bundle once, backfill its meta so the
+        // next listing is metadata-only again.
+        const bundle = await this.get(key);
+        if (!bundle) continue; // deleted between the two reads
+        meta = { docId: key, savedAt: bundle.savedAt, byteLength: bundle.confirmedBytes.byteLength };
+        await this.tx("meta", "readwrite", (t) => t.objectStore("meta").put(meta));
+      }
+      out.push({ ...parseBundleKey(key), key, savedAt: meta.savedAt, byteLength: meta.byteLength });
+    }
+    return out;
   }
 }
