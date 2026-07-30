@@ -44,6 +44,55 @@ function paintProjection(result: ReturnType<typeof layoutDocument>): string {
   return JSON.stringify(result.pages, (key, value) => (key === "src" || key === "tbl" ? undefined : value));
 }
 
+function pageProjection(result: ReturnType<typeof layoutDocument>, pageIndex: number): string {
+  return JSON.stringify(result.pages[pageIndex], (key, value) =>
+    key === "src" || key === "tbl" ? undefined : value,
+  );
+}
+
+describe("page-model resume points", () => {
+  it("reproduces every page-top point and detects altered resume state", () => {
+    const body = Array.from({ length: 24 }, (_, index) =>
+      p(`page-${index} alpha bravo charlie delta`) +
+      (index < 23 ? `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` : ""),
+    ).join("");
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body + section) }));
+    const result = layoutDocument(doc, { measurer });
+    expect(result.totalPages).toBeGreaterThan(20);
+    expect(result._window).toBeDefined();
+
+    const expected = result.pages.map((_, index) => pageProjection(result, index));
+    const points = (result._incr as {
+      points: Array<{
+        pageCount: number;
+        pageItemCount: number;
+        state: { page: { colXs: number[] } };
+      }>;
+    }).points.filter((point) => point.pageItemCount === 0);
+    const pageIndexes = [...new Set(points.map((point) => point.pageCount))];
+    expect(pageIndexes.length).toBeGreaterThan(2);
+
+    result._window!.releaseExcept([0]);
+    for (const pageIndex of pageIndexes.slice(1)) {
+      result._window!.materialize([pageIndex]);
+      expect(pageProjection(result, pageIndex)).toBe(expected[pageIndex]);
+      result._window!.releaseExcept([0]);
+    }
+
+    const changedPage = pageIndexes.find((pageIndex) => pageIndex > 1)!;
+    const changed = points.filter((point) => point.pageCount === changedPage).at(-1)!;
+    const originalX = changed.state.page.colXs[0];
+    changed.state.page.colXs[0] += 8;
+    const preceding = points
+      .filter((point) => point.pageCount < changed.pageCount)
+      .at(-1)!.pageCount;
+    result._window!.releaseExcept([preceding]);
+    result._window!.materialize([changed.pageCount]);
+    expect(pageProjection(result, changed.pageCount)).not.toBe(expected[changed.pageCount]);
+    changed.state.page.colXs[0] = originalX;
+  });
+});
+
 describe("incremental same-page block checkpoints", () => {
   it("matches a full layout, reuses every unchanged page, and remains local on repeated edits", () => {
     const doc = denseDoc();

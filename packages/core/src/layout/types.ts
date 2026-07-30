@@ -337,6 +337,16 @@ export interface LaidOutPage {
   columnBands: Array<{ top: number; colXs: number[]; colWidths: number[] }>;
 }
 
+/** Internal page-model window used by the DOM virtualizer. */
+export interface LayoutWindow {
+  /** Ensure that each requested page has a complete positioned item model. */
+  materialize(pageIndexes: Iterable<number>): void;
+  /** Release positioned items outside the requested page window. */
+  releaseExcept(pageIndexes: Iterable<number>): void;
+  /** Return the pages whose positioned items are retained. */
+  retainedPages(): Set<number>;
+}
+
 export interface LayoutResult {
   pages: LaidOutPage[];
   totalPages: number;
@@ -354,4 +364,6 @@ export interface LayoutResult {
   /** Opaque page state used to refresh headers/footers without repaginating
    * the body when their measured geometry is unchanged. */
   _hf?: unknown;
+  /** Internal positioned-model window. */
+  _window?: LayoutWindow;
 }
