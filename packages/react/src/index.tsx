@@ -422,6 +422,18 @@ export interface DocxViewProps {
     /** Monotonic counter that bumps whenever `doc` was mutated in place; a
      * change triggers an in-place repaint of `doc`. */
     renderSignal?: number;
+    /** Drain the union of the dirty scopes behind `renderSignal` since the
+     * last take. A narrow scope lets the repaint relayout one paragraph
+     * incrementally (the same path local typing takes) instead of the whole
+     * document; `doc` scope (or an absent method) keeps the whole-document
+     * repaint; null means nothing is dirty and the repaint is skipped.
+     * Consumed at the repaint so a coalesced repaint covers every batched
+     * remote intent. */
+    takeRenderScope?: () =>
+      | { kind: "doc" }
+      | { kind: "block"; blocks: XmlElement[] }
+      | { kind: "split"; before: XmlElement; after: XmlElement }
+      | null;
     /** Broadcast the local caret so remote participants draw this user's
      * cursor. Called with the caret's stable-id address on every caret move
      * (null when the caret leaves id-tracked content). */
@@ -594,7 +606,16 @@ export function DocxView({
   const handleRef = useRef<RenderHandle | null>(null);
   // Set by the main effect so the live-collab-doc repaint effect can trigger an
   // in-place re-render without re-running the whole load effect.
-  const rerenderRef = useRef<((doc: DocxDocument) => void) | null>(null);
+  const rerenderRef = useRef<
+    | ((
+        doc: DocxDocument,
+        scope?:
+          | { kind: "doc" }
+          | { kind: "block"; blocks: XmlElement[] }
+          | { kind: "split"; before: XmlElement; after: XmlElement },
+      ) => void)
+    | null
+  >(null);
   const redrawPresenceRef = useRef<(() => void) | null>(null);
   // Current presence, read by the imperative draw (which closes over an older
   // render's props otherwise).
@@ -893,9 +914,37 @@ export function DocxView({
       const doc = liveDoc ?? (cached ? cached.doc : DocxDocument.load(bytes!));
       if (!cached) docCacheRef.current = { source, doc, history: new EditHistory(doc) };
       // Expose an in-place repaint for the live-collab renderSignal effect.
-      // Force modelChanged (the collab apply may not bump modelVersion) so the
-      // body — not just headers/footers — is relaid out against the mutated tree.
-      rerenderRef.current = (d) => { paintedModelVersion = -1; rerender(d, undefined, "global"); };
+      //
+      // A NARROW scope (a remote text edit's one paragraph, or a split's two
+      // halves) repaints through the same incremental path local typing takes:
+      // prev layout retained, the paragraph as the dirty hint, synchronous —
+      // so it never trips the input-blocking background layout, and watching
+      // a collaborator type on page 100 of a 500-page document costs one
+      // paragraph, not the document. The scoped resync left modelVersion
+      // unchanged, which is exactly what rerender's "local" path needs; if a
+      // resync FELL BACK to a full refresh despite the narrow scope, the
+      // modelVersion bump makes rerender treat it as a global change — the
+      // scope can never leave the view stale.
+      //
+      // DOC scope (structural/unverifiable intents, reloads, media installs)
+      // keeps the old behavior: force modelChanged (the collab apply may not
+      // bump modelVersion) so the body — not just headers/footers — is relaid
+      // out against the mutated tree, async past the page threshold.
+      rerenderRef.current = (d, scope) => {
+        if (!scope || scope.kind === "doc") {
+          paintedModelVersion = -1;
+          rerender(d, undefined, "global");
+          return;
+        }
+        // Split → hint the FINAL new paragraph (the engine's insertion fast
+        // path re-hashes the split pair + neighbours and reflows forward,
+        // re-attaching the shifted page suffix). Single block → in-place
+        // hint. Several blocks → no hint: the engine's full signature scan
+        // still relays only from the first dirty block.
+        const hint =
+          scope.kind === "split" ? scope.after : scope.blocks.length === 1 ? scope.blocks[0] : undefined;
+        rerender(d, hint, "local");
+      };
       // Collaboration: populate the stable-id side table so the editor can
       // encode intent positions and emit them (no-op / zero-cost otherwise).
       if (collab) doc.enableStableIds();
@@ -906,6 +955,11 @@ export function DocxView({
       basePageWidthRef.current = doc.sections[0]?.props.pageWidth ?? 816;
       curZoom = effZoomRef.current;
       const pageCount = rerender(doc);
+      // That paint covered the whole document, so any dirty scope accumulated
+      // before it (the welcome's doc replacement, the seed tail's applies) is
+      // already on screen — drain it, or the FIRST remote keystroke would
+      // repaint globally for changes this paint already showed.
+      collab?.takeRenderScope?.();
       pages = pageCount;
       recomputeFit();
       onLoad?.({ pageCount, document: doc });
@@ -2055,7 +2109,16 @@ export function DocxView({
       if (repaintTimerRef.current !== undefined) { clearTimeout(repaintTimerRef.current); repaintTimerRef.current = undefined; }
       const d = docCacheRef.current?.doc;
       const r = rerenderRef.current;
-      if (d && r && d === collab?.doc) r(d);
+      // Drain the dirty scope only when actually painting — an aborted paint
+      // leaves it accumulated for the paint that does run. A null take means
+      // nothing is dirty (an earlier paint covered every recorded change, e.g.
+      // the mount paint racing the first renderSignal) — skip: repainting
+      // would queue a redundant whole-document relayout.
+      if (d && r && d === collab?.doc) {
+        const take = collab.takeRenderScope;
+        const scope = take ? take() : undefined;
+        if (scope !== null) r(d, scope);
+      }
     };
     // rAF coalesces to vsync when THIS window is the foreground one — but the
     // browser PAUSES rAF in a hidden tab and THROTTLES it in a visible-but-

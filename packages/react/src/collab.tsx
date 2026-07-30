@@ -11,6 +11,8 @@ import {
   OFFLINE_TAIL_CAP,
   applyIntentScoped,
   resyncScope,
+  unionScopes,
+  type Scope,
   createWebSocketTransport,
   monitorTransport,
   BundlePersister,
@@ -120,6 +122,18 @@ export interface CollabSession {
    * rides THIS; `version` remains the observer/bookkeeping signal.
    */
   renderVersion: number;
+  /**
+   * Drain the union of the dirty scopes behind `renderVersion` since the last
+   * take — what the repaint answering it must relayout. A remote text edit
+   * reports its one paragraph, so DocxView relayouts that paragraph
+   * incrementally instead of the whole document (the far-page repaint stall);
+   * structural or unverifiable intents, doc reloads, and media installs
+   * report `doc`, which keeps today's whole-document path. Null means nothing
+   * dirty was recorded since the last take (an earlier paint covered it) and
+   * the repaint may be skipped. Consumed on the repaint itself so a coalesced
+   * repaint sees every batched intent's scope.
+   */
+  takeRenderScope: () => Scope | null;
   /** Increases only when reconciliation RELOADED the document (a true
    * conflict). The editor re-mounts on this; between reloads it updates in
    * place (no flash for the common non-conflicting edits). */
@@ -415,6 +429,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   /** Last connection docVersion folded into renderVersion — the two sources
    * (connection counter, local offline bumps) must not collide. */
   const lastDocVersionRef = useRef(0);
+  /** Dirty scope of LOCAL offline applies not yet drained by a repaint —
+   * the offline counterpart of the connection's takeRenderScope. */
+  const renderScopeRef = useRef<Scope | null>(null);
   const [docEpoch, setDocEpoch] = useState(0);
   const [ready, setReady] = useState(false);
   const [presence, setPresence] = useState<Record<string, PresencePosition | null>>({});
@@ -603,7 +620,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       const res = applyIntentScoped(doc, ids, intent as Intent);
       if (!res.applied) return; // nothing changed ⇒ nothing to record
       resyncScope(doc, ids, res);
-      // Applied HERE, not by the editor — the repaint signal must move.
+      // Applied HERE, not by the editor — the repaint signal must move,
+      // carrying what this apply disturbed.
+      renderScopeRef.current = unionScopes(renderScopeRef.current, res);
       setRenderVersion((v) => v + 1);
     }
     const tail = offlineTailRef.current ?? [];
@@ -1035,6 +1054,15 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     doc,
     version,
     renderVersion,
+    // Union of what the connection applied (its replica tracks per-intent
+    // scopes) and any local offline applies, drained together at the repaint.
+    takeRenderScope: () => {
+      const local = renderScopeRef.current;
+      renderScopeRef.current = null;
+      const conn = connRef.current?.takeRenderScope() ?? null;
+      if (local && conn) return unionScopes(local, conn);
+      return conn ?? local;
+    },
     docEpoch,
     ready,
     // DocxView's editor applies every command to the live doc BEFORE emitting
@@ -1357,6 +1385,9 @@ export function CollabEditor(opts: UseCollabOptions & {
       // in a 500-page room queue that relayout: the "collab editor is
       // unusable on a big document" report.
       renderSignal: session.renderVersion,
+      // The dirty scope behind renderSignal: a remote text edit repaints as
+      // ONE incremental paragraph relayout instead of the whole document.
+      takeRenderScope: session.takeRenderScope,
       // Outbound presence: the editor reports caret moves; remote tabs draw
       // this user's cursor (inbound presence above draws theirs here).
       setPresence: session.setPresence,

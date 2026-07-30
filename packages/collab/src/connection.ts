@@ -1,4 +1,5 @@
 import { ClientReplica } from "./replica.js";
+import type { Scope } from "./apply.js";
 import { DocxDocument } from "@wordinweb/core";
 import { Intent, type LogEntry } from "./intents.js";
 import {
@@ -413,6 +414,27 @@ export class CollabConnection {
    */
   get docVersion(): number {
     return this.docVersionBase + (this.replica?.docVersion ?? 0);
+  }
+
+  /** docVersionBase at the last takeRenderScope — a base bump between takes
+   * (welcome doc replacement, media install) has no narrow scope. */
+  private takenDocVersionBase = 0;
+
+  /**
+   * Drain the dirty scope behind the docVersion movement since the last take
+   * — what the repaint answering `docVersion` must relayout. Replica applies
+   * carry their per-intent scope; connection-level bumps (a replaced doc
+   * object, media pixels landing) report document scope. Null means NOTHING
+   * was recorded since the last take — the caller already painted everything
+   * and may skip the repaint.
+   */
+  takeRenderScope(): Scope | null {
+    const replicaScope = this.replica?.takeRenderScope() ?? null;
+    if (this.docVersionBase !== this.takenDocVersionBase) {
+      this.takenDocVersionBase = this.docVersionBase;
+      return { kind: "doc" };
+    }
+    return replicaScope;
   }
 
   get ready(): boolean {

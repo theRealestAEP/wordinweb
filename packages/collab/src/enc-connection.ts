@@ -13,6 +13,7 @@ import {
   sanitizePresencePosition,
 } from "./protocol.js";
 import type { ClientTransport, ConnectionCallbacks } from "./connection.js";
+import type { Scope } from "./apply.js";
 import type { RosterEntry } from "./protocol.js";
 import type { DocBundle } from "./bundle.js";
 import { deriveEpochKeys, openCheckpoint, openIntent, sealIntent, sealCheckpoint, sealMediaBlob, openMediaBlob, sealPresence, openPresence, isSealedPresence, b64ToBytes, bytesToB64, type EpochKeys } from "./e2ee.js";
@@ -199,6 +200,25 @@ export class EncryptedCollabConnection {
    */
   get docVersion(): number {
     return this.docVersionBase + (this.replica?.docVersion ?? 0);
+  }
+
+  /** docVersionBase at the last takeRenderScope — a base bump between takes
+   * (welcome/heal doc replacement, media install) has no narrow scope. */
+  private takenDocVersionBase = 0;
+
+  /**
+   * Drain the dirty scope behind the docVersion movement since the last take
+   * — parity with the plaintext connection (see connection.ts). Replica
+   * applies carry their per-intent scope; base bumps report document scope;
+   * null means nothing was recorded (the caller may skip the repaint).
+   */
+  takeRenderScope(): Scope | null {
+    const replicaScope = this.replica?.takeRenderScope() ?? null;
+    if (this.docVersionBase !== this.takenDocVersionBase) {
+      this.takenDocVersionBase = this.docVersionBase;
+      return { kind: "doc" };
+    }
+    return replicaScope;
   }
 
   /** Un-confirmed local intents in flight — drained-replay parity with the
