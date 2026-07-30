@@ -3,7 +3,8 @@ import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, versionKey, ty
 import { type DocxViewApi } from "wordinweb";
 import { reviveEncrypted } from "./e2ee-flows";
 import { pruneVersions, versionByteBudget, VERSION_COUNT_CAP } from "./version-retention";
-import { FileMenu, savedDocName } from "./file-menu";
+import { useStartupReclaim } from "./startup-reclaim";
+import { FileMenu, fmtSize, savedDocName } from "./file-menu";
 import { PerfHud } from "./perf/hud";
 import { perfMonitor, type DocStats } from "./perf/metrics";
 
@@ -209,6 +210,29 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
    * always said on screen. Silently deleting a restore point is worse than
    * refusing to make a new one. */
   const [versionNotice, setVersionNotice] = useState<string | null>(null);
+  /** Startup reclaim (startup-reclaim.ts): copies leaked before retention
+   * existed are removed on load, and what was removed is reported here. */
+  const reclaim = useStartupReclaim(store);
+  /** What the store holds, measured when a persist write fails — the banner
+   * must say what is taking the space, not just that space ran out. */
+  const [storedSummary, setStoredSummary] = useState<{ count: number; bytes: number } | null>(null);
+  /** Bumped by the banner's "Manage saved copies" to open the File menu. */
+  const [savedMenuRequest, setSavedMenuRequest] = useState(0);
+  const persistFailing = (session?.persistErrors ?? 0) > 0;
+  useEffect(() => {
+    if (!persistFailing) return;
+    let alive = true;
+    store.list().then(
+      (all) => {
+        if (alive) setStoredSummary({ count: all.length, bytes: all.reduce((n, s) => n + s.byteLength, 0) });
+      },
+      () => {
+        // Unlistable storage: the banner still shows, just without numbers.
+        if (alive) setStoredSummary(null);
+      },
+    );
+    return () => { alive = false; };
+  }, [persistFailing, store]);
 
   // Seed the strip FROM THE STORE, not from empty component state: saved
   // versions are durable, so they must still be on screen after a reload.
@@ -561,6 +585,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           savedOpenDisabled
           onDownloadSaved={(s) => void downloadSaved(s)}
           onDeleteSaved={(s) => store.delete(s.key)}
+          openRequest={savedMenuRequest}
         />
         <span className="bar-sep" aria-hidden="true" />
         <span style={{ flex: 1 }} />
@@ -602,9 +627,21 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // the moment their only copy is at risk. Same reasoning as the
           // ConnectionLost and countdown screens, which also kept theirs.
           <span data-testid="persist-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
-            This document may not be saved in this browser — download a copy.{" "}
+            This document may not be saved in this browser — download a copy.
+            {/* WHAT is taking the space, and the route to act on it. Someone
+                stuck in this state needs an action, not a diagnosis: the
+                button opens File > Saved, where delete lives (two-step). */}
+            {storedSummary && storedSummary.count > 0 && (
+              <span data-testid="persist-stored-summary">
+                {" "}{storedSummary.count} saved cop{storedSummary.count === 1 ? "y uses" : "ies use"} {fmtSize(storedSummary.bytes)} in
+                this browser — deleting old ones can free space.
+              </span>
+            )}{" "}
             <button data-testid="persist-download" onClick={download} disabled={!session?.ready}>
               Download .docx
+            </button>{" "}
+            <button data-testid="persist-manage-saved" onClick={() => setSavedMenuRequest((n) => n + 1)}>
+              Manage saved copies
             </button>
           </span>
         ) : session?.offline?.capped ? (
@@ -800,6 +837,17 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           ))}
         </span>
       </div>
+      {reclaim.notice && (
+        // Startup reclaim's report — same contract as the retention notice
+        // below: stored copies were deleted (or could not be), so it is said
+        // on screen and stays until dismissed.
+        <div className="versionbar" data-testid="reclaim-bar">
+          <span data-testid="reclaim-notice" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            {reclaim.notice}{" "}
+            <button className="ghost" data-testid="reclaim-dismiss" onClick={reclaim.dismiss}>Dismiss</button>
+          </span>
+        </div>
+      )}
       {(versions.length > 0 || versionError || versionNotice) && (
         <div className="versionbar" data-testid="versions">
           <span className="versionbar-label">Saved versions</span>

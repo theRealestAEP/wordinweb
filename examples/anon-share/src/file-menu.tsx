@@ -20,7 +20,8 @@ export function savedDocName(s: StoredDocSummary): string {
   }
 }
 
-function fmtSize(bytes: number): string {
+export function fmtSize(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
@@ -54,6 +55,7 @@ export function FileMenu({
   savedOpenDisabled,
   onDownloadSaved,
   onDeleteSaved,
+  openRequest,
 }: {
   onNew?: () => void;
   /** Receives the picked file's bytes and its name. */
@@ -78,6 +80,9 @@ export function FileMenu({
   /** Delete a saved entry. The menu makes this two-step (confirm in place)
    * so it is never a one-click accident beside "open". */
   onDeleteSaved?: (s: StoredDocSummary) => void | Promise<void>;
+  /** Bump to a new non-zero value to open the menu from outside — the
+   * storage-full banner's "Manage saved copies" route to the delete list. */
+  openRequest?: number;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -87,6 +92,11 @@ export function FileMenu({
   const [savedError, setSavedError] = useState(false);
   /** Key of the entry whose Delete is one click from firing. */
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  /** Origin storage usage vs quota, where the browser reports one. This is
+   * the only durable copy of the user's work (zero custody) — how full it is
+   * must not be a mystery until it breaks. Null where estimate() is absent
+   * or fails; the listing's own summed sizes stand in then. */
+  const [quota, setQuota] = useState<{ used: number; total: number } | null>(null);
 
   // (Re-)list on every open: storage may have changed since last time, and a
   // stale listing here would promise documents that are already gone.
@@ -97,11 +107,27 @@ export function FileMenu({
       (all) => setSaved([...all].sort((a, b) => b.savedAt - a.savedAt)),
       () => { setSaved(null); setSavedError(true); },
     );
+    try {
+      void navigator.storage?.estimate?.().then(
+        (est) => {
+          if (est?.quota && Number.isFinite(est.quota)) setQuota({ used: est.usage ?? 0, total: est.quota });
+        },
+        () => {},
+      );
+    } catch {
+      // estimate() unavailable — the summed listing sizes stand in below.
+    }
   };
   useEffect(() => {
     if (!open) { setConfirmDelete(null); return; }
     refreshSaved();
   }, [open]);
+
+  // External open request (the storage-full banner). Bumping the counter
+  // opens the menu so the delete list is one click from the warning.
+  useEffect(() => {
+    if (openRequest) setOpen(true);
+  }, [openRequest]);
 
   // Outside mousedown and Escape both close. mousedown rather than click so the
   // menu is gone before whatever was clicked underneath reacts.
@@ -201,6 +227,18 @@ export function FileMenu({
               {/* "In this browser" is load-bearing copy: zero custody means
                   these exist nowhere else — the server stores nothing. */}
               <div className="filemenu-heading">Saved in this browser</div>
+              {/* Usage against quota where the browser reports one; otherwise
+                  the listing's own summed sizes. estimate() may lie, so this
+                  is information, never a gate. */}
+              {quota ? (
+                <div className="filemenu-note" data-testid="file-saved-quota">
+                  {fmtSize(quota.used)} used of {fmtSize(quota.total)} this browser allows the site
+                </div>
+              ) : saved && saved.length > 0 ? (
+                <div className="filemenu-note" data-testid="file-saved-quota">
+                  Saved copies use {fmtSize(saved.reduce((n, s) => n + s.byteLength, 0))} in this browser
+                </div>
+              ) : null}
               {savedError ? (
                 <div className="filemenu-note" data-testid="file-saved-error">
                   Saved documents couldn’t be read — storage may be blocked

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DocxView, DocxToolbar, type DocxViewApi } from "wordinweb";
 import { IndexedDbBundleStore, type BundleStore, type DocBundle, type StoredDocSummary } from "wordinweb/collab";
-import { FileMenu, savedDocName } from "./file-menu";
+import { FileMenu, fmtSize, savedDocName } from "./file-menu";
+import { useStartupReclaim } from "./startup-reclaim";
 import { type GoLivePhase } from "./e2ee-flows";
 
 /** The single autosave slot the local editor writes (key convention:
@@ -110,6 +111,28 @@ export function LocalEditor({
    * it exists nowhere but this tab's memory.
    */
   const [persistError, setPersistError] = useState<string | null>(null);
+  /** Startup reclaim (startup-reclaim.ts): copies leaked before retention
+   * existed are removed on load, and what was removed is reported here. */
+  const reclaim = useStartupReclaim(store);
+  /** What the store holds, measured when a persist write fails — the banner
+   * must say what is taking the space, not just that space ran out. */
+  const [storedSummary, setStoredSummary] = useState<{ count: number; bytes: number } | null>(null);
+  /** Bumped by the banner's "Manage saved copies" to open the File menu. */
+  const [savedMenuRequest, setSavedMenuRequest] = useState(0);
+  useEffect(() => {
+    if (!persistError) return;
+    let alive = true;
+    store.list().then(
+      (all) => {
+        if (alive) setStoredSummary({ count: all.length, bytes: all.reduce((n, s) => n + s.byteLength, 0) });
+      },
+      () => {
+        // Unlistable storage: the banner still shows, just without numbers.
+        if (alive) setStoredSummary(null);
+      },
+    );
+    return () => { alive = false; };
+  }, [persistError, store]);
 
   useEffect(() => {
     if (initialBytes) return; // reopening a document — nothing to fetch
@@ -407,6 +430,7 @@ export function LocalEditor({
           onOpenSaved={openSaved}
           onDownloadSaved={downloadSaved}
           onDeleteSaved={(s) => store.delete(s.key)}
+          openRequest={savedMenuRequest}
         />
         <span className="bar-sep" aria-hidden="true" />
         {/* THE primary action on this screen, and the only one that changes
@@ -426,10 +450,30 @@ export function LocalEditor({
           // failed write means the only durable copy stopped updating, and
           // the download button belongs NEXT TO that sentence, not in a menu.
           <span data-testid="local-persist-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
-            {persistError}{" "}
+            {persistError}
+            {/* WHAT is taking the space, and the route to act on it. Someone
+                stuck in this state needs an action, not a diagnosis: the
+                button opens File > Saved, where delete lives (two-step). */}
+            {storedSummary && storedSummary.count > 0 && (
+              <span data-testid="local-stored-summary">
+                {" "}{storedSummary.count} saved cop{storedSummary.count === 1 ? "y uses" : "ies use"} {fmtSize(storedSummary.bytes)} in
+                this browser — deleting old ones can free space.
+              </span>
+            )}{" "}
             <button data-testid="local-persist-download" onClick={downloadDocument} disabled={!api}>
               Download .docx
+            </button>{" "}
+            <button data-testid="local-manage-saved" onClick={() => setSavedMenuRequest((n) => n + 1)}>
+              Manage saved copies
             </button>
+          </span>
+        )}
+        {reclaim.notice && (
+          // Startup reclaim's report — stored copies were deleted (or could
+          // not be), so it is said on screen and stays until dismissed.
+          <span data-testid="reclaim-notice" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            {reclaim.notice}{" "}
+            <button className="ghost" data-testid="reclaim-dismiss" onClick={reclaim.dismiss}>Dismiss</button>
           </span>
         )}
         <span style={{ flex: 1 }} />
