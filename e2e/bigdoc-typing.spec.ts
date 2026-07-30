@@ -35,22 +35,16 @@ const PARAS = Number(process.env.WW_BENCH_PARAS ?? 2200); // ~60+ real pages —
 interface TypingProbe {
   times: number[];
   busySeen: number;
-}
-
-/** WW_HUNT=1: in-page Z-count transition log (MutationObserver) — which round
- * never painted, or painted then VANISHED, without changing the typing cadence. */
-const HUNT = !!process.env.WW_HUNT;
-
-interface ZTransition {
-  t: number;
-  z: number;
+  /** Rounds whose typed sentinel PAINTED on the caret's page — see the
+   * landed accounting note in typeRounds. */
+  painted: number;
+  /** Per-page sentinel counts snapshotted just before each keystroke. */
+  prePages?: Record<string, number>;
 }
 
 type PerfGlobals = typeof globalThis & {
   __typingProbe: TypingProbe;
   __dxwPerf?: { samples?: Record<string, number>[] };
-  __zlog?: ZTransition[];
-  __keylog?: number[];
 };
 
 function bigDocx(paras: number): Buffer {
@@ -90,10 +84,14 @@ function percentileOf(values: number[], percentile: number): number {
   return sorted[Math.min(sorted.length - 1, rank - 1)] ?? 0;
 }
 
-/** Count occurrences of the sentinel char in the rendered document. ("Z"
- * does not occur in the generated body text, so each typed Z is countable.) */
-async function sentinelCount(page: Page): Promise<number> {
-  return page.evaluate(() => (document.querySelector(".dxw-pages")?.textContent?.match(/Z/g) ?? []).length);
+/** Sentinel count in the live collab MODEL (null in the local editor, whose
+ * document is not exposed). "Z" does not occur in the generated body text, so
+ * each typed Z is countable. */
+async function modelSentinels(page: Page): Promise<number | null> {
+  return page.evaluate(() => {
+    const w = (window as unknown as { __ww?: { text(): string } }).__ww;
+    return w ? (w.text().match(/Z/g) ?? []).length : null;
+  });
 }
 
 /** True while the editing surface is in the background-layout state. */
@@ -217,181 +215,22 @@ async function clickThenType(page: Page, round: number): Promise<void> {
 }
 
 async function typeRounds(page: Page, scenario: string, rounds: number): Promise<void> {
-  const sentinelsBefore = await sentinelCount(page);
+  const modelBefore = await modelSentinels(page);
   await page.evaluate(() => {
     const probe = (globalThis as PerfGlobals).__typingProbe;
     probe.times = [];
     probe.busySeen = 0;
+    probe.painted = 0;
     const perf = (globalThis as PerfGlobals).__dxwPerf;
     if (perf) perf.samples = [];
-    const g = globalThis as PerfGlobals;
-    if (g.__zlog) g.__zlog = [];
-    if (g.__keylog) g.__keylog = [];
   });
   for (let i = 0; i < rounds; i++) await clickThenType(page, i);
-  const { times, busySeen, samples } = await page.evaluate(() => {
+  const { times, busySeen, samples, landed } = await page.evaluate(() => {
     const probe = (globalThis as PerfGlobals).__typingProbe;
     const perf = (globalThis as PerfGlobals).__dxwPerf;
-    return { times: probe.times, busySeen: probe.busySeen, samples: perf?.samples ?? [] };
+    return { times: probe.times, busySeen: probe.busySeen, samples: perf?.samples ?? [], landed: probe.painted };
   });
-  const landed = (await sentinelCount(page)) - sentinelsBefore;
-  if (HUNT) {
-    const hunt = await page.evaluate(() => {
-      const g = globalThis as PerfGlobals & {
-        __ww?: { text(): string; droppedPreReady(): number; sendFailures(): number; selfHeals(): number };
-      };
-      const w = g.__ww;
-      return {
-        zlog: g.__zlog ?? [],
-        keylog: g.__keylog ?? [],
-        modelZ: w ? (w.text().match(/Z/g) ?? []).length : -1,
-        dropped: w ? w.droppedPreReady() : -1,
-        sendFail: w ? w.sendFailures() : -1,
-        selfHeals: w ? w.selfHeals() : -1,
-      };
-    });
-    console.log(
-      `HUNT ${scenario} landed=${landed} modelZ=${hunt.modelZ} dropped=${hunt.dropped} ` +
-        `sendFail=${hunt.sendFail} selfHeals=${hunt.selfHeals} keys=${hunt.keylog.length} transitions=${hunt.zlog.length}`,
-    );
-    const bp = await page.evaluate(() => {
-      const g = globalThis as {
-        __dxwBpMismatch?: number;
-        __dxwPerf?: { incr?: Record<string, unknown> };
-        __dxwHuntBp?: unknown[];
-      };
-      return { mismatch: g.__dxwBpMismatch ?? 0, incr: g.__dxwPerf?.incr ?? null, breaks: g.__dxwHuntBp ?? [] };
-    });
-    console.log(
-      `HUNT ${scenario} bpMismatch=${bp.mismatch} staleBreaks=${JSON.stringify(bp.breaks)} ` +
-        `lastIncrFallback=${JSON.stringify(bp.incr)}`,
-    );
-    if (landed !== rounds) {
-      // Name the stale paragraph: for every mounted paragraph DOM whose text
-      // contains no Z, compare against the MODEL paragraph text (via __ww).
-      const diff = await page.evaluate(() => {
-        const w = (window as unknown as { __ww?: { text(): string } }).__ww;
-        if (!w) return null;
-        const model = w.text();
-        // Model text is a concatenation of "Paragraph N: ..." bodies (plus Zs).
-        const modelParas = new Map<number, string>();
-        const re = /Paragraph (\d+):/g;
-        let m: RegExpExecArray | null;
-        let prev: { n: number; start: number } | null = null;
-        while ((m = re.exec(model))) {
-          if (prev) modelParas.set(prev.n, model.slice(prev.start, m.index));
-          prev = { n: Number(m[1]), start: m.index };
-        }
-        if (prev) modelParas.set(prev.n, model.slice(prev.start));
-        const out: { n: number; domZ: number; modelZ: number; dom: string; model: string }[] = [];
-        for (const p of Array.from(document.querySelectorAll(".dxw-page"))) {
-          const domText = p.textContent ?? "";
-          const reD = /Paragraph (\d+):/g;
-          let d: RegExpExecArray | null;
-          let prevD: { n: number; start: number } | null = null;
-          const flush = (endIdx: number): void => {
-            if (!prevD) return;
-            const domPara = domText.slice(prevD.start, endIdx);
-            const modelPara = modelParas.get(prevD.n) ?? "";
-            const dz = (domPara.match(/Z/g) ?? []).length;
-            const mz = (modelPara.match(/Z/g) ?? []).length;
-            if (dz !== mz) out.push({ n: prevD.n, domZ: dz, modelZ: mz, dom: domPara.slice(0, 160), model: modelPara.slice(0, 160) });
-          };
-          while ((d = reD.exec(domText))) {
-            flush(d.index);
-            prevD = { n: Number(d[1]), start: d.index };
-          }
-          flush(domText.length);
-          prevD = null;
-        }
-        return out;
-      });
-      console.log(`HUNT ${scenario} staleParas=${JSON.stringify(diff)}`);
-      // Multiset diff of Z CONTEXTS (model minus mounted DOM): names the exact
-      // occurrence the DOM lacks, and whether its page is even mounted.
-      const ctxDiff = await page.evaluate(() => {
-        const w = (window as unknown as { __ww?: { text(): string } }).__ww;
-        if (!w) return null;
-        const contexts = (s: string): string[] => {
-          const out: string[] = [];
-          for (let i = s.indexOf("Z"); i >= 0; i = s.indexOf("Z", i + 1)) {
-            out.push(s.slice(Math.max(0, i - 28), i) + "[Z]" + s.slice(i + 1, i + 8));
-          }
-          return out;
-        };
-        const model = contexts(w.text());
-        const dom: { page: number; ctx: string }[] = [];
-        for (const p of Array.from(document.querySelectorAll<HTMLElement>(".dxw-page"))) {
-          for (const c of contexts(p.textContent ?? "")) dom.push({ page: Number(p.dataset.page), ctx: c });
-        }
-        const domLeft = [...dom];
-        const modelOnly: string[] = [];
-        for (const c of model) {
-          const j = domLeft.findIndex((d) => d.ctx === c);
-          if (j >= 0) domLeft.splice(j, 1);
-          else modelOnly.push(c);
-        }
-        const mounted = Array.from(document.querySelectorAll<HTMLElement>(".dxw-page"))
-          .filter((p) => p.childElementCount > 0)
-          .map((p) => Number(p.dataset.page));
-        return { modelOnly, domOnly: domLeft.map((d) => `${d.page}:${d.ctx}`), mounted, domZ: dom.length, modelZ: model.length };
-      });
-      console.log(`HUNT ${scenario} ctxDiff=${JSON.stringify(ctxDiff)}`);
-      // Raw boundary dump: model text around the missing occurrence, plus the
-      // DOM tail/head of each mounted page — is a whole LINE missing, or one char?
-      const boundary = await page.evaluate((missing: string[]) => {
-        const w = (window as unknown as { __ww?: { text(): string } }).__ww;
-        if (!w || !missing.length) return null;
-        const model = w.text();
-        const probe = missing[0].replace("[Z]", "Z");
-        const at = model.indexOf(probe);
-        const modelAround = at >= 0 ? model.slice(Math.max(0, at - 150), at + probe.length + 150) : null;
-        const pages = Array.from(document.querySelectorAll<HTMLElement>(".dxw-page"))
-          .filter((p) => p.childElementCount > 0)
-          .map((p) => ({
-            page: Number(p.dataset.page),
-            tail: (p.textContent ?? "").slice(-220),
-            head: (p.textContent ?? "").slice(0, 220),
-          }));
-        return { modelAround, pages };
-      }, ctxDiff?.modelOnly ?? []);
-      console.log(`HUNT ${scenario} boundary=${JSON.stringify(boundary)}`);
-      const carets = await page.evaluate(
-        () => (globalThis as { __caretlog?: unknown[] }).__caretlog ?? [],
-      );
-      console.log(`HUNT ${scenario} carets=${JSON.stringify(carets)}`);
-      // Late-paint check: the MO keeps recording. If the missing Z paints
-      // AFTER the landed sample, these post-round transitions catch it.
-      await page.waitForTimeout(2500);
-      const late = await page.evaluate(() => {
-        const g = globalThis as PerfGlobals;
-        const z = (document.querySelector(".dxw-pages")?.textContent?.match(/Z/g) ?? []).length;
-        return { zlog: g.__zlog ?? [], nowZ: z, t: performance.now() };
-      });
-      console.log(
-        `HUNT ${scenario} late nowZ=${late.nowZ} transitions=${late.zlog.length} ` +
-          `tailTrans=${JSON.stringify(late.zlog.slice(-6))}`,
-      );
-    }
-    if (landed !== rounds) {
-      // Full transition + keydown timelines: which keydown got no +1, and
-      // whether any transition DECREASED the count (paint-then-vanish).
-      for (const k of hunt.keylog) console.log(`HUNT ${scenario} keydown t=${k.toFixed(1)}`);
-      for (const z of hunt.zlog) console.log(`HUNT ${scenario} ztrans t=${z.t.toFixed(1)} z=${z.z}`);
-      const drops = hunt.zlog.filter((z, i) => i > 0 && z.z < hunt.zlog[i - 1].z);
-      console.log(`HUNT ${scenario} decreases=${drops.length} times=${times.map((t) => t.toFixed(1)).join(",")}`);
-      const jobs = await page.evaluate(
-        () => (globalThis as { __dxwPerf?: { jobs?: Record<string, number> } }).__dxwPerf?.jobs ?? {},
-      );
-      console.log(`HUNT ${scenario} jobs=${JSON.stringify(jobs)}`);
-      samples.forEach((s, i) => {
-        console.log(
-          `HUNT ${scenario} sample i=${i} ` +
-            Object.entries(s).map(([k, v]) => `${k}=${typeof v === "number" ? v.toFixed(1) : v}`).join(" "),
-        );
-      });
-    }
-  }
+  const modelAfter = await modelSentinels(page);
   const percentile = (p: number) => percentileOf(times, p);
   metric(scenario, {
     paragraphs: PARAS,
@@ -412,7 +251,22 @@ async function typeRounds(page: Page, scenario: string, rounds: number): Promise
   // every round here: local via the caret-move refresh, collab via the
   // version-driven renderSignal.)
   expect(busySeen, `${scenario}: typing must not trigger the inert whole-document relayout`).toBe(0);
+  // LANDED — verified PER KEYSTROKE against the caret's page (the discipline
+  // typeAtTail already uses), never as a whole-mounted-DOM count diff. The
+  // diff version read 99/100 at 12000 paragraphs while every keystroke in
+  // fact painted: the keystroke that grows the page count (500→501) reflows
+  // every page, and a sentinel an earlier phase typed near the bottom of a
+  // mounted page shifts onto an UNMOUNTED page — the mounted total loses that
+  // Z in the same task the new Z paints, and the aggregate mis-reads the
+  // round as lost. Instrumented evidence: per-round caret-page counts
+  // incremented for all 100 rounds, model totals matched, and the connection
+  // counters (droppedPreReady/sendFailures/selfHeals) stayed 0.
   expect(landed, `${scenario}: every keystroke must land`).toBe(rounds);
+  // Collab: every keystroke must also reach — and stay in — the DOCUMENT.
+  // (A char that paints and then vanishes on a reconcile fails here.)
+  if (modelBefore !== null && modelAfter !== null) {
+    expect(modelAfter - modelBefore, `${scenario}: every keystroke must stay in the document`).toBe(rounds);
+  }
   expect(percentile(50), `${scenario}: p50 keystroke latency`).toBeLessThan(25);
   expect(percentile(99), `${scenario}: p99 keystroke latency`).toBeLessThan(25);
 }
@@ -467,10 +321,27 @@ test.describe("big document typing (>50 pages)", () => {
     test.setTimeout(300_000);
     const cdp = await page.context().newCDPSession(page);
     await page.addInitScript(() => {
-      const probe: TypingProbe = { times: [], busySeen: 0 };
+      const probe: TypingProbe = { times: [], busySeen: 0, painted: 0 };
       const globals = globalThis as PerfGlobals;
       globals.__typingProbe = probe;
       globals.__dxwPerf = { samples: [] };
+      // Landed accounting (see typeRounds): per-keystroke, per-page sentinel
+      // counts keyed by page number, so the verdict survives the mounted set
+      // changing mid-keystroke (page-growth rebuilds) and page elements being
+      // replaced. Registered BEFORE the latency-start listener so its cost
+      // stays outside the measured capture→bubble window.
+      const pageZCounts = (): Record<string, number> => {
+        const out: Record<string, number> = {};
+        for (const el of Array.from(document.querySelectorAll<HTMLElement>(".dxw-page"))) {
+          if (el.childElementCount === 0) continue;
+          out[el.dataset.page ?? ""] = (el.textContent?.match(/Z/g) ?? []).length;
+        }
+        return out;
+      };
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Z") return;
+        probe.prePages = pageZCounts();
+      }, true);
       const keyStarts = new WeakMap<KeyboardEvent, number>();
       document.addEventListener("keydown", (event) => {
         if (event.key !== "Z") return;
@@ -479,6 +350,17 @@ test.describe("big document typing (>50 pages)", () => {
       document.addEventListener("keydown", (event) => {
         const started = keyStarts.get(event);
         if (started !== undefined) probe.times.push(performance.now() - started);
+      });
+      // By bubble time the editor has inserted, laid out, and painted
+      // synchronously: the caret's page must show exactly one more sentinel
+      // than it did before the keystroke. Registered AFTER the latency-stop
+      // listener, so this read is also outside the measured window.
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Z") return;
+        const caretPage = document.querySelector("[data-dxw-caret]")?.closest<HTMLElement>(".dxw-page");
+        if (!caretPage) return;
+        const post = (caretPage.textContent?.match(/Z/g) ?? []).length;
+        if (post === (probe.prePages?.[caretPage.dataset.page ?? ""] ?? 0) + 1) probe.painted++;
       });
       new MutationObserver((records) => {
         for (const record of records) {
@@ -491,49 +373,6 @@ test.describe("big document typing (>50 pages)", () => {
         attributeFilter: ["data-dxw-layout-busy"],
       });
     });
-
-    if (HUNT) {
-      await page.addInitScript((verifyBp: boolean) => {
-        const g = globalThis as PerfGlobals;
-        if (verifyBp) (g as { __dxwVerifyBp?: boolean }).__dxwVerifyBp = true;
-        (g as { __dxwHuntBp?: unknown[] }).__dxwHuntBp = [];
-        g.__zlog = [];
-        g.__keylog = [];
-        let last = -1;
-        const read = (): void => {
-          const z = (document.querySelector(".dxw-pages")?.textContent?.match(/Z/g) ?? []).length;
-          if (z !== last) {
-            last = z;
-            g.__zlog!.push({ t: performance.now(), z });
-          }
-        };
-        const carets: { page: number; top: number; near: string }[] = [];
-        (g as { __caretlog?: typeof carets }).__caretlog = carets;
-        document.addEventListener("keydown", (event) => {
-          if (event.key !== "Z") return;
-          g.__keylog!.push(performance.now());
-          // Where did this keystroke's caret end up? (bubble phase: the editor
-          // has already inserted, committed, and positioned the caret.)
-          const caret = document.querySelector<HTMLElement>("[data-dxw-caret]");
-          const pageEl = caret?.closest<HTMLElement>(".dxw-page") ?? null;
-          const mounted = Array.from(document.querySelectorAll<HTMLElement>(".dxw-page")).filter(
-            (p) => p.childElementCount > 0,
-          );
-          const incr = (globalThis as { __dxwPerf?: { incr?: { fallbackReason?: string } } }).__dxwPerf?.incr;
-          carets.push({
-            page: pageEl ? Number(pageEl.dataset.page) : -1,
-            top: caret ? Math.round(caret.getBoundingClientRect().top) : -1,
-            near: `m=${mounted.length} last=${mounted.length ? mounted[mounted.length - 1].dataset.page : "-"} ` +
-              `cpz=${(pageEl?.textContent?.match(/Z/g) ?? []).length} fb=${incr?.fallbackReason ?? ""}`,
-          });
-        });
-        new MutationObserver(() => read()).observe(document, {
-          subtree: true,
-          childList: true,
-          characterData: true,
-        });
-      }, !!process.env.WW_HUNT_VERIFY_BP);
-    }
 
     // ---- LOCAL: open the big docx in the landing editor ----
     await page.goto(LANDING);
