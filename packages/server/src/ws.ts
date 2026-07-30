@@ -14,6 +14,11 @@ export interface WsSocket {
   send(data: string): void;
   on(event: "message", cb: (data: unknown) => void): void;
   on(event: "close", cb: () => void): void;
+  /** Socket-level failures. `ws` re-emits its own errors here — including
+   * the maxPayload RangeError — and with NO listener attached it throws
+   * out of the receiver, reaching the process-level guard and exiting.
+   * One oversized frame from one client would take down every room. */
+  on(event: "error", cb: (err: unknown) => void): void;
   /** Optional so in-memory test fakes need not implement it; the real `ws`
    * socket always has it. Used to hang up on a connection refused by the
    * per-IP cap — a refusal frame the peer can ignore is not a limit. */
@@ -182,6 +187,27 @@ export function attachWebSocketServer(
         void hub.handle(conn, msg).catch((err: unknown) => {
           obs.error("ws.handle", err, { msgType: String((msg as { t?: unknown }).t) });
         });
+      }
+    });
+    // A SOCKET ERROR MUST NOT KILL THE SERVER.
+    //
+    // Without this listener `ws` re-emits its errors as unhandled, and the
+    // process-level uncaughtException guard in cli.ts exits — so ONE client
+    // sending an oversized frame takes down every room on the host. That is
+    // exactly what happened: a large document's checkpoint exceeded maxPayload,
+    // `ws` threw "Max payload size exceeded" out of its receiver, and the whole
+    // server restarted, which the owner saw as the room randomly dying.
+    //
+    // The right blast radius for a bad frame is the socket that sent it. `ws`
+    // closes it itself (1009 for the payload cap), and the `close` handler
+    // below unwinds the accounting, so there is nothing to do here but refuse
+    // to be fatal and leave a record.
+    socket.on("error", (err: unknown) => {
+      obs.error("ws.socket", err, { conn: conn.id });
+      try {
+        (socket.terminate ?? socket.close)?.call(socket);
+      } catch {
+        // Already gone; `close` still fires and does the bookkeeping.
       }
     });
     socket.on("close", () => {

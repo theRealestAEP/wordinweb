@@ -163,7 +163,21 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
   // including the 256 KB envelope cap — ever runs. A violating connection is
   // closed by `ws` with status 1009, which arrives at our ordinary `close`
   // handler and unwinds like any other disconnect.
-  const wss = new wsMod.WebSocketServer({ noServer: true, maxPayload: limits.surge.wsMaxPayloadBytes });
+  // THE FRAME CAP MUST FIT THE LARGEST LEGITIMATE MESSAGE, which is a client
+  // checkpoint — a whole sealed document. Configured alone at 512 KB it was 30x
+  // too small for a 12 MB document, so `ws` threw "Max payload size exceeded"
+  // out of its receiver mid-session. Before the socket error handler existed
+  // that killed the PROCESS and every room on it; now it would merely
+  // disconnect that client on every checkpoint, which is still broken.
+  //
+  // So it is the max of the configured cap and the document ceiling. The cost
+  // is real and worth naming: a hostile peer may now make this server buffer
+  // one frame that large. That is the price of supporting documents that size
+  // at all — the content caps in the hub still reject the message after the
+  // frame is parsed, and the per-IP connection cap bounds how many peers can
+  // try at once. Lower WW_MAX_DOC_BYTES to lower this.
+  const wsFrameCap = Math.max(limits.surge.wsMaxPayloadBytes, maxSealedBytes(limits.surge.maxDocBytes));
+  const wss = new wsMod.WebSocketServer({ noServer: true, maxPayload: wsFrameCap });
   attachWebSocketServer(wss, hub, obs, {
     guard: ipGuard,
     trustProxyHops: limits.ip.trustProxyHops,
@@ -392,15 +406,23 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
         // cap is for, still holds.
         chunks.length = 0;
         req.resume();
-        res
-          .writeHead(413, { "content-type": "application/json", connection: "close" })
-          .end(`{"error":"too-large","maxBytes":${wireCap}}`);
+        // ANSWER ON `end`, NOT HERE. Replying mid-upload lets Node close the
+        // socket while the client is still writing, so its send breaks before
+        // it can read the reply — the same unobservable refusal in a new
+        // costume. It passed in isolation and failed under load, twice.
+        // Draining first costs nothing extra (the bytes are already being read
+        // and discarded) and removes the race rather than narrowing it.
         return;
       }
       chunks.push(c);
     });
     req.on("end", () => {
-      if (overCap) return; // already answered 413
+      if (overCap) {
+        res
+          .writeHead(413, { "content-type": "application/json", connection: "close" })
+          .end(`{"error":"too-large","maxBytes":${wireCap}}`);
+        return;
+      }
       let body: { docx?: string } = {};
       try {
         body = JSON.parse(Buffer.concat(chunks).toString("utf8"));

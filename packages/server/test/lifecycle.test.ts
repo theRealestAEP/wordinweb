@@ -370,3 +370,39 @@ describe("a kicked socket is closed, not left open", () => {
     expect(() => hub.sweepLifecycle()).not.toThrow();
   });
 });
+
+
+/**
+ * A SOCKET ERROR MUST NOT BE FATAL.
+ *
+ * `ws` re-emits its own failures on the socket, and with no listener attached
+ * an EventEmitter throws — reaching cli.ts's process-level uncaughtException
+ * guard, which exits. One client sending an oversized frame therefore took down
+ * the whole server and every room on it. Observed in production as
+ * "RangeError: Max payload size exceeded" followed by the process exiting; the
+ * owner saw it as the room randomly dying.
+ *
+ * The correct blast radius for a bad frame is the socket that sent it.
+ */
+describe("a socket error", () => {
+  it("is handled, so one bad frame cannot take the server down", async () => {
+    const { attachWebSocketServer } = await import("../src/ws.js");
+    const hub = makeHub(() => 1000);
+    const listeners: Record<string, ((a?: unknown) => void)[]> = {};
+    const socket = {
+      send: () => {},
+      close: () => {},
+      terminate: () => {},
+      on: (ev: string, cb: (a?: unknown) => void) => { (listeners[ev] ??= []).push(cb); },
+    };
+    attachWebSocketServer(
+      { on: (_e: string, cb: (s: unknown) => void) => cb(socket) } as never,
+      hub,
+    );
+
+    // An "error" listener must be registered at all — without one, `ws` throws.
+    expect(listeners.error?.length, "the adapter must listen for socket errors").toBeGreaterThan(0);
+    // And firing it must not throw out of the adapter.
+    expect(() => listeners.error![0](new RangeError("Max payload size exceeded"))).not.toThrow();
+  });
+});
