@@ -27,4 +27,16 @@ describe("save() byte-determinism (B11 fixed zip mtime)", () => {
     expect(second.length).toBe(first.length);
     expect(Buffer.from(second).equals(Buffer.from(first))).toBe(true);
   }, 10_000);
+
+  it("async save produces the same package bytes", async () => {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml":
+          `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+          `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+          `<w:body><w:p><w:r><w:t>async bytes</w:t></w:r></w:p></w:body></w:document>`,
+      }),
+    );
+    expect(Buffer.from(await doc.saveAsync()).equals(Buffer.from(doc.save()))).toBe(true);
+  });
 });

@@ -285,6 +285,18 @@ export class EncryptedCollabConnection {
     };
   }
 
+  async exportBundleAsync(docId: string): Promise<DocBundle | null> {
+    if (!this.replica || this.genesisId === null) return null;
+    return {
+      docId,
+      genesisId: this.genesisId,
+      ...await this.replica.exportBundleStateAsync(),
+      clientSeq: this.clientSeq,
+      savedAt: 0,
+      lineage: [],
+    };
+  }
+
   /** Same disjoint carried-id allocation as the plaintext connection. */
   allocIds(n: number): number[] {
     if (this.idBase < 0) {

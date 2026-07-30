@@ -295,7 +295,7 @@ export class BundlePersister {
   }
 
   private async write(): Promise<void> {
-    const bundle = this.conn.exportBundle(this.docId);
+    const bundle = await this.conn.exportBundleAsync(this.docId);
     if (!bundle) return; // not welcomed yet — nothing durable to say
     bundle.savedAt = this.lastWrite;
     // Maintain the lineage chain (doc 15 §1): the PREVIOUS bundle's chain
