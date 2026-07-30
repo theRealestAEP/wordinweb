@@ -1,7 +1,7 @@
 import { DocxDocument, StableIds } from "@wordinweb/core";
 import { Intent, LogEntry, idempotencyKey } from "./intents.js";
 import { transformIntent } from "./transform.js";
-import { applyIntentScoped, resyncScope } from "./apply.js";
+import { applyIntentScoped, resyncScope, unionScopes, type Scope } from "./apply.js";
 
 // transformIntent is used in replayPending below.
 
@@ -54,6 +54,24 @@ export class ClientReplica {
    * finished, blocking further typing for seconds per keystroke).
    */
   docVersion = 0;
+
+  /**
+   * Union of the dirty scopes behind the docVersion bumps not yet consumed by
+   * a repaint (see takeRenderScope). Every path that bumps docVersion also
+   * records what it disturbed: applyAndResync its intent's ApplyScope,
+   * restoreConfirmed doc scope (the doc OBJECT was replaced). The renderer
+   * drains this when it repaints, so a coalesced repaint covering several
+   * bumps sees the union — the batching rule lives in unionScopes.
+   */
+  private renderScope: Scope | null = null;
+
+  /** Drain the dirty scope accumulated since the last take (null when no
+   * doc-mutating change was recorded). The caller repaints exactly this. */
+  takeRenderScope(): Scope | null {
+    const s = this.renderScope;
+    this.renderScope = null;
+    return s;
+  }
 
   constructor(bytes: Uint8Array, sidecar?: ReturnType<StableIds["exportSidecar"]>) {
     this.doc = DocxDocument.load(bytes);
@@ -338,6 +356,7 @@ export class ClientReplica {
     if (!res.applied) return false;
     resyncScope(this.doc, this.ids, res);
     this.docVersion++;
+    this.renderScope = unionScopes(this.renderScope, res);
     return true;
   }
 
@@ -378,7 +397,10 @@ export class ClientReplica {
   private restoreConfirmed(): void {
     // The doc OBJECT is replaced below — a repaint is needed even when the
     // tail replay applies nothing (applyAndResync bumps per applied entry).
+    // Every retained layout/page binds parsed objects of the OLD doc, so no
+    // narrow scope can describe this: the repaint must be document-wide.
     this.docVersion++;
+    this.renderScope = { kind: "doc" };
     // The lazy baseline can be up to FOLD_TAIL_AT entries stale, so pixels
     // installed during the tail window exist only on the LIVE doc — capture
     // them before it is replaced, re-install after the replay.

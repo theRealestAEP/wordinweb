@@ -107,6 +107,32 @@ export type ApplyScope = Scope & { applied: boolean };
 const DOC_SCOPE: Scope = { kind: "doc" };
 
 /**
+ * Union of two dirty scopes — the batching rule for a coalesced repaint: a
+ * receive batch (or one rAF window) can apply several intents, and the single
+ * repaint that follows must relayout everything any of them touched, once.
+ * Doc absorbs everything. Two block scopes merge their block lists. A split
+ * stays a split only while every other dirty block is one of its two halves
+ * (the layout engine's insertion fast path re-lays exactly those); any
+ * combination the narrow forms cannot express verifiably widens to doc scope,
+ * which is always correct.
+ */
+export function unionScopes(a: Scope | null, b: Scope): Scope {
+  if (!a) return b;
+  if (a.kind === "doc" || b.kind === "doc") return DOC_SCOPE;
+  if (a.kind === "split" && b.kind === "split") {
+    return a.before === b.before && a.after === b.after ? a : DOC_SCOPE;
+  }
+  if (a.kind === "split" || b.kind === "split") {
+    const split = a.kind === "split" ? a : (b as Extract<Scope, { kind: "split" }>);
+    const block = a.kind === "block" ? a : (b as Extract<Scope, { kind: "block" }>);
+    return block.blocks.every((el) => el === split.before || el === split.after) ? split : DOC_SCOPE;
+  }
+  const blocks = [...a.blocks];
+  for (const el of b.blocks) if (!blocks.includes(el)) blocks.push(el);
+  return { kind: "block", blocks };
+}
+
+/**
  * Bridge from wire intents to the core mutation functions. Resolves stable
  * ids to model positions, applies the mutation headlessly (no DOM), and
  * assigns carried ids to newly created nodes so every replica agrees on ids
