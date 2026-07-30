@@ -670,7 +670,12 @@ describe("a storage read that never settles", () => {
     try {
       expect(a.session.ready, "the session must connect despite dead storage").toBe(true);
       // And it says so, rather than quietly looking like an empty first visit.
-      expect(a.session.persistErrors, "the unusable store is reported").toBeGreaterThan(0);
+      // `storeSlow`, NOT `persistErrors`: nothing failed to WRITE, and the demo
+      // renders persistErrors as "storage is full or blocked" — a different and
+      // wrong claim for a read that timed out. Conflating them told one user
+      // their storage was full when it held a few megabytes.
+      expect(a.session.storeSlow, "the unresponsive store is reported").toBe(true);
+      expect(a.session.persistErrors, "nothing failed to write").toBe(0);
     } finally {
       await a.unmount();
     }

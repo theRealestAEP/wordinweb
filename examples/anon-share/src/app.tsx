@@ -612,6 +612,16 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
               </>
             )}
           </span>
+        ) : session?.storeSlow ? (
+          // A DIFFERENT CLAIM from "storage is full", and worth its own words:
+          // the read timed out, so this session joined without whatever was
+          // saved here. Nothing has failed to write, and the document on
+          // screen is fine — but a resume did not happen, and saying "full"
+          // sent someone hunting through a store holding a few megabytes.
+          <span data-testid="store-slow-banner" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            This browser’s storage didn’t respond, so this document opened without
+            anything previously saved here. Editing works normally.
+          </span>
         ) : (session?.persistErrors ?? 0) > 0 ? (
           // DATA-LOSS WARNING, deliberately ahead of the other banners. This
           // browser's stored bundle IS the durable copy (doc 12 §4) — the

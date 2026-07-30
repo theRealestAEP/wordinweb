@@ -30,6 +30,12 @@ interface MetaRecord {
  * swallowed quota error would let the user believe work is saved when it is
  * not, so surfacing them is the caller's contract, not an option.
  */
+/**
+ * Legacy records measured per `list()` call. Small on purpose: each costs a
+ * full bundle read, and the cost is paid on a page load.
+ */
+const LEGACY_BACKFILL_PER_LIST = 4;
+
 export class IndexedDbBundleStore implements BundleStore {
   private db: Promise<IDBDatabase> | null = null;
   private persistRequested = false;
@@ -108,17 +114,37 @@ export class IndexedDbBundleStore implements BundleStore {
     const metas = (await this.tx("meta", "readonly", (t) => t.objectStore("meta").getAll())) as MetaRecord[];
     const byKey = new Map(metas.map((m) => [m.docId, m]));
     const out: StoredDocSummary[] = [];
+    // BACKFILL IS BOUNDED, and that bound is the whole point.
+    //
+    // Records written before the meta store existed carry no metadata, and the
+    // only way to recover a bundle's size is to read the bundle — megabytes,
+    // deserialised, to learn two numbers. Doing that for every legacy key made
+    // opening the page deserialise the entire store: on a browser holding a
+    // pile of leaked versions it took over thirty seconds and a matching spike
+    // in memory, before anything rendered. Precisely the browsers that most
+    // need the reclaim this listing feeds.
+    //
+    // So a few per call. The listing stays fast, sizes converge over a handful
+    // of loads, and until a record is measured it reports `byteLength: 0` —
+    // read by callers as "unknown", never as "empty" (see StoredDocSummary).
+    let budget = LEGACY_BACKFILL_PER_LIST;
     for (const key of keys) {
       let meta = byKey.get(key);
-      if (!meta) {
-        // v1 legacy record: read the bundle once, backfill its meta so the
-        // next listing is metadata-only again.
+      if (!meta && budget > 0) {
+        budget--;
         const bundle = await this.get(key);
         if (!bundle) continue; // deleted between the two reads
         meta = { docId: key, savedAt: bundle.savedAt, byteLength: bundle.confirmedBytes.byteLength };
         await this.tx("meta", "readwrite", (t) => t.objectStore("meta").put(meta));
       }
-      out.push({ ...parseBundleKey(key), key, savedAt: meta.savedAt, byteLength: meta.byteLength });
+      out.push({
+        ...parseBundleKey(key),
+        key,
+        // Unmeasured legacy record: 0 means UNKNOWN. A byte-budget caller must
+        // not treat it as free, and must not delete it for being large either.
+        savedAt: meta?.savedAt ?? 0,
+        byteLength: meta?.byteLength ?? 0,
+      });
     }
     return out;
   }

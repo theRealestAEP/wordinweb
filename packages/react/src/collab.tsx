@@ -369,6 +369,14 @@ export interface CollabSession {
    */
   persistErrors: number;
   /**
+   * The connect-path storage read exceeded its deadline, so this session
+   * joined COLD instead of resuming. Says nothing about whether storage is
+   * full — a slow or blocked store looks identical from here, and
+   * conflating the two with {@link persistErrors} told one user their
+   * storage was full when it held a few megabytes.
+   */
+  storeSlow: boolean;
+  /**
    * Submits whose seal or transport send THREW after the edit was already
    * applied optimistically — i.e. lost edits, counted at the far end of the
    * path from droppedPreReady.
@@ -511,6 +519,11 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const [selfHeals, setSelfHeals] = useState(0);
   const [droppedPreReady, setDroppedPreReady] = useState(0);
   const [persistErrors, setPersistErrors] = useState(0);
+  /** Storage did not answer the connect-path read within its deadline.
+   * Distinct from persistErrors: the store may be perfectly healthy and
+   * simply slow, or blocked in a way that never resolves. Either way the
+   * session joined cold rather than resuming. */
+  const [storeSlow, setStoreSlow] = useState(false);
   const [sendFailures, setSendFailures] = useState(0);
   /**
    * THE OFFLINE TAIL (doc 15 §2): intents recorded while the sequencer was
@@ -1027,7 +1040,12 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         // which is the ordinary first-visit path.
         const storeTimedOut = read === TIMED_OUT;
         const bundle = storeTimedOut ? null : (read as Awaited<ReturnType<typeof store.get>>);
-        if (storeTimedOut) setPersistErrors((n) => n + 1);
+        // NOT persistErrors. That counter means "a write failed", and the demo
+        // renders it as "storage is full or blocked" — which is a different
+        // claim, and a wrong one for a read that merely took too long. Saying
+        // the store is full when it holds a few megabytes sends someone
+        // looking in exactly the wrong place; it did.
+        if (storeTimedOut) setStoreSlow(true);
         // The stored tail seeds the in-memory one only when memory holds
         // nothing (a fresh page). Within a page's lifetime the ref is always
         // at least as fresh as the store (the store trails by the throttle
@@ -1215,6 +1233,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     selfHeals,
     droppedPreReady,
     persistErrors,
+    storeSlow,
     sendFailures,
     arrival,
     reconcile: (mode) => {
