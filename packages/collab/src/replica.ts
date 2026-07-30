@@ -214,6 +214,16 @@ export class ClientReplica {
     let confirmedBytes = this.confirmedBytes;
     let confirmedSidecar = this.confirmedSidecar;
     if (this.confirmedTail.length) {
+      // Macrotask hop before the heavy work: folding the confirmed tail
+      // re-parses the confirmed docx and replays the tail (~50-150ms at 500
+      // pages) synchronously. This method starts as a promise continuation
+      // (the persister's serial write chain), which can drain at listener
+      // boundaries inside an in-flight input dispatch — landing the cost in
+      // a keystroke's handler on the persister's 1s cadence. In its own task
+      // it runs between dispatches. Taken only on this branch so exports of
+      // an unchanged document (blank-doc tests, idle sessions) keep their
+      // exact timing.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       if (this.pending.length === 0) {
         confirmedBytes = await this.doc.saveAsync();
         confirmedSidecar = this.ids.exportSidecar(this.doc.editableRoots());
