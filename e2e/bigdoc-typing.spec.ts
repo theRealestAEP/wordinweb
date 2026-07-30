@@ -91,13 +91,22 @@ async function layoutBusy(page: Page): Promise<boolean> {
 }
 
 /**
- * THE VIRTUALIZATION PIN. The 500-page latency regression was the virtualizer
- * silently mounting EVERY page: DocxView's container only becomes the scroll
- * element when the host bounds its height, and without that the "viewport"
- * equals the whole document — every keystroke then walks all pages/bindings
- * (p50 scaled linearly with total pages: 10.7 ms at 92, 51.8 ms at 500).
- * Asserts the container really scrolls, the mounted window stays small, and
- * page order is intact.
+ * THE VIRTUALIZATION PIN — on the real property, in a real browser.
+ *
+ * This class of bug has shipped TWICE: first as missing heights on
+ * `html, body, #root` (commit 38f31e7), then again as heightless wrappers
+ * around App plus a missing `style` height on the DocxView mounts, which
+ * broke the chain further down while the CSS-string proxy test kept passing.
+ * Both times the symptom was identical and invisible to every other test:
+ * the DocxView container grew to the document's height, never scrolled, the
+ * virtualizer's "viewport" equaled the whole document, and EVERY page stayed
+ * mounted — keystroke latency then scales linearly with total pages
+ * (measured p50 10.7 ms at 92 pages, 51.8 ms at 500; bounded: 2.3 / 5.0).
+ *
+ * So the pin is the property itself: on a document this large, the mounted
+ * page count must be a small viewport window, nowhere near the total. The
+ * scroller and ordering checks after it name the usual cause and guard the
+ * splice-reuse render path.
  */
 async function assertVirtualized(page: Page, scenario: string): Promise<void> {
   const vitals = await page.evaluate(() => {
@@ -111,12 +120,15 @@ async function assertVirtualized(page: Page, scenario: string): Promise<void> {
       scrollable: !!scroller && scroller.scrollHeight > scroller.clientHeight + 4,
     };
   });
-  expect(vitals.ordered, `${scenario}: pages must stay in document order`).toBe(true);
-  expect(vitals.scrollable, `${scenario}: the DocxView container must be the scroller`).toBe(true);
   expect(
     vitals.mounted,
-    `${scenario}: only a viewport window may be mounted (mounted=${vitals.mounted} of ${vitals.total})`,
+    `${scenario}: virtualization is DEFEATED — ${vitals.mounted} of ${vitals.total} pages are mounted, ` +
+      `but only a viewport window may be. Almost always a broken height chain: the DocxView ` +
+      `container must be the scroll element, which requires a bounded height on every ancestor ` +
+      `(html/body/#root, the app wrappers, and a style height on the DocxView mount).`,
   ).toBeLessThan(Math.min(40, vitals.total));
+  expect(vitals.scrollable, `${scenario}: the DocxView container must be the scroller`).toBe(true);
+  expect(vitals.ordered, `${scenario}: pages must stay in document order`).toBe(true);
 }
 
 /**
