@@ -27,7 +27,10 @@ import { LANDING, PAGE, goLive, waitHook } from "./_helpers";
  */
 
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-const PARAS = 2200; // ~60+ real pages — safely past BACKGROUND_LAYOUT_PAGE_THRESHOLD (50)
+// Overridable so the same spec can be run at the size a real report came in at
+// (WW_BENCH_PARAS=12000 is ~500 pages, the owner's NIH document). The default
+// stays modest so CI cost is bounded.
+const PARAS = Number(process.env.WW_BENCH_PARAS ?? 2200); // ~60+ real pages — safely past BACKGROUND_LAYOUT_PAGE_THRESHOLD (50)
 
 interface TypingProbe {
   times: number[];
