@@ -181,6 +181,68 @@ function pageEq(a: LaidOutPage, b: LaidOutPage): boolean {
   return true;
 }
 
+function updatePageText(record: PageRender, page: LaidOutPage): boolean {
+  const previous = record.page;
+  if (
+    previous.width !== page.width ||
+    previous.height !== page.height ||
+    previous.number !== page.number ||
+    previous.index !== page.index ||
+    previous.bodyTop !== page.bodyTop ||
+    previous.bodyBottom !== page.bodyBottom ||
+    previous.hfStart !== page.hfStart ||
+    JSON.stringify(previous.columnBands) !== JSON.stringify(page.columnBands) ||
+    previous.items.length !== page.items.length
+  ) {
+    return false;
+  }
+
+  let bindingIndex = 0;
+  for (let i = 0; i < page.items.length; i++) {
+    const before = previous.items[i];
+    const after = page.items[i];
+    if (before.kind !== "text" || after.kind !== "text") {
+      if (!itemEq(before, after, 0)) return false;
+      continue;
+    }
+    if (!record.bindings[bindingIndex]) return false;
+    const beforeFields = before as unknown as Record<string, unknown>;
+    const afterFields = after as unknown as Record<string, unknown>;
+    for (const key in beforeFields) {
+      if (key === "src" || key === "text" || key === "x" || key === "width") continue;
+      if (!(key in afterFields) || !itemEq(beforeFields[key], afterFields[key], 0)) return false;
+    }
+    for (const key in afterFields) {
+      if (key === "src" || key === "text" || key === "x" || key === "width") continue;
+      if (!(key in beforeFields)) return false;
+    }
+    if (
+      before.width !== after.width &&
+      after.props.paintLetterSpacing !== undefined &&
+      after.props.letterSpacing !== undefined &&
+      after.text.trim()
+    ) {
+      return false;
+    }
+    bindingIndex++;
+  }
+  if (bindingIndex !== record.bindings.length) return false;
+
+  bindingIndex = 0;
+  for (const item of page.items) {
+    if (item.kind !== "text") continue;
+    const binding = record.bindings[bindingIndex++];
+    if (binding.item.text !== item.text) {
+      const target = item.strutFont ? binding.el.firstElementChild ?? binding.el : binding.el;
+      target.textContent = item.text;
+    }
+    binding.el.style.left = `${item.x}px`;
+    binding.item = item;
+  }
+  record.page = page;
+  return true;
+}
+
 /** Doc-scoped media caches: an edited page's DOM is rebuilt every keystroke
  * (incremental render), and minting a fresh object URL per render forced a
  * full image re-decode — visible flicker while typing. Keyed by media part
@@ -452,13 +514,22 @@ export function renderToDom(
   let hiNew = layout.pages.length - 1;
   let hiOld = prevPages.length - 1;
   if (canReuse) {
-    while (lo < layout.pages.length && lo < prevPages.length && samePage(layout.pages[lo], prevPages[lo].page, lo)) {
+    while (
+      lo < layout.pages.length &&
+      lo < prevPages.length &&
+      (samePage(layout.pages[lo], prevPages[lo].page, lo) || updatePageText(prevPages[lo], layout.pages[lo]))
+    ) {
       const pr = prevPages[lo];
       pr.page = layout.pages[lo];
       pages[lo] = pr;
       lo++;
     }
-    while (hiNew >= lo && hiOld >= lo && samePage(layout.pages[hiNew], prevPages[hiOld].page, hiNew)) {
+    while (
+      hiNew >= lo &&
+      hiOld >= lo &&
+      (samePage(layout.pages[hiNew], prevPages[hiOld].page, hiNew) ||
+        updatePageText(prevPages[hiOld], layout.pages[hiNew]))
+    ) {
       const pr = prevPages[hiOld];
       pr.page = layout.pages[hiNew];
       pages[hiNew] = pr;
