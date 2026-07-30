@@ -143,13 +143,13 @@ async function typeRounds(page: Page, scenario: string, rounds: number): Promise
     renderP99: percentileOf(samples.map((sample) => sample.render ?? 0), 99),
     layoutP99: percentileOf(samples.map((sample) => sample.layout ?? 0), 99),
   });
-  expect(landed, `${scenario}: every keystroke must land`).toBe(rounds);
   // THE REGRESSION PIN: plain typing must never enter the inert
   // background-layout state — that state is what ate keystrokes for seconds
   // per click-then-type on big documents. (Both pre-fix behaviors trip it on
   // every round here: local via the caret-move refresh, collab via the
   // version-driven renderSignal.)
   expect(busySeen, `${scenario}: typing must not trigger the inert whole-document relayout`).toBe(0);
+  expect(landed, `${scenario}: every keystroke must land`).toBe(rounds);
   expect(percentile(50), `${scenario}: p50 keystroke latency`).toBeLessThan(25);
   expect(percentile(99), `${scenario}: p99 keystroke latency`).toBeLessThan(25);
 }
@@ -175,11 +175,12 @@ test.describe("big document typing (>50 pages)", () => {
       });
       new MutationObserver((records) => {
         for (const record of records) {
-          if ((record.target as Element).hasAttribute("data-dxw-layout-busy")) probe.busySeen++;
+          if (record.oldValue === null) probe.busySeen++;
         }
       }).observe(document, {
         subtree: true,
         attributes: true,
+        attributeOldValue: true,
         attributeFilter: ["data-dxw-layout-busy"],
       });
     });
