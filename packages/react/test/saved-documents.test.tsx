@@ -3,9 +3,9 @@
  * Saved documents in the demo (examples/anon-share): the version strip must
  * come back after a reload (it used to render from useState([]) — saved
  * versions became invisible on refresh even though they sat in IndexedDB),
- * and the File menu's saved listing must be readable but never OPENABLE in
- * a live session — opening replaces the whole document without an intent
- * and silently forks the room, the same rule that already greys Open out.
+ * and the File menu's saved listing must be visible. A live demo can open a
+ * saved copy only when it has a local-editor handoff, which leaves the shared
+ * session instead of silently replacing the live document.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement, act } from "react";
@@ -84,7 +84,7 @@ function bundleAt(key: string, savedAt: number): DocBundle {
   };
 }
 
-function mountApp(store: InMemoryBundleStore, docId: string, clientId: string) {
+function mountApp(store: InMemoryBundleStore, docId: string, clientId: string, onDisconnect?: (bytes: Uint8Array | null) => void) {
   return render(createElement(App, {
     url: "ws://loopback/collab",
     httpBase: "http://loopback",
@@ -92,6 +92,7 @@ function mountApp(store: InMemoryBundleStore, docId: string, clientId: string) {
     clientId,
     name: "Ada",
     store,
+    onDisconnect,
   }));
 }
 
@@ -162,6 +163,36 @@ describe("the saved listing in a live session", () => {
       let gone = await store.get(vKey);
       for (let i = 0; i < 50 && gone; i++) { await tick(); gone = await store.get(vKey); }
       expect(gone, "confirming must delete the entry").toBeNull();
+    } finally {
+      (globalThis as { WebSocket: unknown }).WebSocket = prevSocket;
+    }
+  });
+
+  it("opens the saved-document browser from the visible button and hands a saved copy to the local editor", async () => {
+    const store = new InMemoryBundleStore();
+    const saved = bundleAt("local:archive", 4000);
+    await store.put(saved);
+    const onDisconnect = vi.fn();
+
+    const hub = new CollabHub(provider);
+    const prevSocket = globalThis.WebSocket;
+    (globalThis as { WebSocket: unknown }).WebSocket = hubSocketClass(hub);
+    try {
+      const host = mountApp(store, "open-saved-doc", "open-saved-client", onDisconnect);
+      const browse = () => byId(host, "saved-documents") as HTMLButtonElement | null;
+      for (let i = 0; i < 120 && browse()!.disabled; i++) await tick();
+      expect(browse()!.disabled, "session never became ready").toBe(false);
+
+      click(browse());
+      for (let i = 0; i < 50 && allById(host, "file-saved-entry").length === 0; i++) await tick();
+      const entry = allById(host, "file-saved-entry").find((e) => e.getAttribute("data-kind") === "local")!;
+      expect(entry, "the saved document must be visible").toBeTruthy();
+      const open = entry.querySelector<HTMLButtonElement>('[data-testid="file-saved-open"]')!;
+      expect(open.disabled).toBe(false);
+      click(open);
+      for (let i = 0; i < 50 && onDisconnect.mock.calls.length === 0; i++) await tick();
+      expect(onDisconnect).toHaveBeenCalledTimes(1);
+      expect(Array.from(onDisconnect.mock.calls[0][0] as Uint8Array)).toEqual(Array.from(saved.confirmedBytes));
     } finally {
       (globalThis as { WebSocket: unknown }).WebSocket = prevSocket;
     }

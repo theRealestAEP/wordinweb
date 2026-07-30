@@ -4752,6 +4752,36 @@ describe("floating table flow and overlap", () => {
     expect(topOf(result, "INLINE")).toBeGreaterThan(topOf(result, "FLOAT"));
   });
 
+  it("reflows earlier paragraphs when a floating table moves upward", () => {
+    const wideFloat =
+      `<w:tbl><w:tblPr>` +
+      `<w:tblpPr w:horzAnchor="page" w:vertAnchor="page" w:tblpX="1440" w:tblpY="1440"/>` +
+      `<w:tblW w:w="9000" w:type="dxa"/><w:tblLayout w:type="fixed"/>` +
+      `</w:tblPr><w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>` +
+      `<w:p><w:r><w:t>FLOAT</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        p("EarlierOne") + p("EarlierTwo") + p("EarlierThree") + wideFloat + p("Later"),
+      ),
+    });
+    const tableRect = result.pages[0].items.find(
+      (item): item is Extract<typeof item, { kind: "rect" }> =>
+        item.kind === "rect" && item.fill === "#ffffff" && Math.abs(item.width - 600) < 2,
+    );
+    if (!tableRect) throw new Error("missing floating table rectangle");
+    for (const text of ["EarlierOne", "EarlierTwo", "EarlierThree", "Later"]) {
+      const item = result.pages[0].items.find(
+        (candidate) => candidate.kind === "text" && candidate.text === text,
+      );
+      if (!item || item.kind !== "text") throw new Error(`missing ${text}`);
+      expect(
+        item.lineTop >= tableRect.y + tableRect.height ||
+        item.lineTop + item.lineHeight <= tableRect.y,
+      ).toBe(true);
+    }
+  });
+
   it("allows allow/allow overlap and prevents overlap when either table says never", () => {
     const render = (first: "allow" | "never", second: "allow" | "never") =>
       layout({

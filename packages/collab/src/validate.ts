@@ -391,9 +391,29 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "formatRun":
     case "formatParagraph":
     case "setListType":
-    case "tableOp":
     case "mergeParagraph":
       // Id-addressed, no free-form payload to bound here.
       return null;
+    case "tableOp": {
+      const op = intent.op;
+      if (typeof op === "string") {
+        return ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight"].includes(op)
+          ? null
+          : "tableOp: bad operation";
+      }
+      if (op.kind === "cellShading") {
+        return op.fill === null || /^[0-9a-fA-F]{6}$/.test(op.fill) ? null : "tableOp: bad shading";
+      }
+      if (op.kind === "cellVAlign") {
+        return ["top", "center", "bottom"].includes(op.v) ? null : "tableOp: bad vertical alignment";
+      }
+      if (op.kind !== "textWrapping") return "tableOp: bad operation";
+      if (
+        (op.wrapping !== "none" && op.wrapping !== "around") ||
+        !Number.isFinite(op.xPx) ||
+        !Number.isFinite(op.yPx)
+      ) return "tableOp: bad text wrapping";
+      return null;
+    }
   }
 }

@@ -734,6 +734,26 @@ describe("table operations", () => {
     expect(xml).toContain('w:tblpY="3600"');
   });
 
+  it("switches a moved table back to normal flow and around again", async () => {
+    const { moveTableTo, setTableTextWrapping } = await import("../src/edit/tables.js");
+    const doc = tableDoc();
+    const tbl = doc.sections[0].blocks[0];
+    if (tbl.type !== "table" || !tbl.src) throw new Error("not a table");
+
+    expect(moveTableTo(doc, tbl.src, 120, 240)).toBe(true);
+    expect(serializeXml(tbl.src)).toContain("tblpPr");
+
+    expect(setTableTextWrapping(doc, tbl.src, "none", 120, 240)).toBe(true);
+    expect(serializeXml(tbl.src)).not.toContain("tblpPr");
+    const inline = doc.sections[0].blocks[0];
+    expect(inline.type === "table" ? inline.props.floating : undefined).toBeUndefined();
+
+    expect(setTableTextWrapping(doc, tbl.src, "around", 80, 160)).toBe(true);
+    expect(serializeXml(tbl.src)).toContain("tblpPr");
+    const floating = doc.sections[0].blocks[0];
+    expect(floating.type === "table" ? floating.props.floating?.x : undefined).toBeCloseTo(80, 5);
+  });
+
   it("keeps a table that started a later page on that page when drag-moving it", async () => {
     const { moveTableTo } = await import("../src/edit/tables.js");
     const doc = loadDoc(p("before") +

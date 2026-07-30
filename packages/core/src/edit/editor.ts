@@ -2,12 +2,12 @@ import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
 import { XmlElement, attr, cloneXml, localName } from "../xml.js";
 import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
-import { DrawingBinding, ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
+import { DrawingBinding, GripBinding, ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
 import { TextItem } from "../layout/types.js";
 import { selectionToSegments } from "./selection.js";
 import { type EncodedCaret } from "./ids.js";
 import { EditHistory } from "./history.js";
-import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
+import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
 import { pxToTwips } from "../units.js";
 import { listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
@@ -291,6 +291,7 @@ export type EditorIntent =
   | { kind: "resizeTableColumn"; cellParagraphId: number; boundary: number; deltaPx: number; renderedWidths?: number[] }
   | { kind: "resizeTableRow"; cellParagraphId: number; rowIdx: number; heightPx: number }
   | { kind: "moveTable"; cellParagraphId: number; xPx: number; yPx: number; preservePageStart: boolean; pageDelta: number }
+  | { kind: "tableOp"; cellParagraphId: number; op: { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number } }
   | { kind: "removeDrawing"; runId: number }
   | { kind: "setMathLinear"; blockId: number; mathText: string }
   | { kind: "deleteMath"; blockId: number }
@@ -539,6 +540,7 @@ export class DocxEditor {
 
   /** Re-apply editing chrome after the host re-renders the pages. */
   afterRender(): void {
+    this.dismissTableToolbar();
     this.applyHfChrome();
     this.paintSelection();
     this.positionCaret();
@@ -1249,6 +1251,7 @@ export class DocxEditor {
     c.removeEventListener("drop", this.onDrop);
     this.dismissTextContextMenu();
     this.dismissSuggestionPopover();
+    this.dismissTableToolbar();
     this.setDrawingTool(null);
     this.deselectInkGroup();
     this.hideCaret();
@@ -1852,9 +1855,92 @@ export class DocxEditor {
   // ---------- table drag-move and resize ----------
 
   private suppressNextMouseUp = false;
+  private tableToolbar: HTMLDivElement | null = null;
+
+  private dismissTableToolbar(): void {
+    this.tableToolbar?.remove();
+    this.tableToolbar = null;
+  }
+
+  private showTableToolbar(grip: GripBinding): void {
+    this.dismissTableToolbar();
+    const surface = grip.el.parentElement;
+    if (!surface) return;
+    const tblPr = grip.item.tbl.children.find((child) => localName(child.name) === "tblPr");
+    const floating = tblPr?.children.some((child) => localName(child.name) === "tblpPr") === true;
+    const bar = document.createElement("div");
+    bar.dataset.dxwTableToolbar = "1";
+    bar.setAttribute("role", "toolbar");
+    bar.setAttribute("aria-label", "Table text wrapping");
+    bar.style.cssText =
+      `position:absolute;left:${Math.max(0, grip.item.x)}px;top:${Math.max(0, grip.item.y1 - 34)}px;` +
+      "display:flex;align-items:center;gap:2px;padding:3px;background:#fff;border:1px solid #dadce0;" +
+      "border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,.18);pointer-events:auto;" +
+      "font:11px system-ui,sans-serif;white-space:nowrap;z-index:2147483647;";
+    const label = document.createElement("span");
+    label.textContent = "Text wrapping";
+    label.style.cssText = "padding:0 5px;color:#5f6368;";
+    bar.appendChild(label);
+    for (const [wrapping, text] of [["none", "None"], ["around", "Around"]] as const) {
+      const button = document.createElement("button");
+      const active = wrapping === "around" ? floating : !floating;
+      button.type = "button";
+      button.textContent = text;
+      button.title = wrapping === "none"
+        ? "Keep the table in normal document flow"
+        : "Let document text wrap around the positioned table";
+      button.setAttribute("aria-pressed", String(active));
+      button.style.cssText =
+        `border:1px solid ${active ? "#8ab4f8" : "transparent"};border-radius:4px;padding:3px 7px;` +
+        `cursor:pointer;color:${active ? "#174ea6" : "#3c4043"};font-weight:${active ? "600" : "400"};` +
+        `background:${active ? "#d2e3fc" : "transparent"};`;
+      button.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (active) {
+          this.dismissTableToolbar();
+          return;
+        }
+        const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+        const cellParagraphId = inCollab ? this.tableParagraphId(grip.item.tbl) : null;
+        if (inCollab && cellParagraphId === null) return;
+        this.host.history?.checkpoint();
+        const op = {
+          kind: "textWrapping" as const,
+          wrapping,
+          xPx: grip.item.x,
+          yPx: grip.item.y1,
+        };
+        const changed = setTableTextWrapping(
+          this.host.doc,
+          grip.item.tbl,
+          op.wrapping,
+          op.xPx,
+          op.yPx,
+        );
+        this.dismissTableToolbar();
+        if (!changed) return;
+        if (inCollab && cellParagraphId !== null) {
+          this.host.onIntent?.({ kind: "tableOp", cellParagraphId, op });
+        }
+        this.host.rerender(undefined, "global");
+        this.positionCaret();
+      });
+      bar.appendChild(button);
+    }
+    surface.appendChild(bar);
+    this.tableToolbar = bar;
+  }
 
   private onGripMouseDown = (e: MouseEvent): void => {
     const target = e.target as HTMLElement;
+    if (this.tableToolbar?.contains(target)) {
+      this.suppressNextMouseUp = true;
+      return;
+    }
     if (this.wordArtTextEditor?.input.contains(target)) return;
     if (this.smartArtTextEditor?.input.contains(target)) return;
     if (this.startInkGroupInteraction(e, target)) return;
@@ -1865,6 +1951,7 @@ export class DocxEditor {
     if (this.startImageInteraction(e, target)) return;
     const gripEl = target.closest?.("[data-dxw-grip]") as HTMLElement | null;
     if (!gripEl) {
+      this.dismissTableToolbar();
       this.beginSelectionDrag(e);
       return;
     }
@@ -2002,7 +2089,13 @@ export class DocxEditor {
       guide.remove();
       this.suppressNextMouseUp = false;
       const delta = isCol ? dx : dy;
-      if ((isMove ? targetPageIndex !== sourcePageIndex || Math.hypot(dx, dy) >= 1 : Math.abs(delta) >= 1)) {
+      const changed = isMove ? targetPageIndex !== sourcePageIndex || Math.hypot(dx, dy) >= 1 : Math.abs(delta) >= 1;
+      if (!changed && isMove) {
+        this.showTableToolbar(grip);
+        this.focusText();
+        return;
+      }
+      if (changed) {
         // Collab: table drags must ride the wire — these were silent
         // LOCAL-ONLY mutations (user repro: column/row resize and table
         // moves never synced). All the mutation inputs are plain data, so
@@ -2046,6 +2139,12 @@ export class DocxEditor {
             );
           }
           this.host.rerender(undefined, isMove ? "global" : "local");
+          if (isMove) {
+            const movedGrip = this.host.getHandle()?.grips.find(
+              (candidate) => candidate.item.axis === "move" && candidate.item.tbl === grip.item.tbl,
+            );
+            if (movedGrip) this.showTableToolbar(movedGrip);
+          }
           this.positionCaret();
         }
       }

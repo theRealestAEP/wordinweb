@@ -22,7 +22,8 @@ export type TableOp =
   | "mergeDown"
   | "splitCell"
   | { kind: "cellShading"; fill: string | null }
-  | { kind: "cellVAlign"; v: "top" | "center" | "bottom" };
+  | { kind: "cellVAlign"; v: "top" | "center" | "bottom" }
+  | { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number };
 
 interface CellContext {
   tbl: XmlElement;
@@ -201,8 +202,10 @@ export function applyTableOp(doc: DocxDocument, target: XmlElement, op: TableOp)
     if (typeof op === "object") {
       if (op.kind === "cellShading") {
         setTcPrChild(tc, w, "shd", op.fill === null ? null : { [`${w}val`]: "clear", [`${w}fill`]: op.fill.replace(/^#/, "").toUpperCase() });
-      } else {
+      } else if (op.kind === "cellVAlign") {
         setTcPrChild(tc, w, "vAlign", { [`${w}val`]: op.v });
+      } else {
+        return setTableTextWrapping(doc, tbl, op.wrapping, op.xPx, op.yPx);
       }
       doc.refresh();
       return true;
@@ -638,6 +641,24 @@ export function moveTableTo(
   set("tblpY", String(Math.round(pxToTwips(yPx))));
   remove("tblpXSpec");
   remove("tblpYSpec");
+  doc.refresh();
+  return true;
+}
+
+/** Set Word's table text wrapping: None is in document flow; Around floats. */
+export function setTableTextWrapping(
+  doc: DocxDocument,
+  tblEl: XmlElement,
+  wrapping: "none" | "around",
+  xPx: number,
+  yPx: number,
+): boolean {
+  if (localName(tblEl.name) !== "tbl") return false;
+  if (wrapping === "around") return moveTableTo(doc, tblEl, xPx, yPx);
+  const tblPr = child(tblEl, "tblPr");
+  const position = tblPr ? child(tblPr, "tblpPr") : undefined;
+  if (!tblPr || !position) return false;
+  tblPr.children.splice(tblPr.children.indexOf(position), 1);
   doc.refresh();
   return true;
 }

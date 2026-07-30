@@ -1096,6 +1096,14 @@ export class CollabHub {
       const room = this.rooms.get(docId);
       if (room) {
         room.conns.delete(conn);
+        // A participant's last caret is ephemeral connection state. Clear it
+        // for every remaining client when that socket leaves, or the name flag
+        // stays painted on the document until the participant reconnects and
+        // moves it.
+        if (clientId && !this.findClientConn(docId, clientId)) {
+          const out: ServerMessage = { t: "presence", participant: clientId, position: null };
+          for (const c of room.conns) c.send(out);
+        }
         // Roster: mark disconnected (entry survives for session-lifetime
         // attribution; a reconnect under the same clientId resumes it) —
         // unless another live socket still holds this clientId (takeover

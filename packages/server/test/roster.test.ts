@@ -77,11 +77,19 @@ describe("CollabHub roster (doc 14 §2)", () => {
     await hub.handle(b, hello("d", "bob", { name: "Bob", color: "#00ff00" }));
     await hub.handle(a, { t: "profile", profile: { name: "Alicia", color: "#ff0000" } });
     expect(rosterOf(b).find((r) => r.clientId === "alice")!.profile.name).toBe("Alicia");
+    await hub.handle(a, {
+      t: "presence",
+      position: { anchor: { blockId: 1, runId: 2, offset: 0 } },
+    });
 
     hub.disconnect(a);
     const afterLeave = rosterOf(b).find((r) => r.clientId === "alice")!;
     expect(afterLeave.connected).toBe(false); // greyed, NOT removed — attribution keeps a name
     expect(afterLeave.profile.name).toBe("Alicia");
+    expect(
+      [...b.received].reverse().find((m) => m.t === "presence"),
+      "disconnect must clear the participant's last caret",
+    ).toEqual({ t: "presence", participant: "alice", position: null });
 
     const a2 = new FakeConn("s3"); // new socket, same bound identity
     await hub.handle(a2, hello("d", "alice", { name: "Alicia", color: "#ff0000" }));

@@ -218,6 +218,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   const [storedSummary, setStoredSummary] = useState<{ count: number; bytes: number } | null>(null);
   /** Bumped by the banner's "Manage saved copies" to open the File menu. */
   const [savedMenuRequest, setSavedMenuRequest] = useState(0);
+  const [controlTooltip, setControlTooltip] = useState<{ text: string; top: number; left: number } | null>(null);
   const persistFailing = (session?.persistErrors ?? 0) > 0;
   useEffect(() => {
     if (!persistFailing) return;
@@ -342,8 +343,22 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     }
   };
 
-  /** Download any saved entry from the File menu without opening it — the
-   * one honest way to get at a stored copy while the session is live. */
+  /** Open a saved copy in the local editor. Leaving the session first avoids
+   * replacing the live document for only this participant. */
+  const openSaved = async (s: StoredDocSummary) => {
+    if (!onDisconnect) return;
+    try {
+      const b = await store.get(s.key);
+      if (!b) throw new Error("gone");
+      try { socketRef.current?.close(); } catch { /* already closed */ }
+      socketRef.current = null;
+      onDisconnect(b.confirmedBytes);
+    } catch {
+      setVersionError("Couldn’t read that saved copy from this browser’s storage.");
+    }
+  };
+
+  /** Download any saved entry from the File menu without opening it. */
   const downloadSaved = async (s: StoredDocSummary) => {
     try {
       const b = await store.get(s.key);
@@ -448,6 +463,15 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     jumpTimerRef.current = setTimeout(() => setJumpNotice(null), 4000);
   };
 
+  const showControlTooltip = (el: HTMLElement, text: string) => {
+    const rect = el.getBoundingClientRect();
+    setControlTooltip({
+      text,
+      top: rect.bottom + 6,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 288)),
+    });
+  };
+
   const download = () => {
     if (!session?.doc) return;
     const blob = new Blob([session.doc.save() as BlobPart], {
@@ -537,6 +561,27 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         </div>
       );
     }
+    if (reason === "kicked") {
+      const hasLocalCopy = !!session?.doc;
+      return (
+        <div className="gate">
+          <div className="gate-card">
+            <h2>You were removed from this session</h2>
+            <p>The document owner removed this browser from the session. This browser identity cannot rejoin this document.</p>
+            <div className="row">
+              {onDisconnect && (
+                <button data-testid="kicked-keep-local" onClick={leaveSession}>
+                  {hasLocalCopy ? "Keep editing a local copy" : "Return to the local editor"}
+                </button>
+              )}
+              {onNewDocument && (
+                <button className="ghost" data-testid="kicked-new-document" onClick={onNewDocument}>Start a new document</button>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
     if (reason === "idle-timeout" || reason === "session-expired") {
       // THE DEADLINE ARRIVING, not a refusal. The countdown that preceded it
       // explained what was about to happen, so this must read as the ending
@@ -570,7 +615,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     return (
       <div className="gate">
         <div className="gate-card">
-          <h2>Can\u2019t open this document</h2>
+          <h2>Can’t open this document</h2>
           {/* The reason is protocol vocabulary, not prose — shown because a
               specific word someone can search or quote beats "something went
               wrong", and these are the cases with no tailored screen yet. */}
@@ -610,11 +655,21 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           disabled={!session?.ready}
           openDisabled
           listSaved={() => store.list().then((all) => all.filter((s) => s.key !== docId))}
-          savedOpenDisabled
+          onOpenSaved={onDisconnect ? (s) => void openSaved(s) : undefined}
+          savedOpenDisabled={!onDisconnect}
+          savedOpenTitle="Leave the shared session and open this saved copy in the local editor"
           onDownloadSaved={(s) => void downloadSaved(s)}
           onDeleteSaved={(s) => store.delete(s.key)}
           openRequest={savedMenuRequest}
         />
+        <button
+          data-testid="saved-documents"
+          disabled={!session?.ready}
+          title="Browse documents, versions, and drafts saved in this browser"
+          onClick={() => setSavedMenuRequest((n) => n + 1)}
+        >
+          Saved documents
+        </button>
         <span className="bar-sep" aria-hidden="true" />
         <span style={{ flex: 1 }} />
         {session?.arrival ? (
@@ -862,11 +917,16 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           </span>
         )}
         <span className="roster-scroll">
-          {(session?.roster ?? []).map((r) => {
+          {(session?.roster ?? []).filter((r) => r.connected).map((r) => {
             const pill = {
               padding: "2px 10px", borderRadius: 999, fontSize: 12, color: "#fff",
-              background: r.profile.color, opacity: r.connected ? 1 : 0.35, whiteSpace: "nowrap",
+              background: r.profile.color, whiteSpace: "nowrap",
             } as const;
+            const viewOnly = r.write === "demoted";
+            const roleTooltip = viewOnly
+              ? `Allow ${r.profile.name} to edit this document again`
+              : `Make ${r.profile.name} view-only. They can still read and download the document.`;
+            const kickTooltip = `Remove ${r.profile.name} from this session and block this browser identity from rejoining`;
             return (
             <span key={r.clientId} data-testid="roster-chip" data-connected={r.connected} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
               {/* A COLLABORATOR'S chip is a real button — click (or Tab +
@@ -895,16 +955,60 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
               )}
               {isOwner && r.clientId !== clientId && (
                 <>
-                  <button className="chip" title="Demote to viewer"
-                    onClick={() => session?.admin({ op: "setRole", clientId: r.clientId, role: "viewer" })}>👁</button>
-                  <button className="chip" title="Kick"
-                    onClick={() => session?.admin({ op: "kick", clientId: r.clientId })}>✕</button>
+                  <button
+                    className="chip"
+                    data-testid="roster-role"
+                    data-active={viewOnly}
+                    aria-pressed={viewOnly}
+                    aria-label={roleTooltip}
+                    title={roleTooltip}
+                    onMouseEnter={(e) => showControlTooltip(e.currentTarget, roleTooltip)}
+                    onMouseLeave={() => setControlTooltip(null)}
+                    onFocus={(e) => showControlTooltip(e.currentTarget, roleTooltip)}
+                    onBlur={() => setControlTooltip(null)}
+                    onClick={() => {
+                      setControlTooltip(null);
+                      session?.admin({
+                        op: "setRole",
+                        clientId: r.clientId,
+                        role: viewOnly ? "editor" : "viewer",
+                      });
+                    }}
+                  >
+                    👁
+                  </button>
+                  <button
+                    className="chip"
+                    data-testid="roster-kick"
+                    aria-label={kickTooltip}
+                    title={kickTooltip}
+                    onMouseEnter={(e) => showControlTooltip(e.currentTarget, kickTooltip)}
+                    onMouseLeave={() => setControlTooltip(null)}
+                    onFocus={(e) => showControlTooltip(e.currentTarget, kickTooltip)}
+                    onBlur={() => setControlTooltip(null)}
+                    onClick={() => {
+                      setControlTooltip(null);
+                      session?.admin({ op: "kick", clientId: r.clientId });
+                    }}
+                  >
+                    ✕
+                  </button>
                 </>
               )}
             </span>
             );
           })}
         </span>
+        {controlTooltip && (
+          <span
+            className="control-tooltip"
+            role="tooltip"
+            data-testid="control-tooltip"
+            style={{ top: controlTooltip.top, left: controlTooltip.left }}
+          >
+            {controlTooltip.text}
+          </span>
+        )}
       </div>
       {reclaim.notice && (
         // Startup reclaim's report — same contract as the retention notice

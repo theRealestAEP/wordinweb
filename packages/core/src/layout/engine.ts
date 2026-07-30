@@ -3588,6 +3588,64 @@ class Engine {
         shapes: [],
       };
     };
+    // A page/margin-positioned table can move above paragraphs that precede
+    // its document anchor. Register its exclusion before those paragraphs are
+    // emitted, provided the anchor still belongs to this page. This matches
+    // the farther-anchor lookahead below and prevents a moved table from
+    // painting over earlier body text.
+    if (
+      broken.lines.length > 0 &&
+      siblings &&
+      index !== undefined &&
+      this.cur.colXs.length === 1
+    ) {
+      let simY = paraBottom;
+      let prevAfter = props.spacingAfter ?? 0;
+      let registered = false;
+      for (let idx = index + 1, hops = 0; idx < siblings.length && hops < 40; idx++, hops++) {
+        const blk = siblings[idx];
+        if (blk.type === "table") {
+          const fl = blk.props.floating;
+          if (
+            fl &&
+            (fl.vAnchor === "page" || fl.vAnchor === "margin") &&
+            simY <= this.bodyBottom + 0.25
+          ) {
+            if (!this.floatWrapRegistered.has(blk)) {
+              this.registerFloatingTableWrap(blk);
+              registered = true;
+            }
+            continue;
+          }
+          break;
+        }
+        const np = this.doc.effectiveParaProps(blk);
+        if (np.pageBreakBefore || leadingBreakOf(blk)?.type === "page") break;
+        simY += Math.max(prevAfter, np.spacingBefore ?? 0);
+        const nb = breakParagraph(
+          this.doc,
+          this.measurer,
+          blk,
+          this.colWidth,
+          this.fieldCtx(),
+          undefined,
+          undefined,
+          this.sp.docGridLinePitch,
+          { cache: true },
+        );
+        simY += nb.lines.reduce((sum, line) => sum + line.height, 0);
+        if (
+          simY > this.bodyBottom + 0.25 ||
+          nb.lines.some((line) => line.forcedBreakAfter === "page")
+        ) {
+          break;
+        }
+        prevAfter = np.spacingAfter ?? 0;
+      }
+      if (registered) {
+        broken = breakNow(paraTopEstimate);
+      }
+    }
     if (next?.type === "paragraph" && broken.lines.length > 0) {
       const predictedNextTop = paraBottom;
       // topAndBottom boxes anchor at this paragraph's line bottom EXACTLY

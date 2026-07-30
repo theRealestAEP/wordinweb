@@ -53,6 +53,7 @@ export function FileMenu({
   listSaved,
   onOpenSaved,
   savedOpenDisabled,
+  savedOpenTitle,
   onDownloadSaved,
   onDeleteSaved,
   openRequest,
@@ -75,6 +76,8 @@ export function FileMenu({
    * a stored copy there would replace the shared document and silently fork
    * the room (the same rule as `openDisabled`). Download stays live. */
   savedOpenDisabled?: boolean;
+  /** Explains what opening a saved copy does on the current screen. */
+  savedOpenTitle?: string;
   /** Download a saved entry as .docx without opening it. */
   onDownloadSaved?: (s: StoredDocSummary) => void;
   /** Delete a saved entry. The menu makes this two-step (confirm in place)
@@ -258,7 +261,7 @@ export function FileMenu({
                       title={
                         savedOpenDisabled
                           ? "Opening would replace the shared document for you alone and split you from the session. Leave the session first, or download a copy."
-                          : "Open this saved copy (replaces the current document)"
+                          : savedOpenTitle ?? "Open this saved copy (replaces the current document)"
                       }
                       onClick={savedOpenDisabled || !onOpenSaved ? undefined : item(() => onOpenSaved(s))}
                     >

@@ -168,7 +168,8 @@ export interface TableOpIntent extends IntentBase {
     | "colLeft"
     | "colRight"
     | { kind: "cellShading"; fill: string | null }
-    | { kind: "cellVAlign"; v: "top" | "center" | "bottom" };
+    | { kind: "cellVAlign"; v: "top" | "center" | "bottom" }
+    | { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number };
   /** For INSERT ops (rowAbove/rowBelow/colLeft/colRight): carried ids for the
    * new tracked nodes (p / r) in document order, so replicas address them
    * alike. */

@@ -48,7 +48,7 @@ export type { EditCaret, MutationCtx, SplitResult } from "./edit/mutations.js";
 export { defaultProvenance, recordedProvenance } from "./edit/provenance.js";
 export type { EditProvenance } from "./edit/provenance.js";
 export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, paragraphOf, topLevelBlockOf, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";
-export { applyTableOp, cellContextOf, resizeDrawing, resizeTableColumn, resizeTableRow, moveTableTo } from "./edit/tables.js";
+export { applyTableOp, cellContextOf, resizeDrawing, resizeTableColumn, resizeTableRow, moveTableTo, setTableTextWrapping } from "./edit/tables.js";
 export {
   setImageWrap,
   adjustFloatingPosition,

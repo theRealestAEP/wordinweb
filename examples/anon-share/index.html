@@ -68,6 +68,11 @@
       .sessionbar button.chip { font-size: 10px; line-height: 1; padding: 2px 4px; border-radius: 4px;
         border: 1px solid #dadce0; background: #fff; color: #5f6368; cursor: pointer; }
       .sessionbar button.chip:hover { background: #f1f3f4; color: #202124; }
+      .sessionbar button.chip[data-active="true"] { background: #e8f0fe; border-color: #1a73e8; color: #174ea6; }
+      .control-tooltip { position: fixed; z-index: 300; width: max-content; max-width: 260px;
+        padding: 6px 8px; border-radius: 5px; background: #202124; color: #fff;
+        font-size: 11px; line-height: 1.35; box-shadow: 0 2px 8px rgba(0,0,0,.22);
+        pointer-events: none; }
       /* GATE SCREENS: what you see INSTEAD of a document — needs a share
          code, already open elsewhere, session gone, connection lost. These
          are the first thing a person following a shared link sees, and they

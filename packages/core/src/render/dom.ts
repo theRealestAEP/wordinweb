@@ -884,7 +884,7 @@ function renderPage(
         g.style.opacity = "0";
         g.style.pointerEvents = "none";
         g.style.boxShadow = "0 1px 1px rgba(0,0,0,.08)";
-        g.title = "Move table";
+        g.title = "Move table. Click for text wrapping options.";
         g.dataset.dxwTableMove = "1";
         g.innerHTML =
           '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square">' +

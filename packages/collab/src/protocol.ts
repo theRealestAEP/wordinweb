@@ -73,8 +73,11 @@ export interface SealedCheckpoint {
  *       document fork on the FIRST padded envelope. (Presence and
  *       checkpoints ride the same bump; sealed media is deliberately NOT
  *       padded — its sha addresses require byte-identical re-encryption.)
+ *   e7  table text wrapping: tableOp now carries None/Around. An e6 peer
+ *       interprets the new object as vertical alignment and diverges, so the
+ *       room must contain only clients that know the new canonical mutation.
  */
-export const ENGINE_VERSION = "e6";
+export const ENGINE_VERSION = "e7";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-

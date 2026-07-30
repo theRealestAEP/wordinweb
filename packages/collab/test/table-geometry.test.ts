@@ -87,6 +87,38 @@ describe("table geometry intents (resize/move)", () => {
     expect(serializeXml(a.s.doc.docRoot)).toContain("tblpPr"); // floated
   });
 
+  it("table text wrapping switches between Around and None on every replica", () => {
+    const a = tableSession();
+    const b = tableSession();
+    const move = {
+      kind: "moveTable", clientId: "c", clientSeq: 10, base: a.s.seq,
+      cellParagraphId: a.cellParagraphId, xPx: 150, yPx: 300, preservePageStart: false, pageDelta: 0,
+    } as const;
+    expect(a.s.submit(move as never).kind).toBe("applied");
+    expect(b.s.submit(move as never).kind).toBe("applied");
+
+    const inline = {
+      kind: "tableOp", clientId: "c", clientSeq: 11, base: a.s.seq,
+      cellParagraphId: a.cellParagraphId,
+      op: { kind: "textWrapping", wrapping: "none", xPx: 150, yPx: 300 },
+    } as const;
+    expect(a.s.submit(inline as never).kind).toBe("applied");
+    expect(b.s.submit(inline as never).kind).toBe("applied");
+    expect(serializeXml(a.s.doc.docRoot)).toBe(serializeXml(b.s.doc.docRoot));
+    expect(serializeXml(a.s.doc.docRoot)).not.toContain("tblpPr");
+
+    const around = {
+      ...inline,
+      clientSeq: 12,
+      base: a.s.seq,
+      op: { kind: "textWrapping", wrapping: "around", xPx: 90, yPx: 180 },
+    } as const;
+    expect(a.s.submit(around as never).kind).toBe("applied");
+    expect(b.s.submit(around as never).kind).toBe("applied");
+    expect(serializeXml(a.s.doc.docRoot)).toBe(serializeXml(b.s.doc.docRoot));
+    expect(serializeXml(a.s.doc.docRoot)).toContain("tblpPr");
+  });
+
   it("rejects cleanly when the paragraph is not inside a table", () => {
     const s = new DocumentSession(makeDoc());
     const para = s.doc.sections[0].blocks[0] as Paragraph;
