@@ -354,12 +354,49 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
     }
     const chunks: Buffer[] = [];
     let size = 0;
+    let overCap = false;
     req.on("data", (c: Buffer) => {
       size += c.length;
-      if (size > 16 * 1024 * 1024) req.destroy(); // wire-level cap above the decoded cap
-      else chunks.push(c);
+      // WIRE-LEVEL CAP, above the decoded cap seed-http enforces.
+      //
+      // ANSWER, then hang up. This used to call `req.destroy()` alone, which
+      // kills the socket with NO RESPONSE — so the browser's fetch never
+      // settles and the caller waits forever. That is exactly what "making the
+      // NIH document collaborative just spins forever" was: a large document
+      // base64s past 16 MiB, the connection died mid-upload, and the go-live
+      // flow had nothing to fail on. A refusal the client cannot observe is
+      // indistinguishable from a hang.
+      //
+      // Stop buffering immediately — the point of the cap is to bound memory,
+      // so the reply must not be paid for by reading the rest of the body.
+      if (size > 16 * 1024 * 1024) {
+        if (overCap) return;
+        overCap = true;
+        // STOP BUFFERING, then DRAIN — do not destroy.
+        //
+        // Dropping the buffer is what bounds memory, and that happens here.
+        // Killing the socket does something different and worse: the client is
+        // still writing megabytes, so its send fails before it ever reads the
+        // reply, and a refusal it cannot observe is indistinguishable from a
+        // hang. That was the "spins forever" report, and destroying after the
+        // response flushed only narrowed the race rather than closing it —
+        // passing alone and failing under load.
+        //
+        // `resume()` discards the rest of the upload without accumulating it,
+        // so the client can finish sending and read the 413. The cost is
+        // reading bytes we will not keep; the memory ceiling, which is what the
+        // cap is for, still holds.
+        chunks.length = 0;
+        req.resume();
+        res
+          .writeHead(413, { "content-type": "application/json", connection: "close" })
+          .end(`{"error":"too-large","maxBytes":${16 * 1024 * 1024}}`);
+        return;
+      }
+      chunks.push(c);
     });
     req.on("end", () => {
+      if (overCap) return; // already answered 413
       let body: { docx?: string } = {};
       try {
         body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
