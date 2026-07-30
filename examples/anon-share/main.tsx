@@ -178,7 +178,12 @@ function Harness() {
   };
 
   return (
-    <div>
+    // THE HEIGHT CHAIN IS LOAD-BEARING (see index.html): the local branch
+    // mounts directly under the height:100% #root, but this collab branch
+    // wraps App in two divs — without heights here, App's `height: 100%`
+    // resolves against auto, the DocxView container never scrolls, and the
+    // virtualizer mounts EVERY page (p50 52 ms/keystroke at 500 pages).
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <div className="app-header">
         <span className="brand-lockup">
           <span className="brand-mark">W</span>
@@ -198,7 +203,7 @@ function Harness() {
           here. They are session controls like download and disconnect, so they
           now sit in App's single session row instead of a second strip of
           chrome saying much the same thing one line higher. */}
-      <div id="root-editor">
+      <div id="root-editor" style={{ flex: 1, minHeight: 0 }}>
         <App
           url={WS}
           httpBase={HTTP}

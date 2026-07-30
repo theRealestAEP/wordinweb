@@ -1435,6 +1435,13 @@ export function CollabEditor(opts: UseCollabOptions & {
 
   const view = createElement(DocxView, {
     source: liveSource,
+    // height:100% is LOAD-BEARING for virtualization (the refused path below
+    // already passes it): DocxView's outer wrapper only gets a height when
+    // the caller passes one. Without it the wrapper grows to the document's
+    // full height, its overflow:auto container never scrolls, and the
+    // virtualizer mounts EVERY page — each keystroke then pays O(total
+    // pages) in DOM scans (measured: p50 52ms at 500 pages, 10ms bounded).
+    style: { height: "100%" },
     onReady: (a: DocxViewApi) => {
       setApi(a);
       opts.onReady?.(a);

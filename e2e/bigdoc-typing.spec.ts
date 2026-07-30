@@ -1,6 +1,6 @@
 import { test, expect, type CDPSession, type Page } from "@playwright/test";
 import { zipSync, strToU8 } from "fflate";
-import { LANDING, PAGE, goLive, waitHook } from "./_helpers";
+import { LANDING, PAGE, goLive, scrollToEnd, tailClickPoint, waitHook } from "./_helpers";
 
 /**
  * BIG-DOCUMENT TYPING LATENCY — the "500-page document is uneditable"
@@ -88,6 +88,94 @@ async function sentinelCount(page: Page): Promise<number> {
 /** True while the editing surface is in the background-layout state. */
 async function layoutBusy(page: Page): Promise<boolean> {
   return page.evaluate(() => !!document.querySelector("[data-dxw-layout-busy]"));
+}
+
+/**
+ * THE VIRTUALIZATION PIN — on the real property, in a real browser.
+ *
+ * This class of bug has shipped TWICE: first as missing heights on
+ * `html, body, #root` (commit 38f31e7), then again as heightless wrappers
+ * around App plus a missing `style` height on the DocxView mounts, which
+ * broke the chain further down while the CSS-string proxy test kept passing.
+ * Both times the symptom was identical and invisible to every other test:
+ * the DocxView container grew to the document's height, never scrolled, the
+ * virtualizer's "viewport" equaled the whole document, and EVERY page stayed
+ * mounted — keystroke latency then scales linearly with total pages
+ * (measured p50 10.7 ms at 92 pages, 51.8 ms at 500; bounded: 2.3 / 5.0).
+ *
+ * So the pin is the property itself: on a document this large, the mounted
+ * page count must be a small viewport window, nowhere near the total. The
+ * scroller and ordering checks after it name the usual cause and guard the
+ * splice-reuse render path.
+ */
+async function assertVirtualized(page: Page, scenario: string): Promise<void> {
+  const vitals = await page.evaluate(() => {
+    const pages = Array.from(document.querySelectorAll<HTMLElement>(".dxw-page"));
+    const order = pages.map((p) => Number(p.dataset.page));
+    const scroller = document.querySelector(".dxw-pages")?.parentElement ?? null;
+    return {
+      total: pages.length,
+      mounted: pages.filter((p) => p.childElementCount > 0).length,
+      ordered: order.every((n, i) => i === 0 || n > order[i - 1]),
+      scrollable: !!scroller && scroller.scrollHeight > scroller.clientHeight + 4,
+    };
+  });
+  expect(
+    vitals.mounted,
+    `${scenario}: virtualization is DEFEATED — ${vitals.mounted} of ${vitals.total} pages are mounted, ` +
+      `but only a viewport window may be. Almost always a broken height chain: the DocxView ` +
+      `container must be the scroll element, which requires a bounded height on every ancestor ` +
+      `(html/body/#root, the app wrappers, and a style height on the DocxView mount).`,
+  ).toBeLessThan(Math.min(40, vitals.total));
+  expect(vitals.scrollable, `${scenario}: the DocxView container must be the scroller`).toBe(true);
+  expect(vitals.ordered, `${scenario}: pages must stay in document order`).toBe(true);
+}
+
+/**
+ * Scroll to the tail, click the last text, type once: the far page must mount
+ * from a scroll (the virtualizer's remount path), the keystroke must land
+ * there, and the scroll position must survive the incremental re-render.
+ */
+async function typeAtTail(page: Page, scenario: string): Promise<void> {
+  await scrollToEnd(page);
+  await expect
+    .poll(() => page.evaluate(tailClickPoint), {
+      message: `${scenario}: the last page never mounted after scrolling to the end`,
+      timeout: 15_000,
+    })
+    .not.toBeNull();
+  const spot = (await page.evaluate(tailClickPoint))!;
+  await page.mouse.click(spot.x, spot.y);
+  // Count Zs on the CARET'S page, not the whole mounted text: the mounted
+  // SET changes across this edit (the previously-edited page was only kept
+  // mounted by caret retention and unmounts once the caret moves here), so a
+  // whole-document count moves for reasons other than this keystroke.
+  const caretPageZs = () =>
+    page.evaluate(
+      () =>
+        (document.querySelector("[data-dxw-caret]")?.closest(".dxw-page")?.textContent?.match(/Z/g) ?? []).length,
+    );
+  const before = await page.evaluate(() => ({
+    scrollTop: document.querySelector(".dxw-pages")!.parentElement!.scrollTop,
+  }));
+  const zBefore = await caretPageZs();
+  await page.keyboard.type("Z");
+  // The typed char must PAINT on the caret's page (which also pins that page
+  // staying mounted through the re-render).
+  await expect
+    .poll(caretPageZs, { message: `${scenario}: the tail keystroke never painted`, timeout: 10_000 })
+    .toBe(zBefore + 1);
+  const after = await page.evaluate(() => ({
+    scrollTop: document.querySelector(".dxw-pages")!.parentElement!.scrollTop,
+  }));
+  expect(
+    Math.abs(after.scrollTop - before.scrollTop),
+    `${scenario}: scroll position must survive the keystroke re-render`,
+  ).toBeLessThanOrEqual(2);
+  // Back to the top so the next measurement block starts from the same state.
+  await page.evaluate(() => {
+    document.querySelector(".dxw-pages")!.parentElement!.scrollTo({ top: 0 });
+  });
 }
 
 /**
@@ -250,7 +338,9 @@ test.describe("big document typing (>50 pages)", () => {
     const pages = await page.locator(PAGE).count();
     metric("bigdoc-pages", { paragraphs: PARAS, pages });
 
+    await assertVirtualized(page, "bigdoc-local");
     await typeRounds(page, "bigdoc-local-clicktype", 100);
+    await typeAtTail(page, "bigdoc-local");
     await memoryRounds(page, cdp, "bigdoc-local-clicktype", 30);
 
     // ---- COLLAB: the same document, made collaborative ----
@@ -259,7 +349,9 @@ test.describe("big document typing (>50 pages)", () => {
     await waitHook(page);
     await expect.poll(() => layoutBusy(page), { timeout: 120_000 }).toBe(false);
 
+    await assertVirtualized(page, "bigdoc-collab");
     await typeRounds(page, "bigdoc-collab-clicktype", 100);
+    await typeAtTail(page, "bigdoc-collab");
     await memoryRounds(page, cdp, "bigdoc-collab-clicktype", 30);
   });
 });

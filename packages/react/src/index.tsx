@@ -739,6 +739,7 @@ export function DocxView({
       // (destroy-then-append clamps scrollTop to 0 otherwise). The previous
       // handle is handed to renderToDom so it can adopt the DOM of unchanged
       // pages and tear down only what actually changed.
+      const tScroll0 = perf ? performance.now() : 0;
       const { scrollTop, scrollLeft } = container;
       const prev = handle;
       const t2 = perf ? performance.now() : 0;
@@ -751,6 +752,7 @@ export function DocxView({
         onReplyComment,
         onViewportChange: () => editor?.afterViewportChange(),
       }, prev ?? undefined);
+      const tDom = perf ? performance.now() : 0;
       handleRef.current = handle;
       if (presenceRef.current) drawCollabPresence();
       container.scrollTop = scrollTop;
@@ -762,6 +764,10 @@ export function DocxView({
           layout: layoutMs,
           destroy: 0,
           render: t3 - t2,
+          scrollRead: t2 - tScroll0,
+          renderDom: tDom - t2,
+          scrollWrite: t3 - tDom,
+          afterRender: performance.now() - t3,
           totalPages: layout.totalPages,
         };
         // The FIRST paint on this page — the mount paint — recorded once, so

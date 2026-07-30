@@ -534,6 +534,14 @@ export function LocalEditor({
         <DocxView
           source={blank}
           editable
+          // height:100% is LOAD-BEARING for virtualization: DocxView's outer
+          // wrapper only gets a height when the caller passes one. Without it
+          // the wrapper (and the overflow:auto container inside) grow to the
+          // full document height, the container never scrolls, and the
+          // virtualizer's viewport equals the whole document — every page
+          // stays mounted and each keystroke pays O(total pages) in DOM scans
+          // (measured: p50 52ms at 500 pages, 10ms once bounded).
+          style={{ height: "100%" }}
           onReady={(a) => {
             apiRef.current = a;
             setApi(a);
