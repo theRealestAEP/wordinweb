@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DocxView, DocxToolbar, type DocxViewApi } from "wordinweb";
 import { IndexedDbBundleStore, type BundleStore, type DocBundle, type StoredDocSummary } from "wordinweb/collab";
 import { FileMenu, savedDocName } from "./file-menu";
+import { type GoLivePhase } from "./e2ee-flows";
 
 /** The single autosave slot the local editor writes (key convention:
  * `local:` marks documents that never went live — parseBundleKey knows it). */
@@ -76,8 +77,10 @@ export function LocalEditor({
   httpBase: string;
   /** Bytes to open instead of the blank template (returning from a session). */
   initialBytes?: Uint8Array;
-  /** Seal + PUT the given local bytes, then switch the app into collab mode. */
-  onGoLive: (bytes: Uint8Array, shareCode?: string) => Promise<void>;
+  /** Seal + PUT the given local bytes, then switch the app into collab mode.
+   * `onPhase` reports pipeline progress for the overlay below — on a 500-page
+   * document the seal + upload is real seconds of work. */
+  onGoLive: (bytes: Uint8Array, shareCode?: string, onPhase?: (phase: GoLivePhase) => void) => Promise<void>;
   /** Where local work persists (shared with the collab screen). Defaults to
    * this browser's IndexedDB; tests inject the in-memory store. */
   store?: BundleStore;
@@ -297,19 +300,51 @@ export function LocalEditor({
     URL.revokeObjectURL(a.href);
   };
 
+  /** Go-live progress text over the document, or null. Same overlay pattern
+   * as `loading` above — the honest alternative to a frozen tab while a big
+   * document serialises, seals and uploads. */
+  const [goPhase, setGoPhase] = useState<string | null>(null);
+  /** The last go-live failure, shown in the reopened modal. */
+  const [goError, setGoError] = useState<string | null>(null);
+
+  const phaseCopy: Record<GoLivePhase, string> = {
+    encrypt: "Encrypting in your browser…",
+    upload: "Uploading the encrypted document…",
+  };
+
   const startCollab = () => {
     // A code is REQUIRED (owner's call): a shared link is a capability, and
     // this is the second factor that keeps a link on its own from being one.
     // The button is disabled without it; this guard covers the Enter key.
     if (!api || !code.trim()) return;
     setGoing(true);
-    // Read the CURRENT edited document straight off the imperative API — the
-    // exact bytes we seal are what the collaborative session opens to.
-    const bytes = api.save();
-    void onGoLive(bytes, code.trim()).catch(() => {
-      setGoing(false);
-      setModalOpen(false);
-    });
+    setGoError(null);
+    setModalOpen(false);
+    setGoPhase("Preparing your document…");
+    // THE OVERLAY MUST PAINT BEFORE THE SERIALISE. `api.save()` on a 500-page
+    // document is hundreds of synchronous milliseconds; run it in the same
+    // tick as the state updates above and the browser's first paint happens
+    // only after all of it — the exact openDocument trap (fea7e44). Two
+    // frames, not one: a single rAF callback still runs before the paint.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      // Read the CURRENT edited document straight off the imperative API — the
+      // exact bytes we seal are what the collaborative session opens to.
+      const t0 = performance.now();
+      const bytes = api.save();
+      // Same grep-able shape as scripts/bench-golive.mjs, so field reports of
+      // a slow go-live come with the serialise number attached.
+      // eslint-disable-next-line no-console
+      console.log(`STRESS-METRIC golive-serialize docxBytes=${bytes.byteLength} saveMs=${(performance.now() - t0).toFixed(2)}`);
+      void onGoLive(bytes, code.trim(), (p) => setGoPhase(phaseCopy[p])).catch((err: unknown) => {
+        // Refused (too large, server down): back to the editor with the
+        // reason on screen — landing on a dead "session" screen or silently
+        // resetting the button are both lies about what happened.
+        setGoing(false);
+        setGoPhase(null);
+        setGoError(err instanceof Error ? err.message : "Couldn’t start the session. Try again in a moment.");
+        setModalOpen(true);
+      });
+    }));
   };
 
   if (loadError) {
@@ -412,6 +447,13 @@ export function LocalEditor({
             <span>Preparing pages for editing…</span>
           </div>
         )}
+        {goPhase && (
+          <div className="document-loading" data-testid="golive-progress" role="status" aria-live="polite" aria-busy="true">
+            <span className="document-loading-spinner" aria-hidden="true" />
+            <strong>Making this document collaborative…</strong>
+            <span data-testid="golive-phase">{goPhase}</span>
+          </div>
+        )}
         {/* onError as well as onLoad: a document that fails to parse would
             otherwise leave the spinner up forever, which is a worse lie than
             no spinner. Both paths clear it; the error surfaces through the
@@ -443,6 +485,11 @@ export function LocalEditor({
               This document is encrypted in your browser and shared by link. The server orders
               edits without ever holding the key.
             </p>
+            {goError && (
+              <p data-testid="golive-error" style={{ background: "#f8d7da", padding: "6px 10px", borderRadius: 6 }}>
+                {goError}
+              </p>
+            )}
             <label htmlFor="share-code-input">Share code</label>
             <input
               id="share-code-input"

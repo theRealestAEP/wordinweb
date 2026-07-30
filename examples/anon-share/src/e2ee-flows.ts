@@ -25,6 +25,37 @@ function randHex(bytes: number): string {
   return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
 
+/** Where the go-live pipeline currently is, for progress UI. */
+export type GoLivePhase = "encrypt" | "upload";
+
+/** Going live failed in a way worth different words in the UI. */
+export class GoLiveError extends Error {
+  constructor(
+    message: string,
+    /** HTTP status, when the server answered at all. */
+    readonly status?: number,
+    /** The server's ciphertext cap (413 responses carry it). */
+    readonly maxBytes?: number,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Let the browser PAINT between phases. Setting state and then doing
+ * synchronous work in the same tick means the progress text never reaches
+ * the screen (the fea7e44 lesson: the parse spinner needed the same two
+ * frames). Two frames, not one — a single rAF callback runs BEFORE the paint
+ * it is scheduled alongside.
+ */
+const paintYield = (): Promise<void> =>
+  new Promise((resolve) => {
+    const frame = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame
+      : (fn: () => void) => setTimeout(fn, 0);
+    frame(() => frame(() => resolve()));
+  });
+
 async function sealSeed(
   httpBase: string,
   docId: string,
@@ -32,29 +63,62 @@ async function sealSeed(
   docx: Uint8Array,
   sidecar: unknown,
   shareCode?: string,
-): Promise<{ status: number; genesisId: string; ownerToken?: string }> {
+  onPhase?: (phase: GoLivePhase) => void,
+): Promise<{ status: number; genesisId: string; ownerToken?: string; maxBytes?: number }> {
   const genesisId = `g_${randHex(16)}`;
+  const now = () => performance.now();
+  const t: Record<string, number> = {};
+  onPhase?.("encrypt");
+  await paintYield();
+  let t0 = now();
   const stretched = shareCode ? await stretchShareCode(shareCode, docId) : undefined;
+  t.stretchMs = now() - t0;
+  t0 = now();
   const keys = await deriveEpochKeys(docKey, genesisId, stretched);
+  t.deriveMs = now() - t0;
+  // The synchronous blocks below (re-parse, canonical serialise, base64) are
+  // each yielded ahead of, so the phase text and spinner stay painted.
+  await paintYield();
+  t0 = now();
   const doc = DocxDocument.load(docx);
+  t.parseMs = now() - t0;
+  t0 = now();
+  const hash = await docHash(doc as never); // duplicate d.ts identities across entries; same runtime class
+  t.hashMs = now() - t0;
+  await paintYield();
+  t0 = now();
   const sealed = await sealCheckpoint(keys.kContent, docId, genesisId, 0, {
     docx: bytesToB64(docx),
     sidecar,
-    docHash: await docHash(doc as never), // duplicate d.ts identities across entries; same runtime class
+    docHash: hash,
     // Doc 16 §6 late-join: carry the addresses of any media the seeded
     // document already registers, so joiners can fetch bytes the seed bytes
     // themselves may not contain (a revival's bundle can hold registrations
     // whose pixels only participants have).
     mediaMeta: mediaAddressesOf(doc as never),
   });
+  t.sealMs = now() - t0;
   const codeVerifier = stretched ? btoa(String.fromCharCode(...stretched)) : undefined;
+  onPhase?.("upload");
+  await paintYield();
+  t0 = now();
   const res = await fetch(`${httpBase}/docs/${docId}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ encrypted: { genesisId, checkpoint: { seq: 0, ...sealed } }, codeVerifier }),
   });
-  const body = (await res.json()) as { genesisId: string; ownerToken?: string };
-  return { status: res.status, genesisId: body.genesisId, ownerToken: body.ownerToken };
+  t.uploadMs = now() - t0;
+  // One grep-able line per seal, in the shape scripts/bench-golive.mjs and
+  // perf-report.mjs already speak — so "going live chugs" stays measurable
+  // in the field rather than anecdotal.
+  // eslint-disable-next-line no-console
+  console.log(
+    `STRESS-METRIC golive-seal docxBytes=${docx.byteLength} status=${res.status} ` +
+      Object.entries(t).map(([k, v]) => `${k}=${v.toFixed(2)}`).join(" ") +
+      ` totalMs=${Object.values(t).reduce((a, b) => a + b, 0).toFixed(2)}`,
+  );
+  const body = (await res.json().catch(() => ({}))) as { genesisId?: string; ownerToken?: string; maxBytes?: number };
+  return { status: res.status, genesisId: body.genesisId ?? genesisId, ownerToken: body.ownerToken, maxBytes: body.maxBytes };
 }
 
 /** Encrypted go-live: seal the CURRENT local document's bytes (the ones the
@@ -62,15 +126,28 @@ async function sealSeed(
  * URL needs: `?doc=<id>#k=<key>`. The bytes are the genesis checkpoint (seq 0),
  * so the id table IS this docx's parse order — no sidecar needed (null is
  * honest here; a REVIVAL below always carries the bundle's sidecar). Callers
- * that want a blank session pass the bytes from `GET {httpBase}/blank`. */
+ * that want a blank session pass the bytes from `GET {httpBase}/blank`.
+ *
+ * THROWS a GoLiveError on refusal instead of returning garbage: a 413 used
+ * to fall through as `docKey` with no session behind it, and the app would
+ * "join" a document the server had refused — landing on a misleading
+ * "session has ended" screen. */
 export async function goLiveEncrypted(
   httpBase: string,
   docx: Uint8Array,
   shareCode?: string,
+  onPhase?: (phase: GoLivePhase) => void,
 ): Promise<{ docId: string; docKey: string; ownerToken?: string }> {
   const docId = `d_${randHex(16)}`;
   const docKey = mintDocKey();
-  const seeded = await sealSeed(httpBase, docId, docKey, docx, null, shareCode);
+  const seeded = await sealSeed(httpBase, docId, docKey, docx, null, shareCode, onPhase);
+  if (seeded.status !== 200 && seeded.status !== 201) {
+    if (seeded.status === 413) {
+      const mb = seeded.maxBytes ? ` (the limit is about ${Math.round((seeded.maxBytes * 0.55) / 1024 / 1024)} MB of document)` : "";
+      throw new GoLiveError(`This document is too large to share live${mb}. You can keep editing it here, and share a smaller copy.`, 413, seeded.maxBytes);
+    }
+    throw new GoLiveError(`The server refused to start the session (${seeded.status}). Try again in a moment.`, seeded.status);
+  }
   return { docId, docKey, ownerToken: seeded.ownerToken };
 }
 
