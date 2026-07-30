@@ -36,7 +36,7 @@ import {
   resolveField,
 } from "./inline.js";
 import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
-import { FontSpec, LaidOutPage, LayoutResult, PageItem, TextItem } from "./types.js";
+import { FontSpec, LaidOutPage, LayoutResult, LayoutWindow, PageItem, TextItem } from "./types.js";
 
 export interface LayoutOptions {
   measurer?: TextMeasurer;
@@ -165,6 +165,8 @@ type ResolvedFrame = NonNullable<ParaProps["frame"]> & {
 
 interface InternalPage {
   items: PageItem[];
+  /** The page shell remains, but positioned items can be rematerialized. */
+  discarded?: boolean;
   sp: SectionProps;
   physIndex: number;
   displayNumber: number;
@@ -600,6 +602,8 @@ class Engine {
    * this block (before it, the relay trivially matches prev at the resume point
    * and would wrongly splice the edit away). */
   private incrFirstDirty = -1;
+  /** Stop a page-window relay at the first block boundary after this page. */
+  private materializeEndPage = -1;
 
   constructor(
     private doc: DocxDocument,
@@ -615,6 +619,35 @@ class Engine {
       prevSp = this.layoutSectionWithBoundary(sections, sectionIndex, prevSp);
     }
     return this.finishRun();
+  }
+
+  /** Rebuild a contiguous page range from the closest page-top resume point. */
+  materializeRange(data: IncrData, startPage: number, endPage: number): InternalPage[] {
+    let resume: IncrPoint | undefined;
+    for (const point of data.points) {
+      if (point.pageItemCount === 0 && point.pageCount <= startPage) resume = point;
+      if (point.pageCount > startPage) break;
+    }
+    if (!resume) throw new Error(`No layout resume point for page ${startPage + 1}`);
+
+    this.physBase = resume.pageCount;
+    this.displayBase = resume.state.page.displayNumber - 1;
+    this.materializeEndPage = endPage;
+    this.bookmarkPages = new Map(data.bookmarks);
+    this.bookmarkPageIndices = new Map(data.bookmarkPageIndices);
+    this.seqCounters = new Map(data.seqCounters);
+    this.seqAssigned = data.seqAssigned;
+    this.refFieldPosition = data.refFieldPosition;
+    this.refFieldParaNumber = data.refFieldParaNumber;
+    this.restoreIncrState(resume.state, []);
+    this.layoutBlocks(this.doc.sections[0].blocks, resume.blockIdx);
+
+    if (resume.pageCount === 0 && resume.blockIdx === 0) this.applyOpeningFlowOverlap();
+    this.emitColumnSeparators();
+    this.finalizeHeadersFooters();
+    this.rewritePageRefs(this.pages);
+    this.applySectionVAlign();
+    return this.pages;
   }
 
   runHeadersFootersOnly(prev: LayoutResult): LayoutResult | null {
@@ -876,6 +909,15 @@ class Engine {
         refFieldPosition: this.refFieldPosition,
         refFieldParaNumber: this.refFieldParaNumber,
       } satisfies IncrData;
+    }
+    if (result._incr && pages.length > 20) {
+      result._window = new LayoutWindowController(
+        this.doc,
+        this.measurer,
+        result,
+        result._incr as IncrData,
+        this.pages,
+      );
     }
     return result;
   }
@@ -2748,6 +2790,10 @@ class Engine {
   private layoutBlocks(blocks: Block[], startIdx = 0): void {
     this.prepareBlockFlow(startIdx);
     for (let i = startIdx; i < blocks.length; i++) {
+      if (
+        this.materializeEndPage >= 0 &&
+        this.pages.length - 1 + this.physBase > this.materializeEndPage
+      ) return;
       if (this.incrPoints) this.capturePoint(i);
       if (this.incrConvergePrevPageIdx >= 0) return; // tail re-converged; suffix reused
       this.layoutBlock(blocks, i);
@@ -8260,6 +8306,82 @@ class Engine {
       diag(cell.props.borders?.tl2br, `M0 0 L${w} ${h}`);
       diag(cell.props.borders?.tr2bl, `M${w} 0 L0 ${h}`);
     }
+  }
+}
+
+class LayoutWindowController implements LayoutWindow {
+  private retained: Set<number>;
+
+  constructor(
+    private doc: DocxDocument,
+    private measurer: TextMeasurer,
+    private result: LayoutResult,
+    private data: IncrData,
+    private pages: InternalPage[],
+  ) {
+    this.retained = new Set(pages.map((_, index) => index));
+  }
+
+  materialize(pageIndexes: Iterable<number>): void {
+    const wanted = this.expand(pageIndexes);
+    const missing = [...wanted].filter((index) => !this.retained.has(index)).sort((a, b) => a - b);
+    let cursor = 0;
+    while (cursor < missing.length) {
+      const start = missing[cursor];
+      let end = start;
+      while (cursor + 1 < missing.length && missing[cursor + 1] === end + 1) {
+        cursor++;
+        end = missing[cursor];
+      }
+      const rebuilt = new Engine(this.doc, this.measurer).materializeRange(this.data, start, end);
+      const byIndex = new Map(rebuilt.map((page) => [page.physIndex - 1, page]));
+      for (let index = start; index <= end; index++) {
+        const page = byIndex.get(index);
+        if (!page) throw new Error(`Layout relay did not produce page ${index + 1}`);
+        const target = this.pages[index];
+        target.items = page.items;
+        target.hfStart = page.hfStart;
+        target.discarded = false;
+        this.result.pages[index].items = page.items;
+        this.result.pages[index].hfStart = page.hfStart ?? page.items.length;
+        this.retained.add(index);
+      }
+      cursor++;
+    }
+  }
+
+  releaseExcept(pageIndexes: Iterable<number>): void {
+    const wanted = this.expand(pageIndexes);
+    for (const index of this.retained) {
+      if (wanted.has(index)) continue;
+      const page = this.pages[index];
+      page.items = [];
+      page.hfStart = 0;
+      page.discarded = true;
+      this.result.pages[index].items = page.items;
+      this.result.pages[index].hfStart = 0;
+    }
+    this.retained = wanted;
+  }
+
+  retainedPages(): Set<number> {
+    return new Set(this.retained);
+  }
+
+  private expand(pageIndexes: Iterable<number>): Set<number> {
+    const wanted = new Set<number>();
+    const points = this.data.points;
+    for (const pageIndex of pageIndexes) {
+      if (pageIndex < 0 || pageIndex >= this.pages.length) continue;
+      wanted.add(pageIndex);
+      let preceding = -1;
+      for (const point of points) {
+        if (point.pageCount >= pageIndex) break;
+        preceding = point.pageCount;
+      }
+      if (preceding >= 0) wanted.add(preceding);
+    }
+    return wanted;
   }
 }
 
