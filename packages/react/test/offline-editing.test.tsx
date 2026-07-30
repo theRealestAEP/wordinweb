@@ -91,7 +91,7 @@ async function tick(ms = 5) {
     await new Promise<void>((r) => setTimeout(r, ms));
   });
 }
-async function until(pred: () => boolean, label: string, n = 400) {
+async function until(pred: () => boolean, label: string, n = 1200) {
   for (let i = 0; i < n && !pred(); i++) await tick();
   if (!pred()) throw new Error(`timeout: ${label}`);
 }
@@ -635,4 +635,44 @@ describe("seeded fuzz: random offline tails against a concurrently-mutating room
       await c.unmount();
     });
   }
+});
+
+
+/**
+ * A WEDGED STORE MUST NOT WEDGE THE CONNECTION.
+ *
+ * IndexedDB does not reject when the quota is exhausted or storage is blocked
+ * — it simply never settles. The join used to `await store.get(docId)` with no
+ * bound, and the hello is sent only after that resolves, so the socket opened,
+ * no hello was ever sent, the server saw a room with no participants and
+ * evicted it on the empty-room grace, and the client sat on "Connecting…"
+ * forever. Observed in production, with nothing in any log naming the cause:
+ * `conn-open`, then `room-evict reason=empty`, and no `conn-close`.
+ *
+ * Losing the resume costs a pending queue and one cold rejoin. Never
+ * connecting costs everything.
+ */
+describe("a storage read that never settles", () => {
+  class DeadStore extends InMemoryBundleStore {
+    override get(): Promise<never> {
+      return new Promise<never>(() => {}); // never settles, exactly like a wedged IDB
+    }
+  }
+
+  it("still joins — cold — instead of hanging on Connecting", async () => {
+    const hub = seeded();
+    const store = new DeadStore();
+    // mount() waits for session.ready, so reaching this line at all is the
+    // assertion: before the deadline it timed out here.
+    // Generous poll budget: the join deliberately waits out the storage
+    // deadline before proceeding, so this must outlast it.
+    const a = await mount(hub, store);
+    try {
+      expect(a.session.ready, "the session must connect despite dead storage").toBe(true);
+      // And it says so, rather than quietly looking like an empty first visit.
+      expect(a.session.persistErrors, "the unusable store is reported").toBeGreaterThan(0);
+    } finally {
+      await a.unmount();
+    }
+  }, 30_000);
 });

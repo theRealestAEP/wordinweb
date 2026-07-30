@@ -418,6 +418,37 @@ export interface CollabSession {
  * DocxView `collab` prop is typed structurally, so the react package needs no
  * runtime dependency on this module).
  */
+/** Sentinel distinguishing "storage did not answer" from "nothing stored". */
+const TIMED_OUT = Symbol("store-timeout");
+
+/**
+ * How long a storage read may take before the join gives up on it.
+ *
+ * A healthy IndexedDB read is single-digit milliseconds, so this is ~1000x
+ * headroom and still only two seconds of spinner before the user is connected
+ * anyway. Longer would be more patient with a slow disk at the cost of every
+ * user with a broken one staring at nothing.
+ */
+const STORE_DEADLINE_MS = 2000;
+
+/**
+ * Resolve `p`, or `fallback` if it has not settled within `ms`.
+ *
+ * Deliberately RESOLVES on timeout rather than rejecting: every caller here is
+ * on the connect path, where the right answer to "storage is not answering" is
+ * to carry on without it, not to abort the connection.
+ */
+function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let done = false;
+    const t = setTimeout(() => { if (!done) { done = true; resolve(fallback); } }, ms);
+    void p.then(
+      (v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } },
+      () => { if (!done) { done = true; clearTimeout(t); resolve(fallback); } },
+    );
+  });
+}
+
 export function useCollab(opts: UseCollabOptions): CollabSession {
   const { url, docId, clientId, token, createSocket, store, profile, takeover, docKey, shareCode, ownerToken, httpBase } = opts;
   const connRef = useRef<CollabConnection | null>(null);
@@ -970,12 +1001,33 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         // the store before that lands would resume from a stale bundle — or,
         // on the very first save, find nothing and join COLD, discarding
         // exactly the state the resume path exists to carry across the drop.
-        await flushDoneRef.current;
+        // BOUNDED, both of them. A wedged IndexedDB — quota exhausted, storage
+        // blocked, private mode — does not reject, it simply never settles, and
+        // the hello below is sent only after these awaits. The observed failure:
+        // the socket opens, no hello is ever sent, the server sees a room with
+        // no participants and evicts it on the empty-room grace, and the client
+        // spins on "Connecting…" forever with nothing in any log to explain it.
+        //
+        // Losing the resume costs the pending queue and one cold rejoin. Never
+        // connecting costs everything, so the deadline resolves rather than
+        // throws and the join proceeds without the bundle.
+        await withDeadline(flushDoneRef.current, STORE_DEADLINE_MS, undefined);
         if (disposed || connRef.current !== conn) return;
         // Resume if a bundle exists, else join cold. The get() is async;
         // the editor stays !ready (input disabled) until the welcome.
-        const bundle = await store.get(docId);
+        const read = await withDeadline<Awaited<ReturnType<typeof store.get>> | typeof TIMED_OUT>(
+          store.get(docId),
+          STORE_DEADLINE_MS,
+          TIMED_OUT,
+        );
         if (disposed || connRef.current !== conn) return;
+        // A timeout is NOT the same as "no bundle stored", and conflating them
+        // would silently look like the session forgot the user's work. Only the
+        // timeout raises the warning; a genuine empty store joins cold quietly,
+        // which is the ordinary first-visit path.
+        const storeTimedOut = read === TIMED_OUT;
+        const bundle = storeTimedOut ? null : (read as Awaited<ReturnType<typeof store.get>>);
+        if (storeTimedOut) setPersistErrors((n) => n + 1);
         // The stored tail seeds the in-memory one only when memory holds
         // nothing (a fresh page). Within a page's lifetime the ref is always
         // at least as fresh as the store (the store trails by the throttle
