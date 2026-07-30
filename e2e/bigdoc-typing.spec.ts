@@ -72,7 +72,8 @@ function metric(scenario: string, fields: Record<string, string | number>): void
 
 function percentileOf(values: number[], percentile: number): number {
   const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length - 1, Math.floor((percentile / 100) * sorted.length))] ?? 0;
+  const rank = Math.max(1, Math.ceil((percentile / 100) * sorted.length));
+  return sorted[Math.min(sorted.length - 1, rank - 1)] ?? 0;
 }
 
 /** Count occurrences of the sentinel char in the rendered document. ("Z"
