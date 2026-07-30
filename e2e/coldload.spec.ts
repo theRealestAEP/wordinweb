@@ -68,12 +68,16 @@ const arm = (page: Page) =>
 
 async function measureLoad(page: Page, scenario: string): Promise<void> {
   const t0 = Date.now();
-  await page.goto(LANDING);
   if (scenario === "bigdoc-restore") {
     // THE UX CONTRACT: restoring a big document must show the loading
     // overlay, not a bare frozen page — this is the frame on screen for the
-    // seconds the synchronous parse + pagination takes.
-    await expect(page.getByTestId("doc-loading")).toBeVisible({ timeout: 10_000 });
+    // seconds the synchronous parse + pagination takes. Poll from COMMIT:
+    // waiting for the load event can return only after the freeze is over,
+    // sailing past the spinner's whole window.
+    await page.goto(LANDING, { waitUntil: "commit" });
+    await expect(page.getByTestId("doc-loading")).toBeVisible({ timeout: 15_000 });
+  } else {
+    await page.goto(LANDING);
   }
   await expect(page.getByTestId("local-editor")).toBeVisible({ timeout: 60_000 });
   const editorMs = Date.now() - t0;
