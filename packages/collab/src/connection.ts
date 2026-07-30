@@ -424,16 +424,17 @@ export class CollabConnection {
    * Drain the dirty scope behind the docVersion movement since the last take
    * — what the repaint answering `docVersion` must relayout. Replica applies
    * carry their per-intent scope; connection-level bumps (a replaced doc
-   * object, media pixels landing) report document scope, as does a bump with
-   * no recorded scope (conservative: a broad repaint is always correct).
+   * object, media pixels landing) report document scope. Null means NOTHING
+   * was recorded since the last take — the caller already painted everything
+   * and may skip the repaint.
    */
-  takeRenderScope(): Scope {
+  takeRenderScope(): Scope | null {
     const replicaScope = this.replica?.takeRenderScope() ?? null;
     if (this.docVersionBase !== this.takenDocVersionBase) {
       this.takenDocVersionBase = this.docVersionBase;
       return { kind: "doc" };
     }
-    return replicaScope ?? { kind: "doc" };
+    return replicaScope;
   }
 
   get ready(): boolean {

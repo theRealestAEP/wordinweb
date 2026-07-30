@@ -128,10 +128,12 @@ export interface CollabSession {
    * reports its one paragraph, so DocxView relayouts that paragraph
    * incrementally instead of the whole document (the far-page repaint stall);
    * structural or unverifiable intents, doc reloads, and media installs
-   * report `doc`, which keeps today's whole-document path. Consumed on the
-   * repaint itself so a coalesced repaint sees every batched intent's scope.
+   * report `doc`, which keeps today's whole-document path. Null means nothing
+   * dirty was recorded since the last take (an earlier paint covered it) and
+   * the repaint may be skipped. Consumed on the repaint itself so a coalesced
+   * repaint sees every batched intent's scope.
    */
-  takeRenderScope: () => Scope;
+  takeRenderScope: () => Scope | null;
   /** Increases only when reconciliation RELOADED the document (a true
    * conflict). The editor re-mounts on this; between reloads it updates in
    * place (no flash for the common non-conflicting edits). */
@@ -1059,7 +1061,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       renderScopeRef.current = null;
       const conn = connRef.current?.takeRenderScope() ?? null;
       if (local && conn) return unionScopes(local, conn);
-      return conn ?? local ?? { kind: "doc" };
+      return conn ?? local;
     },
     docEpoch,
     ready,
@@ -1383,6 +1385,9 @@ export function CollabEditor(opts: UseCollabOptions & {
       // in a 500-page room queue that relayout: the "collab editor is
       // unusable on a big document" report.
       renderSignal: session.renderVersion,
+      // The dirty scope behind renderSignal: a remote text edit repaints as
+      // ONE incremental paragraph relayout instead of the whole document.
+      takeRenderScope: session.takeRenderScope,
       // Outbound presence: the editor reports caret moves; remote tabs draw
       // this user's cursor (inbound presence above draws theirs here).
       setPresence: session.setPresence,

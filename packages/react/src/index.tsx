@@ -425,13 +425,15 @@ export interface DocxViewProps {
     /** Drain the union of the dirty scopes behind `renderSignal` since the
      * last take. A narrow scope lets the repaint relayout one paragraph
      * incrementally (the same path local typing takes) instead of the whole
-     * document; absent, or `doc` scope, keeps the whole-document repaint.
+     * document; `doc` scope (or an absent method) keeps the whole-document
+     * repaint; null means nothing is dirty and the repaint is skipped.
      * Consumed at the repaint so a coalesced repaint covers every batched
      * remote intent. */
     takeRenderScope?: () =>
       | { kind: "doc" }
       | { kind: "block"; blocks: XmlElement[] }
-      | { kind: "split"; before: XmlElement; after: XmlElement };
+      | { kind: "split"; before: XmlElement; after: XmlElement }
+      | null;
     /** Broadcast the local caret so remote participants draw this user's
      * cursor. Called with the caret's stable-id address on every caret move
      * (null when the caret leaves id-tracked content). */
@@ -953,6 +955,11 @@ export function DocxView({
       basePageWidthRef.current = doc.sections[0]?.props.pageWidth ?? 816;
       curZoom = effZoomRef.current;
       const pageCount = rerender(doc);
+      // That paint covered the whole document, so any dirty scope accumulated
+      // before it (the welcome's doc replacement, the seed tail's applies) is
+      // already on screen — drain it, or the FIRST remote keystroke would
+      // repaint globally for changes this paint already showed.
+      collab?.takeRenderScope?.();
       pages = pageCount;
       recomputeFit();
       onLoad?.({ pageCount, document: doc });
@@ -2103,8 +2110,15 @@ export function DocxView({
       const d = docCacheRef.current?.doc;
       const r = rerenderRef.current;
       // Drain the dirty scope only when actually painting — an aborted paint
-      // leaves it accumulated for the paint that does run.
-      if (d && r && d === collab?.doc) r(d, collab.takeRenderScope?.());
+      // leaves it accumulated for the paint that does run. A null take means
+      // nothing is dirty (an earlier paint covered every recorded change, e.g.
+      // the mount paint racing the first renderSignal) — skip: repainting
+      // would queue a redundant whole-document relayout.
+      if (d && r && d === collab?.doc) {
+        const take = collab.takeRenderScope;
+        const scope = take ? take() : undefined;
+        if (scope !== null) r(d, scope);
+      }
     };
     // rAF coalesces to vsync when THIS window is the foreground one — but the
     // browser PAUSES rAF in a hidden tab and THROTTLES it in a visible-but-

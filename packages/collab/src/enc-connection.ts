@@ -209,15 +209,16 @@ export class EncryptedCollabConnection {
   /**
    * Drain the dirty scope behind the docVersion movement since the last take
    * — parity with the plaintext connection (see connection.ts). Replica
-   * applies carry their per-intent scope; base bumps report document scope.
+   * applies carry their per-intent scope; base bumps report document scope;
+   * null means nothing was recorded (the caller may skip the repaint).
    */
-  takeRenderScope(): Scope {
+  takeRenderScope(): Scope | null {
     const replicaScope = this.replica?.takeRenderScope() ?? null;
     if (this.docVersionBase !== this.takenDocVersionBase) {
       this.takenDocVersionBase = this.docVersionBase;
       return { kind: "doc" };
     }
-    return replicaScope ?? { kind: "doc" };
+    return replicaScope;
   }
 
   /** Un-confirmed local intents in flight — drained-replay parity with the
