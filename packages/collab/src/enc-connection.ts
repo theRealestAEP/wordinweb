@@ -559,19 +559,29 @@ export class EncryptedCollabConnection {
         // this file be" should not wait on a rehydrate to find out.
         this.mediaMaxBlobBytes = msg.mediaMaxBlobBytes ?? null;
         this.enqueue(async () => {
+          // Phase timings for the join-mount critical path (the "joining a
+          // session on a big document takes seconds" report) — printed only
+          // when a host armed __dxwPerf (benchmarks, e2e, the perf HUD).
+          const perfOn = !!(globalThis as { __dxwPerf?: unknown }).__dxwPerf;
+          const t: Record<string, number> = {};
+          let t0 = performance.now();
           this.genesisId = msg.genesisId;
           this.keys = await deriveEpochKeys(this.docKey, msg.genesisId, this.stretchedCode);
+          t.deriveMs = performance.now() - t0; t0 = performance.now();
           const cp = await openCheckpoint(this.keys.kContent, msg.docId, msg.genesisId, msg.checkpoint.seq, msg.checkpoint);
           const bytes = b64ToBytes(cp.docx);
+          t.openMs = performance.now() - t0; t0 = performance.now();
           // The mirror is the local blind-mode "server": seeded exactly as a
           // rehydrating plaintext server would be — bytes, then sidecar,
           // then the tail replayed through the canonical pipeline.
           this.mirror = new DocumentSession(DocxDocument.load(bytes));
           this.mirror.setSeqFloor(msg.checkpoint.seq); // numbering continues from the checkpoint
           if (cp.sidecar) this.mirror.installSidecar(cp.sidecar as never);
+          t.mirrorParseMs = performance.now() - t0; t0 = performance.now();
           this.docVersionBase += (this.replica?.docVersion ?? 0) + 1; // new doc object ⇒ repaint
           this.replica = new ClientReplica(bytes, (cp.sidecar ?? undefined) as never);
           this.replica.confirmedSeq = msg.checkpoint.seq;
+          t.replicaParseMs = performance.now() - t0; t0 = performance.now();
           // Doc 16 §6 late-join: the addresses ride inside the SEALED body,
           // so they are available only here, after the checkpoint opened.
           // Tolerantly read — a checkpoint from an older build has none and
@@ -579,6 +589,14 @@ export class EncryptedCollabConnection {
           applyMediaAddresses(this.replica.doc, cp.mediaMeta);
           applyMediaAddresses(this.mirror.doc, cp.mediaMeta);
           for (const env of msg.tail) await this.ingest(env);
+          t.tailMs = performance.now() - t0;
+          if (perfOn) {
+            // eslint-disable-next-line no-console
+            console.log(
+              `STRESS-METRIC join-welcome docxBytes=${bytes.byteLength} tail=${msg.tail.length} ` +
+                Object.entries(t).map(([k, v]) => `${k}=${v.toFixed(2)}`).join(" "),
+            );
+          }
           // Resume epilogue — same semantics as the plaintext connection.
           const resumed = this.resuming;
           this.resuming = null;
