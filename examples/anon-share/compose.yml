@@ -99,6 +99,17 @@ services:
       # inside every other limit and still grows this at ~1GB/s, and pruning
       # only happens at a quiescent checkpoint a hostile room never reaches.
       # A sealed keystroke is ~500 bytes, so nobody real comes near this.
+      # Largest DOCUMENT this server accepts, decoded. The seed route, the
+      # HTTP body reader and the live checkpoint check all derive their wire
+      # ceilings from this one number (base64 costs a third), so they cannot
+      # drift — three independent copies is what let a document start a
+      # session and then have every checkpoint silently refused.
+      #
+      # COSTS RAM PER ROOM, not just per upload: an encrypted room holds its
+      # latest sealed checkpoint in memory for the whole session, so 64 MB
+      # documents mean ~85 MiB per such room. Chunked seeding would remove
+      # the ceiling properly; this raises it.
+      WW_MAX_DOC_BYTES: "67108864"
       WW_ROOM_LOG_MAX_BYTES: "67108864"
       # Global ceilings. Per-IP caps bound one address, not a botnet. New
       # sessions are refused (503 / server-busy); existing ones are untouched.

@@ -3,7 +3,7 @@ import { attachWebSocketServer, WsServer } from "./ws.js";
 import { InMemoryStorage } from "./storage.js";
 import { blankProvider } from "./blank.js";
 import { createObservability, observabilityEnabled } from "./observability.js";
-import { envLimits, clientIp, mediaWireCap } from "./limits.js";
+import { envLimits, clientIp, mediaWireCap, maxSealedBytes } from "./limits.js";
 import { IpGuard } from "./ip-guard.js";
 
 /**
@@ -352,6 +352,10 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
       res.writeHead(404, { "content-type": "application/json" }).end(`{"error":"not-found"}`);
       return;
     }
+    // Derived from the ONE document limit, never its own constant — see
+    // SurgeLimits.maxDocBytes. A body cap smaller than what the seed route
+    // accepts means the upload dies before the route can answer.
+    const wireCap = maxSealedBytes(limits.surge.maxDocBytes);
     const chunks: Buffer[] = [];
     let size = 0;
     let overCap = false;
@@ -369,7 +373,7 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
       //
       // Stop buffering immediately — the point of the cap is to bound memory,
       // so the reply must not be paid for by reading the rest of the body.
-      if (size > 16 * 1024 * 1024) {
+      if (size > wireCap) {
         if (overCap) return;
         overCap = true;
         // STOP BUFFERING, then DRAIN — do not destroy.
@@ -390,7 +394,7 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
         req.resume();
         res
           .writeHead(413, { "content-type": "application/json", connection: "close" })
-          .end(`{"error":"too-large","maxBytes":${16 * 1024 * 1024}}`);
+          .end(`{"error":"too-large","maxBytes":${wireCap}}`);
         return;
       }
       chunks.push(c);

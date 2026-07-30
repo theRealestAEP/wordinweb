@@ -16,6 +16,29 @@ import { startZeroCustodyServer } from "../src/cli.js";
  * is covered in seed-http.test.ts; this is the transport cap underneath it,
  * which nothing exercised.
  */
+/**
+ * Shrink the document limit for the duration of a test.
+ *
+ * The real cap is derived from `WW_MAX_DOC_BYTES` (64 MB by default), whose
+ * wire ceiling is ~93 MiB — pushing that much through a test would cost more
+ * than it proves. The BEHAVIOUR under test is "does an over-cap body get
+ * answered", which is identical at any threshold, so the threshold moves
+ * instead of the payload.
+ */
+async function withDocCap<T>(bytes: number, fn: (port: number) => Promise<T>): Promise<T> {
+  const prev = process.env.WW_MAX_DOC_BYTES;
+  process.env.WW_MAX_DOC_BYTES = String(bytes);
+  const port = await freePort();
+  const server = await startZeroCustodyServer({ port });
+  try {
+    return await fn(port);
+  } finally {
+    server.close();
+    if (prev === undefined) delete process.env.WW_MAX_DOC_BYTES;
+    else process.env.WW_MAX_DOC_BYTES = prev;
+  }
+}
+
 async function freePort(): Promise<number> {
   const net = await import("node:net");
   return new Promise((resolve) => {
@@ -29,12 +52,9 @@ async function freePort(): Promise<number> {
 
 describe("the seed route's wire-level size cap", () => {
   it("answers 413 instead of dropping the connection", async () => {
-    const port = await freePort();
-    const server = await startZeroCustodyServer({ port });
-    try {
-      // Comfortably past the 16 MiB wire cap. Sent as one JSON body, the shape
-      // the demo's go-live actually posts.
-      const huge = "A".repeat(17 * 1024 * 1024);
+    // 1 MB documents ⇒ a wire ceiling near 1.4 MiB; 3 MiB clears it easily.
+    await withDocCap(1024 * 1024, async (port) => {
+      const huge = "A".repeat(3 * 1024 * 1024);
       const res = await fetch(`http://127.0.0.1:${port}/docs`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -49,25 +69,19 @@ describe("the seed route's wire-level size cap", () => {
       // The limit is stated, so a caller can say something useful rather than
       // guessing why it failed.
       expect(typeof body.maxBytes).toBe("number");
-    } finally {
-      server.close();
-    }
+    });
   }, 30_000);
 
   it("still serves normally afterwards — the refusal does not poison the listener", async () => {
-    const port = await freePort();
-    const server = await startZeroCustodyServer({ port });
-    try {
+    await withDocCap(1024 * 1024, async (port) => {
       await fetch(`http://127.0.0.1:${port}/docs`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ docx: "A".repeat(17 * 1024 * 1024) }),
+        body: JSON.stringify({ docx: "A".repeat(3 * 1024 * 1024) }),
       }).catch(() => undefined);
 
       const health = await fetch(`http://127.0.0.1:${port}/healthz`);
       expect(health.status).toBe(200);
-    } finally {
-      server.close();
-    }
+    });
   }, 30_000);
 });

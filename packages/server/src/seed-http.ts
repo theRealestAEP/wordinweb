@@ -1,4 +1,5 @@
 import { CollabHub } from "./hub.js";
+import { maxSealedBytes, DEFAULT_SURGE_LIMITS } from "./limits.js";
 import { makeDocId } from "./demo.js";
 import { blankDocxBytes } from "./blank.js";
 import type { IdSidecar, SealedCheckpoint, LineageHead } from "@wordinweb/collab/server";
@@ -111,7 +112,10 @@ export function handleSeedRequest(
   req: SeedHttpRequest,
   opts: SeedHttpOptions = {},
 ): SeedHttpResponse {
-  const maxBytes = opts.maxDocxBytes ?? 10 * 1024 * 1024;
+  // Derived, never a local constant — see SurgeLimits.maxDocBytes for why
+  // three independent copies of this number was a bug rather than a style
+  // problem. Callers may still override for tests.
+  const maxBytes = opts.maxDocxBytes ?? maxSealedBytes(DEFAULT_SURGE_LIMITS.maxDocBytes);
 
   // Encrypted go-live / revival (doc 13): opaque checkpoint, no content
   // validation possible server-side (clients validate on decrypt — doc 11

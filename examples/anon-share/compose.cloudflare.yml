@@ -75,6 +75,17 @@ services:
       # ── surge valves ────────────────────────────────────────────────────
       WW_WS_MAX_PAYLOAD: "524288"
       WW_WS_MAX_BUFFERED: "4194304"
+      # Largest DOCUMENT this server accepts, decoded. The seed route, the
+      # HTTP body reader and the live checkpoint check all derive their wire
+      # ceilings from this one number (base64 costs a third), so they cannot
+      # drift — three independent copies is what let a document start a
+      # session and then have every checkpoint silently refused.
+      #
+      # COSTS RAM PER ROOM, not just per upload: an encrypted room holds its
+      # latest sealed checkpoint in memory for the whole session, so 64 MB
+      # documents mean ~85 MiB per such room. Chunked seeding would remove
+      # the ceiling properly; this raises it.
+      WW_MAX_DOC_BYTES: "67108864"
       WW_ROOM_LOG_MAX_BYTES: "67108864"
       # Sized for a dedicated 16 GB / 10-core host. See `ulimits` below —
       # WW_MAX_CONNS_GLOBAL is meaningless above the container's file-handle

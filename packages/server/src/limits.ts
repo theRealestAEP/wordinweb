@@ -155,6 +155,27 @@ export interface SurgeLimits {
    * base64 overhead. `ws` closes a violating connection with status 1009
    * (message too big), which reaches our ordinary close path.
    */
+  /**
+   * Largest DOCUMENT this server will take, in bytes of decoded .docx.
+   *
+   * THE ONE NUMBER. Three separate caps used to police document size — the
+   * seed route's decoded cap, the HTTP body cap in cli.ts, and the live
+   * checkpoint cap in hub.ts — each written independently, in different units,
+   * in different files. They disagreed: a document could clear the seed cap and
+   * then have every live checkpoint silently dropped, which stops the log
+   * pruning and makes every joiner replay the whole epoch.
+   *
+   * So the others are DERIVED from this (see maxSealedBytes). Base64 costs a
+   * third, and the sealed wire forms are base64, which is why the derived caps
+   * are visibly larger than this number rather than equal to it.
+   *
+   * RAISING THIS COSTS RAM PER ROOM, not just per upload: every encrypted room
+   * holds its latest sealed checkpoint in memory for the life of the session.
+   * At 64 MB that is ~85 MiB of base64 per room, so ten such rooms is most of a
+   * gigabyte. Size it against the host, not against the biggest file anyone
+   * might have.
+   */
+  maxDocBytes: number;
   wsMaxPayloadBytes: number;
   /**
    * Ceiling on a single socket's OUTBOUND buffer, in bytes.
@@ -312,6 +333,7 @@ export const DEFAULT_IP_LIMITS: IpLimits = {
 };
 
 export const DEFAULT_SURGE_LIMITS: SurgeLimits = {
+  maxDocBytes: 64 * 1024 * 1024,
   wsMaxPayloadBytes: 512 * 1024,
   wsMaxBufferedBytes: 4 * 1024 * 1024,
   roomLogMaxBytes: 64 * 1024 * 1024,
@@ -402,6 +424,7 @@ export function envLimits(): HubLimits {
     surge: {
       wsMaxPayloadBytes: envInt("WW_WS_MAX_PAYLOAD", DEFAULT_SURGE_LIMITS.wsMaxPayloadBytes),
       wsMaxBufferedBytes: envInt("WW_WS_MAX_BUFFERED", DEFAULT_SURGE_LIMITS.wsMaxBufferedBytes),
+      maxDocBytes: envInt("WW_MAX_DOC_BYTES", DEFAULT_SURGE_LIMITS.maxDocBytes),
       roomLogMaxBytes: envInt("WW_ROOM_LOG_MAX_BYTES", DEFAULT_SURGE_LIMITS.roomLogMaxBytes),
       // NAMED `_GLOBAL` DELIBERATELY. `WW_MAX_CONNS` sits one character away
       // from the per-IP `WW_IP_MAX_CONNS` and means something entirely
@@ -448,6 +471,19 @@ export function envLimits(): HubLimits {
 export const MEDIA_WIRE_HEADROOM_BYTES = 2 * 1024 * 1024;
 
 /** The socket-level destroy threshold for a media upload body. */
+/**
+ * The wire ceiling for a sealed document of `maxDocBytes`: base64 of the
+ * ciphertext, plus headroom for the JSON envelope around it.
+ *
+ * Every cap that polices a SEALED document must use this rather than its own
+ * constant, so the seed route, the HTTP body reader and the live checkpoint
+ * check cannot drift apart again. Base64 is 4/3; the extra eighth covers the
+ * surrounding JSON and the GCM tag.
+ */
+export function maxSealedBytes(maxDocBytes: number): number {
+  return Math.ceil((maxDocBytes * 4) / 3) + Math.ceil(maxDocBytes / 8);
+}
+
 export function mediaWireCap(media: MediaLimits): number {
   return media.maxBlobBytes + MEDIA_WIRE_HEADROOM_BYTES;
 }

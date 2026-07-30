@@ -5,7 +5,7 @@ import { ClientMessage, ServerMessage, PROTOCOL_VERSION, sanitizePresencePositio
 import type { Readable } from "node:stream";
 import { StorageDriver } from "./storage.js";
 import { type Observability, NO_OP_OBSERVABILITY } from "./observability.js";
-import { type HubLimits, DEFAULT_LIMITS } from "./limits.js";
+import { type HubLimits, DEFAULT_LIMITS, maxSealedBytes } from "./limits.js";
 import { IpGuard, NO_OP_IP_GUARD, type IpLimitReason } from "./ip-guard.js";
 import { MediaSpill, newRoomSpillId, SPILL_FILE_OVERHEAD } from "./media-spill.js";
 
@@ -924,7 +924,25 @@ export class CollabHub {
         // Only the ASSIGNED connection's checkpoints are accepted — a
         // volunteer (or attacker) can't insist on the role (blocker 2).
         if (!room.enc || room.enc.checkpointerConnId !== conn.id) return;
-        if (msg.checkpoint.ciphertext.length > 16 * 1024 * 1024) return; // size cap
+        // Size cap, DERIVED from the one document limit (SurgeLimits.maxDocBytes)
+        // rather than written here independently — this constant used to be its
+        // own 16 MiB and could silently disagree with what the seed route let
+        // in, so a document could start a session and then have every
+        // checkpoint refused.
+        //
+        // AND IT MUST BE LOUD. This was a bare `return`: no reply, no log, no
+        // counter. Checkpoints are what prune the log, so silently dropping
+        // them makes the log grow until the room hits its budget and dies,
+        // while every joiner replays the whole epoch — all from a size check
+        // that said nothing to anybody.
+        if (msg.checkpoint.ciphertext.length > maxSealedBytes(this.limits.surge.maxDocBytes)) {
+          this.obs.error("hub.checkpointTooLarge", new Error("checkpoint over size cap"), {
+            room: room.obsLabel,
+            bytes: msg.checkpoint.ciphertext.length,
+            cap: maxSealedBytes(this.limits.surge.maxDocBytes),
+          });
+          return;
+        }
         if (msg.checkpoint.seq <= room.enc.checkpoint.seq) return; // stale
         // QUIESCENT acceptance (doc 13 / round-4 blocker 1, fix direction
         // (b)): a checkpoint is adopted only when NO retained entry sits
