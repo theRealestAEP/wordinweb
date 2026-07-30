@@ -6763,12 +6763,27 @@ export class DocxEditor {
     // the caret's page as unchanged (same modelVersion, same in-place-mutated
     // items) and adopts its STALE DOM, so the new glyph never paints until the
     // next keystroke (the bug that made click-then-type look dead and, in collab,
-    // desync as the user re-clicked a stale view). Forcing the full refresh()
-    // path for that one edit bumps modelVersion, disabling page adoption. It is
-    // one non-incremental relayout per caret move — imperceptible, and only when
-    // the caret actually moved, so continuous typing keeps the fast path.
+    // desync as the user re-clicked a stale view). That one edit therefore may
+    // NOT take the in-place path; it needs fresh model objects for the caret's
+    // paragraph so the differ rebuilds its DOM.
+    //
+    // It reparses ONLY that paragraph. An earlier revision forced the full
+    // doc.refresh() here, and that was the 500-page regression (perf:
+    // scripts/bench-local-typing.mjs): refresh() rebuilds every model object
+    // (cold re-measure of the whole document — ~96k measureText calls on a
+    // 3000-paragraph doc, vs ~34 for one paragraph) and bumps modelVersion,
+    // which rerender answers past BACKGROUND_LAYOUT_PAGE_THRESHOLD with an
+    // async whole-document relayout behind an inert container — a multi-second
+    // input-eating stall after EVERY click-then-type. The scoped reparse keeps
+    // the adoption-defeat (new objects ⇒ pageEq fails ⇒ the touched page
+    // repaints) at one-paragraph cost; anything it cannot handle (header/
+    // footer stories, sectPr/bookmark paragraphs) returns null and takes the
+    // old full-refresh path.
     const caretMoved = !!this.caret && this.caret.t !== this.lastCommitCaretT;
-    const syncedText = !caretMoved && textOnly && this.caret ? this.syncTextModel(this.caret.t) : false;
+    let syncedText = !caretMoved && textOnly && this.caret ? this.syncTextModel(this.caret.t) : false;
+    if (!syncedText && !structuralModelSynced && caretMoved && textOnly && dirtyParagraph) {
+      syncedText = this.host.doc.reparseBodyParagraph(dirtyParagraph) !== null;
+    }
     if (syncedText && dirtyParagraph) invalidateParagraphSignature(dirtyParagraph);
     else if (!structuralModelSynced) this.host.doc.refresh();
     this.lastCommitCaretT = this.caret?.t ?? null;
