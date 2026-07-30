@@ -29,6 +29,10 @@ const arg = (name, dflt) => {
 const PARAS = arg("paras", 3000);
 const KEYS = arg("keys", 30);
 const CLICK_EVERY = arg("clickEvery", 0); // 0 = click once, then type straight
+// Bookmark every paragraph (the TOC-heading shape). Pre-fix, typing in a
+// bookmarked paragraph fell out of the reparse fast path into a full
+// doc.refresh() + whole-document relayout per keystroke.
+const BOOKMARKS = arg("bookmarks", 0);
 
 /* ------------------------- jsdom environment ---------------------------- */
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -80,7 +84,9 @@ if (!window.ResizeObserver) {
 /* ------------------------------ doc bytes ------------------------------- */
 function docBytes(paras) {
   const para = (i) =>
-    `<w:p><w:r><w:t xml:space="preserve">Paragraph ${i}: the quick brown fox jumps over the lazy dog while the committee deliberates at length. </w:t></w:r></w:p>`;
+    `<w:p>${BOOKMARKS ? `<w:bookmarkStart w:id="${i}" w:name="_Toc${1000 + i}"/>` : ""}` +
+    `<w:r><w:t xml:space="preserve">Paragraph ${i}: the quick brown fox jumps over the lazy dog while the committee deliberates at length. </w:t></w:r>` +
+    `${BOOKMARKS ? `<w:bookmarkEnd w:id="${i}"/>` : ""}</w:p>`;
   let body = "";
   for (let i = 0; i < paras; i++) body += para(i);
   const documentXml =
@@ -182,9 +188,11 @@ let busySeen = 0;
 
 const perKey = [];
 const perKeyMeasures = [];
+const perKeyAllocMb = [];
 for (let i = 0; i < KEYS; i++) {
   if (CLICK_EVERY && i > 0 && i % CLICK_EVERY === 0) await clickSpan((i * 7) % 40);
   const m0 = globalThis.__measureCalls;
+  const h0 = process.memoryUsage().heapUsed;
   const k0 = performance.now();
   await act(async () => {
     target().dispatchEvent(new window.KeyboardEvent("keydown", { key: "Z", bubbles: true, cancelable: true }));
@@ -195,6 +203,9 @@ for (let i = 0; i < KEYS; i++) {
   if (busy()) busySeen++;
   perKey.push(performance.now() - k0);
   perKeyMeasures.push(globalThis.__measureCalls - m0);
+  // Positive delta only: GC between keystrokes makes the raw delta negative;
+  // clamping keeps the median honest about allocation per keystroke.
+  perKeyAllocMb.push(Math.max(0, (process.memoryUsage().heapUsed - h0) / 1e6));
 }
 
 const typed = (container.textContent?.match(/Z/g) ?? []).length;
@@ -205,12 +216,15 @@ const sum = perKey.reduce((a, b) => a + b, 0);
 const samples = globalThis.__dxwPerf.samples ?? [];
 const phase = (k) => samples.reduce((a, s) => a + (s[k] ?? 0), 0);
 const fmt = (n) => (Number.isInteger(n) ? n : n.toFixed(2));
+const allocSorted = [...perKeyAllocMb].sort((a, b) => a - b);
 console.log(
   `STRESS-METRIC local-typing pkg=${pkg === "wordinweb" ? "worktree" : "custom"} paragraphs=${PARAS} pages=${pages} ` +
-    `keystrokes=${KEYS} mountMs=${fmt(mountMs)} totalMs=${fmt(sum)} msPerKey=${fmt(sum / KEYS)} ` +
+    `bookmarks=${BOOKMARKS} keystrokes=${KEYS} mountMs=${fmt(mountMs)} totalMs=${fmt(sum)} msPerKey=${fmt(sum / KEYS)} ` +
     `p50=${fmt(pct(50))} p90=${fmt(pct(90))} p99=${fmt(pct(99))} max=${fmt(sorted[sorted.length - 1])} busySeen=${busySeen} landed=${typed} ` +
     `measurePerKeyMedian=${[...perKeyMeasures].sort((a, b) => a - b)[Math.floor(perKeyMeasures.length / 2)]} ` +
-    `measurePerKeyMax=${Math.max(...perKeyMeasures)}`,
+    `measurePerKeyMax=${Math.max(...perKeyMeasures)} ` +
+    `allocMbPerKeyMedian=${fmt(allocSorted[Math.floor(allocSorted.length / 2)])} ` +
+    `allocMbPerKeyMax=${fmt(Math.max(...perKeyAllocMb))}`,
 );
 if (samples.length) {
   console.log(

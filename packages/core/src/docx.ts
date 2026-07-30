@@ -770,23 +770,62 @@ export class DocxDocument {
     const old = location.blocks[location.index];
     if (old.type !== "paragraph" || old.sectionBreak) return null;
 
-    const unsafe = (element: XmlElement): boolean => {
+    // Bookmark ranges retain parsed Run identities in refBookmarks; a local
+    // paragraph replacement must rebuild those captures or REF/PAGEREF fields
+    // would read detached runs. Ranges fully INSIDE this paragraph (every
+    // bookmarkStart's id also ends here, and vice versa) are re-captured from
+    // the reparse below. A range crossing the paragraph boundary cannot be
+    // rebuilt locally, so it falls back to the full refresh. This matters at
+    // scale: rejecting bookmarks outright sent the first keystroke in any
+    // heading (TOC targets are bookmarked) through doc.refresh() + a full
+    // relayout — an inert multi-second stall per keystroke on long documents.
+    const starts = new Map<string, string>(); // bookmark id -> name
+    const ends = new Set<string>();
+    let unsafe = false;
+    const scan = (element: XmlElement): void => {
       const name = localName(element.name);
-      // Bookmark ranges retain parsed Run identities in refBookmarks. A local
-      // paragraph replacement would leave those references stale; other
-      // fields, controls, and revisions are safe to parse one-for-one.
-      if (name === "sectPr" || name === "bookmarkStart" || name === "bookmarkEnd") return true;
-      return element.children.some(unsafe);
+      if (name === "sectPr") {
+        unsafe = true;
+        return;
+      }
+      if (name === "bookmarkStart") {
+        const id = attr(element, "id");
+        if (id) starts.set(id, attr(element, "name") ?? "");
+      } else if (name === "bookmarkEnd") {
+        const id = attr(element, "id");
+        if (id) ends.add(id);
+      }
+      for (const c of element.children) scan(c);
     };
-    if (unsafe(source)) return null;
+    scan(source);
+    if (unsafe) return null;
+    if (starts.size !== ends.size) return null;
+    for (const id of starts.keys()) if (!ends.has(id)) return null;
 
+    // A bookmark opened in ANOTHER paragraph can span this one without any
+    // marker inside it; its capture then holds this paragraph's old runs.
+    if (this.refBookmarks.size > 0) {
+      const paragraphNames = new Set(starts.values());
+      const oldRuns = new Set<Run>();
+      for (const c of old.children) {
+        for (const run of c.type === "run" ? [c] : c.runs) oldRuns.add(run);
+      }
+      for (const [name, runs] of this.refBookmarks) {
+        if (paragraphNames.has(name)) continue;
+        if (runs.some((run) => oldRuns.has(run))) return null;
+      }
+    }
+
+    const refBookmarks = { open: new Map<string, Run[]>(), byName: new Map<string, Run[]>() };
     const paragraph = parseParagraph(source, {
       ...this.ctxBase,
       rels: this.documentRels,
       readPart: (part: string) => this.readXmlOptional(part),
+      refBookmarks,
       independentTextboxStories: true,
     });
     if (paragraph.revisionHidden || paragraph.sectionBreak) return null;
+    for (const [name, runs] of refBookmarks.byName) this.refBookmarks.set(name, runs);
     location.blocks[location.index] = paragraph;
     return paragraph;
   }
