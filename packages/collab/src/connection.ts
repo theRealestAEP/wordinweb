@@ -220,7 +220,9 @@ export class CollabConnection {
     this.transport.onMessage((msg) => this.onServer(msg));
     if (mediaOpts) {
       this.media = new MediaClient(mediaOpts, () => this.replica?.doc ?? null, {
-        onChange: () => this.cb.onChange?.(),
+        // Media installs mutate the doc outside the replica's counter — bump
+        // the render signal so the skeleton repaints (see docVersion).
+        onChange: () => { this.docVersionBase++; this.cb.onChange?.(); },
         onState: (part, state) => this.cb.onMediaState?.(part, state),
         need: (sha) => this.mediaNeed(sha),
         have: (shas) => this.mediaHave(shas),
@@ -396,6 +398,23 @@ export class CollabConnection {
     return this.replica?.doc ?? null;
   }
 
+  /** Accumulates doc changes across replica rebuilds (welcome), so the getter
+   * below stays monotonic per connection. */
+  private docVersionBase = 0;
+  /**
+   * Counts changes TO THE RENDERED DOCUMENT — the repaint signal, as opposed
+   * to onChange (which also fires for pure bookkeeping such as a tracked own
+   * echo). The editor-driven typing path mutates and paints the doc itself,
+   * so its submit + echo leave this untouched; remote applies, optimistic
+   * canonical applies (toolbar ops), reloads, and media installs advance it.
+   * The react layer repaints on THIS, not on onChange — repainting on
+   * onChange queued a whole-document relayout per keystroke, catastrophic
+   * past the background-layout page threshold.
+   */
+  get docVersion(): number {
+    return this.docVersionBase + (this.replica?.docVersion ?? 0);
+  }
+
   get ready(): boolean {
     return this.replica !== null;
   }
@@ -487,6 +506,7 @@ export class CollabConnection {
         // baseline is that seq, and any tail entries are strictly after it.
         // The sidecar rides with the snapshot (round-4 F10) so the replica's
         // id table matches the server's even across split-created ids.
+        this.docVersionBase += (this.replica?.docVersion ?? 0) + 1; // new doc object ⇒ repaint
         this.replica = new ClientReplica(base64ToBytes(msg.snapshot), msg.sidecar);
         this.replica.confirmedSeq = msg.seq;
         this.genesisId = msg.genesisId;

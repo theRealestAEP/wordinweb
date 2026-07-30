@@ -9,9 +9,21 @@
  *
  * The DOM staleness itself is a real-browser layout-reuse effect that jsdom's
  * degenerate layout does not reproduce (every jsdom click converges), so this
- * pins the FIX'S MECHANISM instead: commit() must take the full refresh() path
- * (which bumps modelVersion, disabling page adoption) on the first edit after
- * the caret moves, while continuous typing in one spot keeps the fast path.
+ * pins the FIX'S MECHANISM instead. The fix is a SCOPED reparse of the caret's
+ * paragraph: fresh model objects make pageEq fail for exactly the touched
+ * page, so its DOM is rebuilt — page adoption is defeated without rebuilding
+ * the whole model.
+ *
+ * The first revision of the fix forced a full doc.refresh() here instead.
+ * That was the 500-page editing regression (scripts/bench-local-typing.mjs):
+ * refresh() rebuilt every model object (whole-document re-measure, ~96k
+ * measureText calls on a 3000-paragraph doc vs ~34 for one paragraph) and its
+ * modelVersion bump sent rerender down the >50-page background-relayout path
+ * with the container inert — a multi-second input-eating stall after every
+ * click-then-type. So this test pins BOTH halves:
+ *   1. the caret paragraph's retained model object is REPLACED by the first
+ *      edit after a jump (the adoption-defeat that repaints the glyph), and
+ *   2. modelVersion does NOT change (no O(document) refresh/relayout).
  * Verified end-to-end in a real browser; see BUGS.md.
  */
 import { describe, expect, it } from "vitest";
@@ -19,6 +31,7 @@ import { createElement, act } from "react";
 import { createRoot } from "react-dom/client";
 import { CollabEditor } from "../src/collab.js";
 import { CollabHub, blankDocxBytes, type DocProvider, type Connection, type ServerMessage } from "@wordinweb/server";
+import type { DocxDocument, Paragraph, XmlElement } from "@wordinweb/core";
 
 const provider: DocProvider = { load: () => blankDocxBytes() };
 let factorySeq = 0;
@@ -67,27 +80,27 @@ async function mount(hub: CollabHub, docId: string, clientId: string) {
     });
     await tick();
   };
-  // Reach the live collab doc (has modelVersion) through the React tree.
-  const modelVersion = (): number => {
+  // Reach the live collab doc through the React tree.
+  const doc = (): DocxDocument => {
     const key = Object.keys(container).find((k) => k.startsWith("__reactContainer$"))!;
     const stack: unknown[] = [(container as unknown as Record<string, unknown>)[key]];
     let guard = 0;
     while (stack.length && guard++ < 5000) {
-      const f = stack.pop() as { memoizedProps?: { collab?: { doc?: { modelVersion: number } } }; child?: unknown; sibling?: unknown } | null;
+      const f = stack.pop() as { memoizedProps?: { collab?: { doc?: DocxDocument } }; child?: unknown; sibling?: unknown } | null;
       if (!f) continue;
       const d = f.memoizedProps?.collab?.doc;
-      if (d && typeof d.modelVersion === "number") return d.modelVersion;
+      if (d && typeof d.modelVersion === "number") return d;
       if (f.child) stack.push(f.child);
       if (f.sibling) stack.push(f.sibling);
     }
     throw new Error("collab doc not found");
   };
   const unmount = async () => { await act(async () => { root.unmount(); }); };
-  return { container, keys, clickAt, modelVersion, unmount };
+  return { container, keys, clickAt, doc, unmount };
 }
 
-describe("caret-move repaint: first edit after a caret jump takes the full-refresh path", () => {
-  it("typing after clicking a different line bumps modelVersion; same-spot typing does not", async () => {
+describe("caret-move repaint: first edit after a caret jump reparses the caret paragraph", () => {
+  it("replaces the paragraph model object (adoption defeat) WITHOUT a whole-document refresh", async () => {
     const hub = new CollabHub(provider);
     const ed = await mount(hub, "caret-move", "alice");
     // Build three lines. (Line y-bands in this harness: line1<=84, line2~120, line3>=200.)
@@ -97,26 +110,48 @@ describe("caret-move repaint: first edit after a caret jump takes the full-refre
     await ed.keys(["Enter"]); await ed.keys([..."cccc"]);
     await settle();
 
-    // Caret is in line 3. Click BACK into line 1 (a different text node), type one
-    // char: the fix forces the full refresh() path, which bumps modelVersion.
+    // Caret is in line 3. Click BACK into line 1 (a different text node) and
+    // type one char. The paragraph model holding the typed text must be a
+    // FRESH object afterwards — identical retained objects are exactly what
+    // page adoption compares equal, leaving the glyph unpainted in a real
+    // browser (the click-then-type bug).
     await ed.clickAt(12, 12);
-    const beforeJumpEdit = ed.modelVersion();
+    const d = ed.doc();
+    const holds = (p: Paragraph, text: string): boolean =>
+      p.children.some((r) => "content" in r && (r as { content: { kind: string; text?: string }[] }).content.some(
+        (c) => c.kind === "text" && (c.text ?? "").includes(text)));
+    const paraWith = (text: string): Paragraph => {
+      for (const s of d.sections) {
+        for (const b of s.blocks) if (b.type === "paragraph" && holds(b, text)) return b;
+      }
+      throw new Error(`no paragraph containing "${text}"`);
+    };
+    const beforeObj = paraWith("aaaa");
+    const beforeSrc = beforeObj.src as XmlElement;
+    const beforeVersion = d.modelVersion;
     await ed.keys([..."X"]);
     await settle();
-    const afterJumpEdit = ed.modelVersion();
-    expect(afterJumpEdit, "first edit after a caret jump must bump modelVersion (refresh path)").toBeGreaterThan(beforeJumpEdit);
 
-    // Control: keep typing in the SAME spot — the fast in-place path is retained,
-    // so at least one subsequent char must NOT bump modelVersion (no needless
-    // full relayout on every keystroke).
-    const versions: number[] = [];
-    for (const c of [..."YZW"]) {
-      await ed.keys([c]);
-      await settle(6);
-      versions.push(ed.modelVersion());
-    }
-    const bumpedEveryChar = versions.every((v, i) => v > (i === 0 ? afterJumpEdit : versions[i - 1]));
-    expect(bumpedEveryChar, "continuous same-spot typing must keep the fast path (not refresh every char)").toBe(false);
+    // 1. Adoption defeat: the retained model object was replaced (same XML
+    //    element underneath — the reparse is scoped, not a rebuild).
+    const afterObj = paraWith("aaa"); // the X landed somewhere inside the aaaa line
+    expect(afterObj, "first edit after a caret jump must produce a FRESH paragraph model object").not.toBe(beforeObj);
+    expect(afterObj.src, "the reparse must retain the same XML source element").toBe(beforeSrc);
+    expect(holds(afterObj, "X"), "the typed char must be in the reparsed model").toBe(true);
+
+    // 2. No whole-document work: modelVersion must NOT move. A bump here means
+    //    doc.refresh() ran — the O(document) model rebuild whose >50-page
+    //    rerender answer is an async global relayout behind an inert container
+    //    (the 500-page click-then-type stall this pins against).
+    expect(d.modelVersion, "a caret-jump edit must not take the O(document) refresh path").toBe(beforeVersion);
+
+    // Control: continuous typing in the SAME spot keeps the fast in-place path
+    // (no refresh, and no reparse churn is observable beyond the model staying
+    // paint-correct — the glyphs land).
+    await ed.keys([..."YZ"]);
+    await settle(6);
+    expect(d.modelVersion, "same-spot typing must keep the fast path").toBe(beforeVersion);
+    expect(ed.container.textContent).toContain("Y");
 
     await ed.unmount();
   });

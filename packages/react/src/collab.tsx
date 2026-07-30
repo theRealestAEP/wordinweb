@@ -108,6 +108,18 @@ export interface CollabSession {
   /** Monotonically increases on every reconciled change — a cheap re-render
    * signal (the doc object may be reloaded by reconciliation). */
   version: number;
+  /**
+   * Increases only when the RENDERED DOCUMENT changed outside the editor —
+   * remote applies, optimistic toolbar ops, reloads, self-heals, media
+   * installs. The editor-driven typing path (submit + own echo) leaves it
+   * untouched: the editor already mutated AND painted the doc, so repainting
+   * again on `version` queued a redundant whole-document relayout per
+   * keystroke — invisible on 5 pages, catastrophic past DocxView's
+   * background-layout threshold (a 500-page doc relaid out asynchronously
+   * behind an inert container, per keystroke). DocxView's `renderSignal`
+   * rides THIS; `version` remains the observer/bookkeeping signal.
+   */
+  renderVersion: number;
   /** Increases only when reconciliation RELOADED the document (a true
    * conflict). The editor re-mounts on this; between reloads it updates in
    * place (no flash for the common non-conflicting edits). */
@@ -397,6 +409,12 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const connRef = useRef<CollabConnection | null>(null);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
   const [version, setVersion] = useState(0);
+  /** Repaint signal (see CollabSession.renderVersion): follows the
+   * connection's docVersion, plus local bumps for offline toolbar applies. */
+  const [renderVersion, setRenderVersion] = useState(0);
+  /** Last connection docVersion folded into renderVersion — the two sources
+   * (connection counter, local offline bumps) must not collide. */
+  const lastDocVersionRef = useRef(0);
   const [docEpoch, setDocEpoch] = useState(0);
   const [ready, setReady] = useState(false);
   const [presence, setPresence] = useState<Record<string, PresencePosition | null>>({});
@@ -585,6 +603,8 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       const res = applyIntentScoped(doc, ids, intent as Intent);
       if (!res.applied) return; // nothing changed ⇒ nothing to record
       resyncScope(doc, ids, res);
+      // Applied HERE, not by the editor — the repaint signal must move.
+      setRenderVersion((v) => v + 1);
     }
     const tail = offlineTailRef.current ?? [];
     tail.push(intent as Intent);
@@ -729,6 +749,14 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         setDoc(c.doc);
         setReady(c.ready);
         setVersion((v) => v + 1); // signal a re-render on every reconciled change
+        // Repaint only when the DOC changed outside the editor (docVersion
+        // moved) — an own-echo onChange must not queue a whole-document
+        // relayout (see CollabSession.renderVersion).
+        const dv = c.docVersion;
+        if (dv !== lastDocVersionRef.current) {
+          lastDocVersionRef.current = dv;
+          setRenderVersion((v) => v + 1);
+        }
         setDocEpoch(c.docEpoch); // bumps only on a reload (true conflict)
         persister?.notify(); // throttled bundle write (doc 12 §4)
         // A welcome that LANDED is the only proof a reconnect worked. Reset
@@ -1006,6 +1034,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   return {
     doc,
     version,
+    renderVersion,
     docEpoch,
     ready,
     // DocxView's editor applies every command to the live doc BEFORE emitting
@@ -1320,7 +1349,14 @@ export function CollabEditor(opts: UseCollabOptions & {
       // Cmd+Z: reverse my last sequenced action over the wire.
       undoLast: () => { session.undoLast(); },
       doc: session.doc,
-      renderSignal: session.version,
+      // The repaint signal is renderVersion, NOT version: version moves on
+      // every onChange (including the editor's own submit + echo, which the
+      // editor already painted), and DocxView answers each renderSignal move
+      // with a whole-document relayout — behind an inert container past the
+      // background-layout page threshold. Riding version made every keystroke
+      // in a 500-page room queue that relayout: the "collab editor is
+      // unusable on a big document" report.
+      renderSignal: session.renderVersion,
       // Outbound presence: the editor reports caret moves; remote tabs draw
       // this user's cursor (inbound presence above draws theirs here).
       setPresence: session.setPresence,

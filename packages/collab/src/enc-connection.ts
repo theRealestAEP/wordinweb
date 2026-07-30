@@ -132,7 +132,9 @@ export class EncryptedCollabConnection {
         mediaOpts,
         () => this.replica?.doc ?? null,
         {
-          onChange: () => this.cb.onChange?.(),
+          // Media installs mutate the doc (pixels land) outside the replica's
+          // counter — bump the render signal so the skeleton repaints.
+          onChange: () => { this.docVersionBase++; this.cb.onChange?.(); },
           onState: (part, state) => this.cb.onMediaState?.(part, state),
           need: (sha) => this.transport.send({ t: "media-need", sha }),
           have: (shas) => { if (shas.length) this.transport.send({ t: "media-have", shas }); },
@@ -180,6 +182,23 @@ export class EncryptedCollabConnection {
   }
   get ready(): boolean {
     return this.replica !== null;
+  }
+
+  /** Accumulates doc changes across replica rebuilds (self-heal/welcome), so
+   * the getter below stays monotonic per connection. */
+  private docVersionBase = 0;
+  /**
+   * Counts changes TO THE RENDERED DOCUMENT — the repaint signal, as opposed
+   * to onChange (which also fires for pure bookkeeping: a tracked own echo, a
+   * roster-adjacent state change). The editor-driven typing path mutates and
+   * paints the doc itself, so its submit + echo leave this untouched; remote
+   * applies, optimistic canonical applies (toolbar ops), reloads, heals, and
+   * media installs advance it. The react layer repaints on THIS, not on
+   * onChange — repainting on onChange queued a whole-document relayout per
+   * keystroke, catastrophic past the background-layout page threshold.
+   */
+  get docVersion(): number {
+    return this.docVersionBase + (this.replica?.docVersion ?? 0);
   }
 
   /** Un-confirmed local intents in flight — drained-replay parity with the
@@ -530,6 +549,7 @@ export class EncryptedCollabConnection {
           this.mirror = new DocumentSession(DocxDocument.load(bytes));
           this.mirror.setSeqFloor(msg.checkpoint.seq); // numbering continues from the checkpoint
           if (cp.sidecar) this.mirror.installSidecar(cp.sidecar as never);
+          this.docVersionBase += (this.replica?.docVersion ?? 0) + 1; // new doc object ⇒ repaint
           this.replica = new ClientReplica(bytes, (cp.sidecar ?? undefined) as never);
           this.replica.confirmedSeq = msg.checkpoint.seq;
           // Doc 16 §6 late-join: the addresses ride inside the SEALED body,
@@ -811,6 +831,7 @@ export class EncryptedCollabConnection {
       const liveHash = await docHash(this.replica.doc);
       const canonicalHash = await docHash(this.mirror.doc);
       const cp = this.mirror.checkpoint();
+      this.docVersionBase += this.replica.docVersion + 1; // doc object replaced ⇒ repaint
       this.replica = new ClientReplica(cp.docx, cp.sidecar as never);
       this.replica.confirmedSeq = cp.seq;
       this.docEpoch++;
@@ -850,6 +871,7 @@ export class EncryptedCollabConnection {
     // mirror — byte-exact canonical state + the exact id table (checkpoint()
     // is a pure snapshot; save() is side-effect-free by invariant).
     const cp = this.mirror.checkpoint();
+    this.docVersionBase += this.replica.docVersion + 1; // doc object replaced ⇒ repaint
     this.replica = new ClientReplica(cp.docx, cp.sidecar as never);
     this.replica.confirmedSeq = cp.seq;
     this.docEpoch++;

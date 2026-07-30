@@ -40,6 +40,20 @@ export class ClientReplica {
   private confirmedTail: LogEntry[] = [];
   /** Fold cadence for the lazy confirmed baseline (see confirmedTail). */
   private static FOLD_TAIL_AT = 100;
+  /**
+   * Bumped every time THIS CLASS mutates the live doc (optimistic apply,
+   * remote apply, replay, restore) — and deliberately NOT on bookkeeping
+   * that leaves the doc untouched (trackLocal, own-echo confirmation).
+   *
+   * This is the renderer's repaint gate. The react layer used to repaint on
+   * EVERY onChange, but for the editor-driven typing path (trackLocal + the
+   * own-echo fast path) the doc was already mutated AND painted by the
+   * editor, so each keystroke queued a redundant whole-document relayout —
+   * invisible on 5 pages, catastrophic past the background-layout threshold
+   * (500 pages: the layout ran async with the container inert until it
+   * finished, blocking further typing for seconds per keystroke).
+   */
+  docVersion = 0;
 
   constructor(bytes: Uint8Array, sidecar?: ReturnType<StableIds["exportSidecar"]>) {
     this.doc = DocxDocument.load(bytes);
@@ -323,6 +337,7 @@ export class ClientReplica {
     const res = applyIntentScoped(this.doc, this.ids, intent);
     if (!res.applied) return false;
     resyncScope(this.doc, this.ids, res);
+    this.docVersion++;
     return true;
   }
 
@@ -361,6 +376,9 @@ export class ClientReplica {
   }
 
   private restoreConfirmed(): void {
+    // The doc OBJECT is replaced below — a repaint is needed even when the
+    // tail replay applies nothing (applyAndResync bumps per applied entry).
+    this.docVersion++;
     // The lazy baseline can be up to FOLD_TAIL_AT entries stale, so pixels
     // installed during the tail window exist only on the LIVE doc — capture
     // them before it is replaced, re-install after the replay.
