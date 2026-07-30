@@ -295,6 +295,15 @@ export class BundlePersister {
   }
 
   private async write(): Promise<void> {
+    // Macrotask hop before the heavy sync half. exportBundleAsync's export
+    // re-parses the confirmed docx and replays the tail (~50-150ms on a
+    // 500-page doc) BEFORE its first internal await, and this method starts
+    // as a promise continuation (the serial chain / a prior write's store
+    // completion) — which drains at listener boundaries inside an in-flight
+    // input dispatch, so the cost landed in a keystroke's measured handler
+    // (observed as ~70-85ms spikes on the persister's 1s cadence). In its
+    // own task it runs between dispatches; the chain still serializes.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const bundle = await this.conn.exportBundleAsync(this.docId);
     if (!bundle) return; // not welcomed yet — nothing durable to say
     bundle.savedAt = this.lastWrite;

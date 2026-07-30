@@ -221,7 +221,6 @@ async function typeRounds(page: Page, cdp: CDPSession, scenario: string, rounds:
     probe.times = [];
     probe.busySeen = 0;
     probe.painted = 0;
-    (probe as unknown as { heaps: number[] }).heaps = [];
     const perf = (globalThis as PerfGlobals).__dxwPerf;
     if (perf) perf.samples = [];
   });
@@ -246,15 +245,11 @@ async function typeRounds(page: Page, cdp: CDPSession, scenario: string, rounds:
   const percentile = (p: number) => percentileOf(times, p);
   // Name every slow round: was it the editor's commit (and which phase), or
   // time outside the commit entirely (GC, event dispatch)?
-  const heaps = await page.evaluate(
-    () => ((globalThis as PerfGlobals).__typingProbe as unknown as { heaps?: number[] }).heaps ?? [],
-  );
   times.forEach((t, i) => {
     if (t <= 25) return;
     const s = samples[i] ?? {};
-    const heapDeltaMB = heaps.length > i + 1 ? (heaps[i + 1] - heaps[i]) / 1e6 : NaN;
     console.log(
-      `SLOW-ROUND ${scenario} i=${i} keydownMs=${t.toFixed(1)} heapDeltaMB=${heapDeltaMB.toFixed(1)} ` +
+      `SLOW-ROUND ${scenario} i=${i} keydownMs=${t.toFixed(1)} ` +
         Object.entries(s).map(([k, v]) => `${k}=${typeof v === "number" ? v.toFixed(1) : v}`).join(" "),
     );
   });
@@ -367,11 +362,6 @@ test.describe("big document typing (>50 pages)", () => {
       document.addEventListener("keydown", (event) => {
         if (event.key !== "Z") return;
         probe.prePages = pageZCounts();
-        const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
-        if (mem) (probe as unknown as { heaps: number[] }).heaps = [
-          ...(((probe as unknown as { heaps?: number[] }).heaps) ?? []),
-          mem.usedJSHeapSize,
-        ];
       }, true);
       const keyStarts = new WeakMap<KeyboardEvent, number>();
       document.addEventListener("keydown", (event) => {
