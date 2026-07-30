@@ -265,6 +265,47 @@ describe("incremental same-page block checkpoints", () => {
     expect(__incrStats.blocksLaid).toBeLessThanOrEqual(20);
   });
 
+  it("reparses a bookmarked paragraph in place and recaptures its refBookmarks range", () => {
+    // The dead-editor regression: TOC targets bookmark every heading, and a
+    // reparse rejection here sent the first keystroke in any heading through
+    // doc.refresh() + a full inert relayout on long documents.
+    const body =
+      `<w:p><w:bookmarkStart w:id="1" w:name="Target"/><w:r><w:t>heading text</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>` +
+      Array.from({ length: 8 }, (_, i) => p(`block-${i} alpha bravo`)).join("");
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body + section) }));
+    const block = doc.sections[0].blocks[0] as Paragraph;
+    const text = (block.children[0] as Run).content[0] as TextContent;
+    const version = doc.modelVersion;
+    text.srcT!.text = "heading textZ";
+
+    const reparsed = doc.reparseBodyParagraph(block.src!);
+    expect(reparsed).not.toBeNull();
+    expect(doc.modelVersion).toBe(version);
+    // REF fields read the bookmark range through doc.refBookmarks; the
+    // recapture must hold the NEW runs (stale captures would render old text).
+    const runs = doc.refBookmarks.get("Target")!;
+    const captured = runs
+      .flatMap((run) => run.content)
+      .filter((content) => content.kind === "text")
+      .map((content) => (content as TextContent).text)
+      .join("");
+    expect(captured).toBe("heading textZ");
+  });
+
+  it("rejects an in-place reparse when a bookmark range crosses the paragraph", () => {
+    const body =
+      `<w:p><w:bookmarkStart w:id="1" w:name="Spanning"/><w:r><w:t>range opens here</w:t></w:r></w:p>` +
+      p("covered middle paragraph") +
+      `<w:p><w:r><w:t>range closes here</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>`;
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body + section) }));
+    const blocks = doc.sections[0].blocks as Paragraph[];
+    // Unbalanced markers inside the paragraph.
+    expect(doc.reparseBodyParagraph(blocks[0].src!)).toBeNull();
+    expect(doc.reparseBodyParagraph(blocks[2].src!)).toBeNull();
+    // No markers inside, but the spanning range captured this paragraph's runs.
+    expect(doc.reparseBodyParagraph(blocks[1].src!)).toBeNull();
+  });
+
   it("reparses a paragraph split inside a table cell without refreshing the document", () => {
     const tableXml =
       `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr>` +
