@@ -689,6 +689,21 @@ export function DocxView({
     let layoutAbort: AbortController | null = null;
     let layoutTimer: ReturnType<typeof setTimeout> | null = null;
     let restoreEditorFocus = false;
+    /** An async background layout is currently in flight. */
+    let layoutRunning = false;
+    /** Changes arrived while it ran (folded queue requests, or a sync paint
+     * superseding a dying job) — the completion repair must re-validate. */
+    let layoutDirty = false;
+    /** Background-layout lifecycle counters, published when the host arms
+     * `__dxwPerf` (benchmarks, the perf HUD, the e2e stress suite). The
+     * inert-editor livelock was invisible precisely because nothing counted
+     * jobs started against jobs that ever landed. */
+    const countJob = (k: string): void => {
+      const p = (globalThis as { __dxwPerf?: { jobs?: Record<string, number> } }).__dxwPerf;
+      if (!p) return;
+      p.jobs ??= {};
+      p.jobs[k] = (p.jobs[k] ?? 0) + 1;
+    };
 
     const setLayoutPending = (pending: boolean): void => {
       const container = containerRef.current;
@@ -749,6 +764,11 @@ export function DocxView({
           render: t3 - t2,
           totalPages: layout.totalPages,
         };
+        // The FIRST paint on this page — the mount paint — recorded once, so
+        // a bench can read the mount's layout/render breakdown even after
+        // later incremental paints have overwritten `last`.
+        const p = perf as { mount?: Record<string, number> };
+        p.mount ??= { ...perf.last };
       }
       if (pages !== layout.totalPages) onPageCountChangeRef.current?.(layout.totalPages);
       pages = layout.totalPages;
@@ -756,7 +776,24 @@ export function DocxView({
     };
 
     const queueGlobalLayout = (doc: DocxDocument, delayMs = 0, preferHeadersOnly = false): void => {
-      layoutAbort?.abort();
+      countJob("bgQueued");
+      /**
+       * FOLD INTO THE RUNNING JOB, never restart it. The old abort-and-restart
+       * had no progress guarantee, and on a document whose full layout takes
+       * seconds it was a LIVELOCK: every mid-flight change (a remote apply, a
+       * coalesced repaint) restarted the layout from block zero, so under a
+       * steady stream of broadcasts the layout never completed, the container
+       * stayed `inert` forever, and the editor was dead while looking fine —
+       * keystrokes fell through to the page (space scrolled). The running job
+       * reads the LIVE tree, and the completion repair below re-validates
+       * every block against the final tree, so folding loses nothing.
+       */
+      if (layoutRunning) {
+        layoutDirty = true;
+        countJob("bgFolded");
+        return;
+      }
+      layoutAbort?.abort(); // a delayed timer job at most — a running one folds above
       if (layoutTimer) clearTimeout(layoutTimer);
       const abort = new AbortController();
       layoutAbort = abort;
@@ -775,19 +812,48 @@ export function DocxView({
             return;
           }
         }
+        countJob("bgStarted");
+        const startModelVersion = doc.modelVersion;
+        layoutRunning = true;
+        layoutDirty = false;
         setLayoutPending(true);
         void layoutDocumentAsync(doc, { measurer, signal: abort.signal }).then((layout) => {
-          if (cancelled || job !== layoutJob || abort.signal.aborted || doc.modelVersion !== modelVersion) return;
+          if (cancelled || job !== layoutJob || abort.signal.aborted) return;
+          if (doc.modelVersion !== startModelVersion || layoutDirty) {
+            /**
+             * The tree changed while the async layout ran (remote applies —
+             * local input is gated by `inert`). Do NOT discard the result:
+             * repair it synchronously instead. The engine's signature scan
+             * relays exactly the blocks whose content no longer matches what
+             * this run laid out (each run records per-block signatures), and
+             * falls back to a full layout only when it cannot prove reuse —
+             * either way the painted result matches the CURRENT tree, and the
+             * job LANDS instead of being thrown away and restarted forever.
+             */
+            countJob("bgRepaired");
+            layout = layoutDocument(doc, { measurer, prev: layout });
+          }
+          layoutDirty = false;
           paintLayout(doc, layout, performance.now() - started);
+          countJob("bgCompleted");
         }).catch((cause: unknown) => {
           if (abort.signal.aborted || cancelled) return;
           const err = cause instanceof Error ? cause : new Error(String(cause));
           setError(err);
           onError?.(err);
         }).finally(() => {
-          if (job !== layoutJob) return;
-          layoutAbort = null;
-          setLayoutPending(false);
+          layoutRunning = false;
+          if (job === layoutJob) {
+            layoutAbort = null;
+            setLayoutPending(false);
+          } else if (layoutDirty && !cancelled) {
+            // A queue request folded into this job while it was being torn
+            // down (aborted by a sync paint, then a new request arrived before
+            // this cleanup ran). It has no owner now — re-queue it, or the
+            // change it represents never paints.
+            countJob("bgRequeued");
+            queueGlobalLayout(doc, 0, false);
+          }
         });
       };
       if (delayMs > 0) {
@@ -852,6 +918,10 @@ export function DocxView({
       if (layoutTimer) clearTimeout(layoutTimer);
       layoutTimer = null;
       layoutJob++;
+      // This synchronous layout reads the current tree, so it also covers any
+      // change that folded into the (just-aborted) background job; its dying
+      // `finally` must not re-queue a background layout for work painted here.
+      layoutDirty = false;
       setLayoutPending(false);
       const started = performance.now();
       const layout =

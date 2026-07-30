@@ -212,10 +212,24 @@ function applyIntentInner(
         // author/date; the revision w:id is scan-based (deterministic).
         const s = intent.suggest;
         const suggestCtx = { suggesting: true, revMeta: () => ({ author: s.author, date: s.date, nextId: () => doc.nextRevisionId() }) };
-        const before = trackedSet(ids, doc);
+        // Verify the scope BEFORE mutating: the insertion may split the
+        // addressed run into fresh pieces, after which the original run
+        // element is no longer in the tree and containment can't be checked.
+        const scope = blockScope(ids, intent.at.blockId, intent.at.runId);
         applyInsertText(doc, caret, intent.text, suggestCtx);
-        if (doc.stableIds) { doc.refresh(); ids.assignFromRoots(doc.editableRoots()); }
-        void before;
+        // The insertion (w:ins wrapper, split run pieces) stays inside the
+        // addressed paragraph, so reconcile at the PARAGRAPH's cost: scoped
+        // reparse + assignFromSubtrees produces the id table the old full
+        // refresh()+assignFromRoots() did (the documented equivalence in
+        // StableIds.assignFromSubtrees — new nodes only inside the block).
+        // This ran a full-document refresh per remote suggest KEYSTROKE, and
+        // the doc-wide scope it reported forced a whole-document relayout per
+        // keystroke on every peer — on a 500-page document, seconds of inert
+        // editor per keystroke (the livelock's fuel). Unverifiable block ids
+        // fall back to doc scope; resyncScope's own fallback is the old full
+        // refresh, so anything the scoped reparse cannot handle is unchanged.
+        if (doc.stableIds) resyncScope(doc, ids, scope);
+        out.scope = scope;
         return true;
       }
       applyInsertText(doc, caret, intent.text, ctx);
@@ -415,26 +429,47 @@ function applyIntentInner(
         date: intent.suggest.date,
         nextId: () => doc.nextRevisionId(),
       };
-      const resolved: { t: XmlElement; start: number; end: number }[] = [];
+      const resolved: { t: XmlElement; start: number; end: number; block: XmlElement | null }[] = [];
       for (const r of intent.ranges ?? []) {
         const caret = resolveCaret(ids, runOf, { blockId: r.blockId, runId: r.runId, offset: r.start });
         if (!caret) continue;
         const localEnd = caret.offset + (r.end - r.start);
         if (localEnd > caret.t.text.length) continue;
-        resolved.push({ t: caret.t, start: caret.offset, end: localEnd });
+        // Verify the range's own blockId names the paragraph really holding
+        // the run — the same rule blockScope enforces everywhere else. A
+        // verified block lets the reconcile below stay scoped; any failure
+        // widens to the full-document path.
+        const sc = blockScope(ids, r.blockId, r.runId);
+        resolved.push({ t: caret.t, start: caret.offset, end: localEnd, block: sc.kind === "block" ? sc.blocks[0] : null });
       }
-      const markEls: { el: XmlElement; glyph: "ins" | "del" }[] = [];
+      const markEls: { el: XmlElement; glyph: "ins" | "del"; block: XmlElement | null }[] = [];
       for (const m of intent.marks ?? []) {
         const el = ids.elOf(m.blockId);
-        if (el) markEls.push({ el, glyph: m.glyph });
+        if (el) markEls.push({ el, glyph: m.glyph, block: localName(el.name) === "p" ? el : null });
       }
       if (resolved.length === 0 && markEls.length === 0) return false;
       if (resolved.length) deleteSuggestedRange(doc, resolved, meta);
       for (const m of markEls) markParagraphGlyph(m.el, m.glyph, meta);
-      // Strikes wrap runs in w:del (structure changed): refresh + re-key —
-      // deterministic across replicas (identical tree, identical counter).
-      doc.refresh();
-      ids.assignFromRoots(doc.editableRoots());
+      // Strikes wrap runs in w:del and split partially-struck runs — new
+      // nodes, but all INSIDE the addressed paragraphs. When every touched
+      // paragraph verified, reconcile at those paragraphs' cost (scoped
+      // reparse + assignFromSubtrees — id-table-identical to the full walk,
+      // see StableIds.assignFromSubtrees) and report them as the dirty
+      // scope. The old unconditional refresh()+assignFromRoots() here ran a
+      // full-document rebuild per remote suggest-DELETE keystroke and forced
+      // a whole-document relayout on every peer; anything unverifiable keeps
+      // exactly that behavior via the doc-scope fallback.
+      const parts = [...resolved.map((x) => x.block), ...markEls.map((x) => x.block)];
+      if (parts.every((b): b is XmlElement => b !== null)) {
+        const blocks: XmlElement[] = [];
+        for (const b of parts) if (!blocks.includes(b)) blocks.push(b);
+        const scope: Scope = { kind: "block", blocks };
+        resyncScope(doc, ids, scope);
+        out.scope = scope;
+      } else {
+        doc.refresh();
+        ids.assignFromRoots(doc.editableRoots());
+      }
       return true;
     }
     case "insertImage": {
