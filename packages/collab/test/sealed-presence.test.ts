@@ -103,9 +103,18 @@ describe("sealed presence is bound to its room, epoch and sender", () => {
   it("rejects a tampered ciphertext", async () => {
     const k = await keysFor(mintDocKey(), "g1");
     const sealed = await sealPresence(k.kPresence, "doc1", "g1", "alice", position);
+    // Flip a MIDDLE character: the final chars of a base64 string can carry
+    // padding slack, and a flip that only changes discarded padding bits
+    // decodes to the SAME bytes — the ciphertext then opens legitimately and
+    // the test flaked (the IV is random, so only some runs hit it). Every
+    // non-final character encodes real ciphertext bits.
+    const mid = Math.floor(sealed.ciphertext.length / 2);
     const flipped = {
       ...sealed,
-      ciphertext: sealed.ciphertext.slice(0, -2) + (sealed.ciphertext.endsWith("A") ? "B" : "A") + "=",
+      ciphertext:
+        sealed.ciphertext.slice(0, mid) +
+        (sealed.ciphertext[mid] === "A" ? "B" : "A") +
+        sealed.ciphertext.slice(mid + 1),
     };
     await expect(openPresence(k.kPresence, "doc1", "g1", "alice", flipped)).rejects.toThrow();
   });

@@ -212,6 +212,10 @@ function applyIntentInner(
         // author/date; the revision w:id is scan-based (deterministic).
         const s = intent.suggest;
         const suggestCtx = { suggesting: true, revMeta: () => ({ author: s.author, date: s.date, nextId: () => doc.nextRevisionId() }) };
+        // Verify the scope BEFORE mutating: the insertion may split the
+        // addressed run into fresh pieces, after which the original run
+        // element is no longer in the tree and containment can't be checked.
+        const scope = blockScope(ids, intent.at.blockId, intent.at.runId);
         applyInsertText(doc, caret, intent.text, suggestCtx);
         // The insertion (w:ins wrapper, split run pieces) stays inside the
         // addressed paragraph, so reconcile at the PARAGRAPH's cost: scoped
@@ -224,7 +228,6 @@ function applyIntentInner(
         // editor per keystroke (the livelock's fuel). Unverifiable block ids
         // fall back to doc scope; resyncScope's own fallback is the old full
         // refresh, so anything the scoped reparse cannot handle is unchanged.
-        const scope = blockScope(ids, intent.at.blockId, intent.at.runId);
         if (doc.stableIds) resyncScope(doc, ids, scope);
         out.scope = scope;
         return true;

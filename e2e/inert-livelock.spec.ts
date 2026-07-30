@@ -94,26 +94,35 @@ const stopBusySampler = (page: Page) =>
     return w.__busySamples;
   });
 
-/** Stream intents through the joiner's real connection; resolves when done. */
-const stream = (page: Page, kind: "suggest" | "format", ms: number, everyMs: number) =>
+/** Stream intents through the joiner's real connection; resolves when done.
+ *
+ * "plain" is the faithful NIH-session fuel: ONE doc-scope op (formatParagraph)
+ * followed by ordinary typing (plain insertText, block-scoped — cheap for the
+ * sender, exactly like a peer's pre-applied keystrokes). On the victim the
+ * seed forces a whole-document background layout, and in the broken build
+ * every scoped arrival RESTARTED it (the painted model version stays stale
+ * until a global layout lands, so `rerender` kept re-queueing) — the layout
+ * never completed and the editor stayed inert for the stream's whole life.
+ *
+ * "format" is a pure doc-scope stream (every op forces a global layout). Both
+ * alignments toggled are NON-DEFAULT: "left" on a left-aligned paragraph is a
+ * no-op the canonical apply rejects, and a first-op rejection stalls the
+ * sender's pending queue instead of exercising the stream.
+ */
+const stream = (page: Page, kind: "plain" | "format", ms: number, everyMs: number) =>
   page.evaluate(
     async ([k, total, gap]) => {
       const ww = (window as unknown as { __ww: Ww }).__ww;
       const t0 = Date.now();
       let n = 0;
-      // Toggle between two NON-DEFAULT alignments: "left" on an already
-      // left-aligned paragraph is a no-op, which the canonical apply rejects
-      // ("apply failed") — and a first-op rejection stalls the sender's
-      // pending queue instead of exercising the stream.
       let align: "center" | "right" = "right";
+      if (k === "plain") {
+        ww.submitOp({ kind: "formatParagraph", blockId: 1, align: "right" }); // the doc-scope seed
+        n++;
+      }
       while (Date.now() - t0 < (total as number)) {
-        if (k === "suggest") {
-          ww.submitOp({
-            kind: "insertText",
-            at: { blockId: 1, runId: 2, offset: 0 },
-            text: "x",
-            suggest: { author: "Joiner", date: "2026-01-01T00:00:00Z" },
-          });
+        if (k === "plain") {
+          ww.submitOp({ kind: "insertText", at: { blockId: 1, runId: 2, offset: 0 }, text: "x" });
         } else {
           align = align === "center" ? "right" : "center";
           ww.submitOp({ kind: "formatParagraph", blockId: 1, align });
@@ -133,6 +142,10 @@ test("a big-document session stays editable under remote streams (inert must alw
   await page.addInitScript(() => {
     (window as unknown as { __dxwPerf: unknown }).__dxwPerf = { samples: [], jobs: {} };
   });
+  // Surface both pages' console errors in the test log — a silent reconnect
+  // or self-heal mid-run otherwise presents as an inexplicable empty view.
+  page.on("console", (m) => { if (m.type() === "error" || m.type() === "warning") console.log(`[owner console] ${m.text()}`); });
+  page.on("pageerror", (e) => console.log(`[owner pageerror] ${e.message}`));
 
   // Owner: open the big document locally, go live.
   await page.goto(LANDING);
@@ -154,28 +167,50 @@ test("a big-document session stays editable under remote streams (inert must alw
   });
   await joinCollabBig(joiner, url, BOARD_CODE);
 
-  /* ---------------- Phase A: remote suggest-typing stream ---------------- */
-  // The victim must stay INTERACTIVE: suggest-typing is block-scoped now, so
-  // it repaints one paragraph and never queues a whole-document layout.
+  /* ------- Phase A: one doc-scope op + ordinary remote typing stream ------- */
+  // The livelock's shape: the seed op forces a whole-document background
+  // layout, and every subsequent scoped keystroke used to RESTART it. The
+  // victim must (1) see the busy flag clear while the stream continues, and
+  // (2) be able to type.
   const jobsA0 = await jobs(page);
+  // Baseline BEFORE the stream: the word-soup text already contains x's, so
+  // only a counted DELTA proves the inserts actually arrived here.
+  const countX = () =>
+    page.evaluate(() => (((window as unknown as { __ww?: Ww }).__ww?.text() ?? "").slice(0, 4000).match(/x/g) ?? []).length);
+  const xBefore = await countX();
   await startBusySampler(page);
-  const STREAM_A_MS = 15_000;
-  const streamA = stream(joiner, "suggest", STREAM_A_MS, 150);
+  // 250ms pacing: livelock only needs arrivals FASTER than the multi-second
+  // full layout; 4/s also stays under the owner's per-broadcast budget so the
+  // liveness monitor is not starved by the harness itself.
+  const STREAM_A_MS = 25_000;
+  const streamA = stream(joiner, "plain", STREAM_A_MS, 250);
 
-  // Give the stream 3s to (in the broken build) wedge the layout, then type.
-  await page.waitForTimeout(3000);
-  const box = await page.locator(PAGE).first().boundingBox();
-  expect(box).not.toBeNull();
-  await page.mouse.click(box!.x + 30, box!.y + 25);
+  // The stream must actually be ARRIVING (sender is cheap: plain inserts).
+  await expect
+    .poll(async () => (await countX()) - xBefore, { message: "the remote inserts never reached the victim", timeout: 20_000 })
+    .toBeGreaterThanOrEqual(5);
+
+  // THE LIVELOCK PIN: the seed's global layout must LAND while keystrokes
+  // keep arriving. In the broken build each arrival restarted it, so the
+  // busy flag stayed up for the stream's entire life.
+  await expect
+    .poll(() => page.evaluate(() => !!document.querySelector("[data-dxw-layout-busy]")), {
+      message: "the background layout never landed while remote typing continued (the livelock)",
+      timeout: 15_000,
+    })
+    .toBe(false);
+
+  // THE CONTRACT: keystrokes typed during the remote stream LAND. In the
+  // broken build the container is inert, every key falls through (space
+  // scrolls the page), and the document never contains a Q.
+  // Actionability-aware click (auto-waits for a stable, visible target —
+  // a raw boundingBox read here can catch the repaint mid-DOM-swap).
+  await page.locator(PAGE).first().click({ position: { x: 30, y: 25 } });
   await page.keyboard.type("QQQQQ", { delay: 80 });
-
-  // THE CONTRACT: keystrokes typed during a remote stream LAND. In the
-  // broken build the container is inert, every key falls through, and the
-  // document never contains a Q.
   await expect
     .poll(
       () => page.evaluate(() => ((window as unknown as { __ww?: Ww }).__ww?.text() ?? "").split("Q").length - 1),
-      { message: "keystrokes typed during the remote suggest stream never landed (inert editor)", timeout: STREAM_A_MS },
+      { message: "keystrokes typed during the remote stream never landed (inert editor)", timeout: 15_000 },
     )
     .toBeGreaterThanOrEqual(3);
 
@@ -184,15 +219,10 @@ test("a big-document session stays editable under remote streams (inert must alw
   const jobsA1 = await jobs(page);
   const busyPctA = Math.round((100 * busyA.filter(Boolean).length) / Math.max(1, busyA.length));
   console.log(
-    `STRESS-METRIC inert-livelock-suggest paragraphs=${PARAS} sent=${sentA} busyPct=${busyPctA} ` +
+    `STRESS-METRIC inert-livelock-typing paragraphs=${PARAS} sent=${sentA} busyPct=${busyPctA} ` +
       `bgQueued=${(jobsA1.bgQueued ?? 0) - (jobsA0.bgQueued ?? 0)} bgStarted=${(jobsA1.bgStarted ?? 0) - (jobsA0.bgStarted ?? 0)} ` +
       `bgCompleted=${(jobsA1.bgCompleted ?? 0) - (jobsA0.bgCompleted ?? 0)} bgFolded=${(jobsA1.bgFolded ?? 0) - (jobsA0.bgFolded ?? 0)}`,
   );
-
-  // The suggest stream must also have actually applied (x's at the doc head).
-  await expect
-    .poll(() => page.evaluate(() => ((window as unknown as { __ww?: Ww }).__ww?.text() ?? "").slice(0, 200)))
-    .toContain("x");
 
   /* --------------- Phase B: remote doc-scope (global) stream -------------- */
   // formatParagraph reports doc scope, so every op forces a whole-document
