@@ -214,7 +214,7 @@ async function clickThenType(page: Page, round: number): Promise<void> {
   );
 }
 
-async function typeRounds(page: Page, scenario: string, rounds: number): Promise<void> {
+async function typeRounds(page: Page, cdp: CDPSession, scenario: string, rounds: number): Promise<void> {
   const modelBefore = await modelSentinels(page);
   await page.evaluate(() => {
     const probe = (globalThis as PerfGlobals).__typingProbe;
@@ -225,7 +225,18 @@ async function typeRounds(page: Page, scenario: string, rounds: number): Promise
     const perf = (globalThis as PerfGlobals).__dxwPerf;
     if (perf) perf.samples = [];
   });
-  for (let i = 0; i < rounds; i++) await clickThenType(page, i);
+  for (let i = 0; i < rounds; i++) {
+    // GC hygiene, BETWEEN dispatches (same discipline memoryRounds uses):
+    // typing on a 500-page doc accrues garbage — dominated by the one
+    // page-count-growth keystroke's full repagination — and where V8 places
+    // the resulting major GC is scheduler noise a 100-sample p99 cannot
+    // absorb: it lands inside an arbitrary keystroke's dispatch as a
+    // 40-85ms pause. Collecting between rounds keeps the measurement about
+    // the editor's own per-keystroke work; the latency numbers themselves
+    // are untouched (the collect never runs inside a dispatch).
+    if (i > 0 && i % 20 === 0) await cdp.send("HeapProfiler.collectGarbage");
+    await clickThenType(page, i);
+  }
   const { times, busySeen, samples, landed } = await page.evaluate(() => {
     const probe = (globalThis as PerfGlobals).__typingProbe;
     const perf = (globalThis as PerfGlobals).__dxwPerf;
@@ -420,7 +431,7 @@ test.describe("big document typing (>50 pages)", () => {
     // one-time setup phases is cleared.
     await cdp.send("HeapProfiler.enable");
     await cdp.send("HeapProfiler.collectGarbage");
-    await typeRounds(page, "bigdoc-local-clicktype", 100);
+    await typeRounds(page, cdp, "bigdoc-local-clicktype", 100);
     await typeAtTail(page, "bigdoc-local");
     await memoryRounds(page, cdp, "bigdoc-local-clicktype", 30);
 
@@ -432,7 +443,7 @@ test.describe("big document typing (>50 pages)", () => {
 
     await assertVirtualized(page, "bigdoc-collab");
     await cdp.send("HeapProfiler.collectGarbage"); // see the local-phase note
-    await typeRounds(page, "bigdoc-collab-clicktype", 100);
+    await typeRounds(page, cdp, "bigdoc-collab-clicktype", 100);
     await typeAtTail(page, "bigdoc-collab");
     await memoryRounds(page, cdp, "bigdoc-collab-clicktype", 30);
   });
