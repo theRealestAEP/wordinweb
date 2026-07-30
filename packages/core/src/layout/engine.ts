@@ -32,14 +32,27 @@ import {
   FieldContext,
   LineBox,
   breakParagraph,
+  clearBreakCache,
   fontOf,
   resolveField,
 } from "./inline.js";
 import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
-import { FontSpec, LaidOutPage, LayoutResult, LayoutWindow, PageItem, TextItem } from "./types.js";
+import {
+  FontSpec,
+  LaidOutPage,
+  LayoutFontSample,
+  LayoutResult,
+  LayoutWindow,
+  PageItem,
+  TextItem,
+} from "./types.js";
+
+const INITIAL_MODEL_WINDOW_PAGES = 12;
 
 export interface LayoutOptions {
   measurer?: TextMeasurer;
+  /** Retain positioned items only for a viewport-sized page window. */
+  windowModel?: boolean;
   /** Previous layout result (from an earlier layoutDocument call on the same
    * document). Enables incremental relayout: pages whose input blocks and
    * lead-in state are unchanged are reused instead of re-laid. The engine falls
@@ -70,10 +83,15 @@ export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): 
   if (options.prev && options.prev._incr) {
     // Incremental attempt uses its own engine; if it can't prove reuse is safe
     // it returns null and a fresh engine does a clean full layout.
-    const attempt = new Engine(doc, measurer).runIncremental(options.prev, options.dirtyHint, options.dirtySource);
+    const attempt = new Engine(
+      doc,
+      measurer,
+      undefined,
+      options.windowModel === true,
+    ).runIncremental(options.prev, options.dirtyHint, options.dirtySource);
     if (attempt) return attempt;
   }
-  return layoutWithBodyPageTotal(doc, measurer);
+  return layoutWithBodyPageTotal(doc, measurer, options.windowModel === true);
 }
 
 function bodyHasPageTotal(el: XmlElement): boolean {
@@ -83,13 +101,13 @@ function bodyHasPageTotal(el: XmlElement): boolean {
   return el.children.some(bodyHasPageTotal);
 }
 
-function layoutWithBodyPageTotal(doc: DocxDocument, measurer: TextMeasurer): LayoutResult {
-  let result = new Engine(doc, measurer).run();
+function layoutWithBodyPageTotal(doc: DocxDocument, measurer: TextMeasurer, windowModel: boolean): LayoutResult {
+  let result = new Engine(doc, measurer, undefined, windowModel).run();
   if (!bodyHasPageTotal(doc.docRoot)) return result;
 
   for (let pass = 0; pass < 2; pass++) {
     const total = result.totalPages;
-    result = new Engine(doc, measurer, total).run();
+    result = new Engine(doc, measurer, total, windowModel).run();
     if (result.totalPages === total) break;
   }
   return result;
@@ -116,7 +134,7 @@ export async function layoutDocumentAsync(
 ): Promise<LayoutResult> {
   options.signal?.throwIfAborted();
   const measurer = options.measurer ?? createMeasurer();
-  const engine = new Engine(doc, measurer);
+  const engine = new Engine(doc, measurer, undefined, options.windowModel === true);
   if (!engine.canRunAsync()) {
     await yieldToMain(options.signal);
     return layoutDocument(doc, options);
@@ -128,7 +146,12 @@ export async function layoutDocumentAsync(
   for (let pass = 0; pass < 2; pass++) {
     options.signal?.throwIfAborted();
     const total = result.totalPages;
-    result = await new Engine(doc, measurer, total).runAsync(options.signal, sliceMs);
+    result = await new Engine(
+      doc,
+      measurer,
+      total,
+      options.windowModel === true,
+    ).runAsync(options.signal, sliceMs);
     if (result.totalPages === total) break;
   }
   return result;
@@ -593,6 +616,7 @@ class Engine {
   private incrConvergePageIdx = -1;
   private incrConvergeItemDelta = 0;
   private incrConvergePrevPointPageIdx = -1;
+  private incrPrevWindow?: LayoutWindow;
   private incrPageShift = 0;
   /** New block indices are old indices plus this value after a structural
    * split, so convergence compares the same semantic suffix boundary. */
@@ -604,11 +628,18 @@ class Engine {
   private incrFirstDirty = -1;
   /** Stop a page-window relay at the first block boundary after this page. */
   private materializeEndPage = -1;
+  private windowFullRun = false;
+  private windowActive = false;
+  private windowPointPages = 0;
+  private windowLastPointPage = -1;
+  private windowFontSamples = new Map<string, LayoutFontSample>();
+  private windowHasModel3D = false;
 
   constructor(
     private doc: DocxDocument,
     private measurer: TextMeasurer,
     private knownTotalPages?: number,
+    private windowModel = false,
   ) {}
 
   run(): LayoutResult {
@@ -625,7 +656,10 @@ class Engine {
   materializeRange(data: IncrData, startPage: number, endPage: number): InternalPage[] {
     let resume: IncrPoint | undefined;
     for (const point of data.points) {
-      if (point.pageItemCount === 0 && point.pageCount <= startPage) resume = point;
+      if (
+        point.pageCount < startPage ||
+        (point.pageCount === startPage && point.pageItemCount === 0)
+      ) resume = point;
       if (point.pageCount > startPage) break;
     }
     if (!resume) throw new Error(`No layout resume point for page ${startPage + 1}`);
@@ -647,10 +681,15 @@ class Engine {
     this.finalizeHeadersFooters();
     this.rewritePageRefs(this.pages);
     this.applySectionVAlign();
+    if (this.windowModel) {
+      sampleHeap();
+      clearBreakCache(this.measurer);
+    }
     return this.pages;
   }
 
   runHeadersFootersOnly(prev: LayoutResult): LayoutResult | null {
+    if (prev._window) return null;
     const prior = prev._hf as HeaderFooterData | undefined;
     if (!prior || prior.modelVersion !== this.doc.modelVersion || !this.hfFastPathEligible()) return null;
 
@@ -731,6 +770,7 @@ class Engine {
       this.incrSigs = blocks.map((b) => this.blockSig(b));
       this.incrLastNumberingUse = this.lastNumberingUse(blocks);
       this.incrPoints = [];
+      this.windowFullRun = this.windowModel;
     }
     this.assignNoteNumbers();
     this.assignSeqNumbers();
@@ -889,6 +929,13 @@ class Engine {
     this.finalizeHeadersFooters();
     this.rewritePageRefs(this.pages);
     this.applySectionVAlign();
+    if (this.windowActive) {
+      for (const page of this.pages) {
+        if (!page.discarded) continue;
+        this.discardPage(page);
+        for (const note of page.footnotes) note.items = [];
+      }
+    }
     const pages: LaidOutPage[] = this.pages.map((p) => laidOutPage(p));
     const result: LayoutResult = {
       pages,
@@ -910,14 +957,25 @@ class Engine {
         refFieldParaNumber: this.refFieldParaNumber,
       } satisfies IncrData;
     }
-    if (result._incr && pages.length > 20) {
-      result._window = new LayoutWindowController(
-        this.doc,
-        this.measurer,
-        result,
-        result._incr as IncrData,
-        this.pages,
-      );
+    if (this.windowActive && result._incr && pages.length > 20) {
+      const incremental = result._incr as IncrData;
+      const pointPages = new Set(incremental.points.map((point) => point.pageCount));
+      if (pointPages.size > 1) {
+        result._fontSamples = [...this.windowFontSamples.values()];
+        result._hasModel3D = this.windowHasModel3D;
+        result._window = new LayoutWindowController(
+          this.doc,
+          this.measurer,
+          result,
+          incremental,
+          this.pages,
+          this.windowFontSamples,
+        );
+      }
+    }
+    if (this.windowActive) {
+      sampleHeap();
+      clearBreakCache(this.measurer);
     }
     return result;
   }
@@ -1120,6 +1178,14 @@ class Engine {
     // counter snapshots stay modest while replay remains capped at 15 blocks.
     if (!atPageTop && blockIdx % 16 !== 0) return;
     const globalPageIdx = this.pages.length - 1 + this.physBase;
+    if (this.windowFullRun && globalPageIdx !== this.windowLastPointPage) {
+      this.windowLastPointPage = globalPageIdx;
+      this.windowPointPages++;
+      if (this.windowPointPages > 1 && this.pages.length > 20) {
+        this.windowActive = true;
+        this.pruneFullRunPages();
+      }
+    }
     const snapshot = (): IncrPoint => ({
       blockIdx,
       pageCount: globalPageIdx,
@@ -1180,6 +1246,7 @@ class Engine {
           this.incrConvergePrevPageIdx = pp.pageCount;
           this.pages.pop();
         } else {
+          this.incrPrevWindow?.materialize([pp.pageCount]);
           const oldPage = this.incrPrevPages?.[pp.pageCount];
           if (!oldPage) return;
           const freshCount = p.items.length;
@@ -1287,6 +1354,28 @@ class Engine {
     this.bannerSlotUsed = s.bannerSlotUsed;
     this.counters = new Map(s.counters.map(([k, v]) => [k, [...v]]));
     this.seenNumIds = new Set(s.seenNumIds);
+  }
+
+  private pruneFullRunPages(): void {
+    sampleHeap();
+    for (let index = INITIAL_MODEL_WINDOW_PAGES; index < this.pages.length - 1; index++) {
+      const page = this.pages[index];
+      if (!page.discarded) this.discardPage(page);
+    }
+    clearBreakCache(this.measurer);
+  }
+
+  private discardPage(page: InternalPage): void {
+    collectPageMetadata(
+      page,
+      this.windowFontSamples,
+      () => {
+        this.windowHasModel3D = true;
+      },
+    );
+    page.items = [];
+    page.hfStart = 0;
+    page.discarded = true;
   }
 
   private bodyHasPageField(el: XmlElement = this.doc.docRoot): boolean {
@@ -1508,6 +1597,7 @@ class Engine {
     }
     if (!rp || rp.pageCount >= inc.pages.length) return fallback("resume-point");
     const prefixCount = rp.pageCount;
+    prev._window?.materialize([rp.pageCount]);
 
     this.seqCounters = new Map(inc.seqCounters);
     this.seqAssigned = inc.seqAssigned;
@@ -1522,6 +1612,7 @@ class Engine {
       blockIdx > this.incrBlockShiftAfter ? blockIdx + this.incrBlockDelta : blockIdx;
     this.incrPrevPoints = new Map(inc.points.map((pt) => [shiftedBlockIdx(pt.blockIdx), pt]));
     this.incrPrevPages = inc.pages;
+    this.incrPrevWindow = prev._window;
     this.incrFirstDirty = firstDirty;
     __incrStats.resumeBlock = rp.blockIdx;
     __incrStats.resumePage = rp.pageCount;
@@ -1664,7 +1755,7 @@ class Engine {
       );
     const perf = (globalThis as { __dxwPerf?: { incr?: typeof __incrStats } }).__dxwPerf;
     if (perf) perf.incr = { ...__incrStats };
-    return {
+    const result: LayoutResult = {
       pages: outPages,
       totalPages: outPages.length,
       _hf: { pages: outInternal, modelVersion: this.doc.modelVersion } satisfies HeaderFooterData,
@@ -1684,6 +1775,26 @@ class Engine {
       _incremental: true,
       _incrementalStructuralPrefixEnd: structuralPrefixEnd,
     };
+    if (prev._window) {
+      const fontSamples = new Map(
+        (prev._fontSamples ?? []).map((sample) => [fontSampleKey(sample), sample]),
+      );
+      result._fontSamples = [...fontSamples.values()];
+      result._hasModel3D = prev._hasModel3D;
+      result._window = new LayoutWindowController(
+        this.doc,
+        this.measurer,
+        result,
+        result._incr as IncrData,
+        outInternal,
+        fontSamples,
+      );
+    }
+    if (result._window) {
+      sampleHeap();
+      clearBreakCache(this.measurer);
+    }
+    return result;
   }
 
   /**
@@ -6165,6 +6276,10 @@ class Engine {
   private finalizeHeadersFooters(emitBorders = true): void {
     const total = this.pages.length;
     for (const page of this.pages) {
+      if (page.discarded) {
+        page.hfStart = 0;
+        continue;
+      }
       const sp = page.sp;
       this.sp = sp; // frames built here must resolve anchors against this page's section
       if (emitBorders) this.emitPageBorders(page);
@@ -8412,12 +8527,15 @@ class LayoutWindowController implements LayoutWindow {
     private result: LayoutResult,
     private data: IncrData,
     private pages: InternalPage[],
+    private fontSamples = new Map<string, LayoutFontSample>(),
   ) {
-    this.retained = new Set(pages.map((_, index) => index));
+    this.retained = new Set(
+      pages.flatMap((page, index) => page.discarded ? [] : [index]),
+    );
   }
 
   materialize(pageIndexes: Iterable<number>): void {
-    const wanted = this.expand(pageIndexes);
+    const wanted = this.normalize(pageIndexes);
     const missing = [...wanted].filter((index) => !this.retained.has(index)).sort((a, b) => a - b);
     let cursor = 0;
     while (cursor < missing.length) {
@@ -8427,7 +8545,12 @@ class LayoutWindowController implements LayoutWindow {
         cursor++;
         end = missing[cursor];
       }
-      const rebuilt = new Engine(this.doc, this.measurer).materializeRange(this.data, start, end);
+      const rebuilt = new Engine(
+        this.doc,
+        this.measurer,
+        undefined,
+        true,
+      ).materializeRange(this.data, start, end);
       const byIndex = new Map(rebuilt.map((page) => [page.physIndex - 1, page]));
       for (let index = start; index <= end; index++) {
         const page = byIndex.get(index);
@@ -8435,6 +8558,8 @@ class LayoutWindowController implements LayoutWindow {
         const target = this.pages[index];
         target.items = page.items;
         target.hfStart = page.hfStart;
+        target.footnotes = page.footnotes;
+        target.footnoteH = page.footnoteH;
         target.discarded = false;
         this.result.pages[index].items = page.items;
         this.result.pages[index].hfStart = page.hfStart ?? page.items.length;
@@ -8445,41 +8570,70 @@ class LayoutWindowController implements LayoutWindow {
   }
 
   releaseExcept(pageIndexes: Iterable<number>): void {
-    const wanted = this.expand(pageIndexes);
+    const wanted = this.normalize(pageIndexes);
     for (const index of this.retained) {
       if (wanted.has(index)) continue;
       const page = this.pages[index];
+      collectPageMetadata(
+        page,
+        this.fontSamples,
+        () => {
+          this.result._hasModel3D = true;
+        },
+      );
       page.items = [];
+      for (const note of page.footnotes) note.items = [];
       page.hfStart = 0;
       page.discarded = true;
       this.result.pages[index].items = page.items;
       this.result.pages[index].hfStart = 0;
     }
     this.retained = wanted;
+    this.result._fontSamples = [...this.fontSamples.values()];
   }
 
   retainedPages(): Set<number> {
     return new Set(this.retained);
   }
 
-  private expand(pageIndexes: Iterable<number>): Set<number> {
+  private normalize(pageIndexes: Iterable<number>): Set<number> {
     const wanted = new Set<number>();
-    const points = this.data.points;
     for (const pageIndex of pageIndexes) {
       if (pageIndex < 0 || pageIndex >= this.pages.length) continue;
       wanted.add(pageIndex);
-      let preceding = -1;
-      for (const point of points) {
-        if (point.pageCount >= pageIndex) break;
-        preceding = point.pageCount;
-      }
-      if (preceding >= 0) wanted.add(preceding);
     }
     return wanted;
   }
 }
 
 // ---------- helpers ----------
+
+function collectPageMetadata(
+  page: InternalPage,
+  fontSamples: Map<string, LayoutFontSample>,
+  foundModel3D: () => void,
+): void {
+  const items = page.items.concat(page.footnotes.flatMap((note) => note.items));
+  for (const item of items) {
+    if (item.kind === "image" && item.model3D) foundModel3D();
+    if (item.kind !== "text" || !item.text.trim()) continue;
+    const key = fontSampleKey({ font: item.font, text: item.text });
+    const sample = item.text.trim().slice(0, 40);
+    const existing = fontSamples.get(key);
+    if (!existing || (!/[^\u0000-\u024f]/.test(existing.text) && /[^\u0000-\u024f]/.test(sample))) {
+      fontSamples.set(key, { font: item.font, text: sample });
+    }
+  }
+}
+
+function fontSampleKey(sample: LayoutFontSample): string {
+  return `${sample.font.family}\u0000${sample.font.bold ? 1 : 0}${sample.font.italic ? 1 : 0}`;
+}
+
+function sampleHeap(): void {
+  const perf = (globalThis as { __dxwPerf?: { heapSample?: () => void } }).__dxwPerf;
+  perf?.heapSample?.();
+}
 
 /** A custom-mark footnote attached through an otherwise blank paragraph is a
  * zero-height anchor. IEEE templates use this to place the author footnote

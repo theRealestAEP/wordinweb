@@ -347,6 +347,11 @@ export interface LayoutWindow {
   retainedPages(): Set<number>;
 }
 
+export interface LayoutFontSample {
+  font: FontSpec;
+  text: string;
+}
+
 export interface LayoutResult {
   pages: LaidOutPage[];
   totalPages: number;
@@ -366,4 +371,8 @@ export interface LayoutResult {
   _hf?: unknown;
   /** Internal positioned-model window. */
   _window?: LayoutWindow;
+  /** Font samples collected before offscreen page items were released. */
+  _fontSamples?: LayoutFontSample[];
+  /** True when any page contains a 3D model item. */
+  _hasModel3D?: boolean;
 }

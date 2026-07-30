@@ -667,6 +667,7 @@ export function renderToDom(
   const syncViewport = (notify: boolean, force = false, overscan = 2): void => {
     if (!virtualized) return;
     const wanted = wantedPages(overscan);
+    layout._window?.materialize(wanted);
     let changed = false;
     for (const i of wanted) {
       if (pages[i].mounted) continue;
@@ -679,6 +680,7 @@ export function renderToDom(
         changed = true;
       }
     }
+    layout._window?.releaseExcept(wanted);
     if (!changed && !force) return;
     refreshBindings();
     if (drawComments || force) redrawComments();
@@ -736,6 +738,8 @@ export function renderToDom(
     updateViewport: () => syncViewport(true),
     materializeAll: () => {
       const mounted = pages.map((p) => p.mounted);
+      const retained = layout._window?.retainedPages();
+      layout._window?.materialize(pages.keys());
       for (const page of pages) mountPageRecord(doc, page, zoom, options);
       refreshBindings();
       redrawComments();
@@ -743,6 +747,7 @@ export function renderToDom(
         for (let i = 0; i < pages.length; i++) {
           if (!mounted[i]) unmountPageRecord(pages[i]);
         }
+        if (retained) layout._window?.releaseExcept(retained);
         refreshBindings();
         redrawComments();
         options.onViewportChange?.();

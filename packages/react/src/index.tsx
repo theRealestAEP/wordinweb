@@ -779,7 +779,8 @@ export function DocxView({
       if (
         editable
         && !customElements.get("model-viewer")
-        && layout.pages.some((page) => page.items.some((item) => item.kind === "image" && item.model3D))
+        && (layout._hasModel3D ||
+          layout.pages.some((page) => page.items.some((item) => item.kind === "image" && item.model3D)))
       ) {
         void import("@google/model-viewer");
       }
@@ -871,7 +872,11 @@ export function DocxView({
         layoutRunning = true;
         layoutDirty = false;
         setLayoutPending(true);
-        void layoutDocumentAsync(doc, { measurer, signal: abort.signal }).then((layout) => {
+        void layoutDocumentAsync(doc, {
+          measurer,
+          signal: abort.signal,
+          windowModel: true,
+        }).then((layout) => {
           if (cancelled || job !== layoutJob || abort.signal.aborted) return;
           if (doc.modelVersion !== startModelVersion || layoutDirty) {
             /**
@@ -885,7 +890,7 @@ export function DocxView({
              * job LANDS instead of being thrown away and restarted forever.
              */
             countJob("bgRepaired");
-            layout = layoutDocument(doc, { measurer, prev: layout });
+            layout = layoutDocument(doc, { measurer, windowModel: true, prev: layout });
           }
           layoutDirty = false;
           paintLayout(doc, layout, performance.now() - started);
@@ -981,9 +986,11 @@ export function DocxView({
       const started = performance.now();
       const layout =
         headerFooterOnly && prevLayout
-          ? relayoutHeadersFooters(doc, prevLayout, measurer) ?? layoutDocument(doc, { measurer })
+          ? relayoutHeadersFooters(doc, prevLayout, measurer) ??
+            layoutDocument(doc, { measurer, windowModel: true })
           : layoutDocument(doc, {
               measurer,
+              windowModel: true,
               prev: globalChange ? undefined : prevLayout ?? undefined,
               dirtyHint: globalChange ? undefined : dirtyBlock,
               dirtySource: globalChange ? undefined : dirtySource,
