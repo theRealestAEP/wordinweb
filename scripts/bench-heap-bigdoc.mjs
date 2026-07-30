@@ -129,7 +129,7 @@ function docBytes(paras, chars) {
 
 /* -------------------------------- run ----------------------------------- */
 const pkg = process.env.WW_PKG ?? "wordinweb";
-const corePkg = process.env.WW_CORE ?? "@wordinweb/core";
+const corePkg = process.env.WW_CORE ?? pkg;
 const [{ createElement }, { act }, { createRoot }, mod, core] = await Promise.all([
   import("react"),
   import("react"),
@@ -139,6 +139,32 @@ const [{ createElement }, { act }, { createRoot }, mod, core] = await Promise.al
 ]);
 const DocxView = mod.DocxView;
 if (!DocxView) throw new Error(`no DocxView export in ${pkg}`);
+if (!core.DocxDocument || !core.layoutDocument) throw new Error(`no DocxDocument/layoutDocument export in ${corePkg}`);
+
+/** Version-independent deterministic measurer (mirrors core's ApproxMeasurer)
+ * so the engine-only stages compare identically across builds that may not
+ * export one. */
+function approxWidth(text, font, letterSpacing = 0) {
+  let w = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 32;
+    let em;
+    if (ch === " ") em = 0.25;
+    else if ("iIljtf.,;:!|'".includes(ch)) em = 0.28;
+    else if ("mwMW".includes(ch)) em = 0.85;
+    else if (ch >= "A" && ch <= "Z") em = 0.66;
+    else if (ch >= "0" && ch <= "9") em = 0.5;
+    else if (code > 0x2e80) em = 1.0;
+    else em = 0.5;
+    if (font.bold) em *= 1.05;
+    w += em * font.size;
+  }
+  return w + letterSpacing * text.length;
+}
+const benchMeasurer = {
+  width: approxWidth,
+  metrics: (font) => ({ ascent: font.size * 0.9, descent: font.size * 0.25, lineHeight: font.size * 1.15 }),
+};
 
 const h0 = heapMB();
 const bytes = docBytes(PARAS, CHARS);
@@ -147,8 +173,7 @@ const docxMB = bytes.length / 1048576;
 /* Engine-only stages first: these transfer to the browser unchanged. */
 const doc = await core.DocxDocument.load(bytes.slice());
 const h1 = heapMB();
-const measurer = new core.ApproxMeasurer();
-let layout = core.layoutDocument(doc, { measurer });
+let layout = core.layoutDocument(doc, { measurer: benchMeasurer });
 const h2 = heapMB();
 const pages = layout.totalPages;
 let items = 0;
