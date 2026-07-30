@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, versionKey, type BundleStore, type CollabSession, type DocBundle, type StoredDocSummary } from "wordinweb/collab";
 import { type DocxViewApi } from "wordinweb";
 import { reviveEncrypted } from "./e2ee-flows";
+import { pruneVersions, versionByteBudget, VERSION_COUNT_CAP } from "./version-retention";
 import { FileMenu, savedDocName } from "./file-menu";
 import { PerfHud } from "./perf/hud";
 import { perfMonitor, type DocStats } from "./perf/metrics";
@@ -204,6 +205,10 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
    * swallowed quota error means the user believes a restore point exists
    * when it does not (the browser is the only place it could exist). */
   const [versionError, setVersionError] = useState<string | null>(null);
+  /** Older versions were deleted by retention (see version-retention.ts) —
+   * always said on screen. Silently deleting a restore point is worse than
+   * refusing to make a new one. */
+  const [versionNotice, setVersionNotice] = useState<string | null>(null);
 
   // Seed the strip FROM THE STORE, not from empty component state: saved
   // versions are durable, so they must still be on screen after a reload.
@@ -216,8 +221,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           all
             .filter((s) => s.kind === "version" && s.docId === docId)
             .map((s) => ({ key: s.key, label: s.label ?? "(auto)", savedAt: s.versionSavedAt ?? s.savedAt }))
-            .sort((a, b) => a.savedAt - b.savedAt)
-            .slice(-25),
+            .sort((a, b) => a.savedAt - b.savedAt),
         );
       },
       () => {
@@ -244,9 +248,16 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     return () => window.removeEventListener("keydown", onKey);
   }, [versionModal]);
 
+  /** What a dropped version is called in the retention notice. */
+  const versionName = (s: StoredDocSummary) =>
+    s.label ?? new Date(s.versionSavedAt ?? s.savedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
   const saveVersion = async (label: string) => {
     if (!session?.doc) return;
     const savedAt = Date.now();
+    // Everything retention deleted in this save, oldest first — reported on
+    // screen whether or not the save itself succeeded (see the catch).
+    let dropped: StoredDocSummary[] = [];
     try {
       const bundle = await store.get(docId);
       if (!bundle) {
@@ -257,11 +268,35 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         return;
       }
       const key = versionKey(docId, savedAt, label);
-      await store.put({ ...bundle, docId: key, savedAt });
+      const next = { ...bundle, docId: key, savedAt };
+      const budget = await versionByteBudget();
+      try {
+        await store.put(next);
+        // Landed. Retention runs AFTER the save, so a restore point is only
+        // ever deleted once the newer one it makes way for durably exists.
+        dropped = await pruneVersions(store, docId, budget);
+      } catch (err) {
+        // Out of space (or blocked). Free THIS doc's older versions — the one
+        // kind of stored copy that is redundant by construction — and retry
+        // once. keepNewest: 0 because the version being made room for is the
+        // incoming one; the budget leaves it headroom.
+        dropped = await pruneVersions(store, docId, Math.max(0, budget - bundle.confirmedBytes.byteLength), { keepNewest: 0, countCap: VERSION_COUNT_CAP - 1 });
+        if (dropped.length === 0) throw err; // nothing to free — surface the original failure
+        await store.put(next);
+      }
       setVersionError(null);
-      setVersions((v) => [...v, { key, label: label || "(auto)", savedAt }].slice(-25));
+      const droppedKeys = new Set(dropped.map((d) => d.key));
+      setVersions((v) => [...v.filter((x) => !droppedKeys.has(x.key)), { key, label: label || "(auto)", savedAt }]);
     } catch {
       setVersionError("Couldn’t save this version — storage is full or blocked. Download a copy instead.");
+    } finally {
+      if (dropped.length) {
+        const names = dropped.map(versionName);
+        const shown = names.length > 4 ? `${names.slice(0, 3).join(", ")} and ${names.length - 3} more` : names.join(", ");
+        setVersionNotice(
+          `Removed ${dropped.length} older version${dropped.length === 1 ? "" : "s"} to stay within this browser’s storage: ${shown}. Download a version to keep it outside the browser.`,
+        );
+      }
     }
   };
   const downloadVersion = async (key: string, label: string, savedAt: number) => {
@@ -765,7 +800,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           ))}
         </span>
       </div>
-      {(versions.length > 0 || versionError) && (
+      {(versions.length > 0 || versionError || versionNotice) && (
         <div className="versionbar" data-testid="versions">
           <span className="versionbar-label">Saved versions</span>
           {versions.map((v) => (
@@ -781,6 +816,12 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           {versionError && (
             <span data-testid="version-error" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
               {versionError}
+            </span>
+          )}
+          {versionNotice && (
+            <span data-testid="version-retention-notice" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+              {versionNotice}{" "}
+              <button className="ghost" onClick={() => setVersionNotice(null)}>Dismiss</button>
             </span>
           )}
         </div>
