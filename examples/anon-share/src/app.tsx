@@ -640,16 +640,6 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
               </>
             )}
           </span>
-        ) : session?.storeSlow ? (
-          // A DIFFERENT CLAIM from "storage is full", and worth its own words:
-          // the read timed out, so this session joined without whatever was
-          // saved here. Nothing has failed to write, and the document on
-          // screen is fine — but a resume did not happen, and saying "full"
-          // sent someone hunting through a store holding a few megabytes.
-          <span data-testid="store-slow-banner" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
-            This browser’s storage didn’t respond, so this document opened without
-            anything previously saved here. Editing works normally.
-          </span>
         ) : (session?.persistErrors ?? 0) > 0 ? (
           // DATA-LOSS WARNING, deliberately ahead of the other banners. This
           // browser's stored bundle IS the durable copy (doc 12 §4) — the
@@ -681,6 +671,21 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             <button data-testid="persist-manage-saved" onClick={() => setSavedMenuRequest((n) => n + 1)}>
               Manage saved copies
             </button>
+          </span>
+        ) : session?.storeSlow ? (
+          // AFTER the persist-failure branch on purpose. If a write has also
+          // failed, THAT is the more serious fact — work is not being saved —
+          // and it must not be hidden behind a slower-sounding message. Putting
+          // this first shadowed it, and the suite caught it.
+          //
+          // A DIFFERENT CLAIM from "storage is full", and worth its own words:
+          // the read timed out, so this session joined without whatever was
+          // saved here. Nothing has failed to write, and the document on
+          // screen is fine — but a resume did not happen, and saying "full"
+          // sent someone hunting through a store holding a few megabytes.
+          <span data-testid="store-slow-banner" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            This browser’s storage didn’t respond, so this document opened without
+            anything previously saved here. Editing works normally.
           </span>
         ) : session?.offline?.capped ? (
           // THE TAIL CAP (doc 15 §4.3): recording stopped and the editor is
