@@ -420,6 +420,34 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     setModeTick((n) => n + 1);
   };
 
+  /**
+   * Click a collaborator's roster chip → scroll to their caret. The geometry
+   * lives behind `api.revealPresence` (the react package owns page layout and
+   * the LIVE presence table — the session object here is a snapshot, so
+   * passing a position from this render could be stale by the click). The two
+   * non-jumps are said out loud in a transient notice rather than doing
+   * nothing: a participant with no cursor yet, and a position that no longer
+   * resolves (they moved or the text was deleted).
+   */
+  const [jumpNotice, setJumpNotice] = useState<string | null>(null);
+  const jumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (jumpTimerRef.current) clearTimeout(jumpTimerRef.current); }, []);
+  const jumpToParticipant = (participantId: string, participantName: string) => {
+    if (!api) return;
+    const result = api.revealPresence(participantId);
+    if (jumpTimerRef.current) clearTimeout(jumpTimerRef.current);
+    if (result === "revealed") {
+      setJumpNotice(null);
+      return;
+    }
+    setJumpNotice(
+      result === "no-position"
+        ? `${participantName} hasn’t placed a cursor yet.`
+        : `${participantName}’s cursor spot is gone — they may have just moved.`,
+    );
+    jumpTimerRef.current = setTimeout(() => setJumpNotice(null), 4000);
+  };
+
   const download = () => {
     if (!session?.doc) return;
     const blob = new Blob([session.doc.save() as BlobPart], {
@@ -813,18 +841,43 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             width is not ours to choose — a busy room can hold ten names of any
             length — so it scrolls WITHIN itself rather than wrapping the row
             or pushing the controls off the edge. */}
+        {jumpNotice && (
+          <span role="status" data-testid="jump-notice" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            {jumpNotice}
+          </span>
+        )}
         <span className="roster-scroll">
-          {(session?.roster ?? []).map((r) => (
+          {(session?.roster ?? []).map((r) => {
+            const pill = {
+              padding: "2px 10px", borderRadius: 999, fontSize: 12, color: "#fff",
+              background: r.profile.color, opacity: r.connected ? 1 : 0.35, whiteSpace: "nowrap",
+            } as const;
+            return (
             <span key={r.clientId} data-testid="roster-chip" data-connected={r.connected} style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+              {/* A COLLABORATOR'S chip is a real button — click (or Tab +
+                  Enter) jumps the view to their caret. Your own chip and the
+                  view-only case (no api) stay plain labels: offering a jump
+                  to where you already are, or one the viewer build cannot
+                  perform, is a broken affordance. */}
+              {api && r.clientId !== clientId ? (
+                <button
+                  type="button"
+                  data-testid="roster-jump"
+                  title={`Jump to ${r.profile.name}’s cursor (names are chosen by participants)`}
+                  aria-label={`Jump to ${r.profile.name}’s cursor`}
+                  onClick={() => jumpToParticipant(r.clientId, r.profile.name)}
+                  style={{ ...pill, border: "none", cursor: "pointer", font: "inherit", fontSize: 12 }}
+                >
+                  {r.profile.name}
+                </button>
+              ) : (
               <span
                 title="Names are chosen by participants"
-                style={{
-                  padding: "2px 10px", borderRadius: 999, fontSize: 12, color: "#fff",
-                  background: r.profile.color, opacity: r.connected ? 1 : 0.35, whiteSpace: "nowrap",
-                }}
+                style={pill}
               >
                 {r.profile.name}
               </span>
+              )}
               {isOwner && r.clientId !== clientId && (
                 <>
                   <button className="chip" title="Demote to viewer"
@@ -834,7 +887,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
                 </>
               )}
             </span>
-          ))}
+            );
+          })}
         </span>
       </div>
       {reclaim.notice && (
