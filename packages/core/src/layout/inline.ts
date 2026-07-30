@@ -832,6 +832,40 @@ function brokenProj(b: BrokenParagraph): string {
   );
 }
 
+/** TEMPORARY hunt probe (lost-keystroke investigation): when
+ * `globalThis.__dxwHuntBp` is an array, every break whose XML text, parsed
+ * model text, and broken-line output disagree on 'Z' count is recorded.
+ * Partition: zx!==zp = stale PARSED MODEL; zp!==zb = stale BREAK output. */
+function huntCheckBreak(para: Paragraph, result: BrokenParagraph, cached: boolean): void {
+  const recs = (globalThis as { __dxwHuntBp?: Record<string, unknown>[] }).__dxwHuntBp;
+  if (!recs || !para.src) return;
+  const xmlZ = (el: XmlElement): number => {
+    let n = (el.text.match(/Z/g) ?? []).length;
+    for (const c of el.children) n += xmlZ(c);
+    return n;
+  };
+  let zp = 0;
+  for (const child of para.children) {
+    const runs = child.type === "hyperlink" ? child.runs : [child];
+    for (const r of runs) {
+      for (const c of r.content) {
+        if (c.kind === "text") zp += (c.text.match(/Z/g) ?? []).length;
+      }
+    }
+  }
+  const zx = xmlZ(para.src as XmlElement);
+  let zb = 0;
+  for (const line of result.lines) {
+    for (const span of line.spans) {
+      const t = (span as unknown as { text?: string }).text;
+      if (t) zb += (t.match(/Z/g) ?? []).length;
+    }
+  }
+  if ((zx || zp || zb) && (zx !== zp || zp !== zb)) {
+    recs.push({ t: performance.now(), zx, zp, zb, cached });
+  }
+}
+
 export function breakParagraph(
   doc: DocxDocument,
   measurer: TextMeasurer,
@@ -850,7 +884,9 @@ export function breakParagraph(
     para.props.tableStyleId === undefined &&
     !paraHasPositionalContent(para);
   if (!cacheable) {
-    return breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
+    const direct = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
+    huntCheckBreak(para, direct, false);
+    return direct;
   }
   const cache = bpCacheFor(measurer);
   const key = breakCacheKey(doc, para, contentWidth, minLineHeight, numberingLabel, opts);
@@ -868,9 +904,11 @@ export function breakParagraph(
     }
     // Never hand out the cached instance: the engine mutates line/span fields
     // (doc-grid height snapping, in-place re-placement) during layout.
+    huntCheckBreak(para, hit, true);
     return cloneBroken(hit);
   }
   const result = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
+  huntCheckBreak(para, result, false);
   if (cache.size >= BP_CACHE_MAX) cache.clear();
   // Store a pristine clone; return the original for this caller to mutate.
   cache.set(key, cloneBroken(result));

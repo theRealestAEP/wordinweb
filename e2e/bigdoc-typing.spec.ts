@@ -254,6 +254,125 @@ async function typeRounds(page: Page, scenario: string, rounds: number): Promise
       `HUNT ${scenario} landed=${landed} modelZ=${hunt.modelZ} dropped=${hunt.dropped} ` +
         `sendFail=${hunt.sendFail} selfHeals=${hunt.selfHeals} keys=${hunt.keylog.length} transitions=${hunt.zlog.length}`,
     );
+    const bp = await page.evaluate(() => {
+      const g = globalThis as {
+        __dxwBpMismatch?: number;
+        __dxwPerf?: { incr?: Record<string, unknown> };
+        __dxwHuntBp?: unknown[];
+      };
+      return { mismatch: g.__dxwBpMismatch ?? 0, incr: g.__dxwPerf?.incr ?? null, breaks: g.__dxwHuntBp ?? [] };
+    });
+    console.log(
+      `HUNT ${scenario} bpMismatch=${bp.mismatch} staleBreaks=${JSON.stringify(bp.breaks)} ` +
+        `lastIncrFallback=${JSON.stringify(bp.incr)}`,
+    );
+    if (landed !== rounds) {
+      // Name the stale paragraph: for every mounted paragraph DOM whose text
+      // contains no Z, compare against the MODEL paragraph text (via __ww).
+      const diff = await page.evaluate(() => {
+        const w = (window as unknown as { __ww?: { text(): string } }).__ww;
+        if (!w) return null;
+        const model = w.text();
+        // Model text is a concatenation of "Paragraph N: ..." bodies (plus Zs).
+        const modelParas = new Map<number, string>();
+        const re = /Paragraph (\d+):/g;
+        let m: RegExpExecArray | null;
+        let prev: { n: number; start: number } | null = null;
+        while ((m = re.exec(model))) {
+          if (prev) modelParas.set(prev.n, model.slice(prev.start, m.index));
+          prev = { n: Number(m[1]), start: m.index };
+        }
+        if (prev) modelParas.set(prev.n, model.slice(prev.start));
+        const out: { n: number; domZ: number; modelZ: number; dom: string; model: string }[] = [];
+        for (const p of Array.from(document.querySelectorAll(".dxw-page"))) {
+          const domText = p.textContent ?? "";
+          const reD = /Paragraph (\d+):/g;
+          let d: RegExpExecArray | null;
+          let prevD: { n: number; start: number } | null = null;
+          const flush = (endIdx: number): void => {
+            if (!prevD) return;
+            const domPara = domText.slice(prevD.start, endIdx);
+            const modelPara = modelParas.get(prevD.n) ?? "";
+            const dz = (domPara.match(/Z/g) ?? []).length;
+            const mz = (modelPara.match(/Z/g) ?? []).length;
+            if (dz !== mz) out.push({ n: prevD.n, domZ: dz, modelZ: mz, dom: domPara.slice(0, 160), model: modelPara.slice(0, 160) });
+          };
+          while ((d = reD.exec(domText))) {
+            flush(d.index);
+            prevD = { n: Number(d[1]), start: d.index };
+          }
+          flush(domText.length);
+          prevD = null;
+        }
+        return out;
+      });
+      console.log(`HUNT ${scenario} staleParas=${JSON.stringify(diff)}`);
+      // Multiset diff of Z CONTEXTS (model minus mounted DOM): names the exact
+      // occurrence the DOM lacks, and whether its page is even mounted.
+      const ctxDiff = await page.evaluate(() => {
+        const w = (window as unknown as { __ww?: { text(): string } }).__ww;
+        if (!w) return null;
+        const contexts = (s: string): string[] => {
+          const out: string[] = [];
+          for (let i = s.indexOf("Z"); i >= 0; i = s.indexOf("Z", i + 1)) {
+            out.push(s.slice(Math.max(0, i - 28), i) + "[Z]" + s.slice(i + 1, i + 8));
+          }
+          return out;
+        };
+        const model = contexts(w.text());
+        const dom: { page: number; ctx: string }[] = [];
+        for (const p of Array.from(document.querySelectorAll<HTMLElement>(".dxw-page"))) {
+          for (const c of contexts(p.textContent ?? "")) dom.push({ page: Number(p.dataset.page), ctx: c });
+        }
+        const domLeft = [...dom];
+        const modelOnly: string[] = [];
+        for (const c of model) {
+          const j = domLeft.findIndex((d) => d.ctx === c);
+          if (j >= 0) domLeft.splice(j, 1);
+          else modelOnly.push(c);
+        }
+        const mounted = Array.from(document.querySelectorAll<HTMLElement>(".dxw-page"))
+          .filter((p) => p.childElementCount > 0)
+          .map((p) => Number(p.dataset.page));
+        return { modelOnly, domOnly: domLeft.map((d) => `${d.page}:${d.ctx}`), mounted, domZ: dom.length, modelZ: model.length };
+      });
+      console.log(`HUNT ${scenario} ctxDiff=${JSON.stringify(ctxDiff)}`);
+      // Raw boundary dump: model text around the missing occurrence, plus the
+      // DOM tail/head of each mounted page — is a whole LINE missing, or one char?
+      const boundary = await page.evaluate((missing: string[]) => {
+        const w = (window as unknown as { __ww?: { text(): string } }).__ww;
+        if (!w || !missing.length) return null;
+        const model = w.text();
+        const probe = missing[0].replace("[Z]", "Z");
+        const at = model.indexOf(probe);
+        const modelAround = at >= 0 ? model.slice(Math.max(0, at - 150), at + probe.length + 150) : null;
+        const pages = Array.from(document.querySelectorAll<HTMLElement>(".dxw-page"))
+          .filter((p) => p.childElementCount > 0)
+          .map((p) => ({
+            page: Number(p.dataset.page),
+            tail: (p.textContent ?? "").slice(-220),
+            head: (p.textContent ?? "").slice(0, 220),
+          }));
+        return { modelAround, pages };
+      }, ctxDiff?.modelOnly ?? []);
+      console.log(`HUNT ${scenario} boundary=${JSON.stringify(boundary)}`);
+      const carets = await page.evaluate(
+        () => (globalThis as { __caretlog?: unknown[] }).__caretlog ?? [],
+      );
+      console.log(`HUNT ${scenario} carets=${JSON.stringify(carets)}`);
+      // Late-paint check: the MO keeps recording. If the missing Z paints
+      // AFTER the landed sample, these post-round transitions catch it.
+      await page.waitForTimeout(2500);
+      const late = await page.evaluate(() => {
+        const g = globalThis as PerfGlobals;
+        const z = (document.querySelector(".dxw-pages")?.textContent?.match(/Z/g) ?? []).length;
+        return { zlog: g.__zlog ?? [], nowZ: z, t: performance.now() };
+      });
+      console.log(
+        `HUNT ${scenario} late nowZ=${late.nowZ} transitions=${late.zlog.length} ` +
+          `tailTrans=${JSON.stringify(late.zlog.slice(-6))}`,
+      );
+    }
     if (landed !== rounds) {
       // Full transition + keydown timelines: which keydown got no +1, and
       // whether any transition DECREASED the count (paint-then-vanish).
@@ -261,6 +380,16 @@ async function typeRounds(page: Page, scenario: string, rounds: number): Promise
       for (const z of hunt.zlog) console.log(`HUNT ${scenario} ztrans t=${z.t.toFixed(1)} z=${z.z}`);
       const drops = hunt.zlog.filter((z, i) => i > 0 && z.z < hunt.zlog[i - 1].z);
       console.log(`HUNT ${scenario} decreases=${drops.length} times=${times.map((t) => t.toFixed(1)).join(",")}`);
+      const jobs = await page.evaluate(
+        () => (globalThis as { __dxwPerf?: { jobs?: Record<string, number> } }).__dxwPerf?.jobs ?? {},
+      );
+      console.log(`HUNT ${scenario} jobs=${JSON.stringify(jobs)}`);
+      samples.forEach((s, i) => {
+        console.log(
+          `HUNT ${scenario} sample i=${i} ` +
+            Object.entries(s).map(([k, v]) => `${k}=${typeof v === "number" ? v.toFixed(1) : v}`).join(" "),
+        );
+      });
     }
   }
   const percentile = (p: number) => percentileOf(times, p);
@@ -364,8 +493,10 @@ test.describe("big document typing (>50 pages)", () => {
     });
 
     if (HUNT) {
-      await page.addInitScript(() => {
+      await page.addInitScript((verifyBp: boolean) => {
         const g = globalThis as PerfGlobals;
+        if (verifyBp) (g as { __dxwVerifyBp?: boolean }).__dxwVerifyBp = true;
+        (g as { __dxwHuntBp?: unknown[] }).__dxwHuntBp = [];
         g.__zlog = [];
         g.__keylog = [];
         let last = -1;
@@ -376,15 +507,32 @@ test.describe("big document typing (>50 pages)", () => {
             g.__zlog!.push({ t: performance.now(), z });
           }
         };
+        const carets: { page: number; top: number; near: string }[] = [];
+        (g as { __caretlog?: typeof carets }).__caretlog = carets;
         document.addEventListener("keydown", (event) => {
-          if (event.key === "Z") g.__keylog!.push(performance.now());
+          if (event.key !== "Z") return;
+          g.__keylog!.push(performance.now());
+          // Where did this keystroke's caret end up? (bubble phase: the editor
+          // has already inserted, committed, and positioned the caret.)
+          const caret = document.querySelector<HTMLElement>("[data-dxw-caret]");
+          const pageEl = caret?.closest<HTMLElement>(".dxw-page") ?? null;
+          const mounted = Array.from(document.querySelectorAll<HTMLElement>(".dxw-page")).filter(
+            (p) => p.childElementCount > 0,
+          );
+          const incr = (globalThis as { __dxwPerf?: { incr?: { fallbackReason?: string } } }).__dxwPerf?.incr;
+          carets.push({
+            page: pageEl ? Number(pageEl.dataset.page) : -1,
+            top: caret ? Math.round(caret.getBoundingClientRect().top) : -1,
+            near: `m=${mounted.length} last=${mounted.length ? mounted[mounted.length - 1].dataset.page : "-"} ` +
+              `cpz=${(pageEl?.textContent?.match(/Z/g) ?? []).length} fb=${incr?.fallbackReason ?? ""}`,
+          });
         });
         new MutationObserver(() => read()).observe(document, {
           subtree: true,
           childList: true,
           characterData: true,
         });
-      });
+      }, !!process.env.WW_HUNT_VERIFY_BP);
     }
 
     // ---- LOCAL: open the big docx in the landing editor ----
