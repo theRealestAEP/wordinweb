@@ -912,6 +912,12 @@ export class EncryptedCollabConnection {
     const seq = this.mirror.seq;
     if (seq === this.lastSelfCheckSeq) return; // this state already verified
     const liveHash = await docHash(this.replica.doc);
+    // Macrotask hop (see the checkpoint duty in ingest): the second hash's
+    // full-doc serialization otherwise runs as a continuation of the first
+    // hash's digest, which can drain inside an in-flight input dispatch.
+    // The raced-a-local-submit recheck below already covers state moving
+    // across this await.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const canonicalHash = await docHash(this.mirror.doc);
     if (this.replica.pendingCount !== 0 || this.mirror.seq !== seq) return; // raced a local submit
     this.lastSelfCheckSeq = seq;
@@ -969,6 +975,15 @@ export class EncryptedCollabConnection {
     // round-4 F17 rule structurally; the server adopts it only if it is
     // quiescent (exactly at the log head) — a miss just retries next round.
     if (this.isCheckpointer && env.seq % EncryptedCollabConnection.CHECKPOINT_EVERY === 0) {
+      // Hop to a fresh MACROTASK before the heavy work. checkpoint() and
+      // docHash() serialize the full canonical doc (~60-100ms at 500 pages),
+      // and as bare promise continuations they drain at listener boundaries
+      // INSIDE an in-flight input dispatch — the cost landed inside a
+      // keystroke's handler and delayed its paint (measured: 40-85ms spikes
+      // on the keystrokes at these seq points). In its own task the work
+      // runs BETWEEN dispatches instead. Still on the serial chain: no later
+      // ingest interleaves, so the mirror is still exactly at env.seq.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       const cp = this.mirror!.checkpoint();
       const sealed = await sealCheckpoint(this.keys!.kContent, this.docId, this.genesisId!, cp.seq, {
         docx: bytesToB64(cp.docx),
@@ -990,6 +1005,10 @@ export class EncryptedCollabConnection {
     // tampered history — surfaced as `divergence` (the resync path:
     // rejoin from the welcome, which is always available).
     if (env.seq % EncryptedCollabConnection.GOSSIP_EVERY === 0) {
+      // Same macrotask hop as the checkpoint duty above: docHash serializes
+      // the whole canonical doc, and every honest client must hash the state
+      // at exactly this seq — the serial chain guarantees that across the hop.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       const hash = await docHash(this.mirror!.doc);
       this.ownHashes.set(env.seq, hash);
       if (this.ownHashes.size > 5) {

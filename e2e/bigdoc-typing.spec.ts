@@ -221,6 +221,7 @@ async function typeRounds(page: Page, scenario: string, rounds: number): Promise
     probe.times = [];
     probe.busySeen = 0;
     probe.painted = 0;
+    (probe as unknown as { heaps: number[] }).heaps = [];
     const perf = (globalThis as PerfGlobals).__dxwPerf;
     if (perf) perf.samples = [];
   });
@@ -232,6 +233,20 @@ async function typeRounds(page: Page, scenario: string, rounds: number): Promise
   });
   const modelAfter = await modelSentinels(page);
   const percentile = (p: number) => percentileOf(times, p);
+  // Name every slow round: was it the editor's commit (and which phase), or
+  // time outside the commit entirely (GC, event dispatch)?
+  const heaps = await page.evaluate(
+    () => ((globalThis as PerfGlobals).__typingProbe as unknown as { heaps?: number[] }).heaps ?? [],
+  );
+  times.forEach((t, i) => {
+    if (t <= 25) return;
+    const s = samples[i] ?? {};
+    const heapDeltaMB = heaps.length > i + 1 ? (heaps[i + 1] - heaps[i]) / 1e6 : NaN;
+    console.log(
+      `SLOW-ROUND ${scenario} i=${i} keydownMs=${t.toFixed(1)} heapDeltaMB=${heapDeltaMB.toFixed(1)} ` +
+        Object.entries(s).map(([k, v]) => `${k}=${typeof v === "number" ? v.toFixed(1) : v}`).join(" "),
+    );
+  });
   metric(scenario, {
     paragraphs: PARAS,
     rounds,
@@ -341,6 +356,11 @@ test.describe("big document typing (>50 pages)", () => {
       document.addEventListener("keydown", (event) => {
         if (event.key !== "Z") return;
         probe.prePages = pageZCounts();
+        const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+        if (mem) (probe as unknown as { heaps: number[] }).heaps = [
+          ...(((probe as unknown as { heaps?: number[] }).heaps) ?? []),
+          mem.usedJSHeapSize,
+        ];
       }, true);
       const keyStarts = new WeakMap<KeyboardEvent, number>();
       document.addEventListener("keydown", (event) => {
@@ -392,6 +412,14 @@ test.describe("big document typing (>50 pages)", () => {
     metric("bigdoc-pages", { paragraphs: PARAS, pages });
 
     await assertVirtualized(page, "bigdoc-local");
+    // Latency rounds start from a collected heap: the load (local) and the
+    // seal+rehydrate (collab) leave tens of MB of transient garbage whose
+    // deferred major GC otherwise lands as a ~50ms pause on an arbitrary
+    // keystroke mid-measurement (observed: keydown 58.7ms, commit 5.0ms).
+    // GC pressure created BY typing still shows up — only the debt from the
+    // one-time setup phases is cleared.
+    await cdp.send("HeapProfiler.enable");
+    await cdp.send("HeapProfiler.collectGarbage");
     await typeRounds(page, "bigdoc-local-clicktype", 100);
     await typeAtTail(page, "bigdoc-local");
     await memoryRounds(page, cdp, "bigdoc-local-clicktype", 30);
@@ -403,6 +431,7 @@ test.describe("big document typing (>50 pages)", () => {
     await expect.poll(() => layoutBusy(page), { timeout: 120_000 }).toBe(false);
 
     await assertVirtualized(page, "bigdoc-collab");
+    await cdp.send("HeapProfiler.collectGarbage"); // see the local-phase note
     await typeRounds(page, "bigdoc-collab-clicktype", 100);
     await typeAtTail(page, "bigdoc-collab");
     await memoryRounds(page, cdp, "bigdoc-collab-clicktype", 30);
