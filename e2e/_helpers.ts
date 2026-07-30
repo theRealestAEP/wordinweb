@@ -90,7 +90,9 @@ export async function goLive(page: Page, shareCode: string = BOARD_CODE): Promis
   await expect(page).toHaveURL(/[?&]doc=/);
   await expect(page).toHaveURL(/#k=/);
   await expect(page.getByTestId("toolbar")).toBeVisible(); // collab chrome mounted
-  await expect(page.locator(PAGE)).toBeVisible();
+  // .first(): a multi-page document resolves PAGE to many elements, and a
+  // bare toBeVisible is a strict-mode violation (single-page docs unchanged).
+  await expect(page.locator(PAGE).first()).toBeVisible();
   await waitHook(page);
   return page.url();
 }
