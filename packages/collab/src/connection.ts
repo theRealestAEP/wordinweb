@@ -394,6 +394,18 @@ export class CollabConnection {
     };
   }
 
+  async exportBundleAsync(docId: string): Promise<DocBundle | null> {
+    if (!this.replica || this.genesisId === null) return null;
+    return {
+      docId,
+      genesisId: this.genesisId,
+      ...await this.replica.exportBundleStateAsync(),
+      clientSeq: this.clientSeq,
+      savedAt: 0,
+      lineage: [],
+    };
+  }
+
   /** The live document (null until welcome). The editor renders this. */
   get doc() {
     return this.replica?.doc ?? null;

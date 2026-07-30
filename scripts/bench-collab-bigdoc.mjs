@@ -95,6 +95,18 @@ function patch(obj, key, name) {
   obj[key] = function (...args) {
     const t0 = performance.now();
     const out = orig.apply(this, args);
+    if (out && typeof out.then === "function") {
+      return out.then(
+        (value) => {
+          tally(name, performance.now() - t0);
+          return value;
+        },
+        (error) => {
+          tally(name, performance.now() - t0);
+          throw error;
+        },
+      );
+    }
     tally(name, performance.now() - t0);
     return out;
   };
@@ -349,6 +361,7 @@ async function collabTyping(bytes, { persist }) {
   const BundledIds = conn.doc.stableIds.constructor;
   const unpatch = [
     patch(BundledDoc.prototype, "save", "doc.save"),
+    patch(BundledDoc.prototype, "saveAsync", "doc.saveAsync"),
     patch(BundledDoc.prototype, "refresh", "doc.refresh"),
     patch(BundledDoc, "load", "DocxDocument.load"),
     patch(BundledIds.prototype, "exportSidecar", "ids.exportSidecar"),
@@ -357,11 +370,15 @@ async function collabTyping(bytes, { persist }) {
     patch(DocumentSession.prototype, "checkpoint", "mirror.checkpoint"),
     patch(ClientReplica.prototype, "receive", "replica.receive"),
     patch(ClientReplica.prototype, "exportBundleState", "replica.exportBundleState"),
+    patch(ClientReplica.prototype, "exportBundleStateAsync", "replica.exportBundleStateAsync"),
   ];
 
   const perKey = [];
+  const perKeyAllocMb = [];
+  const heapStartMb = process.memoryUsage().heapUsed / 1e6;
   const t0 = performance.now();
   for (let i = 0; i < KEYS; i++) {
+    const h0 = process.memoryUsage().heapUsed;
     const k0 = performance.now();
     conn.submit({
       kind: "insertText",
@@ -370,6 +387,7 @@ async function collabTyping(bytes, { persist }) {
     });
     await until(() => conn.pendingCount === 0, `echo ${i}`);
     perKey.push(performance.now() - k0);
+    perKeyAllocMb.push(Math.max(0, (process.memoryUsage().heapUsed - h0) / 1e6));
   }
   const total = performance.now() - t0;
   // Let the trailing persister write + self-check land inside the patched
@@ -381,6 +399,9 @@ async function collabTyping(bytes, { persist }) {
   const sorted = [...perKey].sort((a, b) => a - b);
   const pct = (p) => sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))];
   const scenario = persist ? "bigdoc-collab-typing" : "bigdoc-collab-typing-nopersist";
+  const heapEndMb = process.memoryUsage().heapUsed / 1e6;
+  const positiveAllocMb = perKeyAllocMb.reduce((sum, value) => sum + value, 0);
+  const allocSorted = [...perKeyAllocMb].sort((a, b) => a - b);
   metric(scenario, {
     paragraphs: PARAS,
     keystrokes: KEYS,
@@ -396,6 +417,13 @@ async function collabTyping(bytes, { persist }) {
     checkpoints: srv.state.checkpoints,
     sendFailures: conn.sendFailures,
     selfHeals: conn.selfHeals,
+    heapStartMB: heapStartMb,
+    heapEndMB: heapEndMb,
+    heapGrowthMB: heapEndMb - heapStartMb,
+    positiveAllocMB: positiveAllocMb,
+    allocMBPerKeyMedian: allocSorted[Math.floor(allocSorted.length / 2)],
+    allocMBPerKeyMax: Math.max(...perKeyAllocMb),
+    allocMBps: positiveAllocMb / (total / 1000),
   });
   const t = snapshotTallies();
   for (const [name, v] of Object.entries(t)) {

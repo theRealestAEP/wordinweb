@@ -1,6 +1,6 @@
 import { Package, FIXED_ZIP_MTIME } from "./zip.js";
 import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName, cyrb53 } from "./xml.js";
-import { strToU8, zipSync } from "fflate";
+import { strToU8, zip, zipSync } from "fflate";
 import { pxToTwips, twipsToPx } from "./units.js";
 import {
   Block,
@@ -1686,7 +1686,29 @@ export class DocxDocument {
     }
   }
 
+  saveAsync(): Promise<Uint8Array> {
+    const journal: (() => void)[] = [];
+    this.saveJournal = journal;
+    let files: Record<string, Uint8Array>;
+    try {
+      files = this.buildPackageFiles();
+    } finally {
+      for (let i = journal.length - 1; i >= 0; i--) journal[i]();
+      this.saveJournal = null;
+    }
+    return new Promise((resolve, reject) => {
+      zip(files, { mtime: FIXED_ZIP_MTIME }, (error, bytes) => {
+        if (error) reject(error);
+        else resolve(bytes);
+      });
+    });
+  }
+
   private buildPackage(): Uint8Array {
+    return zipSync(this.buildPackageFiles(), { mtime: FIXED_ZIP_MTIME });
+  }
+
+  private buildPackageFiles(): Record<string, Uint8Array> {
     this.normalizePercentageTableGrids();
     const files: Record<string, Uint8Array> = { ...this.pkg.raw() };
     if (files["docProps/custom.xml"] && this.contentTypesRoot && !this.contentTypesRoot.children.some(
@@ -1728,7 +1750,7 @@ export class DocxDocument {
     if (this.settingsDirty) files[this.settingsPart] = strToU8(serializeXml(this.settingsRoot, true));
     if (this.relsRoot) this.writeModeledXml(files, this.relsPath, this.relsRoot);
     if (this.contentTypesRoot) this.writeModeledXml(files, "[Content_Types].xml", this.contentTypesRoot);
-    return zipSync(files, { mtime: FIXED_ZIP_MTIME });
+    return files;
   }
 
   /** Fresh unique docPr id for inserted drawings. Seeded once past the

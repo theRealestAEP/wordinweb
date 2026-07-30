@@ -210,6 +210,36 @@ export class ClientReplica {
     };
   }
 
+  async exportBundleStateAsync(): Promise<ReturnType<ClientReplica["exportBundleState"]>> {
+    let confirmedBytes = this.confirmedBytes;
+    let confirmedSidecar = this.confirmedSidecar;
+    if (this.confirmedTail.length) {
+      if (this.pending.length === 0) {
+        confirmedBytes = await this.doc.saveAsync();
+        confirmedSidecar = this.ids.exportSidecar(this.doc.editableRoots());
+      } else {
+        const base = DocxDocument.load(this.confirmedBytes);
+        const baseIds = base.enableStableIds();
+        baseIds.importSidecar(base.editableRoots(), this.confirmedSidecar);
+        for (const e of this.confirmedTail) {
+          if (e.kind !== "applied") continue;
+          const res = applyIntentScoped(base, baseIds, e.intent);
+          if (res.applied) resyncScope(base, baseIds, res);
+        }
+        this.carryInstalledMedia(this.doc, base);
+        confirmedBytes = await base.saveAsync();
+        confirmedSidecar = baseIds.exportSidecar(base.editableRoots());
+      }
+    }
+    return {
+      confirmedSeq: this.confirmedSeq,
+      confirmedBytes,
+      confirmedSidecar,
+      pending: [...this.pending],
+      mediaMeta: [...this.doc.mediaMeta] as [string, { sha: string; iv?: string; genesisId?: string }][],
+    };
+  }
+
   /**
    * Receive the server's canonical broadcast entries (in seq order) and
    * reconcile. The invariant is: live doc = confirmed baseline + remaining
