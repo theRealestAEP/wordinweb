@@ -19,6 +19,8 @@ import { createElement, act } from "react";
 import { createRoot } from "react-dom/client";
 import { zipSync, strToU8 } from "fflate";
 import { CollabEditor } from "../src/collab.js";
+import { DocxView, type DocxViewApi } from "../src/index.js";
+import { DocxDocument } from "@wordinweb/core";
 import { CollabHub, type DocProvider, type Connection, type ServerMessage } from "@wordinweb/server";
 
 /** Word's own pleading gutter markup, copied out of a Word-authored fixture
@@ -84,6 +86,78 @@ async function tick(ms = 5) { await act(async () => { await new Promise<void>((r
 async function settle(n = 40) { for (let i = 0; i < n; i++) await tick(); }
 
 describe("pleading number column in a collab session", () => {
+  it("moves, rotates, and enters text editing in the local editor", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let api: DocxViewApi | null = null;
+    let doc: DocxDocument | null = null;
+    await act(async () => {
+      root.render(createElement(DocxView, {
+        source: PLEADING_BYTES,
+        editable: true,
+        onReady: (readyApi: DocxViewApi) => { api = readyApi; },
+        onLoad: (info: { document: DocxDocument }) => { doc = info.document; },
+      }));
+    });
+    for (let i = 0; i < 60 && !container.querySelector(".dxw-page"); i++) await tick();
+    expect(api).toBeTruthy();
+    expect(doc).toBeTruthy();
+
+    const target = container.querySelector<HTMLElement>("[data-dxw-textbox-story]")!;
+    await act(async () => {
+      target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: 5, clientY: 5, button: 0, detail: 1 }));
+      target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, clientX: 5, clientY: 5, button: 0, detail: 1 }));
+    });
+    expect(api!.getSelectedObjectContext()).toMatchObject({ kind: "shape", canEditText: true, floating: true });
+
+    const answerPair = async (first: string, second: string) => {
+      await tick();
+      const form = document.querySelector<HTMLFormElement>(".dxw-input-dialog-backdrop form")!;
+      const fields = [...form.querySelectorAll<HTMLInputElement>('input[type="number"]')];
+      fields[0].value = first;
+      fields[1].value = second;
+      await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+      await tick();
+    };
+    const objectButton = (label: string): HTMLButtonElement => {
+      const button = [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((candidate) => candidate.textContent === label);
+      if (!button) throw new Error(`${label} object toolbar button missing`);
+      return button;
+    };
+    await act(async () => { objectButton("Position").click(); });
+    await answerPair("120", "240");
+    await act(async () => { objectButton("Rotate").click(); });
+    await tick();
+    const rotationForm = document.querySelector<HTMLFormElement>(".dxw-input-dialog-backdrop form")!;
+    rotationForm.querySelector<HTMLInputElement>('input[type="number"]')!.value = "45";
+    await act(async () => { rotationForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+    await tick();
+
+    const header = DocxDocument.load(doc!.save()).pkg.text("word/header1.xml") ?? "";
+    expect(header).toContain("margin-left:90pt");
+    expect(header).toContain("margin-top:180pt");
+    expect(header).toContain("rotation:45");
+    expect(container.querySelector<HTMLElement>("[data-dxw-object-selection]")?.style.transform)
+      .toContain("rotate(45deg)");
+
+    await act(async () => { objectButton("Edit text").click(); });
+    await tick();
+    expect(container.querySelector("[data-dxw-caret]")).toBeTruthy();
+    const focus = container.contains(document.activeElement)
+      ? document.activeElement as HTMLElement
+      : container.querySelector<HTMLElement>("textarea") ?? container;
+    await act(async () => {
+      focus.dispatchEvent(new KeyboardEvent("keydown", { key: "9", bubbles: true, cancelable: true }));
+    });
+    await tick();
+    expect(DocxDocument.load(doc!.save()).pkg.text("word/header1.xml")).toContain("<w:t>91</w:t>");
+
+    await act(async () => { root.unmount(); });
+    container.remove();
+  });
+
   it("typing in the gutter survives the confirmed state", async () => {
     const hub = new CollabHub(provider);
     const container = document.createElement("div");

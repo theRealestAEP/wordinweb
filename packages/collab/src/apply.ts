@@ -998,10 +998,11 @@ function tableOfParagraph(doc: DocxDocument, ids: StableIds, cellParagraphId: nu
   return null;
 }
 
-/** The w:drawing element inside a run's subtree (drawing-edit intents address
- * a drawing via the run that carries it — drawings aren't tracked/id'd). */
+/** The DrawingML or legacy VML drawing inside a run's subtree. Drawing-edit
+ * intents address the object through its carrier run because drawings are not
+ * tracked directly. */
 function firstDrawingIn(el: XmlElement): XmlElement | null {
-  if (localName(el.name) === "drawing") return el;
+  if (["drawing", "shape", "rect"].includes(localName(el.name))) return el;
   for (const c of el.children) {
     const found = firstDrawingIn(c);
     if (found) return found;

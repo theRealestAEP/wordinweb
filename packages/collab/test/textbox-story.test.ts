@@ -112,6 +112,19 @@ function gutterAddress(s: DocumentSession, index: number): { blockId: number; ru
   return { blockId, runId };
 }
 
+function gutterDrawingRunId(s: DocumentSession): number {
+  let result: number | undefined;
+  const containsGutter = (el: XmlElement): boolean =>
+    (localName(el.name) === "shape" && el.attrs.id === "LineNumbers") || el.children.some(containsGutter);
+  const walk = (el: XmlElement): void => {
+    if (localName(el.name) === "r" && containsGutter(el)) result = s.ids.idOf(el);
+    for (const child of el.children) walk(child);
+  };
+  walk(hdrRoot(s.doc));
+  if (result === undefined) throw new Error("gutter carrier run is not id-tracked");
+  return result;
+}
+
 describe("pleading number column (header text-box story) is editable over the wire", () => {
   it("the story paragraphs and runs carry stable ids", () => {
     const s = new DocumentSession(pleadingDoc());
@@ -168,6 +181,28 @@ describe("pleading number column (header text-box story) is editable over the wi
     expect(gutter(a.doc)).toEqual(["71", "2", "3"]);
     expect(serializeXml(hdrRoot(a.doc))).toBe(serializeXml(hdrRoot(b.doc)));
     expect(Buffer.from(a.doc.save())).toEqual(Buffer.from(b.doc.save()));
+  });
+
+  it("moves and rotates the VML gutter through drawing intents", () => {
+    const a = new DocumentSession(pleadingDoc());
+    const b = new DocumentSession(pleadingDoc());
+    const intents = [
+      { kind: "setFloatingPagePosition", clientId: "a", clientSeq: 1, base: 0, runId: gutterDrawingRunId(a), xPx: 120, yPx: 240 },
+      { kind: "setDrawingRotation", clientId: "a", clientSeq: 2, base: 1, runId: gutterDrawingRunId(a), degrees: 45 },
+    ] as const;
+    const bIntents = intents.map((intent) => ({ ...intent, runId: gutterDrawingRunId(b) }));
+
+    expect(a.submit(intents[0]).kind).toBe("applied");
+    expect(a.submit(intents[1]).kind).toBe("applied");
+    expect(b.submit(bIntents[0]).kind).toBe("applied");
+    expect(b.submit(bIntents[1]).kind).toBe("applied");
+
+    const header = serializeXml(hdrRoot(a.doc));
+    expect(header).toContain("margin-left:90pt");
+    expect(header).toContain("margin-top:180pt");
+    expect(header).toContain("mso-position-horizontal-relative:page");
+    expect(header).toContain("rotation:45");
+    expect(header).toBe(serializeXml(hdrRoot(b.doc)));
   });
 
   it("an out-of-range offset in the gutter is still a clean reject", () => {

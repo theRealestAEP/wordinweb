@@ -2400,6 +2400,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
         const strokeColor = el.attrs["strokecolor"];
         const stroked = el.attrs["stroked"] !== "f" && strokeColor !== undefined;
         const ta = style.get("v-text-anchor");
+        const rotation = parseFloat(style.get("rotation") ?? "0") || 0;
         const vmlInsets = parseVmlInset(findDescendant(el, "textbox")?.attrs["inset"]);
         out.push({
           kind: "anchor",
@@ -2423,6 +2424,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
             pctWidthRel: relOf(style.get("mso-width-relative")),
             pctHeightRel: relOf(style.get("mso-height-relative")),
             textAnchor: ta === "middle" ? "middle" : ta === "bottom" ? "bottom" : undefined,
+            ...(rotation ? { rotation } : {}),
             ...(vmlInsets ? { insets: vmlInsets } : {}),
             srcDrawing: el,
             ...(ctx.independentTextboxStories ? { textboxStory: true } : {}),

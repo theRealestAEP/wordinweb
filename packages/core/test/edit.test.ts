@@ -9,8 +9,10 @@ import { adjustIndent, paragraphDividerAt, setDropCapAt, setParagraphDivider, se
 import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
 import { applyTableOp, cellShadingAt, resizeDrawing } from "../src/edit/tables.js";
 import {
+  adjustFloatingPosition,
   drawingRotation,
   imageAltText,
+  isFloatingDrawing,
   replaceImageBlip,
   setDrawingOrder,
   setDrawingRotation,
@@ -1544,6 +1546,34 @@ describe("cover page insertion", () => {
 });
 
 describe("shape insertion", () => {
+  it("moves and rotates a legacy VML text box through its native style", () => {
+    const doc = loadDoc(
+      `<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml">` +
+      `<v:shape id="LineNumbers" style="position:absolute;margin-left:-47.15pt;margin-top:0;` +
+      `width:36pt;height:669.6pt;mso-position-horizontal-relative:margin;` +
+      `mso-position-vertical-relative:margin"><v:textbox><w:txbxContent>` +
+      `<w:p><w:r><w:t>1</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>` +
+      `</w:pict></w:r></w:p>`,
+    );
+    const run = (doc.sections[0].blocks[0] as Paragraph).children[0] as Run;
+    const anchor = run.content.find((content) => content.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("VML text box missing");
+    const shape = anchor.shape.srcDrawing!;
+
+    expect(isFloatingDrawing(shape)).toBe(true);
+    expect(setFloatingPagePosition(doc, shape, 120, 240)).toBe(true);
+    expect(adjustFloatingPosition(doc, shape, 8, -4)).toBe(true);
+    expect(setDrawingRotation(doc, shape, 45)).toBe(true);
+    expect(drawingRotation(shape)).toBe(45);
+
+    const saved = DocxDocument.load(doc.save()).pkg.text("word/document.xml");
+    expect(saved).toContain("margin-left:96pt");
+    expect(saved).toContain("margin-top:177pt");
+    expect(saved).toContain("mso-position-horizontal-relative:page");
+    expect(saved).toContain("mso-position-vertical-relative:page");
+    expect(saved).toContain("rotation:45");
+  });
+
   it("creates a native vertical line and preserves its axis when resized", () => {
     const doc = loadDoc(p("Anchor"));
     const { run } = firstRun(doc);

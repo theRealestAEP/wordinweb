@@ -80,8 +80,12 @@ export interface SealedCheckpoint {
  *       cannot apply that sealed intent, so mixed encrypted clients diverge.
  *   e9  splitParagraph can carry suggestion metadata. Older peers apply the
  *       split without its tracked paragraph mark and diverge immediately.
+ *   e10 legacy VML drawing edits: existing position/rotation intents now
+ *       resolve v:shape/v:rect carriers as well as w:drawing. An e9 peer
+ *       rejects the same intent that an e10 peer applies, so a mixed
+ *       encrypted room would fork on the first pleading-gutter object edit.
  */
-export const ENGINE_VERSION = "e9";
+export const ENGINE_VERSION = "e10";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-

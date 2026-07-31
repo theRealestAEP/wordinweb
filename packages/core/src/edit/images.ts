@@ -11,8 +11,45 @@ function el(name: string, attrs: Record<string, string> = {}, children: XmlEleme
   return { name, attrs, children, text };
 }
 
+function isVmlShape(el: XmlElement): boolean {
+  return ["shape", "rect"].includes(localName(el.name));
+}
+
+function vmlStyle(el: XmlElement): Map<string, string> {
+  const style = new Map<string, string>();
+  for (const declaration of (el.attrs.style ?? "").split(";")) {
+    const colon = declaration.indexOf(":");
+    if (colon > 0) style.set(declaration.slice(0, colon).trim(), declaration.slice(colon + 1).trim());
+  }
+  return style;
+}
+
+function setVmlStyle(el: XmlElement, patch: Record<string, string | null>): void {
+  const style = vmlStyle(el);
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) style.delete(key);
+    else style.set(key, value);
+  }
+  el.attrs.style = [...style].map(([key, value]) => `${key}:${value}`).join(";");
+}
+
+function vmlLengthPx(raw: string | undefined): number {
+  if (!raw) return 0;
+  const match = /^(-?[\d.]+)\s*(pt|in|px)?$/.exec(raw.trim());
+  if (!match) return 0;
+  const value = parseFloat(match[1]);
+  if (match[2] === "pt") return value * 4 / 3;
+  if (match[2] === "in") return value * 96;
+  return value;
+}
+
+function pxToVmlPt(px: number): string {
+  return `${Math.round(px * 75) / 100}pt`;
+}
+
 export function isFloatingDrawing(drawingEl: XmlElement): boolean {
-  return !!child(drawingEl, "anchor");
+  return !!child(drawingEl, "anchor") ||
+    (isVmlShape(drawingEl) && vmlStyle(drawingEl).get("position") === "absolute");
 }
 
 /**
@@ -167,7 +204,20 @@ export function setFloatingPagePosition(
   yPx: number,
 ): boolean {
   const anchor = child(drawingEl, "anchor");
-  if (!anchor) return false;
+  if (!anchor) {
+    if (!isVmlShape(drawingEl)) return false;
+    setVmlStyle(drawingEl, {
+      position: "absolute",
+      "margin-left": pxToVmlPt(xPx),
+      "margin-top": pxToVmlPt(yPx),
+      "mso-position-horizontal": "absolute",
+      "mso-position-horizontal-relative": "page",
+      "mso-position-vertical": "absolute",
+      "mso-position-vertical-relative": "page",
+    });
+    doc.refresh();
+    return true;
+  }
   const set = (posName: string, px: number): void => {
     let posEl = child(anchor, posName);
     if (!posEl) {
@@ -193,7 +243,16 @@ export function adjustFloatingPosition(
   dyPx: number,
 ): boolean {
   const anchor = child(drawingEl, "anchor");
-  if (!anchor) return false;
+  if (!anchor) {
+    if (!isVmlShape(drawingEl) || !isFloatingDrawing(drawingEl)) return false;
+    const style = vmlStyle(drawingEl);
+    setVmlStyle(drawingEl, {
+      "margin-left": pxToVmlPt(vmlLengthPx(style.get("margin-left")) + dxPx),
+      "margin-top": pxToVmlPt(vmlLengthPx(style.get("margin-top")) + dyPx),
+    });
+    doc.refresh();
+    return true;
+  }
   const bump = (posName: string, deltaPx: number): void => {
     const posEl = child(anchor, posName);
     if (!posEl) return;
@@ -227,7 +286,7 @@ function drawingTransform(drawingEl: XmlElement): XmlElement | undefined {
 /** Current DrawingML rotation in clockwise degrees. */
 export function drawingRotation(drawingEl: XmlElement): number {
   const xfrm = drawingTransform(drawingEl);
-  if (!xfrm) return 0;
+  if (!xfrm) return isVmlShape(drawingEl) ? parseFloat(vmlStyle(drawingEl).get("rotation") ?? "0") || 0 : 0;
   const key = Object.keys(xfrm.attrs).find((k) => localName(k) === "rot");
   return key ? (parseInt(xfrm.attrs[key], 10) || 0) / 60000 : 0;
 }
@@ -235,7 +294,13 @@ export function drawingRotation(drawingEl: XmlElement): number {
 /** Rotate an image or shape while keeping native DrawingML save-back. */
 export function setDrawingRotation(doc: DocxDocument, drawingEl: XmlElement, degrees: number): boolean {
   const xfrm = drawingTransform(drawingEl);
-  if (!xfrm) return false;
+  if (!xfrm) {
+    if (!isVmlShape(drawingEl)) return false;
+    const normalized = ((degrees % 360) + 360) % 360;
+    setVmlStyle(drawingEl, { rotation: normalized === 0 ? null : String(Math.round(normalized * 100) / 100) });
+    doc.refresh();
+    return true;
+  }
   const key = Object.keys(xfrm.attrs).find((k) => localName(k) === "rot") ?? "rot";
   const normalized = ((degrees % 360) + 360) % 360;
   if (normalized === 0) delete xfrm.attrs[key];
