@@ -12,8 +12,8 @@ import { createElement, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { blankDocxBytes } from "@wordinweb/server";
 import { InMemoryBundleStore } from "@wordinweb/collab/client";
-import { LocalEditor } from "../../../examples/anon-share/src/local-editor";
-import { goLiveEncrypted, GoLiveError, type GoLivePhase } from "../../../examples/anon-share/src/e2ee-flows";
+import { LocalEditor } from "../src/local-editor";
+import { goLiveEncrypted, GoLiveError, type GoLivePhase } from "../src/e2ee-flows";
 
 /* --------------------------- goLiveEncrypted ----------------------------- */
 

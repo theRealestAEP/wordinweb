@@ -12,18 +12,18 @@
  * Every assertion about what was deleted goes to `store.list()` /
  * `store.get()`, never to component state — the store is where the truth is.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { CollabHub, blankDocxBytes, type DocProvider, type Connection, type ServerMessage } from "@wordinweb/server";
 import { InMemoryBundleStore, versionKey, draftKey, supersededKey, type BundleStore, type DocBundle } from "@wordinweb/collab/client";
-import { App } from "../../../examples/anon-share/src/app";
+import { App } from "../src/app";
 import {
   reclaimStorage,
   storeByteBudget,
   RECLAIM_LIST_FAILED_MESSAGE,
-} from "../../../examples/anon-share/src/startup-reclaim";
-import { FileMenu } from "../../../examples/anon-share/src/file-menu";
+} from "../src/startup-reclaim";
+import { FileMenu } from "../src/file-menu";
 
 /* ------------------------------ helpers --------------------------------- */
 
@@ -152,12 +152,15 @@ function render(node: ReturnType<typeof createElement>) {
   mounted.push({ root, host });
   return host;
 }
-afterEach(() => {
+function unmountAll() {
   for (const { root, host } of mounted) {
     act(() => { root.unmount(); });
     host.remove();
   }
   mounted = [];
+}
+afterEach(() => {
+  unmountAll();
   setEstimate(undefined);
 });
 
@@ -167,22 +170,13 @@ function click(el: HTMLElement | null) {
   act(() => { el!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
 }
 async function tick(ms = 5) { await act(async () => { await new Promise<void>((r) => setTimeout(r, ms)); }); }
-/**
- * Poll for `cond`.
- *
- * The default budget is 200 x 5 ms = 1000 ms, which is EXACTLY the
- * BundlePersister throttle — so anything waiting on a persisted write was a
- * coin flip and failed roughly one run in three. Waits that depend on that
- * throttle must pass a budget comfortably beyond it; the parameter exists so
- * the reason is stated at the call site rather than by inflating every wait.
- */
-async function until(cond: () => boolean, what: string, ticks = 200) {
-  for (let i = 0; i < ticks && !cond(); i++) await tick();
+async function until(cond: () => boolean, what: string) {
+  for (let i = 0; i < 200 && !cond(); i++) await tick();
   expect(cond(), what).toBe(true);
 }
 
-/** ~3 s: three times the persister's 1 s throttle. */
-const PAST_PERSIST_THROTTLE = 600;
+const sessionReady = () =>
+  Boolean((window as typeof window & { __ww?: { ready?: boolean } }).__ww?.ready);
 
 const provider: DocProvider = { load: () => blankDocxBytes() };
 
@@ -281,6 +275,7 @@ describe("App startup reclaim", () => {
   });
 
   it("storage-full banner counts what is stored and routes to the saved-documents list", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     // Live-bundle writes fail (the wedged-quota shape); versions seeded so
     // the banner has something to count. Small sizes: reclaim stays inert.
     const inner = new InMemoryBundleStore();
@@ -291,18 +286,28 @@ describe("App startup reclaim", () => {
       delete: (k) => inner.delete(k),
       put: async () => { throw new DOMException("quota", "QuotaExceededError"); },
     };
-    const host = mountApp(store, "rdoc");
-    // Waits on the persister's throttled write actually being attempted.
-    await until(() => byId(host, "persist-banner") !== null, "a failed persist write must raise the banner", PAST_PERSIST_THROTTLE);
-    await until(() => byId(host, "persist-stored-summary") !== null, "the banner must say what is taking the space", PAST_PERSIST_THROTTLE);
-    const summary = byId(host, "persist-stored-summary")!;
-    expect(summary.textContent).toContain("3 saved copies");
-    expect(summary.textContent).toContain("29 KB");
-    // The route to act: the button opens the File menu's saved list.
-    expect(byId(host, "file-menu-panel")).toBeNull();
-    click(byId(host, "persist-manage-saved"));
-    await until(() => byId(host, "file-menu-panel") !== null, "Manage saved copies must open the File menu");
-    await until(() => byId(host, "file-saved-entry") !== null, "the delete-capable saved list is on screen");
+    try {
+      const host = mountApp(store, "rdoc");
+      await until(sessionReady, "the session must become ready");
+      // Page hide flushes the persister immediately. This tests the failure
+      // path without waiting for its one-second production throttle.
+      act(() => { window.dispatchEvent(new Event("pagehide")); });
+      await until(() => byId(host, "persist-banner") !== null, "a failed persist write must raise the banner");
+      await until(() => byId(host, "persist-stored-summary") !== null, "the banner must say what is taking the space");
+      const summary = byId(host, "persist-stored-summary")!;
+      expect(summary.textContent).toContain("3 saved copies");
+      expect(summary.textContent).toContain("29 KB");
+      // The route to act: the button opens the File menu's saved list.
+      expect(byId(host, "file-menu-panel")).toBeNull();
+      click(byId(host, "persist-manage-saved"));
+      await until(() => byId(host, "file-menu-panel") !== null, "Manage saved copies must open the File menu");
+      await until(() => byId(host, "file-saved-entry") !== null, "the delete-capable saved list is on screen");
+      unmountAll();
+      await tick();
+      expect(consoleError).toHaveBeenCalledWith("[wordinweb] bundle-persist", expect.any(DOMException));
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
 

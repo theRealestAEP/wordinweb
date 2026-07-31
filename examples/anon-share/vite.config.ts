@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
  * (automatic runtime) so no extra React plugin is required. The workspace
  * packages (`wordinweb`, `wordinweb/collab`, `@wordinweb/collab/client`,
  * `@wordinweb/core`) resolve through the repo's node_modules symlinks to their
- * built `dist/` — run `npm run build` at the repo root first (or after any
- * package change). Not shipped to npm; this is the local run/test harness.
+ * built `dist/` — run `npm run build` at the repository root first. This
+ * private example is the local run and test harness.
  */
 export default defineConfig({
   root: fileURLToPath(new URL(".", import.meta.url)),

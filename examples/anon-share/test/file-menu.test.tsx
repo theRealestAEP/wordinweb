@@ -16,8 +16,8 @@ import { createElement, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { CollabHub, blankDocxBytes, type DocProvider, type Connection, type ServerMessage } from "@wordinweb/server";
 import { InMemoryBundleStore } from "@wordinweb/collab/client";
-import { FileMenu } from "../../../examples/anon-share/src/file-menu";
-import { App } from "../../../examples/anon-share/src/app";
+import { FileMenu } from "../src/file-menu";
+import { App } from "../src/app";
 
 let mounted: { root: Root; host: HTMLElement }[] = [];
 
@@ -41,9 +41,12 @@ afterEach(() => {
 const byId = (host: HTMLElement, id: string) =>
   host.querySelector<HTMLElement>(`[data-testid="${id}"]`);
 
-function click(el: HTMLElement | null) {
+async function click(el: HTMLElement | null) {
   expect(el).toBeTruthy();
-  act(() => { el!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+  await act(async () => {
+    el!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+  });
 }
 
 /**
@@ -84,7 +87,7 @@ describe("FileMenu", () => {
     expect(byId(host, "file-menu-panel")).toBeNull();
     expect(byId(host, "file-menu")!.getAttribute("aria-expanded")).toBe("false");
 
-    click(byId(host, "file-menu"));
+    await click(byId(host, "file-menu"));
     expect(byId(host, "file-menu-panel")).toBeTruthy();
 
     const open = byId(host, "file-open") as HTMLButtonElement;
@@ -94,7 +97,7 @@ describe("FileMenu", () => {
     const input = host.querySelector<HTMLInputElement>('.filemenu input[type="file"]')!;
     const opened = vi.fn();
     input.click = opened;
-    click(open);
+    await click(open);
     expect(opened).toHaveBeenCalledTimes(1);
     // Activating an item closes the menu.
     expect(byId(host, "file-menu-panel")).toBeNull();
@@ -117,7 +120,7 @@ describe("FileMenu", () => {
     // disabled item, never a live Open.
     const host = render(createElement(FileMenu, { onOpen, openDisabled: true }));
 
-    click(byId(host, "file-menu"));
+    await click(byId(host, "file-menu"));
     const open = byId(host, "file-open") as HTMLButtonElement;
     // Present, not hidden — the menu holds still between the two screens.
     expect(open).toBeTruthy();
@@ -125,7 +128,7 @@ describe("FileMenu", () => {
     // No picker is rendered at all while Open is blocked.
     expect(host.querySelector('input[type="file"]')).toBeNull();
 
-    click(open);
+    await click(open);
     expect(onOpen).not.toHaveBeenCalled();
   });
 });
@@ -183,7 +186,7 @@ describe("the collaborative screen", () => {
       for (let i = 0; i < 120 && trigger()!.disabled; i++) await tick();
       expect(trigger()!.disabled, "session never became ready").toBe(false);
 
-      click(trigger());
+      await click(trigger());
       const item = byId(host, "file-open") as HTMLButtonElement;
       expect(item, "Open must be OFFERED and greyed out, not hidden").toBeTruthy();
       expect(item.disabled, "Open must never be live in a session").toBe(true);

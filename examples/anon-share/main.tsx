@@ -22,7 +22,7 @@ installWsRegistry();
  * sent. A URL that already carries `?doc=` is the "someone shared me a link"
  * path: join that collaborative session directly.
  *
- *   ZERO_CUSTODY=1 node packages/server/dist/cli.js   (:1234, HTTP+WS)
+ *   WW_ENCRYPTED_ONLY=1 node packages/server/dist/cli.js   (:1234, HTTP+WS)
  *
  * When the session ends the server forgets it; this browser's IndexedDB bundle
  * revives it. Override the server with ?server=host:port (dev and e2e do).

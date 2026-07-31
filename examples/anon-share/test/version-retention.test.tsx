@@ -14,8 +14,8 @@ import { createElement, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { CollabHub, blankDocxBytes, type DocProvider, type Connection, type ServerMessage } from "@wordinweb/server";
 import { InMemoryBundleStore, versionKey, type BundleStore, type DocBundle } from "@wordinweb/collab/client";
-import { App } from "../../../examples/anon-share/src/app";
-import { pruneVersions, versionByteBudget, VERSION_COUNT_CAP } from "../../../examples/anon-share/src/version-retention";
+import { App } from "../src/app";
+import { pruneVersions, versionByteBudget, VERSION_COUNT_CAP } from "../src/version-retention";
 
 /* ------------------------------ helpers --------------------------------- */
 

@@ -12,8 +12,8 @@ import { createElement, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { CollabHub, blankDocxBytes, type DocProvider, type Connection, type ServerMessage } from "@wordinweb/server";
 import { InMemoryBundleStore, versionKey, type DocBundle, type StoredDocSummary } from "@wordinweb/collab/client";
-import { App } from "../../../examples/anon-share/src/app";
-import { FileMenu } from "../../../examples/anon-share/src/file-menu";
+import { App } from "../src/app";
+import { FileMenu } from "../src/file-menu";
 
 let mounted: { root: Root; host: HTMLElement }[] = [];
 
@@ -38,9 +38,12 @@ afterEach(unmountAll);
 const byId = (host: HTMLElement, id: string) => host.querySelector<HTMLElement>(`[data-testid="${id}"]`);
 const allById = (host: HTMLElement, id: string) => [...host.querySelectorAll<HTMLElement>(`[data-testid="${id}"]`)];
 
-function click(el: HTMLElement | null) {
+async function click(el: HTMLElement | null) {
   expect(el).toBeTruthy();
-  act(() => { el!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+  await act(async () => {
+    el!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+  });
 }
 
 async function tick(ms = 5) { await act(async () => { await new Promise<void>((r) => setTimeout(r, ms)); }); }
@@ -138,7 +141,7 @@ describe("the saved listing in a live session", () => {
       for (let i = 0; i < 120 && trigger()!.disabled; i++) await tick();
       expect(trigger()!.disabled, "session never became ready").toBe(false);
 
-      click(trigger());
+      await click(trigger());
       for (let i = 0; i < 50 && allById(host, "file-saved-entry").length === 0; i++) await tick();
       const entries = allById(host, "file-saved-entry");
       expect(entries.length, "the stored version must be listed").toBeGreaterThan(0);
@@ -155,11 +158,11 @@ describe("the saved listing in a live session", () => {
       expect(dlBtn.disabled).toBe(false);
 
       // Delete is two-step: the first click only arms the confirmation.
-      click(entry.querySelector('[data-testid="file-saved-delete"]'));
+      await click(entry.querySelector('[data-testid="file-saved-delete"]'));
       expect(await store.get(vKey), "one click must not delete").toBeTruthy();
       const confirm = byId(host, "file-saved-delete-confirm");
       expect(confirm, "the second, explicit step must be offered").toBeTruthy();
-      click(confirm);
+      await click(confirm);
       let gone = await store.get(vKey);
       for (let i = 0; i < 50 && gone; i++) { await tick(); gone = await store.get(vKey); }
       expect(gone, "confirming must delete the entry").toBeNull();
@@ -183,13 +186,13 @@ describe("the saved listing in a live session", () => {
       for (let i = 0; i < 120 && browse()!.disabled; i++) await tick();
       expect(browse()!.disabled, "session never became ready").toBe(false);
 
-      click(browse());
+      await click(browse());
       for (let i = 0; i < 50 && allById(host, "file-saved-entry").length === 0; i++) await tick();
       const entry = allById(host, "file-saved-entry").find((e) => e.getAttribute("data-kind") === "local")!;
       expect(entry, "the saved document must be visible").toBeTruthy();
       const open = entry.querySelector<HTMLButtonElement>('[data-testid="file-saved-open"]')!;
       expect(open.disabled).toBe(false);
-      click(open);
+      await click(open);
       for (let i = 0; i < 50 && onDisconnect.mock.calls.length === 0; i++) await tick();
       expect(onDisconnect).toHaveBeenCalledTimes(1);
       expect(Array.from(onDisconnect.mock.calls[0][0] as Uint8Array)).toEqual(Array.from(saved.confirmedBytes));
@@ -209,9 +212,9 @@ describe("FileMenu saved section (unit)", () => {
       listSaved: async () => [summary],
       onOpenSaved,
     }));
-    click(byId(host, "file-menu"));
+    await click(byId(host, "file-menu"));
     for (let i = 0; i < 50 && allById(host, "file-saved-entry").length === 0; i++) await tick();
-    click(byId(host, "file-saved-open"));
+    await click(byId(host, "file-saved-open"));
     expect(onOpenSaved).toHaveBeenCalledWith(summary);
   });
 
@@ -219,7 +222,7 @@ describe("FileMenu saved section (unit)", () => {
     const host = render(createElement(FileMenu, {
       listSaved: async () => { throw new DOMException("blocked", "InvalidStateError"); },
     }));
-    click(byId(host, "file-menu"));
+    await click(byId(host, "file-menu"));
     for (let i = 0; i < 50 && !byId(host, "file-saved-error"); i++) await tick();
     expect(byId(host, "file-saved-error"), "a failed list read must be said, not blank").toBeTruthy();
   });

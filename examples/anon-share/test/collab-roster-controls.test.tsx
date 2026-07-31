@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createElement, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { App } from "../../../examples/anon-share/src/app";
+import { App } from "../src/app";
 import { CollabHub, blankDocxBytes, type Connection, type ServerMessage } from "@wordinweb/server";
 import { CollabConnection, createWebSocketTransport, InMemoryBundleStore } from "@wordinweb/collab/client";
 

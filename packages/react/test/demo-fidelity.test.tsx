@@ -47,7 +47,7 @@ async function spyState(hub: CollabHub, factory: (u: string) => WebSocket, doc: 
   const spy = new CollabConnection(createWebSocketTransport(factory("ws://spy") as never), `spy-${spySeq++}`);
   spy.join(doc);
   // The hub handles the hello asynchronously; wait for the welcome.
-  for (let i = 0; i < 40 && !spy.doc; i++) await new Promise((r) => setTimeout(r, 5));
+  for (let i = 0; i < 40 && !spy.doc; i++) await tick();
   expect(spy.doc).toBeTruthy();
   const body = spy.doc!.docRoot.children.find((c) => c.name.endsWith("body"))!;
   const textOf = (el: { name: string; text: string; children: unknown[] }): string =>

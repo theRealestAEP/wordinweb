@@ -17,7 +17,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { blankDocxBytes } from "@wordinweb/server";
 import { InMemoryBundleStore, type DocBundle } from "@wordinweb/collab/client";
 import { DocxDocument } from "@wordinweb/core";
-import { LocalEditor, LOCAL_AUTOSAVE_KEY } from "../../../examples/anon-share/src/local-editor";
+import { LocalEditor, LOCAL_AUTOSAVE_KEY } from "../src/local-editor";
 
 let mounted: { root: Root; host: HTMLElement }[] = [];
 
@@ -54,9 +54,12 @@ async function tick(ms = 5) { await act(async () => { await new Promise<void>((r
 
 const byId = (host: HTMLElement, id: string) => host.querySelector<HTMLElement>(`[data-testid="${id}"]`);
 
-function click(el: HTMLElement | null) {
+async function click(el: HTMLElement | null) {
   expect(el).toBeTruthy();
-  act(() => { el!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+  await act(async () => {
+    el!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+  });
 }
 
 /** Click into the page and type, the way a browser delivers it. */
@@ -132,8 +135,8 @@ describe("local editor persistence", () => {
     const store = new InMemoryBundleStore();
     const host = render(editor(store));
     await typeText(host, "KEEPTHIS");
-    click(byId(host, "file-menu"));
-    click(byId(host, "file-new"));
+    await click(byId(host, "file-menu"));
+    await click(byId(host, "file-new"));
     let archived = (await store.list()).filter((s) => s.kind === "local" && s.key !== LOCAL_AUTOSAVE_KEY);
     for (let i = 0; i < 100 && archived.length === 0; i++) {
       await tick();
@@ -149,8 +152,8 @@ describe("local editor persistence", () => {
     const host = render(editor(store));
     await typeText(host, "DONTLOSE");
     store.put = async () => { throw new DOMException("quota", "QuotaExceededError"); };
-    click(byId(host, "file-menu"));
-    click(byId(host, "file-new"));
+    await click(byId(host, "file-menu"));
+    await click(byId(host, "file-new"));
     for (let i = 0; i < 100 && !byId(host, "local-persist-banner"); i++) await tick();
     expect(byId(host, "local-persist-banner"), "the failed archive must be surfaced").toBeTruthy();
     // The document was NOT replaced by a blank — the work is still on screen.

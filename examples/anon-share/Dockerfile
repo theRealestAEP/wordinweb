@@ -15,7 +15,6 @@ COPY packages/core/package.json packages/core/
 COPY packages/collab/package.json packages/collab/
 COPY packages/server/package.json packages/server/
 COPY packages/react/package.json packages/react/
-COPY examples/anon-share/package.json examples/anon-share/
 # The lockfile is DISCARDED here, and only here. It is generated on the
 # developer's machine, so it records that platform's optional rollup binary
 # and not linux-musl's; the react package's tsup build then dies with "Cannot
@@ -34,11 +33,8 @@ COPY packages/ packages/
 COPY examples/anon-share/ examples/anon-share/
 # The demo imports the workspace packages' BUILT output, so build them first.
 RUN npm run build:packages
-# Invoked directly, NOT via `npm -w`: the demo is deliberately outside the
-# workspaces list (root package.json declares `packages/*` only), so a
-# workspace-scoped build fails with "No workspaces found". Verified by running
-# it — this Dockerfile originally used the -w form and would not have built.
-RUN cd examples/anon-share && npx vite build
+# The private example stays outside the npm workspaces and package publish set.
+RUN npx vite build --config examples/anon-share/vite.config.ts
 
 # Nothing but the built assets — the runtime image is Caddy's (compose.yml
 # mounts this stage's output), so this stage exists to be copied FROM.

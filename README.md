@@ -297,9 +297,17 @@ when a host needs a narrowly scoped style override.
 
 WordInWeb never converts the document to flowing HTML. It parses the OOXML into a typed model, runs a layout engine that breaks lines with real canvas metrics and paginates like Word, and renders each primitive as one absolutely-positioned element, so the browser does zero reflow. Editing mutates the retained XML tree and re-serializes only the parts it models, leaving everything else byte-for-byte intact.
 
-## Collaboration — zero-custody, end-to-end encrypted
+## Collaboration
 
-Real-time collaboration ships as a separate entry (`wordinweb/collab`). In its encrypted mode the server is a **blind sequencer**: it orders opaque encrypted envelopes and relays bytes, but never holds a key, never parses a document, and keeps **nothing at rest** — every browser holds the durable copy, and the document key rides the share link's `#fragment`, which browsers never send to a server.
+Real-time collaboration ships as a separate entry (`wordinweb/collab`). It
+supports encrypted and plaintext sessions, so the host application chooses
+the security and persistence model. The
+[`anon-share` example](examples/anon-share/README.md) documents the
+zero-custody encrypted deployment, architecture, and operations.
+
+The Node host ships as the separate `@wordinweb/server` package. A viewer or
+browser-only collaboration application has no dependency path to the server
+package, so its Node runtime and `ws` dependency stay out of browser bundles.
 
 ### Two modes
 
@@ -340,110 +348,6 @@ the server refuses writes from a locked, demoted, or viewer-role client, and an
 editable surface over those refusals applies each keystroke locally and then
 discards it.
 
-```mermaid
-flowchart LR
-  subgraph A["Browser A — owner"]
-    direction TB
-    AE["DocxView editor + toolbar<br/>every local mutation = canonical apply + emitted intent"]
-    AR["ClientReplica<br/>optimistic doc (instant typing)"]
-    AM["DocumentSession mirror<br/>canonical doc — the same authority code<br/>a plaintext server would run"]
-    AC["EncryptedCollabConnection<br/>seals/opens AES-GCM envelopes (K_content)<br/>self-heal · stuck-op watchdog · rate-limit re-drive"]
-    AB[("IndexedDB bundle<br/>confirmed bytes + id sidecar + pending ops<br/>the ONLY durable copy — can revive a dead session")]
-    AE --> AR
-    AR --> AC
-    AM --> AC
-    AC --> AB
-  end
-
-  subgraph S["Server — blind sequencer (RAM only, nothing at rest)"]
-    direction TB
-    SQ["Sequencer<br/>orders opaque envelopes per epoch<br/>dedup · rate limit · engine-version fence"]
-    SR["Room state<br/>sealed checkpoint + envelope log (pruned at client checkpoints)<br/>roster · presence relay · owner admin (read-only / kick / roles)"]
-    SM["Media relay<br/>sha-addressed ciphertext blobs<br/>staged, TTL-evicted — pixels never persist"]
-    SO["Observability<br/>GET /stats counters"]
-    SQ --- SR
-    SR --- SM
-    SR --- SO
-  end
-
-  subgraph B["Browser B — participant (same stack)"]
-    direction TB
-    BC["EncryptedCollabConnection"]
-    BM["mirror"]
-    BR["replica"]
-    BE["DocxView"]
-    BC --> BM
-    BM --> BR
-    BR --> BE
-  end
-
-  K["Share link<br/>https://…?doc=id#k=KEY<br/>the #k fragment NEVER reaches the server"]
-
-  AC <-->|"WebSocket: submit-enc / broadcast-enc<br/>presence · roster · hash gossip"| SQ
-  SQ <-->|"WebSocket: ordered opaque envelopes"| BC
-  AC -.->|"HTTP PUT: sealed seed checkpoint (go-live / revival)<br/>PUT/GET media ciphertext by sha"| SM
-  SR -.->|"welcome-enc: sealed checkpoint + tail<br/>(late join, media addresses included)"| BC
-  K -.-> AE
-  K -.-> BE
-```
-
-In encrypted mode, what the server can see: envelope sizes, timing, participant count, sha addresses of media ciphertext. What it cannot see: document content, media pixels, part structure, or the key. Sizes and timing are worth stating plainly — encryption is length-preserving and nothing is padded, so an edit's size tracks the text's, and one intent is sent per keystroke. Every client re-derives the canonical history by running the identical transform/validate/apply pipeline over the same ordered log — convergence is by construction, guarded by an engine-version fence (mixed client builds are refused rather than allowed to fork) and per-client self-healing.
-
-### Deploy
-
-A droplet with Docker, a DNS A record, and ports 80/443 open:
-
-```sh
-git clone <repo> && cd wordinweb/examples/anon-share
-DOMAIN=docs.example.com docker compose up -d
-```
-
-Caddy provisions a Let's Encrypt certificate on first boot, serves the built
-app at `/`, and proxies the collab server's routes (`/docs*`, `/blank`,
-`/healthz`, and the WebSocket upgrade) on the same origin. Without `DOMAIN` it
-falls back to `localhost` with Caddy's internal CA, which is enough to run the
-whole stack locally.
-
-**TLS is not optional here.** The E2EE flows use WebCrypto, and
-`crypto.subtle` is undefined outside a [secure context][sc] — served over plain
-`http` on a real hostname, the app cannot encrypt at all. That is also why the
-proxy puts everything on one origin: the browser never makes a cross-origin
-request, so CORS stops being part of the production picture.
-
-[sc]: https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts
-
-`compose.cloudflare.yml` is an alternative stack that runs the same services
-behind a [Cloudflare Tunnel][cft]. `cloudflared` dials outbound, so the host
-publishes no ports and the origin is unreachable from the internet; TLS
-terminates at Cloudflare's edge instead of Caddy. Use it when the host is a
-home machine or a droplet you would rather keep off the public internet:
-
-```sh
-TUNNEL_TOKEN=… docker compose -f compose.cloudflare.yml up -d
-```
-
-Point the tunnel's public hostname at `caddy:80` over HTTP. Caddy rewrites
-`X-Forwarded-For` from Cloudflare's `CF-Connecting-IP`, which leaves a
-single-entry chain, so `WW_TRUST_PROXY` stays 1 on this stack too.
-
-[cft]: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
-
-Operational shape, stated plainly:
-
-| | |
-|---|---|
-| **Restarts** | Wipe every live room and lose nothing durable — browsers hold the documents and revive them on reconnect. There is no database and no document volume, by design. |
-| **Scale** | One process, one core. Rooms are in-memory, so there is no sharding story yet; `WW_ROOM_CAP` (default 10) caps **participants per room** — the 11th joiner is refused rather than degrading the session. |
-| **Session lifecycle** | Empty rooms are deleted after `WW_EMPTY_ROOM_TTL_MS` (60s). Rooms with no qualifying activity (edits/admin/media/joins — deliberately not cursor presence) are warned, then ended at `WW_IDLE_TIMEOUT_MS` (10min). Every room hits an absolute wall at `WW_ROOM_MAX_LIFETIME_MS` (12h) that nothing resets — the cap keepalive scripts cannot defeat. Ending a session loses no documents: any holder re-seeds from their browser bundle into a new epoch. |
-| **Surge valves** | Bound what an already-admitted session can spend, as opposed to the per-IP row below, which bounds what one address can start. `WW_WS_MAX_PAYLOAD` (512KB) caps inbound frames — `ws` otherwise defaults to 100MiB, so a hostile peer could make the server buffer and parse a huge frame before any hub check ran. `WW_WS_MAX_BUFFERED` (4MB) terminates a socket whose owner has stopped reading, rather than letting Node hold every broadcast for it. `WW_ROOM_LOG_MAX_BYTES` (64MB) ends a room whose envelope log runs away — pruning only happens at quiescent checkpoints, which a hostile room never reaches. `WW_MAX_ROOMS_GLOBAL` (2000) and `WW_MAX_CONNS_GLOBAL` (5000) are the global ceilings: new sessions get 503, existing ones are untouched. The `_GLOBAL` suffix is load-bearing — `WW_IP_MAX_CONNS` caps one address and `WW_ROOM_CAP` caps participants in one room, so the families have to read differently at a glance. |
-| **Media** | `WW_MEDIA_MAX_BLOB_BYTES` (5MB) is the number users see — a 413 carries it so the UI can say "images must be under 5 MB"; the socket-level guard derives from it (+2MB) rather than duplicating it. `WW_MEDIA_MAX_ROOM_BYTES` (100MB) caps how much one room holds at a time. `WW_MEDIA_ROOM_UPLOADS_PER_MIN` (60) and `WW_MEDIA_ROOM_UPLOAD_BURST` (64) cap how fast a room can be asked to hold it; the burst is sized for re-supply, since a joiner's images are requested from holders all at once. `WW_MEDIA_STAGE_TTL_MS` (60s) and `WW_MEDIA_TTL_MS` (5min) are lifecycles, not deletions of record: the relay is a **cache**, so an evicted blob is re-supplied by any participant who holds it — expiry costs latency, never data. The cache is tiered: `WW_MEDIA_RAM_BYTES` (128MB) bounds what all rooms' media may occupy in process RAM, and under pressure LRU blobs demote to an encrypted disk spill. `WW_MEDIA_DISK_BYTES` (**0 — the spill is off by default**) is both the disk budget and the opt-in: a server whose whole claim is holding nothing should not write to disk because a default said so, and the budget must sit under the volume's real free space, which only the operator knows — so the number lives in deployment config (this repo's compose file sets 8GB), the same call as `WW_ENCRYPTED_ONLY`. `WW_MEDIA_SPILL_DIR` is where it writes: **ephemeral local scratch, never a persistent or backed-up volume.** Every spilled file is encrypted under a per-boot key that exists only in process RAM, the whole directory is wiped at boot, and files are unlinked on every eviction path — a restart turns anything left into undecryptable garbage, so no recoverable content is ever at rest. Past the disk budget the ladder ends: LRU spilled blobs are dropped entirely and re-supply recovers them. |
-| **Per-IP limits** | `WW_IP_SEED_PER_MIN` (10), `WW_IP_MAX_DOCS` (25), `WW_IP_MAX_CONNS` (50) — deliberately generous because NAT/CGNAT makes an office look like one address; raise them if real users get refused. **`WW_TRUST_PROXY` is a hop count, not a boolean**: 1 is correct behind this compose file's Caddy; set it to 0 if the server is ever exposed without a proxy, or per-IP protection silently switches off while appearing configured. Every limit is parsed in `packages/server/src/limits.ts`; 0 disables any of them. |
-| **Health** | `GET /healthz` is ungated and is what probes should use. `GET /stats` requires `WW_OBS=1` **and** is not proxied — enabling metrics is deliberately two steps. |
-| **Document size** | `WW_MAX_DOC_BYTES` (64 MB) is the largest document the server accepts, decoded. The seed route, the HTTP body reader and the live checkpoint check all derive their wire ceilings from it (base64 costs a third), so they cannot disagree — three independent copies of this number previously let a document start a session and then have every checkpoint refused. Raising it costs RAM per room, not just per upload: an encrypted room holds its sealed checkpoint in memory for the whole session. Chunked seeding, which would remove the ceiling rather than raise it, is not built. |
-| **Mode** | `WW_ENCRYPTED_ONLY=1` refuses plaintext seeds, so the only rooms this server can hold are ones it cannot read. Off by default — both modes work. The client cannot enforce this: encrypted and plaintext documents are created through the same `/docs` route, so a UI that only offers encryption is not a gate. |
-| **Logs** | Structured lines on stderr, collector-ready as-is; compose bounds them with the json-file driver. `WW_LOG_LEVEL=debug` is a per-op firehose, not a production setting. |
-| **Media routes are unauthenticated** | Anyone who can reach the origin can `PUT`/`GET` blobs within the size and room caps. In an encrypted room those blobs are ciphertext. Uploads require an open room and are rate limited per room, both decided before the request body is read, so a refused upload costs no memory — but per-user auth is a recorded launch gate. |
-
 ## Fonts
 
 Text is measured on a canvas before layout, so line breaks depend on the real font metrics. For Word parity, register the bundled OFL substitutes in your app entry:
@@ -477,8 +381,10 @@ When the browser can't render a requested face, `onMissingFonts` reports it so y
 
 ```bash
 npm install
-npm test                 # core unit tests (parser + layout, deterministic measurer)
-npm run build            # build the public package
+npm run build            # build all published packages
+npm run typecheck        # type-check packages and the example
+npm test                 # build and run all package and example unit tests
+npm run demo             # build and open the collaboration demo
 ```
 
 ## Rendering parity

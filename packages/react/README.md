@@ -297,6 +297,23 @@ when a host needs a narrowly scoped style override.
 
 WordInWeb never converts the document to flowing HTML. It parses the OOXML into a typed model, runs a layout engine that breaks lines with real canvas metrics and paginates like Word, and renders each primitive as one absolutely-positioned element, so the browser does zero reflow. Editing mutates the retained XML tree and re-serializes only the parts it models, leaving everything else byte-for-byte intact.
 
+## Collaboration
+
+React collaboration ships as the separate `wordinweb/collab` entry:
+
+```tsx
+import { CollabEditor, IndexedDbBundleStore } from "wordinweb/collab";
+```
+
+The Node host ships as `@wordinweb/server`. Browser-only applications do not
+install it, and the main `wordinweb` entry has no path to either collaboration
+entry.
+
+The [anonymous sharing example][collab-example] documents a complete encrypted
+deployment.
+
+[collab-example]: https://github.com/theRealestAEP/wordinweb/tree/main/examples/anon-share
+
 ## Fonts
 
 Text is measured on a canvas before layout, so line breaks depend on the real font metrics. For Word parity, register the bundled OFL substitutes in your app entry:
@@ -330,8 +347,10 @@ When the browser can't render a requested face, `onMissingFonts` reports it so y
 
 ```bash
 npm install
-npm test                 # core unit tests (parser + layout, deterministic measurer)
-npm run build            # build the public package
+npm run build            # build all published packages
+npm run typecheck        # type-check packages and the example
+npm test                 # build and run package and example unit tests
+npm run demo             # build and open the collaboration demo
 ```
 
 ## Rendering parity

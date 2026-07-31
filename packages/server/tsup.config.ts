@@ -9,9 +9,8 @@ export default defineConfig({
   // tsconfig.json (see packages/react/tsup.config.ts for why both halves are
   // needed). Core's runtime deps (cfb, fflate, wmf; emf-converter is
   // tree-shaken away with the paint path) stay external and are declared as
-  // dependencies — inlining core means adopting them. `ws` is an optional
-  // peer, only ever loaded through a dynamic `import(spec)` with a variable
-  // specifier, which esbuild leaves untouched.
+  // dependencies — inlining core means adopting them. `ws` is a server-package
+  // dependency and remains external to this bundle.
   // Pinned by scripts/check-dts-selfcontained.mjs at prepack.
   dts: true,
   sourcemap: true,

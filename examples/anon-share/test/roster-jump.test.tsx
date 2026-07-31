@@ -23,7 +23,7 @@ import { zipSync, strToU8 } from "fflate";
 import { CollabHub, type DocProvider, type Connection, type ServerMessage } from "@wordinweb/server";
 import { CollabConnection, createWebSocketTransport, InMemoryBundleStore } from "@wordinweb/collab/client";
 import type { DocxDocument, Paragraph, Run } from "@wordinweb/core";
-import { App } from "../../../examples/anon-share/src/app";
+import { App } from "../src/app";
 
 // ---- causal layout-work counter (remote-repaint-scoped's) ------------------
 // Canvas measureText calls are the real cost of layout; a scroll must add 0.

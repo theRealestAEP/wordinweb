@@ -87,7 +87,7 @@ async function main() {
   const server = run("node", ["packages/server/dist/cli.js"], {
     env: {
       ...process.env,
-      ZERO_CUSTODY: "1",
+      WW_ENCRYPTED_ONLY: "1",
       PORT: SERVER_PORT,
       WW_OBS: "1",
       // PER-IP LIMITS OFF for the local stack (0 disables — see limits.ts).

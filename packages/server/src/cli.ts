@@ -7,20 +7,15 @@ import { envLimits, clientIp, mediaWireCap, maxSealedBytes } from "./limits.js";
 import { IpGuard } from "./ip-guard.js";
 
 /**
- * Zero-config dev server (plan Tier 1: `npx wordinweb server`). Uses blank-doc
- * provider + in-memory (ephemeral) storage and a real `ws` WebSocketServer,
- * dynamically imported so the package carries no `ws` build dependency — the
- * operator installs it (`npm i ws`). Auth is OFF here; production embeds
- * CollabHub with a real storage/JWT/media configuration.
+ * Zero-config dev server. Uses a blank-doc provider, in-memory storage, and
+ * the `ws` WebSocketServer shipped with this server package. Auth is off here;
+ * production embeds CollabHub with its storage, auth, and media configuration.
  */
 export async function startDevServer(opts: { port?: number } = {}): Promise<{ close: () => void }> {
   const port = opts.port ?? 1234;
-  // Dynamic import via an indirect specifier keeps `ws` optional at build/
-  // test time (it is never statically resolved).
-  const spec = "ws";
-  const wsMod = (await import(spec).catch(() => {
-    throw new Error("startDevServer needs the 'ws' package — run: npm i ws");
-  })) as { WebSocketServer: new (o: { port: number }) => WsServer & { close(): void } };
+  const wsMod = (await import("ws")) as {
+    WebSocketServer: new (o: { port: number }) => WsServer & { close(): void };
+  };
 
   const hub = new CollabHub(blankProvider, new InMemoryStorage());
   const wss = new wsMod.WebSocketServer({ port });
@@ -89,10 +84,7 @@ async function makeLogSink(): Promise<((line: string) => void) | undefined> {
 
 export async function startZeroCustodyServer(opts: { port?: number } = {}): Promise<{ close: () => void }> {
   const port = opts.port ?? 1234;
-  const spec = "ws";
-  const wsMod = (await import(spec).catch(() => {
-    throw new Error("startZeroCustodyServer needs the 'ws' package — run: npm i ws");
-  })) as {
+  const wsMod = (await import("ws")) as {
     WebSocketServer: new (o: { noServer: true; maxPayload: number }) => WsServer & {
       close(): void;
       handleUpgrade(req: unknown, socket: unknown, head: unknown, cb: (client: unknown) => void): void;

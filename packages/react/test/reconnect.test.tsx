@@ -172,7 +172,7 @@ describe("desync detection", () => {
     expect(p.session.writesBlocked, "a healthy session is writable").toBe(false);
     expect(p.session.offline, "no offline state while live").toBeNull();
 
-    p.sockets[0].kill();
+    await act(async () => p.sockets[0].kill());
     await until(() => p.session.connection !== "live", "drop detected");
 
     expect(p.session.connection).toBe("reconnecting");
@@ -240,7 +240,7 @@ describe("reconnect", () => {
     expect(p.hellos.length, "one join so far").toBe(1);
     const firstJoin = p.hellos[0];
 
-    p.sockets[0].kill();
+    await act(async () => p.sockets[0].kill());
     await until(() => p.hellos.length > 1, "rejoin handshake sent");
     await until(() => p.session.connection === "live", "session recovered");
 

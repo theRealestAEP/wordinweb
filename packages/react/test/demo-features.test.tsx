@@ -43,7 +43,7 @@ let spySeq = 0; // fresh identity per spy: a reused clientId is refused `already
 async function spyState(factory: (u: string) => WebSocket, doc: string) {
   const spy = new CollabConnection(createWebSocketTransport(factory("ws://spy") as never), `spy-${spySeq++}`);
   spy.join(doc);
-  for (let i = 0; i < 40 && !spy.doc; i++) await new Promise((r) => setTimeout(r, 5));
+  for (let i = 0; i < 40 && !spy.doc; i++) await tick();
   expect(spy.doc).toBeTruthy();
   const body = spy.doc!.docRoot.children.find((c) => c.name.endsWith("body"))!;
   const textOf = (el: { name: string; text: string; children: unknown[] }): string =>

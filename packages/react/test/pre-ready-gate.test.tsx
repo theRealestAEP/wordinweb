@@ -124,7 +124,7 @@ describe("the editor is not editable until the session is ready", () => {
     ).toBe(0);
 
     // …and once the welcome lands, the editor appears and paints.
-    release();
+    await act(async () => release());
     for (let i = 0; i < 20 && !container.textContent?.includes("HELLO"); i++) await tick();
     expect(container.textContent, "the document paints once ready").toContain("HELLO");
     expect(container.textContent).not.toContain("Connecting");
