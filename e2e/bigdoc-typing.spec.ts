@@ -337,7 +337,7 @@ async function memoryRounds(page: Page, cdp: CDPSession, scenario: string, round
 
 test.use({ trace: "off" });
 
-test.describe("big document typing (>50 pages)", () => {
+test.describe("big document typing (>50 pages) @benchmark", () => {
   test("local editor and collab editor stay interactive on a 60+ page document", async ({ page }) => {
     test.setTimeout(300_000);
     const cdp = await page.context().newCDPSession(page);

@@ -24,6 +24,7 @@
     "verify": "npm run typecheck && npm test && vite build --config examples/anon-share/vite.config.ts",
     "demo": "node scripts/dev.mjs",
     "e2e": "playwright test",
+    "e2e:ci": "playwright test --grep-invert @benchmark",
     "e2e:headed": "playwright test --headed",
     "perf:report": "node scripts/perf-report.mjs run",
     "check:dist": "node scripts/check-dist-fresh.mjs"

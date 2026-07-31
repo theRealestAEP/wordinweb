@@ -151,7 +151,7 @@ async function joinBigDoc(page: Page, url: string): Promise<void> {
   await waitHook(page);
 }
 
-test.describe("collab demo — stress & performance", () => {
+test.describe("collab demo — stress & performance @benchmark", () => {
   test("throughput: keyboard typing + an intent flood on one run converge byte-identically", async ({ browser }) => {
     test.setTimeout(120_000);
     const TYPED = 300; // real keystrokes on A (the editor's own intent path)

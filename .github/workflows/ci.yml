@@ -27,4 +27,4 @@ jobs:
       - run: npm install --no-save --no-audit --no-fund @rollup/rollup-linux-x64-gnu@4.62.2
       - run: npm run verify
       - run: npx playwright install --with-deps chromium
-      - run: npm run e2e
+      - run: npm run e2e:ci

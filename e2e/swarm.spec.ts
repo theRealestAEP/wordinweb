@@ -154,7 +154,7 @@ function tally(text: string, tag: string): number {
   return text.split(tag).length - 1;
 }
 
-test.describe("collab demo — many-editor swarm", () => {
+test.describe("collab demo — many-editor swarm @benchmark", () => {
   test("clash: 10 clients on one line converge byte-identically after the churn stops", async ({ browser }) => {
     test.setTimeout(180_000);
     const { pages, contexts } = await newClients(browser, CLASH_CLIENTS);
