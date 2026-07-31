@@ -1478,6 +1478,7 @@ function WordArtMenu({ api }: { api: DocxViewApi | null }) {
 function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: string }) {
   type Chart = Parameters<DocxViewApi["insertChart"]>[0];
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [type, setType] = useState<Chart["type"]>("column");
   const [title, setTitle] = useState("");
   const [categories, setCategories] = useState(["", ""]);
@@ -1494,19 +1495,35 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
   }, [open]);
   const submit = () => {
     const categoryValues = categories.map((value) => value.trim());
-    const rawSeries = series.map((entry) => ({
+    const rawSeries = (type === "pie" ? series.slice(0, 1) : series).map((entry) => ({
       name: entry.name.trim(),
       values: entry.values.map((value) => value.trim()),
     }));
-    if (
-      categoryValues.some((value) => !value) ||
-      rawSeries.some((entry) => !entry.name || entry.values.some((value) => value === "" || !Number.isFinite(Number(value))))
-    ) {
-      setError("Give every category and series a name, and enter a number in every data cell.");
+    if (categoryValues.some((value) => !value)) {
+      setError(type === "pie" ? "Enter a label for every slice." : "Enter a name for every category.");
       return;
     }
-    const seriesValues = rawSeries.map((entry) => ({ name: entry.name, values: entry.values.map(Number) }));
-    const data: Chart = { type, title, categories: categoryValues, series: seriesValues };
+    if (type !== "pie" && rawSeries.some((entry) => !entry.name)) {
+      setError("Enter a name for every series.");
+      return;
+    }
+    if (rawSeries.some((entry) => entry.values.some((value) => value === "" || !Number.isFinite(Number(value))))) {
+      setError("Enter a number in every value field.");
+      return;
+    }
+    if (type === "pie" && rawSeries.some((entry) => entry.values.some((value) => Number(value) < 0))) {
+      setError("Pie chart values must be zero or greater.");
+      return;
+    }
+    if (type === "pie" && rawSeries.every((entry) => entry.values.every((value) => Number(value) === 0))) {
+      setError("Enter at least one pie chart value greater than zero.");
+      return;
+    }
+    const seriesValues = rawSeries.map((entry) => ({
+      name: type === "pie" ? entry.name || "Values" : entry.name,
+      values: entry.values.map(Number),
+    }));
+    const data: Chart = { type, title: title.trim(), categories: categoryValues, series: seriesValues };
     if (api?.updateSelectedChart(data) || api?.insertChart(data)) {
       setError("");
       setOpen(false);
@@ -1521,97 +1538,202 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
     setCategories(categories.filter((_, itemIndex) => itemIndex !== index));
     setSeries(series.map((entry) => ({ ...entry, values: entry.values.filter((_, itemIndex) => itemIndex !== index) })));
   };
+  const changeType = (next: Chart["type"]) => {
+    setType(next);
+    if (next === "pie") {
+      setSeries((current) => [
+        current[0] ?? { name: "Values", values: categories.map(() => "") },
+      ]);
+    }
+    setError("");
+  };
   const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
   const viewportWidth = typeof window === "undefined" ? 456 : window.innerWidth;
   const popoverWidth = Math.min(440, viewportWidth - 16);
   const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
   const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+  const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
+  const tableHeaderStyle: React.CSSProperties = { padding: "0 3px 4px", textAlign: "left", verticalAlign: "bottom", color: T.muted, font: "600 11px system-ui, sans-serif" };
+  const tableCellStyle: React.CSSProperties = { padding: 3, verticalAlign: "bottom" };
   const toggle = () => {
     if (open) {
       setOpen(false);
       return;
     }
     const selected = api?.getSelectedChart();
+    const nextCategories = selected?.categories.length ? [...selected.categories] : ["", ""];
+    const nextSeries = selected?.series.length
+      ? selected.series.map((entry) => ({
+        name: entry.name,
+        values: nextCategories.map((_, index) => String(entry.values[index] ?? "")),
+      }))
+      : [{ name: "", values: nextCategories.map(() => "") }];
+    setEditing(!!selected);
     setType(selected?.type ?? "column");
     setTitle(selected?.title ?? "");
-    setCategories(selected ? [...selected.categories] : ["", ""]);
-    setSeries(selected
-      ? selected.series.map((entry) => ({ name: entry.name, values: entry.values.map(String) }))
-      : [{ name: "", values: ["", ""] }]);
+    setCategories(nextCategories);
+    setSeries(selected?.type === "pie" ? nextSeries.slice(0, 1) : nextSeries);
     setError("");
     setOpen(true);
   };
+  const chartTypes: { value: Chart["type"]; label: string }[] = [
+    { value: "column", label: "Column" },
+    { value: "bar", label: "Bar" },
+    { value: "line", label: "Line" },
+    { value: "pie", label: "Pie" },
+  ];
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert or edit chart" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>{label}</button>
       {open && (
         <div style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, maxHeight: "calc(100vh - 48px)", overflow: "auto", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <ToolbarMenuSelect
-            value={type}
-            ariaLabel="Chart type"
-            width="100%"
-            menuWidth={300}
-            options={[
-              { value: "column", label: "Column" },
-              { value: "bar", label: "Bar" },
-              { value: "line", label: "Line" },
-              { value: "pie", label: "Pie" },
-            ]}
-            onChange={(value) => setType(value as Chart["type"])}
-            style={fieldStyle}
-          />
-          <input aria-label="Chart title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Chart title" style={fieldStyle} />
+          <strong style={{ color: T.fg, font: "600 13px system-ui, sans-serif" }}>{editing ? "Edit chart" : "Insert chart"}</strong>
+          <fieldset style={{ minWidth: 0, margin: 0, padding: 0, border: 0 }}>
+            <legend style={{ marginBottom: 4, color: T.muted, font: "11px system-ui, sans-serif" }}>Chart type</legend>
+            <div role="radiogroup" aria-label="Chart type" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 5 }}>
+              {chartTypes.map((chartType) => {
+                const selected = chartType.value === type;
+                return (
+                  <button
+                    key={chartType.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => changeType(chartType.value)}
+                    style={{
+                      minHeight: 34,
+                      border: `1px solid ${selected ? T.accent : T.border}`,
+                      borderRadius: 6,
+                      background: selected ? T.tabActiveBg : T.popoverBg,
+                      color: selected ? T.accent : T.fg,
+                      cursor: "pointer",
+                      font: "600 12px system-ui, sans-serif",
+                    }}
+                  >
+                    {chartType.label}
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+          <label style={fieldLabelStyle}>
+            <span>Chart title (optional)</span>
+            <input aria-label="Chart title" value={title} onChange={(event) => setTitle(event.target.value)} style={fieldStyle} />
+          </label>
           <div role="group" aria-label="Chart data" style={{ display: "grid", gap: 7 }}>
-            <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>Data</strong>
+            <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{type === "pie" ? "Slices" : "Chart data"}</strong>
             <div style={{ overflowX: "auto" }}>
-              <div style={{ display: "grid", gridTemplateColumns: `minmax(110px,1.2fr) repeat(${categories.length},minmax(72px,1fr)) 62px`, gap: 5, minWidth: categories.length > 3 ? 430 : undefined }}>
-                <span style={{ alignSelf: "center", color: T.muted, font: "11px system-ui, sans-serif" }}>Series</span>
-                {categories.map((category, index) => (
-                  <label key={index} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 3 }}>
-                    <input
-                      aria-label={`Chart category ${index + 1}`}
-                      value={category}
-                      placeholder="Category"
-                      onChange={(event) => setCategories(categories.map((value, itemIndex) => itemIndex === index ? event.target.value : value))}
-                      style={fieldStyle}
-                    />
-                    {categories.length > 1 && <button type="button" aria-label={`Remove chart category ${index + 1}`} onClick={() => removeCategory(index)} style={{ ...pillBtn, padding: "0 6px" }}>×</button>}
-                  </label>
-                ))}
-                <span />
-                {series.map((entry, seriesIndex) => (
-                  <Fragment key={seriesIndex}>
-                    <input
-                      aria-label={`Chart series ${seriesIndex + 1} name`}
-                      value={entry.name}
-                      placeholder="Series"
-                      onChange={(event) => setSeries(series.map((value, itemIndex) => itemIndex === seriesIndex ? { ...value, name: event.target.value } : value))}
-                      style={fieldStyle}
-                    />
-                    {entry.values.map((value, valueIndex) => (
-                      <input
-                        key={valueIndex}
-                        aria-label={`Chart series ${seriesIndex + 1} value ${valueIndex + 1}`}
-                        type="number"
-                        step="any"
-                        value={value}
-                        placeholder="0"
-                        onChange={(event) => setSeries(series.map((seriesValue, itemIndex) => itemIndex === seriesIndex ? { ...seriesValue, values: seriesValue.values.map((itemValue, itemValueIndex) => itemValueIndex === valueIndex ? event.target.value : itemValue) } : seriesValue))}
-                        style={fieldStyle}
-                      />
+              {type === "pie" ? (
+                <table aria-label="Pie chart data" style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      <th scope="col" style={tableHeaderStyle}>Slice label</th>
+                      <th scope="col" style={tableHeaderStyle}>Value</th>
+                      <th scope="col" aria-label="Actions" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {categories.map((category, index) => (
+                      <tr key={index}>
+                        <th scope="row" style={{ ...tableCellStyle, width: "52%", fontWeight: 400 }}>
+                          <label style={fieldLabelStyle}>
+                            <span>Slice {index + 1}</span>
+                            <input
+                              aria-label={`Chart slice ${index + 1} label`}
+                              value={category}
+                              onChange={(event) => setCategories(categories.map((value, itemIndex) => itemIndex === index ? event.target.value : value))}
+                              style={fieldStyle}
+                            />
+                          </label>
+                        </th>
+                        <td style={tableCellStyle}>
+                          <input
+                            aria-label={`Chart slice ${index + 1} value`}
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={series[0]?.values[index] ?? ""}
+                            onChange={(event) => setSeries([{
+                              ...(series[0] ?? { name: "Values", values: categories.map(() => "") }),
+                              values: categories.map((_, itemIndex) => itemIndex === index ? event.target.value : (series[0]?.values[itemIndex] ?? "")),
+                            }])}
+                            style={fieldStyle}
+                          />
+                        </td>
+                        <td style={tableCellStyle}>
+                          {categories.length > 1 && <button type="button" aria-label={`Remove chart slice ${index + 1}`} onClick={() => removeCategory(index)} style={{ ...pillBtn, padding: "0 7px" }}>Remove</button>}
+                        </td>
+                      </tr>
                     ))}
-                    <button type="button" aria-label={`Remove chart series ${seriesIndex + 1}`} disabled={series.length === 1} onClick={() => setSeries(series.filter((_, itemIndex) => itemIndex !== seriesIndex))} style={{ ...pillBtn, padding: "0 7px" }}>Remove</button>
-                  </Fragment>
-                ))}
-              </div>
+                  </tbody>
+                </table>
+              ) : (
+                <table aria-label={`${type} chart data`} style={{ minWidth: series.length > 2 ? 430 : undefined, width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      <th scope="col" style={tableHeaderStyle}>Category</th>
+                      {series.map((entry, seriesIndex) => (
+                        <th key={seriesIndex} scope="col" style={tableHeaderStyle}>
+                          <label style={fieldLabelStyle}>
+                            <span>Series {seriesIndex + 1} name</span>
+                            <input
+                              aria-label={`Chart series ${seriesIndex + 1} name`}
+                              value={entry.name}
+                              onChange={(event) => setSeries(series.map((value, itemIndex) => itemIndex === seriesIndex ? { ...value, name: event.target.value } : value))}
+                              style={fieldStyle}
+                            />
+                          </label>
+                          {series.length > 1 && <button type="button" aria-label={`Remove chart series ${seriesIndex + 1}`} onClick={() => setSeries(series.filter((_, itemIndex) => itemIndex !== seriesIndex))} style={{ ...pillBtn, marginTop: 3, padding: "0 7px" }}>Remove</button>}
+                        </th>
+                      ))}
+                      <th scope="col" aria-label="Actions" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {categories.map((category, categoryIndex) => (
+                      <tr key={categoryIndex}>
+                        <th scope="row" style={{ ...tableCellStyle, minWidth: 120, fontWeight: 400 }}>
+                          <label style={fieldLabelStyle}>
+                            <span>Category {categoryIndex + 1}</span>
+                            <input
+                              aria-label={`Chart category ${categoryIndex + 1}`}
+                              value={category}
+                              onChange={(event) => setCategories(categories.map((value, itemIndex) => itemIndex === categoryIndex ? event.target.value : value))}
+                              style={fieldStyle}
+                            />
+                          </label>
+                        </th>
+                        {series.map((entry, seriesIndex) => (
+                          <td key={seriesIndex} style={{ ...tableCellStyle, minWidth: 82 }}>
+                            <input
+                              aria-label={`Chart series ${seriesIndex + 1} value ${categoryIndex + 1}`}
+                              type="number"
+                              step="any"
+                              value={entry.values[categoryIndex] ?? ""}
+                              onChange={(event) => setSeries(series.map((seriesValue, itemIndex) => itemIndex === seriesIndex ? {
+                                ...seriesValue,
+                                values: categories.map((_, itemValueIndex) => itemValueIndex === categoryIndex ? event.target.value : (seriesValue.values[itemValueIndex] ?? "")),
+                              } : seriesValue))}
+                              style={fieldStyle}
+                            />
+                          </td>
+                        ))}
+                        <td style={tableCellStyle}>
+                          {categories.length > 1 && <button type="button" aria-label={`Remove chart category ${categoryIndex + 1}`} onClick={() => removeCategory(categoryIndex)} style={{ ...pillBtn, padding: "0 7px" }}>Remove</button>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
             <div style={{ display: "flex", gap: 6 }}>
-              <button type="button" onClick={() => setSeries([...series, { name: "", values: categories.map(() => "") }])} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Add series</button>
-              <button type="button" onClick={addCategory} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Add category</button>
+              {type !== "pie" && <button type="button" onClick={() => setSeries([...series, { name: "", values: categories.map(() => "") }])} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Add series</button>}
+              <button type="button" onClick={addCategory} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>{type === "pie" ? "Add slice" : "Add category"}</button>
             </div>
           </div>
           {error && <div role="alert" style={{ color: "#c5221f", font: "11.5px system-ui, sans-serif" }}>{error}</div>}
-          <button onClick={submit} style={{ border: 0, borderRadius: 6, padding: "7px 10px", background: T.accent, color: T.accentFg, cursor: "pointer", font: "600 12px system-ui, sans-serif" }}>Insert or update chart</button>
+          <button onClick={submit} style={{ border: 0, borderRadius: 6, padding: "7px 10px", background: T.accent, color: T.accentFg, cursor: "pointer", font: "600 12px system-ui, sans-serif" }}>{editing ? "Update chart" : "Insert chart"}</button>
         </div>
       )}
     </span>

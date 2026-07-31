@@ -557,6 +557,23 @@ describe("block commands", () => {
     expect(reloaded.sections[0].props.pageWidth).toBeGreaterThan(reloaded.sections[0].props.pageHeight);
   });
 
+  it("preserves landscape orientation when the page size changes to Envelope #10", async () => {
+    const { setPageLayout } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(
+      p("text") + `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`,
+    );
+    setPageLayout(doc, { orientation: "landscape" });
+    setPageLayout(doc, { size: { width: 4.13, height: 9.5 } });
+
+    const saved = doc.save();
+    const documentXml = strFromU8(unzipSync(saved)["word/document.xml"]);
+    expect(documentXml).toContain('<w:pgSz w:w="13680" w:h="5947" w:orient="landscape"/>');
+
+    const reloaded = DocxDocument.load(saved);
+    expect(reloaded.sections[0].props.pageWidth).toBeCloseTo(9.5 * 96, 0);
+    expect(reloaded.sections[0].props.pageHeight).toBeCloseTo(4.13 * 96, 0);
+  });
+
   it("saves and reopens a custom page border color", async () => {
     const { setPageLayout } = await import("../src/edit/blocks.js");
     const doc = loadDoc(
