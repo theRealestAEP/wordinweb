@@ -84,8 +84,11 @@ export interface SealedCheckpoint {
  *       resolve v:shape/v:rect carriers as well as w:drawing. An e9 peer
  *       rejects the same intent that an e10 peer applies, so a mixed
  *       encrypted room would fork on the first pleading-gutter object edit.
+ *   e11 WordArt insertion writes centered Word-compatible text-body
+ *       geometry. An e10 peer generates different canonical DOCX bytes for
+ *       the same insertWordArt intent, so mixed encrypted clients diverge.
  */
-export const ENGINE_VERSION = "e10";
+export const ENGINE_VERSION = "e11";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-
