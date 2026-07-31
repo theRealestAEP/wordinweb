@@ -1747,6 +1747,65 @@ describe("WordArt insertion", () => {
     expect(xml).not.toContain(">Before<");
     expect(xml).toContain('cy="381000"');
   });
+
+  it("keeps several moved WordArt objects independent without reflowing body text", () => {
+    const doc = loadDoc(p("Alpha body line") + p("Bravo body line") + p("Charlie body line") + p("Delta body line"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    const drawings = [
+      insertWordArtAt(doc, t, "First", "plain"),
+      insertWordArtAt(doc, t, "Second", "archUp"),
+      insertWordArtAt(doc, t, "Third", "wave"),
+    ];
+    if (drawings.some((drawing) => !drawing)) throw new Error("WordArt missing");
+
+    const bodyXs = layoutDocument(doc).pages[0].items
+      .filter((item) => item.kind === "text" && /^(Alpha|Bravo|Charlie|Delta)/.test(item.text))
+      .map((item) => item.kind === "text" ? item.x : 0);
+    expect(bodyXs).toHaveLength(4);
+    expect(Math.max(...bodyXs) - Math.min(...bodyXs)).toBeLessThan(0.1);
+
+    const positions = [
+      { x: 110, y: 140, rotation: 0 },
+      { x: 280, y: 320, rotation: 18 },
+      { x: 75, y: 510, rotation: 342 },
+    ];
+    drawings.forEach((drawing, index) => {
+      const value = drawing!;
+      // Model two separate drags. Only the final page position must survive.
+      expect(setFloatingPagePosition(doc, value, positions[index].x - 25, positions[index].y - 20)).toBe(true);
+      expect(setFloatingPagePosition(doc, value, positions[index].x, positions[index].y)).toBe(true);
+      expect(setDrawingRotation(doc, value, positions[index].rotation)).toBe(true);
+    });
+
+    const reopened = DocxDocument.load(doc.save());
+    const xml = reopened.pkg.text("word/document.xml");
+    expect(xml.match(/<wp:wrapNone\/>/g)).toHaveLength(3);
+    expect(xml).not.toContain("<wp:wrapSquare");
+    expect(xml).toContain("Alpha body line");
+    const names = [...xml.matchAll(/name="(WordArt \d+)"/g)].map((match) => match[1]);
+    expect(names).toHaveLength(3);
+    expect(new Set(names).size).toBe(3);
+
+    for (const { x, y, rotation } of positions) {
+      expect(xml).toContain(
+        `<wp:positionH relativeFrom="page"><wp:posOffset>${Math.round(x * 9525)}</wp:posOffset></wp:positionH>`,
+      );
+      expect(xml).toContain(
+        `<wp:positionV relativeFrom="page"><wp:posOffset>${Math.round(y * 9525)}</wp:posOffset></wp:positionV>`,
+      );
+      if (rotation !== 0) expect(xml).toContain(`rot="${Math.round(rotation * 60000)}"`);
+    }
+
+    // Word uses wp:extent for the anchored box and a:ext for its native shape
+    // transform. Every inserted object must keep the two sizes synchronized.
+    const extents = [...xml.matchAll(/<wp:extent cx="(\d+)" cy="(\d+)"\/>/g)].map((match) => `${match[1]}x${match[2]}`);
+    const transforms = [...xml.matchAll(/<a:ext cx="(\d+)" cy="(\d+)"\/>/g)].map((match) => `${match[1]}x${match[2]}`);
+    expect(extents).toHaveLength(3);
+    expect(transforms).toEqual(extents);
+    expect(xml).toContain('<a:prstTxWarp prst="textNoShape">');
+    expect(xml).toContain('<a:prstTxWarp prst="textArchUp">');
+    expect(xml).toContain('<a:prstTxWarp prst="textWave1">');
+  });
 });
 
 describe("ink insertion", () => {

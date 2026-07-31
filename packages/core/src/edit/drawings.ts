@@ -144,6 +144,17 @@ export function insertWordArtAt(
   const docPr = descendant(drawing, "docPr");
   if (docPr) docPr.attrs.name = `WordArt ${docPr.attrs.id}`;
 
+  // WordArt is decorative page content. Let it sit over the document instead
+  // of carving a 240 px channel through every line near its anchor. Several
+  // square-wrapped WordArt objects otherwise reflow the same body text after
+  // each drag, which also makes Word lay out the saved file very differently.
+  const anchor = descendant(drawing, "anchor");
+  if (anchor) {
+    const wrap = anchor.children.findIndex((child) => localName(child.name).startsWith("wrap"));
+    if (wrap !== -1) anchor.children[wrap] = el("wp:wrapNone");
+    anchor.attrs.behindDoc = "0";
+  }
+
   if (preset === "plain") {
     const height = String(Math.round(40 * EMU_PER_PX));
     const extent = descendant(drawing, "extent");
