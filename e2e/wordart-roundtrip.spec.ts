@@ -98,6 +98,8 @@ test("several WordArt objects drag repeatedly and keep native positions through 
     expect(outer?.slice(1)).toEqual(transform?.slice(1));
   }
   expect(xml.match(/<a:prstTxWarp prst="(?:textNoShape|textArchUp|textWave1)">/g)).toHaveLength(3);
+  expect(xml.match(/<w:jc w:val="center"\/>/g)).toHaveLength(3);
+  expect(xml.match(/<a:noAutofit\/>/g)).toHaveLength(3);
 
   const input = page.locator('input[type="file"][accept*=".docx"]');
   await input.setInputFiles(path);

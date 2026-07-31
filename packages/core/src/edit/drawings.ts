@@ -178,8 +178,44 @@ export function insertWordArtAt(
     if (size) size.attrs[Object.keys(size.attrs).find((key) => localName(key) === "val") ?? `${prefixOf(size)}val`] = "40";
   }
 
+  const paragraphProperties = descendant(drawing, "pPr");
+  const justification = paragraphProperties ? descendant(paragraphProperties, "jc") : undefined;
+  if (justification) {
+    const valueKey =
+      Object.keys(justification.attrs).find((key) => localName(key) === "val") ??
+      `${prefixOf(justification)}val`;
+    justification.attrs[valueKey] = "center";
+  }
+
   const bodyPr = descendant(drawing, "bodyPr");
-  if (bodyPr) bodyPr.children.unshift(el("a:prstTxWarp", { prst: warp }, [el("a:avLst")]));
+  if (bodyPr) {
+    bodyPr.attrs = {
+      rot: "0",
+      spcFirstLastPara: "1",
+      vertOverflow: "overflow",
+      horzOverflow: "overflow",
+      vert: "horz",
+      wrap: "none",
+      lIns: "91440",
+      tIns: "45720",
+      rIns: "91440",
+      bIns: "45720",
+      numCol: "1",
+      spcCol: "0",
+      rtlCol: "0",
+      fromWordArt: "0",
+      anchor: "t",
+      anchorCtr: "0",
+      forceAA: "0",
+      compatLnSpc: "1",
+    };
+    // Keep the authored box size stable in WordInWeb. Word's gallery uses
+    // spAutoFit, which recomputes the box height and breaks repeated drag.
+    bodyPr.children = [
+      el("a:prstTxWarp", { prst: warp }, [el("a:avLst")]),
+      el("a:noAutofit"),
+    ];
+  }
   doc.refresh();
   return drawing;
 }
