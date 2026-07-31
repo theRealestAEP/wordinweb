@@ -270,7 +270,9 @@ export function FileMenu({
                       title={
                         savedOpenDisabled
                           ? "Opening would replace the shared document for you alone and split you from the session. Leave the session first, or download a copy."
-                          : savedOpenTitle ?? "Open this saved copy (replaces the current document)"
+                          : savedOpenTitle ?? (rejoinable
+                            ? "Open this room-linked copy for offline editing"
+                            : "Open this saved copy (replaces the current document)")
                       }
                       onClick={openDisabled ? undefined : item(() => onOpenSaved!(s))}
                     >

@@ -147,6 +147,38 @@ describe("local editor persistence", () => {
     expect(docText(banked!.confirmedBytes)).toContain("KEEPTHIS");
   });
 
+  it("routes a room-linked saved copy to the shared offline workspace", async () => {
+    const store = new InMemoryBundleStore();
+    const doc = DocxDocument.load(blankDocxBytes());
+    const ids = doc.enableStableIds();
+    await store.put({
+      docId: "room-copy",
+      genesisId: "room-genesis",
+      confirmedSeq: 0,
+      confirmedBytes: doc.save(),
+      confirmedSidecar: ids.exportSidecar(doc.editableRoots()),
+      pending: [],
+      clientSeq: 0,
+      savedAt: 1,
+      lineage: [],
+      title: "Client brief",
+    });
+    const onOpenSavedRoom = vi.fn();
+    const host = render(editor(store, {
+      canRejoinSaved: () => true,
+      onOpenSavedRoom,
+      onRejoinSaved: vi.fn(),
+    }));
+
+    for (let i = 0; i < 100 && byId(host, "file-menu")?.hasAttribute("disabled"); i++) await tick();
+    await click(byId(host, "file-menu"));
+    for (let i = 0; i < 100 && !byId(host, "file-saved-open"); i++) await tick();
+    expect(byId(host, "file-saved-open")).toBeTruthy();
+    expect(byId(host, "file-saved-open")?.getAttribute("title")).toBe("Open this room-linked copy for offline editing");
+    await click(byId(host, "file-saved-open"));
+    expect(onOpenSavedRoom).toHaveBeenCalledWith(expect.objectContaining({ docId: "room-copy", title: "Client brief" }));
+  });
+
   it("refuses to blank the document when the New-archive write fails", async () => {
     const store = new InMemoryBundleStore();
     const host = render(editor(store));

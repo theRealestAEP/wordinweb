@@ -4,6 +4,7 @@ import { DocxView, type DocxViewApi } from "./index.js";
 import { DocxToolbar, type ToolbarFeature, type ToolbarMode } from "./toolbar.js";
 import {
   CollabConnection,
+  ClientReplica,
   EncryptedCollabConnection,
   CarriedIdAllocator,
   stretchShareCode,
@@ -65,6 +66,9 @@ export interface UseCollabOptions {
    * (join cold, keep nothing).
    */
   store?: BundleStore;
+  /** Open the stored browser copy without creating a socket. Reconnect uses
+   * the normal resume path and reconciles the captured offline tail. */
+  startOffline?: boolean;
   /** Claim the identity from an existing live connection (doc 12 §7 "use
    * here instead"): set after an `already-open` refusal and remount. */
   takeover?: boolean;
@@ -472,6 +476,7 @@ function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 
 export function useCollab(opts: UseCollabOptions): CollabSession {
   const { url, docId, clientId, token, createSocket, store, profile, takeover, docKey, shareCode, ownerToken, httpBase } = opts;
+  const startOffline = Boolean(opts.startOffline);
   const connRef = useRef<CollabConnection | null>(null);
   const carriedIdAllocator = useMemo(() => new CarriedIdAllocator(clientId), [clientId]);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
@@ -570,8 +575,8 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const tailConnRef = useRef<object | null>(null);
   /** Trailing-throttle timer for the OFFLINE tail writer (below). */
   const offlinePersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [connection, setConnection] = useState<ConnectionState>("live");
-  const connectionRef = useRef<ConnectionState>("live");
+  const [connection, setConnection] = useState<ConnectionState>(startOffline ? "lost" : "live");
+  const connectionRef = useRef<ConnectionState>(startOffline ? "lost" : "live");
   /**
    * Bumped to force the connection effect to tear down and rebuild — the
    * reconnect itself.
@@ -592,10 +597,11 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const attemptRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSocketRef = useRef<WebSocket | null>(null);
-  const manuallyOfflineRef = useRef(false);
+  const manuallyOfflineRef = useRef(startOffline);
   const disconnectSeqRef = useRef<number | null>(null);
   const manualDraftBankedRef = useRef(false);
   const manualDraftSnapshotRef = useRef<DocBundle | null>(null);
+  const offlineBaseBundleRef = useRef<DocBundle | null>(null);
   /**
    * The teardown's bundle flush, awaited by the next effect run before it
    * reads the store.
@@ -623,7 +629,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     attemptRef.current = 0;
     if (manuallyOfflineRef.current) {
       const currentDoc = docRef.current;
-      const currentBundle = connRef.current?.exportBundle(docId);
+      const currentBundle = connRef.current?.exportBundle(docId) ?? offlineBaseBundleRef.current;
       const ids = currentDoc?.stableIds;
       manualDraftSnapshotRef.current = currentDoc && currentBundle && ids
         ? {
@@ -823,6 +829,51 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // Every dep change here means a DIFFERENT connection, so a deadline
     // announced by the previous one no longer applies to anything.
     clearDeadlines();
+    if (startOffline && reconnectNonce === 0) {
+      let disposed = false;
+      if (!store) {
+        setRefused("no-session");
+        return;
+      }
+      void store.get(docId).then((bundle) => {
+        if (disposed) return;
+        if (!bundle) {
+          setRefused("no-session");
+          return;
+        }
+        const replica = new ClientReplica(bundle.confirmedBytes, bundle.confirmedSidecar);
+        for (const intent of bundle.pending) replica.submitLocal(intent);
+        const offlineTail = bundle.offlineTail ?? [];
+        let scope: Scope | null = null;
+        for (const intent of offlineTail) {
+          const result = applyIntentScoped(replica.doc, replica.ids, intent);
+          if (!result.applied) continue;
+          resyncScope(replica.doc, replica.ids, result);
+          scope = scope ? unionScopes(scope, result) : result;
+        }
+        offlineBaseBundleRef.current = bundle;
+        offlineTailRef.current = offlineTail.length ? [...offlineTail] : undefined;
+        offlineEpochRef.current = bundle.offlineTailEpoch ?? bundle.genesisId;
+        disconnectSeqRef.current = bundle.offlineBaseSeq ?? bundle.confirmedSeq;
+        lastGenesisRef.current = bundle.genesisId;
+        docRef.current = replica.doc;
+        publishedDocRef.current = replica.doc;
+        renderScopeRef.current = scope ?? { kind: "doc" };
+        setDoc(replica.doc);
+        setOfflineHeld(offlineTail.length);
+        setReady(true);
+        setVersion((value) => value + 1);
+        setRenderVersion((value) => value + 1);
+        connectionRef.current = "lost";
+        setConnection("lost");
+      }).catch(() => {
+        if (!disposed) setPersistErrors((count) => count + 1);
+      });
+      return () => {
+        disposed = true;
+        flushOfflinePersist();
+      };
+    }
     const socket = (createSocket ?? ((u: string) => new WebSocket(u)))(url);
     activeSocketRef.current = socket;
     let disposed = false;
@@ -1209,7 +1260,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // profile intentionally omitted from deps (an inline object literal would
     // reconnect every render); renames go through setProfile, not re-join.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, docId, clientId, token, createSocket, store, takeover, docKey, shareCode, ownerToken, httpBase, reconnectNonce]);
+  }, [url, docId, clientId, token, createSocket, store, takeover, docKey, shareCode, ownerToken, httpBase, reconnectNonce, startOffline]);
 
   /** Cancel a pending retry if the hook unmounts between attempts. */
   useEffect(() => () => {

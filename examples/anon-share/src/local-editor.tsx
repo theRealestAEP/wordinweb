@@ -74,6 +74,7 @@ export function LocalEditor({
   onGoLive,
   canRejoinSaved,
   onRejoinSaved,
+  onOpenSavedRoom,
   store: storeProp,
   autosaveMs = AUTOSAVE_MS,
 }: {
@@ -88,6 +89,8 @@ export function LocalEditor({
   canRejoinSaved?: (s: StoredDocSummary) => boolean;
   /** Rejoin the collaborative room for a saved entry. */
   onRejoinSaved?: (s: StoredDocSummary) => void;
+  /** Open a room-linked saved entry in the shared offline workspace. */
+  onOpenSavedRoom?: (s: StoredDocSummary) => void;
   /** Where local work persists (shared with the collab screen). Defaults to
    * this browser's IndexedDB; tests inject the in-memory store. */
   store?: BundleStore;
@@ -270,9 +273,13 @@ export function LocalEditor({
       });
   };
 
-  /** Open a saved entry from the File menu (replaces the current document —
-   * safe here: there is no session, so nothing can fork). */
+  /** Open a saved entry from the File menu. Room-linked copies stay on the
+   * room-aware offline path; ordinary local copies replace this document. */
   const openSaved = (s: StoredDocSummary) => {
+    if (onOpenSavedRoom && canRejoinSaved?.(s)) {
+      onOpenSavedRoom(s);
+      return;
+    }
     void store
       .get(s.key)
       .then((b) => {

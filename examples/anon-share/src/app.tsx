@@ -1309,6 +1309,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           docKey={docKey}
           shareCode={shareCode}
           ownerToken={ownerToken}
+          startOffline={restoreOffline}
           // Media relay origin (doc 16 §3) — the same server the socket
           // points at. Image bytes ride these HTTP routes, never the
           // sequencer; without it the image button stays inert.

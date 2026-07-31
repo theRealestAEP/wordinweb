@@ -105,6 +105,7 @@ const Probe = forwardRef(function Probe(
     store: InMemoryBundleStore;
     clientId?: string;
     offlineTailCap?: number;
+    startOffline?: boolean;
   },
   ref: Ref<{ session: CollabSession }>,
 ) {
@@ -116,6 +117,7 @@ const Probe = forwardRef(function Probe(
     store: props.store,
     liveness: FAST,
     offlineTailCap: props.offlineTailCap,
+    startOffline: props.startOffline,
   });
   useImperativeHandle(ref, () => ({ session }), [session]);
   return null;
@@ -124,7 +126,7 @@ const Probe = forwardRef(function Probe(
 async function mount(
   hub: CollabHub,
   store: InMemoryBundleStore,
-  opts: { clientId?: string; offlineTailCap?: number; delayMs?: number } = {},
+  opts: { clientId?: string; offlineTailCap?: number; delayMs?: number; startOffline?: boolean } = {},
 ) {
   const f = factoryFor(hub, opts.delayMs ?? 1);
   const holder: { current: { session: CollabSession } | null } = { current: null };
@@ -136,6 +138,7 @@ async function mount(
         store,
         clientId: opts.clientId,
         offlineTailCap: opts.offlineTailCap,
+        startOffline: opts.startOffline,
         ref: (v: never) => (holder.current = v),
       }),
     );
@@ -172,6 +175,39 @@ const storedTail = (store: InMemoryBundleStore, id = "d"): unknown[] | undefined
   (store as unknown as { bundles: Map<string, { offlineTail?: unknown[] }> }).bundles.get(id)?.offlineTail;
 
 describe("offline capture is durable (the live data-loss bug)", () => {
+  it("opens a stored room copy offline without creating a socket, then rejoins through the normal merge check", async () => {
+    const hub = seeded();
+    const store = new InMemoryBundleStore();
+    const live = await mount(hub, store);
+    await act(async () => live.session.submitOp(insertAt(0, "BASE")));
+    await until(() => live.session.version > 1 && docText(live.session) === "BASE", "base edit echoed");
+    await until(
+      () => {
+        const bundle = (store as unknown as { bundles: Map<string, { pending: unknown[]; confirmedSeq: number }> }).bundles.get("d");
+        return bundle?.pending.length === 0 && bundle.confirmedSeq === 1;
+      },
+      "confirmed bundle persisted",
+    );
+    await live.unmount();
+
+    const offline = await mount(hub, store, { startOffline: true });
+    expect(offline.sockets, "opening the browser copy must not join the room").toHaveLength(0);
+    expect(offline.session.connection).toBe("lost");
+    expect(offline.session.offline).toEqual({ editsHeld: 0, capped: false });
+    expect(docText(offline.session)).toBe("BASE");
+
+    await act(async () => offline.session.submitOp(insertAt(4, "+OFF")));
+    expect(docText(offline.session)).toBe("BASE+OFF");
+    await until(() => storedTail(store)?.length === 1, "offline edit persisted");
+
+    await act(async () => offline.session.reconnect());
+    await until(() => offline.sockets.length === 1, "rejoin creates the first socket");
+    await until(() => offline.session.arrival?.mode === "replay", "rejoin offers the merge check");
+    await act(async () => offline.session.reconcile("replay"));
+    await until(() => offline.session.connection === "live" && docText(offline.session) === "BASE+OFF", "offline edit merged");
+    await offline.unmount();
+  });
+
   it("offline edits persist through the throttled writer WITHOUT an unmount, tagged with their epoch", async () => {
     const hub = seeded();
     const store = new InMemoryBundleStore();

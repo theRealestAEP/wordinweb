@@ -94,6 +94,35 @@ test.describe("zero-custody demo — browser E2E", () => {
     }
   });
 
+  test("File open keeps a saved room copy offline and offers Rejoin instead of Make collaborative", async ({ page }) => {
+    await createDoc(page);
+    await typeInEditor(page, "ROOM COPY");
+    await expect.poll(() => paintedText(page)).toContain("ROOM COPY");
+    await page.waitForTimeout(1200); // bundle persistence throttle
+
+    await page.getByTestId("new-document").click();
+    await expect(page.getByTestId("local-editor")).toBeVisible();
+    await page.getByTestId("file-menu").click();
+    await expect(page.getByTestId("file-saved-open").first()).toBeVisible();
+    await page.getByTestId("file-saved-open").first().click();
+
+    await expect(page.getByTestId("offline-workspace-rejoin")).toHaveText("Rejoin room");
+    await expect(page.getByTestId("offline-workspace-status")).toContainText("Editing offline in this browser");
+    await expect(page.getByTestId("make-collaborative")).toHaveCount(0);
+    await expect.poll(() => paintedText(page)).toContain("ROOM COPY");
+    const connection = await page.evaluate(
+      () => (window as unknown as { __ww: { _session: { connection: string } } }).__ww._session.connection,
+    );
+    expect(connection).toBe("lost");
+
+    await typeInEditor(page, "+OFFLINE");
+    await expect(page.getByTestId("offline-workspace-status")).toContainText("saved change");
+    await page.getByTestId("offline-workspace-rejoin").click();
+    await expect(page.getByTestId("arrival-banner")).toBeVisible();
+    await page.getByTestId("merge-offline-changes").click();
+    await expect.poll(() => paintedText(page)).toContain("+OFFLINE");
+  });
+
   test("typing paints in a real browser (editor apply over the real keydown path)", async ({ page }) => {
     await createDoc(page);
     await typeInEditor(page, "hello e2e");

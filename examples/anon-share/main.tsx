@@ -121,6 +121,17 @@ function Harness() {
   const rejoinSaved = (saved: StoredDocSummary) => {
     const roomUrl = localStorage.getItem(roomUrlKey(saved.docId));
     if (!roomUrl) return;
+    localStorage.removeItem(`wordinweb-offline-${saved.docId}`);
+    const next = new URL(roomUrl);
+    history.replaceState(null, "", next.toString());
+    setDocKey(docKeyFromFragment(next.hash));
+    setDocId(saved.docId);
+  };
+
+  const openSavedRoomOffline = (saved: StoredDocSummary) => {
+    const roomUrl = localStorage.getItem(roomUrlKey(saved.docId));
+    if (!roomUrl) return;
+    localStorage.setItem(`wordinweb-offline-${saved.docId}`, "1");
     const next = new URL(roomUrl);
     history.replaceState(null, "", next.toString());
     setDocKey(docKeyFromFragment(next.hash));
@@ -169,6 +180,7 @@ function Harness() {
         onGoLive={goLive}
         canRejoinSaved={canRejoinSaved}
         onRejoinSaved={rejoinSaved}
+        onOpenSavedRoom={openSavedRoomOffline}
         store={bundleStore}
       />
     );
