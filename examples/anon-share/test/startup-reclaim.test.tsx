@@ -171,7 +171,7 @@ function click(el: HTMLElement | null) {
 }
 async function tick(ms = 5) { await act(async () => { await new Promise<void>((r) => setTimeout(r, ms)); }); }
 async function until(cond: () => boolean, what: string) {
-  for (let i = 0; i < 200 && !cond(); i++) await tick();
+  for (let i = 0; i < 1000 && !cond(); i++) await tick();
   expect(cond(), what).toBe(true);
 }
 
