@@ -23,8 +23,8 @@
 	# NOTE the path list is EXPLICIT rather than a catch-all: it is the
 	# deployed surface of the server, and writing it out means adding a
 	# route to the server is a deliberate act here too. /stats is absent on
-	# purpose — it is the WW_OBS-gated metrics read path and has no business
-	# being reachable from the internet even when someone enables the flag.
+	# purpose because the private operations dashboard reads it from inside
+	# the container.
 	@collab path /docs /docs/* /blank /healthz
 	handle @collab {
 		reverse_proxy collab:1234

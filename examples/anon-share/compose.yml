@@ -27,6 +27,9 @@ services:
       # info | debug | silent. Structured lines on stderr; `debug` is the
       # per-op firehose and is not a production setting.
       WW_LOG_LEVEL: "info"
+      # Aggregate counters for the operations dashboard. Set WW_OBS=0 to
+      # disable the route.
+      WW_OBS: "${WW_OBS:-1}"
       # Optional: also append logs to a file inside the container. Usually
       # leave unset and let the container runtime collect stderr (below).
       # WW_LOG_FILE: "/var/log/wordinweb.log"
@@ -144,10 +147,6 @@ services:
       # re-supply, so expiry costs latency, never data.
       WW_MEDIA_STAGE_TTL_MS: "60000"
       WW_MEDIA_TTL_MS: "300000"
-      # WW_OBS=1 additionally EXPOSES GET /stats. Left unset deliberately —
-      # Caddy does not proxy /stats either, so enabling it is a two-step,
-      # conscious act. /healthz is ungated and is what probes should use.
-      # WW_OBS: "1"
     healthcheck:
       # The ungated liveness route (see cli.ts): proves the listener answers
       # without requiring the metrics surface to be open.

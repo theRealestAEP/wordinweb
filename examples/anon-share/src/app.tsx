@@ -289,7 +289,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         // The persister has not landed a bundle — there is nothing durable
         // to freeze, and pretending otherwise is the failure mode this
         // feature exists to avoid.
-        setVersionError("Nothing is saved in this browser yet to freeze — storage may be blocked. Download a copy instead.");
+        setVersionError("Wait a moment, then try again. You can also download the document.");
         return;
       }
       const key = versionKey(docId, savedAt, label);
@@ -313,7 +313,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
       const droppedKeys = new Set(dropped.map((d) => d.key));
       setVersions((v) => [...v.filter((x) => !droppedKeys.has(x.key)), { key, label: label || "(auto)", savedAt }]);
     } catch {
-      setVersionError("Couldn’t save this version — storage is full or blocked. Download a copy instead.");
+      setVersionError("Browser storage is full or unavailable. Download the document instead.");
     } finally {
       if (dropped.length) {
         const names = dropped.map(versionName);
@@ -458,7 +458,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     setJumpNotice(
       result === "no-position"
         ? `${participantName} hasn’t placed a cursor yet.`
-        : `${participantName}’s cursor spot is gone — they may have just moved.`,
+        : `${participantName} moved their cursor. Try again.`,
     );
     jumpTimerRef.current = setTimeout(() => setJumpNotice(null), 4000);
   };
@@ -490,8 +490,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         <div className="gate">
           <div className="gate-card">
           <h2>Already open in another tab</h2>
-          <p>A document can only be live in one tab at a time. Taking over here disconnects the other one.</p>
-          <button onClick={() => { setTakeover(true); setAttempt((a) => a + 1); }}>Use here instead</button>
+          <p>Continue here to disconnect the other tab.</p>
+          <button onClick={() => { setTakeover(true); setAttempt((a) => a + 1); }}>Continue here</button>
           </div>
         </div>
       );
@@ -499,12 +499,12 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     if (reason === "no-session") {
       return (
         <div>
-          <p>This session has ended — the server keeps nothing between sessions.</p>
+          <p>This session has ended.</p>
           {reviveState === "no-copy" ? (
-            <p>This browser has no saved copy of the document, so it can’t revive it. Any participant who edited here before can.</p>
+            <p>A previous participant can restart it from a saved browser copy.</p>
           ) : (
             <button disabled={reviveState === "reviving"} onClick={() => void revive()}>
-              {reviveState === "reviving" ? "Bringing it back…" : "Bring it back live"}
+              {reviveState === "reviving" ? "Restarting…" : "Restart session"}
             </button>
           )}
         </div>
@@ -519,10 +519,10 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             </h2>
             <p>
               {reason === "code-locked"
-                ? "Wait a minute, then re-enter the share code."
+                ? "Wait a minute, then try again."
                 : reason === "code-invalid"
-                  ? "Ask whoever shared the document \u2014 the code is sent separately from the link."
-                  : "This document is locked with a code, sent separately from the link."}
+                  ? "Get the share code from the person who sent the link."
+                  : "Enter the share code from the person who sent this link."}
             </p>
             <div className="gate-row">
           <input
@@ -567,7 +567,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         <div className="gate">
           <div className="gate-card">
             <h2>You were removed from this session</h2>
-            <p>The document owner removed this browser from the session. This browser identity cannot rejoin this document.</p>
+            <p>The owner removed this browser from the session.</p>
             <div className="row">
               {onDisconnect && (
                 <button data-testid="kicked-keep-local" onClick={leaveSession}>
@@ -607,7 +607,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     if (reason === "engine-version-mismatch" || reason === "engine-version-required") {
       return (
         <div>
-          <p>This tab is running a different version of the editor than the session — joining would silently corrupt the document.</p>
+          <p>This session uses another editor version. Reload this tab before joining.</p>
           <button data-testid="refused-reload" onClick={() => window.location.reload()}>Reload this tab</button>
         </div>
       );
@@ -619,7 +619,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           {/* The reason is protocol vocabulary, not prose — shown because a
               specific word someone can search or quote beats "something went
               wrong", and these are the cases with no tailored screen yet. */}
-          <p>The server refused the connection: <code>{reason}</code>.</p>
+          <p>Server response: <code>{reason}</code>.</p>
           <button onClick={() => window.location.reload()}>Reload this tab</button>
         </div>
       </div>
@@ -691,7 +691,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
               </>
             ) : (
               <>
-                Too many to suggest cleanly — <button onClick={() => session.reconcile("draft")}>keep as a draft</button>.
+                There are too many changes to add as suggestions.{" "}
+                <button onClick={() => session.reconcile("draft")}>Keep as a draft</button>
               </>
             )}
           </span>
@@ -710,14 +711,14 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // the moment their only copy is at risk. Same reasoning as the
           // ConnectionLost and countdown screens, which also kept theirs.
           <span data-testid="persist-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
-            This document may not be saved in this browser — download a copy.
+            Browser storage is full or unavailable. Download a copy.
             {/* WHAT is taking the space, and the route to act on it. Someone
                 stuck in this state needs an action, not a diagnosis: the
                 button opens File > Saved, where delete lives (two-step). */}
             {storedSummary && storedSummary.count > 0 && (
               <span data-testid="persist-stored-summary">
                 {" "}{storedSummary.count} saved cop{storedSummary.count === 1 ? "y uses" : "ies use"} {fmtSize(storedSummary.bytes)} in
-                this browser — deleting old ones can free space.
+                this browser. Delete old copies to free space.
               </span>
             )}{" "}
             <button data-testid="persist-download" onClick={download} disabled={!session?.ready}>
@@ -739,8 +740,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // screen is fine — but a resume did not happen, and saying "full"
           // sent someone hunting through a store holding a few megabytes.
           <span data-testid="store-slow-banner" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
-            This browser’s storage didn’t respond, so this document opened without
-            anything previously saved here. Editing works normally.
+            Browser storage took too long to respond. This session opened without your saved browser copy.
           </span>
         ) : session?.offline?.capped ? (
           // THE TAIL CAP (doc 15 §4.3): recording stopped and the editor is
@@ -748,9 +748,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // keystrokes. Ahead of the generic offline chip because this is
           // the moment the promise "your changes are being kept" ends.
           <span data-testid="offline-cap-banner" style={{ fontSize: 12, background: "#f8d7da", padding: "2px 8px", borderRadius: 6 }}>
-            Offline change limit reached — editing is paused so nothing goes missing.
-            Your {session.offline.editsHeld} saved changes are safe in this browser;
-            reconnect to send them, or download a copy to keep working.{" "}
+            You reached the offline change limit. Editing is paused.
+            Reconnect to send your {session.offline.editsHeld} saved changes, or download a copy.{" "}
             <button data-testid="offline-cap-download" onClick={download} disabled={!session?.ready}>
               Download .docx
             </button>
@@ -768,12 +767,11 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // dismiss the one that matters. `lost` gets the modal below.
           <span data-testid="reconnect-banner" data-state={session.connection}
             style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
-            {session.connection === "lost" ? "Connection lost" : "Reconnecting…"} — you can keep
-            editing; your changes are saved in this browser
+            {session.connection === "lost" ? "Connection lost." : "Reconnecting…"} Your changes are saved in this browser
             {session.offline.editsHeld > 0
               ? ` (${session.offline.editsHeld} so far) `
               : " "}
-            and will be added back when you reconnect — as suggestions to review if others edited meanwhile.
+            and will sync when the connection returns.
           </span>
         ) : session && session.connection !== "live" ? (
           // Non-live with offline editing UNAVAILABLE (never welcomed, or a
@@ -802,13 +800,13 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
                 (older build) the copy stays deliberately vague rather than
                 naming a cause we were not told. */}
             {session.writeStatus === "owner-lock"
-              ? "The owner paused editing for everyone — you can read along, and editing returns by itself when they lift it."
+              ? "The owner paused editing. You can still read the document."
               : session.writeStatus === "demoted"
-                ? "The owner set you to view-only in this session — you can read along."
+                ? "The owner set you to view-only. You can still read and download the document."
                 : session.writeStatus === "viewer-role"
-                  ? "Your link is view-only. You can read and download this document, but editing isn’t part of this link."
+                  ? "This link is view-only. You can read or download the document."
                   : "This document is read-only for you right now."}
-            {" "}The editor is in view mode, so nothing you type can be silently lost.{" "}
+            {" "}
             {/* Only offered where trying could actually change the answer. A
                 viewer-role link is a property of the link itself — no amount of
                 retrying alters it, and a button that cannot work is the same
@@ -823,7 +821,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           </span>
         ) : session?.epochChanged ? (
           <span style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
-            Restored by another participant — your offline copy is saved as a draft.
+            Another participant restored the session. Your offline copy is saved as a draft.
           </span>
         ) : null}
         {onDisconnect && (
@@ -894,7 +892,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           value={name}
           placeholder="Your name"
           maxLength={40}
-          title="The name other participants see. Anyone can pick any name — it is a label, not an account."
+          title="Choose the name other participants see."
           onChange={(e) => onNameChange?.(e.target.value)}
         />
         {onShareLink && (
@@ -1026,7 +1024,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           <span className="versionbar-label">Saved versions</span>
           {versions.map((v) => (
             <button key={v.key} className="version-chip"
-              title="Downloads as a new file — never merges into the live document"
+              title="Download this version as a separate .docx file"
               onClick={() => void downloadVersion(v.key, v.label, v.savedAt)}>
               {/* "(auto)" is the STORAGE sentinel for an unnamed version, so
                   it is renamed for display here rather than at the source. */}
@@ -1056,8 +1054,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="version-modal-title">
             <h2 id="version-modal-title">Save a version</h2>
             <p>
-              A frozen copy of the document as it stands now, kept in this browser beside the
-              live one. Downloading a version never merges it back — it opens as its own file.
+              Save the document as it is now. This browser stores the version under Saved documents.
             </p>
             <label htmlFor="version-label-input">Name (optional)</label>
             <input
@@ -1202,26 +1199,26 @@ function SessionEndedModal({ reason, reviveState, onRevive, onKeepLocal, onNewDo
         </h2>
         <p>
           {reason === "idle-timeout"
-            ? "This session ended after a long stretch with no edits. Rooms close when nobody is using them — the server keeps nothing between sessions."
-            : "This session reached its time limit and ended. Every room has a maximum age, so none of them lives on the server indefinitely."}
+            ? "The room closed after a period without edits."
+            : "The room reached its time limit."}
         </p>
         {reviveState === "no-copy" ? (
-          <p>This browser has no saved copy of the document, so it can’t bring it back. Any participant who edited here before can.</p>
+          <p>A previous participant can restart the room from a saved browser copy.</p>
         ) : (
-          <p>Your copy is still here in this browser — nothing was lost.</p>
+          <p>A copy is saved in this browser.</p>
         )}
         <div className="row">
           {reviveState !== "no-copy" && onKeepLocal && (
-            <button className="ghost" data-testid="ended-keep-local" onClick={onKeepLocal}>Keep editing on your own</button>
+            <button className="ghost" data-testid="ended-keep-local" onClick={onKeepLocal}>Continue locally</button>
           )}
           {onNewDocument && (
             <button className={reviveState === "no-copy" ? undefined : "ghost"} data-testid="ended-new-document" onClick={onNewDocument}>
-              Start fresh
+              New document
             </button>
           )}
           {reviveState !== "no-copy" && (
             <button data-testid="bring-back" disabled={reviveState === "reviving"} onClick={onRevive}>
-              {reviveState === "reviving" ? "Bringing it back…" : "Bring it back live"}
+              {reviveState === "reviving" ? "Restarting…" : "Restart session"}
             </button>
           )}
         </div>
@@ -1292,24 +1289,19 @@ function ConnectionLost({ onRetry, onDownload, saved, onKeepEditing }: {
         </h2>
         {saved ? (
           <p style={{ margin: "0 0 12px", lineHeight: 1.5 }}>
-            You’ve been disconnected. <strong>Your work is saved in this
-            browser</strong> — and you can keep editing: changes you make while
-            offline are saved here too. When you reconnect, everything is sent
-            automatically — and if someone restored the document while you were
-            away, your changes come back as suggestions to review rather than
-            overwriting theirs.
+            <strong>Your work is saved in this browser.</strong> You can keep
+            editing offline or reconnect now. Offline changes will sync when
+            the connection returns.
           </p>
         ) : (
           <p style={{ margin: "0 0 12px", lineHeight: 1.5 }}>
-            You’ve been disconnected, and{" "}
-            <strong>this browser could not save a copy of the document</strong>{" "}
-            (storage may be full or blocked). Download it now — that is the only
-            copy you can rely on.
+            <strong>Browser storage is unavailable.</strong> Download the
+            document now to keep a copy.
           </p>
         )}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button data-testid="lost-retry" onClick={onRetry} autoFocus>
-            Try to reconnect
+            Reconnect
           </button>
           {onKeepEditing && saved && (
             <button data-testid="lost-keep-editing" onClick={onKeepEditing}>
@@ -1317,7 +1309,7 @@ function ConnectionLost({ onRetry, onDownload, saved, onKeepEditing }: {
             </button>
           )}
           <button data-testid="lost-reload" onClick={() => location.reload()}>
-            Reload the page
+            Reload
           </button>
           <button data-testid="lost-download" onClick={onDownload}>
             Download .docx
@@ -1375,8 +1367,8 @@ function SessionCountdown({ warning, onDownload }: {
       <span className="clock" data-testid="countdown-clock">{clock}</span>
       <p>
         {idle
-          ? "Keep editing to stay connected — any edit resets the clock for everyone."
-          : "Your copy is safe in this browser; you can re-share it as a new session afterwards."}
+          ? "Make an edit to reset the timer for everyone."
+          : "A copy is saved in this browser. You can start a new session after this one ends."}
       </p>
       {!idle && <button onClick={onDownload}>Download .docx</button>}
     </div>

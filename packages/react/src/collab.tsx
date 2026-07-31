@@ -1391,7 +1391,7 @@ export function CollabEditor(opts: UseCollabOptions & {
           docVisible
             ? { style: { margin: 16, padding: "10px 14px", width: "fit-content", background: "rgba(255,255,255,.95)", borderRadius: 8, font: "14px system-ui", boxShadow: "0 2px 8px rgba(0,0,0,.25)" } }
             : undefined,
-          `Please refresh — ${session.refused}.`,
+          `Server response: ${session.refused}. Reload the page.`,
         );
     if (!docVisible) {
       return createElement("div", { className: "dxw-collab-refused" }, content);
@@ -1532,7 +1532,7 @@ function ConnectingNotice(): ReactNode {
     },
     createElement("span", { className: "dxw-collab-spinner", "aria-hidden": "true", key: "s" }),
     slow
-      ? "Still connecting — is the collab server running? (start it, then reload this page)"
+      ? "Still connecting. Check your connection, then reload this page."
       : "Connecting…",
   );
 }

@@ -247,7 +247,7 @@ describe("roster chip → jump to a collaborator's caret", () => {
     scrolled = [];
     clickJump(host);
     expect(scrolled.length).toBe(0);
-    expect(byId(host, "jump-notice")?.textContent).toContain("Bea’s cursor spot is gone");
+    expect(byId(host, "jump-notice")?.textContent).toContain("Bea moved their cursor");
   }, 60_000);
 
   it("the chip is a real focusable button and activation jumps (keyboard reachable)", async () => {

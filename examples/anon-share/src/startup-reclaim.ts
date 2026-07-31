@@ -128,15 +128,14 @@ export function reclaimMessage(r: ReclaimReport): string | null {
     const names = r.reclaimed.map(reclaimName);
     const shown = names.length > 4 ? `${names.slice(0, 3).join(", ")} and ${names.length - 3} more` : names.join(", ");
     parts.push(
-      `Freed ${fmtSize(r.reclaimedBytes)} of this browser’s storage by removing ${r.reclaimed.length} redundant stored ` +
-        `cop${r.reclaimed.length === 1 ? "y" : "ies"}: ${shown}. Drafts, local documents and each document’s newest version were kept.`,
+      `Freed ${fmtSize(r.reclaimedBytes)} by removing ${r.reclaimed.length} older browser ` +
+        `cop${r.reclaimed.length === 1 ? "y" : "ies"}: ${shown}.`,
     );
   }
   if (r.overBudget) {
     parts.push(
-      `This browser’s storage is still holding ${fmtSize(r.keptBytes)} across ${r.keptCount} saved ` +
-        `item${r.keptCount === 1 ? "" : "s"}. The rest is unique work (drafts, local documents), so nothing more is removed ` +
-        `automatically — review and delete what you no longer need under File > Saved in this browser.`,
+      `Saved documents use ${fmtSize(r.keptBytes)} across ${r.keptCount} ` +
+        `item${r.keptCount === 1 ? "" : "s"}. Open File > Saved in this browser to delete old copies.`,
     );
   }
   return parts.length ? parts.join(" ") : null;
@@ -145,7 +144,7 @@ export function reclaimMessage(r: ReclaimReport): string | null {
 /** The message when the store cannot even be listed — degrade to words, not
  * a crash: nothing was deleted, and the manual route still gets named. */
 export const RECLAIM_LIST_FAILED_MESSAGE =
-  "Couldn’t check this browser’s stored documents — storage may be blocked. Nothing was deleted; if saving fails, manage copies under File > Saved.";
+  "Browser storage is unavailable. Open File > Saved in this browser to manage copies.";
 
 /**
  * Run reclaim once on mount and hold the dismissible notice. Both screens
