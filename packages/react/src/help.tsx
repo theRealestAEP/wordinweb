@@ -391,7 +391,10 @@ export function HelpGuide({ open, onClose, returnFocus }: HelpGuideProps) {
           boxShadow: "0 18px 60px rgba(0,0,0,.28)",
         }}
       >
-        <header style={{ padding: "18px 20px 14px", borderBottom: "1px solid var(--dxw-toolbar-border, #dadce0)" }}>
+        <div
+          data-dxw-help-header=""
+          style={{ padding: "18px 20px 14px", borderBottom: "1px solid var(--dxw-toolbar-border, #dadce0)" }}
+        >
           <div style={{ display: "flex", alignItems: "flex-start", gap: 16 }}>
             <div style={{ flex: 1 }}>
               <h2 id="dxw-help-title" style={{ margin: 0, fontSize: 22, color: "var(--dxw-toolbar-fg, #202124)" }}>WordInWeb help</h2>
@@ -451,7 +454,7 @@ export function HelpGuide({ open, onClose, returnFocus }: HelpGuideProps) {
               </button>
             ))}
           </div>
-        </header>
+        </div>
         <div style={{ overflow: "auto", padding: "18px 20px 24px" }}>
           {tab === "guides" && guideGroups.map((group) => (
             <section key={group.title} style={{ marginBottom: 24 }}>

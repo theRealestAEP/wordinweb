@@ -171,7 +171,7 @@ describe("the saved listing in a live session", () => {
     }
   });
 
-  it("opens the saved-document browser from the visible button and hands a saved copy to the local editor", async () => {
+  it("opens saved documents from File and hands a saved copy to the local editor", async () => {
     const store = new InMemoryBundleStore();
     const saved = bundleAt("local:archive", 4000);
     await store.put(saved);
@@ -182,9 +182,10 @@ describe("the saved listing in a live session", () => {
     (globalThis as { WebSocket: unknown }).WebSocket = hubSocketClass(hub);
     try {
       const host = mountApp(store, "open-saved-doc", "open-saved-client", onDisconnect);
-      const browse = () => byId(host, "saved-documents") as HTMLButtonElement | null;
+      const browse = () => byId(host, "file-menu") as HTMLButtonElement | null;
       for (let i = 0; i < 120 && browse()!.disabled; i++) await tick();
       expect(browse()!.disabled, "session never became ready").toBe(false);
+      expect(byId(host, "saved-documents")).toBeNull();
 
       await click(browse());
       for (let i = 0; i < 50 && allById(host, "file-saved-entry").length === 0; i++) await tick();

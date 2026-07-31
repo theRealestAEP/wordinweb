@@ -475,14 +475,6 @@ export function LocalEditor({
           onDeleteSaved={(s) => store.delete(s.key)}
           openRequest={savedMenuRequest}
         />
-        <button
-          data-testid="saved-documents"
-          disabled={!api}
-          title="Browse documents, versions, and drafts saved in this browser"
-          onClick={() => setSavedMenuRequest((n) => n + 1)}
-        >
-          Saved documents
-        </button>
         <span className="bar-sep" aria-hidden="true" />
         {/* THE primary action on this screen, and the only one that changes
             what the app is — so it is sized like it and placed ahead of the

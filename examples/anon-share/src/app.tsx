@@ -756,14 +756,6 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           onDeleteSaved={(s) => store.delete(s.key)}
           openRequest={savedMenuRequest}
         />
-        <button
-          data-testid="saved-documents"
-          disabled={!session?.ready}
-          title="Browse documents, versions, and drafts saved in this browser"
-          onClick={() => setSavedMenuRequest((n) => n + 1)}
-        >
-          Saved documents
-        </button>
         <span className="bar-sep" aria-hidden="true" />
         {offlineWorkspace ? (
           <>

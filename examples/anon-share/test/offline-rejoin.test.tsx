@@ -223,7 +223,7 @@ describe("disconnect choice", () => {
     await until(() => localStorage.getItem("wordinweb-offline-offline-rejoin") === "1", "offline choice persists");
     expect((await store.get("offline-rejoin"))?.title).toBe("Case filing");
     expect(host.querySelector('[data-testid="file-menu"]')).toBeTruthy();
-    expect(host.querySelector('[data-testid="saved-documents"]')).toBeTruthy();
+    expect(host.querySelector('[data-testid="saved-documents"]')).toBeNull();
     expect(host.querySelector('[data-testid="offline-workspace-rejoin"]')?.textContent).toBe("Rejoin room");
     expect(localBytes, "offline editing keeps the room identity and stable URL").toBeUndefined();
 
