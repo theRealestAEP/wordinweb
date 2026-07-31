@@ -171,7 +171,7 @@ function click(el: HTMLElement | null) {
 }
 async function tick(ms = 5) { await act(async () => { await new Promise<void>((r) => setTimeout(r, ms)); }); }
 async function until(cond: () => boolean, what: string) {
-  for (let i = 0; i < 1000 && !cond(); i++) await tick();
+  for (let i = 0; i < 200 && !cond(); i++) await tick();
   expect(cond(), what).toBe(true);
 }
 
@@ -275,7 +275,11 @@ describe("App startup reclaim", () => {
   });
 
   it("storage-full banner counts what is stored and routes to the saved-documents list", async () => {
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    let reportPersistError!: () => void;
+    const persistErrorReported = new Promise<void>((resolve) => { reportPersistError = resolve; });
+    const consoleError = vi.spyOn(console, "error").mockImplementation((message) => {
+      if (message === "[wordinweb] bundle-persist") reportPersistError();
+    });
     // Live-bundle writes fail (the wedged-quota shape); versions seeded so
     // the banner has something to count. Small sizes: reclaim stays inert.
     const inner = new InMemoryBundleStore();
@@ -292,7 +296,8 @@ describe("App startup reclaim", () => {
       // Page hide flushes the persister immediately. This tests the failure
       // path without waiting for its one-second production throttle.
       act(() => { window.dispatchEvent(new Event("pagehide")); });
-      await until(() => byId(host, "persist-banner") !== null, "a failed persist write must raise the banner");
+      await act(async () => { await persistErrorReported; });
+      expect(byId(host, "persist-banner"), "a failed persist write must raise the banner").toBeTruthy();
       await until(() => byId(host, "persist-stored-summary") !== null, "the banner must say what is taking the space");
       const summary = byId(host, "persist-stored-summary")!;
       expect(summary.textContent).toContain("3 saved copies");
