@@ -1546,7 +1546,7 @@ describe("cover page insertion", () => {
 });
 
 describe("shape insertion", () => {
-  it("moves and rotates a legacy VML text box through its native style", () => {
+  it("moves, resizes, and rotates a legacy VML text box through its native style", () => {
     const doc = loadDoc(
       `<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml">` +
       `<v:shape id="LineNumbers" style="position:absolute;margin-left:-47.15pt;margin-top:0;` +
@@ -1565,6 +1565,7 @@ describe("shape insertion", () => {
     expect(adjustFloatingPosition(doc, shape, 8, -4)).toBe(true);
     expect(setDrawingRotation(doc, shape, 45)).toBe(true);
     expect(drawingRotation(shape)).toBe(45);
+    expect(resizeDrawing(doc, shape, 72, 900)).toBe(true);
 
     const saved = DocxDocument.load(doc.save()).pkg.text("word/document.xml");
     expect(saved).toContain("margin-left:96pt");
@@ -1572,6 +1573,8 @@ describe("shape insertion", () => {
     expect(saved).toContain("mso-position-horizontal-relative:page");
     expect(saved).toContain("mso-position-vertical-relative:page");
     expect(saved).toContain("rotation:45");
+    expect(saved).toContain("width:54pt");
+    expect(saved).toContain("height:675pt");
   });
 
   it("creates a native vertical line and preserves its axis when resized", () => {

@@ -183,25 +183,30 @@ describe("pleading number column (header text-box story) is editable over the wi
     expect(Buffer.from(a.doc.save())).toEqual(Buffer.from(b.doc.save()));
   });
 
-  it("moves and rotates the VML gutter through drawing intents", () => {
+  it("moves, resizes, and rotates the VML gutter through drawing intents", () => {
     const a = new DocumentSession(pleadingDoc());
     const b = new DocumentSession(pleadingDoc());
     const intents = [
       { kind: "setFloatingPagePosition", clientId: "a", clientSeq: 1, base: 0, runId: gutterDrawingRunId(a), xPx: 120, yPx: 240 },
       { kind: "setDrawingRotation", clientId: "a", clientSeq: 2, base: 1, runId: gutterDrawingRunId(a), degrees: 45 },
+      { kind: "resizeDrawing", clientId: "a", clientSeq: 3, base: 2, runId: gutterDrawingRunId(a), widthPx: 72, heightPx: 900 },
     ] as const;
     const bIntents = intents.map((intent) => ({ ...intent, runId: gutterDrawingRunId(b) }));
 
     expect(a.submit(intents[0]).kind).toBe("applied");
     expect(a.submit(intents[1]).kind).toBe("applied");
+    expect(a.submit(intents[2]).kind).toBe("applied");
     expect(b.submit(bIntents[0]).kind).toBe("applied");
     expect(b.submit(bIntents[1]).kind).toBe("applied");
+    expect(b.submit(bIntents[2]).kind).toBe("applied");
 
     const header = serializeXml(hdrRoot(a.doc));
     expect(header).toContain("margin-left:90pt");
     expect(header).toContain("margin-top:180pt");
     expect(header).toContain("mso-position-horizontal-relative:page");
     expect(header).toContain("rotation:45");
+    expect(header).toContain("width:54pt");
+    expect(header).toContain("height:675pt");
     expect(header).toBe(serializeXml(hdrRoot(b.doc)));
   });
 

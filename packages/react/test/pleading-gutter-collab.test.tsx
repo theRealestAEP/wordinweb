@@ -126,6 +126,30 @@ describe("pleading number column in a collab session", () => {
       if (!button) throw new Error(`${label} object toolbar button missing`);
       return button;
     };
+    const savedHeader = () => DocxDocument.load(doc!.save()).pkg.text("word/header1.xml") ?? "";
+
+    const drawingHit = container.querySelector<HTMLElement>("[data-dxw-textbox-story-object]")!;
+    await act(async () => {
+      drawingHit.dispatchEvent(new MouseEvent("mousedown", {
+        bubbles: true, cancelable: true, clientX: 10, clientY: 10, button: 0, detail: 1,
+      }));
+      document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 30, clientY: 25 }));
+      document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 30, clientY: 25 }));
+    });
+    await tick();
+    expect(savedHeader()).not.toContain("margin-left:-47.15pt");
+
+    const eastHandle = container.querySelector<HTMLElement>('[data-dxw-img-handle="e"]')!;
+    await act(async () => {
+      eastHandle.dispatchEvent(new MouseEvent("mousedown", {
+        bubbles: true, cancelable: true, clientX: 30, clientY: 25, button: 0,
+      }));
+      document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 50, clientY: 25 }));
+      document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 50, clientY: 25 }));
+    });
+    await tick();
+    expect(savedHeader()).toContain("width:51pt");
+
     await act(async () => { objectButton("Position").click(); });
     await answerPair("120", "240");
     await act(async () => { objectButton("Rotate").click(); });
@@ -135,7 +159,7 @@ describe("pleading number column in a collab session", () => {
     await act(async () => { rotationForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
     await tick();
 
-    const header = DocxDocument.load(doc!.save()).pkg.text("word/header1.xml") ?? "";
+    const header = savedHeader();
     expect(header).toContain("margin-left:90pt");
     expect(header).toContain("margin-top:180pt");
     expect(header).toContain("rotation:45");
