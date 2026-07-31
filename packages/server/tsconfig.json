@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "paths": {
+      "@wordinweb/core": ["../core/src/index.ts"],
+      "@wordinweb/collab/server": ["../collab/src/server.ts"]
+    }
+  },
+  "include": ["src", "../core/src/wmf.d.ts", "../collab/src/crypto-env.d.ts"]
+}

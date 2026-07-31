@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { requestTextInputDialog } from "@wordinweb/core";
+import { availableObjectCommands, requestTextInputDialog } from "@wordinweb/core";
 import type { DocxViewApi } from "./index.js";
 import { HelpGuide } from "./help.js";
 
@@ -1791,6 +1791,14 @@ function DrawTab({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/** Byte count as the size a person would say out loud ("5 MB", "512 KB"). */
+function formatBytes(n: number): string {
+  const mb = n / (1024 * 1024);
+  if (mb >= 1) return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`;
+  const kb = n / 1024;
+  return `${Math.max(1, Math.round(kb))} KB`;
+}
+
 function ScreenshotButton({ api }: { api: DocxViewApi | null }) {
   const [status, setStatus] = useState("");
   const capture = async () => {
@@ -2734,6 +2742,12 @@ function PageBorderMenu({
   );
 }
 
+/** Whether the selected object accepts rotation, per the shared offered set. */
+function rotatable(api: DocxViewApi | null): boolean {
+  const context = api?.getSelectedObjectContext();
+  return !!context && availableObjectCommands(context).includes("rotate");
+}
+
 /** Word's Layout ribbon, scoped to the whole document or the caret's
  * section (per-page layout = section breaks + section scope). */
 function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange: boolean }) {
@@ -2856,13 +2870,19 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
             ]}
             onPick={(value) => api?.arrangeObject(value as Parameters<NonNullable<typeof api>["arrangeObject"]>[0])}
           />
-          <ActionMenu
-            label="Rotate"
-            title="Rotate selected object"
-            width={78}
-            groups={[{ items: [["rotateRight", "Rotate right 90°"], ["rotateLeft", "Rotate left 90°"]] }]}
-            onPick={(value) => api?.arrangeObject(value as Parameters<NonNullable<typeof api>["arrangeObject"]>[0])}
-          />
+          {/* Offered-set gate, shared with the contextual tab and the
+              capability matrix: rotation only exists for shape-geometry
+              objects; SmartArt/chart graphic frames have no rotatable xfrm,
+              and the menu silently no-op'd for them. */}
+          {rotatable(api) && (
+            <ActionMenu
+              label="Rotate"
+              title="Rotate selected object"
+              width={78}
+              groups={[{ items: [["rotateRight", "Rotate right 90°"], ["rotateLeft", "Rotate left 90°"]] }]}
+              onPick={(value) => api?.arrangeObject(value as Parameters<NonNullable<typeof api>["arrangeObject"]>[0])}
+            />
+          )}
           <ActionMenu
             label="Arrange"
             title="Change selected object stacking order"
@@ -2941,18 +2961,22 @@ function ObjectFormatTab({
   showArrange: boolean;
 }) {
   const run = (command: Parameters<DocxViewApi["runSelectedObjectCommand"]>[0]) => api?.runSelectedObjectCommand(command);
-  const wrap = (
+  // What this tab offers comes from core's shared offered set, so the buttons
+  // rendered here and the capability matrix's `offered` column cannot drift.
+  const offered = new Set(availableObjectCommands(context, { arrange: showArrange }));
+  const wrapItems = ([
+    ["wrapInline", "Inline with text"],
+    ["wrapSquare", "Square"],
+    ["wrapTopAndBottom", "Top and bottom"],
+    ["wrapFront", "In front of text"],
+    ["wrapBehind", "Behind text"],
+  ] as [Parameters<DocxViewApi["runSelectedObjectCommand"]>[0], string][]).filter(([command]) => offered.has(command));
+  const wrap = wrapItems.length > 0 && (
     <ActionMenu
       label="Wrap"
       title="Wrap"
       width={72}
-      groups={[{ items: [
-        ["wrapInline", "Inline with text"],
-        ["wrapSquare", "Square"],
-        ["wrapTopAndBottom", "Top and bottom"],
-        ["wrapFront", "In front of text"],
-        ["wrapBehind", "Behind text"],
-      ] }]}
+      groups={[{ items: wrapItems }]}
       onPick={(value) => run(value as Parameters<DocxViewApi["runSelectedObjectCommand"]>[0])}
     />
   );
@@ -2961,37 +2985,35 @@ function ObjectFormatTab({
       {context.kind === "chart" && <ChartMenu api={api} label="Edit data" />}
       {context.kind === "smartArt" && <SmartArtMenu api={api} label="Edit SmartArt" />}
       {context.kind === "smartArt" && <SmartArtTextControls api={api} nodeIndex={context.smartArtNodeIndex} />}
-      {context.canEditText && (
+      {offered.has("editText") && (
         <Btn
           label="Edit text"
           title={context.kind === "smartArt" ? "Edit selected SmartArt node text" : "Edit shape text"}
           onClick={() => run("editText")}
         />
       )}
-      {(context.kind === "shape" || context.kind === "smartArt") && (
+      {offered.has("fill") && (
         <Btn
           label={context.kind === "smartArt" ? (context.smartArtNodeSelected ? "Node fill" : "Fill all") : "Fill"}
           title={context.kind === "smartArt" ? (context.smartArtNodeSelected ? "Selected SmartArt node fill" : "All SmartArt node fills") : "Fill color"}
           onClick={() => run("fill")}
         />
       )}
-      {context.kind === "shape" && <Btn label="Outline" title="Outline color, weight, and style" onClick={() => run("outline")} />}
-      {context.kind === "line" && <Btn label="Line style" title="Line color, weight, and style" onClick={() => run("lineStyle")} />}
-      {(context.kind === "image" || context.kind === "model3d") && <Btn label="Alt text" title="Alternative text" onClick={() => run("altText")} />}
+      {offered.has("outline") && <Btn label="Outline" title="Outline color, weight, and style" onClick={() => run("outline")} />}
+      {offered.has("lineStyle") && <Btn label="Line style" title="Line color, weight, and style" onClick={() => run("lineStyle")} />}
+      {offered.has("altText") && <Btn label="Alt text" title="Alternative text" onClick={() => run("altText")} />}
       {wrap}
-      <Btn label="Size" title="Exact size" onClick={() => run("size")} />
-      <Btn label="Position" title="Exact page position" onClick={() => run("position")} />
-      {(context.kind === "shape" || context.kind === "line" || context.kind === "image" || context.kind === "model3d") && (
-        <Btn label="Rotate" title="Set rotation" onClick={() => run("rotate")} />
-      )}
-      {showArrange && (
+      {offered.has("size") && <Btn label="Size" title="Exact size" onClick={() => run("size")} />}
+      {offered.has("position") && <Btn label="Position" title="Exact page position" onClick={() => run("position")} />}
+      {offered.has("rotate") && <Btn label="Rotate" title="Set rotation" onClick={() => run("rotate")} />}
+      {offered.has("bringForward") && (
         <>
           <Btn label="Bring forward" title="Bring selected object forward" onClick={() => run("bringForward")} />
           <Btn label="Send backward" title="Send selected object backward" onClick={() => run("sendBackward")} />
         </>
       )}
-      {context.kind === "model3d" && <Btn label="Reset 3D" title="Reset 3D rotation" onClick={() => run("reset3d")} />}
-      <Btn label="Delete" title="Delete selected object" onClick={() => run("delete")} />
+      {offered.has("reset3d") && <Btn label="Reset 3D" title="Reset 3D rotation" onClick={() => run("reset3d")} />}
+      {offered.has("delete") && <Btn label="Delete" title="Delete selected object" onClick={() => run("delete")} />}
     </span>
   );
 }
@@ -3041,6 +3063,56 @@ export type ToolbarFeature =
   | "layout"
   | "help"
   | "download";
+
+/**
+ * Every `DocxViewApi` command that INSERTS content at the caret, paired with
+ * the toolbar feature group that gates its control.
+ *
+ * A single source of truth in the same spirit as core's
+ * `SELECTED_OBJECT_COMMANDS`: the collab audit (react/test/insert-commands
+ * INVARIANT C) reads this list and the real `COLLAB_TOOLBAR_DEFAULTS` gate
+ * rather than restating either, so "what the toolbar offers in a room" and
+ * "what the audit checks" cannot drift apart.
+ *
+ * THE RULE a new entry signs up to: in collab mode an insert command must
+ * EMIT an intent, or its feature must be gated off so no control exists to
+ * press. An absent button is honest; a present button that mutates the local
+ * document without emitting forks the room silently — the exact shape that
+ * shipped in `insertImage` and stayed green through the whole capability
+ * matrix, because the matrix's collab mount withholds `submitOp` and so
+ * never exercises an insert command's collab path.
+ */
+export interface InsertCommandSpec {
+  /** The `DocxViewApi` method name. */
+  command: string;
+  /** Toolbar group whose gate decides whether a control is offered. */
+  feature: ToolbarFeature;
+}
+
+export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
+  { command: "insertTable", feature: "table" },
+  { command: "insertImage", feature: "image" },
+  { command: "insertScreenshot", feature: "screenshot" },
+  { command: "insertModel3D", feature: "model3D" },
+  { command: "insertOnlineVideo", feature: "media" },
+  { command: "insertEmbeddedObject", feature: "object" },
+  { command: "insertChart", feature: "chart" },
+  { command: "insertSmartArt", feature: "smartArt" },
+  { command: "insertShape", feature: "shape" },
+  { command: "insertWordArt", feature: "wordArt" },
+  { command: "insertEquation", feature: "equation" },
+  { command: "insertSymbol", feature: "symbol" },
+  { command: "insertPageNumber", feature: "pageNumber" },
+  { command: "insertField", feature: "field" },
+  { command: "insertDateTime", feature: "dateTime" },
+  { command: "insertCrossReference", feature: "crossReference" },
+  { command: "insertBreak", feature: "break" },
+  { command: "insertBlankPage", feature: "break" },
+  { command: "insertCoverPage", feature: "coverPage" },
+  { command: "addComment", feature: "comment" },
+  { command: "addFootnote", feature: "footnote" },
+  { command: "addBookmark", feature: "bookmark" },
+];
 
 export type ToolbarMode = "simple" | "advanced";
 
@@ -3118,6 +3190,57 @@ export function DocxToolbar({
   // the last real range and restore it before applying their choice.
   const savedRange = useRef<Range | null>(null);
   const imageInput = useRef<HTMLInputElement | null>(null);
+  /**
+   * Why the picked image did not land, shown beside the Pictures button.
+   *
+   * Every one of these was a silent `return` in insertImage, and a user hit
+   * the format one: they chose an SVG through a picker that advertised SVG,
+   * and the document did nothing — no skeleton, no error, no log. The picker
+   * no longer offers what a shared document refuses (see `accept` below), so
+   * these are now the paths reachable through the API or through a genuine
+   * failure, and each of them says something.
+   */
+  const [imageStatus, setImageStatus] = useState("");
+  useEffect(() => {
+    if (!imageStatus) return;
+    const t = setTimeout(() => setImageStatus(""), 8000);
+    return () => clearTimeout(t);
+  }, [imageStatus]);
+  const insertPicture = async (file: File) => {
+    setImageStatus("");
+    const result = await api?.insertImage(file);
+    if (result === undefined || result === "inserted") return;
+    setImageStatus(
+      result === "too-large"
+        // The CONFIGURED number, never a constant: this deployment's cap is
+        // whatever the server published (5MB in the public compose file, 50MB
+        // in the dev stack), and a hardcoded figure would be wrong in one of
+        // them. If no limit was published there is no number to name, and the
+        // message says nothing about size rather than inventing one.
+        ? (() => {
+            const max = api?.imageMaxBytes() ?? null;
+            return max === null
+              ? "That image is too large for this document."
+              : `Images must be under ${formatBytes(max)}.`;
+          })()
+        : result === "unsupported-format"
+        ? "Images in a shared document must be PNG, JPEG, GIF, BMP or WebP."
+        : result === "no-relay"
+          ? "This shared document has no image relay, so images can’t be added to it."
+          : result === "upload-failed"
+            // DELIBERATELY DOES NOT NAME A SIZE. The relay's 413 carries the
+            // configured maxBytes, but that number does not reach this layer
+            // today (it would have to be threaded through the media client and
+            // both connection classes), and the cap differs per deployment —
+            // 5MB in the published compose file, 50MB in the dev stack. So the
+            // copy points at the likely cause and the action that fixes it
+            // without asserting a limit it cannot actually know.
+            ? "Upload failed — the image may be too large, or the connection dropped. Try a smaller image."
+            : result === "no-caret"
+              ? "Click in the document before inserting an image."
+              : "That file could not be read as an image.",
+    );
+  };
   // Responsive collapse: measure the toolbar width and pick a tier; the higher
   // the tier the more low-frequency Home groups fold into the ⋮ overflow menu,
   // so the strip stays single-row-clean on phones and tablets (Google Docs
@@ -3613,7 +3736,20 @@ export function DocxToolbar({
         <>
           {on("coverPage") && <CoverPageMenu api={api} />}
           {on("table") && <TableMenu api={api} />}
-          {on("image") && <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />}
+          {on("image") && (
+            <span style={{ position: "relative", display: "inline-flex" }}>
+              <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
+              {imageStatus && (
+                <span
+                  role="alert"
+                  data-dxw-image-status=""
+                  style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 230, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
+                >
+                  {imageStatus}
+                </span>
+              )}
+            </span>
+          )}
           {on("icon") && <Btn label="Icons" title="Insert SVG icon" onClick={() => iconInput.current?.click()} />}
           {on("screenshot") && <ScreenshotButton api={api} />}
           {tier === 0 ? (
@@ -3808,11 +3944,15 @@ export function DocxToolbar({
       <input
         ref={imageInput}
         type="file"
-        accept="image/png,image/jpeg,image/gif,image/svg+xml,image/webp"
+        // ASKED, not asserted: a shared document can't carry every format a
+        // local one can, and this picker used to advertise SVG that the
+        // collab insert then silently refused. The document answers for
+        // itself so the offer and the acceptance cannot drift apart again.
+        accept={api?.imageAccept() ?? "image/png,image/jpeg,image/gif,image/bmp,image/webp,image/svg+xml"}
         style={{ display: "none" }}
         onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f) void api?.insertImage(f);
+          if (f) void insertPicture(f);
           e.target.value = "";
         }}
       />
@@ -3823,7 +3963,7 @@ export function DocxToolbar({
         style={{ display: "none" }}
         onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f) void api?.insertImage(f);
+          if (f) void insertPicture(f);
           e.target.value = "";
         }}
       />

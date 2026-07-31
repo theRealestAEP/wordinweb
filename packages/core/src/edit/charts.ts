@@ -1,4 +1,5 @@
 import { strToU8, zipSync } from "fflate";
+import { FIXED_ZIP_MTIME } from "../zip.js";
 import { DocxDocument } from "../docx.js";
 import type { ChartData, ChartSeries } from "../model.js";
 import { parseRelationships, relsPathFor } from "../parse/rels.js";
@@ -126,7 +127,7 @@ export function buildChartWorkbook(input: ChartData): Uint8Array {
     ),
     "xl/worksheets/sheet1.xml": strToU8(workbookSheetXml(data)),
   };
-  return zipSync(files);
+  return zipSync(files, { mtime: FIXED_ZIP_MTIME });
 }
 
 function chartTitle(title: string | undefined): string {

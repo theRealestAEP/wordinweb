@@ -216,6 +216,21 @@ export function setPageLayout(doc: DocxDocument, patch: PageLayoutPatch, target?
     };
     walk(doc.editableRoots()[0]);
   }
+  if (sectPrs.length === 0 && !target) {
+    // A minimal document (the demo blank) has no sectPr at all, which made
+    // every Layout control a dead no-op. Materialize the default body-level
+    // section (Word's implicit Letter/1in section) and patch that —
+    // deterministic, so collab replicas converge on the identical sectPr.
+    const root = doc.editableRoots()[0];
+    const body = localName(root.name) === "body"
+      ? root
+      : root.children.find((c) => localName(c.name) === "body");
+    if (!body) return false;
+    const w = prefixOf(body);
+    const created = { name: `${w}sectPr`, attrs: {}, children: [], text: "" } as XmlElement;
+    body.children.push(created);
+    sectPrs.push(created);
+  }
   if (sectPrs.length === 0) return false;
 
   for (const sectPr of sectPrs) {

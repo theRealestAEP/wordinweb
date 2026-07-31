@@ -2,13 +2,14 @@ import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
 import { XmlElement, attr, cloneXml, localName } from "../xml.js";
 import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
-import { DrawingBinding, ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
+import { DrawingBinding, GripBinding, ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
 import { TextItem } from "../layout/types.js";
 import { selectionToSegments } from "./selection.js";
+import { type EncodedCaret } from "./ids.js";
 import { EditHistory } from "./history.js";
-import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow } from "./tables.js";
+import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
 import { pxToTwips } from "../units.js";
-import { listTypeAt, setListLevel } from "./lists.js";
+import { listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
 import { deleteMath, isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
 import {
@@ -82,7 +83,80 @@ export type SelectedObjectCommand =
   | "sendBackward"
   | "reset3d"
   | "delete";
+
+/** What the selection is, as far as the object-command surface is concerned. */
+export interface SelectedObjectContext {
+  kind: SelectedObjectKind;
+  canEditText: boolean;
+  smartArtNodeSelected?: boolean;
+  smartArtNodeIndex?: number;
+  /** Anchored (wp:anchor) vs inline — inline objects have no z-order, so
+   * the arrange commands are only offered when floating. */
+  floating?: boolean;
+}
+
+/** Every selected-object command, in the order the contextual tab shows them.
+ * The capability matrix iterates this, so a new command is covered the moment
+ * it joins the union. */
+export const SELECTED_OBJECT_COMMANDS: readonly SelectedObjectCommand[] = [
+  "editText",
+  "fill",
+  "outline",
+  "lineStyle",
+  "altText",
+  "wrapInline",
+  "wrapSquare",
+  "wrapTopAndBottom",
+  "wrapFront",
+  "wrapBehind",
+  "size",
+  "position",
+  "rotate",
+  "bringForward",
+  "sendBackward",
+  "reset3d",
+  "delete",
+];
+
+/**
+ * Which commands the UI OFFERS for a selected object — the single source of
+ * truth shared by the contextual Shape Format tab, the Layout ribbon's Rotate
+ * menu, and the capability-matrix test. Keeping one function means an offered
+ * control can never drift away from what the tests audit (the SmartArt
+ * "Rotate" button that silently no-op'd on graphic frames was exactly that
+ * drift). Pure: no DOM, no document.
+ *
+ * `arrange` mirrors the host's "arrange" toolbar feature flag; when it is off
+ * the stacking-order commands are not offered.
+ */
+export function availableObjectCommands(
+  context: SelectedObjectContext,
+  options: { arrange?: boolean } = {},
+): SelectedObjectCommand[] {
+  const { kind, canEditText } = context;
+  const arrange = options.arrange ?? true;
+  const commands: SelectedObjectCommand[] = [];
+  if (canEditText) commands.push("editText");
+  if (kind === "shape" || kind === "smartArt") commands.push("fill");
+  if (kind === "shape") commands.push("outline");
+  if (kind === "line") commands.push("lineStyle");
+  if (kind === "image" || kind === "model3d") commands.push("altText");
+  commands.push("wrapInline", "wrapSquare", "wrapTopAndBottom", "wrapFront", "wrapBehind");
+  commands.push("size", "position");
+  // Rotation only exists for shape-geometry objects; SmartArt/chart graphic
+  // frames have no rotatable xfrm, so rotate is not offered for them.
+  if (kind === "shape" || kind === "line" || kind === "image" || kind === "model3d") commands.push("rotate");
+  // Inline objects have no z-order (setDrawingOrder needs a wp:anchor):
+  // Word greys the arrange controls for them; we withhold them (matrix
+  // finding — they were offered-but-dead for every inline default insert).
+  if (arrange && context.floating !== false) commands.push("bringForward", "sendBackward");
+  if (kind === "model3d") commands.push("reset3d");
+  commands.push("delete");
+  return commands;
+}
 import { graphemeStep } from "./grapheme.js";
+import { EditProvenance, defaultProvenance } from "./provenance.js";
+import { applyInsertText, applySplitParagraph, applyDeleteRange, MutationCtx } from "./mutations.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
 import { resolveParagraphStyleChain } from "../parse/styles.js";
 import {
@@ -151,7 +225,78 @@ export interface EditorHost {
   onTextCommand?: (
     command: "link" | "comment" | "alignLeft" | "alignCenter" | "alignRight" | "justify" | "bullet" | "number",
   ) => void;
+  /**
+   * Collaboration hook (plan doc 06): called after a local edit that maps to a
+   * replicable intent, with the intent's kind, its position(s) as stable ids
+   * (from doc.stableIds), and any payload. Only fires when doc.stableIds is
+   * populated (collab mode) and the edit position is id-addressable. The host
+   * forwards it to the collab connection. Local-only editors leave it unset.
+   */
+  onIntent?: (intent: EditorIntent) => void;
+  /**
+   * Collaborative undo (plan doc 03 Phase 8). In a shared session the LOCAL
+   * history stack must never drive the document: replaying it mutates this
+   * replica with no intent on the wire, which forks the room. The host
+   * supplies this hook to reverse the user's last SEQUENCED action instead
+   * (the inverse rides the wire as an ordinary intent). Absent ⇒ undo is an
+   * honest no-op in collab, never a local mutation.
+   */
+  onCollabUndo?: () => void;
+  /** Collaboration presence hook: called when the local caret moves, with its
+   * stable-id address (null when the caret leaves id-tracked content). The
+   * host forwards it to the collab connection's setPresence so remote
+   * participants can draw this user's cursor. Fires only in collab mode
+   * (doc.stableIds populated); deduplicated against the last sent position. */
+  onCaretMove?: (pos: { blockId: number; runId: number; offset: number } | null) => void;
+  /** Collaboration id allocator: returns n fresh ids from this client's
+   * DISJOINT id block (from the collab connection). The editor uses it for
+   * carried ids on node-creating intents (paragraph split). Without it the
+   * split fell back to the local table's sequential counter — two clients
+   * would mint the SAME ids and the second split was rejected everywhere
+   * (typing after Enter went dead in the demo). */
+  allocIds?: (n: number) => number[];
 }
+
+/** A local edit expressed as a replicable intent, emitted by the editor for
+ * the collab layer. Positions are stable ids; the connection adds wire
+ * bookkeeping (clientId/clientSeq/base). Mirrors the @wordinweb/collab intent
+ * shapes without a dependency on that package. */
+export type EditorIntent =
+  | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string; suggest?: { author: string; date: string } }
+  | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
+  | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number }
+  | { kind: "formatRun"; blockId: number; runId: number; patch: Record<string, unknown> }
+  | { kind: "formatRange"; blockId: number; runId: number; start: number; end: number; patch: Record<string, unknown>; beforeId?: number; middleId: number; afterId?: number }
+  | { kind: "formatParagraph"; blockId: number; align?: "left" | "center" | "right" | "justify"; styleId?: string | null }
+  | { kind: "setListType"; blockId: number; listKind: "bullet" | "number" | null }
+  | { kind: "mergeParagraph"; blockId: number }
+  | {
+      kind: "suggestRevision";
+      ranges?: { blockId: number; runId: number; start: number; end: number }[];
+      marks?: { blockId: number; glyph: "ins" | "del" }[];
+      suggest: { author: string; date: string };
+    }
+  | { kind: "setImageWrap"; runId: number; mode: "inline" | "square" | "topAndBottom" | "none" | "behind" }
+  | { kind: "setFloatingPagePosition"; runId: number; xPx: number; yPx: number }
+  | { kind: "resizeDrawing"; runId: number; widthPx: number; heightPx: number }
+  | { kind: "setDrawingRotation"; runId: number; degrees: number }
+  | { kind: "setDrawingOrder"; runId: number; order: "front" | "back" }
+  | { kind: "setDrawingLineStyle"; runId: number; color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" }
+  | { kind: "setImageAltText"; runId: number; alt: string }
+  | { kind: "setDrawingFill"; runId: number; color: string | null }
+  | { kind: "setSmartArtFill"; runId: number; color: string | null; nodeIndex?: number }
+  | { kind: "setSmartArtNodeText"; runId: number; index: number; text: string }
+  | { kind: "setDrawingWordArtText"; runId: number; text: string }
+  | { kind: "insertBreak"; runId: number; breakKind: "page" | "column"; nodeIds: number[] }
+  | { kind: "resizeTableColumn"; cellParagraphId: number; boundary: number; deltaPx: number; renderedWidths?: number[] }
+  | { kind: "resizeTableRow"; cellParagraphId: number; rowIdx: number; heightPx: number }
+  | { kind: "moveTable"; cellParagraphId: number; xPx: number; yPx: number; preservePageStart: boolean; pageDelta: number }
+  | { kind: "tableOp"; cellParagraphId: number; op: { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number } }
+  | { kind: "removeDrawing"; runId: number }
+  | { kind: "setMathLinear"; blockId: number; mathText: string }
+  | { kind: "deleteMath"; blockId: number }
+  | { kind: "moveMath"; blockId: number; at: { blockId: number; runId: number; offset: number }; nodeIds: number[] }
+  | { kind: "ensureHeaderFooter"; hfKind: "header" | "footer"; nodeIds: number[] };
 
 interface Caret {
   t: XmlElement;
@@ -190,6 +335,18 @@ function textElements(el: XmlElement): XmlElement[] {
   return out;
 }
 
+/** The first m:oMath in document order under `el`. Must stay identical to the
+ * collab apply's helper of the same name: it is what decides whether an
+ * equation edit is addressable on the wire (see mathIntentBlockId). */
+function firstMathIn(el: XmlElement): XmlElement | null {
+  if (localName(el.name) === "oMath") return el;
+  for (const c of el.children) {
+    const found = firstMathIn(c);
+    if (found) return found;
+  }
+  return null;
+}
+
 function clearListParagraphFormatting(doc: DocxDocument, paragraph: XmlElement): boolean {
   const pPr = paragraph.children.find((child) => localName(child.name) === "pPr");
   if (!pPr) return false;
@@ -223,7 +380,7 @@ function emptyParagraphLike(el: XmlElement): { paragraph: XmlElement; text: XmlE
   };
 }
 
-function removeDrawingRun(doc: DocxDocument, src: XmlElement): boolean {
+export function removeDrawingRun(doc: DocxDocument, src: XmlElement): boolean {
   // A text-box selection can resolve to an element inside w:txbxContent.
   // Climb out to the drawing container first so the first nested text run is
   // never mistaken for the outer run that owns the object.
@@ -257,6 +414,10 @@ function pointInPolygon(point: { x: number; y: number }, polygon: readonly { x: 
 
 export class DocxEditor {
   private caret: Caret | null = null;
+  /** Source of edit-time nondeterministic values (dates, random ids).
+   * Replicated editing swaps in a recorded provenance so every replica
+   * writes identical XML; local editing keeps the ambient default. */
+  provenance: EditProvenance = defaultProvenance();
   /** Header/footer editing is gated behind double-click, like Word. */
   private inHeaderFooter = false;
   /** Page whose header/footer is being edited. The same hdr/ftr XML renders
@@ -280,6 +441,12 @@ export class DocxEditor {
    * snapshot that the following text insertion belongs to. */
   private pendingClickTypeCheckpoint = false;
   private clickTypeCheckpointUntil = 0;
+  /** The caret's text node at the end of the previous commit(). When the next
+   * commit's caret sits in a DIFFERENT node, the caret moved (click / arrow /
+   * programmatic) rather than advanced by typing, so that commit must take the
+   * full refresh() path — the in-place fast text sync otherwise leaves the DOM
+   * stale until the following keystroke (see commit()). */
+  private lastCommitCaretT: XmlElement | null = null;
   private textContextMenu: HTMLDivElement | null = null;
   /** True while a drag-selection is in progress (checked by onMouseUp, which
    * bubbles from the container BEFORE the document-level drag-end listener). */
@@ -373,6 +540,7 @@ export class DocxEditor {
 
   /** Re-apply editing chrome after the host re-renders the pages. */
   afterRender(): void {
+    this.dismissTableToolbar();
     this.applyHfChrome();
     this.paintSelection();
     this.positionCaret();
@@ -400,8 +568,27 @@ export class DocxEditor {
     this.notifySelection();
   }
 
+  /** Last presence position sent, as a cheap dedup key. */
+  private lastPresenceKey: string | null = null;
+
+  /** Report the caret's stable-id address to the collab presence hook when it
+   * changed. Called from both selection notifications and caret positioning —
+   * a plain click places a caret without a selection change, and remote
+   * participants must see that cursor too. Deduped, so repeated positioning
+   * (e.g. after every repaint) sends nothing new. */
+  private reportPresence(): void {
+    if (!this.host.onCaretMove || !this.host.doc.stableIds) return;
+    const pos = this.caret ? this.encodeCaretForIntent() : null;
+    const key = pos ? `${pos.blockId}:${pos.runId}:${pos.offset}` : "null";
+    if (key !== this.lastPresenceKey) {
+      this.lastPresenceKey = key;
+      this.host.onCaretMove(pos);
+    }
+  }
+
   private notifySelection(): void {
     document.dispatchEvent(new CustomEvent("dxw-selection"));
+    this.reportPresence();
   }
 
   /** Ordinal position of a selection point in paint order. */
@@ -1064,6 +1251,7 @@ export class DocxEditor {
     c.removeEventListener("drop", this.onDrop);
     this.dismissTextContextMenu();
     this.dismissSuggestionPopover();
+    this.dismissTableToolbar();
     this.setDrawingTool(null);
     this.deselectInkGroup();
     this.hideCaret();
@@ -1133,11 +1321,16 @@ export class DocxEditor {
     return true;
   }
 
-  getSelectedObjectContext(): { kind: SelectedObjectKind; canEditText: boolean; smartArtNodeSelected?: boolean; smartArtNodeIndex?: number } | null {
+  getSelectedObjectContext(): SelectedObjectContext | null {
     const selected = this.selectedImage;
     if (!selected) return null;
+    // Inline objects have no z-order: the arrange commands only exist for
+    // floating (anchored) drawings, so the context carries floatingness and
+    // availableObjectCommands withholds them otherwise (matrix finding: the
+    // Arrange buttons were live-but-dead for every inline default insert).
+    const floating = isFloatingDrawing(selected.src);
     if (selected.kind === "image") {
-      return { kind: selected.el.dataset.dxwModel3d ? "model3d" : "image", canEditText: false };
+      return { kind: selected.el.dataset.dxwModel3d ? "model3d" : "image", canEditText: false, floating };
     }
     const binding = this.host.getHandle()?.drawings.find((item) => item.item.src === selected.src);
     if (binding?.item.smartArtData) {
@@ -1146,13 +1339,15 @@ export class DocxEditor {
         canEditText: this.selectedSmartArtNodeIndex !== null,
         smartArtNodeSelected: this.selectedSmartArtNodeIndex !== null,
         smartArtNodeIndex: this.selectedSmartArtNodeIndex ?? undefined,
+        floating,
       };
     }
-    if (binding?.item.chartData) return { kind: "chart", canEditText: false };
+    if (binding?.item.chartData) return { kind: "chart", canEditText: false, floating };
     const kind = isDrawingLine(selected.src) ? "line" : "shape";
     return {
       kind,
       canEditText: kind === "shape" && !!binding?.item.textboxStory && !isDrawingWordArt(selected.src),
+      floating,
     };
   }
 
@@ -1163,8 +1358,15 @@ export class DocxEditor {
     const { src, el } = selected;
     const selectedSmartArtNodeIndex = this.selectedSmartArtNodeIndex;
     const reselect = () => this.reselectImage(src, undefined, selectedSmartArtNodeIndex);
+    // Collab: object commands must ride the wire (the A17 pattern — local
+    // apply is the canonical intent function with the same args, then the
+    // intent is emitted). Commands with no wire form are honest no-ops in
+    // collab mode rather than silent local-only divergences.
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+    const collabRun = inCollab ? this.drawingRunId(src) : null;
+    if (inCollab && collabRun === null) return false; // unaddressable object
     if (command === "delete") {
-      this.deleteSelectedImage();
+      this.deleteSelectedImage(); // collab-aware: emits removeDrawing
       return true;
     }
     if (command === "bringForward" || command === "sendBackward") {
@@ -1176,6 +1378,15 @@ export class DocxEditor {
           : command === "wrapTopAndBottom" ? "topAndBottom"
             : command === "wrapBehind" ? "behind" : "none";
       this.host.history?.checkpoint();
+      if (collabRun !== null) {
+        // Canonical form: no layout-derived overlap position (it reads THIS
+        // window's binding geometry and would diverge the replicas).
+        if (!setImageWrap(this.host.doc, src, mode)) return false;
+        this.host.onIntent?.({ kind: "setImageWrap", runId: collabRun, mode });
+        this.host.rerender(undefined, "global");
+        reselect();
+        return true;
+      }
       const handle = this.host.getHandle();
       const binding = selected.kind === "image"
         ? handle?.images.find((item) => item.item.src === src)
@@ -1202,6 +1413,9 @@ export class DocxEditor {
         if (!next) return;
         this.host.history?.checkpoint();
         if (resizeDrawing(this.host.doc, src, next.first, next.second)) {
+          if (collabRun !== null) {
+            this.host.onIntent?.({ kind: "resizeDrawing", runId: collabRun, widthPx: next.first, heightPx: next.second });
+          }
           this.host.rerender();
           reselect();
         }
@@ -1221,8 +1435,18 @@ export class DocxEditor {
       }).then((next) => {
         if (!next) return;
         this.host.history?.checkpoint();
-        if (!isFloatingDrawing(src)) setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
+        if (!isFloatingDrawing(src)) {
+          if (collabRun !== null) {
+            setImageWrap(this.host.doc, src, "square");
+            this.host.onIntent?.({ kind: "setImageWrap", runId: collabRun, mode: "square" });
+          } else {
+            setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
+          }
+        }
         if (setFloatingPagePosition(this.host.doc, src, next.first, next.second)) {
+          if (collabRun !== null) {
+            this.host.onIntent?.({ kind: "setFloatingPagePosition", runId: collabRun, xPx: next.first, yPx: next.second });
+          }
           this.host.rerender();
           reselect();
         }
@@ -1243,6 +1467,9 @@ export class DocxEditor {
         if (!Number.isFinite(degrees)) return;
         this.host.history?.checkpoint();
         if (setDrawingRotation(this.host.doc, src, degrees)) {
+          if (collabRun !== null) {
+            this.host.onIntent?.({ kind: "setDrawingRotation", runId: collabRun, degrees });
+          }
           this.host.rerender(undefined, "global");
           reselect();
         }
@@ -1259,6 +1486,9 @@ export class DocxEditor {
         if (next === null) return;
         this.host.history?.checkpoint();
         if (setImageAltText(this.host.doc, src, next)) {
+          if (collabRun !== null) {
+            this.host.onIntent?.({ kind: "setImageAltText", runId: collabRun, alt: next });
+          }
           this.host.rerender();
           reselect();
         }
@@ -1292,6 +1522,13 @@ export class DocxEditor {
           ? setSmartArtFill(this.host.doc, src, next, selectedSmartArtNodeIndex ?? undefined)
           : setDrawingFill(this.host.doc, src, next);
         if (changed) {
+          if (collabRun !== null) {
+            this.host.onIntent?.(
+              context.kind === "smartArt"
+                ? { kind: "setSmartArtFill", runId: collabRun, color: next, nodeIndex: selectedSmartArtNodeIndex ?? undefined }
+                : { kind: "setDrawingFill", runId: collabRun, color: next },
+            );
+          }
           this.host.rerender();
           reselect();
         }
@@ -1311,6 +1548,9 @@ export class DocxEditor {
         if (!next) return;
         this.host.history?.checkpoint();
         if (setDrawingLineStyle(this.host.doc, src, next.color, next.width, next.style)) {
+          if (collabRun !== null) {
+            this.host.onIntent?.({ kind: "setDrawingLineStyle", runId: collabRun, color: next.color, widthPx: next.width, dash: next.style });
+          }
           this.host.rerender();
           reselect();
         }
@@ -1319,6 +1559,8 @@ export class DocxEditor {
     }
     if (command === "reset3d") {
       if (context.kind !== "model3d") return false;
+      // 3D rotation has no wire form; honest no-op in collab.
+      if (inCollab) return false;
       this.host.history?.checkpoint();
       if (!setModel3DRotation(this.host.doc, src, { x: 0, y: 0, z: 0 })) return false;
       this.host.rerender(undefined, "local");
@@ -1347,6 +1589,10 @@ export class DocxEditor {
     const group = this.selectedInkGroup;
     const selected = this.selectedImage;
     if (!group && !selected) return false;
+    // Collab: ink-group arranging mutates several sources from THIS window's
+    // overlay geometry — no wire form yet; honest no-op instead of a silent
+    // local-only divergence. (Ink is disabled in the collab toolbar anyway.)
+    if (group && this.host.onIntent && this.host.doc.stableIds) return false;
     this.host.history?.checkpoint();
     let changed = false;
 
@@ -1376,6 +1622,12 @@ export class DocxEditor {
     const src = selected!.src;
     const rect = selected!.el.getBoundingClientRect();
     const near = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    // Collab: arrange actions ride the wire — local apply is the canonical
+    // intent function with the same args, then the intent is emitted (the
+    // A17 pattern). Emission requires an addressable carrier run.
+    const collabRunId = this.host.onIntent && this.host.doc.stableIds ? this.drawingRunId(src) : null;
+    const inCollab = this.host.onIntent !== undefined && this.host.doc.stableIds !== undefined;
+    if (inCollab && collabRunId === null) return false; // unaddressable: honest no-op
     if (action.startsWith("align")) {
       const page = selected!.el.closest(".dxw-page") as HTMLElement | null;
       const surface = page?.firstElementChild as HTMLElement | null;
@@ -1387,12 +1639,30 @@ export class DocxEditor {
       const h = parseFloat(selected!.el.style.height) || 0;
       const targetX = action === "alignLeft" ? 0 : action === "alignCenter" ? (pageW - w) / 2 : action === "alignRight" ? pageW - w : x;
       const targetY = action === "alignTop" ? 0 : action === "alignMiddle" ? (pageH - h) / 2 : action === "alignBottom" ? pageH - h : y;
-      if (!isFloatingDrawing(src)) setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
+      if (!isFloatingDrawing(src)) {
+        if (collabRunId !== null) {
+          setImageWrap(this.host.doc, src, "square");
+          this.host.onIntent?.({ kind: "setImageWrap", runId: collabRunId, mode: "square" });
+        } else {
+          setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
+        }
+      }
       changed = setFloatingPagePosition(this.host.doc, src, targetX, targetY);
+      if (changed && collabRunId !== null) {
+        this.host.onIntent?.({ kind: "setFloatingPagePosition", runId: collabRunId, xPx: targetX, yPx: targetY });
+      }
     } else if (action === "rotateLeft" || action === "rotateRight") {
-      changed = setDrawingRotation(this.host.doc, src, drawingRotation(src) + (action === "rotateRight" ? 90 : -90));
+      const degrees = drawingRotation(src) + (action === "rotateRight" ? 90 : -90);
+      changed = setDrawingRotation(this.host.doc, src, degrees);
+      if (changed && collabRunId !== null) {
+        this.host.onIntent?.({ kind: "setDrawingRotation", runId: collabRunId, degrees });
+      }
     } else {
-      changed = setDrawingOrder(this.host.doc, src, action === "bringToFront" ? "front" : "back");
+      const order = action === "bringToFront" ? "front" : "back";
+      changed = setDrawingOrder(this.host.doc, src, order);
+      if (changed && collabRunId !== null) {
+        this.host.onIntent?.({ kind: "setDrawingOrder", runId: collabRunId, order });
+      }
     }
     if (changed) {
       this.host.rerender(undefined, "global");
@@ -1476,6 +1746,15 @@ export class DocxEditor {
     if (!this.suggesting && chunks.length > 1) {
       this.insertPlainTextParagraphs(chunks);
       this.commit(false, large ? "background" : "global");
+      return;
+    }
+    if (this.suggesting && this.host.onIntent) {
+      // Collab gate (narrow): paste in suggesting mode routes through
+      // insertTextCore/splitParagraphCore DIRECTLY (no emission), so in a
+      // live session it would mutate locally with no peer ever seeing it —
+      // refused per the standing audit rule (no mutation branch without an
+      // emission). Suggesting TYPING emits fine; suggesting PASTE is the
+      // tracked follow-on. Local mode is unaffected.
       return;
     }
     for (let i = 0; i < chunks.length; i++) {
@@ -1576,9 +1855,92 @@ export class DocxEditor {
   // ---------- table drag-move and resize ----------
 
   private suppressNextMouseUp = false;
+  private tableToolbar: HTMLDivElement | null = null;
+
+  private dismissTableToolbar(): void {
+    this.tableToolbar?.remove();
+    this.tableToolbar = null;
+  }
+
+  private showTableToolbar(grip: GripBinding): void {
+    this.dismissTableToolbar();
+    const surface = grip.el.parentElement;
+    if (!surface) return;
+    const tblPr = grip.item.tbl.children.find((child) => localName(child.name) === "tblPr");
+    const floating = tblPr?.children.some((child) => localName(child.name) === "tblpPr") === true;
+    const bar = document.createElement("div");
+    bar.dataset.dxwTableToolbar = "1";
+    bar.setAttribute("role", "toolbar");
+    bar.setAttribute("aria-label", "Table text wrapping");
+    bar.style.cssText =
+      `position:absolute;left:${Math.max(0, grip.item.x)}px;top:${Math.max(0, grip.item.y1 - 34)}px;` +
+      "display:flex;align-items:center;gap:2px;padding:3px;background:#fff;border:1px solid #dadce0;" +
+      "border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,.18);pointer-events:auto;" +
+      "font:11px system-ui,sans-serif;white-space:nowrap;z-index:2147483647;";
+    const label = document.createElement("span");
+    label.textContent = "Text wrapping";
+    label.style.cssText = "padding:0 5px;color:#5f6368;";
+    bar.appendChild(label);
+    for (const [wrapping, text] of [["none", "None"], ["around", "Around"]] as const) {
+      const button = document.createElement("button");
+      const active = wrapping === "around" ? floating : !floating;
+      button.type = "button";
+      button.textContent = text;
+      button.title = wrapping === "none"
+        ? "Keep the table in normal document flow"
+        : "Let document text wrap around the positioned table";
+      button.setAttribute("aria-pressed", String(active));
+      button.style.cssText =
+        `border:1px solid ${active ? "#8ab4f8" : "transparent"};border-radius:4px;padding:3px 7px;` +
+        `cursor:pointer;color:${active ? "#174ea6" : "#3c4043"};font-weight:${active ? "600" : "400"};` +
+        `background:${active ? "#d2e3fc" : "transparent"};`;
+      button.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (active) {
+          this.dismissTableToolbar();
+          return;
+        }
+        const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+        const cellParagraphId = inCollab ? this.tableParagraphId(grip.item.tbl) : null;
+        if (inCollab && cellParagraphId === null) return;
+        this.host.history?.checkpoint();
+        const op = {
+          kind: "textWrapping" as const,
+          wrapping,
+          xPx: grip.item.x,
+          yPx: grip.item.y1,
+        };
+        const changed = setTableTextWrapping(
+          this.host.doc,
+          grip.item.tbl,
+          op.wrapping,
+          op.xPx,
+          op.yPx,
+        );
+        this.dismissTableToolbar();
+        if (!changed) return;
+        if (inCollab && cellParagraphId !== null) {
+          this.host.onIntent?.({ kind: "tableOp", cellParagraphId, op });
+        }
+        this.host.rerender(undefined, "global");
+        this.positionCaret();
+      });
+      bar.appendChild(button);
+    }
+    surface.appendChild(bar);
+    this.tableToolbar = bar;
+  }
 
   private onGripMouseDown = (e: MouseEvent): void => {
     const target = e.target as HTMLElement;
+    if (this.tableToolbar?.contains(target)) {
+      this.suppressNextMouseUp = true;
+      return;
+    }
     if (this.wordArtTextEditor?.input.contains(target)) return;
     if (this.smartArtTextEditor?.input.contains(target)) return;
     if (this.startInkGroupInteraction(e, target)) return;
@@ -1589,6 +1951,7 @@ export class DocxEditor {
     if (this.startImageInteraction(e, target)) return;
     const gripEl = target.closest?.("[data-dxw-grip]") as HTMLElement | null;
     if (!gripEl) {
+      this.dismissTableToolbar();
       this.beginSelectionDrag(e);
       return;
     }
@@ -1726,7 +2089,21 @@ export class DocxEditor {
       guide.remove();
       this.suppressNextMouseUp = false;
       const delta = isCol ? dx : dy;
-      if ((isMove ? targetPageIndex !== sourcePageIndex || Math.hypot(dx, dy) >= 1 : Math.abs(delta) >= 1)) {
+      const changed = isMove ? targetPageIndex !== sourcePageIndex || Math.hypot(dx, dy) >= 1 : Math.abs(delta) >= 1;
+      if (!changed && isMove) {
+        this.showTableToolbar(grip);
+        this.focusText();
+        return;
+      }
+      if (changed) {
+        // Collab: table drags must ride the wire — these were silent
+        // LOCAL-ONLY mutations (user repro: column/row resize and table
+        // moves never synced). All the mutation inputs are plain data, so
+        // the same call replicates exactly; an unaddressable table (no
+        // id-tracked paragraph) is an honest no-op instead of a fork.
+        const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+        const cellParagraphId = inCollab ? this.tableParagraphId(grip.item.tbl) : null;
+        if (inCollab && cellParagraphId === null) return;
         this.host.history?.checkpoint();
         const bodyTop = parseFloat(sourcePage?.dataset.bodyTop ?? "");
         const preservePageStart =
@@ -1735,6 +2112,10 @@ export class DocxEditor {
           sourcePageIndex > 0 &&
           Number.isFinite(bodyTop) &&
           Math.abs(grip.item.y1 - bodyTop) <= 1;
+        const pageDelta = targetPageIndex - sourcePageIndex;
+        // Clamp to the wire's floor so the local call and the validated
+        // intent always agree.
+        const rowHeightPx = Math.max(1, (grip.item.rowHeightPx ?? 0) + dy);
         const ok = isMove
           ? moveTableTo(
               this.host.doc,
@@ -1742,13 +2123,28 @@ export class DocxEditor {
               targetX,
               targetY,
               preservePageStart,
-              targetPageIndex - sourcePageIndex,
+              pageDelta,
             )
           : isCol
             ? resizeTableColumn(this.host.doc, grip.item.tbl, grip.item.boundary, dx, grip.item.renderedWidths)
-            : resizeTableRow(this.host.doc, grip.item.tbl, grip.item.boundary, (grip.item.rowHeightPx ?? 0) + dy);
+            : resizeTableRow(this.host.doc, grip.item.tbl, grip.item.boundary, rowHeightPx);
         if (ok) {
+          if (inCollab && cellParagraphId !== null) {
+            this.host.onIntent?.(
+              isMove
+                ? { kind: "moveTable", cellParagraphId, xPx: targetX, yPx: targetY, preservePageStart, pageDelta }
+                : isCol
+                  ? { kind: "resizeTableColumn", cellParagraphId, boundary: grip.item.boundary, deltaPx: dx, renderedWidths: grip.item.renderedWidths }
+                  : { kind: "resizeTableRow", cellParagraphId, rowIdx: grip.item.boundary, heightPx: rowHeightPx },
+            );
+          }
           this.host.rerender(undefined, isMove ? "global" : "local");
+          if (isMove) {
+            const movedGrip = this.host.getHandle()?.grips.find(
+              (candidate) => candidate.item.axis === "move" && candidate.item.tbl === grip.item.tbl,
+            );
+            if (movedGrip) this.showTableToolbar(movedGrip);
+          }
           this.positionCaret();
         }
       }
@@ -2392,6 +2788,13 @@ export class DocxEditor {
       document.removeEventListener("mouseup", onUp);
       this.suppressNextMouseUp = false;
       if (Math.hypot(dx, dy) < 1) return;
+      // Collab: ink-group drags have no wire form — honest no-op (restore
+      // the preview) instead of a silent local-only divergence.
+      if (this.host.onIntent && this.host.doc.stableIds) {
+        this.reselectInkGroup(selected.sources);
+        this.focusText();
+        return;
+      }
       this.host.history?.checkpoint();
       let changed = false;
       for (const src of selected.sources) changed = adjustFloatingPosition(this.host.doc, src, dx, dy) || changed;
@@ -2511,6 +2914,30 @@ export class DocxEditor {
     if (drw) this.selectImage(drw.el, src, undefined, "drawing", smartArtNodeIndex);
   }
 
+  /** Selection handle edge length, in px. The handle style below is built from
+   * this, so the two cannot drift. */
+  private static readonly HANDLE_PX = 9;
+  /**
+   * The smallest size a RESIZE DRAG may leave an object.
+   *
+   * THE FLOOR EXISTS SO THE OBJECT REMAINS GRABBABLE. Selection handles are
+   * HANDLE_PX square; once an object is smaller than about three handle-widths
+   * per axis there is nothing left to aim at, so it can no longer be selected
+   * or resized back — the shrink is a ONE-WAY TRIP. `resizeDrawing` has no
+   * inverse either (invert.ts covers only insertText/deleteText/
+   * splitParagraph/insertImage), so undo cannot rescue it and this floor is
+   * the only protection that exists.
+   *
+   * USER-REPORTED as "the image disappears when I move it": the handles sit on
+   * the image's edges, which is exactly where you aim to drag a picture, so a
+   * mis-grab collapsed a 624x351 photo to 624x8 in one gesture — measured, and
+   * indistinguishable from the image being gone.
+   *
+   * Derived from the handle size on purpose: making the handles bigger without
+   * moving the floor would silently re-open the hole.
+   */
+  private static readonly MIN_DRAG_SIZE_PX = DocxEditor.HANDLE_PX * 3;
+
   /** Word-style handle set: corners resize aspect-locked, edges stretch. */
   private static readonly HANDLE_DIRS: [string, number, number][] = [
     ["nw", 0, 0],
@@ -2583,7 +3010,7 @@ export class DocxEditor {
       const h = document.createElement("div");
       const corner = dir.length === 2;
       h.style.cssText =
-        `position:absolute;width:9px;height:9px;background:#fff;border:1.5px solid #1a73e8;` +
+        `position:absolute;width:${DocxEditor.HANDLE_PX}px;height:${DocxEditor.HANDLE_PX}px;background:#fff;border:1.5px solid #1a73e8;` +
         `box-sizing:border-box;border-radius:${corner ? "50%" : "2px"};pointer-events:auto;` +
         `left:calc(${fx * 100}% - 5px);top:calc(${fy * 100}% - 5px);cursor:${DocxEditor.handleCursor(dir)};` +
         `box-shadow:0 1px 2px rgba(0,0,0,.25);`;
@@ -2744,8 +3171,29 @@ export class DocxEditor {
   private deleteSelectedImage(): void {
     if (!this.selectedImage) return;
     const src = this.selectedImage.src;
+    // Collab: deleting a drawing rides the wire as removeDrawing (the A17
+    // pattern — same core mutation locally, intent emitted; the carrier
+    // runId is captured BEFORE the removal retires it). Unaddressable
+    // drawings stay an honest no-op — including VML pict/object carriers,
+    // which the remote apply cannot resolve (it walks for w:drawing only).
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+    const runId = inCollab ? this.drawingRunId(src) : null;
+    if (inCollab && runId === null) return;
+    if (inCollab) {
+      let container: XmlElement | undefined = src;
+      while (container) {
+        const n = localName(container.name);
+        if (n === "drawing" || n === "pict" || n === "object" || n === "AlternateContent") break;
+        container = this.host.doc.findParentOf(container);
+      }
+      if (!container || localName(container.name) !== "drawing") return;
+    }
     this.host.history?.checkpoint();
     if (removeDrawingRun(this.host.doc, src)) {
+      if (inCollab && runId !== null) {
+        this.host.doc.stableIds?.prune(this.host.doc.editableRoots());
+        this.host.onIntent?.({ kind: "removeDrawing", runId });
+      }
       this.host.doc.refresh();
       this.host.rerender(undefined, "global");
     }
@@ -3008,19 +3456,29 @@ export class DocxEditor {
         tgt.style.left = `${dir.includes("w") ? left0 + (w0 - w) : left0}px`;
         tgt.style.top = `${dir.includes("n") ? top0 + (h0 - h) : top0}px`;
       };
+      // The floor this drag may not cross (see MIN_DRAG_SIZE_PX). Capped at the
+      // object's CURRENT size so an already-tiny picture is never forcibly
+      // GROWN by grabbing its handle: the floor bounds what a drag may
+      // produce, not what the document is allowed to contain.
+      const floorW = Math.min(DocxEditor.MIN_DRAG_SIZE_PX, w0);
+      const floorH = Math.min(DocxEditor.MIN_DRAG_SIZE_PX, h0);
       const onMove = (me: MouseEvent) => {
         const dx = (me.clientX - startX) / zoom;
         const dy = (me.clientY - startY) / zoom;
         w = dir.includes("e") ? w0 + dx : dir.includes("w") ? w0 - dx : w0;
         h = dir.includes("s") ? h0 + dy : dir.includes("n") ? h0 - dy : h0;
         if (dir.length === 2) {
-          // Corner: aspect-locked, driven by the dominant cursor axis.
-          const scale = Math.max(0.05, Math.abs(dx) > Math.abs(dy) ? w / w0 : h / h0);
+          // Corner: aspect-locked, driven by the dominant cursor axis. The
+          // floor applies to the SCALE rather than to each axis, or clamping
+          // one side would silently break the aspect lock.
+          const minScale = Math.max(floorW / w0, floorH / h0);
+          const scale = Math.max(minScale, Math.abs(dx) > Math.abs(dy) ? w / w0 : h / h0);
           w = w0 * scale;
           h = h0 * scale;
+        } else {
+          w = Math.max(floorW, w);
+          h = line ? h0 : Math.max(floorH, h);
         }
-        w = Math.max(8, w);
-        h = line ? h0 : Math.max(8, h);
         apply(el);
         if (this.imageOverlay) apply(this.imageOverlay);
       };
@@ -3030,6 +3488,34 @@ export class DocxEditor {
         this.suppressNextMouseUp = true;
         if (Math.abs(w - w0) > 0.5 || Math.abs(h - h0) > 0.5) {
           this.host.history?.checkpoint();
+          // Collab: resize rides the wire as resizeDrawing (+ the w/n-anchor
+          // compensation as an absolute page position). Local apply = the
+          // canonical intent functions with the same args; floatIfClipped is
+          // skipped — it reads THIS window's layout and can't replicate.
+          if (this.host.onIntent && this.host.doc.stableIds) {
+            const runId = this.drawingRunId(src);
+            if (runId !== null) {
+              if (resizeDrawing(this.host.doc, src, w, h)) {
+                this.host.onIntent({ kind: "resizeDrawing", runId, widthPx: w, heightPx: h });
+                if (isFloatingDrawing(src) && (dir.includes("w") || dir.includes("n"))) {
+                  const x = left0 + (dir.includes("w") ? w0 - w : 0);
+                  const y = top0 + (dir.includes("n") ? h0 - h : 0);
+                  if (setFloatingPagePosition(this.host.doc, src, x, y)) {
+                    this.host.onIntent({ kind: "setFloatingPagePosition", runId, xPx: x, yPx: y });
+                  }
+                }
+                this.host.rerender();
+                this.reselectImage(src, nearPt);
+              } else {
+                el.style.width = `${w0}px`;
+                el.style.height = `${h0}px`;
+                el.style.left = `${left0}px`;
+                el.style.top = `${top0}px`;
+                this.reselectImage(src, nearPt);
+              }
+              return;
+            }
+          }
           if (resizeDrawing(this.host.doc, src, w, h)) {
             const floating = isFloatingDrawing(src);
             if (floating && (dir.includes("w") || dir.includes("n"))) {
@@ -3081,6 +3567,24 @@ export class DocxEditor {
           const dest = this.caretFromPoint(me.clientX, me.clientY) ?? this.nearestCaret(me.clientX, me.clientY);
           if (!dest) return;
           this.host.history?.checkpoint();
+          if (this.host.onIntent && this.host.doc.stableIds) {
+            // Collab: the drop position rides as a wire caret and the equation
+            // as its block, both encoded BEFORE the move detaches anything.
+            const blockId = this.mathIntentBlockId(oMathEl);
+            const at = this.encodeTextPos(dest.t, dest.offset);
+            if (blockId !== null && at) {
+              const nodeIds = this.host.allocIds?.(4) ?? [];
+              const before = this.trackedNodeSet();
+              if (moveMath(this.host.doc, oMathEl, dest.t, dest.offset)) {
+                // A mid-text drop splits the destination run; the tail takes a
+                // carried id (same walk the remote apply performs).
+                this.assignFreshTrackedIds(before, nodeIds);
+                this.host.onIntent({ kind: "moveMath", blockId, at, nodeIds });
+                this.host.rerender();
+              }
+            }
+            return;
+          }
           if (moveMath(this.host.doc, oMathEl, dest.t, dest.offset)) this.host.rerender();
         };
         document.addEventListener("mousemove", onMove);
@@ -3202,6 +3706,34 @@ export class DocxEditor {
           // before applying the pointer delta to the document model.
           el.style.left = `${left0}px`;
           el.style.top = `${top0}px`;
+          // Collab: the drag must ride the wire (see the image-drag branch) —
+          // this was a silent local-only mutation ("drag a shape → desync").
+          // Local apply = the canonical intent function with the same args.
+          if (this.host.onIntent && this.host.doc.stableIds) {
+            const runId = this.drawingRunId(binding.item.src);
+            if (runId !== null) {
+              // Clamp onto the page sheet (Word never strands an object off
+              // the page): without this a drag from low on the page emits a
+              // y past the page height and the object jumps to the next
+              // page. The clamped values ride the intent, so every replica
+              // applies the identical position.
+              const surfaceEl = el.closest(".dxw-page")?.firstElementChild as HTMLElement | null;
+              const pageW = (surfaceEl && parseFloat(surfaceEl.style.width)) || this.host.doc.sections[0]?.props.pageWidth || 816;
+              const pageH = (surfaceEl && parseFloat(surfaceEl.style.height)) || this.host.doc.sections[0]?.props.pageHeight || 1056;
+              const objW = rect0.width / zoom;
+              const objH = rect0.height / zoom;
+              const x = Math.max(0, Math.min(left0 + dxClient / zoom, pageW - objW));
+              const y = Math.max(0, Math.min(top0 + dyClient / zoom, pageH - objH));
+              if (setFloatingPagePosition(this.host.doc, binding.item.src, x, y)) {
+                this.host.onIntent({ kind: "setFloatingPagePosition", runId, xPx: x, yPx: y });
+                this.host.rerender();
+                this.reselectImage(binding.item.src, want);
+              } else {
+                this.reselectImage(binding.item.src, { x: rect0.left, y: rect0.top });
+              }
+              return;
+            }
+          }
           const changed = staysOnPage
             ? setFloatingPagePosition(
                 this.host.doc,
@@ -3225,6 +3757,23 @@ export class DocxEditor {
         }
         if (dest) {
           this.host.history?.checkpoint();
+          // Collab: re-anchoring an inline drawing has no intent form; float
+          // it at the drop point instead (Word-like wrap-on-drag) so the move
+          // replicates instead of silently diverging.
+          if (this.host.onIntent && this.host.doc.stableIds) {
+            const runId = this.drawingRunId(binding.item.src);
+            if (runId !== null) {
+              const x = binding.item.x + (me.clientX - startX) / zoom;
+              const y = binding.item.y + (me.clientY - startY) / zoom;
+              setImageWrap(this.host.doc, binding.item.src, "square");
+              this.host.onIntent({ kind: "setImageWrap", runId, mode: "square" });
+              if (setFloatingPagePosition(this.host.doc, binding.item.src, x, y)) {
+                this.host.onIntent({ kind: "setFloatingPagePosition", runId, xPx: x, yPx: y });
+              }
+              this.host.rerender();
+              return;
+            }
+          }
           if (moveDrawingTo(this.host.doc, binding.item.src, dest.t)) this.host.rerender();
         }
       };
@@ -3244,9 +3793,16 @@ export class DocxEditor {
       imageBinding = this.host.getHandle()?.images.find(
         (binding) => binding.el === selected.el && binding.item.src === selected.src,
       );
-    } else if (target.tagName === "IMG") {
+    } else if (target.tagName === "IMG" || target.closest("[data-dxw-media-state]")) {
+      // A PENDING image renders as a skeleton DIV, not an <img> (doc 16 §5.2),
+      // and it is already in the same `images` binding list — this branch was
+      // the only thing keeping it unselectable, and therefore undeletable. A
+      // participant whose bytes never arrive could not remove the box at all.
+      // Matching on the media-state marker covers BOTH skeleton states:
+      // "fetching" (still coming) and "unavailable" (nobody online has it).
       const handle = this.host.getHandle();
-      imageBinding = handle?.images.find((b) => b.el === target || b.el.contains(target));
+      const el = target.tagName === "IMG" ? target : target.closest<HTMLElement>("[data-dxw-media-state]")!;
+      imageBinding = handle?.images.find((b) => b.el === el || b.el.contains(el));
     } else if (
       !target.closest("button") &&
       !target.dataset.dxwImgHandle &&
@@ -3337,6 +3893,46 @@ export class DocxEditor {
           return;
         }
         this.host.history?.checkpoint();
+        // Collab: a drag must ride the wire like every other edit — this was
+        // a silent LOCAL-ONLY mutation (drag a shape → instant divergence).
+        // The local mutation is made IDENTICAL to the canonical intent apply
+        // (same core functions, same args) so every replica's tree matches,
+        // and the matching intents are emitted in apply order. The
+        // single-window refinements below (re-anchoring via hit-testing,
+        // residual correction, page clamping) read THIS window's layout and
+        // are not reproducible from the intent stream, so collab mode uses
+        // the absolute page-position form for every drag shape (an inline
+        // drawing dragged in collab mode becomes floating, like Word's
+        // wrap-on-drag).
+        if (this.host.onIntent && this.host.doc.stableIds) {
+          const src = binding.item.src!;
+          const runId = this.drawingRunId(src);
+          if (runId !== null) {
+            el.style.left = `${left0}px`;
+            el.style.top = `${top0}px`;
+            const dx = (me.clientX - startX) / zoom;
+            const dy = (me.clientY - startY) / zoom;
+            // Clamp onto the page sheet (see the drawingHit drag branch).
+            const surfaceEl = el.closest(".dxw-page")?.firstElementChild as HTMLElement | null;
+            const pageW = (surfaceEl && parseFloat(surfaceEl.style.width)) || this.host.doc.sections[0]?.props.pageWidth || 816;
+            const pageH = (surfaceEl && parseFloat(surfaceEl.style.height)) || this.host.doc.sections[0]?.props.pageHeight || 1056;
+            const objW = rect0.width / zoom;
+            const objH = rect0.height / zoom;
+            const x = Math.max(0, Math.min(binding.item.x + dx, pageW - objW));
+            const y = Math.max(0, Math.min(binding.item.y + dy, pageH - objH));
+            const want = { x: rect0.left + me.clientX - startX, y: rect0.top + me.clientY - startY };
+            if (!floating) {
+              setImageWrap(this.host.doc, src, "square");
+              this.host.onIntent({ kind: "setImageWrap", runId, mode: "square" });
+            }
+            if (setFloatingPagePosition(this.host.doc, src, x, y)) {
+              this.host.onIntent({ kind: "setFloatingPagePosition", runId, xPx: x, yPx: y });
+            }
+            this.host.rerender();
+            this.reselectImage(src, want);
+            return;
+          }
+        }
         if (floating) {
           const src = binding.item.src!;
           // Desired landing spot in CLIENT space (valid across pages; the
@@ -3486,7 +4082,14 @@ export class DocxEditor {
       input.remove();
       if (commit && next !== original) {
         this.host.history?.checkpoint();
-        if (setSmartArtNodeText(this.host.doc, src, nodeIndex, next)) this.host.rerender();
+        if (setSmartArtNodeText(this.host.doc, src, nodeIndex, next)) {
+          // Collab: ride the wire (A17 pattern).
+          if (this.host.onIntent && this.host.doc.stableIds) {
+            const runId = this.drawingRunId(src);
+            if (runId !== null) this.host.onIntent({ kind: "setSmartArtNodeText", runId, index: nodeIndex, text: next });
+          }
+          this.host.rerender();
+        }
       }
       if (reselect) this.reselectImage(src, near, nodeIndex);
       this.focusText();
@@ -3540,7 +4143,14 @@ export class DocxEditor {
       input.remove();
       if (commit && next !== original) {
         this.host.history?.checkpoint();
-        if (setDrawingWordArtText(this.host.doc, src, next)) this.host.rerender();
+        if (setDrawingWordArtText(this.host.doc, src, next)) {
+          // Collab: ride the wire (A17 pattern).
+          if (this.host.onIntent && this.host.doc.stableIds) {
+            const runId = this.drawingRunId(src);
+            if (runId !== null) this.host.onIntent({ kind: "setDrawingWordArtText", runId, text: next });
+          }
+          this.host.rerender();
+        }
       }
       if (reselect) this.reselectImage(src);
       this.focusText();
@@ -3816,7 +4426,6 @@ export class DocxEditor {
 
     const btnRow = document.createElement("div");
     btnRow.style.cssText = "display:flex;gap:8px;justify-content:flex-end;";
-    box.appendChild(btnRow);
 
     const mkBtn = (text: string, title: string, primary: boolean, fn: () => void): void => {
       const b = document.createElement("button");
@@ -3843,8 +4452,20 @@ export class DocxEditor {
       });
       btnRow.appendChild(b);
     };
-    mkBtn("✓ Accept", "Accept this suggestion", true, () => this.acceptRevisionRef(ref));
-    mkBtn("✗ Reject", "Reject this suggestion", false, () => this.rejectRevisionRef(ref));
+    if (this.reviewBlockedByCollab()) {
+      // Accept/reject refuses in a live session (see reviewBlockedByCollab).
+      // Render the reason instead of two buttons that silently do nothing —
+      // a dead button in a shared document reads as a broken app.
+      const note = document.createElement("div");
+      note.dataset.dxwReviewBlocked = "1";
+      note.style.cssText = "font-size:11.5px;color:#5f6368;line-height:1.35;";
+      note.textContent = "Accept and reject are not available in a shared session yet.";
+      box.appendChild(note);
+    } else {
+      box.appendChild(btnRow);
+      mkBtn("✓ Accept", "Accept this suggestion", true, () => this.acceptRevisionRef(ref));
+      mkBtn("✗ Reject", "Reject this suggestion", false, () => this.rejectRevisionRef(ref));
+    }
     document.body.appendChild(box);
     this.suggestionPopover = box;
   }
@@ -3865,6 +4486,32 @@ export class DocxEditor {
 
   /** Which part tree the element lives in: document body or header/footer. */
   private mathEditorEl: HTMLDivElement | null = null;
+
+  /**
+   * The block id an equation edit rides on, or null when the equation has no
+   * wire address. The math intents are BLOCK-addressed and the remote apply
+   * resolves the target as "the first m:oMath under this block"
+   * (collab apply.ts firstMathIn), so a second equation in the same paragraph
+   * is deliberately unaddressable — better an honest no-op than an intent that
+   * rewrites the wrong equation on every peer.
+   *
+   * Must be called BEFORE the mutation: setMathLinear/deleteMath refresh the
+   * document, and deleteMath detaches the subtree the walk starts from.
+   */
+  private mathIntentBlockId(oMathEl: XmlElement): number | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids) return null;
+    let blockEl: XmlElement | null = null;
+    for (let cur: XmlElement | null = oMathEl; cur; cur = this.host.doc.findParentOf(cur) ?? null) {
+      const ln = localName(cur.name);
+      if ((ln === "p" || ln === "tbl") && ids.idOf(cur) !== undefined) {
+        blockEl = cur;
+        break;
+      }
+    }
+    if (!blockEl || firstMathIn(blockEl) !== oMathEl) return null;
+    return ids.idOf(blockEl) ?? null;
+  }
 
   /**
    * Inline equation editor. One consistent popover for every equation: it
@@ -3904,7 +4551,19 @@ export class DocxEditor {
 
     const deleteEquation = () => {
       this.host.history?.checkpoint();
-      if (deleteMath(this.host.doc, oMathEl)) this.host.rerender();
+      if (this.host.onIntent && this.host.doc.stableIds) {
+        // Collab (A17): encode the address BEFORE mutating, apply the exact
+        // canonical intent function with the same args, then emit. An
+        // unaddressable equation is an honest no-op — never a local-only
+        // delete, which is what silently forked the room.
+        const blockId = this.mathIntentBlockId(oMathEl);
+        if (blockId !== null && deleteMath(this.host.doc, oMathEl)) {
+          this.host.onIntent({ kind: "deleteMath", blockId });
+          this.host.rerender();
+        }
+      } else if (deleteMath(this.host.doc, oMathEl)) {
+        this.host.rerender();
+      }
       this.closeMathEditor();
       this.focusText();
     };
@@ -3967,7 +4626,18 @@ export class DocxEditor {
           return;
         }
         this.host.history?.checkpoint();
-        if (setMathLinear(this.host.doc, oMathEl, val)) this.host.rerender();
+        if (this.host.onIntent && this.host.doc.stableIds) {
+          // Collab (A17): same canonical function, same args, emitted — this
+          // popover was the last equation edit that mutated locally and never
+          // rode the wire (user repro: a fraction added here reached nobody).
+          const blockId = this.mathIntentBlockId(oMathEl);
+          if (blockId !== null && setMathLinear(this.host.doc, oMathEl, val)) {
+            this.host.onIntent({ kind: "setMathLinear", blockId, mathText: val });
+            this.host.rerender();
+          }
+        } else if (setMathLinear(this.host.doc, oMathEl, val)) {
+          this.host.rerender();
+        }
         this.closeMathEditor();
         // Return keyboard focus to the document so undo works immediately.
         this.focusText();
@@ -4027,10 +4697,17 @@ export class DocxEditor {
    * page. When the part has no directly typed text (pleading paper: all its
    * text sits inside an anchored VML textbox), an empty run is added to its
    * last paragraph so a real header can be typed alongside the shapes.
+   *
+   * This is the single choke point for BOTH ways into header/footer editing
+   * (the ribbon's Header/Footer buttons and the Word-style double-click in the
+   * margin band), so it is where collab correctness is enforced: creating the
+   * part rides the wire as ensureHeaderFooter, and the one remaining local-only
+   * mutation below is an honest no-op in a room.
    */
   private hfCaretForBand(pageEl: HTMLElement, band: "header" | "footer"): Caret | null {
     const handle = this.host.getHandle();
     if (!handle) return null;
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
     const wantKind = band === "header" ? "hdr" : "ftr";
     let part: XmlElement | null = null;
     for (const b of handle.bindings) {
@@ -4044,8 +4721,19 @@ export class DocxEditor {
     }
     if (!part) {
       // No header/footer exists yet - create one like Word does on first
-      // entry into the band.
-      part = this.host.doc.ensureHfPart(band);
+      // entry into the band. In collab this creates a whole PART (rel +
+      // content-type override + sectPr references), so it must ride the wire:
+      // canonical function, same arg, carried ids for the part's paragraph and
+      // run, then emit.
+      if (inCollab) {
+        const nodeIds = this.host.allocIds?.(8) ?? [];
+        const before = this.trackedNodeSet();
+        part = this.host.doc.ensureHfPart(band);
+        this.assignFreshTrackedIds(before, nodeIds);
+        this.host.onIntent!({ kind: "ensureHeaderFooter", hfKind: band, nodeIds });
+      } else {
+        part = this.host.doc.ensureHfPart(band);
+      }
       this.host.rerender();
     }
     const paras = part.children.filter((c) => localName(c.name) === "p");
@@ -4063,6 +4751,12 @@ export class DocxEditor {
         if (localName(c.name) === "t") return caretAt(c, c.text.length);
       }
     }
+    // The part renders but has no directly typed text (pleading paper: all of
+    // it lives inside an anchored VML textbox). Giving it one takes a
+    // structural mutation with no wire form, so in a room this header simply
+    // can't be entered — an honest no-op beats a local-only run that forks the
+    // document. (Follow-on: an appendHfRun intent would restore it.)
+    if (inCollab) return null;
     const w = last.name.includes(":") ? last.name.slice(0, last.name.indexOf(":") + 1) : "";
     const t: XmlElement = { name: `${w}t`, attrs: { "xml:space": "preserve" }, children: [], text: "" };
     last.children.push({ name: `${w}r`, attrs: {}, children: [t], text: "" });
@@ -4325,6 +5019,9 @@ export class DocxEditor {
    * area below that table. Materialize ordinary empty paragraphs between the
    * table and the following block so the requested line becomes editable. */
   private extendCaretAfterPageTable(x: number, y: number): Caret | null {
+    // Collab: splices paragraphs after a trailing table with no emission —
+    // same fork class as extendCaretIntoBodyWhitespace; honest no-op.
+    if (this.host.onIntent && this.host.doc.stableIds) return null;
     const handle = this.host.getHandle();
     const page = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(".dxw-page") as HTMLElement | null;
     const surface = page?.firstElementChild as HTMLElement | null;
@@ -4392,6 +5089,9 @@ export class DocxEditor {
 
   /** Materialize Word's click-and-type position below a moved floating table. */
   private extendCaretBelowFloatingTable(caret: Caret, x: number, y: number): Caret | null {
+    // Collab: local-only paragraph creation — honest no-op (see
+    // extendCaretIntoBodyWhitespace).
+    if (this.host.onIntent && this.host.doc.stableIds) return null;
     const handle = this.host.getHandle();
     const page = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(".dxw-page") as HTMLElement | null;
     const surface = page?.firstElementChild as HTMLElement | null;
@@ -4496,6 +5196,27 @@ export class DocxEditor {
     if (hasLaterLine) return null;
     const lineCount = Math.max(1, Math.round((ly - binding.item.lineTop) / lineHeight));
 
+    // Collab: click-and-type creates the intervening lines through the SAME
+    // emitting split path Enter uses (splitParagraphNoHistory: canonical
+    // split + carried ids + splitParagraph intent) so every created
+    // paragraph rides the wire. The hand-spliced template path below never
+    // emitted — first a silent fork (caught live + by e2e/click-fuzz), then
+    // an honest no-op that made below-content whitespace dead in collab.
+    // Suggest mode keeps the no-op (its split path marks glyphs differently).
+    if (this.host.onIntent && this.host.doc.stableIds) {
+      if (this.suggesting) return null;
+      if (checkpoint) this.host.history?.checkpoint();
+      this.caret = {
+        t: endText,
+        run: binding.item.src!.run,
+        offset: endText.text.length,
+        bias: endText.text.length > 0 ? "end" : undefined,
+      };
+      const lines = Math.min(lineCount, 40);
+      for (let i = 0; i < lines; i++) this.splitParagraphNoHistory();
+      return this.caret;
+    }
+
     if (checkpoint) this.host.history?.checkpoint();
     this.caret = {
       t: endText,
@@ -4526,7 +5247,12 @@ export class DocxEditor {
     let previous = insertBeforeTrailingBreak ? split.before : split.after;
     let caretSource = split.after;
     for (let i = 1; i < lineCount; i++) {
-      if (this.suggesting && previous !== split.before) markParagraphGlyph(previous, "ins", this.revMeta());
+      if (this.suggesting && previous !== split.before) {
+        const meta = this.frozenRevMeta();
+        markParagraphGlyph(previous, "ins", meta);
+        const blockId = this.host.doc.stableIds?.idOf(previous);
+        if (blockId !== undefined) this.emitSuggestRevision(meta, undefined, [{ blockId, glyph: "ins" }]);
+      }
       const t: XmlElement = {
         name: this.caret!.t.name,
         attrs: { ...this.caret!.t.attrs, "xml:space": "preserve" },
@@ -4781,15 +5507,18 @@ export class DocxEditor {
       this.positionCaret();
     }
     // A selected image is deleted by Backspace/Delete regardless of caret
-    // state (selecting an image hides the caret).
+    // state (selecting an image hides the caret). Collab: deleting a drawing
+    // (or ink) has no wire form yet — honest no-op instead of a silent
+    // local-only divergence (follow-on: a removeDrawing intent).
     if ((e.key === "Backspace" || e.key === "Delete") && this.selectedInkGroup) {
       e.preventDefault();
+      if (this.host.onIntent && this.host.doc.stableIds) return;
       this.deleteSelectedInkGroup();
       return;
     }
     if ((e.key === "Backspace" || e.key === "Delete") && this.selectedImage) {
       e.preventDefault();
-      this.deleteSelectedImage();
+      this.deleteSelectedImage(); // collab-aware: emits removeDrawing
       return;
     }
     if (this.selectedImage && e.key === "Escape") {
@@ -4798,8 +5527,10 @@ export class DocxEditor {
       return;
     }
     // A selected watermark: Backspace/Delete removes it, Escape deselects.
+    // Collab: watermark removal has no wire form — honest no-op.
     if ((e.key === "Backspace" || e.key === "Delete") && this.selectedWordArt) {
       e.preventDefault();
+      if (this.host.onIntent && this.host.doc.stableIds) return;
       this.deleteSelectedWordArt();
       return;
     }
@@ -4809,8 +5540,10 @@ export class DocxEditor {
       return;
     }
     // Arrow keys nudge a lassoed ink group together (Word: 1px, Shift: 10px).
+    // Collab: ink-group moves have no wire form — honest no-op.
     if (this.selectedInkGroup && e.key.startsWith("Arrow")) {
       e.preventDefault();
+      if (this.host.onIntent && this.host.doc.stableIds) return;
       const step = e.shiftKey ? 10 : 1;
       const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
       const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
@@ -4832,6 +5565,21 @@ export class DocxEditor {
       const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
       const src = this.selectedImage.src;
       this.host.history?.checkpoint();
+      // Collab: same rule as drag — replace the relative local nudge with the
+      // canonical absolute page position and emit it, so the move replicates.
+      if (this.host.onIntent && this.host.doc.stableIds) {
+        const runId = this.drawingRunId(src);
+        if (runId !== null) {
+          const x = (parseFloat(this.selectedImage.el.style.left) || 0) + dx;
+          const y = (parseFloat(this.selectedImage.el.style.top) || 0) + dy;
+          if (setFloatingPagePosition(this.host.doc, src, x, y)) {
+            this.host.onIntent({ kind: "setFloatingPagePosition", runId, xPx: x, yPx: y });
+            this.host.rerender();
+            this.reselectImage(src);
+          }
+          return;
+        }
+      }
       if (adjustFloatingPosition(this.host.doc, src, dx, dy)) {
         this.host.rerender();
         this.reselectImage(src);
@@ -4843,7 +5591,35 @@ export class DocxEditor {
       // column break.
       e.preventDefault();
       this.host.history?.checkpoint();
-      const destination = insertBreakAt(this.host.doc, this.caret.t, this.caret.offset, e.shiftKey ? "column" : "page");
+      const breakKind: "page" | "column" = e.shiftKey ? "column" : "page";
+      // Collab: this was a silent LOCAL-ONLY mutation (user repro: Cmd+Enter
+      // didn't create the page for anyone else). Apply the CANONICAL form —
+      // the break at the END of the caret run's first w:t, the exact shape
+      // the remote insertBreak apply produces — with carried ids, then emit.
+      if (this.host.onIntent && this.host.doc.stableIds) {
+        const enc = this.encodeCaretForIntent();
+        let runEl: XmlElement | null = null;
+        for (let cur: XmlElement | null = this.caret.t; cur; cur = this.host.doc.findParentOf(cur) ?? null) {
+          if (localName(cur.name) === "r") {
+            runEl = cur;
+            break;
+          }
+        }
+        const firstT = runEl ? firstTextOf(runEl) : null;
+        if (enc && runEl && firstT) {
+          const nodeIds = this.host.allocIds?.(8) ?? [];
+          const before = this.trackedNodeSet();
+          const destination = insertBreakAt(this.host.doc, firstT, firstT.text.length, breakKind);
+          if (destination) {
+            this.assignFreshTrackedIds(before, nodeIds);
+            this.host.onIntent({ kind: "insertBreak", runId: enc.runId, breakKind, nodeIds });
+            this.caret = { ...this.caret, ...destination };
+            this.commit();
+          }
+        }
+        return;
+      }
+      const destination = insertBreakAt(this.host.doc, this.caret.t, this.caret.offset, breakKind);
       if (destination) {
         this.caret = { ...this.caret, ...destination };
         this.commit();
@@ -5083,9 +5859,49 @@ export class DocxEditor {
     return this.caret ? { t: this.caret.t, offset: this.caret.offset } : null;
   }
 
+  /** Current caret as wire-stable addresses (collab), or null without a caret
+   * or outside id-tracked content. The encoding survives a reconciliation
+   * reload — the replica reproduces the id table via the sidecar — so a
+   * caller can capture it from a dying view and restore it into the
+   * replacement with setCaretFromEncoded. */
+  getEncodedCaret(): EncodedCaret | null {
+    return this.encodeCaretForIntent();
+  }
+
+  /** Place the caret from a stable-id address captured by getEncodedCaret —
+   * the decode side of the reload-survival path. Resolves against the CURRENT
+   * doc's id table (falling back to the block start when the exact run is
+   * gone), paints the caret, and re-takes keyboard focus only when nothing
+   * else holds it (a remount drops focus to <body>; a user typing in some
+   * other field keeps it). False when the position no longer resolves. */
+  setCaretFromEncoded(pos: EncodedCaret): boolean {
+    const ids = this.host.doc.stableIds;
+    if (!ids) return false;
+    const decoded = ids.decodeCaret(pos);
+    if (!decoded) return false;
+    // The stale run reference self-heals: positionCaret rebinds caret.run to
+    // the layout binding that contains (t, offset).
+    this.caret = { t: decoded.t, run: this.caret?.run ?? ({} as Caret["run"]), offset: decoded.offset };
+    this.positionCaret();
+    const active = document.activeElement;
+    if (!active || active === document.body || this.host.container.contains(active)) this.focusText();
+    return true;
+  }
+
   applyHistory(kind: "undo" | "redo"): void {
     const h = this.host.history;
     if (!h) return;
+    // COLLAB: the local history stack has no wire form — replaying it edits
+    // this replica and tells nobody, so Cmd+Z forked the room silently
+    // (measured: typing emitted 5 intents, Cmd+Z changed the document and
+    // emitted 0). Route to collaborative undo, which reverses the user's last
+    // SEQUENCED action as an ordinary intent; with no hook wired, decline
+    // rather than mutate — the A18 rule that a collab-mode command is an
+    // honest no-op before it is a local edit.
+    if (this.host.onIntent && this.host.doc.stableIds) {
+      if (kind === "undo") this.host.onCollabUndo?.();
+      return;
+    }
     const changed = kind === "undo" ? h.undo() : h.redo();
     if (!changed) return;
     const textChanges = h.lastTextChanges;
@@ -5152,9 +5968,35 @@ export class DocxEditor {
   private revMeta(): RevisionMeta {
     return {
       author: this.revisionAuthor,
-      date: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+      date: this.provenance.date().replace(/\.\d+Z$/, "Z"),
       nextId: () => this.host.doc.nextRevisionId(),
     };
+  }
+
+  /**
+   * Revision meta FROZEN for one gesture (collab, doc 05 rule a): the same
+   * author+date must be used by the LOCAL mutation (this editor is the
+   * pre-applied path) AND carried in the emitted intent — revMeta()'s
+   * per-call date could straddle a second boundary and silently diverge
+   * the local tree from every peer's canonical apply.
+   */
+  private frozenRevMeta(): RevisionMeta {
+    const author = this.revisionAuthor;
+    const date = this.provenance.date().replace(/\.\d+Z$/, "Z");
+    return { author, date, nextId: () => this.host.doc.nextRevisionId() };
+  }
+
+  /** Emit a suggestRevision intent for locally-applied revision marks (the
+   * suggesting counterparts of deleteText/mergeParagraph — nothing moves,
+   * Word keeps both sides until accept/reject). */
+  private emitSuggestRevision(
+    meta: RevisionMeta,
+    ranges?: { blockId: number; runId: number; start: number; end: number }[],
+    marks?: { blockId: number; glyph: "ins" | "del" }[],
+  ): void {
+    if (!this.host.onIntent || !this.host.doc.stableIds) return;
+    if (!ranges?.length && !marks?.length) return;
+    this.host.onIntent({ kind: "suggestRevision", ranges, marks, suggest: { author: meta.author, date: meta.date } });
   }
 
   /** True when `t` sits inside a w:del authored by the current suggester
@@ -5182,9 +6024,24 @@ export class DocxEditor {
     return null;
   }
 
+  /** True in a live session, where accept/reject would fork the room.
+   *
+   * Collab gate (narrow): the four accept/reject entry points below mutate
+   * host.doc DIRECTLY (no emission), so in a live session they would resolve
+   * the suggestion locally with no peer ever seeing it — refused per the
+   * standing audit rule (no mutation branch without an emission). The
+   * acceptRevision/rejectRevision/acceptAllRevisions INTENTS exist and apply
+   * fine (collab/src/apply.ts), but they address a revision by its index in
+   * collectRevisions order, which the editor has no path to produce here.
+   * Wiring that is known follow-on work. Local mode is unaffected. */
+  private reviewBlockedByCollab(): boolean {
+    return !!this.host.onIntent;
+  }
+
   /** Accept (keep insertion / drop deletion) the given revision, or the one at
    * the caret. Re-renders and returns whether anything changed. */
   acceptRevisionRef(ref?: RevisionRef): boolean {
+    if (this.reviewBlockedByCollab()) return false;
     const target = ref ?? this.revisionAtCaret();
     if (!target) return false;
     this.host.history?.checkpoint();
@@ -5199,6 +6056,7 @@ export class DocxEditor {
   /** Reject (drop insertion / restore deletion) the given revision, or the one
    * at the caret. */
   rejectRevisionRef(ref?: RevisionRef): boolean {
+    if (this.reviewBlockedByCollab()) return false;
     const target = ref ?? this.revisionAtCaret();
     if (!target) return false;
     this.host.history?.checkpoint();
@@ -5217,6 +6075,7 @@ export class DocxEditor {
 
   /** Accept every tracked change (one undo step). Returns how many applied. */
   acceptAllRevisions(): number {
+    if (this.reviewBlockedByCollab()) return 0;
     this.host.history?.checkpoint();
     const n = acceptAllRevisions(this.host.doc);
     if (n === 0) return 0;
@@ -5229,6 +6088,7 @@ export class DocxEditor {
 
   /** Reject every tracked change (one undo step). Returns how many applied. */
   rejectAllRevisions(): number {
+    if (this.reviewBlockedByCollab()) return 0;
     this.host.history?.checkpoint();
     const n = rejectAllRevisions(this.host.doc);
     if (n === 0) return 0;
@@ -5247,30 +6107,134 @@ export class DocxEditor {
     if (!joinsClickPlacement) this.host.history?.checkpoint("typing");
     this.pendingClickTypeCheckpoint = false;
     this.clickTypeCheckpointUntil = joinsClickPlacement ? now + 1000 : 0;
-    const textOnly = !this.hasSelection() && !this.suggesting && !!this.caret;
-    if (this.hasSelection()) this.removeSelectedText();
-    this.insertTextCore(text);
+    const hadSelection = this.hasSelection();
+    const textOnly = !hadSelection && !this.suggesting && !!this.caret;
+    // Typing over a selection: the removal FIRST (removeSelectedText emits
+    // its own deleteText / suggest-strike intents), THEN the insert is
+    // encoded against the post-delete state — previously neither half was
+    // emitted at all (review finding: type-over-selection was local-only).
+    if (hadSelection) this.removeSelectedText();
+    // Suggesting inserts emit too (doc 14 §3 L2): the SAME frozen
+    // author/date drives the local w:ins AND rides the intent, so the
+    // pre-applied local tree equals every peer's canonical apply.
+    const suggestEmit = this.suggesting && !!this.caret && !!this.host.onIntent;
+    const frozen = suggestEmit ? this.frozenRevMeta() : null;
+    const emitPos = (!this.suggesting || suggestEmit) && this.host.onIntent && this.caret ? this.encodeCaretForIntent() : null;
+    this.insertTextCore(text, frozen ?? undefined);
     this.commit(textOnly);
+    if (emitPos) {
+      this.host.onIntent?.(
+        frozen
+          ? { kind: "insertText", at: emitPos, text, suggest: { author: frozen.author, date: frozen.date } }
+          : { kind: "insertText", at: emitPos, text },
+      );
+    }
     return true;
+  }
+
+  /** Stable id of the run carrying a drawing (drawing-edit intents address
+   * the drawing via its run — drawings themselves aren't id-tracked). The
+   * OUTERMOST run ancestor is the carrier: a shape's binding src can sit
+   * inside the drawing's w:txbxContent, whose inner run is id-tracked too
+   * but holds no drawing — an intent addressed there rejects on every
+   * remote replica. Null when the drawing isn't inside id-tracked content. */
+  private drawingRunId(src: XmlElement): number | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids) return null;
+    let outer: number | null = null;
+    for (let cur: XmlElement | null = src; cur; cur = this.host.doc.findParentOf(cur) ?? null) {
+      if (localName(cur.name) === "r") {
+        const id = ids.idOf(cur);
+        if (id !== undefined) outer = id;
+      }
+    }
+    return outer;
+  }
+
+  /** Stable id of a paragraph inside `tbl` whose NEAREST tbl ancestor is
+   * `tbl` itself (table intents address a table via such a paragraph; a
+   * nested table's paragraphs would address the inner table). Null when the
+   * table holds no addressable paragraph. */
+  private tableParagraphId(tbl: XmlElement): number | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids) return null;
+    let found: number | null = null;
+    const nearestTbl = (el: XmlElement): XmlElement | null => {
+      for (let cur: XmlElement | null = this.host.doc.findParentOf(el) ?? null; cur; cur = this.host.doc.findParentOf(cur) ?? null) {
+        if (localName(cur.name) === "tbl") return cur;
+      }
+      return null;
+    };
+    const walk = (el: XmlElement): void => {
+      if (found !== null) return;
+      if (localName(el.name) === "p") {
+        const id = ids.idOf(el);
+        if (id !== undefined && nearestTbl(el) === tbl) {
+          found = id;
+          return;
+        }
+      }
+      for (const c of el.children) walk(c);
+    };
+    walk(tbl);
+    return found;
+  }
+
+  /** Reassign carried ids to tracked nodes (p/tbl/r) created since `before`,
+   * in document order — the editor-side mirror of the canonical apply's
+   * assignFreshTracked, so a pre-applied node-creating intent yields the
+   * same id table locally as on every replica. */
+  private assignFreshTrackedIds(before: Set<XmlElement>, nodeIds: number[]): void {
+    const ids = this.host.doc.stableIds;
+    if (!ids) return;
+    const fresh: XmlElement[] = [];
+    const walk = (el: XmlElement): void => {
+      const ln = localName(el.name);
+      if ((ln === "p" || ln === "tbl" || ln === "r") && !before.has(el)) fresh.push(el);
+      el.children.forEach(walk);
+    };
+    this.host.doc.editableRoots().forEach(walk);
+    for (let k = 0; k < fresh.length && k < nodeIds.length; k++) ids.reassign(fresh[k], nodeIds[k]);
+  }
+
+  /** Snapshot the tracked-node set (see assignFreshTrackedIds). */
+  private trackedNodeSet(): Set<XmlElement> {
+    const set = new Set<XmlElement>();
+    const walk = (el: XmlElement): void => {
+      const ln = localName(el.name);
+      if (ln === "p" || ln === "tbl" || ln === "r") set.add(el);
+      el.children.forEach(walk);
+    };
+    this.host.doc.editableRoots().forEach(walk);
+    return set;
+  }
+
+  /** Encode an arbitrary text position as stable-id addresses (collab). */
+  private encodeTextPos(t: XmlElement, offset: number): { blockId: number; runId: number; offset: number } | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids) return null;
+    return ids.encodeCaret(t, offset, (el) => this.host.doc.findParentOf(el) ?? null);
+  }
+
+  /** Encode the current caret as stable-id addresses for a collab intent, or
+   * null when there is no caret or it isn't inside id-tracked content. */
+  private encodeCaretForIntent(): { blockId: number; runId: number; offset: number } | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids || !this.caret) return null;
+    return ids.encodeCaret(this.caret.t, this.caret.offset, (el) => this.host.doc.findParentOf(el) ?? null);
   }
 
   /** Insert text at the caret (suggesting-aware) without touching history or
    * committing — shared by typing and multi-chunk paste. */
-  private insertTextCore(text: string): void {
-    const caret = this.caret;
-    if (!caret) return;
-    // A checkbox content control's glyph is atomic: typing never edits it
-    // (toggle by clicking). Guards against corrupting the w:t inside an SDT.
-    if (checkboxStateElement(caret.run, caret.t)) return;
-    if (this.suggesting) {
-      const nc = insertSuggestedText(this.host.doc, caret.t, caret.offset, text, this.revMeta());
-      if (nc) this.caret = { t: nc.t, run: caret.run, offset: nc.offset, bias: "end" };
-      return;
-    }
-    const t = caret.t;
-    t.text = t.text.slice(0, caret.offset) + text + t.text.slice(caret.offset);
-    caret.offset += text.length;
-    caret.bias = "end";
+  private insertTextCore(text: string, meta?: RevisionMeta): void {
+    if (!this.caret) return;
+    const ctx = meta ? { suggesting: this.suggesting, revMeta: () => meta } : this.mutationCtx();
+    this.caret = applyInsertText(this.host.doc, this.caret, text, ctx);
+  }
+
+  /** Context the extracted mutation core needs from the editor. */
+  private mutationCtx(): MutationCtx {
+    return { suggesting: this.suggesting, revMeta: () => this.revMeta() };
   }
 
   private deleteContents(direction?: -1 | 1): void {
@@ -5297,7 +6261,15 @@ export class DocxEditor {
           if (!prev) return;
           const junction = lastTextOf(prev);
           this.host.history?.checkpoint();
+          // Collab: capture the merged paragraph's stable id BEFORE the merge
+          // retires it, and emit the intent so every replica merges too (this
+          // was a silent local-only mutation — Backspace across a paragraph
+          // boundary desynced the doc).
+          const mergeBlockId = this.host.onIntent && this.host.doc.stableIds
+            ? this.host.doc.stableIds.idOf(pEl)
+            : undefined;
           if (mergeParagraphBackward(this.host.doc, pEl)) {
+            if (mergeBlockId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeBlockId });
             const target = junction && paragraphOf(this.host.doc, junction) ? junction : caret.t;
             this.caret = { t: target, run: caret.run, offset: target === junction ? target.text.length : 0 };
             invalidateParagraphSignature(paragraphOf(this.host.doc, target) ?? pEl);
@@ -5314,11 +6286,14 @@ export class DocxEditor {
       if (checkboxStateElement(caret.run, caret.t)) return;
       // Delete the whole grapheme cluster before the caret (a Devanagari
       // conjunct, an Arabic base+harakāt, a surrogate pair) — never a lone
-      // combining mark that would leave a broken cluster.
+      // combining mark that would leave a broken cluster. The boundary is
+      // resolved here; the extracted core does the engine-independent splice.
       const from = graphemeStep(caret.t.text, caret.offset, -1) ?? caret.offset - 1;
-      caret.t.text = caret.t.text.slice(0, from) + caret.t.text.slice(caret.offset);
-      caret.offset = from;
-      caret.bias = "end";
+      const del = this.host.onIntent ? this.encodeCaretForIntent() : null;
+      this.caret = applyDeleteRange(caret, from, caret.offset);
+      // del.offset is the caret in the wire basis (cumulative within the run);
+      // shift by the same local delta to express the deleted range on the wire.
+      if (del) this.emitDelete(del.blockId, del.runId, del.offset - (caret.offset - from), del.offset);
     } else {
       if (caret.offset >= caret.t.text.length) {
         const pEl = paragraphOf(this.host.doc, caret.t);
@@ -5327,7 +6302,11 @@ export class DocxEditor {
           const next = siblingParagraph(this.host.doc, pEl, 1);
           if (!next) return;
           this.host.history?.checkpoint();
+          const mergeNextId = this.host.onIntent && this.host.doc.stableIds
+            ? this.host.doc.stableIds.idOf(next)
+            : undefined;
           if (mergeParagraphBackward(this.host.doc, next)) {
+            if (mergeNextId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeNextId });
             invalidateParagraphSignature(pEl);
             this.commit(false, "local", true);
           }
@@ -5341,9 +6320,15 @@ export class DocxEditor {
       if (checkboxStateElement(caret.run, caret.t)) return;
       // Forward-delete the whole grapheme cluster after the caret.
       const to = graphemeStep(caret.t.text, caret.offset, 1) ?? caret.offset + 1;
-      caret.t.text = caret.t.text.slice(0, caret.offset) + caret.t.text.slice(to);
+      const del = this.host.onIntent ? this.encodeCaretForIntent() : null;
+      this.caret = applyDeleteRange(caret, caret.offset, to);
+      if (del) this.emitDelete(del.blockId, del.runId, del.offset, del.offset + (to - caret.offset));
     }
-    this.commit(caret.t.text.length > 0);
+    this.commit(this.caret !== null && this.caret.t.text.length > 0);
+  }
+
+  private emitDelete(blockId: number, runId: number, start: number, end: number): void {
+    if (end > start) this.host.onIntent?.({ kind: "deleteText", blockId, runId, start, end });
   }
 
   /** Backspace/Delete in suggesting mode: mark one character (or a paragraph
@@ -5375,7 +6360,12 @@ export class DocxEditor {
             this.positionCaret();
             return;
           }
-          markParagraphGlyph(prev, "del", this.revMeta());
+          {
+            const meta = this.frozenRevMeta();
+            markParagraphGlyph(prev, "del", meta);
+            const blockId = this.host.doc.stableIds?.idOf(prev);
+            if (blockId !== undefined) this.emitSuggestRevision(meta, undefined, [{ blockId, glyph: "del" }]);
+          }
           this.commit();
           return;
         }
@@ -5383,7 +6373,10 @@ export class DocxEditor {
         this.suggestDelete(-1);
         return;
       }
-      const c = deleteSuggestedRange(doc, [{ t: caret.t, start: caret.offset - 1, end: caret.offset }], this.revMeta());
+      const meta = this.frozenRevMeta();
+      const pos = this.encodeTextPos(caret.t, caret.offset - 1);
+      const c = deleteSuggestedRange(doc, [{ t: caret.t, start: caret.offset - 1, end: caret.offset }], meta);
+      if (pos) this.emitSuggestRevision(meta, [{ blockId: pos.blockId, runId: pos.runId, start: pos.offset, end: pos.offset + 1 }]);
       if (c) this.caret = { t: c.t, run: caret.run, offset: c.offset, bias: "end" };
       this.commit();
       return;
@@ -5398,7 +6391,12 @@ export class DocxEditor {
           this.positionCaret();
           return;
         }
-        markParagraphGlyph(pEl, "del", this.revMeta());
+        {
+          const meta = this.frozenRevMeta();
+          markParagraphGlyph(pEl, "del", meta);
+          const blockId = this.host.doc.stableIds?.idOf(pEl);
+          if (blockId !== undefined) this.emitSuggestRevision(meta, undefined, [{ blockId, glyph: "del" }]);
+        }
         this.commit();
         return;
       }
@@ -5406,14 +6404,24 @@ export class DocxEditor {
       this.suggestDelete(1);
       return;
     }
-    const c = deleteSuggestedRange(doc, [{ t: caret.t, start: caret.offset, end: caret.offset + 1 }], this.revMeta());
+    const meta2 = this.frozenRevMeta();
+    const pos2 = this.encodeTextPos(caret.t, caret.offset);
+    const c = deleteSuggestedRange(doc, [{ t: caret.t, start: caret.offset, end: caret.offset + 1 }], meta2);
+    if (pos2) this.emitSuggestRevision(meta2, [{ blockId: pos2.blockId, runId: pos2.runId, start: pos2.offset, end: pos2.offset + 1 }]);
     if (c) this.caret = { t: c.t, run: caret.run, offset: c.offset };
     this.commit();
   }
 
   /** Delete the owned selection's text from the XML; caret → start. */
   private removeSelectedText(): void {
-    if (this.selectedAll && !this.inHeaderFooter && !this.textboxStory && !this.suggesting) {
+    // Collab: selection deletes were a silent LOCAL-ONLY mutation — nothing
+    // rode the wire (review finding), so any select+Backspace/type-over
+    // desynced the room. The generic branch below now emits a deleteText per
+    // range; the structural fast paths with no wire form (whole-body
+    // replacement, list-numPr strip, whole-table removal) are skipped in
+    // collab — the delete degrades to text-only, identically everywhere.
+    const collabEmit = !!(this.host.onIntent && this.host.doc.stableIds);
+    if (!collabEmit && this.selectedAll && !this.inHeaderFooter && !this.textboxStory && !this.suggesting) {
       const root = this.host.doc.editableRoots()[0];
       const body = localName(root.name) === "body"
         ? root
@@ -5438,7 +6446,21 @@ export class DocxEditor {
       const ranges = segments
         .filter((s) => s.t)
         .map((s) => ({ t: s.t as XmlElement, start: s.start, end: s.end }));
-      const c = deleteSuggestedRange(this.host.doc, ranges, this.revMeta());
+      const meta = this.frozenRevMeta();
+      // Encode the wire ranges BEFORE the strike: deleteSuggestedRange
+      // replaces the struck runs wholesale, detaching r.t — encoding after
+      // it returned null for every range and the whole suggestRevision was
+      // silently dropped (review finding: suggest-mode selection strikes
+      // emitted nothing). Mirrors the caret-strike sites, which encode
+      // before mutating.
+      const wireRanges = ranges
+        .map((r) => {
+          const pos = this.encodeTextPos(r.t, r.start);
+          return pos ? { blockId: pos.blockId, runId: pos.runId, start: pos.offset, end: pos.offset + (r.end - r.start) } : null;
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null);
+      const c = deleteSuggestedRange(this.host.doc, ranges, meta);
+      this.emitSuggestRevision(meta, wireRanges);
       this.clearSelection();
       const run = segments[0]?.run;
       if (c && run) this.caret = { t: c.t, run, offset: c.offset };
@@ -5475,31 +6497,48 @@ export class DocxEditor {
       return texts.length > 0 && texts.every((text) => fullySelected.has(text));
     });
     const fullySelectedTables = new Set<XmlElement>();
-    for (const paragraph of fullySelectedParagraphs) {
-      const paragraphProperties = paragraph.children.find(
-        (child) => localName(child.name) === "pPr",
-      );
-      const paragraphTexts = textElements(paragraph).filter((text) => text.text.length > 0);
-      const style = paragraphProperties?.children.find((child) => localName(child.name) === "pStyle");
-      const styleNumbering = resolveParagraphStyleChain(
-        this.host.doc.styles,
-        attr(style, "val"),
-        false,
-      ).pPr.numbering;
-      const isList = paragraphTexts.some((text) => listTypeAt(this.host.doc, text)) || !!styleNumbering;
-      if (paragraphProperties && isList) {
-        paragraphProperties.children = paragraphProperties.children.filter(
-          (child) => localName(child.name) !== "numPr" && localName(child.name) !== "pStyle",
+    if (!collabEmit) {
+      for (const paragraph of fullySelectedParagraphs) {
+        const paragraphProperties = paragraph.children.find(
+          (child) => localName(child.name) === "pPr",
         );
+        const paragraphTexts = textElements(paragraph).filter((text) => text.text.length > 0);
+        const style = paragraphProperties?.children.find((child) => localName(child.name) === "pStyle");
+        const styleNumbering = resolveParagraphStyleChain(
+          this.host.doc.styles,
+          attr(style, "val"),
+          false,
+        ).pPr.numbering;
+        const isList = paragraphTexts.some((text) => listTypeAt(this.host.doc, text)) || !!styleNumbering;
+        if (paragraphProperties && isList) {
+          paragraphProperties.children = paragraphProperties.children.filter(
+            (child) => localName(child.name) !== "numPr" && localName(child.name) !== "pStyle",
+          );
+        }
+        let ancestor = this.host.doc.findParentOf(paragraph);
+        while (ancestor && localName(ancestor.name) !== "tbl") {
+          ancestor = this.host.doc.findParentOf(ancestor);
+        }
+        if (!ancestor) continue;
+        const tableTexts = textElements(ancestor).filter((text) => text.text.length > 0);
+        if (tableTexts.length > 0 && tableTexts.every((text) => fullySelected.has(text))) {
+          fullySelectedTables.add(ancestor);
+        }
       }
-      let ancestor = this.host.doc.findParentOf(paragraph);
-      while (ancestor && localName(ancestor.name) !== "tbl") {
-        ancestor = this.host.doc.findParentOf(ancestor);
-      }
-      if (!ancestor) continue;
-      const tableTexts = textElements(ancestor).filter((text) => text.text.length > 0);
-      if (tableTexts.length > 0 && tableTexts.every((text) => fullySelected.has(text))) {
-        fullySelectedTables.add(ancestor);
+    }
+    // Emit BEFORE the splices (wire offsets read from the pre-splice tree) in
+    // the exact order the splices run — per t, END-FIRST, so each intent's
+    // offsets stay valid against the state its predecessors produce.
+    if (collabEmit) {
+      for (const [t, ranges] of byT) {
+        const ordered = [...ranges].sort((a, b) => b.start - a.start);
+        for (const r of ordered) {
+          if (r.end <= r.start) continue;
+          const pos = this.encodeTextPos(t, r.start);
+          if (pos) {
+            this.host.onIntent?.({ kind: "deleteText", blockId: pos.blockId, runId: pos.runId, start: pos.offset, end: pos.offset + (r.end - r.start) });
+          }
+        }
       }
     }
     for (const [t, ranges] of byT) {
@@ -5575,6 +6614,21 @@ export class DocxEditor {
   }
 
   private splitParagraphNoHistory(): void {
+    if (this.caret && this.host.onIntent && this.host.doc.stableIds) {
+      // Collab: Enter on an empty list item exits the list via the CANONICAL
+      // setListType(null) mutation + intent (clearListParagraphFormatting is
+      // editor-local and was never replicated — the exit desynced the doc).
+      const paragraph = paragraphOf(this.host.doc, this.caret.t);
+      if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && listTypeAt(this.host.doc, this.caret.t) !== null) {
+        const blockId = this.host.doc.stableIds.idOf(paragraph);
+        if (blockId !== undefined && setListType(this.host.doc, [this.caret.t], null)) {
+          this.host.onIntent({ kind: "setListType", blockId, listKind: null });
+          this.commit(false, "global");
+          this.focusText();
+          return;
+        }
+      }
+    }
     if (this.caret) {
       const paragraph = paragraphOf(this.host.doc, this.caret.t);
       if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && clearListParagraphFormatting(this.host.doc, paragraph)) {
@@ -5597,7 +6651,7 @@ export class DocxEditor {
         return;
       }
     }
-    const insertedBefore = this.insertBlankParagraphBeforeAtStart();
+    const insertedBefore = this.host.onIntent ? null : this.insertBlankParagraphBeforeAtStart();
     if (insertedBefore) {
       const reparsed = this.host.doc.insertDirectBodyParagraphBefore(insertedBefore.reference, insertedBefore.blank);
       if (reparsed) {
@@ -5613,7 +6667,22 @@ export class DocxEditor {
       this.focusText();
       return;
     }
+    // Capture the pre-split position for a collab intent before the caret moves.
+    const splitPos = this.host.onIntent ? this.encodeCaretForIntent() : null;
     const split = this.splitParagraphCore();
+    if (split && splitPos && this.host.doc.stableIds && this.host.onIntent) {
+      // Allocate carried ids for the new paragraph and its moved-tail run so
+      // every replica addresses them identically (plan doc 03). MUST come from
+      // the collab connection's disjoint per-client block — the local table's
+      // sequential counter mints identical ids on every client, and colliding
+      // carried ids get the second client's split rejected on every replica.
+      const ids = this.host.doc.stableIds;
+      const alloc = this.host.allocIds?.(2) ?? [];
+      const newBlockId = ids.assign(split.after, alloc[0]);
+      const newRunEl = split.after.children.find((c) => localName(c.name) === "r");
+      const newRunId = newRunEl ? ids.assign(newRunEl, alloc[1]) : newBlockId;
+      this.host.onIntent({ kind: "splitParagraph", at: splitPos, newBlockId, newRunId });
+    }
     const reparsed = split
       ? this.host.doc.reparseDirectBodyParagraphSplit(split.before, split.after)
       : null;
@@ -5683,63 +6752,11 @@ export class DocxEditor {
   /** Split the paragraph at the caret without history or commit — shared by
    * Enter and multi-line paste. */
   private splitParagraphCore(): { before: XmlElement; after: XmlElement } | null {
-    const caret = this.caret;
-    if (!caret) return null;
-    // Resolve containers from the w:t itself — cached run/model objects go
-    // stale after any refresh, but the t element's identity is durable.
-    const rEl = this.host.doc.findParentOf(caret.t);
-    if (!rEl || localName(rEl.name) !== "r") return null;
-    let pEl: XmlElement | undefined = this.host.doc.findParentOf(rEl);
-    while (pEl && localName(pEl.name) !== "p") pEl = this.host.doc.findParentOf(pEl);
-    if (!pEl) return null;
-    const pParent = this.host.doc.findParentOf(pEl);
-    if (!pParent) return null;
-    const runIdx = pEl.children.indexOf(rEl);
-    const tIdx = rEl.children.indexOf(caret.t);
-    if (runIdx === -1 || tIdx === -1) return null;
-
-    const prefix = pEl.name.includes(":") ? pEl.name.slice(0, pEl.name.indexOf(":") + 1) : "";
-    const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
-
-    // Split the caret run: text after the caret moves to a new run.
-    const afterT: XmlElement = {
-      name: caret.t.name,
-      attrs: { ...caret.t.attrs, "xml:space": "preserve" },
-      text: caret.t.text.slice(caret.offset),
-      children: [],
-    };
-    const afterRun: XmlElement = {
-      name: rEl.name,
-      attrs: { ...rEl.attrs },
-      text: "",
-      children: [...(rPr ? [cloneXml(rPr)] : []), afterT, ...rEl.children.slice(tIdx + 1)],
-    };
-    caret.t.text = caret.t.text.slice(0, caret.offset);
-    rEl.children = rEl.children.slice(0, tIdx + 1);
-
-    // New paragraph: cloned pPr (minus any section break!) + moved content.
-    const pPrEl = pEl.children.find((c) => localName(c.name) === "pPr");
-    const newPPr = pPrEl ? cloneXml(pPrEl) : undefined;
-    if (newPPr) {
-      newPPr.children = newPPr.children.filter((c) => localName(c.name) !== "sectPr");
-    }
-    const moved = pEl.children.slice(runIdx + 1);
-    pEl.children = pEl.children.slice(0, runIdx + 1);
-    const newP: XmlElement = {
-      name: prefix + "p",
-      attrs: {},
-      text: "",
-      children: [...(newPPr ? [newPPr] : []), afterRun, ...moved],
-    };
-    const pIdx = pParent.children.indexOf(pEl);
-    pParent.children.splice(pIdx + 1, 0, newP);
-
-    // Suggesting mode: the split introduces a new paragraph mark at the end of
-    // the FIRST paragraph — record it as an inserted glyph (pPr/rPr/w:ins).
-    if (this.suggesting) markParagraphGlyph(pEl, "ins", this.revMeta());
-
-    this.caret = { t: afterT, run: caret.run, offset: 0 };
-    return { before: pEl, after: newP };
+    if (!this.caret) return null;
+    const result = applySplitParagraph(this.host.doc, this.caret, this.mutationCtx());
+    if (!result) return null;
+    this.caret = result.caret;
+    return { before: result.before, after: result.after };
   }
 
   /** Update the retained parsed run for a simple in-place w:t edit. The XML
@@ -5837,9 +6854,38 @@ export class DocxEditor {
     // and fall back to the full scan — the hint is only ever an optimisation.
     const dirtyParagraph = this.caret ? paragraphOf(this.host.doc, this.caret.t) ?? undefined : undefined;
     const dirtyBlock = this.caret ? topLevelBlockOf(this.host.doc, this.caret.t) ?? undefined : undefined;
-    const syncedText = textOnly && this.caret ? this.syncTextModel(this.caret.t) : false;
+    // The fast in-place text path (syncTextModel) mutates the retained layout
+    // item's text WITHOUT bumping doc.modelVersion. During continuous typing in
+    // one spot the incremental renderer still repaints the caret's block, but the
+    // FIRST edit after the caret JUMPS to a different text node — by click, arrow,
+    // or any non-typing move — races the page-adoption reuse: the renderer sees
+    // the caret's page as unchanged (same modelVersion, same in-place-mutated
+    // items) and adopts its STALE DOM, so the new glyph never paints until the
+    // next keystroke (the bug that made click-then-type look dead and, in collab,
+    // desync as the user re-clicked a stale view). That one edit therefore may
+    // NOT take the in-place path; it needs fresh model objects for the caret's
+    // paragraph so the differ rebuilds its DOM.
+    //
+    // It reparses ONLY that paragraph. An earlier revision forced the full
+    // doc.refresh() here, and that was the 500-page regression (perf:
+    // scripts/bench-local-typing.mjs): refresh() rebuilds every model object
+    // (cold re-measure of the whole document — ~96k measureText calls on a
+    // 3000-paragraph doc, vs ~34 for one paragraph) and bumps modelVersion,
+    // which rerender answers past BACKGROUND_LAYOUT_PAGE_THRESHOLD with an
+    // async whole-document relayout behind an inert container — a multi-second
+    // input-eating stall after EVERY click-then-type. The scoped reparse keeps
+    // the adoption-defeat (new objects ⇒ pageEq fails ⇒ the touched page
+    // repaints) at one-paragraph cost; anything it cannot handle (header/
+    // footer stories, sectPr/bookmark paragraphs) returns null and takes the
+    // old full-refresh path.
+    const caretMoved = !!this.caret && this.caret.t !== this.lastCommitCaretT;
+    let syncedText = !caretMoved && textOnly && this.caret ? this.syncTextModel(this.caret.t) : false;
+    if (!syncedText && !structuralModelSynced && caretMoved && textOnly && dirtyParagraph) {
+      syncedText = this.host.doc.reparseBodyParagraph(dirtyParagraph) !== null;
+    }
     if (syncedText && dirtyParagraph) invalidateParagraphSignature(dirtyParagraph);
     else if (!structuralModelSynced) this.host.doc.refresh();
+    this.lastCommitCaretT = this.caret?.t ?? null;
     const t1 = perf ? performance.now() : 0;
     const repeated = !!this.caret && this.regionOf(this.caret.t) === "hf";
     this.host.rerender(repeated ? undefined : dirtyBlock, repeated ? "global" : scope, repeated ? undefined : this.caret?.t);
@@ -5856,6 +6902,10 @@ export class DocxEditor {
         layout: r.layout ?? 0,
         destroy: r.destroy ?? 0,
         render: r.render ?? 0,
+        scrollRead: r.scrollRead ?? 0,
+        renderDom: r.renderDom ?? 0,
+        scrollWrite: r.scrollWrite ?? 0,
+        afterRender: r.afterRender ?? 0,
         chromeCaret: t3 - t2,
         total: t3 - t0,
         totalPages: r.totalPages ?? 0,
@@ -5885,6 +6935,9 @@ export class DocxEditor {
   positionCaret(): void {
     const caret = this.caret;
     const handle = this.host.getHandle();
+    // A plain click positions a caret without a selection change; presence
+    // must still broadcast it (deduped inside).
+    this.reportPresence();
     if (!caret || !handle) return;
     // Prefer the binding containing the offset; at boundaries prefer the one
     // whose range ends exactly at the caret (keeps the caret after the char).

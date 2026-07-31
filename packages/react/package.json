@@ -1,6 +1,6 @@
 {
   "name": "wordinweb",
-  "version": "0.1.22",
+  "version": "0.2.0",
   "description": "React component for high-fidelity DOCX viewing and editing",
   "license": "MIT",
   "repository": {
@@ -16,12 +16,17 @@
     "access": "public"
   },
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./collab": {
+      "types": "./dist/collab.d.ts",
+      "import": "./dist/collab.js"
     }
   },
   "files": [
@@ -29,7 +34,9 @@
   ],
   "scripts": {
     "build": "tsup",
-    "prepack": "npm run build"
+    "prepack": "npm run build && node ../../scripts/check-dts-selfcontained.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@google/model-viewer": "^4.3.1",
@@ -46,7 +53,10 @@
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@wordinweb/core": "0.1.0",
+    "@wordinweb/collab": "0.2.0",
     "react": "^18.3.0",
-    "react-dom": "^18.3.0"
+    "react-dom": "^18.3.0",
+    "jsdom": "^25.0.0",
+    "vitest": "^2.1.0"
   }
 }

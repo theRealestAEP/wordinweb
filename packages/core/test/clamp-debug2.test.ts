@@ -14,7 +14,5 @@ it("cell trailing spaces carry caretClampX", () => {
   const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(tbl + sect) }));
   const result = layoutDocument(doc, { measurer: new ApproxMeasurer() });
   const spaces = result.pages[0].items.filter((i) => i.kind === "text" && i.text === " ");
-  console.log("space items:", spaces.length, "clamped:", spaces.filter((s: any) => s.caretClampX !== undefined).length);
-  for (const s of spaces.slice(0, 3)) console.log("  x=", (s as any).x.toFixed(1), "clamp=", (s as any).caretClampX);
   expect(spaces.some((s: any) => s.caretClampX !== undefined)).toBe(true);
 });

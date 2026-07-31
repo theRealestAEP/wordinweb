@@ -1,0 +1,262 @@
+import { describe, expect, it } from "vitest";
+import { CollabHub, Connection } from "../src/hub.js";
+import { PROTOCOL_VERSION, ENGINE_VERSION, deriveEpochKeys, mintDocKey, sealIntent } from "@wordinweb/collab/server";
+import type { ServerMessage, IntentEnvelope } from "@wordinweb/collab/server";
+
+/** Hub as blind sequencer (doc 13 §2): encrypted rooms, engine fence,
+ * cross-mode refusals, dedup on plaintext bookkeeping. */
+
+class FakeConn implements Connection {
+  received: ServerMessage[] = [];
+  constructor(public id: string) {}
+  send(msg: ServerMessage): void {
+    this.received.push(msg);
+  }
+  last(): ServerMessage {
+    for (let i = this.received.length - 1; i >= 0; i--) {
+      const t = this.received[i].t;
+      if (t !== "roster" && t !== "checkpointer") return this.received[i]; // ambient designations
+    }
+    return this.received[this.received.length - 1];
+  }
+}
+
+const CP = { seq: 0, iv: "aXY=", ciphertext: "b3BhcXVl" }; // opaque to the server — any bytes do
+const env = (clientId: string, clientSeq: number): IntentEnvelope => ({
+  clientId,
+  clientSeq,
+  base: 0,
+  iv: "aXY=",
+  ciphertext: "Y2lwaGVy",
+});
+const hello = (clientId: string, over: Record<string, unknown> = {}) =>
+  ({ t: "hello", protocolVersion: PROTOCOL_VERSION, docId: "d", clientId, sinceSeq: 0, engineVersion: ENGINE_VERSION, ...over }) as never;
+
+const encHub = () => {
+  const hub = new CollabHub(null); // zero-custody: encrypted docs are magic-link tier
+  expect(hub.seedEncrypted("d", "g1", CP).ok).toBe(true);
+  return hub;
+};
+
+describe("CollabHub encrypted rooms (doc 13 §2/§3)", () => {
+  it("seedEncrypted is first-wins like plaintext seed", () => {
+    const hub = encHub();
+    const second = hub.seedEncrypted("d", "g2", CP);
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.genesisId).toBe("g1");
+  });
+
+  it("welcome-enc carries the sealed checkpoint + tail; the server never parses anything", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice"));
+    const w = a.last();
+    expect(w.t).toBe("welcome-enc");
+    if (w.t !== "welcome-enc") return;
+    expect(w.genesisId).toBe("g1");
+    expect(w.checkpoint).toEqual(CP); // byte-for-byte what the seeder sent
+    expect(w.tail).toEqual([]);
+    expect(w.mode).toBe("encrypted");
+  });
+
+  it("engine fence: first joiner registers; a mismatched second is refused; missing is refused", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice"));
+    expect(a.last().t).toBe("welcome-enc");
+    const b = new FakeConn("b");
+    await hub.handle(b, hello("bob", { engineVersion: "e999" }));
+    expect(b.last()).toEqual({ t: "refused", reason: "engine-version-mismatch" });
+    const c = new FakeConn("c");
+    await hub.handle(c, hello("carol", { engineVersion: undefined }));
+    expect(c.last()).toEqual({ t: "refused", reason: "engine-version-required" });
+  });
+
+  it("sequences envelopes in order, dedups by plaintext bookkeeping, fans out", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    const b = new FakeConn("b");
+    await hub.handle(a, hello("alice"));
+    await hub.handle(b, hello("bob"));
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) });
+    await hub.handle(b, { t: "submit-enc", envelope: env("bob", 1) });
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) }); // re-send
+    const bcasts = b.received.filter((m) => m.t === "broadcast-enc");
+    expect(bcasts).toHaveLength(3);
+    const seqs = bcasts.flatMap((m) => (m.t === "broadcast-enc" ? m.entries.map((e) => e.seq) : []));
+    expect(seqs).toEqual([1, 2, 1]); // the re-send returns the ORIGINAL entry (dedup)
+  });
+
+  it("identity binding holds in encrypted mode (forged envelope clientId refused)", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("mallory"));
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) });
+    expect(a.last()).toEqual({ t: "refused", reason: "client-id-mismatch" });
+  });
+
+  it("no mixed-mode documents: plaintext submit into an encrypted room (and vice versa) refused", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice"));
+    await hub.handle(a, {
+      t: "submit",
+      intent: { kind: "insertText", clientId: "alice", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 0 }, text: "x" } as never,
+    });
+    expect(a.last()).toEqual({ t: "refused", reason: "wrong-mode" });
+
+    // Vice versa on a plaintext room.
+    const hub2 = new CollabHub(null);
+    hub2.seed("p", plaintextDoc());
+    const c = new FakeConn("c");
+    await hub2.handle(c, hello("carol", { docId: "p" }));
+    await hub2.handle(c, { t: "submit-enc", envelope: env("carol", 1) });
+    expect(c.last()).toEqual({ t: "refused", reason: "wrong-mode" });
+  });
+
+  it("oversized ciphertext is refused (the size cap a blind server CAN enforce)", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice"));
+    await hub.handle(a, { t: "submit-enc", envelope: { ...env("alice", 1), ciphertext: "A".repeat(300 * 1024) } });
+    expect(a.last()).toEqual({ t: "refused", reason: "too-large" });
+  });
+});
+
+import { zipSync, strToU8 } from "fflate";
+function plaintextDoc(): Uint8Array {
+  const documentXml =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>` +
+    `<w:p><w:r><w:t xml:space="preserve">hi</w:t></w:r></w:p></w:body></w:document>`;
+  return zipSync({
+    "[Content_Types].xml": strToU8(
+      `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+        `<Default Extension="xml" ContentType="application/xml"/>` +
+        `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+        `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+    ),
+    "_rels/.rels": strToU8(
+      `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+    ),
+    "word/document.xml": strToU8(documentXml),
+  });
+}
+
+describe("server-assigned checkpointer (doc 13 §3, blocker 2)", () => {
+  it("first joiner is designated; rotation on disconnect; only the designee's checkpoints count", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    const b = new FakeConn("b");
+    await hub.handle(a, hello("alice"));
+    await hub.handle(b, hello("bob"));
+    expect(a.received.some((m) => m.t === "checkpointer" && m.active)).toBe(true);
+    expect(b.received.some((m) => m.t === "checkpointer")).toBe(false);
+
+    // An edit sequences; a volunteer (bob) uploads at the log head — ignored.
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) });
+    const forged = { seq: 1, iv: "aXY=", ciphertext: "Zm9yZ2Vk" };
+    await hub.handle(b, { t: "checkpoint", checkpoint: forged });
+    const c1 = new FakeConn("c1");
+    await hub.handle(c1, hello("carol"));
+    const w1 = c1.last();
+    if (w1.t === "welcome-enc") expect(w1.checkpoint).toEqual(CP); // still the seed
+
+    // The DESIGNEE's quiescent checkpoint is adopted; the log prunes; a
+    // fresh joiner gets it with an empty tail.
+    await hub.handle(a, { t: "checkpoint", checkpoint: forged });
+    const c2 = new FakeConn("c2");
+    await hub.handle(c2, hello("dave"));
+    const w2 = c2.last();
+    expect(w2.t).toBe("welcome-enc");
+    if (w2.t === "welcome-enc") {
+      expect(w2.checkpoint).toEqual(forged);
+      expect(w2.tail).toEqual([]);
+    }
+
+    // Rotation: the designee leaves; someone else is designated.
+    hub.disconnect(a);
+    expect(b.received.some((m) => m.t === "checkpointer" && m.active)).toBe(true);
+  });
+
+  it("seq numbering continues from the checkpoint after the log prunes (no reset-to-1 desync)", async () => {
+    // Regression: after an adopted checkpoint pruned room.enc.log to empty, the
+    // next submit computed seq = (log empty ? 1 : ...) and RESET to 1. Every
+    // client's mirror numbers continuously from the checkpoint, so it expects
+    // checkpoint.seq+1 and hard-refuses seq 1 with `sequence-desync` — crashing
+    // ALL clients ~CHECKPOINT_EVERY edits into a session, right after a pause.
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice")); // first joiner = designated checkpointer
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) }); // seq 1
+    // Designee adopts a quiescent checkpoint at the log head; the log prunes.
+    await hub.handle(a, { t: "checkpoint", checkpoint: { seq: 1, iv: "aXY=", ciphertext: "eA==" } });
+    // The next edit MUST be seq 2 (checkpoint.seq + 1), not a reset to 1.
+    a.received = [];
+    await hub.handle(a, { t: "submit-enc", envelope: { ...env("alice", 2), base: 1 } });
+    const bcast = a.received.find((m) => m.t === "broadcast-enc");
+    expect(bcast?.t === "broadcast-enc" && bcast.entries[0].seq).toBe(2);
+  });
+
+  it("non-quiescent checkpoints are ignored (blocker-1 discipline)", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice"));
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) });
+    await hub.handle(a, { t: "submit-enc", envelope: { ...env("alice", 2), base: 1 } });
+    // Checkpoint at seq 1 while the log head is 2: straddled — ignored.
+    await hub.handle(a, { t: "checkpoint", checkpoint: { seq: 1, iv: "aXY=", ciphertext: "eA==" } });
+    const c = new FakeConn("c");
+    await hub.handle(c, hello("carol"));
+    const w = c.last();
+    if (w.t === "welcome-enc") {
+      expect(w.checkpoint).toEqual(CP); // unadopted
+      expect(w.tail).toHaveLength(2); // full tail still served
+    }
+  });
+
+  it("stale-base submits are refused after a checkpoint (joiner tails stay transformable)", async () => {
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice"));
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 1) });
+    await hub.handle(a, { t: "checkpoint", checkpoint: { seq: 1, iv: "aXY=", ciphertext: "eA==" } });
+    // base 0 < checkpoint seq 1 → the entry's transform context is pruned;
+    // the guard refuses instead of stranding future joiners.
+    await hub.handle(a, { t: "submit-enc", envelope: env("alice", 2) }); // base: 0
+    expect(a.last()).toEqual({ t: "refused", reason: "stale-base" });
+    // Rebased resubmit (same clientSeq) sequences fine.
+    await hub.handle(a, { t: "submit-enc", envelope: { ...env("alice", 2), base: 1 } });
+    expect(a.last().t).toBe("broadcast-enc");
+  });
+
+  it("log accounting counts the PADDED ciphertext length of real sealed envelopes", async () => {
+    // The room log budget must charge what actually crosses the wire. With
+    // sealed-body padding (e2ee.ts) every small intent seals to the 384-byte
+    // plaintext rung → 400 ct bytes → 536 base64 chars, so logBytes advances
+    // in 536-char steps for keystrokes — not the raw JSON's size.
+    const keys = await deriveEpochKeys(mintDocKey(), "g1");
+    const seal = (clientSeq: number, base: number) =>
+      sealIntent(keys.kContent, "d", "g1", {
+        kind: "insertText",
+        clientId: "alice",
+        clientSeq,
+        base,
+        at: { blockId: 1, runId: 2, offset: 0 },
+        text: "a",
+      } as never);
+    const hub = encHub();
+    const a = new FakeConn("a");
+    await hub.handle(a, hello("alice"));
+    const e1 = await seal(1, 0);
+    expect(e1.ciphertext.length).toBe(536); // the rung-1 envelope size
+    await hub.handle(a, { t: "submit-enc", envelope: e1 });
+    const snap1 = hub.roomsSnapshot();
+    expect(snap1).toHaveLength(1);
+    expect(snap1[0].logBytes).toBe(e1.ciphertext.length);
+    const e2 = await seal(2, 1);
+    await hub.handle(a, { t: "submit-enc", envelope: e2 });
+    expect(hub.roomsSnapshot()[0].logBytes).toBe(e1.ciphertext.length + e2.ciphertext.length); // 1072
+  });
+});

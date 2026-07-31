@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>wordinweb collab — anon-share demo</title>
+    <style>
+      /* Page + control-bar chrome matched to the viewer demo. The stage is a
+         cool grey with a soft light source at the top, so the white page
+         floats on it instead of sitting on flat white-on-white — which is
+         what made this look unfinished next to the viewer. */
+      /* THE HEIGHT CHAIN IS LOAD-BEARING FOR PERFORMANCE, not cosmetics.
+         DocxView only keeps the visible pages mounted, and it computes that
+         window from its scroll container's clientHeight (render/dom.ts). With
+         no height here, `height: 100%` further down resolves against an
+         auto-height #root, the editor's container grows to fit its content
+         instead of scrolling, clientHeight becomes the WHOLE document, and
+         nothing is ever culled — a 500-page file mounts all 500 pages and
+         every keystroke relayouts and repaints the lot.
+         This was missing from the start; the viewer demo has always had it. */
+      html, body, #root { height: 100%; }
+      body { margin: 0; font: 14px system-ui, sans-serif; color: #17243a;
+        background: radial-gradient(circle at 50% -60px, rgba(255,255,255,.72), transparent 440px), #e6eaf0; }
+      /* The session control bar, styled like the viewer's: pale blue-grey
+         rather than white, with a hairline and a soft shadow so it reads as
+         chrome sitting above the document rather than part of the page. */
+      header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+        min-height: 52px; padding: 7px 14px; background: #f8fafc;
+        border-bottom: 1px solid #cfd6e0; box-shadow: 0 1px 4px rgba(24,39,59,.07); }
+      header b { font-size: 15px; }
+      header .pill { background: #e8f0fe; color: #1a73e8; border-radius: 12px; padding: 3px 10px; }
+      header input { font: 12px ui-monospace, monospace; width: 320px; max-width: 50vw;
+        padding: 4px 8px; border: 1px solid #dadce0; border-radius: 6px; }
+      header button { font: 13px system-ui; padding: 5px 12px; border: 1px solid #dadce0;
+        background: #1a73e8; color: #fff; border-radius: 6px; cursor: pointer; }
+      header a { color: #1a73e8; }
+      header button.ghost { background: #fff; color: #202124; }
+      header button.ghost:hover { background: #f8f9fa; }
+      header button:focus-visible, .modal button:focus-visible,
+      header input:focus-visible, .modal input:focus-visible {
+        outline: 2px solid #1a73e8; outline-offset: 2px;
+      }
+      /* The in-session control row (download, disconnect, versions, owner
+         controls). These are SECONDARY to the document, so they are outlined
+         rather than filled — a row of solid blue buttons competes with the
+         page content for attention, and none of them is the primary action.
+         The owner's read-only toggle is the one exception below: it changes
+         what everyone else can do, so it should not look like "Download". */
+      /* One left gutter for every chrome row — the dark header, the session bar
+         and the ribbon below all start their content at the same x. The rows
+         were at 16/8/10px, so the roster chips sat a few pixels left of the
+         ribbon's "Home" and the whole stack looked slightly askew. */
+      .sessionbar { background: #f8fafc; border-bottom: 1px solid #cfd6e0;
+        --dxw-toolbar-z-index: 100; }
+      .app-header, .sessionbar, header { padding-left: 14px; padding-right: 14px; }
+      .sessionbar button { font: 13px system-ui; padding: 5px 11px; border: 1px solid #dadce0;
+        background: #fff; color: #202124; border-radius: 6px; cursor: pointer; }
+      .sessionbar button:hover:not([disabled]) { background: #f8f9fa; border-color: #c6cbd1; }
+      .sessionbar button:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
+      .sessionbar button[disabled] { opacity: .5; cursor: default; }
+      /* Owner-only, and destructive-ish: it silences everyone else. Amber
+         while ARMED so the person holding the lock can see they are holding
+         it — a lock you forget you set looks like a broken document to
+         everybody else in the room. */
+      .sessionbar button.owner[aria-pressed="true"] { background: #fef7e0; border-color: #f9ab00; color: #7a5900; }
+      /* Tiny per-participant actions (demote, kick) sitting inside a roster
+         chip. Square, quiet, and only ever rendered for the owner. */
+      .sessionbar button.chip { font-size: 10px; line-height: 1; padding: 2px 4px; border-radius: 4px;
+        border: 1px solid #dadce0; background: #fff; color: #5f6368; cursor: pointer; }
+      .sessionbar button.chip:hover { background: #f1f3f4; color: #202124; }
+      .sessionbar button.chip[data-active="true"] { background: #e8f0fe; border-color: #1a73e8; color: #174ea6; }
+      .control-tooltip { position: fixed; z-index: 300; width: max-content; max-width: 260px;
+        padding: 6px 8px; border-radius: 5px; background: #202124; color: #fff;
+        font-size: 11px; line-height: 1.35; box-shadow: 0 2px 8px rgba(0,0,0,.22);
+        pointer-events: none; }
+      /* GATE SCREENS: what you see INSTEAD of a document — needs a share
+         code, already open elsewhere, session gone, connection lost. These
+         are the first thing a person following a shared link sees, and they
+         were bare text and default controls pinned to the top-left of an
+         empty page, which reads as a broken page rather than a question.
+         Centred card, so it reads as "answer this to continue". */
+      .gate { display: flex; justify-content: center; padding: 56px 16px; }
+      .gate-card { background: #fff; border: 1px solid #e0e3e7; border-radius: 12px;
+        padding: 22px 24px; width: 440px; max-width: 100%; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+      .gate-card h2 { margin: 0 0 6px; font-size: 16px; }
+      .gate-card > p { margin: 0 0 16px; color: #5f6368; font-size: 13px; line-height: 1.5; }
+      .gate-row { display: flex; gap: 8px; align-items: center; }
+      .gate-card input { flex: 1; min-width: 0; font: 13px system-ui; padding: 8px 10px;
+        border: 1px solid #dadce0; border-radius: 6px; }
+      .gate-card input:focus-visible { outline: 2px solid #1a73e8; outline-offset: 1px; border-color: #1a73e8; }
+      .gate-card button { font: 13px system-ui; padding: 8px 16px; border-radius: 6px;
+        border: 1px solid transparent; background: #1a73e8; color: #fff; cursor: pointer; white-space: nowrap; }
+      .gate-card button:hover:not([disabled]) { background: #1765cc; }
+      .gate-card button[disabled] { opacity: .45; cursor: default; }
+      .gate-card button.ghost { background: #fff; color: #202124; border-color: #dadce0; }
+      .gate-card button.ghost:hover { background: #f8f9fa; }
+      /* Secondary escape hatch, separated so it never competes with the
+         primary action — "start a new document" abandons the one you were
+         invited to, which is the wrong thing to click by accident. */
+      .gate-foot { margin: 16px 0 0; padding-top: 14px; border-top: 1px solid #f1f3f4;
+        font-size: 13px; color: #5f6368; display: flex; gap: 8px; align-items: center; }
+      /* Wordmark: the product name plain, "Collaborative" set apart. This is
+         the collab build of WordInWeb, and the header should say which of the
+         two you are looking at without reading the subtitle. */
+      .brand .word { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+      .brand .collab { font-family: "Bradley Hand", "Segoe Print", "Comic Sans MS", cursive;
+        font-size: 18px; font-weight: 700; color: #1a73e8; margin-left: 5px;
+        transform: rotate(-2deg); display: inline-block; }
+      /* Project links, pushed to the far side and quiet: useful to a visitor
+         evaluating the project, never competing with the session controls. */
+      .brand-links { display: flex; gap: 14px; align-items: center; }
+      .brand-links a { font-size: 12px; color: #5f6368; text-decoration: none; white-space: nowrap; }
+      .brand-links a:hover { color: #1a73e8; text-decoration: underline; }
+      /* PRODUCT HEADER, matched to the viewer demo at word-in-web.com so the
+         two read as one project rather than two unrelated sites. The dark bar
+         carries identity and cross-links only; everything session-specific
+         (doc id, your name, share, disconnect) stays in the light bar below,
+         because those change constantly and identity should not move. */
+      .app-header { display: flex; min-height: 48px; align-items: center;
+        justify-content: space-between; gap: 20px; padding: 8px 16px; color: #fff;
+        background: linear-gradient(110deg, #132640, #1b365d 58%, #224b7a);
+        border-bottom: 1px solid rgba(5,18,34,.24); flex-wrap: wrap; }
+      .brand-lockup { display: flex; align-items: center; gap: 9px; min-width: 0; }
+      .brand-mark { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center;
+        border: 1px solid rgba(255,255,255,.24); border-radius: 4px; background: #2f6fed;
+        font-family: Georgia, serif; font-size: 18px; font-weight: 700; color: #fff; }
+      .brand-copy { display: flex; align-items: flex-start; flex-direction: column; line-height: 1.15; }
+      .brand-copy strong { font-family: Georgia, "Times New Roman", serif; font-size: 17px; letter-spacing: -.01em; }
+      /* "Collaborative" in a handwritten face: this is the collab build, and
+         the header should say which of the two you are on at a glance. */
+      .brand-copy .collab { font-family: "Bradley Hand", "Segoe Print", "Comic Sans MS", cursive;
+        font-size: 17px; font-weight: 700; color: #8ab4f8; margin-left: 6px;
+        display: inline-block; transform: rotate(-2deg); }
+      .brand-copy span.tag { color: #b9cae0; font-size: 10.5px; }
+      .app-links { display: flex; align-items: center; gap: 4px; }
+      .app-links a { padding: 6px 9px; border-radius: 6px; color: #dbe7f7; font-size: 12.5px;
+        font-weight: 600; text-decoration: none; white-space: nowrap; }
+      .app-links a:hover { color: #fff; background: rgba(255,255,255,.1); }
+      /* The sibling surface, lifted like Collaborative is on the viewer side. */
+      .app-links a.other { border: 1px solid rgba(255,255,255,.28); background: rgba(255,255,255,.08); }
+      /* Primary call to action: bigger than the utility buttons around it,
+         because it is the one control that changes what the app is. */
+      button.cta { font: 600 14px system-ui; padding: 9px 18px; border: 1px solid transparent;
+        background: #1a73e8; color: #fff; border-radius: 7px; cursor: pointer; }
+      button.cta:hover:not([disabled]) { background: #1765cc; }
+      button.cta[disabled] { opacity: .45; cursor: default; }
+      button.cta:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
+      /* Group divider inside the session row: session actions on one side,
+         identity and sharing on the other. */
+      .bar-sep { width: 1px; align-self: stretch; margin: 0 4px; background: #d7dde6; }
+      .sessionbar input.alias { font: 13px system-ui; width: 128px; padding: 5px 9px;
+        border: 1px solid #dadce0; border-radius: 6px; }
+      .sessionbar input.alias:focus-visible { outline: 2px solid #1a73e8; outline-offset: 1px; }
+      .sessionbar button.primary { background: #1a73e8; color: #fff; border-color: transparent; }
+      .sessionbar button.primary:hover { background: #1765cc; }
+      /* The roster is the one element whose width is not ours to choose, so it
+         scrolls within itself: a busy room must not wrap the row or push the
+         controls off the edge. min-width:0 is what actually lets a flex child
+         shrink below its content — without it the scroll never engages. */
+      .roster-scroll { display: flex; align-items: center; gap: 6px; margin-left: auto;
+        max-width: 38vw; min-width: 0; overflow-x: auto; overflow-y: hidden;
+        scrollbar-width: thin; padding: 2px 0; }
+      .hint { color: #5f6368; font-size: 12px; }
+      /* NO padding here: the header and control bars are full-bleed chrome and
+         a padded root inset them from the viewport, leaving a grey gutter down
+         both sides that made the whole app look like a widget embedded in a
+         page. Content that needs breathing room asks for it itself. */
+      #root { padding: 0; }
+
+      /* Wordmark: one line + a small subtitle. The subtitle is the product's
+         actual claim, not a tagline — letterspaced small caps so it reads as a
+         property of the thing rather than marketing copy. */
+      .brand { display: flex; flex-direction: column; line-height: 1.15; margin-right: 4px; }
+      .brand b { font-size: 15px; letter-spacing: -0.01em; }
+      .brand .sub { font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+        text-transform: uppercase; color: #5f6368; }
+      .spacer { flex: 1 1 auto; }
+
+      /* Name control sits inline in the header; it is a text field, not a
+         dialog, because changing your display name should cost one click. */
+      header input.alias { font: 13px system-ui; width: 132px; }
+
+      /* Above the toolbar, which sits at var(--dxw-toolbar-z-index, 100) and
+         renders its dropdowns at that same level. At 60 the scrim dimmed the
+         page but left the ribbon bright and clickable on top of it: the
+         dialog said aria-modal while the toolbar underneath stayed live.
+         200 clears the toolbar and its popovers together.
+
+         The countdown toast (z-index 50) is below this, which still costs
+         nothing: the local-editor "Start Collab" dialog exists only BEFORE a
+         session starts; the Save-version dialog is user-opened and closes on
+         Escape; and the session-ended dialog appears only AFTER the session
+         is over — the hook clears any pending deadline before it reports the
+         refusal, so there is never a live countdown to bury.
+
+         The scrim stays SEMI-transparent on purpose: the session-ended
+         dialog sits over the still-rendered (read-only) document, and the
+         document reading through the scrim is what tells the user their copy
+         is still here. */
+      .modal-scrim { position: fixed; inset: 0; background: rgba(32,33,36,.45);
+        display: flex; align-items: center; justify-content: center; z-index: 200; padding: 16px; }
+      .modal { background: #fff; border-radius: 12px; padding: 20px; width: 420px; max-width: 100%;
+        box-shadow: 0 8px 32px rgba(0,0,0,.24); }
+      .modal h2 { margin: 0 0 6px; font-size: 17px; }
+      .modal p { margin: 0 0 14px; color: #5f6368; font-size: 13px; line-height: 1.5; }
+      .modal label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 5px; }
+      .modal input { font: 13px system-ui; width: 100%; box-sizing: border-box;
+        padding: 7px 10px; border: 1px solid #dadce0; border-radius: 6px; }
+      .modal .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+      .modal button { font: 13px system-ui; padding: 7px 14px; border-radius: 6px; cursor: pointer;
+        border: 1px solid #dadce0; background: #1a73e8; color: #fff; }
+      .modal button.ghost { background: #fff; color: #202124; }
+      .modal button[disabled] { opacity: .6; cursor: default; }
+
+      /* FILE MENU. The trigger deliberately matches the main WordInWeb site's
+         `.file-menu-button` rather than this row's generic button — 32px tall,
+         70px wide, 7px radius, same border and text colour. The two apps share
+         a header and a wordmark, so a File menu that changes size between them
+         reads as two different products.
+
+         Z-INDEX 150 sits in the gap the existing ladder leaves: above the
+         ribbon and its dropdowns (--dxw-toolbar-z-index: 100, set on
+         .sessionbar) so the panel is never painted behind the toolbar, and
+         below the modal scrim (200) so a dialog still covers everything. */
+      .filemenu { position: relative; display: inline-flex; flex: 0 0 auto; }
+      .sessionbar .filemenu > button.filemenu-trigger {
+        display: inline-flex; align-items: center; justify-content: center;
+        height: 32px; min-width: 70px; gap: 8px; padding: 0 11px;
+        border: 1px solid #bcc7d5; border-radius: 7px; color: #29405e; background: #fff;
+        box-shadow: 0 1px 1px rgba(20,36,55,.04); }
+      .sessionbar .filemenu > button.filemenu-trigger:hover:not([disabled]) {
+        border-color: #8fa1b6; background: #f4f7fb; }
+      .filemenu-caret { font-size: 11px; line-height: 1; }
+      .filemenu-panel { position: absolute; top: calc(100% + 5px); left: 0; z-index: 150;
+        min-width: 210px; padding: 4px; background: #fff; border: 1px solid #dadce0;
+        border-radius: 6px; box-shadow: 0 4px 16px rgba(24,39,59,.18); }
+      /* Two class levels so these beat the `.sessionbar button` rules the panel
+         inherits by sitting inside the session row (full-width rows, no border,
+         left-aligned — a menu item is not a bar button). */
+      .filemenu .filemenu-panel button { display: block; width: 100%; text-align: left;
+        font: 13px system-ui; padding: 7px 10px; border: 1px solid transparent;
+        border-radius: 4px; background: transparent; color: #202124; cursor: pointer; }
+      .filemenu .filemenu-panel button:hover:not([disabled]) { background: #f1f3f4; border-color: transparent; }
+      .filemenu .filemenu-panel button[disabled] { opacity: .5; cursor: default; }
+      /* Saved-in-this-browser section: a divided block under the items. */
+      .filemenu-saved { margin-top: 4px; padding-top: 4px; border-top: 1px solid #e8eaed;
+        max-height: 260px; overflow-y: auto; min-width: 250px; }
+      .filemenu-heading { font: 600 11px system-ui; color: #5f6368; text-transform: uppercase;
+        letter-spacing: .4px; padding: 5px 10px 3px; }
+      .filemenu-note { font: 12px system-ui; color: #5f6368; padding: 5px 10px 7px; max-width: 250px; }
+      .filemenu-saveditem { display: flex; align-items: stretch; gap: 2px; }
+      .filemenu-saveditem > button:first-child { flex: 1; min-width: 0; }
+      .filemenu-savedname { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .filemenu-savedmeta { display: block; font-size: 11px; color: #5f6368; }
+      .filemenu .filemenu-panel button.filemenu-mini { display: inline-flex; align-items: center;
+        width: auto; flex: 0 0 auto; padding: 4px 7px; font-size: 12px; color: #5f6368; }
+      .filemenu .filemenu-panel button.filemenu-mini.danger { color: #a50e0e; background: #fce8e6; white-space: nowrap; }
+
+      /* DOCUMENT LOADING. Parsing and laying out a large .docx takes real
+         seconds, and without this the app showed a blank stage — which reads
+         as broken rather than busy. Matched to the viewer demo's overlay so
+         the two products behave the same way while they work. */
+      .document-loading { position: absolute; inset: 0; z-index: 20; display: grid;
+        place-content: center; justify-items: center; gap: 8px; color: #29405e;
+        background: rgba(230,234,240,.88); font-size: 13px; text-align: center; }
+      .document-loading span:last-child { color: #607086; font-size: 12px; }
+      .document-loading-spinner { width: 28px; height: 28px; border: 3px solid #c7d5ea;
+        border-top-color: #2f6fed; border-radius: 50%;
+        animation: document-loading-spin 700ms linear infinite; }
+      @keyframes document-loading-spin { to { transform: rotate(360deg); } }
+      /* A spinner that never stops is a lie about progress; respect the
+         setting rather than animating regardless. */
+      @media (prefers-reduced-motion: reduce) {
+        .document-loading-spinner, .dxw-collab-spinner { animation: none; border-top-color: #c7d5ea; }
+      }
+      /* Joining a session, styled to match the local screen's loader. The
+         package renders an empty span with this class and no styling of its
+         own, so the look belongs here. Centred, because this replaces the
+         whole document area rather than overlaying it. */
+      .dxw-collab-connecting { display: grid; place-content: center; justify-items: center;
+        gap: 10px; height: 100%; color: #29405e; font-size: 13px; text-align: center; }
+      .dxw-collab-spinner { width: 28px; height: 28px; border: 3px solid #c7d5ea;
+        border-top-color: #2f6fed; border-radius: 50%;
+        animation: document-loading-spin 700ms linear infinite; }
+
+      /* SAVED VERSIONS. Its own quiet strip under the session row, labelled,
+         so a row of timestamps reads as a list of restore points rather than
+         a loose button someone left behind. */
+      .versionbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+        padding: 6px 14px; background: #f8fafc; border-bottom: 1px solid #e6eaf0; }
+      .versionbar-label { font-size: 11px; font-weight: 600; letter-spacing: .04em;
+        text-transform: uppercase; color: #7a869a; margin-right: 2px; }
+      .versionbar button.version-chip { display: inline-flex; align-items: baseline; gap: 6px;
+        font: 12px system-ui; padding: 3px 9px; border: 1px solid #dbe2ea; border-radius: 999px;
+        background: #fff; color: #29405e; cursor: pointer; }
+      .versionbar button.version-chip:hover { border-color: #8fa1b6; background: #f4f7fb; }
+      .versionbar button.version-chip:focus-visible { outline: 2px solid #1a73e8; outline-offset: 2px; }
+      .version-name { font-weight: 600; }
+      .version-time { color: #7a869a; font-variant-numeric: tabular-nums; }
+
+      /* Countdown toward an announced session ending. DELIBERATELY NOT A
+         MODAL: the session stays fully usable through the grace period, and
+         for the idle deadline typing is what cancels it — a dialog that stole
+         the caret would prevent the one action that saves the session. It sits
+         out of the text column instead and lets editing continue underneath. */
+      .countdown { position: fixed; right: 16px; bottom: 16px; z-index: 50;
+        width: 320px; max-width: calc(100vw - 32px); background: #fff;
+        border: 1px solid #dadce0; border-left: 4px solid #f9ab00; border-radius: 10px;
+        padding: 12px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
+      /* Red for the deadline nothing can cancel, amber for the one editing
+         resets — the color says which kind of ending this is before the text. */
+      .countdown[data-reason="lifetime"] { border-left-color: #d93025; }
+      .countdown b { display: block; font-size: 13px; margin-bottom: 3px; }
+      .countdown .clock { font: 600 16px ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+      .countdown p { margin: 5px 0 0; font-size: 12px; color: #5f6368; line-height: 1.45; }
+      .countdown button { margin-top: 10px; font: 13px system-ui; padding: 6px 12px;
+        border-radius: 6px; border: 1px solid #dadce0; background: #fff; color: #202124; cursor: pointer; }
+      .countdown button:hover { background: #f8f9fa; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "name": "wordinweb-anon-share-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ../../scripts/dev.mjs",
+    "server": "WW_ENCRYPTED_ONLY=1 node ../../packages/server/dist/cli.js",
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run"
+  },
+  "comment": "Private example outside the root npm workspaces. `npm start` builds the packages, then runs the encrypted-only server and Vite app.",
+  "dependencies": {
+    "wordinweb": "0.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  },
+  "devDependencies": {
+    "@wordinweb/collab": "0.2.0",
+    "@wordinweb/core": "0.1.0",
+    "@wordinweb/server": "0.2.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}

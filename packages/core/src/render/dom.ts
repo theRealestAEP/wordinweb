@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { checkboxStateElement } from "../checkbox.js";
+import { isSafeUrl } from "../url-safety.js";
 import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem, WarpTextItem, ChartItem } from "../layout/types.js";
 import { cssFont, cambriaMathDescentShare } from "../layout/measure.js";
 import { Border } from "../model.js";
@@ -177,6 +178,68 @@ function pageEq(a: LaidOutPage, b: LaidOutPage): boolean {
   for (let i = 0; i < a.items.length; i++) {
     if (!itemEq(a.items[i], b.items[i], 0)) return false;
   }
+  return true;
+}
+
+function updatePageText(record: PageRender, page: LaidOutPage): boolean {
+  const previous = record.page;
+  if (
+    previous.width !== page.width ||
+    previous.height !== page.height ||
+    previous.number !== page.number ||
+    previous.index !== page.index ||
+    previous.bodyTop !== page.bodyTop ||
+    previous.bodyBottom !== page.bodyBottom ||
+    previous.hfStart !== page.hfStart ||
+    JSON.stringify(previous.columnBands) !== JSON.stringify(page.columnBands) ||
+    previous.items.length !== page.items.length
+  ) {
+    return false;
+  }
+
+  let bindingIndex = 0;
+  for (let i = 0; i < page.items.length; i++) {
+    const before = previous.items[i];
+    const after = page.items[i];
+    if (before.kind !== "text" || after.kind !== "text") {
+      if (!itemEq(before, after, 0)) return false;
+      continue;
+    }
+    if (!record.bindings[bindingIndex]) return false;
+    const beforeFields = before as unknown as Record<string, unknown>;
+    const afterFields = after as unknown as Record<string, unknown>;
+    for (const key in beforeFields) {
+      if (key === "src" || key === "text" || key === "x" || key === "width") continue;
+      if (!(key in afterFields) || !itemEq(beforeFields[key], afterFields[key], 0)) return false;
+    }
+    for (const key in afterFields) {
+      if (key === "src" || key === "text" || key === "x" || key === "width") continue;
+      if (!(key in beforeFields)) return false;
+    }
+    if (
+      before.width !== after.width &&
+      after.props.paintLetterSpacing !== undefined &&
+      after.props.letterSpacing !== undefined &&
+      after.text.trim()
+    ) {
+      return false;
+    }
+    bindingIndex++;
+  }
+  if (bindingIndex !== record.bindings.length) return false;
+
+  bindingIndex = 0;
+  for (const item of page.items) {
+    if (item.kind !== "text") continue;
+    const binding = record.bindings[bindingIndex++];
+    if (binding.item.text !== item.text) {
+      const target = item.strutFont ? binding.el.firstElementChild ?? binding.el : binding.el;
+      target.textContent = item.text;
+    }
+    binding.el.style.left = `${item.x}px`;
+    binding.item = item;
+  }
+  record.page = page;
   return true;
 }
 
@@ -451,13 +514,22 @@ export function renderToDom(
   let hiNew = layout.pages.length - 1;
   let hiOld = prevPages.length - 1;
   if (canReuse) {
-    while (lo < layout.pages.length && lo < prevPages.length && samePage(layout.pages[lo], prevPages[lo].page, lo)) {
+    while (
+      lo < layout.pages.length &&
+      lo < prevPages.length &&
+      (samePage(layout.pages[lo], prevPages[lo].page, lo) || updatePageText(prevPages[lo], layout.pages[lo]))
+    ) {
       const pr = prevPages[lo];
       pr.page = layout.pages[lo];
       pages[lo] = pr;
       lo++;
     }
-    while (hiNew >= lo && hiOld >= lo && samePage(layout.pages[hiNew], prevPages[hiOld].page, hiNew)) {
+    while (
+      hiNew >= lo &&
+      hiOld >= lo &&
+      (samePage(layout.pages[hiNew], prevPages[hiOld].page, hiNew) ||
+        updatePageText(prevPages[hiOld], layout.pages[hiNew]))
+    ) {
       const pr = prevPages[hiOld];
       pr.page = layout.pages[hiNew];
       pages[hiNew] = pr;
@@ -812,7 +884,7 @@ function renderPage(
         g.style.opacity = "0";
         g.style.pointerEvents = "none";
         g.style.boxShadow = "0 1px 1px rgba(0,0,0,.08)";
-        g.title = "Move table";
+        g.title = "Move table. Click for text wrapping options.";
         g.dataset.dxwTableMove = "1";
         g.innerHTML =
           '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square">' +
@@ -1208,6 +1280,11 @@ function ensureStylesheet(): void {
   style.id = "dxw-style";
   style.textContent = `
 .dxw-page span { font-kerning: none; font-variant-ligatures: none; }
+/* Remote presence name flag: the display name renders via CSS content from a
+   data attribute — inert (never parsed as markup, doc 11 XSS vector 7) AND
+   absent from the page's textContent, so cursor labels never leak into copy,
+   find-in-page, or accessibility text. The caret bar itself is an empty div. */
+.dxw-presence-name::after { content: attr(data-name); }
 .dxw-hf-mode .dxw-page span:not([data-dxw-hf]),
 .dxw-hf-mode .dxw-page a:not([data-dxw-hf]),
 .dxw-hf-mode .dxw-page img:not([data-dxw-hf]) { opacity: .45; }
@@ -1279,6 +1356,38 @@ function ensureStylesheet(): void {
 .dxw-narrow .dxw-comment-card.dxw-open .dxw-comment-delete { display: none; }
 `;
   document.head.appendChild(style);
+}
+
+/**
+ * The placeholder for a registered image whose bytes are still travelling
+ * (plan doc 05 change 2 / doc 16 §5.2). It occupies the part's real laid-out
+ * box, so filling it later changes pixels inside the frame and never reflows
+ * the page.
+ *
+ * The "unavailable" wording is deliberately about people, not errors: doc 16
+ * §7 makes this state recoverable by definition — the registration survives,
+ * and any participant holding the bytes restores it just by coming back.
+ */
+function renderMediaSkeleton(item: ImageItem, doc: DocxDocument): HTMLElement {
+  // A hole DERIVED from the package (rel to a missing part) carries no
+  // declared address, so no transfer can ever be in flight for it — never
+  // show it as "loading".
+  const addressless = doc.pendingMedia.get(item.part)?.sha === "";
+  const state = doc.mediaTransferState.get(item.part) ?? (addressless ? "unavailable" : "fetching");
+  const box = document.createElement("div");
+  box.className = "dxw-media-skeleton";
+  box.dataset.dxwMediaState = state;
+  const unavailable = state === "unavailable";
+  box.style.cssText =
+    `position:absolute;left:${item.x}px;top:${item.y}px;width:${item.width}px;height:${item.height}px;` +
+    `box-sizing:border-box;border:1px dashed ${unavailable ? "#e0a800" : "#c6cbd1"};border-radius:4px;` +
+    `background:${unavailable ? "#fffaf0" : "#f5f6f7"};display:flex;align-items:center;justify-content:center;` +
+    `text-align:center;padding:4px;font:11px system-ui,sans-serif;color:#5f6368;overflow:hidden;`;
+  box.textContent = unavailable
+    ? "Image unavailable — it reappears when someone who has it is online"
+    : "Loading image…";
+  box.title = box.textContent;
+  return box;
 }
 
 const CHART_COLORS = ["#4472c4", "#ed7d31", "#a5a5a5", "#ffc000", "#5b9bd5", "#70ad47"];
@@ -1515,7 +1624,13 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
       return renderChart(item);
     case "image": {
       const bytes = doc.media(item.part);
-      if (!bytes) return null;
+      // SKELETON (plan doc 05 change 2 / doc 16 §5.2): a registered part
+      // whose bytes haven't arrived reserves its exact laid-out box — the
+      // extents live in the XML, so a document full of skeletons paginates
+      // pixel-identically to the filled one. Rendering nothing (the old
+      // behavior) made an in-flight image look like a document that had
+      // silently lost it.
+      if (!bytes) return doc.pendingMedia.has(item.part) ? renderMediaSkeleton(item, doc) : null;
       const ext = item.part.slice(item.part.lastIndexOf(".") + 1).toLowerCase();
       const img = document.createElement("img");
       let splashOffset = false;
@@ -1837,7 +1952,10 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
       if (item.webVideo) {
         node.dataset.dxwWebVideo = "1";
         node.addEventListener("dblclick", () => {
-          window.open(item.webVideo!.url, "_blank", "noopener,noreferrer");
+          // Web-video URL is authored content — allowlist the scheme.
+          if (isSafeUrl(item.webVideo!.url)) {
+            window.open(item.webVideo!.url, "_blank", "noopener,noreferrer");
+          }
         });
       }
       if (item.embeddedObject) {
@@ -2363,7 +2481,10 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
   if (item.href) {
     const anchor = el as HTMLAnchorElement;
     const bookmark = item.href.startsWith("#") ? item.href.slice(1) : undefined;
-    anchor.href = item.href;
+    // User-authored URL: never assign a non-allowlisted scheme to href or
+    // navigate to it (javascript:/data:/vbscript: would be stored XSS).
+    const safe = isSafeUrl(item.href);
+    anchor.href = safe ? item.href : "about:blank";
     if (!bookmark) {
       anchor.target = "_blank";
       anchor.rel = "noreferrer noopener";
@@ -2377,8 +2498,8 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
         event.preventDefault();
         if (bookmark && (!interactive || event.metaKey || event.ctrlKey)) {
           scrollToBookmark(anchor, bookmark);
-        } else if (!bookmark && (event.metaKey || event.ctrlKey)) {
-          window.open(anchor.href, "_blank", "noopener,noreferrer");
+        } else if (!bookmark && safe && (event.metaKey || event.ctrlKey)) {
+          window.open(item.href, "_blank", "noopener,noreferrer");
         }
       });
     }

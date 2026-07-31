@@ -127,7 +127,7 @@ The object passed to `onReady`. Every command operates on the current selection 
 - `tableOp(op)` — insert/delete row/column, merge/split cells, cell vertical align, cell shading, delete table.
 
 **Images**
-- `insertImage(file)` — inserts a raster image or editable SVG icon inline at the caret, clamped to the column width (TIFF/WMF/EMF are decoded to something the browser can paint).
+- `insertImage(file)` — inserts a raster image or editable SVG icon inline at the caret, clamped to the column width (TIFF/WMF/EMF are decoded to something the browser can paint). Returns why it didn't happen (`unsupported-format`, `no-relay`, `upload-failed`, `no-caret`, `error`) rather than failing silently; in a collaborative document the formats narrow to what the wire carries, which `imageAccept()` reports for your file picker.
 - `insertScreenshot()` — opens the browser screen/window/tab picker and inserts the captured frame as an editable PNG picture.
 - `insertModel3D(file, poster?)` — packages a GLB as a native Office 3D model; editable documents show a drag-to-rotate viewport and save the orientation back to Word.
 - `insertOnlineVideo(url)` — inserts Word online-video metadata with a safe browser poster; double-click opens the validated HTTP(S) URL.
@@ -297,6 +297,57 @@ when a host needs a narrowly scoped style override.
 
 WordInWeb never converts the document to flowing HTML. It parses the OOXML into a typed model, runs a layout engine that breaks lines with real canvas metrics and paginates like Word, and renders each primitive as one absolutely-positioned element, so the browser does zero reflow. Editing mutates the retained XML tree and re-serializes only the parts it models, leaving everything else byte-for-byte intact.
 
+## Collaboration
+
+Real-time collaboration ships as a separate entry (`wordinweb/collab`). It
+supports encrypted and plaintext sessions, so the host application chooses
+the security and persistence model. The
+[`anon-share` example](examples/anon-share/README.md) documents the
+zero-custody encrypted deployment, architecture, and operations.
+
+The Node host ships as the separate `@wordinweb/server` package. A viewer or
+browser-only collaboration application has no dependency path to the server
+package, so its Node runtime and `ws` dependency stay out of browser bundles.
+
+### Two modes
+
+A document is encrypted or not, decided when it is created, and it cannot be joined in the wrong mode.
+
+| | Encrypted | Plaintext |
+|---|---|---|
+| Where edits are applied | Every client, over an ordered log of sealed envelopes | On the server |
+| What the server holds | Ciphertext it has no key for | The document |
+| Key management | The doc key rides the link fragment; a share code can be mixed in | None |
+| Good for | Anything crossing a network you do not own | An internal tool on a trusted network |
+
+Both are supported and neither is deprecated. Plaintext is simpler — no keys, no fragments, no share codes — and is the right choice when the server is yours and the network is trusted.
+
+**A client cannot enforce the mode.** The two are created through the same `/docs` route, so a deployment whose whole claim is that it never holds a readable document must say so on the server: set `WW_ENCRYPTED_ONLY=1`, or pass `encryptedOnly: true` to `handleSeedRequest`. Without it, posting plain bytes to that route creates a plaintext room no matter what the app UI offers. It is off by default — turning it on is a deployment's choice.
+
+```tsx
+import { CollabEditor, IndexedDbBundleStore } from "wordinweb/collab";
+
+export function Room({ docId, clientId, docKey, shareCode }) {
+  return (
+    <CollabEditor
+      url="wss://collab.example.com"
+      docId={docId}
+      clientId={clientId}
+      docKey={docKey}        // from the link's #k= fragment; presence selects E2EE
+      shareCode={shareCode}  // optional passphrase, mixed into key derivation
+      httpBase="https://collab.example.com"  // enables images
+      store={new IndexedDbBundleStore()}     // resume across reloads
+    />
+  );
+}
+```
+
+`useCollab(opts)` returns the same `CollabSession` if you want to build the UI
+yourself. Render the editor read-only whenever `session.writesBlocked` is true:
+the server refuses writes from a locked, demoted, or viewer-role client, and an
+editable surface over those refusals applies each keystroke locally and then
+discards it.
+
 ## Fonts
 
 Text is measured on a canvas before layout, so line breaks depend on the real font metrics. For Word parity, register the bundled OFL substitutes in your app entry:
@@ -330,8 +381,10 @@ When the browser can't render a requested face, `onMissingFonts` reports it so y
 
 ```bash
 npm install
-npm test                 # core unit tests (parser + layout, deterministic measurer)
-npm run build            # build the public package
+npm run build            # build all published packages
+npm run typecheck        # type-check packages and the example
+npm test                 # build and run all package and example unit tests
+npm run demo             # build and open the collaboration demo
 ```
 
 ## Rendering parity

@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "@wordinweb/core": ["../core/src/index.ts"]
+    }
+  },
+  "include": ["src", "../core/src/wmf.d.ts"]
+}

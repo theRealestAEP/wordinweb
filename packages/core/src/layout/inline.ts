@@ -64,6 +64,10 @@ export interface FieldContext {
    * (Word recomputes REF on open; cached results are stale). undefined when
    * the bookmark is unknown — the caller then keeps the cache. */
   refText?: (bookmark: string) => string | undefined;
+  /** Clock for DATE/TIME field evaluation. Injectable so layout is
+   * deterministic under test/harness (plan doc 09 M3 — layout-time new Date()
+   * otherwise makes field rendering wall-clock-dependent). Defaults to now. */
+  now?: Date;
   /** REF `\p`: the referenced bookmark's position relative to this field
    * occurrence ("above"/"below"), or undefined when the target is unknown. */
   refPosition?: (fieldKey: object) => "above" | "below" | undefined;
@@ -1266,9 +1270,55 @@ function breakParagraphImpl(
     let rest = atom.text;
     while (rest.length > 0) {
       const capacity = lineStartX(lineIndex) + availFor(lineIndex) - x;
-      let take = rest.length;
-      while (take > 1 && measurer.width(rest.slice(0, take), atom.font, atom.props.letterSpacing) > capacity) {
-        take--;
+      const fits = (n: number): boolean =>
+        measurer.width(rest.slice(0, n), atom.font, atom.props.letterSpacing) <= capacity;
+      // How many characters fit: the LARGEST n whose prefix still fits, or 1
+      // when not even one does.
+      //
+      // Found by bisection rather than by walking n down one character at a
+      // time. Both find the same n — the predicate is monotone, because every
+      // added character contributes a non-negative advance — but the walk
+      // measures a prefix per character, and measuring is O(prefix), so
+      // fitting one line of a long token was O(token²). That is the whole of
+      // perf B10: a collab flood pastes tokens with no spaces into one run,
+      // every line then takes this emergency character-wrap path, and the
+      // receiving client burned 67% of its main thread re-measuring prefixes
+      // (292 MILLION characters measured for a 1.5 KB document in 12 s) until
+      // clicks took seconds to land. Bisection makes it O(token · log token).
+      //
+      // Monotonicity is NOT a safe assumption to leave implicit. Negative
+      // letter spacing (Word condensed text) makes a longer prefix measure
+      // narrower outright, and text measurement has its own non-monotone
+      // corners — kerning pairs, combining marks, joiners. So the bisection
+      // is not trusted on faith: its answer is VERIFIED against the boundary
+      // property, and anything that fails verification falls back to the
+      // exact walk for that fragment. Three cache-warm probes on the happy
+      // path buy a result that is checked rather than assumed.
+      const walkDown = (): number => {
+        let n = rest.length;
+        while (n > 1 && !fits(n)) n--;
+        return n;
+      };
+      let take: number;
+      if ((atom.props.letterSpacing ?? 0) >= 0) {
+        let lo = 1;
+        let hi = rest.length;
+        while (lo < hi) {
+          const mid = lo + Math.ceil((hi - lo) / 2);
+          if (fits(mid)) lo = mid;
+          else hi = mid - 1;
+        }
+        take = lo;
+        // The boundary the walk would have produced: this prefix fits, one
+        // more character does not, and the whole remainder does not fit
+        // either (the walk starts at the top and would have stopped there).
+        const verified =
+          (take === 1 || fits(take)) &&
+          (take === rest.length || !fits(take + 1)) &&
+          (take === rest.length || !fits(rest.length));
+        if (!verified) take = walkDown();
+      } else {
+        take = walkDown();
       }
       const piece = rest.slice(0, take);
       const w = measurer.width(piece, atom.font, atom.props.letterSpacing);
@@ -3716,7 +3766,7 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       // live clock (the parity harness freezes it to the reference PDF's
       // creation instant, so both sides evaluate the same moment).
       const picture = /\\@\s+"([^"]*)"/.exec(instr)?.[1];
-      return formatDatePicture(new Date(), picture ?? (keyword === "TIME" ? "h:mm am/pm" : "M/d/yyyy"));
+      return formatDatePicture(ctx.now ?? new Date(), picture ?? (keyword === "TIME" ? "h:mm am/pm" : "M/d/yyyy"));
     }
     case "STYLEREF": {
       // Word recomputes STYLEREF on open (the docx cache reflects the style's

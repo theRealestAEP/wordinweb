@@ -56,9 +56,28 @@ export function decodeEntities(s: string): string {
   });
 }
 
-export function parseXml(input: string): XmlElement {
+/** Resource caps for parseXml — a denial-of-service guard so a crafted part
+ * (millions of empty elements, pathological nesting) cannot exhaust memory on
+ * the server or a peer that re-parses a snapshot (plan doc 11, security F4).
+ * Generous enough for real documents; override per call if ever needed. */
+export interface XmlParseLimits {
+  maxLength: number;
+  maxNodes: number;
+  maxDepth: number;
+}
+export const DEFAULT_XML_LIMITS: XmlParseLimits = {
+  maxLength: 64 * 1024 * 1024, // 64 MB of XML text
+  maxNodes: 4_000_000,
+  maxDepth: 512,
+};
+
+export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIMITS): XmlElement {
+  if (input.length > limits.maxLength) {
+    throw new Error(`XML parse error: input exceeds ${limits.maxLength} bytes`);
+  }
   let i = 0;
   const n = input.length;
+  let nodeCount = 0;
   // Strip BOM
   if (input.charCodeAt(0) === 0xfeff) i = 1;
 
@@ -148,9 +167,13 @@ export function parseXml(input: string): XmlElement {
       const selfClose = input[j] === "/";
       if (selfClose) j++;
       if (input[j] !== ">") fail(`malformed tag <${name}`);
+      if (++nodeCount > limits.maxNodes) fail(`too many nodes (> ${limits.maxNodes})`);
       const top = stack[stack.length - 1];
       top.children.push(el);
-      if (!selfClose) stack.push(el);
+      if (!selfClose) {
+        stack.push(el);
+        if (stack.length > limits.maxDepth) fail(`nesting too deep (> ${limits.maxDepth})`);
+      }
       i = j + 1;
     }
   }

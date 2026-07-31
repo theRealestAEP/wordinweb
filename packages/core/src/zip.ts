@@ -1,11 +1,37 @@
 import { unzipSync, strFromU8 } from "fflate";
 
+/** Fixed mtime for every zip entry we write (2020-01-01T00:00:00Z). Without
+ * it fflate stamps `new Date()` at 2-second DOS granularity, so two save()
+ * calls straddling a boundary differ in bytes — breaking byte-identity
+ * checks (docHash self-heal, checkpoint dedup, byte-compare tests). B11. */
+export const FIXED_ZIP_MTIME = new Date(1577836800000);
+
+/** Decompression-bomb guards (plan doc 11, security F4): a crafted .docx must
+ * not exhaust memory via a huge uncompressed payload or a vast number of
+ * entries. Generous for real documents. */
+export const DEFAULT_ZIP_LIMITS = {
+  maxTotalUncompressed: 512 * 1024 * 1024, // 512 MB across all entries
+  maxEntries: 20_000,
+};
+
 /** A read-only view over the OPC (zip) package inside a .docx file. */
 export class Package {
   private files: Record<string, Uint8Array>;
 
   constructor(data: Uint8Array) {
     this.files = unzipSync(data);
+    let total = 0;
+    let entries = 0;
+    for (const name in this.files) {
+      entries++;
+      total += this.files[name].length;
+      if (entries > DEFAULT_ZIP_LIMITS.maxEntries) {
+        throw new Error(`zip has too many entries (> ${DEFAULT_ZIP_LIMITS.maxEntries})`);
+      }
+      if (total > DEFAULT_ZIP_LIMITS.maxTotalUncompressed) {
+        throw new Error(`zip uncompressed size exceeds ${DEFAULT_ZIP_LIMITS.maxTotalUncompressed} bytes`);
+      }
+    }
   }
 
   static from(data: ArrayBuffer | Uint8Array): Package {

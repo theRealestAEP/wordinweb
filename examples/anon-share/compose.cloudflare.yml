@@ -1,0 +1,186 @@
+# wordinweb collab demo — Cloudflare Tunnel deployment.
+#
+#   TUNNEL_TOKEN=... docker compose -f compose.cloudflare.yml up -d --build
+#
+# WHY THIS IS A SEPARATE FILE rather than an override of compose.yml: the one
+# thing that has to change is the REMOVAL of caddy's published ports, and
+# Compose merges `ports:` by appending. An override can add a port; it cannot
+# take one away. A file that silently failed to close 80/443 would be the
+# worst possible outcome here, so the two stacks are stated separately.
+#
+# Use ./compose.yml instead when you want the direct-to-internet stack (Caddy
+# owns the hostname and its own Let's Encrypt certificate).
+#
+# THE PROPERTY THIS FILE EXISTS FOR: nothing binds to the droplet's public
+# interface. `cloudflared` dials OUT to Cloudflare and requests arrive back
+# through that connection, so the origin is not reachable from the internet at
+# all — not merely firewalled off from it. Combined with a DO Cloud Firewall
+# that permits only SSH, a leaked droplet IP is an annoyance rather than an
+# exposure, because there is nothing listening to find.
+#
+# Zero custody is unchanged and still the contract: rooms live in the collab
+# server's memory and die with it. No database, no volume for document state.
+services:
+  collab:
+    build:
+      context: ../..
+      dockerfile: packages/server/Dockerfile
+    expose:
+      - "1234"
+    environment:
+      PORT: "1234"
+      WW_LOG_LEVEL: "info"
+      # Participants in ONE room, not the number of rooms — the name invites
+      # the opposite reading and compose.yml documented it wrongly until it
+      # was caught. Room count is WW_MAX_ROOMS_GLOBAL below.
+      WW_ROOM_CAP: "10"
+      # ── session lifecycle (see compose.yml for the full rationale) ──────
+      WW_EMPTY_ROOM_TTL_MS: "60000"
+      WW_IDLE_TIMEOUT_MS: "600000"
+      WW_IDLE_WARNING_MS: "60000"
+      WW_ROOM_MAX_LIFETIME_MS: "43200000"
+      WW_LIFETIME_WARNING_MS: "300000"
+      # ── per-IP limits ───────────────────────────────────────────────────
+      # DELIBERATELY NOT RAISED alongside the global caps below. These bound
+      # what ONE address can consume, and the useful property is the RATIO to
+      # the global caps: at 50 per address against 20000 global, an attacker
+      # needs 400 distinct addresses to saturate the server. Raising these
+      # lowers that number in direct proportion and buys nothing, because
+      # nothing was hitting them. WW_IP_MAX_DOCS matters most now that a room
+      # holds a copy of its document in memory — it is the cap on the most
+      # expensive resource one address can claim.
+      WW_IP_SEED_PER_MIN: "10"
+      WW_IP_MAX_DOCS: "25"
+      WW_IP_MAX_CONNS: "50"
+      # ONE hop, and that is exact rather than estimated: Caddyfile.tunnel
+      # REPLACES X-Forwarded-For with Cloudflare's CF-Connecting-IP, so the
+      # chain reaching this server is always exactly one entry — the real
+      # client. Do not raise this to "account for Cloudflare"; the extra hops
+      # were collapsed at the proxy on purpose, because counting them behind a
+      # tunnel is guesswork that fails silently.
+      #
+      # VERIFY IT ANYWAY, behaviorally — IPs are deliberately never logged, so
+      # a wrong value cannot be read off a log line. Seed past WW_IP_SEED_PER_MIN
+      # from one network, then try from a genuinely different one (a phone on
+      # cellular). If the second is also refused, every client is sharing one
+      # bucket and this is wrong.
+      WW_TRUST_PROXY: "1"
+      # This demo's whole claim is that the server never holds a document it
+      # can read. The app only ever creates encrypted documents — but the app
+      # is not a gate. Posting plain bytes to the same /docs route creates a
+      # plaintext room, where the server does hold and parse the file. This
+      # closes that. The server supports both modes; refusing one is this
+      # deployment's choice, not the package's default.
+      WW_ENCRYPTED_ONLY: "1"
+      # ── surge valves ────────────────────────────────────────────────────
+      WW_WS_MAX_PAYLOAD: "524288"
+      WW_WS_MAX_BUFFERED: "4194304"
+      # Largest DOCUMENT this server accepts, decoded. The seed route, the
+      # HTTP body reader and the live checkpoint check all derive their wire
+      # ceilings from this one number (base64 costs a third), so they cannot
+      # drift — three independent copies is what let a document start a
+      # session and then have every checkpoint silently refused.
+      #
+      # COSTS RAM PER ROOM, not just per upload: an encrypted room holds its
+      # latest sealed checkpoint in memory for the whole session, so 64 MB
+      # documents mean ~85 MiB per such room. Chunked seeding would remove
+      # the ceiling properly; this raises it.
+      WW_MAX_DOC_BYTES: "67108864"
+      WW_ROOM_LOG_MAX_BYTES: "67108864"
+      # Sized for a dedicated 16 GB / 10-core host. See `ulimits` below —
+      # WW_MAX_CONNS_GLOBAL is meaningless above the container's file-handle
+      # limit, because every connection needs one. It read 5000 here while the
+      # container allowed 1024, so the server would have failed to accept long
+      # before reaching its own configured cap.
+      WW_MAX_ROOMS_GLOBAL: "10000"
+      WW_MAX_CONNS_GLOBAL: "20000"
+      # ── media ───────────────────────────────────────────────────────────
+      WW_MEDIA_MAX_BLOB_BYTES: "5242880"
+      WW_MEDIA_MAX_ROOM_BYTES: "104857600"
+      # Two-tier media locker. Before this, media RAM was bounded only PER
+      # ROOM, so enough rooms could exhaust the host; now it is capped
+      # globally and the overflow spills to disk.
+      #
+      # 8 GB, not the spec's 20 GB. This host's disk is 228 GB but 89% full —
+      # 184 GB used, ~25 GB free — and the budget must sit UNDER free space so
+      # that the budget is what binds, not the filesystem. 20 GB would not.
+      #
+      # This is a CEILING, not a reservation: the tier writes to disk only when
+      # media actually overflows the RAM ceiling above, so a quiet server uses
+      # none of it. That is why 8 GB against 25 GB free is not tight — it caps
+      # the worst case and leaves 17 GB clear.
+      #
+      # The spill path must be EPHEMERAL SCRATCH. The container's own writable
+      # layer is exactly that — it dies with the container. Do NOT mount a
+      # named volume here, and do NOT use tmpfs: tmpfs is RAM-backed, which
+      # would put the disk tier in memory and defeat the entire point.
+      WW_MEDIA_RAM_BYTES: "134217728"
+      WW_MEDIA_DISK_BYTES: "8589934592"
+      WW_MEDIA_ROOM_UPLOADS_PER_MIN: "60"
+      WW_MEDIA_ROOM_UPLOAD_BURST: "64"
+      WW_MEDIA_STAGE_TTL_MS: "60000"
+      WW_MEDIA_TTL_MS: "300000"
+    # Every WebSocket connection holds one file handle. The default of 1024
+    # was the real ceiling on concurrency, well below WW_MAX_CONNS_GLOBAL, and
+    # the server would hit EMFILE on accept rather than its own limit.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1234/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - collab
+    # NO `ports:` — deliberately, and this is the whole difference from
+    # compose.yml. Adding one here republishes the origin to the internet and
+    # makes Caddyfile.tunnel's CF-Connecting-IP rewrite spoofable by anyone
+    # who reaches it directly. If you think you need a port, you want
+    # compose.yml instead.
+    volumes:
+      - ./deploy/Caddyfile.tunnel:/etc/caddy/Caddyfile:ro
+      - app-dist:/srv:ro
+    # No caddy-data/caddy-config volumes: those persist certificates and ACME
+    # account keys, and this Caddy issues no certificates. TLS terminates at
+    # Cloudflare's edge.
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    depends_on:
+      - caddy
+    # Dials OUT. No ports, no inbound firewall rule, nothing to expose.
+    command: tunnel --no-autoupdate run
+    environment:
+      # From the Cloudflare Zero Trust dashboard when you create the tunnel.
+      # It is a CREDENTIAL: keep it in a .env file beside this one (gitignored)
+      # or the shell environment, never committed. `:?` fails the run loudly
+      # rather than starting a tunnel that silently connects to nothing.
+      TUNNEL_TOKEN: "${TUNNEL_TOKEN:?set TUNNEL_TOKEN — see the Cloudflare tunnel dashboard}"
+    restart: unless-stopped
+
+  # Builds the static bundle into the shared volume, then exits.
+  app:
+    build:
+      context: ../..
+      dockerfile: examples/anon-share/Dockerfile
+      target: build
+    command: sh -c "rm -rf /out/* && cp -r /app/examples/anon-share/dist/. /out/"
+    volumes:
+      - app-dist:/out
+    restart: "no"
+
+volumes:
+  app-dist:

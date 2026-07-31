@@ -10,3 +10,19 @@ test-results/
 internal/
 __pycache__/
 *.py[cod]
+playwright-report/
+.vite/
+# Deployment credentials. examples/anon-share/.env holds TUNNEL_TOKEN, which
+# is enough on its own for anyone to run a connector for the tunnel — so this
+# rule exists BEFORE the file does, rather than after someone runs `git add -A`
+# and rewrites history to take it back.
+.env
+.env.*
+!.env.example
+
+# Ops dashboard for a specific deployment: host addresses, an SSH path, and a
+# view of live rooms. Useful locally, not part of the published project, and
+# it reads /stats which is deliberately never exposed publicly. Scoped to the
+# subdirectory rather than all of tools/ so a genuine repo tool can still land.
+/tools/dashboard/
+.prefix-react-dist/

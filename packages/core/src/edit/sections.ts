@@ -342,7 +342,21 @@ export function lineNumberingAt(
  * or updates it in schema-correct position and relayouts.
  */
 export function setLineNumbering(doc: DocxDocument, patch: LineNumberingPatch, target?: XmlElement): boolean {
-  const sectPrs = target ? [target] : allSectPrs(doc);
+  let sectPrs = target ? [target] : allSectPrs(doc);
+  if (sectPrs.length === 0 && !target) {
+    // sectPr-less minimal doc: materialize the default body section (see
+    // setPageLayout) so the control isn't a dead no-op.
+    const root = doc.editableRoots()[0];
+    const body = root && (localName(root.name) === "body"
+      ? root
+      : root.children.find((c) => localName(c.name) === "body"));
+    if (body) {
+      const w = prefixOf(body) || "w:";
+      const created: XmlElement = { name: `${w}sectPr`, attrs: {}, children: [], text: "" };
+      body.children.push(created);
+      sectPrs = [created];
+    }
+  }
   if (sectPrs.length === 0) return false;
   for (const sectPr of sectPrs) {
     const w = prefixOf(sectPr) || "w:";

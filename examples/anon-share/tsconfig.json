@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "declaration": false,
+    "noEmit": true,
+    "types": ["vite/client", "node"],
+    "paths": {
+      "wordinweb": ["../../packages/react/src/index.tsx"],
+      "wordinweb/collab": ["../../packages/react/src/collab.tsx"],
+      "@wordinweb/core": ["../../packages/core/src/index.ts"],
+      "@wordinweb/collab/client": ["../../packages/collab/src/client.ts"],
+      "@wordinweb/collab/server": ["../../packages/collab/src/server.ts"],
+      "@wordinweb/server": ["../../packages/server/src/index.ts"]
+    }
+  },
+  "include": ["main.tsx", "src", "../../packages/core/src/wmf.d.ts"]
+}
