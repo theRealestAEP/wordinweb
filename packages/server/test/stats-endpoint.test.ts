@@ -220,7 +220,7 @@ describe("GET /stats with the spill tier live", () => {
 });
 
 describe("the startup banner", () => {
-  it("states storage: none and both media budgets, the spill dir, and the ephemeral-scratch warning", async () => {
+  it("states storage, media budgets, and structured spill properties", async () => {
     process.env.WW_LOG_LEVEL = "info"; // the banner is an info-level line
     const lines: string[] = [];
     const spy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
@@ -245,8 +245,12 @@ describe("the startup banner", () => {
         mediaRamBytes: 5 * 1024 * 1024,
         mediaDiskBytes: 32 * 1024 * 1024,
         spillDir: join(root, "spill"),
+        spillMode: "ephemeral",
+        spillEncrypted: true,
+        spillWipedAtBoot: true,
+        spillPersistent: false,
       });
-      expect(String(banner!.spillNote)).toContain("never a persistent");
+      expect(banner).not.toHaveProperty("spillNote");
     } finally {
       spy.mockRestore();
       server.close();

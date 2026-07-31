@@ -461,14 +461,8 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
     ipGuard.sweep();
   }, 10_000);
   server.listen(port);
-  // THE STARTUP BANNER (doc 16 §4, doc 12 §2), as one structured stderr line
-  // — stdout stays clean by design (`scripts/dev.mjs` prints the demo's own
-  // ready line and parses nothing else). It states the whole storage
-  // contract in one place: no document storage, both media budgets, and —
-  // when the spill is on — where it writes and the warning that the path
-  // must be ephemeral scratch. The dir is config echoed back (it came from
-  // the environment), never session data, and it appears here only — /stats
-  // carries nothing path-shaped.
+  // Emit the storage configuration once after the port binds. The spill
+  // directory comes from the environment and never appears in /stats.
   obs.serverStarted({
     port,
     storage: "none (zero-custody)",
@@ -477,10 +471,12 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
     ...(limits.media.diskBytes > 0
       ? {
           spillDir: limits.media.spillDir,
-          spillNote:
-            "ephemeral scratch — per-boot-key encrypted, wiped at boot, worthless across restarts; never a persistent or backed-up volume",
+          spillMode: "ephemeral",
+          spillEncrypted: true,
+          spillWipedAtBoot: true,
+          spillPersistent: false,
         }
-      : { spillNote: "disk spill off (WW_MEDIA_DISK_BYTES=0)" }),
+      : { spillMode: "off" }),
   });
   return {
     close: () => {
