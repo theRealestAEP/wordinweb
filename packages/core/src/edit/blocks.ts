@@ -260,8 +260,14 @@ export function setPageLayout(doc: DocxDocument, patch: PageLayoutPatch, target?
     };
 
     if (patch.size) {
-      setAttr(pgSz, "w", String(Math.round(patch.size.width * TWIPS_PER_INCH)));
-      setAttr(pgSz, "h", String(Math.round(patch.size.height * TWIPS_PER_INCH)));
+      let width = Math.round(patch.size.width * TWIPS_PER_INCH);
+      let height = Math.round(patch.size.height * TWIPS_PER_INCH);
+      const currentWidth = parseInt(getAttr(pgSz, "w") ?? "12240", 10);
+      const currentHeight = parseInt(getAttr(pgSz, "h") ?? "15840", 10);
+      const isLandscape = getAttr(pgSz, "orient") === "landscape" || currentWidth > currentHeight;
+      if (isLandscape !== (width > height)) [width, height] = [height, width];
+      setAttr(pgSz, "w", String(width));
+      setAttr(pgSz, "h", String(height));
     }
     if (patch.orientation) {
       const cw = parseInt(getAttr(pgSz, "w") ?? "12240", 10);
