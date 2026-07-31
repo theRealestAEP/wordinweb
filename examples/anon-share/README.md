@@ -121,7 +121,7 @@ Point the tunnel hostname at `caddy:80`. Caddy replaces
 | **Surge valves** | `WW_WS_MAX_PAYLOAD`, `WW_WS_MAX_BUFFERED`, `WW_ROOM_LOG_MAX_BYTES`, `WW_MAX_ROOMS_GLOBAL`, and `WW_MAX_CONNS_GLOBAL` bound server work and memory. |
 | **Media** | The relay holds encrypted blobs within per-blob, per-room, RAM, and disk limits. Evicted blobs can be supplied again by a participant. |
 | **Per-IP limits** | `WW_IP_SEED_PER_MIN`, `WW_IP_MAX_DOCS`, and `WW_IP_MAX_CONNS` bound what one address can create. `WW_TRUST_PROXY` is a hop count. |
-| **Health** | `GET /healthz` is public. `GET /stats` requires `WW_OBS=1` and is not proxied by default. |
+| **Health** | `GET /healthz` reports liveness. Compose enables the internal `GET /stats` route for the private operations dashboard. |
 | **Document size** | `WW_MAX_DOC_BYTES` limits the decoded document size. Encrypted rooms retain a sealed checkpoint in memory. |
 | **Mode** | `WW_ENCRYPTED_ONLY=1` rejects plaintext seeds. |
 | **Logs** | The server writes structured logs to stderr. Compose bounds the JSON log files. |

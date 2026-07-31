@@ -30,6 +30,9 @@ services:
     environment:
       PORT: "1234"
       WW_LOG_LEVEL: "info"
+      # Aggregate counters for the operations dashboard. Set WW_OBS=0 to
+      # disable the route.
+      WW_OBS: "${WW_OBS:-1}"
       # Participants in ONE room, not the number of rooms — the name invites
       # the opposite reading and compose.yml documented it wrongly until it
       # was caught. Room count is WW_MAX_ROOMS_GLOBAL below.

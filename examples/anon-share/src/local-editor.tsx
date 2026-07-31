@@ -433,7 +433,7 @@ export function LocalEditor({
         <nav className="app-links" aria-label="Project links">
           <a className="other" href="https://word-in-web.com" target="_blank" rel="noreferrer">WordInWeb</a>
           <a href="https://github.com/theRealestAEP/wordinweb" target="_blank" rel="noreferrer">GitHub</a>
-          <a href="https://www.aepick.me/blog" target="_blank" rel="noreferrer">Blog</a>
+          <a href="https://www.aepick.me/blog/collaborative-docx-editing/" target="_blank" rel="noreferrer">Blog</a>
           <a href="https://word-in-web.com/report/" target="_blank" rel="noreferrer">Parity report</a>
         </nav>
       </div>

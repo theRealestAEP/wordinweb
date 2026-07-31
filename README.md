@@ -387,6 +387,11 @@ npm test                 # build and run all package and example unit tests
 npm run demo             # build and open the collaboration demo
 ```
 
+## Contributing
+
+Create an issue for now. For a large change, fork the repository, make the
+edits in your fork, and reach out to me.
+
 ## Rendering parity
 
 Fidelity is measured against desktop Microsoft Word. Word exports each fixture
