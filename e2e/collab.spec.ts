@@ -195,7 +195,7 @@ test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () 
     }
   });
 
-  test("owner read-only blocks editors, owner keeps writing, then lifts (doc 14 §2.5)", async ({ browser }) => {
+  test("owner read-only blocks everyone, then the owner lifts it (doc 14 §2.5)", async ({ browser }) => {
     const ctxOwner = await browser.newContext();
     const ctxEditor = await browser.newContext();
     const owner = await ctxOwner.newPage();
@@ -224,10 +224,11 @@ test.describe("zero-custody demo — E2E (multi-client round-trip + roles)", () 
       // after it is refused input rather than a local mutation that gets
       // healed away — the silent-loss shape this gate exists to remove.
       await expect(editor.getByTestId("readonly-banner")).toBeVisible();
-      // The owner bypasses their own lock and it reaches the editor.
+      // The owner sees the same read-only gate. The admin control remains
+      // available so the owner can lift the lock.
       await typeInEditor(owner, "OWNER-WRITE");
-      await expect.poll(() => paintedText(owner)).toContain("OWNER-WRITE");
-      await expect.poll(() => paintedText(editor)).toContain("OWNER-WRITE");
+      expect(await paintedText(owner)).not.toContain("OWNER-WRITE");
+      expect(await paintedText(editor)).not.toContain("OWNER-WRITE");
       // Lift read-only. THE BLOCKED CLIENT COMES BACK ON ITS OWN — no click,
       // no reload. The roster carries a positive write status that is re-fanned
       // on every transition, so the lift reaches this client without it having

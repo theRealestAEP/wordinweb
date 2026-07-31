@@ -295,20 +295,15 @@ export interface DocxViewApi {
    */
   setSuggesting(on: boolean, author?: string): void;
   isSuggesting(): boolean;
-  /** Accept the tracked change at the caret (keep insertion / apply deletion).
-   * Refuses (false, no mutation) in a live collab session — resolving a
-   * suggestion emits no intent yet, so it would fork the room. */
+  /** Accept the tracked change at the caret (keep insertion / apply deletion). */
   acceptRevisionAtCaret(): boolean;
-  /** Reject the tracked change at the caret (drop insertion / restore
-   * deletion). Refuses in a live collab session, like accept. */
+  /** Reject the tracked change at the caret (drop insertion / restore deletion). */
   rejectRevisionAtCaret(): boolean;
   /** How many tracked changes (suggestions) the document currently holds. */
   revisionCount(): number;
-  /** Accept every tracked change (one undo step). Returns how many applied.
-   * Returns 0 without mutating in a live collab session, like accept. */
+  /** Accept every tracked change (one undo step). Returns how many applied. */
   acceptAllRevisions(): number;
-  /** Reject every tracked change (one undo step). Returns how many applied.
-   * Returns 0 without mutating in a live collab session, like accept. */
+  /** Reject every tracked change (one undo step). Returns how many applied. */
   rejectAllRevisions(): number;
   /** Current caret as stable-id addresses (collab), or null. The encoding
    * survives a reconciliation reload, so it can be captured from a view
@@ -637,6 +632,10 @@ export function DocxView({
   // render's props otherwise).
   const presenceRef = useRef<Record<string, PresencePosition | null> | undefined>(undefined);
   presenceRef.current = collab?.presence;
+  // The editor and imperative API survive prop updates. Their callbacks must
+  // read the current session, especially when a live room becomes offline.
+  const collabRef = useRef(collab);
+  collabRef.current = collab;
 
   // Redraw remote presence carets whenever the presence prop changes.
   useEffect(() => {
@@ -874,14 +873,15 @@ export function DocxView({
     // for each distinct paragraph the given text targets belong to.
     const emitBlockIntents = (targets: XmlElement[], make: (blockId: number) => EditorIntent): void => {
       const d = docCacheRef.current?.doc;
-      if (!collab || !d?.stableIds) return;
+      const current = collabRef.current;
+      if (!current || !d?.stableIds) return;
       const seen = new Set<number>();
       for (const t of targets) {
         const p = paragraphOf(d, t);
         const blockId = p ? d.stableIds.idOf(p) : undefined;
         if (blockId !== undefined && !seen.has(blockId)) {
           seen.add(blockId);
-          collab.submit(make(blockId));
+          current.submit(make(blockId));
         }
       }
     };
@@ -896,7 +896,7 @@ export function DocxView({
       // so their surface-local geometry aligns and scales like the local caret.
       // Highlights first, carets on top (each draw clears only its own class).
       drawPresenceSelections(handle.root, computePresenceSelections(handle, d, presence));
-      drawPresenceCarets(handle.root, computePresenceCarets(handle, d, presence), collab?.participantNames);
+      drawPresenceCarets(handle.root, computePresenceCarets(handle, d, presence), collabRef.current?.participantNames);
     };
     redrawPresenceRef.current = drawCollabPresence;
 
@@ -1103,7 +1103,8 @@ export function DocxView({
 
         const flushPresence = (): void => {
           presenceQueued = false;
-          if (!collab?.setPresence) return;
+          const current = collabRef.current;
+          if (!current?.setPresence) return;
           const ranges = selectionRanges();
           // A drag-selection can leave the editor without a caret; the payload
           // still needs an anchor (the pre-ranges shape old clients read), so
@@ -1115,7 +1116,7 @@ export function DocxView({
           const key = pos ? JSON.stringify(pos) : "null";
           if (key === presenceKey) return; // dedup, like the caret path
           presenceKey = key;
-          collab.setPresence(pos);
+          current.setPresence(pos);
         };
         const queuePresence = (): void => {
           if (presenceQueued) return;
@@ -1161,11 +1162,11 @@ export function DocxView({
           onStyleShortcut: (styleId) => applyStyleShortcut?.(styleId),
           // Collaboration: forward each local edit as an intent. The editor
           // emits only when doc.stableIds is populated, so enable it here.
-          onIntent: collab ? (intent) => collab.submit(intent) : undefined,
+          onIntent: collab ? (intent) => collabRef.current?.submit(intent) : undefined,
           // Cmd+Z in a room reverses the last SEQUENCED action over the wire;
           // without this hook the editor declines rather than replaying local
           // history (which would fork the room silently).
-          onCollabUndo: collab?.undoLast,
+          onCollabUndo: collab?.undoLast ? () => collabRef.current?.undoLast?.() : undefined,
           // Presence: broadcast the local caret so remote participants can
           // draw this user's cursor (the anchor mirrors the intent addressing).
           // The caret is recorded here and sent by flushPresence together with
@@ -1178,7 +1179,7 @@ export function DocxView({
             : undefined,
           // Disjoint carried-id blocks for the editor's node-creating intents
           // (paragraph split); see EditorHost.allocIds.
-          allocIds: collab?.allocIds,
+          allocIds: collab?.allocIds ? (n) => collabRef.current?.allocIds?.(n) ?? [] : undefined,
           onTextCommand: (command) => {
             const current = apiRef.current;
             if (!current) return;
@@ -1306,7 +1307,8 @@ export function DocxView({
           ) => ({ kind: string } & Record<string, unknown>) | null,
           at?: { t: XmlElement; offset: number } | null,
         ): boolean => {
-          if (!collab?.submitOp || !doc.stableIds) return false;
+          const current = collabRef.current;
+          if (!current?.submitOp || !doc.stableIds) return false;
           // Past this gate we are IN collab mode and must return true no
           // matter what: returning false would drop the caller into its
           // LOCAL mutation fallback, which never rides the wire — a silent
@@ -1318,22 +1320,23 @@ export function DocxView({
           if (!target) return true;
           const anchor = collabAnchor(target.t, target.offset);
           if (!anchor) return true;
-          const intent = make(anchor, (n) => collab.allocIds?.(n) ?? []);
+          const intent = make(anchor, (n) => current.allocIds?.(n) ?? []);
           if (!intent) return true;
           history.checkpoint();
-          collab.submitOp(intent);
+          current.submitOp(intent);
           return true;
         };
         /** Document-level ops (page layout, line numbering, cover page). */
         const collabDocOp = (
           make: (alloc: (n: number) => number[]) => ({ kind: string } & Record<string, unknown>) | null,
         ): boolean => {
-          if (!collab?.submitOp || !doc.stableIds) return false;
+          const current = collabRef.current;
+          if (!current?.submitOp || !doc.stableIds) return false;
           // In collab mode never fall through to the local path (see collabOp).
-          const intent = make((n) => collab.allocIds?.(n) ?? []);
+          const intent = make((n) => current.allocIds?.(n) ?? []);
           if (!intent) return true;
           history.checkpoint();
-          collab.submitOp(intent);
+          current.submitOp(intent);
           return true;
         };
         /** Per-block ops over the current selection/caret paragraphs. */
@@ -1341,7 +1344,8 @@ export function DocxView({
           targets: XmlElement[],
           make: (blockId: number) => ({ kind: string } & Record<string, unknown>) | null,
         ): boolean => {
-          if (!collab?.submitOp || !doc.stableIds) return false;
+          const current = collabRef.current;
+          if (!current?.submitOp || !doc.stableIds) return false;
           // In collab mode never fall through to the local path (see collabOp):
           // even with zero addressable targets this returns true (honest no-op).
           const submitted = new Set<number>();
@@ -1354,7 +1358,7 @@ export function DocxView({
             if (!intent) continue;
             if (!any) history.checkpoint();
             any = true;
-            collab.submitOp(intent);
+            current.submitOp(intent);
           }
           return true;
         };
@@ -1364,7 +1368,7 @@ export function DocxView({
          * — checkpoint B1 rev 2): capture the segment's start in that basis
          * plus the run's total wire length. */
         const captureFormatIds = (segs: SelectionSegment[]) =>
-          collab && doc.stableIds
+          collabRef.current && doc.stableIds
             ? segs.map((seg) => ({
                 runId: seg.run.src ? doc.stableIds!.idOf(seg.run.src) : undefined,
                 blockId: seg.run.srcParent ? doc.stableIds!.idOf(seg.run.srcParent) : undefined,
@@ -1382,7 +1386,8 @@ export function DocxView({
           formatted: { t: XmlElement | null }[],
           patch: Record<string, unknown>,
         ): void => {
-          if (!collab || !doc.stableIds) return;
+          const current = collabRef.current;
+          if (!current || !doc.stableIds) return;
           // A selection over a run with several w:t yields one seg PER w:t,
           // all sharing the runId. Group them: the whole-run check must use
           // the COMBINED cumulative span (each seg alone is partial), else a
@@ -1417,18 +1422,18 @@ export function DocxView({
             // matches the local mutation exactly.
             const whole = !seg.t || (span.lo <= 0 && span.hi >= runLen) || (segCountByRun.get(runId) ?? 1) > 1;
             if (whole) {
-              collab.submit({ kind: "formatRun", blockId, runId, patch } as never);
+              current.submit({ kind: "formatRun", blockId, runId, patch } as never);
               return;
             }
             const before = cumStart > 0;
             const after = cumEnd < runLen;
-            const alloc = collab.allocIds?.((before ? 1 : 0) + 1 + (after ? 1 : 0)) ?? [];
+            const alloc = current.allocIds?.((before ? 1 : 0) + 1 + (after ? 1 : 0)) ?? [];
             let k = 0;
             const beforeId = before ? alloc[k++] : undefined;
             const middleId = alloc[k++];
             const afterId = after ? alloc[k++] : undefined;
             if (middleId === undefined) return;
-            collab.submit({ kind: "formatRange", blockId, runId, start: cumStart, end: cumEnd, patch, beforeId, middleId, afterId } as never);
+            current.submit({ kind: "formatRange", blockId, runId, start: cumStart, end: cumEnd, patch, beforeId, middleId, afterId } as never);
             const middleT = formatted[i]?.t;
             const middleRun = middleT ? doc.findParentOf(middleT) : null;
             const parent = middleRun ? doc.findParentOf(middleRun) : null;
@@ -1599,7 +1604,7 @@ export function DocxView({
           updateSelectedChart: (data) => {
             // Collab: selected-object updates are not intent-anchored yet;
             // no-op rather than make a local-only (diverging) edit.
-            if (collab?.submitOp) return false;
+            if (collabRef.current?.submitOp) return false;
             const source = editor?.getSelectedDrawingSource();
             if (!source) return false;
             history.checkpoint();
@@ -1621,7 +1626,7 @@ export function DocxView({
           updateSelectedSmartArt: (data) => {
             // Collab: selected-object updates are not intent-anchored yet;
             // no-op rather than make a local-only (diverging) edit.
-            if (collab?.submitOp) return false;
+            if (collabRef.current?.submitOp) return false;
             const source = editor?.getSelectedDrawingSource();
             if (!source) return false;
             history.checkpoint();
@@ -1636,7 +1641,7 @@ export function DocxView({
             // is the only honest answer: the toolbar hides this in collab, but
             // the API is reachable directly, and mutating here would edit this
             // replica alone and tell nobody — a silent fork.
-            if (collab?.submitOp) return false;
+            if (collabRef.current?.submitOp) return false;
             const target = insertionTarget();
             if (!target) return false;
             const preview = poster ?? await objectPoster("3D model", "Double-click in Word to explore", "◇");
@@ -1650,7 +1655,7 @@ export function DocxView({
           insertOnlineVideo: async (url) => {
             // Same as insertModel3D: no intent carries a web-video reference,
             // so a local insert here would fork the room silently.
-            if (collab?.submitOp) return false;
+            if (collabRef.current?.submitOp) return false;
             const target = insertionTarget();
             if (!target) return false;
             const preview = await objectPoster("Online video", url, "▶");
@@ -1663,7 +1668,7 @@ export function DocxView({
           insertEmbeddedObject: async (file, filename) => {
             // Same as insertModel3D: no intent carries an OLE part, so a local
             // insert here would fork the room silently.
-            if (collab?.submitOp) return false;
+            if (collabRef.current?.submitOp) return false;
             const target = insertionTarget();
             if (!target) return false;
             const name = filename ?? (file instanceof File ? file.name : "embedded-file.bin");
@@ -1686,7 +1691,7 @@ export function DocxView({
           addComment: (text) => {
             // Collab: selected-object updates are not intent-anchored yet;
             // no-op rather than make a local-only (diverging) edit.
-            if (collab?.submitOp) return false;
+            if (collabRef.current?.submitOp) return false;
             const segs = editor?.getSelectionSegments() ?? [];
             const segments = segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : [];
             if (segments.length === 0) return false;
@@ -1735,8 +1740,8 @@ export function DocxView({
             const caret = editor?.getCaretTarget();
             return caret ? cellShadingAt(doc, caret.t) : undefined;
           },
-          imageAccept: () => (collab?.submitOp && doc.stableIds ? COLLAB_IMAGE_ACCEPT : LOCAL_IMAGE_ACCEPT),
-          imageMaxBytes: () => (collab?.submitOp && doc.stableIds ? collab.mediaMaxBlobBytes ?? null : null),
+          imageAccept: () => (collabRef.current?.submitOp && doc.stableIds ? COLLAB_IMAGE_ACCEPT : LOCAL_IMAGE_ACCEPT),
+          imageMaxBytes: () => (collabRef.current?.submitOp && doc.stableIds ? collabRef.current.mediaMaxBlobBytes ?? null : null),
           insertImage: async (file) => {
             // Caret, else the selection's end, else the start of the document
             // (see documentStart): picking a file is an unambiguous request to
@@ -1755,7 +1760,7 @@ export function DocxView({
             // the real number regardless, so skipping risks nothing, while
             // guessing would either block uploads it would have accepted or
             // promise a size it will refuse.
-            const maxBytes = collab?.submitOp && doc.stableIds ? collab.mediaMaxBlobBytes ?? null : null;
+            const maxBytes = collabRef.current?.submitOp && doc.stableIds ? collabRef.current.mediaMaxBlobBytes ?? null : null;
             if (typeof maxBytes === "number" && file.size > maxBytes) return "too-large";
             const bytes = new Uint8Array(await file.arrayBuffer());
             const isSvg = file.type === "image/svg+xml";
@@ -1775,7 +1780,8 @@ export function DocxView({
             // — upload first, reserve only on success. Reserving first would
             // leave every other replica with a skeleton pointing at a blob
             // that was refused and will never exist.
-            if (collab?.submitOp && doc.stableIds) {
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
               bmp?.close();
               // Past the collab gate this NEVER falls through to the local
               // mutation (checkpoint A18): an app that wired submitOp but no
@@ -1783,7 +1789,7 @@ export function DocxView({
               // would fork the room the moment anyone else typed. Honest
               // no-op instead. Caught by INVARIANT C, which mounts exactly
               // that configuration.
-              if (!collab.uploadMedia) return "no-relay";
+              if (!current.uploadMedia) return "no-relay";
               // The wire allowlist is raster-only (validate.ts): an SVG would
               // be refused by every replica, so decline it here rather than
               // inserting something only this client can see. The picker is
@@ -1791,7 +1797,7 @@ export function DocxView({
               // line of defence, not the first — a user should never reach it
               // through the toolbar, only through the API.
               if (!(COLLAB_IMAGE_EXTS as readonly string[]).includes(ext)) return "unsupported-format";
-              const media = await collab.uploadMedia(bytes);
+              const media = await current.uploadMedia(bytes);
               if (!media) return "upload-failed"; // relay refused — nothing reserved, nothing forked
               const w = naturalWidth * scale;
               const h2 = naturalHeight * scale;

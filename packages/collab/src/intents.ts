@@ -38,7 +38,7 @@ interface IntentBase {
  * revisions and/or mark paragraph glyphs (split "ins" marks, merge "del"
  * suggestions) — the SUGGESTING counterparts of deleteText/mergeParagraph.
  * Nothing is removed: Word keeps both sides until accept/reject (the
- * already-collab-wired acceptRevision/rejectRevision/acceptAllRevisions).
+ * already-collab-wired accept/reject revision intents).
  * Author/date travel IN the intent (doc 05 rule a: nondeterministic values
  * are generated once by the originator); revision w:ids are scan-derived
  * from identical tree state on every replica. Positional offsets were
@@ -83,6 +83,8 @@ export interface SplitParagraphIntent extends IntentBase {
   at: Position;
   newBlockId: StableId;
   newRunId: StableId;
+  /** With metadata, Enter remains a tracked paragraph-break suggestion. */
+  suggest?: { author: string; date: string };
 }
 
 /**
@@ -444,6 +446,7 @@ export type Intent =
   | AcceptRevisionIntent
   | RejectRevisionIntent
   | AcceptAllRevisionsIntent
+  | RejectAllRevisionsIntent
   | InsertTableIntent;
 
 /** Insert a blank page at the end of a run. */
@@ -796,6 +799,11 @@ export interface RejectRevisionIntent extends IntentBase {
 /** Accept every tracked change in the document. */
 export interface AcceptAllRevisionsIntent extends IntentBase {
   kind: "acceptAllRevisions";
+}
+
+/** Reject every tracked change in the document. */
+export interface RejectAllRevisionsIntent extends IntentBase {
+  kind: "rejectAllRevisions";
 }
 
 /** Insert a rows×cols table after the paragraph containing the anchor run. */

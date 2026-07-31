@@ -151,6 +151,7 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "acceptRevision":
     case "rejectRevision":
     case "acceptAllRevisions":
+    case "rejectAllRevisions":
       // Accept/reject CAN change text (an accepted deletion / rejected
       // insertion removes runs). Under the session's one-in-flight constraint
       // these administrative review ops don't overlap a concurrent text edit,
@@ -338,6 +339,7 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "acceptRevision":
     case "rejectRevision":
     case "acceptAllRevisions":
+    case "rejectAllRevisions":
       return { ...intent, base: newBase };
     case "deleteText": {
       const s = transformPosition({ blockId: intent.blockId, runId: intent.runId, offset: intent.start }, ahead);

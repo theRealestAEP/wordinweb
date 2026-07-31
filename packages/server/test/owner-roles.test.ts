@@ -70,7 +70,7 @@ describe("owner roles (doc 14 §2.5)", () => {
     expect(owner.received.some((m) => m.t === "refused")).toBe(false);
   });
 
-  it("read-only: editors are refused, the owner keeps writing, then it lifts", async () => {
+  it("read-only: every editor is refused, then the owner lifts it", async () => {
     const { hub, ownerToken } = ownedHub();
     const owner = new FakeConn("o");
     const alice = new FakeConn("a");
@@ -80,9 +80,9 @@ describe("owner roles (doc 14 §2.5)", () => {
     await hub.handle(owner, { t: "admin", action: { op: "readOnly", on: true } });
     await hub.handle(alice, { t: "submit", intent: edit("alice", 1) });
     expect(alice.last()).toEqual({ t: "refused", reason: "read-only" });
-    // The owner bypasses their own read-only lock.
+    // The owner can still use the admin channel, but cannot edit the document.
     await hub.handle(owner, { t: "submit", intent: edit("owner", 1) });
-    expect(owner.last().t).toBe("broadcast");
+    expect(owner.last()).toEqual({ t: "refused", reason: "read-only" });
     // Lifted: alice writes again.
     await hub.handle(owner, { t: "admin", action: { op: "readOnly", on: false } });
     await hub.handle(alice, { t: "submit", intent: edit("alice", 2) });

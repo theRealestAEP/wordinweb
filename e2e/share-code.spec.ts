@@ -84,6 +84,10 @@ test.describe("zero-custody demo — share code UX", () => {
       const b = await joiner.newPage();
       await b.goto(url);
       await expect(codeInput(b), "joiner without the code must be prompted").toBeVisible();
+      await expect(
+        b.getByTestId("readonly-banner"),
+        "the share-code prompt must not show a separate write-status banner",
+      ).toHaveCount(0);
       // While refused, the editor isn't mounted (download etc. are App chrome
       // and stay visible — the meaningful signal is no rendered document).
       await expect(b.locator(PAGE)).toHaveCount(0);

@@ -264,7 +264,7 @@ export interface EditorHost {
 export type EditorIntent =
   | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string; suggest?: { author: string; date: string } }
   | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
-  | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number }
+  | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number; suggest?: { author: string; date: string } }
   | { kind: "formatRun"; blockId: number; runId: number; patch: Record<string, unknown> }
   | { kind: "formatRange"; blockId: number; runId: number; start: number; end: number; patch: Record<string, unknown>; beforeId?: number; middleId: number; afterId?: number }
   | { kind: "formatParagraph"; blockId: number; align?: "left" | "center" | "right" | "justify"; styleId?: string | null }
@@ -276,6 +276,10 @@ export type EditorIntent =
       marks?: { blockId: number; glyph: "ins" | "del" }[];
       suggest: { author: string; date: string };
     }
+  | { kind: "acceptRevision"; index: number }
+  | { kind: "rejectRevision"; index: number }
+  | { kind: "acceptAllRevisions" }
+  | { kind: "rejectAllRevisions" }
   | { kind: "setImageWrap"; runId: number; mode: "inline" | "square" | "topAndBottom" | "none" | "behind" }
   | { kind: "setFloatingPagePosition"; runId: number; xPx: number; yPx: number }
   | { kind: "resizeDrawing"; runId: number; widthPx: number; heightPx: number }
@@ -4359,7 +4363,7 @@ export class DocxEditor {
       this.focusText();
       // A click on a tracked change offers accept/reject (view-only or while
       // suggesting). Placing the caret still works so the text stays editable.
-      const ref = revisionForText(this.host.doc, caret.t);
+      const ref = this.revisionAtCaret();
       if (ref) this.showSuggestionPopover(ref, e.clientX, e.clientY);
     } else {
       this.hideCaret();
@@ -4374,7 +4378,7 @@ export class DocxEditor {
   private showSuggestionPopover(ref: RevisionRef, clientX: number, clientY: number): void {
     this.dismissSuggestionPopover();
     const isIns = ref.kind === "insertion" || ref.kind === "markInsertion";
-    const ink = isIns ? "#C00000" : "#B0261C"; // matches the markup renderer's revision colors
+    const ink = isIns ? "#188038" : "#D93025"; // matches the markup renderer's revision colors
     // Author + date come off the revision element (w:author / w:date). Word
     // stamps these on every w:ins/w:del; show them so a reviewer sees WHO
     // suggested the change and WHEN, like Google Docs' suggestion card.
@@ -4452,20 +4456,9 @@ export class DocxEditor {
       });
       btnRow.appendChild(b);
     };
-    if (this.reviewBlockedByCollab()) {
-      // Accept/reject refuses in a live session (see reviewBlockedByCollab).
-      // Render the reason instead of two buttons that silently do nothing —
-      // a dead button in a shared document reads as a broken app.
-      const note = document.createElement("div");
-      note.dataset.dxwReviewBlocked = "1";
-      note.style.cssText = "font-size:11.5px;color:#5f6368;line-height:1.35;";
-      note.textContent = "Accept and reject are not available in a shared session yet.";
-      box.appendChild(note);
-    } else {
-      box.appendChild(btnRow);
-      mkBtn("✓ Accept", "Accept this suggestion", true, () => this.acceptRevisionRef(ref));
-      mkBtn("✗ Reject", "Reject this suggestion", false, () => this.rejectRevisionRef(ref));
-    }
+    box.appendChild(btnRow);
+    mkBtn("✓ Accept", "Accept this suggestion", true, () => this.acceptRevisionRef(ref));
+    mkBtn("✗ Reject", "Reject this suggestion", false, () => this.rejectRevisionRef(ref));
     document.body.appendChild(box);
     this.suggestionPopover = box;
   }
@@ -6024,28 +6017,18 @@ export class DocxEditor {
     return null;
   }
 
-  /** True in a live session, where accept/reject would fork the room.
-   *
-   * Collab gate (narrow): the four accept/reject entry points below mutate
-   * host.doc DIRECTLY (no emission), so in a live session they would resolve
-   * the suggestion locally with no peer ever seeing it — refused per the
-   * standing audit rule (no mutation branch without an emission). The
-   * acceptRevision/rejectRevision/acceptAllRevisions INTENTS exist and apply
-   * fine (collab/src/apply.ts), but they address a revision by its index in
-   * collectRevisions order, which the editor has no path to produce here.
-   * Wiring that is known follow-on work. Local mode is unaffected. */
-  private reviewBlockedByCollab(): boolean {
-    return !!this.host.onIntent;
-  }
-
   /** Accept (keep insertion / drop deletion) the given revision, or the one at
    * the caret. Re-renders and returns whether anything changed. */
   acceptRevisionRef(ref?: RevisionRef): boolean {
-    if (this.reviewBlockedByCollab()) return false;
     const target = ref ?? this.revisionAtCaret();
     if (!target) return false;
+    const index = this.host.onIntent
+      ? collectRevisions(this.host.doc).findIndex((item) => item.el === target.el && item.kind === target.kind)
+      : -1;
+    if (this.host.onIntent && index < 0) return false;
     this.host.history?.checkpoint();
     if (!acceptRevision(this.host.doc, target)) return false;
+    if (this.host.onIntent) this.host.onIntent({ kind: "acceptRevision", index });
     this.dismissSuggestionPopover();
     this.host.rerender();
     this.positionCaret();
@@ -6056,11 +6039,15 @@ export class DocxEditor {
   /** Reject (drop insertion / restore deletion) the given revision, or the one
    * at the caret. */
   rejectRevisionRef(ref?: RevisionRef): boolean {
-    if (this.reviewBlockedByCollab()) return false;
     const target = ref ?? this.revisionAtCaret();
     if (!target) return false;
+    const index = this.host.onIntent
+      ? collectRevisions(this.host.doc).findIndex((item) => item.el === target.el && item.kind === target.kind)
+      : -1;
+    if (this.host.onIntent && index < 0) return false;
     this.host.history?.checkpoint();
     if (!rejectRevision(this.host.doc, target)) return false;
+    if (this.host.onIntent) this.host.onIntent({ kind: "rejectRevision", index });
     this.dismissSuggestionPopover();
     this.host.rerender();
     this.positionCaret();
@@ -6075,10 +6062,10 @@ export class DocxEditor {
 
   /** Accept every tracked change (one undo step). Returns how many applied. */
   acceptAllRevisions(): number {
-    if (this.reviewBlockedByCollab()) return 0;
     this.host.history?.checkpoint();
     const n = acceptAllRevisions(this.host.doc);
     if (n === 0) return 0;
+    this.host.onIntent?.({ kind: "acceptAllRevisions" });
     this.dismissSuggestionPopover();
     this.host.rerender();
     this.positionCaret();
@@ -6088,10 +6075,10 @@ export class DocxEditor {
 
   /** Reject every tracked change (one undo step). Returns how many applied. */
   rejectAllRevisions(): number {
-    if (this.reviewBlockedByCollab()) return 0;
     this.host.history?.checkpoint();
     const n = rejectAllRevisions(this.host.doc);
     if (n === 0) return 0;
+    this.host.onIntent?.({ kind: "rejectAllRevisions" });
     this.dismissSuggestionPopover();
     this.host.rerender();
     this.positionCaret();
@@ -6669,7 +6656,8 @@ export class DocxEditor {
     }
     // Capture the pre-split position for a collab intent before the caret moves.
     const splitPos = this.host.onIntent ? this.encodeCaretForIntent() : null;
-    const split = this.splitParagraphCore();
+    const splitMeta = this.suggesting && this.host.onIntent ? this.frozenRevMeta() : undefined;
+    const split = this.splitParagraphCore(splitMeta);
     if (split && splitPos && this.host.doc.stableIds && this.host.onIntent) {
       // Allocate carried ids for the new paragraph and its moved-tail run so
       // every replica addresses them identically (plan doc 03). MUST come from
@@ -6681,7 +6669,13 @@ export class DocxEditor {
       const newBlockId = ids.assign(split.after, alloc[0]);
       const newRunEl = split.after.children.find((c) => localName(c.name) === "r");
       const newRunId = newRunEl ? ids.assign(newRunEl, alloc[1]) : newBlockId;
-      this.host.onIntent({ kind: "splitParagraph", at: splitPos, newBlockId, newRunId });
+      this.host.onIntent({
+        kind: "splitParagraph",
+        at: splitPos,
+        newBlockId,
+        newRunId,
+        suggest: splitMeta ? { author: splitMeta.author, date: splitMeta.date } : undefined,
+      });
     }
     const reparsed = split
       ? this.host.doc.reparseDirectBodyParagraphSplit(split.before, split.after)
@@ -6751,9 +6745,10 @@ export class DocxEditor {
 
   /** Split the paragraph at the caret without history or commit — shared by
    * Enter and multi-line paste. */
-  private splitParagraphCore(): { before: XmlElement; after: XmlElement } | null {
+  private splitParagraphCore(meta?: RevisionMeta): { before: XmlElement; after: XmlElement } | null {
     if (!this.caret) return null;
-    const result = applySplitParagraph(this.host.doc, this.caret, this.mutationCtx());
+    const ctx = meta ? { suggesting: true, revMeta: () => meta } : this.mutationCtx();
+    const result = applySplitParagraph(this.host.doc, this.caret, ctx);
     if (!result) return null;
     this.caret = result.caret;
     return { before: result.before, after: result.after };

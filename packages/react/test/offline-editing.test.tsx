@@ -10,8 +10,9 @@
  *    online half; the offline half is pinned here.
  *  - The server is UNREACHABLE — the editor stays writable; every edit
  *    applies locally, lands in the durable offline tail, survives a reload,
- *    and replays on reconnect: silently (same epoch), as suggestions
- *    (diverged, small tail), or as a draft (diverged, large tail).
+ *    and replays on reconnect: silently after an automatic same-page retry,
+ *    after a merge check for a stable-URL return, as suggestions (diverged,
+ *    small tail), or as a draft (diverged, large tail).
  *  - The tail is BOUNDED: at the cap recording stops by loudly gating the
  *    editor, never by silently discarding keystrokes.
  *
@@ -197,6 +198,7 @@ describe("offline capture is durable (the live data-loss bug)", () => {
     // The epoch stamp is what lets the NEXT session decide silent-replay vs
     // arrival ladder without guessing.
     expect(stored.offlineTailEpoch).toBe(genesis);
+    expect(stored.offlineBaseSeq).toBe(stored.confirmedSeq);
     await p.unmount();
   });
 
@@ -267,6 +269,7 @@ describe("offline capture is durable (the live data-loss bug)", () => {
     const p = await mount(hub, store);
     await act(async () => p.session.submitOp(insertAt(0, "BASE")));
     await until(() => p.session.version > 1, "edit echoed");
+    await tick(50); // persist the drained live queue before the offline copy starts
     p.outage.value = true;
     await until(() => p.session.offline !== null, "offline");
     await act(async () => p.session.submitOp(insertAt(4, "+TAIL")));
@@ -274,10 +277,15 @@ describe("offline capture is durable (the live data-loss bug)", () => {
 
     const stored = (await store.get("d"))!;
     expect(stored.offlineTail, "the tail survived the reload").toHaveLength(1);
+    expect(stored.offlineBaseSeq, "the stable URL keeps its room base").toBeTypeOf("number");
+    expect(stored.pending, "the offline copy has no in-flight live edits").toHaveLength(0);
 
-    // Same epoch is still live on the hub: the reloaded session replays the
-    // tail SILENTLY through the ordinary submit path and converges.
+    // Same epoch is still live on the hub. A fresh stable-URL mount restores
+    // the recorded base sequence and asks before it merges the tail.
     const p2 = await mount(hub, store);
+    await until(() => p2.session.arrival?.mode === "replay", "stable URL offers a merge check");
+    expect(p2.session.arrival).toMatchObject({ mode: "replay", tailLength: 1 });
+    await act(async () => p2.session.reconcile("replay"));
     await until(() => docText(p2.session).includes("+TAIL"), "tail replayed after reload");
     await until(() => !storedTail(store)?.length, "stored tail erased after replay");
     expect(docText(p2.session)).toBe("BASE+TAIL");
@@ -395,30 +403,31 @@ describe("arrival outcomes 2+3 — diverged epoch: suggestions and draft", () =>
     return hub2;
   };
 
-  it("suggest: text edits replay as attributed tracked changes; structural edits are counted and survive in the draft", async () => {
+  it("suggest: Enter and its following text stay linked; unsupported structure remains in the draft", async () => {
     const store = new InMemoryBundleStore();
     const old = await offlineBundle(store, async (s) => {
-      await act(async () => s.submitOp(insertAt(0, "NOTE ")));
-      // A structural edit: no suggestion form exists (rebase.ts) — it must
-      // be COUNTED up front and survive in the banked draft, never vanish.
       const [nb, nr] = s.allocIds(2);
       await act(async () =>
-        s.submitOp({ kind: "splitParagraph", at: { blockId: 1, runId: 2, offset: 2 }, newBlockId: nb, newRunId: nr } as never),
+        s.submitOp({ kind: "splitParagraph", at: { blockId: 1, runId: 2, offset: 0 }, newBlockId: nb, newRunId: nr } as never),
       );
+      await act(async () => s.submitOp({ kind: "insertText", at: { blockId: nb, runId: nr, offset: 0 }, text: "NEW LINE" } as never));
+      // Formatting has no tracked suggestion form. Count it and retain the
+      // complete original tail in the banked draft.
+      await act(async () => s.submitOp({ kind: "formatRun", blockId: 1, runId: 2, patch: { bold: true } } as never));
     });
-    expect(old.offlineTail).toHaveLength(2);
+    expect(old.offlineTail).toHaveLength(3);
 
     const hub2 = reseeded();
     const p2 = await mount(hub2, store);
     await until(() => p2.session.arrival !== null, "arrival offered");
-    expect(p2.session.arrival).toMatchObject({ mode: "suggest", tailLength: 2, structural: 1 });
+    expect(p2.session.arrival).toMatchObject({ mode: "suggest", tailLength: 3, structural: 1 });
     expect(p2.session.epochChanged, "the fork was surfaced, not merged").not.toBeNull();
     const paragraphsBefore = (serializeXml(p2.session.doc!.docRoot).match(/<w:p[ >]/g) ?? []).length;
     const hubSession = (hub2 as unknown as { rooms: Map<string, { session: { seq: number } }> }).rooms.get("d")!.session;
     const seqBefore = hubSession.seq;
 
     await act(async () => p2.session.reconcile("suggest"));
-    await until(() => docText(p2.session).includes("NOTE"), "suggested text landed");
+    await until(() => docText(p2.session).includes("NEW LINE"), "text after the suggested Enter landed");
     // The replay must run the WHOLE tail (structural entries popped, not
     // stalled) and erase it — otherwise the assertions below could pass on
     // a half-finished replay.
@@ -428,6 +437,7 @@ describe("arrival outcomes 2+3 — diverged epoch: suggestions and draft", () =>
     const xml = serializeXml(p2.session.doc!.docRoot);
     expect(xml).toContain("w:ins");
     expect(xml).toContain('w:author="alice"');
+    expect(xml).toMatch(/<w:pPr>[\s\S]*?<w:rPr>[\s\S]*?<w:ins /);
 
     // A second client sees byte-identical content (the replay used the
     // ordinary sequencer path, not a local shortcut).
@@ -435,19 +445,15 @@ describe("arrival outcomes 2+3 — diverged epoch: suggestions and draft", () =>
     await until(() => Buffer.compare(bytes(p2.session), bytes(other.session)) === 0, "converged");
 
     // The structural edit did NOT vanish: the banked draft holds the whole
-    // tail, split included.
+    // tail, unsupported formatting included.
     const draft = await store.get(`d#draft-${old.genesisId}`);
     expect(draft, "draft slot banked on epoch change").toBeTruthy();
-    expect(draft!.offlineTail?.some((i) => (i as { kind: string }).kind === "splitParagraph")).toBe(true);
-    // And the live doc does NOT contain the split — a suggest replay must
-    // never apply a structural intent destructively (paragraph count is the
-    // observable: a leaked split would add one).
+    expect(draft!.offlineTail?.some((i) => (i as { kind: string }).kind === "formatRun")).toBe(true);
+    // The live split carries a tracked paragraph mark. It remains reversible.
     const paragraphsAfter = (serializeXml(p2.session.doc!.docRoot).match(/<w:p[ >]/g) ?? []).length;
-    expect(paragraphsAfter, "no un-suggested structural change leaked into the live doc").toBe(paragraphsBefore);
-    // Stronger: the structural intent never reached the sequencer AT ALL —
-    // exactly one entry (the suggested insert) was sequenced by the replay.
-    // A destructive submit would land a second entry (applied or rejected).
-    expect(hubSession.seq, "only the suggestion was sequenced; the split never left the client").toBe(seqBefore + 1);
+    expect(paragraphsAfter, "the suggested Enter creates one reviewable paragraph").toBe(paragraphsBefore + 1);
+    // Split and following text sequence. Unsupported formatting stays local.
+    expect(hubSession.seq).toBe(seqBefore + 2);
     await p2.unmount();
     await other.unmount();
   });

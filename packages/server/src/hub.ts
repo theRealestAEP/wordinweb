@@ -759,7 +759,7 @@ export class CollabHub {
         const room = this.rooms.get(docId)!;
         // Write controls, ALL THREE through the one predicate the roster also
         // advertises (see writeBlock): role, demotion, and the room-wide lock
-        // with its owner bypass. Two copies of this rule is how the advertised
+        // for every participant. Two copies of this rule is how the advertised
         // status and the enforced one drift apart, and a client told "you may
         // write" while the server refuses is worse off than one told nothing.
         if (this.writeBlock(room, conn, msg.intent.clientId)) {
@@ -1151,25 +1151,23 @@ export class CollabHub {
    * because there is only one of them.
    *
    * ORDER IS THE ENFORCEMENT ORDER, not preference:
-   *  - role first, and NOT owner-bypassed — a viewer token stays a viewer
+   *  - role first — a viewer token stays a viewer
    *    token even for the epoch's owner (the token is the capability; the
    *    owner crown does not mint write access the token withheld);
-   *  - demotion next, also not owner-bypassed;
-   *  - the room-wide lock last, which the owner DOES bypass — that bypass is
-   *    why this is per-connection and cannot be a room flag broadcast
-   *    identically to everyone.
+   *  - demotion next;
+   *  - the room-wide lock last, for every participant. The owner keeps the
+   *    admin control that can lift the lock, but the document stays read-only.
    */
   private writeBlock(room: Room, conn: Connection, clientId: string): Exclude<WriteStatus, "allowed"> | null {
     if (this.verifier && this.auth.get(conn.id)?.role !== "editor") return "viewer-role";
     if (room.demoted?.has(clientId)) return "demoted";
-    if (room.readOnly && !this.ownerConns.has(conn.id)) return "owner-lock";
+    if (room.readOnly) return "owner-lock";
     return null;
   }
 
   private broadcastRoster(room: Room): void {
-    // Map each roster identity back to its LIVE socket: write status depends
-    // on the connection (the owner bypass is a property of the socket that
-    // proved the owner token), not on the clientId alone.
+    // Map each roster identity back to its live socket. Token roles belong to
+    // the connection, while demotion and the room lock belong to the room.
     const connOf = new Map<string, Connection>();
     for (const c of room.conns) {
       const cid = this.connClient.get(c.id);
@@ -1177,15 +1175,13 @@ export class CollabHub {
     }
     const roster = [...room.roster].map(([clientId, e]) => {
       const conn = connOf.get(clientId);
-      // A DISCONNECTED participant has no socket to evaluate the owner bypass
-      // against. Report the identity-only conditions and omit the room lock
-      // rather than guess: they are not writing anything right now, and the
-      // status is recomputed the moment they rejoin.
+      // A disconnected participant has no token role to evaluate. The room
+      // lock and an identity demotion still have exact answers.
       const write: WriteStatus = conn
         ? (this.writeBlock(room, conn, clientId) ?? "allowed")
         : room.demoted?.has(clientId)
           ? "demoted"
-          : "allowed";
+          : room.readOnly ? "owner-lock" : "allowed";
       return { clientId, profile: e.profile, connected: e.connected, write };
     });
     const out: ServerMessage = { t: "roster", roster };

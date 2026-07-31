@@ -76,8 +76,12 @@ export interface SealedCheckpoint {
  *   e7  table text wrapping: tableOp now carries None/Around. An e6 peer
  *       interprets the new object as vertical alignment and diverges, so the
  *       room must contain only clients that know the new canonical mutation.
+ *   e8  collaborative suggestion review adds rejectAllRevisions. An e7 peer
+ *       cannot apply that sealed intent, so mixed encrypted clients diverge.
+ *   e9  splitParagraph can carry suggestion metadata. Older peers apply the
+ *       split without its tracked paragraph mark and diverge immediately.
  */
-export const ENGINE_VERSION = "e7";
+export const ENGINE_VERSION = "e9";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-
@@ -505,10 +509,7 @@ export type ServerMessage =
  * refresh" — the mechanism working as designed, and the same price every prior
  * bump paid.
  *
- * ENGINE_VERSION is deliberately NOT bumped. That fence guards CANONICAL
- * DIVERGENCE in E2EE rooms, where clients derive document state themselves and
- * no arbiter exists. Liveness frames are never sealed, never sequenced, never
- * logged, and never reach apply or transform; two clients disagreeing about
- * them cannot produce two different documents. Bumping it would force every
- * live room to re-seed for a change that cannot affect a byte of content. */
-export const PROTOCOL_VERSION = 3;
+ * The v3 liveness change did not bump ENGINE_VERSION because liveness frames
+ * cannot change document bytes. Version 4 adds rejectAllRevisions and uses
+ * engine e8. Version 5 adds tracked paragraph splits and uses engine e9. */
+export const PROTOCOL_VERSION = 5;

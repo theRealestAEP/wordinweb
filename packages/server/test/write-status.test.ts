@@ -118,8 +118,7 @@ describe("write status at join", () => {
     const late = new FakeConn("l");
     await join(hub, late, "latecomer");
     expect(late.writeOf("latecomer")).toBe("owner-lock");
-    // …and the owner is still writable in their own locked room.
-    expect(late.writeOf("owner")).toBe("allowed");
+    expect(late.writeOf("owner")).toBe("owner-lock");
   });
 
   it("reports `viewer-role` when the TOKEN grants read only", async () => {
@@ -160,7 +159,7 @@ describe("write status on transitions — the signal arrives unprompted", () => 
 
     await hub.handle(owner, { t: "admin", action: { op: "readOnly", on: true } });
     expect(ed.writeOf("editor")).toBe("owner-lock");
-    expect(ed.writeOf("owner")).toBe("allowed"); // the bypass, visible to everyone
+    expect(ed.writeOf("owner")).toBe("owner-lock");
 
     const before = ed.rosterCount();
     await hub.handle(owner, { t: "admin", action: { op: "readOnly", on: false } });
@@ -200,7 +199,7 @@ describe("the advertised status matches what the sequencer enforces", () => {
    * requires them to agree. Enforcement and advertisement share one predicate;
    * this is what proves it rather than assuming it.
    */
-  it("agrees for allowed, owner-lock, demoted, and the owner bypass", async () => {
+  it("agrees for allowed, owner-lock, and demoted", async () => {
     const { hub, ownerToken } = await seededRoom();
     const owner = new FakeConn("o");
     const ed = new FakeConn("e");
@@ -221,9 +220,9 @@ describe("the advertised status matches what the sequencer enforces", () => {
     expect(ed.writeOf("editor")).toBe("owner-lock");
     expect(await accepts(ed, "editor", 2)).toBe(false);
 
-    // The owner bypasses their own lock — advertised allowed, edit lands.
-    expect(ed.writeOf("owner")).toBe("allowed");
-    expect(await accepts(owner, "owner", 1)).toBe(true);
+    // The same room lock blocks the owner, while the admin channel stays live.
+    expect(ed.writeOf("owner")).toBe("owner-lock");
+    expect(await accepts(owner, "owner", 1)).toBe(false);
 
     // Demotion, with the room lock lifted, is still a block both ways.
     await hub.handle(owner, { t: "admin", action: { op: "readOnly", on: false } });

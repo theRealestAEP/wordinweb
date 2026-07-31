@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./src/app";
 import { LocalEditor } from "./src/local-editor";
 import { goLiveEncrypted } from "./src/e2ee-flows";
-import { docKeyFromFragment, IndexedDbBundleStore } from "wordinweb/collab";
+import { docKeyFromFragment, IndexedDbBundleStore, type StoredDocSummary } from "wordinweb/collab";
 import { installWsRegistry } from "./src/perf/ws-tap";
 
 // Perf HUD plumbing (Ctrl+Shift+P / ?perf=1): registers collab sockets so the
@@ -96,16 +96,36 @@ const storedName = persist(localStorage, "wordinweb-name", () => "");
 // drafts all live in the same IndexedDB, so the File menu can list them all
 // and switching between local and collaborative reuses one connection.
 const bundleStore = new IndexedDbBundleStore();
+const roomUrlKey = (docId: string) => `wordinweb-room-${docId}`;
 
 function Harness() {
   const [docId, setDocId] = useState<string | null>(() => params.get("doc"));
   const [name, setName] = useState(storedName);
-  // Bytes carried back out of a session by Disconnect, so the local editor
-  // reopens the document you were editing rather than a blank one.
+  // Bytes carried out when a session ends or a saved copy opens, so the local
+  // editor reopens that document instead of a blank one.
   const [localBytes, setLocalBytes] = useState<Uint8Array | undefined>(undefined);
   const [copied, setCopied] = useState(false);
   // E2EE (doc 13 §1): the key rides the fragment — browsers never send it.
   const [docKey, setDocKey] = useState<string | null>(() => docKeyFromFragment(location.hash));
+
+  // Keep the complete encrypted room capability in this browser. The saved
+  // bundle has the room id, but only the URL fragment has its decryption key.
+  useEffect(() => {
+    if (!docId || !docKey) return;
+    localStorage.setItem(roomUrlKey(docId), location.href);
+  }, [docId, docKey]);
+
+  const canRejoinSaved = (saved: StoredDocSummary) =>
+    saved.kind === "live" && localStorage.getItem(roomUrlKey(saved.docId)) !== null;
+
+  const rejoinSaved = (saved: StoredDocSummary) => {
+    const roomUrl = localStorage.getItem(roomUrlKey(saved.docId));
+    if (!roomUrl) return;
+    const next = new URL(roomUrl);
+    history.replaceState(null, "", next.toString());
+    setDocKey(docKeyFromFragment(next.hash));
+    setDocId(saved.docId);
+  };
 
   // Abandon the current collaborative doc and return to the local editor to
   // start a fresh one. The escape hatch for "I forgot the share code" — you
@@ -142,7 +162,16 @@ function Harness() {
       setDocKey(key);
       setDocId(id);
     };
-    return <LocalEditor httpBase={HTTP} initialBytes={localBytes} onGoLive={goLive} store={bundleStore} />;
+    return (
+      <LocalEditor
+        httpBase={HTTP}
+        initialBytes={localBytes}
+        onGoLive={goLive}
+        canRejoinSaved={canRejoinSaved}
+        onRejoinSaved={rejoinSaved}
+        store={bundleStore}
+      />
+    );
   }
 
   // Collaborative mode: either we just went live, or the URL carried `?doc=`
@@ -163,10 +192,9 @@ function Harness() {
     );
   };
 
-  // Leave the room, keep the copy. The session's current bytes come back with
-  // us into the local editor and the socket is closed, so the server sees a
-  // departure rather than a phantom participant. Nothing durable is lost —
-  // that is the zero-custody contract, made into a button.
+  // Exit to a local copy after an ended session or a saved-copy selection.
+  // Offline room editing stays in App so its intent tail and stable URL can
+  // reconcile on rejoin.
   const disconnect = (bytes: Uint8Array | null) => {
     if (bytes) setLocalBytes(bytes);
     const u = new URL(location.href);

@@ -226,4 +226,26 @@ describe("FileMenu saved section (unit)", () => {
     for (let i = 0; i < 50 && !byId(host, "file-saved-error"); i++) await tick();
     expect(byId(host, "file-saved-error"), "a failed list read must be said, not blank").toBeTruthy();
   });
+
+  it("opens a saved room copy offline and keeps rejoin as an explicit action", async () => {
+    const onRejoinSaved = vi.fn();
+    const onOpenSaved = vi.fn();
+    const summary: StoredDocSummary = {
+      key: "room-secret", docId: "room-secret", kind: "live", savedAt: 1000, byteLength: 2048, title: "Client brief",
+    };
+    const host = render(createElement(FileMenu, {
+      listSaved: async () => [summary],
+      onOpenSaved,
+      canRejoinSaved: (s) => s.docId === summary.docId,
+      onRejoinSaved,
+    }));
+    await click(byId(host, "file-menu"));
+    for (let i = 0; i < 50 && !byId(host, "file-saved-rejoin"); i++) await tick();
+    expect(byId(host, "file-menu-panel")!.textContent).not.toContain(summary.docId);
+    expect(byId(host, "file-menu-panel")!.textContent).toContain("Client brief");
+    expect(byId(host, "file-saved-rejoin")!.textContent).toBe("Rejoin");
+    await click(byId(host, "file-saved-open"));
+    expect(onOpenSaved).toHaveBeenCalledWith(summary);
+    expect(onRejoinSaved).not.toHaveBeenCalled();
+  });
 });

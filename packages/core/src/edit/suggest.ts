@@ -156,6 +156,31 @@ export function insertSuggestedText(
   afterChildren.push(...following);
   if (afterChildren.length > 0) replacement.push(runLike(rEl, rPr, afterChildren));
 
+  // A second author can type inside another author's pending insertion. OOXML
+  // revisions must stay as siblings, so split the outer insertion around the
+  // new one instead of nesting w:ins elements.
+  if (localName(parent.name) === "ins") {
+    const grand = doc.findParentOf(parent);
+    if (!grand) return null;
+    const parentIdx = grand.children.indexOf(parent);
+    if (parentIdx === -1) return null;
+
+    const insIdx = replacement.indexOf(ins);
+    const before = [...parent.children.slice(0, idx), ...replacement.slice(0, insIdx)];
+    const after = [...replacement.slice(insIdx + 1), ...parent.children.slice(idx + 1)];
+    const outerParts: XmlElement[] = [];
+    if (before.length > 0) outerParts.push({ ...cloneXml(parent), children: before });
+    outerParts.push(ins);
+    if (after.length > 0) {
+      const afterOuter = { ...cloneXml(parent), children: after };
+      const idKey = Object.keys(afterOuter.attrs).find((key) => localName(key) === "id");
+      if (before.length > 0 && idKey) afterOuter.attrs[idKey] = String(meta.nextId());
+      outerParts.push(afterOuter);
+    }
+    grand.children.splice(parentIdx, 1, ...outerParts);
+    return { t: newT, offset: text.length };
+  }
+
   parent.children.splice(idx, 1, ...replacement);
   return { t: newT, offset: text.length };
 }

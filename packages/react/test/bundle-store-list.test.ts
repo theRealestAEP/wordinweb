@@ -140,7 +140,7 @@ describe("IndexedDbBundleStore.list", () => {
   it("lists stored entries from metadata without reading any bundle values", async () => {
     const db = installFakeIdb();
     const store = new IndexedDbBundleStore("t");
-    await store.put(bundle("doc1", 100, 5000));
+    await store.put({ ...bundle("doc1", 100, 5000), title: "Client brief" });
     await store.put(bundle("doc1#version-200-v1", 200, 4000));
 
     const bundles = db.log.get("bundles")!;
@@ -148,7 +148,7 @@ describe("IndexedDbBundleStore.list", () => {
     const all = await store.list();
 
     expect(all).toHaveLength(2);
-    expect(all.find((s) => s.key === "doc1")).toMatchObject({ kind: "live", savedAt: 100, byteLength: 5000 });
+    expect(all.find((s) => s.key === "doc1")).toMatchObject({ kind: "live", savedAt: 100, byteLength: 5000, title: "Client brief" });
     expect(all.find((s) => s.key === "doc1#version-200-v1")).toMatchObject({ kind: "version", label: "v1", byteLength: 4000 });
     // The load-bearing claim: no bundle VALUE was read — keys only.
     expect(bundles.gets).toBe(before.gets);

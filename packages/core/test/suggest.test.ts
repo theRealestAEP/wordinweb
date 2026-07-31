@@ -90,6 +90,25 @@ describe("suggesting mode — insertion", () => {
     expect(finalText(doc)).toBe("Hiabc");
     void t;
   });
+
+  it("keeps different authors as sibling suggestions at the same position", () => {
+    const doc = loadDoc(p("Hi"));
+    const alex = insertSuggestedText(doc, firstT(doc), 2, "AB", meta("Alex"))!;
+    doc.refresh();
+    insertSuggestedText(doc, alex.t, 1, "X", meta("Priya"));
+    doc.refresh();
+
+    expect(finalText(doc)).toBe("HiAXB");
+    const revisions = collectRevisions(doc);
+    expect(revisions.map((r) => r.author)).toEqual(["Alex", "Priya", "Alex"]);
+    expect(revisions.every((r) => localName(doc.findParentOf(r.el)!.name) !== "ins")).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect((xml.match(/<w:ins /g) ?? [])).toHaveLength(3);
+
+    const priya = revisions.find((r) => r.author === "Priya")!;
+    rejectRevision(doc, priya);
+    expect(finalText(doc)).toBe("HiAB");
+  });
 });
 
 describe("suggesting mode — deletion", () => {

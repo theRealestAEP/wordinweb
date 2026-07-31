@@ -5,6 +5,7 @@ interface MetaRecord {
   docId: string;
   savedAt: number;
   byteLength: number;
+  title?: string;
 }
 
 /**
@@ -89,7 +90,12 @@ export class IndexedDbBundleStore implements BundleStore {
     await new Promise<void>((resolve, reject) => {
       const t = db.transaction(["bundles", "meta"], "readwrite");
       t.objectStore("bundles").put(bundle);
-      const meta: MetaRecord = { docId: bundle.docId, savedAt: bundle.savedAt, byteLength: bundle.confirmedBytes.byteLength };
+      const meta: MetaRecord = {
+        docId: bundle.docId,
+        savedAt: bundle.savedAt,
+        byteLength: bundle.confirmedBytes.byteLength,
+        title: bundle.title,
+      };
       t.objectStore("meta").put(meta);
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
@@ -134,7 +140,12 @@ export class IndexedDbBundleStore implements BundleStore {
         budget--;
         const bundle = await this.get(key);
         if (!bundle) continue; // deleted between the two reads
-        meta = { docId: key, savedAt: bundle.savedAt, byteLength: bundle.confirmedBytes.byteLength };
+        meta = {
+          docId: key,
+          savedAt: bundle.savedAt,
+          byteLength: bundle.confirmedBytes.byteLength,
+          title: bundle.title,
+        };
         await this.tx("meta", "readwrite", (t) => t.objectStore("meta").put(meta));
       }
       out.push({
@@ -144,6 +155,7 @@ export class IndexedDbBundleStore implements BundleStore {
         // not treat it as free, and must not delete it for being large either.
         savedAt: meta?.savedAt ?? 0,
         byteLength: meta?.byteLength ?? 0,
+        title: meta?.title,
       });
     }
     return out;
