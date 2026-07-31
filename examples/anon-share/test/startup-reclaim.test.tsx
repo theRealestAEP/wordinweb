@@ -297,7 +297,7 @@ describe("App startup reclaim", () => {
       // path without waiting for its one-second production throttle.
       act(() => { window.dispatchEvent(new Event("pagehide")); });
       await act(async () => { await persistErrorReported; });
-      expect(byId(host, "persist-banner"), "a failed persist write must raise the banner").toBeTruthy();
+      await until(() => byId(host, "persist-banner") !== null, "a failed persist write must raise the banner");
       await until(() => byId(host, "persist-stored-summary") !== null, "the banner must say what is taking the space");
       const summary = byId(host, "persist-stored-summary")!;
       expect(summary.textContent).toContain("3 saved copies");
