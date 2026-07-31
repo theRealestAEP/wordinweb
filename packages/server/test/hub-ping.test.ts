@@ -135,7 +135,7 @@ describe("protocol version fence (the ping/pong bump)", () => {
     expect(a.last()).toEqual({ t: "refused", reason: "version-mismatch" });
   });
 
-  it("PROTOCOL_VERSION was bumped for ping/pong", () => {
-    expect(PROTOCOL_VERSION, "adding ping/pong required a bump — see the constant's note").toBe(3);
+  it("PROTOCOL_VERSION includes the ping/pong bump", () => {
+    expect(PROTOCOL_VERSION, "ping/pong requires protocol version 3 or newer").toBeGreaterThanOrEqual(3);
   });
 });

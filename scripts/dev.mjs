@@ -41,7 +41,7 @@ for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => shutdown(0));
  */
 async function portHolders(port) {
   try {
-    const probe = spawn("lsof", ["-ti", `:${port}`], { stdio: ["ignore", "pipe", "ignore"] });
+    const probe = spawn("lsof", [`-tiTCP:${port}`, "-sTCP:LISTEN"], { stdio: ["ignore", "pipe", "ignore"] });
     let out = "";
     probe.stdout.on("data", (d) => (out += d));
     await once(probe, "close");

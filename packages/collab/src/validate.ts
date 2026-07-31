@@ -123,6 +123,10 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "splitParagraph":
       if (!nonNegInt(intent.at.offset)) return "splitParagraph: bad offset";
       if (!nonNegInt(intent.newBlockId) || !nonNegInt(intent.newRunId)) return "splitParagraph: bad ids";
+      if (intent.suggest !== undefined) {
+        if (typeof intent.suggest.author !== "string" || intent.suggest.author.length > 100) return "splitParagraph: bad author";
+        if (typeof intent.suggest.date !== "string" || intent.suggest.date.length > 40) return "splitParagraph: bad date";
+      }
       return null;
     case "formatRange":
       if (!nonNegInt(intent.start) || !nonNegInt(intent.end) || intent.end <= intent.start) return "formatRange: bad range";
@@ -343,6 +347,7 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (!nonNegInt(intent.index) || intent.index > 100000) return `${intent.kind}: bad index`;
       return null;
     case "acceptAllRevisions":
+    case "rejectAllRevisions":
       return null;
     case "insertTable": {
       const okDim = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 50;

@@ -25,6 +25,7 @@ export { toSuggestions, replayDrained, arrivalMode, OFFLINE_TAIL_CAP } from "./r
 export { applyIntentScoped, resyncScope, unionScopes, type Scope } from "./apply.js";
 export { CollabConnection, type ClientTransport, type ConnectionCallbacks } from "./connection.js";
 export { EncryptedCollabConnection } from "./enc-connection.js";
+export { CarriedIdAllocator } from "./id-allocator.js";
 export { bindEditor, type EditorBridge, type EditorBinding } from "./binding.js";
 export { createWebSocketTransport, type SocketLike } from "./ws-transport.js";
 export { LivenessMonitor, monitorTransport, type ConnectionState, type LivenessOptions } from "./liveness.js";

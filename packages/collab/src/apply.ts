@@ -56,6 +56,7 @@ import {
   acceptRevision,
   rejectRevision,
   acceptAllRevisions,
+  rejectAllRevisions,
   isSafeUrl,
   applyTableOp,
   runWireLength,
@@ -259,7 +260,17 @@ function applyIntentInner(
     case "splitParagraph": {
       const caret = resolveCaret(ids, runOf, intent.at);
       if (!caret) return false;
-      const res = applySplitParagraph(doc, caret, ctx);
+      const splitCtx = intent.suggest
+        ? {
+            suggesting: true,
+            revMeta: () => ({
+              author: intent.suggest!.author,
+              date: intent.suggest!.date,
+              nextId: () => doc.nextRevisionId(),
+            }),
+          }
+        : ctx;
+      const res = applySplitParagraph(doc, caret, splitCtx);
       if (!res) return false;
       ids.assign(res.after, intent.newBlockId);
       const newRun = res.after.children.find((c) => localRun(c));
@@ -805,6 +816,8 @@ function applyIntentInner(
     }
     case "acceptAllRevisions":
       return acceptAllRevisions(doc) > 0;
+    case "rejectAllRevisions":
+      return rejectAllRevisions(doc) > 0;
     case "insertTable": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;

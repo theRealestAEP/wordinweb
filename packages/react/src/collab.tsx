@@ -5,6 +5,7 @@ import { DocxToolbar, type ToolbarFeature, type ToolbarMode } from "./toolbar.js
 import {
   CollabConnection,
   EncryptedCollabConnection,
+  CarriedIdAllocator,
   stretchShareCode,
   toSuggestions,
   arrivalMode,
@@ -21,6 +22,7 @@ import {
   type ConnectionState,
   type LivenessOptions,
   type BundleStore,
+  type DocBundle,
   type ParticipantProfile,
   type RosterEntry,
   type Intent,
@@ -28,6 +30,8 @@ import {
   type UndoOutcome,
   type WriteStatus,
 } from "@wordinweb/collab/client";
+
+const EMPTY_PRESENCE: Record<string, PresencePosition | null> = {};
 
 /**
  * React binding for wordinweb collaboration. Imported from the SEPARATE
@@ -134,8 +138,8 @@ export interface CollabSession {
    * repaint sees every batched intent's scope.
    */
   takeRenderScope: () => Scope | null;
-  /** Increases only when reconciliation RELOADED the document (a true
-   * conflict). The editor re-mounts on this; between reloads it updates in
+  /** Increases when a reconnect or reconciliation replaces the document
+   * object. The editor re-mounts on this; between replacements it updates in
    * place (no flash for the common non-conflicting edits). */
   docEpoch: number;
   /** True once joined and the snapshot is loaded. */
@@ -195,8 +199,9 @@ export interface CollabSession {
    *
    * Null while the connection is live, and null when a refusal already
    * blocks writes (a viewer's link does not become writable by going
-   * through a tunnel). On reconnect the tail replays: silently as ordinary
-   * edits when the session is the same epoch, else via {@link arrival}.
+   * through a tunnel). An automatic same-epoch reconnect replays the tail
+   * silently. An intentional disconnect uses {@link arrival} for an explicit
+   * merge check.
    */
   offline: { editsHeld: number; capped: boolean } | null;
   /**
@@ -206,6 +211,14 @@ export interface CollabSession {
    * the statement that automatic recovery has stopped.
    */
   reconnect: () => void;
+  /**
+   * Intentionally leave the transport while the document stays open. Edits
+   * continue into the offline tail until {@link reconnect} rejoins the same
+   * room. This differs from a server refusal, which blocks edits.
+   */
+  disconnect: () => void;
+  /** Reapply the stored offline tail after a page reload restores its base. */
+  restoreOfflineView: () => void;
   /**
    * The server announced it will END this session, and this is the grace
    * period before it does. `inMs` is the measured remainder at the moment the
@@ -337,15 +350,15 @@ export interface CollabSession {
    * a DIFFERENT epoch than the tail was recorded against, the recommended
    * mode is `suggest` (replay as tracked changes; ≤ the suggest threshold)
    * or `draft` (large tails). `structural` counts the tail intents that
-   * have no suggestion form (splits/merges/tables/format — rebase.ts):
+   * have no suggestion form (merges/tables/format — rebase.ts):
    * they are NOT replayed by `suggest` and survive in the banked draft
    * slot instead — say so, or their absence reads as silent loss. A
-   * same-epoch rejoin never surfaces here: its tail replays silently
-   * through the ordinary submit path, like a large pending queue.
+   * same-epoch automatic rejoin replays silently. An intentional disconnect
+   * offers `replay`; a changed room offers `suggest` or `draft`.
    * Null when there's nothing to reconcile. `reconcile()` runs the choice.
    */
-  arrival: { mode: "suggest" | "draft"; tailLength: number; structural: number } | null;
-  reconcile: (mode: "suggest" | "draft") => void;
+  arrival: { mode: "replay" | "suggest" | "draft"; tailLength: number; structural: number } | null;
+  reconcile: (mode: "replay" | "suggest" | "draft") => void;
   /** How many times the connection self-healed a drifted optimistic replica
    * (encrypted mode's quiescent mirror check — the B6a class). Telemetry;
    * the heal itself is automatic and already reflected in doc/docEpoch. */
@@ -460,7 +473,12 @@ function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 export function useCollab(opts: UseCollabOptions): CollabSession {
   const { url, docId, clientId, token, createSocket, store, profile, takeover, docKey, shareCode, ownerToken, httpBase } = opts;
   const connRef = useRef<CollabConnection | null>(null);
+  const carriedIdAllocator = useMemo(() => new CarriedIdAllocator(clientId), [clientId]);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
+  const docRef = useRef<DocxDocument | null>(null);
+  const offlineActiveRef = useRef(false);
+  const offlineCappedRef = useRef(false);
+  const captureOfflineRef = useRef<(intent: Omit<Intent, "clientId" | "clientSeq" | "base">, preApplied: boolean) => void>(() => {});
   const [version, setVersion] = useState(0);
   /** Repaint signal (see CollabSession.renderVersion): follows the
    * connection's docVersion, plus local bumps for offline toolbar applies. */
@@ -472,6 +490,8 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
    * the offline counterpart of the connection's takeRenderScope. */
   const renderScopeRef = useRef<Scope | null>(null);
   const [docEpoch, setDocEpoch] = useState(0);
+  const publishedDocRef = useRef<DocxDocument | null>(null);
+  const connectionDocEpochRef = useRef(0);
   const [ready, setReady] = useState(false);
   const [presence, setPresence] = useState<Record<string, PresencePosition | null>>({});
   const [refused, setRefused] = useState<string | null>(null);
@@ -515,7 +535,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const [notOwner, setNotOwner] = useState(false);
   const [epochChanged, setEpochChanged] = useState<{ from: string; to: string } | null>(null);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
-  const [arrival, setArrival] = useState<{ mode: "suggest" | "draft"; tailLength: number; structural: number } | null>(null);
+  const [arrival, setArrival] = useState<{ mode: "replay" | "suggest" | "draft"; tailLength: number; structural: number } | null>(null);
   const [selfHeals, setSelfHeals] = useState(0);
   const [droppedPreReady, setDroppedPreReady] = useState(0);
   const [persistErrors, setPersistErrors] = useState(0);
@@ -534,7 +554,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
    */
   const offlineTailRef = useRef<import("@wordinweb/collab/client").DocBundle["offlineTail"]>(undefined);
   /** The genesisId the tail was recorded against (bundle.offlineTailEpoch):
-   * same epoch on rejoin ⇒ silent replay; different ⇒ arrival ladder. */
+   * same epoch can replay; a different epoch requires the arrival ladder. */
   const offlineEpochRef = useRef<string | null>(null);
   /** Tail length mirrored into state so the UI re-renders as it grows. */
   const [offlineHeld, setOfflineHeld] = useState(0);
@@ -551,6 +571,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   /** Trailing-throttle timer for the OFFLINE tail writer (below). */
   const offlinePersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("live");
+  const connectionRef = useRef<ConnectionState>("live");
   /**
    * Bumped to force the connection effect to tear down and rebuild — the
    * reconnect itself.
@@ -570,6 +591,11 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const backoffRef = useRef(0);
   const attemptRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeSocketRef = useRef<WebSocket | null>(null);
+  const manuallyOfflineRef = useRef(false);
+  const disconnectSeqRef = useRef<number | null>(null);
+  const manualDraftBankedRef = useRef(false);
+  const manualDraftSnapshotRef = useRef<DocBundle | null>(null);
   /**
    * The teardown's bundle flush, awaited by the next effect run before it
    * reads the store.
@@ -595,8 +621,45 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     retryTimerRef.current = null;
     backoffRef.current = 0;
     attemptRef.current = 0;
+    if (manuallyOfflineRef.current) {
+      const currentDoc = docRef.current;
+      const currentBundle = connRef.current?.exportBundle(docId);
+      const ids = currentDoc?.stableIds;
+      manualDraftSnapshotRef.current = currentDoc && currentBundle && ids
+        ? {
+            ...currentBundle,
+            confirmedBytes: currentDoc.save(),
+            confirmedSidecar: ids.exportSidecar(currentDoc.editableRoots()),
+            pending: [],
+            offlineTail: undefined,
+            offlineTailEpoch: undefined,
+            offlineBaseSeq: undefined,
+            savedAt: Date.now(),
+          }
+        : null;
+    }
+    manuallyOfflineRef.current = false;
+    connectionRef.current = "reconnecting";
     setConnection("reconnecting");
     setReconnectNonce((n) => n + 1);
+  };
+
+  /** Stop this session's transport and keep the current document editable. */
+  const disconnect = () => {
+    if (manuallyOfflineRef.current) return;
+    disconnectSeqRef.current = connRef.current?.exportBundle(docId)?.confirmedSeq ?? null;
+    manualDraftBankedRef.current = false;
+    manualDraftSnapshotRef.current = null;
+    manuallyOfflineRef.current = true;
+    if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = null;
+    connectionRef.current = "lost";
+    setConnection("lost");
+    try {
+      activeSocketRef.current?.close();
+    } catch {
+      // The connection state above already completed the intentional leave.
+    }
   };
 
   /**
@@ -619,9 +682,11 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         if (tail.length) {
           next.offlineTail = [...tail];
           next.offlineTailEpoch = offlineEpochRef.current ?? undefined;
+          next.offlineBaseSeq = disconnectSeqRef.current ?? prev.confirmedSeq;
         } else {
           delete next.offlineTail;
           delete next.offlineTailEpoch;
+          delete next.offlineBaseSeq;
         }
         await store.put(next);
       })
@@ -670,7 +735,22 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       setRenderVersion((v) => v + 1);
     }
     const tail = offlineTailRef.current ?? [];
-    tail.push(intent as Intent);
+    const next = intent as Intent;
+    const last = tail[tail.length - 1];
+    if (
+      preApplied &&
+      last?.kind === "insertText" &&
+      next.kind === "insertText" &&
+      !last.suggest &&
+      !next.suggest &&
+      last.at.blockId === next.at.blockId &&
+      last.at.runId === next.at.runId &&
+      next.at.offset === last.at.offset + last.text.length
+    ) {
+      tail[tail.length - 1] = { ...last, text: last.text + next.text };
+    } else {
+      tail.push(next);
+    }
     offlineTailRef.current = tail;
     // Stamp the epoch the tail is being recorded against, once per tail.
     offlineEpochRef.current ??= lastGenesisRef.current;
@@ -679,6 +759,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     if (connRef.current?.ready) persisterRef.current?.notify();
     else scheduleOfflinePersist();
   };
+  captureOfflineRef.current = captureOffline;
 
   /**
    * Drain the offline tail through the ordinary submit path, one-in-flight
@@ -687,8 +768,8 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
    * rejoin: to the session this client is indistinguishable from one that
    * was disconnected with a large pending queue — doc 15 §2). `suggest`
    * converts each entry to its tracked-change form first (diverged rejoin,
-   * the owner-adopted default); structural entries have no suggestion form
-   * and are popped WITHOUT submitting — they survive in the banked draft
+   * the owner-adopted default); unsupported structural entries are popped
+   * WITHOUT submitting — they survive in the banked draft
    * slot, and `arrival.structural` told the user so.
    *
    * EXACTLY-ONCE across a kill: each step pops the entry from the tail,
@@ -705,7 +786,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       // Torn down or dropped again: stop. The remainder is persisted and
       // resumes on the next welcome (same epoch now ⇒ silent continuation;
       // suggest remainders re-offer via the arrival ladder).
-      if (connRef.current !== conn || !conn.ready) return;
+      if (connRef.current !== conn || !conn.ready || manuallyOfflineRef.current) return;
       if (conn.pendingCount > 0) {
         setTimeout(step, 25);
         return;
@@ -718,6 +799,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         offlineEpochRef.current = null;
         setOfflineHeld(0);
         setArrival(null);
+        disconnectSeqRef.current = null;
+        manualDraftBankedRef.current = false;
+        manualDraftSnapshotRef.current = null;
         return;
       }
       const next = tail[0];
@@ -740,6 +824,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // announced by the previous one no longer applies to anything.
     clearDeadlines();
     const socket = (createSocket ?? ((u: string) => new WebSocket(u)))(url);
+    activeSocketRef.current = socket;
     let disposed = false;
     /** One verdict per socket: close, error and heartbeat-timeout all funnel
      * here and only the first is acted on. */
@@ -751,6 +836,11 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       if (dropHandled || disposed) return;
       dropHandled = true;
       monitor?.stop();
+      if (manuallyOfflineRef.current) {
+        connectionRef.current = "lost";
+        setConnection("lost");
+        return;
+      }
       // Close it ourselves. A half-open socket is still OPEN as far as the
       // browser is concerned, and leaving it around means the next reconnect
       // adds a second live socket for the same clientId — which the hub's
@@ -765,6 +855,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       // open, and would never give the user the modal that tells them their
       // work is safe.
       if (attemptRef.current >= maxRetries) {
+        connectionRef.current = "lost";
         setConnection("lost");
         return;
       }
@@ -772,6 +863,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       // Backoff matching scheduleRateLimitRedrive (enc-connection.ts): 300ms
       // doubling to a 5s ceiling, reset on success.
       backoffRef.current = Math.min(backoffRef.current === 0 ? 300 : backoffRef.current * 2, 5000);
+      connectionRef.current = "reconnecting";
       setConnection("reconnecting");
       retryTimerRef.current = setTimeout(() => {
         retryTimerRef.current = null;
@@ -809,7 +901,12 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       onChange: () => {
         const c = connRef.current;
         if (!c) return;
-        setDoc(c.doc);
+        const nextDoc = c.doc;
+        const objectChanged = publishedDocRef.current !== null && nextDoc !== publishedDocRef.current;
+        const connectionEpochChanged = c.docEpoch !== connectionDocEpochRef.current;
+        publishedDocRef.current = nextDoc;
+        connectionDocEpochRef.current = c.docEpoch;
+        setDoc(nextDoc);
         setReady(c.ready);
         setVersion((v) => v + 1); // signal a re-render on every reconciled change
         // Repaint only when the DOC changed outside the editor (docVersion
@@ -820,36 +917,55 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
           lastDocVersionRef.current = dv;
           setRenderVersion((v) => v + 1);
         }
-        setDocEpoch(c.docEpoch); // bumps only on a reload (true conflict)
+        if (objectChanged || connectionEpochChanged) setDocEpoch((epoch) => epoch + 1);
         persister?.notify(); // throttled bundle write (doc 12 §4)
         // A welcome that LANDED is the only proof a reconnect worked. Reset
         // the budget here rather than when the socket opens: an open socket
         // that is then refused (`already-open`, version mismatch) has not
         // recovered anything, and crediting it would let a refusal loop retry
         // forever without ever reaching `lost`.
-        if (c.ready) {
+        if (c.ready && !manuallyOfflineRef.current) {
           backoffRef.current = 0;
           attemptRef.current = 0;
+          connectionRef.current = "live";
           setConnection((s) => (s === "live" ? s : "live"));
           lastGenesisRef.current = c.genesisId;
           // Resolve the offline tail ONCE per welcomed connection (doc 15
-          // arrival ladder). Same epoch as the tail was recorded against ⇒
-          // this client is just a rejoiner with a large pending queue:
-          // replay silently through the ordinary drained submit path.
+          // arrival ladder). Automatic same-epoch reconnects replay silently.
+          // An intentional or stable-URL rejoin gets an explicit merge check.
           // Different epoch (or a tail from a build that recorded none) ⇒
           // true divergence: offer the choice, never silently bulldoze.
           if (tailConnRef.current !== c) {
             tailConnRef.current = c;
             const tail = offlineTailRef.current ?? [];
             if (tail.length) {
-              if (offlineEpochRef.current === c.genesisId) {
-                runTailReplay(c, "plain");
+              const confirmedSeq = c.exportBundle(docId)?.confirmedSeq ?? null;
+              const roomChangedWhileAway = disconnectSeqRef.current !== null &&
+                confirmedSeq !== null && confirmedSeq > disconnectSeqRef.current;
+              if (offlineEpochRef.current === c.genesisId && !roomChangedWhileAway) {
+                if (disconnectSeqRef.current !== null) {
+                  setArrival({ mode: "replay", tailLength: tail.length, structural: 0 });
+                } else {
+                  runTailReplay(c, "plain");
+                }
               } else {
                 const structural = toSuggestions(tail, "", "").dropped.length;
                 // diverged=true never yields "fast-forward"; narrow for the type.
                 const mode = arrivalMode(tail.length, true) === "draft" ? "draft" as const : "suggest" as const;
                 setArrival({ mode, tailLength: tail.length, structural });
+                if (roomChangedWhileAway && store && !manualDraftBankedRef.current) {
+                  const epoch = offlineEpochRef.current ?? c.genesisId;
+                  const snapshot = manualDraftSnapshotRef.current;
+                  if (epoch && snapshot) {
+                    manualDraftBankedRef.current = true;
+                    void store.put({ ...snapshot, docId: draftKey(docId, epoch) });
+                  }
+                }
               }
+            } else {
+              disconnectSeqRef.current = null;
+              manualDraftBankedRef.current = false;
+              manualDraftSnapshotRef.current = null;
             }
           }
         }
@@ -1001,7 +1117,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
           // ERASE a stored tail the user had not reconciled yet.
           offlineTail: () => {
             const tail = offlineTailRef.current ?? [];
-            return tail.length ? { tail: [...tail], epoch: offlineEpochRef.current ?? undefined } : null;
+            return tail.length
+              ? { tail: [...tail], epoch: offlineEpochRef.current ?? undefined, baseSeq: disconnectSeqRef.current ?? undefined }
+              : null;
           },
         });
         persisterRef.current = persister;
@@ -1053,6 +1171,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         if (!offlineTailRef.current?.length) {
           offlineTailRef.current = bundle?.offlineTail;
           offlineEpochRef.current = bundle?.offlineTailEpoch ?? null;
+          disconnectSeqRef.current = bundle?.offlineTail?.length && !bundle.pending.length
+            ? bundle.offlineBaseSeq ?? bundle.confirmedSeq
+            : null;
           setOfflineHeld(bundle?.offlineTail?.length ?? 0);
         }
         // resume() already claims takeover for this exact reason (doc 12 §7).
@@ -1080,6 +1201,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       persister?.stop(); // …then detach (no timers left behind)
       if (persisterRef.current === persister) persisterRef.current = null;
       connRef.current = null;
+      if (activeSocketRef.current === socket) activeSocketRef.current = null;
     };
     // Reconnect when the target document or endpoint changes, or when
     // `reconnectNonce` is bumped by a detected drop — the reconnect IS a
@@ -1119,6 +1241,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     refused !== null || (myWrite !== undefined ? myWrite !== "allowed" : readOnlyBlocked);
   const offlineActive = !refusalBlocked && connection !== "live" && ready;
   const offlineCapped = offlineActive && offlineHeld >= (opts.offlineTailCap ?? OFFLINE_TAIL_CAP);
+  docRef.current = doc;
+  offlineActiveRef.current = offlineActive;
+  offlineCappedRef.current = offlineCapped;
 
   return {
     doc,
@@ -1147,7 +1272,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // that slips to the connection anyway lands in the loud droppedPreReady
     // backstop rather than vanishing.
     submit: (intent) => {
-      if (offlineActive && !offlineCapped) return captureOffline(intent, /*preApplied*/ true);
+      if (offlineActiveRef.current && !offlineCappedRef.current) return captureOfflineRef.current(intent, /*preApplied*/ true);
       connRef.current?.submitPreApplied(intent);
     },
     // Toolbar/API ops: canonical-apply optimistic path (see CollabSession).
@@ -1155,12 +1280,23 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // code before recording, so the local result stays byte-identical to
     // what every replica will derive when the tail replays.
     submitOp: (intent) => {
-      if (offlineActive && !offlineCapped) return captureOffline(intent, /*preApplied*/ false);
+      if (offlineActiveRef.current && !offlineCappedRef.current) return captureOfflineRef.current(intent, /*preApplied*/ false);
       connRef.current?.submit(intent);
     },
-    setPresence: (pos) => connRef.current?.setPresence(pos),
-    allocIds: (n) => connRef.current?.allocIds(n) ?? [],
-    uploadMedia: async (bytes) => (await connRef.current?.uploadMedia(bytes)) ?? null,
+    setPresence: (pos) => {
+      if (connectionRef.current === "live") connRef.current?.setPresence(pos);
+    },
+    allocIds: (n) => {
+      const out: number[] = [];
+      while (out.length < n) {
+        const id = carriedIdAllocator.next();
+        if (!docRef.current?.stableIds?.elOf(id)) out.push(id);
+      }
+      return out;
+    },
+    uploadMedia: async (bytes) => connectionRef.current === "live"
+      ? (await connRef.current?.uploadMedia(bytes)) ?? null
+      : null,
     // Read straight off the connection rather than mirrored into state: it is
     // set once when the welcome lands and never changes for the session, and
     // in the encrypted connection it is assigned OUTSIDE the serial rehydrate
@@ -1176,8 +1312,10 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // at construction — a pre-existing modelling wrinkle, not this arc's), so
     // the access is structural. The TYPE is the real one now, so a change to
     // UndoOutcome breaks here rather than silently disagreeing.
-    undoLast: () => (connRef.current as Partial<{ undoLast: () => UndoOutcome }> | null)?.undoLast?.() ?? "unavailable",
-    presence,
+    undoLast: () => connectionRef.current === "live"
+      ? (connRef.current as Partial<{ undoLast: () => UndoOutcome }> | null)?.undoLast?.() ?? "unavailable"
+      : "unavailable",
+    presence: connection === "live" ? presence : EMPTY_PRESENCE,
     refused,
     sessionWarning,
     readOnlyBlocked,
@@ -1224,12 +1362,35 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     writeStatus: myWrite,
     connection,
     reconnect,
+    disconnect,
+    restoreOfflineView: () => {
+      const current = connRef.current?.doc;
+      const ids = current?.stableIds;
+      const tail = offlineTailRef.current ?? [];
+      if (!current || !ids || tail.length === 0) return;
+      let scope: Scope | null = null;
+      for (const intent of tail) {
+        const result = applyIntentScoped(current, ids, intent);
+        if (!result.applied) continue;
+        resyncScope(current, ids, result);
+        scope = scope ? unionScopes(scope, result) : result;
+      }
+      if (scope) {
+        renderScopeRef.current = scope;
+        setVersion((value) => value + 1);
+        setRenderVersion((value) => value + 1);
+      }
+    },
     retryWrites: () => setReadOnlyBlocked(false),
     epochChanged,
     roster,
-    setProfile: (p) => connRef.current?.setProfile(p),
+    setProfile: (p) => {
+      if (connectionRef.current === "live") connRef.current?.setProfile(p);
+    },
     activity: connRef.current?.activity ?? [],
-    admin: (action) => connRef.current?.admin(action),
+    admin: (action) => {
+      if (connectionRef.current === "live") connRef.current?.admin(action);
+    },
     selfHeals,
     droppedPreReady,
     persistErrors,
@@ -1244,10 +1405,15 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         offlineEpochRef.current = null;
         setOfflineHeld(0);
         setArrival(null);
+        disconnectSeqRef.current = null;
+        manualDraftBankedRef.current = false;
+        manualDraftSnapshotRef.current = null;
         return;
       }
       setArrival(null); // the choice is made; the banner comes down now
-      if (mode === "suggest") {
+      if (mode === "replay") {
+        runTailReplay(conn, "plain");
+      } else if (mode === "suggest") {
         // Replay the tail as tracked changes on the crowd's doc, drained
         // one-in-flight, popping + persisting per intent (see runTailReplay
         // — a kill mid-replay resumes from the store, and the remainder is
@@ -1261,6 +1427,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
         offlineTailRef.current = undefined;
         offlineEpochRef.current = null;
         setOfflineHeld(0);
+        disconnectSeqRef.current = null;
+        manualDraftBankedRef.current = false;
+        manualDraftSnapshotRef.current = null;
         void persisterRef.current?.flush(); // erase the tail from the live slot
       }
     },
@@ -1300,6 +1469,8 @@ export const COLLAB_TOOLBAR_DEFAULTS: Partial<Record<ToolbarFeature, boolean>> =
 
 export function CollabEditor(opts: UseCollabOptions & {
   editable?: boolean;
+  /** Tracked-change display. Use markup to show suggestions in the document. */
+  revisions?: "final" | "markup";
   /** Render the Word-style ribbon toolbar above the page (default true). */
   toolbar?: boolean;
   /** Ribbon mode: "simple" (Home only) or "advanced" (default). */
@@ -1339,9 +1510,9 @@ export function CollabEditor(opts: UseCollabOptions & {
     // shell renders the disconnect modal off it, and without it the observer
     // would only learn the socket died when some unrelated change happened to
     // re-fire this effect — which, on a dead connection, may be never.
-  }, [session.version, session.ready, session.refused, session.roster, session.epochChanged, session.sessionWarning, session.writesBlocked, session.connection, session.persistErrors]);
+  }, [session.version, session.ready, session.refused, session.roster, session.epochChanged, session.sessionWarning, session.writesBlocked, session.connection, session.persistErrors, session.storeSlow, session.notOwner, session.arrival, session.offline?.editsHeld, session.offline?.capped]);
   const [api, setApi] = useState<DocxViewApi | null>(null);
-  // Caret survival across a true-conflict reload: the docEpoch key change
+  // Caret survival across a document replacement: the docEpoch key change
   // below remounts the whole DocxView, killing the caret's node references.
   // The stable-id encoding survives (the replica reproduces the id table via
   // the sidecar), so capture it from the OUTGOING view the moment the epoch
@@ -1362,7 +1533,7 @@ export function CollabEditor(opts: UseCollabOptions & {
   // serializing here on the live path was pure waste — and it sat on the
   // join-mount critical path: a full save() of a ~12 MB document is seconds
   // of main thread between the welcome and the first paint, run again on
-  // every docEpoch reload. Computed only when a refusal actually surfaces.
+  // every document replacement. Computed only when a refusal surfaces.
   const bytes = useMemo(
     () => (session.refused && session.doc ? session.doc.save() : null),
     [session.refused, session.doc, session.docEpoch],
@@ -1489,8 +1660,9 @@ export function CollabEditor(opts: UseCollabOptions & {
     // and lost it, which is why the read-only banner could be on screen while
     // the user's text appeared and then vanished.
     editable: (opts.editable ?? true) && !session.writesBlocked,
-    // Re-key only on docEpoch (a true-conflict reload) — NOT on every change.
-    // Between reloads the live doc mutates in place and the key stays stable,
+    revisions: opts.revisions,
+    // Re-key only on docEpoch (a document replacement), not on every change.
+    // Between replacements the live doc mutates in place and the key stays stable,
     // so DocxView repaints in place instead of re-mounting (no flash/jump).
     key: session.docEpoch,
   });

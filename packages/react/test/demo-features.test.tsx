@@ -967,6 +967,31 @@ describe("demo features: header/footer editing rides the wire", () => {
  * the wire as a real intent and lands on the peer as a real tracked change.
  */
 describe("suggesting mode replicates as tracked changes", () => {
+  it("Enter stays a reviewable paragraph suggestion and following text reaches peers", async () => {
+    const hub = new CollabHub(provider);
+    const a = await mountEditor(hub, "suggest-enter", "alice");
+    const b = await mountEditor(hub, "suggest-enter", "bob");
+    await settle();
+    await a.click();
+    await a.typed("first");
+    await act(async () => { a.api().setSuggesting(true, "Priya"); });
+    await a.keys(["Enter"]);
+    await a.typed("second");
+    await settle(40);
+
+    const server = await spyState(a.factory, "suggest-enter");
+    expect(server.paragraphs).toBe(2);
+    expect(server.text).toBe("first|second");
+    expect(server.xml).toMatch(/<w:pPr>[\s\S]*?<w:rPr>[\s\S]*?<w:ins /);
+    expect(server.xml).toContain('w:author="Priya"');
+    expect(server.xml).toContain("second");
+    expect(a.clientXml()).toBe(server.xml);
+    expect(b.clientXml()).toBe(server.xml);
+    expect(b.api().revisionCount()).toBe(2); // paragraph break + inserted text
+    await a.unmount();
+    await b.unmount();
+  });
+
   it("A types in suggest mode; B converges and the text is a w:ins, not plain text", async () => {
     const hub = new CollabHub(provider);
     const a = await mountEditor(hub, "suggest-live", "alice");
@@ -1006,7 +1031,7 @@ describe("suggesting mode replicates as tracked changes", () => {
     await b.unmount();
   });
 
-  it("accept/reject refuses in the session rather than forking it", async () => {
+  it("accept/reject all replicate through the session", async () => {
     const hub = new CollabHub(provider);
     const a = await mountEditor(hub, "suggest-review", "alice");
     const b = await mountEditor(hub, "suggest-review", "bob");
@@ -1019,19 +1044,28 @@ describe("suggesting mode replicates as tracked changes", () => {
     await settle(40);
     expect(a.clientXml()).toContain("<w:ins");
 
-    // B reviews. Accept/reject emits no intent yet, so it must refuse — the
-    // alternative is B resolving the suggestion on B's replica alone.
     await act(async () => {
-      expect(b.api().acceptRevisionAtCaret()).toBe(false);
-      expect(b.api().rejectRevisionAtCaret()).toBe(false);
-      expect(b.api().acceptAllRevisions()).toBe(0);
-      expect(b.api().rejectAllRevisions()).toBe(0);
+      expect(b.api().acceptAllRevisions()).toBe(1);
     });
     await settle();
 
-    // Nothing moved anywhere: the suggestion still stands on both replicas.
-    const server = await spyState(a.factory, "suggest-review");
-    expect(server.xml).toContain("<w:ins");
+    let server = await spyState(a.factory, "suggest-review");
+    expect(server.xml).not.toContain("<w:ins");
+    expect(server.xml).toContain("XY");
+    expect(a.clientXml()).toBe(server.xml);
+    expect(b.clientXml()).toBe(server.xml);
+
+    await a.typed("Z");
+    await settle(40);
+    expect(a.clientXml()).toContain("<w:ins");
+    await act(async () => {
+      expect(b.api().rejectAllRevisions()).toBe(1);
+    });
+    await settle();
+
+    server = await spyState(a.factory, "suggest-review");
+    expect(server.xml).not.toContain("<w:ins");
+    expect(server.xml).not.toContain(">Z<");
     expect(a.clientXml()).toBe(server.xml);
     expect(b.clientXml()).toBe(server.xml);
     await a.unmount();

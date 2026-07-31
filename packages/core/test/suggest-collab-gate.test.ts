@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { DocxDocument } from "../src/docx.js";
 import { Paragraph, Run, TextContent } from "../src/model.js";
-import { serializeXml } from "../src/xml.js";
 import { insertSuggestedText, collectRevisions, RevisionMeta } from "../src/edit/suggest.js";
 import { DocxEditor, type EditorHost, type EditorIntent } from "../src/edit/editor.js";
 import { makeDocx, wrapDocument, p } from "./helpers.js";
@@ -48,17 +47,7 @@ describe("suggesting-mode emission audit", () => {
   });
 });
 
-/**
- * Accept/reject is the OTHER half of suggesting mode, and it mutates
- * host.doc directly with no emission — in a live session a reviewer's click
- * resolved the suggestion on their replica only and forked the room. It is
- * reachable today because offline rebase-as-suggestions (collab/src/rebase.ts)
- * writes tracked changes into SHARED documents.
- *
- * These are behavioural pins, not source greps: build a real editor over a
- * real document WITH host.onIntent set, drive the four public entry points,
- * and assert the XML is byte-identical and the wire stayed silent.
- */
+/** Accept/reject mutates locally and emits the matching pre-applied intent. */
 function suggestingDoc(): { doc: DocxDocument; meta: RevisionMeta } {
   const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(p("Hello world")) }));
   const meta: RevisionMeta = { author: "Alex", date: "2026-07-12T00:00:00Z", nextId: () => 1 };
@@ -81,13 +70,18 @@ function editorOver(doc: DocxDocument, onIntent?: (i: EditorIntent) => void): Do
   return new DocxEditor(host);
 }
 
-describe("accept/reject is refused in a live session (no emission ⇒ no mutation)", () => {
-  for (const call of ["acceptRevisionRef", "rejectRevisionRef", "acceptAllRevisions", "rejectAllRevisions"] as const) {
-    it(`${call} mutates nothing and emits nothing when host.onIntent is set`, () => {
+describe("accept/reject emits in a live session", () => {
+  const cases = [
+    ["acceptRevisionRef", "acceptRevision"],
+    ["rejectRevisionRef", "rejectRevision"],
+    ["acceptAllRevisions", "acceptAllRevisions"],
+    ["rejectAllRevisions", "rejectAllRevisions"],
+  ] as const;
+  for (const [call, kind] of cases) {
+    it(`${call} resolves the change and emits ${kind}`, () => {
       const { doc } = suggestingDoc();
       const ref = collectRevisions(doc)[0];
-      expect(ref).toBeTruthy(); // the fixture really does carry a tracked change
-      const before = serializeXml(doc.docRoot);
+      expect(ref).toBeTruthy();
 
       const intents: EditorIntent[] = [];
       const editor = editorOver(doc, (i) => intents.push(i));
@@ -95,10 +89,10 @@ describe("accept/reject is refused in a live session (no emission ⇒ no mutatio
         ? editor[call](ref)
         : editor[call]();
 
-      expect(result).toBeFalsy(); // false for the ref pair, 0 for the bulk pair
-      expect(intents).toEqual([]); // nothing on the wire
-      expect(serializeXml(doc.docRoot)).toBe(before); // document untouched
-      expect(collectRevisions(doc)).toHaveLength(1); // the suggestion still stands
+      expect(result).toBeTruthy();
+      expect(intents).toHaveLength(1);
+      expect(intents[0].kind).toBe(kind);
+      expect(collectRevisions(doc)).toHaveLength(0);
     });
   }
 
@@ -114,7 +108,7 @@ describe("accept/reject is refused in a live session (no emission ⇒ no mutatio
   });
 });
 
-describe("the accept/reject popover explains itself instead of rendering dead buttons", () => {
+describe("the accept/reject popover", () => {
   /** The popover is opened by a click on a tracked change; drive the builder
    * directly so the test does not depend on layout/hit-testing. */
   const openPopover = (editor: DocxEditor, ref: unknown): HTMLElement => {
@@ -130,12 +124,10 @@ describe("the accept/reject popover explains itself instead of rendering dead bu
     box.remove();
   });
 
-  it("replaces them with a reason in a live session", () => {
+  it("renders live Accept/Reject buttons in a shared session", () => {
     const { doc } = suggestingDoc();
     const box = openPopover(editorOver(doc, () => {}), collectRevisions(doc)[0]);
-    expect(box.querySelectorAll("button")).toHaveLength(0);
-    const note = box.querySelector<HTMLElement>("[data-dxw-review-blocked]");
-    expect(note?.textContent).toMatch(/not available in a shared session/i);
+    expect([...box.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["✓ Accept", "✗ Reject"]);
     box.remove();
   });
 });

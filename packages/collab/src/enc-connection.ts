@@ -20,6 +20,7 @@ import { deriveEpochKeys, openCheckpoint, openIntent, sealIntent, sealCheckpoint
 import { docHash } from "./hash.js";
 import { transformIntent } from "./transform.js";
 import { MediaClient, applyMediaAddresses, mediaAddressesOf, type MediaTransportOptions } from "./media.js";
+import { CarriedIdAllocator } from "./id-allocator.js";
 
 /**
  * The E2EE client connection (plan doc 13 §2) — the counterpart of a BLIND
@@ -64,8 +65,7 @@ export class EncryptedCollabConnection {
   /** Envelope processing is async (WebCrypto) but MUST be strictly ordered
    * (seq order is the convergence contract) — a serial promise chain. */
   private queue: Promise<void> = Promise.resolve();
-  private idCounter = 0;
-  private idBase = -1;
+  private readonly idAllocator: CarriedIdAllocator;
   /** Own doc hashes at gossip points (seq → hash), a small ring — peers'
    * gossip for a seq we also hashed is comparable; anything else is skipped
    * (clients hash at the SAME seq cadence, so overlap is the common case). */
@@ -122,6 +122,7 @@ export class EncryptedCollabConnection {
     /** Origin serving the doc-16 §3 media routes; enables media transfer. */
     mediaOpts?: MediaTransportOptions,
   ) {
+    this.idAllocator = new CarriedIdAllocator(clientId);
     this.transport.onMessage((msg) => this.onServer(msg));
     if (mediaOpts) {
       // E2EE media (doc 16 §6): blobs are sealed under K_media, a key
@@ -299,13 +300,11 @@ export class EncryptedCollabConnection {
 
   /** Same disjoint carried-id allocation as the plaintext connection. */
   allocIds(n: number): number[] {
-    if (this.idBase < 0) {
-      let h = 0;
-      for (let i = 0; i < this.clientId.length; i++) h = (h * 31 + this.clientId.charCodeAt(i)) >>> 0;
-      this.idBase = 1_000_000_000 + (h % 100_000) * 10_000_000;
-    }
     const out: number[] = [];
-    for (let i = 0; i < n; i++) out.push(this.idBase + this.idCounter++);
+    while (out.length < n) {
+      const id = this.idAllocator.next();
+      if (!this.replica?.doc.stableIds?.elOf(id)) out.push(id);
+    }
     return out;
   }
 

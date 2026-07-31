@@ -17,6 +17,8 @@ import type { CollabConnection } from "./connection.js";
  */
 export interface DocBundle {
   docId: string;
+  /** Human title chosen for this browser copy. It never enters the room URL. */
+  title?: string;
   /** Epoch of the session this state came from (doc 12 §5): on rejoin,
    * same ⇒ seamless resume; different ⇒ someone re-seeded while away. */
   genesisId: string;
@@ -57,11 +59,14 @@ export interface DocBundle {
   /**
    * The genesisId of the epoch the offline tail was recorded AGAINST. This
    * is what lets a resume decide the arrival rung without guessing: same
-   * epoch ⇒ the tail is morally a large pending queue and replays silently;
-   * different (or absent, for a tail written by an older build) ⇒ true
-   * divergence, offer suggest/draft — never silently bulldoze.
+   * epoch can replay after the required merge check; different (or absent,
+   * for a tail written by an older build) means true divergence and offers
+   * suggest/draft.
    */
   offlineTailEpoch?: string;
+  /** Confirmed room sequence when offline editing began. A stable-URL rejoin
+   * compares this with the room sequence to decide whether a review is needed. */
+  offlineBaseSeq?: number;
   /** Per-part media metadata (doc 16 §5.3): the sha (and E2EE iv/epoch)
    * of every media part this copy knows. The docx bytes carry the PIXELS;
    * this carries the ADDRESSES — without it a resumed holder couldn't
@@ -133,6 +138,8 @@ export interface StoredDocSummary extends ParsedBundleKey {
   savedAt: number;
   /** Size of the stored document bytes. */
   byteLength: number;
+  /** Human title stored with the browser copy. */
+  title?: string;
 }
 
 /**
@@ -170,6 +177,7 @@ export class InMemoryBundleStore implements BundleStore {
       key: b.docId,
       savedAt: b.savedAt,
       byteLength: b.confirmedBytes.byteLength,
+      title: b.title,
     }));
   }
 }
@@ -226,7 +234,7 @@ export class BundlePersister {
        * omitting the getter) ERASES any stored tail — which is exactly
        * right once a replay has drained it.
        */
-      offlineTail?: () => { tail: Intent[]; epoch?: string } | null;
+      offlineTail?: () => { tail: Intent[]; epoch?: string; baseSeq?: number } | null;
     } = {},
   ) {}
 
@@ -302,6 +310,7 @@ export class BundlePersister {
     // carries forward; the head for the current epoch is refreshed in
     // place (same genesisId) or appended (first write in a new epoch).
     const prior = await this.store.get(this.docId);
+    bundle.title = prior?.title;
     const chain = [...(prior?.lineage ?? [])];
     const digest = await crypto.subtle.digest("SHA-256", bundle.confirmedBytes as BufferSource);
     let hash = "";
@@ -317,6 +326,7 @@ export class BundlePersister {
     if (off && off.tail.length) {
       bundle.offlineTail = off.tail;
       bundle.offlineTailEpoch = off.epoch;
+      bundle.offlineBaseSeq = off.baseSeq ?? bundle.confirmedSeq;
     }
     await this.store.put(bundle);
   }

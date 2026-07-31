@@ -61,6 +61,14 @@ describe("more intents batch 10 (tracked-change review — reaches 60 intents)",
     expect(collectRevisions(s.doc).length).toBe(0);
   });
 
+  it("rejectAllRevisions clears every pending change", () => {
+    const s = suggestedDoc();
+    const e = s.submit({ kind: "rejectAllRevisions", clientId: "a", clientSeq: 2, base: s.seq });
+    expect(e.kind).toBe("applied");
+    expect(collectRevisions(s.doc)).toHaveLength(0);
+    expect(serializeXml(s.doc.docRoot)).not.toContain("NEW");
+  });
+
   it("acceptRevision with an out-of-range index is a clean no-op", () => {
     const s = suggestedDoc();
     expect(s.submit({ kind: "acceptRevision", clientId: "a", clientSeq: 2, base: s.seq, index: 99 }).kind).toBe("rejected");

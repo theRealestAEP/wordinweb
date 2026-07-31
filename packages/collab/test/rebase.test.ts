@@ -37,18 +37,18 @@ function docBytes(text: string): Uint8Array {
 const SUG = { author: "Returning", date: "2026-07-23T15:00:00Z" };
 
 describe("toSuggestions (doc 15)", () => {
-  it("insertText → suggested insert; deleteText → suggestRevision strike; structural → dropped (no silent loss)", () => {
+  it("text and paragraph splits become suggestions; unsupported structure is dropped", () => {
     const tail: Intent[] = [
       { kind: "insertText", clientId: "a", clientSeq: 1, base: 0, at: { blockId: 1, runId: 2, offset: 0 }, text: "X" } as never,
       { kind: "deleteText", clientId: "a", clientSeq: 2, base: 0, blockId: 1, runId: 2, start: 0, end: 3 } as never,
       { kind: "splitParagraph", clientId: "a", clientSeq: 3, base: 0, at: { blockId: 1, runId: 2, offset: 1 }, newBlockId: 9, newRunId: 10 } as never,
     ];
     const { suggestions, dropped } = toSuggestions(tail, SUG.author, SUG.date);
-    expect(suggestions).toHaveLength(2);
+    expect(suggestions).toHaveLength(3);
     expect(suggestions[0]).toMatchObject({ kind: "insertText", suggest: SUG });
     expect(suggestions[1]).toMatchObject({ kind: "suggestRevision", suggest: SUG });
-    expect(dropped).toHaveLength(1); // the split — surfaced, not silently lost
-    expect(dropped[0].kind).toBe("splitParagraph");
+    expect(suggestions[2]).toMatchObject({ kind: "splitParagraph", suggest: SUG });
+    expect(dropped).toHaveLength(0);
   });
 });
 

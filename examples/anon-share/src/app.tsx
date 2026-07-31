@@ -31,6 +31,26 @@ function b64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
+/** Use the first text-bearing paragraph as an editable title suggestion. */
+function inferredDocumentTitle(doc: NonNullable<CollabSession["doc"]>): string {
+  const root = doc.docRoot;
+  const paragraphs: typeof root[] = [];
+  const collectParagraphs = (el: typeof root) => {
+    if (el.name.split(":").pop() === "p") paragraphs.push(el);
+    else for (const child of el.children) collectParagraphs(child);
+  };
+  const textOf = (el: typeof root): string => {
+    const own = el.name.split(":").pop() === "t" ? el.text : "";
+    return own + el.children.map(textOf).join("");
+  };
+  collectParagraphs(root);
+  for (const paragraph of paragraphs) {
+    const text = textOf(paragraph).replace(/\s+/g, " ").trim();
+    if (/\p{L}.*\p{L}.*\p{L}/u.test(text)) return text.slice(0, 100);
+  }
+  return "";
+}
+
 export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, initialShareCode, onNewDocument, onDisconnect, onNameChange, onShareLink, shareCopied, store: storeProp }: {
   url: string;
   httpBase: string;
@@ -68,10 +88,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   const [session, setSession] = useState<CollabSession | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   /**
-   * The demo builds its own socket so Disconnect can CLOSE it: the hook's
-   * teardown flushes the bundle and drops its reference but never closes the
-   * transport, so without this the server would keep counting a participant
-   * who had already left, and the room would stay alive on a phantom.
+   * The demo builds its own socket so exit-to-local-copy flows can close it.
+   * The collaboration hook owns the ordinary offline Disconnect control.
    *
    * STABLE IDENTITY IS LOAD-BEARING — `createSocket` is in useCollab's effect
    * deps, so an inline arrow is a new function every render and the session
@@ -180,7 +198,6 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   // in E2EE mode mixes into key derivation).
   const [shareCode, setShareCode] = useState<string | undefined>(() => initialShareCode);
   const [codeDraft, setCodeDraft] = useState(initialShareCode ?? "");
-  const [readOnly, setReadOnly] = useState(false);
   // HOLDING a token is not the same as it being VALID. A room re-seeded into
   // a new epoch mints a fresh owner token, leaving the old one truthy here
   // with no rights attached — which used to render the admin controls and
@@ -188,15 +205,42 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   // refusal was treated as a dead session). The server's refusal is the
   // authoritative answer, so once it arrives the controls stop being offered.
   const isOwner = !!ownerToken && !session?.notOwner;
+  const readOnly = isOwner && session?.writeStatus === "owner-lock";
+  const shareCodePrompt = session?.refused === "code-required" ||
+    session?.refused === "code-invalid" ||
+    session?.refused === "code-locked";
   // Remount key: bumps to retry the connection after takeover/revival.
   const [attempt, setAttempt] = useState(0);
-  // "Keep editing offline" was chosen on the ConnectionLost dialog. Reset
-  // the moment the connection recovers, so a LATER loss re-raises the
-  // dialog rather than inheriting a dismissal from a different outage.
-  const [lostDismissed, setLostDismissed] = useState(false);
+  const offlinePreferenceKey = `wordinweb-offline-${docId}`;
+  const [restoreOffline] = useState(() => {
+    try { return localStorage.getItem(offlinePreferenceKey) === "1"; } catch { return false; }
+  });
+  const restoreOfflineRef = useRef(restoreOffline);
+  /** The user chose Disconnect. Keep the room identity and editor mounted so
+   * the modal can offer a rejoin or the linked offline workspace. */
+  const [intentionalOffline, setIntentionalOffline] = useState(restoreOffline);
+  const [disconnectDecisionOpen, setDisconnectDecisionOpen] = useState(false);
+  const [offlineWorkspace, setOfflineWorkspace] = useState(restoreOffline);
+  const [offlineTitle, setOfflineTitle] = useState("");
+  const [offlineTitleSaving, setOfflineTitleSaving] = useState(false);
+  const [offlineTitleError, setOfflineTitleError] = useState<string | null>(null);
   useEffect(() => {
-    if (session?.connection !== "lost") setLostDismissed(false);
-  }, [session?.connection]);
+    if (session?.connection === "live") {
+      if (restoreOfflineRef.current) {
+        if (!session.ready || !session.doc) return;
+        restoreOfflineRef.current = false;
+        session.disconnect();
+        session.restoreOfflineView();
+        setIntentionalOffline(true);
+        setDisconnectDecisionOpen(false);
+        setOfflineWorkspace(true);
+        return;
+      }
+      setIntentionalOffline(false);
+      setDisconnectDecisionOpen(false);
+      setOfflineWorkspace(false);
+    }
+  }, [session?.connection, session?.ready]);
   const [showActivity, setShowActivity] = useState(false);
   // Versions (doc 14 §1): frozen restore points beside the live bundle.
   // Stored in the same IndexedDB db under version-suffixed keys — a
@@ -405,9 +449,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
    * Editing vs Suggesting, live (doc 05). Suggesting mode already replicates:
    * typing emits `insertText` carrying `suggest{author,date}` (or a
    * `suggestRevision`), and peers apply it as a real tracked change. All that
-   * was missing is the client-side control, so this is UI over an existing
-   * intent surface — no new intent kind, no changed apply semantics, so no
-   * ENGINE_VERSION bump (that fence guards canonical divergence).
+   * was missing is the client-side control. Review actions now use the
+   * accept/reject intent surface too, including bulk rejection.
    *
    * THE MODE IS THE EDITOR'S, NOT REACT'S. Every render reads it back with
    * `api.isSuggesting()`. A mirrored React boolean would disagree with what
@@ -418,15 +461,21 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
    */
   const [api, setApi] = useState<DocxViewApi | null>(null);
   const [, setModeTick] = useState(0);
+  const [reviewOpen, setReviewOpen] = useState(false);
   // writesBlocked is THE write gate in this codebase (it is what turns the
   // editor read-only). View-only folds INTO it rather than sitting beside it.
   const writesBlocked = !!session?.writesBlocked;
+  const choiceModalOpen = (intentionalOffline && disconnectDecisionOpen) ||
+    (session?.connection === "lost" && !intentionalOffline);
   const suggesting = !writesBlocked && (api?.isSuggesting() ?? false);
   const mode = writesBlocked ? "view" : suggesting ? "suggest" : "edit";
   // A full tracked-change walk of the document, re-run whenever this shell
   // re-renders (i.e. per broadcast). Cheap next to the layout each broadcast
   // already triggers, and there is no incremental counter to read instead.
   const pendingSuggestions = api?.revisionCount() ?? 0;
+  useEffect(() => {
+    if (pendingSuggestions === 0) setReviewOpen(false);
+  }, [pendingSuggestions]);
   const toggleSuggesting = () => {
     if (!api || writesBlocked) return;
     // The participant alias is the revision author, so peers see WHO
@@ -484,6 +533,44 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     URL.revokeObjectURL(a.href);
   };
 
+  const openOfflineChoice = () => {
+    if (!session) return;
+    session.disconnect();
+    setIntentionalOffline(true);
+    setOfflineTitle(inferredDocumentTitle(session.doc!));
+    setOfflineTitleError(null);
+    setDisconnectDecisionOpen(true);
+    setShowActivity(false);
+    setReviewOpen(false);
+  };
+
+  const continueEditingOffline = async () => {
+    if (!session) return;
+    const title = offlineTitle.trim();
+    if (!title) return;
+    setOfflineTitleSaving(true);
+    setOfflineTitleError(null);
+    try {
+      const bundle = await store.get(docId);
+      if (!bundle) throw new Error("bundle unavailable");
+      await store.put({ ...bundle, title, savedAt: Date.now() });
+      try { localStorage.setItem(offlinePreferenceKey, "1"); } catch { /* IndexedDB still holds the copy. */ }
+    } catch {
+      setOfflineTitleError("The browser could not save this title. Try again.");
+      setOfflineTitleSaving(false);
+      return;
+    }
+    setOfflineTitleSaving(false);
+    setDisconnectDecisionOpen(false);
+    setOfflineWorkspace(true);
+  };
+
+  const rejoinRoom = () => {
+    try { localStorage.removeItem(offlinePreferenceKey); } catch { /* The current page still rejoins. */ }
+    restoreOfflineRef.current = false;
+    session?.reconnect();
+  };
+
   const refusedContent = (reason: string): ReactNode => {
     if (reason === "already-open") {
       return (
@@ -503,7 +590,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           {reviveState === "no-copy" ? (
             <p>A previous participant can restart it from a saved browser copy.</p>
           ) : (
-            <button disabled={reviveState === "reviving"} onClick={() => void revive()}>
+            <button className="cta" disabled={reviveState === "reviving"} onClick={() => void revive()}>
               {reviveState === "reviving" ? "Restarting…" : "Restart session"}
             </button>
           )}
@@ -632,7 +719,16 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           sit outside <header> and fall back to raw browser buttons, next to a
           header whose buttons are styled — the inconsistency reads as broken
           rather than plain. */}
-      <div data-testid="toolbar" className="sessionbar" style={{ display: "flex", gap: 8, alignItems: "center", padding: "7px 14px", flexWrap: "wrap" }}>
+      <div
+        data-testid="toolbar"
+        data-room-state={intentionalOffline ? "offline" : "live"}
+        className="sessionbar"
+        style={{
+          display: "flex", gap: 8, alignItems: "center", padding: "7px 14px", flexWrap: "wrap",
+          background: offlineWorkspace ? "#f8fafc" : intentionalOffline ? "#fffdf5" : undefined,
+          borderBottomColor: offlineWorkspace ? "#cfd6e0" : intentionalOffline ? "#f9ab00" : undefined,
+        }}
+      >
         {/* Open is disabled in a session. Loading a file replaces the whole
             document locally without emitting an intent that describes the
             replacement, so this browser would fork from every peer while both
@@ -644,11 +740,9 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             DocxDocument (save/docRoot) and not the view api that owns
             `print()`. An item that cannot work is worse than no item.
 
-            Saved documents are LISTED here but never OPENABLE: opening a
-            stored copy replaces the whole document without an intent, which
-            forks the room exactly like Open would. Download-only is the
-            honest offer while the session is live. The current doc's live
-            bundle is excluded — it is the document on screen. */}
+            A saved copy opens only after this screen leaves the shared room.
+            The current document's live bundle is excluded because it is
+            already on screen. */}
         <FileMenu
           onNew={onNewDocument}
           onDownload={download}
@@ -671,13 +765,38 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           Saved documents
         </button>
         <span className="bar-sep" aria-hidden="true" />
+        {offlineWorkspace ? (
+          <>
+            <button
+              className="cta"
+              data-testid="offline-workspace-rejoin"
+              disabled={session?.connection === "reconnecting"}
+              onClick={rejoinRoom}
+            >
+              {session?.connection === "reconnecting" ? "Rejoining…" : "Rejoin room"}
+            </button>
+            <span style={{ flex: 1 }} />
+            <span data-testid="offline-workspace-status" style={{ color: "#5f6368", fontSize: 12 }}>
+              Editing offline in this browser
+              {session?.offline?.editsHeld ? ` · ${session.offline.editsHeld} saved change${session.offline.editsHeld === 1 ? "" : "s"}` : ""}
+            </span>
+          </>
+        ) : (
+          <>
         <span style={{ flex: 1 }} />
         {session?.arrival ? (
           <span data-testid="arrival-banner" style={{ fontSize: 12, background: "#d1ecf1", padding: "2px 8px", borderRadius: 6 }}>
             You edited offline ({session.arrival.tailLength} change{session.arrival.tailLength === 1 ? "" : "s"}).{" "}
-            {session.arrival.mode === "suggest" ? (
+            {session.arrival.mode === "replay" ? (
               <>
-                {/* Structural edits (splits, tables, formatting) have no
+                The shared room has no newer changes.{" "}
+                <button data-testid="merge-offline-changes" onClick={() => session.reconcile("replay")}>
+                  Merge my changes
+                </button>
+              </>
+            ) : session.arrival.mode === "suggest" ? (
+              <>
+                {/* Some structural edits (merges, tables, formatting) have no
                     tracked-change form — they stay in the saved draft copy
                     rather than replaying. Said up front, or their absence
                     after "add as suggestions" reads as silent loss. */}
@@ -755,23 +874,24 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             </button>
           </span>
         ) : session?.offline ? (
-          // OFFLINE, EDITING CONTINUES (doc 12 §5: offline is first-class).
-          // Not "editing is paused" — that copy became false the day the
-          // offline tail became real. The chip says what is actually
-          // happening: edits apply here, are saved here, and replay on
-          // reconnect (as suggestions if the document moved on — doc 15).
+          // Automatic reconnect keeps the durable tail active. An intentional
+          // disconnect blocks the editor behind the choice modal, so the bar
+          // states the same two actions instead of presenting another offline
+          // editor mode.
           //
-          // `reconnecting` is deliberately a quiet chip rather than a modal:
+          // `reconnecting` stays a quiet chip rather than a modal:
           // most drops (a tunnel, a lid closed for ten seconds) heal in under
           // a second, and a dialog that flashes on every blip trains people to
           // dismiss the one that matters. `lost` gets the modal below.
           <span data-testid="reconnect-banner" data-state={session.connection}
-            style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
-            {session.connection === "lost" ? "Connection lost." : "Reconnecting…"} Your changes are saved in this browser
-            {session.offline.editsHeld > 0
-              ? ` (${session.offline.editsHeld} so far) `
-              : " "}
-            and will sync when the connection returns.
+            style={{ fontSize: 13, background: "#fef7e0", border: "1px solid #f9ab00", padding: "6px 10px", borderRadius: 8, fontWeight: 600 }}>
+            {intentionalOffline
+              ? session.connection === "reconnecting"
+                ? "Rejoining the room…"
+                : "The room connection is closed. Choose Rejoin or Edit offline."
+              : <>{session.connection === "lost" ? "Connection lost." : "Reconnecting…"} Your changes are saved in this browser
+                  {session.offline.editsHeld > 0 ? ` (${session.offline.editsHeld} so far) ` : " "}
+                  and will sync when the connection returns.</>}
           </span>
         ) : session && session.connection !== "live" ? (
           // Non-live with offline editing UNAVAILABLE (never welcomed, or a
@@ -781,7 +901,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
             Reconnecting…
           </span>
-        ) : session?.writesBlocked ? (
+        ) : session?.writesBlocked && !shareCodePrompt ? (
           // Owner lock (doc 14 §2.5): NOT a dead session — the doc stays live
           // and readable; editing returns when the owner lifts.
           //
@@ -800,7 +920,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
                 (older build) the copy stays deliberately vague rather than
                 naming a cause we were not told. */}
             {session.writeStatus === "owner-lock"
-              ? "The owner paused editing. You can still read the document."
+              ? "Editing is paused for everyone. You can still read the document."
               : session.writeStatus === "demoted"
                 ? "The owner set you to view-only. You can still read and download the document."
                 : session.writeStatus === "viewer-role"
@@ -827,21 +947,33 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         {onDisconnect && (
           <button
             data-testid="disconnect"
-            title="Leave this session and keep editing your copy locally"
-            onClick={leaveSession}
+            className={intentionalOffline ? "primary" : undefined}
+            title={intentionalOffline ? "Rejoin the shared room" : "Disconnect from the shared room"}
+            disabled={intentionalOffline && session?.connection === "reconnecting"}
+            onClick={() => {
+              if (!session) return;
+              if (intentionalOffline) rejoinRoom();
+              else openOfflineChoice();
+            }}
           >
-            Disconnect
+            {intentionalOffline
+              ? session?.connection === "reconnecting" ? "Rejoining…" : "Rejoin"
+              : "Disconnect"}
           </button>
         )}
-        <button onClick={() => { setVersionLabel(""); setVersionModal(true); }} disabled={!session?.ready}>Save version</button>
-        <button onClick={() => setShowActivity((v) => !v)}>{showActivity ? "Hide" : "Show"} activity</button>
-        {isOwner && (
+        {!intentionalOffline && (
+          <button onClick={() => { setVersionLabel(""); setVersionModal(true); }} disabled={!session?.ready}>Save version</button>
+        )}
+        {!intentionalOffline && (
+          <button onClick={() => setShowActivity((v) => !v)}>{showActivity ? "Hide" : "Show"} activity</button>
+        )}
+        {isOwner && !intentionalOffline && (
           <button
             data-testid="readonly-toggle"
             className="owner"
             aria-pressed={readOnly}
-            title="Owner: block all editors (you keep writing)"
-            onClick={() => { const on = !readOnly; setReadOnly(on); session?.admin({ op: "readOnly", on }); }}
+            title="Make the document read-only for everyone"
+            onClick={() => session?.admin({ op: "readOnly", on: !readOnly })}
           >
             {readOnly ? "🔒 Read-only ON" : "🔓 Make read-only"}
           </button>
@@ -852,26 +984,79 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             to offer a choice it cannot honour. The ON tint is the markup
             renderer's revision ink, so the chip matches what suggestions look
             like on the page. */}
-        <button
-          data-testid="suggest-toggle"
-          data-mode={mode}
-          aria-pressed={suggesting}
-          disabled={writesBlocked || !api}
-          title={
-            writesBlocked
-              ? "This session is view-only, so there is nothing to suggest into."
-              : suggesting
-                ? "You are suggesting. Your edits arrive as tracked changes for others to review."
-                : "Switch to suggesting: your edits arrive as tracked changes instead of changing the text."
-          }
-          style={suggesting ? { background: "#fce8e6", borderColor: "#d93025", color: "#a50e0e" } : undefined}
-          onClick={toggleSuggesting}
-        >
-          {mode === "view" ? "View only" : suggesting ? "✎ Suggesting" : "Editing"}
-        </button>
+        {intentionalOffline ? (
+          <button
+            data-testid="edit-offline"
+            title="Continue in the linked offline workspace"
+            style={{ background: "#fef7e0", borderColor: "#f9ab00", color: "#7a5900" }}
+            onClick={() => {
+              setOfflineTitle(inferredDocumentTitle(session!.doc!));
+              setOfflineTitleError(null);
+              setDisconnectDecisionOpen(true);
+            }}
+          >
+            Edit offline
+          </button>
+        ) : (
+          <button
+            data-testid="suggest-toggle"
+            data-mode={mode}
+            aria-pressed={suggesting}
+            disabled={writesBlocked || !api}
+            title={
+              writesBlocked
+                ? "This session is view-only, so there is nothing to suggest into."
+                : suggesting
+                  ? "You are suggesting. Your edits arrive as tracked changes for others to review."
+                  : "Switch to suggesting: your edits arrive as tracked changes instead of changing the text."
+            }
+            style={suggesting ? { background: "#e6f4ea", borderColor: "#188038", color: "#137333" } : undefined}
+            onClick={toggleSuggesting}
+          >
+            {mode === "view" ? "View only" : suggesting ? "✎ Suggesting" : "Editing"}
+          </button>
+        )}
         {pendingSuggestions > 0 && (
-          <span data-testid="suggestion-count" style={{ fontSize: 12, color: "#a50e0e" }}>
-            {pendingSuggestions} pending suggestion{pendingSuggestions === 1 ? "" : "s"}
+          <span style={{ position: "relative" }}>
+            <button
+              data-testid="suggestion-count"
+              aria-expanded={reviewOpen}
+              disabled={intentionalOffline}
+              title={intentionalOffline ? "Rejoin the room to review suggestions" : "Review pending suggestions"}
+              style={{ color: "#137333", borderColor: "#81c995", background: "#e6f4ea" }}
+              onClick={() => setReviewOpen((open) => !open)}
+            >
+              {pendingSuggestions} pending suggestion{pendingSuggestions === 1 ? "" : "s"}
+            </button>
+            {reviewOpen && !intentionalOffline && (
+              <span
+                data-testid="suggestion-review"
+                style={{
+                  position: "absolute", zIndex: 150, top: "calc(100% + 8px)", right: 0,
+                  width: 270, padding: 12, border: "1px solid #dadce0", borderRadius: 10,
+                  background: "#fff", boxShadow: "0 4px 20px rgba(0,0,0,.18)",
+                  display: "flex", flexDirection: "column", gap: 9, color: "#3c4043", fontSize: 12,
+                }}
+              >
+                <strong>{pendingSuggestions} suggestion{pendingSuggestions === 1 ? "" : "s"} to review</strong>
+                <span>Suggested insertions are green and underlined. Click one in the document to accept or reject it.</span>
+                <span style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                  <button
+                    data-testid="reject-all-suggestions"
+                    onClick={() => { api?.rejectAllRevisions(); setReviewOpen(false); }}
+                  >
+                    Reject all
+                  </button>
+                  <button
+                    className="primary"
+                    data-testid="accept-all-suggestions"
+                    onClick={() => { api?.acceptAllRevisions(); setReviewOpen(false); }}
+                  >
+                    Accept all
+                  </button>
+                </span>
+              </span>
+            )}
           </span>
         )}
         {suggesting && (
@@ -886,18 +1071,24 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           </span>
         )}
         <span className="bar-sep" aria-hidden="true" />
-        <input
-          className="alias"
-          data-testid="alias"
-          value={name}
-          placeholder="Your name"
-          maxLength={40}
-          title="Choose the name other participants see."
-          onChange={(e) => onNameChange?.(e.target.value)}
-        />
+        {intentionalOffline ? (
+          <span data-testid="offline-identity" style={{ fontSize: 12, color: "#5f6368" }}>
+            Editing offline as {name || "Guest"}
+          </span>
+        ) : (
+          <input
+            className="alias"
+            data-testid="alias"
+            value={name}
+            placeholder="Your name"
+            maxLength={40}
+            title="Choose the name other participants see."
+            onChange={(e) => onNameChange?.(e.target.value)}
+          />
+        )}
         {onShareLink && (
-          <button className="primary" data-testid="share-collab" onClick={onShareLink} title="Copy the share link to your clipboard">
-            {shareCopied ? "Copied!" : "Share Collab"}
+          <button className={intentionalOffline ? undefined : "primary"} data-testid="share-collab" onClick={onShareLink} title="Copy the room link to your clipboard">
+            {shareCopied ? "Copied!" : intentionalOffline ? "Copy room link" : "Share Collab"}
           </button>
         )}
         {onNewDocument && (
@@ -914,7 +1105,11 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             {jumpNotice}
           </span>
         )}
-        <span className="roster-scroll">
+        {intentionalOffline ? (
+          <span className="roster-scroll" data-testid="offline-roster" style={{ color: "#5f6368", fontSize: 12 }}>
+            Room participants are unavailable while offline
+          </span>
+        ) : <span className="roster-scroll">
           {(session?.roster ?? []).filter((r) => r.connected).map((r) => {
             const pill = {
               padding: "2px 10px", borderRadius: 999, fontSize: 12, color: "#fff",
@@ -996,7 +1191,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             </span>
             );
           })}
-        </span>
+        </span>}
         {controlTooltip && (
           <span
             className="control-tooltip"
@@ -1006,6 +1201,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           >
             {controlTooltip.text}
           </span>
+        )}
+          </>
         )}
       </div>
       {reclaim.notice && (
@@ -1085,7 +1282,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           </div>
         </div>
       )}
-      {showActivity && (
+      {showActivity && !intentionalOffline && (
         <div style={{ maxHeight: 120, overflowY: "auto", padding: "0 8px 4px", fontSize: 12, fontFamily: "monospace" }}>
           {/* Attribution L1 (doc 14 §3): the canonical log IS the record —
               clientId joins the roster for a name + color. */}
@@ -1120,13 +1317,25 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           onSession={setSession}
           onReady={setApi}
           refusedContent={refusedContent}
-          editable
+          editable={!choiceModalOpen}
+          revisions="markup"
         />
       </div>
       {session?.sessionWarning && (
         <SessionCountdown warning={session.sessionWarning} onDownload={download} />
       )}
-      {session?.connection === "lost" && !lostDismissed && (
+      {intentionalOffline && disconnectDecisionOpen && (
+        <OfflineChoiceModal
+          rejoining={session?.connection === "reconnecting"}
+          title={offlineTitle}
+          saving={offlineTitleSaving}
+          error={offlineTitleError}
+          onTitleChange={setOfflineTitle}
+          onRejoin={rejoinRoom}
+          onContinue={() => void continueEditingOffline()}
+        />
+      )}
+      {session?.connection === "lost" && !intentionalOffline && (
         <ConnectionLost
           onRetry={() => session.reconnect()}
           onDownload={download}
@@ -1134,14 +1343,59 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // existing. Passing this rather than hardcoding "your work is safe"
           // is the whole point: see the copy in the component.
           saved={(session.persistErrors ?? 0) === 0}
-          // Offline editing is only offered when it is actually available
-          // (a document in hand, no refusal): dismissing into a page that
-          // cannot record anything would betray the button's promise.
-          onKeepEditing={session.offline ? () => setLostDismissed(true) : undefined}
+          // The offline workspace is only offered when the session has a
+          // document and a durable tail can record its edits.
+          onKeepEditing={session.offline ? openOfflineChoice : undefined}
         />
       )}
       {/* Dev perf menu (Ctrl+Shift+P / ?perf=1) — inert until opened. */}
       <PerfHud clientId={clientId} docStats={docStats} />
+    </div>
+  );
+}
+
+function OfflineChoiceModal({ rejoining, title, saving, error, onTitleChange, onRejoin, onContinue }: {
+  rejoining: boolean;
+  title: string;
+  saving: boolean;
+  error: string | null;
+  onTitleChange: (title: string) => void;
+  onRejoin: () => void;
+  onContinue: () => void;
+}) {
+  return (
+    <div className="modal-scrim" data-testid="disconnect-modal">
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="disconnect-modal-title">
+        <h2 id="disconnect-modal-title">The room connection is closed</h2>
+        <p>
+          Rejoin now, or continue editing offline in this browser. Your offline
+          changes stay linked to this room and will be reviewed when you rejoin.
+        </p>
+        <label htmlFor="offline-document-title">Document title</label>
+        <input
+          id="offline-document-title"
+          data-testid="offline-document-title"
+          value={title}
+          maxLength={100}
+          onChange={(event) => onTitleChange(event.target.value)}
+          autoFocus
+        />
+        <p className="hint">Confirm or change the title before you edit offline.</p>
+        {error && <p className="error" data-testid="offline-title-error">{error}</p>}
+        <div className="row">
+          <button
+            className="ghost"
+            data-testid="disconnect-continue-offline"
+            disabled={!title.trim() || saving}
+            onClick={onContinue}
+          >
+            {saving ? "Saving…" : "Continue editing offline"}
+          </button>
+          <button data-testid="disconnect-rejoin" disabled={rejoining || saving} onClick={onRejoin}>
+            {rejoining ? "Rejoining…" : "Rejoin"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1241,11 +1495,9 @@ function SessionEndedModal({ reason, reviveState, onRevive, onKeepLocal, onNewDo
  * durable copy. It holds the confirmed document plus the pending queue —
  * edits made before the drop that the server had not yet acknowledged — and
  * those replay verbatim on rejoin, deduplicated by (clientId, clientSeq), so
- * reconnecting cannot double-apply them. Nothing typed AFTER the drop is at
- * risk either, because those edits are recorded to the durable offline tail
- * (doc 15 §2) and replayed on reconnect; that capture is the reason this
- * dialog can make a promise at all — and the reason it now offers "keep
- * editing offline" instead of holding the document hostage.
+ * reconnecting cannot double-apply them. Edits recorded during automatic
+ * retry stay in the durable offline tail. The offline choice keeps that tail
+ * and the stable room URL attached to the editor.
  *
  * If the room was re-seeded while this browser was away, the rejoin lands in a
  * different epoch and doc 15's arrival ladder takes over — the offline edits
@@ -1289,9 +1541,9 @@ function ConnectionLost({ onRetry, onDownload, saved, onKeepEditing }: {
         </h2>
         {saved ? (
           <p style={{ margin: "0 0 12px", lineHeight: 1.5 }}>
-            <strong>Your work is saved in this browser.</strong> You can keep
-            editing offline or reconnect now. Offline changes will sync when
-            the connection returns.
+            <strong>Your work is saved in this browser.</strong> You can reconnect
+            now or continue editing offline. Your offline changes stay linked to
+            this room and will be reviewed when you rejoin.
           </p>
         ) : (
           <p style={{ margin: "0 0 12px", lineHeight: 1.5 }}>
@@ -1305,7 +1557,7 @@ function ConnectionLost({ onRetry, onDownload, saved, onKeepEditing }: {
           </button>
           {onKeepEditing && saved && (
             <button data-testid="lost-keep-editing" onClick={onKeepEditing}>
-              Keep editing offline
+              Continue editing offline
             </button>
           )}
           <button data-testid="lost-reload" onClick={() => location.reload()}>

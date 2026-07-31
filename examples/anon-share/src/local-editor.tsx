@@ -72,6 +72,8 @@ export function LocalEditor({
   httpBase,
   initialBytes,
   onGoLive,
+  canRejoinSaved,
+  onRejoinSaved,
   store: storeProp,
   autosaveMs = AUTOSAVE_MS,
 }: {
@@ -82,6 +84,10 @@ export function LocalEditor({
    * `onPhase` reports pipeline progress for the overlay below — on a 500-page
    * document the seal + upload is real seconds of work. */
   onGoLive: (bytes: Uint8Array, shareCode?: string, onPhase?: (phase: GoLivePhase) => void) => Promise<void>;
+  /** Identify saved entries whose collaborative room URL remains available. */
+  canRejoinSaved?: (s: StoredDocSummary) => boolean;
+  /** Rejoin the collaborative room for a saved entry. */
+  onRejoinSaved?: (s: StoredDocSummary) => void;
   /** Where local work persists (shared with the collab screen). Defaults to
    * this browser's IndexedDB; tests inject the in-memory store. */
   store?: BundleStore;
@@ -456,6 +462,8 @@ export function LocalEditor({
           // — "open the document you are already editing" is not an item.
           listSaved={() => store.list().then((all) => all.filter((s) => s.key !== LOCAL_AUTOSAVE_KEY))}
           onOpenSaved={openSaved}
+          canRejoinSaved={canRejoinSaved}
+          onRejoinSaved={onRejoinSaved}
           onDownloadSaved={downloadSaved}
           onDeleteSaved={(s) => store.delete(s.key)}
           openRequest={savedMenuRequest}

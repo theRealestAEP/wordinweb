@@ -42,8 +42,9 @@ export const OFFLINE_TAIL_CAP = 2000;
  *  - `insertText`  → `insertText` with `suggest{author,date}` (a w:ins).
  *  - `deleteText`  → `suggestRevision` striking that range (a w:del wrap;
  *                    nothing is removed until the crowd accepts).
+ *  - `splitParagraph` → a split with an inserted paragraph-mark revision.
  *
- * Structural intents (splits, merges, tables, images, format) have no
+ * Other structural intents (merges, tables, images, format) have no
  * clean non-destructive suggestion form and are DROPPED from the suggestion
  * replay — surfaced to the caller as `dropped` so the UI can say "N
  * structural changes couldn't be suggested; keep them in a draft instead"
@@ -65,6 +66,14 @@ export function toSuggestions(
       suggestions.push({
         kind: "suggestRevision",
         ranges: [{ blockId: intent.blockId, runId: intent.runId, start: intent.start, end: intent.end }],
+        suggest: { author, date },
+      } as never);
+    } else if (intent.kind === "splitParagraph") {
+      suggestions.push({
+        kind: "splitParagraph",
+        at: intent.at,
+        newBlockId: intent.newBlockId,
+        newRunId: intent.newRunId,
         suggest: { author, date },
       } as never);
     } else {

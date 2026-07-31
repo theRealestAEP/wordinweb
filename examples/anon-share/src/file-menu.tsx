@@ -10,6 +10,7 @@ const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingm
  * what distinguishes entries instead.
  */
 export function savedDocName(s: StoredDocSummary): string {
+  if (s.title) return s.title;
   switch (s.kind) {
     case "local": return "Local document";
     case "live": return "Shared document (saved copy)";
@@ -52,6 +53,8 @@ export function FileMenu({
   openDisabled,
   listSaved,
   onOpenSaved,
+  canRejoinSaved,
+  onRejoinSaved,
   savedOpenDisabled,
   savedOpenTitle,
   onDownloadSaved,
@@ -72,6 +75,10 @@ export function FileMenu({
   listSaved?: () => Promise<StoredDocSummary[]>;
   /** Open a saved entry (replaces the current document). */
   onOpenSaved?: (s: StoredDocSummary) => void;
+  /** True when this browser retained the room URL for a live saved entry. */
+  canRejoinSaved?: (s: StoredDocSummary) => boolean;
+  /** Rejoin the collaborative room behind a saved entry. */
+  onRejoinSaved?: (s: StoredDocSummary) => void;
   /** Grey saved entries' open action out — the collaborative screen: opening
    * a stored copy there would replace the shared document and silently fork
    * the room (the same rule as `openDisabled`). Download stays live. */
@@ -251,18 +258,21 @@ export function FileMenu({
               ) : saved.length === 0 ? (
                 <div className="filemenu-note" data-testid="file-saved-empty">Nothing saved in this browser yet.</div>
               ) : (
-                saved.map((s) => (
+                saved.map((s) => {
+                  const rejoinable = Boolean(onRejoinSaved && canRejoinSaved?.(s));
+                  const openDisabled = savedOpenDisabled || !onOpenSaved;
+                  return (
                   <div className="filemenu-saveditem" key={s.key} data-testid="file-saved-entry" data-kind={s.kind}>
                     <button
                       role="menuitem"
                       data-testid="file-saved-open"
-                      disabled={savedOpenDisabled || !onOpenSaved}
+                      disabled={openDisabled}
                       title={
                         savedOpenDisabled
                           ? "Opening would replace the shared document for you alone and split you from the session. Leave the session first, or download a copy."
                           : savedOpenTitle ?? "Open this saved copy (replaces the current document)"
                       }
-                      onClick={savedOpenDisabled || !onOpenSaved ? undefined : item(() => onOpenSaved(s))}
+                      onClick={openDisabled ? undefined : item(() => onOpenSaved!(s))}
                     >
                       <span className="filemenu-savedname">{savedDocName(s)}</span>
                       <span className="filemenu-savedmeta">{fmtDate(s.savedAt)} · {fmtSize(s.byteLength)}</span>
@@ -275,6 +285,16 @@ export function FileMenu({
                         onClick={item(() => onDownloadSaved(s))}
                       >
                         ⬇
+                      </button>
+                    )}
+                    {rejoinable && (
+                      <button
+                        className="filemenu-mini"
+                        data-testid="file-saved-rejoin"
+                        title="Rejoin this collaborative room"
+                        onClick={item(() => onRejoinSaved!(s))}
+                      >
+                        Rejoin
                       </button>
                     )}
                     {onDeleteSaved && (
@@ -302,7 +322,8 @@ export function FileMenu({
                       )
                     )}
                   </div>
-                ))
+                  );
+                })
               )}
             </div>
           )}

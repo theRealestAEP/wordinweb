@@ -533,7 +533,7 @@ function parseParaChildren(
         const style = (r: Run) => {
           r.props = {
             ...r.props,
-            color: isInsert ? "#C00000" : "#B0261C",
+            color: isInsert ? "#188038" : "#D93025",
             ...(isInsert ? { underline: "single" } : { strike: true }),
           };
         };
