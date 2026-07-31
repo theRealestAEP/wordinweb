@@ -193,7 +193,7 @@ export function LocalEditor({
       setPersistError(null);
     } catch {
       dirtyRef.current = true;
-      setPersistError("This document may not be saved in this browser — storage is full or blocked. Download a copy.");
+      setPersistError("Browser storage is full or unavailable. Download a copy.");
     }
   }, [store]);
   useEffect(() => {
@@ -247,7 +247,7 @@ export function LocalEditor({
         });
       })
       .catch(() => {
-        setPersistError("Couldn’t keep a copy of this document — storage is full or blocked. Download it before starting a new one.");
+        setPersistError("Download this document before starting a new one. Browser storage is full or unavailable.");
         throw new Error("archive-failed");
       })
       .then(() => fetch(`${httpBase}/blank`))
@@ -341,8 +341,8 @@ export function LocalEditor({
   const [goError, setGoError] = useState<string | null>(null);
 
   const phaseCopy: Record<GoLivePhase, string> = {
-    encrypt: "Encrypting in your browser…",
-    upload: "Uploading the encrypted document…",
+    encrypt: "Encrypting…",
+    upload: "Uploading…",
   };
 
   const startCollab = () => {
@@ -353,7 +353,7 @@ export function LocalEditor({
     setGoing(true);
     setGoError(null);
     setModalOpen(false);
-    setGoPhase("Preparing your document…");
+    setGoPhase("Saving your document…");
     // THE OVERLAY MUST PAINT BEFORE THE SERIALISE. `api.save()` on a 500-page
     // document is hundreds of synchronous milliseconds; run it in the same
     // tick as the state updates above and the browser's first paint happens
@@ -374,7 +374,7 @@ export function LocalEditor({
         // resetting the button are both lies about what happened.
         setGoing(false);
         setGoPhase(null);
-        setGoError(err instanceof Error ? err.message : "Couldn’t start the session. Try again in a moment.");
+        setGoError(err instanceof Error ? err.message : "Couldn’t start collaboration. Try again.");
         setModalOpen(true);
       });
     }));
@@ -383,8 +383,7 @@ export function LocalEditor({
   if (loadError) {
     return (
       <div style={{ padding: 24 }} data-testid="local-editor-error">
-        Couldn’t reach the server at {httpBase} to start a document. Start the zero-custody
-        server, then reload.
+        Couldn’t connect to {httpBase}. Check the collaboration server, then reload.
       </div>
     );
   }
@@ -399,11 +398,11 @@ export function LocalEditor({
         {loading ? (
           <div className="document-loading" data-testid="doc-loading" role="status" aria-live="polite" aria-busy="true">
             <span className="document-loading-spinner" aria-hidden="true" />
-            <strong>Loading {loading}…</strong>
-            <span>Preparing pages for editing…</span>
+            <strong>Opening {loading}…</strong>
+            <span>Large documents may take a few seconds.</span>
           </div>
         ) : (
-          "Loading editor…"
+          "Opening editor…"
         )}
       </div>
     );
@@ -428,7 +427,7 @@ export function LocalEditor({
           <span className="brand-mark">W</span>
           <span className="brand-copy">
             <strong>WordInWeb<span className="collab">Collaborative!</span></strong>
-            <span className="tag">Editing locally — nothing has left this browser yet</span>
+            <span className="tag">Editing locally in this browser</span>
           </span>
         </span>
         <nav className="app-links" aria-label="Project links">
@@ -494,7 +493,7 @@ export function LocalEditor({
             {storedSummary && storedSummary.count > 0 && (
               <span data-testid="local-stored-summary">
                 {" "}{storedSummary.count} saved cop{storedSummary.count === 1 ? "y uses" : "ies use"} {fmtSize(storedSummary.bytes)} in
-                this browser — deleting old ones can free space.
+                this browser. Delete old copies to free space.
               </span>
             )}{" "}
             <button data-testid="local-persist-download" onClick={downloadDocument} disabled={!api}>
@@ -524,14 +523,14 @@ export function LocalEditor({
         {loading && (
           <div className="document-loading" data-testid="doc-loading" role="status" aria-live="polite" aria-busy="true">
             <span className="document-loading-spinner" aria-hidden="true" />
-            <strong>Loading {loading}…</strong>
-            <span>Preparing pages for editing…</span>
+            <strong>Opening {loading}…</strong>
+            <span>Large documents may take a few seconds.</span>
           </div>
         )}
         {goPhase && (
           <div className="document-loading" data-testid="golive-progress" role="status" aria-live="polite" aria-busy="true">
             <span className="document-loading-spinner" aria-hidden="true" />
-            <strong>Making this document collaborative…</strong>
+            <strong>Starting collaboration…</strong>
             <span data-testid="golive-phase">{goPhase}</span>
           </div>
         )}
@@ -569,10 +568,9 @@ export function LocalEditor({
           onMouseDown={(e) => { if (e.target === e.currentTarget && !going) setModalOpen(false); }}
         >
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="collab-modal-title">
-            <h2 id="collab-modal-title">Start collaborating</h2>
+            <h2 id="collab-modal-title">Share this document</h2>
             <p>
-              This document is encrypted in your browser and shared by link. The server orders
-              edits without ever holding the key.
+              WordInWeb encrypts this document in your browser. The server only relays encrypted edits.
             </p>
             {goError && (
               <p data-testid="golive-error" style={{ background: "#f8d7da", padding: "6px 10px", borderRadius: 6 }}>
@@ -598,10 +596,7 @@ export function LocalEditor({
               onKeyDown={(e) => { if (e.key === "Enter" && !going) startCollab(); }}
             />
             <p style={{ margin: "8px 0 0" }}>
-              Everyone you share the link with needs this code as well. Send it separately —
-              a different app, or in person — so that a link on its own is never enough to
-              open the document. It doesn’t change what the server can see: the key stays in
-              your browser and never reaches it either way.
+              Send this code separately from the link. Everyone needs both to open the document.
             </p>
             <div className="row">
               <button className="ghost" data-testid="collab-cancel" disabled={going} onClick={() => setModalOpen(false)}>
@@ -611,7 +606,7 @@ export function LocalEditor({
                   minimum, no strength rules, no suggestions. Whatever they
                   type is the code. */}
               <button data-testid="start-collab" disabled={going || !code.trim()} onClick={startCollab}>
-                {going ? "Starting…" : "Start Collab"}
+                {going ? "Starting…" : "Start collaboration"}
               </button>
             </div>
           </div>

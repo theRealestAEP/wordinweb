@@ -13,7 +13,7 @@ export function savedDocName(s: StoredDocSummary): string {
   switch (s.kind) {
     case "local": return "Local document";
     case "live": return "Shared document (saved copy)";
-    case "version": return s.label ? `Version — ${s.label}` : "Version (unnamed)";
+    case "version": return s.label ? `Version: ${s.label}` : "Version (unnamed)";
     case "draft": return "Offline draft";
     case "superseded": return "Superseded copy";
     default: return "Stored data";
@@ -244,8 +244,7 @@ export function FileMenu({
               ) : null}
               {savedError ? (
                 <div className="filemenu-note" data-testid="file-saved-error">
-                  Saved documents couldn’t be read — storage may be blocked
-                  (private window?). Nothing here is stored on the server.
+                  Browser storage is unavailable. Try again outside private browsing.
                 </div>
               ) : saved === null ? (
                 <div className="filemenu-note">Loading…</div>
@@ -283,7 +282,7 @@ export function FileMenu({
                         <button
                           className="filemenu-mini danger"
                           data-testid="file-saved-delete-confirm"
-                          title="This copy exists only in this browser — deleting it here deletes it everywhere."
+                          title="Delete this saved browser copy."
                           onClick={() => {
                             setConfirmDelete(null);
                             void Promise.resolve(onDeleteSaved(s)).then(refreshSaved, () => setSavedError(true));

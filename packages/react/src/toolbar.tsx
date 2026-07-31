@@ -3235,7 +3235,7 @@ export function DocxToolbar({
             // 5MB in the published compose file, 50MB in the dev stack. So the
             // copy points at the likely cause and the action that fixes it
             // without asserting a limit it cannot actually know.
-            ? "Upload failed — the image may be too large, or the connection dropped. Try a smaller image."
+            ? "Upload failed. The image may be too large, or the connection dropped. Try a smaller image."
             : result === "no-caret"
               ? "Click in the document before inserting an image."
               : "That file could not be read as an image.",

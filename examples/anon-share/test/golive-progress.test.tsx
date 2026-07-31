@@ -124,7 +124,7 @@ describe("LocalEditor go-live", () => {
     for (let i = 0; i < 100 && onGoLive.mock.calls.length === 0; i++) await tick();
     expect(onGoLive).toHaveBeenCalled();
     expect(overlayUpAtCall, "the overlay must be committed before the heavy work begins").toBe(true);
-    expect(phaseTextAtCall).toContain("Preparing");
+    expect(phaseTextAtCall).toContain("Saving your document");
   });
 
   it("moves the overlay text as onGoLive reports phases", async () => {
