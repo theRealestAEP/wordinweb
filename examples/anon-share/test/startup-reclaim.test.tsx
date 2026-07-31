@@ -275,6 +275,10 @@ describe("App startup reclaim", () => {
   });
 
   it("storage-full banner counts what is stored and routes to the saved-documents list", async () => {
+    let rejectFirstPut!: (reason?: unknown) => void;
+    const firstPutFailure = new Promise<void>((_, reject) => { rejectFirstPut = reject; });
+    let reportFirstPutStarted!: () => void;
+    const firstPutStarted = new Promise<void>((resolve) => { reportFirstPutStarted = resolve; });
     let reportPersistError!: () => void;
     const persistErrorReported = new Promise<void>((resolve) => { reportPersistError = resolve; });
     const consoleError = vi.spyOn(console, "error").mockImplementation((message) => {
@@ -284,11 +288,19 @@ describe("App startup reclaim", () => {
     // the banner has something to count. Small sizes: reclaim stays inert.
     const inner = new InMemoryBundleStore();
     for (let i = 1; i <= 3; i++) await inner.put(bundleAt(versionKey("rdoc", i * 1000, `v${i}`), i * 1000, 10_000));
+    let putCalls = 0;
     const store: BundleStore = {
       get: (k) => inner.get(k),
       list: () => inner.list(),
       delete: (k) => inner.delete(k),
-      put: async () => { throw new DOMException("quota", "QuotaExceededError"); },
+      put: () => {
+        putCalls++;
+        if (putCalls === 1) {
+          reportFirstPutStarted();
+          return firstPutFailure;
+        }
+        return Promise.reject(new DOMException("quota", "QuotaExceededError"));
+      },
     };
     try {
       const host = mountApp(store, "rdoc");
@@ -296,7 +308,11 @@ describe("App startup reclaim", () => {
       // Page hide flushes the persister immediately. This tests the failure
       // path without waiting for its one-second production throttle.
       act(() => { window.dispatchEvent(new Event("pagehide")); });
-      await act(async () => { await persistErrorReported; });
+      await firstPutStarted;
+      await act(async () => {
+        rejectFirstPut(new DOMException("quota", "QuotaExceededError"));
+        await persistErrorReported;
+      });
       await until(() => byId(host, "persist-banner") !== null, "a failed persist write must raise the banner");
       await until(() => byId(host, "persist-stored-summary") !== null, "the banner must say what is taking the space");
       const summary = byId(host, "persist-stored-summary")!;
