@@ -1,5 +1,6 @@
 import { webcrypto } from "node:crypto";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import WebSocket from "ws";
 import {
@@ -281,7 +282,7 @@ async function main(): Promise<void> {
   await connectAgent(invitationUrl);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) {
   void main().catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

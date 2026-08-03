@@ -13,6 +13,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/core/package.json packages/core/
 COPY packages/collab/package.json packages/collab/
+COPY packages/agent/package.json packages/agent/
 COPY packages/server/package.json packages/server/
 COPY packages/react/package.json packages/react/
 # The lockfile is DISCARDED here, and only here. It is generated on the
@@ -33,6 +34,10 @@ COPY packages/ packages/
 COPY examples/anon-share/ examples/anon-share/
 # The demo imports the workspace packages' BUILT output, so build them first.
 RUN npm run build:packages
+# The AI invitation must work before @wordinweb/agent has an npm release.
+# Serve the packed CLI from the same trusted origin as the invitation page.
+RUN AGENT_TARBALL="$(npm pack --ignore-scripts --workspace @wordinweb/agent --silent)" && \
+    mv "$AGENT_TARBALL" examples/anon-share/public/wordinweb-agent.tgz
 # The private example stays outside the npm workspaces and package publish set.
 RUN npx vite build --config examples/anon-share/vite.config.ts
 

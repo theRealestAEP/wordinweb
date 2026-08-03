@@ -27,7 +27,7 @@ An AI invitation link can bootstrap a live shell session without an MCP
 installation:
 
 ```bash
-npx -y @wordinweb/agent connect '<complete invitation URL>'
+npx -y --package=https://collab.word-in-web.com/wordinweb-agent.tgz wordinweb-agent connect '<complete invitation URL>'
 ```
 
 The command keeps one encrypted collaboration connection open and accepts one

@@ -8,6 +8,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/core/package.json packages/core/
 COPY packages/collab/package.json packages/collab/
+COPY packages/agent/package.json packages/agent/
 COPY packages/server/package.json packages/server/
 RUN npm ci
 # ROLLUP'S NATIVE BINARY, installed explicitly because npm will not.
@@ -47,6 +48,7 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 COPY packages/core/package.json packages/core/
 COPY packages/collab/package.json packages/collab/
+COPY packages/agent/package.json packages/agent/
 COPY packages/server/package.json packages/server/
 # Install only the server workspace's production dependencies.
 RUN npm ci --omit=dev --ignore-scripts --workspace @wordinweb/server --include-workspace-root=false
