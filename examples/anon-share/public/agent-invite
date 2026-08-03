@@ -2,15 +2,17 @@
 
 The user has invited you to edit a live DOCX document with WordInWeb.
 
-Run this command with the complete URL from the user, including its fragment:
+Do not open this invitation in a browser. Run the exact command included in
+the user's message. It passes the short invitation URL directly to the agent
+client. The command has this form:
 
-    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge-2' wordinweb-agent connect '<complete invitation URL>'
+    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent connect '<short invitation URL>'
 
 The connect command starts a detached local bridge and returns a `sessionId`.
 It does not require a persistent terminal tool call. Run each document command
 as a new short process:
 
-    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge-2' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
+    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
 
 Read the `instructions` value from the ready result. Start with `sync`, then
 use short `session` commands for `inspect`, `edit`, `chat`, and `wait`. Treat
@@ -19,8 +21,9 @@ every edit. If an edit returns `needs_sync`, sync and inspect the changed
 content before you retry. After each task, call `wait` again instead of sending
 a final response. Send a `close` command when the inviter ends the task.
 
-Available session commands: `sync`, `capabilities`, `inspect`, `edit`, `chat`,
-`wait`, and `close`.
+The agent starts in suggestion mode. The inviter can switch it to direct editing
+from the private chat panel. Available session commands: `sync`, `capabilities`,
+`inspect`, `edit`, `chat`, `wait`, and `close`.
 
 This URL is a bearer credential. Do not print it, save it in a file, or share
 it with another process.

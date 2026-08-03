@@ -24,8 +24,12 @@ interface InvitePayload {
   version: 1;
   room: { wsUrl: string; httpBase: string; docId: string; docKey?: string; shareCode?: string };
   invite: { inviteId: string; token: string; chatKey: string; expiresAt: number };
-  agent: { name: string; instructions: string };
+  agent: { name: string; instructions: string; mode?: AgentMode };
 }
+
+type AgentMode = "suggest" | "edit";
+
+const AGENT_MODE_CONTROL_PREFIX = "\u0000wordinweb-agent-mode:";
 
 interface Command {
   id?: string | number;
@@ -46,13 +50,70 @@ function bytesToBase64Url(value: Uint8Array): string {
   return Buffer.from(value).toString("base64url");
 }
 
-function parseInvite(url: string): InvitePayload {
-  const encoded = new URL(url).hash.match(/(?:^#|&)invite=([A-Za-z0-9_-]+)/)?.[1];
-  if (!encoded) throw new Error("The URL has no AI invitation payload");
-  const payload = JSON.parse(new TextDecoder().decode(base64UrlToBytes(encoded))) as InvitePayload;
+async function parseInvite(url: string): Promise<InvitePayload> {
+  const parsed = new URL(url);
+  const encoded = parsed.hash.match(/(?:^#|&)invite=([A-Za-z0-9_-]+)/)?.[1];
+  let payload: InvitePayload;
+  if (encoded) {
+    payload = JSON.parse(new TextDecoder().decode(base64UrlToBytes(encoded))) as InvitePayload;
+  } else {
+    const values = new URLSearchParams(parsed.hash.slice(1));
+    const inviteId = values.get("i");
+    const secret = values.get("k");
+    if (!inviteId || !/^[A-Za-z0-9_-]{16,64}$/.test(inviteId) || !secret) throw new Error("The URL has no AI invitation payload");
+    const response = await fetch(new URL(`/agent-invites/${inviteId}`, parsed.origin));
+    if (!response.ok) throw new Error(response.status === 404 ? "The AI invitation is unavailable or expired" : `The AI invitation could not be loaded (${response.status})`);
+    const stored = await response.json() as { iv: string; ciphertext: string; expiresAt: number };
+    if (stored.expiresAt <= Date.now()) throw new Error("The AI invitation has expired");
+    const key = await crypto.subtle.importKey("raw", base64UrlToBytes(secret) as BufferSource, "AES-GCM", false, ["decrypt"]);
+    const plaintext = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: base64UrlToBytes(stored.iv) as BufferSource,
+        additionalData: new TextEncoder().encode(`wordinweb-agent-invite:${inviteId}`) as BufferSource,
+      },
+      key,
+      base64UrlToBytes(stored.ciphertext) as BufferSource,
+    );
+    payload = JSON.parse(new TextDecoder().decode(plaintext)) as InvitePayload;
+  }
   if (payload.version !== 1) throw new Error("The AI invitation version is unsupported");
   if (payload.invite.expiresAt <= Date.now()) throw new Error("The AI invitation has expired");
   return payload;
+}
+
+function parseAgentModeControl(text: string): AgentMode | null {
+  if (!text.startsWith(AGENT_MODE_CONTROL_PREFIX)) return null;
+  const mode = text.slice(AGENT_MODE_CONTROL_PREFIX.length);
+  return mode === "suggest" || mode === "edit" ? mode : null;
+}
+
+function editRequestForMode(request: Record<string, unknown> | undefined, mode: AgentMode): Record<string, unknown> | undefined {
+  if (mode === "edit" || !request) return request;
+  if (!Array.isArray(request.operations)) return request;
+  const operations = request.operations.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Each edit operation must be an object");
+    const operation = value as Record<string, unknown>;
+    switch (operation.kind) {
+      case "insertText":
+      case "splitParagraph":
+        return { ...operation, suggest: true };
+      case "deleteText":
+        return {
+          kind: "suggestRevision",
+          ranges: [{ blockRef: operation.blockRef, runRef: operation.runRef, start: operation.start, end: operation.end }],
+        };
+      case "mergeParagraph":
+        return { kind: "suggestRevision", marks: [{ blockRef: operation.blockRef, glyph: "del" }] };
+      case "suggestRevision":
+      case "commentRun":
+      case "replyComment":
+        return operation;
+      default:
+        throw new Error(`${String(operation.kind)} is unavailable in suggestion mode. Ask the inviter to switch this agent to editing mode`);
+    }
+  });
+  return { ...request, operations };
 }
 
 function randomId(prefix: string): string {
@@ -110,7 +171,8 @@ export async function connectAgent(
   inputStream: NodeJS.ReadableStream = process.stdin,
   emit: Emit = write,
 ): Promise<void> {
-  const payload = parseInvite(invitationUrl);
+  const payload = await parseInvite(invitationUrl);
+  let mode: AgentMode = payload.agent.mode === "edit" ? "edit" : "suggest";
   const clientId = randomId("agent");
   const socket = new WebSocket(payload.room.wsUrl);
   const transport = createWebSocketTransport(socket as never);
@@ -168,7 +230,13 @@ export async function connectAgent(
     onAgentChat: (message) => {
       if (message.agentClientId !== clientId || message.sender !== "inviter") return;
       void decryptChat(chatKey, clientId, message.messageId, message.iv, message.ciphertext).then(
-        (text) => publish({ event: "chat", messageId: message.messageId, text }),
+        (text) => {
+          const nextMode = parseAgentModeControl(text);
+          if (nextMode) {
+            mode = nextMode;
+            publish({ event: "mode_changed", mode });
+          } else publish({ event: "chat", messageId: message.messageId, text });
+        },
         () => publish({ event: "chat_error", messageId: message.messageId }),
       );
     },
@@ -209,6 +277,14 @@ export async function connectAgent(
     getRevision: () => revision,
     allocateIds: (count) => connection.allocIds(count),
     submit: (operation) => connection.submit(operation),
+    setPresence: (position) => {
+      const deadline = Date.now() + 30_000;
+      const send = (): void => {
+        if (connection.pendingCount === 0) connection.setPresence(position);
+        else if (connectionState.current === "live" && Date.now() < deadline) setTimeout(send, 25);
+      };
+      send();
+    },
     uploadMedia: (bytes) => connection.uploadMedia(bytes),
     getConnectionState: () => connectionState.current,
   }, { provenance: { author: profile.name } });
@@ -217,6 +293,7 @@ export async function connectAgent(
     event: "ready",
     clientId,
     revision: document.revision,
+    mode,
     instructions: payload.agent.instructions,
     commands: ["sync", "capabilities", "inspect", "edit", "chat", "wait", "close"],
   });
@@ -255,7 +332,7 @@ export async function connectAgent(
         case "sync": {
           const activity = connection.activity.slice(lastActivityIndex);
           lastActivityIndex = connection.activity.length;
-          respond(command.id, { revision: document.revision, activity, roster });
+          respond(command.id, { revision: document.revision, activity, roster, mode });
           break;
         }
         case "capabilities":
@@ -267,7 +344,7 @@ export async function connectAgent(
         case "edit":
           try {
             if (connectionState.current !== "live") throw new Error("The collaboration connection is offline. Reconnect before editing");
-            respond(command.id, await document.edit(command.request as never));
+            respond(command.id, await document.edit(editRequestForMode(command.request, mode) as never));
           } catch (error) {
             if (error instanceof Error && error.message.includes("revision is stale")) {
               respond(command.id, { status: "needs_sync", latestRevision: document.revision });

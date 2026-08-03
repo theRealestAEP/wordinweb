@@ -1,5 +1,5 @@
-import { DocxDocument, type Block, type Paragraph, type Run, type StableIds } from "@wordinweb/core";
-import { INTENT_KINDS, applyIntentScoped, resyncScope, type Intent, type IntentBody } from "@wordinweb/collab/client";
+import { DocxDocument, localName, runWireLength, type Block, type Paragraph, type Run, type StableIds, type XmlElement } from "@wordinweb/core";
+import { INTENT_KINDS, applyIntentScoped, resyncScope, type Intent, type IntentBody, type PresencePosition } from "@wordinweb/collab/client";
 import { agentCapabilities, agentOperationSchema, type AgentEditCapability } from "./capabilities.js";
 import { AGENT_COMPOSE_SCHEMA, composeDocxBytes } from "./compose.js";
 import { compileAgentOperation, localMedia } from "./edit.js";
@@ -51,6 +51,119 @@ function installPreparedImage(doc: DocxDocument, operation: IntentBody, asset?: 
     }
   }
   throw new Error("The image registration was not created");
+}
+
+function runsInParagraph(paragraph: XmlElement, ids: StableIds): Array<{ id: number; length: number }> {
+  const runs: Array<{ id: number; length: number }> = [];
+  const visit = (element: XmlElement): void => {
+    if (element !== paragraph && localName(element.name) === "p") return;
+    if (localName(element.name) === "r") {
+      const id = ids.idOf(element);
+      if (id !== undefined) runs.push({ id, length: runWireLength(element) });
+      return;
+    }
+    for (const child of element.children) visit(child);
+  };
+  visit(paragraph);
+  return runs;
+}
+
+function paragraphForRun(doc: DocxDocument, runId: number): { blockId: number; runs: Array<{ id: number; length: number }> } | null {
+  const ids = doc.enableStableIds();
+  const target = ids.elOf(runId);
+  if (!target) return null;
+  let result: { blockId: number; runs: Array<{ id: number; length: number }> } | null = null;
+  const visit = (element: XmlElement, paragraph?: XmlElement): void => {
+    if (result) return;
+    const current = localName(element.name) === "p" ? element : paragraph;
+    if (element === target && current) {
+      const blockId = ids.idOf(current);
+      if (blockId !== undefined) result = { blockId, runs: runsInParagraph(current, ids) };
+      return;
+    }
+    for (const child of element.children) visit(child, current);
+  };
+  for (const root of doc.editableRoots()) visit(root);
+  return result;
+}
+
+function presenceInParagraph(doc: DocxDocument, blockId: number, absoluteOffset: number): PresencePosition | null {
+  const ids = doc.enableStableIds();
+  const paragraph = ids.elOf(blockId);
+  if (!paragraph || localName(paragraph.name) !== "p") return null;
+  const runs = runsInParagraph(paragraph, ids);
+  if (runs.length === 0) return null;
+  let remaining = Math.max(0, absoluteOffset);
+  for (const run of runs) {
+    if (remaining <= run.length) return { anchor: { blockId, runId: run.id, offset: remaining } };
+    remaining -= run.length;
+  }
+  const last = runs[runs.length - 1];
+  return { anchor: { blockId, runId: last.id, offset: last.length } };
+}
+
+function absoluteRunOffset(doc: DocxDocument, blockId: number, runId: number, offset: number): number | null {
+  const ids = doc.enableStableIds();
+  const paragraph = ids.elOf(blockId);
+  if (!paragraph || localName(paragraph.name) !== "p") return null;
+  let absolute = 0;
+  for (const run of runsInParagraph(paragraph, ids)) {
+    if (run.id === runId) return absolute + Math.min(Math.max(0, offset), run.length);
+    absolute += run.length;
+  }
+  return null;
+}
+
+interface PresenceHint {
+  blockId: number;
+  absoluteOffset: number;
+}
+
+function presenceHint(doc: DocxDocument, operation: IntentBody): PresenceHint | null {
+  const value = operation as IntentBody & Record<string, unknown>;
+  const range = Array.isArray(value.ranges) ? value.ranges[value.ranges.length - 1] as Record<string, unknown> | undefined : undefined;
+  const mark = Array.isArray(value.marks) ? value.marks[value.marks.length - 1] as Record<string, unknown> | undefined : undefined;
+  const at = value.at && typeof value.at === "object" ? value.at as Record<string, unknown> : undefined;
+  const runId = Number(range?.runId ?? at?.runId ?? value.runId);
+  let blockId = Number(range?.blockId ?? at?.blockId ?? mark?.blockId ?? value.blockId ?? value.cellParagraphId ?? value.afterBlockId);
+  if (!Number.isInteger(blockId) && Number.isInteger(runId)) blockId = paragraphForRun(doc, runId)?.blockId ?? NaN;
+  if (!Number.isInteger(blockId)) return null;
+  if (!Number.isInteger(runId)) {
+    const paragraph = doc.enableStableIds().elOf(blockId);
+    if (!paragraph) return null;
+    const absoluteOffset = runsInParagraph(paragraph, doc.enableStableIds()).reduce((total, run) => total + run.length, 0);
+    return { blockId, absoluteOffset };
+  }
+  let offset = Number(range?.end ?? at?.offset ?? value.end);
+  if (value.kind === "deleteText") offset = Number(value.start);
+  if (!Number.isFinite(offset)) {
+    const run = doc.enableStableIds().elOf(runId);
+    offset = run ? runWireLength(run) : 0;
+  }
+  const absolute = absoluteRunOffset(doc, blockId, runId, offset);
+  if (absolute === null) return null;
+  return {
+    blockId,
+    absoluteOffset: absolute + (value.kind === "insertText" ? String(value.text ?? "").length : 0),
+  };
+}
+
+function presenceAfterOperation(doc: DocxDocument, operation: IntentBody, hint: PresenceHint | null): PresencePosition | null {
+  if (operation.kind === "splitParagraph") {
+    return { anchor: { blockId: operation.newBlockId, runId: operation.newRunId, offset: 0 } };
+  }
+  if (hint) return presenceInParagraph(doc, hint.blockId, hint.absoluteOffset);
+  const value = operation as IntentBody & Record<string, unknown>;
+  const nodeIds = Array.isArray(value.nodeIds) ? value.nodeIds : [];
+  for (let index = nodeIds.length - 1; index >= 0; index--) {
+    const runId = Number(nodeIds[index]);
+    if (!Number.isInteger(runId)) continue;
+    const paragraph = paragraphForRun(doc, runId);
+    if (!paragraph) continue;
+    const run = paragraph.runs.find((candidate) => candidate.id === runId);
+    if (run) return { anchor: { blockId: paragraph.blockId, runId, offset: run.length } };
+  }
+  return null;
 }
 
 function asObject(input: unknown): Record<string, unknown> {
@@ -456,6 +569,7 @@ export class AgentDocument {
     const ids = live.enableStableIds();
     const trial = cloneWithIds(live, ids);
     const compiled: Array<{ operation: IntentBody; asset?: AgentAsset }> = [];
+    let presence: PresencePosition | null = null;
     for (const input of request.operations) {
       const sourceAsset = typeof input.assetRef === "string" ? this.asset(input.assetRef) : undefined;
       const operation = await compileAgentOperation(input, {
@@ -471,14 +585,17 @@ export class AgentDocument {
           return prepared;
         },
       });
+      const hint = presenceHint(trial.doc, operation);
       const result = applyIntentScoped(trial.doc, trial.ids, { ...operation, clientId: "agent-trial", clientSeq: 0, base: 0 } as Intent);
       if (!result.applied) throw new Error(`${operation.kind} could not apply to the referenced document state`);
       resyncScope(trial.doc, trial.ids, result);
       installPreparedImage(trial.doc, operation, sourceAsset);
+      presence = presenceAfterOperation(trial.doc, operation, hint) ?? presence;
       compiled.push({ operation, asset: sourceAsset });
     }
     if (request.revision !== this.revision) throw new Error("The document changed while the transaction was validated");
     for (const { operation } of compiled) await target.submit(operation);
+    if (presence) target.setPresence?.(presence);
     return {
       revision: this.revision,
       status: "submitted",
@@ -550,6 +667,7 @@ export interface CollabSessionLike {
   doc: DocxDocument | null;
   version: number;
   submitOp(operation: IntentBody): void;
+  setPresence?(position: PresencePosition | null): void;
   allocIds(count: number): number[];
   uploadMedia?(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number; iv?: string } | null>;
   connection: "live" | "reconnecting" | "lost";
@@ -563,6 +681,7 @@ export function collaborativeAgentTarget(getSession: () => CollabSessionLike): A
     getRevision: () => getSession().version,
     allocateIds: (count) => getSession().allocIds(count),
     submit: (operation) => getSession().submitOp(operation),
+    setPresence: (position) => getSession().setPresence?.(position),
     uploadMedia: (bytes) => getSession().uploadMedia?.(bytes) ?? Promise.resolve(null),
     getConnectionState: () => {
       const state = getSession().connection;

@@ -9,6 +9,8 @@ export interface TextInputDialogOptions {
   min?: number;
   max?: number;
   step?: number;
+  /** Collaborator names offered as @mention shortcuts in comment dialogs. */
+  mentions?: string[];
 }
 
 export interface NumberPairDialogValue {
@@ -113,6 +115,34 @@ export function requestTextInputDialog(
       "font:13px system-ui,sans-serif;resize:vertical;";
     label.appendChild(field);
     form.appendChild(label);
+
+    if (options.mentions?.length) {
+      const mentions = doc.createElement("div");
+      mentions.className = "dxw-input-dialog-mentions";
+      mentions.setAttribute("aria-label", "Mention a collaborator");
+      mentions.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:5px;";
+      const caption = doc.createElement("span");
+      caption.textContent = "Mention:";
+      caption.style.cssText = "color:var(--dxw-toolbar-muted,#5f6368);font-size:11px;";
+      mentions.appendChild(caption);
+      for (const name of [...new Set(options.mentions)].filter((value) => value.trim())) {
+        const button = doc.createElement("button");
+        button.type = "button";
+        button.textContent = `@${name}`;
+        button.style.cssText =
+          "padding:3px 7px;border:1px solid var(--dxw-toolbar-border,#dadce0);border-radius:999px;" +
+          "color:var(--dxw-toolbar-fg,#3c4043);background:var(--dxw-popover-bg,#fff);cursor:pointer;font:11px system-ui,sans-serif;";
+        button.addEventListener("click", () => {
+          const start = field.selectionStart ?? field.value.length;
+          const end = field.selectionEnd ?? start;
+          const prefix = start > 0 && !/\s$/.test(field.value.slice(0, start)) ? " " : "";
+          field.setRangeText(`${prefix}@${name} `, start, end, "end");
+          field.focus();
+        });
+        mentions.appendChild(button);
+      }
+      form.appendChild(mentions);
+    }
 
     const actions = doc.createElement("div");
     actions.className = "dxw-input-dialog-actions";

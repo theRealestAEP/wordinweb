@@ -43,7 +43,7 @@
 	# leaves XFF empty, and the server falls back to the socket peer — every
 	# such request then shares one bucket. That over-limits rather than
 	# under-limits, which is the direction this codebase already chose.
-	@collab path /docs /docs/* /blank /healthz
+	@collab path /docs /docs/* /agent-invites/* /blank /healthz
 	handle @collab {
 		reverse_proxy collab:1234 {
 			header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}

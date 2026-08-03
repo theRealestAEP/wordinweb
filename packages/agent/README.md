@@ -27,19 +27,20 @@ An AI invitation link can bootstrap a live shell session without an MCP
 installation:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge-2' wordinweb-agent connect '<complete invitation URL>'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent connect '<short invitation URL>'
 ```
 
 The command starts a detached local bridge and returns a `sessionId`. Run each
 JSON command through a short process:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge-2' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
 ```
 
 The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, `wait`,
 and `close`. Every edit includes the inspected revision. A newer room revision
-returns `needs_sync` before the agent changes the document.
+returns `needs_sync` before the agent changes the document. The bridge places
+the agent's visible collaboration cursor after its latest edit.
 
 ## Headless use
 

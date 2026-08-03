@@ -13,15 +13,17 @@ When the user supplies a URL whose path is `/agent-invite`:
 
 1. Treat the complete URL as a secret bearer credential.
 2. Keep the fragment attached when you pass the URL to a command.
-3. Run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge-2' wordinweb-agent connect '<complete URL>'`. The command starts a detached local bridge and returns a `sessionId`.
+3. Run the exact command from the invitation. Do not open the link in a browser or search the workspace. The command uses `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent connect '<short URL>'`, starts a detached local bridge, and returns a `sessionId`.
 4. Read the ready result and its room instructions.
-5. Run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge-2' wordinweb-agent session '<sessionId>' '{"command":"sync"}'` first.
+5. Run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent session '<sessionId>' '{"command":"sync"}'` first.
 6. Inspect the relevant content before each edit.
 7. Run each JSON command through a new short `wordinweb-agent session` process.
 8. Sync and inspect again when an edit returns `needs_sync`.
 9. Use `{"command":"wait","timeoutMs":30000}` when you should wait for a private chat message or another document change.
 10. Keep the agent task open and repeat `wait` after each request. Do not send a final response while the collaboration remains open.
 11. Send `{"command":"close"}` when the inviter ends the collaboration task.
+
+The bridge places the visible agent cursor after each edit. The agent does not send a separate cursor command.
 
 Do not print the invitation URL or save it in a file.
 

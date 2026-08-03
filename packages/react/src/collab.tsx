@@ -1562,6 +1562,10 @@ export const COLLAB_TOOLBAR_DEFAULTS: Partial<Record<ToolbarFeature, boolean>> =
 
 export function CollabEditor(opts: UseCollabOptions & {
   editable?: boolean;
+  /** Author name stamped on comments and tracked suggestions. */
+  commentAuthor?: string;
+  /** Connected collaborator names offered as @mention shortcuts in comments. */
+  commentMentions?: string[];
   /** Tracked-change display. Use markup to show suggestions in the document. */
   revisions?: "final" | "markup";
   /** Render the Word-style ribbon toolbar above the page (default true). */
@@ -1753,6 +1757,8 @@ export function CollabEditor(opts: UseCollabOptions & {
     // and lost it, which is why the read-only banner could be on screen while
     // the user's text appeared and then vanished.
     editable: (opts.editable ?? true) && !session.writesBlocked,
+    commentAuthor: opts.commentAuthor,
+    commentMentions: opts.commentMentions,
     revisions: opts.revisions,
     // Re-key only on docEpoch (a document replacement), not on every change.
     // Between replacements the live doc mutates in place and the key stays stable,
@@ -1768,6 +1774,7 @@ export function CollabEditor(opts: UseCollabOptions & {
       api,
       mode: opts.toolbarMode ?? "advanced",
       features: { ...COLLAB_TOOLBAR_DEFAULTS, ...opts.toolbarFeatures },
+      commentMentions: opts.commentMentions,
     }),
     createElement("div", { style: { flex: 1, minHeight: 0 } }, view),
   );

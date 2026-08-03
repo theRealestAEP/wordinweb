@@ -1,13 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentInviteClipboardText,
   agentInviteUrl,
+  createShortAgentInvite,
   decodeAgentInvite,
   decryptAgentChat,
   encryptAgentChat,
   randomAgentToken,
   type AgentInvitePayload,
 } from "../src/agent-invite";
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("AI invitation helpers", () => {
   it("keeps the room code, document key, and instructions in the URL fragment", () => {
@@ -35,12 +38,39 @@ describe("AI invitation helpers", () => {
   });
 
   it("copies the invitation with connection and private-chat instructions", () => {
-    const url = "https://docs.example.test/agent-invite#invite=secret";
+    const url = "https://docs.example.test/agent-invite#i=short-link&k=secret";
     const copied = agentInviteClipboardText(url);
 
     expect(copied).toContain(url);
-    expect(copied).toContain("follow its connection instructions");
+    expect(copied).toContain("Run this exact command now");
+    expect(copied).toContain("Do not open the invitation in a browser");
     expect(copied).toContain("private chat messages");
+  });
+
+  it("stores an encrypted invite behind a short URL", async () => {
+    const payload: AgentInvitePayload = {
+      version: 1,
+      room: { wsUrl: "wss://docs.example.test", httpBase: "https://docs.example.test", docId: "private-doc", docKey: "private-key" },
+      invite: {
+        inviteId: "invite_1234567890",
+        token: "token_12345678901234567890123456789012",
+        chatKey: randomAgentToken("", 32).slice(1),
+        expiresAt: Date.now() + 60_000,
+      },
+      agent: { name: "Review agent", instructions: "Wait for tasks.", mode: "suggest" },
+    };
+    let stored = "";
+    vi.stubGlobal("fetch", async (_url: URL, init: RequestInit) => {
+      stored = String(init.body);
+      return { ok: true, status: 201 };
+    });
+
+    const url = await createShortAgentInvite("https://docs.example.test", payload);
+
+    expect(url.length).toBeLessThan(180);
+    expect(url).toContain("#i=link_");
+    expect(url).not.toContain("private-doc");
+    expect(stored).not.toContain("private-key");
   });
 
   it("encrypts private chat for one invited agent", async () => {

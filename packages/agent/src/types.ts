@@ -1,5 +1,5 @@
 import type { DocxDocument } from "@wordinweb/core";
-import type { IntentBody } from "@wordinweb/collab/client";
+import type { IntentBody, PresencePosition } from "@wordinweb/collab/client";
 
 export type AgentReference = string;
 
@@ -280,6 +280,7 @@ export interface AgentCollaborativeTarget {
   getRevision(): string | number;
   allocateIds(count: number): number[];
   submit(operation: IntentBody): void | Promise<void>;
+  setPresence?(position: PresencePosition | null): void;
   uploadMedia?(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number; iv?: string } | null>;
   getConnectionState?(): "local" | "live" | "offline" | "reconnecting";
 }

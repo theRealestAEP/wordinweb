@@ -149,6 +149,7 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
   }
   const ipGuard = new IpGuard(limits.ip);
   const hub = new CollabHub(/*provider*/ null, undefined, undefined, undefined, undefined, obs, limits, ipGuard); // zero-custody: seed-only rooms
+  const shortAgentInvites = new Map<string, { iv: string; ciphertext: string; expiresAt: number }>();
   // INBOUND FRAME CAP — the first wall, and it has to be first: `ws` defaults
   // maxPayload to 100 MiB, so without this a hostile peer makes the server
   // buffer and PARSE a hundred-megabyte frame before any hub-level check —
@@ -253,6 +254,58 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
       // the server CANNOT seal a blank doc itself — it has no keys — so the
       // creating browser fetches the template, seals, and POSTs the blob.
       res.writeHead(200, { "content-type": "application/octet-stream" }).end(Buffer.from(blankDocxBytes()));
+      return;
+    }
+    const shortInvite = /^\/agent-invites\/([A-Za-z0-9_-]{16,64})$/.exec(url);
+    if (shortInvite) {
+      const id = shortInvite[1];
+      if (req.method === "GET") {
+        const invite = shortAgentInvites.get(id);
+        if (!invite || invite.expiresAt <= Date.now()) {
+          shortAgentInvites.delete(id);
+          res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" }).end(`{"error":"not-found"}`);
+        } else {
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(invite));
+        }
+        return;
+      }
+      if (req.method === "PUT") {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        req.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size <= 8_192) chunks.push(chunk);
+        });
+        req.on("end", () => {
+          if (size > 8_192) {
+            res.writeHead(413, { "content-type": "application/json" }).end(`{"error":"too-large"}`);
+            return;
+          }
+          let value: { iv?: unknown; ciphertext?: unknown; expiresAt?: unknown };
+          try {
+            value = JSON.parse(Buffer.concat(chunks).toString("utf8")) as typeof value;
+          } catch {
+            res.writeHead(400, { "content-type": "application/json" }).end(`{"error":"bad-json"}`);
+            return;
+          }
+          const valid = typeof value.iv === "string" && /^[A-Za-z0-9_-]{16,32}$/.test(value.iv) &&
+            typeof value.ciphertext === "string" && /^[A-Za-z0-9_-]{32,7000}$/.test(value.ciphertext) &&
+            typeof value.expiresAt === "number" && Number.isFinite(value.expiresAt) &&
+            value.expiresAt > Date.now() && value.expiresAt <= Date.now() + 10 * 60_000;
+          if (!valid) {
+            res.writeHead(400, { "content-type": "application/json" }).end(`{"error":"invalid"}`);
+            return;
+          }
+          if (!shortAgentInvites.has(id) && shortAgentInvites.size >= 1_000) {
+            res.writeHead(429, { "content-type": "application/json" }).end(`{"error":"full"}`);
+            return;
+          }
+          shortAgentInvites.set(id, value as { iv: string; ciphertext: string; expiresAt: number });
+          res.writeHead(201, { "content-type": "application/json", "cache-control": "no-store" }).end(`{"ok":true}`);
+        });
+        return;
+      }
+      res.writeHead(405).end();
       return;
     }
     // Media relay (doc 16 §3): bytes over HTTP, never the WS sequencer.
@@ -459,6 +512,8 @@ export async function startZeroCustodyServer(opts: { port?: number } = {}): Prom
     hub.sweepExpired();
     hub.sweepMedia();
     ipGuard.sweep();
+    const now = Date.now();
+    for (const [id, invite] of shortAgentInvites) if (invite.expiresAt <= now) shortAgentInvites.delete(id);
   }, 10_000);
   server.listen(port);
   // Emit the storage configuration once after the port binds. The spill
