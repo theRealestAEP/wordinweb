@@ -422,6 +422,7 @@ export type Intent =
   | SetChartDataIntent
   | SetSmartArtNodeTextIntent
   | SetDrawingWordArtTextIntent
+  | SetDrawingWordArtStyleIntent
   | SetDrawingLineStyleIntent
   | SetImageAltTextIntent
   | RemoveLinkIntent
@@ -448,6 +449,88 @@ export type Intent =
   | AcceptAllRevisionsIntent
   | RejectAllRevisionsIntent
   | InsertTableIntent;
+
+/**
+ * Complete runtime list of canonical edit operations.
+ *
+ * The typed map is a coverage gate: a new Intent variant must be added here
+ * before TypeScript will build. Other surfaces, including the agent API and
+ * browser convergence tests, consume this list instead of maintaining a
+ * second list that can silently drift.
+ */
+const INTENT_KIND_MAP: Record<Intent["kind"], true> = {
+  insertText: true,
+  deleteText: true,
+  splitParagraph: true,
+  formatRun: true,
+  formatParagraph: true,
+  setListType: true,
+  formatRange: true,
+  tableOp: true,
+  mergeParagraph: true,
+  commentRun: true,
+  pasteBlocks: true,
+  insertImage: true,
+  suggestRevision: true,
+  insertBreak: true,
+  insertMath: true,
+  insertShape: true,
+  replyComment: true,
+  adjustIndent: true,
+  setSpacing: true,
+  insertPageField: true,
+  setLink: true,
+  insertFootnote: true,
+  setDropCap: true,
+  setDivider: true,
+  insertBookmark: true,
+  insertBlankPage: true,
+  insertSectionBreak: true,
+  insertCrossRef: true,
+  insertCoverPage: true,
+  setPageLayout: true,
+  setListLevel: true,
+  insertWordArt: true,
+  insertChart: true,
+  insertSmartArt: true,
+  setLineNumbering: true,
+  insertDateTimeField: true,
+  insertField: true,
+  setDrawingRotation: true,
+  setDrawingFill: true,
+  setChartData: true,
+  setSmartArtNodeText: true,
+  setDrawingWordArtText: true,
+  setDrawingWordArtStyle: true,
+  setDrawingLineStyle: true,
+  setImageAltText: true,
+  removeLink: true,
+  setImageWrap: true,
+  setDrawingOrder: true,
+  setSmartArtData: true,
+  setSmartArtFill: true,
+  setSmartArtTextFormat: true,
+  setFloatingPagePosition: true,
+  resizeDrawing: true,
+  resizeTableColumn: true,
+  resizeTableRow: true,
+  moveTable: true,
+  removeDrawing: true,
+  setMathLinear: true,
+  deleteMath: true,
+  moveMath: true,
+  ensureHeaderFooter: true,
+  deleteComment: true,
+  insertBookmarkRange: true,
+  toggleCheckbox: true,
+  acceptRevision: true,
+  rejectRevision: true,
+  acceptAllRevisions: true,
+  rejectAllRevisions: true,
+  insertTable: true,
+};
+
+export const INTENT_KINDS = Object.freeze(Object.keys(INTENT_KIND_MAP) as Intent["kind"][]);
 
 /** Insert a blank page at the end of a run. */
 export interface InsertBlankPageIntent extends IntentBase {
@@ -560,8 +643,14 @@ export interface InsertFieldIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
+interface DrawingTarget {
+  runId: StableId;
+  /** Parsed run-content index. It disambiguates several drawings carried by one run. */
+  objectIndex?: number;
+}
+
 /** Rotate the drawing carried by a run. Identity transform (run-addressed). */
-export interface SetDrawingRotationIntent extends IntentBase {
+export interface SetDrawingRotationIntent extends IntentBase, DrawingTarget {
   kind: "setDrawingRotation";
   runId: StableId;
   degrees: number;
@@ -569,7 +658,7 @@ export interface SetDrawingRotationIntent extends IntentBase {
 
 /** Set/clear the solid fill of the drawing carried by a run. `color` is a
  * 6-hex-digit RGB (no #) or null to clear. */
-export interface SetDrawingFillIntent extends IntentBase {
+export interface SetDrawingFillIntent extends IntentBase, DrawingTarget {
   kind: "setDrawingFill";
   runId: StableId;
   color: string | null;
@@ -577,7 +666,7 @@ export interface SetDrawingFillIntent extends IntentBase {
 
 /** Replace the data of the chart carried by a run (same shape as insertChart's
  * chart). Edits an existing chart in place. */
-export interface SetChartDataIntent extends IntentBase {
+export interface SetChartDataIntent extends IntentBase, DrawingTarget {
   kind: "setChartData";
   runId: StableId;
   chart: {
@@ -589,7 +678,7 @@ export interface SetChartDataIntent extends IntentBase {
 }
 
 /** Set the text of one node of the SmartArt diagram carried by a run. */
-export interface SetSmartArtNodeTextIntent extends IntentBase {
+export interface SetSmartArtNodeTextIntent extends IntentBase, DrawingTarget {
   kind: "setSmartArtNodeText";
   runId: StableId;
   index: number;
@@ -597,24 +686,32 @@ export interface SetSmartArtNodeTextIntent extends IntentBase {
 }
 
 /** Replace the text of the WordArt drawing carried by a run. */
-export interface SetDrawingWordArtTextIntent extends IntentBase {
+export interface SetDrawingWordArtTextIntent extends IntentBase, DrawingTarget {
   kind: "setDrawingWordArtText";
   runId: StableId;
   text: string;
 }
 
-/** Set the outline (line) style of the drawing carried by a run. */
-export interface SetDrawingLineStyleIntent extends IntentBase {
+/** Set the glyph fill and alpha of the WordArt drawing carried by a run. */
+export interface SetDrawingWordArtStyleIntent extends IntentBase, DrawingTarget {
+  kind: "setDrawingWordArtStyle";
+  runId: StableId;
+  color: string;
+  opacity: number;
+}
+
+/** Set or clear the outline of the drawing carried by a run. */
+export type SetDrawingLineStyleIntent = IntentBase & DrawingTarget & {
   kind: "setDrawingLineStyle";
   runId: StableId;
-  color: string; // 6-hex RGB (no #)
-  widthPx: number;
-  dash: "solid" | "dashed" | "dotted";
-}
+} & (
+  | { color: null; widthPx?: number; dash?: "solid" | "dashed" | "dotted" }
+  | { color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" }
+);
 
 /** Set/clear the alt text (accessibility description) of the image/drawing
  * carried by a run. Empty string clears it. */
-export interface SetImageAltTextIntent extends IntentBase {
+export interface SetImageAltTextIntent extends IntentBase, DrawingTarget {
   kind: "setImageAltText";
   runId: StableId;
   alt: string;
@@ -628,21 +725,21 @@ export interface RemoveLinkIntent extends IntentBase {
 
 /** Set the text-wrap mode of the drawing carried by a run. A floating mode
  * converts an inline drawing to an anchor. */
-export interface SetImageWrapIntent extends IntentBase {
+export interface SetImageWrapIntent extends IntentBase, DrawingTarget {
   kind: "setImageWrap";
   runId: StableId;
   mode: "inline" | "square" | "topAndBottom" | "none" | "behind";
 }
 
 /** Bring the (floating) drawing carried by a run to front/back. */
-export interface SetDrawingOrderIntent extends IntentBase {
+export interface SetDrawingOrderIntent extends IntentBase, DrawingTarget {
   kind: "setDrawingOrder";
   runId: StableId;
   order: "front" | "back";
 }
 
 /** Replace the whole SmartArt diagram (layout + items) carried by a run. */
-export interface SetSmartArtDataIntent extends IntentBase {
+export interface SetSmartArtDataIntent extends IntentBase, DrawingTarget {
   kind: "setSmartArtData";
   runId: StableId;
   smartArt: { layout: "process" | "cycle" | "hierarchy" | "list"; items: string[] };
@@ -650,7 +747,7 @@ export interface SetSmartArtDataIntent extends IntentBase {
 
 /** Set/clear the fill of a SmartArt node (or all nodes when nodeIndex omitted).
  * `color` is 6-hex RGB (no #) or null to clear. */
-export interface SetSmartArtFillIntent extends IntentBase {
+export interface SetSmartArtFillIntent extends IntentBase, DrawingTarget {
   kind: "setSmartArtFill";
   runId: StableId;
   color: string | null;
@@ -658,7 +755,7 @@ export interface SetSmartArtFillIntent extends IntentBase {
 }
 
 /** Set the text format of a SmartArt node (or all nodes). */
-export interface SetSmartArtTextFormatIntent extends IntentBase {
+export interface SetSmartArtTextFormatIntent extends IntentBase, DrawingTarget {
   kind: "setSmartArtTextFormat";
   runId: StableId;
   format: {
@@ -673,7 +770,7 @@ export interface SetSmartArtTextFormatIntent extends IntentBase {
 }
 
 /** Position the (floating) drawing carried by a run relative to the page. */
-export interface SetFloatingPagePositionIntent extends IntentBase {
+export interface SetFloatingPagePositionIntent extends IntentBase, DrawingTarget {
   kind: "setFloatingPagePosition";
   runId: StableId;
   xPx: number;
@@ -682,7 +779,7 @@ export interface SetFloatingPagePositionIntent extends IntentBase {
 
 /** Resize the drawing carried by a run (extent in px; the mutation clamps to
  * a 1px-EMU floor and keeps line geometry degenerate on its minor axis). */
-export interface ResizeDrawingIntent extends IntentBase {
+export interface ResizeDrawingIntent extends IntentBase, DrawingTarget {
   kind: "resizeDrawing";
   runId: StableId;
   widthPx: number;
@@ -718,8 +815,8 @@ export interface MoveTableIntent extends IntentBase {
   pageDelta: number;
 }
 
-/** Delete the drawing carried by a run (removes the carrier run). */
-export interface RemoveDrawingIntent extends IntentBase {
+/** Delete the drawing at the supplied run-content target. */
+export interface RemoveDrawingIntent extends IntentBase, DrawingTarget {
   kind: "removeDrawing";
   runId: StableId;
 }

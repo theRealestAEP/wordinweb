@@ -71,6 +71,9 @@ describe("more intents batch 7 (edit an existing element)", () => {
     const e = s.submit({ kind: "setDrawingLineStyle", clientId: "a", clientSeq: 2, base: s.seq, runId: rid, color: "112233", widthPx: 3, dash: "dashed" });
     expect(e.kind).toBe("applied");
     expect(serializeXml(s.doc.docRoot)).toContain("112233");
+    const cleared = s.submit({ kind: "setDrawingLineStyle", clientId: "a", clientSeq: 3, base: s.seq, runId: rid, color: null });
+    expect(cleared.kind).toBe("applied");
+    expect(serializeXml(s.doc.docRoot)).toContain("<a:noFill/>");
   });
 
   it("setImageAltText sets an accessibility description", () => {

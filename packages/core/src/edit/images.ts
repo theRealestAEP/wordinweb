@@ -15,6 +15,14 @@ function isVmlShape(el: XmlElement): boolean {
   return ["shape", "rect"].includes(localName(el.name));
 }
 
+function isVmlLine(el: XmlElement): boolean {
+  return localName(el.name) === "line";
+}
+
+function isVmlDrawing(el: XmlElement): boolean {
+  return isVmlShape(el) || isVmlLine(el);
+}
+
 function vmlStyle(el: XmlElement): Map<string, string> {
   const style = new Map<string, string>();
   for (const declaration of (el.attrs.style ?? "").split(";")) {
@@ -47,9 +55,25 @@ function pxToVmlPt(px: number): string {
   return `${Math.round(px * 75) / 100}pt`;
 }
 
+function vmlLinePoints(line: XmlElement): { x1: number; y1: number; x2: number; y2: number } {
+  const from = (line.attrs.from ?? "0,0").split(",");
+  const to = (line.attrs.to ?? "0,0").split(",");
+  return {
+    x1: vmlLengthPx(from[0]),
+    y1: vmlLengthPx(from[1]),
+    x2: vmlLengthPx(to[0]),
+    y2: vmlLengthPx(to[1]),
+  };
+}
+
+function setVmlLinePoints(line: XmlElement, points: { x1: number; y1: number; x2: number; y2: number }): void {
+  line.attrs.from = `${pxToVmlPt(points.x1)},${pxToVmlPt(points.y1)}`;
+  line.attrs.to = `${pxToVmlPt(points.x2)},${pxToVmlPt(points.y2)}`;
+}
+
 export function isFloatingDrawing(drawingEl: XmlElement): boolean {
   return !!child(drawingEl, "anchor") ||
-    (isVmlShape(drawingEl) && vmlStyle(drawingEl).get("position") === "absolute");
+    (isVmlDrawing(drawingEl) && (isVmlLine(drawingEl) || vmlStyle(drawingEl).get("position") === "absolute"));
 }
 
 /**
@@ -205,11 +229,21 @@ export function setFloatingPagePosition(
 ): boolean {
   const anchor = child(drawingEl, "anchor");
   if (!anchor) {
-    if (!isVmlShape(drawingEl)) return false;
+    if (isVmlLine(drawingEl)) {
+      const points = vmlLinePoints(drawingEl);
+      const dx = xPx - Math.min(points.x1, points.x2);
+      const dy = yPx - Math.min(points.y1, points.y2);
+      setVmlLinePoints(drawingEl, {
+        x1: points.x1 + dx,
+        y1: points.y1 + dy,
+        x2: points.x2 + dx,
+        y2: points.y2 + dy,
+      });
+    } else if (!isVmlShape(drawingEl)) return false;
     setVmlStyle(drawingEl, {
       position: "absolute",
-      "margin-left": pxToVmlPt(xPx),
-      "margin-top": pxToVmlPt(yPx),
+      "margin-left": isVmlLine(drawingEl) ? null : pxToVmlPt(xPx),
+      "margin-top": isVmlLine(drawingEl) ? null : pxToVmlPt(yPx),
       "mso-position-horizontal": "absolute",
       "mso-position-horizontal-relative": "page",
       "mso-position-vertical": "absolute",
@@ -244,7 +278,18 @@ export function adjustFloatingPosition(
 ): boolean {
   const anchor = child(drawingEl, "anchor");
   if (!anchor) {
-    if (!isVmlShape(drawingEl) || !isFloatingDrawing(drawingEl)) return false;
+    if (!isVmlDrawing(drawingEl) || !isFloatingDrawing(drawingEl)) return false;
+    if (isVmlLine(drawingEl)) {
+      const points = vmlLinePoints(drawingEl);
+      setVmlLinePoints(drawingEl, {
+        x1: points.x1 + dxPx,
+        y1: points.y1 + dyPx,
+        x2: points.x2 + dxPx,
+        y2: points.y2 + dyPx,
+      });
+      doc.refresh();
+      return true;
+    }
     const style = vmlStyle(drawingEl);
     setVmlStyle(drawingEl, {
       "margin-left": pxToVmlPt(vmlLengthPx(style.get("margin-left")) + dxPx),
@@ -286,7 +331,13 @@ function drawingTransform(drawingEl: XmlElement): XmlElement | undefined {
 /** Current DrawingML rotation in clockwise degrees. */
 export function drawingRotation(drawingEl: XmlElement): number {
   const xfrm = drawingTransform(drawingEl);
-  if (!xfrm) return isVmlShape(drawingEl) ? parseFloat(vmlStyle(drawingEl).get("rotation") ?? "0") || 0 : 0;
+  if (!xfrm) {
+    if (isVmlLine(drawingEl)) {
+      const points = vmlLinePoints(drawingEl);
+      return Math.round(Math.atan2(points.y2 - points.y1, points.x2 - points.x1) * 18000 / Math.PI) / 100;
+    }
+    return isVmlShape(drawingEl) ? parseFloat(vmlStyle(drawingEl).get("rotation") ?? "0") || 0 : 0;
+  }
   const key = Object.keys(xfrm.attrs).find((k) => localName(k) === "rot");
   return key ? (parseInt(xfrm.attrs[key], 10) || 0) / 60000 : 0;
 }
@@ -295,6 +346,18 @@ export function drawingRotation(drawingEl: XmlElement): number {
 export function setDrawingRotation(doc: DocxDocument, drawingEl: XmlElement, degrees: number): boolean {
   const xfrm = drawingTransform(drawingEl);
   if (!xfrm) {
+    if (isVmlLine(drawingEl)) {
+      const points = vmlLinePoints(drawingEl);
+      const cx = (points.x1 + points.x2) / 2;
+      const cy = (points.y1 + points.y2) / 2;
+      const half = Math.hypot(points.x2 - points.x1, points.y2 - points.y1) / 2;
+      const radians = degrees * Math.PI / 180;
+      const dx = Math.cos(radians) * half;
+      const dy = Math.sin(radians) * half;
+      setVmlLinePoints(drawingEl, { x1: cx - dx, y1: cy - dy, x2: cx + dx, y2: cy + dy });
+      doc.refresh();
+      return true;
+    }
     if (!isVmlShape(drawingEl)) return false;
     const normalized = ((degrees % 360) + 360) % 360;
     setVmlStyle(drawingEl, { rotation: normalized === 0 ? null : String(Math.round(normalized * 100) / 100) });
@@ -316,7 +379,25 @@ export function setDrawingOrder(
   order: "front" | "back",
 ): boolean {
   const selected = child(drawingEl, "anchor");
-  if (!selected) return false;
+  if (!selected) {
+    if (!isVmlDrawing(drawingEl)) return false;
+    let root: XmlElement = drawingEl;
+    for (;;) {
+      const parent = doc.findParentOf(root);
+      if (!parent) break;
+      root = parent;
+    }
+    const values: number[] = [];
+    const collect = (node: XmlElement): void => {
+      if (isVmlDrawing(node)) values.push(parseFloat(vmlStyle(node).get("z-index") ?? "0") || 0);
+      for (const childNode of node.children) collect(childNode);
+    };
+    collect(root);
+    const z = order === "front" ? Math.max(...values, 0) + 1 : Math.min(...values, 0) - 1;
+    setVmlStyle(drawingEl, { "z-index": String(z) });
+    doc.refresh();
+    return true;
+  }
   let root: XmlElement = drawingEl;
   for (;;) {
     const parent = doc.findParentOf(root);

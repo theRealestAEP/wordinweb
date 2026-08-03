@@ -53,8 +53,10 @@ const METRIC_SUBSTITUTES: Record<string, string> = {
   // baked hhea metrics keep line pitch right even when widths differ).
   consolas: "Menlo",
   "segoe ui": "Helvetica Neue",
-  aptos: "Helvetica Neue",
-  "aptos display": "Helvetica Neue",
+  // The system UI face tracks Aptos advances much more closely than
+  // Helvetica Neue. This keeps narrow Word text boxes on the same line.
+  aptos: "system-ui",
+  "aptos display": "system-ui",
   "franklin gothic book": "Avenir Next",
   "franklin gothic medium": "Avenir Next Medium",
   "century gothic": "Avenir Next",
@@ -199,6 +201,13 @@ export function cssFont(font: FontSpec): string {
   return `${style}${weight}${font.size}px ${stack}`;
 }
 
+/** Horizontal correction for substitutes whose glyph shapes are close but
+ * whose advances differ from the Office face. */
+export function fontWidthScale(font: FontSpec): number {
+  const family = normalizeFamily(font.family, !!font.bold, !!font.italic).family.toLowerCase();
+  return family === "aptos" || family === "aptos display" ? 0.935 : 1;
+}
+
 let _cambriaMath: boolean | undefined;
 /** True when the real "Cambria Math" face is available (dev fonts-local). The
  * math pipeline paints real glyphs whenever present (the CSS stack lists it
@@ -313,8 +322,13 @@ export class CanvasMeasurer implements TextMeasurer {
       // 2/3px at 96dpi. Canvas loses a small amount of precision at those
       // fractional sizes; measuring at 3x makes every half-point size an
       // integer number of pixels, then scales the nominal advance back down.
-      this.setFont({ ...font, size: font.size * 3 });
-      w = this.ctx.measureText(text).width / 3;
+      // system-ui uses optical sizing, so its 3x advances do not scale back
+      // to the small text Word puts in shapes. Measure Aptos substitutes at
+      // the paint size, then apply the calibrated Aptos advance ratio.
+      const widthScale = fontWidthScale(font);
+      const measureScale = widthScale === 1 ? 3 : 1;
+      this.setFont({ ...font, size: font.size * measureScale });
+      w = (this.ctx.measureText(text).width / measureScale) * widthScale;
       if (this.widthCache.size > 20000) this.widthCache.clear();
       this.widthCache.set(key, w);
     }
@@ -398,7 +412,7 @@ export class ApproxMeasurer implements TextMeasurer {
   width(text: string, font: FontSpec, letterSpacing = 0): number {
     let w = 0;
     for (const ch of text) w += charWidth(ch, font);
-    return w + letterSpacing * text.length;
+    return w * fontWidthScale(font) + letterSpacing * text.length;
   }
 
   metrics(font: FontSpec): FontMetrics {

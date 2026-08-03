@@ -7,6 +7,13 @@ import { useStartupReclaim } from "./startup-reclaim";
 import { FileMenu, fmtSize, savedDocName } from "./file-menu";
 import { PerfHud } from "./perf/hud";
 import { perfMonitor, type DocStats } from "./perf/metrics";
+import {
+  agentInviteUrl,
+  decryptAgentChat,
+  encryptAgentChat,
+  randomAgentToken,
+  type AgentInvitePayload,
+} from "./agent-invite";
 
 /**
  * The zero-custody demo app (plan doc 12): everything around the editor —
@@ -29,6 +36,36 @@ function b64(bytes: Uint8Array): string {
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
+}
+
+interface OwnedAgentInvite {
+  inviteId: string;
+  chatKey: string;
+  agentName: string;
+  expiresAt: number;
+}
+
+interface AgentChatMessage {
+  messageId: string;
+  sender: "inviter" | "agent";
+  text: string;
+}
+
+function ownedAgentStorageKey(docId: string): string {
+  return `wordinweb-agent-invites-${docId}`;
+}
+
+function loadOwnedAgentInvites(docId: string): OwnedAgentInvite[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(ownedAgentStorageKey(docId)) ?? "[]") as OwnedAgentInvite[];
+    return value.filter((invite) => invite.expiresAt > Date.now());
+  } catch {
+    return [];
+  }
+}
+
+function saveOwnedAgentInvites(docId: string, invites: OwnedAgentInvite[]): void {
+  localStorage.setItem(ownedAgentStorageKey(docId), JSON.stringify(invites));
 }
 
 /** Use the first text-bearing paragraph as an editable title suggestion. */
@@ -198,6 +235,86 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   // in E2EE mode mixes into key derivation).
   const [shareCode, setShareCode] = useState<string | undefined>(() => initialShareCode);
   const [codeDraft, setCodeDraft] = useState(initialShareCode ?? "");
+  const [agentInviteOpen, setAgentInviteOpen] = useState(false);
+  const [agentName, setAgentName] = useState("Document agent");
+  const [agentInstructions, setAgentInstructions] = useState("");
+  const [agentInviteCopied, setAgentInviteCopied] = useState(false);
+  const [createdAgentInviteId, setCreatedAgentInviteId] = useState<string | null>(null);
+  const [ownedAgentInvites, setOwnedAgentInvites] = useState<OwnedAgentInvite[]>(() => loadOwnedAgentInvites(docId));
+  const [agentChatMessages, setAgentChatMessages] = useState<Record<string, AgentChatMessage[]>>({});
+  const [agentChatDraft, setAgentChatDraft] = useState("");
+  const seenAgentChat = useRef(new Set<string>());
+
+  const createAgentInvite = async () => {
+    if (!session?.ready || session.connection !== "live" || !agentInstructions.trim()) return;
+    const inviteId = randomAgentToken("invite", 16);
+    const inviteToken = randomAgentToken("token", 32);
+    const chatKey = randomAgentToken("key", 32).slice(4);
+    const expiresAt = Date.now() + 10 * 60_000;
+    const payload: AgentInvitePayload = {
+      version: 1,
+      room: { wsUrl: url, httpBase, docId, docKey, shareCode },
+      invite: { inviteId, token: inviteToken, chatKey, expiresAt },
+      agent: { name: agentName.trim() || "Document agent", instructions: agentInstructions.trim() },
+    };
+    session.registerAgentInvite(inviteId, inviteToken, expiresAt);
+    const next = [...ownedAgentInvites, { inviteId, chatKey, agentName: payload.agent.name, expiresAt }];
+    setOwnedAgentInvites(next);
+    saveOwnedAgentInvites(docId, next);
+    await navigator.clipboard.writeText(agentInviteUrl(location.origin, payload));
+    setCreatedAgentInviteId(inviteId);
+    setAgentInviteCopied(true);
+  };
+
+  const revokeAgentInvite = (inviteId: string) => {
+    session?.revokeAgentInvite(inviteId);
+    const next = ownedAgentInvites.filter((invite) => invite.inviteId !== inviteId);
+    setOwnedAgentInvites(next);
+    saveOwnedAgentInvites(docId, next);
+    if (createdAgentInviteId === inviteId) {
+      setCreatedAgentInviteId(null);
+      setAgentInviteCopied(false);
+    }
+  };
+
+  const ownedAgents = useMemo(() => (session?.agentConnections ?? []).flatMap((agent) => {
+    const invite = ownedAgentInvites.find((item) => item.inviteId === agent.inviteId);
+    return invite ? [{ ...agent, invite }] : [];
+  }), [session?.agentConnections, ownedAgentInvites]);
+  const activeAgent = ownedAgents[0];
+
+  useEffect(() => {
+    for (const envelope of session?.agentChat ?? []) {
+      if (seenAgentChat.current.has(envelope.messageId)) continue;
+      const agent = ownedAgents.find((item) => item.agentClientId === envelope.agentClientId);
+      if (!agent) continue;
+      seenAgentChat.current.add(envelope.messageId);
+      void decryptAgentChat(
+        agent.invite.chatKey,
+        envelope.agentClientId,
+        envelope.messageId,
+        envelope.iv,
+        envelope.ciphertext,
+      ).then((text) => {
+        setAgentChatMessages((current) => ({
+          ...current,
+          [envelope.agentClientId]: [
+            ...(current[envelope.agentClientId] ?? []),
+            { messageId: envelope.messageId, sender: envelope.sender, text },
+          ],
+        }));
+      });
+    }
+  }, [session?.agentChat, ownedAgents]);
+
+  const sendAgentChat = async () => {
+    const text = agentChatDraft.trim();
+    if (!session || !activeAgent || !text) return;
+    const messageId = randomAgentToken("message", 16);
+    const sealed = await encryptAgentChat(activeAgent.invite.chatKey, activeAgent.agentClientId, messageId, text);
+    session.sendAgentChat(activeAgent.agentClientId, messageId, sealed.iv, sealed.ciphertext);
+    setAgentChatDraft("");
+  };
   // HOLDING a token is not the same as it being VALID. A room re-seeded into
   // a new epoch mints a fresh owner token, leaving the old one truthy here
   // with no rights attached — which used to render the admin controls and
@@ -1083,6 +1200,11 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             {shareCopied ? "Copied!" : intentionalOffline ? "Copy room link" : "Share Collab"}
           </button>
         )}
+        {!intentionalOffline && session?.ready && (
+          <button data-testid="invite-ai" onClick={() => { setAgentInviteCopied(false); setAgentInviteOpen(true); }}>
+            Invite AI
+          </button>
+        )}
         {onNewDocument && (
           <button data-testid="new-document" onClick={onNewDocument} title="Leave this document and start a fresh one">
             New document
@@ -1128,14 +1250,14 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
                   onClick={() => jumpToParticipant(r.clientId, r.profile.name)}
                   style={{ ...pill, border: "none", cursor: "pointer", font: "inherit", fontSize: 12 }}
                 >
-                  {r.profile.name}
+                  {r.participantType === "agent" ? `AI · ${r.profile.name}` : r.profile.name}
                 </button>
               ) : (
               <span
                 title="Names are chosen by participants"
                 style={pill}
               >
-                {r.profile.name}
+                {r.participantType === "agent" ? `AI · ${r.profile.name}` : r.profile.name}
               </span>
               )}
               {isOwner && r.clientId !== clientId && (
@@ -1274,6 +1396,46 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           </div>
         </div>
       )}
+      {agentInviteOpen && (
+        <div className="modal-scrim" data-testid="agent-invite-modal">
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="agent-invite-title">
+            <h2 id="agent-invite-title">Invite an AI collaborator</h2>
+            <p style={{ color: "#8a4b08" }}>
+              The AI link grants complete read and edit access to this document. Anyone who receives the unused link can use that access.
+            </p>
+            <label htmlFor="agent-name">Name shown in the room</label>
+            <input id="agent-name" data-testid="agent-name" value={agentName} maxLength={40} onChange={(event) => setAgentName(event.target.value)} />
+            <label htmlFor="agent-instructions" style={{ marginTop: 12 }}>Room instructions</label>
+            <textarea
+              id="agent-instructions"
+              data-testid="agent-instructions"
+              value={agentInstructions}
+              maxLength={4000}
+              rows={6}
+              style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
+              placeholder="Describe what the AI should do in this document."
+              onChange={(event) => setAgentInstructions(event.target.value)}
+            />
+            {session?.agentInviteError && <p className="error">The invitation failed: {session.agentInviteError.reason}</p>}
+            {agentInviteCopied && <p role="status">The one-time AI link is copied. It expires in ten minutes.</p>}
+            <div className="row">
+              {agentInviteCopied && createdAgentInviteId && (
+                <button className="ghost" data-testid="revoke-agent-invite" onClick={() => revokeAgentInvite(createdAgentInviteId)}>
+                  Revoke link
+                </button>
+              )}
+              <button className="ghost" onClick={() => setAgentInviteOpen(false)}>Close</button>
+              <button
+                data-testid="copy-agent-invite"
+                disabled={!agentInstructions.trim() || agentInviteCopied}
+                onClick={() => void createAgentInvite()}
+              >
+                {agentInviteCopied ? "Copied" : "Copy AI link"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showActivity && !intentionalOffline && (
         <div style={{ maxHeight: 120, overflowY: "auto", padding: "0 8px 4px", fontSize: 12, fontFamily: "monospace" }}>
           {/* Attribution L1 (doc 14 §3): the canonical log IS the record —
@@ -1288,6 +1450,43 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             );
           })}
         </div>
+      )}
+      {activeAgent && (
+        <aside
+          data-testid="agent-chat-panel"
+          style={{
+            position: "fixed", right: 18, bottom: 18, zIndex: 160, width: 320, maxHeight: 420,
+            display: "flex", flexDirection: "column", background: "#fff", border: "1px solid #cfd6e0",
+            borderRadius: 10, boxShadow: "0 6px 24px rgba(0,0,0,.2)", overflow: "hidden",
+          }}
+        >
+          <div style={{ padding: "10px 12px", background: "#eef4ff", borderBottom: "1px solid #d7e3f4", display: "flex", alignItems: "start", gap: 8 }}>
+            <div style={{ flex: 1 }}><strong>AI · {activeAgent.profile.name}</strong>
+            <div style={{ fontSize: 11, color: "#5f6368" }}>Private chat for the participant who created this invitation</div>
+            </div>
+            <button data-testid="disconnect-agent" onClick={() => revokeAgentInvite(activeAgent.invite.inviteId)}>Disconnect</button>
+          </div>
+          <div style={{ minHeight: 100, maxHeight: 250, overflowY: "auto", padding: 10 }}>
+            {(agentChatMessages[activeAgent.agentClientId] ?? []).map((message) => (
+              <div key={message.messageId} style={{ marginBottom: 8, textAlign: message.sender === "inviter" ? "right" : "left" }}>
+                <span style={{ display: "inline-block", maxWidth: "85%", padding: "6px 8px", borderRadius: 8, background: message.sender === "inviter" ? "#dce8ff" : "#f1f3f4" }}>
+                  {message.text}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 6, padding: 10, borderTop: "1px solid #e0e3e7" }}>
+            <input
+              data-testid="agent-chat-input"
+              value={agentChatDraft}
+              placeholder="Message this AI"
+              style={{ flex: 1, minWidth: 0 }}
+              onChange={(event) => setAgentChatDraft(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") void sendAgentChat(); }}
+            />
+            <button data-testid="agent-chat-send" disabled={!agentChatDraft.trim()} onClick={() => void sendAgentChat()}>Send</button>
+          </div>
+        </aside>
       )}
       <div style={{ flex: 1, minHeight: 0 }}>
         <CollabEditor

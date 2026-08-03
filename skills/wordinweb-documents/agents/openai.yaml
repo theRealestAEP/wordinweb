@@ -1,0 +1,4 @@
+interface:
+  display_name: "WordInWeb Documents"
+  short_description: "Create exceptional DOCX files with WordInWeb"
+  default_prompt: "Use $wordinweb-documents to create a polished DOCX document."

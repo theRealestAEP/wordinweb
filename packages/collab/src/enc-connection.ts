@@ -162,7 +162,7 @@ export class EncryptedCollabConnection {
     return this.media ? this.media.upload(this.docId, plaintext) : null;
   }
 
-  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string; ownerToken?: string }): void {
+  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string; ownerToken?: string; agentInvite?: { inviteId: string; token: string } }): void {
     this.docId = docId;
     this.transport.send({
       t: "hello",
@@ -175,6 +175,7 @@ export class EncryptedCollabConnection {
       profile: opts?.profile,
       codeProof: opts?.codeProof,
       ownerToken: opts?.ownerToken, // owner-capability proof (doc 14 §2.5)
+      agentInvite: opts?.agentInvite,
       engineVersion: ENGINE_VERSION, // the fence for client-derived canon (doc 13 §2)
     });
   }
@@ -234,6 +235,18 @@ export class EncryptedCollabConnection {
 
   setProfile(profile: ParticipantProfile): void {
     this.transport.send({ t: "profile", profile } as ClientMessage);
+  }
+
+  registerAgentInvite(inviteId: string, token: string, expiresAt: number): void {
+    this.transport.send({ t: "agent-invite", inviteId, token, expiresAt });
+  }
+
+  revokeAgentInvite(inviteId: string): void {
+    this.transport.send({ t: "agent-invite-revoke", inviteId });
+  }
+
+  sendAgentChat(agentClientId: string, messageId: string, iv: string, ciphertext: string): void {
+    this.transport.send({ t: "agent-chat", agentClientId, messageId, iv, ciphertext });
   }
 
   /** Bundle being resumed from (consumed after the welcome replay). */
@@ -729,6 +742,22 @@ export class EncryptedCollabConnection {
       case "roster": {
         this.roster = msg.roster;
         this.cb.onRoster?.(msg.roster);
+        return;
+      }
+      case "agent-invite-registered": {
+        this.cb.onAgentInviteRegistered?.({ inviteId: msg.inviteId, expiresAt: msg.expiresAt });
+        return;
+      }
+      case "agent-invite-refused": {
+        this.cb.onAgentInviteRefused?.({ inviteId: msg.inviteId, reason: msg.reason });
+        return;
+      }
+      case "agent-connected": {
+        this.cb.onAgentConnected?.(msg);
+        return;
+      }
+      case "agent-chat": {
+        this.cb.onAgentChat?.(msg);
         return;
       }
       // Session lifecycle warnings are PLAINTEXT bookkeeping and identical in

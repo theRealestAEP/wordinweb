@@ -78,6 +78,7 @@ export {
   isDrawingWordArt,
   setDrawingFill,
   setDrawingLineStyle,
+  setDrawingWordArtStyle,
   setDrawingWordArtText,
 } from "./edit/drawings.js";
 export type { DrawingLineDash, DrawingTool, InkPoint, ShapePreset, WordArtPreset } from "./edit/drawings.js";

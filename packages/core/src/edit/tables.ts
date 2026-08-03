@@ -670,6 +670,35 @@ export function resizeDrawing(
   widthPx: number,
   heightPx: number,
 ): boolean {
+  if (localName(drawingEl.name) === "line") {
+    const lengthPx = (raw: string): number => {
+      const match = /^(-?[\d.]+)\s*(pt|in|px)?$/.exec(raw.trim());
+      if (!match) return 0;
+      const value = parseFloat(match[1]);
+      return match[2] === "pt" ? value * 4 / 3 : match[2] === "in" ? value * 96 : value;
+    };
+    const point = (raw: string | undefined): [number, number] => {
+      const parts = (raw ?? "0,0").split(",");
+      return [lengthPx(parts[0] ?? "0"), lengthPx(parts[1] ?? "0")];
+    };
+    const pt = (value: number): string => `${Math.round(value * 75) / 100}pt`;
+    const [x1, y1] = point(drawingEl.attrs.from);
+    const [x2, y2] = point(drawingEl.attrs.to);
+    const minX = Math.min(x1, x2);
+    const minY = Math.min(y1, y2);
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const next = {
+      x1: dx === 0 ? x1 : dx > 0 ? minX : minX + widthPx,
+      y1: dy === 0 ? y1 : dy > 0 ? minY : minY + heightPx,
+      x2: dx === 0 ? x2 : dx > 0 ? minX + widthPx : minX,
+      y2: dy === 0 ? y2 : dy > 0 ? minY + heightPx : minY,
+    };
+    drawingEl.attrs.from = `${pt(next.x1)},${pt(next.y1)}`;
+    drawingEl.attrs.to = `${pt(next.x2)},${pt(next.y2)}`;
+    doc.refresh();
+    return true;
+  }
   const EMU = 9525;
   const cx = String(Math.max(Math.round(widthPx * EMU), EMU));
   const cy = String(Math.max(Math.round(heightPx * EMU), EMU));

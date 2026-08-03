@@ -1,5 +1,9 @@
 # WordInWeb
 
+For a local page that a human and an AI agent edit together, use
+`useAgentDocumentSession` with `LocalDocumentSession` from
+`@wordinweb/agent`. The agent package README contains the complete example.
+
 [**Live demo →**](https://word-in-web.com/)
 
 A Word/.docx viewer and editor for the web, embeddable as a single React component.

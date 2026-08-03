@@ -1,0 +1,31 @@
+{
+  "name": "technical-brief",
+  "prompt": "Create a polished technical decision brief titled 'Systems Decision Brief' with a subtitle and three top-level sections named 'Context', 'Architecture Options', and 'Recommendation'. Use professional body typography and spacing. Include a 3-column comparison table with a styled header and three data rows, one native equation, one native column chart with three categories and two series, one four-step process SmartArt, a footer with page numbering, Letter pages with 0.75-inch margins, and one positioned shape. Verify the semantic and spatial result before saving.",
+  "expected": {
+    "requiredText": [
+      "Systems Decision Brief",
+      "Architecture Options",
+      "Recommendation"
+    ],
+    "minimumParagraphs": 8,
+    "minimumOutlineEntries": 3,
+    "table": {
+      "minimumRows": 4,
+      "minimumColumns": 3
+    },
+    "requiredObjectTypes": [
+      "math",
+      "chart",
+      "smart-art",
+      "field"
+    ],
+    "minimumSpatialObjects": 3,
+    "requiredStories": [
+      "body",
+      "footer"
+    ],
+    "pageWidth": 816,
+    "pageHeight": 1056,
+    "margin": 72
+  }
+}

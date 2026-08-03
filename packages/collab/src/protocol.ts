@@ -87,8 +87,12 @@ export interface SealedCheckpoint {
  *   e11 WordArt insertion writes centered Word-compatible text-body
  *       geometry. An e10 peer generates different canonical DOCX bytes for
  *       the same insertWordArt intent, so mixed encrypted clients diverge.
+ *   e12 WordArt style edits add schema-enforced glyph color and opacity. An
+ *       e11 peer rejects this canonical intent while an e12 peer applies it.
+ *   e13 drawing line edits accept a null color to clear an outline. An e12
+ *       peer rejects the canonical clear while an e13 peer applies it.
  */
-export const ENGINE_VERSION = "e11";
+export const ENGINE_VERSION = "e13";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-
@@ -198,6 +202,8 @@ export interface RosterEntry {
   clientId: string;
   profile: ParticipantProfile;
   connected: boolean;
+  /** Set by the server after a valid one-time AI invitation is redeemed. */
+  participantType?: "human" | "agent";
   /**
    * Whether this participant may write, re-fanned on every transition.
    *
@@ -267,9 +273,18 @@ export type ClientMessage =
        * accounts: lose the bundle, lose the crown; re-seed to reclaim.
        */
       ownerToken?: string;
+      /** One-time room invitation created by an already joined participant. */
+      agentInvite?: { inviteId: string; token: string };
     }
   /** Update this connection's profile mid-session (rename / recolor). */
   | { t: "profile"; profile: ParticipantProfile }
+  /** Register or revoke an AI invitation. The server binds it to this
+   * connection's room identity and never broadcasts the token. */
+  | { t: "agent-invite"; inviteId: string; token: string; expiresAt: number }
+  | { t: "agent-invite-revoke"; inviteId: string }
+  /** End-to-end encrypted private chat. The server only routes the envelope
+   * between the invited agent and the participant who created its invite. */
+  | { t: "agent-chat"; agentClientId: string; messageId: string; iv: string; ciphertext: string }
   /**
    * Owner admin channel (doc 14 §2.5) — only honored from a connection
    * whose hello proved the owner token. All enforceable by a BLIND server
@@ -443,6 +458,17 @@ export type ServerMessage =
    * (rooms are small; a snapshot beats delta bookkeeping). Ephemeral like
    * presence: never logged, never persisted, dies with the room. */
   | { t: "roster"; roster: RosterEntry[] }
+  | { t: "agent-invite-registered"; inviteId: string; expiresAt: number }
+  | { t: "agent-invite-refused"; inviteId: string; reason: string }
+  | { t: "agent-connected"; inviteId: string; agentClientId: string; profile: ParticipantProfile }
+  | {
+      t: "agent-chat";
+      agentClientId: string;
+      messageId: string;
+      sender: "inviter" | "agent";
+      iv: string;
+      ciphertext: string;
+    }
   /**
    * The session is going to END, and this is the grace period before it does
    * (server lifecycle arc). Sent once per armed deadline to every connection
@@ -519,4 +545,4 @@ export type ServerMessage =
  * The v3 liveness change did not bump ENGINE_VERSION because liveness frames
  * cannot change document bytes. Version 4 adds rejectAllRevisions and uses
  * engine e8. Version 5 adds tracked paragraph splits and uses engine e9. */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;

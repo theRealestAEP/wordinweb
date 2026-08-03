@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { EditorIntent } from "@wordinweb/core";
 import {
   computePresenceCarets,
@@ -490,6 +490,40 @@ export interface DocxViewProps {
    * render (unavailable, or lacking the document's script) — the page is
    * silently substituting and may differ from Word. Empty array = all good. */
   onMissingFonts?: (missing: MissingFont[]) => void;
+}
+
+export interface AgentDocumentViewBinding {
+  subscribe(listener: () => void): () => void;
+  getSnapshot(): number;
+  doc: DocxDocument;
+  submit(intent: EditorIntent): void;
+  submitOp(intent: { kind: string } & Record<string, unknown>): void;
+  allocIds(count: number): number[];
+  uploadMedia?(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number; iv?: string } | null>;
+  takeRenderScope():
+    | { kind: "doc" }
+    | { kind: "block"; blocks: XmlElement[] }
+    | { kind: "split"; before: XmlElement; after: XmlElement }
+    | null;
+}
+
+const AGENT_VIEW_SOURCE = new Uint8Array(0);
+
+/** Connect a framework-neutral local document session to DocxView. */
+export function useAgentDocumentSession(binding: AgentDocumentViewBinding): Pick<DocxViewProps, "source" | "collab"> {
+  const renderSignal = useSyncExternalStore(binding.subscribe, binding.getSnapshot, binding.getSnapshot);
+  return {
+    source: AGENT_VIEW_SOURCE,
+    collab: {
+      doc: binding.doc,
+      renderSignal,
+      submit: binding.submit,
+      submitOp: binding.submitOp,
+      allocIds: binding.allocIds,
+      uploadMedia: binding.uploadMedia,
+      takeRenderScope: binding.takeRenderScope,
+    },
+  };
 }
 
 async function toBytes(source: DocxViewProps["source"]): Promise<Uint8Array> {

@@ -30,6 +30,18 @@ To match Word's glyph advances exactly, load the metric-compatible substitute fo
 
 ## Quick start
 
+### AI agent interface
+
+`@wordinweb/agent` gives AI agents progressive, schema-enforced tools to create,
+inspect, and edit DOCX files. Agents can control long-form text, review flows,
+equations, tables, charts, shapes, and spatial layouts. The same tools work in
+headless, shared browser, live collaboration, and offline sessions. See
+[`packages/agent/README.md`](packages/agent/README.md) and the
+[`wordinweb-documents` agent skill](skills/wordinweb-documents/SKILL.md).
+
+Install the skill from this repository with
+`gh skill install theRealestAEP/wordinweb wordinweb-documents --agent codex --scope user`.
+
 ### View-only
 
 ```tsx

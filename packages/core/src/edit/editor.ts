@@ -1,5 +1,5 @@
 import { DocxDocument } from "../docx.js";
-import { Run } from "../model.js";
+import { Run, type Block, type RunContent } from "../model.js";
 import { XmlElement, attr, cloneXml, localName } from "../xml.js";
 import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
 import { DrawingBinding, GripBinding, ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
@@ -280,23 +280,23 @@ export type EditorIntent =
   | { kind: "rejectRevision"; index: number }
   | { kind: "acceptAllRevisions" }
   | { kind: "rejectAllRevisions" }
-  | { kind: "setImageWrap"; runId: number; mode: "inline" | "square" | "topAndBottom" | "none" | "behind" }
-  | { kind: "setFloatingPagePosition"; runId: number; xPx: number; yPx: number }
-  | { kind: "resizeDrawing"; runId: number; widthPx: number; heightPx: number }
-  | { kind: "setDrawingRotation"; runId: number; degrees: number }
-  | { kind: "setDrawingOrder"; runId: number; order: "front" | "back" }
-  | { kind: "setDrawingLineStyle"; runId: number; color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" }
-  | { kind: "setImageAltText"; runId: number; alt: string }
-  | { kind: "setDrawingFill"; runId: number; color: string | null }
-  | { kind: "setSmartArtFill"; runId: number; color: string | null; nodeIndex?: number }
-  | { kind: "setSmartArtNodeText"; runId: number; index: number; text: string }
-  | { kind: "setDrawingWordArtText"; runId: number; text: string }
+  | { kind: "setImageWrap"; runId: number; objectIndex?: number; mode: "inline" | "square" | "topAndBottom" | "none" | "behind" }
+  | { kind: "setFloatingPagePosition"; runId: number; objectIndex?: number; xPx: number; yPx: number }
+  | { kind: "resizeDrawing"; runId: number; objectIndex?: number; widthPx: number; heightPx: number }
+  | { kind: "setDrawingRotation"; runId: number; objectIndex?: number; degrees: number }
+  | { kind: "setDrawingOrder"; runId: number; objectIndex?: number; order: "front" | "back" }
+  | { kind: "setDrawingLineStyle"; runId: number; objectIndex?: number; color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" }
+  | { kind: "setImageAltText"; runId: number; objectIndex?: number; alt: string }
+  | { kind: "setDrawingFill"; runId: number; objectIndex?: number; color: string | null }
+  | { kind: "setSmartArtFill"; runId: number; objectIndex?: number; color: string | null; nodeIndex?: number }
+  | { kind: "setSmartArtNodeText"; runId: number; objectIndex?: number; index: number; text: string }
+  | { kind: "setDrawingWordArtText"; runId: number; objectIndex?: number; text: string }
   | { kind: "insertBreak"; runId: number; breakKind: "page" | "column"; nodeIds: number[] }
   | { kind: "resizeTableColumn"; cellParagraphId: number; boundary: number; deltaPx: number; renderedWidths?: number[] }
   | { kind: "resizeTableRow"; cellParagraphId: number; rowIdx: number; heightPx: number }
   | { kind: "moveTable"; cellParagraphId: number; xPx: number; yPx: number; preservePageStart: boolean; pageDelta: number }
   | { kind: "tableOp"; cellParagraphId: number; op: { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number } }
-  | { kind: "removeDrawing"; runId: number }
+  | { kind: "removeDrawing"; runId: number; objectIndex?: number }
   | { kind: "setMathLinear"; blockId: number; mathText: string }
   | { kind: "deleteMath"; blockId: number }
   | { kind: "moveMath"; blockId: number; at: { blockId: number; runId: number; offset: number }; nodeIds: number[] }
@@ -385,10 +385,26 @@ function emptyParagraphLike(el: XmlElement): { paragraph: XmlElement; text: XmlE
 }
 
 export function removeDrawingRun(doc: DocxDocument, src: XmlElement): boolean {
+  let emptiedVmlPict: XmlElement | undefined;
+  const vmlName = localName(src.name);
+  if (vmlName === "shape" || vmlName === "rect" || vmlName === "line") {
+    let pict: XmlElement | undefined = src;
+    while (pict && localName(pict.name) !== "pict") pict = doc.findParentOf(pict);
+    const parent = doc.findParentOf(src);
+    if (pict && parent) {
+      parent.children.splice(parent.children.indexOf(src), 1);
+      const hasDrawing = (element: XmlElement): boolean => element.children.some((child) => {
+        const name = localName(child.name);
+        return name === "shape" || name === "rect" || name === "line" || hasDrawing(child);
+      });
+      if (hasDrawing(pict)) return true;
+      emptiedVmlPict = pict;
+    }
+  }
   // A text-box selection can resolve to an element inside w:txbxContent.
   // Climb out to the drawing container first so the first nested text run is
   // never mistaken for the outer run that owns the object.
-  let drawing: XmlElement | undefined = src;
+  let drawing: XmlElement | undefined = emptiedVmlPict ?? src;
   while (drawing) {
     const name = localName(drawing.name);
     if (name === "drawing" || name === "pict" || name === "object" || name === "AlternateContent") break;
@@ -399,6 +415,12 @@ export function removeDrawingRun(doc: DocxDocument, src: XmlElement): boolean {
   while (run && localName(run.name) !== "r") run = doc.findParentOf(run);
   const parent = run ? doc.findParentOf(run) : undefined;
   if (!run || !parent) return false;
+  const drawingParent = doc.findParentOf(drawing);
+  const hasOtherContent = run.children.some((child) => child !== drawing && localName(child.name) !== "rPr");
+  if (drawingParent && hasOtherContent) {
+    drawingParent.children.splice(drawingParent.children.indexOf(drawing), 1);
+    return true;
+  }
   parent.children.splice(parent.children.indexOf(run), 1);
   return true;
 }
@@ -1367,8 +1389,8 @@ export class DocxEditor {
     // intent is emitted). Commands with no wire form are honest no-ops in
     // collab mode rather than silent local-only divergences.
     const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
-    const collabRun = inCollab ? this.drawingRunId(src) : null;
-    if (inCollab && collabRun === null) return false; // unaddressable object
+    const collabTarget = inCollab ? this.drawingIntentTarget(src) : null;
+    if (inCollab && collabTarget === null) return false; // unaddressable object
     if (command === "delete") {
       this.deleteSelectedImage(); // collab-aware: emits removeDrawing
       return true;
@@ -1382,11 +1404,11 @@ export class DocxEditor {
           : command === "wrapTopAndBottom" ? "topAndBottom"
             : command === "wrapBehind" ? "behind" : "none";
       this.host.history?.checkpoint();
-      if (collabRun !== null) {
+      if (collabTarget !== null) {
         // Canonical form: no layout-derived overlap position (it reads THIS
         // window's binding geometry and would diverge the replicas).
         if (!setImageWrap(this.host.doc, src, mode)) return false;
-        this.host.onIntent?.({ kind: "setImageWrap", runId: collabRun, mode });
+        this.host.onIntent?.({ kind: "setImageWrap", ...collabTarget, mode });
         this.host.rerender(undefined, "global");
         reselect();
         return true;
@@ -1417,8 +1439,8 @@ export class DocxEditor {
         if (!next) return;
         this.host.history?.checkpoint();
         if (resizeDrawing(this.host.doc, src, next.first, next.second)) {
-          if (collabRun !== null) {
-            this.host.onIntent?.({ kind: "resizeDrawing", runId: collabRun, widthPx: next.first, heightPx: next.second });
+          if (collabTarget !== null) {
+            this.host.onIntent?.({ kind: "resizeDrawing", ...collabTarget, widthPx: next.first, heightPx: next.second });
           }
           this.host.rerender();
           reselect();
@@ -1440,16 +1462,16 @@ export class DocxEditor {
         if (!next) return;
         this.host.history?.checkpoint();
         if (!isFloatingDrawing(src)) {
-          if (collabRun !== null) {
+          if (collabTarget !== null) {
             setImageWrap(this.host.doc, src, "square");
-            this.host.onIntent?.({ kind: "setImageWrap", runId: collabRun, mode: "square" });
+            this.host.onIntent?.({ kind: "setImageWrap", ...collabTarget, mode: "square" });
           } else {
             setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
           }
         }
         if (setFloatingPagePosition(this.host.doc, src, next.first, next.second)) {
-          if (collabRun !== null) {
-            this.host.onIntent?.({ kind: "setFloatingPagePosition", runId: collabRun, xPx: next.first, yPx: next.second });
+          if (collabTarget !== null) {
+            this.host.onIntent?.({ kind: "setFloatingPagePosition", ...collabTarget, xPx: next.first, yPx: next.second });
           }
           this.host.rerender();
           reselect();
@@ -1471,8 +1493,8 @@ export class DocxEditor {
         if (!Number.isFinite(degrees)) return;
         this.host.history?.checkpoint();
         if (setDrawingRotation(this.host.doc, src, degrees)) {
-          if (collabRun !== null) {
-            this.host.onIntent?.({ kind: "setDrawingRotation", runId: collabRun, degrees });
+          if (collabTarget !== null) {
+            this.host.onIntent?.({ kind: "setDrawingRotation", ...collabTarget, degrees });
           }
           this.host.rerender(undefined, "global");
           reselect();
@@ -1490,8 +1512,8 @@ export class DocxEditor {
         if (next === null) return;
         this.host.history?.checkpoint();
         if (setImageAltText(this.host.doc, src, next)) {
-          if (collabRun !== null) {
-            this.host.onIntent?.({ kind: "setImageAltText", runId: collabRun, alt: next });
+          if (collabTarget !== null) {
+            this.host.onIntent?.({ kind: "setImageAltText", ...collabTarget, alt: next });
           }
           this.host.rerender();
           reselect();
@@ -1526,11 +1548,11 @@ export class DocxEditor {
           ? setSmartArtFill(this.host.doc, src, next, selectedSmartArtNodeIndex ?? undefined)
           : setDrawingFill(this.host.doc, src, next);
         if (changed) {
-          if (collabRun !== null) {
+          if (collabTarget !== null) {
             this.host.onIntent?.(
               context.kind === "smartArt"
-                ? { kind: "setSmartArtFill", runId: collabRun, color: next, nodeIndex: selectedSmartArtNodeIndex ?? undefined }
-                : { kind: "setDrawingFill", runId: collabRun, color: next },
+                ? { kind: "setSmartArtFill", ...collabTarget, color: next, nodeIndex: selectedSmartArtNodeIndex ?? undefined }
+                : { kind: "setDrawingFill", ...collabTarget, color: next },
             );
           }
           this.host.rerender();
@@ -1541,8 +1563,7 @@ export class DocxEditor {
     }
     if (command === "outline" || command === "lineStyle") {
       if ((command === "outline" && context.kind !== "shape") || (command === "lineStyle" && context.kind !== "line")) return false;
-      const style = drawingLineStyle(src);
-      if (!style) return false;
+      const style = drawingLineStyle(src) ?? { color: "#000000", width: 0.75, dash: "solid" as const };
       const title = command === "lineStyle" ? "Line style" : "Outline";
       void requestLineStyleDialog(this.host.container, {
         color: style.color,
@@ -1552,8 +1573,8 @@ export class DocxEditor {
         if (!next) return;
         this.host.history?.checkpoint();
         if (setDrawingLineStyle(this.host.doc, src, next.color, next.width, next.style)) {
-          if (collabRun !== null) {
-            this.host.onIntent?.({ kind: "setDrawingLineStyle", runId: collabRun, color: next.color, widthPx: next.width, dash: next.style });
+          if (collabTarget !== null) {
+            this.host.onIntent?.({ kind: "setDrawingLineStyle", ...collabTarget, color: next.color, widthPx: next.width, dash: next.style });
           }
           this.host.rerender();
           reselect();
@@ -1629,9 +1650,9 @@ export class DocxEditor {
     // Collab: arrange actions ride the wire — local apply is the canonical
     // intent function with the same args, then the intent is emitted (the
     // A17 pattern). Emission requires an addressable carrier run.
-    const collabRunId = this.host.onIntent && this.host.doc.stableIds ? this.drawingRunId(src) : null;
+    const collabTarget = this.host.onIntent && this.host.doc.stableIds ? this.drawingIntentTarget(src) : null;
     const inCollab = this.host.onIntent !== undefined && this.host.doc.stableIds !== undefined;
-    if (inCollab && collabRunId === null) return false; // unaddressable: honest no-op
+    if (inCollab && collabTarget === null) return false; // unaddressable: honest no-op
     if (action.startsWith("align")) {
       const page = selected!.el.closest(".dxw-page") as HTMLElement | null;
       const surface = page?.firstElementChild as HTMLElement | null;
@@ -1644,28 +1665,28 @@ export class DocxEditor {
       const targetX = action === "alignLeft" ? 0 : action === "alignCenter" ? (pageW - w) / 2 : action === "alignRight" ? pageW - w : x;
       const targetY = action === "alignTop" ? 0 : action === "alignMiddle" ? (pageH - h) / 2 : action === "alignBottom" ? pageH - h : y;
       if (!isFloatingDrawing(src)) {
-        if (collabRunId !== null) {
+        if (collabTarget !== null) {
           setImageWrap(this.host.doc, src, "square");
-          this.host.onIntent?.({ kind: "setImageWrap", runId: collabRunId, mode: "square" });
+          this.host.onIntent?.({ kind: "setImageWrap", ...collabTarget, mode: "square" });
         } else {
           setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
         }
       }
       changed = setFloatingPagePosition(this.host.doc, src, targetX, targetY);
-      if (changed && collabRunId !== null) {
-        this.host.onIntent?.({ kind: "setFloatingPagePosition", runId: collabRunId, xPx: targetX, yPx: targetY });
+      if (changed && collabTarget !== null) {
+        this.host.onIntent?.({ kind: "setFloatingPagePosition", ...collabTarget, xPx: targetX, yPx: targetY });
       }
     } else if (action === "rotateLeft" || action === "rotateRight") {
       const degrees = drawingRotation(src) + (action === "rotateRight" ? 90 : -90);
       changed = setDrawingRotation(this.host.doc, src, degrees);
-      if (changed && collabRunId !== null) {
-        this.host.onIntent?.({ kind: "setDrawingRotation", runId: collabRunId, degrees });
+      if (changed && collabTarget !== null) {
+        this.host.onIntent?.({ kind: "setDrawingRotation", ...collabTarget, degrees });
       }
     } else {
       const order = action === "bringToFront" ? "front" : "back";
       changed = setDrawingOrder(this.host.doc, src, order);
-      if (changed && collabRunId !== null) {
-        this.host.onIntent?.({ kind: "setDrawingOrder", runId: collabRunId, order });
+      if (changed && collabTarget !== null) {
+        this.host.onIntent?.({ kind: "setDrawingOrder", ...collabTarget, order });
       }
     }
     if (changed) {
@@ -3000,17 +3021,18 @@ export class DocxEditor {
       }
     }
     const line = kind === "drawing" && isDrawingLine(src);
+    const verticalLine = line && (parseFloat(el.style.height) || 0) > (parseFloat(el.style.width) || 0);
     if (line) {
       const move = document.createElement("div");
       move.dataset.dxwObjectMove = "1";
       move.title = "Drag to move line";
-      move.style.cssText =
-        "position:absolute;left:5px;right:5px;top:calc(50% - 7px);height:14px;" +
-        "pointer-events:auto;cursor:move;";
+      move.style.cssText = verticalLine
+        ? "position:absolute;top:5px;bottom:5px;left:calc(50% - 7px);width:14px;pointer-events:auto;cursor:move;"
+        : "position:absolute;left:5px;right:5px;top:calc(50% - 7px);height:14px;pointer-events:auto;cursor:move;";
       overlay.appendChild(move);
     }
     for (const [dir, fx, fy] of DocxEditor.HANDLE_DIRS) {
-      if (line && dir !== "e" && dir !== "w") continue;
+      if (line && (verticalLine ? dir !== "n" && dir !== "s" : dir !== "e" && dir !== "w")) continue;
       const h = document.createElement("div");
       const corner = dir.length === 2;
       h.style.cssText =
@@ -3181,22 +3203,13 @@ export class DocxEditor {
     // drawings stay an honest no-op — including VML pict/object carriers,
     // which the remote apply cannot resolve (it walks for w:drawing only).
     const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
-    const runId = inCollab ? this.drawingRunId(src) : null;
-    if (inCollab && runId === null) return;
-    if (inCollab) {
-      let container: XmlElement | undefined = src;
-      while (container) {
-        const n = localName(container.name);
-        if (n === "drawing" || n === "pict" || n === "object" || n === "AlternateContent") break;
-        container = this.host.doc.findParentOf(container);
-      }
-      if (!container || localName(container.name) !== "drawing") return;
-    }
+    const target = inCollab ? this.drawingIntentTarget(src) : null;
+    if (inCollab && target === null) return;
     this.host.history?.checkpoint();
     if (removeDrawingRun(this.host.doc, src)) {
-      if (inCollab && runId !== null) {
+      if (inCollab && target !== null) {
         this.host.doc.stableIds?.prune(this.host.doc.editableRoots());
-        this.host.onIntent?.({ kind: "removeDrawing", runId });
+        this.host.onIntent?.({ kind: "removeDrawing", ...target });
       }
       this.host.doc.refresh();
       this.host.rerender(undefined, "global");
@@ -3447,6 +3460,7 @@ export class DocxEditor {
       const nearPt = { x: el.getBoundingClientRect().left, y: el.getBoundingClientRect().top };
       const w0 = parseFloat(el.style.width);
       const h0 = parseFloat(el.style.height);
+      const verticalLine = line && h0 > w0;
       const left0 = parseFloat(el.style.left) || 0;
       const top0 = parseFloat(el.style.top) || 0;
       const startX = e.clientX;
@@ -3480,8 +3494,8 @@ export class DocxEditor {
           w = w0 * scale;
           h = h0 * scale;
         } else {
-          w = Math.max(floorW, w);
-          h = line ? h0 : Math.max(floorH, h);
+          w = verticalLine ? w0 : Math.max(floorW, w);
+          h = line && !verticalLine ? h0 : Math.max(floorH, h);
         }
         apply(el);
         if (this.imageOverlay) apply(this.imageOverlay);
@@ -3497,15 +3511,15 @@ export class DocxEditor {
           // canonical intent functions with the same args; floatIfClipped is
           // skipped — it reads THIS window's layout and can't replicate.
           if (this.host.onIntent && this.host.doc.stableIds) {
-            const runId = this.drawingRunId(src);
-            if (runId !== null) {
+            const target = this.drawingIntentTarget(src);
+            if (target !== null) {
               if (resizeDrawing(this.host.doc, src, w, h)) {
-                this.host.onIntent({ kind: "resizeDrawing", runId, widthPx: w, heightPx: h });
+                this.host.onIntent({ kind: "resizeDrawing", ...target, widthPx: w, heightPx: h });
                 if (isFloatingDrawing(src) && (dir.includes("w") || dir.includes("n"))) {
                   const x = left0 + (dir.includes("w") ? w0 - w : 0);
                   const y = top0 + (dir.includes("n") ? h0 - h : 0);
                   if (setFloatingPagePosition(this.host.doc, src, x, y)) {
-                    this.host.onIntent({ kind: "setFloatingPagePosition", runId, xPx: x, yPx: y });
+                    this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
                   }
                 }
                 this.host.rerender();
@@ -3714,8 +3728,8 @@ export class DocxEditor {
           // this was a silent local-only mutation ("drag a shape → desync").
           // Local apply = the canonical intent function with the same args.
           if (this.host.onIntent && this.host.doc.stableIds) {
-            const runId = this.drawingRunId(binding.item.src);
-            if (runId !== null) {
+            const target = this.drawingIntentTarget(binding.item.src);
+            if (target !== null) {
               // Clamp onto the page sheet (Word never strands an object off
               // the page): without this a drag from low on the page emits a
               // y past the page height and the object jumps to the next
@@ -3729,7 +3743,7 @@ export class DocxEditor {
               const x = Math.max(0, Math.min(left0 + dxClient / zoom, pageW - objW));
               const y = Math.max(0, Math.min(top0 + dyClient / zoom, pageH - objH));
               if (setFloatingPagePosition(this.host.doc, binding.item.src, x, y)) {
-                this.host.onIntent({ kind: "setFloatingPagePosition", runId, xPx: x, yPx: y });
+                this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
                 this.host.rerender();
                 this.reselectImage(binding.item.src, want);
               } else {
@@ -3765,14 +3779,14 @@ export class DocxEditor {
           // it at the drop point instead (Word-like wrap-on-drag) so the move
           // replicates instead of silently diverging.
           if (this.host.onIntent && this.host.doc.stableIds) {
-            const runId = this.drawingRunId(binding.item.src);
-            if (runId !== null) {
+            const target = this.drawingIntentTarget(binding.item.src);
+            if (target !== null) {
               const x = binding.item.x + (me.clientX - startX) / zoom;
               const y = binding.item.y + (me.clientY - startY) / zoom;
               setImageWrap(this.host.doc, binding.item.src, "square");
-              this.host.onIntent({ kind: "setImageWrap", runId, mode: "square" });
+              this.host.onIntent({ kind: "setImageWrap", ...target, mode: "square" });
               if (setFloatingPagePosition(this.host.doc, binding.item.src, x, y)) {
-                this.host.onIntent({ kind: "setFloatingPagePosition", runId, xPx: x, yPx: y });
+                this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
               }
               this.host.rerender();
               return;
@@ -3910,8 +3924,8 @@ export class DocxEditor {
         // wrap-on-drag).
         if (this.host.onIntent && this.host.doc.stableIds) {
           const src = binding.item.src!;
-          const runId = this.drawingRunId(src);
-          if (runId !== null) {
+          const target = this.drawingIntentTarget(src);
+          if (target !== null) {
             el.style.left = `${left0}px`;
             el.style.top = `${top0}px`;
             const dx = (me.clientX - startX) / zoom;
@@ -3927,10 +3941,10 @@ export class DocxEditor {
             const want = { x: rect0.left + me.clientX - startX, y: rect0.top + me.clientY - startY };
             if (!floating) {
               setImageWrap(this.host.doc, src, "square");
-              this.host.onIntent({ kind: "setImageWrap", runId, mode: "square" });
+              this.host.onIntent({ kind: "setImageWrap", ...target, mode: "square" });
             }
             if (setFloatingPagePosition(this.host.doc, src, x, y)) {
-              this.host.onIntent({ kind: "setFloatingPagePosition", runId, xPx: x, yPx: y });
+              this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
             }
             this.host.rerender();
             this.reselectImage(src, want);
@@ -4089,8 +4103,8 @@ export class DocxEditor {
         if (setSmartArtNodeText(this.host.doc, src, nodeIndex, next)) {
           // Collab: ride the wire (A17 pattern).
           if (this.host.onIntent && this.host.doc.stableIds) {
-            const runId = this.drawingRunId(src);
-            if (runId !== null) this.host.onIntent({ kind: "setSmartArtNodeText", runId, index: nodeIndex, text: next });
+            const target = this.drawingIntentTarget(src);
+            if (target !== null) this.host.onIntent({ kind: "setSmartArtNodeText", ...target, index: nodeIndex, text: next });
           }
           this.host.rerender();
         }
@@ -4150,8 +4164,8 @@ export class DocxEditor {
         if (setDrawingWordArtText(this.host.doc, src, next)) {
           // Collab: ride the wire (A17 pattern).
           if (this.host.onIntent && this.host.doc.stableIds) {
-            const runId = this.drawingRunId(src);
-            if (runId !== null) this.host.onIntent({ kind: "setDrawingWordArtText", runId, text: next });
+            const target = this.drawingIntentTarget(src);
+            if (target !== null) this.host.onIntent({ kind: "setDrawingWordArtText", ...target, text: next });
           }
           this.host.rerender();
         }
@@ -5561,12 +5575,12 @@ export class DocxEditor {
       // Collab: same rule as drag — replace the relative local nudge with the
       // canonical absolute page position and emit it, so the move replicates.
       if (this.host.onIntent && this.host.doc.stableIds) {
-        const runId = this.drawingRunId(src);
-        if (runId !== null) {
+        const target = this.drawingIntentTarget(src);
+        if (target !== null) {
           const x = (parseFloat(this.selectedImage.el.style.left) || 0) + dx;
           const y = (parseFloat(this.selectedImage.el.style.top) || 0) + dy;
           if (setFloatingPagePosition(this.host.doc, src, x, y)) {
-            this.host.onIntent({ kind: "setFloatingPagePosition", runId, xPx: x, yPx: y });
+            this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
             this.host.rerender();
             this.reselectImage(src);
           }
@@ -6119,8 +6133,7 @@ export class DocxEditor {
     return true;
   }
 
-  /** Stable id of the run carrying a drawing (drawing-edit intents address
-   * the drawing via its run — drawings themselves aren't id-tracked). The
+  /** Stable id of the run carrying a drawing. The
    * OUTERMOST run ancestor is the carrier: a shape's binding src can sit
    * inside the drawing's w:txbxContent, whose inner run is id-tracked too
    * but holds no drawing — an intent addressed there rejects on every
@@ -6136,6 +6149,54 @@ export class DocxEditor {
       }
     }
     return outer;
+  }
+
+  /** Stable run and parsed content index for a drawing-edit intent. */
+  private drawingIntentTarget(src: XmlElement): { runId: number; objectIndex?: number } | null {
+    const runId = this.drawingRunId(src);
+    const ids = this.host.doc.stableIds;
+    if (runId === null || !ids) return null;
+
+    const sourceOf = (content: RunContent): XmlElement | undefined => {
+      if (content.kind === "image" || content.kind === "drawing") return content.srcDrawing;
+      if (content.kind !== "anchor") return undefined;
+      if (content.shape.type === "wordart" || content.shape.type === "line") return content.shape.src;
+      return content.shape.srcDrawing;
+    };
+    const owns = (source: XmlElement): boolean => {
+      for (let current: XmlElement | undefined = src; current; current = this.host.doc.findParentOf(current)) {
+        if (current === source) return true;
+      }
+      return false;
+    };
+    let objectIndex: number | undefined;
+    const visit = (blocks: Block[]): void => {
+      for (const block of blocks) {
+        if (objectIndex !== undefined) return;
+        if (block.type === "table") {
+          for (const row of block.rows) for (const cell of row.cells) visit(cell.blocks);
+          continue;
+        }
+        for (const child of block.children) {
+          const runs = child.type === "run" ? [child] : child.runs;
+          for (const run of runs) {
+            if (!run.src || ids.idOf(run.src) !== runId) continue;
+            objectIndex = run.content.findIndex((content) => {
+              const source = sourceOf(content);
+              return source !== undefined && owns(source);
+            });
+            if (objectIndex < 0) objectIndex = undefined;
+            return;
+          }
+        }
+      }
+    };
+    for (const section of this.host.doc.sections) visit(section.blocks);
+    for (const story of this.host.doc.headers.values()) visit(story.blocks);
+    for (const story of this.host.doc.footers.values()) visit(story.blocks);
+    for (const blocks of this.host.doc.footnotes.values()) visit(blocks);
+    for (const blocks of this.host.doc.endnotes.values()) visit(blocks);
+    return objectIndex === undefined ? { runId } : { runId, objectIndex };
   }
 
   /** Stable id of a paragraph inside `tbl` whose NEAREST tbl ancestor is

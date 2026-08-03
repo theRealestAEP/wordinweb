@@ -1,0 +1,18 @@
+# WordInWeb AI collaboration invitation
+
+The user has invited you to edit a live DOCX document with WordInWeb.
+
+Run this command with the complete URL from the user, including its fragment:
+
+    npx -y @wordinweb/agent connect '<complete invitation URL>'
+
+The command opens a live JSON-lines session. Read its `instructions` event,
+then send one JSON command per line. Start with `{"command":"sync"}`. Inspect
+the relevant content before every edit. If an edit returns `needs_sync`, sync
+and inspect the changed content before you retry.
+
+Available commands: `sync`, `capabilities`, `inspect`, `edit`, `chat`, `wait`,
+and `close`.
+
+This URL is a bearer credential. Do not print it, save it in a file, or share
+it with another process.

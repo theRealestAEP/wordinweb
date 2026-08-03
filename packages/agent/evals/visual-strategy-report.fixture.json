@@ -1,0 +1,22 @@
+{
+  "name": "visual-strategy-report",
+  "prompt": "Create an executive campaign strategy report titled Horizon 2027. Use a strong cover and sections for Market Signals, Portfolio Choices, Launch Sequence, and Decision. Present market momentum in a native column chart and channel efficiency in a native line chart, each with clear titles and at least four categories. Show each point in the line chart with a clear marker. Add a four-step process diagram for the launch sequence and a hierarchy diagram for campaign ownership. Use a WordArt callout for the phrase ONE MARKET, ONE STORY. Add two positioned text boxes for a recommendation and a risk note, with a deliberate partial overlap that keeps both labels readable and places the recommendation above the risk note. Include a styled 4-column decision table and a footer with Page X of Y. Use a consistent dark blue, teal, and orange visual system.",
+  "expected": {
+    "requiredText": ["Horizon 2027", "Market Signals", "Portfolio Choices", "Launch Sequence", "Decision", "ONE MARKET, ONE STORY"],
+    "minimumParagraphs": 10,
+    "minimumOutlineEntries": 4,
+    "minimumTables": 1,
+    "table": { "minimumRows": 4, "minimumColumns": 4 },
+    "objectRequirements": [
+      { "type": "chart", "storyKind": "body", "minimum": 1, "detail": { "chart": { "type": "column" } } },
+      { "type": "chart", "storyKind": "body", "minimum": 1, "detail": { "chart": { "type": "line" } } },
+      { "type": "smart-art", "storyKind": "body", "minimum": 2 },
+      { "type": "anchored-textbox", "storyKind": "body", "minimum": 3 },
+      { "type": "field", "storyKind": "footer", "minimum": 2 }
+    ],
+    "requiredStories": ["body", "footer", "textbox"],
+    "minimumSpatialObjects": 7,
+    "minimumOverlaps": 1,
+    "requiredPackageText": ["<c:lineChart", "<c:marker val=\"1\""]
+  }
+}

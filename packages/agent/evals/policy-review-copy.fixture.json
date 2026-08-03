@@ -1,0 +1,15 @@
+{
+  "name": "policy-review-copy",
+  "prompt": "Create a review-ready Remote Work Policy for the People Operations team. Structure it with Purpose, Eligibility, Workspace Support, Security, and Approval sections. Present the proposed monthly home-office stipend as a tracked insertion. Mark an outdated requirement to submit a weekly desk photograph as a tracked deletion. Add a reviewer comment to the stipend amount and reply to that comment with a finance note, leaving the discussion open. Bookmark the Security section as Security_Requirements and add a cross-reference to it from the approval checklist. Include a link to https://example.com/security, one footnote for equipment ownership, and a concise approval checklist. Add a footer with the document title, the current date field, and Page X of Y.",
+  "expected": {
+    "requiredText": ["Remote Work Policy", "Purpose", "Eligibility", "Workspace Support", "Security", "Approval"],
+    "minimumParagraphs": 12,
+    "minimumOutlineEntries": 5,
+    "minimumComments": 1,
+    "requiredBookmarks": ["Security_Requirements"],
+    "requiredStories": ["body", "footer", "footnote"],
+    "requiredObjectTypes": ["field", "footnote-reference"],
+    "requiredPackageParts": ["word/comments.xml", "word/footnotes.xml"],
+    "requiredPackageText": ["<w:ins", "<w:del", "commentRangeStart", "https://example.com/security"]
+  }
+}

@@ -3198,6 +3198,10 @@ function buildAtoms(
           });
           break;
         }
+        default: {
+          const exhaustive: never = content;
+          return exhaustive;
+        }
       }
     }
   };

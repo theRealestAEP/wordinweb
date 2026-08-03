@@ -1,0 +1,26 @@
+{
+  "name": "field-inspection-packet",
+  "prompt": "Prepare a professional on-site safety inspection packet for the Harbor Point facility. Use landscape Letter pages with 0.6-inch margins, a visible page border, two text columns separated by a rule, and line numbers every five lines. Add a repeating header with the facility name and inspection date, and a footer with Page X of Y. Include sections for Arrival Check, Equipment Review, Findings, and Emergency Response. Add a practical 5-column findings table, a short footnote that defines a critical finding, a bookmark named Emergency_Response on the emergency procedure, and a later cross-reference that directs inspectors back to it. Insert a next-page section break before the findings record so the packet has a clear printable division.",
+  "expected": {
+    "requiredText": ["Harbor Point", "Arrival Check", "Equipment Review", "Findings", "Emergency Response"],
+    "minimumParagraphs": 10,
+    "minimumOutlineEntries": 4,
+    "minimumSections": 2,
+    "minimumPages": 2,
+    "pageWidth": 1056,
+    "pageHeight": 816,
+    "margin": 57.6,
+    "minimumTables": 1,
+    "table": { "minimumRows": 4, "minimumColumns": 5 },
+    "requiredStories": ["body", "header", "footer", "footnote"],
+    "requiredObjectTypes": ["footnote-reference", "field"],
+    "requiredBookmarks": ["Emergency_Response"],
+    "sectionLayout": {
+      "minimumColumns": 2,
+      "columnSeparator": true,
+      "pageBorders": true,
+      "lineNumbering": true
+    },
+    "requiredPackageParts": ["word/footnotes.xml"]
+  }
+}

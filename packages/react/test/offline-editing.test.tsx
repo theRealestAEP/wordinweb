@@ -27,6 +27,7 @@ import { CollabHub, blankDocxBytes, type Connection, type ServerMessage } from "
 import { InMemoryBundleStore } from "@wordinweb/collab/client";
 import { serializeXml } from "@wordinweb/core";
 import { useCollab, type CollabSession } from "../src/collab.js";
+import { AgentDocument, collaborativeAgentTarget } from "../../agent/src/index.js";
 
 /** Same staged-death factory as reconnect.test.tsx, plus a swappable delay.
  * Connection ids are NAMESPACED per factory (write-gate style): two probes
@@ -175,6 +176,31 @@ const storedTail = (store: InMemoryBundleStore, id = "d"): unknown[] | undefined
   (store as unknown as { bundles: Map<string, { offlineTail?: unknown[] }> }).bundles.get(id)?.offlineTail;
 
 describe("offline capture is durable (the live data-loss bug)", () => {
+  it("records AgentDocument edits through the real offline session tail", async () => {
+    const hub = seeded();
+    const store = new InMemoryBundleStore();
+    const p = await mount(hub, store);
+    p.outage.value = true;
+    await until(() => p.session.connection === "lost", "offline");
+
+    const agent = AgentDocument.connect(collaborativeAgentTarget(() => p.session));
+    const read = agent.inspect({ kind: "read" });
+    if (!("blocks" in read) || read.blocks[0].type !== "paragraph") throw new Error("missing paragraph");
+    const paragraph = read.blocks[0];
+    let result: Awaited<ReturnType<AgentDocument["edit"]>> | undefined;
+    await act(async () => {
+      result = await agent.edit({
+        revision: agent.revision,
+        operations: [{ kind: "insertText", at: { blockRef: paragraph.ref, runRef: paragraph.runs[0].ref, offset: 0 }, text: "agent offline" }],
+      });
+    });
+
+    expect(result!.connection).toBe("offline");
+    expect(docText(p.session)).toBe("agent offline");
+    await until(() => storedTail(store)?.length === 1, "agent edit persisted");
+    await p.unmount();
+  });
+
   it("opens a stored room copy offline without creating a socket, then rejoins through the normal merge check", async () => {
     const hub = seeded();
     const store = new InMemoryBundleStore();

@@ -1460,6 +1460,19 @@ function parseDrawing(
     // "textNoShape" is the identity (no warp) and is treated as absent.
     const warpRaw = bodyPr ? attr(child(bodyPr, "prstTxWarp"), "prst") : undefined;
     const warp = warpRaw && warpRaw !== "textNoShape" ? warpRaw : undefined;
+    const wordArt = (attr(child(anchor, "docPr"), "name") ?? "").startsWith("WordArt ");
+    const wordArtRunProperties = wordArt && txbxContent ? findDescendant(txbxContent, "rPr") : undefined;
+    const wordArtTextFill = wordArtRunProperties ? child(wordArtRunProperties, "textFill") : undefined;
+    const fallbackWordArtColor = wordArtRunProperties ? attr(child(wordArtRunProperties, "color"), "val") : undefined;
+    const wordArtFill = (wordArtTextFill
+      ? solidFillColor(wordArtTextFill, ctx.theme)
+      : fallbackWordArtColor && fallbackWordArtColor !== "auto"
+        ? `#${fallbackWordArtColor}`
+        : undefined)?.toUpperCase();
+    const wordArtAlpha = wordArtTextFill ? findDescendant(wordArtTextFill, "alpha") : undefined;
+    const wordArtOpacity = wordArtAlpha
+      ? Math.max(0, Math.min(1, (intAttr(wordArtAlpha, "val") ?? 100000) / 100000))
+      : undefined;
     // Non-rect preset geometry (oval, diamond, flowchart shapes): paint the
     // real outline and lay the text inside the geometry's text rectangle.
     const prstA = attr(child(spPr, "prstGeom"), "prst") ?? "rect";
@@ -1520,6 +1533,9 @@ function parseDrawing(
         ...(noAutofit ? { clipText: true } : {}),
         ...(spAutoFit ? { autofitHeight: true } : {}),
         ...(warp ? { warp } : {}),
+        ...(wordArt ? { wordArt: true } : {}),
+        ...(wordArtFill ? { wordArtFill } : {}),
+        ...(wordArtOpacity !== undefined ? { wordArtOpacity } : {}),
         wrap,
         ...(behind ? { behind: true } : {}),
         ...(attr(anchor, "allowOverlap") === "0" ? { allowOverlap: false } : {}),
@@ -2248,6 +2264,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
       const style = parseVmlStyle(el.attrs["style"]);
       const from = (el.attrs["from"] ?? "0,0").split(",");
       const to = (el.attrs["to"] ?? "0,0").split(",");
+      const dashRaw = findDescendant(el, "stroke")?.attrs["dashstyle"]?.toLowerCase() ?? "";
       out.push({
         kind: "anchor",
         shape: {
@@ -2258,8 +2275,11 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
           y2: vmlLength(to[1]),
           color: el.attrs["strokecolor"] ?? "#000000",
           weight: vmlLength(el.attrs["strokeweight"]) || 1,
+          style: dashRaw.includes("dot") ? "dotted" : dashRaw && dashRaw !== "solid" ? "dashed" : "single",
           hRel: anchorRel(style.get("mso-position-horizontal-relative")),
           vRel: anchorRel(style.get("mso-position-vertical-relative")),
+          z: parseFloat(style.get("z-index") ?? "0") || 0,
+          src: el,
         },
       });
       return;
@@ -2401,6 +2421,7 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
         const stroked = el.attrs["stroked"] !== "f" && strokeColor !== undefined;
         const ta = style.get("v-text-anchor");
         const rotation = parseFloat(style.get("rotation") ?? "0") || 0;
+        const zIndex = parseFloat(style.get("z-index") ?? "0") || 0;
         const vmlInsets = parseVmlInset(findDescendant(el, "textbox")?.attrs["inset"]);
         out.push({
           kind: "anchor",
@@ -2425,9 +2446,39 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
             pctHeightRel: relOf(style.get("mso-height-relative")),
             textAnchor: ta === "middle" ? "middle" : ta === "bottom" ? "bottom" : undefined,
             ...(rotation ? { rotation } : {}),
+            z: zIndex,
+            ...(zIndex < 0 ? { behind: true } : {}),
             ...(vmlInsets ? { insets: vmlInsets } : {}),
             srcDrawing: el,
             ...(ctx.independentTextboxStories ? { textboxStory: true } : {}),
+          },
+        });
+        return;
+      }
+      const style = parseVmlStyle(el.attrs["style"]);
+      if (style.get("position") === "absolute") {
+        const fillRaw = el.attrs["fillcolor"];
+        const fill = el.attrs["filled"] === "f" ? undefined : fillRaw ? fillRaw.split(" ")[0] : undefined;
+        const strokeColor = el.attrs["strokecolor"];
+        const stroked = el.attrs["stroked"] !== "f" && strokeColor !== undefined;
+        const zIndex = parseFloat(style.get("z-index") ?? "0") || 0;
+        out.push({
+          kind: "anchor",
+          shape: {
+            type: "textbox",
+            x: vmlLength(style.get("margin-left")),
+            y: vmlLength(style.get("margin-top")),
+            width: vmlLength(style.get("width")),
+            height: vmlLength(style.get("height")),
+            hRel: anchorRel(style.get("mso-position-horizontal-relative")),
+            vRel: anchorRel(style.get("mso-position-vertical-relative")),
+            blocks: [],
+            ...(fill ? { fill } : {}),
+            ...(stroked ? { stroke: { color: strokeColor.split(" ")[0], weight: vmlLength(el.attrs["strokeweight"]) || 1 } } : {}),
+            wrap: "none",
+            z: zIndex,
+            ...(zIndex < 0 ? { behind: true } : {}),
+            srcDrawing: el,
           },
         });
         return;

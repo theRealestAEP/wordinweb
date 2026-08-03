@@ -68,6 +68,7 @@ describe("resizeDrawing intent (B2a)", () => {
     expect(validateIntent({ kind: "resizeDrawing", clientId: "a", clientSeq: 1, base: 0, runId: 1, widthPx: 0, heightPx: 50 } as never, DEFAULT_LIMITS)).toContain("bad extent");
     expect(validateIntent({ kind: "resizeDrawing", clientId: "a", clientSeq: 1, base: 0, runId: 1, widthPx: 50, heightPx: 9999 } as never, DEFAULT_LIMITS)).toContain("bad extent");
     expect(validateIntent({ kind: "resizeDrawing", clientId: "a", clientSeq: 1, base: 0, runId: 1, widthPx: 320.5, heightPx: 96 } as never, DEFAULT_LIMITS)).toBeNull();
+    expect(validateIntent({ kind: "resizeDrawing", clientId: "a", clientSeq: 1, base: 0, runId: 1, objectIndex: -1, widthPx: 50, heightPx: 50 } as never, DEFAULT_LIMITS)).toContain("bad objectIndex");
   });
 
   it("removeDrawing deletes the carrier run on every replica identically", () => {

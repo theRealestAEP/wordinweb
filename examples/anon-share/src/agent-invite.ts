@@ -1,0 +1,95 @@
+export interface AgentInvitePayload {
+  version: 1;
+  room: {
+    wsUrl: string;
+    httpBase: string;
+    docId: string;
+    docKey?: string;
+    shareCode?: string;
+  };
+  invite: {
+    inviteId: string;
+    token: string;
+    chatKey: string;
+    expiresAt: number;
+  };
+  agent: {
+    name: string;
+    instructions: string;
+  };
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlToBytes(value: string): Uint8Array {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+export function randomAgentToken(prefix: string, byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return `${prefix}_${bytesToBase64Url(bytes)}`;
+}
+
+export function encodeAgentInvite(payload: AgentInvitePayload): string {
+  return bytesToBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
+}
+
+export function decodeAgentInvite(url: string): AgentInvitePayload {
+  const encoded = new URL(url).hash.match(/(?:^#|&)invite=([A-Za-z0-9_-]+)/)?.[1];
+  if (!encoded) throw new Error("The URL has no AI invitation payload");
+  const payload = JSON.parse(new TextDecoder().decode(base64UrlToBytes(encoded))) as AgentInvitePayload;
+  if (payload.version !== 1) throw new Error("The AI invitation version is unsupported");
+  return payload;
+}
+
+export function agentInviteUrl(origin: string, payload: AgentInvitePayload): string {
+  const url = new URL("/agent-invite", origin);
+  url.hash = `invite=${encodeAgentInvite(payload)}`;
+  return url.toString();
+}
+
+async function chatKey(value: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", base64UrlToBytes(value) as BufferSource, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+function chatAad(agentClientId: string, messageId: string): Uint8Array {
+  return new TextEncoder().encode(`wordinweb-agent-chat:${agentClientId}:${messageId}`);
+}
+
+export async function encryptAgentChat(
+  key: string,
+  agentClientId: string,
+  messageId: string,
+  text: string,
+): Promise<{ iv: string; ciphertext: string }> {
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv as BufferSource, additionalData: chatAad(agentClientId, messageId) as BufferSource },
+    await chatKey(key),
+    new TextEncoder().encode(text),
+  );
+  return { iv: bytesToBase64Url(iv), ciphertext: bytesToBase64Url(new Uint8Array(ciphertext)) };
+}
+
+export async function decryptAgentChat(
+  key: string,
+  agentClientId: string,
+  messageId: string,
+  iv: string,
+  ciphertext: string,
+): Promise<string> {
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64UrlToBytes(iv) as BufferSource, additionalData: chatAad(agentClientId, messageId) as BufferSource },
+    await chatKey(key),
+    base64UrlToBytes(ciphertext) as BufferSource,
+  );
+  return new TextDecoder().decode(plaintext);
+}

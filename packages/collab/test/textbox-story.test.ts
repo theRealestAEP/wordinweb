@@ -48,7 +48,10 @@ const PLEADING_HEADER =
   `mso-position-vertical-relative:margin;v-text-anchor:top" stroked="f">` +
   `<v:textbox inset="0,0,0,0"><w:txbxContent>` +
   STORY_PARA("1") + STORY_PARA("2") + STORY_PARA("3") +
-  `</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p></w:hdr>`;
+  `</w:txbxContent></v:textbox></v:shape>` +
+  `<v:line id="MarginRule" style="position:absolute;z-index:3" from="48pt,24pt" to="48pt,624pt" ` +
+  `strokecolor="#AA0000" strokeweight="1pt"><v:stroke dashstyle="solid"/></v:line>` +
+  `</w:pict></w:r></w:p></w:hdr>`;
 
 const DOCUMENT = `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
   `<w:body><w:p><w:r><w:t>Complaint body</w:t></w:r></w:p>` +
@@ -208,6 +211,24 @@ describe("pleading number column (header text-box story) is editable over the wi
     expect(header).toContain("width:54pt");
     expect(header).toContain("height:675pt");
     expect(header).toBe(serializeXml(hdrRoot(b.doc)));
+  });
+
+  it("edits the exact VML object when one run carries a text box and a line", () => {
+    const s = new DocumentSession(pleadingDoc());
+    const parsed = s.doc.headers.get("rIdH")?.blocks[0];
+    if (!parsed || parsed.type !== "paragraph" || parsed.children[0].type !== "run") throw new Error("header run missing");
+    expect(parsed.children[0].content.map((content) => content.kind)).toEqual(["anchor", "anchor"]);
+    const e = s.submit({
+      kind: "setDrawingLineStyle", clientId: "a", clientSeq: 1, base: 0,
+      runId: gutterDrawingRunId(s), objectIndex: 1, color: "156082", widthPx: 3, dash: "dotted",
+    });
+    expect(e.kind).toBe("applied");
+    const header = serializeXml(hdrRoot(s.doc));
+    expect(header).toContain('id="LineNumbers"');
+    expect(header).toContain('stroked="f"');
+    expect(header).toContain('id="MarginRule"');
+    expect(header).toContain('strokecolor="156082"');
+    expect(header).toContain('dashstyle="dot"');
   });
 
   it("an out-of-range offset in the gutter is still a clean reject", () => {

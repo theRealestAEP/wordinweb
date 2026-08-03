@@ -22,7 +22,7 @@ import {
 import { insertFootnote } from "../src/edit/notes.js";
 import { insertDateTimeField, insertField, insertPageField } from "../src/edit/fields.js";
 import { insertBlankPageAt, insertBreakAt, insertCoverPage, sectionContextAt } from "../src/edit/sections.js";
-import { drawingLineStyle, drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingLineStyle, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
+import { drawingLineStyle, drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingLineStyle, setDrawingWordArtStyle, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
 import { buildChartXml, insertChartAt, setChartData } from "../src/edit/charts.js";
 import { buildSmartArtDataXml, buildSmartArtDrawingXml, insertSmartArtAt, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "../src/edit/smartart.js";
 import { insertEmbeddedObjectAt, insertModel3DAt, insertWebVideoAt } from "../src/edit/objects.js";
@@ -1546,6 +1546,41 @@ describe("cover page insertion", () => {
 });
 
 describe("shape insertion", () => {
+  it("selects and edits a legacy VML vertical line", () => {
+    const doc = loadDoc(
+      `<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml">` +
+      `<v:line id="Rule" style="position:absolute;z-index:4;` +
+      `mso-position-horizontal-relative:page;mso-position-vertical-relative:page" ` +
+      `from="48pt,24pt" to="48pt,624pt" strokecolor="#AA0000" strokeweight="1.5pt">` +
+      `<v:stroke dashstyle="dash"/></v:line></w:pict></w:r></w:p>`,
+    );
+    const run = (doc.sections[0].blocks[0] as Paragraph).children[0] as Run;
+    const anchor = run.content.find((content) => content.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "line" || !anchor.shape.src) {
+      throw new Error("VML line missing");
+    }
+    const line = anchor.shape.src;
+
+    expect(anchor.shape).toMatchObject({ color: "#AA0000", weight: 2, style: "dashed" });
+    expect(layoutDocument(doc).pages[0].items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "drawingHit", src: line, width: 0 }),
+    ]));
+    expect(isFloatingDrawing(line)).toBe(true);
+    expect(drawingRotation(line)).toBe(90);
+    expect(setFloatingPagePosition(doc, line, 120, 80)).toBe(true);
+    expect(resizeDrawing(doc, line, 1, 500)).toBe(true);
+    expect(setDrawingLineStyle(doc, line, "156082", 3, "dotted")).toBe(true);
+    expect(setDrawingOrder(doc, line, "front")).toBe(true);
+
+    const saved = DocxDocument.load(doc.save()).pkg.text("word/document.xml");
+    expect(saved).toContain('from="90pt,60pt"');
+    expect(saved).toContain('to="90pt,435pt"');
+    expect(saved).toContain('strokecolor="156082"');
+    expect(saved).toContain('strokeweight="2.25pt"');
+    expect(saved).toContain('dashstyle="dot"');
+    expect(saved).toContain('z-index:5');
+  });
+
   it("moves, resizes, and rotates a legacy VML text box through its native style", () => {
     const doc = loadDoc(
       `<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml">` +
@@ -1746,6 +1781,45 @@ describe("WordArt insertion", () => {
     expect(xml).toContain("After");
     expect(xml).not.toContain(">Before<");
     expect(xml).toContain('cy="381000"');
+  });
+
+  it("sets DrawingML WordArt glyph fill and opacity without a backing rectangle", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    const drawing = insertWordArtAt(doc, t, "DRAFT", "plain");
+    if (!drawing) throw new Error("WordArt missing");
+    expect(setDrawingWordArtStyle(doc, drawing, "B7C9DB", 0.12)).toBe(true);
+
+    const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml");
+    expect(xml).toContain('<w14:textFill xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">');
+    expect(xml).toContain('<w14:srgbClr w14:val="B7C9DB"><w14:alpha w14:val="12000"/></w14:srgbClr>');
+    expect(xml).toContain('<w:color w:val="F6F9FB"/>');
+    expect(xml).toContain("<a:noFill/>");
+
+    const reopened = DocxDocument.load(doc.save());
+    const para = reopened.sections[0].blocks[0] as Paragraph;
+    const anchor = para.children.flatMap((child) => child.type === "run" ? child.content : [])
+      .find((content) => content.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("WordArt anchor missing");
+    expect(anchor.shape).toMatchObject({ wordArt: true, wordArtFill: "#B7C9DB", wordArtOpacity: 0.12 });
+    expect(anchor.shape.fill).toBeUndefined();
+    const text = layoutDocument(reopened).pages[0].items.find((item) => item.kind === "text" && item.text === "DRAFT");
+    expect(text).toMatchObject({ kind: "text", opacity: 0.12 });
+  });
+
+  it("clears DrawingML and VML outlines with the same canonical edit", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    const drawing = insertShapeAt(doc, t, "rectangle", "Panel");
+    if (!drawing) throw new Error("shape missing");
+    expect(setDrawingLineStyle(doc, drawing, null)).toBe(true);
+    expect(drawingLineStyle(drawing)).toBeNull();
+    expect(serializeXml(drawing)).toContain("<a:noFill/>");
+
+    const vml = parseXml('<v:shape xmlns:v="urn:schemas-microsoft-com:vml" strokecolor="#112233" strokeweight="1pt"><v:stroke dashstyle="solid"/></v:shape>');
+    expect(setDrawingLineStyle(doc, vml, null)).toBe(true);
+    expect(drawingLineStyle(vml)).toBeNull();
+    expect(vml.attrs.stroked).toBe("f");
   });
 
   it("keeps several moved WordArt objects independent without reflowing body text", () => {

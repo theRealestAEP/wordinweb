@@ -2,8 +2,8 @@ import { DocxDocument } from "../docx.js";
 import { checkboxStateElement } from "../checkbox.js";
 import { isSafeUrl } from "../url-safety.js";
 import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem, WarpTextItem, ChartItem } from "../layout/types.js";
-import { cssFont, cambriaMathDescentShare } from "../layout/measure.js";
-import { Border } from "../model.js";
+import { cssFont, cambriaMathDescentShare, fontWidthScale } from "../layout/measure.js";
+import { Border, type Theme } from "../model.js";
 import { XmlElement } from "../xml.js";
 import { decodeTiff } from "./tiff.js";
 import { extractOlePackage } from "../parse/ole.js";
@@ -1390,10 +1390,33 @@ function renderMediaSkeleton(item: ImageItem, doc: DocxDocument): HTMLElement {
   return box;
 }
 
-const CHART_COLORS = ["#4472c4", "#ed7d31", "#a5a5a5", "#ffc000", "#5b9bd5", "#70ad47"];
+const DEFAULT_CHART_COLORS = ["#156082", "#e97132", "#196b24", "#0f9ed5", "#a02b93", "#4ea72e"];
 
-function renderChart(item: ChartItem): HTMLElement {
+function chartColors(theme: Theme): string[] {
+  const themed = Array.from({ length: 6 }, (_, index) => theme.colors.get(`accent${index + 1}`));
+  return themed.every((color): color is string => !!color) ? themed : DEFAULT_CHART_COLORS;
+}
+
+function chartScale(values: number[]): { low: number; high: number; step: number } {
+  const rawLow = Math.min(0, ...values);
+  const rawHigh = Math.max(0, ...values);
+  const span = rawHigh - rawLow || 1;
+  const rough = span / 5;
+  const magnitude = 10 ** Math.floor(Math.log10(rough));
+  const fraction = rough / magnitude;
+  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
+  const step = niceFraction * magnitude;
+  let low = Math.floor(rawLow / step) * step;
+  let high = Math.ceil(rawHigh / step) * step;
+  if (rawLow < 0 && Math.abs(low - rawLow) < step / 1000) low -= step;
+  if (rawHigh > 0 && Math.abs(high - rawHigh) < step / 1000) high += step;
+  return { low, high, step };
+}
+
+function renderChart(item: ChartItem, theme: Theme): HTMLElement {
   const ns = "http://www.w3.org/2000/svg";
+  const colors = chartColors(theme);
+  const fontFamily = theme.colors.size ? `${theme.minorFont}, system-ui, sans-serif` : "Aptos, system-ui, sans-serif";
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("viewBox", `0 0 ${item.width} ${item.height}`);
   svg.setAttribute("role", "img");
@@ -1408,13 +1431,13 @@ function renderChart(item: ChartItem): HTMLElement {
     return result;
   };
   const addText = (x: number, y: number, text: string, attrs: Record<string, string | number> = {}): void => {
-    svg.appendChild(node("text", { x, y, fill: "#595959", "font-family": "Arial, sans-serif", "font-size": 10, ...attrs }, text));
+    svg.appendChild(node("text", { x, y, fill: "#404040", "font-family": fontFamily, "font-size": 12, ...attrs }, text));
   };
 
   svg.appendChild(node("rect", { x: 0, y: 0, width: item.width, height: item.height, fill: "#fff" }));
-  const titleHeight = item.data.title ? 30 : 12;
-  if (item.data.title) addText(item.width / 2, 20, item.data.title, { "text-anchor": "middle", fill: "#404040", "font-size": 15, "font-weight": 600 });
-  const legendWidth = item.data.series.length > 1 ? Math.min(104, item.width * 0.24) : 0;
+  const titleHeight = item.data.title ? 48 : 12;
+  if (item.data.title) addText(item.width / 2, 34, item.data.title, { "text-anchor": "middle", fill: "#262626", "font-size": 24, "font-weight": 600 });
+  const legendWidth = item.data.series.length > 1 ? Math.min(124, item.width * 0.24) : 0;
   const plot = { x: 48, y: titleHeight + 5, width: Math.max(item.width - 62 - legendWidth, 40), height: Math.max(item.height - titleHeight - 42, 40) };
 
   if (item.data.type === "pie") {
@@ -1433,34 +1456,36 @@ function renderChart(item: ChartItem): HTMLElement {
       const large = next - angle > Math.PI ? 1 : 0;
       svg.appendChild(node("path", {
         d: `M ${cx} ${cy} L ${x1} ${y1} A ${radius} ${radius} 0 ${large} 1 ${x2} ${y2} Z`,
-        fill: CHART_COLORS[index % CHART_COLORS.length], stroke: "#fff", "stroke-width": 1,
+        fill: colors[index % colors.length], stroke: "#fff", "stroke-width": 1,
       }));
       angle = next;
     });
     const lx = plot.x + plot.width + 8;
     item.data.categories.forEach((category, index) => {
       const y = plot.y + 10 + index * 16;
-      svg.appendChild(node("rect", { x: lx, y: y - 8, width: 9, height: 9, fill: CHART_COLORS[index % CHART_COLORS.length] }));
+      svg.appendChild(node("rect", { x: lx, y: y - 8, width: 9, height: 9, fill: colors[index % colors.length] }));
       addText(lx + 14, y, category);
     });
     return svg as unknown as HTMLElement;
   }
 
   const allValues = item.data.series.flatMap((series) => series.values);
-  const low = Math.min(0, ...allValues);
-  const high = Math.max(0, ...allValues);
-  const range = high - low || 1;
+  const { low, high, step: majorStep } = chartScale(allValues);
+  const range = high - low;
   const valueY = (value: number) => plot.y + plot.height - ((value - low) / range) * plot.height;
   const valueX = (value: number) => plot.x + ((value - low) / range) * plot.width;
-  for (let step = 0; step <= 4; step++) {
-    const value = low + (range * step) / 4;
+  const valueTicks: number[] = [];
+  for (let value = low, guard = 0; value <= high + majorStep / 1000 && guard < 100; value += majorStep, guard++) {
+    valueTicks.push(Number(value.toPrecision(12)));
+  }
+  for (const value of valueTicks) {
     if (item.data.type === "bar") {
       const x = valueX(value);
-      svg.appendChild(node("line", { x1: x, y1: plot.y, x2: x, y2: plot.y + plot.height, stroke: "#d9d9d9", "stroke-width": 1 }));
+      svg.appendChild(node("line", { x1: x, y1: plot.y, x2: x, y2: plot.y + plot.height, stroke: "#595959", "stroke-width": 1 }));
       addText(x, plot.y + plot.height + 15, Number(value.toFixed(2)).toString(), { "text-anchor": "middle" });
     } else {
       const y = valueY(value);
-      svg.appendChild(node("line", { x1: plot.x, y1: y, x2: plot.x + plot.width, y2: y, stroke: "#d9d9d9", "stroke-width": 1 }));
+      svg.appendChild(node("line", { x1: plot.x, y1: y, x2: plot.x + plot.width, y2: y, stroke: "#595959", "stroke-width": 1 }));
       addText(plot.x - 6, y + 3, Number(value.toFixed(2)).toString(), { "text-anchor": "end" });
     }
   }
@@ -1470,7 +1495,25 @@ function renderChart(item: ChartItem): HTMLElement {
   const labelEvery = Math.max(1, Math.ceil(categoryCount / 8));
   if (item.data.type === "bar") {
     const band = plot.height / categoryCount;
-    const barHeight = Math.max((band * 0.72) / seriesCount, 1);
+    const zero = valueX(0);
+    const axisY = plot.y + plot.height;
+    svg.appendChild(node("line", { x1: plot.x, y1: axisY, x2: plot.x + plot.width, y2: axisY, stroke: "#262626", "stroke-width": 1.25 }));
+    svg.appendChild(node("line", { x1: zero, y1: plot.y, x2: zero, y2: plot.y + plot.height, stroke: "#262626", "stroke-width": 1.25 }));
+    for (const value of valueTicks) {
+      const x = valueX(value);
+      svg.appendChild(node("line", { x1: x, y1: axisY - 4, x2: x, y2: axisY + 4, stroke: "#262626", "stroke-width": 1.25, "data-dxw-chart-tick": "major" }));
+    }
+    for (let index = 0; index < valueTicks.length - 1; index++) {
+      for (let minor = 1; minor < 5; minor++) {
+        const x = valueX(valueTicks[index] + (majorStep * minor) / 5);
+        svg.appendChild(node("line", { x1: x, y1: axisY - 2.5, x2: x, y2: axisY + 2.5, stroke: "#262626", "stroke-width": 1, "data-dxw-chart-tick": "minor" }));
+      }
+    }
+    for (let index = 0; index <= categoryCount; index++) {
+      const y = plot.y + band * index;
+      svg.appendChild(node("line", { x1: zero - 4, y1: y, x2: zero + 4, y2: y, stroke: "#262626", "stroke-width": 1.25, "data-dxw-chart-tick": "category" }));
+    }
+    const barHeight = Math.max(band / (seriesCount + 1.5), 1);
     item.data.categories.forEach((category, categoryIndex) => {
       if (categoryIndex % labelEvery === 0) addText(plot.x - 6, plot.y + band * (categoryIndex + 0.5) + 3, category, { "text-anchor": "end" });
       item.data.series.forEach((series, seriesIndex) => {
@@ -1480,33 +1523,51 @@ function renderChart(item: ChartItem): HTMLElement {
         svg.appendChild(node("rect", {
           x: Math.min(zero, edge), y: plot.y + categoryIndex * band + (band - barHeight * seriesCount) / 2 + seriesIndex * barHeight,
           width: Math.max(Math.abs(edge - zero), 0.5), height: barHeight,
-          fill: CHART_COLORS[seriesIndex % CHART_COLORS.length],
+          fill: colors[seriesIndex % colors.length],
         }));
       });
     });
   } else {
     const band = plot.width / categoryCount;
+    const zero = valueY(0);
+    svg.appendChild(node("line", { x1: plot.x, y1: plot.y, x2: plot.x, y2: plot.y + plot.height, stroke: "#262626", "stroke-width": 1.25 }));
+    svg.appendChild(node("line", { x1: plot.x, y1: zero, x2: plot.x + plot.width, y2: zero, stroke: "#262626", "stroke-width": 1.25 }));
+    for (const value of valueTicks) {
+      const y = valueY(value);
+      svg.appendChild(node("line", { x1: plot.x - 4, y1: y, x2: plot.x + 4, y2: y, stroke: "#262626", "stroke-width": 1.25, "data-dxw-chart-tick": "major" }));
+    }
+    for (let index = 0; index < valueTicks.length - 1; index++) {
+      for (let minor = 1; minor < 5; minor++) {
+        const y = valueY(valueTicks[index] + (majorStep * minor) / 5);
+        svg.appendChild(node("line", { x1: plot.x - 2.5, y1: y, x2: plot.x + 2.5, y2: y, stroke: "#262626", "stroke-width": 1, "data-dxw-chart-tick": "minor" }));
+      }
+    }
+    for (let index = 0; index <= categoryCount; index++) {
+      const x = plot.x + band * index;
+      svg.appendChild(node("line", { x1: x, y1: zero - 4, x2: x, y2: zero + 4, stroke: "#262626", "stroke-width": 1.25, "data-dxw-chart-tick": "category" }));
+    }
     item.data.categories.forEach((category, index) => {
       if (index % labelEvery === 0) addText(plot.x + band * (index + 0.5), plot.y + plot.height + 15, category, { "text-anchor": "middle" });
     });
     if (item.data.type === "column") {
-      const barWidth = Math.max((band * 0.72) / seriesCount, 1);
+      const barWidth = Math.max(band / (seriesCount + 1.5), 1);
       item.data.series.forEach((series, seriesIndex) => series.values.forEach((value, categoryIndex) => {
         const zero = valueY(0);
         const edge = valueY(value);
         svg.appendChild(node("rect", {
           x: plot.x + categoryIndex * band + (band - barWidth * seriesCount) / 2 + seriesIndex * barWidth,
           y: Math.min(zero, edge), width: barWidth, height: Math.max(Math.abs(edge - zero), 0.5),
-          fill: CHART_COLORS[seriesIndex % CHART_COLORS.length],
+          fill: colors[seriesIndex % colors.length],
         }));
       }));
     } else {
       item.data.series.forEach((series, seriesIndex) => {
         const points = series.values.map((value, index) => `${plot.x + band * (index + 0.5)},${valueY(value)}`).join(" ");
-        svg.appendChild(node("polyline", { points, fill: "none", stroke: CHART_COLORS[seriesIndex % CHART_COLORS.length], "stroke-width": 2 }));
+        svg.appendChild(node("polyline", { points, fill: "none", stroke: colors[seriesIndex % colors.length], "stroke-width": 2 }));
         series.values.forEach((value, index) => svg.appendChild(node("circle", {
           cx: plot.x + band * (index + 0.5), cy: valueY(value), r: 2.5,
-          fill: "#fff", stroke: CHART_COLORS[seriesIndex % CHART_COLORS.length], "stroke-width": 1.5,
+          fill: colors[seriesIndex % colors.length], stroke: "#fff", "stroke-width": 1,
+          "data-dxw-chart-marker": "1",
         })));
       });
     }
@@ -1516,7 +1577,7 @@ function renderChart(item: ChartItem): HTMLElement {
     const x = plot.x + plot.width + 10;
     item.data.series.forEach((series, index) => {
       const y = plot.y + 11 + index * 17;
-      svg.appendChild(node("rect", { x, y: y - 8, width: 10, height: 10, fill: CHART_COLORS[index % CHART_COLORS.length] }));
+      svg.appendChild(node("rect", { x, y: y - 8, width: 10, height: 10, fill: colors[index % colors.length] }));
       addText(x + 15, y, series.name);
     });
   }
@@ -1621,7 +1682,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
       return el;
     }
     case "chart":
-      return renderChart(item);
+      return renderChart(item, doc.theme);
     case "image": {
       const bytes = doc.media(item.part);
       // SKELETON (plan doc 05 change 2 / doc 16 §5.2): a registered part
@@ -1990,6 +2051,10 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
       return renderWarpText(item);
     case "grip":
       return null; // handled by renderPage when interactive
+    default: {
+      const exhaustive: never = item;
+      return exhaustive;
+    }
   }
 }
 
@@ -2189,6 +2254,7 @@ function renderWarpText(item: WarpTextItem): HTMLElement {
   svg.style.width = `${W}px`;
   svg.style.height = `${H}px`;
   svg.style.overflow = "visible";
+  if (item.opacity !== undefined) svg.style.opacity = String(item.opacity);
   if (item.rotate) {
     svg.style.transform = `rotate(${item.rotate.deg}deg)`;
     svg.style.transformOrigin = `${item.rotate.ox}px ${item.rotate.oy}px`;
@@ -2423,6 +2489,7 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
   if (item.font.kerning) el.style.fontKerning = "normal";
   let color = props.color && props.color !== "auto" ? props.color : "#000000";
   el.style.color = color;
+  if (item.opacity !== undefined) el.style.opacity = String(item.opacity);
   if (props.underline && props.underline !== "none") {
     el.style.textDecoration = "underline";
     if (props.underline === "double") el.style.textDecorationStyle = "double";
@@ -2459,6 +2526,12 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
   // the painted glyphs to match. Math items own their transform (scaleY).
   if (props.textScale && props.textScale !== 1 && !item.mathScaleY) {
     el.style.transform = `scaleX(${props.textScale})`;
+    el.style.transformOrigin = "0 50%";
+  }
+  const substituteScale = fontWidthScale(item.font);
+  if (substituteScale !== 1 && !item.rotate) {
+    const previous = el.style.transform;
+    el.style.transform = `${previous ? `${previous} ` : ""}scaleX(${substituteScale})`;
     el.style.transformOrigin = "0 50%";
   }
   // w:outline: hollow glyphs — Word strokes a hairline (~0.75pt) and leaves

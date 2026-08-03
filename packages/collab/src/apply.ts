@@ -35,6 +35,7 @@ import {
   setChartData,
   setSmartArtNodeText,
   setDrawingWordArtText,
+  setDrawingWordArtStyle,
   setDrawingLineStyle,
   setImageAltText,
   removeLink,
@@ -494,7 +495,7 @@ function applyIntentInner(
       // band and install via installMedia when fetched; until then the part
       // is pending and renders as a placeholder. The sha/iv metadata is
       // recorded on the doc for verification + E2EE re-supply (doc 16 §5.3).
-      const relId = doc.registerPendingImage(intent.blobSha, intent.ext, { iv: intent.iv });
+      const relId = doc.registerPendingImage(intent.blobSha, intent.ext, { iv: intent.iv }, runEl);
       const before = trackedSet(ids, doc);
       const newRun = insertImageAt(doc, entry.firstT, relId, intent.widthPx, intent.heightPx);
       if (!newRun) return false;
@@ -610,49 +611,56 @@ function applyIntentInner(
     case "setDrawingRotation": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setDrawingRotation(doc, drawing, intent.degrees);
     }
     case "setDrawingFill": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setDrawingFill(doc, drawing, intent.color);
     }
     case "setChartData": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setChartData(doc, drawing, intent.chart as never);
     }
     case "setSmartArtNodeText": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setSmartArtNodeText(doc, drawing, intent.index, intent.text);
     }
     case "setDrawingWordArtText": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setDrawingWordArtText(doc, drawing, intent.text);
+    }
+    case "setDrawingWordArtStyle": {
+      const runEl = ids.elOf(intent.runId);
+      if (!runEl) return false;
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
+      if (!drawing) return false;
+      return setDrawingWordArtStyle(doc, drawing, intent.color, intent.opacity);
     }
     case "setDrawingLineStyle": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setDrawingLineStyle(doc, drawing, intent.color, intent.widthPx, intent.dash);
     }
     case "setImageAltText": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setImageAltText(doc, drawing, intent.alt);
     }
@@ -666,49 +674,49 @@ function applyIntentInner(
     case "setImageWrap": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setImageWrap(doc, drawing, intent.mode);
     }
     case "setDrawingOrder": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setDrawingOrder(doc, drawing, intent.order);
     }
     case "setSmartArtData": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setSmartArtData(doc, drawing, intent.smartArt as never);
     }
     case "setSmartArtFill": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setSmartArtFill(doc, drawing, intent.color, intent.nodeIndex);
     }
     case "setSmartArtTextFormat": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setSmartArtTextFormat(doc, drawing, intent.format as never, intent.nodeIndex);
     }
     case "setFloatingPagePosition": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return setFloatingPagePosition(doc, drawing, intent.xPx, intent.yPx);
     }
     case "resizeDrawing": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       return resizeDrawing(doc, drawing, intent.widthPx, intent.heightPx);
     }
@@ -730,7 +738,7 @@ function applyIntentInner(
     case "removeDrawing": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
-      const drawing = firstDrawingIn(runEl);
+      const drawing = drawingIn(runEl, intent.objectIndex, runOf);
       if (!drawing) return false;
       const ok = removeDrawingRun(doc, drawing);
       if (ok) ids.prune(doc.editableRoots()); // retire the removed run's ids
@@ -940,6 +948,10 @@ function applyIntentInner(
       assignFreshTracked(ids, doc, before, intent.nodeIds);
       return true;
     }
+    default: {
+      const exhaustive: never = intent;
+      return exhaustive;
+    }
   }
 }
 
@@ -998,16 +1010,29 @@ function tableOfParagraph(doc: DocxDocument, ids: StableIds, cellParagraphId: nu
   return null;
 }
 
-/** The DrawingML or legacy VML drawing inside a run's subtree. Drawing-edit
- * intents address the object through its carrier run because drawings are not
- * tracked directly. */
+/** The first DrawingML or legacy VML drawing inside a run's subtree. */
 function firstDrawingIn(el: XmlElement): XmlElement | null {
-  if (["drawing", "shape", "rect"].includes(localName(el.name))) return el;
+  if (["drawing", "shape", "rect", "line"].includes(localName(el.name))) return el;
   for (const c of el.children) {
     const found = firstDrawingIn(c);
     if (found) return found;
   }
   return null;
+}
+
+function drawingSource(content: Run["content"][number]): XmlElement | undefined {
+  if (content.kind === "image" || content.kind === "drawing") return content.srcDrawing;
+  if (content.kind !== "anchor") return undefined;
+  const shape = content.shape;
+  if (shape.type === "wordart") return shape.src;
+  if (shape.type === "line") return shape.src;
+  return shape.srcDrawing;
+}
+
+function drawingIn(runEl: XmlElement, objectIndex: number | undefined, runOf: RunLookup): XmlElement | null {
+  if (objectIndex === undefined) return firstDrawingIn(runEl);
+  const content = runOf(runEl)?.run.content[objectIndex];
+  return content ? drawingSource(content) ?? null : null;
 }
 
 /** The m:oMath element inside a run's subtree (math-edit intents address a math

@@ -170,7 +170,14 @@ export class DocxDocument {
   /** Parsed document.xml root (read-only outside the class; the layout engine
    * scans it for incremental-reuse eligibility, tests walk it). */
   readonly docRoot: XmlElement;
-  private readonly hfParts: { relId: string; target: string; root: XmlElement; isHeader: boolean; rels: Relationships }[] = [];
+  private readonly hfParts: {
+    relId: string;
+    target: string;
+    root: XmlElement;
+    isHeader: boolean;
+    rels: Relationships;
+    relsRoot: XmlElement | null;
+  }[] = [];
   private readonly ctxBase: { theme: Theme; revisionView?: "final" | "markup" };
   /** Tracked-changes display mode; refresh() re-derives after changes. */
   revisionView: "final" | "markup" = "final";
@@ -294,10 +301,17 @@ export class DocxDocument {
       if (!isHeader && !isFooter) continue;
       const root = this.readXmlOptional(rel.target);
       if (!root) continue;
-      const partRels = parseRelationships(this.readXmlOptional(relsPathFor(rel.target)), rel.target);
+      const partRelsRoot = this.readXmlOptional(relsPathFor(rel.target));
+      const partRels = parseRelationships(partRelsRoot, rel.target);
+      for (const imageRel of partRels.values()) {
+        if (imageRel.type !== "image" && !imageRel.type.endsWith("/image")) continue;
+        if (imageRel.external || this.pkg.binary(imageRel.target)) continue;
+        this.pendingMedia.set(imageRel.target, { sha: "" });
+        this.mediaMeta.set(imageRel.target, { sha: "" });
+      }
       this.rememberOriginalXml(rel.target, root);
       this.hydrateCorePropertyControls(root, coreProperties);
-      this.hfParts.push({ relId: rel.id, target: rel.target, root, isHeader, rels: partRels });
+      this.hfParts.push({ relId: rel.id, target: rel.target, root, isHeader, rels: partRels, relsRoot: partRelsRoot ?? null });
     }
 
     // Footnote/endnote parts. Footnotes retain their tree so insertion can
@@ -1240,7 +1254,7 @@ export class DocxDocument {
         });
       }
     }
-    this.hfParts.push({ relId, target, root, isHeader, rels: new Map() });
+    this.hfParts.push({ relId, target, root, isHeader, rels: new Map(), relsRoot: null });
     // A minimal document (the blank the demo starts from) has NO sectPr at
     // all, so the reference walk below had nowhere to put the reference: the
     // part was created, never referenced, never laid out, and the caller found
@@ -1731,6 +1745,7 @@ export class DocxDocument {
     this.writeModeledXml(files, this.docPart, this.docRoot);
     for (const part of this.hfParts) {
       this.writeModeledXml(files, part.target, part.root);
+      if (part.relsRoot) this.writeModeledXml(files, relsPathFor(part.target), part.relsRoot);
     }
     if (this.commentsDirty && this.commentsRoot && this.commentsPart) {
       files[this.commentsPart] = strToU8(serializeXml(this.commentsRoot, true));
@@ -1847,30 +1862,38 @@ export class DocxDocument {
     return true;
   }
 
-  addImageResource(bytes: Uint8Array, ext: string): string {
+  private addImageResourceAt(bytes: Uint8Array, ext: string, source?: XmlElement): { relId: string; part: string } {
     const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
-    // Unique media name
     let n = 1;
     while (this.pkg.has(`${docDir}media/image${n}.${ext}`)) n++;
     const part = `${docDir}media/image${n}.${ext}`;
     this.pkg.raw()[part] = bytes;
 
-    // Relationship
-    if (!this.relsRoot) {
-      this.relsRoot = {
+    const contains = (root: XmlElement, target: XmlElement): boolean =>
+      root === target || root.children.some((item) => contains(item, target));
+    const owner = source ? this.hfParts.find((candidate) => contains(candidate.root, source)) : undefined;
+    let relsRoot: XmlElement;
+    let relationships: Relationships;
+    if (owner) {
+      owner.relsRoot ??= {
         name: "Relationships",
         attrs: { xmlns: "http://schemas.openxmlformats.org/package/2006/relationships" },
         children: [],
         text: "",
       };
+      relsRoot = owner.relsRoot;
+      relationships = owner.rels;
+    } else {
+      relsRoot = this.ensureRelsRoot();
+      relationships = this.documentRels;
     }
     let maxId = 0;
-    for (const r of this.relsRoot.children) {
+    for (const r of relsRoot.children) {
       const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
       if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
     }
     const relId = `rId${maxId + 1}`;
-    this.relsRoot.children.push({
+    relsRoot.children.push({
       name: "Relationship",
       attrs: {
         Id: relId,
@@ -1880,7 +1903,7 @@ export class DocxDocument {
       children: [],
       text: "",
     });
-    this.documentRels.set(relId, { id: relId, type: "image", target: part, external: false });
+    relationships.set(relId, { id: relId, type: "image", target: part, external: false });
 
     // Content type default for the extension
     const MIME: Record<string, string> = {
@@ -1899,7 +1922,11 @@ export class DocxDocument {
         });
       }
     }
-    return relId;
+    return { relId, part };
+  }
+
+  addImageResource(bytes: Uint8Array, ext: string): string {
+    return this.addImageResourceAt(bytes, ext).relId;
   }
 
   /** Add a GLB model part and its Office 2019 model3d relationship. */
@@ -2182,11 +2209,15 @@ export class DocxDocument {
    * naming/rId scan as addImageResource so every replica applying the same
    * canonical intent derives identical registration.
    */
-  registerPendingImage(sha: string, ext: string, meta?: { iv?: string; genesisId?: string }): string {
+  registerPendingImage(
+    sha: string,
+    ext: string,
+    meta?: { iv?: string; genesisId?: string },
+    source?: XmlElement,
+  ): string {
     // Register with a 0-byte placeholder entry so part-name scanning and
     // content-type bookkeeping behave identically to a real image…
-    const relId = this.addImageResource(new Uint8Array(0), ext);
-    const part = this.documentRels.get(relId)!.target;
+    const { relId, part } = this.addImageResourceAt(new Uint8Array(0), ext, source);
     // …then remove the placeholder bytes: the zip entry must be ABSENT for
     // a pending part (doc 16 §6 — absence is the unambiguous hole).
     delete this.pkg.raw()[part];

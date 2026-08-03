@@ -1,0 +1,24 @@
+{
+  "name": "media-brand-guide",
+  "prompt": "Create a polished launch-day field guide for Northstar Coffee that staff can print and share. Give the cover a deep navy page-sized panel behind white title text. Create and embed a small raster compass logo for the repeating header, plus a separate warm raster banner on the cover. Give both images useful alternative text, and place a smaller copy of the banner beside body copy with square text wrapping. Add a faint diagonal DRAFT wordmark behind the content on every page. Use a restrained navy, cream, and copper palette, clear section headings, a compact brand-color table, and a centered Page X of Y footer. Keep the repeated header mark, cover background, floating image, and watermark independently editable.",
+  "expected": {
+    "requiredText": ["Northstar Coffee", "DRAFT"],
+    "minimumParagraphs": 8,
+    "minimumOutlineEntries": 2,
+    "minimumTables": 1,
+    "table": { "minimumRows": 3, "minimumColumns": 2 },
+    "requiredStories": ["body", "header", "footer", "textbox"],
+    "minimumPages": 2,
+    "minimumAssets": 2,
+    "requiredAssetMediaTypes": ["image/png"],
+    "objectRequirements": [
+      { "type": ["image", "anchored-image"], "storyKind": "header", "minimum": 1, "nonEmptyDetail": ["altText"] },
+      { "type": "anchored-image", "storyKind": "body", "minimum": 1, "nonEmptyDetail": ["altText"] },
+      { "type": ["anchored-textbox", "anchored-wordart"], "storyKind": "header", "minimum": 1, "detail": { "wordArt": true, "behind": true } },
+      { "type": "anchored-textbox", "storyKind": "body", "minimum": 1, "detail": { "behind": true } },
+      { "type": "field", "storyKind": "footer", "minimum": 2 }
+    ],
+    "minimumSpatialObjects": 6,
+    "minimumSpatialLayers": { "behind-text": 2 }
+  }
+}

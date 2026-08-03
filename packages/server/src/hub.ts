@@ -190,7 +190,16 @@ interface Room {
    * Ephemeral like presence — never persisted, dies with the room.
    * Disconnected entries stay (greyed in UI) so attribution keeps a name
    * for everyone who touched the session; reconnects resume the entry. */
-  roster: Map<string, { profile: ParticipantProfile; connected: boolean }>;
+  roster: Map<string, { profile: ParticipantProfile; connected: boolean; participantType: "human" | "agent" }>;
+  /** Short-lived bearer capabilities created by participants for AI agents. */
+  agentInvites: Map<string, {
+    token: string;
+    inviterClientId: string;
+    expiresAt: number;
+    agentClientId?: string;
+  }>;
+  /** Connected or reconnectable AI identities and their private chat owner. */
+  agentClients: Map<string, { inviteId: string; inviterClientId: string }>;
   /** Share-code verifier registered at seed (doc 13 §7) — a PBKDF2 output,
    * NOT the code. Optional; rotation happens naturally at re-seed. */
   codeVerifier?: string;
@@ -419,6 +428,20 @@ export class CollabHub {
    * exists for the stress harnesses (scripts/swarm.mjs drives up to 30
    * clients into one room), NOT for production tuning. */
   private static MAX_ROOM_CLIENTS = Number(process.env.WW_ROOM_CAP ?? 10) || 10;
+  private static MAX_AGENT_INVITES = 20;
+  private static MAX_AGENT_INVITE_LIFETIME_MS = 15 * 60_000;
+  private static MAX_AGENT_CHAT_CIPHERTEXT = 48_000;
+
+  private refuseAgentInvite(conn: Connection, inviteId: string, reason: string): void {
+    conn.send({ t: "agent-invite-refused", inviteId, reason });
+  }
+
+  private pruneAgentInvites(room: Room): void {
+    const now = this.now();
+    for (const [inviteId, invite] of room.agentInvites) {
+      if (invite.expiresAt <= now && !invite.agentClientId) room.agentInvites.delete(inviteId);
+    }
+  }
   private rateLimited(connId: string): boolean {
     const now = this.now();
     let b = this.buckets.get(connId);
@@ -590,6 +613,27 @@ export class CollabHub {
           this.refuse(conn, "no-session");
           return;
         }
+        let agentPair: { inviteId: string; inviterClientId: string } | null = null;
+        {
+          const inviteRoom = this.rooms.get(msg.docId);
+          const previous = inviteRoom?.agentClients.get(msg.clientId);
+          if (msg.agentInvite) {
+            const invite = inviteRoom?.agentInvites.get(msg.agentInvite.inviteId);
+            const usable = invite &&
+              invite.token === msg.agentInvite.token &&
+              (!invite.agentClientId || invite.agentClientId === msg.clientId) &&
+              (invite.expiresAt > this.now() || invite.agentClientId === msg.clientId);
+            if (!usable) {
+              this.refuse(conn, "agent-invite-invalid");
+              return;
+            }
+            invite.agentClientId = msg.clientId;
+            agentPair = { inviteId: msg.agentInvite.inviteId, inviterClientId: invite.inviterClientId };
+          } else if (previous) {
+            this.refuse(conn, "agent-invite-required");
+            return;
+          }
+        }
         // Encrypted rooms enforce the ENGINE fence before admission
         // (doc 13 §2): canonical forms are client-derived there, so mixed
         // transform semantics would diverge with no arbiter. First joiner
@@ -609,6 +653,7 @@ export class CollabHub {
         }
         this.connClient.set(conn.id, msg.clientId);
         const room = await this.room(msg.docId);
+        if (agentPair) room.agentClients.set(msg.clientId, agentPair);
         room.conns.add(conn);
         room.emptySince = undefined; // occupied: the eviction clock stops.
         this.connDoc.set(conn.id, msg.docId);
@@ -642,11 +687,21 @@ export class CollabHub {
             // worse than one that does not pre-check at all.
             mediaMaxBlobBytes: this.limits.media.maxBlobBytes,
           });
+          const joinedProfile = sanitizeProfile(msg.profile, msg.clientId);
           room.roster.set(msg.clientId, {
-            profile: sanitizeProfile(msg.profile, msg.clientId),
+            profile: joinedProfile,
             connected: true,
+            participantType: agentPair ? "agent" : "human",
           });
           this.broadcastRoster(room);
+          if (agentPair) {
+            this.findClientConn(msg.docId, agentPair.inviterClientId)?.send({
+              t: "agent-connected",
+              inviteId: agentPair.inviteId,
+              agentClientId: msg.clientId,
+              profile: joinedProfile,
+            });
+          }
           this.assignCheckpointer(room);
           this.sendPendingWarning(room, conn);
           return;
@@ -682,12 +737,99 @@ export class CollabHub {
         // so a reconnect resumes the same entry. Sanitization is server-side
         // here (plaintext mode); clients still render defensively (doc 11
         // vector 7), which is also what E2EE mode will rely on entirely.
+        const joinedProfile = sanitizeProfile(msg.profile, msg.clientId);
         room.roster.set(msg.clientId, {
-          profile: sanitizeProfile(msg.profile, msg.clientId),
+          profile: joinedProfile,
           connected: true,
+          participantType: agentPair ? "agent" : "human",
         });
         this.broadcastRoster(room);
+        if (agentPair) {
+          this.findClientConn(msg.docId, agentPair.inviterClientId)?.send({
+            t: "agent-connected",
+            inviteId: agentPair.inviteId,
+            agentClientId: msg.clientId,
+            profile: joinedProfile,
+          });
+        }
         this.sendPendingWarning(room, conn);
+        return;
+      }
+      case "agent-invite": {
+        const docId = this.connDoc.get(conn.id);
+        const inviterClientId = this.connClient.get(conn.id);
+        if (!docId || !inviterClientId) return;
+        const room = this.rooms.get(docId)!;
+        this.pruneAgentInvites(room);
+        const validId = /^[A-Za-z0-9_-]{16,128}$/.test(msg.inviteId);
+        const validToken = /^[A-Za-z0-9_-]{32,256}$/.test(msg.token);
+        const validExpiry = Number.isFinite(msg.expiresAt) &&
+          msg.expiresAt > this.now() &&
+          msg.expiresAt <= this.now() + CollabHub.MAX_AGENT_INVITE_LIFETIME_MS;
+        const existing = room.agentInvites.get(msg.inviteId);
+        if (!validId || !validToken || !validExpiry) {
+          this.refuseAgentInvite(conn, msg.inviteId, "invalid");
+          return;
+        }
+        if (existing && existing.inviterClientId !== inviterClientId) {
+          this.refuseAgentInvite(conn, msg.inviteId, "already-exists");
+          return;
+        }
+        if (!existing && room.agentInvites.size >= CollabHub.MAX_AGENT_INVITES) {
+          this.refuseAgentInvite(conn, msg.inviteId, "room-limit");
+          return;
+        }
+        room.agentInvites.set(msg.inviteId, { token: msg.token, inviterClientId, expiresAt: msg.expiresAt });
+        conn.send({ t: "agent-invite-registered", inviteId: msg.inviteId, expiresAt: msg.expiresAt });
+        this.noteActivity(room);
+        return;
+      }
+      case "agent-invite-revoke": {
+        const docId = this.connDoc.get(conn.id);
+        const inviterClientId = this.connClient.get(conn.id);
+        if (!docId || !inviterClientId) return;
+        const room = this.rooms.get(docId)!;
+        const invite = room.agentInvites.get(msg.inviteId);
+        if (!invite || invite.inviterClientId !== inviterClientId) return;
+        room.agentInvites.delete(msg.inviteId);
+        if (invite.agentClientId) {
+          room.agentClients.delete(invite.agentClientId);
+          const agentConn = this.findClientConn(docId, invite.agentClientId);
+          if (agentConn) this.kick(agentConn, "agent-invite-revoked");
+        }
+        this.noteActivity(room);
+        return;
+      }
+      case "agent-chat": {
+        const docId = this.connDoc.get(conn.id);
+        const senderClientId = this.connClient.get(conn.id);
+        if (!docId || !senderClientId) return;
+        const room = this.rooms.get(docId)!;
+        if (!/^[A-Za-z0-9_-]{8,128}$/.test(msg.messageId) ||
+            !/^[A-Za-z0-9_-]{8,128}$/.test(msg.iv) ||
+            !/^[A-Za-z0-9_-]+$/.test(msg.ciphertext) ||
+            msg.ciphertext.length > CollabHub.MAX_AGENT_CHAT_CIPHERTEXT) return;
+        const pair = room.agentClients.get(msg.agentClientId);
+        if (!pair) return;
+        const sender = senderClientId === msg.agentClientId
+          ? "agent" as const
+          : senderClientId === pair.inviterClientId
+            ? "inviter" as const
+            : null;
+        if (!sender) return;
+        const out: ServerMessage = {
+          t: "agent-chat",
+          agentClientId: msg.agentClientId,
+          messageId: msg.messageId,
+          sender,
+          iv: msg.iv,
+          ciphertext: msg.ciphertext,
+        };
+        const agentConn = this.findClientConn(docId, msg.agentClientId);
+        const inviterConn = this.findClientConn(docId, pair.inviterClientId);
+        agentConn?.send(out);
+        if (inviterConn && inviterConn.id !== agentConn?.id) inviterConn.send(out);
+        this.noteActivity(room);
         return;
       }
       case "admin": {
@@ -1182,7 +1324,7 @@ export class CollabHub {
         : room.demoted?.has(clientId)
           ? "demoted"
           : room.readOnly ? "owner-lock" : "allowed";
-      return { clientId, profile: e.profile, connected: e.connected, write };
+      return { clientId, profile: e.profile, connected: e.connected, write, participantType: e.participantType };
     });
     const out: ServerMessage = { t: "roster", roster };
     for (const c of room.conns) c.send(out);
@@ -1870,6 +2012,8 @@ export class CollabHub {
       conns: new Set(),
       genesisId: this.genGenesisId(),
       roster: new Map(),
+      agentInvites: new Map(),
+      agentClients: new Map(),
       codeVerifier,
       lineage,
       ownerToken: defaultGenesisId().replace("g_", "o_"),
@@ -1920,6 +2064,8 @@ export class CollabHub {
       conns: new Set(),
       genesisId,
       roster: new Map(),
+      agentInvites: new Map(),
+      agentClients: new Map(),
       codeVerifier,
       ownerToken: defaultGenesisId().replace("g_", "o_"),
       emptySince: this.now(),
@@ -1945,6 +2091,8 @@ export class CollabHub {
         conns: new Set(),
         genesisId: this.genGenesisId(),
         roster: new Map(),
+        agentInvites: new Map(),
+        agentClients: new Map(),
         createdAt: this.now(),
         lastActivityAt: this.now(),
         obsLabel: newObsLabel(),

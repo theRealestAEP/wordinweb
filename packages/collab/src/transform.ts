@@ -118,6 +118,7 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "setChartData":
     case "setSmartArtNodeText":
     case "setDrawingWordArtText":
+    case "setDrawingWordArtStyle":
     case "setDrawingLineStyle":
     case "setImageAltText":
     case "removeLink":
@@ -315,6 +316,7 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "setChartData":
     case "setSmartArtNodeText":
     case "setDrawingWordArtText":
+    case "setDrawingWordArtStyle":
     case "setDrawingLineStyle":
     case "setImageAltText":
     case "removeLink":

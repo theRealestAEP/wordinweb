@@ -112,6 +112,20 @@ export interface UseCollabOptions {
   offlineTailCap?: number;
 }
 
+export interface AgentConnectionInfo {
+  inviteId: string;
+  agentClientId: string;
+  profile: ParticipantProfile;
+}
+
+export interface AgentChatEnvelope {
+  agentClientId: string;
+  messageId: string;
+  sender: "inviter" | "agent";
+  iv: string;
+  ciphertext: string;
+}
+
 export interface CollabSession {
   /** The live document to render (null until the welcome arrives). */
   doc: DocxDocument | null;
@@ -434,6 +448,12 @@ export interface CollabSession {
    * connection, whose authority lives on the server.
    */
   undoLast: () => UndoOutcome;
+  agentConnections: AgentConnectionInfo[];
+  agentChat: AgentChatEnvelope[];
+  agentInviteError: { inviteId: string; reason: string } | null;
+  registerAgentInvite: (inviteId: string, token: string, expiresAt: number) => void;
+  revokeAgentInvite: (inviteId: string) => void;
+  sendAgentChat: (agentClientId: string, messageId: string, iv: string, ciphertext: string) => void;
 }
 
 
@@ -540,6 +560,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const [notOwner, setNotOwner] = useState(false);
   const [epochChanged, setEpochChanged] = useState<{ from: string; to: string } | null>(null);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
+  const [agentConnections, setAgentConnections] = useState<AgentConnectionInfo[]>([]);
+  const [agentChat, setAgentChat] = useState<AgentChatEnvelope[]>([]);
+  const [agentInviteError, setAgentInviteError] = useState<{ inviteId: string; reason: string } | null>(null);
   const [arrival, setArrival] = useState<{ mode: "replay" | "suggest" | "draft"; tailLength: number; structural: number } | null>(null);
   const [selfHeals, setSelfHeals] = useState(0);
   const [droppedPreReady, setDroppedPreReady] = useState(0);
@@ -1067,6 +1090,13 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       // there is deliberately no per-reason branch here to get wrong.
       onSessionWarningCleared: () => setDeadlines((d) => (d.idle === null ? d : { ...d, idle: null })),
       onRoster: (r) => setRoster(r),
+      onAgentInviteRegistered: () => setAgentInviteError(null),
+      onAgentInviteRefused: (invite) => setAgentInviteError(invite),
+      onAgentConnected: (agent) => setAgentConnections((current) => {
+        const next = current.filter((item) => item.inviteId !== agent.inviteId);
+        return [...next, agent];
+      }),
+      onAgentChat: (message) => setAgentChat((current) => [...current.slice(-199), message]),
       onSelfHeal: () => setSelfHeals((n) => n + 1),
       // A submit that never left the client. Counted, never swallowed.
       onSubmitDropped: () => setDroppedPreReady((n) => n + 1),
@@ -1435,6 +1465,18 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     retryWrites: () => setReadOnlyBlocked(false),
     epochChanged,
     roster,
+    agentConnections,
+    agentChat,
+    agentInviteError,
+    registerAgentInvite: (inviteId, inviteToken, expiresAt) => {
+      if (connectionRef.current === "live") connRef.current?.registerAgentInvite(inviteId, inviteToken, expiresAt);
+    },
+    revokeAgentInvite: (inviteId) => {
+      if (connectionRef.current === "live") connRef.current?.revokeAgentInvite(inviteId);
+    },
+    sendAgentChat: (agentClientId, messageId, iv, ciphertext) => {
+      if (connectionRef.current === "live") connRef.current?.sendAgentChat(agentClientId, messageId, iv, ciphertext);
+    },
     setProfile: (p) => {
       if (connectionRef.current === "live") connRef.current?.setProfile(p);
     },

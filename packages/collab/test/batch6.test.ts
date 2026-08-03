@@ -51,12 +51,24 @@ describe("more intents batch 6 (drawing-property edits)", () => {
     expect(serializeXml(s.doc.docRoot)).toContain("FF8800");
   });
 
-  it("rejects a bad rotation and a bad fill color", () => {
+  it("setDrawingWordArtStyle sets glyph color and opacity", () => {
+    const s = new DocumentSession(makeDoc("body"));
+    s.submit({ kind: "insertWordArt", clientId: "a", clientSeq: 1, base: 0, runId: firstRunId(s), text: "Draft", preset: "plain", nodeIds: Array.from({ length: 12 }, (_, i) => 900 + i) });
+    const rid = drawingRunId(s)!;
+    const e = s.submit({ kind: "setDrawingWordArtStyle", clientId: "a", clientSeq: 2, base: s.seq, runId: rid, color: "AABBCC", opacity: 0.2 });
+    expect(e.kind).toBe("applied");
+    const xml = serializeXml(s.doc.docRoot);
+    expect(xml).toContain('w14:val="AABBCC"');
+    expect(xml).toContain('w14:val="20000"');
+  });
+
+  it("rejects bad rotation, fill, and WordArt style values", () => {
     const s = new DocumentSession(makeDoc("body"));
     s.submit({ kind: "insertWordArt", clientId: "a", clientSeq: 1, base: 0, runId: firstRunId(s), text: "X", preset: "plain", nodeIds: Array.from({ length: 12 }, (_, i) => 900 + i) });
     const rid = drawingRunId(s)!;
     expect(s.submit({ kind: "setDrawingRotation", clientId: "a", clientSeq: 2, base: s.seq, runId: rid, degrees: Infinity as never }).kind).toBe("rejected");
     expect(s.submit({ kind: "setDrawingFill", clientId: "a", clientSeq: 3, base: s.seq, runId: rid, color: "not-hex" }).kind).toBe("rejected");
+    expect(s.submit({ kind: "setDrawingWordArtStyle", clientId: "a", clientSeq: 4, base: s.seq, runId: rid, color: "AABBCC", opacity: 2 }).kind).toBe("rejected");
   });
 
   it("a drawing edit on a run with no drawing is a clean no-op (rejected)", () => {

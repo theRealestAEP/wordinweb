@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { INTENT_KINDS } from "../packages/collab/src/client.js";
 import { BOARD_CODE, enterCodeIfPrompted } from "./_helpers";
 
 /**
@@ -10,7 +11,7 @@ import { BOARD_CODE, enterCodeIfPrompted } from "./_helpers";
  * BYTE-IDENTICAL docx (`doc.save()`, deterministic by design). The server broadcasts to B and C; their agreement with A's optimistic
  * apply is the multi-client + server-mediated convergence check.
  *
- * WHAT THIS PROVES for every one of the 62 kinds: wire serialization +
+ * WHAT THIS PROVES for every canonical kind: wire serialization +
  * server sequencing + deterministic outcome → all clients AGREE (never
  * diverge — a divergence would be a worse bug than a no-op). Coverage is
  * asserted against the full union, so every kind is exercised.
@@ -22,25 +23,9 @@ import { BOARD_CODE, enterCodeIfPrompted } from "./_helpers";
 
 const SERVER = "localhost:1399";
 
-// Every editing intent kind (the intents.ts union minus the LogEntry kinds
-// `applied`/`rejected`). The test must exercise all of these.
-const ALL_KINDS = [
-  "insertText", "deleteText", "splitParagraph", "mergeParagraph", "formatRun",
-  "formatParagraph", "formatRange", "setListType", "setListLevel", "adjustIndent",
-  "setSpacing", "tableOp", "cellShading", "cellVAlign", "insertTable", "commentRun",
-  "replyComment", "deleteComment", "pasteBlocks", "insertImage", "insertBreak",
-  "insertMath", "setMathLinear", "moveMath", "deleteMath", "ensureHeaderFooter",
-  "insertShape", "setDrawingRotation",
-  "setDrawingFill", "setDrawingLineStyle", "setDrawingOrder", "setDrawingWordArtText",
-  "setFloatingPagePosition", "insertChart", "setChartData", "insertSmartArt",
-  "setSmartArtData", "setSmartArtNodeText", "setSmartArtFill", "setSmartArtTextFormat",
-  "insertWordArt", "insertPageField", "insertDateTimeField", "insertField",
-  "insertFootnote", "setLink", "removeLink", "setDropCap", "setDivider",
-  "insertBookmark", "insertBookmarkRange", "insertBlankPage", "insertSectionBreak",
-  "insertCrossRef", "insertCoverPage", "setPageLayout", "setLineNumbering",
-  "setImageAltText", "setImageWrap", "toggleCheckbox", "suggestRevision",
-  "acceptRevision", "rejectRevision", "acceptAllRevisions",
-] as const;
+// This runtime list is tied to the Intent union by a typed map. A new intent
+// reaches this test and the agent capability gate in the same build.
+const ALL_KINDS = INTENT_KINDS;
 
 /** Submit an intent on A (allocating any carried ids named in `allocs`), then
  * assert all three clients converge byte-identically. `allocs` maps a field
@@ -119,7 +104,7 @@ async function joinAll(browser: import("@playwright/test").Browser): Promise<{
   return { a, b, c, contexts: [ca, cb, cc] };
 }
 
-test("all 62 intent kinds converge byte-identically across 3 browser clients", async ({ browser }) => {
+test("all canonical intent kinds converge byte-identically across 3 browser clients", async ({ browser }) => {
   test.setTimeout(120_000);
   const pages = await joinAll(browser);
   const covered = new Set<string>();
@@ -170,8 +155,11 @@ test("all 62 intent kinds converge byte-identically across 3 browser clients", a
     const tableIds = await step(pages, "insertTable", { kind: "insertTable", runId: 2, rows: 2, cols: 2 }, { nodeIds: 12 }); cover("insertTable");
     const cellParaId = tableIds.find((_id, i) => i > 2) ?? tableIds[tableIds.length - 1];
     await step(pages, "tableOp", { kind: "tableOp", cellParagraphId: cellParaId, op: { kind: "insertRow", where: "below" } }, { nodeIds: 6 }); cover("tableOp");
-    await step(pages, "cellShading", { kind: "tableOp", cellParagraphId: cellParaId, op: { kind: "cellShading", fill: "FFFF00" } }); cover("cellShading");
-    await step(pages, "cellVAlign", { kind: "tableOp", cellParagraphId: cellParaId, op: { kind: "cellVAlign", v: "center" } }); cover("cellVAlign");
+    await step(pages, "cellShading", { kind: "tableOp", cellParagraphId: cellParaId, op: { kind: "cellShading", fill: "FFFF00" } });
+    await step(pages, "cellVAlign", { kind: "tableOp", cellParagraphId: cellParaId, op: { kind: "cellVAlign", v: "center" } });
+    await step(pages, "resizeTableColumn", { kind: "resizeTableColumn", cellParagraphId: cellParaId, boundary: 1, deltaPx: 8 }); cover("resizeTableColumn");
+    await step(pages, "resizeTableRow", { kind: "resizeTableRow", cellParagraphId: cellParaId, rowIdx: 0, heightPx: 32 }); cover("resizeTableRow");
+    await step(pages, "moveTable", { kind: "moveTable", cellParagraphId: cellParaId, xPx: 24, yPx: 36, preservePageStart: false, pageDelta: 0 }); cover("moveTable");
 
     // --- comments ---
     await step(pages, "commentRun", { kind: "commentRun", runId: 2, text: "note", author: "A", date: "2026-07-23T00:00:00Z", paraId: "c1" }, { nodeIds: 2 }); cover("commentRun");
@@ -209,10 +197,12 @@ test("all 62 intent kinds converge byte-identically across 3 browser clients", a
     await step(pages, "setDrawingLineStyle", { kind: "setDrawingLineStyle", runId: shapeRun, color: "000000", widthPx: 2, dash: "dashed" }); cover("setDrawingLineStyle");
     await step(pages, "setDrawingOrder", { kind: "setDrawingOrder", runId: shapeRun, order: "front" }); cover("setDrawingOrder");
     await step(pages, "setFloatingPagePosition", { kind: "setFloatingPagePosition", runId: shapeRun, xPx: 10, yPx: 10 }); cover("setFloatingPagePosition");
+    await step(pages, "resizeDrawing", { kind: "resizeDrawing", runId: shapeRun, widthPx: 180, heightPx: 90 }); cover("resizeDrawing");
 
     // --- wordart ---
     const waIds = await step(pages, "insertWordArt", { kind: "insertWordArt", runId: 2, text: "WA", preset: "plain" }, { nodeIds: 3 }); cover("insertWordArt");
     await step(pages, "setDrawingWordArtText", { kind: "setDrawingWordArtText", runId: waIds[0], text: "WA2" }); cover("setDrawingWordArtText");
+    await step(pages, "setDrawingWordArtStyle", { kind: "setDrawingWordArtStyle", runId: waIds[0], color: "AABBCC", opacity: 0.25 }); cover("setDrawingWordArtStyle");
 
     // --- chart + data ---
     const chartIds = await step(pages, "insertChart", { kind: "insertChart", runId: 2, chart: { type: "column", categories: ["a", "b"], series: [{ name: "s", values: [1, 2] }] } }, { nodeIds: 3 }); cover("insertChart");
@@ -248,6 +238,10 @@ test("all 62 intent kinds converge byte-identically across 3 browser clients", a
     await step(pages, "rejectRevision", { kind: "rejectRevision", index: 0 }); cover("rejectRevision");
     await step(pages, "suggestRevision-3", { kind: "suggestRevision", ranges: [{ blockId: 1, runId: 2, start: 0, end: 1 }], suggest: { author: "A", date: "2026-07-23T00:03:00Z" } });
     await step(pages, "acceptAllRevisions", { kind: "acceptAllRevisions" }); cover("acceptAllRevisions");
+    await step(pages, "suggestRevision-4", { kind: "suggestRevision", ranges: [{ blockId: 1, runId: 2, start: 0, end: 1 }], suggest: { author: "A", date: "2026-07-23T00:04:00Z" } });
+    await step(pages, "rejectAllRevisions", { kind: "rejectAllRevisions" }); cover("rejectAllRevisions");
+
+    await step(pages, "removeDrawing", { kind: "removeDrawing", runId: shapeRun }); cover("removeDrawing");
 
     // --- delete (last: removes content) ---
     await step(pages, "deleteText", { kind: "deleteText", blockId: 1, runId: 2, start: 0, end: 1 }); cover("deleteText");

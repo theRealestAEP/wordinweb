@@ -377,8 +377,11 @@ export interface ShapeLine {
   color: string;
   /** Stroke weight px. */
   weight: number;
+  style?: "single" | "dotted" | "dashed";
   hRel: AnchorRel;
   vRel: AnchorRel;
+  /** Source VML v:line for selection and save-back editing. */
+  src?: XmlElement;
 }
 
 export interface ShapeTextbox {
@@ -448,6 +451,10 @@ export interface ShapeTextbox {
   textboxStory?: boolean;
   /** DrawingML WordArt, including the identity textNoShape preset. */
   wordArt?: boolean;
+  /** WordArt glyph fill from w14:textFill or the fallback run color. */
+  wordArtFill?: string;
+  /** WordArt glyph alpha, 0..1. */
+  wordArtOpacity?: number;
   /** bodyPr a:prstTxWarp preset name (textArchUp, textWave1, textChevron,
    * textCirclePour, …): the shape's text is bent onto the preset's envelope
    * rather than flowed as ordinary lines. "textNoShape" (no warp) is dropped. */

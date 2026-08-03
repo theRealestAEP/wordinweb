@@ -92,6 +92,10 @@ function smartArtError(a: { layout: unknown; items: unknown }, who: string): str
 /** Returns a rejection reason, or null if the intent is well-formed. */
 export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_INTENT_LIMITS): string | null {
   const nonNegInt = (n: number) => Number.isInteger(n) && n >= 0;
+  if ("objectIndex" in intent && intent.objectIndex !== undefined &&
+      (!Number.isInteger(intent.objectIndex) || intent.objectIndex < 0 || intent.objectIndex > 10000)) {
+    return `${intent.kind}: bad objectIndex`;
+  }
   switch (intent.kind) {
     case "insertText":
       if (typeof intent.text !== "string") return "insertText: text not a string";
@@ -250,7 +254,12 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "setDrawingWordArtText":
       if (typeof intent.text !== "string" || intent.text.length === 0 || intent.text.length > 500) return "setDrawingWordArtText: bad text";
       return null;
+    case "setDrawingWordArtStyle":
+      if (!/^[0-9a-fA-F]{6}$/.test(intent.color)) return "setDrawingWordArtStyle: bad color";
+      if (typeof intent.opacity !== "number" || !Number.isFinite(intent.opacity) || intent.opacity < 0 || intent.opacity > 1) return "setDrawingWordArtStyle: bad opacity";
+      return null;
     case "setDrawingLineStyle":
+      if (intent.color === null) return null;
       if (!/^[0-9a-fA-F]{6}$/.test(intent.color)) return "setDrawingLineStyle: bad color";
       if (typeof intent.widthPx !== "number" || !Number.isFinite(intent.widthPx) || intent.widthPx <= 0 || intent.widthPx > 100) return "setDrawingLineStyle: bad width";
       if (!["solid", "dashed", "dotted"].includes(intent.dash)) return "setDrawingLineStyle: bad dash";
@@ -419,6 +428,10 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
         !Number.isFinite(op.yPx)
       ) return "tableOp: bad text wrapping";
       return null;
+    }
+    default: {
+      const exhaustive: never = intent;
+      return exhaustive;
     }
   }
 }

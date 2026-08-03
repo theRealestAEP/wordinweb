@@ -46,6 +46,16 @@ export interface ConnectionCallbacks {
   onEpochChange?: (storedGenesisId: string, currentGenesisId: string) => void;
   /** The session roster changed (join/leave/rename) — full snapshot. */
   onRoster?: (roster: RosterEntry[]) => void;
+  onAgentInviteRegistered?: (invite: { inviteId: string; expiresAt: number }) => void;
+  onAgentInviteRefused?: (invite: { inviteId: string; reason: string }) => void;
+  onAgentConnected?: (agent: { inviteId: string; agentClientId: string; profile: ParticipantProfile }) => void;
+  onAgentChat?: (message: {
+    agentClientId: string;
+    messageId: string;
+    sender: "inviter" | "agent";
+    iv: string;
+    ciphertext: string;
+  }) => void;
   /**
    * The connection detected that the local OPTIMISTIC replica drifted from
    * the canonical document at quiescence and rebuilt it in place (encrypted
@@ -259,7 +269,7 @@ export class CollabConnection {
    * (the doc-12 §7 "use here instead" path for a second same-profile tab);
    * without it, a duplicate join is refused `already-open`.
    */
-  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string; ownerToken?: string }): void {
+  join(docId: string, token?: string, opts?: { takeover?: boolean; profile?: ParticipantProfile; codeProof?: string; ownerToken?: string; agentInvite?: { inviteId: string; token: string } }): void {
     this.docId = docId;
     this.transport.send({
       t: "hello",
@@ -272,7 +282,20 @@ export class CollabConnection {
       profile: opts?.profile,
       codeProof: opts?.codeProof,
       ownerToken: opts?.ownerToken,
+      agentInvite: opts?.agentInvite,
     });
+  }
+
+  registerAgentInvite(inviteId: string, token: string, expiresAt: number): void {
+    this.transport.send({ t: "agent-invite", inviteId, token, expiresAt });
+  }
+
+  revokeAgentInvite(inviteId: string): void {
+    this.transport.send({ t: "agent-invite-revoke", inviteId });
+  }
+
+  sendAgentChat(agentClientId: string, messageId: string, iv: string, ciphertext: string): void {
+    this.transport.send({ t: "agent-chat", agentClientId, messageId, iv, ciphertext });
   }
 
   /** Owner admin op (doc 14 §2.5): honored only if this connection proved
@@ -640,6 +663,22 @@ export class CollabConnection {
       case "roster": {
         this.roster = msg.roster;
         this.cb.onRoster?.(msg.roster);
+        return;
+      }
+      case "agent-invite-registered": {
+        this.cb.onAgentInviteRegistered?.({ inviteId: msg.inviteId, expiresAt: msg.expiresAt });
+        return;
+      }
+      case "agent-invite-refused": {
+        this.cb.onAgentInviteRefused?.({ inviteId: msg.inviteId, reason: msg.reason });
+        return;
+      }
+      case "agent-connected": {
+        this.cb.onAgentConnected?.(msg);
+        return;
+      }
+      case "agent-chat": {
+        this.cb.onAgentChat?.(msg);
         return;
       }
       case "session-warning": {

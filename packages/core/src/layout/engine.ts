@@ -5662,19 +5662,36 @@ class Engine {
       if (shape.type === "line") {
         const ox = originX(shape.hRel);
         const oy = originY(shape.vRel);
+        const x1 = ox + shape.x1 - fx;
+        const y1 = oy + shape.y1 - fy;
+        const x2 = ox + shape.x2 - fx;
+        const y2 = oy + shape.y2 - fy;
         page.items.push({
           kind: "edge",
-          x1: ox + shape.x1 - fx,
-          y1: oy + shape.y1 - fy,
-          x2: ox + shape.x2 - fx,
-          y2: oy + shape.y2 - fy,
+          x1,
+          y1,
+          x2,
+          y2,
           border: {
-            style: "single",
+            style: shape.style ?? "single",
             width: Math.max(shape.weight, 0.75),
             color: shape.color,
             space: 0,
           },
+          z: shape.z,
         });
+        if (shape.src) {
+          page.items.push({
+            kind: "drawingHit",
+            x: Math.min(x1, x2),
+            y: Math.min(y1, y2),
+            width: Math.abs(x2 - x1),
+            height: Math.abs(y2 - y1),
+            src: shape.src,
+            anchored: true,
+            z: shape.z,
+          });
+        }
       } else {
         // Word's built-in header/footer designs size and place their shapes
         // with percent-of-page/margin geometry plus alignment keywords, and
@@ -5881,7 +5898,8 @@ class Engine {
               fontSize: f.size,
               bold: f.bold,
               italic: f.italic,
-              fill: col && col !== "auto" ? col : "#000000",
+              fill: shape.wordArtFill ?? (col && col !== "auto" ? col : "#000000"),
+              ...(shape.wordArtOpacity !== undefined ? { opacity: shape.wordArtOpacity } : {}),
               warp: shape.warp,
               ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
               ...(behind ? { behind: true } : {}),
@@ -5926,6 +5944,7 @@ class Engine {
         }
         for (const it of inner.items) {
           if (it.kind === "text") {
+            if (shape.wordArtOpacity !== undefined) it.opacity = shape.wordArtOpacity;
             if (independentStory && shape.srcDrawing) it.textboxStory = shape.srcDrawing;
             // Chained boxes hide whole lines outside their own [skipTopY,
             // content-bottom] window (overflow flows to the next box); a plain

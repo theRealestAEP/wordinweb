@@ -18,6 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/checkout@v4
+        with:
+          repository: theRealestAEP/wordinweb-parity
+          path: wordinweb-parity
+
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
@@ -26,5 +31,6 @@ jobs:
       - run: npm ci
       - run: npm install --no-save --no-audit --no-fund @rollup/rollup-linux-x64-gnu@4.62.2
       - run: npm run verify
+      - run: npm run test:agent-fixtures
       - run: npx playwright install --with-deps chromium
       - run: npm run e2e:ci

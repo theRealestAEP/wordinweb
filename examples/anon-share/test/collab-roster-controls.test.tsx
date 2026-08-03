@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { App } from "../src/app";
 import { CollabHub, blankDocxBytes, type Connection, type ServerMessage } from "@wordinweb/server";
 import { CollabConnection, createWebSocketTransport, InMemoryBundleStore } from "@wordinweb/collab/client";
+import { decodeAgentInvite } from "../src/agent-invite";
 
 let mounted: { root: Root; host: HTMLElement }[] = [];
 const previousSocket = globalThis.WebSocket;
@@ -72,7 +73,72 @@ function click(element: Element) {
   act(() => { element.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
 }
 
+function input(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(element.constructor.prototype, "value")?.set;
+    setter?.call(element, value);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 describe("collaborator controls", () => {
+  it("creates an AI link, marks the joined editor as AI, and shows chat only to the inviter", async () => {
+    const hub = new CollabHub(null);
+    const seeded = hub.seed("agent-room", blankDocxBytes());
+    if (!seeded.ok) throw new Error("seed failed");
+    const sockets: { close: () => void }[] = [];
+    const Socket = socketClass(hub, sockets);
+    (globalThis as { WebSocket: unknown }).WebSocket = Socket;
+    let copied = "";
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (value: string) => { copied = value; } },
+    });
+    const mount = async (clientId: string, name: string) => {
+      const host = document.createElement("div");
+      document.body.appendChild(host);
+      const root = createRoot(host);
+      await act(async () => {
+        root.render(createElement(App, {
+          url: "ws://loopback/collab",
+          httpBase: "http://loopback",
+          docId: "agent-room",
+          clientId,
+          name,
+          store: new InMemoryBundleStore(),
+        }));
+      });
+      mounted.push({ root, host });
+      return host;
+    };
+    const inviter = await mount("inviter", "Inviter");
+    const watcher = await mount("watcher", "Watcher");
+    await until(() => !!inviter.querySelector('[data-testid="invite-ai"]'), "invite button appears");
+    click(inviter.querySelector('[data-testid="invite-ai"]')!);
+    input(inviter.querySelector('[data-testid="agent-name"]')!, "Review agent");
+    input(inviter.querySelector('[data-testid="agent-instructions"]')!, "Review the current document.");
+    await act(async () => {
+      inviter.querySelector('[data-testid="copy-agent-invite"]')!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    await until(() => copied.includes("#invite="), "AI link is copied");
+    const payload = decodeAgentInvite(copied);
+
+    const agent = new CollabConnection(
+      createWebSocketTransport(new Socket("ws://agent") as never),
+      "agent-client",
+    );
+    agent.join("agent-room", undefined, {
+      profile: { name: payload.agent.name, color: "" },
+      agentInvite: { inviteId: payload.invite.inviteId, token: payload.invite.token },
+    });
+    await until(() => inviter.textContent?.includes("AI · Review agent") ?? false, "AI roster badge appears");
+    await until(() => !!inviter.querySelector('[data-testid="agent-chat-panel"]'), "inviter chat appears");
+    expect(watcher.textContent).toContain("AI · Review agent");
+    expect(watcher.querySelector('[data-testid="agent-chat-panel"]')).toBeNull();
+  });
+
   it("toggles view-only, explains both actions, and removes inactive participants", async () => {
     const hub = new CollabHub(null);
     const seeded = hub.seed("roster-controls", blankDocxBytes());

@@ -5,6 +5,7 @@ const EMU_PER_PX = 9525;
 const NS_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
 const NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const NS_WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
+const NS_W14 = "http://schemas.microsoft.com/office/word/2010/wordml";
 
 export type ShapePreset = "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox";
 export type WordArtPreset = "plain" | "archUp" | "archDown" | "wave" | "chevron";
@@ -31,6 +32,16 @@ function descendant(node: XmlElement, name: string): XmlElement | undefined {
     if (found) return found;
   }
   return undefined;
+}
+
+function vmlLengthPx(raw: string | undefined): number {
+  if (!raw) return 0;
+  const match = /^(-?[\d.]+)\s*(pt|in|px)?$/.exec(raw.trim());
+  if (!match) return 0;
+  const value = parseFloat(match[1]);
+  if (match[2] === "pt") return value * 4 / 3;
+  if (match[2] === "in") return value * 96;
+  return value;
 }
 
 /** Insert a floating DrawingML shape anchored to the caret paragraph. */
@@ -221,20 +232,30 @@ export function insertWordArtAt(
 }
 
 export function isDrawingWordArt(drawing: XmlElement): boolean {
-  return (descendant(drawing, "docPr")?.attrs.name ?? "").startsWith("WordArt ");
+  return (descendant(drawing, "docPr")?.attrs.name ?? "").startsWith("WordArt ") ||
+    (["shape", "rect"].includes(localName(drawing.name)) && Boolean(descendant(drawing, "textpath")));
 }
 
 export function isDrawingLine(drawing: XmlElement): boolean {
+  if (localName(drawing.name) === "line") return true;
   const preset = descendant(drawing, "prstGeom")?.attrs.prst ?? "";
   return preset === "line" || preset.startsWith("straightConnector");
 }
 
 export function drawingWordArtText(drawing: XmlElement): string {
-  return isDrawingWordArt(drawing) ? descendant(drawing, "t")?.text ?? "" : "";
+  if (!isDrawingWordArt(drawing)) return "";
+  return descendant(drawing, "textpath")?.attrs.string ?? descendant(drawing, "t")?.text ?? "";
 }
 
 export function setDrawingWordArtText(doc: DocxDocument, drawing: XmlElement, text: string): boolean {
-  const textElement = isDrawingWordArt(drawing) ? descendant(drawing, "t") : undefined;
+  if (!isDrawingWordArt(drawing)) return false;
+  const textPath = descendant(drawing, "textpath");
+  if (textPath) {
+    textPath.attrs.string = text;
+    doc.refresh();
+    return true;
+  }
+  const textElement = descendant(drawing, "t");
   if (!textElement) return false;
   textElement.text = text;
   textElement.attrs["xml:space"] = "preserve";
@@ -242,11 +263,76 @@ export function setDrawingWordArtText(doc: DocxDocument, drawing: XmlElement, te
   return true;
 }
 
+/** Set the visible glyph fill and alpha of DrawingML or VML WordArt. */
+export function setDrawingWordArtStyle(
+  doc: DocxDocument,
+  drawing: XmlElement,
+  color: string,
+  opacity = 1,
+): boolean {
+  if (!isDrawingWordArt(drawing)) return false;
+  const hex = color.replace(/^#/, "").toUpperCase();
+  const alpha = Math.round(Math.max(0, Math.min(1, opacity)) * 100000);
+  const textPath = descendant(drawing, "textpath");
+  if (textPath) {
+    drawing.attrs.filled = "t";
+    drawing.attrs.fillcolor = `#${hex}`;
+    let fill = descendant(drawing, "fill");
+    if (!fill) {
+      fill = el(`${prefixOf(drawing)}fill`);
+      drawing.children.push(fill);
+    }
+    fill.attrs.opacity = String(Math.round(alpha / 100) / 1000);
+    doc.refresh();
+    return true;
+  }
+
+  const rPr = descendant(drawing, "rPr");
+  const spPr = descendant(drawing, "spPr");
+  if (!rPr || !spPr) return false;
+
+  let fallback = rPr.children.find((child) => localName(child.name) === "color");
+  if (!fallback) {
+    fallback = el(`${prefixOf(rPr)}color`);
+    rPr.children.push(fallback);
+  }
+  const fallbackHex = [0, 2, 4].map((offset) => {
+    const channel = parseInt(hex.slice(offset, offset + 2), 16);
+    return Math.round(255 + (channel - 255) * Math.max(0, Math.min(1, opacity))).toString(16).padStart(2, "0");
+  }).join("").toUpperCase();
+  // Word uses w14:alpha below. LibreOffice ignores that extension and paints
+  // the legacy w:color instead, so give the fallback the same visual weight
+  // on the white page that repeating watermarks normally sit over.
+  fallback.attrs[`${prefixOf(fallback)}val`] = fallbackHex;
+  rPr.children = rPr.children.filter((child) => localName(child.name) !== "textFill");
+  rPr.children.push(el("w14:textFill", { "xmlns:w14": NS_W14 }, [
+    el("w14:solidFill", {}, [
+      el("w14:srgbClr", { "w14:val": hex }, alpha < 100000 ? [el("w14:alpha", { "w14:val": String(alpha) })] : []),
+    ]),
+  ]));
+
+  spPr.children = spPr.children.filter((child) => !["solidFill", "noFill"].includes(localName(child.name)));
+  const lineIndex = spPr.children.findIndex((child) => localName(child.name) === "ln");
+  spPr.children.splice(lineIndex === -1 ? spPr.children.length : lineIndex, 0, el("a:noFill"));
+  doc.refresh();
+  return true;
+}
+
 export function drawingLineStyle(drawing: XmlElement): { color: string; width: number; dash: DrawingLineDash } | null {
   const spPr = descendant(drawing, "spPr");
-  if (!spPr) return null;
+  if (!spPr) {
+    if (!["line", "shape", "rect"].includes(localName(drawing.name))) return null;
+    if (drawing.attrs.stroked === "f" || drawing.attrs.stroked === "false") return null;
+    const dashValue = descendant(drawing, "stroke")?.attrs.dashstyle?.toLowerCase() ?? "solid";
+    return {
+      color: drawing.attrs.strokecolor ?? "#000000",
+      width: vmlLengthPx(drawing.attrs.strokeweight) || 0.75,
+      dash: dashValue.includes("dot") ? "dotted" : dashValue !== "solid" ? "dashed" : "solid",
+    };
+  }
   const line = descendant(drawing, "ln");
   if (!line) return { color: "#000000", width: 0.75, dash: "solid" };
+  if (line.children.some((child) => localName(child.name) === "noFill")) return null;
   const color = descendant(line, "srgbClr")?.attrs.val ?? "000000";
   const width = Math.max((parseInt(line.attrs.w ?? "0", 10) || 0) / EMU_PER_PX, 0.75);
   const dashValue = line.children.find((child) => localName(child.name) === "prstDash")?.attrs.val;
@@ -260,7 +346,11 @@ export function drawingLineStyle(drawing: XmlElement): { color: string; width: n
 
 export function drawingFillColor(drawing: XmlElement): string | null {
   const spPr = descendant(drawing, "spPr");
-  if (!spPr || spPr.children.some((child) => localName(child.name) === "noFill")) return null;
+  if (!spPr) {
+    if (!["shape", "rect"].includes(localName(drawing.name)) || drawing.attrs.filled === "f") return null;
+    return drawing.attrs.fillcolor ?? null;
+  }
+  if (spPr.children.some((child) => localName(child.name) === "noFill")) return null;
   const solidFill = spPr.children.find((child) => localName(child.name) === "solidFill");
   const color = solidFill ? descendant(solidFill, "srgbClr")?.attrs.val : undefined;
   return color ? `#${color.toUpperCase()}` : null;
@@ -268,7 +358,14 @@ export function drawingFillColor(drawing: XmlElement): string | null {
 
 export function setDrawingFill(doc: DocxDocument, drawing: XmlElement, color: string | null): boolean {
   const spPr = descendant(drawing, "spPr");
-  if (!spPr) return false;
+  if (!spPr) {
+    if (!["shape", "rect"].includes(localName(drawing.name))) return false;
+    drawing.attrs.filled = color ? "t" : "f";
+    if (color) drawing.attrs.fillcolor = color;
+    else delete drawing.attrs.fillcolor;
+    doc.refresh();
+    return true;
+  }
   spPr.children = spPr.children.filter((child) => {
     const name = localName(child.name);
     return name !== "solidFill" && name !== "noFill";
@@ -285,16 +382,45 @@ export function setDrawingFill(doc: DocxDocument, drawing: XmlElement, color: st
 export function setDrawingLineStyle(
   doc: DocxDocument,
   drawing: XmlElement,
-  color: string,
-  widthPx: number,
+  color: string | null,
+  widthPx = 0.75,
   dash: DrawingLineDash = "solid",
 ): boolean {
   const spPr = descendant(drawing, "spPr");
-  if (!spPr) return false;
+  if (!spPr) {
+    if (!["line", "shape", "rect"].includes(localName(drawing.name))) return false;
+    if (color === null) {
+      drawing.attrs.stroked = "f";
+      delete drawing.attrs.strokecolor;
+      delete drawing.attrs.strokeweight;
+      doc.refresh();
+      return true;
+    }
+    drawing.attrs.stroked = "t";
+    drawing.attrs.strokecolor = color;
+    drawing.attrs.strokeweight = `${Math.round(widthPx * 75) / 100}pt`;
+    let stroke = descendant(drawing, "stroke");
+    if (!stroke) {
+      stroke = el(`${prefixOf(drawing)}stroke`);
+      drawing.children.push(stroke);
+    }
+    stroke.attrs.dashstyle = dash === "dotted" ? "dot" : dash === "dashed" ? "dash" : "solid";
+    doc.refresh();
+    return true;
+  }
   let line = spPr.children.find((child) => localName(child.name) === "ln");
   if (!line) {
     line = el("a:ln");
     spPr.children.push(line);
+  }
+  if (color === null) {
+    line.children = line.children.filter((child) => {
+      const name = localName(child.name);
+      return name !== "solidFill" && name !== "noFill" && name !== "prstDash";
+    });
+    line.children.unshift(el("a:noFill"));
+    doc.refresh();
+    return true;
   }
   line.attrs.w = String(Math.max(1, Math.round(widthPx * EMU_PER_PX)));
   line.children = line.children.filter((child) => {

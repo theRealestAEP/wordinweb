@@ -108,6 +108,8 @@ export interface TextItem {
    * layers in-front shapes above the text layer). */
   front?: boolean;
   z?: number;
+  /** Paint-only alpha for decorative text such as DrawingML WordArt. */
+  opacity?: number;
   /** Right-to-left run: renderer sets direction:rtl so the browser shapes and
    * orders the (Arabic/Hebrew) glyphs within the span box. */
   rtl?: boolean;
@@ -295,6 +297,8 @@ export interface WarpTextItem {
   italic?: boolean;
   /** CSS text color. */
   fill: string;
+  /** WordArt glyph alpha, 0..1. */
+  opacity?: number;
   /** Preset name (textArchUp, textWave1, textChevron, textCirclePour, …). */
   warp: string;
   rotate?: { deg: number; ox: number; oy: number };

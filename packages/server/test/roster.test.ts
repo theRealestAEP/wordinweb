@@ -123,4 +123,67 @@ describe("CollabHub roster (doc 14 §2)", () => {
     await hub.handle(a, { t: "profile", profile: { name: "A2", color: "#ff0000" } });
     expect(await storage.readLog("d", 0)).toHaveLength(0);
   });
+
+  it("binds an invited AI to its inviter and keeps chat private", async () => {
+    const hub = new CollabHub(provider);
+    const inviter = new FakeConn("s1");
+    const watcher = new FakeConn("s2");
+    const agent = new FakeConn("s3");
+    await hub.handle(inviter, hello("d", "alice", { name: "Alice", color: "#ff0000" }));
+    await hub.handle(watcher, hello("d", "bob", { name: "Bob", color: "#00ff00" }));
+    await hub.handle(inviter, {
+      t: "agent-invite",
+      inviteId: "invite_1234567890",
+      token: "token_12345678901234567890123456789012",
+      expiresAt: Date.now() + 60_000,
+    });
+    await hub.handle(agent, {
+      ...hello("d", "agent-one", { name: "Drafting agent", color: "#0000ff" }),
+      agentInvite: {
+        inviteId: "invite_1234567890",
+        token: "token_12345678901234567890123456789012",
+      },
+    });
+
+    expect(rosterOf(watcher).find((entry) => entry.clientId === "agent-one")?.participantType).toBe("agent");
+    expect(inviter.received.some((message) => message.t === "agent-connected")).toBe(true);
+    expect(watcher.received.some((message) => message.t === "agent-connected")).toBe(false);
+    const secondAgent = new FakeConn("s4");
+    await hub.handle(secondAgent, {
+      ...hello("d", "agent-two", { name: "Other agent", color: "#0000ff" }),
+      agentInvite: {
+        inviteId: "invite_1234567890",
+        token: "token_12345678901234567890123456789012",
+      },
+    });
+    expect(secondAgent.received).toContainEqual({ t: "refused", reason: "agent-invite-invalid" });
+
+    inviter.received.length = 0;
+    watcher.received.length = 0;
+    agent.received.length = 0;
+    await hub.handle(watcher, {
+      t: "agent-chat",
+      agentClientId: "agent-one",
+      messageId: "message_1234",
+      iv: "iv_12345678",
+      ciphertext: "ciphertext_1234",
+    });
+    expect(inviter.received).toHaveLength(0);
+    expect(agent.received).toHaveLength(0);
+
+    await hub.handle(inviter, {
+      t: "agent-chat",
+      agentClientId: "agent-one",
+      messageId: "message_5678",
+      iv: "iv_12345678",
+      ciphertext: "ciphertext_5678",
+    });
+    expect(agent.received).toContainEqual(expect.objectContaining({
+      t: "agent-chat",
+      sender: "inviter",
+      agentClientId: "agent-one",
+    }));
+    expect(inviter.received).toContainEqual(expect.objectContaining({ t: "agent-chat", sender: "inviter" }));
+    expect(watcher.received).toHaveLength(0);
+  });
 });
