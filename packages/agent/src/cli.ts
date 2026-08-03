@@ -29,7 +29,10 @@ interface InvitePayload {
 
 type AgentMode = "suggest" | "edit";
 
+type WakeTarget = { provider: "codex" | "claude"; sessionId: string };
+
 const AGENT_MODE_CONTROL_PREFIX = "\u0000wordinweb-agent-mode:";
+const AGENT_PACKAGE_URL = "https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2";
 
 interface Command {
   id?: string | number;
@@ -118,6 +121,30 @@ function editRequestForMode(request: Record<string, unknown> | undefined, mode: 
 
 function randomId(prefix: string): string {
   return `${prefix}_${bytesToBase64Url(crypto.getRandomValues(new Uint8Array(16)))}`;
+}
+
+export function detectWakeTarget(env: NodeJS.ProcessEnv = process.env): WakeTarget | null {
+  const codexSessionId = env.CODEX_THREAD_ID?.trim();
+  if (codexSessionId && /^[A-Za-z0-9_-]{8,128}$/.test(codexSessionId)) {
+    return { provider: "codex", sessionId: codexSessionId };
+  }
+  const claudeSessionId = env.CLAUDE_CODE_SESSION_ID?.trim();
+  if (claudeSessionId && /^[A-Za-z0-9_-]{8,128}$/.test(claudeSessionId)) {
+    return { provider: "claude", sessionId: claudeSessionId };
+  }
+  return null;
+}
+
+export function agentWakePrompt(agentSessionId: string, text: string): string {
+  return [
+    "An authenticated private WordInWeb message resumed this agent task.",
+    `The inviter's message is ${JSON.stringify(text)}.`,
+    `The detached document bridge session is ${agentSessionId}. Do not run the connect command again.`,
+    `Run document commands with: npx -y --package='${AGENT_PACKAGE_URL}' wordinweb-agent session '${agentSessionId}' '<JSON command>'`,
+    "Start with sync. Inspect the relevant content before every edit. If an edit returns needs_sync, sync and inspect again.",
+    "Complete this task, then send the inviter a concise result with the chat command.",
+    "End this agent turn after the reply. Do not call wait. The detached bridge will resume this task for the next message.",
+  ].join("\n\n");
 }
 
 function write(value: unknown): void {
@@ -404,17 +431,49 @@ async function listen(server: ReturnType<typeof createServer>, path: string): Pr
 async function runDaemon(invitationUrl: string, sessionId: string): Promise<void> {
   const path = sessionSocketPath(sessionId);
   const input = new PassThrough();
+  const wakeTarget = detectWakeTarget();
+  const wakeQueue: string[] = [];
   const pending = new Map<string, PendingCommand>();
   let readyEvent: Record<string, unknown> | null = null;
   let fatalError: string | null = null;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
+  let wakeChild: ReturnType<typeof spawn> | null = null;
   let requestCounter = 0;
   let stopped = false;
+
+  const sendWakeFailure = (): void => {
+    input.write(`${JSON.stringify({ command: "chat", text: "I could not resume the agent task. Reopen the original Codex or Claude task and reconnect this AI." })}\n`);
+  };
+
+  const startNextWake = (): void => {
+    if (!wakeTarget || wakeChild || wakeQueue.length === 0 || stopped) return;
+    const prompt = agentWakePrompt(sessionId, wakeQueue.shift()!);
+    const childEnv = { ...process.env };
+    delete childEnv.CODEX_THREAD_ID;
+    delete childEnv.CLAUDE_CODE_SESSION_ID;
+    delete childEnv.CLAUDECODE;
+    wakeChild = wakeTarget.provider === "codex"
+      ? spawn("codex", ["exec", "resume", wakeTarget.sessionId, "-"], { env: childEnv, stdio: ["pipe", "ignore", "ignore"] })
+      : spawn("claude", ["-p", "--resume", wakeTarget.sessionId], { env: childEnv, stdio: ["pipe", "ignore", "ignore"] });
+    let finished = false;
+    const finish = (ok: boolean): void => {
+      if (finished) return;
+      finished = true;
+      wakeChild = null;
+      if (!ok && !stopped) sendWakeFailure();
+      startNextWake();
+    };
+    wakeChild.once("error", () => finish(false));
+    wakeChild.once("exit", (code) => finish(code === 0));
+    wakeChild.stdin?.on("error", () => undefined);
+    wakeChild.stdin?.end(prompt);
+  };
 
   const shutdown = (): void => {
     if (stopped) return;
     stopped = true;
     if (closeTimer) clearTimeout(closeTimer);
+    wakeChild?.kill();
     input.end();
     server.close();
     if (process.platform !== "win32") rmSync(path, { force: true });
@@ -426,6 +485,10 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
     if (message.event === "connection_closed" && !closeTimer) {
       closeTimer = setTimeout(shutdown, 60_000);
       closeTimer.unref();
+    }
+    if (message.event === "chat" && typeof message.text === "string" && wakeTarget) {
+      wakeQueue.push(message.text);
+      startNextWake();
     }
     if (typeof message.id !== "string") return;
     const command = pending.get(message.id);
@@ -506,8 +569,8 @@ function daemonRequest(sessionId: string, request: unknown, timeoutMs = 60_000):
 }
 
 async function startDaemon(invitationUrl: string): Promise<void> {
-  parseInvite(invitationUrl);
   const sessionId = randomId("session");
+  const wakeTarget = detectWakeTarget();
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "daemon", invitationUrl, sessionId], {
     detached: true,
     stdio: "ignore",
@@ -524,6 +587,9 @@ async function startDaemon(invitationUrl: string): Promise<void> {
           ...result.ready,
           sessionId,
           mode: "detached",
+          wake: wakeTarget
+            ? { state: "armed", provider: wakeTarget.provider }
+            : { state: "unavailable", reason: "This command did not run inside a Codex or Claude task" },
           next: `wordinweb-agent session '${sessionId}' '<JSON command>'`,
         });
         return;

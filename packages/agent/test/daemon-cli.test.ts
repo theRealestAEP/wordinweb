@@ -1,6 +1,10 @@
 import { execFile } from "node:child_process";
 import { webcrypto } from "node:crypto";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -28,13 +32,27 @@ function documentText(root: XmlElement): string {
   return text;
 }
 
-async function cliCommand(args: string[]): Promise<Record<string, unknown>> {
-  const result = await runFile(process.execPath, [cli, ...args], { timeout: 45_000 });
+async function cliCommand(args: string[], env: NodeJS.ProcessEnv = {}): Promise<Record<string, unknown>> {
+  const commandEnv = { ...process.env };
+  delete commandEnv.CODEX_THREAD_ID;
+  delete commandEnv.CLAUDE_CODE_SESSION_ID;
+  Object.assign(commandEnv, env);
+  const result = await runFile(process.execPath, [cli, ...args], { timeout: 45_000, env: commandEnv });
   return JSON.parse(result.stdout.trim()) as Record<string, unknown>;
 }
 
 describe("detached agent CLI bridge", () => {
   it("keeps the collaboration socket alive between short CLI commands", async () => {
+    const fakeBin = await mkdtemp(join(tmpdir(), "wordinweb-wake-"));
+    const wakeLog = join(fakeBin, "wake.json");
+    const fakeCodex = join(fakeBin, "codex");
+    await writeFile(fakeCodex, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+writeFileSync(process.env.WORDINWEB_WAKE_LOG, JSON.stringify({ args: process.argv.slice(2), prompt: Buffer.concat(chunks).toString() }));
+`);
+    await chmod(fakeCodex, 0o755);
     const hub = new CollabHub(blankProvider);
     let storedInvite = "";
     const httpServer = createServer((request, response) => {
@@ -100,9 +118,13 @@ describe("detached agent CLI bridge", () => {
     const invitationUrl = `http://127.0.0.1:${port}/agent-invite#i=link_1234567890123456&k=${inviteSecret.toString("base64url")}`;
     let sessionId = "";
     try {
-      const connected = await cliCommand(["connect", invitationUrl]);
+      const connected = await cliCommand(["connect", invitationUrl], {
+        CODEX_THREAD_ID: "thread_12345678",
+        PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
+        WORDINWEB_WAKE_LOG: wakeLog,
+      });
       sessionId = String(connected.sessionId);
-      expect(connected).toMatchObject({ event: "ready", mode: "detached" });
+      expect(connected).toMatchObject({ event: "ready", mode: "detached", wake: { state: "armed", provider: "codex" } });
       expect(sessionId).toMatch(/^session_/);
       await until(() => !!agentClientId, "agent joined");
 
@@ -125,6 +147,12 @@ describe("detached agent CLI bridge", () => {
         if ((waited.result as { event?: string } | undefined)?.event === "chat") break;
       }
       expect(waited).toMatchObject({ ok: true, result: { event: "chat", text: "Please make the edit." } });
+      await until(() => existsSync(wakeLog), "Codex session wakes");
+      const wake = JSON.parse(await readFile(wakeLog, "utf8")) as { args: string[]; prompt: string };
+      expect(wake.args).toEqual(["exec", "resume", "thread_12345678", "-"]);
+      expect(wake.prompt).toContain("Please make the edit.");
+      expect(wake.prompt).toContain(sessionId);
+      expect(wake.prompt).toContain("Do not call wait");
 
       const synced = await cliCommand(["session", sessionId, JSON.stringify({ command: "sync" })]);
       const revision = String((synced.result as { revision: string }).revision);
@@ -192,6 +220,7 @@ describe("detached agent CLI bridge", () => {
       humanSocket.close();
       wss.close();
       httpServer.close();
+      await rm(fakeBin, { recursive: true, force: true });
     }
   }, 20_000);
 });

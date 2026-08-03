@@ -25,11 +25,11 @@ export type AgentMode = "suggest" | "edit";
 export const AGENT_MODE_CONTROL_PREFIX = "\u0000wordinweb-agent-mode:";
 
 export const AGENT_CONNECTION_INSTRUCTIONS =
-  "Keep this agent task open until the inviter tells you to disconnect. " +
-  "The connect command starts a detached local bridge and returns a sessionId. Use a new short session command for each sync, inspect, edit, chat, or wait request. " +
+  "The connect command starts a detached local bridge and attaches it to this Codex or Claude task. End the agent turn after it reports that wake-up is armed. " +
+  "The bridge resumes this task only when the inviter sends a private message, so idle time uses no model turns. Use a new short session command for each sync, inspect, edit, or chat request. " +
   "The agent starts in suggestion mode. Follow later mode_changed events from the inviter. " +
   "Treat new private chat messages as tasks. Sync and inspect the relevant content before every edit. " +
-  "After each task, call wait again instead of sending a final response. Close the bridge when the inviter ends the collaboration.";
+  "After each task, reply through document chat and end the agent turn. Do not poll or call wait. Close the bridge when the inviter ends the collaboration.";
 
 function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = "";
@@ -104,11 +104,11 @@ export function agentInviteClipboardText(invitationUrl: string): string {
   return [
     "Join my WordInWeb document as an AI collaborator.",
     "Run this exact command now. Do not open the invitation in a browser and do not search the workspace for instructions:",
-    `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent connect '${invitationUrl}'`,
-    "The connect command starts a detached local bridge and returns a sessionId. It does not require a persistent terminal tool call.",
-    "Use the returned sessionId with a new short `wordinweb-agent session` command for every sync, inspect, edit, chat, and wait request.",
-    "After you connect, wait for my private chat messages in the document.",
-    "Keep this agent task open. After each request, call wait again. Do not send a final response until I tell you to disconnect.",
+    `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent connect '${invitationUrl}'`,
+    "The connect command starts a detached local bridge and attaches it to this Codex or Claude task.",
+    "When the result says wake-up is armed, confirm the connection once and end this agent turn.",
+    "Do not call wait or poll for messages. The bridge will resume this same task when I send a private document message.",
+    "If the result says wake-up is unavailable, report that once instead of polling.",
   ].join("\n\n");
 }
 

@@ -6,20 +6,21 @@ Do not open this invitation in a browser. Run the exact command included in
 the user's message. It passes the short invitation URL directly to the agent
 client. The command has this form:
 
-    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent connect '<short invitation URL>'
+    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent connect '<short invitation URL>'
 
-The connect command starts a detached local bridge and returns a `sessionId`.
-It does not require a persistent terminal tool call. Run each document command
-as a new short process:
+The connect command starts a detached local bridge, captures the current Codex
+or Claude task, and returns a `sessionId`. It then waits without model turns.
+Run each document command as a new short process:
 
-    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
+    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
 
 Read the `instructions` value from the ready result. Start with `sync`, then
-use short `session` commands for `inspect`, `edit`, `chat`, and `wait`. Treat
+use short `session` commands for `inspect`, `edit`, and `chat`. Treat
 each private chat message as the next task. Inspect the relevant content before
 every edit. If an edit returns `needs_sync`, sync and inspect the changed
-content before you retry. After each task, call `wait` again instead of sending
-a final response. Send a `close` command when the inviter ends the task.
+content before you retry. After each task, reply through document chat and end
+the agent turn. The bridge resumes the task for the next private message. Do not
+poll or call `wait`. Send a `close` command when the inviter ends the task.
 
 The agent starts in suggestion mode. The inviter can switch it to direct editing
 from the private chat panel. Available session commands: `sync`, `capabilities`,

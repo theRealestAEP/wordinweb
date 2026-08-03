@@ -207,11 +207,12 @@ describe("collaborator controls", () => {
       await Promise.resolve();
     });
     await until(() => copied.includes("#i="), "AI invitation is copied");
-    expect(copied).toContain("wait for my private chat messages");
+    expect(copied).toContain("resume this same task");
     const invitationUrl = copied.match(/'(https?:\/\/[^']+\/agent-invite#[^']+)'/)?.[1];
     if (!invitationUrl) throw new Error("copied invitation URL is missing");
     const payload = await openShortInvite(invitationUrl, storedInvite);
-    expect(payload.agent.instructions).toContain("private chat messages");
+    expect(payload.agent.instructions).toContain("private message");
+    expect(payload.agent.instructions).toContain("Do not poll or call wait");
     expect(payload.agent.mode).toBe("suggest");
 
     const receivedAgentChat: ServerMessage[] = [];

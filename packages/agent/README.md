@@ -27,18 +27,20 @@ An AI invitation link can bootstrap a live shell session without an MCP
 installation:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent connect '<short invitation URL>'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent connect '<short invitation URL>'
 ```
 
-The command starts a detached local bridge and returns a `sessionId`. Run each
-JSON command through a short process:
+The command starts a detached local bridge, captures the current Codex or
+Claude session, and returns a `sessionId`. The bridge waits without model turns.
+It resumes the agent session when the inviter sends a private message. Run each
+JSON document command through a short process:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-1' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
 ```
 
-The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, `wait`,
-and `close`. Every edit includes the inspected revision. A newer room revision
+The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, and
+`close`. `wait` remains available for manual clients. Every edit includes the inspected revision. A newer room revision
 returns `needs_sync` before the agent changes the document. The bridge places
 the agent's visible collaboration cursor after its latest edit.
 

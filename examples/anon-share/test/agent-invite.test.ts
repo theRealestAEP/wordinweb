@@ -44,7 +44,9 @@ describe("AI invitation helpers", () => {
     expect(copied).toContain(url);
     expect(copied).toContain("Run this exact command now");
     expect(copied).toContain("Do not open the invitation in a browser");
-    expect(copied).toContain("private chat messages");
+    expect(copied).toContain("resume this same task");
+    expect(copied).toContain("Do not call wait or poll");
+    expect(copied).not.toContain("Keep this agent task open");
   });
 
   it("stores an encrypted invite behind a short URL", async () => {
