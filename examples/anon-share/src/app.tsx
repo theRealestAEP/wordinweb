@@ -8,7 +8,9 @@ import { FileMenu, fmtSize, savedDocName } from "./file-menu";
 import { PerfHud } from "./perf/hud";
 import { perfMonitor, type DocStats } from "./perf/metrics";
 import {
+  AGENT_CONNECTION_INSTRUCTIONS,
   agentInviteUrl,
+  agentInviteClipboardText,
   decryptAgentChat,
   encryptAgentChat,
   randomAgentToken,
@@ -237,7 +239,6 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   const [codeDraft, setCodeDraft] = useState(initialShareCode ?? "");
   const [agentInviteOpen, setAgentInviteOpen] = useState(false);
   const [agentName, setAgentName] = useState("Document agent");
-  const [agentInstructions, setAgentInstructions] = useState("");
   const [agentInviteCopied, setAgentInviteCopied] = useState(false);
   const [createdAgentInviteId, setCreatedAgentInviteId] = useState<string | null>(null);
   const [ownedAgentInvites, setOwnedAgentInvites] = useState<OwnedAgentInvite[]>(() => loadOwnedAgentInvites(docId));
@@ -246,7 +247,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   const seenAgentChat = useRef(new Set<string>());
 
   const createAgentInvite = async () => {
-    if (!session?.ready || session.connection !== "live" || !agentInstructions.trim()) return;
+    if (!session?.ready || session.connection !== "live") return;
     const inviteId = randomAgentToken("invite", 16);
     const inviteToken = randomAgentToken("token", 32);
     const chatKey = randomAgentToken("key", 32).slice(4);
@@ -255,13 +256,14 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
       version: 1,
       room: { wsUrl: url, httpBase, docId, docKey, shareCode },
       invite: { inviteId, token: inviteToken, chatKey, expiresAt },
-      agent: { name: agentName.trim() || "Document agent", instructions: agentInstructions.trim() },
+      agent: { name: agentName.trim() || "Document agent", instructions: AGENT_CONNECTION_INSTRUCTIONS },
     };
     session.registerAgentInvite(inviteId, inviteToken, expiresAt);
     const next = [...ownedAgentInvites, { inviteId, chatKey, agentName: payload.agent.name, expiresAt }];
     setOwnedAgentInvites(next);
     saveOwnedAgentInvites(docId, next);
-    await navigator.clipboard.writeText(agentInviteUrl(location.origin, payload));
+    const invitationUrl = agentInviteUrl(location.origin, payload);
+    await navigator.clipboard.writeText(agentInviteClipboardText(invitationUrl));
     setCreatedAgentInviteId(inviteId);
     setAgentInviteCopied(true);
   };
@@ -1403,19 +1405,11 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             <p style={{ color: "#8a4b08" }}>
               The AI link grants complete read and edit access to this document. Anyone who receives the unused link can use that access.
             </p>
+            <p>
+              Paste the copied invitation into an active Codex or Claude task. After it connects, send its work through the private chat panel.
+            </p>
             <label htmlFor="agent-name">Name shown in the room</label>
             <input id="agent-name" data-testid="agent-name" value={agentName} maxLength={40} onChange={(event) => setAgentName(event.target.value)} />
-            <label htmlFor="agent-instructions" style={{ marginTop: 12 }}>Room instructions</label>
-            <textarea
-              id="agent-instructions"
-              data-testid="agent-instructions"
-              value={agentInstructions}
-              maxLength={4000}
-              rows={6}
-              style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
-              placeholder="Describe what the AI should do in this document."
-              onChange={(event) => setAgentInstructions(event.target.value)}
-            />
             {session?.agentInviteError && <p className="error">The invitation failed: {session.agentInviteError.reason}</p>}
             {agentInviteCopied && <p role="status">The one-time AI link is copied. It expires in ten minutes.</p>}
             <div className="row">
@@ -1427,7 +1421,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
               <button className="ghost" onClick={() => setAgentInviteOpen(false)}>Close</button>
               <button
                 data-testid="copy-agent-invite"
-                disabled={!agentInstructions.trim() || agentInviteCopied}
+                disabled={agentInviteCopied}
                 onClick={() => void createAgentInvite()}
               >
                 {agentInviteCopied ? "Copied" : "Copy AI link"}

@@ -116,14 +116,19 @@ describe("collaborator controls", () => {
     await until(() => !!inviter.querySelector('[data-testid="invite-ai"]'), "invite button appears");
     click(inviter.querySelector('[data-testid="invite-ai"]')!);
     input(inviter.querySelector('[data-testid="agent-name"]')!, "Review agent");
-    input(inviter.querySelector('[data-testid="agent-instructions"]')!, "Review the current document.");
+    expect(inviter.querySelector('[data-testid="agent-instructions"]')).toBeNull();
+    expect((inviter.querySelector('[data-testid="copy-agent-invite"]') as HTMLButtonElement).disabled).toBe(false);
     await act(async () => {
       inviter.querySelector('[data-testid="copy-agent-invite"]')!
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
     });
-    await until(() => copied.includes("#invite="), "AI link is copied");
-    const payload = decodeAgentInvite(copied);
+    await until(() => copied.includes("#invite="), "AI invitation is copied");
+    expect(copied).toContain("wait for my private chat messages");
+    const invitationUrl = copied.split("\n").find((line) => line.includes("#invite="));
+    if (!invitationUrl) throw new Error("copied invitation URL is missing");
+    const payload = decodeAgentInvite(invitationUrl);
+    expect(payload.agent.instructions).toContain("private chat messages");
 
     const agent = new CollabConnection(
       createWebSocketTransport(new Socket("ws://agent") as never),

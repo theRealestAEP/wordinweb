@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentInviteClipboardText,
   agentInviteUrl,
   decodeAgentInvite,
   decryptAgentChat,
@@ -31,6 +32,15 @@ describe("AI invitation helpers", () => {
     expect(new URL(url).pathname).toBe("/agent-invite");
     expect(new URL(url).search).toBe("");
     expect(decodeAgentInvite(url)).toEqual(payload);
+  });
+
+  it("copies the invitation with connection and private-chat instructions", () => {
+    const url = "https://docs.example.test/agent-invite#invite=secret";
+    const copied = agentInviteClipboardText(url);
+
+    expect(copied).toContain(url);
+    expect(copied).toContain("follow its connection instructions");
+    expect(copied).toContain("private chat messages");
   });
 
   it("encrypts private chat for one invited agent", async () => {

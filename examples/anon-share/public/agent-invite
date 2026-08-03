@@ -6,10 +6,12 @@ Run this command with the complete URL from the user, including its fragment:
 
     npx -y --package=https://collab.word-in-web.com/wordinweb-agent.tgz wordinweb-agent connect '<complete invitation URL>'
 
-The command opens a live JSON-lines session. Read its `instructions` event,
-then send one JSON command per line. Start with `{"command":"sync"}`. Inspect
-the relevant content before every edit. If an edit returns `needs_sync`, sync
-and inspect the changed content before you retry.
+The command opens a live JSON-lines session. Keep that session open while you
+work with the user. Read its `instructions` event, then send one JSON command
+per line. Start with `{"command":"sync"}`, then wait for private chat messages
+from the inviter. Treat each chat message as the next task. Inspect the relevant
+content before every edit. If an edit returns `needs_sync`, sync and inspect the
+changed content before you retry.
 
 Available commands: `sync`, `capabilities`, `inspect`, `edit`, `chat`, `wait`,
 and `close`.

@@ -19,6 +19,10 @@ export interface AgentInvitePayload {
   };
 }
 
+export const AGENT_CONNECTION_INSTRUCTIONS =
+  "Connect to this document and stay available for private chat messages from the inviter. " +
+  "Treat each new chat message as the next task. Sync and inspect the relevant content before every edit.";
+
 function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -53,6 +57,15 @@ export function agentInviteUrl(origin: string, payload: AgentInvitePayload): str
   const url = new URL("/agent-invite", origin);
   url.hash = `invite=${encodeAgentInvite(payload)}`;
   return url.toString();
+}
+
+export function agentInviteClipboardText(invitationUrl: string): string {
+  return [
+    "Join my WordInWeb document as an AI collaborator.",
+    "Open this one-time invitation URL and follow its connection instructions:",
+    invitationUrl,
+    "After you connect, stay available and wait for my private chat messages in the document.",
+  ].join("\n\n");
 }
 
 async function chatKey(value: string): Promise<CryptoKey> {
