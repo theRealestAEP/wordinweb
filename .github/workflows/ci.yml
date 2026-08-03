@@ -32,5 +32,7 @@ jobs:
       - run: npm install --no-save --no-audit --no-fund @rollup/rollup-linux-x64-gnu@4.62.2
       - run: npm run verify
       - run: npm run test:agent-fixtures
+        env:
+          WORDINWEB_FIXTURES: ${{ github.workspace }}/wordinweb-parity
       - run: npx playwright install --with-deps chromium
       - run: npm run e2e:ci
