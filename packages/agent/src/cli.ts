@@ -1,7 +1,11 @@
 import { webcrypto } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, realpathSync, rmSync } from "node:fs";
+import { createConnection, createServer, type Socket } from "node:net";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
+import { PassThrough } from "node:stream";
 import WebSocket from "ws";
 import {
   CollabConnection,
@@ -59,6 +63,15 @@ function write(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+type Emit = (value: unknown) => void;
+
+function sessionSocketPath(sessionId: string): string {
+  if (!/^session_[A-Za-z0-9_-]{16,128}$/.test(sessionId)) throw new Error("The agent session ID is invalid");
+  return process.platform === "win32"
+    ? `\\\\.\\pipe\\wordinweb-agent-${sessionId}`
+    : join("/tmp", `wordinweb-agent-${sessionId}.sock`);
+}
+
 async function importChatKey(value: string): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", base64UrlToBytes(value) as BufferSource, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
@@ -92,7 +105,11 @@ async function decryptChat(
   return new TextDecoder().decode(plaintext);
 }
 
-export async function connectAgent(invitationUrl: string): Promise<void> {
+export async function connectAgent(
+  invitationUrl: string,
+  inputStream: NodeJS.ReadableStream = process.stdin,
+  emit: Emit = write,
+): Promise<void> {
   const payload = parseInvite(invitationUrl);
   const clientId = randomId("agent");
   const socket = new WebSocket(payload.room.wsUrl);
@@ -111,7 +128,7 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
     const waiter = waiters.shift();
     if (waiter) waiter(event);
     else events.push(event);
-    write(event);
+    emit(event);
   };
   const heartbeat = setInterval(() => {
     if (socket.readyState === WebSocket.OPEN) socket.ping();
@@ -196,7 +213,7 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
     getConnectionState: () => connectionState.current,
   }, { provenance: { author: profile.name } });
 
-  write({
+  emit({
     event: "ready",
     clientId,
     revision: document.revision,
@@ -221,9 +238,9 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
   };
 
   const respond = (id: Command["id"], result?: unknown, error?: unknown): void => {
-    write(error === undefined ? { id, ok: true, result } : { id, ok: false, error: String(error) });
+    emit(error === undefined ? { id, ok: true, result } : { id, ok: false, error: String(error) });
   };
-  const input = createInterface({ input: process.stdin, terminal: false });
+  const input = createInterface({ input: inputStream, terminal: false });
   for await (const line of input) {
     if (!line.trim()) continue;
     let command: Command;
@@ -286,14 +303,181 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
   socket.close();
 }
 
+interface PendingCommand {
+  socket: Socket;
+  originalId?: string | number;
+}
+
+function sendSocketValue(socket: Socket, value: unknown): void {
+  socket.end(`${JSON.stringify(value)}\n`);
+}
+
+async function listen(server: ReturnType<typeof createServer>, path: string): Promise<void> {
+  if (process.platform !== "win32") rmSync(path, { force: true });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path, () => {
+      server.off("error", reject);
+      if (process.platform !== "win32") chmodSync(path, 0o600);
+      resolve();
+    });
+  });
+}
+
+async function runDaemon(invitationUrl: string, sessionId: string): Promise<void> {
+  const path = sessionSocketPath(sessionId);
+  const input = new PassThrough();
+  const pending = new Map<string, PendingCommand>();
+  let readyEvent: Record<string, unknown> | null = null;
+  let fatalError: string | null = null;
+  let closeTimer: ReturnType<typeof setTimeout> | null = null;
+  let requestCounter = 0;
+  let stopped = false;
+
+  const shutdown = (): void => {
+    if (stopped) return;
+    stopped = true;
+    if (closeTimer) clearTimeout(closeTimer);
+    input.end();
+    server.close();
+    if (process.platform !== "win32") rmSync(path, { force: true });
+  };
+
+  const emit: Emit = (value) => {
+    const message = value as Record<string, unknown>;
+    if (message.event === "ready") readyEvent = message;
+    if (message.event === "connection_closed" && !closeTimer) {
+      closeTimer = setTimeout(shutdown, 60_000);
+      closeTimer.unref();
+    }
+    if (typeof message.id !== "string") return;
+    const command = pending.get(message.id);
+    if (!command) return;
+    pending.delete(message.id);
+    const response = { ...message };
+    if (command.originalId === undefined) delete response.id;
+    else response.id = command.originalId;
+    sendSocketValue(command.socket, response);
+  };
+
+  const server = createServer((socket) => {
+    socket.setEncoding("utf8");
+    let buffer = "";
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      socket.removeAllListeners("data");
+      try {
+        const message = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
+        if (message.daemon === "status") {
+          if (fatalError) sendSocketValue(socket, { ok: false, error: fatalError });
+          else if (readyEvent) sendSocketValue(socket, { ok: true, result: { state: "ready", ready: readyEvent } });
+          else sendSocketValue(socket, { ok: true, result: { state: "starting" } });
+          return;
+        }
+        if (!readyEvent) {
+          sendSocketValue(socket, { ok: false, error: fatalError ?? "The agent bridge is still starting" });
+          return;
+        }
+        const id = `request_${++requestCounter}`;
+        pending.set(id, { socket, originalId: message.id as string | number | undefined });
+        input.write(`${JSON.stringify({ ...message, id })}\n`);
+      } catch (error) {
+        sendSocketValue(socket, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      }
+    });
+  });
+
+  await listen(server, path);
+  try {
+    await connectAgent(invitationUrl, input, emit);
+  } catch (error) {
+    fatalError = error instanceof Error ? error.message : String(error);
+    for (const command of pending.values()) sendSocketValue(command.socket, { ok: false, error: fatalError });
+    pending.clear();
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+  } finally {
+    shutdown();
+  }
+}
+
+function daemonRequest(sessionId: string, request: unknown, timeoutMs = 60_000): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(sessionSocketPath(sessionId));
+    let buffer = "";
+    const fail = (error: Error) => {
+      socket.destroy();
+      reject(error);
+    };
+    socket.setEncoding("utf8");
+    socket.setTimeout(timeoutMs, () => fail(new Error("The agent bridge command timed out")));
+    socket.once("error", fail);
+    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      socket.destroy();
+      try {
+        resolve(JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
+async function startDaemon(invitationUrl: string): Promise<void> {
+  parseInvite(invitationUrl);
+  const sessionId = randomId("session");
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "daemon", invitationUrl, sessionId], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  const deadline = Date.now() + 35_000;
+  while (Date.now() < deadline) {
+    try {
+      const status = await daemonRequest(sessionId, { daemon: "status" }, 2_000);
+      if (!status.ok) throw new Error(String(status.error));
+      const result = status.result as { state?: string; ready?: Record<string, unknown> } | undefined;
+      if (result?.state === "ready" && result.ready) {
+        write({
+          ...result.ready,
+          sessionId,
+          mode: "detached",
+          next: `wordinweb-agent session '${sessionId}' '<JSON command>'`,
+        });
+        return;
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ECONNREFUSED") throw error;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("The detached agent bridge did not become ready within 35 seconds");
+}
+
 async function main(): Promise<void> {
-  const [command, invitationUrl] = process.argv.slice(2);
-  if (command !== "connect" || !invitationUrl) {
-    process.stderr.write("Usage: wordinweb-agent connect '<AI invitation URL>'\n");
-    process.exitCode = 1;
+  const [command, first, second] = process.argv.slice(2);
+  if (command === "connect" && first) return startDaemon(first);
+  if (command === "session" && first && second) {
+    const request = JSON.parse(second) as Command;
+    const timeoutMs = request.command === "wait"
+      ? Math.min(Math.max(request.timeoutMs ?? 30_000, 1), 55_000) + 5_000
+      : 60_000;
+    write(await daemonRequest(first, request, timeoutMs));
     return;
   }
-  await connectAgent(invitationUrl);
+  if (command === "daemon" && first && second) return runDaemon(first, second);
+  process.stderr.write(
+    "Usage:\n" +
+    "  wordinweb-agent connect '<AI invitation URL>'\n" +
+    "  wordinweb-agent session '<session ID>' '<JSON command>'\n",
+  );
+  process.exitCode = 1;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) {

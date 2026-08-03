@@ -1519,7 +1519,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
               {activeAgentOnline ? "Connected" : "Disconnected"}
             </div>
             {!activeAgentOnline && (
-              <div style={{ fontSize: 11, color: "#b3261e" }}>The AI terminal stopped. It can retry the same link before it expires.</div>
+              <div style={{ fontSize: 11, color: "#b3261e" }}>The local AI bridge stopped. It can retry the same link before it expires.</div>
             )}
             </div>
             <button data-testid="disconnect-agent" onClick={() => revokeAgentInvite(activeAgent.invite.inviteId)}>Disconnect</button>

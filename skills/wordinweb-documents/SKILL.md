@@ -13,16 +13,15 @@ When the user supplies a URL whose path is `/agent-invite`:
 
 1. Treat the complete URL as a secret bearer credential.
 2. Keep the fragment attached when you pass the URL to a command.
-3. In Codex, run `npx -y --package=https://collab.word-in-web.com/wordinweb-agent.tgz wordinweb-agent connect '<complete URL>'` with a PTY and a short yield time. Keep the returned terminal session ID and use `write_stdin`. Do not set a command timeout.
-4. Read the `ready` event and its room instructions.
-5. Send `{"command":"sync"}` as the first JSON line.
+3. Run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge' wordinweb-agent connect '<complete URL>'`. The command starts a detached local bridge and returns a `sessionId`.
+4. Read the ready result and its room instructions.
+5. Run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge' wordinweb-agent session '<sessionId>' '{"command":"sync"}'` first.
 6. Inspect the relevant content before each edit.
-7. Send one JSON command per line through the same process.
+7. Run each JSON command through a new short `wordinweb-agent session` process.
 8. Sync and inspect again when an edit returns `needs_sync`.
 9. Use `{"command":"wait","timeoutMs":30000}` when you should wait for a private chat message or another document change.
 10. Keep the agent task open and repeat `wait` after each request. Do not send a final response while the collaboration remains open.
-11. If the terminal stops, reconnect with the same URL before it expires.
-12. Send `{"command":"close"}` when the inviter ends the collaboration task.
+11. Send `{"command":"close"}` when the inviter ends the collaboration task.
 
 Do not print the invitation URL or save it in a file.
 

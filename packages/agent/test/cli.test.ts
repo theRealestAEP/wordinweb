@@ -14,6 +14,7 @@ describe("installed CLI", () => {
     const result = spawnSync(process.execPath, [binary], { encoding: "utf8" });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Usage: wordinweb-agent connect");
+    expect(result.stderr).toContain("wordinweb-agent connect '<AI invitation URL>'");
+    expect(result.stderr).toContain("wordinweb-agent session '<session ID>' '<JSON command>'");
   });
 });
