@@ -1671,7 +1671,11 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             ))}
             {agentThinking[activeAgent.invite.inviteId] && activeAgentOnline && (
               <div data-testid="agent-thinking-indicator" role="status" aria-label={`${activeAgent.profile.name} is working`} style={{ marginBottom: 8, textAlign: "left" }}>
-                <span className="agent-thinking" title={`${activeAgent.profile.name} received the message and is working`}>…</span>
+                <span className="agent-thinking" title={`${activeAgent.profile.name} received the message and is working`} aria-hidden="true">
+                  <span className="agent-thinking-dot" />
+                  <span className="agent-thinking-dot" />
+                  <span className="agent-thinking-dot" />
+                </span>
               </div>
             )}
           </div>

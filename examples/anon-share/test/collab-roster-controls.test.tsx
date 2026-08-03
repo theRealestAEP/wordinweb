@@ -240,6 +240,7 @@ describe("collaborator controls", () => {
     expect(receivedAgentChat[0]).toMatchObject({ t: "agent-chat", sender: "inviter" });
     expect(inviter.textContent).not.toContain("Not delivered");
     await until(() => !!inviter.querySelector('[data-testid="agent-thinking-indicator"]'), "thinking indicator appears");
+    expect(inviter.querySelectorAll(".agent-thinking-dot")).toHaveLength(3);
 
     const replyId = "message_agent_reply";
     const reply = await encryptAgentChat(payload.invite.chatKey, "agent-client", replyId, "I am reviewing it now.");
