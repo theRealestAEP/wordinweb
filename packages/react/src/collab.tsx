@@ -1603,7 +1603,7 @@ export function CollabEditor(opts: UseCollabOptions & {
     // shell renders the disconnect modal off it, and without it the observer
     // would only learn the socket died when some unrelated change happened to
     // re-fire this effect — which, on a dead connection, may be never.
-  }, [session.version, session.ready, session.refused, session.roster, session.epochChanged, session.sessionWarning, session.writesBlocked, session.connection, session.persistErrors, session.storeSlow, session.notOwner, session.arrival, session.offline?.editsHeld, session.offline?.capped]);
+  }, [session.version, session.ready, session.refused, session.roster, session.agentConnections, session.agentChat, session.agentInviteError, session.epochChanged, session.sessionWarning, session.writesBlocked, session.connection, session.persistErrors, session.storeSlow, session.notOwner, session.arrival, session.offline?.editsHeld, session.offline?.capped]);
   const [api, setApi] = useState<DocxViewApi | null>(null);
   // Caret survival across a document replacement: the docEpoch key change
   // below remounts the whole DocxView, killing the caret's node references.

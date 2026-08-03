@@ -34,6 +34,7 @@ The command keeps one encrypted collaboration connection open and accepts one
 JSON command per input line. It supports `sync`, `capabilities`, `inspect`,
 `edit`, `chat`, `wait`, and `close`. Every edit includes the inspected revision.
 A newer room revision returns `needs_sync` before the agent changes the document.
+Run the command in a persistent interactive terminal without a fixed timeout.
 
 ## Headless use
 

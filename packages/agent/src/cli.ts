@@ -112,6 +112,13 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
     else events.push(event);
     write(event);
   };
+  const heartbeat = setInterval(() => {
+    if (socket.readyState === WebSocket.OPEN) socket.ping();
+  }, 25_000);
+  socket.addEventListener("close", (event) => {
+    clearInterval(heartbeat);
+    publish({ event: "connection_closed", code: event.code, reason: event.reason || undefined });
+  });
 
   let readyResolve: (() => void) | null = null;
   let readyReject: ((error: Error) => void) | null = null;
@@ -259,6 +266,7 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
           break;
         case "close":
           respond(command.id, { closed: true });
+          clearInterval(heartbeat);
           socket.close();
           input.close();
           return;
@@ -269,6 +277,7 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
       respond(command.id, undefined, error instanceof Error ? error.message : String(error));
     }
   }
+  clearInterval(heartbeat);
   socket.close();
 }
 

@@ -13,7 +13,7 @@ When the user supplies a URL whose path is `/agent-invite`:
 
 1. Treat the complete URL as a secret bearer credential.
 2. Keep the fragment attached when you pass the URL to a command.
-3. Run `npx -y --package=https://collab.word-in-web.com/wordinweb-agent.tgz wordinweb-agent connect '<complete URL>'` in a persistent terminal session.
+3. Run `npx -y --package=https://collab.word-in-web.com/wordinweb-agent.tgz wordinweb-agent connect '<complete URL>'` in a persistent interactive terminal without a fixed command timeout.
 4. Read the `ready` event and its room instructions.
 5. Send `{"command":"sync"}` as the first JSON line.
 6. Inspect the relevant content before each edit.

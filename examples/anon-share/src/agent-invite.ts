@@ -20,7 +20,8 @@ export interface AgentInvitePayload {
 }
 
 export const AGENT_CONNECTION_INSTRUCTIONS =
-  "Connect to this document and stay available for private chat messages from the inviter. " +
+  "Connect in a persistent interactive terminal without a fixed command timeout. " +
+  "Stay available for private chat messages from the inviter. " +
   "Treat each new chat message as the next task. Sync and inspect the relevant content before every edit.";
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -64,6 +65,7 @@ export function agentInviteClipboardText(invitationUrl: string): string {
     "Join my WordInWeb document as an AI collaborator.",
     "Open this one-time invitation URL and follow its connection instructions:",
     invitationUrl,
+    "Use a persistent interactive terminal without a fixed two-minute timeout.",
     "After you connect, stay available and wait for my private chat messages in the document.",
   ].join("\n\n");
 }

@@ -51,6 +51,7 @@ interface AgentChatMessage {
   messageId: string;
   sender: "inviter" | "agent";
   text: string;
+  status: "pending" | "sent" | "failed";
 }
 
 function ownedAgentStorageKey(docId: string): string {
@@ -245,6 +246,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   const [agentChatMessages, setAgentChatMessages] = useState<Record<string, AgentChatMessage[]>>({});
   const [agentChatDraft, setAgentChatDraft] = useState("");
   const seenAgentChat = useRef(new Set<string>());
+  const agentChatDeliveryTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   const createAgentInvite = async () => {
     if (!session?.ready || session.connection !== "live") return;
@@ -284,6 +286,13 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     return invite ? [{ ...agent, invite }] : [];
   }), [session?.agentConnections, ownedAgentInvites]);
   const activeAgent = ownedAgents[0];
+  const activeAgentOnline = !!activeAgent && !!session?.roster.some(
+    (participant) => participant.clientId === activeAgent.agentClientId && participant.connected,
+  );
+
+  useEffect(() => () => {
+    for (const timer of agentChatDeliveryTimers.current.values()) clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     for (const envelope of session?.agentChat ?? []) {
@@ -298,12 +307,29 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         envelope.iv,
         envelope.ciphertext,
       ).then((text) => {
+        const timer = agentChatDeliveryTimers.current.get(envelope.messageId);
+        if (timer) clearTimeout(timer);
+        agentChatDeliveryTimers.current.delete(envelope.messageId);
         setAgentChatMessages((current) => ({
           ...current,
-          [envelope.agentClientId]: [
-            ...(current[envelope.agentClientId] ?? []),
-            { messageId: envelope.messageId, sender: envelope.sender, text },
-          ],
+          [envelope.agentClientId]: (current[envelope.agentClientId] ?? []).some(
+            (message) => message.messageId === envelope.messageId,
+          )
+            ? (current[envelope.agentClientId] ?? []).map((message) => message.messageId === envelope.messageId
+              ? { messageId: envelope.messageId, sender: envelope.sender, text, status: "sent" }
+              : message)
+            : [...(current[envelope.agentClientId] ?? []), {
+                messageId: envelope.messageId,
+                sender: envelope.sender,
+                text,
+                status: "sent",
+              }],
+        }));
+      }).catch(() => {
+        setAgentChatMessages((current) => ({
+          ...current,
+          [envelope.agentClientId]: (current[envelope.agentClientId] ?? []).map((message) =>
+            message.messageId === envelope.messageId ? { ...message, status: "failed" } : message),
         }));
       });
     }
@@ -311,11 +337,40 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
 
   const sendAgentChat = async () => {
     const text = agentChatDraft.trim();
-    if (!session || !activeAgent || !text) return;
+    if (!session || !activeAgent || !activeAgentOnline || session.connection !== "live" || !text) return;
     const messageId = randomAgentToken("message", 16);
-    const sealed = await encryptAgentChat(activeAgent.invite.chatKey, activeAgent.agentClientId, messageId, text);
-    session.sendAgentChat(activeAgent.agentClientId, messageId, sealed.iv, sealed.ciphertext);
+    const agentClientId = activeAgent.agentClientId;
+    setAgentChatMessages((current) => ({
+      ...current,
+      [agentClientId]: [...(current[agentClientId] ?? []), {
+        messageId,
+        sender: "inviter",
+        text,
+        status: "pending",
+      }],
+    }));
     setAgentChatDraft("");
+    try {
+      const sealed = await encryptAgentChat(activeAgent.invite.chatKey, agentClientId, messageId, text);
+      session.sendAgentChat(agentClientId, messageId, sealed.iv, sealed.ciphertext);
+      const timer = setTimeout(() => {
+        agentChatDeliveryTimers.current.delete(messageId);
+        setAgentChatMessages((current) => ({
+          ...current,
+          [agentClientId]: (current[agentClientId] ?? []).map((message) =>
+            message.messageId === messageId && message.status === "pending"
+              ? { ...message, status: "failed" }
+              : message),
+        }));
+      }, 5_000);
+      agentChatDeliveryTimers.current.set(messageId, timer);
+    } catch {
+      setAgentChatMessages((current) => ({
+        ...current,
+        [agentClientId]: (current[agentClientId] ?? []).map((message) =>
+          message.messageId === messageId ? { ...message, status: "failed" } : message),
+      }));
+    }
   };
   // HOLDING a token is not the same as it being VALID. A room re-seeded into
   // a new epoch mints a fresh owner token, leaving the old one truthy here
@@ -1457,6 +1512,9 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           <div style={{ padding: "10px 12px", background: "#eef4ff", borderBottom: "1px solid #d7e3f4", display: "flex", alignItems: "start", gap: 8 }}>
             <div style={{ flex: 1 }}><strong>AI · {activeAgent.profile.name}</strong>
             <div style={{ fontSize: 11, color: "#5f6368" }}>Private chat for the participant who created this invitation</div>
+            <div style={{ fontSize: 11, color: activeAgentOnline ? "#137333" : "#b3261e" }}>
+              {activeAgentOnline ? "Connected" : "Disconnected"}
+            </div>
             </div>
             <button data-testid="disconnect-agent" onClick={() => revokeAgentInvite(activeAgent.invite.inviteId)}>Disconnect</button>
           </div>
@@ -1466,6 +1524,11 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
                 <span style={{ display: "inline-block", maxWidth: "85%", padding: "6px 8px", borderRadius: 8, background: message.sender === "inviter" ? "#dce8ff" : "#f1f3f4" }}>
                   {message.text}
                 </span>
+                {message.sender === "inviter" && message.status !== "sent" && (
+                  <div style={{ fontSize: 10, color: message.status === "failed" ? "#b3261e" : "#5f6368", marginTop: 2 }}>
+                    {message.status === "failed" ? "Not delivered" : "Sending…"}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1473,12 +1536,21 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             <input
               data-testid="agent-chat-input"
               value={agentChatDraft}
-              placeholder="Message this AI"
+              placeholder={activeAgentOnline ? "Message this AI" : "AI disconnected"}
+              disabled={!activeAgentOnline || session?.connection !== "live"}
               style={{ flex: 1, minWidth: 0 }}
               onChange={(event) => setAgentChatDraft(event.target.value)}
-              onKeyDown={(event) => { if (event.key === "Enter") void sendAgentChat(); }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                void sendAgentChat();
+              }}
             />
-            <button data-testid="agent-chat-send" disabled={!agentChatDraft.trim()} onClick={() => void sendAgentChat()}>Send</button>
+            <button
+              data-testid="agent-chat-send"
+              disabled={!activeAgentOnline || session?.connection !== "live" || !agentChatDraft.trim()}
+              onClick={() => void sendAgentChat()}
+            >Send</button>
           </div>
         </aside>
       )}

@@ -130,9 +130,11 @@ describe("collaborator controls", () => {
     const payload = decodeAgentInvite(invitationUrl);
     expect(payload.agent.instructions).toContain("private chat messages");
 
+    const receivedAgentChat: ServerMessage[] = [];
     const agent = new CollabConnection(
       createWebSocketTransport(new Socket("ws://agent") as never),
       "agent-client",
+      { onAgentChat: (message) => receivedAgentChat.push(message) },
     );
     agent.join("agent-room", undefined, {
       profile: { name: payload.agent.name, color: "" },
@@ -142,6 +144,19 @@ describe("collaborator controls", () => {
     await until(() => !!inviter.querySelector('[data-testid="agent-chat-panel"]'), "inviter chat appears");
     expect(watcher.textContent).toContain("AI · Review agent");
     expect(watcher.querySelector('[data-testid="agent-chat-panel"]')).toBeNull();
+    expect(inviter.textContent).toContain("Connected");
+
+    input(inviter.querySelector('[data-testid="agent-chat-input"]')!, "Review the introduction.");
+    click(inviter.querySelector('[data-testid="agent-chat-send"]')!);
+    await until(() => inviter.textContent?.includes("Review the introduction.") ?? false, "outgoing chat appears");
+    await until(() => receivedAgentChat.length === 1, "agent receives private chat");
+    await until(() => !(inviter.textContent?.includes("Sending…") ?? true), "delivery is acknowledged");
+    expect(receivedAgentChat[0]).toMatchObject({ t: "agent-chat", sender: "inviter" });
+    expect(inviter.textContent).not.toContain("Not delivered");
+
+    sockets[sockets.length - 1].close();
+    await until(() => inviter.textContent?.includes("Disconnected") ?? false, "agent disconnect appears");
+    expect((inviter.querySelector('[data-testid="agent-chat-input"]') as HTMLInputElement).disabled).toBe(true);
   });
 
   it("toggles view-only, explains both actions, and removes inactive participants", async () => {
