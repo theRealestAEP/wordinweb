@@ -13,9 +13,9 @@ When the user supplies a URL whose path is `/agent-invite`:
 
 1. Treat the complete URL as a secret bearer credential.
 2. Keep the fragment attached when you pass the URL to a command.
-3. Run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge' wordinweb-agent connect '<complete URL>'`. The command starts a detached local bridge and returns a `sessionId`.
+3. Run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge-2' wordinweb-agent connect '<complete URL>'`. The command starts a detached local bridge and returns a `sessionId`.
 4. Read the ready result and its room instructions.
-5. Run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge' wordinweb-agent session '<sessionId>' '{"command":"sync"}'` first.
+5. Run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge-2' wordinweb-agent session '<sessionId>' '{"command":"sync"}'` first.
 6. Inspect the relevant content before each edit.
 7. Run each JSON command through a new short `wordinweb-agent session` process.
 8. Sync and inspect again when an edit returns `needs_sync`.

@@ -4,13 +4,13 @@ The user has invited you to edit a live DOCX document with WordInWeb.
 
 Run this command with the complete URL from the user, including its fragment:
 
-    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge' wordinweb-agent connect '<complete invitation URL>'
+    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge-2' wordinweb-agent connect '<complete invitation URL>'
 
 The connect command starts a detached local bridge and returns a `sessionId`.
 It does not require a persistent terminal tool call. Run each document command
 as a new short process:
 
-    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
+    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=detached-bridge-2' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
 
 Read the `instructions` value from the ready result. Start with `sync`, then
 use short `session` commands for `inspect`, `edit`, `chat`, and `wait`. Treat
