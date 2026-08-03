@@ -25,7 +25,7 @@
 	# route to the server is a deliberate act here too. /stats is absent on
 	# purpose because the private operations dashboard reads it from inside
 	# the container.
-	@collab path /docs /docs/* /blank /healthz
+	@collab path /docs /docs/* /agent-invites/* /blank /healthz
 	handle @collab {
 		reverse_proxy collab:1234
 	}

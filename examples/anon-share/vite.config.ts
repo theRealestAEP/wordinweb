@@ -12,7 +12,11 @@ import { fileURLToPath } from "node:url";
 export default defineConfig({
   root: fileURLToPath(new URL(".", import.meta.url)),
   esbuild: { jsx: "automatic" },
-  server: { port: 5817, open: true },
+  server: {
+    port: 5817,
+    open: true,
+    proxy: { "/agent-invites": "http://localhost:1234" },
+  },
   // Pre-bundle the workspace ESM so their internal bare imports resolve.
   optimizeDeps: { include: ["wordinweb", "wordinweb/collab", "@wordinweb/collab/client", "@wordinweb/core", "react", "react-dom", "react-dom/client"] },
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, versionKey, type BundleStore, type CollabSession, type DocBundle, type StoredDocSummary } from "wordinweb/collab";
 import { type DocxViewApi } from "wordinweb";
+import type { XmlElement } from "@wordinweb/core";
 import { reviveEncrypted } from "./e2ee-flows";
 import { pruneVersions, versionByteBudget, VERSION_COUNT_CAP } from "./version-retention";
 import { useStartupReclaim } from "./startup-reclaim";
@@ -9,11 +10,14 @@ import { PerfHud } from "./perf/hud";
 import { perfMonitor, type DocStats } from "./perf/metrics";
 import {
   AGENT_CONNECTION_INSTRUCTIONS,
-  agentInviteUrl,
   agentInviteClipboardText,
+  agentModeControl,
+  createShortAgentInvite,
   decryptAgentChat,
   encryptAgentChat,
+  parseAgentModeControl,
   randomAgentToken,
+  type AgentMode,
   type AgentInvitePayload,
 } from "./agent-invite";
 
@@ -45,6 +49,7 @@ interface OwnedAgentInvite {
   chatKey: string;
   agentName: string;
   expiresAt: number;
+  mode: AgentMode;
 }
 
 interface AgentChatMessage {
@@ -61,7 +66,9 @@ function ownedAgentStorageKey(docId: string): string {
 function loadOwnedAgentInvites(docId: string): OwnedAgentInvite[] {
   try {
     const value = JSON.parse(localStorage.getItem(ownedAgentStorageKey(docId)) ?? "[]") as OwnedAgentInvite[];
-    return value.filter((invite) => invite.expiresAt > Date.now());
+    return value
+      .filter((invite) => invite.expiresAt > Date.now())
+      .map((invite) => ({ ...invite, mode: invite.mode === "edit" ? "edit" : "suggest" }));
   } catch {
     return [];
   }
@@ -69,6 +76,27 @@ function loadOwnedAgentInvites(docId: string): OwnedAgentInvite[] {
 
 function saveOwnedAgentInvites(docId: string, invites: OwnedAgentInvite[]): void {
   localStorage.setItem(ownedAgentStorageKey(docId), JSON.stringify(invites));
+}
+
+function mentions(text: string, participantName: string): boolean {
+  return participantName.trim().length > 0 && text.toLocaleLowerCase().includes(`@${participantName.trim().toLocaleLowerCase()}`);
+}
+
+function commentTarget(doc: NonNullable<CollabSession["doc"]>, commentId: string): { runRef?: string; text?: string } {
+  const target = doc.commentAnchors().get(commentId)?.[0];
+  if (!target) return {};
+  let run: XmlElement | undefined;
+  const visit = (element: XmlElement, currentRun?: XmlElement): boolean => {
+    const nextRun = element.name.split(":").pop() === "r" ? element : currentRun;
+    if (element === target) {
+      run = nextRun;
+      return true;
+    }
+    return element.children.some((child) => visit(child, nextRun));
+  };
+  visit(doc.docRoot);
+  const runId = run ? doc.enableStableIds().idOf(run) : undefined;
+  return { runRef: runId === undefined ? undefined : `run:${runId}`, text: target.text.trim() || undefined };
 }
 
 /** Use the first text-bearing paragraph as an editable title suggestion. */
@@ -241,11 +269,16 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
   const [agentInviteOpen, setAgentInviteOpen] = useState(false);
   const [agentName, setAgentName] = useState("Document agent");
   const [agentInviteCopied, setAgentInviteCopied] = useState(false);
+  const [agentInviteCopyError, setAgentInviteCopyError] = useState<string | null>(null);
   const [createdAgentInviteId, setCreatedAgentInviteId] = useState<string | null>(null);
   const [ownedAgentInvites, setOwnedAgentInvites] = useState<OwnedAgentInvite[]>(() => loadOwnedAgentInvites(docId));
   const [agentChatMessages, setAgentChatMessages] = useState<Record<string, AgentChatMessage[]>>({});
   const [agentChatDraft, setAgentChatDraft] = useState("");
+  const [agentThinking, setAgentThinking] = useState<Record<string, boolean>>({});
+  const [mentionAlerts, setMentionAlerts] = useState<Array<{ commentId: string; author: string }>>([]);
   const seenAgentChat = useRef(new Set<string>());
+  const seenComments = useRef<Set<string> | null>(null);
+  const seenAgentActivity = useRef<Record<string, number>>({});
   const agentChatDeliveryTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   const createAgentInvite = async () => {
@@ -258,16 +291,21 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
       version: 1,
       room: { wsUrl: url, httpBase, docId, docKey, shareCode },
       invite: { inviteId, token: inviteToken, chatKey, expiresAt },
-      agent: { name: agentName.trim() || "Document agent", instructions: AGENT_CONNECTION_INSTRUCTIONS },
+      agent: { name: agentName.trim() || "Document agent", instructions: AGENT_CONNECTION_INSTRUCTIONS, mode: "suggest" },
     };
-    session.registerAgentInvite(inviteId, inviteToken, expiresAt);
-    const next = [...ownedAgentInvites, { inviteId, chatKey, agentName: payload.agent.name, expiresAt }];
-    setOwnedAgentInvites(next);
-    saveOwnedAgentInvites(docId, next);
-    const invitationUrl = agentInviteUrl(location.origin, payload);
-    await navigator.clipboard.writeText(agentInviteClipboardText(invitationUrl));
-    setCreatedAgentInviteId(inviteId);
-    setAgentInviteCopied(true);
+    setAgentInviteCopyError(null);
+    try {
+      const invitationUrl = await createShortAgentInvite(location.origin, payload);
+      await navigator.clipboard.writeText(agentInviteClipboardText(invitationUrl));
+      session.registerAgentInvite(inviteId, inviteToken, expiresAt);
+      const next = [...ownedAgentInvites, { inviteId, chatKey, agentName: payload.agent.name, expiresAt, mode: "suggest" as const }];
+      setOwnedAgentInvites(next);
+      saveOwnedAgentInvites(docId, next);
+      setCreatedAgentInviteId(inviteId);
+      setAgentInviteCopied(true);
+    } catch (error) {
+      setAgentInviteCopyError(error instanceof Error ? error.message : "The AI invitation could not be copied");
+    }
   };
 
   const revokeAgentInvite = (inviteId: string) => {
@@ -290,6 +328,51 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     (participant) => participant.clientId === activeAgent.agentClientId && participant.connected,
   );
 
+  const sendAgentText = useCallback(async (text: string, visible = true): Promise<boolean> => {
+    if (!session || !activeAgent || !activeAgentOnline || session.connection !== "live" || !text.trim()) return false;
+    const messageId = randomAgentToken("message", 16);
+    const agentClientId = activeAgent.agentClientId;
+    const chatId = activeAgent.invite.inviteId;
+    if (visible) {
+      setAgentChatMessages((current) => ({
+        ...current,
+        [chatId]: [...(current[chatId] ?? []), {
+          messageId,
+          sender: "inviter",
+          text: text.trim(),
+          status: "pending",
+        }],
+      }));
+    }
+    try {
+      const sealed = await encryptAgentChat(activeAgent.invite.chatKey, agentClientId, messageId, text.trim());
+      session.sendAgentChat(agentClientId, messageId, sealed.iv, sealed.ciphertext);
+      if (visible) {
+        const timer = setTimeout(() => {
+          agentChatDeliveryTimers.current.delete(messageId);
+          setAgentChatMessages((current) => ({
+            ...current,
+            [chatId]: (current[chatId] ?? []).map((message) =>
+              message.messageId === messageId && message.status === "pending"
+                ? { ...message, status: "failed" }
+                : message),
+          }));
+        }, 5_000);
+        agentChatDeliveryTimers.current.set(messageId, timer);
+      }
+      return true;
+    } catch {
+      if (visible) {
+        setAgentChatMessages((current) => ({
+          ...current,
+          [chatId]: (current[chatId] ?? []).map((message) =>
+            message.messageId === messageId ? { ...message, status: "failed" } : message),
+        }));
+      }
+      return false;
+    }
+  }, [session, activeAgent, activeAgentOnline]);
+
   useEffect(() => () => {
     for (const timer of agentChatDeliveryTimers.current.values()) clearTimeout(timer);
   }, []);
@@ -308,9 +391,12 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         envelope.ciphertext,
       ).then((text) => {
         const chatId = agent.invite.inviteId;
+        const mode = parseAgentModeControl(text);
+        if (mode) return;
         const timer = agentChatDeliveryTimers.current.get(envelope.messageId);
         if (timer) clearTimeout(timer);
         agentChatDeliveryTimers.current.delete(envelope.messageId);
+        setAgentThinking((current) => ({ ...current, [chatId]: envelope.sender === "inviter" }));
         setAgentChatMessages((current) => ({
           ...current,
           [chatId]: (current[chatId] ?? []).some(
@@ -339,42 +425,61 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
 
   const sendAgentChat = async () => {
     const text = agentChatDraft.trim();
-    if (!session || !activeAgent || !activeAgentOnline || session.connection !== "live" || !text) return;
-    const messageId = randomAgentToken("message", 16);
-    const agentClientId = activeAgent.agentClientId;
-    const chatId = activeAgent.invite.inviteId;
-    setAgentChatMessages((current) => ({
-      ...current,
-      [chatId]: [...(current[chatId] ?? []), {
-        messageId,
-        sender: "inviter",
-        text,
-        status: "pending",
-      }],
-    }));
+    if (!text) return;
     setAgentChatDraft("");
-    try {
-      const sealed = await encryptAgentChat(activeAgent.invite.chatKey, agentClientId, messageId, text);
-      session.sendAgentChat(agentClientId, messageId, sealed.iv, sealed.ciphertext);
-      const timer = setTimeout(() => {
-        agentChatDeliveryTimers.current.delete(messageId);
-        setAgentChatMessages((current) => ({
-          ...current,
-          [chatId]: (current[chatId] ?? []).map((message) =>
-            message.messageId === messageId && message.status === "pending"
-              ? { ...message, status: "failed" }
-              : message),
-        }));
-      }, 5_000);
-      agentChatDeliveryTimers.current.set(messageId, timer);
-    } catch {
-      setAgentChatMessages((current) => ({
-        ...current,
-        [chatId]: (current[chatId] ?? []).map((message) =>
-          message.messageId === messageId ? { ...message, status: "failed" } : message),
-      }));
-    }
+    await sendAgentText(text);
   };
+
+  const setActiveAgentMode = async (mode: AgentMode) => {
+    if (!activeAgent || !(await sendAgentText(agentModeControl(mode), false))) return;
+    const next = ownedAgentInvites.map((invite) => invite.inviteId === activeAgent.invite.inviteId ? { ...invite, mode } : invite);
+    setOwnedAgentInvites(next);
+    saveOwnedAgentInvites(docId, next);
+  };
+
+  useEffect(() => {
+    if (!activeAgent) return;
+    const chatId = activeAgent.invite.inviteId;
+    const latest = session?.activity.reduce(
+      (seq, item) => item.clientId === activeAgent.agentClientId ? Math.max(seq, item.seq) : seq,
+      0,
+    ) ?? 0;
+    const previous = seenAgentActivity.current[chatId] ?? 0;
+    seenAgentActivity.current[chatId] = latest;
+    if (latest <= previous) return;
+    setAgentThinking((current) => current[activeAgent.invite.inviteId]
+      ? { ...current, [activeAgent.invite.inviteId]: false }
+      : current);
+  }, [session?.activity, activeAgent]);
+
+  useEffect(() => {
+    if (!session?.doc) return;
+    const comments = session.doc.comments;
+    if (!seenComments.current) {
+      seenComments.current = new Set(comments.map((comment) => comment.id));
+      return;
+    }
+    const added = comments.filter((comment) => !seenComments.current!.has(comment.id));
+    for (const comment of added) seenComments.current.add(comment.id);
+    if (added.length === 0) return;
+    const activity = session.activity[session.activity.length - 1];
+    const commentActivity = activity?.kind === "commentRun" || activity?.kind === "replyComment";
+    for (const comment of added) {
+      if (commentActivity && activity.clientId !== clientId && mentions(comment.text, name)) {
+        setMentionAlerts((current) => [...current, { commentId: comment.parentId ?? comment.id, author: comment.author }]);
+      }
+      if (!commentActivity || activity.clientId !== clientId || !activeAgent || !mentions(comment.text, activeAgent.profile.name)) continue;
+      const target = commentTarget(session.doc, comment.parentId ?? comment.id);
+      const task = [
+        "You were tagged in a document comment.",
+        `Comment: ${comment.text}`,
+        target.text ? `Selected text: ${target.text}` : undefined,
+        target.runRef ? `Inspect this target first: ${target.runRef}` : undefined,
+        `Use ${activeAgent.invite.mode === "suggest" ? "suggestions" : "direct edits"} for this task. Sync before you start.`,
+      ].filter(Boolean).join("\n");
+      void sendAgentText(task);
+    }
+  }, [session?.version, session?.doc, session?.activity, activeAgent, clientId, name, sendAgentText]);
   // HOLDING a token is not the same as it being VALID. A room re-seeded into
   // a new epoch mints a fresh owner token, leaving the old one truthy here
   // with no rights attached — which used to render the admin controls and
@@ -1261,7 +1366,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           </button>
         )}
         {!intentionalOffline && session?.ready && (
-          <button data-testid="invite-ai" onClick={() => { setAgentInviteCopied(false); setAgentInviteOpen(true); }}>
+          <button data-testid="invite-ai" onClick={() => { setAgentInviteCopied(false); setAgentInviteCopyError(null); setAgentInviteOpen(true); }}>
             Invite AI
           </button>
         )}
@@ -1279,6 +1384,24 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             {jumpNotice}
           </span>
         )}
+        {mentionAlerts.length > 0 && (() => {
+          const alert = mentionAlerts[mentionAlerts.length - 1];
+          return (
+            <span data-testid="comment-mention-alert" role="status" style={{ display: "inline-flex", gap: 6, alignItems: "center", fontSize: 12, background: "#fef7e0", padding: "2px 8px", borderRadius: 6 }}>
+              🔔 {alert.author || "A collaborator"} mentioned you in a comment
+              <button
+                className="chip"
+                onClick={() => {
+                  const target = document.querySelector<HTMLElement>(`[data-dxw-comment-id="${alert.commentId}"]`);
+                  target?.scrollIntoView({ block: "center" });
+                  target?.click();
+                  setMentionAlerts((current) => current.filter((item) => item !== alert));
+                }}
+              >View</button>
+              <button className="chip" aria-label="Dismiss comment mention" onClick={() => setMentionAlerts((current) => current.filter((item) => item !== alert))}>×</button>
+            </span>
+          );
+        })()}
         {intentionalOffline ? (
           <span className="roster-scroll" data-testid="offline-roster" style={{ color: "#5f6368", fontSize: 12 }}>
             Room participants are unavailable while offline
@@ -1469,6 +1592,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             <label htmlFor="agent-name">Name shown in the room</label>
             <input id="agent-name" data-testid="agent-name" value={agentName} maxLength={40} onChange={(event) => setAgentName(event.target.value)} />
             {session?.agentInviteError && <p className="error">The invitation failed: {session.agentInviteError.reason}</p>}
+            {agentInviteCopyError && <p className="error">{agentInviteCopyError}</p>}
             {agentInviteCopied && <p role="status">The one-time AI link is copied. It expires in ten minutes.</p>}
             <div className="row">
               {agentInviteCopied && createdAgentInviteId && (
@@ -1522,6 +1646,14 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
               <div style={{ fontSize: 11, color: "#b3261e" }}>The local AI bridge stopped. It can retry the same link before it expires.</div>
             )}
             </div>
+            <button
+              data-testid="agent-mode-toggle"
+              data-mode={activeAgent.invite.mode}
+              aria-pressed={activeAgent.invite.mode === "edit"}
+              disabled={!activeAgentOnline || session?.connection !== "live"}
+              title={activeAgent.invite.mode === "suggest" ? "Switch this AI to direct editing" : "Switch this AI to tracked suggestions"}
+              onClick={() => void setActiveAgentMode(activeAgent.invite.mode === "suggest" ? "edit" : "suggest")}
+            >{activeAgent.invite.mode === "suggest" ? "Suggesting" : "Editing"}</button>
             <button data-testid="disconnect-agent" onClick={() => revokeAgentInvite(activeAgent.invite.inviteId)}>Disconnect</button>
           </div>
           <div style={{ minHeight: 100, maxHeight: 250, overflowY: "auto", padding: 10 }}>
@@ -1537,6 +1669,11 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
                 )}
               </div>
             ))}
+            {agentThinking[activeAgent.invite.inviteId] && activeAgentOnline && (
+              <div data-testid="agent-thinking-indicator" role="status" aria-label={`${activeAgent.profile.name} is working`} style={{ marginBottom: 8, textAlign: "left" }}>
+                <span className="agent-thinking" title={`${activeAgent.profile.name} received the message and is working`}>…</span>
+              </div>
+            )}
           </div>
           <div style={{ display: "flex", gap: 6, padding: 10, borderTop: "1px solid #e0e3e7" }}>
             <input
@@ -1578,6 +1715,12 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           // sequencer; without it the image button stays inert.
           httpBase={httpBase}
           profile={{ name, color: "" /* server assigns a palette color */ }}
+          commentAuthor={name || "Guest"}
+          commentMentions={(session?.roster ?? []).filter((participant) =>
+            participant.connected &&
+            participant.clientId !== clientId &&
+            (participant.participantType !== "agent" || ownedAgents.some((agent) => agent.agentClientId === participant.clientId))
+          ).map((participant) => participant.profile.name)}
           onSession={setSession}
           onReady={setApi}
           refusedContent={refusedContent}

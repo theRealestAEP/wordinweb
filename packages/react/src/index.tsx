@@ -482,6 +482,8 @@ export interface DocxViewProps {
   };
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
+  /** Connected collaborator names offered as @mention shortcuts in comments. */
+  commentMentions?: string[];
   /** Render review comments (range highlights + margin balloons). Default true. */
   showComments?: boolean;
   /** Tracked-changes display: "final" (default) or "markup". */
@@ -560,12 +562,15 @@ export function DocxView({
   onReady,
   onError,
   commentAuthor = "You",
+  commentMentions = [],
   showComments = true,
   revisions = "final",
   onMissingFonts,
   collab,
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const commentMentionsRef = useRef(commentMentions);
+  commentMentionsRef.current = commentMentions;
   const [error, setError] = useState<Error | null>(null);
   const [layoutBusy, setLayoutBusy] = useState(false);
   // Fit-to-width scale (page-width / container-width) recomputed on resize, and
@@ -1236,6 +1241,7 @@ export function DocxView({
                 label: "Comment",
                 submitLabel: "Comment",
                 multiline: true,
+                mentions: commentMentionsRef.current,
               }).then((text) => {
                 if (text?.trim()) current.addComment(text.trim());
               });

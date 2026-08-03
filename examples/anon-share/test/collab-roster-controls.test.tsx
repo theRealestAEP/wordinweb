@@ -5,10 +5,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { App } from "../src/app";
 import { CollabHub, blankDocxBytes, type Connection, type ServerMessage } from "@wordinweb/server";
 import { CollabConnection, createWebSocketTransport, InMemoryBundleStore } from "@wordinweb/collab/client";
-import { decodeAgentInvite } from "../src/agent-invite";
+import { localName, type XmlElement } from "@wordinweb/core";
+import { encryptAgentChat, type AgentInvitePayload } from "../src/agent-invite";
 
 let mounted: { root: Root; host: HTMLElement }[] = [];
 const previousSocket = globalThis.WebSocket;
+const previousFetch = globalThis.fetch;
 
 afterEach(() => {
   for (const { root, host } of mounted) {
@@ -17,7 +19,33 @@ afterEach(() => {
   }
   mounted = [];
   (globalThis as { WebSocket: unknown }).WebSocket = previousSocket;
+  globalThis.fetch = previousFetch;
 });
+
+function base64UrlBytes(value: string): Uint8Array {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function openShortInvite(url: string, stored: string): Promise<AgentInvitePayload> {
+  const parsed = new URL(url);
+  const values = new URLSearchParams(parsed.hash.slice(1));
+  const inviteId = values.get("i")!;
+  const secret = values.get("k")!;
+  const body = JSON.parse(stored) as { iv: string; ciphertext: string };
+  const key = await crypto.subtle.importKey("raw", base64UrlBytes(secret) as BufferSource, "AES-GCM", false, ["decrypt"]);
+  const plaintext = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: base64UrlBytes(body.iv) as BufferSource,
+      additionalData: new TextEncoder().encode(`wordinweb-agent-invite:${inviteId}`) as BufferSource,
+    },
+    key,
+    base64UrlBytes(body.ciphertext) as BufferSource,
+  );
+  return JSON.parse(new TextDecoder().decode(plaintext)) as AgentInvitePayload;
+}
 
 async function tick(ms = 5) {
   await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); });
@@ -82,6 +110,56 @@ function input(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
 }
 
 describe("collaborator controls", () => {
+  it("alerts a collaborator when a new comment mentions their displayed name", async () => {
+    const hub = new CollabHub(null);
+    const seeded = hub.seed("mention-room", blankDocxBytes());
+    if (!seeded.ok) throw new Error("seed failed");
+    const sockets: { close: () => void }[] = [];
+    const Socket = socketClass(hub, sockets);
+    (globalThis as { WebSocket: unknown }).WebSocket = Socket;
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    mounted.push({ root, host });
+    await act(async () => {
+      root.render(createElement(App, {
+        url: "ws://loopback/collab",
+        httpBase: "http://loopback",
+        docId: "mention-room",
+        clientId: "inviter",
+        name: "Inviter",
+        store: new InMemoryBundleStore(),
+      }));
+    });
+    await until(() => !!host.querySelector('[data-testid="invite-ai"]'), "document is ready");
+
+    const commenter = new CollabConnection(createWebSocketTransport(new Socket("ws://commenter") as never), "commenter");
+    commenter.join("mention-room", undefined, { profile: { name: "Commenter", color: "" } });
+    await until(() => commenter.ready, "commenter joins");
+    const ids = commenter.doc!.enableStableIds();
+    let run: XmlElement | undefined;
+    const findRun = (element: XmlElement): void => {
+      if (!run && localName(element.name) === "r") run = element;
+      for (const child of element.children) findRun(child);
+    };
+    findRun(commenter.doc!.docRoot);
+    const runId = run ? ids.idOf(run) : undefined;
+    if (runId === undefined) throw new Error("blank document has no run");
+    commenter.submit({
+      kind: "commentRun",
+      runId,
+      text: "@Inviter please review this section.",
+      author: "Commenter",
+      initials: "C",
+      date: new Date().toISOString(),
+      paraId: "ABCDEF12",
+    });
+
+    await until(() => !!host.querySelector('[data-testid="comment-mention-alert"]'), "mention alert appears");
+    expect(host.querySelector('[data-testid="comment-mention-alert"]')?.textContent).toContain("Commenter mentioned you");
+    sockets[sockets.length - 1].close();
+  });
+
   it("creates an AI link, marks the joined editor as AI, and shows chat only to the inviter", async () => {
     const hub = new CollabHub(null);
     const seeded = hub.seed("agent-room", blankDocxBytes());
@@ -90,6 +168,11 @@ describe("collaborator controls", () => {
     const Socket = socketClass(hub, sockets);
     (globalThis as { WebSocket: unknown }).WebSocket = Socket;
     let copied = "";
+    let storedInvite = "";
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      storedInvite = String(init?.body ?? "");
+      return { ok: true, status: 201 } as Response;
+    }) as typeof fetch;
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText: async (value: string) => { copied = value; } },
@@ -123,12 +206,13 @@ describe("collaborator controls", () => {
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
     });
-    await until(() => copied.includes("#invite="), "AI invitation is copied");
+    await until(() => copied.includes("#i="), "AI invitation is copied");
     expect(copied).toContain("wait for my private chat messages");
-    const invitationUrl = copied.split("\n").find((line) => line.includes("#invite="));
+    const invitationUrl = copied.match(/'(https?:\/\/[^']+\/agent-invite#[^']+)'/)?.[1];
     if (!invitationUrl) throw new Error("copied invitation URL is missing");
-    const payload = decodeAgentInvite(invitationUrl);
+    const payload = await openShortInvite(invitationUrl, storedInvite);
     expect(payload.agent.instructions).toContain("private chat messages");
+    expect(payload.agent.mode).toBe("suggest");
 
     const receivedAgentChat: ServerMessage[] = [];
     const agent = new CollabConnection(
@@ -145,6 +229,7 @@ describe("collaborator controls", () => {
     expect(watcher.textContent).toContain("AI · Review agent");
     expect(watcher.querySelector('[data-testid="agent-chat-panel"]')).toBeNull();
     expect(inviter.textContent).toContain("Connected");
+    expect(inviter.querySelector('[data-testid="agent-mode-toggle"]')?.textContent).toBe("Suggesting");
 
     input(inviter.querySelector('[data-testid="agent-chat-input"]')!, "Review the introduction.");
     click(inviter.querySelector('[data-testid="agent-chat-send"]')!);
@@ -153,6 +238,16 @@ describe("collaborator controls", () => {
     await until(() => !(inviter.textContent?.includes("Sending…") ?? true), "delivery is acknowledged");
     expect(receivedAgentChat[0]).toMatchObject({ t: "agent-chat", sender: "inviter" });
     expect(inviter.textContent).not.toContain("Not delivered");
+    await until(() => !!inviter.querySelector('[data-testid="agent-thinking-indicator"]'), "thinking indicator appears");
+
+    const replyId = "message_agent_reply";
+    const reply = await encryptAgentChat(payload.invite.chatKey, "agent-client", replyId, "I am reviewing it now.");
+    agent.sendAgentChat("agent-client", replyId, reply.iv, reply.ciphertext);
+    await until(() => inviter.textContent?.includes("I am reviewing it now.") ?? false, "agent response appears");
+    await until(() => !inviter.querySelector('[data-testid="agent-thinking-indicator"]'), "thinking indicator clears");
+
+    click(inviter.querySelector('[data-testid="agent-mode-toggle"]')!);
+    await until(() => inviter.querySelector('[data-testid="agent-mode-toggle"]')?.textContent === "Editing", "agent mode changes");
 
     sockets[sockets.length - 1].close();
     await until(() => inviter.textContent?.includes("Disconnected") ?? false, "agent disconnect appears");

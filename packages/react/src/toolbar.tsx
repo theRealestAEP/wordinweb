@@ -906,7 +906,7 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
 
 /** Google-Docs-style "add comment": popover with a text box, anchored to the
  * current selection (the editor keeps its owned selection while typing). */
-function CommentMenu({ api }: { api: DocxViewApi | null }) {
+function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions?: string[] }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
@@ -925,6 +925,18 @@ function CommentMenu({ api }: { api: DocxViewApi | null }) {
       setText("");
       setOpen(false);
     }
+  };
+  const addMention = (name: string) => {
+    const field = inputRef.current;
+    const start = field?.selectionStart ?? text.length;
+    const end = field?.selectionEnd ?? start;
+    const prefix = start > 0 && !/\s$/.test(text.slice(0, start)) ? " " : "";
+    const value = `${prefix}@${name} `;
+    setText(text.slice(0, start) + value + text.slice(end));
+    requestAnimationFrame(() => {
+      field?.focus();
+      field?.setSelectionRange(start + value.length, start + value.length);
+    });
   };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
@@ -961,6 +973,19 @@ function CommentMenu({ api }: { api: DocxViewApi | null }) {
               font: "13px system-ui, sans-serif", outline: "none",
             }}
           />
+          {mentions.length > 0 && (
+            <div aria-label="Mention a collaborator" style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center", marginTop: 6 }}>
+              <span style={{ color: T.muted, fontSize: 11 }}>Mention:</span>
+              {[...new Set(mentions)].filter((name) => name.trim()).map((name) => (
+                <button
+                  type="button"
+                  key={name}
+                  onClick={() => addMention(name)}
+                  style={{ ...pillBtn, minHeight: 24, padding: "0 7px", background: T.popoverBg, color: T.fg, borderColor: T.border }}
+                >@{name}</button>
+              ))}
+            </div>
+          )}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
             <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => setOpen(false)}>
               Cancel
@@ -3249,6 +3274,8 @@ export interface DocxToolbarProps {
   className?: string;
   /** Inline overrides merged onto the toolbar root; wins over the defaults. */
   style?: React.CSSProperties;
+  /** Connected collaborator names offered as @mention shortcuts in comments. */
+  commentMentions?: string[];
 }
 
 export function DocxToolbar({
@@ -3258,6 +3285,7 @@ export function DocxToolbar({
   features,
   className,
   style,
+  commentMentions,
 }: DocxToolbarProps) {
   const on = (k: ToolbarFeature) => features?.[k] !== false;
   // Ribbon-style tabs: complex tool groups get their own surface instead of
@@ -3885,7 +3913,7 @@ export function DocxToolbar({
           {on("textBox") && <TextBoxMenu api={api} />}
           {on("wordArt") && <WordArtMenu api={api} />}
           {on("link") && <LinkMenu api={api} />}
-          {on("comment") && <CommentMenu api={api} />}
+          {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
           {on("footnote") && <FootnoteMenu api={api} />}
           {on("bookmark") && <BookmarkMenu api={api} />}
           {on("crossReference") && <CrossReferenceMenu api={api} />}
@@ -3982,7 +4010,7 @@ export function DocxToolbar({
               {on("textBox") && <TextBoxMenu api={api} />}
               {on("wordArt") && <WordArtMenu api={api} />}
               {on("link") && <LinkMenu api={api} />}
-              {on("comment") && <CommentMenu api={api} />}
+              {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
               {on("footnote") && <FootnoteMenu api={api} />}
               {on("bookmark") && <BookmarkMenu api={api} />}
               {on("crossReference") && <CrossReferenceMenu api={api} />}
