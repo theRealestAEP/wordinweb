@@ -34,7 +34,7 @@ The command keeps one encrypted collaboration connection open and accepts one
 JSON command per input line. It supports `sync`, `capabilities`, `inspect`,
 `edit`, `chat`, `wait`, and `close`. Every edit includes the inspected revision.
 A newer room revision returns `needs_sync` before the agent changes the document.
-Run the command in a persistent interactive terminal without a fixed timeout.
+In Codex, run the command with a PTY and a short yield time. Keep the returned terminal session ID and use `write_stdin`. Do not set a command timeout.
 
 ## Headless use
 

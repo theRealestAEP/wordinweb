@@ -20,9 +20,10 @@ export interface AgentInvitePayload {
 }
 
 export const AGENT_CONNECTION_INSTRUCTIONS =
-  "Connect in a persistent interactive terminal without a fixed command timeout. " +
-  "Stay available for private chat messages from the inviter. " +
-  "Treat each new chat message as the next task. Sync and inspect the relevant content before every edit.";
+  "Keep this agent task open until the inviter tells you to disconnect. " +
+  "In Codex, start the command with a PTY and a short yield time, keep its session ID, and use write_stdin. Do not set a command timeout. " +
+  "Treat new private chat messages as tasks. Sync and inspect the relevant content before every edit. " +
+  "After each task, call wait again instead of sending a final response. If the terminal stops, reconnect with this URL before it expires.";
 
 function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = "";
@@ -63,10 +64,12 @@ export function agentInviteUrl(origin: string, payload: AgentInvitePayload): str
 export function agentInviteClipboardText(invitationUrl: string): string {
   return [
     "Join my WordInWeb document as an AI collaborator.",
-    "Open this one-time invitation URL and follow its connection instructions:",
+    "Open this short-lived invitation URL and follow its connection instructions:",
     invitationUrl,
-    "Use a persistent interactive terminal without a fixed two-minute timeout.",
-    "After you connect, stay available and wait for my private chat messages in the document.",
+    "For Codex: run the command in a PTY with a short yield time. Keep the returned terminal session ID and use write_stdin. Do not set a command timeout.",
+    "After you connect, wait for my private chat messages in the document.",
+    "Keep this agent task open. After each request, call wait again. Do not send a final response until I tell you to disconnect.",
+    "If the terminal stops before then, reconnect with this URL before it expires.",
   ].join("\n\n");
 }
 

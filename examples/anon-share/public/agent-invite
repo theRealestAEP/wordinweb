@@ -6,13 +6,16 @@ Run this command with the complete URL from the user, including its fragment:
 
     npx -y --package=https://collab.word-in-web.com/wordinweb-agent.tgz wordinweb-agent connect '<complete invitation URL>'
 
-Run the command in a persistent interactive terminal. Do not give it a fixed
-two-minute command timeout. Keep that terminal session open while you work with
-the user. The command opens a live JSON-lines session. Read its `instructions`
-event, then send one JSON command per line. Start with `{"command":"sync"}`,
-then wait for private chat messages from the inviter. Treat each chat message
-as the next task. Inspect the relevant content before every edit. If an edit
-returns `needs_sync`, sync and inspect the changed content before you retry.
+Keep this agent task open until the inviter tells you to disconnect. In Codex,
+start the command with a PTY and a short yield time. Keep the returned terminal
+session ID and use `write_stdin`; do not set a command timeout. The command
+opens a live JSON-lines session. Read its `instructions` event, then send one
+JSON command per line. Start with `{"command":"sync"}`, then wait for private
+chat messages from the inviter. Treat each chat message as the next task.
+Inspect the relevant content before every edit. If an edit returns
+`needs_sync`, sync and inspect the changed content before you retry. After each
+task, call `wait` again instead of sending a final response. If the terminal
+stops, reconnect with the invitation URL before it expires.
 
 Available commands: `sync`, `capabilities`, `inspect`, `edit`, `chat`, `wait`,
 and `close`.

@@ -185,5 +185,50 @@ describe("CollabHub roster (doc 14 §2)", () => {
     }));
     expect(inviter.received).toContainEqual(expect.objectContaining({ t: "agent-chat", sender: "inviter" }));
     expect(watcher.received).toHaveLength(0);
+
+    hub.disconnect(agent);
+    const retriedAgent = new FakeConn("s5");
+    await hub.handle(retriedAgent, {
+      ...hello("d", "agent-retry", { name: "Drafting agent", color: "#0000ff" }),
+      agentInvite: {
+        inviteId: "invite_1234567890",
+        token: "token_12345678901234567890123456789012",
+      },
+    });
+    expect(retriedAgent.received.some((message) => message.t === "welcome")).toBe(true);
+    expect(rosterOf(inviter).find((entry) => entry.clientId === "agent-retry")?.participantType).toBe("agent");
+  });
+
+  it("refuses an AI retry after its invitation expires", async () => {
+    let now = 1_000;
+    const hub = new CollabHub(provider, undefined, undefined, () => now);
+    const inviter = new FakeConn("s1");
+    const agent = new FakeConn("s2");
+    await hub.handle(inviter, hello("d", "alice"));
+    await hub.handle(inviter, {
+      t: "agent-invite",
+      inviteId: "invite_1234567890",
+      token: "token_12345678901234567890123456789012",
+      expiresAt: now + 100,
+    });
+    await hub.handle(agent, {
+      ...hello("d", "agent-one"),
+      agentInvite: {
+        inviteId: "invite_1234567890",
+        token: "token_12345678901234567890123456789012",
+      },
+    });
+    hub.disconnect(agent);
+    now += 101;
+
+    const retry = new FakeConn("s3");
+    await hub.handle(retry, {
+      ...hello("d", "agent-retry"),
+      agentInvite: {
+        inviteId: "invite_1234567890",
+        token: "token_12345678901234567890123456789012",
+      },
+    });
+    expect(retry.received).toContainEqual({ t: "refused", reason: "agent-invite-invalid" });
   });
 });

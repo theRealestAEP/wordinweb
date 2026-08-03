@@ -157,6 +157,18 @@ describe("collaborator controls", () => {
     sockets[sockets.length - 1].close();
     await until(() => inviter.textContent?.includes("Disconnected") ?? false, "agent disconnect appears");
     expect((inviter.querySelector('[data-testid="agent-chat-input"]') as HTMLInputElement).disabled).toBe(true);
+
+    const retriedAgent = new CollabConnection(
+      createWebSocketTransport(new Socket("ws://agent-retry") as never),
+      "agent-retry",
+    );
+    retriedAgent.join("agent-room", undefined, {
+      profile: { name: payload.agent.name, color: "" },
+      agentInvite: { inviteId: payload.invite.inviteId, token: payload.invite.token },
+    });
+    await until(() => inviter.textContent?.includes("Connected") ?? false, "agent reconnect appears");
+    expect((inviter.querySelector('[data-testid="agent-chat-input"]') as HTMLInputElement).disabled).toBe(false);
+    expect(inviter.textContent).toContain("Review the introduction.");
   });
 
   it("toggles view-only, explains both actions, and removes inactive participants", async () => {

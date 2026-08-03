@@ -307,18 +307,19 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         envelope.iv,
         envelope.ciphertext,
       ).then((text) => {
+        const chatId = agent.invite.inviteId;
         const timer = agentChatDeliveryTimers.current.get(envelope.messageId);
         if (timer) clearTimeout(timer);
         agentChatDeliveryTimers.current.delete(envelope.messageId);
         setAgentChatMessages((current) => ({
           ...current,
-          [envelope.agentClientId]: (current[envelope.agentClientId] ?? []).some(
+          [chatId]: (current[chatId] ?? []).some(
             (message) => message.messageId === envelope.messageId,
           )
-            ? (current[envelope.agentClientId] ?? []).map((message) => message.messageId === envelope.messageId
+            ? (current[chatId] ?? []).map((message) => message.messageId === envelope.messageId
               ? { messageId: envelope.messageId, sender: envelope.sender, text, status: "sent" }
               : message)
-            : [...(current[envelope.agentClientId] ?? []), {
+            : [...(current[chatId] ?? []), {
                 messageId: envelope.messageId,
                 sender: envelope.sender,
                 text,
@@ -326,9 +327,10 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
               }],
         }));
       }).catch(() => {
+        const chatId = agent.invite.inviteId;
         setAgentChatMessages((current) => ({
           ...current,
-          [envelope.agentClientId]: (current[envelope.agentClientId] ?? []).map((message) =>
+          [chatId]: (current[chatId] ?? []).map((message) =>
             message.messageId === envelope.messageId ? { ...message, status: "failed" } : message),
         }));
       });
@@ -340,9 +342,10 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     if (!session || !activeAgent || !activeAgentOnline || session.connection !== "live" || !text) return;
     const messageId = randomAgentToken("message", 16);
     const agentClientId = activeAgent.agentClientId;
+    const chatId = activeAgent.invite.inviteId;
     setAgentChatMessages((current) => ({
       ...current,
-      [agentClientId]: [...(current[agentClientId] ?? []), {
+      [chatId]: [...(current[chatId] ?? []), {
         messageId,
         sender: "inviter",
         text,
@@ -357,7 +360,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
         agentChatDeliveryTimers.current.delete(messageId);
         setAgentChatMessages((current) => ({
           ...current,
-          [agentClientId]: (current[agentClientId] ?? []).map((message) =>
+          [chatId]: (current[chatId] ?? []).map((message) =>
             message.messageId === messageId && message.status === "pending"
               ? { ...message, status: "failed" }
               : message),
@@ -367,7 +370,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
     } catch {
       setAgentChatMessages((current) => ({
         ...current,
-        [agentClientId]: (current[agentClientId] ?? []).map((message) =>
+        [chatId]: (current[chatId] ?? []).map((message) =>
           message.messageId === messageId ? { ...message, status: "failed" } : message),
       }));
     }
@@ -1458,7 +1461,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="agent-invite-title">
             <h2 id="agent-invite-title">Invite an AI collaborator</h2>
             <p style={{ color: "#8a4b08" }}>
-              The AI link grants complete read and edit access to this document. Anyone who receives the unused link can use that access.
+              The AI link grants complete read and edit access to this document. Anyone who receives the unexpired link can use that access.
             </p>
             <p>
               Paste the copied invitation into an active Codex or Claude task. After it connects, send its work through the private chat panel.
@@ -1515,11 +1518,14 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
             <div style={{ fontSize: 11, color: activeAgentOnline ? "#137333" : "#b3261e" }}>
               {activeAgentOnline ? "Connected" : "Disconnected"}
             </div>
+            {!activeAgentOnline && (
+              <div style={{ fontSize: 11, color: "#b3261e" }}>The AI terminal stopped. It can retry the same link before it expires.</div>
+            )}
             </div>
             <button data-testid="disconnect-agent" onClick={() => revokeAgentInvite(activeAgent.invite.inviteId)}>Disconnect</button>
           </div>
           <div style={{ minHeight: 100, maxHeight: 250, overflowY: "auto", padding: 10 }}>
-            {(agentChatMessages[activeAgent.agentClientId] ?? []).map((message) => (
+            {(agentChatMessages[activeAgent.invite.inviteId] ?? []).map((message) => (
               <div key={message.messageId} style={{ marginBottom: 8, textAlign: message.sender === "inviter" ? "right" : "left" }}>
                 <span style={{ display: "inline-block", maxWidth: "85%", padding: "6px 8px", borderRadius: 8, background: message.sender === "inviter" ? "#dce8ff" : "#f1f3f4" }}>
                   {message.text}

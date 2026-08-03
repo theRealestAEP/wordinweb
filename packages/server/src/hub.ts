@@ -198,7 +198,7 @@ interface Room {
     expiresAt: number;
     agentClientId?: string;
   }>;
-  /** Connected or reconnectable AI identities and their private chat owner. */
+  /** Connected AI identities and their private chat owner. */
   agentClients: Map<string, { inviteId: string; inviterClientId: string }>;
   /** Share-code verifier registered at seed (doc 13 §7) — a PBKDF2 output,
    * NOT the code. Optional; rotation happens naturally at re-seed. */
@@ -621,8 +621,8 @@ export class CollabHub {
             const invite = inviteRoom?.agentInvites.get(msg.agentInvite.inviteId);
             const usable = invite &&
               invite.token === msg.agentInvite.token &&
-              (!invite.agentClientId || invite.agentClientId === msg.clientId) &&
-              (invite.expiresAt > this.now() || invite.agentClientId === msg.clientId);
+              invite.expiresAt > this.now() &&
+              (!invite.agentClientId || invite.agentClientId === msg.clientId);
             if (!usable) {
               this.refuse(conn, "agent-invite-invalid");
               return;
@@ -1256,6 +1256,12 @@ export class CollabHub {
           if (entry && entry.connected) {
             entry.connected = false;
             this.broadcastRoster(room);
+          }
+          const agent = room.agentClients.get(clientId);
+          if (agent) {
+            room.agentClients.delete(clientId);
+            const invite = room.agentInvites.get(agent.inviteId);
+            if (invite?.agentClientId === clientId) invite.agentClientId = undefined;
           }
         }
         if (room.conns.size === 0) room.emptySince = this.now();

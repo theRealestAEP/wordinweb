@@ -101,6 +101,7 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
   let connection: CollabConnection;
   let revision = 0;
   let ready = false;
+  const connectionState: { current: "reconnecting" | "live" | "offline" } = { current: "reconnecting" };
   let roster: RosterEntry[] = [];
   let lastActivityIndex = 0;
   const events: unknown[] = [];
@@ -116,6 +117,7 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
     if (socket.readyState === WebSocket.OPEN) socket.ping();
   }, 25_000);
   socket.addEventListener("close", (event) => {
+    connectionState.current = "offline";
     clearInterval(heartbeat);
     publish({ event: "connection_closed", code: event.code, reason: event.reason || undefined });
   });
@@ -131,6 +133,7 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
       revision++;
       if (connection?.ready && !ready) {
         ready = true;
+        connectionState.current = "live";
         readyResolve?.();
         return;
       }
@@ -190,7 +193,7 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
     allocateIds: (count) => connection.allocIds(count),
     submit: (operation) => connection.submit(operation),
     uploadMedia: (bytes) => connection.uploadMedia(bytes),
-    getConnectionState: () => "live",
+    getConnectionState: () => connectionState.current,
   }, { provenance: { author: profile.name } });
 
   write({
@@ -246,6 +249,7 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
           break;
         case "edit":
           try {
+            if (connectionState.current !== "live") throw new Error("The collaboration connection is offline. Reconnect before editing");
             respond(command.id, await document.edit(command.request as never));
           } catch (error) {
             if (error instanceof Error && error.message.includes("revision is stale")) {
@@ -254,6 +258,7 @@ export async function connectAgent(invitationUrl: string): Promise<void> {
           }
           break;
         case "chat": {
+          if (connectionState.current !== "live") throw new Error("The collaboration connection is offline. Reconnect before sending chat");
           if (!command.text?.trim()) throw new Error("Chat text is required");
           const messageId = randomId("message");
           const sealed = await encryptChat(chatKey, clientId, messageId, command.text.trim());
