@@ -32,7 +32,7 @@ type AgentMode = "suggest" | "edit";
 type WakeTarget = { provider: "codex" | "claude"; sessionId: string };
 
 const AGENT_MODE_CONTROL_PREFIX = "\u0000wordinweb-agent-mode:";
-const AGENT_PACKAGE_URL = "https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2";
+const AGENT_PACKAGE_URL = "https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3";
 
 interface Command {
   id?: string | number;
@@ -141,7 +141,8 @@ export function agentWakePrompt(agentSessionId: string, text: string): string {
     `The inviter's message is ${JSON.stringify(text)}.`,
     `The detached document bridge session is ${agentSessionId}. Do not run the connect command again.`,
     `Run document commands with: npx -y --package='${AGENT_PACKAGE_URL}' wordinweb-agent session '${agentSessionId}' '<JSON command>'`,
-    "Start with sync. Inspect the relevant content before every edit. If an edit returns needs_sync, sync and inspect again.",
+    'Start with sync. For a broad text task, inspect all non-empty stories in one compact call: {"command":"inspect","request":{"kind":"context"}}. Use overview, read, object, or spatial only when the task needs their extra detail.',
+    "Inspect the relevant content before every edit. If an edit returns needs_sync, sync and inspect again.",
     "Complete this task, then send the inviter a concise result with the chat command.",
     "End this agent turn after the reply. Do not call wait. The detached bridge will resume this task for the next message.",
   ].join("\n\n");

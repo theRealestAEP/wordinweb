@@ -6,16 +6,17 @@ Do not open this invitation in a browser. Run the exact command included in
 the user's message. It passes the short invitation URL directly to the agent
 client. The command has this form:
 
-    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent connect '<short invitation URL>'
+    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent connect '<short invitation URL>'
 
 The connect command starts a detached local bridge, captures the current Codex
 or Claude task, and returns a `sessionId`. It then waits without model turns.
 Run each document command as a new short process:
 
-    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
+    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
 
 Read the `instructions` value from the ready result. Start with `sync`, then
-use short `session` commands for `inspect`, `edit`, and `chat`. Treat
+use one compact `context` inspection for broad text tasks. Use detailed
+`overview`, `read`, `object`, or `spatial` inspection only when needed. Treat
 each private chat message as the next task. Inspect the relevant content before
 every edit. If an edit returns `needs_sync`, sync and inspect the changed
 content before you retry. After each task, reply through document chat and end

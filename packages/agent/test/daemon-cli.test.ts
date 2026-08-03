@@ -153,16 +153,18 @@ writeFileSync(process.env.WORDINWEB_WAKE_LOG, JSON.stringify({ args: process.arg
       expect(wake.prompt).toContain("Please make the edit.");
       expect(wake.prompt).toContain(sessionId);
       expect(wake.prompt).toContain("Do not call wait");
+      expect(wake.prompt).toContain('{"kind":"context"}');
 
       const synced = await cliCommand(["session", sessionId, JSON.stringify({ command: "sync" })]);
       const revision = String((synced.result as { revision: string }).revision);
       const inspected = await cliCommand(["session", sessionId, JSON.stringify({
         command: "inspect",
-        request: { kind: "read" },
+        request: { kind: "context", includeEmpty: true },
       })]);
       const first = (inspected.result as {
-        blocks: Array<{ ref: string; runs: Array<{ ref: string }> }>;
-      }).blocks[0];
+        contents: Array<{ blocks: Array<{ ref: string; runs: Array<{ ref: string }> }> }>;
+      }).contents[0].blocks[0];
+      expect(first.runs[0]).not.toHaveProperty("formatting");
       const edited = await cliCommand(["session", sessionId, JSON.stringify({
         command: "edit",
         request: {

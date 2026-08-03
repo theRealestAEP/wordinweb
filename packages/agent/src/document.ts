@@ -182,6 +182,19 @@ const inspectToolSchema: Record<string, unknown> = {
     {
       type: "object",
       properties: {
+        kind: { const: "context" },
+        stories: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1 } },
+        maxBlocks: { type: "integer", minimum: 1, maximum: 200 },
+        maxCharacters: { type: "integer", minimum: 1, maximum: 100000 },
+        include: { type: "array", uniqueItems: true, items: { enum: ["bookmarks", "objects"] } },
+        includeEmpty: { type: "boolean" },
+      },
+      required: ["kind"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
         kind: { const: "read" },
         story: { type: "string", minLength: 1 },
         cursor: {
@@ -449,6 +462,7 @@ export class AgentDocument {
     const inspector = this.inspector();
     switch (request.kind) {
       case "overview": return inspector.overview();
+      case "context": return inspector.context(request.stories, request.maxBlocks, request.maxCharacters, request.include, request.includeEmpty);
       case "read": return inspector.read(request.story, request.cursor?.value, request.maxBlocks, request.maxCharacters);
       case "search": return inspector.search(request.query, request.maxResults);
       case "object": return inspector.object(request.ref);
@@ -634,7 +648,7 @@ export class AgentDocument {
       },
       {
         name: "word_document_inspect",
-        description: "Inspect a document progressively by overview, story range, search, object, or page geometry.",
+        description: "Inspect compact bulk text context, overview, a detailed story range, search results, one object, or page geometry.",
         inputSchema: inspectToolSchema,
         execute: async (input) => this.inspect(asObject(input) as unknown as AgentInspectRequest),
       },

@@ -15,6 +15,8 @@ import type {
   AgentAsset,
   AgentBlock,
   AgentComponentSummary,
+  AgentContextParagraph,
+  AgentContextResult,
   AgentObjectResult,
   AgentOverview,
   AgentParagraph,
@@ -403,6 +405,126 @@ export class SemanticInspector {
       components: { ...this.components },
       objectCounts: { ...this.objectCounts },
       outline,
+    };
+  }
+
+  context(
+    storyIds?: string[],
+    maxBlocks = 100,
+    maxCharacters = 24_000,
+    include: Array<"bookmarks" | "objects"> = [],
+    includeEmpty = false,
+  ): AgentContextResult {
+    if (storyIds !== undefined && (!Array.isArray(storyIds) || storyIds.length < 1 || storyIds.length > 100)) {
+      throw new Error("stories must contain 1 to 100 story IDs");
+    }
+    if (!Number.isInteger(maxBlocks) || maxBlocks < 1 || maxBlocks > 200) throw new Error("maxBlocks must be between 1 and 200");
+    if (!Number.isInteger(maxCharacters) || maxCharacters < 1 || maxCharacters > 100_000) throw new Error("maxCharacters must be between 1 and 100000");
+    if (!Array.isArray(include) || include.some((value) => value !== "bookmarks" && value !== "objects")) {
+      throw new Error("include supports bookmarks and objects");
+    }
+    const selected = storyIds ?? [...this.stories.keys()];
+    if (new Set(selected).size !== selected.length) throw new Error("stories must not contain duplicates");
+    for (const id of selected) if (!this.stories.has(id)) throw new Error(`Unknown story: ${id}`);
+
+    const available = selected.filter((id) => (this.entries.get(id) ?? []).some((entry) =>
+      entry.block.type === "table" || includeEmpty || paragraphText(entry.block).length > 0));
+    const contents: AgentContextResult["contents"] = [];
+    let usedBlocks = 0;
+    let usedCharacters = 0;
+    let remainingStories: string[] | undefined;
+
+    for (let storyIndex = 0; storyIndex < available.length; storyIndex++) {
+      const storyId = available[storyIndex];
+      const story = this.stories.get(storyId)!;
+      const entries = this.entries.get(storyId) ?? [];
+      const blocks: AgentContextResult["contents"][number]["blocks"] = [];
+      let next: AgentReadResult["next"];
+
+      for (let index = 0; index < entries.length; index++) {
+        const entry = entries[index];
+        if (entry.block.type === "paragraph" && !includeEmpty && paragraphText(entry.block).length === 0) continue;
+        if (usedBlocks >= maxBlocks || (entry.block.type === "paragraph" && usedCharacters >= maxCharacters)) {
+          next = { value: `cursor:${this.revision}:${index}:0` };
+          break;
+        }
+        if (entry.block.type === "table") {
+          blocks.push({
+            type: "table",
+            ref: entry.ref,
+            rows: entry.block.rows.length,
+            columns: Math.max(0, ...entry.block.rows.map((row) => row.cells.length)),
+          });
+          usedBlocks++;
+          continue;
+        }
+        const text = paragraphText(entry.block);
+        const end = Math.min(text.length, maxCharacters - usedCharacters);
+        blocks.push(this.contextParagraph(entry, 0, end, include));
+        usedBlocks++;
+        usedCharacters += end;
+        if (end < text.length) {
+          next = { value: `cursor:${this.revision}:${index}:${end}` };
+          break;
+        }
+      }
+
+      if (next && blocks.length === 0) {
+        remainingStories = available.slice(storyIndex);
+        break;
+      }
+      if (blocks.length > 0) contents.push({ story: storyId, kind: story.kind, blocks, ...(next ? { next } : {}) });
+      if (next) {
+        remainingStories = available.slice(storyIndex + 1);
+        break;
+      }
+    }
+
+    const truncated = contents.some((story) => story.next !== undefined) || Boolean(remainingStories?.length);
+    return {
+      revision: this.revision,
+      contents,
+      truncated,
+      ...(remainingStories?.length ? { remainingStories } : {}),
+    };
+  }
+
+  private contextParagraph(
+    indexed: IndexedBlock,
+    start: number,
+    end: number,
+    include: Array<"bookmarks" | "objects">,
+  ): AgentContextParagraph {
+    const paragraph = indexed.block as Paragraph;
+    const allText = paragraphText(paragraph);
+    const runs: AgentContextParagraph["runs"] = [];
+    const objects: AgentComponentSummary[] = [];
+    let paragraphOffset = 0;
+    for (const { run } of paragraphRuns(paragraph)) {
+      const text = runText(run);
+      const runStart = paragraphOffset;
+      const runEnd = runStart + text.length;
+      paragraphOffset = runEnd;
+      if (include.includes("objects")) objects.push(...(this.componentsByRun.get(run) ?? []));
+      const overlaps = text.length === 0 ? start === 0 && end === 0 : runEnd > start && runStart < end;
+      if (!overlaps) continue;
+      const identity = this.refsByRun.get(run)!;
+      const wireLength = run.src ? runWireLength(run.src) : text.length;
+      runs.push({ ref: identity.ref, start: runStart, end: runEnd, ...(wireLength !== text.length ? { wireLength } : {}) });
+    }
+    const effective = this.doc.effectiveParaProps(paragraph);
+    const bookmarks = paragraph.bookmarks ?? [];
+    return {
+      type: "paragraph",
+      ref: indexed.ref,
+      text: allText.slice(start, end),
+      ...(start > 0 || end < allText.length ? { range: { start, end, total: allText.length } } : {}),
+      runs,
+      ...(paragraph.props.styleId ? { styleId: paragraph.props.styleId } : {}),
+      ...(effective.outlineLevel === undefined ? {} : { outlineLevel: effective.outlineLevel + 1 }),
+      ...(effective.numbering ? { list: { numId: effective.numbering.numId, level: effective.numbering.ilvl } } : {}),
+      ...(include.includes("bookmarks") && bookmarks.length ? { bookmarks } : {}),
+      ...(include.includes("objects") && objects.length ? { objects } : {}),
     };
   }
 

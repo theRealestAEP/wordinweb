@@ -13,16 +13,17 @@ When the user supplies a URL whose path is `/agent-invite`:
 
 1. Treat the complete URL as a secret bearer credential.
 2. Keep the fragment attached when you pass the URL to a command.
-3. Run the exact command from the invitation. Do not open the link in a browser or search the workspace. The command uses `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent connect '<short URL>'`, starts a detached local bridge, and returns a `sessionId`.
+3. Run the exact command from the invitation. Do not open the link in a browser or search the workspace. The command uses `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent connect '<short URL>'`, starts a detached local bridge, and returns a `sessionId`.
 4. Read the ready result and its room instructions.
 5. Confirm that the ready result reports `wake.state` as `armed`.
 6. End the current agent turn. Do not poll or call `wait`.
-7. When the bridge resumes this task for a private message, run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent session '<sessionId>' '{"command":"sync"}'` first.
-8. Inspect the relevant content before each edit.
-9. Run each JSON command through a new short `wordinweb-agent session` process.
-10. Sync and inspect again when an edit returns `needs_sync`.
-11. Reply through the document chat command, then end the agent turn.
-12. Send `{"command":"close"}` when the inviter ends the collaboration task.
+7. When the bridge resumes this task for a private message, run `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent session '<sessionId>' '{"command":"sync"}'` first.
+8. Use one `context` inspection for a broad text task. It returns bounded text and edit references from all non-empty stories.
+9. Use `overview`, `read`, `object`, or `spatial` only when the task needs their extra detail.
+10. Run each JSON command through a new short `wordinweb-agent session` process.
+11. Sync and inspect again when an edit returns `needs_sync`.
+12. Reply through the document chat command, then end the agent turn.
+13. Send `{"command":"close"}` when the inviter ends the collaboration task.
 
 The bridge places the visible agent cursor after each edit. The agent does not send a separate cursor command.
 
@@ -51,21 +52,22 @@ Do not print the invitation URL or save it in a file.
 
 ## Edit a loaded document
 
-1. Inspect `overview` to learn the revision, stories, sections, outline, components, and page setup.
-2. Read bounded story ranges or search for a specific target.
-3. Expand only the objects that matter to the task.
-4. Query `word_document_capabilities` by exact operation kind.
-5. Use references returned by the current inspection revision.
-6. Apply one bounded transaction against that revision.
-7. Re-inspect after a structural edit before use of new content.
-8. Inspect affected objects and page ranges.
-9. Save after semantic and spatial checks pass.
+1. Use `context` for a broad text task across non-empty stories.
+2. Use `overview` only when the task needs sections, layout, outline, or object counts.
+3. Use detailed `read`, `search`, `object`, or `spatial` requests only for the relevant target.
+4. Expand only the objects that matter to the task.
+5. Query `word_document_capabilities` by exact operation kind.
+6. Use references returned by the current inspection revision.
+7. Apply one bounded transaction against that revision.
+8. Re-inspect after a structural edit before use of new content.
+9. Inspect affected objects and page ranges.
+10. Save after semantic and spatial checks pass.
 
 ## Keep context bounded
 
-- Start with `overview`.
+- Start with `context` for broad text work.
 - Use `search` to locate specific content.
-- Read 10–30 blocks or approximately 12,000 characters at a time.
+- Use detailed `read` only when the compact context lacks a required field.
 - Expand only relevant objects.
 - Inspect only the required page ranges.
 - Query capabilities by exact `kind`.

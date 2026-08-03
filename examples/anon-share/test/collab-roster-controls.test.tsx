@@ -212,6 +212,7 @@ describe("collaborator controls", () => {
     if (!invitationUrl) throw new Error("copied invitation URL is missing");
     const payload = await openShortInvite(invitationUrl, storedInvite);
     expect(payload.agent.instructions).toContain("private message");
+    expect(payload.agent.instructions).toContain("compact context inspection");
     expect(payload.agent.instructions).toContain("Do not poll or call wait");
     expect(payload.agent.mode).toBe("suggest");
 

@@ -214,6 +214,53 @@ describe("AgentDocument local tools", () => {
     expect(page2.blocks[0].type === "paragraph" && page2.blocks[0].textRange.start).toBe(10_000);
   });
 
+  it("returns compact editable text from multiple stories in one inspection", async () => {
+    const agent = AgentDocument.create();
+    await agent.compose({
+      revision: agent.revision,
+      body: [
+        { type: "paragraph", runs: [{ text: "Decision: ", bold: true }, { text: "select the platform." }] },
+        { type: "paragraph", text: "" },
+      ],
+      header: [{ type: "paragraph", text: "Confidential" }],
+      footer: [{ type: "paragraph", text: "Review copy" }],
+    });
+
+    const context = agent.inspect({ kind: "context" });
+    if (!("contents" in context)) throw new Error("compact context missing");
+    expect(context.contents.map((content) => content.kind)).toEqual(expect.arrayContaining(["body", "header", "footer"]));
+    const bodyContext = context.contents.find((content) => content.story === "body");
+    const paragraph = bodyContext?.blocks.find((block) => block.type === "paragraph");
+    if (!paragraph || paragraph.type !== "paragraph") throw new Error("compact paragraph missing");
+    expect(paragraph).toMatchObject({
+      text: "Decision: select the platform.",
+      runs: [
+        { ref: expect.stringMatching(/^run:/), start: 0, end: 10 },
+        { ref: expect.stringMatching(/^run:/), start: 10, end: 30 },
+      ],
+    });
+    expect(bodyContext?.blocks.filter((block) => block.type === "paragraph")).toHaveLength(1);
+    expect(paragraph).not.toHaveProperty("range");
+    expect(paragraph).not.toHaveProperty("bookmarks");
+    expect(paragraph).not.toHaveProperty("objects");
+    expect(paragraph.runs[0]).not.toHaveProperty("formatting");
+
+    const bodyOnly = agent.inspect({ kind: "context", stories: ["body"] });
+    if (!("contents" in bodyOnly)) throw new Error("filtered context missing");
+    expect(bodyOnly.contents.map((content) => content.story)).toEqual(["body"]);
+
+    const overview = agent.inspect({ kind: "overview" });
+    if (!("stories" in overview)) throw new Error("overview missing");
+    const detailed = overview.stories.map((story) => agent.inspect({ kind: "read", story: story.id, maxBlocks: 200, maxCharacters: 100_000 }));
+    expect(JSON.stringify(context).length).toBeLessThan(JSON.stringify(detailed).length / 2);
+
+    const page = agent.inspect({ kind: "context", maxCharacters: 12 });
+    if (!("contents" in page)) throw new Error("bounded context missing");
+    expect(page).toMatchObject({ truncated: true, remainingStories: expect.any(Array) });
+    expect(page.contents[0].next).toBeTruthy();
+    expect(page.contents[0].blocks[0]).toMatchObject({ text: "Decision: se", range: { start: 0, end: 12, total: 30 } });
+  });
+
   it("returns detailed shape stories and deterministic overlap geometry", () => {
     const boxes = anchorBox(1, 457200, 457200, "AA0004") + anchorBox(2, 685800, 685800, "AA0005");
     const agent = AgentDocument.load(makeDocx(body(`<w:p>${boxes}<w:r><w:t>host</w:t></w:r></w:p>`)));
@@ -221,6 +268,9 @@ describe("AgentDocument local tools", () => {
     if (!("blocks" in read) || read.blocks[0].type !== "paragraph") throw new Error("missing paragraph");
     const shapeRefs = read.blocks[0].runs.flatMap((run) => run.components).filter((component) => component.type === "anchored-textbox").map((component) => component.ref);
     expect(shapeRefs).toHaveLength(2);
+    const context = agent.inspect({ kind: "context", include: ["objects"] });
+    if (!("contents" in context)) throw new Error("compact context missing");
+    expect(context.contents[0].blocks[0]).toMatchObject({ objects: [{ type: "anchored-textbox" }, { type: "anchored-textbox" }] });
     const detail = agent.inspect({ kind: "object", ref: shapeRefs[0] });
     expect(detail).toMatchObject({ type: "anchored-textbox" });
     expect(JSON.stringify(detail)).not.toContain("srcDrawing");
@@ -444,7 +494,7 @@ describe("AgentDocument local tools", () => {
     expect(composeSchema).toMatchObject({ type: "object", additionalProperties: false });
     const inspectSchema = agent.tools().find((tool) => tool.name === "word_document_inspect")?.inputSchema;
     expect(inspectSchema).toMatchObject({ anyOf: expect.any(Array) });
-    expect((inspectSchema?.anyOf as Array<Record<string, unknown>>)).toHaveLength(5);
+    expect((inspectSchema?.anyOf as Array<Record<string, unknown>>)).toHaveLength(6);
     expect((inspectSchema?.anyOf as Array<Record<string, unknown>>).every((schema) => schema.additionalProperties === false)).toBe(true);
     const editSchema = agent.tools().find((tool) => tool.name === "word_document_edit")?.inputSchema;
     const operationSchemas = (((editSchema?.properties as Record<string, unknown>).operations as Record<string, unknown>).items as Record<string, unknown>).anyOf;

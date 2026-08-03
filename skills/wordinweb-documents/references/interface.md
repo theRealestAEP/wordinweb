@@ -128,6 +128,8 @@ interface AgentComposeResult {
 Inspect document content progressively.
 
 ```json
+{ "kind": "context", "maxBlocks": 100, "maxCharacters": 24000 }
+{ "kind": "context", "stories": ["body", "header:rId7"], "include": ["bookmarks", "objects"] }
 { "kind": "overview" }
 { "kind": "read", "story": "body", "maxBlocks": 20, "maxCharacters": 12000 }
 { "kind": "read", "story": "body", "cursor": { "value": "returned cursor" } }
@@ -138,6 +140,9 @@ Inspect document content progressively.
 
 Limits:
 
+- `context.stories`: 1–100 unique story IDs
+- `context.maxBlocks`: 1–200 across the complete response
+- `context.maxCharacters`: 1–100,000 across the complete response
 - `read.maxBlocks`: 1–200
 - `read.maxCharacters`: 1–100,000
 - `search.query`: 1–1,000 characters
@@ -180,6 +185,43 @@ Serialize the current document.
 The result contains DOCX `mediaType` and base64 bytes.
 
 ## Inspection types
+
+### Compact context
+
+`context` returns all non-empty stories by default. It omits optional fields
+whose values are empty. The default global budget is 100 blocks and 24,000
+characters.
+
+```ts
+interface AgentContextResult {
+  revision: string;
+  contents: Array<{
+    story: string;
+    kind: "body" | "header" | "footer" | "footnote" | "endnote" | "textbox";
+    blocks: Array<
+      | {
+          type: "paragraph";
+          ref: string;
+          text: string;
+          range?: { start: number; end: number; total: number };
+          runs: Array<{ ref: string; start: number; end: number; wireLength?: number }>;
+          styleId?: string;
+          outlineLevel?: number;
+          list?: { numId: number; level: number };
+          bookmarks?: string[];
+          objects?: Array<{ ref: string; editRef?: string; type: string; label?: string }>;
+        }
+      | { type: "table"; ref: string; rows: number; columns: number }
+    >;
+    next?: { value: string };
+  }>;
+  truncated: boolean;
+  remainingStories?: string[];
+}
+```
+
+Use a returned `next` cursor with a detailed `read` request for the same story.
+Set `includeEmpty: true` only when empty paragraph targets matter.
 
 ### Overview
 

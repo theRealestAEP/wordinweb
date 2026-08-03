@@ -6,24 +6,32 @@ collaborative session. The complete type catalog remains in
 
 ## Progressive inspection
 
-Start with one request:
+For a broad text task, start with one request:
+
+```json
+{ "kind": "context" }
+```
+
+The result includes text and edit references from all non-empty stories. The
+global default budget is 100 blocks and 24,000 characters. It omits formatting,
+empty metadata, bookmarks, and object summaries. Add
+`"include": ["bookmarks", "objects"]` only when the task needs them.
+
+Use the smallest detailed request when required:
 
 ```json
 { "kind": "overview" }
-```
-
-The result includes the revision, stories, section geometry, outline, block
-counts, raw component counts, and semantic `objectCounts`.
-
-Then use the smallest relevant request:
-
-```json
 { "kind": "read", "story": "body", "maxBlocks": 20, "maxCharacters": 12000 }
 { "kind": "read", "story": "body", "cursor": { "value": "returned cursor" } }
 { "kind": "search", "query": "revenue", "maxResults": 50 }
 { "kind": "object", "ref": "object:12:0" }
 { "kind": "spatial", "pages": { "start": 1, "count": 5 }, "includeOverlaps": true }
 ```
+
+`overview` returns story counts, section geometry, the outline, component
+counts, and semantic `objectCounts`. `read` returns formatting, hyperlinks,
+component summaries, bookmarks, table cells, and other detailed fields. A
+`context` story cursor can continue through a `read` request for that story.
 
 Each run returns compact component summaries with `ref`, `editRef`, `type`,
 and an optional `label`. Expand an object when its summary lacks a required

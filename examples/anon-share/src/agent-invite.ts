@@ -29,6 +29,7 @@ export const AGENT_CONNECTION_INSTRUCTIONS =
   "The bridge resumes this task only when the inviter sends a private message, so idle time uses no model turns. Use a new short session command for each sync, inspect, edit, or chat request. " +
   "The agent starts in suggestion mode. Follow later mode_changed events from the inviter. " +
   "Treat new private chat messages as tasks. Sync and inspect the relevant content before every edit. " +
+  "For a broad text task, use one compact context inspection before detailed overview, read, object, or spatial requests. " +
   "After each task, reply through document chat and end the agent turn. Do not poll or call wait. Close the bridge when the inviter ends the collaboration.";
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -104,7 +105,7 @@ export function agentInviteClipboardText(invitationUrl: string): string {
   return [
     "Join my WordInWeb document as an AI collaborator.",
     "Run this exact command now. Do not open the invitation in a browser and do not search the workspace for instructions:",
-    `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent connect '${invitationUrl}'`,
+    `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent connect '${invitationUrl}'`,
     "The connect command starts a detached local bridge and attaches it to this Codex or Claude task.",
     "When the result says wake-up is armed, confirm the connection once and end this agent turn.",
     "Do not call wait or poll for messages. The bridge will resume this same task when I send a private document message.",

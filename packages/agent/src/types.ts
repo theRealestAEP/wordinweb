@@ -110,6 +110,47 @@ export interface AgentReadResult {
   truncated: boolean;
 }
 
+export interface AgentContextRun {
+  ref: AgentReference;
+  start: number;
+  end: number;
+  wireLength?: number;
+}
+
+export interface AgentContextParagraph {
+  type: "paragraph";
+  ref: AgentReference;
+  text: string;
+  range?: { start: number; end: number; total: number };
+  runs: AgentContextRun[];
+  styleId?: string;
+  outlineLevel?: number;
+  list?: { numId: number; level: number };
+  bookmarks?: string[];
+  objects?: AgentComponentSummary[];
+}
+
+export interface AgentContextTable {
+  type: "table";
+  ref: AgentReference;
+  rows: number;
+  columns: number;
+}
+
+export interface AgentContextStory {
+  story: string;
+  kind: "body" | "header" | "footer" | "footnote" | "endnote" | "textbox";
+  blocks: Array<AgentContextParagraph | AgentContextTable>;
+  next?: AgentCursor;
+}
+
+export interface AgentContextResult {
+  revision: string;
+  contents: AgentContextStory[];
+  truncated: boolean;
+  remainingStories?: string[];
+}
+
 export interface AgentSearchResult {
   revision: string;
   matches: Array<{
@@ -180,6 +221,7 @@ export interface AgentSpatialResult {
 
 export type AgentInspectRequest =
   | { kind: "overview" }
+  | { kind: "context"; stories?: string[]; maxBlocks?: number; maxCharacters?: number; include?: Array<"bookmarks" | "objects">; includeEmpty?: boolean }
   | { kind: "read"; story?: string; cursor?: AgentCursor; maxBlocks?: number; maxCharacters?: number }
   | { kind: "search"; query: string; maxResults?: number }
   | { kind: "object"; ref: AgentReference }
@@ -187,6 +229,7 @@ export type AgentInspectRequest =
 
 export type AgentInspectResult =
   | AgentOverview
+  | AgentContextResult
   | AgentReadResult
   | AgentSearchResult
   | AgentObjectResult

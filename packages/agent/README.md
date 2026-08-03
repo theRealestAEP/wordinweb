@@ -27,7 +27,7 @@ An AI invitation link can bootstrap a live shell session without an MCP
 installation:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent connect '<short invitation URL>'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent connect '<short invitation URL>'
 ```
 
 The command starts a detached local bridge, captures the current Codex or
@@ -36,13 +36,19 @@ It resumes the agent session when the inviter sends a private message. Run each
 JSON document command through a short process:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-2' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
 ```
 
 The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, and
 `close`. `wait` remains available for manual clients. Every edit includes the inspected revision. A newer room revision
 returns `needs_sync` before the agent changes the document. The bridge places
 the agent's visible collaboration cursor after its latest edit.
+
+For a broad text task, read all non-empty stories in one bounded compact call:
+
+```bash
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent session '<sessionId>' '{"command":"inspect","request":{"kind":"context"}}'
+```
 
 ## Headless use
 
@@ -127,13 +133,21 @@ and DOCX saves.
 
 ## Progressive inspection
 
-For a loaded document, start with `overview`. It reports stories, an outline,
-block counts, raw component counts, and semantic object counts. A compose call
-already returns this overview plus compact summaries for created objects.
-Then use these requests:
+For a broad text task, start with `context`. It returns text and edit references
+from all non-empty stories in one response. The default global budget is 100
+blocks and 24,000 characters. It omits formatting, empty metadata, bookmarks,
+and object summaries. Add `include: ["bookmarks", "objects"]` only when the
+task needs those fields.
 
+Use `overview` when the task needs page setup, the outline, story counts, or
+object counts. A compose call already returns this overview plus compact
+summaries for created objects. Then use these requests:
+
+- `context` returns bounded bulk editing context. Its story cursor can continue
+  through `read` when one story exceeds the global budget.
 - `read` returns a bounded block and character window. Use its cursor for the
-  next window.
+  next window. It includes detailed formatting, components, bookmarks, and
+  table cell references.
 - `search` returns bounded matches with block and run references.
 - `object` expands one equation, image, shape, chart, SmartArt diagram, field,
   note reference, or other inline component.
