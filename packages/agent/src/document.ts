@@ -569,7 +569,7 @@ export class AgentDocument {
         return exhaustive;
       }
     }
-    this.recordInspection(result, inspector);
+    if (this.target) this.recordInspection(result, inspector);
     return result;
   }
 
