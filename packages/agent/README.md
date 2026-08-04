@@ -27,17 +27,18 @@ An AI invitation link can bootstrap a live shell session without an MCP
 installation:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-4' wordinweb-agent connect '<short invitation URL>'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent connect '<short invitation URL>'
 ```
 
 The command starts a detached local bridge and returns a `sessionId`. For Codex,
 the bridge starts one dedicated resident document thread. Each private message
 starts a turn on that thread, so its document context stays warm. The bridge
 waits without model turns. Claude uses its captured session for each private
-message. Run each JSON document command through a short process:
+message. Each started turn supplies a `wakeId`. Include it in every document
+command for that turn:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-4' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent session '<sessionId>' '{"command":"sync","wakeId":"<wakeId>"}'
 ```
 
 The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, and
@@ -45,12 +46,20 @@ The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, and
 inspected revision. When the room advances, the package compares the edit's
 inspected targets with their current state. Unchanged targets proceed across
 the newer revision. Changed targets return `needs_sync`. The bridge places the
-agent's visible collaboration cursor after its latest edit.
+agent's visible collaboration cursor after its latest edit. A successful turn
+ends with a `chat` command for the current `wakeId`. The bridge interrupts a
+turn after 60 seconds and reports the failure in the private document chat.
+
+Inspect the current wake state with a short status command:
+
+```bash
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent session '<sessionId>' '{"daemon":"status"}'
+```
 
 For a broad text task, read all non-empty stories in one bounded compact call:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-4' wordinweb-agent session '<sessionId>' '{"command":"inspect","request":{"kind":"context"}}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent session '<sessionId>' '{"command":"inspect","wakeId":"<wakeId>","request":{"kind":"context"}}'
 ```
 
 ## Headless use

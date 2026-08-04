@@ -44,7 +44,7 @@ describe("AI invitation helpers", () => {
     expect(copied).toContain(url);
     expect(copied).toContain("Run this exact command in the terminal");
     expect(copied).toContain("Pass the invitation URL directly");
-    expect(copied).toContain("short-invite-4");
+    expect(copied).toContain("short-invite-5");
     expect(copied).toContain("dedicated document-agent session");
     expect(copied).toContain("Stay idle after this turn");
   });

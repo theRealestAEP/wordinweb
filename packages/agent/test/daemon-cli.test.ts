@@ -47,10 +47,12 @@ describe("detached agent CLI bridge", () => {
     const wakeLog = join(fakeBin, "wake.json");
     const fakeCodex = join(fakeBin, "codex");
     await writeFile(fakeCodex, `#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 const log = (value) => appendFileSync(process.env.WORDINWEB_WAKE_LOG, JSON.stringify(value) + "\\n");
 const reply = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 let turn = 0;
+let currentTurn = null;
 log({ event: "start", args: process.argv.slice(2) });
 let buffer = "";
 process.stdin.setEncoding("utf8");
@@ -67,8 +69,34 @@ process.stdin.on("data", (chunk) => {
     if (message.method === "thread/start") reply({ id: message.id, result: { thread: { id: "thread_document_agent" } } });
     if (message.method === "turn/start") {
       const turnId = "turn_" + ++turn;
+      currentTurn = { id: turnId, threadId: message.params.threadId };
       reply({ id: message.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
+      const prompt = message.params.input[0].text;
+      const sessionId = prompt.match(/session_[A-Za-z0-9_-]+/)?.[0];
+      const wakeId = prompt.match(/wake_[A-Za-z0-9_-]+/)?.[0];
+      if (!sessionId || !wakeId) process.exit(2);
+      const runSession = (command) => {
+        const output = execFileSync(process.execPath, [
+          process.env.WORDINWEB_TEST_CLI,
+          "session",
+          sessionId,
+          JSON.stringify({ ...command, wakeId }),
+        ], { cwd: process.cwd(), encoding: "utf8" });
+        const result = JSON.parse(output);
+        log({ event: "session-command", cwd: process.cwd(), command: command.command, wakeId, ok: result.ok });
+      };
+      if (prompt.includes("Please stall.")) continue;
+      runSession({ command: "sync" });
+      if (!prompt.includes("Finish without reply.")) runSession({ command: "chat", text: "Completed." });
       reply({ method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: turnId, status: "completed", items: [] } } });
+      currentTurn = null;
+    }
+    if (message.method === "turn/interrupt") {
+      reply({ id: message.id, result: {} });
+      if (currentTurn) {
+        reply({ method: "turn/completed", params: { threadId: currentTurn.threadId, turn: { id: currentTurn.id, status: "interrupted", items: [] } } });
+        currentTurn = null;
+      }
     }
     if (message.method === "thread/delete") reply({ id: message.id, result: {} });
   }
@@ -95,6 +123,9 @@ process.stdin.on("data", (chunk) => {
     const port = (httpServer.address() as { port: number }).port;
     const wsUrl = `ws://127.0.0.1:${port}`;
     const humanSocket = new WebSocket(wsUrl);
+    const chatKeyBytes = Buffer.alloc(32, 7);
+    const chatKey = await webcrypto.subtle.importKey("raw", chatKeyBytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+    const receivedAgentChats: string[] = [];
     let inviteRegistered = false;
     let agentClientId = "";
     let agentPresence: PresencePosition | null = null;
@@ -104,13 +135,26 @@ process.stdin.on("data", (chunk) => {
       onPresence: (participant, position) => {
         if (participant === agentClientId) agentPresence = position;
       },
+      onAgentChat: (message) => {
+        if (message.sender !== "agent") return;
+        void webcrypto.subtle.decrypt(
+          {
+            name: "AES-GCM",
+            iv: Buffer.from(message.iv, "base64url"),
+            additionalData: new TextEncoder().encode(`wordinweb-agent-chat:${message.agentClientId}:${message.messageId}`),
+          },
+          chatKey,
+          Buffer.from(message.ciphertext, "base64url"),
+        ).then((plaintext) => {
+          receivedAgentChats.push(new TextDecoder().decode(plaintext));
+        });
+      },
     });
     human.join("daemon-test", undefined, { profile: { name: "Human", color: "" } });
     await until(() => human.ready, "human ready");
 
     const inviteId = "invite_1234567890";
     const token = "token_12345678901234567890123456789012";
-    const chatKeyBytes = Buffer.alloc(32, 7);
     human.registerAgentInvite(inviteId, token, Date.now() + 120_000);
     await until(() => inviteRegistered, "invite registered");
     const payload = {
@@ -148,25 +192,30 @@ process.stdin.on("data", (chunk) => {
         CODEX_THREAD_ID: "thread_12345678",
         PATH: `${fakeBin}${delimiter}${process.env.PATH}`,
         WORDINWEB_WAKE_LOG: wakeLog,
+        WORDINWEB_TEST_CLI: cli,
+        WORDINWEB_WAKE_TIMEOUT_MS: "800",
       });
       sessionId = String(connected.sessionId);
       expect(connected).toMatchObject({ event: "ready", mode: "detached", wake: { state: "armed", provider: "codex" } });
       expect(sessionId).toMatch(/^session_/);
       await until(() => !!agentClientId, "agent joined");
 
-      const messageId = "message_12345678";
-      const iv = Buffer.alloc(12, 3);
-      const chatKey = await webcrypto.subtle.importKey("raw", chatKeyBytes, "AES-GCM", false, ["encrypt"]);
-      const ciphertext = await webcrypto.subtle.encrypt(
-        {
-          name: "AES-GCM",
-          iv,
-          additionalData: new TextEncoder().encode(`wordinweb-agent-chat:${agentClientId}:${messageId}`),
-        },
-        chatKey,
-        new TextEncoder().encode("Please make the edit."),
-      );
-      human.sendAgentChat(agentClientId, messageId, iv.toString("base64url"), Buffer.from(ciphertext).toString("base64url"));
+      let privateMessageNonce = 3;
+      const sendPrivateMessage = async (messageId: string, text: string): Promise<void> => {
+        const iv = Buffer.alloc(12, privateMessageNonce++);
+        const ciphertext = await webcrypto.subtle.encrypt(
+          {
+            name: "AES-GCM",
+            iv,
+            additionalData: new TextEncoder().encode(`wordinweb-agent-chat:${agentClientId}:${messageId}`),
+          },
+          chatKey,
+          new TextEncoder().encode(text),
+        );
+        human.sendAgentChat(agentClientId, messageId, iv.toString("base64url"), Buffer.from(ciphertext).toString("base64url"));
+      };
+
+      await sendPrivateMessage("message_12345678", "Please make the edit.");
       let waited: Record<string, unknown> = {};
       for (let attempt = 0; attempt < 3; attempt++) {
         waited = await cliCommand(["session", sessionId, JSON.stringify({ command: "wait", timeoutMs: 2_000 })]);
@@ -189,20 +238,24 @@ process.stdin.on("data", (chunk) => {
       expect(prompt).toContain(cli);
       expect(prompt).toContain("stay idle");
       expect(prompt).toContain('{"kind":"context"}');
-
-      const nextMessageId = "message_abcdefgh";
-      const nextIv = Buffer.alloc(12, 6);
-      const nextCiphertext = await webcrypto.subtle.encrypt(
-        {
-          name: "AES-GCM",
-          iv: nextIv,
-          additionalData: new TextEncoder().encode(`wordinweb-agent-chat:${agentClientId}:${nextMessageId}`),
-        },
-        chatKey,
-        new TextEncoder().encode("Please make another edit."),
+      const threadStart = events.find((event) => event.method === "thread/start") as { params: { cwd: string } };
+      expect(existsSync(join(threadStart.params.cwd, "bridge.sock"))).toBe(true);
+      await until(
+        async () => (await wakeEvents()).filter((event) => event.event === "session-command").length === 2,
+        "Codex runs document commands",
       );
-      human.sendAgentChat(agentClientId, nextMessageId, nextIv.toString("base64url"), Buffer.from(nextCiphertext).toString("base64url"));
+      const firstCommands = (await wakeEvents()).filter((event) => event.event === "session-command");
+      expect(firstCommands.map((event) => event.command)).toEqual(["sync", "chat"]);
+      expect(firstCommands.every((event) => existsSync(join(String(event.cwd), "bridge.sock")) && event.ok === true)).toBe(true);
+      await until(() => receivedAgentChats.includes("Completed."), "agent sends completion chat");
+      expect(await cliCommand(["session", sessionId, JSON.stringify({ daemon: "status" })])).toMatchObject({
+        ok: true,
+        result: { state: "ready", wakeState: "idle", lastWakeError: null },
+      });
+
+      await sendPrivateMessage("message_abcdefgh", "Please make another edit.");
       await until(async () => (await wakeEvents()).filter((event) => event.method === "turn/start").length === 2, "resident Codex session handles another message");
+      await until(() => receivedAgentChats.filter((text) => text === "Completed.").length === 2, "resident Codex session replies again");
       const residentEvents = await wakeEvents();
       expect(residentEvents.filter((event) => event.event === "start")).toHaveLength(1);
       expect(residentEvents.filter((event) => event.method === "thread/start")).toHaveLength(1);
@@ -210,6 +263,42 @@ process.stdin.on("data", (chunk) => {
       expect(turns.map((turn) => turn.params.threadId)).toEqual(["thread_document_agent", "thread_document_agent"]);
       expect(await cliCommand(["session", sessionId, JSON.stringify({ command: "wait", timeoutMs: 2_000 })]))
         .toMatchObject({ ok: true, result: { event: "chat", text: "Please make another edit." } });
+
+      await sendPrivateMessage("message_no_reply", "Finish without reply.");
+      await until(
+        () => receivedAgentChats.some((text) => text.includes("ended before the agent sent a reply")),
+        "silent completion reports failure",
+      );
+      expect(await cliCommand(["session", sessionId, JSON.stringify({ daemon: "status" })])).toMatchObject({
+        ok: true,
+        result: { wakeState: "failed", lastWakeError: "turn_completed_without_chat" },
+      });
+
+      await sendPrivateMessage("message_stall", "Please stall.");
+      await until(async () => (await wakeEvents()).filter((event) => event.method === "turn/start").length === 4, "stalled Codex turn starts");
+      expect(await cliCommand(["session", sessionId, JSON.stringify({ daemon: "status" })])).toMatchObject({
+        ok: true,
+        result: { wakeState: "active", lastWakeError: null },
+      });
+      await until(
+        () => receivedAgentChats.some((text) => text.includes("document task timed out")),
+        "stalled Codex turn reports timeout",
+      );
+      expect(await cliCommand(["session", sessionId, JSON.stringify({ daemon: "status" })])).toMatchObject({
+        ok: true,
+        result: { wakeState: "failed", lastWakeError: "turn_timed_out" },
+      });
+      expect((await wakeEvents()).some((event) => event.method === "turn/interrupt")).toBe(true);
+
+      await sendPrivateMessage("message_recover", "Please recover.");
+      await until(() => receivedAgentChats.filter((text) => text === "Completed.").length === 3, "resident Codex session recovers");
+      const recoveredEvents = await wakeEvents();
+      expect(recoveredEvents.filter((event) => event.event === "start")).toHaveLength(1);
+      expect(recoveredEvents.filter((event) => event.method === "thread/start")).toHaveLength(1);
+      expect(await cliCommand(["session", sessionId, JSON.stringify({ daemon: "status" })])).toMatchObject({
+        ok: true,
+        result: { wakeState: "idle", lastWakeError: null },
+      });
 
       const synced = await cliCommand(["session", sessionId, JSON.stringify({ command: "sync" })]);
       const revision = String((synced.result as { revision: string }).revision);
@@ -238,20 +327,9 @@ process.stdin.on("data", (chunk) => {
       expect(agentPresence?.anchor.offset).toBe("Detached edit".length);
       expect(collectRevisions(human.doc!)).toHaveLength(1);
 
-      const modeMessageId = "message_mode_edit";
-      const modeIv = Buffer.alloc(12, 4);
-      const modeCiphertext = await webcrypto.subtle.encrypt(
-        {
-          name: "AES-GCM",
-          iv: modeIv,
-          additionalData: new TextEncoder().encode(`wordinweb-agent-chat:${agentClientId}:${modeMessageId}`),
-        },
-        chatKey,
-        new TextEncoder().encode("\u0000wordinweb-agent-mode:edit"),
-      );
-      human.sendAgentChat(agentClientId, modeMessageId, modeIv.toString("base64url"), Buffer.from(modeCiphertext).toString("base64url"));
+      await sendPrivateMessage("message_mode_edit", "\u0000wordinweb-agent-mode:edit");
       let modeEvent: Record<string, unknown> = {};
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 6; attempt++) {
         modeEvent = await cliCommand(["session", sessionId, JSON.stringify({ command: "wait", timeoutMs: 2_000 })]);
         if ((modeEvent.result as { event?: string } | undefined)?.event === "mode_changed") break;
       }
@@ -281,5 +359,5 @@ process.stdin.on("data", (chunk) => {
       httpServer.close();
       await rm(fakeBin, { recursive: true, force: true });
     }
-  }, 20_000);
+  }, 30_000);
 });

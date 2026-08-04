@@ -27,6 +27,7 @@ export const AGENT_MODE_CONTROL_PREFIX = "\u0000wordinweb-agent-mode:";
 export const AGENT_CONNECTION_INSTRUCTIONS =
   "The connect command starts a detached local bridge and a dedicated document-agent session. End the agent turn after it reports that wake-up is armed. " +
   "The bridge starts a turn when the inviter sends a private message, so idle time uses no model turns. Use a new short session command for each sync, inspect, edit, or chat request. " +
+  "Each started turn supplies a wakeId. Include it in every session command for that turn. " +
   "The agent starts in suggestion mode. Follow later mode_changed events from the inviter. " +
   "Treat new private chat messages as tasks. Sync and inspect the relevant content before every edit. " +
   "For a broad text task, use one compact context inspection before detailed overview, read, object, or spatial requests. " +
@@ -105,7 +106,7 @@ export function agentInviteClipboardText(invitationUrl: string): string {
   return [
     "Join my WordInWeb document as an AI collaborator.",
     "Run this exact command in the terminal. Pass the invitation URL directly to the agent client:",
-    `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-4' wordinweb-agent connect '${invitationUrl}'`,
+    `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent connect '${invitationUrl}'`,
     "The connect command starts a detached local bridge and a dedicated document-agent session in this agent harness.",
     "When the result says wake-up is armed, confirm the connection once and end this agent turn.",
     "Stay idle after this turn. The bridge will start the document-agent turn when I send a private document message.",

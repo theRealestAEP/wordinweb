@@ -11,23 +11,24 @@ Use the portable WordInWeb interface to inspect and edit DOCX state.
 
 When the user supplies a URL whose path is `/agent-invite`:
 
-1. Treat the complete URL as a secret bearer credential.
+1. Treat the complete URL as a secret bearer credential and keep it private.
 2. Keep the fragment attached when you pass the URL to a command.
 3. Run the exact command from the invitation in the terminal. The command passes the complete URL to `wordinweb-agent connect`, starts a detached local bridge, and returns a `sessionId`.
 4. Read the ready result and its room instructions.
 5. Confirm that the ready result reports `wake.state` as `armed`.
 6. End the current agent turn and stay idle.
-7. When the bridge starts a document-agent turn for a private message, run the exact local session command from that message with `{"command":"sync"}` first.
-8. Use one `context` inspection for a broad text task. It returns bounded text and edit references from all non-empty stories.
-9. Use `overview`, `read`, `object`, or `spatial` only when the task needs their extra detail.
-10. Run each JSON command through the local session command supplied in the turn message.
-11. Sync and inspect again when an edit returns `needs_sync`.
-12. Reply through the document chat command, then end the agent turn.
-13. Send `{"command":"close"}` when the inviter ends the collaboration task.
+7. When the bridge starts a document-agent turn, read its `wakeId` and include it in every session command for that turn.
+8. Run the exact local session command from that message with `{"command":"sync","wakeId":"<wakeId>"}` first.
+9. Use one `context` inspection for a broad text task. It returns bounded text and edit references from all non-empty stories.
+10. Use `overview`, `read`, `object`, or `spatial` only when the task needs their extra detail.
+11. Run each JSON command through the local session command supplied in the turn message.
+12. Sync and inspect again when an edit returns `needs_sync`.
+13. Reply through the document chat command with the current `wakeId`, then end the agent turn.
+14. Send `{"command":"close"}` when the inviter ends the collaboration task.
 
 The bridge places the visible agent cursor after each edit. The agent does not send a separate cursor command.
 
-Do not print the invitation URL or save it in a file.
+Keep the invitation URL in the exact connect command.
 
 ## Select one reference
 

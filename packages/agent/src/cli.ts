@@ -36,6 +36,7 @@ const AGENT_MODE_CONTROL_PREFIX = "\u0000wordinweb-agent-mode:";
 interface Command {
   id?: string | number;
   command?: string;
+  wakeId?: string;
   request?: Record<string, unknown>;
   category?: string;
   kind?: string;
@@ -134,14 +135,15 @@ export function detectWakeTarget(env: NodeJS.ProcessEnv = process.env): WakeTarg
   return null;
 }
 
-export function agentWakePrompt(agentSessionId: string, text: string): string {
+export function agentWakePrompt(agentSessionId: string, wakeId: string, text: string): string {
   const sessionCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(fileURLToPath(import.meta.url))} session ${JSON.stringify(agentSessionId)} '<JSON command>'`;
   return [
     "An authenticated private WordInWeb message started this document-agent turn.",
     `The inviter's message is ${JSON.stringify(text)}.`,
     `The detached document bridge session is ${agentSessionId}. Use this existing bridge for the task.`,
+    `The wake ID is ${wakeId}. Include ${JSON.stringify(wakeId)} as the wakeId field in every document command.`,
     `Run document commands with: ${sessionCommand}`,
-    'Start with sync. For a broad text task, inspect all non-empty stories in one compact call: {"command":"inspect","request":{"kind":"context"}}. Use overview, read, object, or spatial only when the task needs their extra detail.',
+    `Start with {"command":"sync","wakeId":${JSON.stringify(wakeId)}}. For a broad text task, inspect all non-empty stories in one compact call: {"command":"inspect","wakeId":${JSON.stringify(wakeId)},"request":{"kind":"context"}}. Use overview, read, object, or spatial only when the task needs their extra detail.`,
     "Inspect the relevant content before every edit. If an edit returns needs_sync, sync and inspect again.",
     "Complete this task, then send the inviter a concise result with the chat command.",
     "End this agent turn after the reply and stay idle. The detached bridge will start the next turn when another message arrives.",
@@ -154,11 +156,20 @@ function write(value: unknown): void {
 
 type Emit = (value: unknown) => void;
 
-function sessionSocketPath(sessionId: string): string {
+function validateSessionId(sessionId: string): void {
   if (!/^session_[A-Za-z0-9_-]{16,128}$/.test(sessionId)) throw new Error("The agent session ID is invalid");
+}
+
+function sessionDirectory(sessionId: string): string {
+  validateSessionId(sessionId);
+  return join(tmpdir(), `wiw-${sessionId.slice("session_".length)}`);
+}
+
+function sessionSocketPath(sessionId: string): string {
+  validateSessionId(sessionId);
   return process.platform === "win32"
     ? `\\\\.\\pipe\\wordinweb-agent-${sessionId}`
-    : join("/tmp", `wordinweb-agent-${sessionId}.sock`);
+    : join(sessionDirectory(sessionId), "bridge.sock");
 }
 
 async function importChatKey(value: string): Promise<CryptoKey> {
@@ -411,6 +422,8 @@ export async function connectAgent(
 interface PendingCommand {
   socket: Socket;
   originalId?: string | number;
+  command?: string;
+  wakeId?: string;
 }
 
 function sendSocketValue(socket: Socket, value: unknown): void {
@@ -431,7 +444,8 @@ async function listen(server: ReturnType<typeof createServer>, path: string): Pr
 
 interface CodexWakeHost {
   startTurn(prompt: string): Promise<void>;
-  close(): void;
+  interrupt(): Promise<void>;
+  close(): Promise<void>;
 }
 
 interface AppServerRequest {
@@ -441,8 +455,7 @@ interface AppServerRequest {
 }
 
 async function startCodexWakeHost(sessionId: string): Promise<CodexWakeHost> {
-  const cwd = join(tmpdir(), `wordinweb-agent-${sessionId}`);
-  mkdirSync(cwd, { mode: 0o700 });
+  const cwd = sessionDirectory(sessionId);
   const childEnv = { ...process.env };
   delete childEnv.CODEX_THREAD_ID;
   delete childEnv.CLAUDE_CODE_SESSION_ID;
@@ -456,7 +469,7 @@ async function startCodexWakeHost(sessionId: string): Promise<CodexWakeHost> {
   const requests = new Map<number, AppServerRequest>();
   let requestId = 0;
   let threadId = "";
-  let activeTurn: { resolve: () => void; reject: (error: Error) => void } | null = null;
+  let activeTurn: { turnId?: string; resolve: () => void; reject: (error: Error) => void } | null = null;
   let closed = false;
 
   const fail = (error: Error): void => {
@@ -474,7 +487,6 @@ async function startCodexWakeHost(sessionId: string): Promise<CodexWakeHost> {
     if (!closed) {
       fail(new Error(`The Codex document session exited with code ${code ?? "unknown"}`));
       closed = true;
-      rmSync(cwd, { recursive: true, force: true });
     }
   });
 
@@ -501,8 +513,9 @@ async function startCodexWakeHost(sessionId: string): Promise<CodexWakeHost> {
       return;
     }
     if (message.method !== "turn/completed" || !activeTurn) return;
-    const params = message.params as { threadId?: string; turn?: { status?: string; error?: { message?: string } } } | undefined;
+    const params = message.params as { threadId?: string; turn?: { id?: string; status?: string; error?: { message?: string } } } | undefined;
     if (params?.threadId !== threadId) return;
+    if (activeTurn.turnId && params.turn?.id !== activeTurn.turnId) return;
     const turn = activeTurn;
     activeTurn = null;
     if (params.turn?.status === "completed") turn.resolve();
@@ -539,7 +552,6 @@ async function startCodexWakeHost(sessionId: string): Promise<CodexWakeHost> {
   } catch (error) {
     closed = true;
     child.kill();
-    rmSync(cwd, { recursive: true, force: true });
     throw error;
   }
 
@@ -547,39 +559,57 @@ async function startCodexWakeHost(sessionId: string): Promise<CodexWakeHost> {
     async startTurn(prompt) {
       if (closed) throw new Error("The Codex document session is closed");
       if (activeTurn) throw new Error("The Codex document session already has an active turn");
+      let turn: { turnId?: string; resolve: () => void; reject: (error: Error) => void };
       const completed = new Promise<void>((resolve, reject) => {
-        activeTurn = { resolve, reject };
+        turn = { resolve, reject };
+        activeTurn = turn;
       });
       try {
-        await request("turn/start", {
+        const started = await request("turn/start", {
           threadId,
           effort: "low",
           input: [{ type: "text", text: prompt }],
         });
+        turn!.turnId = String((started.turn as { id?: string } | undefined)?.id ?? "");
         await completed;
       } catch (error) {
         activeTurn = null;
         throw error;
       }
     },
-    close() {
+    async interrupt() {
+      const turn = activeTurn;
+      if (!turn) return;
+      try {
+        if (turn.turnId) await request("turn/interrupt", { threadId, turnId: turn.turnId }, 5_000);
+      } finally {
+        if (activeTurn === turn) {
+          activeTurn = null;
+          turn.reject(new Error("The Codex document turn timed out"));
+        }
+      }
+    },
+    async close() {
       if (closed) return;
       closed = true;
       activeTurn?.reject(new Error("The Codex document session closed"));
       activeTurn = null;
-      void request("thread/delete", { threadId }, 2_000).catch(() => undefined).finally(() => {
+      await request("thread/delete", { threadId }, 2_000).catch(() => undefined).finally(() => {
         output.close();
         child.kill();
-        rmSync(cwd, { recursive: true, force: true });
       });
     },
   };
 }
 
 async function runDaemon(invitationUrl: string, sessionId: string): Promise<void> {
+  const directory = sessionDirectory(sessionId);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
   const path = sessionSocketPath(sessionId);
   const input = new PassThrough();
   const wakeTarget = detectWakeTarget();
+  const wakeTimeoutMs = Number(process.env.WORDINWEB_WAKE_TIMEOUT_MS) || 60_000;
   const wakeQueue: string[] = [];
   const pending = new Map<string, PendingCommand>();
   let readyEvent: Record<string, unknown> | null = null;
@@ -587,29 +617,85 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
   let wakeChild: ReturnType<typeof spawn> | null = null;
   let codexWakeHost: CodexWakeHost | null = null;
-  let codexTurnActive = false;
+  let activeWake: { id: string; startedAt: number; replied: boolean; timedOut: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
+  let wakeState: "idle" | "active" | "failed" = "idle";
+  let wakeId: string | null = null;
+  let wakeStartedAt: number | null = null;
+  let lastWakeError: string | null = null;
+  let lastSuccessfulChatAt: number | null = null;
   let requestCounter = 0;
   let stopped = false;
+  let shutdownPromise: Promise<void> | null = null;
 
-  const sendWakeFailure = (): void => {
-    input.write(`${JSON.stringify({ command: "chat", text: "The agent turn could not start. Run a new invitation command from a Codex or Claude task to reconnect this AI." })}\n`);
+  const sendWakeFailure = (text: string): void => {
+    input.write(`${JSON.stringify({ command: "chat", text })}\n`);
   };
 
-  const startNextWake = (): void => {
-    if (!wakeTarget || wakeChild || codexTurnActive || wakeQueue.length === 0 || stopped) return;
-    const prompt = agentWakePrompt(sessionId, wakeQueue.shift()!);
+  let startNextWake: () => void = () => undefined;
+  const finishWake = (id: string, error: string | null, failureReply: string): void => {
+    const wake = activeWake;
+    if (!wake || wake.id !== id) return;
+    clearTimeout(wake.timer);
+    activeWake = null;
+    if (error && !wake.replied) {
+      wakeState = "failed";
+      lastWakeError = error;
+      if (!stopped) sendWakeFailure(failureReply);
+    } else {
+      wakeState = "idle";
+      lastWakeError = null;
+    }
+    startNextWake();
+  };
+
+  startNextWake = (): void => {
+    if (!wakeTarget || wakeChild || activeWake || wakeQueue.length === 0 || stopped) return;
+    const text = wakeQueue.shift()!;
+    const id = randomId("wake");
+    const startedAt = Date.now();
+    wakeId = id;
+    wakeStartedAt = startedAt;
+    wakeState = "active";
+    lastWakeError = null;
+    const timer = setTimeout(() => {
+      const wake = activeWake;
+      if (!wake || wake.id !== id) return;
+      wake.timedOut = true;
+      if (wakeTarget.provider === "codex") {
+        const interrupted = codexWakeHost ? codexWakeHost.interrupt() : Promise.resolve();
+        void interrupted.finally(() => {
+          finishWake(id, "turn_timed_out", "The bridge stayed connected, but this document task timed out. Send the task again.");
+        });
+      } else {
+        wakeChild?.kill();
+      }
+    }, wakeTimeoutMs);
+    timer.unref();
+    activeWake = { id, startedAt, replied: false, timedOut: false, timer };
+    const prompt = agentWakePrompt(sessionId, id, text);
     if (wakeTarget.provider === "codex") {
-      if (!codexWakeHost) return;
-      codexTurnActive = true;
+      if (!codexWakeHost) {
+        finishWake(id, "wake_host_unavailable", "The bridge stayed connected, but this document task could not start. Send the task again.");
+        return;
+      }
       void codexWakeHost.startTurn(prompt).then(
         () => {
-          codexTurnActive = false;
-          startNextWake();
+          const replied = activeWake?.id === id && activeWake.replied;
+          finishWake(
+            id,
+            replied ? null : "turn_completed_without_chat",
+            "The bridge stayed connected, but this document task ended before the agent sent a reply. Send the task again.",
+          );
         },
         () => {
-          codexTurnActive = false;
-          if (!stopped) sendWakeFailure();
-          startNextWake();
+          const timedOut = activeWake?.id === id && activeWake.timedOut;
+          finishWake(
+            id,
+            timedOut ? "turn_timed_out" : "turn_failed",
+            timedOut
+              ? "The bridge stayed connected, but this document task timed out. Send the task again."
+              : "The bridge stayed connected, but this document task failed. Send the task again.",
+          );
         },
       );
       return;
@@ -624,8 +710,15 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
       if (finished) return;
       finished = true;
       wakeChild = null;
-      if (!ok && !stopped) sendWakeFailure();
-      startNextWake();
+      const wake = activeWake?.id === id ? activeWake : null;
+      const error = wake?.timedOut ? "turn_timed_out" : ok && wake?.replied ? null : "turn_failed";
+      finishWake(
+        id,
+        error,
+        wake?.timedOut
+          ? "The bridge stayed connected, but this document task timed out. Send the task again."
+          : "The bridge stayed connected, but this document task failed. Send the task again.",
+      );
     };
     wakeChild.once("error", () => finish(false));
     wakeChild.once("exit", (code) => finish(code === 0));
@@ -633,23 +726,33 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
     wakeChild.stdin?.end(prompt);
   };
 
-  const shutdown = (): void => {
-    if (stopped) return;
+  let serverListening = false;
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
     stopped = true;
     if (closeTimer) clearTimeout(closeTimer);
+    if (activeWake) clearTimeout(activeWake.timer);
+    activeWake = null;
     wakeChild?.kill();
-    codexWakeHost?.close();
+    const host = codexWakeHost;
     codexWakeHost = null;
     input.end();
-    server.close();
-    if (process.platform !== "win32") rmSync(path, { force: true });
+    shutdownPromise = Promise.all([
+      host?.close() ?? Promise.resolve(),
+      serverListening
+        ? new Promise<void>((resolve) => server.close(() => resolve()))
+        : Promise.resolve(),
+    ]).then(() => {
+      rmSync(directory, { recursive: true, force: true });
+    });
+    return shutdownPromise;
   };
 
   const emit: Emit = (value) => {
     const message = value as Record<string, unknown>;
     if (message.event === "ready") readyEvent = message;
     if (message.event === "connection_closed" && !closeTimer) {
-      closeTimer = setTimeout(shutdown, 60_000);
+      closeTimer = setTimeout(() => { void shutdown(); }, 60_000);
       closeTimer.unref();
     }
     if (message.event === "chat" && typeof message.text === "string" && wakeTarget) {
@@ -660,6 +763,15 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
     const command = pending.get(message.id);
     if (!command) return;
     pending.delete(message.id);
+    if (
+      message.ok === true &&
+      command.command === "chat" &&
+      command.wakeId &&
+      activeWake?.id === command.wakeId
+    ) {
+      activeWake.replied = true;
+      lastSuccessfulChatAt = Date.now();
+    }
     const response = { ...message };
     if (command.originalId === undefined) delete response.id;
     else response.id = command.originalId;
@@ -678,16 +790,35 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
         const message = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
         if (message.daemon === "status") {
           if (fatalError) sendSocketValue(socket, { ok: false, error: fatalError });
-          else if (readyEvent) sendSocketValue(socket, { ok: true, result: { state: "ready", ready: readyEvent } });
-          else sendSocketValue(socket, { ok: true, result: { state: "starting" } });
+          else sendSocketValue(socket, {
+            ok: true,
+            result: {
+              state: readyEvent ? "ready" : "starting",
+              ready: readyEvent,
+              wakeState,
+              wakeId,
+              wakeStartedAt,
+              lastWakeError,
+              lastSuccessfulChatAt,
+            },
+          });
           return;
         }
         if (!readyEvent) {
           sendSocketValue(socket, { ok: false, error: fatalError ?? "The agent bridge is still starting" });
           return;
         }
+        if (message.command === "chat" && activeWake && message.wakeId !== activeWake.id) {
+          sendSocketValue(socket, { ok: false, error: "The chat command must include the current wakeId" });
+          return;
+        }
         const id = `request_${++requestCounter}`;
-        pending.set(id, { socket, originalId: message.id as string | number | undefined });
+        pending.set(id, {
+          socket,
+          originalId: message.id as string | number | undefined,
+          command: typeof message.command === "string" ? message.command : undefined,
+          wakeId: typeof message.wakeId === "string" ? message.wakeId : undefined,
+        });
         input.write(`${JSON.stringify({ ...message, id })}\n`);
       } catch (error) {
         sendSocketValue(socket, { ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -695,8 +826,9 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
     });
   });
 
-  await listen(server, path);
   try {
+    await listen(server, path);
+    serverListening = true;
     if (wakeTarget?.provider === "codex") codexWakeHost = await startCodexWakeHost(sessionId);
     await connectAgent(invitationUrl, input, emit);
   } catch (error) {
@@ -705,7 +837,7 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
     pending.clear();
     await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
   } finally {
-    shutdown();
+    await shutdown();
   }
 }
 
@@ -763,7 +895,7 @@ async function startDaemon(invitationUrl: string): Promise<void> {
       }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ECONNREFUSED") throw error;
+      if (code !== "ENOENT" && code !== "ECONNREFUSED" && code !== "EINVAL") throw error;
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
   }
