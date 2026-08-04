@@ -27,16 +27,17 @@ An AI invitation link can bootstrap a live shell session without an MCP
 installation:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent connect '<short invitation URL>'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-4' wordinweb-agent connect '<short invitation URL>'
 ```
 
-The command starts a detached local bridge, captures the current Codex or
-Claude session, and returns a `sessionId`. The bridge waits without model turns.
-It resumes the agent session when the inviter sends a private message. Run each
-JSON document command through a short process:
+The command starts a detached local bridge and returns a `sessionId`. For Codex,
+the bridge starts one dedicated resident document thread. Each private message
+starts a turn on that thread, so its document context stays warm. The bridge
+waits without model turns. Claude uses its captured session for each private
+message. Run each JSON document command through a short process:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-4' wordinweb-agent session '<sessionId>' '{"command":"sync"}'
 ```
 
 The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, and
@@ -49,7 +50,7 @@ agent's visible collaboration cursor after its latest edit.
 For a broad text task, read all non-empty stories in one bounded compact call:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent session '<sessionId>' '{"command":"inspect","request":{"kind":"context"}}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-4' wordinweb-agent session '<sessionId>' '{"command":"inspect","request":{"kind":"context"}}'
 ```
 
 ## Headless use

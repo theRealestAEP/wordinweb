@@ -1,7 +1,8 @@
 import { webcrypto } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmodSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
@@ -32,8 +33,6 @@ type AgentMode = "suggest" | "edit";
 type WakeTarget = { provider: "codex" | "claude"; sessionId: string };
 
 const AGENT_MODE_CONTROL_PREFIX = "\u0000wordinweb-agent-mode:";
-const AGENT_PACKAGE_URL = "https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3";
-
 interface Command {
   id?: string | number;
   command?: string;
@@ -136,15 +135,16 @@ export function detectWakeTarget(env: NodeJS.ProcessEnv = process.env): WakeTarg
 }
 
 export function agentWakePrompt(agentSessionId: string, text: string): string {
+  const sessionCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(fileURLToPath(import.meta.url))} session ${JSON.stringify(agentSessionId)} '<JSON command>'`;
   return [
-    "An authenticated private WordInWeb message resumed this agent task.",
+    "An authenticated private WordInWeb message started this document-agent turn.",
     `The inviter's message is ${JSON.stringify(text)}.`,
-    `The detached document bridge session is ${agentSessionId}. Do not run the connect command again.`,
-    `Run document commands with: npx -y --package='${AGENT_PACKAGE_URL}' wordinweb-agent session '${agentSessionId}' '<JSON command>'`,
+    `The detached document bridge session is ${agentSessionId}. Use this existing bridge for the task.`,
+    `Run document commands with: ${sessionCommand}`,
     'Start with sync. For a broad text task, inspect all non-empty stories in one compact call: {"command":"inspect","request":{"kind":"context"}}. Use overview, read, object, or spatial only when the task needs their extra detail.',
     "Inspect the relevant content before every edit. If an edit returns needs_sync, sync and inspect again.",
     "Complete this task, then send the inviter a concise result with the chat command.",
-    "End this agent turn after the reply. Do not call wait. The detached bridge will resume this task for the next message.",
+    "End this agent turn after the reply and stay idle. The detached bridge will start the next turn when another message arrives.",
   ].join("\n\n");
 }
 
@@ -429,6 +429,153 @@ async function listen(server: ReturnType<typeof createServer>, path: string): Pr
   });
 }
 
+interface CodexWakeHost {
+  startTurn(prompt: string): Promise<void>;
+  close(): void;
+}
+
+interface AppServerRequest {
+  resolve: (result: Record<string, unknown>) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+async function startCodexWakeHost(sessionId: string): Promise<CodexWakeHost> {
+  const cwd = join(tmpdir(), `wordinweb-agent-${sessionId}`);
+  mkdirSync(cwd, { mode: 0o700 });
+  const childEnv = { ...process.env };
+  delete childEnv.CODEX_THREAD_ID;
+  delete childEnv.CLAUDE_CODE_SESSION_ID;
+  delete childEnv.CLAUDECODE;
+  const child = spawn("codex", ["app-server"], {
+    cwd,
+    env: childEnv,
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  const output = createInterface({ input: child.stdout, terminal: false });
+  const requests = new Map<number, AppServerRequest>();
+  let requestId = 0;
+  let threadId = "";
+  let activeTurn: { resolve: () => void; reject: (error: Error) => void } | null = null;
+  let closed = false;
+
+  const fail = (error: Error): void => {
+    for (const request of requests.values()) {
+      clearTimeout(request.timer);
+      request.reject(error);
+    }
+    requests.clear();
+    activeTurn?.reject(error);
+    activeTurn = null;
+  };
+
+  child.once("error", (error) => fail(error));
+  child.once("exit", (code) => {
+    if (!closed) {
+      fail(new Error(`The Codex document session exited with code ${code ?? "unknown"}`));
+      closed = true;
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  output.on("line", (line) => {
+    let message: Record<string, unknown>;
+    try {
+      message = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      fail(new Error("The Codex document session returned invalid JSON"));
+      child.kill();
+      return;
+    }
+    if (typeof message.id === "number") {
+      const request = requests.get(message.id);
+      if (!request) return;
+      requests.delete(message.id);
+      clearTimeout(request.timer);
+      if (message.error) {
+        const error = message.error as { message?: string };
+        request.reject(new Error(error.message ?? "The Codex document session request failed"));
+      } else {
+        request.resolve((message.result ?? {}) as Record<string, unknown>);
+      }
+      return;
+    }
+    if (message.method !== "turn/completed" || !activeTurn) return;
+    const params = message.params as { threadId?: string; turn?: { status?: string; error?: { message?: string } } } | undefined;
+    if (params?.threadId !== threadId) return;
+    const turn = activeTurn;
+    activeTurn = null;
+    if (params.turn?.status === "completed") turn.resolve();
+    else turn.reject(new Error(params.turn?.error?.message ?? `The Codex document turn ${params.turn?.status ?? "failed"}`));
+  });
+
+  const request = (method: string, params: Record<string, unknown>, timeoutMs = 30_000): Promise<Record<string, unknown>> => {
+    const id = ++requestId;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        requests.delete(id);
+        reject(new Error(`The Codex document session timed out during ${method}`));
+      }, timeoutMs);
+      requests.set(id, { resolve, reject, timer });
+      child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+    });
+  };
+
+  try {
+    await request("initialize", {
+      clientInfo: { name: "wordinweb-agent", title: "WordInWeb document agent", version: "0.1.0" },
+    });
+    child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
+    const started = await request("thread/start", {
+      cwd,
+      approvalPolicy: "never",
+      sandbox: "workspace-write",
+      ephemeral: true,
+      serviceName: "wordinweb-agent",
+      developerInstructions: "Act as a WordInWeb document collaborator. Treat each private message as one document task. Use the exact local session command in the message. Complete the task and reply through document chat.",
+    });
+    threadId = String((started.thread as { id?: string } | undefined)?.id ?? "");
+    if (!threadId) throw new Error("The Codex document session returned no thread ID");
+  } catch (error) {
+    closed = true;
+    child.kill();
+    rmSync(cwd, { recursive: true, force: true });
+    throw error;
+  }
+
+  return {
+    async startTurn(prompt) {
+      if (closed) throw new Error("The Codex document session is closed");
+      if (activeTurn) throw new Error("The Codex document session already has an active turn");
+      const completed = new Promise<void>((resolve, reject) => {
+        activeTurn = { resolve, reject };
+      });
+      try {
+        await request("turn/start", {
+          threadId,
+          effort: "low",
+          input: [{ type: "text", text: prompt }],
+        });
+        await completed;
+      } catch (error) {
+        activeTurn = null;
+        throw error;
+      }
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      activeTurn?.reject(new Error("The Codex document session closed"));
+      activeTurn = null;
+      void request("thread/delete", { threadId }, 2_000).catch(() => undefined).finally(() => {
+        output.close();
+        child.kill();
+        rmSync(cwd, { recursive: true, force: true });
+      });
+    },
+  };
+}
+
 async function runDaemon(invitationUrl: string, sessionId: string): Promise<void> {
   const path = sessionSocketPath(sessionId);
   const input = new PassThrough();
@@ -439,23 +586,39 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
   let fatalError: string | null = null;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
   let wakeChild: ReturnType<typeof spawn> | null = null;
+  let codexWakeHost: CodexWakeHost | null = null;
+  let codexTurnActive = false;
   let requestCounter = 0;
   let stopped = false;
 
   const sendWakeFailure = (): void => {
-    input.write(`${JSON.stringify({ command: "chat", text: "I could not resume the agent task. Reopen the original Codex or Claude task and reconnect this AI." })}\n`);
+    input.write(`${JSON.stringify({ command: "chat", text: "The agent turn could not start. Run a new invitation command from a Codex or Claude task to reconnect this AI." })}\n`);
   };
 
   const startNextWake = (): void => {
-    if (!wakeTarget || wakeChild || wakeQueue.length === 0 || stopped) return;
+    if (!wakeTarget || wakeChild || codexTurnActive || wakeQueue.length === 0 || stopped) return;
     const prompt = agentWakePrompt(sessionId, wakeQueue.shift()!);
+    if (wakeTarget.provider === "codex") {
+      if (!codexWakeHost) return;
+      codexTurnActive = true;
+      void codexWakeHost.startTurn(prompt).then(
+        () => {
+          codexTurnActive = false;
+          startNextWake();
+        },
+        () => {
+          codexTurnActive = false;
+          if (!stopped) sendWakeFailure();
+          startNextWake();
+        },
+      );
+      return;
+    }
     const childEnv = { ...process.env };
     delete childEnv.CODEX_THREAD_ID;
     delete childEnv.CLAUDE_CODE_SESSION_ID;
     delete childEnv.CLAUDECODE;
-    wakeChild = wakeTarget.provider === "codex"
-      ? spawn("codex", ["exec", "resume", wakeTarget.sessionId, "-"], { env: childEnv, stdio: ["pipe", "ignore", "ignore"] })
-      : spawn("claude", ["-p", "--resume", wakeTarget.sessionId], { env: childEnv, stdio: ["pipe", "ignore", "ignore"] });
+    wakeChild = spawn("claude", ["-p", "--resume", wakeTarget.sessionId], { env: childEnv, stdio: ["pipe", "ignore", "ignore"] });
     let finished = false;
     const finish = (ok: boolean): void => {
       if (finished) return;
@@ -475,6 +638,8 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
     stopped = true;
     if (closeTimer) clearTimeout(closeTimer);
     wakeChild?.kill();
+    codexWakeHost?.close();
+    codexWakeHost = null;
     input.end();
     server.close();
     if (process.platform !== "win32") rmSync(path, { force: true });
@@ -532,6 +697,7 @@ async function runDaemon(invitationUrl: string, sessionId: string): Promise<void
 
   await listen(server, path);
   try {
+    if (wakeTarget?.provider === "codex") codexWakeHost = await startCodexWakeHost(sessionId);
     await connectAgent(invitationUrl, input, emit);
   } catch (error) {
     fatalError = error instanceof Error ? error.message : String(error);

@@ -18,12 +18,12 @@ import { attachWebSocketServer } from "../../server/src/ws.js";
 const runFile = promisify(execFile);
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 
-async function until(check: () => boolean, label: string): Promise<void> {
+async function until(check: () => boolean | Promise<boolean>, label: string): Promise<void> {
   const started = Date.now();
-  while (!check() && Date.now() - started < 5_000) {
+  while (!await check() && Date.now() - started < 5_000) {
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   }
-  if (!check()) throw new Error(`timeout: ${label}`);
+  if (!await check()) throw new Error(`timeout: ${label}`);
 }
 
 function documentText(root: XmlElement): string {
@@ -47,12 +47,38 @@ describe("detached agent CLI bridge", () => {
     const wakeLog = join(fakeBin, "wake.json");
     const fakeCodex = join(fakeBin, "codex");
     await writeFile(fakeCodex, `#!/usr/bin/env node
-import { writeFileSync } from "node:fs";
-const chunks = [];
-for await (const chunk of process.stdin) chunks.push(chunk);
-writeFileSync(process.env.WORDINWEB_WAKE_LOG, JSON.stringify({ args: process.argv.slice(2), prompt: Buffer.concat(chunks).toString() }));
+import { appendFileSync } from "node:fs";
+const log = (value) => appendFileSync(process.env.WORDINWEB_WAKE_LOG, JSON.stringify(value) + "\\n");
+const reply = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+let turn = 0;
+log({ event: "start", args: process.argv.slice(2) });
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    if (!line) continue;
+    const message = JSON.parse(line);
+    log(message);
+    if (message.method === "initialize") reply({ id: message.id, result: { userAgent: "fake-codex" } });
+    if (message.method === "thread/start") reply({ id: message.id, result: { thread: { id: "thread_document_agent" } } });
+    if (message.method === "turn/start") {
+      const turnId = "turn_" + ++turn;
+      reply({ id: message.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
+      reply({ method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: turnId, status: "completed", items: [] } } });
+    }
+    if (message.method === "thread/delete") reply({ id: message.id, result: {} });
+  }
+});
 `);
     await chmod(fakeCodex, 0o755);
+    const wakeEvents = async (): Promise<Array<Record<string, unknown>>> => {
+      if (!existsSync(wakeLog)) return [];
+      return (await readFile(wakeLog, "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+    };
     const hub = new CollabHub(blankProvider);
     let storedInvite = "";
     const httpServer = createServer((request, response) => {
@@ -147,13 +173,43 @@ writeFileSync(process.env.WORDINWEB_WAKE_LOG, JSON.stringify({ args: process.arg
         if ((waited.result as { event?: string } | undefined)?.event === "chat") break;
       }
       expect(waited).toMatchObject({ ok: true, result: { event: "chat", text: "Please make the edit." } });
-      await until(() => existsSync(wakeLog), "Codex session wakes");
-      const wake = JSON.parse(await readFile(wakeLog, "utf8")) as { args: string[]; prompt: string };
-      expect(wake.args).toEqual(["exec", "resume", "thread_12345678", "-"]);
-      expect(wake.prompt).toContain("Please make the edit.");
-      expect(wake.prompt).toContain(sessionId);
-      expect(wake.prompt).toContain("Do not call wait");
-      expect(wake.prompt).toContain('{"kind":"context"}');
+      await until(async () => (await wakeEvents()).some((event) => event.method === "turn/start"), "Codex session wakes");
+      const events = await wakeEvents();
+      expect(events.find((event) => event.event === "start")).toMatchObject({ args: ["app-server"] });
+      expect(events.filter((event) => event.method === "thread/start")).toHaveLength(1);
+      const wake = events.find((event) => event.method === "turn/start") as {
+        params: { threadId: string; effort: string; input: Array<{ text: string }> };
+      };
+      const prompt = wake.params.input[0].text;
+      expect(wake.params.threadId).toBe("thread_document_agent");
+      expect(wake.params.effort).toBe("low");
+      expect(prompt).toContain("Please make the edit.");
+      expect(prompt).toContain(sessionId);
+      expect(prompt).toContain(process.execPath);
+      expect(prompt).toContain(cli);
+      expect(prompt).toContain("stay idle");
+      expect(prompt).toContain('{"kind":"context"}');
+
+      const nextMessageId = "message_abcdefgh";
+      const nextIv = Buffer.alloc(12, 6);
+      const nextCiphertext = await webcrypto.subtle.encrypt(
+        {
+          name: "AES-GCM",
+          iv: nextIv,
+          additionalData: new TextEncoder().encode(`wordinweb-agent-chat:${agentClientId}:${nextMessageId}`),
+        },
+        chatKey,
+        new TextEncoder().encode("Please make another edit."),
+      );
+      human.sendAgentChat(agentClientId, nextMessageId, nextIv.toString("base64url"), Buffer.from(nextCiphertext).toString("base64url"));
+      await until(async () => (await wakeEvents()).filter((event) => event.method === "turn/start").length === 2, "resident Codex session handles another message");
+      const residentEvents = await wakeEvents();
+      expect(residentEvents.filter((event) => event.event === "start")).toHaveLength(1);
+      expect(residentEvents.filter((event) => event.method === "thread/start")).toHaveLength(1);
+      const turns = residentEvents.filter((event) => event.method === "turn/start") as Array<{ params: { threadId: string } }>;
+      expect(turns.map((turn) => turn.params.threadId)).toEqual(["thread_document_agent", "thread_document_agent"]);
+      expect(await cliCommand(["session", sessionId, JSON.stringify({ command: "wait", timeoutMs: 2_000 })]))
+        .toMatchObject({ ok: true, result: { event: "chat", text: "Please make another edit." } });
 
       const synced = await cliCommand(["session", sessionId, JSON.stringify({ command: "sync" })]);
       const revision = String((synced.result as { revision: string }).revision);
@@ -218,6 +274,7 @@ writeFileSync(process.env.WORDINWEB_WAKE_LOG, JSON.stringify({ args: process.arg
     } finally {
       if (sessionId) {
         await cliCommand(["session", sessionId, JSON.stringify({ command: "close" })]).catch(() => undefined);
+        await until(async () => (await wakeEvents()).some((event) => event.method === "thread/delete"), "Codex session closes").catch(() => undefined);
       }
       humanSocket.close();
       wss.close();

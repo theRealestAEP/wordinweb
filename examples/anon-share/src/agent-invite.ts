@@ -25,12 +25,12 @@ export type AgentMode = "suggest" | "edit";
 export const AGENT_MODE_CONTROL_PREFIX = "\u0000wordinweb-agent-mode:";
 
 export const AGENT_CONNECTION_INSTRUCTIONS =
-  "The connect command starts a detached local bridge and attaches it to this Codex or Claude task. End the agent turn after it reports that wake-up is armed. " +
-  "The bridge resumes this task only when the inviter sends a private message, so idle time uses no model turns. Use a new short session command for each sync, inspect, edit, or chat request. " +
+  "The connect command starts a detached local bridge and a dedicated document-agent session. End the agent turn after it reports that wake-up is armed. " +
+  "The bridge starts a turn when the inviter sends a private message, so idle time uses no model turns. Use a new short session command for each sync, inspect, edit, or chat request. " +
   "The agent starts in suggestion mode. Follow later mode_changed events from the inviter. " +
   "Treat new private chat messages as tasks. Sync and inspect the relevant content before every edit. " +
   "For a broad text task, use one compact context inspection before detailed overview, read, object, or spatial requests. " +
-  "After each task, reply through document chat and end the agent turn. Do not poll or call wait. Close the bridge when the inviter ends the collaboration.";
+  "After each task, reply through document chat and end the agent turn. Stay idle between turns. Close the bridge when the inviter ends the collaboration.";
 
 function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = "";
@@ -104,11 +104,11 @@ export async function createShortAgentInvite(origin: string, payload: AgentInvit
 export function agentInviteClipboardText(invitationUrl: string): string {
   return [
     "Join my WordInWeb document as an AI collaborator.",
-    "Run this exact command now. Do not open the invitation in a browser and do not search the workspace for instructions:",
-    `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-3' wordinweb-agent connect '${invitationUrl}'`,
-    "The connect command starts a detached local bridge and attaches it to this Codex or Claude task.",
+    "Run this exact command in the terminal. Pass the invitation URL directly to the agent client:",
+    `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-4' wordinweb-agent connect '${invitationUrl}'`,
+    "The connect command starts a detached local bridge and a dedicated document-agent session in this agent harness.",
     "When the result says wake-up is armed, confirm the connection once and end this agent turn.",
-    "Do not call wait or poll for messages. The bridge will resume this same task when I send a private document message.",
+    "Stay idle after this turn. The bridge will start the document-agent turn when I send a private document message.",
     "If the result says wake-up is unavailable, report that once instead of polling.",
   ].join("\n\n");
 }

@@ -42,12 +42,11 @@ describe("AI invitation helpers", () => {
     const copied = agentInviteClipboardText(url);
 
     expect(copied).toContain(url);
-    expect(copied).toContain("Run this exact command now");
-    expect(copied).toContain("Do not open the invitation in a browser");
-    expect(copied).toContain("short-invite-3");
-    expect(copied).toContain("resume this same task");
-    expect(copied).toContain("Do not call wait or poll");
-    expect(copied).not.toContain("Keep this agent task open");
+    expect(copied).toContain("Run this exact command in the terminal");
+    expect(copied).toContain("Pass the invitation URL directly");
+    expect(copied).toContain("short-invite-4");
+    expect(copied).toContain("dedicated document-agent session");
+    expect(copied).toContain("Stay idle after this turn");
   });
 
   it("stores an encrypted invite behind a short URL", async () => {
