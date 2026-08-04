@@ -1,4 +1,4 @@
-import { DocxDocument, localName, runWireLength, type Block, type Paragraph, type Run, type StableIds, type XmlElement } from "@wordinweb/core";
+import { DocxDocument, localName, runWireLength, serializeXml, type Block, type Paragraph, type Run, type StableIds, type XmlElement } from "@wordinweb/core";
 import { INTENT_KINDS, applyIntentScoped, resyncScope, type Intent, type IntentBody, type PresencePosition } from "@wordinweb/collab/client";
 import { agentCapabilities, agentOperationSchema, type AgentEditCapability } from "./capabilities.js";
 import { AGENT_COMPOSE_SCHEMA, composeDocxBytes } from "./compose.js";
@@ -40,6 +40,101 @@ function cloneWithIds(doc: DocxDocument, ids: StableIds): { doc: DocxDocument; i
   const cloneIds = clone.enableStableIds();
   cloneIds.importSidecar(clone.editableRoots(), sidecar);
   return { doc: clone, ids: cloneIds };
+}
+
+const TARGET_SCOPED_REF = /^(?:block:\d+|run:\d+|object:\d+:\d+)$/;
+const GLOBAL_REVISION_KINDS = new Set(["mergeParagraph", "insertBookmark", "insertBookmarkRange", "insertCrossRef"]);
+
+function inspectionReferences(value: unknown, refs = new Set<string>()): Set<string> {
+  if (typeof value === "string") {
+    if (TARGET_SCOPED_REF.test(value)) refs.add(value);
+    return refs;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) inspectionReferences(item, refs);
+    return refs;
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) inspectionReferences(item, refs);
+  }
+  return refs;
+}
+
+function operationReferences(operation: AgentOperation): Set<string> | null {
+  if (GLOBAL_REVISION_KINDS.has(operation.kind)) return null;
+  const refs = new Set<string>();
+  const add = (value: unknown): void => {
+    if (typeof value === "string" && TARGET_SCOPED_REF.test(value)) refs.add(value);
+  };
+  add(operation.blockRef);
+  add(operation.runRef);
+  add(operation.objectRef);
+  add(operation.cellRef);
+  add(operation.afterBlockRef);
+  if (operation.at && typeof operation.at === "object" && !Array.isArray(operation.at)) {
+    const at = operation.at as Record<string, unknown>;
+    add(at.blockRef);
+    add(at.runRef);
+  }
+  for (const field of ["ranges", "marks"] as const) {
+    if (!Array.isArray(operation[field])) continue;
+    for (const item of operation[field]) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const target = item as Record<string, unknown>;
+      add(target.blockRef);
+      add(target.runRef);
+    }
+  }
+  return refs.size > 0 ? refs : null;
+}
+
+function editReferences(operations: AgentOperation[]): Set<string> | null {
+  const refs = new Set<string>();
+  for (const operation of operations) {
+    const operationTargets = operationReferences(operation);
+    if (!operationTargets) return null;
+    for (const ref of operationTargets) refs.add(ref);
+  }
+  return refs;
+}
+
+function referenceElement(ids: StableIds, ref: string): XmlElement | null {
+  const id = /^(?:block|run):(\d+)$/.exec(ref)?.[1] ?? /^object:(\d+):\d+$/.exec(ref)?.[1];
+  return id === undefined ? null : ids.elOf(Number(id)) ?? null;
+}
+
+function referenceScope(doc: DocxDocument, element: XmlElement): XmlElement {
+  let current: XmlElement | undefined = element;
+  let paragraph: XmlElement | undefined;
+  while (current) {
+    const name = localName(current.name);
+    if (name === "tbl") return current;
+    if (name === "p") paragraph = current;
+    current = doc.findParentOf(current);
+  }
+  return paragraph ?? element;
+}
+
+function referenceFingerprint(
+  doc: DocxDocument,
+  inspector: SemanticInspector,
+  ref: string,
+  xmlByScope: WeakMap<XmlElement, string>,
+): string | null {
+  const element = referenceElement(doc.enableStableIds(), ref);
+  if (!element) return null;
+  const scope = referenceScope(doc, element);
+  let xml = xmlByScope.get(scope);
+  if (xml === undefined) {
+    xml = serializeXml(scope);
+    xmlByScope.set(scope, xml);
+  }
+  if (!ref.startsWith("object:")) return xml;
+  try {
+    return `${xml}\u0000${JSON.stringify(inspector.object(ref).detail)}`;
+  } catch {
+    return null;
+  }
 }
 
 function installPreparedImage(doc: DocxDocument, operation: IntentBody, asset?: AgentAsset): void {
@@ -404,6 +499,7 @@ export class AgentDocument {
   private assetCounter = 0;
   private composeAvailable: boolean;
   private readonly listeners = new Set<(document: DocxDocument, revision: string) => void>();
+  private readonly inspectedTargets = new Map<string, Map<string, string>>();
 
   private constructor(doc: DocxDocument | null, target: AgentCollaborativeTarget | null, provenance?: AgentProvenance, composeAvailable = false) {
     this.localDoc = doc;
@@ -460,18 +556,50 @@ export class AgentDocument {
   inspect(request: AgentInspectRequest): AgentInspectResult {
     if (!request || typeof request !== "object") throw new Error("Inspection request is required");
     const inspector = this.inspector();
+    let result: AgentInspectResult;
     switch (request.kind) {
-      case "overview": return inspector.overview();
-      case "context": return inspector.context(request.stories, request.maxBlocks, request.maxCharacters, request.include, request.includeEmpty);
-      case "read": return inspector.read(request.story, request.cursor?.value, request.maxBlocks, request.maxCharacters);
-      case "search": return inspector.search(request.query, request.maxResults);
-      case "object": return inspector.object(request.ref);
-      case "spatial": return spatialInspect(this.document, this.document.enableStableIds(), this.revision, inspector, request.pages, request.includeOverlaps);
+      case "overview": result = inspector.overview(); break;
+      case "context": result = inspector.context(request.stories, request.maxBlocks, request.maxCharacters, request.include, request.includeEmpty); break;
+      case "read": result = inspector.read(request.story, request.cursor?.value, request.maxBlocks, request.maxCharacters); break;
+      case "search": result = inspector.search(request.query, request.maxResults); break;
+      case "object": result = inspector.object(request.ref); break;
+      case "spatial": result = spatialInspect(this.document, this.document.enableStableIds(), this.revision, inspector, request.pages, request.includeOverlaps); break;
       default: {
         const exhaustive: never = request;
         return exhaustive;
       }
     }
+    this.recordInspection(result, inspector);
+    return result;
+  }
+
+  private recordInspection(result: AgentInspectResult, inspector: SemanticInspector): void {
+    const fingerprints = this.inspectedTargets.get(result.revision) ?? new Map<string, string>();
+    const xmlByScope = new WeakMap<XmlElement, string>();
+    for (const ref of inspectionReferences(result)) {
+      const fingerprint = referenceFingerprint(this.document, inspector, ref, xmlByScope);
+      if (fingerprint !== null) fingerprints.set(ref, fingerprint);
+    }
+    if (!this.inspectedTargets.has(result.revision)) {
+      this.inspectedTargets.set(result.revision, fingerprints);
+      while (this.inspectedTargets.size > 8) this.inspectedTargets.delete(this.inspectedTargets.keys().next().value!);
+    }
+  }
+
+  private revisionMatchesEdit(request: AgentEditRequest): boolean {
+    if (request.revision === this.revision) return true;
+    if (!this.target) return false;
+    const refs = editReferences(request.operations);
+    const observed = this.inspectedTargets.get(request.revision);
+    if (!refs || !observed) return false;
+    const inspector = this.inspector();
+    const xmlByScope = new WeakMap<XmlElement, string>();
+    for (const ref of refs) {
+      const before = observed.get(ref);
+      const current = referenceFingerprint(this.document, inspector, ref, xmlByScope);
+      if (before === undefined || current === null || before !== current) return false;
+    }
+    return true;
   }
 
   capabilities(category?: AgentEditCapability["category"], kind?: Intent["kind"]): ReturnType<typeof agentCapabilities> {
@@ -541,7 +669,7 @@ export class AgentDocument {
   async edit(request: AgentEditRequest): Promise<AgentEditResult> {
     if (!request || typeof request !== "object" || !Array.isArray(request.operations) || request.operations.length === 0) throw new Error("At least one edit operation is required");
     if (request.operations.length > 100) throw new Error("A transaction can contain at most 100 operations");
-    if (request.revision !== this.revision) throw new Error("The document revision is stale");
+    if (!this.revisionMatchesEdit(request)) throw new Error("The document revision is stale");
     return this.target ? this.editCollaborative(request) : this.editLocal(request);
   }
 
@@ -607,7 +735,7 @@ export class AgentDocument {
       presence = presenceAfterOperation(trial.doc, operation, hint) ?? presence;
       compiled.push({ operation, asset: sourceAsset });
     }
-    if (request.revision !== this.revision) throw new Error("The document changed while the transaction was validated");
+    if (!this.revisionMatchesEdit(request)) throw new Error("The document revision is stale");
     for (const { operation } of compiled) await target.submit(operation);
     if (presence) target.setPresence?.(presence);
     return {

@@ -47,6 +47,38 @@ function firstPosition(agent: AgentDocument): { blockRef: string; runRef: string
   return { blockRef: read.blocks[0].ref, runRef: read.blocks[0].runs[0].ref };
 }
 
+function paragraphPositions(agent: AgentDocument): Array<{ blockRef: string; runRef: string; offset: number }> {
+  const read = agent.inspect({ kind: "read", maxBlocks: 10 });
+  if (!("blocks" in read)) throw new Error("missing paragraphs");
+  return read.blocks.map((block) => {
+    if (block.type !== "paragraph" || !block.runs[0]) throw new Error("missing paragraph run");
+    return { blockRef: block.ref, runRef: block.runs[0].ref, offset: block.text.length };
+  });
+}
+
+function applyingTarget(bytes: Uint8Array): { target: AgentCollaborativeTarget; doc: DocxDocument } {
+  const doc = DocxDocument.load(bytes);
+  const ids = doc.enableStableIds();
+  let revision = 0;
+  let clientSeq = 0;
+  let nextId = 100_000;
+  return {
+    doc,
+    target: {
+      getDocument: () => doc,
+      getRevision: () => revision,
+      allocateIds: (count) => Array.from({ length: count }, () => nextId++),
+      submit: (operation) => {
+        const result = applyIntentScoped(doc, ids, { ...operation, clientId: "shared-agent", clientSeq: ++clientSeq, base: revision } as Intent);
+        if (!result.applied) throw new Error("shared apply failed");
+        resyncScope(doc, ids, result);
+        revision++;
+      },
+      getConnectionState: () => "live",
+    },
+  };
+}
+
 describe("AgentDocument collaboration adapters", () => {
   it("submits through a real collaborative connection and reaches a second replica", async () => {
     const hub = new LoopbackHub(makeDocx(body(`<w:p><w:r><w:t>Shared</w:t></w:r></w:p>`)));
@@ -103,5 +135,48 @@ describe("AgentDocument collaboration adapters", () => {
     expect(tail[0]).toMatchObject({ kind: "insertText", text: " edit" });
     const search = agent.inspect({ kind: "search", query: "Offline edit" });
     expect("matches" in search && search.matches).toHaveLength(1);
+  });
+
+  it("allows agents to edit different inspected targets across revisions", async () => {
+    const { target } = applyingTarget(makeDocx(body(
+      `<w:p><w:r><w:t>Alpha</w:t></w:r></w:p>` +
+      `<w:p><w:r><w:t>Beta</w:t></w:r></w:p>`,
+    )));
+    const firstAgent = AgentDocument.connect(target);
+    const secondAgent = AgentDocument.connect(target);
+    const firstTargets = paragraphPositions(firstAgent);
+    const secondTargets = paragraphPositions(secondAgent);
+
+    await firstAgent.edit({
+      revision: "0",
+      operations: [{ kind: "insertText", at: firstTargets[0], text: " one" }],
+    });
+    const result = await secondAgent.edit({
+      revision: "0",
+      operations: [{ kind: "insertText", at: secondTargets[1], text: " two" }],
+    });
+
+    expect(result).toMatchObject({ status: "submitted", revision: "2" });
+    const context = secondAgent.inspect({ kind: "context" });
+    if (!("contents" in context)) throw new Error("missing context");
+    const text = context.contents.flatMap((story) => story.blocks).flatMap((block) => block.type === "paragraph" ? [block.text] : []);
+    expect(text).toEqual(["Alpha one", "Beta two"]);
+  });
+
+  it("rejects a stale edit when another agent changed the inspected target", async () => {
+    const { target } = applyingTarget(makeDocx(body(`<w:p><w:r><w:t>Shared</w:t></w:r></w:p>`)));
+    const firstAgent = AgentDocument.connect(target);
+    const secondAgent = AgentDocument.connect(target);
+    const firstTarget = paragraphPositions(firstAgent)[0];
+    const secondTarget = paragraphPositions(secondAgent)[0];
+
+    await firstAgent.edit({
+      revision: "0",
+      operations: [{ kind: "insertText", at: firstTarget, text: " first" }],
+    });
+    await expect(secondAgent.edit({
+      revision: "0",
+      operations: [{ kind: "insertText", at: secondTarget, text: " second" }],
+    })).rejects.toThrow("revision is stale");
   });
 });

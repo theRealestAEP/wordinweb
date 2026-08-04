@@ -40,9 +40,11 @@ npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-inv
 ```
 
 The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, and
-`close`. `wait` remains available for manual clients. Every edit includes the inspected revision. A newer room revision
-returns `needs_sync` before the agent changes the document. The bridge places
-the agent's visible collaboration cursor after its latest edit.
+`close`. `wait` remains available for manual clients. Every edit includes the
+inspected revision. When the room advances, the package compares the edit's
+inspected targets with their current state. Unchanged targets proceed across
+the newer revision. Changed targets return `needs_sync`. The bridge places the
+agent's visible collaboration cursor after its latest edit.
 
 For a broad text task, read all non-empty stories in one bounded compact call:
 
@@ -169,10 +171,13 @@ The interface exposes opaque stable references for document targets.
   text or endnote content that the current editor cannot mutate.
 - An object result contains `editRef` only when an edit target exists.
 
-Every edit includes the revision that the agent inspected. The edit fails when
-the revision changed. Operation schemas reject extra fields, internal IDs, bad
-reference types, and invalid canonical intents. Local batches apply to a clone
-first, so a failed operation leaves the source document unchanged.
+Every edit includes the revision that the agent inspected. A newer revision
+triggers a fingerprint comparison for the referenced paragraphs, tables, and
+objects. Unchanged targets proceed, while changed targets request a new
+inspection. Document-wide operations use the global revision. Operation schemas
+reject extra fields, internal IDs, bad reference types, and invalid canonical
+intents. Local batches apply to a clone first, so a failed operation leaves the
+source document unchanged.
 
 Call `capabilities(category, kind)` or the capabilities tool before an edit.
 This returns a closed JSON Schema for the selected operation. The package
