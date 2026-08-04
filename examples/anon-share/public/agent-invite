@@ -5,14 +5,14 @@ The user has invited you to edit a live DOCX document with WordInWeb.
 Run the exact command included in the user's message. It passes the short
 invitation URL directly to the agent client. The command has this form:
 
-    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent connect '<short invitation URL>'
+    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent connect '<short invitation URL>'
 
 The connect command starts a detached local bridge and returns a `sessionId`.
 Codex uses one dedicated resident document thread, so its context stays warm
 between private messages. The bridge waits without model turns. Each started
 turn supplies a `wakeId`. Include it in every short document command:
 
-    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent session '<sessionId>' '{"command":"sync","wakeId":"<wakeId>"}'
+    npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent session '<sessionId>' '{"command":"sync","wakeId":"<wakeId>"}'
 
 Read the `instructions` value from the ready result. Start with `sync`, then
 use one compact `context` inspection for broad text tasks. Use detailed

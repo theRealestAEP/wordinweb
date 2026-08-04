@@ -227,11 +227,17 @@ process.stdin.on("data", (chunk) => {
       expect(events.find((event) => event.event === "start")).toMatchObject({ args: ["app-server"] });
       expect(events.filter((event) => event.method === "thread/start")).toHaveLength(1);
       const wake = events.find((event) => event.method === "turn/start") as {
-        params: { threadId: string; effort: string; input: Array<{ text: string }> };
+        params: {
+          threadId: string;
+          effort: string;
+          sandboxPolicy: { type: string; networkAccess: boolean };
+          input: Array<{ text: string }>;
+        };
       };
       const prompt = wake.params.input[0].text;
       expect(wake.params.threadId).toBe("thread_document_agent");
       expect(wake.params.effort).toBe("low");
+      expect(wake.params.sandboxPolicy).toEqual({ type: "workspaceWrite", networkAccess: true });
       expect(prompt).toContain("Please make the edit.");
       expect(prompt).toContain(sessionId);
       expect(prompt).toContain(process.execPath);

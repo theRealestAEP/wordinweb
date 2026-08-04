@@ -106,7 +106,7 @@ export function agentInviteClipboardText(invitationUrl: string): string {
   return [
     "Join my WordInWeb document as an AI collaborator.",
     "Run this exact command in the terminal. Pass the invitation URL directly to the agent client:",
-    `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent connect '${invitationUrl}'`,
+    `npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent connect '${invitationUrl}'`,
     "The connect command starts a detached local bridge and a dedicated document-agent session in this agent harness.",
     "When the result says wake-up is armed, confirm the connection once and end this agent turn.",
     "Stay idle after this turn. The bridge will start the document-agent turn when I send a private document message.",

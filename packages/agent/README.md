@@ -27,7 +27,7 @@ An AI invitation link can bootstrap a live shell session without an MCP
 installation:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent connect '<short invitation URL>'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent connect '<short invitation URL>'
 ```
 
 The command starts a detached local bridge and returns a `sessionId`. For Codex,
@@ -38,7 +38,7 @@ message. Each started turn supplies a `wakeId`. Include it in every document
 command for that turn:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent session '<sessionId>' '{"command":"sync","wakeId":"<wakeId>"}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent session '<sessionId>' '{"command":"sync","wakeId":"<wakeId>"}'
 ```
 
 The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, and
@@ -53,13 +53,13 @@ turn after 60 seconds and reports the failure in the private document chat.
 Inspect the current wake state with a short status command:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent session '<sessionId>' '{"daemon":"status"}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent session '<sessionId>' '{"daemon":"status"}'
 ```
 
 For a broad text task, read all non-empty stories in one bounded compact call:
 
 ```bash
-npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-5' wordinweb-agent session '<sessionId>' '{"command":"inspect","wakeId":"<wakeId>","request":{"kind":"context"}}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent session '<sessionId>' '{"command":"inspect","wakeId":"<wakeId>","request":{"kind":"context"}}'
 ```
 
 ## Headless use

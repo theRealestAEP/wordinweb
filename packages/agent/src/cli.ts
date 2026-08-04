@@ -568,6 +568,7 @@ async function startCodexWakeHost(sessionId: string): Promise<CodexWakeHost> {
         const started = await request("turn/start", {
           threadId,
           effort: "low",
+          sandboxPolicy: { type: "workspaceWrite", networkAccess: true },
           input: [{ type: "text", text: prompt }],
         });
         turn!.turnId = String((started.turn as { id?: string } | undefined)?.id ?? "");
