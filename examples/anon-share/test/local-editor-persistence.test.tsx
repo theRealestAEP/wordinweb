@@ -107,9 +107,16 @@ describe("local editor persistence", () => {
     const host = render(editor(store));
     await typeText(host, "PERSISTME");
 
-    // The throttled autosave lands within its interval.
+    // The throttled autosave lands within its interval. A (re)load also marks
+    // the document dirty, so the FIRST write to the slot can be the blank
+    // document from mount — it wins the race whenever painting the page takes
+    // longer than one autosave interval. Wait for the write that carries the
+    // typed text, not merely for the slot to exist.
     let saved: DocBundle | null = null;
-    for (let i = 0; i < 100 && !saved; i++) { await tick(); saved = await store.get(LOCAL_AUTOSAVE_KEY); }
+    for (let i = 0; i < 100 && !(saved && docText(saved.confirmedBytes).includes("PERSISTME")); i++) {
+      await tick();
+      saved = await store.get(LOCAL_AUTOSAVE_KEY);
+    }
     expect(saved, "the autosave slot must be written").toBeTruthy();
     expect(docText(saved!.confirmedBytes)).toContain("PERSISTME");
 

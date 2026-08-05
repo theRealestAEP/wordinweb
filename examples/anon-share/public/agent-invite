@@ -24,9 +24,14 @@ current `wakeId` and end the agent turn. The bridge starts the next turn after
 the next private message. Stay idle between turns. Send a `close` command when
 the inviter ends the task.
 
+For a bulk prose rewrite, use `project` to read the story as text, then `patch`
+to send the changed line ranges back with the projection's `revision`. The patch
+result carries the refreshed projection, so a second read is unnecessary.
+
 The agent starts in suggestion mode. The inviter can switch it to direct editing
-from the private chat panel. Available session commands: `sync`, `capabilities`,
-`inspect`, `edit`, `chat`, `wait`, and `close`.
+from the private chat panel. In suggestion mode the bridge records every patch
+as tracked changes. Available session commands: `sync`, `capabilities`,
+`inspect`, `edit`, `project`, `patch`, `chat`, `wait`, and `close`.
 
 This URL is a bearer credential. Keep it private and pass it only to the exact
 connect command.

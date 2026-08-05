@@ -12,12 +12,19 @@ import type { AgentAnchorLine, AgentAnchorSegment, AgentOperation, AgentPatchHun
  * offsets inside a run that already exists.
  */
 
-function markerOperations(blockRef: string, current: MarkerShape, target: MarkerShape): AgentOperation[] {
+/** A marker change is a paragraph-property change, and the review model has no
+ * tracked form for one. A suggested hunk refuses it instead of applying it
+ * untracked behind the reviewer's back. */
+function markerOperations(blockRef: string, current: MarkerShape, target: MarkerShape, suggest: boolean): AgentOperation[] {
   const operations: AgentOperation[] = [];
   if (current.heading !== target.heading) {
+    if (suggest) throw new Error("A suggested hunk cannot change a heading marker. Send the structure change as a direct edit.");
     operations.push({ kind: "formatParagraph", blockRef, styleId: target.heading === undefined ? "Normal" : `Heading${target.heading}` });
   }
-  if (current.list !== target.list) operations.push({ kind: "setListType", blockRef, listKind: target.list ?? null });
+  if (current.list !== target.list) {
+    if (suggest) throw new Error("A suggested hunk cannot change a list marker. Send the structure change as a direct edit.");
+    operations.push({ kind: "setListType", blockRef, listKind: target.list ?? null });
+  }
   return operations;
 }
 
@@ -106,7 +113,7 @@ function paragraphOperations(source: ProjectedLine, targets: string[], mode: Age
     }
   }
   const bodies = targets.map((line, index) => line.slice(shapes[index].width));
-  const operations = markerOperations(blockRef, markerShape(source.text.slice(0, anchor.marker), mode), shapes[0]);
+  const operations = markerOperations(blockRef, markerShape(source.text.slice(0, anchor.marker), mode), shapes[0], suggest);
   const body = bodies.join("");
   const current = source.text.slice(anchor.marker);
 
@@ -179,6 +186,11 @@ function hunkOperations(lines: ProjectedLine[], hunk: AgentPatchHunk, mode: Agen
   // The last paired paragraph absorbs the remainder: it swallows the extra old
   // paragraphs, or it splits into the extra new ones.
   const extra = slice.slice(paired);
+  // Removing a paragraph break is a paragraph-mark deletion, and this compiler
+  // only knows the direct form of it. Refuse rather than merge untracked.
+  if (suggest && extra.length > 0) {
+    throw new Error("A suggested hunk cannot remove a paragraph break. Send the merge as a direct edit.");
+  }
   for (const line of extra) operations.push({ kind: "mergeParagraph", blockRef: line.anchor.blockRef! });
   const last = extra.length > 0 ? mergedLine(slice.slice(paired - 1)) : slice[paired - 1];
   operations.push(...paragraphOperations(last, targets.slice(paired - 1), mode, suggest));

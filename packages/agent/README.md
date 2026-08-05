@@ -41,14 +41,25 @@ command for that turn:
 npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent session '<sessionId>' '{"command":"sync","wakeId":"<wakeId>"}'
 ```
 
-The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, and
-`close`. `wait` remains available for manual clients. Every edit includes the
-inspected revision. When the room advances, the package compares the edit's
-inspected targets with their current state. Unchanged targets proceed across
-the newer revision. Changed targets return `needs_sync`. The bridge places the
-agent's visible collaboration cursor after its latest edit. A successful turn
-ends with a `chat` command for the current `wakeId`. The bridge interrupts a
-turn after 60 seconds and reports the failure in the private document chat.
+The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `project`,
+`patch`, `chat`, and `close`. `wait` remains available for manual clients. Every
+edit includes the inspected revision. When the room advances, the package
+compares the edit's inspected targets with their current state. Unchanged
+targets proceed across the newer revision. Changed targets return `needs_sync`.
+A `patch` against a stale window returns `needs_sync` the same way. In
+suggestion mode the bridge applies every patch as tracked changes. The bridge
+places the agent's visible collaboration cursor after its latest edit. A
+successful turn ends with a `chat` command for the current `wakeId`. The bridge
+interrupts a turn after 60 seconds and reports the failure in the private
+document chat.
+
+For a bulk prose rewrite, project the story once and send the changed lines
+back:
+
+```bash
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent session '<sessionId>' '{"command":"project","wakeId":"<wakeId>","request":{"mode":"md"}}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent session '<sessionId>' '{"command":"patch","wakeId":"<wakeId>","request":{"revision":"<projection revision>","mode":"md","edits":[{"startLine":4,"endLine":4,"newText":"Adopt the managed platform."}]}}'
+```
 
 Inspect the current wake state with a short status command:
 

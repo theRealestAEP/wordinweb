@@ -607,6 +607,9 @@ Rules:
   outside the changed span keep their own formatting.
 - With `suggest: true` a hunk may add text or remove text, not both. Send a
   replacement as two patches.
+- With `suggest: true` a hunk may not change a marker and may not remove a
+  paragraph break. The review model carries no tracked form for either, so a
+  hunk that asks for one is rejected. Send those changes as direct edits.
 
 Only the blocks a hunk touches must be unchanged. A patch written against an
 older revision still applies when someone else edited a different part of the

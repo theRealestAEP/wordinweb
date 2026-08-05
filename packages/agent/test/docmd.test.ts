@@ -450,6 +450,34 @@ describe("DocMD patch", () => {
     })).rejects.toThrow("add text or remove text, not both");
   });
 
+  it("refuses a suggested hunk that only a structural operation could carry", async () => {
+    const agent = await brief();
+    const projection = agent.project({ mode: "md" });
+    const heading = lineOf(projection, "# Findings");
+    await expect(agent.patch({
+      revision: projection.revision,
+      mode: "md",
+      suggest: true,
+      edits: [{ startLine: heading, endLine: heading, newText: "## Findings" }],
+    })).rejects.toThrow("cannot change a heading marker");
+
+    const bullet = lineOf(projection, "- Latency");
+    await expect(agent.patch({
+      revision: projection.revision,
+      mode: "md",
+      suggest: true,
+      edits: [{ startLine: bullet, endLine: bullet, newText: "Latency" }],
+    })).rejects.toThrow("cannot change a list marker");
+
+    await expect(agent.patch({
+      revision: projection.revision,
+      mode: "md",
+      suggest: true,
+      edits: [{ startLine: bullet, endLine: bullet + 1, newText: "- Latency" }],
+    })).rejects.toThrow("cannot remove a paragraph break");
+    expect(agent.project({ mode: "md" }).text).toBe(projection.text);
+  });
+
   it("submits a patch through a collaborative target", async () => {
     const doc = DocxDocument.load(makeDocx(body("<w:p><w:r><w:t>Shared draft</w:t></w:r></w:p>")));
     const ids = doc.enableStableIds();
