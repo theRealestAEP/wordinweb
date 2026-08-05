@@ -22,7 +22,20 @@ import {
   TableOp,
   applyRunFormat,
   applyTableOp,
+  attr,
+  localName,
+  cellContextOf,
   cellShadingAt,
+  listTableStyles,
+  setTableBorders,
+  setTableCellMargins,
+  setTableColumnWidth,
+  setTableHeaderRows,
+  setTableLayoutMode,
+  setTableLook,
+  setTableStyle,
+  setTableWidth,
+  tableLookOf,
   addComment,
   adjustIndent,
   paragraphDividerAt,
@@ -110,6 +123,12 @@ import {
   summarizeSelection,
   runWireLength,
   wireOffsetOf,
+} from "@wordinweb/core";
+import type {
+  CellMarginsPt,
+  TableBorderEdge,
+  TableBorderSpec,
+  TableLookToggles,
 } from "@wordinweb/core";
 
 async function objectPoster(title: string, subtitle: string, glyph: string): Promise<Blob> {
@@ -211,6 +230,37 @@ export interface DocxViewApi {
   tableOp(op: TableOp): void;
   /** Current table-cell fill, undefined when the caret is outside a table. */
   getTableCellFill(): string | null | undefined;
+  /** Set or clear border edges on the caret's cell or its whole table. A null
+   * `border` removes the edges so they inherit again; `{ style: "none" }`
+   * instead suppresses them, which is Word's No Border. */
+  setTableBorders(scope: "cell" | "table", edges: TableBorderEdge[], border: TableBorderSpec | null): void;
+  /** The table styles this document's styles.xml defines — the whole valid
+   * domain for setTableStyle, since an undefined id renders nothing. */
+  listTableStyles(): { id: string; name: string }[];
+  /** Style id of the table containing the caret: null when it has none,
+   * undefined when the caret is outside a table. */
+  getTableStyleId(): string | null | undefined;
+  /** Apply a table style, or with null remove the reference. */
+  setTableStyle(styleId: string | null): void;
+  /** Word's six table style options for the caret's table, undefined outside
+   * a table. */
+  getTableLook(): TableLookToggles | undefined;
+  /** Set some of the six table style options. */
+  setTableLook(patch: Partial<TableLookToggles>): void;
+  /** Set the table's preferred width. `value` is points for "pt", 0-100 for
+   * "pct", and ignored for "auto". */
+  setTableWidth(unit: "pt" | "pct" | "auto", value?: number): void;
+  /** Set one column to an exact width in points. */
+  setTableColumnWidth(colIdx: number, widthPt: number): void;
+  /** Switch the table between fixed column widths and autofit. Switching to
+   * fixed freezes the columns as currently RENDERED, which is what the user
+   * is looking at; switching to autofit measures them from content again. */
+  setTableLayout(layout: "fixed" | "autofit"): void;
+  /** Set the table's default cell margins, or the caret cell's override, in
+   * points. A null patch drops the override. */
+  setTableCellMargins(scope: "cell" | "table", margins: CellMarginsPt | null): void;
+  /** Repeat the first `count` rows as a header band on every page. */
+  setTableHeaderRows(count: number): void;
   /** Insert an image file at the caret (inline, natural size clamped to column).
    * The result is REPORTED rather than swallowed: a picker that accepts a file
    * and then does nothing is indistinguishable from a broken button. */
@@ -1393,6 +1443,47 @@ export function DocxView({
           args: RegisteredOperationArgs<K>,
         ): boolean =>
           collabOp((anchor, alloc) => operationBody(kind, anchor.runId, args, alloc) as never);
+        /** The w:tbl the caret is in, or null when it is outside a table. */
+        const caretTable = (): XmlElement | null => {
+          const caret = editor?.getCaretTarget();
+          if (!caret) return null;
+          return cellContextOf(doc, caret.t)?.tbl ?? null;
+        };
+        /** The column widths a table was last PAINTED at, read off its resize
+         * grips. An autofit table's grid rarely agrees with them, which is
+         * exactly why freezing to fixed widths needs these and not the grid. */
+        const renderedColumnWidths = (tblEl: XmlElement): number[] | undefined => {
+          for (const page of prevLayout?.pages ?? []) {
+            for (const item of page.items) {
+              if (item.kind === "grip" && item.axis === "col" && item.tbl === tblEl && item.renderedWidths) {
+                return item.renderedWidths;
+              }
+            }
+          }
+          return undefined;
+        };
+        /** Submit a REGISTERED cell-addressed operation, falling back to the
+         * local mutation outside a room. The caret's paragraph is the address;
+         * the registry decides whether the operation reads the cell or widens
+         * to the table. */
+        const runTableOperation = <K extends RegisteredOperationKind>(
+          kind: K,
+          args: RegisteredOperationArgs<K>,
+          local: (caretT: XmlElement) => boolean,
+        ): void => {
+          const caret = editor?.getCaretTarget();
+          if (!caret) return;
+          if (
+            collabOp(
+              (anchor, alloc) => operationBody(kind, anchor.blockId, args, alloc) as never,
+              { t: caret.t, offset: 0 },
+            )
+          ) {
+            return;
+          }
+          history.checkpoint();
+          if (local(caret.t)) pages = rerender(doc);
+        };
         /** Document-level ops (page layout, line numbering, cover page). */
         const collabDocOp = (
           make: (alloc: (n: number) => number[]) => ({ kind: string } & Record<string, unknown>) | null,
@@ -1807,6 +1898,62 @@ export function DocxView({
             const caret = editor?.getCaretTarget();
             return caret ? cellShadingAt(doc, caret.t) : undefined;
           },
+          setTableBorders: (scope, edges, border) =>
+            runTableOperation("setTableBorders", { scope, edges, border }, (caret) =>
+              setTableBorders(doc, caret, scope, edges, border),
+            ),
+          listTableStyles: () => listTableStyles(doc),
+          getTableStyleId: () => {
+            const tbl = caretTable();
+            if (!tbl) return undefined;
+            const tblPr = tbl.children.find((c) => localName(c.name) === "tblPr");
+            const style = tblPr?.children.find((c) => localName(c.name) === "tblStyle");
+            return style ? attr(style, "val") ?? null : null;
+          },
+          setTableStyle: (styleId) =>
+            runTableOperation("setTableStyle", { styleId }, () => {
+              const tbl = caretTable();
+              return tbl ? setTableStyle(doc, tbl, styleId) : false;
+            }),
+          getTableLook: () => {
+            const tbl = caretTable();
+            return tbl ? tableLookOf(tbl) : undefined;
+          },
+          setTableLook: (patch) =>
+            runTableOperation("setTableLook", { look: patch }, () => {
+              const tbl = caretTable();
+              return tbl ? setTableLook(doc, tbl, patch) : false;
+            }),
+          setTableWidth: (unit, value) =>
+            runTableOperation("setTableWidth", { unit, value }, () => {
+              const tbl = caretTable();
+              return tbl ? setTableWidth(doc, tbl, unit, value ?? 0) : false;
+            }),
+          setTableColumnWidth: (colIdx, widthPt) =>
+            runTableOperation("setTableColumnWidth", { colIdx, widthPt }, () => {
+              const tbl = caretTable();
+              return tbl ? setTableColumnWidth(doc, tbl, colIdx, widthPt) : false;
+            }),
+          setTableLayout: (layout) => {
+            const tbl = caretTable();
+            if (!tbl) return;
+            // Measured on THIS replica, then sent as data: freezing an autofit
+            // table has to keep the columns the user can see, and a replica
+            // that re-measured them itself could freeze a different table.
+            const renderedWidths = layout === "fixed" ? renderedColumnWidths(tbl) : undefined;
+            runTableOperation("setTableLayout", { layout, renderedWidths }, () =>
+              setTableLayoutMode(doc, tbl, layout, renderedWidths),
+            );
+          },
+          setTableCellMargins: (scope, margins) =>
+            runTableOperation("setTableCellMargins", { scope, margins }, (caret) =>
+              setTableCellMargins(doc, caret, scope, margins),
+            ),
+          setTableHeaderRows: (count) =>
+            runTableOperation("setTableHeaderRows", { count }, () => {
+              const tbl = caretTable();
+              return tbl ? setTableHeaderRows(doc, tbl, count) : false;
+            }),
           imageAccept: () => (collabRef.current?.submitOp && doc.stableIds ? COLLAB_IMAGE_ACCEPT : LOCAL_IMAGE_ACCEPT),
           imageMaxBytes: () => (collabRef.current?.submitOp && doc.stableIds ? collabRef.current.mediaMaxBlobBytes ?? null : null),
           insertImage: async (file) => {

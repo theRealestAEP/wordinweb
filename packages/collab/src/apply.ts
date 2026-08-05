@@ -949,16 +949,17 @@ function resolveOperationTarget(
       if (!el) return null;
       const entry = runOf(el);
       if (!entry) return null;
-      return { el, t: entry.firstT ?? null, run: entry.run };
+      return { el, t: entry.firstT ?? null, run: entry.run, cellParagraph: null };
     }
     case "block": {
       const el = ids.elOf(addressId);
       if (!el) return null;
-      return { el, t: firstTextDescendant(el), run: null };
+      return { el, t: firstTextDescendant(el), run: null, cellParagraph: null };
     }
     case "cell": {
-      const tbl = tableOfParagraph(doc, ids, addressId);
-      return tbl ? { el: tbl, t: null, run: null } : null;
+      const paraEl = ids.elOf(addressId) ?? null;
+      const tbl = paraEl ? tableOf(doc, paraEl) : null;
+      return tbl ? { el: tbl, t: null, run: null, cellParagraph: paraEl } : null;
     }
   }
 }
@@ -1030,8 +1031,12 @@ function firstTextDescendant(el: XmlElement): XmlElement | null {
  * pick a paragraph whose nearest tbl is the intended one). */
 function tableOfParagraph(doc: DocxDocument, ids: StableIds, cellParagraphId: number): XmlElement | null {
   const paraEl = ids.elOf(cellParagraphId);
-  if (!paraEl) return null;
-  for (let cur: XmlElement | null = paraEl; cur; cur = doc.findParentOf(cur) ?? null) {
+  return paraEl ? tableOf(doc, paraEl) : null;
+}
+
+/** The nearest w:tbl ancestor of (or equal to) an element. */
+function tableOf(doc: DocxDocument, el: XmlElement): XmlElement | null {
+  for (let cur: XmlElement | null = el; cur; cur = doc.findParentOf(cur) ?? null) {
     if (localName(cur.name) === "tbl") return cur;
   }
   return null;
