@@ -96,7 +96,7 @@ export type { OoxmlValidationResult, OoxmlValidationLimits } from "./ooxml-valid
 export { sectPrAt, sectionContextAt, insertBreakAt, insertBlankPageAt, insertCoverPage, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
 export type { BreakInsertion, CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
-export { printPages } from "./render/dom.js";
+export { printPages, buildPrintHtml } from "./render/dom.js";
 export type { FindMatch } from "./edit/find.js";
 export { cellShadingAt } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";

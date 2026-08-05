@@ -96,6 +96,7 @@ import {
   topLevelBlockOf,
   paragraphOf,
   printPages,
+  buildPrintHtml,
   setListType,
   paragraphStyleIdOf,
   renderToDom,
@@ -283,6 +284,12 @@ export interface DocxViewApi {
   getSelectionFormat(): SelectionFormat | null;
   /** Print the rendered pages (browser print dialog / save as PDF). */
   print(): void;
+  /**
+   * The standalone print document (all pages plus styles) as an HTML string,
+   * for hosts that produce the PDF themselves (e.g. a desktop shell).
+   * Null before the first render.
+   */
+  exportPrintHtml(): string | null;
   /** Serialize the (edited) document back to .docx bytes. */
   save(): Uint8Array;
   /** Page count after the latest layout. */
@@ -2161,6 +2168,18 @@ export function DocxView({
             const restore = handle.materializeAll?.();
             printPages(handle.root, sp?.pageWidth ?? 816, sp?.pageHeight ?? 1056);
             restore?.();
+          },
+          exportPrintHtml: () => {
+            if (!handle) return null;
+            const sp = doc.sections[0]?.props;
+            const restore = handle.materializeAll?.();
+            const html = buildPrintHtml(
+              handle.root,
+              sp?.pageWidth ?? 816,
+              sp?.pageHeight ?? 1056,
+            );
+            restore?.();
+            return html;
           },
           save: () => doc.save(),
           setSuggesting: (on, author) => editor?.setSuggesting(on, author ?? commentAuthor),
