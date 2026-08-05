@@ -41,6 +41,32 @@ Use cursors for large stories. Reuse only a cursor from the same revision.
 Headless spatial inspection reports deterministic approximate metrics.
 Browser spatial inspection reports canvas-based exact metrics.
 
+## Bulk text work
+
+For a task that is mostly "change this prose", project the story as text with
+`word_document_project` and send the changed lines back through
+`word_document_patch`:
+
+```json
+{ "mode": "md" }
+```
+
+```json
+{
+  "revision": "17",
+  "mode": "md",
+  "edits": [{ "startLine": 4, "endLine": 4, "newText": "Adopt the managed platform." }]
+}
+```
+
+One projection window plus one patch replaces dozens of structured calls for
+rewrites, insertions, paragraph splits, and merges. Keep the structured
+operations for formatting, tables, drawings, equations, review data, and page
+layout.
+
+The projection contract, the atom placeholders, and the patch rules are in
+[interface.md](interface.md#text-projection).
+
 ## References
 
 - `block:*` identifies an editable paragraph or table.

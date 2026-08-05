@@ -46,7 +46,7 @@ interface ObjectEntry {
   detail: Record<string, unknown>;
 }
 
-function mathText(nodes: MathNode[]): string {
+export function mathText(nodes: MathNode[]): string {
   const render = (node: MathNode): string => {
     switch (node.t) {
       case "run": return node.text;
@@ -86,7 +86,7 @@ function blockText(block: Block): string {
   return block.rows.flatMap((row) => row.cells).flatMap((cell) => cell.blocks).map(blockText).join("\n");
 }
 
-function runText(run: Run): string {
+export function runText(run: Run): string {
   let out = "";
   for (const content of run.content) {
     switch (content.kind) {
@@ -110,7 +110,7 @@ function runText(run: Run): string {
   return out;
 }
 
-function paragraphRuns(paragraph: Paragraph): Array<{ run: Run; hyperlink?: { href?: string; anchor?: string } }> {
+export function paragraphRuns(paragraph: Paragraph): Array<{ run: Run; hyperlink?: { href?: string; anchor?: string } }> {
   const runs: Array<{ run: Run; hyperlink?: { href?: string; anchor?: string } }> = [];
   for (const child of paragraph.children) {
     if (child.type === "run") runs.push({ run: child });

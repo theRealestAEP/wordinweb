@@ -139,9 +139,31 @@ const result = await document.compose({
 console.log(result.overview.outline, result.createdObjects);
 ```
 
-`AgentDocument.create()` starts a blank DOCX. `tools()` returns six portable
-tool objects for composition, capabilities, inspection, edits, asset reads,
-and DOCX saves.
+`AgentDocument.create()` starts a blank DOCX. `tools()` returns eight portable
+tool objects for composition, capabilities, inspection, edits, text projection,
+projection patches, asset reads, and DOCX saves.
+
+## Text projection
+
+`project` renders a story as deterministic text — plain paragraphs, structural
+markdown, or the outline — with an anchor map that carries every line back to
+its block, its runs, and their wire offsets. `patch` takes line-range hunks or
+a unified diff written against that projection and compiles them into the same
+intents an editor emits, so a bulk rewrite costs one window and one call.
+
+```ts
+const projection = agentDoc.project({ mode: "md" });
+await agentDoc.patch({
+  revision: projection.revision,
+  mode: "md",
+  edits: [{ startLine: 4, endLine: 4, newText: "Adopt the managed platform." }],
+});
+```
+
+Agents read the text and never see a wire offset: the anchor map is built in
+the same pass as the text and owns that translation. Projecting never changes
+the document. The projection contract, the atom placeholders, and the patch
+rules live in the skill's `references/interface.md`.
 
 ## Progressive inspection
 

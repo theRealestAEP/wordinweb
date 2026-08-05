@@ -235,6 +235,80 @@ export type AgentInspectResult =
   | AgentObjectResult
   | AgentSpatialResult;
 
+export type AgentProjectionMode = "text" | "md" | "outline";
+
+/** One run of projected characters that came from one place in the document.
+ * `start`/`end` are columns in the projection line; `wireStart`/`wireEnd` are
+ * offsets in the run's wire space. An editable segment is backed by a `w:t`,
+ * so the two spaces line up one-to-one across it and a patch can address any
+ * column inside it. Everything else is an atom the patch path treats as
+ * opaque. */
+export interface AgentAnchorSegment {
+  start: number;
+  end: number;
+  runRef: AgentReference;
+  wireStart: number;
+  wireEnd: number;
+  editable: boolean;
+}
+
+export interface AgentAnchorLine {
+  line: number;
+  role: "paragraph" | "table" | "structure";
+  blockRef?: AgentReference;
+  /** Leading characters of the line that are markdown structure rather than
+   * document text (`## `, `- `, `1. `). Always 0 in `text` mode. */
+  marker: number;
+  editable: boolean;
+  segments: AgentAnchorSegment[];
+}
+
+export interface AgentProjectRequest {
+  story?: string;
+  mode?: AgentProjectionMode;
+  cursor?: AgentCursor;
+  maxBlocks?: number;
+  maxCharacters?: number;
+}
+
+export interface AgentProjectResult {
+  revision: string;
+  story: string;
+  mode: AgentProjectionMode;
+  text: string;
+  lines: number;
+  window: { cursor: string | null; startBlock: number; endBlock: number; maxBlocks: number; maxCharacters: number };
+  anchors: AgentAnchorLine[];
+  next?: AgentCursor;
+  truncated: boolean;
+}
+
+export interface AgentPatchHunk {
+  startLine: number;
+  endLine: number;
+  newText: string;
+}
+
+export interface AgentPatchRequest {
+  revision: string;
+  story?: string;
+  mode?: AgentProjectionMode;
+  cursor?: AgentCursor;
+  maxBlocks?: number;
+  maxCharacters?: number;
+  edits?: AgentPatchHunk[];
+  diff?: string;
+  suggest?: boolean;
+}
+
+export interface AgentPatchResult {
+  revision: string;
+  status: "applied" | "submitted";
+  operations: string[];
+  connection?: "local" | "live" | "offline" | "reconnecting";
+  projection: AgentProjectResult;
+}
+
 export type AgentOperation = Record<string, unknown> & { kind: string };
 
 export interface AgentEditRequest {
