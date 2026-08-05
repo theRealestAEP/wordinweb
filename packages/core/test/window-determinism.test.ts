@@ -88,6 +88,24 @@ function fixtures(): Fixture[] {
     `<w:p><w:pPr><w:sectPr>${TALL}</w:sectPr></w:pPr></w:p>`;
   const multi = sectionOne + prose("s2", 320);
 
+  /** A section-break paragraph closing a section with `props`. */
+  const breakPara = (props: string): string => `<w:p><w:pPr><w:sectPr>${props}</w:sectPr></w:pPr></w:p>`;
+
+  // Several sections of alternating geometry. A rebuild has to re-enter part
+  // way through and then cross every later boundary, so the resume section
+  // index has to be right for points in the middle sections, not just the last.
+  const manySections = Array.from({ length: 5 }, (_, i) =>
+    prose(`ms${i}`, 70) + breakPara(i % 2 === 0 ? TALL : SHORT),
+  ).join("") + prose("ms-last", 70);
+
+  // Continuous breaks: the next section resumes on the SAME page at the current
+  // cursor rather than starting a fresh one. That is the boundary path where a
+  // rebuild is most likely to disagree with a full run, because the resumed
+  // state has to put the cursor back mid-page.
+  const continuous = Array.from({ length: 6 }, (_, i) =>
+    prose(`cs${i}`, 200) + breakPara(`<w:type w:val="continuous"/>${TALL}`),
+  ).join("") + prose("cs-last", 200);
+
   // Mixed flow: headings, lists, nested prose and tables together. The spaced
   // paragraphs make the gate sensitive to the before/after spacing the resume
   // state has to carry across a capture point.
@@ -114,7 +132,9 @@ function fixtures(): Fixture[] {
     { name: "dense prose", doc: load(prose("d", 340) + `<w:sectPr>${SHORT}</w:sectPr>`), windowed: true },
     { name: "table-heavy", doc: load(tables + `<w:sectPr>${SHORT}</w:sectPr>`), windowed: true },
     { name: "mixed flow", doc: load(mixed + `<w:sectPr>${SHORT}</w:sectPr>`), windowed: true },
-    { name: "multi-section", doc: load(multi + `<w:sectPr>${SHORT}</w:sectPr>`), windowed: false },
+    { name: "multi-section", doc: load(multi + `<w:sectPr>${SHORT}</w:sectPr>`), windowed: true },
+    { name: "many sections", doc: load(manySections + `<w:sectPr>${SHORT}</w:sectPr>`), windowed: true },
+    { name: "continuous sections", doc: load(continuous + `<w:sectPr>${TALL}</w:sectPr>`), windowed: true },
   ];
 }
 

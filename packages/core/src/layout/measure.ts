@@ -273,6 +273,22 @@ export function cambriaMathDescentShare(): number {
   return 0.238;
 }
 
+/** Drop least-recently-used entries until the cache fits under `max`. Callers
+ * re-insert on a hit, so Map insertion order is recency order. Eviction beats
+ * clearing: these caches are re-read in bulk by an incremental relay, which a
+ * clear would send back to the canvas for the whole document. */
+function evictLru(cache: Map<string, unknown>, max: number): void {
+  while (cache.size >= max) {
+    const oldest = cache.keys().next();
+    if (oldest.done) return;
+    cache.delete(oldest.value);
+  }
+}
+
+const WIDTH_CACHE_MAX = 20000;
+/** Ink extents are only asked for by math radicals, so this stays small. */
+const INK_CACHE_MAX = 4000;
+
 /**
  * Canvas-based measurer for browsers. Word's single line spacing derives from
  * the font's ascent+descent+lineGap; canvas fontBoundingBox* exposes exactly
@@ -317,7 +333,11 @@ export class CanvasMeasurer implements TextMeasurer {
     if (text.length === 0) return 0;
     const key = fontKey(font) + "\0" + text;
     let w = this.widthCache.get(key);
-    if (w === undefined) {
+    if (w !== undefined) {
+      // Re-insert so Map iteration order tracks recency (see evictLru).
+      this.widthCache.delete(key);
+      this.widthCache.set(key, w);
+    } else {
       // Word font sizes are stored in half-points, which become multiples of
       // 2/3px at 96dpi. Canvas loses a small amount of precision at those
       // fractional sizes; measuring at 3x makes every half-point size an
@@ -329,7 +349,7 @@ export class CanvasMeasurer implements TextMeasurer {
       const measureScale = widthScale === 1 ? 3 : 1;
       this.setFont({ ...font, size: font.size * measureScale });
       w = (this.ctx.measureText(text).width / measureScale) * widthScale;
-      if (this.widthCache.size > 20000) this.widthCache.clear();
+      evictLru(this.widthCache, WIDTH_CACHE_MAX);
       this.widthCache.set(key, w);
     }
     return w + letterSpacing * text.length;
@@ -356,13 +376,17 @@ export class CanvasMeasurer implements TextMeasurer {
   inkBox(text: string, font: FontSpec): { ascent: number; descent: number } | undefined {
     const key = "ink " + fontKey(font) + " " + text;
     let m = this.inkBoxCache.get(key);
-    if (m === undefined) {
+    if (m !== undefined) {
+      this.inkBoxCache.delete(key);
+      this.inkBoxCache.set(key, m);
+    } else {
       this.setFont({ ...font, size: font.size * 3 });
       const tm = this.ctx.measureText(text);
       m =
         tm.actualBoundingBoxAscent !== undefined && tm.actualBoundingBoxDescent !== undefined
           ? { ascent: tm.actualBoundingBoxAscent / 3, descent: tm.actualBoundingBoxDescent / 3 }
           : null;
+      evictLru(this.inkBoxCache, INK_CACHE_MAX);
       this.inkBoxCache.set(key, m);
     }
     return m ?? undefined;

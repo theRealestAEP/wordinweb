@@ -694,7 +694,13 @@ type BreakOpts = { inTableCell?: boolean; verticalGridResync?: boolean; cache?: 
 // layout run with a different (e.g. cold-font, pre-fonts-ready) measurer can
 // never serve a stale break to the warm measurer the editor actually uses.
 const BP_CACHES = new WeakMap<TextMeasurer, Map<string, BrokenParagraph>>();
-const BP_CACHE_MAX = 60000;
+let BP_CACHE_MAX = 60000;
+
+/** Test/benchmark hook for sweeping the cap. Not part of the public API. */
+export function __setBreakCacheMax(max: number): void {
+  BP_CACHE_MAX = max;
+}
+
 function bpCacheFor(measurer: TextMeasurer): Map<string, BrokenParagraph> {
   let m = BP_CACHES.get(measurer);
   if (!m) {
@@ -866,12 +872,25 @@ export function breakParagraph(
         return fresh;
       }
     }
+    // Map iterates in insertion order, so re-inserting on a hit makes the first
+    // key the least recently used one and eviction below an LRU.
+    cache.delete(key);
+    cache.set(key, hit);
     // Never hand out the cached instance: the engine mutates line/span fields
     // (doc-grid height snapping, in-place re-placement) during layout.
     return cloneBroken(hit);
   }
   const result = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
-  if (cache.size >= BP_CACHE_MAX) cache.clear();
+  // Evict the least recently used entry rather than clearing the whole cache.
+  // A structural edit re-lays every block after it (the reflow is genuine: the
+  // added line pushes every later page boundary), and those breaks all come
+  // from here. Clearing on overflow dropped entries that relay was about to ask
+  // for, turning one Enter into a re-measure of the rest of the document.
+  while (cache.size >= BP_CACHE_MAX) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
   // Store a pristine clone; return the original for this caller to mutate.
   cache.set(key, cloneBroken(result));
   return result;
