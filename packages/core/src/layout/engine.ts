@@ -1356,14 +1356,17 @@ class Engine {
   /** Drop positioned items for pages behind the opening window, keeping the
    * page shells so the window can rebuild them from capture points.
    *
-   * The measurer's break cache is deliberately NOT dropped alongside them. A
-   * structural edit (splitParagraph) shifts every later block index, so the
-   * incremental relay does not re-converge and re-lays the whole block list;
-   * it stays interactive only because each paragraph's line breaks come back
-   * from that cache. Clearing it here turns one Enter on a long document into
-   * a full-document re-measure — see the split bound in
-   * packages/react/test/remote-repaint-scoped.test.tsx. The cache is the
-   * remaining large holder; windowing it needs that relay to converge first. */
+   * The measurer's break cache is deliberately NOT dropped alongside them, and
+   * it cannot be windowed the way these items are. The relay itself converges
+   * fine past the shifted block indices a splitParagraph creates (see
+   * packages/core/test/incremental-convergence.test.ts). What it cannot do is
+   * converge in continuous prose, because there the reflow is real: the added
+   * line pushes the last line of the page onto the next page, and so on to the
+   * end of the document. That relay re-lays every later block by necessity and
+   * asks this cache for each one's line breaks, so its working set is the whole
+   * document tail. Measured on 3,500 paragraphs: an Enter costs 361 measure
+   * calls served from cache, against 382,897 once the entries it walks are
+   * evicted. Scoping the cache to the page window would evict exactly those. */
   private pruneFullRunPages(): void {
     sampleHeap();
     for (let index = INITIAL_MODEL_WINDOW_PAGES; index < this.pages.length - 1; index++) {
