@@ -3166,10 +3166,13 @@ class Engine {
       const y0 = paraTop + yOffset;
       const y1 = y0 + estHeight;
       const floats = this.floats.get(page) ?? [];
-      // Boundary-touching counts as overlap: Word narrows the line whose top
-      // sits exactly at the float's bottom (parity-wrapmodes: a 72px image
-      // over 18px lines wraps five rows, not four).
-      const overlaps = (f: { y0: number; y1: number }) => f.y1 >= y0 - 0.25 && f.y0 <= y1 - 0.25;
+      // A float's BOTTOM edge is exclusive: a line whose top sits exactly at
+      // the float's bottom runs full width (probe-wrapclear groups A/C — Word
+      // resumes cleared text with its line top exactly at the float bottom and
+      // gives it the whole column). parity-wrapmodes' fifth beside-row is not a
+      // counter-example: its top sits 0.30pt ABOVE the float bottom, a real
+      // overlap. The top edge keeps its slack for float-position noise.
+      const overlaps = (f: { y0: number; y1: number }) => f.y1 > y0 + 0.01 && f.y0 <= y1 - 0.25;
       // A top-and-bottom float pushes the whole line below it. When the
       // paragraph's FIRST line is displaced, Word re-applies the paragraph's
       // space-before below the band (parity2-textboxes p1: the Heading1 after
@@ -3218,14 +3221,18 @@ class Engine {
         for (const f of floats) {
           if (f.mode === "square" && f.y1 > y0 && f.y0 < y1) bottom = Math.max(bottom, f.y1);
         }
-        if (bottom > y0) return { x: 0, width: colW, skipTo: bottom - paraTop + 2 };
+        if (bottom > y0) return { x: 0, width: colW, skipTo: bottom - paraTop };
         return { x: 0, width: colW };
       }
+      // Text driven below a square float resumes with its line top at exactly
+      // the float bottom (the wrap distance is already folded into f.y1) — no
+      // padding, and no snapping to the line grid: probe-wrapclear sweeps the
+      // box height in 3pt steps and Word's cleared line tracks it 1:1.
       let clearY: number | undefined;
       let exactTextEdge = false;
       for (const f of floats) {
         if (f.mode === "square" && overlaps(f)) {
-          clearY = Math.max(clearY ?? 0, f.y1 - paraTop + 2);
+          clearY = Math.max(clearY ?? 0, f.y1 - paraTop);
           exactTextEdge ||= f.exactTextEdge === true;
         }
       }
