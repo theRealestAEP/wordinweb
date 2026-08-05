@@ -179,6 +179,29 @@ describe("DocMD projection", () => {
     expect(agent.project({ mode: "text" }).text).toContain(DOCMD_ATOMS.object);
   });
 
+  it("keeps multi-line image alt text on one projection line", async () => {
+    const agent = AgentDocument.create();
+    const logo = agent.addAsset(Uint8Array.from(Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+      "base64",
+    )), "image/png");
+    await agent.compose({
+      revision: agent.revision,
+      body: [{
+        type: "image",
+        assetRef: logo,
+        widthPx: 96,
+        heightPx: 24,
+        alt: "Ein Bild.\n\nAutomatisch erstellte Beschreibung",
+      }],
+    });
+    const md = agent.project({ mode: "md" });
+    // Wild-hamburg regression: alt text with embedded newlines must not add
+    // projection lines the anchor map does not cover.
+    expect(md.text.split("\n").length).toBe(md.anchors.length);
+    expect(md.text).toContain("![Ein Bild. Automatisch erstellte Beschreibung](object:");
+  });
+
   it("escapes paragraph text that would otherwise read as a markdown marker", async () => {
     const agent = AgentDocument.create();
     await agent.compose({

@@ -315,7 +315,7 @@ export class CanvasMeasurer implements TextMeasurer {
 
   width(text: string, font: FontSpec, letterSpacing = 0): number {
     if (text.length === 0) return 0;
-    const key = fontKey(font) + " " + text;
+    const key = fontKey(font) + "\0" + text;
     let w = this.widthCache.get(key);
     if (w === undefined) {
       // Word font sizes are stored in half-points, which become multiples of

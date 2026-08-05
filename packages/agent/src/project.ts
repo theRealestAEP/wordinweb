@@ -51,8 +51,13 @@ function fieldName(instruction: string): string {
 }
 
 function renderContent(content: RunContent, mode: AgentProjectionMode, runId: number | undefined, index: number): string {
+  // Alt text arrives verbatim from the document (accessibility descriptions
+  // often contain newlines); a raw newline here would add a projection line
+  // the anchor map does not know about, like the w:t case below.
   const object = (label: string): string =>
-    mode === "text" || runId === undefined ? DOCMD_ATOMS.object : `![${label}](${objectRef(runId, index)})`;
+    mode === "text" || runId === undefined
+      ? DOCMD_ATOMS.object
+      : `![${label.replace(/[\r\n]+/g, " ")}](${objectRef(runId, index)})`;
   switch (content.kind) {
     // A literal newline inside a w:t would add a projection line the anchor
     // map does not know about; the stand-in keeps the mapping one-to-one.
