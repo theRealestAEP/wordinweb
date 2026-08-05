@@ -1,9 +1,57 @@
 import { DocxDocument } from "../docx.js";
 import { RunProps } from "../model.js";
-import { XmlElement, child, cloneXml, localName } from "../xml.js";
+import { DEFAULT_OOXML_LIMITS, pruneToPastedSubset, validatePastedOoxml } from "../ooxml-validate.js";
+import { XmlElement, child, cloneXml, localName, parseXml, serializeXml } from "../xml.js";
 import { pxToTwips } from "../units.js";
 import { topLevelBlockOf } from "./blocks.js";
 import { SelectionSegment } from "./commands.js";
+
+/**
+ * CLIPBOARD PAYLOAD CONTRACT
+ * ==========================
+ *
+ * Copy and cut write two flavors:
+ *
+ *   text/plain  the selection's text in logical (source) order.
+ *   text/html   `<div data-dxw-ooxml="…">` + a semantic HTML rendering of the
+ *               same content, so apps that ignore the attribute still get
+ *               paragraphs, runs, and table shape.
+ *
+ * `data-dxw-ooxml` holds `encodeURIComponent(serializeXml(fragment))`, where
+ * the fragment is a complete WordprocessingML main part:
+ *
+ *   <w:document xmlns:w="…/wordprocessingml/2006/main">
+ *     <w:body> w:p | w:tbl … </w:body>
+ *   </w:document>
+ *
+ * The blocks are the document's OWN retained XML for the selection, pruned to
+ * the paste subset (ooxml-validate.ts) — not a reconstruction from the layout
+ * or the HTML, so run properties, paragraph properties and table geometry
+ * arrive exactly as the source document spelled them.
+ *
+ * WHY A DATA ATTRIBUTE. A native copy only carries text/plain and text/html
+ * across every browser and OS; a custom DataTransfer type survives inside one
+ * page but is dropped or unreadable across applications. Riding inside the
+ * HTML flavor is what Word itself does with its CF_HTML comment markers, and
+ * it is what lets an ordinary browser paste keep full fidelity.
+ *
+ * FOR A DESKTOP SHELL. Read the text/html flavor, lift the fragment with
+ * `extractClipboardOoxml`, and you hold a valid `word/document.xml`. Zipped
+ * with a minimal `[Content_Types].xml` and `_rels/.rels` that is a .docx Word
+ * opens, which is what a shell writes to the native Word clipboard format
+ * alongside the two web flavors.
+ *
+ * ON PASTE the fragment is parsed and put through the SAME validator the
+ * collab apply path uses before anything enters the document — the attribute
+ * is attacker-controlled the moment a user pastes from a web page — and a
+ * fragment that fails is refused whole, leaving the HTML rendering beside it
+ * to carry the paste.
+ */
+
+/** The HTML attribute carrying the WordprocessingML fragment. */
+export const CLIPBOARD_OOXML_ATTR = "data-dxw-ooxml";
+
+const WORDPROCESSINGML_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
 const el = (
   name: string,
@@ -102,7 +150,9 @@ function trimTable(
 
 /** Build an exact internal OOXML fragment for rich copy/paste. Paragraph
  * selections become self-contained runs with their effective formatting;
- * table selections retain the table/cell structure and properties. */
+ * table selections retain the table/cell structure and properties. The blocks
+ * are pruned to the paste subset, so a copy of any document produces a
+ * fragment the paste gate accepts. */
 export function selectionClipboardBlocks(doc: DocxDocument, segments: SelectionSegment[]): XmlElement[] {
   const selected = new Map<XmlElement, { start: number; end: number }[]>();
   const byBlock = new Map<XmlElement, SelectionSegment[]>();
@@ -128,20 +178,57 @@ export function selectionClipboardBlocks(doc: DocxDocument, segments: SelectionS
       blocks.push(paragraphFragment(block, blockSegments));
     }
   }
-  return blocks;
+  return pruneToPastedSubset(blocks);
 }
 
-export function encodeClipboardBlocks(blocks: XmlElement[]): string {
-  return JSON.stringify({ version: 1, blocks });
+/** Serialize copied blocks as a self-contained WordprocessingML main part —
+ * the clipboard's OOXML flavor (see the payload contract at the top). */
+export function encodeClipboardOoxml(blocks: XmlElement[]): string {
+  const body = el("w:body", {}, blocks);
+  return serializeXml(el("w:document", { "xmlns:w": WORDPROCESSINGML_NS }, [body]));
 }
 
-export function decodeClipboardBlocks(value: string): XmlElement[] {
-  if (!value) return [];
+/**
+ * Parse a WordprocessingML clipboard fragment into insertable blocks, or
+ * return [] when it is unusable.
+ *
+ * The payload is UNTRUSTED — any web page can write the attribute — so it is
+ * put through validatePastedOoxml at DEFAULT_OOXML_LIMITS, the same gate the
+ * collab apply path runs on the receiving side, and a fragment that fails is
+ * refused whole. It is deliberately NOT pruned first: pruning here would
+ * silently repair a hostile fragment into something acceptable, and would put
+ * a second, differently-written reading of the same markup in front of the
+ * validator. Pruning happens at COPY time, on content this editor already
+ * trusts (selectionClipboardBlocks), which is what lets an internal copy pass
+ * the same gate an external paste faces.
+ */
+export function decodeClipboardOoxml(xml: string): XmlElement[] {
+  if (!xml) return [];
+  let root: XmlElement;
   try {
-    const payload = JSON.parse(value) as { version?: number; blocks?: XmlElement[] };
-    return payload.version === 1 && Array.isArray(payload.blocks) ? payload.blocks.map(cloneXml) : [];
+    root = parseXml(xml);
   } catch {
     return [];
+  }
+  const body = root.children.find((node) => localName(node.name) === "body") ?? root;
+  const blocks = body.children.filter(
+    (node) => localName(node.name) === "p" || localName(node.name) === "tbl",
+  );
+  if (blocks.length === 0) return [];
+  return validatePastedOoxml(blocks, DEFAULT_OOXML_LIMITS).ok ? blocks : [];
+}
+
+/** Lift the WordprocessingML fragment out of a text/html clipboard payload,
+ * for a desktop shell writing the native Word clipboard format. Returns null
+ * when the HTML did not come from this editor. */
+export function extractClipboardOoxml(html: string): string | null {
+  if (!html) return null;
+  const match = html.match(new RegExp(`${CLIPBOARD_OOXML_ATTR}="([^"]*)"`));
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
   }
 }
 
@@ -243,15 +330,31 @@ function htmlTable(node: Element, w: string, contentTwips: number): XmlElement {
   ]);
 }
 
-/** Convert the ordinary HTML clipboard format used by Word, browsers, and
- * spreadsheets into the small OOXML subset the editor can insert safely. */
+/**
+ * Convert a text/html clipboard payload into blocks the editor can insert.
+ *
+ * A payload carrying the OOXML flavor (ours, or one a shell converted from
+ * Word's native format) takes the fragment; everything else — Word's own HTML,
+ * a browser, a spreadsheet — is converted from the HTML. Both paths end at the
+ * same validator, and both return [] when the payload is unusable, which drops
+ * the caller back to the plain-text fallback.
+ */
 export function htmlClipboardBlocks(html: string, contentWidthPx: number): XmlElement[] {
   if (!html || typeof DOMParser === "undefined") return [];
   const body = new DOMParser().parseFromString(html, "text/html").body;
-  const encoded = body.querySelector<HTMLElement>("[data-dxw-fragment]")?.dataset.dxwFragment;
-  if (encoded) {
-    const internal = decodeClipboardBlocks(decodeURIComponent(encoded));
-    if (internal.length > 0) return internal;
+  const fragment = body.querySelector<HTMLElement>(`[${CLIPBOARD_OOXML_ATTR}]`)?.getAttribute(CLIPBOARD_OOXML_ATTR);
+  if (fragment) {
+    let decoded = "";
+    try {
+      decoded = decodeURIComponent(fragment);
+    } catch {
+      decoded = "";
+    }
+    const blocks = decodeClipboardOoxml(decoded);
+    // An unusable fragment falls through to the HTML below rather than
+    // failing the paste: the same payload always carries a readable HTML
+    // rendering of the same content.
+    if (blocks.length > 0) return blocks;
   }
   const w = "w:";
   const contentTwips = pxToTwips(contentWidthPx);
@@ -272,7 +375,11 @@ export function htmlClipboardBlocks(html: string, contentWidthPx: number): XmlEl
     else if (/^(p|div|h[1-6]|li|pre|blockquote)$/.test(tag)) blocks.push(htmlParagraph(element, w));
     else if (element.textContent?.trim()) blocks.push(htmlParagraph(element, w));
   }
-  return blocks;
+  // The converter above only builds allowlisted elements, so this gate is
+  // really about the node and depth caps: a paste that exceeds them would be
+  // accepted here and REJECTED by every peer's apply, which is a fork. Refuse
+  // it on the originating client too, and let plain text carry the paste.
+  return validatePastedOoxml(blocks, DEFAULT_OOXML_LIMITS).ok ? blocks : [];
 }
 
 function escapeHtml(value: string): string {
@@ -284,8 +391,10 @@ function textOf(node: XmlElement): string {
   return node.children.map(textOf).join("");
 }
 
-/** A semantic HTML fallback lets rich copies retain table shape in apps that
- * do not preserve the private WordInWeb clipboard flavor. */
+/** The text/html clipboard flavor: the WordprocessingML fragment in a data
+ * attribute (the payload contract at the top of this file), wrapped around a
+ * semantic HTML rendering so apps that ignore the attribute still receive the
+ * paragraphs and the table shape. */
 export function clipboardBlocksHtml(blocks: XmlElement[]): string {
   const renderParagraph = (paragraph: XmlElement): string => `<p>${paragraph.children
     .filter((node) => localName(node.name) === "r")
@@ -304,7 +413,9 @@ export function clipboardBlocksHtml(blocks: XmlElement[]): string {
     .map((row) => `<tr>${row.children.filter((node) => localName(node.name) === "tc")
       .map((cellNode) => `<td>${cellNode.children.filter((node) => localName(node.name) === "p").map(renderParagraph).join("")}</td>`)
       .join("")}</tr>`).join("")}</table>`;
-  const payload = escapeHtml(encodeURIComponent(encodeClipboardBlocks(blocks)));
+  // encodeURIComponent percent-escapes & < > " itself, so the result is
+  // already safe as an attribute value.
+  const payload = encodeURIComponent(encodeClipboardOoxml(blocks));
   const content = blocks.map((block) => localName(block.name) === "tbl" ? renderTable(block) : renderParagraph(block)).join("");
-  return `<div data-dxw-fragment="${payload}">${content}</div>`;
+  return `<div ${CLIPBOARD_OOXML_ATTR}="${payload}">${content}</div>`;
 }

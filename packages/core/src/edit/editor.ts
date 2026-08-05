@@ -1,6 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { Run, type Block, type RunContent } from "../model.js";
-import { XmlElement, attr, cloneXml, localName } from "../xml.js";
+import { XmlElement, attr, cloneXml, localName, serializeXml } from "../xml.js";
 import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
 import { DrawingBinding, GripBinding, ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
 import { TextItem } from "../layout/types.js";
@@ -273,6 +273,7 @@ export type EditorIntent =
   | { kind: "formatRange"; blockId: number; runId: number; start: number; end: number; patch: Record<string, unknown>; beforeId?: number; middleId: number; afterId?: number }
   | { kind: "formatParagraph"; blockId: number; align?: "left" | "center" | "right" | "justify"; styleId?: string | null }
   | { kind: "mergeParagraph"; blockId: number }
+  | { kind: "pasteBlocks"; afterBlockId: number; blocksXml: string; nodeIds: number[] }
   | {
       kind: "suggestRevision";
       ranges?: { blockId: number; runId: number; start: number; end: number }[];
@@ -329,6 +330,15 @@ function deepTextNode(el: HTMLElement): Node | null {
   let n: Node | null = el.firstChild;
   while (n && n.nodeType !== Node.TEXT_NODE) n = n.firstChild;
   return n;
+}
+
+/** How many nodes in a subtree carry a stable id (p/tbl/r) — the number of
+ * carried ids a node-creating intent has to allocate. Written as a reducer so
+ * a block LIST folds in one call. Must stay in step with the apply path's
+ * walk, which is what consumes the ids. */
+function trackedNodeCount(total: number, el: XmlElement): number {
+  const ln = localName(el.name);
+  return el.children.reduce(trackedNodeCount, total + (ln === "p" || ln === "tbl" || ln === "r" ? 1 : 0));
 }
 
 function textElements(el: XmlElement): XmlElement[] {
@@ -1762,13 +1772,32 @@ export class DocxEditor {
 
   /** Insert clipboard text at the caret. Newlines split into paragraph breaks;
    * both text and the new marks route through the suggesting-aware cores so
-   * paste in suggesting mode records w:ins. One checkpoint + one commit. */
+   * paste in suggesting mode records w:ins. One checkpoint + one commit —
+   * except in a room, where each line is its own wire edit (see below). */
   private pasteText(text: string): void {
     const hadSelection = this.hasSelection();
+    const chunks = text.replace(/\r\n?/g, "\n").split("\n");
+    if (this.host.onIntent && this.host.doc.stableIds && !this.suggesting) {
+      // Collab: plain-text paste reached the document through the NON-emitting
+      // cores below (insertPlainTextParagraphs splices the paragraphs by hand;
+      // insertTextCore is the core insert without its intent), so every
+      // Cmd+V of plain text forked the room. It now runs on the same emitting
+      // primitives typing and Enter use. That is one commit per line rather
+      // than one for the paste — the cost of a wire edit per created
+      // paragraph, and the same shape as click-and-type's collab path.
+      this.host.history?.checkpoint();
+      if (hadSelection) this.removeSelectedText();
+      if (!this.caret) return;
+      for (let i = 0; i < chunks.length; i++) {
+        if (i > 0) this.splitParagraphNoHistory();
+        if (!this.caret) break;
+        if (chunks[i]) this.insertText(chunks[i]);
+      }
+      return;
+    }
     this.host.history?.checkpoint();
     if (hadSelection) this.removeSelectedText();
     if (!this.caret) return;
-    const chunks = text.replace(/\r\n?/g, "\n").split("\n");
     const large = text.length > 50_000 || chunks.length > 200;
     if (!this.suggesting && chunks.length > 1) {
       this.insertPlainTextParagraphs(chunks);
@@ -1859,17 +1888,73 @@ export class DocxEditor {
     this.caret = { t: last.text, run: caret.run, offset: chunks[chunks.length - 1].length, bias: "end" };
   }
 
+  /** The stable id of the paragraph a paste would split, read BEFORE the paste
+   * touches anything so an unaddressable target can decline cleanly. */
+  private pasteAnchorId(): number | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids) return null;
+    const t = this.caret?.t ?? this.getSelectionSegments().find((seg) => seg.t)?.t;
+    const paragraph = t ? paragraphOf(this.host.doc, t) : null;
+    return (paragraph ? ids.idOf(paragraph) : undefined) ?? null;
+  }
+
+  /**
+   * Splice pasted blocks in at the caret: split the paragraph in two and put
+   * the blocks between the halves.
+   *
+   * Collab: rich paste was a LOCAL-ONLY mutation — the whole fragment landed
+   * on the pasting replica and nothing rode the wire, so one paste forked the
+   * room permanently. It now emits the delete of any replaced selection
+   * (removeSelectedText), the split, and a pasteBlocks carrying the same XML
+   * this replica just spliced plus carried ids for every p/tbl/r in it, so
+   * every replica ends with the same tree AND the same id table. Honest
+   * no-op: when the target paragraph has no stable id, the caret is not
+   * id-addressable, or the split does not happen, the paste does nothing
+   * rather than mutating this replica alone.
+   */
   private pasteBlocks(blocks: XmlElement[], background: boolean): void {
+    const ids = this.host.doc.stableIds;
+    const inCollab = !!(this.host.onIntent && ids);
+    if (inCollab && this.pasteAnchorId() === null) return;
     this.host.history?.checkpoint();
     if (this.hasSelection()) this.removeSelectedText();
     if (!this.caret) return;
-    this.splitParagraphCore();
-    if (!this.caret) return;
+    const splitPos = inCollab ? this.encodeCaretForIntent() : null;
+    if (inCollab && !splitPos) return;
+    const split = this.splitParagraphCore();
+    if (!this.caret || (inCollab && !split)) return;
+    if (ids && split && splitPos && this.host.onIntent) {
+      // Carried ids for the new paragraph and its moved-tail run, exactly as
+      // Enter's emitting split does — the allocation MUST come from the
+      // connection's disjoint block, or two clients mint the same id.
+      const alloc = this.host.allocIds?.(2) ?? [];
+      const newBlockId = ids.assign(split.after, alloc[0]);
+      const newRunEl = split.after.children.find((c) => localName(c.name) === "r");
+      this.host.onIntent({
+        kind: "splitParagraph",
+        at: splitPos,
+        newBlockId,
+        newRunId: newRunEl ? ids.assign(newRunEl, alloc[1]) : newBlockId,
+      });
+    }
     const tail = paragraphOf(this.host.doc, this.caret.t);
     const parent = tail ? this.host.doc.findParentOf(tail) : undefined;
     if (!tail || !parent) return;
+    const afterBlockId = ids && split ? ids.idOf(split.before) : undefined;
+    if (inCollab && afterBlockId === undefined) return;
+    const tracked = inCollab ? this.trackedNodeSet() : null;
     const copies = blocks.map(cloneXml);
     parent.children.splice(parent.children.indexOf(tail), 0, ...copies);
+    if (tracked && afterBlockId !== undefined && this.host.onIntent) {
+      const nodeIds = this.host.allocIds?.(copies.reduce(trackedNodeCount, 0)) ?? [];
+      this.assignFreshTrackedIds(tracked, nodeIds);
+      this.host.onIntent({
+        kind: "pasteBlocks",
+        afterBlockId,
+        blocksXml: copies.map((block) => serializeXml(block)).join(""),
+        nodeIds,
+      });
+    }
     for (let i = copies.length - 1; i >= 0; i--) {
       const t = lastTextOf(copies[i]);
       if (!t) continue;

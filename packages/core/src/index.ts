@@ -113,8 +113,12 @@ export { buildOlePackage, extractOlePackage } from "./parse/ole.js";
 export { validBookmarkName, listBookmarks, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference } from "./edit/references.js";
 export { checkboxStateElement, checkboxChecked, toggleCheckbox } from "./checkbox.js";
 export { isSafeUrl, safeUrlOrBlank } from "./url-safety.js";
-export { validatePastedOoxml, DEFAULT_OOXML_LIMITS } from "./ooxml-validate.js";
+export { validatePastedOoxml, pruneToPastedSubset, DEFAULT_OOXML_LIMITS } from "./ooxml-validate.js";
 export type { OoxmlValidationResult, OoxmlValidationLimits } from "./ooxml-validate.js";
+// The clipboard's OOXML flavor. A desktop shell reads the text/html payload
+// the editor wrote and lifts the WordprocessingML out of it, so it can ALSO
+// write the native Word clipboard format. Payload contract: edit/clipboard.ts.
+export { CLIPBOARD_OOXML_ATTR, extractClipboardOoxml, encodeClipboardOoxml, decodeClipboardOoxml } from "./edit/clipboard.js";
 export { sectPrAt, sectionContextAt, insertBreakAt, insertBlankPageAt, insertCoverPage, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
 export type { BreakInsertion, CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
