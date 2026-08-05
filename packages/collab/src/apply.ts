@@ -9,7 +9,6 @@ import {
   applyRunFormat,
   setParagraphAlignment,
   setParagraphStyle,
-  setListType,
   adjustIndent,
   setParagraphSpacing,
   insertPageField,
@@ -53,7 +52,6 @@ import {
   checkboxStateElement,
   toggleCheckbox,
   collectRevisions,
-  insertTableAfter,
   acceptRevision,
   rejectRevision,
   acceptAllRevisions,
@@ -64,7 +62,6 @@ import {
   resolveRunOffset,
   resizeDrawing,
   resizeTableColumn,
-  resizeTableRow,
   moveTableTo,
   removeDrawingRun,
   mergeParagraphBackward,
@@ -78,13 +75,18 @@ import {
   insertBreakAt,
   insertMathAt,
   insertShapeAt,
+  ADDRESS_WIRE_FIELD,
+  applyRegisteredOperation,
+  registeredOperation,
+  type OperationAddress,
+  type OperationTarget,
   type EditCaret,
   type Run,
   type Block,
   type XmlElement,
   type SelectionSegment,
 } from "@wordinweb/core";
-import { Intent, Position } from "./intents.js";
+import { Intent, Position, isRegisteredIntent, type RegisteredIntent } from "./intents.js";
 
 /**
  * How much of the document an applied intent disturbed — the input to
@@ -205,6 +207,11 @@ function applyIntentInner(
   // threaded through the intent); the session forbids it upstream.
   const ctx = { suggesting: false, revMeta: () => { throw new Error("suggesting mode unsupported headlessly"); } };
 
+  // Registered operations carry their mutation in the core registry. Narrowing
+  // here leaves the switch below exhaustive over what is still hand-written,
+  // so its `never` gate keeps its full force.
+  if (isRegisteredIntent(intent)) return applyRegistered(doc, ids, runOf, intent);
+
   switch (intent.kind) {
     case "insertText": {
       const caret = resolveCaret(ids, runOf, intent.at);
@@ -302,12 +309,6 @@ function applyIntentInner(
       if (intent.align) changed = setParagraphAlignment(doc, [target], intent.align) || changed;
       if (intent.styleId !== undefined) changed = setParagraphStyle(doc, [target], intent.styleId) || changed;
       return changed;
-    }
-    case "setListType": {
-      const blockEl = ids.elOf(intent.blockId);
-      if (!blockEl) return false;
-      const target = firstTextDescendant(blockEl) ?? blockEl;
-      return setListType(doc, [target], intent.listKind);
     }
     case "formatRange": {
       if (intent.end <= intent.start) return false;
@@ -725,11 +726,6 @@ function applyIntentInner(
       if (!tbl) return false;
       return resizeTableColumn(doc, tbl, intent.boundary, intent.deltaPx, intent.renderedWidths);
     }
-    case "resizeTableRow": {
-      const tbl = tableOfParagraph(doc, ids, intent.cellParagraphId);
-      if (!tbl) return false;
-      return resizeTableRow(doc, tbl, intent.rowIdx, intent.heightPx);
-    }
     case "moveTable": {
       const tbl = tableOfParagraph(doc, ids, intent.cellParagraphId);
       if (!tbl) return false;
@@ -826,16 +822,6 @@ function applyIntentInner(
       return acceptAllRevisions(doc) > 0;
     case "rejectAllRevisions":
       return rejectAllRevisions(doc) > 0;
-    case "insertTable": {
-      const runEl = ids.elOf(intent.runId);
-      if (!runEl) return false;
-      const entry = runOf(runEl);
-      if (!entry || !entry.firstT) return false;
-      const before = trackedSet(ids, doc);
-      const ok = insertTableAfter(doc, entry.firstT, intent.rows, intent.cols);
-      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
-      return ok;
-    }
     case "setLink": {
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.
       const runEl = ids.elOf(intent.runId);
@@ -953,6 +939,59 @@ function applyIntentInner(
       return exhaustive;
     }
   }
+}
+
+/**
+ * Resolve a registered operation's stable-id address to a document target.
+ * A null result IS the collaborative "honest no-op": the address named
+ * content this replica cannot see, so nothing is mutated and every replica
+ * records the same rejection.
+ */
+function resolveOperationTarget(
+  doc: DocxDocument,
+  ids: StableIds,
+  runOf: RunLookup,
+  address: OperationAddress,
+  intent: RegisteredIntent,
+): OperationTarget | null {
+  const addressId = (intent as unknown as Record<string, number>)[ADDRESS_WIRE_FIELD[address]];
+  switch (address) {
+    case "run": {
+      const el = ids.elOf(addressId);
+      if (!el) return null;
+      const entry = runOf(el);
+      if (!entry) return null;
+      return { el, t: entry.firstT ?? null };
+    }
+    case "block": {
+      const el = ids.elOf(addressId);
+      if (!el) return null;
+      return { el, t: firstTextDescendant(el) };
+    }
+    case "cell": {
+      const tbl = tableOfParagraph(doc, ids, addressId);
+      return tbl ? { el: tbl, t: null } : null;
+    }
+  }
+}
+
+/** Apply a registered operation: resolve its address, run the declared
+ * mutation, and hand the nodes it created their carried ids. */
+function applyRegistered(
+  doc: DocxDocument,
+  ids: StableIds,
+  runOf: RunLookup,
+  intent: RegisteredIntent,
+): boolean {
+  const definition = registeredOperation(intent.kind);
+  if (!definition) return false;
+  const target = resolveOperationTarget(doc, ids, runOf, definition.address, intent);
+  if (!target) return false;
+  const nodeIds = "nodeIds" in intent ? intent.nodeIds : undefined;
+  const before = nodeIds ? trackedSet(ids, doc) : null;
+  const applied = applyRegisteredOperation(doc, target, intent);
+  if (applied && before && nodeIds) assignFreshTracked(ids, doc, before, nodeIds);
+  return applied;
 }
 
 /** Assign carried ids to tracked nodes created since `before`, in doc order. */

@@ -1,4 +1,4 @@
-import { localName, runWireLength, type DocxDocument, type StableIds } from "@wordinweb/core";
+import { localName, registeredOperation, runWireLength, type DocxDocument, type StableIds } from "@wordinweb/core";
 import { sha256Hex, type Intent, type IntentBody } from "@wordinweb/collab/client";
 import { validateIntent } from "@wordinweb/collab/server";
 import { AGENT_EDIT_CAPABILITIES, validateAgentOperationShape } from "./capabilities.js";
@@ -38,6 +38,10 @@ function paraId(context: CompileContext): string {
 }
 
 function idsForOperation(kind: Intent["kind"], operation: Record<string, unknown>): number {
+  // A registered operation declares its own carried-id budget, so the editor,
+  // the React host, and this compiler all size the allocation the same way.
+  const registered = registeredOperation(kind);
+  if (registered) return registered.nodeIds ? registered.nodeIds(operation as never) : 0;
   switch (kind) {
     case "pasteBlocks": {
       const xml = String(operation.blocksXml ?? "");
@@ -63,11 +67,6 @@ function idsForOperation(kind: Intent["kind"], operation: Record<string, unknown
     case "insertCoverPage":
     case "insertChart":
     case "insertSmartArt": return 24;
-    case "insertTable": {
-      const rows = Number(operation.rows);
-      const cols = Number(operation.cols);
-      return Number.isInteger(rows) && Number.isInteger(cols) && rows > 0 && cols > 0 ? rows * cols * 2 + 8 : 8;
-    }
     default: return 0;
   }
 }

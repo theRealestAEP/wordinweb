@@ -1,4 +1,5 @@
-import { Intent } from "./intents.js";
+import { validateRegisteredOperation } from "@wordinweb/core";
+import { Intent, isRegisteredIntent } from "./intents.js";
 
 /**
  * Structural validation of an inbound intent BEFORE it is transformed/applied
@@ -96,6 +97,9 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       (!Number.isInteger(intent.objectIndex) || intent.objectIndex < 0 || intent.objectIndex > 10000)) {
     return `${intent.kind}: bad objectIndex`;
   }
+  // Registered operations declare their own payload bounds. Narrowing first
+  // keeps the switch below exhaustive over the hand-written intents.
+  if (isRegisteredIntent(intent)) return validateRegisteredOperation(intent);
   switch (intent.kind) {
     case "insertText":
       if (typeof intent.text !== "string") return "insertText: text not a string";
@@ -314,11 +318,6 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       }
       return null;
     }
-    case "resizeTableRow": {
-      if (!Number.isInteger(intent.rowIdx) || intent.rowIdx < 0 || intent.rowIdx > 5000) return "resizeTableRow: bad row";
-      if (typeof intent.heightPx !== "number" || !Number.isFinite(intent.heightPx) || intent.heightPx < 1 || intent.heightPx > 20000) return "resizeTableRow: bad height";
-      return null;
-    }
     case "moveTable": {
       const num = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= -5000 && v <= 20000;
       if (!num(intent.xPx) || !num(intent.yPx)) return "moveTable: bad position";
@@ -358,11 +357,6 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "acceptAllRevisions":
     case "rejectAllRevisions":
       return null;
-    case "insertTable": {
-      const okDim = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 50;
-      if (!okDim(intent.rows) || !okDim(intent.cols)) return "insertTable: bad dimensions";
-      return null;
-    }
     case "setLineNumbering": {
       const p = intent.patch;
       if (typeof p !== "object" || p === null || typeof p.enabled !== "boolean") return "setLineNumbering: bad patch";
@@ -404,7 +398,6 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null;
     case "formatRun":
     case "formatParagraph":
-    case "setListType":
     case "mergeParagraph":
       // Id-addressed, no free-form payload to bound here.
       return null;

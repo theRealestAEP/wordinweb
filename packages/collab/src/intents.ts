@@ -13,6 +13,13 @@
  * broadcasting the canonical form (doc 03).
  */
 
+import {
+  REGISTERED_OPERATION_KINDS,
+  isRegisteredOperationKind,
+  type RegisteredOperationBody,
+  type RegisteredOperationKind,
+} from "@wordinweb/core";
+
 export type StableId = number;
 
 /** A caret/endpoint position within a run. */
@@ -121,12 +128,11 @@ export interface FormatParagraphIntent extends IntentBase {
  * Turn a paragraph into a bullet/numbered list item, or clear its list
  * formatting (kind null). Block-level: mutates w:pPr/numbering, preserves the
  * block id, moves no text — transform identity.
+ *
+ * REGISTERED: shape and wiring come from the core operation registry (see
+ * RegisteredIntent below). The alias keeps the published type name.
  */
-export interface SetListTypeIntent extends IntentBase {
-  kind: "setListType";
-  blockId: StableId;
-  listKind: "bullet" | "number" | null;
-}
+export type SetListTypeIntent = RegisteredIntentOf<"setListType">;
 
 /**
  * Format a character sub-range of a single run (plan doc 03 F3). The run is
@@ -379,6 +385,31 @@ export interface InsertBookmarkIntent extends IntentBase {
   name: string;
 }
 
+/**
+ * Intents whose wire shape comes from the core operation registry. One
+ * declaration in @wordinweb/core's edit/registry.ts produces the payload, the
+ * apply, the validation, the carried-id budget, and the agent capability row;
+ * here it just picks up the wire bookkeeping every intent carries.
+ *
+ * The registry admits only id-addressed, position-stable operations with no
+ * wire inverse, so every registered intent's transform is identity and
+ * collaborative undo skips it — see the registry's module comment.
+ */
+export type RegisteredIntent = RegisteredOperationBody & IntentBase;
+
+/** One registered intent, by kind. */
+export type RegisteredIntentOf<Kind extends RegisteredOperationKind> = Extract<
+  RegisteredIntent,
+  { kind: Kind }
+>;
+
+/** True when the intent's wiring lives in the registry rather than in this
+ * file's hand-written cases. Narrowing with it keeps every downstream switch
+ * exhaustive over the intents that are still hand-written. */
+export function isRegisteredIntent(intent: Intent): intent is RegisteredIntent {
+  return isRegisteredOperationKind(intent.kind);
+}
+
 export type Intent =
   | InsertTextIntent
   | DeleteTextIntent
@@ -451,20 +482,25 @@ export type Intent =
   | InsertTableIntent;
 
 /**
- * Complete runtime list of canonical edit operations.
+ * Every canonical edit operation that is NOT declared in the core operation
+ * registry.
  *
- * The typed map is a coverage gate: a new Intent variant must be added here
- * before TypeScript will build. Other surfaces, including the agent API and
- * browser convergence tests, consume this list instead of maintaining a
- * second list that can silently drift.
+ * The typed map is a coverage gate, and it still is: a new hand-written Intent
+ * variant must be added here before TypeScript will build. Registered
+ * operations are excluded because their kinds already come from a single
+ * declaration — listing them again is the duplication the registry removes,
+ * and Exclude keeps the gate total (a variant that is neither registered nor
+ * listed here breaks the build, exactly as before).
  */
-const INTENT_KIND_MAP: Record<Intent["kind"], true> = {
+const HAND_WRITTEN_INTENT_KIND_MAP: Record<
+  Exclude<Intent["kind"], RegisteredOperationKind>,
+  true
+> = {
   insertText: true,
   deleteText: true,
   splitParagraph: true,
   formatRun: true,
   formatParagraph: true,
-  setListType: true,
   formatRange: true,
   tableOp: true,
   mergeParagraph: true,
@@ -513,7 +549,6 @@ const INTENT_KIND_MAP: Record<Intent["kind"], true> = {
   setFloatingPagePosition: true,
   resizeDrawing: true,
   resizeTableColumn: true,
-  resizeTableRow: true,
   moveTable: true,
   removeDrawing: true,
   setMathLinear: true,
@@ -527,10 +562,16 @@ const INTENT_KIND_MAP: Record<Intent["kind"], true> = {
   rejectRevision: true,
   acceptAllRevisions: true,
   rejectAllRevisions: true,
-  insertTable: true,
 };
 
-export const INTENT_KINDS = Object.freeze(Object.keys(INTENT_KIND_MAP) as Intent["kind"][]);
+/** Complete runtime list of canonical edit operations: the hand-written ones
+ * plus everything the core operation registry declares. Other surfaces (the
+ * agent API, browser convergence tests) consume this instead of maintaining a
+ * second list that can silently drift. */
+export const INTENT_KINDS = Object.freeze([
+  ...(Object.keys(HAND_WRITTEN_INTENT_KIND_MAP) as Intent["kind"][]),
+  ...REGISTERED_OPERATION_KINDS,
+] as Intent["kind"][]);
 
 /** Insert a blank page at the end of a run. */
 export interface InsertBlankPageIntent extends IntentBase {
@@ -797,13 +838,8 @@ export interface ResizeTableColumnIntent extends IntentBase {
   renderedWidths?: number[];
 }
 
-/** Drag-resize a table row's height (trHeight atLeast). */
-export interface ResizeTableRowIntent extends IntentBase {
-  kind: "resizeTableRow";
-  cellParagraphId: StableId;
-  rowIdx: number;
-  heightPx: number;
-}
+/** Drag-resize a table row's height (trHeight atLeast). REGISTERED. */
+export type ResizeTableRowIntent = RegisteredIntentOf<"resizeTableRow">;
 
 /** Position a table at page coordinates (converts inline to float). */
 export interface MoveTableIntent extends IntentBase {
@@ -903,14 +939,9 @@ export interface RejectAllRevisionsIntent extends IntentBase {
   kind: "rejectAllRevisions";
 }
 
-/** Insert a rows×cols table after the paragraph containing the anchor run. */
-export interface InsertTableIntent extends IntentBase {
-  kind: "insertTable";
-  runId: StableId;
-  rows: number;
-  cols: number;
-  nodeIds: StableId[];
-}
+/** Insert a rows×cols table after the paragraph containing the anchor run.
+ * REGISTERED. */
+export type InsertTableIntent = RegisteredIntentOf<"insertTable">;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

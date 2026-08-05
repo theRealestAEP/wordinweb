@@ -84,6 +84,9 @@ import {
   type SmartArtData,
   type SmartArtTextFormat,
   insertTableAfter,
+  operationBody,
+  type RegisteredOperationArgs,
+  type RegisteredOperationKind,
   createMeasurer,
   type TextMeasurer,
   layoutDocument,
@@ -1373,6 +1376,16 @@ export function DocxView({
           current.submitOp(intent);
           return true;
         };
+        /** Submit a REGISTERED run-addressed operation. The wire field the
+         * address goes in, and the number of carried ids the mutation needs,
+         * both come from the registry declaration — so this call site restates
+         * neither, and it cannot drift from the agent compiler, which sizes
+         * its allocation from that same declaration. */
+        const collabRunOperation = <K extends RegisteredOperationKind>(
+          kind: K,
+          args: RegisteredOperationArgs<K>,
+        ): boolean =>
+          collabOp((anchor, alloc) => operationBody(kind, anchor.runId, args, alloc) as never);
         /** Document-level ops (page layout, line numbering, cover page). */
         const collabDocOp = (
           make: (alloc: (n: number) => number[]) => ({ kind: string } & Record<string, unknown>) | null,
@@ -1770,7 +1783,7 @@ export function DocxView({
           canUndo: () => history.canUndo,
           canRedo: () => history.canRedo,
           insertTable: (rows, cols) => {
-            if (collabOp((a, ids) => ({ kind: "insertTable", runId: a.runId, rows, cols, nodeIds: ids(rows * cols * 2 + 8) }))) return;
+            if (collabRunOperation("insertTable", { rows, cols })) return;
             const caret = editor?.getCaretTarget();
             if (!caret) return;
             history.checkpoint();
@@ -2120,7 +2133,7 @@ export function DocxView({
             history.checkpoint();
             const listKind = current === kind ? null : kind;
             if (setListType(doc, targets as Parameters<typeof setListType>[1], listKind)) {
-              emitBlockIntents(targets, (blockId) => ({ kind: "setListType", blockId, listKind }));
+              emitBlockIntents(targets, (blockId) => operationBody("setListType", blockId, { listKind }));
               pages = rerender(doc, dirtyBlock);
               document.dispatchEvent(new CustomEvent("dxw-selection"));
             }

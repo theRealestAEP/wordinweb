@@ -11,6 +11,7 @@ import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColu
 import { pxToTwips } from "../units.js";
 import { listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
+import { operationBody, type RegisteredOperationBody } from "./registry.js";
 import { deleteMath, isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
 import {
   drawingFillColor,
@@ -260,15 +261,17 @@ export interface EditorHost {
 /** A local edit expressed as a replicable intent, emitted by the editor for
  * the collab layer. Positions are stable ids; the connection adds wire
  * bookkeeping (clientId/clientSeq/base). Mirrors the @wordinweb/collab intent
- * shapes without a dependency on that package. */
+ * shapes without a dependency on that package — except for the registered
+ * operations, whose single declaration in registry.ts feeds BOTH this type
+ * and the collab intent union, so there is nothing left to mirror. */
 export type EditorIntent =
+  | RegisteredOperationBody
   | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string; suggest?: { author: string; date: string } }
   | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
   | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number; suggest?: { author: string; date: string } }
   | { kind: "formatRun"; blockId: number; runId: number; patch: Record<string, unknown> }
   | { kind: "formatRange"; blockId: number; runId: number; start: number; end: number; patch: Record<string, unknown>; beforeId?: number; middleId: number; afterId?: number }
   | { kind: "formatParagraph"; blockId: number; align?: "left" | "center" | "right" | "justify"; styleId?: string | null }
-  | { kind: "setListType"; blockId: number; listKind: "bullet" | "number" | null }
   | { kind: "mergeParagraph"; blockId: number }
   | {
       kind: "suggestRevision";
@@ -293,7 +296,6 @@ export type EditorIntent =
   | { kind: "setDrawingWordArtText"; runId: number; objectIndex?: number; text: string }
   | { kind: "insertBreak"; runId: number; breakKind: "page" | "column"; nodeIds: number[] }
   | { kind: "resizeTableColumn"; cellParagraphId: number; boundary: number; deltaPx: number; renderedWidths?: number[] }
-  | { kind: "resizeTableRow"; cellParagraphId: number; rowIdx: number; heightPx: number }
   | { kind: "moveTable"; cellParagraphId: number; xPx: number; yPx: number; preservePageStart: boolean; pageDelta: number }
   | { kind: "tableOp"; cellParagraphId: number; op: { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number } }
   | { kind: "removeDrawing"; runId: number; objectIndex?: number }
@@ -2160,7 +2162,7 @@ export class DocxEditor {
                 ? { kind: "moveTable", cellParagraphId, xPx: targetX, yPx: targetY, preservePageStart, pageDelta }
                 : isCol
                   ? { kind: "resizeTableColumn", cellParagraphId, boundary: grip.item.boundary, deltaPx: dx, renderedWidths: grip.item.renderedWidths }
-                  : { kind: "resizeTableRow", cellParagraphId, rowIdx: grip.item.boundary, heightPx: rowHeightPx },
+                  : operationBody("resizeTableRow", cellParagraphId, { rowIdx: grip.item.boundary, heightPx: rowHeightPx }),
             );
           }
           this.host.rerender(undefined, isMove ? "global" : "local");
@@ -6670,7 +6672,7 @@ export class DocxEditor {
       if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && listTypeAt(this.host.doc, this.caret.t) !== null) {
         const blockId = this.host.doc.stableIds.idOf(paragraph);
         if (blockId !== undefined && setListType(this.host.doc, [this.caret.t], null)) {
-          this.host.onIntent({ kind: "setListType", blockId, listKind: null });
+          this.host.onIntent(operationBody("setListType", blockId, { listKind: null }));
           this.commit(false, "global");
           this.focusText();
           return;

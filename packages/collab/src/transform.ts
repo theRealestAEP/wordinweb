@@ -1,4 +1,4 @@
-import { Intent, Position } from "./intents.js";
+import { Intent, Position, isRegisteredIntent } from "./intents.js";
 
 /**
  * The canonical transform (plan doc 03). Stable ids make structural
@@ -30,6 +30,9 @@ export interface RunEdit {
 /** The run edits a prior intent imposes on the document (only same-run edits
  * matter to offset transformation; cross-run structure is handled by ids). */
 export function runEditsOf(intent: Intent): RunEdit[] {
+  // The registry admits only position-stable operations (see its module
+  // comment), so a registered intent never shifts another intent's offsets.
+  if (isRegisteredIntent(intent)) return [];
   switch (intent.kind) {
     case "insertText":
       return [{ runId: intent.at.runId, at: intent.at.offset, del: 0, ins: intent.text.length }];
@@ -43,9 +46,6 @@ export function runEditsOf(intent: Intent): RunEdit[] {
       // position of any concurrent intent is affected.
       return [];
     case "formatParagraph":
-      // Block-level; moves no text, preserves ids.
-      return [];
-    case "setListType":
       // Block-level; moves no text, preserves ids.
       return [];
     case "formatRange":
@@ -130,7 +130,6 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "setFloatingPagePosition":
     case "resizeDrawing":
     case "resizeTableColumn":
-    case "resizeTableRow":
     case "moveTable":
     case "removeDrawing":
     case "setMathLinear":
@@ -148,7 +147,6 @@ export function runEditsOf(intent: Intent): RunEdit[] {
       // every replica (degraded concurrency fidelity, never divergence). The
       // movedToRunId remap is the designed follow-on for both.
       return [];
-    case "insertTable":
     case "acceptRevision":
     case "rejectRevision":
     case "acceptAllRevisions":
@@ -233,6 +231,9 @@ export function transformPosition(pos: Position, ahead: Intent[], leftGravity = 
  * intent with adjusted positions; `base` is advanced past `ahead`. */
 export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
   const newBase = intent.base + ahead.length;
+  // Registered operations are addressed by stable id alone; their transform is
+  // identity. Narrowing first keeps the switch over the hand-written intents.
+  if (isRegisteredIntent(intent)) return { ...intent, base: newBase };
   switch (intent.kind) {
     case "insertText":
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
@@ -243,8 +244,6 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       return { ...intent, base: newBase };
     case "formatParagraph":
       // Addressed by block id only; nothing to transform.
-      return { ...intent, base: newBase };
-    case "setListType":
       return { ...intent, base: newBase };
     case "formatRange": {
       // Transform the [start,end) endpoints against prior edits in the run.
@@ -328,7 +327,6 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "setFloatingPagePosition":
     case "resizeDrawing":
     case "resizeTableColumn":
-    case "resizeTableRow":
     case "moveTable":
     case "removeDrawing":
     case "setMathLinear":
@@ -337,7 +335,6 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "deleteComment":
     case "insertBookmarkRange":
     case "toggleCheckbox":
-    case "insertTable":
     case "acceptRevision":
     case "rejectRevision":
     case "acceptAllRevisions":

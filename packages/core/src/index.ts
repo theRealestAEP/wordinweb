@@ -21,6 +21,28 @@ export { formatNumber } from "./parse/numbering.js";
 export { applyRunFormat, summarizeSelection } from "./edit/commands.js";
 export type { RunFormatPatch, SelectionSegment, SelectionFormat, FormattedRange } from "./edit/commands.js";
 export { selectionToSegments } from "./edit/selection.js";
+export {
+  ADDRESS_AGENT_FIELD,
+  ADDRESS_WIRE_FIELD,
+  REGISTERED_OPERATION_KINDS,
+  applyRegisteredOperation,
+  isRegisteredOperationKind,
+  operationBody,
+  registeredOperation,
+  registeredOperationCapabilities,
+  validateRegisteredOperation,
+} from "./edit/registry.js";
+export type {
+  OperationAddress,
+  OperationCategory,
+  OperationDefinition,
+  OperationTarget,
+  RegisteredOperationArgs,
+  RegisteredOperationBody,
+  RegisteredOperationBodyFor,
+  RegisteredOperationCapability,
+  RegisteredOperationKind,
+} from "./edit/registry.js";
 export { DocxEditor } from "./edit/editor.js";
 export type { EditorIntent } from "./edit/editor.js";
 export type { ObjectArrangeAction, SelectedObjectCommand, SelectedObjectContext, SelectedObjectKind } from "./edit/editor.js";

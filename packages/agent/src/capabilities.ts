@@ -1,3 +1,4 @@
+import { registeredOperationCapabilities, type RegisteredOperationKind } from "@wordinweb/core";
 import { INTENT_KINDS, type Intent } from "@wordinweb/collab/client";
 
 export interface AgentEditCapability {
@@ -8,17 +9,24 @@ export interface AgentEditCapability {
 }
 
 /**
- * The agent-facing coverage map for the complete canonical edit surface.
- * Record<Intent["kind"], ...> makes a new intent fail the agent build until
- * its tool contract is declared here.
+ * The agent-facing coverage map for every edit operation that is NOT declared
+ * in the core operation registry.
+ *
+ * The Record is still the coverage gate it always was: a new hand-written
+ * intent fails the agent build until its tool contract is declared here.
+ * Registered operations are excluded because their category, description, and
+ * agent-facing fields already come from one declaration — see
+ * registeredOperationCapabilities.
  */
-export const AGENT_EDIT_CAPABILITIES: Record<Intent["kind"], AgentEditCapability> = {
+const HAND_WRITTEN_CAPABILITIES: Record<
+  Exclude<Intent["kind"], RegisteredOperationKind>,
+  AgentEditCapability
+> = {
   insertText: { category: "text", description: "Insert text at a run offset.", required: ["at", "text"], optional: ["suggest"] },
   deleteText: { category: "text", description: "Delete a range within one run.", required: ["blockRef", "runRef", "start", "end"] },
   splitParagraph: { category: "paragraph", description: "Split a paragraph at a run offset.", required: ["at"], optional: ["suggest"] },
   formatRun: { category: "text", description: "Format a complete run.", required: ["blockRef", "runRef", "patch"] },
   formatParagraph: { category: "paragraph", description: "Set paragraph alignment or style.", required: ["blockRef"], optional: ["align", "styleId"] },
-  setListType: { category: "paragraph", description: "Set or clear paragraph list formatting.", required: ["blockRef", "listKind"] },
   formatRange: { category: "text", description: "Format a range within one run.", required: ["blockRef", "runRef", "start", "end", "patch"] },
   tableOp: { category: "table", description: "Apply a row, column, cell, or table operation.", required: ["cellRef", "op"] },
   mergeParagraph: { category: "paragraph", description: "Merge a paragraph into its predecessor.", required: ["blockRef"] },
@@ -67,7 +75,6 @@ export const AGENT_EDIT_CAPABILITIES: Record<Intent["kind"], AgentEditCapability
   setFloatingPagePosition: { category: "drawing", description: "Position a floating drawing on the page.", required: ["objectRef", "xPx", "yPx"] },
   resizeDrawing: { category: "drawing", description: "Resize a drawing.", required: ["objectRef", "widthPx", "heightPx"] },
   resizeTableColumn: { category: "table", description: "Resize a table column.", required: ["cellRef", "boundary", "deltaPx"], optional: ["renderedWidths"] },
-  resizeTableRow: { category: "table", description: "Resize a table row.", required: ["cellRef", "rowIdx", "heightPx"] },
   moveTable: { category: "table", description: "Move a floating table.", required: ["cellRef", "xPx", "yPx", "preservePageStart", "pageDelta"] },
   removeDrawing: { category: "drawing", description: "Remove a drawing.", required: ["objectRef"] },
   setMathLinear: { category: "math", description: "Replace an equation from linear math text.", required: ["blockRef", "mathText"] },
@@ -81,7 +88,13 @@ export const AGENT_EDIT_CAPABILITIES: Record<Intent["kind"], AgentEditCapability
   rejectRevision: { category: "review", description: "Reject one tracked revision.", required: ["index"] },
   acceptAllRevisions: { category: "review", description: "Accept all tracked revisions.", required: [] },
   rejectAllRevisions: { category: "review", description: "Reject all tracked revisions.", required: [] },
-  insertTable: { category: "insert", description: "Insert a table.", required: ["runRef", "rows", "cols"] },
+};
+
+/** The complete agent-facing coverage map: hand-written rows plus the rows
+ * the core operation registry declares. */
+export const AGENT_EDIT_CAPABILITIES: Record<Intent["kind"], AgentEditCapability> = {
+  ...HAND_WRITTEN_CAPABILITIES,
+  ...registeredOperationCapabilities(),
 };
 
 type JsonSchema = Record<string, unknown>;
