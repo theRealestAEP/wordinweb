@@ -557,7 +557,6 @@ const HAND_WRITTEN_INTENT_KIND_MAP: Record<
   ensureHeaderFooter: true,
   deleteComment: true,
   insertBookmarkRange: true,
-  toggleCheckbox: true,
   acceptRevision: true,
   rejectRevision: true,
   acceptAllRevisions: true,
@@ -910,11 +909,8 @@ export interface InsertBookmarkRangeIntent extends IntentBase {
   end: number;
 }
 
-/** Toggle the checkbox content control carried by a run. */
-export interface ToggleCheckboxIntent extends IntentBase {
-  kind: "toggleCheckbox";
-  runId: StableId;
-}
+/** Toggle the checkbox content control carried by a run. REGISTERED. */
+export type ToggleCheckboxIntent = RegisteredIntentOf<"toggleCheckbox">;
 
 /** Accept one tracked change, addressed by its position in document order
  * (collectRevisions order — deterministic across replicas). */

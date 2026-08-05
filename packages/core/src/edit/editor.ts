@@ -3245,6 +3245,11 @@ export class DocxEditor {
    * directly too — a checkbox's checked state is form data, not tracked
    * prose, and Word does not record it as a w:ins/w:del revision. Returns true
    * if consumed.
+   *
+   * Collab: the toggle must ride the wire — it was a silent LOCAL-ONLY
+   * mutation, so a human clicking a checkbox flipped their replica alone and
+   * the room diverged for good (the agent path always emitted the intent). A
+   * run with no stable id is an honest no-op instead of a fork.
    */
   private startCheckboxInteraction(e: MouseEvent, target: HTMLElement): boolean {
     if (e.button !== 0) return false;
@@ -3255,12 +3260,16 @@ export class DocxEditor {
     const src = binding?.item.src;
     const cbEl = checkboxStateElement(src?.run, src?.t);
     if (!cbEl) return false;
+    const ids = this.host.onIntent ? this.host.doc.stableIds : undefined;
+    const runId = (src?.run.src && ids?.idOf(src.run.src)) ?? null;
+    if (ids && runId === null) return false;
     e.preventDefault();
     e.stopPropagation();
     this.suppressNextMouseUp = true;
     this.hideCaret();
     this.host.history?.checkpoint();
     toggleCheckbox(this.host.doc, cbEl);
+    if (runId !== null) this.host.onIntent?.(operationBody("toggleCheckbox", runId, {}));
     this.host.doc.refresh();
     this.host.rerender();
     // Keep the editor focused so keyboard shortcuts (undo/redo) still land.

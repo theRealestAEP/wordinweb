@@ -83,7 +83,6 @@ const HAND_WRITTEN_CAPABILITIES: Record<
   ensureHeaderFooter: { category: "document", description: "Create a header or footer story.", required: ["hfKind"] },
   deleteComment: { category: "review", description: "Delete a comment thread.", required: ["commentId"] },
   insertBookmarkRange: { category: "insert", description: "Wrap a run range in a bookmark.", required: ["runRef", "name", "start", "end"] },
-  toggleCheckbox: { category: "text", description: "Toggle a checkbox content control.", required: ["runRef"] },
   acceptRevision: { category: "review", description: "Accept one tracked revision.", required: ["index"] },
   rejectRevision: { category: "review", description: "Reject one tracked revision.", required: ["index"] },
   acceptAllRevisions: { category: "review", description: "Accept all tracked revisions.", required: [] },

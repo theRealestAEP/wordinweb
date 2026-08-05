@@ -137,7 +137,6 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "ensureHeaderFooter":
     case "deleteComment":
     case "insertBookmarkRange":
-    case "toggleCheckbox":
       // Run/block/document-level; no existing run's text offsets shift.
       return [];
     case "moveMath":
@@ -334,7 +333,6 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "ensureHeaderFooter":
     case "deleteComment":
     case "insertBookmarkRange":
-    case "toggleCheckbox":
     case "acceptRevision":
     case "rejectRevision":
     case "acceptAllRevisions":

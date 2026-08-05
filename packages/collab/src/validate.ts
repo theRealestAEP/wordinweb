@@ -348,8 +348,6 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (typeof intent.name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,39}$/.test(intent.name)) return "insertBookmarkRange: bad name";
       if (!nonNegInt(intent.start) || !nonNegInt(intent.end) || intent.end <= intent.start) return "insertBookmarkRange: bad range";
       return null;
-    case "toggleCheckbox":
-      return null;
     case "acceptRevision":
     case "rejectRevision":
       if (!nonNegInt(intent.index) || intent.index > 100000) return `${intent.kind}: bad index`;

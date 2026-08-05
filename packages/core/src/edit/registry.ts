@@ -1,4 +1,6 @@
+import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
 import { DocxDocument } from "../docx.js";
+import { Run } from "../model.js";
 import { XmlElement } from "../xml.js";
 import { insertTableAfter } from "./blocks.js";
 import { setListType } from "./lists.js";
@@ -90,6 +92,10 @@ export interface OperationTarget {
   /** The first w:t under a run, or the first text descendant of a paragraph.
    * Null when the target carries no text (and for cell addressing). */
   t: XmlElement | null;
+  /** The parsed run for a run address, null for the other two. Needed by
+   * operations whose state is reachable only through the model — the checkbox
+   * marker parsing hangs on a run's content — rather than from the XML. */
+  run: Run | null;
 }
 
 export interface OperationContext<Payload> {
@@ -213,7 +219,30 @@ const resizeTableRowOperation = defineOperation<{
   apply: ({ doc, target, payload }) => resizeTableRow(doc, target.el, payload.rowIdx, payload.heightPx),
 });
 
-const OPERATIONS = [setListTypeOperation, insertTableOperation, resizeTableRowOperation] as const;
+/** Flip the checked state of the checkbox content control a run carries. */
+const toggleCheckboxOperation = defineOperation<{ runId: StableId }>()({
+  kind: "toggleCheckbox",
+  address: "run",
+  category: "text",
+  description: "Toggle a checkbox content control.",
+  fields: [],
+  // A run that carries no checkbox is a clean no-op, like an unresolvable
+  // address: the ballot glyph of a legacy form field is a synthetic field
+  // result with no w:t, so a null `t` is a lookup mode rather than a failure.
+  apply: ({ doc, target }) => {
+    const cbEl = checkboxStateElement(target.run ?? undefined, target.t);
+    if (!cbEl) return false;
+    toggleCheckbox(doc, cbEl);
+    return true;
+  },
+});
+
+const OPERATIONS = [
+  setListTypeOperation,
+  insertTableOperation,
+  resizeTableRowOperation,
+  toggleCheckboxOperation,
+] as const;
 
 // ---------------------------------------------------------------------------
 // Derived surfaces

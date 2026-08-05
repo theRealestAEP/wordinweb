@@ -49,8 +49,6 @@ import {
   moveMath,
   deleteComment,
   insertBookmarkAroundSelection,
-  checkboxStateElement,
-  toggleCheckbox,
   collectRevisions,
   acceptRevision,
   rejectRevision,
@@ -798,16 +796,6 @@ function applyIntentInner(
       const seg: SelectionSegment = { run: entry.run, t: hit.t, start: hit.offset, end: localEnd, props: entry.run.props };
       return insertBookmarkAroundSelection(doc, [seg], intent.name);
     }
-    case "toggleCheckbox": {
-      const runEl = ids.elOf(intent.runId);
-      if (!runEl) return false;
-      const entry = runOf(runEl);
-      if (!entry) return false;
-      const cbEl = checkboxStateElement(entry.run, entry.firstT);
-      if (!cbEl) return false;
-      toggleCheckbox(doc, cbEl);
-      return true;
-    }
     case "acceptRevision": {
       const refs = collectRevisions(doc);
       if (intent.index >= refs.length) return false;
@@ -961,16 +949,16 @@ function resolveOperationTarget(
       if (!el) return null;
       const entry = runOf(el);
       if (!entry) return null;
-      return { el, t: entry.firstT ?? null };
+      return { el, t: entry.firstT ?? null, run: entry.run };
     }
     case "block": {
       const el = ids.elOf(addressId);
       if (!el) return null;
-      return { el, t: firstTextDescendant(el) };
+      return { el, t: firstTextDescendant(el), run: null };
     }
     case "cell": {
       const tbl = tableOfParagraph(doc, ids, addressId);
-      return tbl ? { el: tbl, t: null } : null;
+      return tbl ? { el: tbl, t: null, run: null } : null;
     }
   }
 }
