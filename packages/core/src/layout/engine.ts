@@ -32,7 +32,6 @@ import {
   FieldContext,
   LineBox,
   breakParagraph,
-  clearBreakCache,
   fontOf,
   resolveField,
 } from "./inline.js";
@@ -683,7 +682,6 @@ class Engine {
     this.applySectionVAlign();
     if (this.windowModel) {
       sampleHeap();
-      clearBreakCache(this.measurer);
     }
     return this.pages;
   }
@@ -975,7 +973,6 @@ class Engine {
     }
     if (this.windowActive) {
       sampleHeap();
-      clearBreakCache(this.measurer);
     }
     return result;
   }
@@ -1356,13 +1353,23 @@ class Engine {
     this.seenNumIds = new Set(s.seenNumIds);
   }
 
+  /** Drop positioned items for pages behind the opening window, keeping the
+   * page shells so the window can rebuild them from capture points.
+   *
+   * The measurer's break cache is deliberately NOT dropped alongside them. A
+   * structural edit (splitParagraph) shifts every later block index, so the
+   * incremental relay does not re-converge and re-lays the whole block list;
+   * it stays interactive only because each paragraph's line breaks come back
+   * from that cache. Clearing it here turns one Enter on a long document into
+   * a full-document re-measure — see the split bound in
+   * packages/react/test/remote-repaint-scoped.test.tsx. The cache is the
+   * remaining large holder; windowing it needs that relay to converge first. */
   private pruneFullRunPages(): void {
     sampleHeap();
     for (let index = INITIAL_MODEL_WINDOW_PAGES; index < this.pages.length - 1; index++) {
       const page = this.pages[index];
       if (!page.discarded) this.discardPage(page);
     }
-    clearBreakCache(this.measurer);
   }
 
   private discardPage(page: InternalPage): void {
@@ -1792,7 +1799,6 @@ class Engine {
     }
     if (result._window) {
       sampleHeap();
-      clearBreakCache(this.measurer);
     }
     return result;
   }
