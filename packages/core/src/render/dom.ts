@@ -2643,6 +2643,34 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
       : Math.max(1 / dpr, Math.round(declaredWidth * dpr) / dpr);
   const snap = (v: number) => Math.round(v * dpr) / dpr;
   const place = border.space === 0 && !deviceHairline ? snap : (v: number) => v;
+  // Chromium rounds a painted box's position to a whole CSS pixel - at the
+  // parity renderer's 2x scale that is TWO device pixels, and it happens even
+  // though `place` already left the value fractional. Adjacent rules in one
+  // table round opposite ways, so Word's evenly pitched grid comes out with
+  // alternating boundaries a device pixel high and a device pixel low
+  // (measured on parity-tables: Word rules at device rows 280.6/318.0/354.4,
+  // ours at 282.6/318.5/356.4). Transforms are NOT snapped, so keep the whole
+  // pixels in top/left and carry the remainder in a translate: the rule then
+  // lands on its layout position exactly, antialiased across the two device
+  // rows it straddles, which is also how Word's own 0.5pt rule rasterises.
+  // Only the cross-axis needs this - it is what positions the rule.
+  let frac = 0;
+  const placeExact = (prop: "top" | "left", v: number) => {
+    // A rotated edge already carries a transform about its own origin, which
+    // a translate would throw off — leave its position whole.
+    if (rotate) {
+      el.style[prop] = `${v}px`;
+      return;
+    }
+    const whole = Math.floor(v);
+    frac = v - whole;
+    el.style[prop] = `${whole}px`;
+  };
+  const applyFrac = (axis: "Y" | "X") => {
+    if (frac === 0) return;
+    el.style.transform = `translate${axis}(${frac}px) ${el.style.transform}`.trim();
+    el.style.transformOrigin = "0 0";
+  };
   // Word's dash pattern is [3 1] x line width (read from its own PDF
   // export) - noticeably longer than CSS `dashed`. Paint dashes/dots as a
   // repeating gradient so the rhythm matches.
@@ -2687,7 +2715,7 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
   }
   if (horizontal) {
     el.style.left = `${Math.min(x1, x2)}px`;
-    el.style.top = `${place(y1 - w / 2 - (ultraThin ? 0.4 : 0))}px`;
+    placeExact("top", place(y1 - w / 2 - (ultraThin ? 0.4 : 0)));
     el.style.width = `${Math.abs(x2 - x1)}px`;
     if (border.style === "double") {
       el.style.height = `${w * 3}px`;
@@ -2718,8 +2746,9 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
       el.style.height = `${w}px`;
       el.style.background = border.color;
     }
+    applyFrac("Y");
   } else {
-    el.style.left = `${place(x1 - w / 2)}px`;
+    placeExact("left", place(x1 - w / 2));
     el.style.top = `${Math.min(y1, y2)}px`;
     el.style.height = `${Math.abs(y2 - y1)}px`;
     if (border.style === "double") {
@@ -2749,6 +2778,7 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
       el.style.width = `${w}px`;
       el.style.background = border.color;
     }
+    applyFrac("X");
   }
   return el;
 }
