@@ -4,6 +4,8 @@ import { agentCapabilities, agentOperationSchema, type AgentEditCapability } fro
 import { AGENT_COMPOSE_SCHEMA, composeDocxBytes } from "./compose.js";
 import { compileAgentOperation, localMedia } from "./edit.js";
 import { SemanticInspector } from "./inspect.js";
+import { hunksFromUnifiedDiff, patchOperations } from "./patch.js";
+import { projectStory, projectedLines } from "./project.js";
 import { blockRef, objectRef, runRef } from "./refs.js";
 import { spatialInspect } from "./spatial.js";
 import type {
@@ -17,6 +19,10 @@ import type {
   AgentInspectRequest,
   AgentInspectResult,
   AgentOperation,
+  AgentPatchRequest,
+  AgentPatchResult,
+  AgentProjectRequest,
+  AgentProjectResult,
   AgentProvenance,
   AgentTool,
 } from "./types.js";
@@ -261,6 +267,10 @@ function presenceAfterOperation(doc: DocxDocument, operation: IntentBody, hint: 
   return null;
 }
 
+function projectionKey(story: string, mode: string, cursor: string | null, revision: string): string {
+  return [revision, story, mode, cursor ?? ""].join(" ");
+}
+
 function asObject(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Tool input must be an object");
   return input as Record<string, unknown>;
@@ -353,6 +363,52 @@ const editToolSchema: Record<string, unknown> = {
     },
   },
   required: ["revision", "operations"],
+  additionalProperties: false,
+};
+
+const projectionWindowSchema: Record<string, Record<string, unknown>> = {
+  story: { type: "string", minLength: 1 },
+  mode: { enum: ["text", "md", "outline"] },
+  cursor: {
+    type: "object",
+    properties: { value: { type: "string", minLength: 1 } },
+    required: ["value"],
+    additionalProperties: false,
+  },
+  maxBlocks: { type: "integer", minimum: 1, maximum: 2000 },
+  maxCharacters: { type: "integer", minimum: 1, maximum: 200000 },
+};
+
+const projectToolSchema: Record<string, unknown> = {
+  type: "object",
+  properties: { ...projectionWindowSchema },
+  additionalProperties: false,
+};
+
+const patchToolSchema: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    revision: { type: "string", minLength: 1 },
+    ...projectionWindowSchema,
+    edits: {
+      type: "array",
+      minItems: 1,
+      maxItems: 100,
+      items: {
+        type: "object",
+        properties: {
+          startLine: { type: "integer", minimum: 1 },
+          endLine: { type: "integer", minimum: 1 },
+          newText: { type: "string", maxLength: 100000 },
+        },
+        required: ["startLine", "endLine", "newText"],
+        additionalProperties: false,
+      },
+    },
+    diff: { type: "string", minLength: 1, maxLength: 1000000 },
+    suggest: { type: "boolean" },
+  },
+  required: ["revision"],
   additionalProperties: false,
 };
 
@@ -500,6 +556,7 @@ export class AgentDocument {
   private composeAvailable: boolean;
   private readonly listeners = new Set<(document: DocxDocument, revision: string) => void>();
   private readonly inspectedTargets = new Map<string, Map<string, string>>();
+  private readonly projections = new Map<string, AgentProjectResult>();
 
   private constructor(doc: DocxDocument | null, target: AgentCollaborativeTarget | null, provenance?: AgentProvenance, composeAvailable = false) {
     this.localDoc = doc;
@@ -569,29 +626,26 @@ export class AgentDocument {
         return exhaustive;
       }
     }
-    if (this.target) this.recordInspection(result, inspector);
+    if (this.target) this.recordInspection(result, result.revision, inspector);
     return result;
   }
 
-  private recordInspection(result: AgentInspectResult, inspector: SemanticInspector): void {
-    const fingerprints = this.inspectedTargets.get(result.revision) ?? new Map<string, string>();
+  private recordInspection(value: unknown, revision: string, inspector: SemanticInspector): void {
+    const fingerprints = this.inspectedTargets.get(revision) ?? new Map<string, string>();
     const xmlByScope = new WeakMap<XmlElement, string>();
-    for (const ref of inspectionReferences(result)) {
+    for (const ref of inspectionReferences(value)) {
       const fingerprint = referenceFingerprint(this.document, inspector, ref, xmlByScope);
       if (fingerprint !== null) fingerprints.set(ref, fingerprint);
     }
-    if (!this.inspectedTargets.has(result.revision)) {
-      this.inspectedTargets.set(result.revision, fingerprints);
+    if (!this.inspectedTargets.has(revision)) {
+      this.inspectedTargets.set(revision, fingerprints);
       while (this.inspectedTargets.size > 8) this.inspectedTargets.delete(this.inspectedTargets.keys().next().value!);
     }
   }
 
-  private revisionMatchesEdit(request: AgentEditRequest): boolean {
-    if (request.revision === this.revision) return true;
-    if (!this.target) return false;
-    const refs = editReferences(request.operations);
-    const observed = this.inspectedTargets.get(request.revision);
-    if (!refs || !observed) return false;
+  private fingerprintsMatch(revision: string, refs: Set<string>): boolean {
+    const observed = this.inspectedTargets.get(revision);
+    if (!observed) return false;
     const inspector = this.inspector();
     const xmlByScope = new WeakMap<XmlElement, string>();
     for (const ref of refs) {
@@ -600,6 +654,88 @@ export class AgentDocument {
       if (before === undefined || current === null || before !== current) return false;
     }
     return true;
+  }
+
+  private revisionMatchesEdit(request: AgentEditRequest): boolean {
+    if (request.revision === this.revision) return true;
+    if (!this.target) return false;
+    const refs = editReferences(request.operations);
+    return refs ? this.fingerprintsMatch(request.revision, refs) : false;
+  }
+
+  /** Render the document as deterministic text plus the anchor map that owns
+   * the rendered-to-wire translation. Read-only: nothing here mutates. */
+  project(request: AgentProjectRequest = {}): AgentProjectResult {
+    if (!request || typeof request !== "object") throw new Error("Projection request is required");
+    const doc = this.document;
+    const result = projectStory(
+      doc,
+      doc.enableStableIds(),
+      this.revision,
+      request.story ?? "body",
+      request.mode ?? "md",
+      request.cursor?.value,
+      request.maxBlocks,
+      request.maxCharacters,
+    );
+    const key = projectionKey(result.story, result.mode, result.window.cursor, result.revision);
+    this.projections.set(key, result);
+    while (this.projections.size > 8) this.projections.delete(this.projections.keys().next().value!);
+    // Anchors carry every block and run the window addresses, so the patch
+    // guard can check exactly the blocks a hunk touches and let concurrent
+    // edits elsewhere through — on local sessions as well as collaborative.
+    this.recordInspection(result.anchors, result.revision, this.inspector());
+    return result;
+  }
+
+  async patch(request: AgentPatchRequest): Promise<AgentPatchResult> {
+    if (!request || typeof request !== "object" || typeof request.revision !== "string") {
+      throw new Error("A patch needs the revision its projection came from");
+    }
+    const hasEdits = Array.isArray(request.edits) && request.edits.length > 0;
+    const hasDiff = typeof request.diff === "string";
+    if (hasEdits === hasDiff) throw new Error("A patch needs either edits or diff");
+    const story = request.story ?? "body";
+    const mode = request.mode ?? "md";
+    const cursor = request.cursor?.value ?? null;
+
+    // The hunks are line numbers into the window the agent read, so patch the
+    // window it read: the cached projection, or a fresh one at the current
+    // revision. A window from a revision this document never projected cannot
+    // be placed at all.
+    const projection = this.projections.get(projectionKey(story, mode, cursor, request.revision))
+      ?? (request.revision === this.revision
+        ? this.project({ story, mode, cursor: request.cursor, maxBlocks: request.maxBlocks, maxCharacters: request.maxCharacters })
+        : undefined);
+    if (!projection) throw new Error("The document revision is stale");
+
+    const lines = projectedLines(projection);
+    const hunks = hasEdits ? request.edits! : hunksFromUnifiedDiff(request.diff!, lines.map((line) => line.text));
+    const operations = patchOperations(lines, hunks, mode, request.suggest === true);
+
+    if (request.revision !== this.revision) {
+      const touched = new Set<string>();
+      for (const hunk of hunks) {
+        for (const line of lines.slice(hunk.startLine - 1, hunk.endLine)) if (line.anchor.blockRef) touched.add(line.anchor.blockRef);
+      }
+      if (!this.fingerprintsMatch(request.revision, touched)) throw new Error("The document revision is stale");
+    }
+
+    // Refresh the window the agent actually held, not the one this request's
+    // budgets would produce, so the returned projection re-anchors the same
+    // region under a cursor the new revision accepts.
+    const refresh = (): AgentProjectResult => this.project({
+      story,
+      mode,
+      ...(projection.window.startBlock > 0 ? { cursor: { value: `docmd:${this.revision}:${projection.window.startBlock}` } } : {}),
+      maxBlocks: projection.window.maxBlocks,
+      maxCharacters: projection.window.maxCharacters,
+    });
+    if (operations.length === 0) {
+      return { revision: this.revision, status: this.target ? "submitted" : "applied", operations: [], projection: refresh() };
+    }
+    const result = await this.edit({ revision: this.revision, operations });
+    return { ...result, projection: refresh() };
   }
 
   capabilities(category?: AgentEditCapability["category"], kind?: Intent["kind"]): ReturnType<typeof agentCapabilities> {
@@ -785,6 +921,18 @@ export class AgentDocument {
         description: "Apply a validated document transaction against an observed revision.",
         inputSchema: editToolSchema,
         execute: async (input) => this.edit(asObject(input) as unknown as AgentEditRequest),
+      },
+      {
+        name: "word_document_project",
+        description: "Project a story as deterministic text or structural markdown with a line anchor map, windowed by cursor.",
+        inputSchema: projectToolSchema,
+        execute: async (input) => this.project(asObject(input) as unknown as AgentProjectRequest),
+      },
+      {
+        name: "word_document_patch",
+        description: "Apply line-range edits or a unified diff written against a projection window.",
+        inputSchema: patchToolSchema,
+        execute: async (input) => this.patch(asObject(input) as unknown as AgentPatchRequest),
       },
       {
         name: "word_document_asset",

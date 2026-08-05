@@ -487,9 +487,15 @@ describe("AgentDocument local tools", () => {
       "word_document_compose",
       "word_document_inspect",
       "word_document_edit",
+      "word_document_project",
+      "word_document_patch",
       "word_document_asset",
       "word_document_save",
     ]);
+    const projectSchema = agent.tools().find((tool) => tool.name === "word_document_project")?.inputSchema;
+    expect(projectSchema).toMatchObject({ type: "object", additionalProperties: false });
+    const patchSchema = agent.tools().find((tool) => tool.name === "word_document_patch")?.inputSchema;
+    expect(patchSchema).toMatchObject({ type: "object", additionalProperties: false, required: ["revision"] });
     const composeSchema = agent.tools().find((tool) => tool.name === "word_document_compose")?.inputSchema;
     expect(composeSchema).toMatchObject({ type: "object", additionalProperties: false });
     const inspectSchema = agent.tools().find((tool) => tool.name === "word_document_inspect")?.inputSchema;

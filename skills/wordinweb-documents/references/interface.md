@@ -5,6 +5,8 @@
 - [Execution surfaces](#execution-surfaces)
 - [Tool contracts](#tool-contracts)
 - [Inspection types](#inspection-types)
+- [Text projection](#text-projection)
+- [Patching a projection](#patching-a-projection)
 - [References](#references)
 - [Editing](#editing)
 - [Compose generic primitives](#compose-generic-primitives)
@@ -163,6 +165,56 @@ Apply one transaction against an inspected revision.
 ```
 
 A transaction accepts 1–100 operations. The tool schema contains the closed schema for every operation and nested value. Runtime validation applies the same contract before mutation.
+
+### `word_document_project`
+
+Render one story as deterministic text plus a line anchor map. Read-only.
+
+```json
+{ "mode": "md" }
+{ "mode": "text", "story": "body", "maxBlocks": 200, "maxCharacters": 24000 }
+{ "mode": "md", "cursor": { "value": "returned cursor" } }
+{ "mode": "outline" }
+```
+
+Limits:
+
+- `mode`: `text`, `md`, or `outline`. Default `md`.
+- `story`: a story ID from `overview`. Default `body`.
+- `maxBlocks`: 1–2,000 top-level blocks per window
+- `maxCharacters`: 1–200,000 per window
+
+The result carries the projected `text`, the `revision` it belongs to, and one
+`anchors` entry per line. See [Text projection](#text-projection).
+
+### `word_document_patch`
+
+Rewrite lines of a projection window. One transaction, all or nothing.
+
+```json
+{
+  "revision": "17",
+  "mode": "md",
+  "edits": [{ "startLine": 4, "endLine": 4, "newText": "Adopt the managed platform." }]
+}
+```
+
+```json
+{
+  "revision": "17",
+  "mode": "md",
+  "diff": "@@ -4,1 +4,2 @@\n-Adopt the platform.\n+Adopt the platform.\n+Name an owner.\n"
+}
+```
+
+Send `edits` or `diff`, never both. Repeat the `story`, `mode`, and `cursor`
+of the projection the lines came from. Set `suggest: true` to record the patch
+as tracked changes. A patch accepts 1–100 hunks and compiles to at most 100
+operations.
+
+The result contains the new `revision`, the applied operation kinds, and the
+refreshed `projection` of the same window, so a second call to re-anchor is
+unnecessary. See [Patching a projection](#patching-a-projection).
 
 ### `word_document_asset`
 
@@ -390,6 +442,175 @@ interface AgentSpatialResult {
 ```
 
 Browser layout uses canvas metrics. Headless layout uses deterministic approximate text metrics. The same polygon intersection computes overlaps in both modes.
+
+## Text projection
+
+`word_document_project` renders a story as text. The same revision always
+produces byte-identical output. Read the text, edit the text, send the changed
+lines back through `word_document_patch`.
+
+The projection hides the two offset spaces. Inspection offsets count rendered
+characters and edit offsets count wire units. The anchor map is built in the
+same pass as the text and holds both, so a patch never asks for a wire offset.
+
+### Modes
+
+| Mode | Content |
+| --- | --- |
+| `text` | Every paragraph of the story, one per line, including table cell paragraphs. No markup. |
+| `md` | Headings, lists, GFM tables with cell content, and rich atom forms. Table cell paragraphs appear inside their table rows. |
+| `outline` | Heading paragraphs only, as markdown headings. |
+
+### Example
+
+A brief with a heading, a mixed-formatting paragraph, a bullet list, a table,
+an equation, and a closing section projects in `md` mode as:
+
+```
+# Findings
+Decision: adopt the managed platform.
+- Latency
+- Cost
+
+| Option | Score |
+| --- | --- |
+| Managed | 9 |
+
+$E=mc^(2)$
+## Next steps
+Schedule the review.
+```
+
+The same document in `text` mode:
+
+```
+Findings
+Decision: adopt the managed platform.
+Latency
+Cost
+Option
+Score
+Managed
+9
+␏
+Next steps
+Schedule the review.
+```
+
+### Atom placeholders
+
+Inline content with no editable text becomes one character in `text` mode, so
+a projection column always names one whole atom.
+
+| Content | `text` mode | `md` mode |
+| --- | --- | --- |
+| tab, positioned tab | `␉` U+2409 | `␉` |
+| line break | `␊` U+240A | `␊` |
+| page or column break | `␌` U+240C | `␌` |
+| field | `␎` U+240E | `{{PAGE}}` from the instruction name |
+| equation | `␏` U+240F | `$E=mc^(2)$` in linear math text |
+| footnote or endnote reference | `␅` U+2405 | `[^3]` |
+| image, chart, SmartArt, shape | `￼` U+FFFC | `![alt](object:12:3)` |
+| ruby annotation | the base text | the base text |
+
+The `object:*` target inside an `md` image form is a live reference. Pass it to
+`word_document_inspect` with `"kind": "object"` for the full detail, or to a
+drawing operation to edit it.
+
+### Escaped lines
+
+Plain paragraphs really do open with `3. ` or `- `. In `md` mode a paragraph
+that carries no heading or list of its own, but whose text would read as a
+marker, is written with a leading backslash:
+
+```
+\3. TERM AND TERMINATION
+\- not a bullet
+- Real bullet
+```
+
+The backslash is structure, not text. Keep it when you rewrite the line. Drop
+it to turn the paragraph into a real list item. `text` mode carries no markdown
+and no escapes.
+
+Apart from that leading escape, `md` mode does not escape markdown characters
+inside document text, and it does not emit inline emphasis. The projection is a
+structural view for editing, not a markdown document to round-trip.
+
+### Anchors
+
+`anchors` holds one entry per projected line, in order.
+
+```ts
+interface AgentAnchorLine {
+  line: number;                                   // 1-based within this window
+  role: "paragraph" | "table" | "structure";
+  blockRef?: string;
+  marker: number;                                 // leading markdown structure characters
+  editable: boolean;
+  segments: AgentAnchorSegment[];
+}
+
+interface AgentAnchorSegment {
+  start: number;                                  // columns in the line
+  end: number;
+  runRef: string;
+  wireStart: number;                              // offsets in the run
+  wireEnd: number;
+  editable: boolean;                              // backed by one w:t
+}
+```
+
+Only `paragraph` lines accept patches. A `table` line is the GFM rendering of a
+whole table and a `structure` line is a blank separator; both carry context,
+not edit targets. Patch table cells through `text` mode, which gives every cell
+paragraph its own editable line.
+
+The map is machine-facing. Read the text, not the anchors.
+
+### Windows
+
+A projection covers whole top-level blocks. When a window fills its budget the
+result sets `truncated` and returns `next`; pass it back as `cursor` for the
+following window. A cursor belongs to one revision and is rejected after any
+edit. Every window carries the `revision` it was taken from.
+
+## Patching a projection
+
+A hunk replaces projection lines `startLine` through `endLine`, inclusive, with
+the lines of `newText`. Line numbers are relative to the window, so repeat the
+`story`, `mode`, and `cursor` that produced it. The refreshed projection in the
+result covers that same window.
+
+| Old lines | New lines | Result |
+| --- | --- | --- |
+| 1 | 1 | The differing span of the paragraph is rewritten. |
+| 1 | many | The paragraph splits. Later lines inherit its style and list. |
+| many | 1 | The paragraphs merge into the first, then the text is rewritten. |
+| many | fewer | The extra paragraphs merge away. |
+
+Delete a paragraph by covering it together with the line before it and
+supplying only that line's text.
+
+Rules:
+
+- Every line a paragraph splits into repeats the first line's marker. Changing
+  a marker on a split line is not supported.
+- Changing the marker on a rewritten line changes the paragraph: `## ` sets the
+  heading style, no marker clears it, and `- ` or `1. ` sets or clears the list.
+  Changing a list indent is not supported.
+- A hunk may not rewrite across an atom placeholder. Edit the atom with the
+  operation that owns it.
+- Hunks may not overlap.
+- Text that replaces a span takes the formatting of the run where the span
+  starts, the rule Word applies when you type over a mixed selection. Runs
+  outside the changed span keep their own formatting.
+- With `suggest: true` a hunk may add text or remove text, not both. Send a
+  replacement as two patches.
+
+Only the blocks a hunk touches must be unchanged. A patch written against an
+older revision still applies when someone else edited a different part of the
+document; it is rejected as stale once its own blocks move.
 
 ## References
 

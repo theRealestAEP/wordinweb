@@ -64,8 +64,17 @@ Keep the invitation URL in the exact connect command.
 9. Inspect affected objects and page ranges.
 10. Save after semantic and spatial checks pass.
 
+## Rewrite prose in bulk
+
+1. Call `word_document_project` for the story, in `md` or `text` mode.
+2. Edit the projected lines.
+3. Send the changed line ranges back through `word_document_patch` with the projection's `revision`.
+4. Read the refreshed `projection` the patch returns instead of inspecting again.
+5. Use structured operations for formatting, tables, drawings, and page layout.
+
 ## Keep context bounded
 
+- Prefer one projection window and one patch over many structured text calls.
 - Start with `context` for broad text work.
 - Use `search` to locate specific content.
 - Use detailed `read` only when the compact context lacks a required field.
