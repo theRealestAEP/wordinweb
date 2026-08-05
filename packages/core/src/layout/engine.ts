@@ -317,6 +317,11 @@ interface IncrState {
 
 interface IncrPoint {
   blockIdx: number;
+  /** Which section `blockIdx` indexes into. The incremental relay only ever
+   * runs on single-section documents and always sees 0; the page window also
+   * covers multi-section documents, and rebuilds resume inside this section
+   * and then continue through the ones after it. */
+  sectionIndex: number;
   pageCount: number;
   /** Number of body items already emitted before this block. This lets an
    * edit resume at a clean block boundary inside a dense page instead of
@@ -628,6 +633,8 @@ class Engine {
   /** Stop a page-window relay at the first block boundary after this page. */
   private materializeEndPage = -1;
   private windowFullRun = false;
+  /** Section currently being laid; stamped onto each capture point. */
+  private curSectionIndex = 0;
   private windowActive = false;
   private windowPointPages = 0;
   private windowLastPointPage = -1;
@@ -643,12 +650,18 @@ class Engine {
 
   run(): LayoutResult {
     this.startRun();
+    this.layoutSectionsFrom(0, null);
+    return this.finishRun();
+  }
+
+  /** Lay sections `from` onward, carrying the previous section's props across
+   * each boundary. Shared by a full run and by a windowed rebuild, which enters
+   * partway through so the boundary handling stays in one place. */
+  private layoutSectionsFrom(from: number, prevSp: SectionProps | null): void {
     const sections = this.doc.sections;
-    let prevSp: SectionProps | null = null;
-    for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+    for (let sectionIndex = from; sectionIndex < sections.length; sectionIndex++) {
       prevSp = this.layoutSectionWithBoundary(sections, sectionIndex, prevSp);
     }
-    return this.finishRun();
   }
 
   /** Rebuild a contiguous page range from the closest page-top resume point. */
@@ -673,7 +686,14 @@ class Engine {
     this.refFieldPosition = data.refFieldPosition;
     this.refFieldParaNumber = data.refFieldParaNumber;
     this.restoreIncrState(resume.state, []);
-    this.layoutBlocks(this.doc.sections[0].blocks, resume.blockIdx);
+    // Finish the section the point sits in, then lay the ones after it through
+    // the normal boundary path. Entering below layoutSection is what the
+    // single-column bar in windowEligible buys: there is no balancing pass
+    // wrapped around the section for this to skip.
+    const sections = this.doc.sections;
+    this.curSectionIndex = resume.sectionIndex;
+    this.layoutBlocks(sections[resume.sectionIndex].blocks, resume.blockIdx);
+    this.layoutSectionsFrom(resume.sectionIndex + 1, sections[resume.sectionIndex].props);
 
     if (resume.pageCount === 0 && resume.blockIdx === 0) this.applyOpeningFlowOverlap();
     this.emitColumnSeparators();
@@ -686,8 +706,13 @@ class Engine {
     return this.pages;
   }
 
+  /** A windowed document is handled too. Discarded pages carry no body items
+   * to retain, and finalizeHeadersFooters already leaves them alone; they pick
+   * the new header/footer up from the current document when the window
+   * rebuilds them. The height check below still runs over every page including
+   * the discarded ones — it reads only page geometry, never body items — so a
+   * header that grows on a page outside the window is still caught. */
   runHeadersFootersOnly(prev: LayoutResult): LayoutResult | null {
-    if (prev._window) return null;
     const prior = prev._hf as HeaderFooterData | undefined;
     if (!prior || prior.modelVersion !== this.doc.modelVersion || !this.hfFastPathEligible()) return null;
 
@@ -731,6 +756,25 @@ class Engine {
     };
     const incremental = prev._incr as IncrData | undefined;
     if (incremental) result._incr = { ...incremental, pages: this.pages } satisfies IncrData;
+    // The pages above are fresh objects, so the previous window controller
+    // still points at the old ones. Hand the window to a controller over the
+    // new array; it re-derives which pages are retained from their own
+    // `discarded` flags, so the window keeps the extent it already had.
+    if (prev._window && result._incr) {
+      const fontSamples = new Map(
+        (prev._fontSamples ?? []).map((sample) => [fontSampleKey(sample), sample]),
+      );
+      result._fontSamples = [...fontSamples.values()];
+      result._hasModel3D = prev._hasModel3D;
+      result._window = new LayoutWindowController(
+        this.doc,
+        this.measurer,
+        result,
+        result._incr as IncrData,
+        this.pages,
+        fontSamples,
+      );
+    }
     return result;
   }
 
@@ -763,13 +807,19 @@ class Engine {
   }
 
   private startRun(): void {
-    if (this.incrEligible()) {
+    // The relay and the window both run off capture points, but they do not
+    // need the same document. The relay diffs block signatures against one
+    // section's block list, so it stays single-section; the window only ever
+    // replays forward from a point, which works across section boundaries.
+    const relayOk = this.incrEligible();
+    const windowOk = this.windowModel && this.windowEligible();
+    if (relayOk || windowOk) this.incrPoints = [];
+    if (relayOk) {
       const blocks = this.doc.sections[0].blocks;
       this.incrSigs = blocks.map((b) => this.blockSig(b));
       this.incrLastNumberingUse = this.lastNumberingUse(blocks);
-      this.incrPoints = [];
-      this.windowFullRun = this.windowModel;
     }
+    this.windowFullRun = windowOk;
     this.assignNoteNumbers();
     this.assignSeqNumbers();
     this.assignRefContext();
@@ -783,6 +833,7 @@ class Engine {
   ): SectionProps {
       const section = sections[sectionIndex];
       const sp = section.props;
+      this.curSectionIndex = sectionIndex;
       // A continuous section shares the page: restart the column band at the
       // current cursor. (Requires matching page geometry, and the previous
       // band must have ended in its first column - Word balances columns
@@ -942,9 +993,11 @@ class Engine {
     };
     if (this.incrPoints && !this.incrAbort) {
       result._incr = {
-        sigs: this.incrSigs!,
+        // Empty on a window-only run: those are the relay's inputs, and
+        // runIncremental turns itself away (incrEligible) before reading them.
+        sigs: this.incrSigs ?? [],
         points: this.incrPoints,
-        lastNumberingUse: this.incrLastNumberingUse!,
+        lastNumberingUse: this.incrLastNumberingUse ?? new Map(),
         pages: this.pages,
         bookmarks: this.bookmarkPages,
         bookmarkPageIndices: this.bookmarkPageIndices,
@@ -1045,6 +1098,37 @@ class Engine {
     if (sp.textDirection === "tbRl") return false;
     if (sp.vAlign && sp.vAlign !== "top") return false;
     if (sp.lineNumbering) return false;
+    if (this._incrFeatureOk === null) {
+      this._incrFeatureOk =
+        !this.hasDisqualifyingFeature(this.doc.docRoot) && !this.hfHasTotalField() && !this.hfHasStyleRef();
+    }
+    return this._incrFeatureOk;
+  }
+
+  /** Whether the page window can rebuild this document from capture points.
+   *
+   * Same envelope as the incremental relay except for the section count: a
+   * rebuild resumes inside one section and then lays the sections after it
+   * through the ordinary boundary path, so several sections are fine. Every
+   * section has to clear the per-section bars, though — the relay only ever
+   * checked section 0 because that was the only one it could see.
+   *
+   * Single-column is the load-bearing one. A rebuild re-enters the flow at a
+   * block, below the column-balancing pass that layoutSection wraps around a
+   * whole section, so a balanced section could not be reproduced from a point
+   * inside it. balanceEligible is false without a second column, which keeps
+   * that pass out of the picture entirely. */
+  private windowEligible(): boolean {
+    if (this.incrAbort) return false;
+    if (this.doc.footnotes.size > 0 || this.doc.endnotes.size > 0) return false;
+    if (this.doc.mirrorMargins) return false;
+    for (const section of this.doc.sections) {
+      const sp = section.props;
+      if (sp.columns.count > 1) return false;
+      if (sp.textDirection === "tbRl") return false;
+      if (sp.vAlign && sp.vAlign !== "top") return false;
+      if (sp.lineNumbering) return false;
+    }
     if (this._incrFeatureOk === null) {
       this._incrFeatureOk =
         !this.hasDisqualifyingFeature(this.doc.docRoot) && !this.hfHasTotalField() && !this.hfHasStyleRef();
@@ -1185,6 +1269,7 @@ class Engine {
     }
     const snapshot = (): IncrPoint => ({
       blockIdx,
+      sectionIndex: this.curSectionIndex,
       pageCount: globalPageIdx,
       pageItemCount: p.items.length,
       state: {
