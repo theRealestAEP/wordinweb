@@ -1,4 +1,4 @@
-import { validateRegisteredOperation } from "@wordinweb/core";
+import { isInsertableFieldInstruction, validateRegisteredOperation } from "@wordinweb/core";
 import { Intent, isRegisteredIntent } from "./intents.js";
 
 /**
@@ -371,21 +371,14 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null;
     }
     case "insertField": {
-      if (typeof intent.instruction !== "string" || intent.instruction.length === 0 || intent.instruction.length > 200) return "insertField: bad instruction";
       if (intent.cachedResult !== undefined && (typeof intent.cachedResult !== "string" || intent.cachedResult.length > 1000)) return "insertField: bad cachedResult";
-      // Positive allowlist on the field TYPE (first token). Blocks external-
-      // content / code fields (INCLUDETEXT, INCLUDEPICTURE, DDE, DDEAUTO, LINK,
-      // HYPERLINK, IMPORT, …) that could exfiltrate or execute (plan doc 11).
-      const SAFE_FIELDS = new Set([
-        "PAGE", "NUMPAGES", "SECTIONPAGES", "SECTION", "DATE", "TIME",
-        "CREATEDATE", "SAVEDATE", "PRINTDATE", "AUTHOR", "TITLE", "SUBJECT",
-        "KEYWORDS", "COMMENTS", "FILENAME", "NUMWORDS", "NUMCHARS", "PAGEREF",
-        "REF", "SEQ", "STYLEREF", "TOC", "INDEX", "LISTNUM", "QUOTE",
-      ]);
-      const type = intent.instruction.trim().split(/\s+/)[0]?.toUpperCase();
-      if (!type || !SAFE_FIELDS.has(type)) return "insertField: field type not allowed";
-      // The whole instruction must be printable ASCII (no control/format chars).
-      if (!/^[\x20-\x7e]+$/.test(intent.instruction)) return "insertField: illegal instruction char";
+      // Positive allowlist on the field TYPE, plus a printable-ASCII rule
+      // (plan doc 11): it blocks the external-content and code fields
+      // (INCLUDETEXT, INCLUDEPICTURE, DDE, DDEAUTO, LINK, HYPERLINK, IMPORT, …)
+      // that could exfiltrate or execute. The predicate lives in core so the
+      // local insertField path enforces exactly the same set — two copies that
+      // drifted would mean an instruction one host writes and another refuses.
+      if (!isInsertableFieldInstruction(intent.instruction)) return "insertField: instruction not allowed";
       return null;
     }
     case "setDrawingRotation":

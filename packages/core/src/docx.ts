@@ -53,7 +53,17 @@ const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
       <w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="${n === 1 ? 240 : 40}" w:after="0"/><w:outlineLvl w:val="${n - 1}"/></w:pPr>
       <w:rPr><w:color w:val="${color}"/><w:sz w:val="${sizeHalfPt}"/><w:szCs w:val="${sizeHalfPt}"/>${extraRpr}</w:rPr>
     </w:style>`;
+  // Word's "toc 1".."toc 9": Normal plus a per-level indent of 220 twips. A
+  // generated table of contents references these by pStyle, so a document that
+  // has never held one still needs them the moment a TOC is inserted.
+  const toc = (n: number): string =>
+    `<w:style ${W} w:type="paragraph" w:styleId="TOC${n}">
+      <w:name w:val="toc ${n}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:autoRedefine/><w:uiPriority w:val="39"/><w:unhideWhenUsed/>
+      <w:pPr><w:spacing w:after="100"/>${n > 1 ? `<w:ind w:left="${(n - 1) * 220}"/>` : ""}</w:pPr>
+    </w:style>`;
   return {
+    ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`TOC${i + 1}`, toc(i + 1)])),
     Heading1: heading(1, 32, "2F5496"),
     Heading2: heading(2, 26, "2F5496"),
     Heading3: heading(3, 24, "1F3863"),

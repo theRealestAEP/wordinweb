@@ -85,8 +85,15 @@ import {
   type SmartArtTextFormat,
   insertTableAfter,
   operationBody,
+  documentOperationBody,
   type RegisteredOperationArgs,
   type RegisteredOperationKind,
+  applyFieldResults,
+  computeFieldResults,
+  findTocFields,
+  insertToc,
+  rebuildToc,
+  type TocOptions,
   createMeasurer,
   type TextMeasurer,
   layoutDocument,
@@ -155,6 +162,31 @@ export interface DocxViewApi {
   addBookmark(name: string): boolean;
   /** Insert a live text or page reference to a bookmark. */
   insertCrossReference(bookmark: string, kind: "text" | "page"): boolean;
+  /**
+   * Recompute every supported field's cached result — Word's F9, and what a
+   * host calls before printing or exporting so the file it hands on carries
+   * current page numbers, dates and cross-references. False when nothing
+   * changed.
+   *
+   * `fileName` and `author` are the host's to supply: the engine has no
+   * filesystem of its own, so FILENAME and AUTHOR fields keep their cached
+   * results without them.
+   */
+  updateFields(values?: { fileName?: string; author?: string }): boolean;
+  /**
+   * Insert a native Word table of contents at the caret, with its page numbers
+   * already filled in. False in a shared document: a TOC adds a paragraph per
+   * heading and this engine has no wire intent carrying that, so inserting one
+   * locally would diverge the room.
+   */
+  insertToc(options?: TocOptions): boolean;
+  /**
+   * Rebuild every table of contents from the document's current headings, then
+   * repage it. Use after headings are added, removed or retitled; repaging an
+   * unchanged heading set needs only updateFields. False in a shared document,
+   * for the reason insertToc gives.
+   */
+  refreshTocs(): boolean;
   /** Insert an editable inline equation from WordInWeb's linear math syntax. */
   insertEquation(linear: string): boolean;
   /** Insert a Unicode symbol through the normal undo/suggestion-aware typing path. */
@@ -1624,6 +1656,55 @@ export function DocxView({
             history.checkpoint();
             if (!insertCrossReference(doc, target.t, target.offset, bookmark, kind)) return false;
             pages = rerender(doc);
+            return true;
+          },
+          updateFields: (values) => {
+            // The results are computed HERE, on the acting client, and carried
+            // on the wire. Page numbers come out of a layout and layout depends
+            // on the host's font metrics, so a replica that recomputed could
+            // install different text; see the registry's updateFields comment.
+            const results = computeFieldResults(doc, {
+              layout: prevLayout ?? undefined,
+              now: new Date(),
+              ...values,
+            });
+            if (collabDocOp(() => documentOperationBody("updateFields", { results }))) return true;
+            history.checkpoint();
+            if (!applyFieldResults(doc, results)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertToc: (options) => {
+            if (collabRef.current?.submitOp) return false;
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertToc(doc, target.t, options)) return false;
+            // The entries land with placeholder page numbers; the layout this
+            // rerender produces is what the update pass reads the real ones from.
+            pages = rerender(doc, undefined, "global");
+            if (applyFieldResults(doc, computeFieldResults(doc, { layout: prevLayout ?? undefined }))) {
+              pages = rerender(doc, undefined, "global");
+            }
+            return true;
+          },
+          refreshTocs: () => {
+            if (collabRef.current?.submitOp) return false;
+            const tocs = findTocFields(doc);
+            if (tocs.length === 0) return false;
+            history.checkpoint();
+            // Rebuilding replaces paragraphs, so each pass invalidates the
+            // element handles the previous one found: re-find between rebuilds.
+            let rebuilt = false;
+            for (let i = 0; i < tocs.length; i++) {
+              const current = findTocFields(doc)[i];
+              if (current && rebuildToc(doc, current)) rebuilt = true;
+            }
+            if (!rebuilt) return false;
+            pages = rerender(doc, undefined, "global");
+            if (applyFieldResults(doc, computeFieldResults(doc, { layout: prevLayout ?? undefined }))) {
+              pages = rerender(doc, undefined, "global");
+            }
             return true;
           },
           insertEquation: (linear) => {

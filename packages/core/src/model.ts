@@ -360,6 +360,11 @@ export interface FieldContent {
    * (in the fldChar begin's w:ffData). Its presence makes the rendered ballot
    * box a click-to-toggle target; the glyph derives from its w:checked child. */
   checkbox?: XmlElement;
+  /** The field's own XML: the `w:fldSimple`, or the `w:fldChar` begin of a
+   * complex field. The update pass (edit/update-fields.ts) writes a recomputed
+   * result back through it — layout resolves fields from this model, so
+   * without the link the computed value has nowhere to land in the file. */
+  src?: XmlElement;
 }
 
 /** What an anchored shape's coordinates are measured from. "char" (relH=

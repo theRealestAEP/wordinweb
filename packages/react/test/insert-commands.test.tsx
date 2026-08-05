@@ -153,6 +153,7 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertSymbol: (api) => api.insertSymbol("§"),
   insertPageNumber: (api) => api.insertPageNumber("page"),
   insertField: (api) => api.insertField("AUTHOR", "me"),
+  insertToc: (api) => api.insertToc(),
   insertDateTime: (api) => api.insertDateTime("date"),
   insertCrossReference: (api) => api.insertCrossReference("Anchor1", "page"),
   insertBreak: (api) => api.insertBreak("page"),

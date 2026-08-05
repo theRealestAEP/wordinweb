@@ -479,7 +479,8 @@ export type Intent =
   | RejectRevisionIntent
   | AcceptAllRevisionsIntent
   | RejectAllRevisionsIntent
-  | InsertTableIntent;
+  | InsertTableIntent
+  | UpdateFieldsIntent;
 
 /**
  * Every canonical edit operation that is NOT declared in the core operation
@@ -938,6 +939,11 @@ export interface RejectAllRevisionsIntent extends IntentBase {
 /** Insert a rows×cols table after the paragraph containing the anchor run.
  * REGISTERED. */
 export type InsertTableIntent = RegisteredIntentOf<"insertTable">;
+
+/** Write recomputed cached results into every field, in document order.
+ * REGISTERED, and the first DOCUMENT-SCOPED registered operation: it carries no
+ * stable id, so its result count is what makes a stale replica reject. */
+export type UpdateFieldsIntent = RegisteredIntentOf<"updateFields">;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

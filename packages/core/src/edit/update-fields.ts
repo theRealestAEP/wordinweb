@@ -1,0 +1,425 @@
+import { DocxDocument } from "../docx.js";
+import { FieldContext, resolveField } from "../layout/inline.js";
+import { LayoutResult } from "../layout/types.js";
+import { Block, FieldContent, Paragraph, Run } from "../model.js";
+import { XmlElement, attr, localName } from "../xml.js";
+
+/**
+ * The field update pass: Word's F9, headless.
+ *
+ * Layout already resolves a field instruction to display text on every render
+ * (layout/inline.ts resolveField), so the SCREEN is never stale. What goes
+ * stale is the cached result stored in the file — the text Word, a PDF export,
+ * or any other consumer sees when it opens the docx without recomputing. This
+ * pass writes the recomputed value back into that cache.
+ *
+ * WHERE THE VALUES COME FROM. Two sources, split by what each knows:
+ *
+ *  - PAGE, NUMPAGES, SECTIONPAGES, PAGEREF, REF and SEQ are HARVESTED from a
+ *    layout. The engine already computes them with every subtlety they carry
+ *    (a section's pgNumType, a `\*` number switch, the final-pass PAGEREF
+ *    rewrite, document-order SEQ counters), so re-deriving them here would be
+ *    a second implementation to keep equal to the first. The rendered text of
+ *    the field's own layout items IS the answer.
+ *  - DATE, TIME, FILENAME, AUTHOR and body STYLEREF are computed here, because
+ *    each needs something the engine does not have: an injected clock, the
+ *    host's file name and author, or a document-order style scan.
+ *
+ * Every other instruction keeps its cached result untouched. That is not a
+ * gap to fill later — an instruction this engine cannot evaluate (INCLUDETEXT,
+ * MERGEFIELD, DOCPROPERTY …) has a cache that is the best value available, and
+ * overwriting it with a guess would lose information the file still holds.
+ *
+ * HEADERS AND FOOTERS ARE OUT OF SCOPE, by nature rather than by omission. A
+ * header PAGE field has a different value on every page; there is no single
+ * result to cache. Word stores one stale result there too and recomputes on
+ * open, exactly as this engine does at layout.
+ *
+ * DETERMINISM UNDER REPLICATION. Layout is NOT replica-independent: font
+ * metrics differ between hosts, so pagination — and therefore every page
+ * number — can differ. The registered `updateFields` operation therefore does
+ * not recompute on each replica. The originator computes the results here and
+ * carries them in the intent payload; every replica applies the same strings
+ * through applyFieldResults. This is the provenance pattern (edit/provenance.ts)
+ * applied to a value that is nondeterministic for a different reason: not a
+ * clock or a random id, but the host's font stack.
+ */
+
+/** Instructions whose result the update pass takes from a layout. */
+const LAYOUT_RESOLVED = new Set(["PAGE", "NUMPAGES", "SECTIONPAGES", "PAGEREF", "REF", "SEQ"]);
+
+/** Instructions the update pass evaluates itself. */
+const LOCALLY_RESOLVED = new Set(["DATE", "TIME", "FILENAME", "AUTHOR", "STYLEREF"]);
+
+/** Every instruction this pass can recompute. Anything else keeps its cache. */
+export const UPDATABLE_FIELD_KEYWORDS: readonly string[] = Object.freeze(
+  [...LAYOUT_RESOLVED, ...LOCALLY_RESOLVED].sort(),
+);
+
+export interface FieldUpdateOptions {
+  /**
+   * A layout of this document. Without one the page-dependent instructions
+   * (PAGE, NUMPAGES, SECTIONPAGES, PAGEREF) and the two the engine counts
+   * (REF, SEQ) keep their cached results — the pass still refreshes the rest.
+   */
+  layout?: LayoutResult;
+  /** Clock for DATE/TIME. Injected so the result is reproducible; the caller
+   * that replicates the pass must pass the same instant to every replica. */
+  now?: Date;
+  /** The host's name for this document (FILENAME). Absent keeps the cache. */
+  fileName?: string;
+  /** The host's document author (AUTHOR). Absent keeps the cache. */
+  author?: string;
+}
+
+/** One updatable field and the run that carries it. */
+interface FieldSite {
+  field: FieldContent;
+  run: Run;
+}
+
+function keywordOf(instruction: string): string {
+  return instruction.trim().split(/\s+/)[0]?.toUpperCase() ?? "";
+}
+
+/**
+ * Every field in the document body that the pass can address, in document
+ * order. This enumeration is the operation's addressing scheme: a replicated
+ * update carries one result per site, positionally, so both sides must walk
+ * the document the same way.
+ *
+ * A field with no `src` came from a shape this pass cannot write back to (a
+ * legacy w:pgNum run has no field XML of its own) and is skipped on both
+ * sides, keeping the two walks aligned.
+ */
+export function collectFieldSites(doc: DocxDocument): FieldSite[] {
+  const sites: FieldSite[] = [];
+  const visitRun = (run: Run): void => {
+    for (const content of run.content) {
+      if (content.kind === "field" && content.src) sites.push({ field: content, run });
+    }
+  };
+  const visitBlocks = (blocks: Block[]): void => {
+    for (const block of blocks) {
+      if (block.type === "paragraph") {
+        for (const child of block.children) {
+          if (child.type === "run") visitRun(child);
+          else for (const run of child.runs) visitRun(run);
+        }
+      } else {
+        for (const row of block.rows) for (const cell of row.cells) visitBlocks(cell.blocks);
+      }
+    }
+  };
+  for (const section of doc.sections) visitBlocks(section.blocks);
+  return sites;
+}
+
+// ---------------------------------------------------------------------------
+// Harvesting the engine's own answers
+// ---------------------------------------------------------------------------
+
+/**
+ * The text a layout painted for each run's field content.
+ *
+ * Field atoms are pushed with `src.t === null` ("format the whole run": a
+ * field is atomic, so no source w:t backs its glyphs), which is what separates
+ * them from the run's ordinary text. A run laid out on more than one page — a
+ * repeated table header row — keeps its FIRST page's text, the same rule Word
+ * uses when it caches one result for a repeated row.
+ */
+function harvestFieldText(layout: LayoutResult): Map<Run, string> {
+  const harvested = new Map<Run, string>();
+  for (const page of layout.pages) {
+    const onThisPage = new Map<Run, string>();
+    const limit = page.hfStart > 0 ? page.hfStart : page.items.length;
+    for (let i = 0; i < limit; i++) {
+      const item = page.items[i];
+      if (item.kind !== "text" || !item.src || item.src.t !== null) continue;
+      onThisPage.set(item.src.run, (onThisPage.get(item.src.run) ?? "") + item.text);
+    }
+    for (const [run, text] of onThisPage) if (!harvested.has(run)) harvested.set(run, text);
+  }
+  return harvested;
+}
+
+// ---------------------------------------------------------------------------
+// Body STYLEREF
+// ---------------------------------------------------------------------------
+
+/** A paragraph's plain text, for a STYLEREF that names its style. */
+function paragraphText(para: Paragraph): string {
+  let out = "";
+  for (const child of para.children) {
+    for (const run of child.type === "run" ? [child] : child.runs) {
+      for (const content of run.content) {
+        if (content.kind === "text") out += content.text;
+        else if (content.kind === "tab") out += "\t";
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Resolve each body STYLEREF against the nearest paragraph of the named style
+ * at or before it, in document order — Word's rule outside a header, where
+ * there is no page for the page-relative rule to work from.
+ *
+ * The style is named by its display name ("Heading 1") or its styleId
+ * ("Heading1"), case-insensitively, matching the header resolver in the
+ * layout engine.
+ */
+function bodyStyleRefText(doc: DocxDocument): Map<FieldContent, string> {
+  const resolved = new Map<FieldContent, string>();
+  /** Lower-cased style name AND id → the last paragraph text seen for it. */
+  const latest = new Map<string, string>();
+
+  const record = (para: Paragraph): void => {
+    const styleId = para.props.styleId ?? doc.styles.defaultParagraphStyle;
+    if (!styleId) return;
+    const text = paragraphText(para);
+    if (!text) return;
+    latest.set(styleId.toLowerCase(), text);
+    const name = doc.styles.byId.get(styleId)?.name;
+    if (name) latest.set(name.toLowerCase(), text);
+  };
+
+  const visitBlocks = (blocks: Block[]): void => {
+    for (const block of blocks) {
+      if (block.type !== "paragraph") {
+        for (const row of block.rows) for (const cell of row.cells) visitBlocks(cell.blocks);
+        continue;
+      }
+      // A STYLEREF inside the paragraph resolves against what came BEFORE it,
+      // so read the fields first and only then let this paragraph contribute.
+      for (const child of block.children) {
+        for (const run of child.type === "run" ? [child] : child.runs) {
+          for (const content of run.content) {
+            if (content.kind !== "field" || keywordOf(content.instruction) !== "STYLEREF") continue;
+            const m = /^STYLEREF\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(content.instruction.trim());
+            const name = (m?.[1] ?? m?.[2] ?? "").toLowerCase();
+            const text = name ? latest.get(name) : undefined;
+            if (text !== undefined) resolved.set(content, text);
+          }
+        }
+      }
+      record(block);
+    }
+  };
+  for (const section of doc.sections) visitBlocks(section.blocks);
+  return resolved;
+}
+
+// ---------------------------------------------------------------------------
+// Computing results
+// ---------------------------------------------------------------------------
+
+/**
+ * The recomputed result for every field site, in the order collectFieldSites
+ * returns them. A site the pass cannot recompute yields its existing cached
+ * result, so the array is always a complete snapshot of what the file should
+ * hold.
+ */
+export function computeFieldResults(doc: DocxDocument, options: FieldUpdateOptions = {}): string[] {
+  const sites = collectFieldSites(doc);
+  const harvested = options.layout ? harvestFieldText(options.layout) : new Map<Run, string>();
+  const styleRefs = bodyStyleRefText(doc);
+
+  return sites.map(({ field, run }) => {
+    const keyword = keywordOf(field.instruction);
+    // Harvested text is keyed by the run the parser hung the field on, which
+    // is one field per run: a complex field's content lands on the run holding
+    // its fldChar begin, and a w:fldSimple gets a synthesized run of its own.
+    if (LAYOUT_RESOLVED.has(keyword)) return harvested.get(run) ?? field.cachedResult;
+    if (!LOCALLY_RESOLVED.has(keyword)) return field.cachedResult;
+    const context: FieldContext = {
+      // Unused by the locally-resolved instructions; a FieldContext requires
+      // them, and a wrong page number can never reach the output.
+      pageNumber: () => 1,
+      totalPages: () => 1,
+      formatPageNumber: String,
+      now: options.now,
+      fileName: options.fileName,
+      author: options.author,
+      styleRefBody: (_name, key) => styleRefs.get(key as FieldContent),
+    };
+    return resolveField(field.instruction, field.cachedResult, context, field);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Writing results back into the XML
+// ---------------------------------------------------------------------------
+
+function prefixOf(node: XmlElement): string {
+  return node.name.includes(":") ? node.name.slice(0, node.name.indexOf(":") + 1) : "";
+}
+
+function textElement(prefix: string, text: string): XmlElement {
+  return { name: `${prefix}t`, attrs: { "xml:space": "preserve" }, children: [], text };
+}
+
+/** Put `text` in the first w:t of `slots` and empty the rest, so a result that
+ * Word split across several runs collapses onto one without removing any run —
+ * removing them would retire the stable ids they carry. */
+function fillTextSlots(slots: XmlElement[], text: string): void {
+  slots[0].attrs = { ...slots[0].attrs, "xml:space": "preserve" };
+  slots[0].text = text;
+  for (let i = 1; i < slots.length; i++) slots[i].text = "";
+}
+
+/** Direct w:t children of the runs in `elements`, skipping any nested field. */
+function resultTextSlots(elements: XmlElement[]): XmlElement[] {
+  const slots: XmlElement[] = [];
+  let depth = 0;
+  const visit = (el: XmlElement): void => {
+    for (const c of el.children) {
+      const ln = localName(c.name);
+      if (ln === "fldChar") {
+        const type = attr(c, "fldCharType");
+        if (type === "begin") depth++;
+        else if (type === "end") depth--;
+      } else if (ln === "t") {
+        if (depth === 0) slots.push(c);
+      } else if (ln === "r" || ln === "hyperlink" || ln === "ins" || ln === "smartTag") {
+        visit(c);
+      }
+    }
+  };
+  for (const el of elements) visit(el);
+  return slots;
+}
+
+/** Rewrite a w:fldSimple's cached result. */
+function writeSimpleField(field: XmlElement, text: string, createResultRuns: boolean): boolean {
+  const slots = resultTextSlots(field.children);
+  if (slots.length > 0) {
+    fillTextSlots(slots, text);
+    return true;
+  }
+  if (!createResultRuns) return false;
+  const run = field.children.find((c) => localName(c.name) === "r");
+  const prefix = prefixOf(run ?? field);
+  const rPr = run?.children.find((c) => localName(c.name) === "rPr");
+  field.children.push({
+    name: `${prefix}r`,
+    attrs: {},
+    children: [...(rPr ? [{ ...rPr, attrs: { ...rPr.attrs } }] : []), textElement(prefix, text)],
+    text: "",
+  });
+  return true;
+}
+
+/**
+ * Rewrite a complex field's cached result: the content between its fldChar
+ * separate and its fldChar end. A field with no separate has never held a
+ * result, so one is created — a separate run followed by a result run, which
+ * is the shape Word writes.
+ */
+function writeComplexField(
+  doc: DocxDocument,
+  beginEl: XmlElement,
+  text: string,
+  createResultRuns: boolean,
+): boolean {
+  const beginRun = doc.findParentOf(beginEl);
+  const parent = beginRun && doc.findParentOf(beginRun);
+  if (!beginRun || !parent) return false;
+  const beginIdx = parent.children.indexOf(beginRun);
+  if (beginIdx < 0) return false;
+
+  let depth = 1;
+  let separateIdx = -1;
+  let endIdx = -1;
+  for (let i = beginIdx + 1; i < parent.children.length && endIdx < 0; i++) {
+    for (const c of parent.children[i].children) {
+      if (localName(c.name) !== "fldChar") continue;
+      const type = attr(c, "fldCharType");
+      if (type === "begin") depth++;
+      else if (type === "separate") {
+        if (depth === 1 && separateIdx < 0) separateIdx = i;
+      } else if (type === "end") {
+        depth--;
+        if (depth === 0) {
+          endIdx = i;
+          break;
+        }
+      }
+    }
+  }
+  if (endIdx < 0) return false;
+
+  if (separateIdx >= 0) {
+    const slots = resultTextSlots(parent.children.slice(separateIdx + 1, endIdx));
+    if (slots.length > 0) {
+      fillTextSlots(slots, text);
+      return true;
+    }
+  }
+  if (!createResultRuns) return false;
+  const prefix = prefixOf(beginRun);
+  const rPr = beginRun.children.find((c) => localName(c.name) === "rPr");
+  const run = (content: XmlElement): XmlElement => ({
+    name: `${prefix}r`,
+    attrs: {},
+    children: [...(rPr ? [{ ...rPr, attrs: { ...rPr.attrs } }] : []), content],
+    text: "",
+  });
+  const resultRun = run(textElement(prefix, text));
+  if (separateIdx >= 0) parent.children.splice(endIdx, 0, resultRun);
+  else {
+    const separate = { name: `${prefix}fldChar`, attrs: { [`${prefix}fldCharType`]: "separate" }, children: [], text: "" };
+    parent.children.splice(endIdx, 0, run(separate), resultRun);
+  }
+  return true;
+}
+
+/**
+ * Write one recomputed result per field site, positionally. Returns false
+ * without touching the document when the count does not match the sites the
+ * document currently has.
+ *
+ * That count check is the operation's "honest no-op" predicate. A document
+ * -scoped operation has no stable id to fail to resolve, so the field
+ * enumeration stands in for one: a replica whose document grew or lost a field
+ * concurrently rejects the whole update rather than applying results to the
+ * wrong fields, and every replica in that position rejects identically.
+ */
+export function applyFieldResults(
+  doc: DocxDocument,
+  results: readonly string[],
+  options: { createResultRuns?: boolean } = {},
+): boolean {
+  const sites = collectFieldSites(doc);
+  if (sites.length !== results.length) return false;
+  // A field that has never been evaluated holds no run to write into. Creating
+  // one is right locally and wrong under replication, where a fresh run is an
+  // id-tracked node the intent carries no id for — so the caller chooses.
+  const createResultRuns = options.createResultRuns ?? true;
+
+  let changed = false;
+  for (let i = 0; i < sites.length; i++) {
+    const { field } = sites[i];
+    const text = results[i];
+    if (text === field.cachedResult || !field.src) continue;
+    const src = field.src;
+    const written =
+      localName(src.name) === "fldSimple"
+        ? writeSimpleField(src, text, createResultRuns)
+        : writeComplexField(doc, src, text, createResultRuns);
+    if (written) changed = true;
+  }
+  if (changed) doc.refresh();
+  return changed;
+}
+
+/**
+ * Recompute every supported field's cached result and write it into the file.
+ * True when anything changed. Local (single-host) entry point; a replicated
+ * update splits this into computeFieldResults on the originator and
+ * applyFieldResults on every replica.
+ */
+export function updateFields(doc: DocxDocument, options: FieldUpdateOptions = {}): boolean {
+  return applyFieldResults(doc, computeFieldResults(doc, options));
+}

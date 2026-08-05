@@ -76,8 +76,19 @@ export interface FieldContext {
   refParaNumber?: (fieldKey: object) => string | undefined;
   /** STYLEREF: the text of the referenced style's paragraph on the field's page
    * (first-on-page, or last with \l). undefined keeps the cache. Header/footer
-   * only — body STYLEREF keeps its cache. */
+   * only — a body field takes `styleRefBody` instead. */
   styleRef?: (styleName: string, lastOnPage: boolean) => string | undefined;
+  /** STYLEREF in the BODY, where there is no header page to resolve against:
+   * Word shows the nearest paragraph of the named style at or before the
+   * field. Keyed by the field occurrence; undefined keeps the cache. Installed
+   * only outside a header/footer, so `styleRef`'s page-relative answer is
+   * always the one a header field gets. */
+  styleRefBody?: (styleName: string, fieldKey: object) => string | undefined;
+  /** FILENAME: the host's name for the open document. Absent keeps the cache —
+   * the engine has no filesystem of its own. */
+  fileName?: string;
+  /** AUTHOR: the host's document author. Absent keeps the cache. */
+  author?: string;
 }
 
 // ---------- atoms ----------
@@ -3795,15 +3806,28 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       // Word recomputes STYLEREF on open (the docx cache reflects the style's
       // value when saved and goes stale). A header/footer STYLEREF shows the
       // first paragraph of the referenced style that starts on the field's page
-      // (or the last, with \l). Body STYLEREF and unknown styles keep the cache.
-      if (!ctx.styleRef) return cachedResult || "";
+      // (or the last, with \l); a body STYLEREF shows the nearest such
+      // paragraph at or before the field. Unknown styles keep the cache.
       const m = /^STYLEREF\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(instr);
       const name = m?.[1] ?? m?.[2];
       if (!name) return cachedResult || "";
-      const lastOnPage = /\\l(\s|$)/i.test(instr);
-      const text = ctx.styleRef(name, lastOnPage);
-      return text !== undefined ? text : cachedResult || "";
+      if (ctx.styleRef) {
+        const lastOnPage = /\\l(\s|$)/i.test(instr);
+        const text = ctx.styleRef(name, lastOnPage);
+        return text !== undefined ? text : cachedResult || "";
+      }
+      const body = ctx.styleRefBody && fieldKey ? ctx.styleRefBody(name, fieldKey) : undefined;
+      return body !== undefined ? body : cachedResult || "";
     }
+    case "FILENAME": {
+      // The name is the host's to know. `\p` asks for the full path, which no
+      // browser host can supply, so it keeps the cache like any unsupported
+      // switch rather than painting a bare name where a path belongs.
+      if (ctx.fileName === undefined || /\\p(\s|$)/i.test(instr)) return cachedResult || "";
+      return ctx.fileName;
+    }
+    case "AUTHOR":
+      return ctx.author !== undefined ? ctx.author : cachedResult || "";
     case "CREATEDATE":
     case "SAVEDATE":
       // These reference stored document moments — the cache IS the value.

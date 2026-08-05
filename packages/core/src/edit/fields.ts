@@ -59,6 +59,51 @@ function insertElementsAt(
   return true;
 }
 
+/**
+ * Field instructions this engine will INSERT, by keyword.
+ *
+ * An arbitrary instruction is an injection surface, not a feature: Word's
+ * INCLUDETEXT and INCLUDEPICTURE read a path or URL the document names,
+ * DDE/DDEAUTO/LINK open a channel to another application, and MACROBUTTON
+ * names code to run. A document that ARRIVES holding one still renders — the
+ * parser keeps every instruction and unsupported ones paint their cached
+ * result — but nothing this editor writes may create one. Same posture
+ * validatePastedOoxml takes toward pasted markup.
+ *
+ * The list is the field types that read nothing outside the document: what the
+ * engine evaluates itself (layout/inline.ts resolveField, edit/update-fields.ts)
+ * plus the document-property fields, which are inert text.
+ */
+const INSERTABLE_FIELD_KEYWORDS = new Set([
+  "PAGE", "NUMPAGES", "SECTIONPAGES", "SECTION", "DATE", "TIME",
+  "CREATEDATE", "SAVEDATE", "PRINTDATE", "AUTHOR", "TITLE", "SUBJECT",
+  "KEYWORDS", "COMMENTS", "FILENAME", "NUMWORDS", "NUMCHARS", "PAGEREF",
+  "REF", "SEQ", "STYLEREF", "TOC", "INDEX", "LISTNUM", "QUOTE",
+]);
+
+/** Longest instruction this engine writes. Real ones are far shorter; the cap
+ * bounds what a remote intent can push through the wire into a w:instrText. */
+export const MAX_FIELD_INSTRUCTION = 200;
+
+/**
+ * Whether `instruction` may be inserted.
+ *
+ * The collaborative sequencer validates inbound intents with this same
+ * predicate, so the local path and the wire path allow exactly the same set —
+ * two lists that drifted would mean an instruction one host writes and another
+ * refuses.
+ */
+export function isInsertableFieldInstruction(instruction: string): boolean {
+  if (typeof instruction !== "string") return false;
+  if (instruction.length === 0 || instruction.length > MAX_FIELD_INSTRUCTION) return false;
+  // Printable ASCII only. A control or format character inside a w:instrText
+  // can split one instruction into two when Word re-reads it, smuggling a
+  // second keyword past the check above.
+  if (!/^[\x20-\x7e]+$/.test(instruction)) return false;
+  const keyword = instruction.trim().split(/\s+/)[0]?.toUpperCase();
+  return !!keyword && INSERTABLE_FIELD_KEYWORDS.has(keyword);
+}
+
 /** Insert a field instruction at a text position, preserving surrounding run formatting. */
 export function insertField(
   doc: DocxDocument,
@@ -67,8 +112,8 @@ export function insertField(
   instruction: string,
   cachedResult = "",
 ): boolean {
+  if (!isInsertableFieldInstruction(instruction)) return false;
   const clean = instruction.trim();
-  if (!clean) return false;
   const rEl = doc.findParentOf(t);
   if (!rEl || localName(rEl.name) !== "r") return false;
   const w = rEl.name.includes(":") ? rEl.name.slice(0, rEl.name.indexOf(":") + 1) : "";

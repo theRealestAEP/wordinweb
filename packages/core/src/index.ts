@@ -28,11 +28,13 @@ export {
   applyRegisteredOperation,
   isRegisteredOperationKind,
   operationBody,
+  documentOperationBody,
   registeredOperation,
   registeredOperationCapabilities,
   validateRegisteredOperation,
 } from "./edit/registry.js";
 export type {
+  AddressedOperation,
   OperationAddress,
   OperationCategory,
   OperationDefinition,
@@ -89,7 +91,17 @@ export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, Dr
 export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertFootnote } from "./edit/notes.js";
-export { insertField, insertPageField, insertDateTimeField } from "./edit/fields.js";
+export { MAX_FIELD_INSTRUCTION, insertField, insertPageField, insertDateTimeField, isInsertableFieldInstruction } from "./edit/fields.js";
+export {
+  UPDATABLE_FIELD_KEYWORDS,
+  applyFieldResults,
+  collectFieldSites,
+  computeFieldResults,
+  updateFields,
+} from "./edit/update-fields.js";
+export type { FieldUpdateOptions } from "./edit/update-fields.js";
+export { TOC_EMPTY_TEXT, findTocFields, insertToc, rebuildToc } from "./edit/toc.js";
+export type { TocLevels, TocOptions } from "./edit/toc.js";
 export {
   drawingFillColor,
   drawingLineStyle,

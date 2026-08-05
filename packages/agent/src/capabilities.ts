@@ -313,6 +313,9 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
   if (field === "xPx" || field === "yPx") return number(-5000, kind === "moveTable" ? 20000 : 5000);
   if (field === "deltaPx") return number(-5000, 5000);
   if (field === "renderedWidths") return { type: "array", maxItems: 200, items: number(0, 20000) };
+  // updateFields carries one recomputed cached result per field in document
+  // order; the caps match the operation's own validate in the core registry.
+  if (field === "results") return { type: "array", maxItems: 20000, items: string(4096) };
   if (field === "color") {
     const nullable = kind === "setDrawingFill" || kind === "setSmartArtFill" || kind === "setDrawingLineStyle";
     const value = { type: "string", pattern: "^[0-9A-Fa-f]{6}$" };

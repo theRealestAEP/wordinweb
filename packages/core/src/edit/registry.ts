@@ -5,6 +5,7 @@ import { XmlElement } from "../xml.js";
 import { insertTableAfter } from "./blocks.js";
 import { setListType } from "./lists.js";
 import { resizeTableRow } from "./tables.js";
+import { applyFieldResults } from "./update-fields.js";
 
 /**
  * The operation registry: ONE declaration per edit operation, read by every
@@ -44,23 +45,35 @@ import { resizeTableRow } from "./tables.js";
 /** A stable id from the core side table (the wire's addressing unit). */
 export type StableId = number;
 
-/** How a registered operation names its target on the wire. */
-export type OperationAddress = "run" | "block" | "cell";
+/**
+ * How a registered operation names its target on the wire.
+ *
+ * "document" scopes an operation to the whole document, which means it has no
+ * stable id and therefore none of the honest-no-op protection an id gives: a
+ * document address ALWAYS resolves. Such an operation has to supply its own
+ * rejection predicate from the payload — see updateFields below, whose result
+ * count must match the document's field count — and it must carry every value
+ * a replica cannot re-derive identically.
+ */
+export type OperationAddress = "run" | "block" | "cell" | "document";
 
-/** The wire field carrying the address, per address kind. */
+/** An operation addressed by a stable id, as opposed to document-scoped. */
+export type AddressedOperation = Exclude<OperationAddress, "document">;
+
+/** The wire field carrying the address, per addressed kind. */
 export const ADDRESS_WIRE_FIELD = {
   run: "runId",
   block: "blockId",
   cell: "cellParagraphId",
-} as const satisfies Record<OperationAddress, string>;
+} as const satisfies Record<AddressedOperation, string>;
 
-/** The agent-facing reference field, per address kind. Agents address content
+/** The agent-facing reference field, per addressed kind. Agents address content
  * with opaque strings ("run:12"), never raw ids. */
 export const ADDRESS_AGENT_FIELD = {
   run: "runRef",
   block: "blockRef",
   cell: "cellRef",
-} as const satisfies Record<OperationAddress, string>;
+} as const satisfies Record<AddressedOperation, string>;
 
 /**
  * Agent capability category. Mirrors @wordinweb/agent's
@@ -237,11 +250,51 @@ const toggleCheckboxOperation = defineOperation<{ runId: StableId }>()({
   },
 });
 
+/**
+ * Write recomputed cached results into the document's fields — Word's F9.
+ *
+ * The results are CARRIED rather than recomputed per replica, because the
+ * values a field update produces are not replica-independent: PAGE, NUMPAGES
+ * and PAGEREF all come out of a layout, and layout depends on the host's font
+ * metrics. Two browsers can paginate the same document differently, so a
+ * replica that recomputed would install different text. This is the provenance
+ * pattern (edit/provenance.ts) applied to a value that varies by font stack
+ * rather than by clock.
+ *
+ * The result count is the operation's rejection predicate, standing in for the
+ * stable id a document-scoped operation does not have: a replica whose field
+ * count has moved under a concurrent edit applies nothing, and every replica in
+ * that position rejects identically.
+ *
+ * Result runs are NOT created here (createResultRuns: false). A field that has
+ * never been evaluated has no run to write into, and adding one would create an
+ * id-tracked node this operation has no carried id for. Those fields keep their
+ * empty result in a room and are filled in by a local update.
+ */
+const updateFieldsOperation = defineOperation<{ results: string[] }>()({
+  kind: "updateFields",
+  address: "document",
+  category: "document",
+  description: "Write recomputed cached results into the document's fields, one per field in document order.",
+  fields: [{ name: "results" }],
+  validate: ({ results }) => {
+    if (!Array.isArray(results)) return "updateFields: results not an array";
+    if (results.length > 20000) return "updateFields: too many results";
+    for (const r of results) {
+      if (typeof r !== "string") return "updateFields: result not a string";
+      if (r.length > 4096) return "updateFields: result too long";
+    }
+    return null;
+  },
+  apply: ({ doc, payload }) => applyFieldResults(doc, payload.results, { createResultRuns: false }),
+});
+
 const OPERATIONS = [
   setListTypeOperation,
   insertTableOperation,
   resizeTableRowOperation,
   toggleCheckboxOperation,
+  updateFieldsOperation,
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -305,6 +358,9 @@ export function operationBody<Kind extends RegisteredOperationKind>(
 ): RegisteredOperationBodyFor<Kind> {
   const definition = BY_KIND.get(kind);
   if (!definition) throw new Error(`${kind} is not a registered operation`);
+  if (definition.address === "document") {
+    throw new Error(`${kind} is document-scoped; use documentOperationBody`);
+  }
   const body: Record<string, unknown> = {
     kind,
     [ADDRESS_WIRE_FIELD[definition.address]]: addressId,
@@ -312,6 +368,20 @@ export function operationBody<Kind extends RegisteredOperationKind>(
   };
   if (definition.nodeIds) body.nodeIds = allocIds(definition.nodeIds(args as never));
   return body as RegisteredOperationBodyFor<Kind>;
+}
+
+/** Build a DOCUMENT-SCOPED operation's wire body. It names no node, so there
+ * is no address field and no id to allocate — the payload is the whole of it. */
+export function documentOperationBody<Kind extends RegisteredOperationKind>(
+  kind: Kind,
+  args: RegisteredOperationArgs<Kind>,
+): RegisteredOperationBodyFor<Kind> {
+  const definition = BY_KIND.get(kind);
+  if (!definition) throw new Error(`${kind} is not a registered operation`);
+  if (definition.address !== "document") {
+    throw new Error(`${kind} is addressed by ${definition.address}; use operationBody`);
+  }
+  return { kind, ...args } as RegisteredOperationBodyFor<Kind>;
 }
 
 /** Validate a registered operation's payload. Null means well-formed. */
@@ -347,7 +417,9 @@ export function registeredOperationCapabilities(): Record<
   const rows = {} as Record<RegisteredOperationKind, RegisteredOperationCapability>;
   for (const op of OPERATIONS) {
     const required = [
-      ADDRESS_AGENT_FIELD[op.address],
+      // A document-scoped operation names no content, so it opens with its own
+      // fields rather than an address reference.
+      ...(op.address === "document" ? [] : [ADDRESS_AGENT_FIELD[op.address]]),
       ...op.fields.filter((f) => !f.optional).map((f) => f.name),
     ];
     const optional = op.fields.filter((f) => f.optional).map((f) => f.name);

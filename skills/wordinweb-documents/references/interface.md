@@ -779,6 +779,7 @@ Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
 | `setPageLayout` | Set margins, page size, columns, or borders | `patch` |
 | `setLineNumbering` | Configure margin line numbers | `patch` |
 | `ensureHeaderFooter` | Create a header or footer story | `hfKind` |
+| `updateFields` | Write recomputed cached results into the document's fields, one per field in document order | `results` |
 
 ## Nested value shapes
 

@@ -3251,6 +3251,10 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertSymbol", feature: "symbol" },
   { command: "insertPageNumber", feature: "pageNumber" },
   { command: "insertField", feature: "field" },
+  // A table of contents IS a field, and it lands in the field group. It
+  // refuses in a room rather than emitting: one paragraph per heading is
+  // more structure than any current intent carries.
+  { command: "insertToc", feature: "field" },
   { command: "insertDateTime", feature: "dateTime" },
   { command: "insertCrossReference", feature: "crossReference" },
   { command: "insertBreak", feature: "break" },

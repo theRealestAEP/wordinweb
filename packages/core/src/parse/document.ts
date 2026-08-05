@@ -165,6 +165,9 @@ interface FieldState {
    * w:ffData, carried onto the emitted field content so it becomes a
    * click-to-toggle target. */
   checkbox?: XmlElement;
+  /** The w:fldChar begin element, carried onto the emitted field content as
+   * its `src` so the update pass can find the field's result region again. */
+  beginEl?: XmlElement;
 }
 
 export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
@@ -621,7 +624,7 @@ function parseParaChildren(
       const fieldRun: Run = {
         type: "run",
         props,
-        content: [{ kind: "field", instruction, cachedResult: cached }],
+        content: [{ kind: "field", instruction, cachedResult: cached, src: el }],
       };
       out.push(fieldRun);
       captureRefBookmarkRun(ctx, fieldRun);
@@ -663,6 +666,7 @@ function flushField(field: FieldState): void {
       instruction: field.instruction,
       cachedResult: field.cachedResult,
       ...(field.checkbox ? { checkbox: field.checkbox } : {}),
+      ...(field.beginEl ? { src: field.beginEl } : {}),
     });
   }
   field.mode = null;
@@ -671,6 +675,7 @@ function flushField(field: FieldState): void {
   field.carrier = null;
   field.live = false;
   field.checkbox = undefined;
+  field.beginEl = undefined;
 }
 
 /**
@@ -778,6 +783,7 @@ function parseRun(
           flushField(field);
           field.mode = "instr";
           field.carrier = run;
+          field.beginEl = el;
           // Legacy form fields carry their display in the fldChar begin's
           // w:ffData, not a separate/result run. FORMCHECKBOX: a ballot box
           // (U+2610) or ballot-box-with-X (U+2612) from w:checkBox/w:checked.
@@ -808,6 +814,7 @@ function parseRun(
               instruction: field.instruction,
               cachedResult: field.cachedResult,
               ...(field.checkbox ? { checkbox: field.checkbox } : {}),
+              ...(field.beginEl ? { src: field.beginEl } : {}),
             };
             if (carrier === run) run.content.push(content);
             else carrier.content.push(content);
@@ -818,6 +825,7 @@ function parseRun(
           field.carrier = null;
           field.live = false;
           field.checkbox = undefined;
+          field.beginEl = undefined;
         }
         break;
       }
