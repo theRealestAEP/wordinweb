@@ -2155,6 +2155,9 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/** Menu value standing for "remove the style reference". */
+const NO_TABLE_STYLE = "(no table style)";
+
 function TableFormatTab({
   api,
   fill,
@@ -2168,6 +2171,28 @@ function TableFormatTab({
     api?.tableOp(op);
     onChanged();
   };
+  const after = (act: () => void) => {
+    act();
+    onChanged();
+  };
+  // Word's "No Borders" and its eraser are different edits, and the engine
+  // keeps them apart: SUPPRESS writes w:val="nil" so no rule is drawn even
+  // when the table style asks for one, while CLEAR removes the direct edges
+  // so the style's rules come back. Both are offered rather than guessing.
+  const ALL_TABLE_EDGES = ["top", "bottom", "left", "right", "insideH", "insideV"] as const;
+  const borderActions: Record<string, () => void> = {
+    tableAll: () => api?.setTableBorders("table", [...ALL_TABLE_EDGES], { style: "single", sz: 4 }),
+    tableOutside: () => api?.setTableBorders("table", ["top", "bottom", "left", "right"], { style: "single", sz: 4 }),
+    tableInside: () => api?.setTableBorders("table", ["insideH", "insideV"], { style: "single", sz: 4 }),
+    tableNone: () => api?.setTableBorders("table", [...ALL_TABLE_EDGES], { style: "none" }),
+    tableClear: () => api?.setTableBorders("table", [...ALL_TABLE_EDGES], null),
+    cellAll: () => api?.setTableBorders("cell", ["top", "bottom", "left", "right"], { style: "single", sz: 4 }),
+    cellNone: () => api?.setTableBorders("cell", ["top", "bottom", "left", "right"], { style: "none" }),
+    cellClear: () => api?.setTableBorders("cell", ["top", "bottom", "left", "right"], null),
+  };
+  const look = api?.getTableLook();
+  const styleId = api?.getTableStyleId() ?? null;
+  const tick = (on: boolean | undefined, text: string) => `${on ? "\u2713 " : "\u2007\u2007"}${text}`;
   return (
     <span data-dxw-table-format="" style={{ display: "contents" }}>
       <ColorMenu
@@ -2205,6 +2230,112 @@ function TableFormatTab({
         width={78}
         groups={[{ items: [["mergeRight", "Merge right"], ["mergeDown", "Merge down"], ["splitCell", "Split cell"]] }]}
         onPick={(value) => run(value as Parameters<DocxViewApi["tableOp"]>[0])}
+      />
+      <ActionMenu
+        label="Borders"
+        title="Set or clear the borders of the table or the current cell"
+        width={92}
+        groups={[
+          {
+            label: "Table",
+            items: [
+              ["tableAll", "All borders"],
+              ["tableOutside", "Outside borders"],
+              ["tableInside", "Inside borders"],
+              ["tableNone", "No borders"],
+              ["tableClear", "Clear direct borders"],
+            ],
+          },
+          {
+            label: "Cell",
+            items: [
+              ["cellAll", "All borders"],
+              ["cellNone", "No borders"],
+              ["cellClear", "Clear direct borders"],
+            ],
+          },
+        ]}
+        onPick={(value) => after(() => borderActions[value]?.())}
+      />
+      <ActionMenu
+        label={styleId ? "Style" : "Table style"}
+        title="Apply a table style defined in this document"
+        width={112}
+        groups={[
+          {
+            items: [
+              // Not "": ToolbarMenuSelect treats the empty value as the
+              // current selection and appends its own tick, which would
+              // contradict the ticks this menu draws itself. A style id is
+              // an XML name, so it can never collide with this sentinel.
+              [NO_TABLE_STYLE, tick(styleId === null, "No style")],
+              ...(api?.listTableStyles() ?? []).map(
+                ({ id, name }) => [id, tick(id === styleId, name)] as [string, string],
+              ),
+            ],
+          },
+        ]}
+        onPick={(value) => after(() => api?.setTableStyle(value === NO_TABLE_STYLE ? null : value))}
+      />
+      {/* The six checkboxes Word calls Table Style Options: they choose WHICH
+          of a style's conditional formats apply, so they are meaningless
+          without one. */}
+      {styleId !== null && (
+        <ActionMenu
+          label="Style options"
+          title="Choose which parts of the table style apply"
+          width={118}
+          groups={[
+            {
+              items: [
+                ["firstRow", tick(look?.firstRow, "Header row")],
+                ["lastRow", tick(look?.lastRow, "Total row")],
+                ["firstColumn", tick(look?.firstColumn, "First column")],
+                ["lastColumn", tick(look?.lastColumn, "Last column")],
+                ["bandedRows", tick(look?.bandedRows, "Banded rows")],
+                ["bandedCols", tick(look?.bandedCols, "Banded columns")],
+              ],
+            },
+          ]}
+          onPick={(value) => {
+            const key = value as keyof NonNullable<typeof look>;
+            if (!look) return;
+            after(() => api?.setTableLook({ [key]: !look[key] }));
+          }}
+        />
+      )}
+      <ActionMenu
+        label="AutoFit"
+        title="Choose how the table sizes its columns"
+        width={92}
+        groups={[
+          {
+            items: [
+              ["contents", "AutoFit to contents"],
+              ["window", "AutoFit to window"],
+              ["fixed", "Fixed column width"],
+            ],
+          },
+        ]}
+        onPick={(value) =>
+          after(() => {
+            if (value === "fixed") {
+              api?.setTableLayout("fixed");
+              return;
+            }
+            api?.setTableLayout("autofit");
+            // "To window" is autofit measured against a full-width target
+            // rather than against the content's own width.
+            if (value === "window") api?.setTableWidth("pct", 100);
+          })
+        }
+      />
+      <ActionMenu
+        label="Header rows"
+        title="Repeat leading rows at the top of every page"
+        width={112}
+        groups={[{ items: [["0", "None"], ["1", "First row"], ["2", "First two rows"]] }]}
+        onPick={(value) => after(() => api?.setTableHeaderRows(Number(value)))}
       />
       <Btn label="Delete table" title="Delete the current table" onClick={() => run("deleteTable")} />
     </span>
