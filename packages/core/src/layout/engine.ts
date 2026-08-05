@@ -6657,12 +6657,22 @@ class Engine {
     // or the NBSP-glued "Wej 7426" gets a spurious raise).
     const fudge = allow(margins.left, margins.right);
     const pad = inset(margins.left) + inset(margins.right) + fudge;
-    const minW = new Array<number>(nCols).fill(pad + 8);
-    const prefW = new Array<number>(nCols).fill(pad + 8);
+    // A column with no content demands its padding and nothing else. Word
+    // collapses an empty column to the rule plus the cell margins: in a pct
+    // autofit table it renders 4 device px at 192dpi next to a wide neighbour,
+    // and still only 22 when the table has width to spare. Seeding a content
+    // stub on top of `pad` let a freshly inserted column claim a share of the
+    // table it never earned.
+    const minW = new Array<number>(nCols).fill(pad);
+    const prefW = new Array<number>(nCols).fill(pad);
     // Hard (non-negotiable) minimum: the demand of nested tables only. Word
     // squeezes TEXT below its longest word when a cell must shrink, but never
     // squeezes a nested table below its own minimum (grid4 L2/L3).
     const hardMinW = new Array<number>(nCols).fill(0);
+    // Cells covering more than one column are held back and applied after the
+    // single-column pass, because their share depends on what the covered
+    // columns demand on their own. See spreadSpan below.
+    const spans: { at: number; span: number; min: number; pref: number; hard: number }[] = [];
     for (const row of tbl.rows) {
       let gridPos = 0;
       for (const cell of row.cells) {
@@ -6739,14 +6749,21 @@ class Engine {
             );
           }
           const span2 = Math.min(span, nCols - gridPos);
-          for (let k = 0; k < span2; k++) {
-            minW[gridPos + k] = Math.max(minW[gridPos + k], cellMin / span2);
-            prefW[gridPos + k] = Math.max(prefW[gridPos + k], cellPref / span2);
-            hardMinW[gridPos + k] = Math.max(hardMinW[gridPos + k], cellHard / span2);
+          if (span2 === 1) {
+            minW[gridPos] = Math.max(minW[gridPos], cellMin);
+            prefW[gridPos] = Math.max(prefW[gridPos], cellPref);
+            hardMinW[gridPos] = Math.max(hardMinW[gridPos], cellHard);
+          } else if (span2 > 1) {
+            spans.push({ at: gridPos, span: span2, min: cellMin, pref: cellPref, hard: cellHard });
           }
         }
         gridPos += span;
       }
+    }
+    for (const s of spans) {
+      spreadSpan(minW, pad, s.at, s.span, s.min);
+      spreadSpan(prefW, pad, s.at, s.span, s.pref);
+      spreadSpan(hardMinW, 0, s.at, s.span, s.hard);
     }
     return { minW, prefW, hardMinW, fudge };
   }
@@ -8437,6 +8454,45 @@ function computeColumns(sp: SectionProps, contentWidth: number): { colXs: number
     }
   }
   return { colXs, colWidths };
+}
+
+/**
+ * Give a spanning cell's demand to the columns it covers.
+ *
+ * Word hands the shortfall to those columns in proportion to what each already
+ * demands on its OWN (single-column) content, NOT in equal shares. Measured by
+ * exporting autofit tables (tblW pct, no tcW) through desktop Word at 192dpi:
+ *
+ *   "Status" spanning [ok | (empty)]         -> Word 96 / 10 device px
+ *   "Status" spanning [ok | alsoContent]     -> Word 39 / 182
+ *   long header spanning [ok | zz]           -> Word 310 / 254
+ *
+ * An equal split reproduces none of those; it renders the first two as 55/55
+ * and 299/299. Weighing by content means a column holding nothing of its own
+ * takes almost none of the span, which is what makes a freshly inserted (empty)
+ * column stay a sliver instead of stealing half of its neighbour's width.
+ *
+ * `floor` is the per-column padding already baked into `target`; it is excluded
+ * from the weights so an empty column weighs zero. When no covered column has
+ * content of its own there is nothing to weigh by, so the shortfall splits
+ * evenly.
+ */
+function spreadSpan(target: number[], floor: number, at: number, span: number, demand: number): void {
+  if (demand <= 0) return;
+  let covered = 0;
+  for (let k = 0; k < span; k++) covered += target[at + k];
+  const short = demand - covered;
+  if (short <= 0) return;
+  const weights: number[] = [];
+  let sum = 0;
+  for (let k = 0; k < span; k++) {
+    const weight = Math.max(0, target[at + k] - floor);
+    weights.push(weight);
+    sum += weight;
+  }
+  for (let k = 0; k < span; k++) {
+    target[at + k] += sum > 0 ? (short * weights[k]) / sum : short / span;
+  }
 }
 
 function resolveGrid(

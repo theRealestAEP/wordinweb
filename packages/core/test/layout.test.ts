@@ -1952,6 +1952,76 @@ describe("layout engine", () => {
     expect(w0).toBeLessThan(w1 + 40); // both stay near content size
   });
 
+  // Column widths of the first table on page 1, read off its vertical rules.
+  // The inserted column below holds no text, so its edges are the only way to
+  // measure it.
+  const autofitColumns = (tbl: string): number[] => {
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + p("after")) });
+    const xs: number[] = [];
+    const vertical = result.pages[0].items
+      .filter((i) => i.kind === "edge" && Math.abs(i.x1 - i.x2) < 0.01)
+      .map((i) => (i.kind === "edge" ? i.x1 : 0))
+      .sort((a, b) => a - b);
+    for (const x of vertical) {
+      if (xs.length === 0 || Math.abs(x - xs[xs.length - 1]) > 0.5) xs.push(x);
+    }
+    return xs.slice(1).map((x, i) => x - xs[i]);
+  };
+
+  const AUTOFIT_PR =
+    `<w:tblPr><w:tblW w:type="pct" w:w="100%"/><w:tblBorders>` +
+    ["top", "left", "bottom", "right", "insideH", "insideV"]
+      .map((s) => `<w:${s} w:val="single" w:color="auto" w:sz="4"/>`)
+      .join("") +
+    `</w:tblBorders></w:tblPr>`;
+  const GRID4 =
+    `<w:tblGrid><w:gridCol w:w="600"/><w:gridCol w:w="900"/>` +
+    `<w:gridCol w:w="600"/><w:gridCol w:w="6926"/></w:tblGrid>`;
+  const LONG = "A much longer description cell that should dominate the width";
+  const cells = (texts: string[]) =>
+    texts.map((t) => `<w:tc><w:p><w:r><w:t>${t}</w:t></w:r></w:p></w:tc>`).join("");
+
+  it("collapses a freshly inserted (empty) autofit column instead of splitting its neighbour", () => {
+    // Desktop Word, parity-tables with one column inserted after "Status",
+    // exported at 192dpi: the columns render 63 / 106 / 4 / 1030 device px.
+    // The empty column takes 4 — the rule plus the cell margins, no content
+    // stub — and "Status" keeps its full content width. Word lands on the
+    // same four numbers for a placeholder grid, an even grid and a grid that
+    // makes the empty column the widest, so the tblGrid plays no part.
+    const tbl =
+      `<w:tbl>${AUTOFIT_PR}${GRID4}` +
+      `<w:tr>${cells(["Key", "Status", "", "Description of the item"])}</w:tr>` +
+      `<w:tr>${cells(["A", "ok", "", LONG])}</w:tr></w:tbl>`;
+    const [, status, inserted, description] = autofitColumns(tbl);
+    // Word 106 / 4 device px = 53 / 2 css px.
+    expect(inserted).toBeLessThan(6);
+    expect(status).toBeGreaterThan(40);
+    expect(description).toBeGreaterThan(400);
+  });
+
+  it("gives a spanning cell's width to the covered columns by their own content, not evenly", () => {
+    // Word, same export: "Status" spanning an [ok | empty] pair renders
+    // 96 / 10 device px, and spanning [ok | alsoContent] renders 39 / 182.
+    // An even split of the spanned demand reproduces neither — it renders the
+    // first pair 55 / 55. The covered columns are weighed by what they hold on
+    // their own, so an empty one takes almost none of the span.
+    const spanned = (second: string, third: string) =>
+      `<w:tbl>${AUTOFIT_PR}${GRID4}` +
+      `<w:tr><w:tc><w:p><w:r><w:t>Key</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Status</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:p><w:r><w:t>Description of the item</w:t></w:r></w:p></w:tc></w:tr>` +
+      `<w:tr>${cells(["A", second, third, LONG])}</w:tr></w:tbl>`;
+
+    const [, ok, empty] = autofitColumns(spanned("ok", ""));
+    expect(empty).toBeLessThan(6);
+    expect(ok).toBeGreaterThan(40);
+
+    // When the second covered column holds the longer text it takes the larger
+    // share, so the weighting follows content in both directions.
+    const [, narrow, wide] = autofitColumns(spanned("ok", "alsoContent"));
+    expect(wide).toBeGreaterThan(narrow * 2);
+  });
+
   it("autofits a tcW-less grid to content like Word", () => {
     // Word only trusts a grid it wrote itself, and it writes tcW on every
     // cell. A plausible-looking grid with no tcW is ignored: Word sizes the
