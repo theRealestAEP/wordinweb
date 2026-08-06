@@ -80,9 +80,9 @@ const HAND_WRITTEN_CAPABILITIES: Record<
   resizeTableColumn: { category: "table", description: "Resize a table column.", required: ["cellRef", "boundary", "deltaPx"], optional: ["renderedWidths"] },
   moveTable: { category: "table", description: "Move a floating table.", required: ["cellRef", "xPx", "yPx", "preservePageStart", "pageDelta"] },
   removeDrawing: { category: "drawing", description: "Remove a drawing.", required: ["objectRef"] },
-  setMathLinear: { category: "math", description: "Replace an equation from linear math text.", required: ["blockRef", "mathText"] },
-  deleteMath: { category: "math", description: "Delete an equation.", required: ["blockRef"] },
-  moveMath: { category: "math", description: "Move an equation to a text position.", required: ["blockRef", "at"] },
+  setMathLinear: { category: "math", description: "Replace an equation from linear math text.", required: ["blockRef", "mathText"], optional: ["mathIndex"] },
+  deleteMath: { category: "math", description: "Delete an equation.", required: ["blockRef"], optional: ["mathIndex"] },
+  moveMath: { category: "math", description: "Move an equation to a text position.", required: ["blockRef", "at"], optional: ["mathIndex"] },
   ensureHeaderFooter: { category: "document", description: "Create a header or footer story.", required: ["hfKind"] },
   deleteComment: { category: "review", description: "Delete a comment thread.", required: ["commentId"] },
   insertBookmarkRange: { category: "insert", description: "Wrap a run range in a bookmark.", required: ["runRef", "name", "start", "end"] },
@@ -472,6 +472,9 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
   if (field === "rowIdx") return integer(0, 5000);
   if (field === "pageDelta") return integer(-500, 500);
   if (field === "index" || field === "nodeIndex") return integer(0, 100000);
+  // Which equation in the block, in document order. The cap matches the wire
+  // validate; anything past the block's last equation is a clean no-op.
+  if (field === "mathIndex") return integer(0, 1000);
   if (field === "start" || field === "end") return integer(0);
   if (field === "degrees") return number();
   if (field === "opacity") return number(0, 1);

@@ -506,4 +506,45 @@ describe("AgentDocument local tools", () => {
     const operationSchemas = (((editSchema?.properties as Record<string, unknown>).operations as Record<string, unknown>).items as Record<string, unknown>).anyOf;
     expect(operationSchemas).toHaveLength(INTENT_KINDS.length);
   });
+
+  it("edits the second equation in a paragraph by index", async () => {
+    // A paragraph can hold several equations, and inspection shows every one.
+    // mathIndex is what lets an agent edit the one it just read instead of
+    // always landing on the first.
+    const agent = AgentDocument.create();
+    const target = () => {
+      const read = agent.inspect({ kind: "read" });
+      if (!("blocks" in read) || read.blocks[0].type !== "paragraph") throw new Error("missing paragraph");
+      const paragraph = read.blocks[0];
+      const run = paragraph.runs.find((candidate) => /^run:\d+$/.test(candidate.ref));
+      if (!run) throw new Error("no editable run");
+      return { blockRef: paragraph.ref, runRef: run.ref };
+    };
+    await agent.edit({
+      revision: agent.revision,
+      operations: [{ kind: "insertText", at: { ...target(), offset: 0 }, text: "Both hold:" }],
+    });
+    for (const mathText of ["c+d", "a+b"]) {
+      await agent.edit({ revision: agent.revision, operations: [{ kind: "insertMath", runRef: target().runRef, mathText }] });
+    }
+    const { blockRef } = target();
+    const equationsOf = () => DocxDocument.load(agent.save()).pkg.text("word/document.xml").split("<m:oMath>").slice(1);
+    expect(equationsOf()).toHaveLength(2);
+
+    // Each insert lands ahead of the last, so document order is "a+b" then
+    // "c+d" — index 1 names "c+d".
+    await agent.edit({ revision: agent.revision, operations: [{ kind: "setMathLinear", blockRef, mathIndex: 1, mathText: "z^2" }] });
+    const equations = equationsOf();
+    expect(equations[0]).toContain("<m:t>a+b</m:t>");
+    expect(equations[1]).toContain("<m:t>z</m:t>");
+    expect(equations[1]).not.toContain("c+d");
+
+    // Omitting the index still means the first equation.
+    await agent.edit({ revision: agent.revision, operations: [{ kind: "setMathLinear", blockRef, mathText: "q" }] });
+    expect(equationsOf()[0]).toContain("<m:t>q</m:t>");
+
+    // The schema takes the field and rejects a negative one.
+    expect(validateAgentOperationShape({ kind: "deleteMath", blockRef: "block:1", mathIndex: 2 })).toBeNull();
+    expect(validateAgentOperationShape({ kind: "deleteMath", blockRef: "block:1", mathIndex: -1 })).toContain("minimum");
+  });
 });

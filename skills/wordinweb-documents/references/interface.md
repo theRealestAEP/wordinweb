@@ -801,9 +801,14 @@ of the style's conditional formats are used.
 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
-| `setMathLinear` | Replace an equation | `blockRef`, `mathText` |
-| `deleteMath` | Delete an equation | `blockRef` |
-| `moveMath` | Move an equation | `blockRef`, `at` |
+| `setMathLinear` | Replace an equation | `blockRef`, `mathText`, `mathIndex` |
+| `deleteMath` | Delete an equation | `blockRef`, `mathIndex` |
+| `moveMath` | Move an equation | `blockRef`, `at`, `mathIndex` |
+
+A block can hold more than one equation. `mathIndex` picks which one, counting
+from 0 in document order; omit it for the first. Inspection lists a block's
+equations in that same order, so the nth equation you read is the nth you can
+edit. An index past the last equation changes nothing.
 
 `mathText` is a linear form of the equation. Scripts are `x^2` and `a_i`, a
 fraction is `{a+b}/{2c}`, a root is `√{x}` or `√[3]{x}` with an index, and
