@@ -507,6 +507,46 @@ describe("autofit and fixed layout interact", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Percentage width against the cell margins
+// ---------------------------------------------------------------------------
+
+describe("percentage table width", () => {
+  // A4 with 1in margins: an 11906tw page less 2880tw of margin leaves a
+  // 9026tw text column, 601.73px at the engine's 15 twips per pixel.
+  const CONTENT_WIDTH = (11906 - 2 * 1440) / 15;
+  const SECTION =
+    `<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+  /** 10pt left and right cell margins, the pair Word's default table uses. */
+  const CELL_MAR =
+    `<w:tblCellMar><w:left w:w="200" w:type="dxa"/><w:right w:w="200" w:type="dxa"/></w:tblCellMar>`;
+
+  const totalWidth = (doc: DocxDocument): number =>
+    renderedWidths(layout(doc)).reduce((a, b) => a + b, 0);
+
+  for (const mode of ["autofit", "fixed"] as const) {
+    it(`fits the cell margins inside a ${mode} 90% table`, () => {
+      // Word paints 0.90 x the text column and insets the cell text within
+      // it — the margins do not widen the table box. (A fixed-layout table at
+      // exactly 100% is Word's "AutoFit to window" and is the one case that
+      // does add them; layout.test.ts pins it from nccih p14.)
+      const tblPr =
+        `<w:tblW w:w="4500" w:type="pct"/><w:tblLayout w:type="${mode}"/>` + CELL_MAR;
+      const doc = load(tableXml(1, 2, tblPr, 3000) + SECTION);
+      expect(totalWidth(doc)).toBeCloseTo(0.9 * CONTENT_WIDTH, 2);
+    });
+  }
+
+  it("keeps a dxa width at its declared size whatever the margins are", () => {
+    const doc = load(tableXml(1, 2, `<w:tblW w:w="6000" w:type="dxa"/>`, 3000) + SECTION);
+    const before = totalWidth(doc);
+    expect(before).toBeCloseTo(6000 / 15, 2);
+    setTableCellMargins(doc, findT(docRoot(doc), "r0c0"), "table", { left: 10, right: 10 });
+    expect(totalWidth(doc)).toBeCloseTo(before, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Cell margins
 // ---------------------------------------------------------------------------
 

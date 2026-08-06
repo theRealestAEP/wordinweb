@@ -8885,14 +8885,20 @@ function resolveGrid(
   // the right margin, not shrunk to fit).
   const fixedOverflow = overflowAllowed && tbl.props.layout === "fixed";
   const cap = fixedOverflow ? Number.POSITIVE_INFINITY : available;
-  // Word measures a body-level FIXED-layout table's PCT width against the
-  // text column PLUS the table's own left+right cell margins: the table box
-  // starts a cell margin left of the text column so the first/last column
-  // TEXT aligns with the column edges while the borders overhang. Measured
-  // on nccih p14 (tblW 5000 pct, 12960tw landscape column, default 108tw
-  // margins): Word renders the authored 13176tw = 12960 + 216 grid raw,
-  // rules at margin - 7.2px and margin + 7.2px.
-  const pctBase = fixedOverflow ? available + edgeCellMargins : available;
+  // A tblW pct width is pct × the text column with the cell margins INSIDE
+  // that box. Measured on A4 with 1in margins (a 1203px column at 192dpi),
+  // tblW 4500 pct and 10pt left + right cell margins: Word paints the table
+  // 1083px = 0.90 × 1203, NOT 0.90 × (1203 + the 53.3px of margins).
+  //
+  // tblW 5000 pct on a fixed-layout table is Word's "AutoFit to window", and
+  // that one alone adds the margins: the box starts a cell margin left of the
+  // text column so the first/last column TEXT aligns with the column edges
+  // while the borders overhang. Measured on nccih p14 (tblW 5000 pct, 12960tw
+  // landscape column, default 108tw margins): Word renders the authored
+  // 13176tw = 12960 + 216 grid raw, rules at margin - 7.2px and margin +
+  // 7.2px.
+  const fitToWindow = fixedOverflow && tbl.props.widthPct === 1;
+  const pctBase = fitToWindow ? available + edgeCellMargins : available;
   const target = Math.min(
     cap,
     tbl.props.width ?? (tbl.props.widthPct !== undefined ? tbl.props.widthPct * pctBase : available),
