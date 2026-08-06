@@ -2460,6 +2460,14 @@ export class DocxEditor {
       document.removeEventListener("mouseup", onUp);
       this.suppressNextMouseUp = false;
       if (erased.size === 0) return;
+      // Erasing rides no wire form. deleteSelectedImage emits removeDrawing
+      // for ONE addressed drawing; a stroke sweep removes several at once,
+      // and each removal shifts the content indices of any later stroke in
+      // the same run, so the addresses would have to be recomputed between
+      // emissions. Honest no-op until that exists. The Draw ribbon is gated
+      // off in a room, but setDrawingTool is public api — which is exactly
+      // how the model3D/onlineVideo/embeddedObject forks were reachable.
+      if (this.host.onIntent && this.host.doc.stableIds) return;
       this.host.history?.checkpoint();
       let changed = false;
       for (const src of erased) changed = removeDrawingRun(this.host.doc, src) || changed;
@@ -2889,6 +2897,9 @@ export class DocxEditor {
   private deleteSelectedInkGroup(): void {
     const selected = this.selectedInkGroup;
     if (!selected) return;
+    // Several drawings in one gesture, with no wire form — same reasoning as
+    // the eraser above.
+    if (this.host.onIntent && this.host.doc.stableIds) return;
     this.host.history?.checkpoint();
     this.deselectInkGroup();
     let changed = false;
