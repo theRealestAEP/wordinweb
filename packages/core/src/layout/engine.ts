@@ -3092,7 +3092,7 @@ class Engine {
           }
           return;
         }
-        // PDF-measured (wild2-legal p1, wild2-med-phase23 p1): the empty
+        // PDF-measured (wild2-legal-ca-agreement p1, wild2-med-phase23 p1): the empty
         // paragraph that OPENS the document can take two slots in Word.
         // Before a table this reserves two mark lines for pagination; a
         // negatively-indented table visually overlaps the second line (handled
@@ -3103,7 +3103,7 @@ class Engine {
         // + 6 after) + ascent (179.05), while its continuation pages start
         // exactly at bodyTop (140.30). An empty opener before a paragraph
         // under a NORMAL header takes ONE slot (wild-athabasca p1), and the
-        // same construct mid-flow takes ONE line (wild2-legal's p15/p23
+        // same construct mid-flow takes ONE line (wild2-legal-ca-agreement's p14/p22
         // signature tables match at a single mark line) - gate on the true
         // document start: first page, nothing placed yet.
         const docStartEmpty =
@@ -3143,7 +3143,7 @@ class Engine {
           this.y += this.measurer.metrics(
             fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"),
           ).lineHeight;
-          // The table case is pinned WITHOUT the after (wild2-legal's 2 x 13.8
+          // The table case is pinned WITHOUT the after (wild2-legal-ca-agreement's 2 x 13.8
           // exactly); the paragraph case needs it (phase23's 2 x 19.4).
           if (!beforeTable) this.y += paraProps.spacingAfter ?? 0;
         }
@@ -3236,7 +3236,7 @@ class Engine {
       const code = lvl.text.codePointAt(0) ?? 0;
       // Word sizes the bullet's LINE from the label's true (fallback) face
       // while the painted glyph maps through Unicode substitution. Face
-      // routing measured from Word PDFs (phase23 + wild2-legal p3): a literal
+      // routing measured from Word PDFs (phase23 + wild2-legal-ca-agreement p2): a literal
       // Unicode bullet declared in a symbol-encoded face falls back to
       // Microsoft JhengHei (17.0pt lines at 11pt); a PUA bullet in Symbol
       // keeps Symbol's hhea 1.2734em (14.0pt lines among 13.5pt Calibri;
