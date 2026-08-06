@@ -1,4 +1,4 @@
-import { DocxDocument } from "../docx.js";
+import { DocxDocument, NotePart } from "../docx.js";
 import { XmlElement, cloneXml, localName } from "../xml.js";
 
 /**
@@ -826,8 +826,12 @@ function applyReject(doc: DocxDocument, ref: RevisionRef): boolean {
  * if the element could not be located.
  */
 export function acceptRevision(doc: DocxDocument, ref: RevisionRef): boolean {
+  const parts = doc.notePartsHolding(ref.el);
   const ok = applyAccept(doc, ref);
-  if (ok) doc.refresh();
+  if (ok) {
+    doc.markNotePartsChanged(parts);
+    doc.refresh();
+  }
   return ok;
 }
 
@@ -838,8 +842,12 @@ export function acceptRevision(doc: DocxDocument, ref: RevisionRef): boolean {
  * previous properties back. Returns false if not located.
  */
 export function rejectRevision(doc: DocxDocument, ref: RevisionRef): boolean {
+  const parts = doc.notePartsHolding(ref.el);
   const ok = applyReject(doc, ref);
-  if (ok) doc.refresh();
+  if (ok) {
+    doc.markNotePartsChanged(parts);
+    doc.refresh();
+  }
   return ok;
 }
 
@@ -852,18 +860,30 @@ export function rejectRevision(doc: DocxDocument, ref: RevisionRef): boolean {
  * be absorbed and silently skipped). Returns how many revisions were applied.
  */
 export function acceptAllRevisions(doc: DocxDocument): number {
-  const refs = collectRevisions(doc);
-  let n = 0;
-  for (let i = refs.length - 1; i >= 0; i--) if (applyAccept(doc, refs[i])) n++;
-  if (n > 0) doc.refresh();
-  return n;
+  return applyToAll(doc, applyAccept);
 }
 
 export function rejectAllRevisions(doc: DocxDocument): number {
+  return applyToAll(doc, applyReject);
+}
+
+function applyToAll(doc: DocxDocument, apply: (doc: DocxDocument, ref: RevisionRef) => boolean): number {
   const refs = collectRevisions(doc);
+  const notes = new Set<NotePart>();
   let n = 0;
-  for (let i = refs.length - 1; i >= 0; i--) if (applyReject(doc, refs[i])) n++;
-  if (n > 0) doc.refresh();
+  for (let i = refs.length - 1; i >= 0; i--) {
+    // Ask which part holds the revision while it is still attached; keep the
+    // answer only when the mutation lands, so a part nothing changed in is
+    // never re-serialized.
+    const held = doc.notePartsHolding(refs[i].el);
+    if (!apply(doc, refs[i])) continue;
+    n++;
+    for (const part of held) notes.add(part);
+  }
+  if (n > 0) {
+    doc.markNotePartsChanged([...notes]);
+    doc.refresh();
+  }
   return n;
 }
 

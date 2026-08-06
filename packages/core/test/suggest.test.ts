@@ -306,3 +306,93 @@ describe("suggesting mode — review all", () => {
     expect(doc.sections[0].blocks.filter((b) => b.type === "paragraph")).toHaveLength(1);
   });
 });
+
+describe("reviewing a revision inside a note part", () => {
+  // A revision authored by Word inside footnotes.xml / endnotes.xml. The
+  // package is loaded whole, so neither part starts dirty — the only thing
+  // that can put the reviewed part back on disk is the review itself.
+  const notesPart = (kind: "footnote" | "endnote", inner: string) => `<?xml version="1.0"?>
+<w:${kind}s xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:${kind} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:${kind}>
+  <w:${kind} w:id="1"><w:p>${inner}</w:p></w:${kind}>
+</w:${kind}s>`;
+
+  const NOTE_RELS = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>
+</Relationships>`;
+
+  const INSERTION = `<w:r><w:t xml:space="preserve">See </w:t></w:r>` +
+    `<w:ins w:id="90" w:author="Word" w:date="2026-07-12T00:00:00Z"><w:r><w:t>Smith 2024</w:t></w:r></w:ins>`;
+  const DELETION = `<w:r><w:t xml:space="preserve">See </w:t></w:r>` +
+    `<w:del w:id="91" w:author="Word" w:date="2026-07-12T00:00:00Z"><w:r><w:delText>Jones 2019</w:delText></w:r></w:del>`;
+
+  const loadWithNotes = (footnotes: string, endnotes: string, body = p("Body text")) =>
+    DocxDocument.load(makeDocx({
+      "word/document.xml": wrapDocument(body),
+      "word/_rels/document.xml.rels": NOTE_RELS,
+      "word/footnotes.xml": footnotes,
+      "word/endnotes.xml": endnotes,
+    }));
+
+  const savedPart = (doc: DocxDocument, part: string) =>
+    DocxDocument.load(doc.save()).pkg.text(part)!;
+
+  /** The one revision of `kind` living inside the note part `part` names. */
+  const noteRevision = (doc: DocxDocument, part: "footnotes" | "endnotes") =>
+    collectRevisions(doc).find((ref) => doc.notePartsHolding(ref.el).includes(part))!;
+
+  it("accepting a w:ins inside a footnote leaves footnotes.xml clean of it", () => {
+    const doc = loadWithNotes(notesPart("footnote", INSERTION), notesPart("endnote", INSERTION));
+    expect(acceptRevision(doc, noteRevision(doc, "footnotes"))).toBe(true);
+    const xml = savedPart(doc, "word/footnotes.xml");
+    expect(xml).not.toContain("<w:ins");
+    expect(xml).toContain("Smith 2024");
+  });
+
+  it("rejecting a w:del inside an endnote restores the text in endnotes.xml", () => {
+    const doc = loadWithNotes(notesPart("footnote", DELETION), notesPart("endnote", DELETION));
+    expect(rejectRevision(doc, noteRevision(doc, "endnotes"))).toBe(true);
+    const xml = savedPart(doc, "word/endnotes.xml");
+    expect(xml).not.toContain("<w:del");
+    expect(xml).not.toContain("delText");
+    expect(xml).toContain("<w:t>Jones 2019</w:t>");
+  });
+
+  it("an unrelated body accept leaves untouched note parts byte-identical", () => {
+    const footnotes = notesPart("footnote", `<w:r><w:t>A plain footnote.</w:t></w:r>`);
+    const endnotes = notesPart("endnote", `<w:r><w:t>A plain endnote.</w:t></w:r>`);
+    const doc = loadWithNotes(footnotes, endnotes, p("Hello world"));
+    insertSuggestedText(doc, firstT(doc), 5, " brave", meta());
+    doc.refresh();
+    expect(acceptRevision(doc, collectRevisions(doc)[0])).toBe(true);
+    expect(finalText(doc, 0)).toBe("Hello brave world");
+    expect(savedPart(doc, "word/footnotes.xml")).toBe(footnotes);
+    expect(savedPart(doc, "word/endnotes.xml")).toBe(endnotes);
+  });
+
+  it("accept-all across body, footnote and endnote re-serializes all three", () => {
+    const doc = loadWithNotes(notesPart("footnote", INSERTION), notesPart("endnote", INSERTION), p("Hello world"));
+    insertSuggestedText(doc, firstT(doc), 5, " brave", meta());
+    doc.refresh();
+    expect(acceptAllRevisions(doc)).toBe(3);
+    expect(collectRevisions(doc)).toHaveLength(0);
+    const saved = DocxDocument.load(doc.save());
+    for (const part of ["word/document.xml", "word/footnotes.xml", "word/endnotes.xml"]) {
+      expect(saved.pkg.text(part), part).not.toContain("<w:ins");
+    }
+    expect(finalText(saved, 0)).toBe("Hello brave world");
+    expect(saved.pkg.text("word/footnotes.xml")).toContain("Smith 2024");
+  });
+
+  it("reject-all restores the deletions in both note parts", () => {
+    const doc = loadWithNotes(notesPart("footnote", DELETION), notesPart("endnote", DELETION));
+    expect(rejectAllRevisions(doc)).toBe(2);
+    const saved = DocxDocument.load(doc.save());
+    for (const part of ["word/footnotes.xml", "word/endnotes.xml"]) {
+      expect(saved.pkg.text(part), part).toContain("<w:t>Jones 2019</w:t>");
+      expect(saved.pkg.text(part), part).not.toContain("<w:del");
+    }
+  });
+});

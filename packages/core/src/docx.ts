@@ -109,6 +109,9 @@ const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
   };
 })();
 
+/** The two note parts a document can carry — see notePartsHolding. */
+export type NotePart = "footnotes" | "endnotes";
+
 /**
  * A fully parsed .docx: sections of blocks, styles, numbering, theme, and
  * header/footer parts, with helpers to resolve effective formatting.
@@ -1489,13 +1492,35 @@ export class DocxDocument {
    * re-serializes footnotes.xml / endnotes.xml. Called by the editor after a
    * text edit; a no-op for body/header/footer targets. */
   markDirtyIfFootnote(t: XmlElement): void {
-    const contains = (el: XmlElement): boolean => {
-      if (el === t) return true;
-      for (const c of el.children) if (contains(c)) return true;
+    if (this.footnotesDirty && this.endnotesDirty) return;
+    this.markNotePartsChanged(this.notePartsHolding(t));
+  }
+
+  /**
+   * Which note parts hold `el` right now. An operation that DETACHES `el` —
+   * accepting or rejecting a revision, for one — has to ask BEFORE it mutates
+   * and mark the answer afterwards: a detached element belongs to no part, so
+   * a containment test run after the fact reports nothing and save() then
+   * leaves the stale footnotes.xml / endnotes.xml in the package.
+   */
+  notePartsHolding(el: XmlElement): NotePart[] {
+    const contains = (root: XmlElement): boolean => {
+      if (root === el) return true;
+      for (const c of root.children) if (contains(c)) return true;
       return false;
     };
-    if (this.footnotesRoot && !this.footnotesDirty && contains(this.footnotesRoot)) this.footnotesDirty = true;
-    if (this.endnotesRoot && !this.endnotesDirty && contains(this.endnotesRoot)) this.endnotesDirty = true;
+    const parts: NotePart[] = [];
+    if (this.footnotesRoot && contains(this.footnotesRoot)) parts.push("footnotes");
+    if (this.endnotesRoot && contains(this.endnotesRoot)) parts.push("endnotes");
+    return parts;
+  }
+
+  /** Flag the given note parts dirty, so save() re-serializes exactly those. */
+  markNotePartsChanged(parts: readonly NotePart[]): void {
+    for (const part of parts) {
+      if (part === "footnotes") this.markFootnotesChanged();
+      else this.markEndnotesChanged();
+    }
   }
 
   /** The mutable XML roots (document body, related modeled parts, settings).
