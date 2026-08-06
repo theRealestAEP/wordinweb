@@ -499,12 +499,20 @@ describe("AgentDocument local tools", () => {
     const composeSchema = agent.tools().find((tool) => tool.name === "word_document_compose")?.inputSchema;
     expect(composeSchema).toMatchObject({ type: "object", additionalProperties: false });
     const inspectSchema = agent.tools().find((tool) => tool.name === "word_document_inspect")?.inputSchema;
-    expect(inspectSchema).toMatchObject({ anyOf: expect.any(Array) });
-    expect((inspectSchema?.anyOf as Array<Record<string, unknown>>)).toHaveLength(6);
-    expect((inspectSchema?.anyOf as Array<Record<string, unknown>>).every((schema) => schema.additionalProperties === false)).toBe(true);
+    expect(inspectSchema).toMatchObject({ type: "object", additionalProperties: false, required: ["kind"] });
+    expect((inspectSchema?.properties as Record<string, Record<string, unknown>>).kind.enum).toHaveLength(6);
     const editSchema = agent.tools().find((tool) => tool.name === "word_document_edit")?.inputSchema;
     const operationSchemas = (((editSchema?.properties as Record<string, unknown>).operations as Record<string, unknown>).items as Record<string, unknown>).anyOf;
     expect(operationSchemas).toHaveLength(INTENT_KINDS.length);
+    // The Messages API rejects anyOf/oneOf/allOf at the TOP level of
+    // input_schema (nested, like the operations items above, is fine). Every
+    // advertised tool must satisfy that, or the first real request 400s.
+    for (const tool of agent.tools()) {
+      expect(tool.inputSchema.type, `${tool.name} root type`).toBe("object");
+      for (const key of ["anyOf", "oneOf", "allOf"]) {
+        expect(tool.inputSchema[key], `${tool.name} top-level ${key}`).toBeUndefined();
+      }
+    }
   });
 
   it("edits the second equation in a paragraph by index", async () => {
