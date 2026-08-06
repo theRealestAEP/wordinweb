@@ -4,7 +4,7 @@ import { computeFieldResults, applyFieldResults, updateFields } from "../src/edi
 import { layoutDocument } from "../src/layout/engine.js";
 import { ApproxMeasurer } from "../src/layout/measure.js";
 import { Block } from "../src/model.js";
-import { serializeXml } from "../src/xml.js";
+import { XmlElement, localName, serializeXml } from "../src/xml.js";
 import { makeDocx, wrapDocument } from "./helpers.js";
 
 const measurer = new ApproxMeasurer();
@@ -297,5 +297,92 @@ describe("stale page-break hints", () => {
     const changed = applyFieldResults(doc, ["1"]);
     expect(changed).toBe(false);
     expect(documentXml(doc)).toContain("lastRenderedPageBreak");
+  });
+});
+
+describe("layout resolves body STYLEREF too", () => {
+  const heading = (text: string) =>
+    `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+
+  /** Rewrite the text of the w:t carrying `from`, the way editing does. */
+  function retitle(doc: DocxDocument, from: string, to: string): void {
+    const walk = (el: XmlElement): boolean => {
+      if (localName(el.name) === "t" && el.text === from) {
+        el.text = to;
+        return true;
+      }
+      return el.children.some(walk);
+    };
+    expect(walk(doc.docRoot), `w:t "${from}"`).toBe(true);
+    doc.refresh();
+  }
+
+  /** Everything the layout paints, in page order. Layout emits one item per
+   * word, so the pieces are joined back into the string a reader sees. */
+  function painted(doc: DocxDocument): string {
+    return layoutDocument(doc, { measurer })
+      .pages.flatMap((page) =>
+        page.items.filter((item) => item.kind === "text").map((item) => (item.kind === "text" ? item.text : "")),
+      )
+      .join("");
+  }
+
+  it("paints the live value rather than the stale cache", () => {
+    // The SCREEN was the gap: the update pass has recomputed body STYLEREF
+    // since the fields engine landed, but layout had no resolver for it and
+    // painted whatever the file cached — so opening a document showed one
+    // value and saving it wrote another.
+    const doc = load(
+      heading("Chapter One") +
+        `<w:p>${field('STYLEREF "Heading 1"', "STALE")}</w:p>` +
+        heading("Chapter Two") +
+        `<w:p>${field("STYLEREF Heading1", "STALE")}</w:p>`,
+    );
+    const text = painted(doc);
+    expect(text).toContain("Chapter One");
+    expect(text).toContain("Chapter Two");
+    expect(text).not.toContain("STALE");
+  });
+
+  it("agrees with the update pass, field for field", () => {
+    // The two paths share one rule (src/style-ref.ts). This is the assertion
+    // that keeps them sharing it: what the reader sees IS what a save writes.
+    const doc = load(
+      heading("Chapter One") +
+        `<w:p>${field('STYLEREF "Heading 1"', "STALE")}</w:p>` +
+        heading("Chapter Two") +
+        `<w:p>${field('STYLEREF "Heading 1"', "STALE")}</w:p>`,
+    );
+    // Each title is painted twice: once by the heading, once by the field
+    // that follows it.
+    expect(painted(doc)).toBe("Chapter OneChapter OneChapter TwoChapter Two");
+    updateFields(doc);
+    expect(caches(doc)).toEqual(["Chapter One", "Chapter Two"]);
+  });
+
+  it("keeps the cache for a field before any paragraph of the style", () => {
+    const doc = load(`<w:p>${field('STYLEREF "Heading 1"', "kept")}</w:p>` + heading("Chapter One"));
+    expect(painted(doc)).toContain("kept");
+  });
+
+  it("keeps the cache for a style the document does not have", () => {
+    const doc = load(heading("Chapter One") + `<w:p>${field('STYLEREF "Caption"', "kept")}</w:p>`);
+    expect(painted(doc)).toContain("kept");
+  });
+
+  it("resolves against the nearest heading, not the first or the last", () => {
+    const doc = load(
+      heading("One") + heading("Two") + `<w:p>${field('STYLEREF "Heading 1"', "STALE")}</w:p>` + heading("Three"),
+    );
+    expect(painted(doc)).toBe("OneTwoTwoThree");
+  });
+
+  it("re-resolves after the referenced heading is edited", () => {
+    // The stale-cache bug in miniature: change the heading, and the field
+    // must follow on the next layout without any update pass at all.
+    const doc = load(heading("Chapter One") + `<w:p>${field('STYLEREF "Heading 1"', "STALE")}</w:p>`);
+    expect(painted(doc)).toBe("Chapter OneChapter One");
+    retitle(doc, "Chapter One", "Chapter Nine");
+    expect(painted(doc)).toBe("Chapter NineChapter Nine");
   });
 });

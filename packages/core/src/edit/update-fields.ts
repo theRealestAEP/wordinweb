@@ -1,7 +1,8 @@
 import { DocxDocument } from "../docx.js";
 import { FieldContext, resolveField } from "../layout/inline.js";
 import { LayoutResult } from "../layout/types.js";
-import { Block, FieldContent, Paragraph, Run } from "../model.js";
+import { bodyStyleRefText } from "../style-ref.js";
+import { Block, FieldContent, Run } from "../model.js";
 import { XmlElement, attr, localName } from "../xml.js";
 
 /**
@@ -21,9 +22,15 @@ import { XmlElement, attr, localName } from "../xml.js";
  *    rewrite, document-order SEQ counters), so re-deriving them here would be
  *    a second implementation to keep equal to the first. The rendered text of
  *    the field's own layout items IS the answer.
- *  - DATE, TIME, FILENAME, AUTHOR and body STYLEREF are computed here, because
- *    each needs something the engine does not have: an injected clock, the
- *    host's file name and author, or a document-order style scan.
+ *  - DATE, TIME and FILENAME/AUTHOR are computed here: each needs something
+ *    the engine does not have, an injected clock or the host's file name and
+ *    author.
+ *  - Body STYLEREF is computed here too, but for a different reason. Layout
+ *    resolves it as well, and the two share the rule (src/style-ref.ts) rather
+ *    than one harvesting the other, because this pass has to work with NO
+ *    layout at all — `layout` is optional, and a caller that omits it should
+ *    still get its STYLEREFs refreshed. Sharing the function is what keeps the
+ *    painted text and the written cache equal.
  *
  * Every other instruction keeps its cached result untouched. That is not a
  * gap to fill later — an instruction this engine cannot evaluate (INCLUDETEXT,
@@ -141,74 +148,6 @@ function harvestFieldText(layout: LayoutResult): Map<Run, string> {
     for (const [run, text] of onThisPage) if (!harvested.has(run)) harvested.set(run, text);
   }
   return harvested;
-}
-
-// ---------------------------------------------------------------------------
-// Body STYLEREF
-// ---------------------------------------------------------------------------
-
-/** A paragraph's plain text, for a STYLEREF that names its style. */
-function paragraphText(para: Paragraph): string {
-  let out = "";
-  for (const child of para.children) {
-    for (const run of child.type === "run" ? [child] : child.runs) {
-      for (const content of run.content) {
-        if (content.kind === "text") out += content.text;
-        else if (content.kind === "tab") out += "\t";
-      }
-    }
-  }
-  return out;
-}
-
-/**
- * Resolve each body STYLEREF against the nearest paragraph of the named style
- * at or before it, in document order — Word's rule outside a header, where
- * there is no page for the page-relative rule to work from.
- *
- * The style is named by its display name ("Heading 1") or its styleId
- * ("Heading1"), case-insensitively, matching the header resolver in the
- * layout engine.
- */
-function bodyStyleRefText(doc: DocxDocument): Map<FieldContent, string> {
-  const resolved = new Map<FieldContent, string>();
-  /** Lower-cased style name AND id → the last paragraph text seen for it. */
-  const latest = new Map<string, string>();
-
-  const record = (para: Paragraph): void => {
-    const styleId = para.props.styleId ?? doc.styles.defaultParagraphStyle;
-    if (!styleId) return;
-    const text = paragraphText(para);
-    if (!text) return;
-    latest.set(styleId.toLowerCase(), text);
-    const name = doc.styles.byId.get(styleId)?.name;
-    if (name) latest.set(name.toLowerCase(), text);
-  };
-
-  const visitBlocks = (blocks: Block[]): void => {
-    for (const block of blocks) {
-      if (block.type !== "paragraph") {
-        for (const row of block.rows) for (const cell of row.cells) visitBlocks(cell.blocks);
-        continue;
-      }
-      // A STYLEREF inside the paragraph resolves against what came BEFORE it,
-      // so read the fields first and only then let this paragraph contribute.
-      for (const child of block.children) {
-        for (const run of child.type === "run" ? [child] : child.runs) {
-          for (const content of run.content) {
-            if (content.kind !== "field" || keywordOf(content.instruction) !== "STYLEREF") continue;
-            const m = /^STYLEREF\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(content.instruction.trim());
-            const name = (m?.[1] ?? m?.[2] ?? "").toLowerCase();
-            const text = name ? latest.get(name) : undefined;
-            if (text !== undefined) resolved.set(content, text);
-          }
-        }
-      }
-      record(block);
-    }
-  };
-  for (const section of doc.sections) visitBlocks(section.blocks);
-  return resolved;
 }
 
 // ---------------------------------------------------------------------------
