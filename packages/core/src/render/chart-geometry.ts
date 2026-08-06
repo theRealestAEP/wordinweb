@@ -108,30 +108,57 @@ function niceStep(rough: number): number {
 }
 
 /**
+ * How far past the data Word's automatic scale reaches before it rounds out to
+ * a major unit: 5% of the data range, added at whichever end the data runs
+ * past zero. Measured over six single-series column charts that desktop Word
+ * rendered at its defaults (probe-charts-autoscale.docx). Data maxima of 9.6,
+ * 10, 10.4, 3.7, 47 and 0.85 gave axis maxima of 12, 12, 12, 4, 50 and 0.9.
+ * The rule pins all six.
+ */
+const AXIS_HEADROOM = 0.05;
+
+/**
+ * Interval count the automatic major unit divides the padded span by.
+ *
+ * APPROXIMATE — pending probes. The measurements pin the resulting major units
+ * but not the rule that produces them. The six charts above land between 6 and
+ * 10 intervals, and a divisor of 10 ahead of the 1/2/2.5/5 ladder reproduces
+ * every measured (axis max, major unit) pair: 12 by 2 three times, then 4 by
+ * 0.5, 50 by 5 and 0.9 by 0.1. Because niceStep rounds up, 10 acts as a
+ * ceiling on the interval count rather than a target — those six charts come
+ * out at 6, 6, 6, 8, 10 and 9 intervals.
+ */
+const AXIS_TARGET_INTERVALS = 10;
+
+/**
  * Choose the value-axis scale.
  *
- * The automatic branch keeps zero on the axis and steps by a nice interval,
- * which is what Word does for the ordinary case of a chart whose data spans
- * its own magnitude. Explicit c:min/c:max/c:majorUnit always win — that is how
- * a Word user pins a scale, and it is the only part of this that the file
- * states outright.
+ * The automatic branch keeps zero on the axis, pads the data by AXIS_HEADROOM
+ * and rounds out to a nice interval, which is what Word does for the ordinary
+ * case of a chart whose data spans its own magnitude. Explicit
+ * c:min/c:max/c:majorUnit always win — that is how a Word user pins a scale,
+ * and it is the only part of this that the file states outright.
  */
 export function axisScale(values: number[], axis?: ChartAxis): AxisScale {
   const finite = values.filter((value) => Number.isFinite(value));
   const rawLow = Math.min(0, ...finite);
   const rawHigh = Math.max(0, ...finite);
-  const span = rawHigh - rawLow || 1;
-  const step = axis?.majorUnit && axis.majorUnit > 0 ? axis.majorUnit : niceStep(span / 5);
-  let low = axis?.min ?? Math.floor(rawLow / step) * step;
-  let high = axis?.max ?? Math.ceil(rawHigh / step) * step;
-  // A value sitting exactly on the top of the scale reads as clipped, so Word
-  // opens another interval above it. The same applies below zero.
-  if (axis?.max === undefined && rawHigh > 0 && Math.abs(high - rawHigh) < step / 1000) high += step;
-  if (axis?.min === undefined && rawLow < 0 && Math.abs(low - rawLow) < step / 1000) low -= step;
-  if (high <= low) high = low + step;
+  const headroom = (rawHigh - rawLow) * AXIS_HEADROOM;
+  const paddedLow = rawLow < 0 ? rawLow - headroom : rawLow;
+  const paddedHigh = rawHigh > 0 ? rawHigh + headroom : rawHigh;
+  const span = paddedHigh - paddedLow || 1;
+  const step = axis?.majorUnit && axis.majorUnit > 0
+    ? axis.majorUnit
+    : niceStep(span / AXIS_TARGET_INTERVALS);
+  // Multiplying a step back out reintroduces binary-float dust — 0.2 × 6 is
+  // 1.2000000000000002 — which would show up in a tick label.
+  const clean = (value: number): number => Number(value.toPrecision(12));
+  const low = clean(axis?.min ?? Math.floor(paddedLow / step) * step);
+  let high = clean(axis?.max ?? Math.ceil(paddedHigh / step) * step);
+  if (high <= low) high = clean(low + step);
   const ticks: number[] = [];
   for (let value = low, guard = 0; value <= high + step / 1000 && guard < 1000; value += step, guard++) {
-    ticks.push(Number(value.toPrecision(12)));
+    ticks.push(clean(value));
   }
   return { low, high, step, ticks };
 }
@@ -270,6 +297,14 @@ const SWATCH = 10;
 const LEGEND_GAP = 16;
 const TICK_GAP = 5;
 
+/**
+ * Baseline-to-baseline distance in a legend, as a multiple of the chart text
+ * size. Word set 18.1pt between legend rows at its default 10pt chart text
+ * (probe-charts-basic.docx), which is the 1.81 here. Scaling by the text size
+ * carries the measurement to charts that set their own size.
+ */
+export const LEGEND_LINE_SPACING = 1.81;
+
 /** Carve the chart box into title, legend and plot rectangles. */
 export function chartFrame(spec: ChartFrameSpec): ChartFrame {
   let left = EDGE_PAD;
@@ -288,13 +323,13 @@ export function chartFrame(spec: ChartFrameSpec): ChartFrame {
     const vertical = spec.legend === "l" || spec.legend === "r" || spec.legend === "tr";
     if (vertical) {
       const width = SWATCH + 6 + Math.max(...spec.legendLabels.map((label) => textWidth(label, spec.textSize))) + 8;
-      const height = spec.legendLabels.length * spec.textSize * 1.5;
+      const height = spec.legendLabels.length * spec.textSize * LEGEND_LINE_SPACING;
       const x = spec.legend === "l" ? left : right - width;
       const y = spec.legend === "tr" ? top : top + Math.max((bottom - top - height) / 2, 0);
       legend = { x, y, width, height, vertical };
       if (spec.legend === "l") left += width; else right -= width;
     } else {
-      const height = spec.textSize * 1.8;
+      const height = spec.textSize * LEGEND_LINE_SPACING;
       const y = spec.legend === "t" ? top : bottom - height;
       legend = { x: left, y, width: right - left, height, vertical };
       if (spec.legend === "t") top += height; else bottom -= height;

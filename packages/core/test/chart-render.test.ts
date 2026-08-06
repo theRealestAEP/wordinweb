@@ -85,7 +85,7 @@ describe("native chart DOM rendering", () => {
     // the category axis, which ticks the three category boundaries plus the end.
     expect(chart.querySelectorAll('[data-dxw-chart-tick="major"]')).toHaveLength(0);
     expect(chart.querySelectorAll('[data-dxw-chart-tick="category"]')).toHaveLength(4);
-    expect(chart.querySelector("text")?.getAttribute("font-size")).toBe(String(14 * (96 / 72)));
+    expect(chart.querySelector("text")?.getAttribute("font-size")).toBe(String(18 * (96 / 72)));
   });
 
   it("places clustered bars by the gap width and overlap in the file", () => {
@@ -125,6 +125,39 @@ describe("native chart DOM rendering", () => {
     const ys = bars.map((bar) => Number(bar.getAttribute("y")));
     expect(ys[0]).toBeGreaterThan(ys[1]);
     expect(ys[1]).toBeGreaterThan(ys[2]);
+  });
+
+  it("reverses a bar chart's legend to follow its reversed category axis", () => {
+    // Word listed Beta above Alpha on the horizontal bar chart in
+    // probe-charts-basic.docx; the column chart beside it kept Alpha first.
+    const legend = (type: "bar" | "column"): string[] => {
+      const chart = renderChart({
+        type,
+        legend: "b",
+        categories: ["Q1", "Q2"],
+        series: [
+          { name: "Alpha", values: [4.2, 7.8] },
+          { name: "Beta", values: [6.5, 2.4] },
+        ],
+      });
+      return texts(chart).filter((text) => text === "Alpha" || text === "Beta");
+    };
+    expect(legend("bar")).toEqual(["Beta", "Alpha"]);
+    expect(legend("column")).toEqual(["Alpha", "Beta"]);
+  });
+
+  it("sizes chart text at Word's defaults: an 18pt title over 10pt everywhere else", () => {
+    const chart = renderChart({
+      type: "column",
+      title: "Sizes",
+      legend: "b",
+      categories: ["Q1"],
+      series: [{ name: "Alpha", values: [4.2] }],
+    });
+    const sizes = Array.from(chart.querySelectorAll("text"))
+      .map((node) => node.getAttribute("font-size"));
+    expect(sizes[0]).toBe(String(18 * (96 / 72)));
+    expect(new Set(sizes.slice(1))).toEqual(new Set([String(10 * (96 / 72))]));
   });
 
   it("seats a line's end points on the plot edges and a column's inside its band", () => {
@@ -264,7 +297,8 @@ describe("native chart DOM rendering", () => {
       `<c:numFmt formatCode="$#,##0" sourceLinked="0"/><c:crossAx val="1"/></c:valAx>` +
       `</c:plotArea></c:chart></c:chartSpace>`,
     );
-    expect(texts(chart)).toEqual(expect.arrayContaining(["$0", "$1,000,000", "$4,000,000"]));
+    // The data tops out at 3,000,000, so the scale runs 0..3,500,000 by 500,000.
+    expect(texts(chart)).toEqual(expect.arrayContaining(["$0", "$500,000", "$3,500,000"]));
   });
 
   it("honours a deleted axis and a suppressed tick label", () => {

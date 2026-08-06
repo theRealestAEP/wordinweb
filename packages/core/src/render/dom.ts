@@ -8,6 +8,7 @@ import {
   type AxisScale,
   type Point,
   type Rect,
+  LEGEND_LINE_SPACING,
   axisScale,
   barSlots,
   chartFrame,
@@ -1421,9 +1422,11 @@ const DEFAULT_CHART_COLORS = ["#156082", "#e97132", "#196b24", "#0f9ed5", "#a02b
  * labels, 15% for the axis lines and gridlines. */
 const CHART_LABEL_COLOR = "#595959";
 const CHART_RULE_COLOR = "#d9d9d9";
-/** Word's default chart title is 14pt and the rest of its text is 9pt. */
-const CHART_TITLE_PX = 14 * (96 / 72);
-const CHART_TEXT_PX = 9 * (96 / 72);
+/** Word's default chart title is 18pt and the rest of its text — axis labels,
+ * legend entries, category labels — is 10pt. Both measured off the desktop
+ * Word render of probe-charts-basic.docx. */
+const CHART_TITLE_PX = 18 * (96 / 72);
+const CHART_TEXT_PX = 10 * (96 / 72);
 
 /** Darken a hex colour toward black by `amount` (DrawingML's a:shade). */
 function shade(hex: string, amount: number): string {
@@ -1510,14 +1513,21 @@ function legendEntries(pen: ChartPen): Array<{ text: string; color: string }> {
       color: pointColor(pen, 0, index),
     }));
   }
-  return pen.data.series.map((series, index) => ({ text: series.name, color: pointColor(pen, index, -1) }));
+  const entries = pen.data.series.map((series, index) => ({
+    text: series.name,
+    color: pointColor(pen, index, -1),
+  }));
+  // A horizontal bar chart runs its categories up the left edge, so the first
+  // category sits at the bottom. Word reverses the legend to match: on the
+  // probe chart it lists Beta above Alpha.
+  return pen.data.type === "bar" ? entries.reverse() : entries;
 }
 
 function paintLegend(pen: ChartPen, box: Rect & { vertical: boolean }): void {
   const entries = legendEntries(pen);
   const swatch = Math.min(pen.size * 0.85, 11);
   if (box.vertical) {
-    const step = pen.size * 1.5;
+    const step = pen.size * LEGEND_LINE_SPACING;
     entries.forEach((entry, index) => {
       const y = box.y + step * index + step / 2;
       pen.add("rect", { x: box.x, y: y - swatch / 2, width: swatch, height: swatch, fill: entry.color });
