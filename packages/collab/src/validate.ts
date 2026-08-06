@@ -106,6 +106,11 @@ function badCharacterStyle(patch: Record<string, unknown>, who: string): string 
 /** Returns a rejection reason, or null if the intent is well-formed. */
 export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_INTENT_LIMITS): string | null {
   const nonNegInt = (n: number) => Number.isInteger(n) && n >= 0;
+  // Which equation in the block a math intent names. Absent means the first.
+  // The cap is generous but finite: an index is an array position, and the
+  // apply resolves out-of-range ones to a clean no-op anyway.
+  const badMathIndex = (math: { mathIndex?: number }, kind: string): string | null =>
+    math.mathIndex === undefined || (nonNegInt(math.mathIndex) && math.mathIndex <= 1000) ? null : `${kind}: bad mathIndex`;
   // Every tracked-change carrier bounds its author/date the same way, so one
   // check serves them all: absent means a direct (untracked) edit.
   const badSuggest = (suggest: { author: string; date: string } | undefined): string | null => {
@@ -350,13 +355,13 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null; // run-addressed only; resolution is the whole check
     case "setMathLinear":
       if (typeof intent.mathText !== "string" || intent.mathText.length === 0 || intent.mathText.length > 1000) return "setMathLinear: bad mathText";
-      return null;
+      return badMathIndex(intent, "setMathLinear");
     case "deleteMath":
-      return null;
+      return badMathIndex(intent, "deleteMath");
     case "moveMath":
       if (!nonNegInt(intent.at?.offset)) return "moveMath: bad offset";
       if (!Array.isArray(intent.nodeIds) || intent.nodeIds.length > 64) return "moveMath: bad nodeIds";
-      return null;
+      return badMathIndex(intent, "moveMath");
     case "ensureHeaderFooter":
       if (intent.hfKind !== "header" && intent.hfKind !== "footer") return "ensureHeaderFooter: bad kind";
       if (!Array.isArray(intent.nodeIds) || intent.nodeIds.length > 64) return "ensureHeaderFooter: bad nodeIds";

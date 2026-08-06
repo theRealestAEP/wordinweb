@@ -330,9 +330,9 @@ export type EditorIntent =
   | { kind: "moveTable"; cellParagraphId: number; xPx: number; yPx: number; preservePageStart: boolean; pageDelta: number }
   | { kind: "tableOp"; cellParagraphId: number; op: { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number } }
   | { kind: "removeDrawing"; runId: number; objectIndex?: number }
-  | { kind: "setMathLinear"; blockId: number; mathText: string }
-  | { kind: "deleteMath"; blockId: number }
-  | { kind: "moveMath"; blockId: number; at: { blockId: number; runId: number; offset: number }; nodeIds: number[] }
+  | { kind: "setMathLinear"; blockId: number; mathIndex: number; mathText: string }
+  | { kind: "deleteMath"; blockId: number; mathIndex: number }
+  | { kind: "moveMath"; blockId: number; mathIndex: number; at: { blockId: number; runId: number; offset: number }; nodeIds: number[] }
   | { kind: "ensureHeaderFooter"; hfKind: "header" | "footer"; nodeIds: number[] };
 
 interface Caret {
@@ -381,16 +381,12 @@ function textElements(el: XmlElement): XmlElement[] {
   return out;
 }
 
-/** The first m:oMath in document order under `el`. Must stay identical to the
- * collab apply's helper of the same name: it is what decides whether an
- * equation edit is addressable on the wire (see mathIntentBlockId). */
-function firstMathIn(el: XmlElement): XmlElement | null {
-  if (localName(el.name) === "oMath") return el;
-  for (const c of el.children) {
-    const found = firstMathIn(c);
-    if (found) return found;
-  }
-  return null;
+/** Every m:oMath under `el`, in document order. Must stay identical to the
+ * collab apply's helper of the same name: the position in this list is how an
+ * equation edit names its target on the wire (see mathIntentTarget). */
+function mathsIn(el: XmlElement): XmlElement[] {
+  if (localName(el.name) === "oMath") return [el];
+  return el.children.flatMap(mathsIn);
 }
 
 function clearListParagraphFormatting(doc: DocxDocument, paragraph: XmlElement): boolean {
@@ -3942,16 +3938,16 @@ export class DocxEditor {
           if (this.host.onIntent && this.host.doc.stableIds) {
             // Collab: the drop position rides as a wire caret and the equation
             // as its block, both encoded BEFORE the move detaches anything.
-            const blockId = this.mathIntentBlockId(oMathEl);
+            const target = this.mathIntentTarget(oMathEl);
             const at = this.encodeTextPos(dest.t, dest.offset);
-            if (blockId !== null && at) {
+            if (target && at) {
               const nodeIds = this.host.allocIds?.(4) ?? [];
               const before = this.trackedNodeSet();
               if (moveMath(this.host.doc, oMathEl, dest.t, dest.offset)) {
                 // A mid-text drop splits the destination run; the tail takes a
                 // carried id (same walk the remote apply performs).
                 this.assignFreshTrackedIds(before, nodeIds);
-                this.host.onIntent({ kind: "moveMath", blockId, at, nodeIds });
+                this.host.onIntent({ kind: "moveMath", ...target, at, nodeIds });
                 this.host.rerender();
               }
             }
@@ -4854,17 +4850,16 @@ export class DocxEditor {
   private mathEditorEl: HTMLDivElement | null = null;
 
   /**
-   * The block id an equation edit rides on, or null when the equation has no
-   * wire address. The math intents are BLOCK-addressed and the remote apply
-   * resolves the target as "the first m:oMath under this block"
-   * (collab apply.ts firstMathIn), so a second equation in the same paragraph
-   * is deliberately unaddressable — better an honest no-op than an intent that
-   * rewrites the wrong equation on every peer.
+   * The wire address of an equation edit, or null when the equation has none.
+   * The math intents are BLOCK-addressed and a block may hold several
+   * equations, so the address is the block plus the equation's position in
+   * document order under it — the same order the remote apply counts in
+   * (collab apply.ts mathIn).
    *
    * Must be called BEFORE the mutation: setMathLinear/deleteMath refresh the
    * document, and deleteMath detaches the subtree the walk starts from.
    */
-  private mathIntentBlockId(oMathEl: XmlElement): number | null {
+  private mathIntentTarget(oMathEl: XmlElement): { blockId: number; mathIndex: number } | null {
     const ids = this.host.doc.stableIds;
     if (!ids) return null;
     let blockEl: XmlElement | null = null;
@@ -4875,8 +4870,10 @@ export class DocxEditor {
         break;
       }
     }
-    if (!blockEl || firstMathIn(blockEl) !== oMathEl) return null;
-    return ids.idOf(blockEl) ?? null;
+    const blockId = blockEl ? ids.idOf(blockEl) : undefined;
+    if (!blockEl || blockId === undefined) return null;
+    const mathIndex = mathsIn(blockEl).indexOf(oMathEl);
+    return mathIndex < 0 ? null : { blockId, mathIndex };
   }
 
   /**
@@ -4922,9 +4919,9 @@ export class DocxEditor {
         // canonical intent function with the same args, then emit. An
         // unaddressable equation is an honest no-op — never a local-only
         // delete, which is what silently forked the room.
-        const blockId = this.mathIntentBlockId(oMathEl);
-        if (blockId !== null && deleteMath(this.host.doc, oMathEl)) {
-          this.host.onIntent({ kind: "deleteMath", blockId });
+        const target = this.mathIntentTarget(oMathEl);
+        if (target && deleteMath(this.host.doc, oMathEl)) {
+          this.host.onIntent({ kind: "deleteMath", ...target });
           this.host.rerender();
         }
       } else if (deleteMath(this.host.doc, oMathEl)) {
@@ -4996,9 +4993,9 @@ export class DocxEditor {
           // Collab (A17): same canonical function, same args, emitted — this
           // popover was the last equation edit that mutated locally and never
           // rode the wire (user repro: a fraction added here reached nobody).
-          const blockId = this.mathIntentBlockId(oMathEl);
-          if (blockId !== null && setMathLinear(this.host.doc, oMathEl, val)) {
-            this.host.onIntent({ kind: "setMathLinear", blockId, mathText: val });
+          const target = this.mathIntentTarget(oMathEl);
+          if (target && setMathLinear(this.host.doc, oMathEl, val)) {
+            this.host.onIntent({ kind: "setMathLinear", ...target, mathText: val });
             this.host.rerender();
           }
         } else if (setMathLinear(this.host.doc, oMathEl, val)) {

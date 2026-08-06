@@ -79,6 +79,28 @@ describe("more intents batch 9 (smartart format / floating / math / comment / bo
     expect(serializeXml(s.doc.docRoot)).not.toContain("oMath");
   });
 
+  it("mathIndex addresses the second equation in a paragraph", () => {
+    // A paragraph may hold several equations. Without an index every math
+    // intent resolved to the first one, so the editor refused to emit for any
+    // other rather than replicate an edit onto the wrong equation.
+    const s = mathDoc();
+    s.submit({ kind: "insertMath", clientId: "a", clientSeq: 2, base: s.seq, runId: firstRunId(s), mathText: "c+d", nodeIds: seq(20, 2000) });
+    const blockId = mathBlockId(s);
+    const applied = s.submit({ kind: "setMathLinear", clientId: "a", clientSeq: 3, base: s.seq, blockId, mathIndex: 1, mathText: "z^2" });
+    expect(applied.kind).toBe("applied");
+    // The insert lands ahead of the first equation, so "c+d" is now the one at
+    // index 0 and "a+b" the one at index 1 — the one the intent named.
+    const equations = serializeXml(s.doc.docRoot).split("<m:oMath>").slice(1);
+    expect(equations.length).toBe(2);
+    expect(equations[0]).toContain("<m:t>c+d</m:t>");
+    expect(equations[1]).toContain("<m:t>z</m:t>");
+    expect(equations[1]).not.toContain("a+b");
+    // An index past the last equation resolves to nothing: a clean rejection,
+    // never a write to whichever equation happens to be there.
+    const past = s.submit({ kind: "setMathLinear", clientId: "a", clientSeq: 4, base: s.seq, blockId, mathIndex: 7, mathText: "q" });
+    expect(past.kind).toBe("rejected");
+  });
+
   it("moveMath re-parents an equation to a text position", () => {
     // Drag-move of an equation used to be a LOCAL-ONLY mutation (checkpoint
     // A17 class): the drop replicated to nobody.

@@ -803,9 +803,38 @@ of the style's conditional formats are used.
 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
-| `setMathLinear` | Replace an equation | `blockRef`, `mathText` |
-| `deleteMath` | Delete an equation | `blockRef` |
-| `moveMath` | Move an equation | `blockRef`, `at` |
+| `setMathLinear` | Replace an equation | `blockRef`, `mathText`, `mathIndex` |
+| `deleteMath` | Delete an equation | `blockRef`, `mathIndex` |
+| `moveMath` | Move an equation | `blockRef`, `at`, `mathIndex` |
+
+A block can hold more than one equation. `mathIndex` picks which one, counting
+from 0 in document order; omit it for the first. Inspection lists a block's
+equations in that same order, so the nth equation you read is the nth you can
+edit. An index past the last equation changes nothing.
+
+`mathText` is a linear form of the equation. Scripts are `x^2` and `a_i`, a
+fraction is `{a+b}/{2c}`, a root is `√{x}` or `√[3]{x}` with an index, and
+braces group whatever the next operator applies to. Beyond those:
+
+| Construct | Written as | Example |
+| --- | --- | --- |
+| matrix | rows in brackets, `&` between cells, `;` between rows | `[a&b;c&d]` |
+| one-cell matrix | marked, so it reads as a matrix and not a bracket group | `■[a]` |
+| equation array | rows in brackets, marked | `█[x=1;y=2]` |
+| cases (piecewise) | a brace group closed by `┤` | `{█[x;-x]}┤` |
+| accent | the combining mark after its base | `x̂`, `{a+b}⃗` |
+| over/under brace | the group character before its argument | `⏞{a+b}` |
+| limit above or below | `┬` above, `┴` below | `{lim}┴{n→∞}f` |
+| a literal `(`, `/`, `^`, … | a backslash before it | `\(x\)`, `-1\/2` |
+
+Formatting the text does not mention — run fonts, an n-ary's limit placement, a
+matrix's column widths — survives an edit untouched, so replacing one cell of a
+matrix changes only that cell.
+
+Equations built from OMML this form cannot name — Word's `m:func` (a typeset
+function name) and `m:sSubSup` (one base carrying both scripts) — are read-only.
+They still render and project; `setMathLinear` refuses them rather than rewrite
+the equation into something else.
 
 ### Document
 

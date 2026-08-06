@@ -894,27 +894,35 @@ export interface RemoveDrawingIntent extends IntentBase, DrawingTarget {
   runId: StableId;
 }
 
-/** Replace the equation of the math object in a paragraph (linear syntax).
- * Math (m:oMath) lives at paragraph level, so this is block-addressed. */
-export interface SetMathLinearIntent extends IntentBase {
-  kind: "setMathLinear";
+/**
+ * Which equation inside a block a math intent means: its position among the
+ * block's m:oMath elements in document order. Absent means the first one, so
+ * an intent recorded before a block could hold more than one addressable
+ * equation still names what it always named.
+ */
+interface MathTarget {
   blockId: StableId;
+  mathIndex?: number;
+}
+
+/** Replace the equation of a math object in a paragraph (linear syntax).
+ * Math (m:oMath) lives at paragraph level, so this is block-addressed. */
+export interface SetMathLinearIntent extends IntentBase, MathTarget {
+  kind: "setMathLinear";
   mathText: string;
 }
 
-/** Delete the math object in a paragraph. */
-export interface DeleteMathIntent extends IntentBase {
+/** Delete a math object in a paragraph. */
+export interface DeleteMathIntent extends IntentBase, MathTarget {
   kind: "deleteMath";
-  blockId: StableId;
 }
 
 /** Drag-move the equation out of `blockId` to the text position `at`. The
- * equation is addressed like the other math intents (block + firstMathIn); the
+ * equation is addressed like the other math intents (block + mathIndex); the
  * destination is an ordinary wire caret. Dropping mid-text splits the
  * destination run, so the split-off tail run takes a carried id. */
-export interface MoveMathIntent extends IntentBase {
+export interface MoveMathIntent extends IntentBase, MathTarget {
   kind: "moveMath";
-  blockId: StableId;
   at: Position;
   nodeIds: StableId[];
 }
