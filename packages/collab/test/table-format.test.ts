@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { zipSync, strToU8 } from "fflate";
-import { DocxDocument, serializeXml, type Paragraph, type Run, type XmlElement } from "@wordinweb/core";
+import { DocxDocument, collectRevisions, serializeXml, type Paragraph, type Run, type XmlElement } from "@wordinweb/core";
 import { DocumentSession } from "../src/session.js";
 
 /**
@@ -177,5 +177,107 @@ describe("table formatting intents", () => {
     expect(bad({ kind: "setTableCellMargins", scope: "cell", margins: { left: -4 } })).toBe("rejected");
     expect(bad({ kind: "setTableLook", look: { bandedRows: "yes" } })).toBe("rejected");
     expect(bad({ kind: "setTableHeaderRows", count: 1.5 })).toBe("rejected");
+  });
+});
+
+/**
+ * The same eight intents plus tableOp, SUGGESTED.
+ *
+ * A tracked table format writes a w:tblPrChange / w:trPrChange / w:tcPrChange
+ * holding what it replaced, stamped with an author and a date. Both come off
+ * the wall clock, so they have to be drawn ONCE by the originating client and
+ * carried in the intent — a replica that re-derived the date would fork the
+ * room on a byte no renderer shows. The w:id is scan-derived from identical
+ * tree state and needs no carrying, which is what makes byte equality the
+ * right assertion here.
+ */
+describe("suggested table formatting intents", () => {
+  const suggest = { author: "Rae", date: "2026-07-12T00:00:00Z" };
+
+  it("writes the same record on every replica, byte for byte", () => {
+    const addr = tableSession().cellParagraphId(1, 1);
+    const { xml } = bothApply({
+      kind: "setTableWidth", cellParagraphId: addr, unit: "pct", value: 75, suggest,
+    });
+    // The record holds the width the table HAD, and the id is scan-derived, so
+    // both replicas wrote the same one.
+    expect(xml).toContain(
+      `<w:tblPrChange w:id="1" w:author="Rae" w:date="2026-07-12T00:00:00Z">` +
+        `<w:tblPr><w:tblW w:w="0" w:type="auto"/>`,
+    );
+    expect(xml).toContain(`<w:tblW w:w="3750" w:type="pct"/>`);
+  });
+
+  it("records at table, row and cell scope from the right address", () => {
+    const addr = tableSession().cellParagraphId(1, 1);
+    expect(bothApply({ kind: "setTableHeaderRows", cellParagraphId: addr, count: 2, suggest }).xml)
+      .toContain("<w:trPrChange");
+    expect(
+      bothApply({
+        kind: "setTableBorders", cellParagraphId: addr, scope: "cell",
+        edges: ["top"], border: { style: "single" }, suggest,
+      }).xml,
+    ).toContain("<w:tcPrChange");
+    expect(
+      bothApply({
+        kind: "setTableCellMargins", cellParagraphId: addr, scope: "table",
+        margins: { left: 9 }, suggest,
+      }).xml,
+    ).toContain("<w:tblPrChange");
+  });
+
+  it("records the grid alongside the table for a column width", () => {
+    const addr = tableSession().cellParagraphId(1, 1);
+    const { xml } = bothApply({
+      kind: "setTableColumnWidth", cellParagraphId: addr, colIdx: 1, widthPt: 120, suggest,
+    });
+    // CT_TblGridChange carries a w:id and nothing else.
+    expect(xml).toMatch(/<w:tblGridChange w:id="\d+"><w:tblGrid>/);
+    expect(xml).toContain("<w:tblPrChange");
+    expect(xml).toContain("<w:tcPrChange");
+  });
+
+  it("tracks the two cell-property tableOps and leaves the rest untracked", () => {
+    const addr = tableSession().cellParagraphId(1, 1);
+    expect(bothApply({ kind: "tableOp", cellParagraphId: addr, op: { kind: "cellShading", fill: "FF0000" }, suggest }).xml)
+      .toContain("<w:tcPrChange");
+    expect(bothApply({ kind: "tableOp", cellParagraphId: addr, op: { kind: "cellVAlign", v: "center" }, suggest }).xml)
+      .toContain("<w:tcPrChange");
+    // A structural op ignores the metadata rather than half-tracking the edit.
+    // The agent CLI is what refuses to SEND one in suggesting mode.
+    expect(bothApply({ kind: "tableOp", cellParagraphId: addr, op: "deleteRow", suggest }).xml)
+      .not.toContain("Change");
+  });
+
+  it("converges when two replicas suggest into different cells", () => {
+    const a = tableSession();
+    const b = tableSession();
+    const ops = [
+      { kind: "tableOp", cellParagraphId: a.cellParagraphId(0, 0), op: { kind: "cellShading", fill: "FF0000" }, suggest },
+      { kind: "tableOp", cellParagraphId: a.cellParagraphId(2, 2), op: { kind: "cellVAlign", v: "bottom" }, suggest },
+      { kind: "setTableHeaderRows", cellParagraphId: a.cellParagraphId(1, 0), count: 1, suggest },
+    ];
+    ops.forEach((body, i) => {
+      expect(a.s.submit({ clientId: "c", clientSeq: 10 + i, base: a.s.seq, ...body } as never).kind).toBe("applied");
+    });
+    // The other replica receives them in the same sequenced order.
+    ops.forEach((body, i) => {
+      expect(b.s.submit({ clientId: "c", clientSeq: 10 + i, base: b.s.seq, ...body } as never).kind).toBe("applied");
+    });
+    expect(serializeXml(a.s.doc.docRoot)).toBe(serializeXml(b.s.doc.docRoot));
+    expect(collectRevisions(a.s.doc).map((r) => r.kind)).toEqual(["rowFormat", "cellFormat", "cellFormat"]);
+  });
+
+  it("refuses a malformed author or date before it is sequenced", () => {
+    const { s, cellParagraphId } = tableSession();
+    let seq = 10;
+    const submit = (suggestValue: unknown) =>
+      s.submit({
+        kind: "setTableLook", clientId: "c", clientSeq: seq++, base: s.seq,
+        cellParagraphId: cellParagraphId(0, 0), look: { bandedRows: false }, suggest: suggestValue,
+      } as never).kind;
+    expect(submit({ author: 7, date: "x" })).toBe("rejected");
+    expect(submit({ author: "a", date: "d".repeat(41) })).toBe("rejected");
+    expect(submit(suggest)).toBe("applied");
   });
 });

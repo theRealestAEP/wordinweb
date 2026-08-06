@@ -760,18 +760,18 @@ Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
-| `tableOp` | Add, delete, or format table parts | `cellRef`, `op` |
+| `tableOp` | Add, delete, or format table parts | `cellRef`, `op`; optional: `suggest` |
 | `resizeTableColumn` | Move a column boundary | `cellRef`, `boundary`, `deltaPx`; optional: `renderedWidths` |
 | `resizeTableRow` | Set row height | `cellRef`, `rowIdx`, `heightPx` |
 | `moveTable` | Float and position a table | `cellRef`, `xPx`, `yPx`, `preservePageStart`, `pageDelta` |
-| `setTableBorders` | Set or clear borders, per edge | `cellRef`, `scope`, `edges`, `border` |
-| `setTableStyle` | Apply a named table style | `cellRef`, `styleId` |
-| `setTableLook` | Toggle which style options apply | `cellRef`, `look` |
-| `setTableWidth` | Set the table's preferred width | `cellRef`, `unit`; optional: `value` |
-| `setTableColumnWidth` | Set one column to an exact width | `cellRef`, `colIdx`, `widthPt` |
-| `setTableLayout` | Switch between fixed and autofit | `cellRef`, `layout`; optional: `renderedWidths` |
-| `setTableCellMargins` | Set cell padding | `cellRef`, `scope`, `margins` |
-| `setTableHeaderRows` | Repeat the first N rows on every page | `cellRef`, `count` |
+| `setTableBorders` | Set or clear borders, per edge | `cellRef`, `scope`, `edges`, `border`; optional: `suggest` |
+| `setTableStyle` | Apply a named table style | `cellRef`, `styleId`; optional: `suggest` |
+| `setTableLook` | Toggle which style options apply | `cellRef`, `look`; optional: `suggest` |
+| `setTableWidth` | Set the table's preferred width | `cellRef`, `unit`; optional: `value`, `suggest` |
+| `setTableColumnWidth` | Set one column to an exact width | `cellRef`, `colIdx`, `widthPt`; optional: `suggest` |
+| `setTableLayout` | Switch between fixed and autofit | `cellRef`, `layout`; optional: `renderedWidths`, `suggest` |
+| `setTableCellMargins` | Set cell padding | `cellRef`, `scope`, `margins`; optional: `suggest` |
+| `setTableHeaderRows` | Repeat the first N rows on every page | `cellRef`, `count`; optional: `suggest` |
 
 `setTableBorders` takes `scope: "cell" | "table"`. Table scope accepts the
 edges `top`, `bottom`, `left`, `right`, `insideH`, `insideV`; cell scope
@@ -950,8 +950,16 @@ Set `suggest: true` to record an operation as a tracked change instead of applyi
 | `mergeParagraph` | `w:del` on the previous paragraph mark | the paragraphs join | they stay split |
 | `formatRun`, `formatRange` | `w:rPrChange` holding the previous run properties | the new formatting stays | the previous properties come back |
 | `formatParagraph`, `setListType`, `adjustIndent`, `setSpacing` | `w:pPrChange` holding the previous paragraph properties | the new formatting stays | the previous properties come back |
+| `setTableStyle`, `setTableLook`, `setTableWidth`, table-scoped `setTableBorders` and `setTableCellMargins` | `w:tblPrChange` holding the previous table properties | the new formatting stays | the previous properties come back |
+| `setTableHeaderRows` | `w:trPrChange` on each row whose header membership moves | the new band stays | the previous rows come back |
+| Cell-scoped `setTableBorders` and `setTableCellMargins`, `tableOp` with `cellShading` or `cellVAlign` | `w:tcPrChange` holding the previous cell properties | the new formatting stays | the previous properties come back |
+| `setTableColumnWidth`, `setTableLayout` | `w:tblPrChange`, plus a `w:tblGridChange` and a `w:tcPrChange` per restamped cell | the new widths stay | the grid, the total and every cell width come back |
 
 A tracked formatting change reads as the NEW formatting everywhere, which is what Word shows: the properties in force live where they always live, and only the ones they replaced move into the change record.
+
+A column width lives in three places at once — the grid, the table's total width, and a width on every cell — so a tracked width change writes a record for each. Accepting or rejecting the table's record carries the grid record with it, because `w:tblGridChange` carries no author of its own.
+
+`tableOp` is only partly suggestible. Cell shading, cell vertical alignment and table text wrapping change PROPERTIES and are tracked. Every row and column insert and delete, the whole-table delete, and cell merge and split are STRUCTURAL, have no tracked form here, and are refused in suggestion mode — ask the inviter for editing mode instead.
 
 ### Fields
 

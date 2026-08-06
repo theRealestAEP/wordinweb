@@ -194,6 +194,30 @@ export function defineOperation<Payload>() {
 // Registered operations
 // ---------------------------------------------------------------------------
 
+/**
+ * The optional suggest payload a TRACKABLE operation carries, and the
+ * validation they share.
+ *
+ * With it the operation records what it replaced — w:pPrChange for a list
+ * marker, w:tblPrChange / w:trPrChange / w:tcPrChange for table formatting —
+ * instead of mutating outright, so a reviewer can accept or reject it. The
+ * author and date travel in the payload so every replica writes byte-identical
+ * XML; the w:id is scan-derived from identical tree state and needs no
+ * carrying. Omitting it is a direct, untracked edit.
+ */
+interface SuggestablePayload {
+  suggest?: { author: string; date: string };
+}
+
+const SUGGEST_FIELD = { name: "suggest", optional: true } as const;
+
+function badSuggest(kind: string, { suggest }: SuggestablePayload): string | null {
+  if (suggest === undefined) return null;
+  if (typeof suggest.author !== "string" || suggest.author.length > 100) return `${kind}: bad author`;
+  if (typeof suggest.date !== "string" || suggest.date.length > 40) return `${kind}: bad date`;
+  return null;
+}
+
 /** Turn a paragraph into a bullet/numbered list item, or clear its list
  * formatting (listKind null). Mutates w:pPr numbering in place. With `suggest`
  * the change is TRACKED (w:pPrChange) instead of applied outright; the author
@@ -201,19 +225,13 @@ export function defineOperation<Payload>() {
 const setListTypeOperation = defineOperation<{
   blockId: StableId;
   listKind: "bullet" | "number" | null;
-  suggest?: { author: string; date: string };
-}>()({
+} & SuggestablePayload>()({
   kind: "setListType",
   address: "block",
   category: "paragraph",
   description: "Set or clear paragraph list formatting.",
-  fields: [{ name: "listKind" }, { name: "suggest", optional: true }],
-  validate: ({ suggest }) => {
-    if (suggest === undefined) return null;
-    if (typeof suggest.author !== "string" || suggest.author.length > 100) return "setListType: bad author";
-    if (typeof suggest.date !== "string" || suggest.date.length > 40) return "setListType: bad date";
-    return null;
-  },
+  fields: [{ name: "listKind" }, SUGGEST_FIELD],
+  validate: (payload) => badSuggest("setListType", payload),
   // setListType resolves the paragraph by walking UP from a target, so pass a
   // descendant w:t when the paragraph has one and the paragraph itself
   // otherwise.
@@ -340,19 +358,23 @@ function cellAnchor(target: OperationTarget): XmlElement | null {
   return target.cellParagraph;
 }
 
+
 /** Set or clear per-edge borders on one cell or on the whole table. */
 const setTableBordersOperation = defineOperation<{
   cellParagraphId: StableId;
   scope: "cell" | "table";
   edges: TableBorderEdge[];
   border: TableBorderSpec | null;
-}>()({
+} & SuggestablePayload>()({
   kind: "setTableBorders",
   address: "cell",
   category: "table",
   description: "Set or clear table or cell borders, per edge.",
-  fields: [{ name: "scope" }, { name: "edges" }, { name: "border" }],
-  validate: ({ scope, edges, border }) => {
+  fields: [{ name: "scope" }, { name: "edges" }, { name: "border" }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const { scope, edges, border } = payload;
+    const bad = badSuggest("setTableBorders", payload);
+    if (bad) return bad;
     if (scope !== "cell" && scope !== "table") return "setTableBorders: bad scope";
     if (!Array.isArray(edges) || edges.length === 0 || edges.length > 8) {
       return "setTableBorders: bad edges";
@@ -375,7 +397,7 @@ const setTableBordersOperation = defineOperation<{
   apply: ({ doc, target, payload }) => {
     const anchor = cellAnchor(target);
     return anchor
-      ? setTableBorders(doc, anchor, payload.scope, payload.edges, payload.border)
+      ? setTableBorders(doc, anchor, payload.scope, payload.edges, payload.border, suggestMeta(doc, payload.suggest))
       : false;
   },
 });
@@ -384,32 +406,39 @@ const setTableBordersOperation = defineOperation<{
 const setTableStyleOperation = defineOperation<{
   cellParagraphId: StableId;
   styleId: string | null;
-}>()({
+} & SuggestablePayload>()({
   kind: "setTableStyle",
   address: "cell",
   category: "table",
   description: "Apply a named table style to a table.",
-  fields: [{ name: "styleId" }],
-  validate: ({ styleId }) => {
+  fields: [{ name: "styleId" }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const bad = badSuggest("setTableStyle", payload);
+    if (bad) return bad;
+    const { styleId } = payload;
     if (styleId === null) return null;
     return typeof styleId === "string" && styleId.length > 0 && styleId.length <= 253
       ? null
       : "setTableStyle: bad styleId";
   },
-  apply: ({ doc, target, payload }) => setTableStyle(doc, target.el, payload.styleId),
+  apply: ({ doc, target, payload }) =>
+    setTableStyle(doc, target.el, payload.styleId, suggestMeta(doc, payload.suggest)),
 });
 
 /** Set some of Word's six table-style option toggles (w:tblLook). */
 const setTableLookOperation = defineOperation<{
   cellParagraphId: StableId;
   look: Partial<TableLookToggles>;
-}>()({
+} & SuggestablePayload>()({
   kind: "setTableLook",
   address: "cell",
   category: "table",
   description: "Toggle which table style options apply (first/last row and column, banding).",
-  fields: [{ name: "look" }],
-  validate: ({ look }) => {
+  fields: [{ name: "look" }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const bad = badSuggest("setTableLook", payload);
+    if (bad) return bad;
+    const { look } = payload;
     if (!look || typeof look !== "object" || Array.isArray(look)) return "setTableLook: bad look";
     const keys: (keyof TableLookToggles)[] = [
       "firstRow",
@@ -427,7 +456,8 @@ const setTableLookOperation = defineOperation<{
     }
     return null;
   },
-  apply: ({ doc, target, payload }) => setTableLook(doc, target.el, payload.look),
+  apply: ({ doc, target, payload }) =>
+    setTableLook(doc, target.el, payload.look, suggestMeta(doc, payload.suggest)),
 });
 
 /** Set the table's preferred width (points, percent, or auto). */
@@ -435,13 +465,16 @@ const setTableWidthOperation = defineOperation<{
   cellParagraphId: StableId;
   unit: "pt" | "pct" | "auto";
   value?: number;
-}>()({
+} & SuggestablePayload>()({
   kind: "setTableWidth",
   address: "cell",
   category: "table",
   description: "Set a table's preferred width in points, as a percent, or to auto.",
-  fields: [{ name: "unit" }, { name: "value", optional: true }],
-  validate: ({ unit, value }) => {
+  fields: [{ name: "unit" }, { name: "value", optional: true }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const bad = badSuggest("setTableWidth", payload);
+    if (bad) return bad;
+    const { unit, value } = payload;
     if (unit !== "pt" && unit !== "pct" && unit !== "auto") return "setTableWidth: bad unit";
     if (unit === "auto") return null;
     if (typeof value !== "number" || !Number.isFinite(value)) return "setTableWidth: value required";
@@ -449,7 +482,7 @@ const setTableWidthOperation = defineOperation<{
     return value > 0 && value <= max ? null : "setTableWidth: value out of range";
   },
   apply: ({ doc, target, payload }) =>
-    setTableWidth(doc, target.el, payload.unit, payload.value ?? 0),
+    setTableWidth(doc, target.el, payload.unit, payload.value ?? 0, suggestMeta(doc, payload.suggest)),
 });
 
 /** Set one grid column to an exact width in points. */
@@ -457,13 +490,16 @@ const setTableColumnWidthOperation = defineOperation<{
   cellParagraphId: StableId;
   colIdx: number;
   widthPt: number;
-}>()({
+} & SuggestablePayload>()({
   kind: "setTableColumnWidth",
   address: "cell",
   category: "table",
   description: "Set one table column to an exact width in points.",
-  fields: [{ name: "colIdx" }, { name: "widthPt" }],
-  validate: ({ colIdx, widthPt }) => {
+  fields: [{ name: "colIdx" }, { name: "widthPt" }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const bad = badSuggest("setTableColumnWidth", payload);
+    if (bad) return bad;
+    const { colIdx, widthPt } = payload;
     if (!Number.isInteger(colIdx) || colIdx < 0 || colIdx > 200) return "setTableColumnWidth: bad column";
     if (typeof widthPt !== "number" || !Number.isFinite(widthPt) || widthPt < 1 || widthPt > 22 * 72) {
       return "setTableColumnWidth: bad width";
@@ -471,7 +507,7 @@ const setTableColumnWidthOperation = defineOperation<{
     return null;
   },
   apply: ({ doc, target, payload }) =>
-    setTableColumnWidth(doc, target.el, payload.colIdx, payload.widthPt),
+    setTableColumnWidth(doc, target.el, payload.colIdx, payload.widthPt, suggestMeta(doc, payload.suggest)),
 });
 
 /** Switch a table between fixed column widths and autofit-to-contents. */
@@ -479,15 +515,18 @@ const setTableLayoutOperation = defineOperation<{
   cellParagraphId: StableId;
   layout: "fixed" | "autofit";
   renderedWidths?: number[];
-}>()({
+} & SuggestablePayload>()({
   kind: "setTableLayout",
   address: "cell",
   category: "table",
   description: "Switch a table between fixed column widths and autofit.",
   // renderedWidths is the caller's MEASURED columns; it rides as data so
   // every replica freezes the same widths when switching to fixed.
-  fields: [{ name: "layout" }, { name: "renderedWidths", optional: true }],
-  validate: ({ layout, renderedWidths }) => {
+  fields: [{ name: "layout" }, { name: "renderedWidths", optional: true }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const bad = badSuggest("setTableLayout", payload);
+    if (bad) return bad;
+    const { layout, renderedWidths } = payload;
     if (layout !== "fixed" && layout !== "autofit") return "setTableLayout: bad layout";
     if (renderedWidths === undefined) return null;
     if (!Array.isArray(renderedWidths) || renderedWidths.length > 200) {
@@ -498,7 +537,7 @@ const setTableLayoutOperation = defineOperation<{
       : "setTableLayout: bad renderedWidths";
   },
   apply: ({ doc, target, payload }) =>
-    setTableLayoutMode(doc, target.el, payload.layout, payload.renderedWidths),
+    setTableLayoutMode(doc, target.el, payload.layout, payload.renderedWidths, suggestMeta(doc, payload.suggest)),
 });
 
 /** Set the table's default cell margins, or one cell's override. */
@@ -506,13 +545,16 @@ const setTableCellMarginsOperation = defineOperation<{
   cellParagraphId: StableId;
   scope: "cell" | "table";
   margins: CellMarginsPt | null;
-}>()({
+} & SuggestablePayload>()({
   kind: "setTableCellMargins",
   address: "cell",
   category: "table",
   description: "Set table default cell margins, or one cell's override, in points.",
-  fields: [{ name: "scope" }, { name: "margins" }],
-  validate: ({ scope, margins }) => {
+  fields: [{ name: "scope" }, { name: "margins" }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const bad = badSuggest("setTableCellMargins", payload);
+    if (bad) return bad;
+    const { scope, margins } = payload;
     if (scope !== "cell" && scope !== "table") return "setTableCellMargins: bad scope";
     if (margins === null) return null;
     if (!margins || typeof margins !== "object" || Array.isArray(margins)) {
@@ -531,7 +573,9 @@ const setTableCellMarginsOperation = defineOperation<{
   },
   apply: ({ doc, target, payload }) => {
     const anchor = cellAnchor(target);
-    return anchor ? setTableCellMargins(doc, anchor, payload.scope, payload.margins) : false;
+    return anchor
+      ? setTableCellMargins(doc, anchor, payload.scope, payload.margins, suggestMeta(doc, payload.suggest))
+      : false;
   },
 });
 
@@ -539,15 +583,19 @@ const setTableCellMarginsOperation = defineOperation<{
 const setTableHeaderRowsOperation = defineOperation<{
   cellParagraphId: StableId;
   count: number;
-}>()({
+} & SuggestablePayload>()({
   kind: "setTableHeaderRows",
   address: "cell",
   category: "table",
   description: "Repeat the first N rows as a header band on every page.",
-  fields: [{ name: "count" }],
-  validate: ({ count }) =>
-    Number.isInteger(count) && count >= 0 && count <= 5000 ? null : "setTableHeaderRows: bad count",
-  apply: ({ doc, target, payload }) => setTableHeaderRows(doc, target.el, payload.count),
+  fields: [{ name: "count" }, SUGGEST_FIELD],
+  validate: (payload) =>
+    badSuggest("setTableHeaderRows", payload) ??
+    (Number.isInteger(payload.count) && payload.count >= 0 && payload.count <= 5000
+      ? null
+      : "setTableHeaderRows: bad count"),
+  apply: ({ doc, target, payload }) =>
+    setTableHeaderRows(doc, target.el, payload.count, suggestMeta(doc, payload.suggest)),
 });
 
 const OPERATIONS = [

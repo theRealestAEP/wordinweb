@@ -64,9 +64,20 @@ export {
   rejectAllRevisions,
   recordRunFormatChange,
   recordParagraphFormatChange,
+  recordTableFormatChange,
+  recordRowFormatChange,
+  recordCellFormatChange,
+  recordTableGridChange,
   suggestMeta,
 } from "./edit/suggest.js";
-export type { RevisionMeta, RevisionRef, RevisionKind, CaretTarget, DeleteRange } from "./edit/suggest.js";
+export type {
+  RevisionMeta,
+  RevisionRef,
+  RevisionKind,
+  FormatRevisionKind,
+  CaretTarget,
+  DeleteRange,
+} from "./edit/suggest.js";
 export { EditHistory } from "./edit/history.js";
 export { StableIds, textsUnderRun, resolveRunOffset, runContentItems, runWireLength, wireOffsetOf } from "./edit/ids.js";
 export type { EncodedCaret } from "./edit/ids.js";

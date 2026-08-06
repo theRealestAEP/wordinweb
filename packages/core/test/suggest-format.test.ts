@@ -12,6 +12,7 @@ import {
   acceptRevision,
   collectRevisions,
   markParagraphGlyph,
+  revisionForText,
   rejectAllRevisions,
   rejectRevision,
 } from "../src/edit/suggest.js";
@@ -299,5 +300,85 @@ describe("review passes over mixed revisions", () => {
       '<w:pPr><w:jc w:val="left"/><w:rPr><w:del w:id="2" w:author="Alex" w:date="2026-07-12T00:00:00Z"/></w:rPr></w:pPr>',
     );
     expect(collectRevisions(doc).map((ref) => ref.kind)).toEqual(["markDeletion", "runFormat"]);
+  });
+});
+
+/**
+ * Resolving a revision FROM THE CARET, which is what the per-suggestion
+ * accept/reject popover runs on (editor.revisionAtCaret, and through it the
+ * React host's acceptRevisionAtCaret / rejectRevisionAtCaret).
+ *
+ * A format revision is countable, and acceptable in bulk, without this — but
+ * the popover could not reach one: a w:rPrChange and a w:pPrChange are
+ * PROPERTIES of the text rather than a wrapper around it, so there is no
+ * w:ins-shaped ancestor to find. The caret search therefore widens outward
+ * through the properties its ancestors carry. Structural revisions still win:
+ * a paragraph can hold a mark revision and a pPrChange at the same time, and
+ * the mark decides whether the paragraph exists at all.
+ */
+describe("resolving a formatting revision at the caret", () => {
+  it("resolves the enclosing run's rPrChange", () => {
+    const doc = loadDoc(`<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>Hello</w:t></w:r></w:p>`);
+    applyRunFormat(doc, [wholeRun(doc)], { bold: true }, meta());
+    doc.refresh();
+    const ref = revisionForText(doc, firstT(doc))!;
+    expect(ref.kind).toBe("runFormat");
+    expect(ref.author).toBe("Alex");
+  });
+
+  it("falls out to the paragraph's pPrChange when the run has none", () => {
+    const doc = loadDoc(`<w:p><w:pPr><w:jc w:val="left"/></w:pPr><w:r><w:t>Hello</w:t></w:r></w:p>`);
+    setParagraphAlignment(doc, [firstT(doc)], "center", meta());
+    doc.refresh();
+    expect(revisionForText(doc, firstT(doc))?.kind).toBe("paragraphFormat");
+  });
+
+  it("prefers the run's own record over the paragraph's", () => {
+    const doc = loadDoc(`<w:p><w:pPr><w:jc w:val="left"/></w:pPr><w:r><w:t>Hello</w:t></w:r></w:p>`);
+    setParagraphAlignment(doc, [firstT(doc)], "center", meta());
+    applyRunFormat(doc, [wholeRun(doc)], { bold: true }, meta());
+    doc.refresh();
+    expect(revisionForText(doc, firstT(doc))?.kind).toBe("runFormat");
+  });
+
+  it("prefers a structural revision over a formatting one", () => {
+    const doc = loadDoc(`<w:p><w:pPr><w:jc w:val="left"/></w:pPr><w:r><w:t>Hello</w:t></w:r></w:p>`);
+    setParagraphAlignment(doc, [firstT(doc)], "center", meta());
+    markParagraphGlyph(paraEl(doc), "ins", meta());
+    doc.refresh();
+    expect(revisionForText(doc, firstT(doc))?.kind).toBe("markInsertion");
+  });
+
+  it("accepts only the revision the caret resolved", () => {
+    const doc = loadDoc(
+      `<w:p><w:pPr><w:jc w:val="left"/></w:pPr>` +
+        `<w:r><w:rPr><w:i/></w:rPr><w:t>Hello</w:t></w:r></w:p>`,
+    );
+    setParagraphAlignment(doc, [firstT(doc)], "center", meta());
+    applyRunFormat(doc, [wholeRun(doc)], { bold: true }, meta());
+    doc.refresh();
+    expect(acceptRevision(doc, revisionForText(doc, firstT(doc))!)).toBe(true);
+    // The run's record is retired; the paragraph's is still pending.
+    expect(collectRevisions(doc).map((ref) => ref.kind)).toEqual(["paragraphFormat"]);
+    expect(paraXml(doc)).toContain("<w:rPr><w:b/><w:bCs/><w:i/></w:rPr>");
+  });
+
+  it("rejects only the revision the caret resolved", () => {
+    const doc = loadDoc(
+      `<w:p><w:pPr><w:jc w:val="left"/></w:pPr>` +
+        `<w:r><w:rPr><w:i/></w:rPr><w:t>Hello</w:t></w:r></w:p>`,
+    );
+    setParagraphAlignment(doc, [firstT(doc)], "center", meta());
+    applyRunFormat(doc, [wholeRun(doc)], { bold: true }, meta());
+    doc.refresh();
+    expect(rejectRevision(doc, revisionForText(doc, firstT(doc))!)).toBe(true);
+    expect(paraXml(doc)).toContain("<w:rPr><w:i/></w:rPr>");
+    expect(paraXml(doc)).toContain('<w:jc w:val="center"/>');
+    expect(collectRevisions(doc).map((ref) => ref.kind)).toEqual(["paragraphFormat"]);
+  });
+
+  it("finds nothing when the caret stands on untracked text", () => {
+    const doc = loadDoc(`<w:p><w:r><w:t>Hello</w:t></w:r></w:p>`);
+    expect(revisionForText(doc, firstT(doc))).toBeNull();
   });
 });

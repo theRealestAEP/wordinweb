@@ -9,7 +9,9 @@ import { XmlElement, cloneXml, localName } from "../xml.js";
  * deleted content is converted to `w:del`/`w:delText` (never actually removed),
  * paragraph splits/merges mark the paragraph glyph via `pPr/rPr/w:ins` or
  * `pPr/rPr/w:del`, and formatting changes stash the properties they replace in
- * `w:rPrChange`/`w:pPrChange`. The markup renderer (parse/document.ts) already
+ * a `*PrChange` — `w:rPrChange` and `w:pPrChange` for a run and a paragraph,
+ * `w:tblPrChange`, `w:trPrChange` and `w:tcPrChange` for a table, a row and a
+ * cell. The markup renderer (parse/document.ts) already
  * colors and underlines/strikes the text ones, so pending suggestions show live
  * as you type; the format ones show as the new formatting, like Word, because
  * the renderer reads only direct property children and never descends into a
@@ -49,23 +51,33 @@ export interface CaretTarget {
   offset: number;
 }
 
+/**
+ * A tracked FORMATTING change: the five properties elements that can carry a
+ * `*PrChange` record of the properties they replaced.
+ */
+export type FormatRevisionKind =
+  | "runFormat"
+  | "paragraphFormat"
+  | "tableFormat"
+  | "rowFormat"
+  | "cellFormat";
+
 /** A tracked-change element the review UI can accept or reject. */
 export type RevisionKind =
   | "insertion"
   | "deletion"
   | "markInsertion"
   | "markDeletion"
-  | "runFormat"
-  | "paragraphFormat";
+  | FormatRevisionKind;
+
 export interface RevisionRef {
   /** The w:ins / w:del element (run-level, or the mark ins/del inside rPr),
-   * or the w:rPrChange / w:pPrChange element for a format revision. */
+   * or the w:rPrChange / w:pPrChange / w:tblPrChange / w:trPrChange /
+   * w:tcPrChange element for a format revision. */
   el: XmlElement;
   kind: RevisionKind;
-  /** For mark and paragraphFormat revisions: the owning w:p. */
+  /** For mark revisions: the owning w:p. */
   paragraph?: XmlElement;
-  /** For runFormat revisions: the w:rPr holding the w:rPrChange. */
-  runProps?: XmlElement;
   author?: string;
 }
 
@@ -391,82 +403,205 @@ export function paragraphGlyphRevision(pEl: XmlElement, kind: "ins" | "del"): Xm
 
 /**
  * Tracked FORMATTING changes. Word records them by keeping the new properties
- * where they always live — directly in w:rPr / w:pPr, so every renderer shows
- * the new look with no special casing — and stashing the PREVIOUS properties
- * in a w:rPrChange / w:pPrChange as the last child of that same element.
- * Accept drops the change element; reject puts the recorded properties back.
+ * where they always live — directly in w:rPr / w:pPr / w:tblPr / w:trPr /
+ * w:tcPr, so every renderer shows the new look with no special casing — and
+ * stashing the PREVIOUS properties in a `*PrChange` as the last child of that
+ * same element. Accept drops the change element; reject puts the recorded
+ * properties back.
  *
- * Both are recorded BEFORE the mutation runs, and only once per pending
- * suggestion: a second edit to the same run or paragraph refines the same
- * suggestion, so the recorded properties stay the ones the reviewer would get
- * back on reject — the state before ANY of it was suggested.
+ * All five are recorded BEFORE the mutation runs, and only once per pending
+ * suggestion: a second edit to the same run, paragraph, table, row or cell
+ * refines the same suggestion, so the recorded properties stay the ones the
+ * reviewer would get back on reject — the state before ANY of it was
+ * suggested.
  */
 
-/** Record the run's current w:rPr as the "previous formatting" of a tracked
- * format change. Call before mutating rEl's rPr. */
-export function recordRunFormatChange(rEl: XmlElement, meta: RevisionMeta): void {
-  const w = prefixOf(rEl);
-  let rPr = rEl.children.find((c) => localName(c.name) === "rPr");
-  if (rPr?.children.some((c) => localName(c.name) === "rPrChange")) return;
-  if (!rPr) {
-    rPr = el(`${w}rPr`);
-    rEl.children.unshift(rPr);
+/**
+ * Per-kind shape of a tracked formatting revision.
+ *
+ * `excluded` is what the change element's payload type may NOT carry, which
+ * ECMA-376 states as the difference between the properties element's own type
+ * and the base type the record holds:
+ *
+ *  - CT_RPr  minus CT_RPrOriginal  → the change record itself.
+ *  - CT_PPr  minus CT_PPrBase      → the paragraph mark's run properties and
+ *                                    the section break.
+ *  - CT_TblPr minus CT_TblPrBase   → the change record itself.
+ *  - CT_TrPr minus CT_TrPrBase     → the row's own w:ins / w:del structural
+ *                                    revisions, which are not formatting.
+ *  - CT_TcPr minus CT_TcPrInner    → the change record itself.
+ *
+ * Excluded children stay LIVE: they are neither recorded nor disturbed by a
+ * reject, which is what keeps a row's structural revision and a paragraph's
+ * sectPr in place while its formatting is reviewed.
+ */
+const FORMAT_CHANGE: Record<
+  FormatRevisionKind,
+  { props: string; change: string; excluded: readonly string[] }
+> = {
+  runFormat: { props: "rPr", change: "rPrChange", excluded: ["rPrChange"] },
+  paragraphFormat: { props: "pPr", change: "pPrChange", excluded: ["rPr", "sectPr", "pPrChange"] },
+  tableFormat: { props: "tblPr", change: "tblPrChange", excluded: ["tblPrChange"] },
+  rowFormat: { props: "trPr", change: "trPrChange", excluded: ["ins", "del", "trPrChange"] },
+  cellFormat: { props: "tcPr", change: "tcPrChange", excluded: ["tcPrChange"] },
+};
+
+/**
+ * Record `owner`'s current properties as the "previous formatting" of a
+ * tracked format change. Call BEFORE mutating them.
+ *
+ * The properties element leads its owner in every one of the five schemas
+ * (w:rPr, w:pPr, w:tblPr, w:trPr and w:tcPr are all the first child), so one
+ * unshift creates a missing one correctly; the change record closes it, so one
+ * push places it correctly.
+ */
+function recordFormatChange(owner: XmlElement, kind: FormatRevisionKind, meta: RevisionMeta): void {
+  const { props: propsName, change: changeName, excluded } = FORMAT_CHANGE[kind];
+  const w = prefixOf(owner);
+  let props = owner.children.find((c) => localName(c.name) === propsName);
+  if (props?.children.some((c) => localName(c.name) === changeName)) return;
+  if (!props) {
+    props = el(`${w}${propsName}`);
+    owner.children.unshift(props);
   }
-  const previous = el(`${w}rPr`, {}, rPr.children.map(cloneXml));
-  rPr.children.push(el(`${w}rPrChange`, revAttrs(w, meta), [previous]));
+  const previous = el(
+    `${w}${propsName}`,
+    {},
+    props.children.filter((c) => !excluded.includes(localName(c.name))).map(cloneXml),
+  );
+  props.children.push(el(`${w}${changeName}`, revAttrs(w, meta), [previous]));
+}
+
+/** Record a run's w:rPr as the previous formatting (w:rPrChange). */
+export function recordRunFormatChange(rEl: XmlElement, meta: RevisionMeta): void {
+  recordFormatChange(rEl, "runFormat", meta);
+}
+
+/** Record a paragraph's w:pPr as the previous formatting (w:pPrChange). */
+export function recordParagraphFormatChange(pEl: XmlElement, meta: RevisionMeta): void {
+  recordFormatChange(pEl, "paragraphFormat", meta);
+}
+
+/** Record a table's w:tblPr as the previous formatting (w:tblPrChange). */
+export function recordTableFormatChange(tblEl: XmlElement, meta: RevisionMeta): void {
+  recordFormatChange(tblEl, "tableFormat", meta);
+}
+
+/** Record a row's w:trPr as the previous formatting (w:trPrChange). */
+export function recordRowFormatChange(trEl: XmlElement, meta: RevisionMeta): void {
+  recordFormatChange(trEl, "rowFormat", meta);
+}
+
+/** Record a cell's w:tcPr as the previous formatting (w:tcPrChange). */
+export function recordCellFormatChange(tcEl: XmlElement, meta: RevisionMeta): void {
+  recordFormatChange(tcEl, "cellFormat", meta);
 }
 
 /**
- * The three children that close a w:pPr, in this order. They are also exactly
- * what a w:pPrChange may NOT carry: its content is CT_PPrBase, which stops
- * short of the paragraph mark's run properties and the section break.
+ * Record a table's w:tblGrid as the previous column grid (w:tblGridChange).
+ *
+ * The grid is NOT part of w:tblPr, so a column-width suggestion that only
+ * restored the table properties would put back a width the grid still
+ * contradicts. CT_TblGridChange carries a w:id and nothing else — no author,
+ * no date — so it is not a revision a reviewer can address on its own; it
+ * rides with the table's w:tblPrChange, which every caller here records too,
+ * and is accepted or rejected with it.
  */
-const PPR_TRAILING = new Set(["rPr", "sectPr", "pPrChange"]);
-
-/** Record the paragraph's current w:pPr as the "previous formatting" of a
- * tracked format change. Call before mutating pEl's pPr. */
-export function recordParagraphFormatChange(pEl: XmlElement, meta: RevisionMeta): void {
-  const w = prefixOf(pEl);
-  let pPr = pEl.children.find((c) => localName(c.name) === "pPr");
-  if (pPr?.children.some((c) => localName(c.name) === "pPrChange")) return;
-  if (!pPr) {
-    pPr = el(`${w}pPr`);
-    pEl.children.unshift(pPr);
-  }
+export function recordTableGridChange(tblEl: XmlElement, meta: RevisionMeta): void {
+  const w = prefixOf(tblEl);
+  const grid = tblEl.children.find((c) => localName(c.name) === "tblGrid");
+  if (!grid || grid.children.some((c) => localName(c.name) === "tblGridChange")) return;
   const previous = el(
-    `${w}pPr`,
+    `${w}tblGrid`,
     {},
-    pPr.children.filter((c) => !PPR_TRAILING.has(localName(c.name))).map(cloneXml),
+    grid.children.filter((c) => localName(c.name) !== "tblGridChange").map(cloneXml),
   );
-  pPr.children.push(el(`${w}pPrChange`, revAttrs(w, meta), [previous]));
+  grid.children.push(el(`${w}tblGridChange`, { [`${w}id`]: String(meta.nextId()) }, [previous]));
 }
 
 /** Append a CT_PPrBase property to a w:pPr, ahead of the three children that
- * close the element (see PPR_TRAILING). A paragraph command that appends has
- * to step over them, or it writes a pPr Word will not read. */
+ * close the element. A paragraph command that appends has to step over them,
+ * or it writes a pPr Word will not read. */
 export function appendParagraphProp(pPr: XmlElement, prop: XmlElement): void {
-  const at = pPr.children.findIndex((c) => PPR_TRAILING.has(localName(c.name)));
+  const trailing = FORMAT_CHANGE.paragraphFormat.excluded;
+  const at = pPr.children.findIndex((c) => trailing.includes(localName(c.name)));
   pPr.children.splice(at === -1 ? pPr.children.length : at, 0, prop);
 }
 
 // ---------- review: locate / accept / reject ----------
 
-/** The run-level revision (w:ins/w:del) enclosing a w:t, if any. */
+/** Which element owns each format revision, by local name. */
+const FORMAT_KIND_BY_OWNER: Record<string, FormatRevisionKind | undefined> = {
+  r: "runFormat",
+  p: "paragraphFormat",
+  tbl: "tableFormat",
+  tr: "rowFormat",
+  tc: "cellFormat",
+};
+
+/** The `*PrChange` a format revision's owner currently holds, if any. */
+function formatChangeIn(owner: XmlElement, kind: FormatRevisionKind): XmlElement | null {
+  const { props: propsName, change: changeName } = FORMAT_CHANGE[kind];
+  const props = owner.children.find((c) => localName(c.name) === propsName);
+  return props?.children.find((c) => localName(c.name) === changeName) ?? null;
+}
+
+function isFormatKind(kind: RevisionKind): kind is FormatRevisionKind {
+  return kind in FORMAT_CHANGE;
+}
+
+/**
+ * The revision at a w:t, for the accept/reject popover. Resolved innermost
+ * out, and in this order of preference:
+ *
+ *  1. A w:ins / w:del the text sits inside — the thing the caret is literally
+ *     within, and what the review UI has always offered. It cannot cross a
+ *     paragraph, so that search stops at the w:p.
+ *  2. The paragraph's own mark revision, an inserted or deleted pilcrow.
+ *  3. A FORMAT revision on an ancestor: the run's w:rPrChange, then the
+ *     paragraph's, cell's, row's and table's records. Without this pass a
+ *     tracked formatting change is countable, and acceptable in bulk, but
+ *     unreachable by clicking the text it formats.
+ *
+ * Structural revisions outrank formatting ones because they decide whether
+ * content exists at all; a paragraph can carry both at once.
+ */
 export function revisionForText(doc: DocxDocument, t: XmlElement): RevisionRef | null {
+  let format: RevisionRef | null = null;
+  let insideParagraph = true;
   let cur: XmlElement | undefined = doc.findParentOf(t);
   while (cur) {
     const ln = localName(cur.name);
-    if (ln === "ins" || ln === "del") {
+    if (insideParagraph && (ln === "ins" || ln === "del")) {
       return {
         el: cur,
         kind: ln === "ins" ? "insertion" : "deletion",
         author: attrByLocal(cur, "author"),
       };
     }
-    if (ln === "p" || ln === "body" || ln === "tc") break;
+    if (ln === "p") {
+      const insMark = paragraphGlyphRevision(cur, "ins");
+      if (insMark) return { el: insMark, kind: "markInsertion", paragraph: cur };
+      const delMark = paragraphGlyphRevision(cur, "del");
+      if (delMark) return { el: delMark, kind: "markDeletion", paragraph: cur };
+      insideParagraph = false;
+    }
+    const kind = FORMAT_KIND_BY_OWNER[ln];
+    if (kind && !format) {
+      const change = formatChangeIn(cur, kind);
+      if (change) {
+        format = {
+          el: change,
+          kind,
+          ...(kind === "paragraphFormat" ? { paragraph: cur } : {}),
+          author: attrByLocal(change, "author"),
+        };
+      }
+    }
+    if (ln === "body") break;
     cur = doc.findParentOf(cur);
   }
-  return null;
+  return format;
 }
 
 function convertDelTextToText(el: XmlElement): void {
@@ -514,9 +649,9 @@ function joinWithNext(doc: DocxDocument, pEl: XmlElement): boolean {
 
 /**
  * Every tracked change in the document, in document order: run-level
- * w:ins/w:del wrappers plus paragraph-mark revisions (pPr/rPr ins/del).
- * Covers the body, headers/footers and footnotes — everything the editor
- * can suggest into.
+ * w:ins/w:del wrappers, paragraph-mark revisions (pPr/rPr ins/del), and the
+ * five formatting records. Covers the body, headers/footers and footnotes —
+ * everything the editor can suggest into.
  */
 export function collectRevisions(doc: DocxDocument): RevisionRef[] {
   const out: RevisionRef[] = [];
@@ -533,22 +668,30 @@ export function collectRevisions(doc: DocxDocument): RevisionRef[] {
         author: attrByLocal(el, "author"),
       });
     }
-    if (ln === "r") {
-      const rPr = el.children.find((c) => localName(c.name) === "rPr");
-      const change = rPr?.children.find((c) => localName(c.name) === "rPrChange");
-      if (rPr && change) {
-        out.push({ el: change, kind: "runFormat", runProps: rPr, author: attrByLocal(change, "author") });
-      }
+    // Run, table, row and cell formatting revisions are collected AT their
+    // owner, ahead of its content, because properties precede what they
+    // format. The paragraph is the exception and is skipped here: the pilcrow
+    // its pPrChange formats ENDS the paragraph, so document order puts it
+    // after the paragraph's runs, and it is collected below.
+    const formatKind = ln === "p" ? undefined : FORMAT_KIND_BY_OWNER[ln];
+    if (formatKind) {
+      const change = formatChangeIn(el, formatKind);
+      if (change) out.push({ el: change, kind: formatKind, author: attrByLocal(change, "author") });
     }
+    // A row's w:trPr may hold its own structural w:ins / w:del. Those are not
+    // run-level revisions, and unwrapping one would splice its children into
+    // the trPr, so never descend into a trPr — its trPrChange is already
+    // collected.
+    if (ln === "trPr") return;
     for (const c of el.children) walk(c);
     // The paragraph-mark revision is the pilcrow at the paragraph's END, so
     // it follows the paragraph's own runs in document order.
     if (ln === "p") {
-      const pPr = el.children.find((c) => localName(c.name) === "pPr");
-      const change = pPr?.children.find((c) => localName(c.name) === "pPrChange");
+      const change = formatChangeIn(el, "paragraphFormat");
       if (change) {
         out.push({ el: change, kind: "paragraphFormat", paragraph: el, author: attrByLocal(change, "author") });
       }
+      const pPr = el.children.find((c) => localName(c.name) === "pPr");
       const rPr = pPr?.children.find((c) => localName(c.name) === "rPr");
       for (const c of rPr?.children ?? []) {
         const cn = localName(c.name);
@@ -581,51 +724,77 @@ function applyAccept(doc: DocxDocument, ref: RevisionRef): boolean {
       return joinWithNext(doc, ref.paragraph);
     case "runFormat":
     case "paragraphFormat":
+    case "tableFormat":
+    case "rowFormat":
+    case "cellFormat":
       // The new formatting is already the live one; accepting just retires the
       // record of what it replaced.
       return removeFormatChange(doc, ref);
   }
 }
 
-/** Drop a w:rPrChange / w:pPrChange from the properties element holding it. */
+/**
+ * The w:tblGrid change record riding with a table's w:tblPrChange, if any.
+ * `props` is the w:tblPr holding the change; its parent is the table.
+ */
+function gridChangeBeside(doc: DocxDocument, props: XmlElement): XmlElement | null {
+  const tbl = doc.findParentOf(props);
+  const grid = tbl?.children.find((c) => localName(c.name) === "tblGrid");
+  return grid?.children.find((c) => localName(c.name) === "tblGridChange") ?? null;
+}
+
+/** Drop a `*PrChange` from the properties element holding it. */
 function removeFormatChange(doc: DocxDocument, ref: RevisionRef): boolean {
-  const props = ref.kind === "runFormat"
-    ? ref.runProps
-    : ref.paragraph?.children.find((c) => localName(c.name) === "pPr");
+  const props = doc.findParentOf(ref.el);
   if (!props) return false;
   const idx = props.children.indexOf(ref.el);
   if (idx === -1) return false;
   props.children.splice(idx, 1);
+  if (ref.kind === "tableFormat") {
+    const gridChange = gridChangeBeside(doc, props);
+    if (gridChange) removeEl(doc, gridChange);
+  }
   if (props.children.length === 0) removeEl(doc, props);
   return true;
 }
 
 /**
  * Reject a formatting revision: the recorded previous properties become the
- * live ones again. A w:pPrChange records CT_PPrBase only, so the paragraph
- * mark's w:rPr (which carries mark ins/del revisions) and the w:sectPr stay
- * exactly as they are and keep their schema position at the end.
+ * live ones again, and the children the record could not carry (see
+ * FORMAT_CHANGE.excluded) stay exactly as they are, keeping their schema
+ * position at the end. That is what leaves a paragraph's w:sectPr, a
+ * paragraph mark's w:rPr and a row's structural w:ins / w:del untouched while
+ * their formatting is reviewed.
  */
 function restoreFormatChange(doc: DocxDocument, ref: RevisionRef): boolean {
-  const props = ref.kind === "runFormat"
-    ? ref.runProps
-    : ref.paragraph?.children.find((c) => localName(c.name) === "pPr");
+  if (!isFormatKind(ref.kind)) return false;
+  const props = doc.findParentOf(ref.el);
   if (!props || props.children.indexOf(ref.el) === -1) return false;
+  const { change, excluded } = FORMAT_CHANGE[ref.kind];
   const recorded = ref.el.children[0];
   const restored = (recorded?.children ?? []).map(cloneXml);
-  const kept = ref.kind === "runFormat"
-    ? []
-    : props.children.filter((c) => {
-        const ln = localName(c.name);
-        // An emptied paragraph-mark rPr — its own revision already reviewed —
-        // is not a property, and keeping it would leave the paragraph in a
-        // shape it was never in.
-        if (ln === "rPr") return c.children.length > 0;
-        return ln === "sectPr";
-      });
+  const kept = props.children.filter((c) => {
+    const ln = localName(c.name);
+    if (ln === change || !excluded.includes(ln)) return false;
+    // An emptied paragraph-mark rPr — its own revision already reviewed — is
+    // not a property, and keeping it would leave the paragraph in a shape it
+    // was never in.
+    if (ln === "rPr") return c.children.length > 0;
+    return true;
+  });
+  if (ref.kind === "tableFormat") restoreGridChange(doc, props);
   props.children = [...restored, ...kept];
   if (props.children.length === 0) removeEl(doc, props);
   return true;
+}
+
+/** Put a table's recorded w:tblGrid back and drop the record. */
+function restoreGridChange(doc: DocxDocument, props: XmlElement): void {
+  const gridChange = gridChangeBeside(doc, props);
+  if (!gridChange) return;
+  const grid = doc.findParentOf(gridChange);
+  if (!grid) return;
+  grid.children = (gridChange.children[0]?.children ?? []).map(cloneXml);
 }
 
 function applyReject(doc: DocxDocument, ref: RevisionRef): boolean {
@@ -643,6 +812,9 @@ function applyReject(doc: DocxDocument, ref: RevisionRef): boolean {
       return removeMarkRevision(ref);
     case "runFormat":
     case "paragraphFormat":
+    case "tableFormat":
+    case "rowFormat":
+    case "cellFormat":
       return restoreFormatChange(doc, ref);
   }
 }
