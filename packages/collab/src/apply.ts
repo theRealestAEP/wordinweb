@@ -959,9 +959,8 @@ function resolveOperationTarget(
   // A document-scoped operation names no node: the document IS the target, so
   // this address always resolves and the operation's own payload has to carry
   // its rejection predicate (see the registry's OperationAddress comment).
-  if (address === "document") {
-    return { el: doc.docRoot, t: null, run: null, cellParagraph: null, drawing: null };
-  }
+  const empty = { t: null, run: null, cellParagraph: null, drawing: null };
+  if (address === "document") return { ...empty, el: doc.docRoot };
   const addressId = (intent as unknown as Record<string, number>)[ADDRESS_WIRE_FIELD[address]];
   switch (address) {
     case "run": {
@@ -969,31 +968,28 @@ function resolveOperationTarget(
       if (!el) return null;
       const entry = runOf(el);
       if (!entry) return null;
-      return { el, t: entry.firstT ?? null, run: entry.run, cellParagraph: null, drawing: null };
+      return { ...empty, el, t: entry.firstT ?? null, run: entry.run };
     }
     case "block": {
       const el = ids.elOf(addressId);
       if (!el) return null;
-      return { el, t: firstTextDescendant(el), run: null, cellParagraph: null, drawing: null };
+      return { ...empty, el, t: firstTextDescendant(el) };
     }
     case "cell": {
       const paraEl = ids.elOf(addressId) ?? null;
       const tbl = paraEl ? tableOf(doc, paraEl) : null;
-      return tbl ? { el: tbl, t: null, run: null, cellParagraph: paraEl, drawing: null } : null;
+      return tbl ? { ...empty, el: tbl, cellParagraph: paraEl } : null;
     }
     case "object": {
-      // The run half of the address must resolve, and so must the object
-      // half: a run whose contents have moved under a concurrent edit is a
-      // clean rejection on every replica rather than a mutation of whatever
-      // now sits at that index.
+      // BOTH halves have to resolve. A run whose contents moved under a
+      // concurrent edit rejects on every replica rather than mutating
+      // whatever now sits at that index — the honest no-op an unresolvable
+      // id already gives, extended to the index that narrows it.
       const el = ids.elOf(addressId);
       if (!el) return null;
-      const entry = runOf(el);
-      if (!entry) return null;
-      const objectIndex = (intent as unknown as Record<string, number | undefined>).objectIndex;
+      const objectIndex = (intent as unknown as { objectIndex?: number }).objectIndex;
       const drawing = drawingIn(el, objectIndex, runOf);
-      if (!drawing) return null;
-      return { el, t: entry.firstT ?? null, run: entry.run, cellParagraph: null, drawing };
+      return drawing ? { ...empty, el, drawing } : null;
     }
   }
 }

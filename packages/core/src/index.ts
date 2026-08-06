@@ -95,7 +95,10 @@ export {
   drawingRotation,
   setDrawingRotation,
   setDrawingOrder,
+  imageCrop,
+  setImageCrop,
 } from "./edit/images.js";
+export type { ImageCrop } from "./edit/images.js";
 export { addComment, deleteComment, replyToComment } from "./edit/comments.js";
 export { setListType, listTypeAt, setListLevel } from "./edit/lists.js";
 export type { ListKind } from "./edit/lists.js";
@@ -133,7 +136,7 @@ export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpac
 export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode } from "./edit/paragraph.js";
 export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
-export { insertFootnote } from "./edit/notes.js";
+export { insertEndnote, insertFootnote } from "./edit/notes.js";
 export { MAX_FIELD_INSTRUCTION, insertField, insertPageField, insertDateTimeField, isInsertableFieldInstruction } from "./edit/fields.js";
 export {
   UPDATABLE_FIELD_KEYWORDS,

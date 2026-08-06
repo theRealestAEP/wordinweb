@@ -12,14 +12,16 @@ import {
   adjustFloatingPosition,
   drawingRotation,
   imageAltText,
+  imageCrop,
   isFloatingDrawing,
   replaceImageBlip,
   setDrawingOrder,
   setDrawingRotation,
   setFloatingPagePosition,
   setImageAltText,
+  setImageCrop,
 } from "../src/edit/images.js";
-import { insertFootnote } from "../src/edit/notes.js";
+import { insertEndnote, insertFootnote } from "../src/edit/notes.js";
 import { insertDateTimeField, insertField, insertPageField } from "../src/edit/fields.js";
 import { insertBlankPageAt, insertBreakAt, insertCoverPage, sectionContextAt } from "../src/edit/sections.js";
 import { drawingLineStyle, drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingLineStyle, setDrawingWordArtStyle, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
@@ -2319,6 +2321,72 @@ describe("image editing", () => {
     const img2 = (para2.children[0] as Run).content.find((c) => c.kind === "image");
     expect(img2 && img2.kind === "image" ? img2.part : "").toContain("media/image");
   });
+
+  /** The drawing element of the fixture's only image. */
+  function drawingOf(doc: DocxDocument): XmlElement {
+    const run = (doc.sections[0].blocks[0] as Paragraph).children[0] as Run;
+    const img = run.content.find((c) => c.kind === "image");
+    if (!img || img.kind !== "image" || !img.srcDrawing) throw new Error("no image");
+    return img.srcDrawing;
+  }
+
+  it("writes a:srcRect percentages, reads them back, and survives save/reload", () => {
+    const doc = loadWithImage();
+    expect(imageCrop(drawingOf(doc))).toEqual({ l: 0.25, t: 0.1, r: 0, b: 0 });
+    expect(setImageCrop(doc, drawingOf(doc), { l: 0.1, t: 0.2, r: 0.05, b: 0.4 })).toBe(true);
+
+    const saved = DocxDocument.load(doc.save());
+    const xml = saved.pkg.text("word/document.xml");
+    expect(xml).toContain(`<a:srcRect l="10000" t="20000" r="5000" b="40000"/>`);
+    expect(imageCrop(drawingOf(saved))).toEqual({ l: 0.1, t: 0.2, r: 0.05, b: 0.4 });
+    // The parsed model carries the same crop the renderer clips with.
+    const run = (saved.sections[0].blocks[0] as Paragraph).children[0] as Run;
+    const img = run.content.find((c) => c.kind === "image");
+    expect(img?.kind === "image" ? img.crop : undefined).toEqual({ l: 0.1, t: 0.2, r: 0.05, b: 0.4 });
+  });
+
+  it("puts a:srcRect between a:blip and the fill mode, as the schema sequence requires", () => {
+    const doc = loadWithImage();
+    setImageCrop(doc, drawingOf(doc), { l: 0.1, t: 0, r: 0, b: 0 });
+    const blipFill = (function find(el: XmlElement): XmlElement | undefined {
+      if (localName(el.name) === "blipFill") return el;
+      for (const c of el.children) {
+        const hit = find(c);
+        if (hit) return hit;
+      }
+      return undefined;
+    })(drawingOf(doc))!;
+    expect(blipFill.children.map((c) => localName(c.name))).toEqual(["blip", "srcRect"]);
+  });
+
+  it("removes a:srcRect entirely when the crop is cleared", () => {
+    const doc = loadWithImage();
+    expect(setImageCrop(doc, drawingOf(doc), { l: 0, t: 0, r: 0, b: 0 })).toBe(true);
+    expect(imageCrop(drawingOf(doc))).toEqual({ l: 0, t: 0, r: 0, b: 0 });
+    expect(DocxDocument.load(doc.save()).pkg.text("word/document.xml")).not.toContain("srcRect");
+  });
+
+  it("leaves parts it did not touch byte-identical when cropping", () => {
+    const styles = `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="X"><w:rPr><w:b/></w:rPr></w:style>
+</w:styles>`;
+    const doc = DocxDocument.load(
+      makeDocxWithMedia(
+        {
+          "word/document.xml": wrapDocument(DRAWING),
+          "word/_rels/document.xml.rels": DOCRELS,
+          "_rels/.rels": RELS,
+          "word/styles.xml": styles,
+        },
+        { "word/media/image1.png": PNG },
+      ),
+    );
+    setImageCrop(doc, drawingOf(doc), { l: 0.3, t: 0, r: 0.3, b: 0 });
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.pkg.text("word/styles.xml")).toBe(styles);
+    expect(reloaded.pkg.text("word/_rels/document.xml.rels")).toBe(DOCRELS);
+  });
 });
 
 describe("insertFootnote", () => {
@@ -2403,6 +2471,121 @@ describe("footnote editing", () => {
     const fnXml = DocxDocument.load(doc.save()).pkg.text("word/footnotes.xml");
     expect(fnXml).toContain("XYZ");
     expect(fnXml).toMatch(/<w:ins\b/);
+  });
+});
+
+describe("insertEndnote", () => {
+  /** First text content of endnote `id`, or null. */
+  const noteText = (doc: DocxDocument, id: number) => {
+    const para = doc.endnotes.get(id)?.find((b) => b.type === "paragraph") as Paragraph | undefined;
+    for (const c of para?.children ?? []) {
+      for (const r of c.type === "run" ? [c] : c.runs) {
+        const tc = r.content.find((rc) => rc.kind === "text");
+        if (tc && tc.kind === "text") return tc;
+      }
+    }
+    return null;
+  };
+
+  const caretT = (doc: DocxDocument) =>
+    firstRun(doc).run.content.find((c) => c.kind === "text")!.srcT!;
+
+  it("creates endnotes.xml with Word's stock separators, splits at the caret, round-trips", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    expect(insertEndnote(doc, caretT(doc), 15, "See Smith 2024.")).toBe(1);
+    expect(noteText(doc, 1)?.text).toContain("See Smith 2024.");
+
+    const saved = DocxDocument.load(doc.save());
+    const enXml = saved.pkg.text("word/endnotes.xml");
+    // Ids -1 and 0 are the separator pair Word requires of the part, so the
+    // first real note is 1.
+    expect(enXml).toContain(`<w:endnote w:type="separator" w:id="-1">`);
+    expect(enXml).toContain(`<w:endnote w:type="continuationSeparator" w:id="0">`);
+    expect(enXml).toContain(`<w:endnote w:id="1">`);
+    expect(enXml).toContain(`<w:endnoteRef/>`);
+    expect(enXml).toContain(`w:val="EndnoteText"`);
+    expect(noteText(saved, 1)?.text).toContain("See Smith 2024.");
+
+    // The reference run lands between "needed" and " here", in the body.
+    const body = saved.pkg.text("word/document.xml");
+    expect(body).toContain(`<w:endnoteReference w:id="1"/>`);
+    expect(body).toContain(`w:val="EndnoteReference"`);
+    expect(textOf(firstRun(saved).para)).toBe("Citation needed here");
+  });
+
+  it("registers the part in the relationships and the content types", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    insertEndnote(doc, caretT(doc), 20, "A note.");
+    const saved = DocxDocument.load(doc.save());
+    expect(saved.pkg.text("word/_rels/document.xml.rels")).toContain(
+      `Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"`,
+    );
+    expect(saved.pkg.text("[Content_Types].xml")).toContain(
+      "wordprocessingml.endnotes+xml",
+    );
+  });
+
+  it("allocates the next free id and keeps footnotes on their own numbering", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    expect(insertEndnote(doc, caretT(doc), 20, "first")).toBe(1);
+    expect(insertEndnote(doc, caretT(doc), 20, "second")).toBe(2);
+    // Footnotes count from 1 in their own part, unaffected by the endnotes.
+    expect(insertFootnote(doc, caretT(doc), 20, "a footnote")).toBe(1);
+    expect([...doc.endnotes.keys()]).toEqual([1, 2]);
+    expect([...doc.footnotes.keys()]).toEqual([1]);
+  });
+
+  it("keeps endnote text editable: source refs survive and the part re-serializes", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    insertEndnote(doc, caretT(doc), 15, "See Smith 2024.");
+    const tc = noteText(doc, 1)!;
+    expect(tc.srcT, "endnote text keeps its source w:t").toBeTruthy();
+    expect(doc.findParentOf(tc.srcT!), "the endnote run is reachable").toBeTruthy();
+
+    tc.srcT!.text = tc.srcT!.text.replace("Smith", "Smith & Jones");
+    doc.markDirtyIfFootnote(tc.srcT!);
+    doc.refresh();
+    const reloaded = DocxDocument.load(doc.save());
+    expect(noteText(reloaded, 1)!.text).toContain("Smith & Jones");
+  });
+
+  it("refuses empty text and leaves the part uncreated", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    expect(insertEndnote(doc, caretT(doc), 5, "   ")).toBe(null);
+    expect(doc.endnotesTree()).toBe(null);
+    expect(DocxDocument.load(doc.save()).pkg.text("word/endnotes.xml")).toBeUndefined();
+  });
+
+  it("leaves parts it did not touch byte-identical", () => {
+    const styles = `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="X"><w:rPr><w:b/></w:rPr></w:style>
+</w:styles>`;
+    const doc = loadDoc(p("Citation needed here"), { "word/styles.xml": styles });
+    insertEndnote(doc, caretT(doc), 20, "A note.");
+    expect(DocxDocument.load(doc.save()).pkg.text("word/styles.xml")).toBe(styles);
+  });
+
+  it("adds an endnote to a document that already carries one, keeping the part's other notes", () => {
+    const endnotes = `<?xml version="1.0"?>
+<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>
+  <w:endnote w:id="4"><w:p><w:r><w:t>existing note</w:t></w:r></w:p></w:endnote>
+</w:endnotes>`;
+    const rels = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>
+</Relationships>`;
+    const doc = loadDoc(p("Citation needed here"), {
+      "word/endnotes.xml": endnotes,
+      "word/_rels/document.xml.rels": rels,
+    });
+    expect(noteText(doc, 4)?.text).toBe("existing note");
+    // max+1 over the part, so a replica allocating from the same tree agrees.
+    expect(insertEndnote(doc, caretT(doc), 20, "a new note")).toBe(5);
+    const reloaded = DocxDocument.load(doc.save());
+    expect(noteText(reloaded, 4)?.text).toBe("existing note");
+    expect(noteText(reloaded, 5)?.text).toContain("a new note");
   });
 });
 

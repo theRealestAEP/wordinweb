@@ -43,6 +43,37 @@ import {
 
 const REL_TYPE_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 
+/**
+ * A fresh footnotes.xml / endnotes.xml root carrying the two stock notes Word
+ * requires of the part: the separator rule drawn above the notes, and the
+ * continuation separator drawn when a note spills onto the next page. Real
+ * notes start at id 1 because these occupy -1 and 0.
+ */
+function notesPartRoot(kind: "footnote" | "endnote"): XmlElement {
+  const stock = (id: string, type: string, refEl: string): XmlElement => ({
+    name: `w:${kind}`,
+    attrs: { "w:type": type, "w:id": id },
+    children: [
+      {
+        name: "w:p",
+        attrs: {},
+        children: [
+          { name: "w:pPr", attrs: {}, children: [{ name: "w:spacing", attrs: { "w:after": "0", "w:line": "240", "w:lineRule": "auto" }, children: [], text: "" }], text: "" },
+          { name: "w:r", attrs: {}, children: [{ name: refEl, attrs: {}, children: [], text: "" }], text: "" },
+        ],
+        text: "",
+      },
+    ],
+    text: "",
+  });
+  return {
+    name: `w:${kind}s`,
+    attrs: { "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main" },
+    children: [stock("-1", "separator", "w:separator"), stock("0", "continuationSeparator", "w:continuationSeparator")],
+    text: "",
+  };
+}
+
 /** Word's built-in heading/title looks (modern Office theme), injected when a
  * file uses one without declaring it. Sizes in half-points. */
 const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
@@ -104,7 +135,7 @@ export class DocxDocument {
   /** Header/footer parts keyed by relationship id from document.xml.rels. */
   readonly headers: Map<string, HeaderFooter> = new Map();
   readonly footers: Map<string, HeaderFooter> = new Map();
-  /** Note content by note id (render-only; sources stripped). */
+  /** Note content by note id. */
   readonly footnotes: Map<number, Block[]> = new Map();
   readonly endnotes: Map<number, Block[]> = new Map();
   /** The separator paragraph controls the gap between its rule and the first
@@ -171,6 +202,11 @@ export class DocxDocument {
   private footnotesRoot: XmlElement | null = null;
   private footnotesDirty = false;
   private footnotesRels: Relationships = new Map();
+  /** Retained endnotes.xml tree (endnote insertion + save round-trip). */
+  private endnotesPart: string | null = null;
+  private endnotesRoot: XmlElement | null = null;
+  private endnotesDirty = false;
+  private endnotesRels: Relationships = new Map();
   /** Serialize retained optional parts only once actually mutated, keeping
    * untouched parts byte-identical through save(). */
   private stylesDirty = false;
@@ -333,9 +369,9 @@ export class DocxDocument {
       this.hfParts.push({ relId: rel.id, target: rel.target, root, isHeader, rels: partRels, relsRoot: partRelsRoot ?? null });
     }
 
-    // Footnote/endnote parts. Footnotes retain their tree so insertion can
-    // mutate and serialize it; note bodies stay non-editable (source refs
-    // stripped by the parser).
+    // Footnote/endnote parts. Both retain their tree so insertion can mutate
+    // and serialize it, and both parse editable (source refs kept) so the
+    // caret can bind to note text.
     for (const rel of this.documentRels.values()) {
       const isFn = rel.type.endsWith("/footnotes");
       const isEn = rel.type.endsWith("/endnotes");
@@ -353,10 +389,12 @@ export class DocxDocument {
         if (separator) {
           this.footnoteSeparator.push(...parseBlocks(separator, { ...this.ctxBase, rels: partRels }));
         }
+      } else {
+        this.endnotesPart = rel.target;
+        this.endnotesRoot = root;
+        this.endnotesRels = partRels;
       }
-      // Footnotes are editable (sources kept, part retained + re-serialized on
-      // save); endnotes stay render-only for now.
-      const notes = parseNotesPart(root, { ...this.ctxBase, rels: partRels }, isFn);
+      const notes = parseNotesPart(root, { ...this.ctxBase, rels: partRels });
       for (const [id, blocks] of notes) (isFn ? this.footnotes : this.endnotes).set(id, blocks);
     }
 
@@ -606,14 +644,9 @@ export class DocxDocument {
     this.comments = this.deriveComments();
     this.styles = parseStyles(this.stylesRoot ?? undefined, this.ctxBase);
     this.numbering = parseNumbering(this.numberingRoot ?? undefined, this.ctxBase);
-    // Re-derive footnote blocks from the retained tree (editable: keep source
-    // refs) so an edit to a footnote's w:t re-measures. Endnotes are render-
-    // only, parsed once at load, and left untouched here.
-    if (this.footnotesRoot) {
-      this.footnotes.clear();
-      const notes = parseNotesPart(this.footnotesRoot, { ...this.ctxBase, rels: this.footnotesRels }, true);
-      for (const [id, blocks] of notes) this.footnotes.set(id, blocks);
-    }
+    // Re-derive note blocks from the retained trees (editable: keep source
+    // refs) so an edit to a note's w:t re-measures.
+    this.rederiveNotes();
     this._modelVersion++;
     if (this.stableIds) {
       // In-place XML mutation preserves element identity across refresh, so
@@ -1152,65 +1185,58 @@ export class DocxDocument {
    */
   footnotesTree(create = false): XmlElement | null {
     if (this.footnotesRoot || !create) return this.footnotesRoot;
+    this.footnotesPart = this.createNotesPart("footnotes");
+    this.footnotesRoot = notesPartRoot("footnote");
+    this.footnotesDirty = true;
+    return this.footnotesRoot;
+  }
+
+  /** Retained endnotes tree; the endnote mirror of footnotesTree. */
+  endnotesTree(create = false): XmlElement | null {
+    if (this.endnotesRoot || !create) return this.endnotesRoot;
+    this.endnotesPart = this.createNotesPart("endnotes");
+    this.endnotesRoot = notesPartRoot("endnote");
+    this.endnotesDirty = true;
+    return this.endnotesRoot;
+  }
+
+  /** Register a new notes part in document.xml.rels and [Content_Types].xml,
+   * and return the part path. The tree itself is the caller's. */
+  private createNotesPart(kind: "footnotes" | "endnotes"): string {
     const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
-    this.footnotesPart = docDir + "footnotes.xml";
-    const sep = (id: string, type: string, refEl: string): XmlElement => ({
-      name: "w:footnote",
-      attrs: { "w:type": type, "w:id": id },
-      children: [
-        {
-          name: "w:p",
-          attrs: {},
-          children: [
-            { name: "w:pPr", attrs: {}, children: [{ name: "w:spacing", attrs: { "w:after": "0", "w:line": "240", "w:lineRule": "auto" }, children: [], text: "" }], text: "" },
-            { name: "w:r", attrs: {}, children: [{ name: refEl, attrs: {}, children: [], text: "" }], text: "" },
-          ],
-          text: "",
-        },
-      ],
+    const part = `${docDir}${kind}.xml`;
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const r of rels.children) {
+      const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+      if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+    }
+    rels.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: `rId${maxId + 1}`,
+        Type: `http://schemas.openxmlformats.org/officeDocument/2006/relationships/${kind}`,
+        Target: `${kind}.xml`,
+      },
+      children: [],
       text: "",
     });
-    this.footnotesRoot = {
-      name: "w:footnotes",
-      attrs: { "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main" },
-      children: [sep("-1", "separator", "w:separator"), sep("0", "continuationSeparator", "w:continuationSeparator")],
-      text: "",
-    };
-    {
-      const rels = this.ensureRelsRoot();
-      let maxId = 0;
-      for (const r of rels.children) {
-        const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
-        if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
-      }
-      rels.children.push({
-        name: "Relationship",
-        attrs: {
-          Id: `rId${maxId + 1}`,
-          Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes",
-          Target: "footnotes.xml",
-        },
-        children: [],
-        text: "",
-      });
-    }
     if (this.contentTypesRoot) {
-      const partName = "/" + this.footnotesPart;
+      const partName = "/" + part;
       if (!this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) {
         this.contentTypesRoot.children.push({
           name: "Override",
           attrs: {
             PartName: partName,
             ContentType:
-              "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+              `application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml`,
           },
           children: [],
           text: "",
         });
       }
     }
-    this.footnotesDirty = true;
-    return this.footnotesRoot;
+    return part;
   }
 
   /**
@@ -1332,11 +1358,24 @@ export class DocxDocument {
 
   markFootnotesChanged(): void {
     this.footnotesDirty = true;
-    // Re-derive the id -> blocks map so layout sees the new note.
-    this.footnotes.clear();
-    if (this.footnotesRoot) {
-      const notes = parseNotesPart(this.footnotesRoot, { ...this.ctxBase, rels: this.footnotesRels }, true);
-      for (const [id, blocks] of notes) this.footnotes.set(id, blocks);
+    this.rederiveNotes();
+  }
+
+  markEndnotesChanged(): void {
+    this.endnotesDirty = true;
+    this.rederiveNotes();
+  }
+
+  /** Re-derive both id -> blocks maps from the retained trees, so layout sees
+   * an inserted or edited note. */
+  private rederiveNotes(): void {
+    for (const [root, rels, into] of [
+      [this.footnotesRoot, this.footnotesRels, this.footnotes],
+      [this.endnotesRoot, this.endnotesRels, this.endnotes],
+    ] as const) {
+      if (!root) continue;
+      into.clear();
+      for (const [id, blocks] of parseNotesPart(root, { ...this.ctxBase, rels })) into.set(id, blocks);
     }
   }
 
@@ -1446,17 +1485,17 @@ export class DocxDocument {
     return map;
   }
 
-  /** Flag the footnotes part dirty when `t` lives inside it, so save()
-   * re-serializes footnotes.xml. Called by the editor after a text edit; a
-   * no-op for body/header/footer targets. */
+  /** Flag a notes part dirty when `t` lives inside it, so save()
+   * re-serializes footnotes.xml / endnotes.xml. Called by the editor after a
+   * text edit; a no-op for body/header/footer targets. */
   markDirtyIfFootnote(t: XmlElement): void {
-    if (!this.footnotesRoot || this.footnotesDirty) return;
     const contains = (el: XmlElement): boolean => {
       if (el === t) return true;
       for (const c of el.children) if (contains(c)) return true;
       return false;
     };
-    if (contains(this.footnotesRoot)) this.footnotesDirty = true;
+    if (this.footnotesRoot && !this.footnotesDirty && contains(this.footnotesRoot)) this.footnotesDirty = true;
+    if (this.endnotesRoot && !this.endnotesDirty && contains(this.endnotesRoot)) this.endnotesDirty = true;
   }
 
   /** The mutable XML roots (document body, related modeled parts, settings).
@@ -1465,6 +1504,7 @@ export class DocxDocument {
   editableRoots(): XmlElement[] {
     const roots = [this.docRoot, this.settingsRoot, ...this.hfParts.map((p) => p.root)];
     if (this.footnotesRoot) roots.push(this.footnotesRoot);
+    if (this.endnotesRoot) roots.push(this.endnotesRoot);
     if (this.commentsRoot) roots.push(this.commentsRoot);
     if (this.commentsExtRoot) roots.push(this.commentsExtRoot);
     return roots;
@@ -1538,10 +1578,16 @@ export class DocxDocument {
     return this.hfParts.filter((p) => p.isHeader).map((p) => p.root);
   }
 
-  /** XML roots that can carry tracked changes: body, headers/footers, footnotes. */
+  /** XML roots that can carry tracked changes: body, headers/footers, notes. */
   revisionRoots(): XmlElement[] {
+    return this.contentRoots();
+  }
+
+  /** Body, header/footer and note roots — every tree the caret can reach. */
+  private contentRoots(): XmlElement[] {
     const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
     if (this.footnotesRoot) roots.push(this.footnotesRoot);
+    if (this.endnotesRoot) roots.push(this.endnotesRoot);
     return roots;
   }
 
@@ -1574,8 +1620,7 @@ export class DocxDocument {
   }
 
   findParentOf(target: XmlElement): XmlElement | undefined {
-    const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
-    if (this.footnotesRoot) roots.push(this.footnotesRoot);
+    const roots = this.contentRoots();
     const memo = this._parentMemo.get(target);
     if (memo && memo.children.includes(target) && this.memoIsLive(memo, roots)) return memo;
     // A miss walks the tree anyway, so record EVERY link the walk passes, not
@@ -1808,6 +1853,9 @@ export class DocxDocument {
     }
     if (this.footnotesDirty && this.footnotesRoot && this.footnotesPart) {
       files[this.footnotesPart] = strToU8(serializeXml(this.footnotesRoot, true));
+    }
+    if (this.endnotesDirty && this.endnotesRoot && this.endnotesPart) {
+      files[this.endnotesPart] = strToU8(serializeXml(this.endnotesRoot, true));
     }
     if (this.settingsDirty) files[this.settingsPart] = strToU8(serializeXml(this.settingsRoot, true));
     if (this.relsRoot) this.writeModeledXml(files, this.relsPath, this.relsRoot);

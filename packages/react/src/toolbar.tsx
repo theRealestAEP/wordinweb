@@ -840,6 +840,19 @@ function FootnoteIcon() {
   );
 }
 
+/** The footnote mark over its separator, plus the closing rule that says the
+ * note sits at the END of the document rather than the foot of the page. */
+function EndnoteIcon() {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M2.5 10.5V3.5M2.5 3.5h7" strokeLinecap="round" />
+      <text x="10.2" y="6.6" fontSize="6.4" fill="currentColor" stroke="none" fontFamily="system-ui">i</text>
+      <path d="M2.5 10.5h11" strokeLinecap="round" strokeDasharray="1.5 1.6" />
+      <path d="M2.5 13.5h11" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function CommentIcon() {
   return (
     <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -849,8 +862,9 @@ function CommentIcon() {
   );
 }
 
-/** Insert-footnote popover: a text box; the note lands at the caret. */
-function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
+/** Insert-note popover: a text box; the note lands at the caret. A footnote
+ * goes to the foot of its page, an endnote to the end of the document. */
+function NoteMenu({ api, kind }: { api: DocxViewApi | null; kind: "footnote" | "endnote" }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [hint, setHint] = useState("");
@@ -866,7 +880,8 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const submit = () => {
-    if (api?.addFootnote(text)) {
+    const added = kind === "footnote" ? api?.addFootnote(text) : api?.addEndnote(text);
+    if (added) {
       setText("");
       setHint("");
       setOpen(false);
@@ -876,8 +891,8 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
   };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
-      <button title="Insert footnote (at the caret)" style={btnStyle(open)} onMouseDown={(e) => e.preventDefault()} onClick={() => setOpen(!open)}>
-        <FootnoteIcon />
+      <button title={`Insert ${kind} (at the caret)`} style={btnStyle(open)} onMouseDown={(e) => e.preventDefault()} onClick={() => setOpen(!open)}>
+        {kind === "footnote" ? <FootnoteIcon /> : <EndnoteIcon />}
       </button>
       {open && (
         <div
@@ -890,7 +905,7 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
           <textarea
             ref={inputRef}
             value={text}
-            placeholder="Footnote text…"
+            placeholder={kind === "footnote" ? "Footnote text…" : "Endnote text…"}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -4296,6 +4311,7 @@ function ObjectFormatTab({
       {wrap}
       {offered.has("size") && <Btn label="Size" title="Exact size" onClick={() => run("size")} />}
       {offered.has("position") && <Btn label="Position" title="Exact page position" onClick={() => run("position")} />}
+      {offered.has("crop") && <Btn label="Crop" title="Crop to part of the picture" onClick={() => run("crop")} />}
       {offered.has("rotate") && <Btn label="Rotate" title="Set rotation" onClick={() => run("rotate")} />}
       {offered.has("bringForward") && (
         <>
@@ -4414,6 +4430,7 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertWatermark", feature: "watermark" },
   { command: "addComment", feature: "comment" },
   { command: "addFootnote", feature: "footnote" },
+  { command: "addEndnote", feature: "footnote" },
   { command: "addBookmark", feature: "bookmark" },
 ];
 
@@ -5129,7 +5146,8 @@ export function DocxToolbar({
           {on("wordArt") && <WordArtMenu api={api} />}
           {on("link") && <LinkMenu api={api} />}
           {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
-          {on("footnote") && <FootnoteMenu api={api} />}
+          {on("footnote") && <NoteMenu api={api} kind="footnote" />}
+          {on("footnote") && <NoteMenu api={api} kind="endnote" />}
           {on("bookmark") && <BookmarkMenu api={api} />}
           {on("crossReference") && <CrossReferenceMenu api={api} />}
           {on("headerFooter") && (
@@ -5228,7 +5246,8 @@ export function DocxToolbar({
               {on("wordArt") && <WordArtMenu api={api} />}
               {on("link") && <LinkMenu api={api} />}
               {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
-              {on("footnote") && <FootnoteMenu api={api} />}
+              {on("footnote") && <NoteMenu api={api} kind="footnote" />}
+              {on("footnote") && <NoteMenu api={api} kind="endnote" />}
               {on("bookmark") && <BookmarkMenu api={api} />}
               {on("crossReference") && <CrossReferenceMenu api={api} />}
               {on("headerFooter") && (

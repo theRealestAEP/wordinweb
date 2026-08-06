@@ -140,6 +140,21 @@ describe("setModel3DRotation over the wire", () => {
     expect(s.submit(intent as never).kind).toBe("rejected");
   });
 
+  it("gets the object address's own validation without declaring any", () => {
+    // The unification: objectIndex is part of the ADDRESS, so
+    // validateRegisteredOperation checks it for every object-addressed
+    // operation. setCrop used to carry its own copy and this one carried
+    // none — now neither declares it and both are covered.
+    const rotation = { x: 1, y: 2, z: 3 };
+    for (const objectIndex of [-1, 1.5, 100000]) {
+      const intent = { ...base, kind: "setModel3DRotation", runId: 1, objectIndex, rotation };
+      expect(validateIntent(intent as never), `objectIndex ${objectIndex}`).toContain("bad objectIndex");
+    }
+    // Absent is legal: it means the run's first drawing.
+    const noIndex = { ...base, kind: "setModel3DRotation", runId: 1, rotation };
+    expect(validateIntent(noIndex as never)).toBeNull();
+  });
+
   it("refuses a malformed payload before it reaches the document", () => {
     const cases: [string, unknown][] = [
       ["a missing rotation", undefined],

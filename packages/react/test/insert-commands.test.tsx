@@ -162,6 +162,7 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertWatermark: (api) => api.insertWatermark({ text: "DRAFT" }),
   addComment: (api) => api.addComment("note"),
   addFootnote: (api) => api.addFootnote("note"),
+  addEndnote: (api) => api.addEndnote("note"),
   addBookmark: (api) => api.addBookmark("Anchor1"),
 };
 
