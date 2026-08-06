@@ -6546,25 +6546,23 @@ class Engine {
     );
     this.counters = snapshot;
     this.seenNumIds = seenSnapshot;
-    const anchors = hf.blocks.flatMap((block) =>
-      block.type === "paragraph" ? this.collectAnchors(block) : [],
-    );
-    const hasOnlyUnwrappedAnchors =
-      anchors.length > 0 &&
-      anchors.every(
-        (shape) => !("wrap" in shape) || shape.wrap === undefined || shape.wrap === "none",
-      );
-    const complexHeader =
-      anchors.length > 0 || hf.blocks.some((block) => block.type === "table");
-    // Word keeps 22.5pt between complex header content (tables and positioned
-    // shapes) and the body. Plain header text uses its natural height even
-    // with a tight top margin. A header made only of unwrapped page decoration
-    // (watermarks, logos, pleading-paper rails and line numbers) reserves no
-    // gap, including when ordinary header text accompanies it.
-    return reserveBodyClearance
-      ? Math.max(height, contentBottom) +
-          (!hasOnlyUnwrappedAnchors && complexHeader ? ptToPx(22.5) : 0)
-      : height;
+    // Word puts the body at `w:header` plus the header's height and reserves
+    // NOTHING extra, whatever the header holds. A 22.5pt clearance used to be
+    // added here for a header carrying a table or a positioned shape; two
+    // Word-exported probes say it has no case. On the same geometry, with
+    // `w:top="0"` so the header governs the body top, Word's body top is 64.64
+    // for a one-line paragraph header AND for a table row of the same content
+    // height, and 64.64 again for an anchored shape at wrapNone, wrapSquare and
+    // wrapTopAndBottom (parity scripts/generate-headerheight-probe.mjs and
+    // generate-headeranchor-probe.mjs). It also tracks line count at exactly
+    // 16.00px per 12pt line and includes the last paragraph's space-after in
+    // full, both of which Math.max(height, contentBottom) already gives.
+    //
+    // The anchor half was unreachable in any case: layoutFrame above places the
+    // header's paragraphs and consumes their anchors, so the collectAnchors
+    // that used to run here always saw an empty list and only the table
+    // disjunct could ever fire.
+    return reserveBodyClearance ? Math.max(height, contentBottom) : height;
   }
 
   private pageFieldFrameOverlay(hf: HeaderFooter | undefined): boolean {
