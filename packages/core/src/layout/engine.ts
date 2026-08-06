@@ -4252,10 +4252,19 @@ class Engine {
     // TWO THINGS DELIBERATELY LEFT ALONE HERE.
     // 1. The ordinary test's effective bottom for a line can sit ~14px above
     //    the nominal 960: a line at 931.05..945.82 spills although fitHeight
-    //    is capped at the line height and keepNextTail is 0. The cause is in
-    //    planBreaks below - updateBottom, paragraphOverhang or the note
-    //    reserves. It moves WHERE the ordinary threshold sits, not which
-    //    paragraphs take it.
+    //    is capped at the line height and keepNextTail is 0. Measured headless
+    //    on both documents that showed it, the bottom is NOT where it goes
+    //    wrong: on every page of eq-as-images and ca-agreement, updateBottom
+    //    returns the nominal bodyBottom exactly, and paragraphOverhang, the
+    //    banner reserve and both note reserves read 0. eq-as-images' half was
+    //    the DEMAND - a docGrid text line charging its whole snapped pitch
+    //    where Word charges only its glyph box (fixed; see fitHeight in
+    //    inline.ts and test/docgrid-snap-fit.test.ts). ca-agreement's half
+    //    remains open and is browser-only: headless it has no deficit at all
+    //    and every overflow there is genuine. The leading suspect is the
+    //    bodyBottom footer clamp above, whose footerH is measurer-dependent -
+    //    36.80px headless on its tallest footer against the ~62px that would
+    //    put the bottom at 945.8.
     // 2. Whether newPage's section-start coalesce should keep a page a break
     //    created. Suppressing it for the break-only+sectPr shape took BOTH
     //    ca-agreement and nccih to 24, one page over each document's own Word
@@ -7457,9 +7466,41 @@ class Engine {
       Math.max(0, condEdge(r, "top"), ...rows[r].cells.map((c) => bw(c.props.borders?.top)));
     const cellBot = (r: number) =>
       Math.max(0, condEdge(r, "bottom"), ...rows[r].cells.map((c) => bw(c.props.borders?.bottom)));
+    // A w:val="nil" cell border is a declaration of ZERO, not silence: when
+    // BOTH cells facing an interior boundary declare it, the table's insideH
+    // rule is overridden and the boundary costs nothing. paintCellEdges
+    // already draws nothing there, so this is what keeps the row height and
+    // the ink agreeing. Both sides are required — a nil on ONE side leaves the
+    // other cell painting the table rule, and Word charges it in full
+    // (probe-nilborder, parity dc68b0f: against the 15.33 no-rule control, the
+    // sz-12 rule costs 2.00 and both-nil returns to 15.33 exactly, while
+    // one-sided nil stays at 17.33 with the rule).
+    //
+    // Only for rows Word sizes from their content. probe-nilborder is an
+    // atLeast table and pins nothing about hRule="exact", where Word does not
+    // grow the row at all and the boundary shows up only as a content inset:
+    // wild2-legal-ca-agreement's signature rows put a both-nil boundary
+    // between two exact rows, and Word's own 44.00 px from that table's row 0
+    // mark to its row 2 mark is what the current exact-row arithmetic already
+    // reproduces (engine b0b8e2f, fitted on probe-exactrow). Suppressing the
+    // boundary there takes it to 43.00. Leaving the exact case alone keeps
+    // that measurement; what Word insets an exact row by at a suppressed
+    // boundary is unmeasured.
+    const contentSized = (r: number) => rows[r].props.heightRule !== "exact";
+    const declaredNil = (r: number, side: "top" | "bottom") =>
+      rows[r].cells.length > 0 &&
+      rows[r].cells.every((c) => c.props.borders?.[side]?.style === "none");
     const boundary = (k: number): number => {
       if (k === 0) return Math.max(bw(tb?.top), cellTop(0));
       if (k === rows.length) return Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
+      if (
+        contentSized(k - 1) &&
+        contentSized(k) &&
+        declaredNil(k - 1, "bottom") &&
+        declaredNil(k, "top")
+      ) {
+        return 0;
+      }
       return Math.max(bw(tb?.insideH), cellBot(k - 1), cellTop(k));
     };
     return { top: boundary(ri), bottom: boundary(ri + 1) };

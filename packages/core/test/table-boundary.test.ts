@@ -247,9 +247,16 @@ describe("exact rows and cell borders", () => {
     expect(markGap({ tblBorders: true, shading: true })).toBeCloseTo(markGap({ tblBorders: true }), 5);
   });
 
-  it("leaves an atLeast row's height to its cells' own borders", () => {
+  it("leaves an atLeast row's height to its cells' own borders, less the nil boundary", () => {
+    // The cells' own sz-12 rules restate the table's and add nothing. What
+    // does change is the 1/2 boundary, which both cells declare nil: a
+    // content-sized row charges nothing there, so the pair of rows between
+    // the marks costs one rule width less than the plain table (probe-
+    // nilborder, parity dc68b0f — see rowBorderWidths and
+    // test/nil-cell-border.test.ts). The exact case above is deliberately
+    // unchanged: probe-nilborder measured atLeast rows only.
     expect(markGap({ rule: "atLeast", tblBorders: true, cells: fixtureCells })).toBeCloseTo(
-      markGap({ rule: "atLeast", tblBorders: true }),
+      markGap({ rule: "atLeast", tblBorders: true }) - SZ12,
       5,
     );
   });

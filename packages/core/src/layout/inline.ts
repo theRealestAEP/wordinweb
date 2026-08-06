@@ -2785,6 +2785,7 @@ function finishLine(
   // emitting items.
   let height = natural;
   let baselineH: number | undefined;
+  /** Only an OBJECT-snapped line fits as a whole physical box; see fitHeight. */
   let gridImageFit = false;
   const ls = props.lineSpacing;
   // w:docGrid(lines) OBJECT lines: a line whose inline-object extent exceeds
@@ -2841,7 +2842,7 @@ function finishLine(
       // 643.44 vs img 640.75 in the PDF).
       baselineH = cAsc + (height - extent) / 2 + maxDescent - commonLower;
       gridObjSnap = true;
-      gridImageFit = true;
+      gridImageFit = objSnap;
     }
   }
   if (!gridObjSnap && ls) {
@@ -2972,6 +2973,7 @@ function finishLine(
     baselineH = (baselineH ?? height + overlap) - overlap;
   }
 
+  const finalBaselineH = baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height);
   return {
     spans,
     width,
@@ -2979,18 +2981,23 @@ function finishLine(
     maxDescent,
     naturalHeight: natural,
     height,
-    baselineH: baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height),
+    baselineH: finalBaselineH,
     // A grid-snapped object line is a physical box: it must fit whole, but
     // its trailing paragraph space is NOT reserved in the fit decision
     // (eq-as-images p2: Word keeps the (04) equation at bottom 766.6 of 770
     // even though its 7.8pt spacing-after would overflow). An ordinary grid
     // TEXT line hangs its grid-min leading into the bottom margin like any
-    // other leading: the fit extent is the RAW font box, not the pitch
-    // (eq-as-images p7: the last reference line's glyph box ends 769.6 of
-    // 770 while its 15.6pt grid line overruns).
+    // other leading: the fit extent runs from the line top to the bottom of
+    // the RAW font box, and the leading below it overruns (eq-as-images p7:
+    // the last reference line's glyph box ends 769.6 of 770 while its 15.6pt
+    // grid line overruns). Charging a text-snapped line its whole pitch cost
+    // that page its final paragraph - two 41.6px lines whose glyph boxes end
+    // at 1022.3 of 1026.53 - and spilled it onto a page Word does not have.
     fitHeight: gridImageFit
       ? height
-      : Math.min(height, Math.max(maxNatural, maxAscent + maxDescent) - maxDescent + maxRawDescent),
+      : gridObjSnap
+        ? finalBaselineH - maxDescent + maxRawDescent
+        : Math.min(height, Math.max(maxNatural, maxAscent + maxDescent) - maxDescent + maxRawDescent),
     isLast,
     endsWithBreak,
   };
