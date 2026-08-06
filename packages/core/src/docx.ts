@@ -1124,6 +1124,27 @@ export class DocxDocument {
     this._layoutGlobalSig = null;
   }
 
+  /** Retained styles.xml tree, or null when the package has no styles part.
+   * Style-definition editing mutates this tree in place. */
+  stylesTree(): XmlElement | null {
+    return this.stylesRoot;
+  }
+
+  /**
+   * Re-resolve the style cascade after a definition changed in place.
+   *
+   * A style definition is not addressed by any paragraph's XML, so mutating one
+   * changes how EVERY paragraph resolves without changing a single w:p. Two
+   * things therefore have to be reset by hand: the parsed Styles map every
+   * effective-props call reads, and layoutGlobalSig, which is what makes the
+   * line-break cache treat cached breaks for unchanged paragraph XML as stale.
+   */
+  markStylesChanged(): void {
+    this.stylesDirty = true;
+    this.styles = parseStyles(this.stylesRoot ?? undefined, this.ctxBase);
+    this._layoutGlobalSig = null;
+  }
+
   /**
    * Retained footnotes tree. With create=true, a missing footnotes.xml part
    * is created and registered (with Word's required separator footnotes) so

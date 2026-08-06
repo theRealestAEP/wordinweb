@@ -694,6 +694,8 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `setSpacing` | Set line and paragraph spacing | `blockRef`, `patch`; optional: `suggest` |
 | `setDropCap` | Set or clear a drop cap | `blockRef`, `mode` |
 | `setDivider` | Set or clear a paragraph divider | `blockRef`, `divider` |
+| `setNumberingLevel` | Change a list level's number format, label text, or indent | `blockRef`, `ilvl`, `patch` |
+| `setNumberingRestart` | Restart list numbering here, or continue the preceding list | `blockRef`, `start` |
 
 ### Review
 
@@ -810,6 +812,9 @@ of the style's conditional formats are used.
 | `setLineNumbering` | Configure margin line numbers | `patch` |
 | `ensureHeaderFooter` | Create a header or footer story | `hfKind` |
 | `updateFields` | Write recomputed cached results into the document's fields, one per field in document order | `results` |
+| `createStyle` | Create a paragraph or character style definition | `style` |
+| `modifyStyle` | Change an existing style definition | `styleId`, `patch` |
+| `deleteStyle` | Delete a style definition; content using it falls back to the style it was based on | `styleId` |
 
 ## Nested value shapes
 
@@ -832,9 +837,68 @@ of the style's conditional formats are used.
   fontSizePt?: number;
   fontFamily?: string;
   verticalAlign?: "superscript" | "subscript" | null;
+  characterStyleId?: string | null; // w:rStyle — a character style the document defines
   clear?: boolean;
 }
 ```
+
+Applying a character style is a run-patch property rather than an operation of
+its own, so it splits the run at a partial range exactly as the other
+properties do.
+
+### Style spec (`createStyle.style`)
+
+```ts
+{
+  styleId: string;            // [A-Za-z0-9-_], up to 253 chars
+  type: "paragraph" | "character";
+  name: string;               // the display name a gallery shows
+  basedOn?: string | null;    // defaults to Normal / DefaultParagraphFont
+  next?: string | null;       // paragraph styles only
+  quickStyle?: boolean;       // w:qFormat — show in the quick-style gallery
+  uiPriority?: number;        // 0–99, gallery sort order
+  paragraph?: StyleParagraphPatch;
+  run?: StyleRunPatch;        // the run format patch without `clear`
+}
+```
+
+`modifyStyle.patch` is the same shape without `styleId` and `type`; every field
+is optional and an omitted one is left alone.
+
+### Style paragraph patch
+
+```ts
+{
+  alignment?: "left" | "center" | "right" | "both" | null;
+  spacingBeforePt?: number | null;
+  spacingAfterPt?: number | null;
+  lineMultiple?: number | null;   // 1.5 → w:line="360" lineRule="auto"
+  indentLeftPt?: number | null;
+  indentFirstLinePt?: number | null;
+  keepNext?: boolean | null;
+  outlineLevel?: number | null;   // 0–8; what makes a style a TOC heading level
+}
+```
+
+### Numbering level patch (`setNumberingLevel.patch`)
+
+```ts
+{
+  format?: "decimal" | "decimalZero" | "upperRoman" | "lowerRoman"
+    | "upperLetter" | "lowerLetter" | "ordinal" | "bullet" | "none";
+  text?: string;          // "%1." or "%1.%2."; the glyph when format is "bullet"
+  start?: number;
+  alignment?: "left" | "center" | "right";
+  indentLeftPt?: number;
+  hangingPt?: number;
+}
+```
+
+`setNumberingLevel` patches the ABSTRACT definition, so every list built on it
+re-labels. `ilvl` null means the addressed paragraph's own level.
+`setNumberingRestart` splits the list into a fresh instance from the addressed
+paragraph down, because a `w:startOverride` restarts an instance at its first
+paragraph rather than at yours.
 
 ### Paragraph spacing patch
 

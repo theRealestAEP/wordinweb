@@ -38,6 +38,15 @@ export interface RunFormatPatch {
   fontFamily?: string;
   /** Superscript/subscript; null returns the run to the baseline. */
   verticalAlign?: "superscript" | "subscript" | null;
+  /**
+   * Character style (w:rStyle); null removes the reference.
+   *
+   * This rides the run patch rather than taking an operation of its own
+   * because applying a character style to PART of a run splits the run — which
+   * breaks the registry's position-stable precondition, and which formatRange
+   * already handles with its carried before/middle/after piece ids.
+   */
+  characterStyleId?: string | null;
   /** Remove all direct character formatting (and character style). */
   clear?: boolean;
 }
@@ -259,6 +268,9 @@ export function setRunProps(rEl: XmlElement, patch: RunFormatPatch): void {
     return;
   }
   const rPr = ensureRPr(rEl);
+  if (patch.characterStyleId !== undefined) {
+    setProp(rPr, "rStyle", patch.characterStyleId === null ? null : { val: patch.characterStyleId });
+  }
   if (patch.bold !== undefined) {
     setProp(rPr, "b", patch.bold ? {} : { val: "0" });
     setProp(rPr, "bCs", patch.bold ? {} : { val: "0" });
@@ -305,6 +317,9 @@ export interface SelectionFormat {
   highlight?: string;
   fontFamily?: string;
   verticalAlign?: "superscript" | "subscript";
+  /** The character style every selected run carries, if they agree. Null when
+   * they agree on carrying none; undefined when the selection is mixed. */
+  characterStyleId?: string | null;
 }
 
 /** Summarize effective formatting across segments (for toolbar state/toggles). */
@@ -329,6 +344,44 @@ export function summarizeSelection(segments: SelectionSegment[]): SelectionForma
       (v) => (v === "superscript" || v === "subscript" ? v : undefined),
     ),
     fontFamily: uniform((p) => p.font),
+    // Read off the run's OWN props, not the effective ones: the effective set
+    // is what the style resolved TO, and the toolbar needs which style is
+    // applied. Absent is normalized to null so "all plain" is distinguishable
+    // from "the selection disagrees".
+    characterStyleId: uniformOwn(segments, (r) => r.props.styleId ?? null),
+  };
+}
+
+function uniformOwn<T>(segments: SelectionSegment[], read: (run: Run) => T): T | undefined {
+  const first = read(segments[0].run);
+  return segments.every((s) => read(s.run) === first) ? first : undefined;
+}
+
+/**
+ * The run patch that reproduces a summarized selection's character formatting
+ * — the format painter, as a pure function.
+ *
+ * A property the source selection did not agree on is LEFT OUT rather than
+ * guessed, so painting a mixed selection carries over only what it actually
+ * had in common. The booleans are always carried, including when false: a
+ * painter that could not turn bold OFF would be a one-way tool.
+ */
+export function formatPatchFrom(format: SelectionFormat): RunFormatPatch {
+  return {
+    bold: format.bold,
+    italic: format.italic,
+    underline: format.underline,
+    strike: format.strike,
+    verticalAlign: format.verticalAlign ?? null,
+    ...(format.fontSizePt !== undefined ? { fontSizePt: format.fontSizePt } : {}),
+    ...(format.fontFamily !== undefined ? { fontFamily: format.fontFamily } : {}),
+    // Color and highlight are nullable in the patch, so an agreed ABSENCE is
+    // paintable: a selection with no direct color clears the target's.
+    ...(format.color !== undefined ? { color: format.color } : {}),
+    ...(format.highlight !== undefined ? { highlight: format.highlight } : {}),
+    ...(format.characterStyleId !== undefined
+      ? { characterStyleId: format.characterStyleId }
+      : {}),
   };
 }
 

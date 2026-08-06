@@ -126,6 +126,8 @@ const wirePosition = closedObject({
   offset: integer(0),
 }, ["blockRef", "runRef", "offset"]);
 
+const styleId = { type: "string", pattern: "^[A-Za-z0-9\\-_]{1,253}$" };
+
 const runFormatPatch = closedObject({
   bold: boolean,
   italic: boolean,
@@ -136,7 +138,77 @@ const runFormatPatch = closedObject({
   fontSizePt: number(1, 1638),
   fontFamily: string(100, 1),
   verticalAlign: { enum: ["superscript", "subscript", null] },
+  // Applying a character style is a run-patch property rather than an
+  // operation of its own, because it splits the run at a partial selection
+  // exactly as the other properties do. This WIDENS formatRun/formatRange:
+  // every payload that validated before still validates.
+  characterStyleId: { anyOf: [styleId, { type: "null" }] },
   clear: boolean,
+});
+
+/** The paragraph properties a style DEFINITION can carry (styles.xml), as
+ * opposed to the direct paragraph formatting setSpacing patches. */
+const styleParaPatch = closedObject({
+  alignment: { enum: ["left", "center", "right", "both", null] },
+  spacingBeforePt: { anyOf: [number(0, 1584), { type: "null" }] },
+  spacingAfterPt: { anyOf: [number(0, 1584), { type: "null" }] },
+  lineMultiple: { anyOf: [number(0.1, 132), { type: "null" }] },
+  indentLeftPt: { anyOf: [number(-1584, 1584), { type: "null" }] },
+  indentFirstLinePt: { anyOf: [number(-1584, 1584), { type: "null" }] },
+  keepNext: { type: ["boolean", "null"] },
+  outlineLevel: { anyOf: [integer(0, 8), { type: "null" }] },
+});
+
+const styleRunPatch = closedObject({
+  bold: boolean,
+  italic: boolean,
+  underline: boolean,
+  strike: boolean,
+  color: { anyOf: [rgb, { type: "null" }] },
+  highlight: { type: ["string", "null"] },
+  fontSizePt: number(1, 1638),
+  fontFamily: string(64, 1),
+  verticalAlign: { enum: ["superscript", "subscript", null] },
+  characterStyleId: { anyOf: [styleId, { type: "null" }] },
+});
+
+const styleSpec = closedObject(
+  {
+    styleId,
+    type: { enum: ["paragraph", "character"] },
+    name: string(253, 1),
+    basedOn: { anyOf: [styleId, { type: "null" }] },
+    next: { anyOf: [styleId, { type: "null" }] },
+    quickStyle: boolean,
+    uiPriority: integer(0, 99),
+    paragraph: styleParaPatch,
+    run: styleRunPatch,
+  },
+  ["styleId", "type", "name"],
+);
+
+const stylePatch = closedObject({
+  name: string(253, 1),
+  basedOn: { anyOf: [styleId, { type: "null" }] },
+  next: { anyOf: [styleId, { type: "null" }] },
+  quickStyle: boolean,
+  uiPriority: integer(0, 99),
+  paragraph: styleParaPatch,
+  run: styleRunPatch,
+});
+
+const numberingLevelPatch = closedObject({
+  format: {
+    enum: [
+      "decimal", "decimalZero", "upperRoman", "lowerRoman", "upperLetter",
+      "lowerLetter", "ordinal", "bullet", "none",
+    ],
+  },
+  text: string(100, 1),
+  start: integer(0, 32767),
+  alignment: { enum: ["left", "center", "right"] },
+  indentLeftPt: number(0, 1584),
+  hangingPt: number(0, 1584),
 });
 
 const paragraphSpacingPatch = closedObject({
@@ -290,6 +362,13 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setTableColumnWidth.colIdx": integer(0, 200),
   "setTableColumnWidth.widthPt": number(1, 1584),
   "setTableHeaderRows.count": integer(0, 5000),
+  "createStyle.style": styleSpec,
+  "modifyStyle.styleId": styleId,
+  "modifyStyle.patch": stylePatch,
+  "deleteStyle.styleId": styleId,
+  "setNumberingLevel.ilvl": { anyOf: [integer(0, 8), { type: "null" }] },
+  "setNumberingLevel.patch": numberingLevelPatch,
+  "setNumberingRestart.start": { anyOf: [integer(0, 32767), { type: "null" }] },
 };
 
 const ENUMS: Record<string, readonly unknown[]> = {

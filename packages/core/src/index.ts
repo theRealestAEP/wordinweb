@@ -18,7 +18,7 @@ export type { TextMeasurer, FontMetrics } from "./layout/measure.js";
 export { renderToDom } from "./render/dom.js";
 export type { RenderHandle, RenderOptions, TextBinding } from "./render/dom.js";
 export { formatNumber } from "./parse/numbering.js";
-export { applyRunFormat, summarizeSelection } from "./edit/commands.js";
+export { applyRunFormat, summarizeSelection, formatPatchFrom } from "./edit/commands.js";
 export type { RunFormatPatch, SelectionSegment, SelectionFormat, FormattedRange } from "./edit/commands.js";
 export { selectionToSegments } from "./edit/selection.js";
 export {
@@ -88,6 +88,33 @@ export {
 export { addComment, deleteComment, replyToComment } from "./edit/comments.js";
 export { setListType, listTypeAt, setListLevel } from "./edit/lists.js";
 export type { ListKind } from "./edit/lists.js";
+export {
+  createStyle,
+  modifyStyle,
+  deleteStyle,
+  listStyles,
+  styleUsageCount,
+  styleIdFromName,
+  uniqueStyleId,
+} from "./edit/styles.js";
+export type {
+  StyleSpec,
+  StylePatch,
+  StyleParaPatch,
+  StyleRunPatch,
+  StyleGalleryEntry,
+} from "./edit/styles.js";
+export {
+  NUMBER_FORMATS,
+  listInstanceAt,
+  setNumberingLevel,
+  setNumberingLevelAt,
+  setNumberingRestart,
+  restartNumberingAt,
+  continueNumberingAt,
+  detachNumbering,
+} from "./edit/numbering.js";
+export type { LevelPatch, NumberFormat } from "./edit/numbering.js";
 export { setLink, removeLink, linkAt } from "./edit/links.js";
 export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpacing, setDropCapAt } from "./edit/paragraph.js";
 export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode } from "./edit/paragraph.js";

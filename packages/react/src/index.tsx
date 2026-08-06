@@ -127,12 +127,24 @@ import {
   setPageLayout,
   setParagraphAlignment,
   setParagraphStyle,
+  createStyle,
+  modifyStyle,
+  deleteStyle,
+  listStyles,
+  setNumberingLevelAt,
+  restartNumberingAt,
+  continueNumberingAt,
+  formatPatchFrom,
   summarizeSelection,
   suggestMeta,
   runWireLength,
   wireOffsetOf,
 } from "@wordinweb/core";
 import type {
+  StyleGalleryEntry,
+  StyleSpec,
+  StylePatch,
+  LevelPatch,
   CellMarginsPt,
   TableBorderEdge,
   TableBorderSpec,
@@ -347,6 +359,29 @@ export interface DocxViewApi {
   listParagraphStyles(): { id: string; name: string }[];
   /** pStyle id of the caret paragraph (null = Normal). */
   getParagraphStyleId(): string | null;
+  /**
+   * Every declared style with the data a gallery entry needs: identity,
+   * cascade parent, quick-style flag, usage count, and resolved preview props.
+   * Richer than listParagraphStyles, which is the flat menu the toolbar's
+   * existing style dropdown reads.
+   */
+  listStyles(filter?: { type?: StyleGalleryEntry["type"]; quickStyleOnly?: boolean }): StyleGalleryEntry[];
+  /** Add a paragraph or character style definition. */
+  createStyle(spec: StyleSpec): boolean;
+  /** Patch an existing style definition; the cascade re-resolves live. */
+  modifyStyle(styleId: string, patch: StylePatch): boolean;
+  /** Delete a style definition; its users fall back to its basedOn. */
+  deleteStyle(styleId: string): boolean;
+  /** Apply (or with null remove) a character style over the selection. */
+  setCharacterStyle(styleId: string | null): void;
+  /** Change a list level's number format, label text, or indent. */
+  setNumberingLevel(ilvl: number | null, patch: LevelPatch): boolean;
+  /** Restart list numbering at the caret, or (null) continue the preceding list. */
+  setNumberingRestart(start: number | null): boolean;
+  /** Format painter, half one: the selection's formatting, or null. */
+  copyFormatting(): SelectionFormat | null;
+  /** Format painter, half two: paint a copied format over the selection. */
+  applyCopiedFormatting(format: SelectionFormat): void;
   /** Change margins / page size / orientation (inches). */
   setPageLayout(patch: PageLayoutPatch, scope?: "document" | "section"): void;
   /** One-based logical section containing the caret or selection. */
@@ -2415,6 +2450,70 @@ export function DocxView({
             const list = [...out.entries()].map(([id, name]) => ({ id, name }));
             list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
             return list;
+          },
+          listStyles: (filter) => listStyles(doc, filter),
+          createStyle: (spec) => {
+            if (collabDocOp(() => documentOperationBody("createStyle", { style: spec }))) return true;
+            history.checkpoint();
+            if (!createStyle(doc, spec)) return false;
+            // A definition change repaints every paragraph that resolves
+            // through it, so the whole document relayouts rather than a block.
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          modifyStyle: (styleId, patch) => {
+            if (collabDocOp(() => documentOperationBody("modifyStyle", { styleId, patch }))) return true;
+            history.checkpoint();
+            if (!modifyStyle(doc, styleId, patch)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          deleteStyle: (styleId) => {
+            if (collabDocOp(() => documentOperationBody("deleteStyle", { styleId }))) return true;
+            history.checkpoint();
+            if (!deleteStyle(doc, styleId)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          setCharacterStyle: (styleId) => {
+            // A character style is a run property, so it rides the same path
+            // bold and colour do — including the run splitting a partial
+            // selection needs, and the collab intents applyFormat emits.
+            api.applyFormat({ characterStyleId: styleId });
+          },
+          setNumberingLevel: (ilvl, patch) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return false;
+            if (collabOp((anchor) => operationBody("setNumberingLevel", anchor.blockId, { ilvl, patch }), {
+              t: caret.t,
+              offset: 0,
+            })) {
+              return true;
+            }
+            history.checkpoint();
+            if (!setNumberingLevelAt(doc, caret.t, ilvl, patch)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          setNumberingRestart: (start) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return false;
+            if (collabOp((anchor) => operationBody("setNumberingRestart", anchor.blockId, { start }), {
+              t: caret.t,
+              offset: 0,
+            })) {
+              return true;
+            }
+            history.checkpoint();
+            const applied =
+              start === null ? continueNumberingAt(doc, caret.t) : restartNumberingAt(doc, caret.t, start);
+            if (!applied) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          copyFormatting: () => api.getSelectionFormat(),
+          applyCopiedFormatting: (format) => {
+            api.applyFormat(formatPatchFrom(format));
           },
           getParagraphStyleId: () => {
             const segs = editor?.getSelectionSegments() ?? [];
