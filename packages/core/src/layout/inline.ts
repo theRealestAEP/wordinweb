@@ -12,7 +12,7 @@ import {
   TabStop,
   WebVideoReference,
 } from "../model.js";
-import { FontSpec, TextSource } from "./types.js";
+import { FontSpec, LayoutFontSample, TextSource } from "./types.js";
 import { hasSegoeUIEmoji, TextMeasurer } from "./measure.js";
 import { MathBox, layoutMath } from "./math.js";
 import { localName, XmlElement } from "../xml.js";
@@ -483,6 +483,13 @@ export interface LineBox {
 export interface BrokenParagraph {
   lines: LineBox[];
   props: ParaProps;
+  /** Served from the break cache's metrics tier: every line carries its real
+   * geometry but an EMPTY span list, so the paragraph can be paginated but not
+   * painted. Only a caller that passed opts.metricsOnly ever sees this. */
+  metricsOnly?: true;
+  /** One sample per distinct face used by this paragraph's text, for the font
+   * preload list a discarded page can no longer supply from its items. */
+  fontSamples?: LayoutFontSample[];
   /** Floating shapes anchored to this paragraph (don't occupy inline space). */
   anchors: Shape[];
   /** Where each anchor's run sits in the flow: pen x (column-relative) and
@@ -683,7 +690,14 @@ type BreakLabel = {
   alignment?: "left" | "center" | "right";
 };
 type BreakBounds = (yOffset: number, estHeight: number) => LineBounds;
-type BreakOpts = { inTableCell?: boolean; verticalGridResync?: boolean; cache?: boolean };
+type BreakOpts = {
+  inTableCell?: boolean;
+  verticalGridResync?: boolean;
+  cache?: boolean;
+  /** The caller will paginate past these lines without painting them, so a
+   * metrics-only result is acceptable (see the two-tier cache below). */
+  metricsOnly?: boolean;
+};
 
 // --- Line-break cache -------------------------------------------------------
 // breakParagraph is a pure function of (paragraph content, content width,
@@ -704,21 +718,68 @@ type BreakOpts = { inTableCell?: boolean; verticalGridResync?: boolean; cache?: 
 // break cache to it means (a) two documents never share entries, and (b) a
 // layout run with a different (e.g. cold-font, pre-fonts-ready) measurer can
 // never serve a stale break to the warm measurer the editor actually uses.
-const BP_CACHES = new WeakMap<TextMeasurer, Map<string, BrokenParagraph>>();
+//
+// TWO TIERS. A full entry keeps the whole line/span output and costs ~50 KB per
+// paragraph of 600 characters; 3,500 of them were 180 MB of a 192 MB layout
+// heap. Most of that output is never painted, because the page it belongs to
+// sits outside the live window and its items are discarded as soon as they are
+// laid. But the entries cannot simply be capped: an edit's cascade re-lay walks
+// the whole document tail, once, front to back, so any cap below the number of
+// blocks it re-lays evicts every entry just before it is asked for (measured:
+// 361 measure calls at cap 60,000 against 382,897 at cap 1,000).
+//
+// So the entries get SMALLER rather than fewer. Tier 2 holds per-line METRICS
+// only - the heights and flags the pagination path reads - which is all the
+// re-lay needs for a block whose lines it merely paginates past. Tier 1 keeps
+// the full span output for the paragraphs actually being painted, which under a
+// page window is a bounded working set, so it takes a small cap. A caller asks
+// for tier 2 with opts.metricsOnly; it gets a metrics-only result only when the
+// paragraph's lines can be paginated without painting them (see paginatable
+// below), and a full result otherwise.
+const BP_CACHES = new WeakMap<TextMeasurer, BreakCache>();
 let BP_CACHE_MAX = 60000;
+/** Full-tier budget while a page-windowed run is in flight, counted in SPANS
+ * rather than entries because the spans are where the memory is: a paragraph of
+ * 600 characters holds ~200 of them at ~255 bytes each, a one-line heading ~20.
+ * An entry cap that fits one document's window overflows another's — twelve
+ * pages are 85 paragraphs of flowing prose but 540 one-line ones — while their
+ * span counts are within a small factor. This budget is several times either
+ * working set and still an order of magnitude under what the tier used to hold. */
+const BP_WINDOWED_FULL_SPANS = 60000;
+
+interface FullEntry {
+  broken: BrokenParagraph;
+  spans: number;
+}
+
+interface BreakCache {
+  full: Map<string, FullEntry>;
+  /** Running sum of the full tier's span counts, so eviction needs no rescan. */
+  fullSpans: number;
+  compact: Map<string, CompactBreak>;
+  windowed: boolean;
+}
 
 /** Test/benchmark hook for sweeping the cap. Not part of the public API. */
 export function __setBreakCacheMax(max: number): void {
   BP_CACHE_MAX = max;
 }
 
-function bpCacheFor(measurer: TextMeasurer): Map<string, BrokenParagraph> {
-  let m = BP_CACHES.get(measurer);
-  if (!m) {
-    m = new Map();
-    BP_CACHES.set(measurer, m);
+function bpCacheFor(measurer: TextMeasurer): BreakCache {
+  let c = BP_CACHES.get(measurer);
+  if (!c) {
+    c = { full: new Map(), fullSpans: 0, compact: new Map(), windowed: false };
+    BP_CACHES.set(measurer, c);
   }
-  return m;
+  return c;
+}
+
+/** Tell a measurer's cache whether the run about to start keeps only a page
+ * window of positioned items. A windowed run paginates most of the document
+ * from tier 2, so its full tier holds only the window's working set; an
+ * unwindowed run paints every page and keeps the large full tier it always had. */
+export function setBreakCacheWindowed(measurer: TextMeasurer, windowed: boolean): void {
+  bpCacheFor(measurer).windowed = windowed;
 }
 
 /** Drop a measurer's cached line breaks. The host calls this once after the
@@ -726,7 +787,11 @@ function bpCacheFor(measurer: TextMeasurer): Map<string, BrokenParagraph> {
  * fallbacks used during initial load, so any breaks measured before fonts
  * settled must be recomputed. Layouts after this are all warm and consistent. */
 export function clearBreakCache(measurer: TextMeasurer): void {
-  BP_CACHES.get(measurer)?.clear();
+  const cache = BP_CACHES.get(measurer);
+  if (!cache) return;
+  cache.full.clear();
+  cache.fullSpans = 0;
+  cache.compact.clear();
 }
 const paraSigMemo = new WeakMap<Paragraph, string>();
 const paraModelBySource = new WeakMap<XmlElement, Paragraph>();
@@ -823,6 +888,72 @@ function breakCacheKey(
   );
 }
 
+/** A line stripped to what the pagination path reads: the break planner's
+ * fit/height geometry plus the flags the emit loop branches on. Everything a
+ * LineBox carries beyond this exists to PAINT the line. */
+type LineMetrics = Omit<LineBox, "spans">;
+
+/** Metrics tier entry: one paragraph's line geometry without its spans. */
+interface CompactBreak {
+  lines: LineMetrics[];
+  props: ParaProps;
+  fontSamples: LayoutFontSample[];
+  /** Whether a caller may paginate these lines without painting them. False
+   * when a line holds an image, a drawing, a math box, a note mark or a field
+   * result: emitting those does more than push items (it registers footnotes,
+   * recurses into text-box layout, records a 3D model, resolves a PAGEREF), so
+   * the paragraph must take the full path even outside the window. */
+  paginatable: boolean;
+}
+
+function compactOf(b: BrokenParagraph): CompactBreak {
+  let paginatable = true;
+  const samples = new Map<string, LayoutFontSample>();
+  const lines = b.lines.map((line) => {
+    const { spans, ...metrics } = line;
+    for (const span of spans) {
+      if (span.image || span.drawing || span.math || span.noteId !== undefined || span.pageRef) {
+        paginatable = false;
+      }
+      // The docGrid re-sync at the end of placeParagraph asks whether a tall
+      // line came from the PingFang fallback profile, which only the spans can
+      // say. Rather than carry the answer, keep those paragraphs on the full
+      // path — they are the CJK-fallback case, not the bulk of any document.
+      if (PINGFANG_FALLBACK.test(span.font.family)) paginatable = false;
+      const text = span.text?.trim();
+      if (!text) continue;
+      // Mirror collectPageMetadata's preference for a sample that exercises the
+      // face past Latin Extended-B, so the preload list keeps its widest witness.
+      const key = span.font.family + " " + (span.font.bold ? 1 : 0) + (span.font.italic ? 1 : 0);
+      const existing = samples.get(key);
+      const sample = text.slice(0, 40);
+      if (!existing || (!NON_LATIN.test(existing.text) && NON_LATIN.test(sample))) {
+        samples.set(key, { font: span.font, text: sample });
+      }
+    }
+    return metrics;
+  });
+  return { lines, props: b.props, fontSamples: [...samples.values()], paginatable };
+}
+
+const PINGFANG_FALLBACK = /^pingfang /i;
+
+/** collectPageMetadata's witness test, applied to spans instead of items. */
+const NON_LATIN = /[^\u0000-\u024f]/;
+
+/** Metrics-tier result: real line geometry, no spans. The engine reads
+ * `metricsOnly` and skips the paint half of its paragraph loop. */
+function expandCompact(c: CompactBreak): BrokenParagraph {
+  return {
+    lines: c.lines.map((metrics) => ({ ...metrics, spans: [] })),
+    props: c.props,
+    metricsOnly: true,
+    fontSamples: c.fontSamples,
+    anchors: [],
+    anchorPoints: new Map(),
+  };
+}
+
 /** Clone of a break result whose lines and spans are fresh objects, so a
  * caller may mutate line/span scalar fields (the engine snaps line heights to
  * the doc grid and re-places spans in place during layout) without touching the
@@ -871,13 +1002,13 @@ export function breakParagraph(
   }
   const cache = bpCacheFor(measurer);
   const key = breakCacheKey(doc, para, contentWidth, minLineHeight, numberingLabel, opts);
-  const hit = cache.get(key);
+  const hit = cache.full.get(key);
   if (hit !== undefined) {
     // Dev guard (globalThis.__dxwVerifyBp): recompute uncached and confirm the
     // cached break still matches, catching any missed cache-key input.
     if ((globalThis as { __dxwVerifyBp?: boolean }).__dxwVerifyBp) {
       const fresh = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
-      if (brokenProj(hit) !== brokenProj(fresh)) {
+      if (brokenProj(hit.broken) !== brokenProj(fresh)) {
         const g = globalThis as { __dxwBpMismatch?: number };
         g.__dxwBpMismatch = (g.__dxwBpMismatch ?? 0) + 1;
         return fresh;
@@ -885,26 +1016,78 @@ export function breakParagraph(
     }
     // Map iterates in insertion order, so re-inserting on a hit makes the first
     // key the least recently used one and eviction below an LRU.
-    cache.delete(key);
-    cache.set(key, hit);
+    cache.full.delete(key);
+    cache.full.set(key, hit);
     // Never hand out the cached instance: the engine mutates line/span fields
     // (doc-grid height snapping, in-place re-placement) during layout.
-    return cloneBroken(hit);
+    return cloneBroken(hit.broken);
+  }
+  // Tier 2: the caller will not paint these lines, so its whole need is the
+  // geometry. This is the path that keeps a cascade re-lay off the measurer
+  // for every block it merely paginates past.
+  if (opts?.metricsOnly) {
+    const compact = cache.compact.get(key);
+    if (compact !== undefined) {
+      cache.compact.delete(key);
+      cache.compact.set(key, compact);
+      if (compact.paginatable) {
+        if ((globalThis as { __dxwVerifyBp?: boolean }).__dxwVerifyBp) {
+          const fresh = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
+          if (JSON.stringify(compact.lines) !== JSON.stringify(compactOf(fresh).lines)) {
+            const g = globalThis as { __dxwBpMismatch?: number };
+            g.__dxwBpMismatch = (g.__dxwBpMismatch ?? 0) + 1;
+            return fresh;
+          }
+        }
+        return expandCompact(compact);
+      }
+    }
   }
   const result = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
-  // Evict the least recently used entry rather than clearing the whole cache.
-  // A structural edit re-lays every block after it (the reflow is genuine: the
-  // added line pushes every later page boundary), and those breaks all come
-  // from here. Clearing on overflow dropped entries that relay was about to ask
-  // for, turning one Enter into a re-measure of the rest of the document.
-  while (cache.size >= BP_CACHE_MAX) {
-    const oldest = cache.keys().next();
-    if (oldest.done) break;
-    cache.delete(oldest.value);
+  const compact = compactOf(result);
+  evictTo(cache.compact, BP_CACHE_MAX);
+  cache.compact.set(key, compact);
+  // Under a window, a metrics-only caller has no use for the spans it just paid
+  // to compute, and storing them is what the tier split exists to avoid. Every
+  // other caller gets a full entry — including the lookahead sites of an
+  // unwindowed run, where the paragraph they simulated is about to be painted
+  // and would otherwise be broken a second time.
+  if (!opts?.metricsOnly || !compact.paginatable || !cache.windowed) {
+    storeFull(cache, key, result);
+    return result;
   }
-  // Store a pristine clone; return the original for this caller to mutate.
-  cache.set(key, cloneBroken(result));
-  return result;
+  return expandCompact(compact);
+}
+
+/** Store a pristine clone in the full tier; the caller keeps the original to
+ * mutate. Evicts least-recently-used entries rather than clearing: a structural
+ * edit re-lays every block after it (the reflow is genuine — the added line
+ * pushes every later page boundary) and those breaks all come from here, so
+ * clearing on overflow dropped entries the relay was about to ask for and
+ * turned one Enter into a re-measure of the rest of the document. */
+function storeFull(cache: BreakCache, key: string, result: BrokenParagraph): void {
+  let spans = 0;
+  for (const line of result.lines) spans += line.spans.length;
+  while (
+    cache.windowed
+      ? cache.fullSpans + spans > BP_WINDOWED_FULL_SPANS
+      : cache.full.size >= BP_CACHE_MAX
+  ) {
+    const oldest = cache.full.keys().next();
+    if (oldest.done) break;
+    cache.fullSpans -= cache.full.get(oldest.value)!.spans;
+    cache.full.delete(oldest.value);
+  }
+  cache.full.set(key, { broken: cloneBroken(result), spans });
+  cache.fullSpans += spans;
+}
+
+function evictTo(map: Map<string, unknown>, max: number): void {
+  while (map.size >= max) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
 }
 
 function breakParagraphImpl(

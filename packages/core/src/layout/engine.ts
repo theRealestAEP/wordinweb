@@ -37,6 +37,7 @@ import {
   breakParagraph,
   fontOf,
   resolveField,
+  setBreakCacheWindowed,
 } from "./inline.js";
 import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
 import {
@@ -50,6 +51,13 @@ import {
 } from "./types.js";
 
 const INITIAL_MODEL_WINDOW_PAGES = 12;
+
+/** Break options for a lookahead simulation. These sites sum line heights to
+ * decide whether a following block fits, and never paint what they break, so
+ * the break cache's metrics tier can answer them — which also keeps them from
+ * evicting the full entries the paragraphs actually being painted need. */
+const LOOKAHEAD_BREAK = { cache: true, metricsOnly: true } as const;
+const PAINTED_LOOKAHEAD_BREAK = { cache: true } as const;
 
 export interface LayoutOptions {
   measurer?: TextMeasurer;
@@ -330,6 +338,12 @@ interface IncrPoint {
    * edit resume at a clean block boundary inside a dense page instead of
    * replaying every earlier block on that page. */
   pageItemCount: number;
+  /** The page was paginated but not painted (see canPaginateOnly), so
+   * pageItemCount is 0 for want of items rather than for want of content: once
+   * the window rebuilds that page it will hold items this block sits after.
+   * A reader that only needs the carry state may resume here; one that needs
+   * the page's item prefix must not. */
+  paintless?: true;
   state: IncrState;
 }
 
@@ -642,6 +656,10 @@ class Engine {
   /** Section currently being laid; stamped onto each capture point. */
   private curSectionIndex = 0;
   private windowActive = false;
+  /** This run is an edit relay whose result inherits the previous run's page
+   * window, so its pages past the window are discarded exactly as a full run's
+   * are and may be paginated without being painted. */
+  private windowRelay = false;
   private windowPointPages = 0;
   private windowLastPointPage = -1;
   private windowFontSamples = new Map<string, LayoutFontSample>();
@@ -674,9 +692,13 @@ class Engine {
   materializeRange(data: IncrData, startPage: number, endPage: number): InternalPage[] {
     let resume: IncrPoint | undefined;
     for (const point of data.points) {
+      // A point on an EARLIER page only supplies carry state — its own page is
+      // laid but never returned — so a paintless one serves as well as any. On
+      // the start page itself the zero must mean a genuine page top, or the
+      // rebuild would begin mid-page and drop everything above the block.
       if (
         point.pageCount < startPage ||
-        (point.pageCount === startPage && point.pageItemCount === 0)
+        (point.pageCount === startPage && point.pageItemCount === 0 && !point.paintless)
       ) resume = point;
       if (point.pageCount > startPage) break;
     }
@@ -826,6 +848,7 @@ class Engine {
       this.incrLastNumberingUse = this.lastNumberingUse(blocks);
     }
     this.windowFullRun = windowOk;
+    setBreakCacheWindowed(this.measurer, windowOk);
     this.assignNoteNumbers();
     this.assignSeqNumbers();
     this.assignRefContext();
@@ -993,13 +1016,7 @@ class Engine {
     this.finalizeHeadersFooters();
     this.rewritePageRefs(this.pages);
     this.applySectionVAlign();
-    if (this.windowActive) {
-      for (const page of this.pages) {
-        if (!page.discarded) continue;
-        this.discardPage(page);
-        for (const note of page.footnotes) note.items = [];
-      }
-    }
+    this.releaseDiscardedPages();
     const pages: LaidOutPage[] = this.pages.map((p) => laidOutPage(p));
     const result: LayoutResult = {
       pages,
@@ -1287,6 +1304,8 @@ class Engine {
       sectionIndex: this.curSectionIndex,
       pageCount: globalPageIdx,
       pageItemCount: p.items.length,
+      // Not "no items yet" but "no items at all": see IncrPoint.paintless.
+      ...(p.discarded && !atPageTop ? { paintless: true as const } : {}),
       state: {
         col: this.col,
         y: this.y,
@@ -1328,7 +1347,12 @@ class Engine {
     if (this.incrPrevPoints && blockIdx > this.incrFirstDirty) {
       const pp = this.incrPrevPoints.get(blockIdx);
       const pageShift = pp ? globalPageIdx - pp.pageCount : 0;
-      if (pp && this.statesMatch(pp.state, pageShift, blockIdx)) {
+      // Converging mid-page splices the old page's body from pp.pageItemCount,
+      // which a paintless point cannot supply. At a page top the count is a
+      // true zero either way and the whole old page is reused, so only the
+      // mid-page form has to wait for the next point.
+      const ppUsable = pp !== undefined && (!pp.paintless || atPageTop);
+      if (pp && ppUsable && this.statesMatch(pp.state, pageShift, blockIdx)) {
         __incrStats.convergedBlock = blockIdx;
         __incrStats.convergedPage = globalPageIdx;
         __incrStats.pageShift = pageShift;
@@ -1472,6 +1496,51 @@ class Engine {
     for (let index = INITIAL_MODEL_WINDOW_PAGES; index < this.pages.length - 1; index++) {
       const page = this.pages[index];
       if (!page.discarded) this.discardPage(page);
+    }
+  }
+
+  /** Whether a paragraph starting at the cursor may be paginated without being
+   * painted, taking its line breaks from the cache's metrics tier.
+   *
+   * Once the window is active, every page from INITIAL_MODEL_WINDOW_PAGES on is
+   * discarded the moment a later capture point passes it, so the items laid on
+   * it are thrown away — and keeping them layable is exactly what forces the
+   * break cache to retain a full span set per paragraph. Skipping the emission
+   * lets those paragraphs live in the metrics tier instead.
+   *
+   * windowActive is the gate rather than windowFullRun because it is also what
+   * finishRun installs the window controller on: a page nobody paints must be
+   * one the controller can rebuild. A rematerializing run (materializeEndPage
+   * >= 0) is the rebuild, so it always paints.
+   *
+   * The page count is the count for THIS run, not the document: a relay paints
+   * the window's worth of pages from where it resumes, which is where the edit
+   * (and so the caret, and so the viewport) is. */
+  private canPaginateOnly(): boolean {
+    return (
+      (this.windowActive || this.windowRelay) &&
+      this.materializeEndPage < 0 &&
+      !this.balMeasuring &&
+      this.cur.physIndex !== -1 &&
+      this.pages.length - 1 >= INITIAL_MODEL_WINDOW_PAGES
+    );
+  }
+
+  /** Font samples a paginate-only paragraph contributes in place of the page
+   * items collectPageMetadata would otherwise have read them from. */
+  private mergeWindowFontSamples(samples: LayoutFontSample[] | undefined): void {
+    for (const sample of samples ?? []) mergeFontSample(this.windowFontSamples, sample);
+  }
+
+  /** Clear every page the run flagged as outside the window. Runs after the
+   * post-passes, which may push items (page borders, column separators) onto a
+   * flagged page, and after a paginate-only paragraph left one holding only the
+   * items a resume point restored ahead of it. */
+  private releaseDiscardedPages(): void {
+    for (const page of this.pages) {
+      if (!page.discarded) continue;
+      this.discardPage(page);
+      for (const note of page.footnotes) note.items = [];
     }
   }
 
@@ -1699,7 +1768,7 @@ class Engine {
       }
     }
 
-    // Latest captured page top at or before the first changed block.
+    // Latest captured point at or before the first changed block.
     let rp: IncrPoint | undefined;
     for (const pt of inc.points) {
       if (pt.blockIdx <= firstDirty) rp = pt;
@@ -1707,7 +1776,14 @@ class Engine {
     }
     if (!rp || rp.pageCount >= inc.pages.length) return fallback("resume-point");
     const prefixCount = rp.pageCount;
-    prev._window?.materialize([rp.pageCount]);
+    // A paintless point cannot say how much of its page precedes the resume
+    // block, so the relay cannot seed the page with that prefix — it resumes
+    // mid-page holding nothing, and hands the page to the window to rebuild
+    // whole. Resuming from the last PAINTED point instead would mean walking
+    // back to the window itself, which for an edit late in a long document is
+    // most of the document (measured: 3,341 blocks against 109).
+    const prefixItems = rp.paintless ? [] : inc.pages[prefixCount].items.slice(0, rp.pageItemCount);
+    if (!rp.paintless) prev._window?.materialize([prefixCount]);
 
     this.seqCounters = new Map(inc.seqCounters);
     this.seqAssigned = inc.seqAssigned;
@@ -1723,6 +1799,10 @@ class Engine {
     this.incrPrevPoints = new Map(inc.points.map((pt) => [shiftedBlockIdx(pt.blockIdx), pt]));
     this.incrPrevPages = inc.pages;
     this.incrPrevWindow = prev._window;
+    // The window controller below is rebuilt only when prev had one; without it
+    // nothing could rematerialize a page this run declines to paint.
+    this.windowRelay = prev._window !== undefined;
+    setBreakCacheWindowed(this.measurer, this.windowRelay);
     this.incrFirstDirty = firstDirty;
     __incrStats.resumeBlock = rp.blockIdx;
     __incrStats.resumePage = rp.pageCount;
@@ -1730,7 +1810,11 @@ class Engine {
     __incrStats.convergedPage = -1;
     __incrStats.pageShift = 0;
     __incrStats.blocksLaid = 0;
-    this.restoreIncrState(rp.state, inc.pages[rp.pageCount].items.slice(0, rp.pageItemCount));
+    this.restoreIncrState(rp.state, prefixItems);
+    // The resume page is missing everything above the resume block, so it is
+    // not a page anyone may read; releaseDiscardedPages empties it and the
+    // window controller lays it again in full on demand.
+    if (rp.paintless) this.cur.discarded = true;
     this.layoutBlocks(blocks, rp.blockIdx);
     if (this.incrAbort) return fallback("layout-abort");
 
@@ -1812,6 +1896,7 @@ class Engine {
     }
     this.rewritePageRefs(this.pages);
     if (this.incrAbort) return fallback("postpass-abort");
+    this.releaseDiscardedPages();
 
     const middle = this.pages.slice(0, middleCount).map((p) => laidOutPage(p));
     // A dirty block can begin on the preceding page with a leading page break,
@@ -3755,6 +3840,12 @@ class Engine {
       if (fl) fl.length = anchorMark.floats;
       anchorMark = null;
     };
+    // Pages only advance, so a paragraph that starts beyond the window cannot
+    // end inside it: the decision is safe to take once, here.
+    const mayPaginateOnly = this.canPaginateOnly();
+    // Inside the window the simulated paragraph is about to be painted, so let
+    // the lookahead leave a full entry behind rather than break it twice.
+    const lookaheadOpts = mayPaginateOnly ? LOOKAHEAD_BREAK : PAINTED_LOOKAHEAD_BREAK;
     const breakNow = (paraTop: number) =>
       breakParagraph(
         this.doc,
@@ -3767,7 +3858,7 @@ class Engine {
           ? this.makeBoundsAt(paraTop, undefined, rawSpacingBefore)
           : undefined,
         this.sp.docGridLinePitch,
-        { cache: true },
+        { cache: true, metricsOnly: mayPaginateOnly },
       );
 
     // The first paragraph on a page reached by a hard page break lands at the
@@ -3932,7 +4023,7 @@ class Engine {
           undefined,
           undefined,
           this.sp.docGridLinePitch,
-          { cache: true },
+          lookaheadOpts,
         );
         simY += nb.lines.reduce((sum, line) => sum + line.height, 0);
         if (
@@ -4063,7 +4154,7 @@ class Engine {
           const np = this.doc.effectiveParaProps(blk);
           simY += Math.max(prevAfter, np.spacingBefore ?? 0);
           if (idx === lastIdx) break; // reached the anchor paragraph's top
-          const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, { cache: true });
+          const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, lookaheadOpts);
           simY += nb.lines.reduce((a, l) => a + l.height, 0);
           prevAfter = np.spacingAfter ?? 0;
         }
@@ -4334,7 +4425,7 @@ class Engine {
           this.numberingLabel(np, blk),
           undefined,
           this.sp.docGridLinePitch,
-          { cache: true },
+          lookaheadOpts,
         );
         // Collapsed gap from the end of the previous member's lines.
         const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
@@ -4447,7 +4538,7 @@ class Engine {
           this.numberingLabel(np, blk),
           undefined,
           this.sp.docGridLinePitch,
-          { cache: true },
+          lookaheadOpts,
         );
         const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
         if (!paragraphHasContent(blk)) {
@@ -4695,7 +4786,17 @@ class Engine {
     let fragPage = this.cur;
     let fragCol = this.col;
 
+    // The break cache answered with line geometry and no spans, so this
+    // paragraph is paginated but not painted (see canPaginateOnly). Everything
+    // below that advances the cursor, breaks pages or records document state
+    // still runs; only the item-emitting half is skipped. Each page a line lands
+    // on is marked discarded, so the window controller rebuilds it in full when
+    // the viewport reaches it.
+    const paintless = broken.metricsOnly === true;
+    if (paintless) this.mergeWindowFontSamples(broken.fontSamples);
+
     const closeFragment = (endLine: number, isLast: boolean) => {
+      if (paintless) return;
       if (endLine > fragStartLine) {
         this.emitParagraphDecorations(
           props,
@@ -4784,14 +4885,15 @@ class Engine {
 
       this.y += floatOffset;
       const lineItemStart = this.cur.items.length;
-      this.emitLine(line, this.cur, this.colX, this.y);
+      if (paintless) this.cur.discarded = true;
+      else this.emitLine(line, this.cur, this.colX, this.y);
       // w:tab val="bar": not a tab stop — a vertical rule painted at the bar
       // position on EVERY line of the paragraph, spanning the line box, and
       // through the paragraph's after-spacing band on the last line
       // (parity2-tabs: Word's bars at 2880/5760tw run 29.5px tall for an
       // 18.5px single line + 8pt spacing-after; the tab characters
       // themselves advance past bars to the next real stop).
-      if (props.tabs) {
+      if (props.tabs && !paintless) {
         for (const t of props.tabs) {
           if (t.align === "bar" && !t.clear) {
             const bx = this.colX + t.pos;
@@ -4808,7 +4910,7 @@ class Engine {
           }
         }
       }
-      this.emitLineNumber(line, this.cur, this.colX, this.y);
+      if (!paintless) this.emitLineNumber(line, this.cur, this.colX, this.y);
       // Bookmark targets resolve to the page carrying the paragraph's first
       // line (PAGEREF rewrite pass). Frame-laid content (fake page) records
       // against the engine's current real page.
@@ -8899,14 +9001,21 @@ function collectPageMetadata(
   for (const item of items) {
     if (item.kind === "image" && item.model3D) foundModel3D();
     if (item.kind !== "text" || !item.text.trim()) continue;
-    const key = fontSampleKey({ font: item.font, text: item.text });
-    const sample = item.text.trim().slice(0, 40);
-    const existing = fontSamples.get(key);
-    if (!existing || (!/[^\u0000-\u024f]/.test(existing.text) && /[^\u0000-\u024f]/.test(sample))) {
-      fontSamples.set(key, { font: item.font, text: sample });
-    }
+    mergeFontSample(fontSamples, { font: item.font, text: item.text.trim().slice(0, 40) });
   }
 }
+
+/** Keep one sample per face, preferring one that exercises it past Latin
+ * Extended-B so the host's preload list has the widest witness available. */
+function mergeFontSample(fontSamples: Map<string, LayoutFontSample>, sample: LayoutFontSample): void {
+  const key = fontSampleKey(sample);
+  const existing = fontSamples.get(key);
+  if (!existing || (!NON_LATIN_SAMPLE.test(existing.text) && NON_LATIN_SAMPLE.test(sample.text))) {
+    fontSamples.set(key, sample);
+  }
+}
+
+const NON_LATIN_SAMPLE = /[^\u0000-\u024f]/;
 
 function fontSampleKey(sample: LayoutFontSample): string {
   return `${sample.font.family}\u0000${sample.font.bold ? 1 : 0}${sample.font.italic ? 1 : 0}`;
