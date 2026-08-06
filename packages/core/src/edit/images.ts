@@ -139,9 +139,10 @@ export function imageCrop(drawingEl: XmlElement): ImageCrop {
  * rather than writing four zero attributes, so cropping an image and undoing
  * the crop leaves the blipFill exactly as it was found.
  *
- * The extent is left alone: a:srcRect selects which part of the bitmap fills
- * the box Word already draws, which is why cropping in Word shrinks the
- * picture's frame only when the user also drags its size handles.
+ * The extent is left alone: a:srcRect only selects which part of the bitmap
+ * fills the box Word already draws. Shrinking that box to the kept region is a
+ * separate resizeDrawing, which the editor's crop gesture emits alongside this
+ * one so the surviving content holds its scale (see commitCrop).
  */
 export function setImageCrop(doc: DocxDocument, drawingEl: XmlElement, crop: ImageCrop): boolean {
   const blipFill = blipFillOf(drawingEl);

@@ -3359,10 +3359,6 @@ export class DocxEditor {
    *
    * Every measurement here is unzoomed page px in the SURFACE's coordinate
    * space, the same space the renderer positions image elements in.
-   *
-   * WHERE WORD DIFFERS: Word also shrinks the picture's frame as you crop, so
-   * the kept content holds its scale. This writes a:srcRect only, so the kept
-   * region is re-scaled to fill the box the picture already occupied.
    */
   private cropSession: {
     src: XmlElement;
@@ -3480,9 +3476,18 @@ export class DocxEditor {
   }
 
   /**
-   * Write the dragged frame as a:srcRect, then re-enter crop mode on the
-   * re-rendered picture so the next edge can be dragged without a round trip
-   * through the toolbar. `start` is the frame the drag began from.
+   * Write the dragged frame as a:srcRect AND shrink the picture's frame to the
+   * kept region, then re-enter crop mode on the re-rendered picture so the next
+   * edge can be dragged without a round trip through the toolbar. `start` is
+   * the frame the drag began from.
+   *
+   * The frame shrink is what makes this read as a crop rather than a zoom: it
+   * is Word's behaviour, and it keeps the surviving content at the scale it was
+   * drawn at instead of blowing it up to refill the old box. The gesture
+   * therefore carries two intents — setCrop plus resizeDrawing, and for a
+   * floating picture whose west or north edge moved, setFloatingPagePosition so
+   * the edge that did NOT move stays put. One history checkpoint brackets them
+   * all, so undo restores the srcRect and the extent together.
    */
   private commitCrop(start: { x: number; y: number; w: number; h: number }): void {
     const session = this.cropSession;
@@ -3518,6 +3523,25 @@ export class DocxEditor {
       this.host.onIntent?.(
         operationBody("setCrop", runId, objectIndex === undefined ? { crop } : { objectIndex, crop }),
       );
+    }
+    // The kept region is already drawn at the picture's scale, so its frame
+    // size IS the new extent — no separate kept-fraction math.
+    if (resizeDrawing(this.host.doc, src, keep.w, keep.h)) {
+      if (collabTarget) {
+        this.host.onIntent?.({ kind: "resizeDrawing", ...collabTarget, widthPx: keep.w, heightPx: keep.h });
+      }
+      // Only a west/north drag moves the surviving region's own corner; an
+      // east/south one trims the far edge and leaves the anchor alone. An
+      // inline picture has no anchor to move.
+      const dx = keep.x - start.x;
+      const dy = keep.y - start.y;
+      if (isFloatingDrawing(src) && (dx !== 0 || dy !== 0)) {
+        const x = (parseFloat(el.style.left) || 0) + dx;
+        const y = (parseFloat(el.style.top) || 0) + dy;
+        if (setFloatingPagePosition(this.host.doc, src, x, y) && collabTarget) {
+          this.host.onIntent?.({ kind: "setFloatingPagePosition", ...collabTarget, xPx: x, yPx: y });
+        }
+      }
     }
     this.exitCropMode();
     this.host.rerender();
