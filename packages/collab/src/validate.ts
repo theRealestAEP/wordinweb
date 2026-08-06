@@ -90,6 +90,19 @@ function smartArtError(a: { layout: unknown; items: unknown }, who: string): str
   return null;
 }
 
+/**
+ * Bound the one run-patch property that is not a scalar with a fixed shape:
+ * characterStyleId is written verbatim into a w:rStyle attribute, so it gets
+ * the same styleId bound every registered style operation applies.
+ */
+function badCharacterStyle(patch: Record<string, unknown>, who: string): string | null {
+  const id = patch?.characterStyleId;
+  if (id === undefined || id === null) return null;
+  return typeof id === "string" && /^[A-Za-z0-9\-_]{1,253}$/.test(id)
+    ? null
+    : `${who}: bad characterStyleId`;
+}
+
 /** Returns a rejection reason, or null if the intent is well-formed. */
 export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_INTENT_LIMITS): string | null {
   const nonNegInt = (n: number) => Number.isInteger(n) && n >= 0;
@@ -147,7 +160,7 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "formatRange":
       if (!nonNegInt(intent.start) || !nonNegInt(intent.end) || intent.end <= intent.start) return "formatRange: bad range";
       if (!nonNegInt(intent.middleId)) return "formatRange: bad middleId";
-      return null;
+      return badCharacterStyle(intent.patch, "formatRange");
     case "commentRun":
       if (typeof intent.text !== "string" || intent.text.length === 0) return "commentRun: empty";
       if (intent.text.length > limits.maxCommentLength) return "commentRun: too long";
@@ -396,6 +409,10 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (intent.color !== null && !/^[0-9a-fA-F]{6}$/.test(intent.color)) return "setDrawingFill: bad color";
       return null;
     case "formatRun":
+      // The patch is otherwise free-form but every property setRunProps reads
+      // is a bounded scalar. characterStyleId is the exception: it lands
+      // verbatim in a w:rStyle attribute, so it is bounded here.
+      return badCharacterStyle(intent.patch, "formatRun");
     case "formatParagraph":
     case "mergeParagraph":
       // Id-addressed, no free-form payload to bound here.

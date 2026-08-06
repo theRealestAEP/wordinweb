@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { availableObjectCommands, requestTextInputDialog } from "@wordinweb/core";
+import { availableObjectCommands, requestTextInputDialog, type SelectionFormat } from "@wordinweb/core";
 import type { DocxViewApi } from "./index.js";
 import { HelpGuide } from "./help.js";
 
@@ -3300,6 +3300,8 @@ function ObjectFormatTab({
 export type ToolbarFeature =
   | "history"
   | "styles"
+  | "charStyles"
+  | "formatPainter"
   | "font"
   | "size"
   | "format"
@@ -3471,6 +3473,9 @@ export function DocxToolbar({
   const [fmt, setFmt] = useState<ReturnType<NonNullable<DocxViewApi["getSelectionFormat"]>> | null>(null);
   const [curStyle, setCurStyle] = useState<string | null>(null);
   const [listKind, setListKind] = useState<"bullet" | "number" | null>(null);
+  // Format painter: the copied formatting, held until it is painted or cleared.
+  // Word keeps it on the toolbar rather than the document, so it lives here.
+  const [painted, setPainted] = useState<SelectionFormat | null>(null);
   // Toolbar popovers can move focus away from the document selection; remember
   // the last real range and restore it before applying their choice.
   const savedRange = useRef<Range | null>(null);
@@ -3665,6 +3670,53 @@ export function DocxToolbar({
               if (value) {
                 api?.setParagraphStyle(value === "__normal" ? null : value);
                 setCurStyle(api?.getParagraphStyleId?.() ?? null);
+              }
+            }}
+          />
+        ),
+      });
+    if (on("charStyles")) {
+      const charStyles = api?.listStyles?.({ type: "character" }) ?? [];
+      // A document with no character styles beyond Word's hidden defaults has
+      // nothing to offer, so the control stays out of the way entirely.
+      const offered = charStyles.filter((style) => style.quickStyle || style.usageCount > 0);
+      if (offered.length > 0)
+        groups.push({
+          key: "charStyles",
+          node: (
+            <ToolbarMenuSelect
+              title="Character style"
+              value={fmt?.characterStyleId ?? "__none"}
+              width={86}
+              menuWidth={190}
+              options={[
+                { value: "__none", label: "None" },
+                ...offered.map((style) => ({ value: style.id, label: style.name })),
+              ]}
+              onChange={(value) => {
+                if (value) apply({ characterStyleId: value === "__none" ? null : value });
+              }}
+            />
+          ),
+        });
+    }
+    if (on("formatPainter"))
+      groups.push({
+        key: "formatPainter",
+        node: (
+          <Btn
+            label={"\u{1F58C}"}
+            title={painted ? "Paint the copied formatting" : "Copy formatting (format painter)"}
+            active={!!painted}
+            onClick={() => {
+              // One button, two halves: the first click copies, the next
+              // paints and hands the brush back — Word's single-use painter.
+              if (painted) {
+                api?.applyCopiedFormatting?.(painted);
+                setPainted(null);
+                setFmt(api?.getSelectionFormat() ?? null);
+              } else {
+                setPainted(api?.copyFormatting?.() ?? null);
               }
             }}
           />
