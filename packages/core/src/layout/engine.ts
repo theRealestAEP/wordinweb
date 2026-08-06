@@ -3883,29 +3883,26 @@ class Engine {
     // mode <= 14 (nccih WORA: Heading1 before=18pt lands 18pt below the margin).
     const isLeadingPageBreak = leadBreak?.type === "page" && !props.pageBreakBefore;
     if (breakBeforeForced && !(isLeadingPageBreak && keepSpBeforeAtPageTop)) dropSpaceBefore = true;
-    if (this.docGridDropBefore) {
-      // How far the opening paragraph of a lines-grid section sits below the
-      // body top. Ordinary text opens AT it (probe-docgrid). An explicit
-      // w:snapToGrid="0" keeps its own spacing-before when it has one, and
-      // drops two grid rows when it does not; Heading 1 starts on the first
-      // grid row plus Word's 1.5pt grid leading. Keep bodyTop aligned with the
-      // actual cursor so page-top fit checks use the same origin.
-      const pitch = this.sp.docGridLinePitch;
-      if (props.snapToGrid === false && pitch) {
-        if (!((props.spacingBefore ?? 0) > 0)) {
-          this.cur.bodyTop += 2 * pitch;
-          this.y += 2 * pitch;
-        }
-      } else if (para.props.styleId === "Heading1" && pitch) {
-        const drop = pitch + ptToPx(1.5);
-        this.cur.bodyTop += drop;
-        this.y += drop;
-        dropSpaceBefore = true;
-      } else {
-        dropSpaceBefore = true;
-      }
-      this.docGridDropBefore = false;
-    }
+    // The opening paragraph of a lines-grid section is an ORDINARY paragraph.
+    // It opens at the body top, it keeps its space-before, and the only thing
+    // the grid adds is the snap of its own first line - which the line advance
+    // already applies. Nothing is owed here, so this flag now only has to be
+    // cleared (probe-gridopen, six openers on one grid, Word's L01 top against
+    // the plain case: plain 0.00, w:before=12pt +16.00 exactly, snapToGrid="0"
+    // -2.33, snapToGrid="0" with a before +13.67, Heading1 0.00, Heading1 with
+    // snapToGrid="0" -2.33).
+    //
+    // Three rules that used to live here are refuted by that sweep and gone:
+    //  - a `w:snapToGrid="0"` opener without a space-before dropped TWO grid
+    //    rows. Word drops none; -2.33 is simply the first line's grid snap NOT
+    //    being taken, which is what turning the grid off means. We were 39.33px
+    //    low.
+    //  - a `Heading1` opener took a grid row plus 1.5pt of "grid leading". Word
+    //    puts it exactly where a plain paragraph goes. We were 23.59px low.
+    //  - every other opener had its space-before DROPPED. Word applies it in
+    //    full, on top of the snap. We were 16.00px high. probe-docgrid could
+    //    not see this: all six of its cases author `w:before="0"`.
+    this.docGridDropBefore = false;
     const rawSpacingBefore = dropSpaceBefore ? 0 : (props.spacingBefore ?? 0);
 
     let paraTopEstimate = this.y + rawSpacingBefore;

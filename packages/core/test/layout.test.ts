@@ -289,14 +289,15 @@ describe("layout engine", () => {
     expect(inheritedTitle?.kind).toBe("text");
     expect(optedOutTitle?.kind).toBe("text");
     if (inheritedTitle?.kind !== "text" || optedOutTitle?.kind !== "text") return;
-    // An inherited grid paragraph opens AT the body top (probe-docgrid: Word
-    // reserves no grid rows at a section opening) and takes a pitch-sized
-    // line. An explicit opt-out keeps its natural line box, and still drops
-    // two grid rows - that drop is carried over from the old four-row reserve
-    // and no probe has measured it, so it stays until one does.
+    // Both open AT the body top (probe-docgrid: Word reserves no grid rows at
+    // a section opening), and the opt-out changes only the LINE, never the
+    // origin. The two-row drop this used to assert was carried over from the
+    // old four-row reserve; probe-gridopen has now measured it and Word drops
+    // nothing - its opted-out opener sits 2.33px ABOVE the snapped one, which
+    // is just the first line's grid snap not being taken.
     expect(inherited.pages[0].bodyTop).toBeCloseTo(96, 3);
-    expect(inherited.pages[0].bodyTop - optedOut.pages[0].bodyTop).toBeCloseTo(-48, 3);
-    expect(inheritedTitle.lineTop - optedOutTitle.lineTop).toBeCloseTo(-48, 3);
+    expect(optedOut.pages[0].bodyTop).toBeCloseTo(96, 3);
+    expect(inheritedTitle.lineTop).toBeCloseTo(optedOutTitle.lineTop, 3);
     expect(inheritedTitle.lineHeight).toBeCloseTo(24, 3);
     expect(optedOutTitle.lineHeight).toBeLessThan(24);
   });
@@ -483,10 +484,12 @@ describe("layout engine", () => {
       (item) => item.kind === "text" && item.text === "Title",
     );
 
-    expect(result.pages[0].bodyTop).toBeCloseTo(144, 3);
+    // The opt-out survives column balancing, and it opens at the body top:
+    // 144 was the old two-row drop, refuted by probe-gridopen.
+    expect(result.pages[0].bodyTop).toBeCloseTo(96, 3);
     expect(title?.kind).toBe("text");
     if (title?.kind !== "text") return;
-    expect(title.lineTop).toBeCloseTo(144, 3);
+    expect(title.lineTop).toBeCloseTo(96, 3);
   });
 
   it("offsets a header by the binding gutter so it aligns with the body column", () => {
