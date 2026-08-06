@@ -4137,43 +4137,43 @@ class Engine {
       index !== undefined &&
       siblings?.[index - 2]?.type === "table";
 
-    // An EMPTY paragraph whose only content is a hard page break fits on the
-    // current page however little room is left; the new page starts after it.
-    // Measured by a four-sweep probe over rooms of 18..45 CSS px against a
-    // paragraph needing 13.3px space-before + 19.4px line: text-with-break,
-    // text-without and empty-without all spill below 33px on both engines, and
-    // only empty-with-break stays put at every room Word was asked for
-    // (phase23-protocol block 1395: 22.1px of room at the foot of p68, where
-    // spilling the break cost a whole extra page, 70 against Word's 69).
+    // To fit at the foot of a page, an EMPTY paragraph whose only run content
+    // is a hard page break demands exactly its SINGLE-SPACED LINE HEIGHT: not
+    // its space-before, not its w:line multiple, and regardless of any w:sectPr
+    // its pPr carries. Every other paragraph demands space-before plus its full
+    // line, as before.
     //
-    // NOT when the same paragraph also carries the section's w:sectPr. There
-    // Word applies the ORDINARY fit test and spills, and the spilled mark is
-    // what makes the genuinely blank page Word draws. Ungated, this rule took
-    // wild2-legal-ca-agreement's browser baseline from 23 (matching Word) to
-    // 22. A census of the corpus found 204 break-only paragraphs across 137
-    // fixtures and exactly TWO carry a sectPr - ca-agreement p77 and
-    // nccih-protocol p17 - while phase23 (5), wild-gatech (6) and wild-wirfp
-    // (10) have none, so the gate costs the rule nothing it was built for.
-    // The room cannot be the discriminator: Word offers this paragraph the
-    // same room in the unedited and TOC-inserted documents (deepest page-1
-    // baseline 865.93 in both) and still lays one in 23 pages and one in 22.
+    // Bracketed by a five-shape probe sweeping the room under the paragraph in
+    // two documents, one with a sectPr on every target and one with no sections
+    // at all (parity 2ba4f98, scripts/generate-sectadvance-probe.mjs). Word
+    // fits a 10pt break-only paragraph at 17 CSS px of room and spills it at
+    // 16; at 20pt it fits at 33 and spills at 32. The demand DOUBLES with the
+    // font size, so it is a line height and not a constant, and the two
+    // brackets intersect at 1.60..1.65 px/pt - the bare ~1.221em line. That
+    // excludes the w:line="276" multiple (18.72px at 10pt, where Word fits at
+    // 17) and the space-before (32.05px, which is exactly what the
+    // text-carrying controls demand and get). The no-sectPr control gives the
+    // identical thresholds, so Word does not read the section break here.
+    //
+    // Only the FIT decision uses this demand. Placement and painting keep the
+    // paragraph's real space-before and real line height.
     //
     // TWO THINGS DELIBERATELY LEFT ALONE HERE.
-    // 1. The ordinary test's effective bottom for this line sits ~14px above
-    //    the nominal 960: the line at 931.05..945.82 spills although fitHeight
+    // 1. The ordinary test's effective bottom for a line can sit ~14px above
+    //    the nominal 960: a line at 931.05..945.82 spills although fitHeight
     //    is capped at the line height and keepNextTail is 0. The cause is in
     //    planBreaks below - updateBottom, paragraphOverhang or the note
-    //    reserves. It changes WHERE the ordinary threshold sits, not which
-    //    paragraphs take it, so the gate above is independent of it.
+    //    reserves. It moves WHERE the ordinary threshold sits, not which
+    //    paragraphs take it.
     // 2. Whether newPage's section-start coalesce should keep a page a break
-    //    created. Suppressing it for the break-only+sectPr shape takes BOTH
-    //    ca-agreement and nccih to 24 against Word's 23, so today's coalesce
-    //    is right for every case we can currently lay out; the open part is
-    //    only reachable once an inserted TOC renders at all.
-    const pageBreakOnlyFits =
+    //    created. Suppressing it for the break-only+sectPr shape took BOTH
+    //    ca-agreement and nccih to 24, one page over each document's own Word
+    //    count (22 and 23), so today's coalesce is right for every case we can
+    //    currently lay out; the open part is only reachable once an inserted
+    //    TOC renders at all.
+    const pageBreakOnlyPara =
       lines.length === 1 &&
       lines[0].forcedBreakAfter === "page" &&
-      para.sectionBreak === undefined &&
       isPageBreakOnlyParagraph(para);
 
     // HTML-style automatic paragraph spacing (w:beforeAutospacing /
@@ -4507,7 +4507,8 @@ class Engine {
     // Adjacent before/after collapse: the larger of the previous paragraph's
     // spacing-after (already advanced) and this spacing-before wins; a top
     // border reserve then adds on top (see collapseBefore above).
-    this.y += collapseBefore(spacingBefore);
+    const collapsedBefore = collapseBefore(spacingBefore);
+    this.y += collapsedBefore;
 
     // docGrid(lines) re-sync: after a paragraph containing a MULTI-ROW line
     // (a line taller than the pitch: the JhengHei-fallback 2-row lines of
@@ -4523,6 +4524,15 @@ class Engine {
       if (snapped > rel) this.y = this.cur.bodyTop + snapped;
     }
     this.gridResyncPending = false;
+
+    // The break-only demand described above, restated against a cursor that has
+    // ALREADY advanced by the collapsed space-before: taking that advance back
+    // out charges the bare line from the paragraph's TOP, which is where Word
+    // measures the room. Such a paragraph is one line by construction, so this
+    // single value serves both the break plan and the emit-time test.
+    const pageBreakOnlyDemand = pageBreakOnlyPara
+      ? lines[0].naturalHeight - collapsedBefore
+      : undefined;
 
     // Plan natural page-break indices with widow/orphan control (Word default: on).
     const widow = props.widowControl !== false;
@@ -4609,13 +4619,13 @@ class Engine {
         const baseNotes = simOnCurrentPage ? (this.cur.footnoteH[simCol] ?? 0) : 0;
         const simSep =
           simNotes + noteAdd > 0 && baseNotes === 0 ? this.noteSeparatorReserve(this.cur) : 0;
+        const demand =
+          pageBreakOnlyDemand ?? lines[li].fitHeight + (li === lines.length - 1 ? keepNextTail : 0);
         const overflowsHere =
           !postTablePageBreak &&
-          !pageBreakOnlyFits &&
           (simBalancing
             ? simY > bottom + 0.01
-            : simY + lines[li].fitHeight + (li === lines.length - 1 ? keepNextTail : 0) >
-              bottom - simNotes - noteAdd - simSep + paragraphOverhang + 0.01);
+            : simY + demand > bottom - simNotes - noteAdd - simSep + paragraphOverhang + 0.01);
         // The paragraph's VERY FIRST line does not fit on the current partial
         // page: the whole paragraph moves to the next column/page. This is a
         // PHYSICAL fit, independent of widowControl — the emit loop moves line 0
@@ -4744,10 +4754,9 @@ class Engine {
       const balBottomBased = balancing && this.colWidth < 40;
       const overflow =
         !postTablePageBreak &&
-        !pageBreakOnlyFits &&
         (balancing
           ? (balBottomBased ? this.y + line.fitHeight : this.y) > this.bodyBottom + 0.01
-          : this.y + line.fitHeight >
+          : this.y + (pageBreakOnlyDemand ?? line.fitHeight) >
             this.bodyBottom - pendingNotes +
               (this.customNoteBannerFit ? CUSTOM_NOTE_BANNER_OVERHANG : 0) +
               0.01) &&
@@ -8948,8 +8957,8 @@ function isEmptyParagraph(p: Paragraph): boolean {
 /** A paragraph whose ONLY rendered content is one or more hard page breaks:
  * empty text is allowed, everything else (text, tabs, images, drawings, math,
  * fields, note references, anchors, line and column breaks) disqualifies it.
- * Such a paragraph always fits on the current page UNLESS it also closes a
- * section - see pageBreakOnlyFits. */
+ * Such a paragraph demands only its single-spaced line height to fit at the
+ * foot of a page - see pageBreakOnlyPara. */
 function isPageBreakOnlyParagraph(p: Paragraph): boolean {
   let sawBreak = false;
   for (const child of p.children) {
