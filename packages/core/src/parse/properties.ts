@@ -203,6 +203,8 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
   if (emboss !== undefined) props.emboss = emboss;
   const imprint = onOff(child(rPr, "imprint"));
   if (imprint !== undefined) props.imprint = imprint;
+  const snapToGrid = onOff(child(rPr, "snapToGrid"));
+  if (snapToGrid !== undefined) props.snapToGrid = snapToGrid;
 
   const u = childVal(rPr, "u");
   if (u !== undefined) props.underline = u;

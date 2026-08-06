@@ -2485,6 +2485,22 @@ function finishLine(
   minLineHeight?: number,
   inCell = false,
 ): LineBox {
+  // w:snapToGrid="0" turns the per-line grid snap off. The PARAGRAPH flag is
+  // handled at breakParagraphImpl's top (minLineHeight arrives undefined);
+  // this is the RUN carrier: a line whose runs ALL declare w:rPr
+  // w:snapToGrid="0" lays off the grid the same way. probe-gridopen measured
+  // the paragraph carrier (Word's opted-out opener takes its natural line and
+  // the grid resumes at pitch below it, with no re-sync to the grid rows);
+  // the run carrier itself is spec-directed (ECMA-376 17.3.2.34) and has no
+  // probe behind it — no corpus fixture authors it under a lines grid. A
+  // MIXED line keeps the snap: one participating run is enough.
+  if (
+    minLineHeight !== undefined &&
+    spans.length > 0 &&
+    spans.every((s) => s.props.snapToGrid === false)
+  ) {
+    minLineHeight = undefined;
+  }
   let maxAscent = 0;
   let maxDescent = 0;
   let maxRawDescent = 0;

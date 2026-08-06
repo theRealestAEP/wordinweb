@@ -302,6 +302,60 @@ describe("layout engine", () => {
     expect(optedOutTitle.lineHeight).toBeLessThan(24);
   });
 
+  it("resumes the grid at pitch below an opted-out paragraph without re-syncing", () => {
+    // probe-gridopen's G case (parity 02dff8a): the opted-out opener takes its
+    // NATURAL line, and the plain paragraph under it advances at the grid
+    // pitch from wherever that natural line ended — Word's G-case body sits a
+    // constant (pitch - natural) above the plain case's from line 2 onward,
+    // which is only possible if no line re-syncs to the absolute grid rows.
+    const body =
+      `<w:p><w:pPr><w:snapToGrid w:val="0"/></w:pPr><w:r><w:t>Opener</w:t></w:r></w:p>` +
+      `<w:p><w:r><w:t>Body</w:t></w:r></w:p>` +
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+      `<w:docGrid w:type="lines" w:linePitch="360"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    const opener = result.pages[0].items.find((i) => i.kind === "text" && i.text === "Opener");
+    const bodyLine = result.pages[0].items.find((i) => i.kind === "text" && i.text === "Body");
+    expect(opener?.kind).toBe("text");
+    expect(bodyLine?.kind).toBe("text");
+    if (opener?.kind !== "text" || bodyLine?.kind !== "text") return;
+    expect(opener.lineTop).toBeCloseTo(96, 3);
+    expect(opener.lineHeight).toBeLessThan(24);
+    // The plain line snaps to the pitch again, starting at the opener's
+    // natural bottom, NOT at the next absolute grid row (96 + 24).
+    expect(bodyLine.lineHeight).toBeCloseTo(24, 3);
+    expect(bodyLine.lineTop).toBeCloseTo(96 + opener.lineHeight, 3);
+  });
+
+  it("honors run-level snapToGrid=0 when every run on the line opts out", () => {
+    // The run carrier of the same flag (w:rPr w:snapToGrid). No probe measures
+    // it — probe-gridopen authors the paragraph carrier — so this pins the
+    // spec-directed reading: a line whose runs ALL declare 0 lays its natural
+    // box, and ONE participating run keeps the whole line on the grid.
+    const OFF = `<w:rPr><w:snapToGrid w:val="0"/></w:rPr>`;
+    const gridDoc = (runs: string) =>
+      wrapDocument(
+        `<w:p>${runs}</w:p>` +
+          `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+          `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+          `<w:docGrid w:type="lines" w:linePitch="360"/></w:sectPr>`,
+      );
+    const allOff = layout({
+      "word/document.xml": gridDoc(`<w:r>${OFF}<w:t>All</w:t></w:r><w:r>${OFF}<w:t xml:space="preserve"> off</w:t></w:r>`),
+    }).result;
+    const mixed = layout({
+      "word/document.xml": gridDoc(`<w:r>${OFF}<w:t>All</w:t></w:r><w:r><w:t xml:space="preserve"> off</w:t></w:r>`),
+    }).result;
+    const lineOf = (r: typeof allOff) => {
+      const it = r.pages[0].items.find((i) => i.kind === "text" && i.text === "All");
+      if (it?.kind !== "text") throw new Error("missing line");
+      return it;
+    };
+    expect(lineOf(allOff).lineHeight).toBeLessThan(24);
+    expect(lineOf(mixed).lineHeight).toBeCloseTo(24, 3);
+  });
+
   it("snaps an auto-spaced inline-image line to whole grid pitches", () => {
     const rels = `<?xml version="1.0"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">

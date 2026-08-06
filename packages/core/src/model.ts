@@ -129,6 +129,10 @@ export interface RunProps {
   emboss?: boolean;
   imprint?: boolean;
   vanish?: boolean;
+  /** w:rPr w:snapToGrid: whether this run participates in the section's
+   * docGrid. A line whose runs ALL declare 0 lays off the grid (see
+   * finishLine); ParaProps.snapToGrid covers the whole paragraph. */
+  snapToGrid?: boolean;
   /** Character style id (w:rStyle). */
   styleId?: string;
   lang?: string;
