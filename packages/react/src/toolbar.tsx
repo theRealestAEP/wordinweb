@@ -1493,6 +1493,80 @@ function TextBoxMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/** Word's own gallery presets, the four people actually reach for. */
+const WATERMARKS = ["CONFIDENTIAL", "DO NOT COPY", "DRAFT", "SAMPLE"] as const;
+
+function WatermarkMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("CONFIDENTIAL");
+  const [diagonal, setDiagonal] = useState(true);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const stamp = (value: string) => {
+    if (api?.insertWatermark({ text: value, diagonal })) setOpen(false);
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Watermark" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ color: "#9aa0a6", fontSize: 13, fontWeight: 700, letterSpacing: 0.5 }}>WM</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 240, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div style={{ display: "grid", gap: 6 }}>
+            {WATERMARKS.map((preset) => (
+              <button
+                key={preset}
+                title={`Stamp ${preset} on every page`}
+                onClick={() => stamp(preset)}
+                style={{ padding: "7px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: "#9aa0a6", cursor: "pointer", font: "700 12px system-ui, sans-serif", letterSpacing: 0.5 }}
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
+          <input
+            aria-label="Watermark text"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            style={{ width: "100%", boxSizing: "border-box", marginTop: 8, border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+          />
+          <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8, font: "12px system-ui, sans-serif" }}>
+            <input type="checkbox" checked={diagonal} onChange={(event) => setDiagonal(event.target.checked)} />
+            Diagonal
+          </label>
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <button
+              title="Stamp this text on every page"
+              disabled={!text}
+              onClick={() => stamp(text)}
+              style={{ flex: 1, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, cursor: text ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}
+            >
+              Custom
+            </button>
+            <button
+              title="Remove the watermark from every page"
+              onClick={() => {
+                api?.removeWatermark();
+                setOpen(false);
+              }}
+              style={{ flex: 1, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, cursor: "pointer", font: "600 12px system-ui, sans-serif" }}
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 const WORD_ART = [
   ["plain", "Plain", "WordArt"],
   ["archUp", "Arch up", "⌒"],
@@ -4276,6 +4350,7 @@ export type ToolbarFeature =
   | "arrange"
   | "dropCap"
   | "headerFooter"
+  | "watermark"
   | "coverPage"
   | "pageNumber"
   | "break"
@@ -4333,6 +4408,10 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertBreak", feature: "break" },
   { command: "insertBlankPage", feature: "break" },
   { command: "insertCoverPage", feature: "coverPage" },
+  // A watermark lands in the header parts rather than at the caret, so it
+  // needs no addressable position — but it is an insert, and the rule the
+  // list exists for applies to it unchanged.
+  { command: "insertWatermark", feature: "watermark" },
   { command: "addComment", feature: "comment" },
   { command: "addFootnote", feature: "footnote" },
   { command: "addBookmark", feature: "bookmark" },
@@ -5062,6 +5141,7 @@ export function DocxToolbar({
               onPick={(value) => api?.openHeaderFooter(value as "header" | "footer")}
             />
           )}
+          {on("watermark") && <WatermarkMenu api={api} />}
           <Sep />
           {on("pageNumber") && (
             <ActionMenu
@@ -5160,6 +5240,7 @@ export function DocxToolbar({
                   onPick={(value) => api?.openHeaderFooter(value as "header" | "footer")}
                 />
               )}
+              {on("watermark") && <WatermarkMenu api={api} />}
               {on("pageNumber") && (
                 <ActionMenu
                   label="Page number"

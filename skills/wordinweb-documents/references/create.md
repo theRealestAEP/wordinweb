@@ -124,8 +124,11 @@ Floating drawing positions use page coordinates. For a full Letter-page
 background, use `widthPx: 816`, `heightPx: 1056`, and `position: { xPx: 0,
 yPx: 0 }`.
 
-For a repeating watermark, place WordArt in `header`. Use `wrap: "behind"`,
-`order: "back"`, and an opacity near `0.05` to `0.12`.
+For a watermark, prefer the `insertWatermark` edit operation on an existing
+document. It writes Word's own VML stamp into every header part, so Word and
+this renderer draw the same thing. The recipe below is for a decorative
+background that is not a watermark: place WordArt in `header` with
+`wrap: "behind"`, `order: "back"`, and an opacity near `0.05` to `0.12`.
 
 ## Compact compose result
 

@@ -11,7 +11,7 @@ import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColu
 import { pxToTwips } from "../units.js";
 import { listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
-import { operationBody, type RegisteredOperationBody } from "./registry.js";
+import { documentOperationBody, operationBody, type RegisteredOperationBody } from "./registry.js";
 import { deleteMath, isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
 import {
   drawingFillColor,
@@ -40,7 +40,7 @@ import {
   setImageAltText,
   setImageWrap,
 } from "./images.js";
-import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
+import { deleteWatermark, headerWatermarks, removeWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
 import { requestColorDialog, requestLineStyleDialog, requestNumberPairDialog, requestTextInputDialog } from "./dialog.js";
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
 import {
@@ -2975,6 +2975,11 @@ export class DocxEditor {
     const detail = (event as CustomEvent<Model3DRotation>).detail;
     if (!binding || !src || !detail || ![detail.x, detail.y, detail.z].every(Number.isFinite)) return;
     event.stopPropagation();
+    // Same honest no-op the reset3d command takes for the same core function:
+    // 3D rotation has no wire form, and the model3D toolbar flag only hides
+    // INSERTION — a model already in an opened file is still draggable, so
+    // without this a drag in a room forks the document silently.
+    if (this.host.onIntent && this.host.doc.stableIds) return;
     const rect = binding.el.getBoundingClientRect();
     const near = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
     this.host.history?.checkpoint();
@@ -3445,7 +3450,17 @@ export class DocxEditor {
     if (rot) bar.style.transform = `rotate(${-rot}deg)`;
     bar.style.transformOrigin = "0 100%";
 
-    const button = (label: string, title: string, fn: () => void): void => {
+    // WHAT THE OVERLAY OFFERS IN A ROOM. Editing a watermark's text, opacity
+    // or rotation rewrites VML attributes on a shape inside a header part.
+    // Header parts replicate, so applying that locally forks the document —
+    // and the shape carries no stable id, so there is no wire form to route
+    // it through either. Those three are ABSENT in collab rather than present
+    // and inert. Removal survives: removeWatermark is document-scoped, so it
+    // needs no address.
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+
+    const button = (label: string, title: string, fn: () => void, localOnly = false): void => {
+      if (localOnly && inCollab) return;
       const b = document.createElement("button");
       b.textContent = label;
       b.title = title;
@@ -3462,6 +3477,12 @@ export class DocxEditor {
       });
       bar.appendChild(b);
     };
+    const sep = (): void => {
+      if (inCollab) return;
+      const line = document.createElement("span");
+      line.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
+      bar.appendChild(line);
+    };
 
     button("Edit text", "Edit watermark text", () => {
       const cur = wordArtText(src);
@@ -3476,15 +3497,11 @@ export class DocxEditor {
           this.reselectWordArt(src);
         }
       });
-    });
-    const sep1 = document.createElement("span");
-    sep1.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
-    bar.appendChild(sep1);
-    button("−", "Less opaque", () => this.bumpWordArtOpacity(src, -0.1));
-    button("+", "More opaque", () => this.bumpWordArtOpacity(src, +0.1));
-    const sep2 = document.createElement("span");
-    sep2.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
-    bar.appendChild(sep2);
+    }, true);
+    sep();
+    button("−", "Less opaque", () => this.bumpWordArtOpacity(src, -0.1), true);
+    button("+", "More opaque", () => this.bumpWordArtOpacity(src, +0.1), true);
+    sep();
     button("Rotate", "Set rotation (degrees)", () => {
       const cur = wordArtRotation(src);
       void requestTextInputDialog(this.host.container, {
@@ -3503,13 +3520,11 @@ export class DocxEditor {
           this.reselectWordArt(src);
         }
       });
-    });
-    const sep3 = document.createElement("span");
-    sep3.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
-    bar.appendChild(sep3);
+    }, true);
+    sep();
     button("Delete", "Delete watermark", () => {
       this.host.history?.checkpoint();
-      if (deleteWatermark(this.host.doc, src)) this.host.rerender();
+      if (this.removeSelectedWatermark(src)) this.host.rerender();
       this.deselectWordArt();
     });
 
@@ -3530,11 +3545,30 @@ export class DocxEditor {
     }
   }
 
+  /**
+   * Remove the selected WordArt, by the only route the room has.
+   *
+   * In collab that route is the document-scoped removeWatermark, which takes
+   * the stamp off EVERY header part — Word's own Remove Watermark does the
+   * same, and it is the only form with no address to resolve. A WordArt
+   * anchored in the BODY is decorative art rather than a watermark: it is not
+   * what removeWatermark removes and it has no wire form of its own, so in a
+   * room it is an honest no-op instead of a local-only deletion.
+   */
+  private removeSelectedWatermark(src: XmlElement): boolean {
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+    if (!inCollab) return deleteWatermark(this.host.doc, src);
+    if (!headerWatermarks(this.host.doc).includes(src)) return false;
+    if (!removeWatermark(this.host.doc)) return false;
+    this.host.onIntent!(documentOperationBody("removeWatermark", {}));
+    return true;
+  }
+
   private deleteSelectedWordArt(): void {
     if (!this.selectedWordArt) return;
     const src = this.selectedWordArt.src;
     this.host.history?.checkpoint();
-    if (deleteWatermark(this.host.doc, src)) this.host.rerender();
+    if (this.removeSelectedWatermark(src)) this.host.rerender();
     this.deselectWordArt();
   }
 

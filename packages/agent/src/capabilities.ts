@@ -466,7 +466,10 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
       },
     };
   }
-  if (field === "suggest" || field === "preservePageStart") return { type: "boolean" };
+  if (field === "suggest" || field === "preservePageStart" || field === "diagonal") return { type: "boolean" };
+  // insertWatermark's headerCount is both its carried-id budget and its
+  // rejection predicate; the cap matches its own validate in the registry.
+  if (field === "headerCount") return integer(1, 50);
   if (field === "rows" || field === "cols") return integer(1, 50);
   if (field === "boundary") return integer(1, 200);
   if (field === "rowIdx") return integer(0, 5000);
@@ -490,8 +493,9 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
   if (field === "styleId") return { type: ["string", "null"] };
   if (field === "text") {
     const max = kind === "insertText" ? 100000
-      : kind === "insertWordArt" || kind === "setDrawingWordArtText" || kind === "setSmartArtNodeText" ? 500
-        : 20000;
+      : kind === "insertWatermark" ? 255
+        : kind === "insertWordArt" || kind === "setDrawingWordArtText" || kind === "setSmartArtNodeText" ? 500
+          : 20000;
     return string(max, kind === "insertShape" || kind === "setSmartArtNodeText" ? 0 : 1);
   }
   if (field === "blocksXml") return string(2_000_000, 1);

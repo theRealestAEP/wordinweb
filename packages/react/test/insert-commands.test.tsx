@@ -159,6 +159,7 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertBreak: (api) => api.insertBreak("page"),
   insertBlankPage: (api) => api.insertBlankPage(),
   insertCoverPage: (api) => api.insertCoverPage({ title: "T", subtitle: "S", author: "A", date: "2026" } as never),
+  insertWatermark: (api) => api.insertWatermark({ text: "DRAFT" }),
   addComment: (api) => api.addComment("note"),
   addFootnote: (api) => api.addFootnote("note"),
   addBookmark: (api) => api.addBookmark("Anchor1"),

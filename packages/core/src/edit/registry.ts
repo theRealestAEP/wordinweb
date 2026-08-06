@@ -24,6 +24,7 @@ import {
 import { suggestMeta } from "./suggest.js";
 import { TOC_LEADERS, insertToc, type TocLeader, type TocLevels } from "./toc.js";
 import { applyFieldResults } from "./update-fields.js";
+import { insertWatermark, removeWatermark } from "./watermark.js";
 import {
   CELL_SCOPE_EDGES,
   TABLE_BORDER_STYLES,
@@ -184,6 +185,11 @@ export interface OperationDefinition<Kind extends string, Payload> {
    * host, the agent compiler) reads this instead of repeating the arithmetic.
    */
   nodeIds?: (args: OperationArgs<Payload>) => number;
+  /** The mutation removes id-tracked nodes, so the caller must retire their
+   * stable ids afterwards. Deletion and pruning are paired everywhere else in
+   * the apply path (mergeParagraph, removeDrawing); declaring it here keeps
+   * the pairing in the operation's single declaration. */
+  prunesIds?: true;
   /**
    * Reject a malformed payload before it is sequenced. Runs on both sides of
    * the wire, so it must be a pure function of the payload.
@@ -985,6 +991,110 @@ const setTableHeaderRowsOperation = defineOperation<{
     setTableHeaderRows(doc, target.el, payload.count, suggestMeta(doc, payload.suggest)),
 });
 
+// ---------------------------------------------------------------------------
+// Watermarks
+// ---------------------------------------------------------------------------
+
+/**
+ * The two watermark operations are DOCUMENT-scoped because a watermark is a
+ * property of the document, not of a place in it: Word writes one into every
+ * header part so it shows on every page, and there is no single node either
+ * operation could be addressed at.
+ *
+ * `headerCount` is the pattern insertToc established, doing both jobs at once.
+ * As a BUDGET it sizes the carried ids, because `nodeIds` sees the payload and
+ * not the document, and the number of nodes created depends on how many header
+ * parts the document has. As a REJECTION PREDICATE it stands in for the stable
+ * id a document-scoped operation does not have: a replica whose header set has
+ * moved under a concurrent edit applies nothing, and every replica in that
+ * position rejects identically.
+ *
+ * Both are position-stable in the registry's sense. The watermark run is
+ * prepended to a header paragraph that already exists, so no run's text moves
+ * and a concurrent text intent still transforms as identity.
+ *
+ * Neither creates the header part it needs. That is `ensureHeaderFooter`'s
+ * job, which is a structural intent of its own; a caller in a room submits it
+ * first and this one second.
+ */
+
+/** RRGGBB, the colour form every other operation on the wire already uses.
+ * VML would also take a keyword ("silver"), but one convention is worth more
+ * than the second spelling. */
+const HEX_COLOR = /^[0-9A-Fa-f]{6}$/;
+
+function badHeaderCount(count: unknown, what: string): string | null {
+  return Number.isInteger(count) && (count as number) >= 1 && (count as number) <= 50
+    ? null
+    : `${what}: bad headerCount`;
+}
+
+const insertWatermarkOperation = defineOperation<{
+  text: string;
+  headerCount: number;
+  diagonal?: boolean;
+  color?: string;
+  opacity?: number;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertWatermark",
+  address: "document",
+  category: "insert",
+  description: "Stamp a text watermark across every page, in the document's header parts.",
+  fields: [
+    { name: "text" },
+    { name: "headerCount" },
+    { name: "diagonal", optional: true },
+    { name: "color", optional: true },
+    { name: "opacity", optional: true },
+  ],
+  // Per header part: the watermark run, plus the paragraph to host it when the
+  // part has none of its own.
+  nodeIds: ({ headerCount }) => (badHeaderCount(headerCount, "x") ? 2 : headerCount * 2),
+  // Inserting REPLACES any watermark already there, so it deletes runs too.
+  prunesIds: true,
+  validate: ({ text, headerCount, diagonal, color, opacity }) => {
+    if (typeof text !== "string" || text.length === 0 || text.length > 255) {
+      return "insertWatermark: bad text";
+    }
+    const bad = badHeaderCount(headerCount, "insertWatermark");
+    if (bad) return bad;
+    if (diagonal !== undefined && typeof diagonal !== "boolean") return "insertWatermark: bad diagonal";
+    if (color !== undefined && (typeof color !== "string" || !HEX_COLOR.test(color))) {
+      return "insertWatermark: bad color";
+    }
+    if (opacity !== undefined && (typeof opacity !== "number" || !(opacity >= 0 && opacity <= 1))) {
+      return "insertWatermark: bad opacity";
+    }
+    return null;
+  },
+  apply: ({ doc, payload }) =>
+    doc.headerRoots().length === payload.headerCount &&
+    insertWatermark(doc, {
+      text: payload.text,
+      ...(payload.diagonal !== undefined ? { diagonal: payload.diagonal } : {}),
+      ...(payload.color !== undefined ? { color: payload.color } : {}),
+      ...(payload.opacity !== undefined ? { opacity: payload.opacity } : {}),
+    }),
+});
+
+/** A payload with no fields of its own. Not `Record<string, never>`: that
+ * carries an index signature, which would forbid the clientId/clientSeq/base
+ * bookkeeping @wordinweb/collab intersects onto every wire body. */
+type NoPayload = Record<never, never>;
+
+/** Take the watermark back off every page. Its rejection predicate is the
+ * watermark's own existence: a replica with none applies nothing. */
+const removeWatermarkOperation = defineOperation<NoPayload>()({
+  kind: "removeWatermark",
+  address: "document",
+  category: "insert",
+  description: "Remove the text watermark from every page.",
+  fields: [],
+  prunesIds: true,
+  apply: ({ doc }) => removeWatermark(doc),
+});
+
 const OPERATIONS = [
   setListTypeOperation,
   insertTableOperation,
@@ -1005,6 +1115,8 @@ const OPERATIONS = [
   setTableLayoutOperation,
   setTableCellMarginsOperation,
   setTableHeaderRowsOperation,
+  insertWatermarkOperation,
+  removeWatermarkOperation,
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -1081,17 +1193,21 @@ export function operationBody<Kind extends RegisteredOperationKind>(
 }
 
 /** Build a DOCUMENT-SCOPED operation's wire body. It names no node, so there
- * is no address field and no id to allocate — the payload is the whole of it. */
+ * is no address field — but it may still CREATE nodes (insertWatermark adds a
+ * run per header part), and those need carried ids like any other insert. */
 export function documentOperationBody<Kind extends RegisteredOperationKind>(
   kind: Kind,
   args: RegisteredOperationArgs<Kind>,
+  allocIds: (n: number) => StableId[] = () => [],
 ): RegisteredOperationBodyFor<Kind> {
   const definition = BY_KIND.get(kind);
   if (!definition) throw new Error(`${kind} is not a registered operation`);
   if (definition.address !== "document") {
     throw new Error(`${kind} is addressed by ${definition.address}; use operationBody`);
   }
-  return { kind, ...args } as RegisteredOperationBodyFor<Kind>;
+  const body: Record<string, unknown> = { kind, ...args };
+  if (definition.nodeIds) body.nodeIds = allocIds(definition.nodeIds(args as never));
+  return body as RegisteredOperationBodyFor<Kind>;
 }
 
 /** Validate a registered operation's payload. Null means well-formed. */

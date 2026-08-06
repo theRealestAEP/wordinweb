@@ -1531,6 +1531,13 @@ export class DocxDocument {
    * body, headers, footers). Linear scan — documents are small and this only
    * runs on structural edits (Enter, paragraph merge).
    */
+  /** The header part roots, in package order. A watermark is authored into
+   * every one of them: Word paints it on every page, and a document with a
+   * first-page or even-page header has more than one header part. */
+  headerRoots(): XmlElement[] {
+    return this.hfParts.filter((p) => p.isHeader).map((p) => p.root);
+  }
+
   /** XML roots that can carry tracked changes: body, headers/footers, footnotes. */
   revisionRoots(): XmlElement[] {
     const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];

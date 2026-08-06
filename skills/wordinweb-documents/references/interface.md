@@ -734,6 +734,8 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertField` | Insert an allowlisted Word field | `runRef`, `instruction`; optional: `cachedResult` |
 | `insertTable` | Insert a table | `runRef`, `rows`, `cols` |
 | `insertToc` | Insert a table of contents built from the document's headings | `runRef`, `entryCount`, `levels`, `leader` |
+| `insertWatermark` | Stamp a text watermark across every page, in the document's header parts | `text`, `headerCount`; optional: `diagonal`, `color`, `opacity` |
+| `removeWatermark` | Remove the text watermark from every page | — |
 
 ### Drawing
 
