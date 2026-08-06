@@ -303,7 +303,7 @@ export interface EmbeddedObjectReference {
   progId: string;
 }
 /** OMML equation node (subset: runs, scripts, fractions, radicals). */
-export type MathNode =
+export type MathNode = (
   | {
       t: "run";
       text: string;
@@ -330,7 +330,17 @@ export type MathNode =
   /** m:groupChr horizontal group character (over/under brace). */
   | { t: "grp"; chr: string; pos: "top" | "bot"; vertJc: "top" | "bot"; e: MathNode[] }
   /** m:limLow / m:limUpp limit stacked under/over a text operator. */
-  | { t: "lim"; pos: "low" | "upp"; e: MathNode[]; lim: MathNode[] };
+  | { t: "lim"; pos: "low" | "upp"; e: MathNode[]; lim: MathNode[] }
+) & {
+  /**
+   * The OMML element this node was read from. Only the math EDITOR's reader
+   * (edit/math.ts) sets it; the renderer's parser leaves it undefined. Editing
+   * re-emits through it, so the properties the linear syntax does not spell
+   * out — run fonts, m:ctrlPr, a matrix's column specs, an n-ary's limit
+   * placement — survive a text edit instead of being dropped.
+   */
+  src?: XmlElement;
+};
 
 export interface MathContent {
   kind: "math";

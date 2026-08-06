@@ -755,21 +755,21 @@ function applyIntentInner(
     case "setMathLinear": {
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
-      const math = firstMathIn(blockEl);
+      const math = mathIn(blockEl, intent.mathIndex);
       if (!math) return false;
       return setMathLinear(doc, math, intent.mathText);
     }
     case "deleteMath": {
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
-      const math = firstMathIn(blockEl);
+      const math = mathIn(blockEl, intent.mathIndex);
       if (!math) return false;
       return deleteMath(doc, math);
     }
     case "moveMath": {
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
-      const math = firstMathIn(blockEl);
+      const math = mathIn(blockEl, intent.mathIndex);
       if (!math) return false;
       const dest = resolveCaret(ids, runOf, intent.at);
       if (!dest) return false;
@@ -1085,15 +1085,18 @@ function drawingIn(runEl: XmlElement, objectIndex: number | undefined, runOf: Ru
   return content ? drawingSource(content) ?? null : null;
 }
 
-/** The m:oMath element inside a run's subtree (math-edit intents address a math
- * object via the run that carries it). */
-function firstMathIn(el: XmlElement): XmlElement | null {
-  if (localName(el.name) === "oMath") return el;
-  for (const c of el.children) {
-    const found = firstMathIn(c);
-    if (found) return found;
-  }
-  return null;
+/** Every m:oMath under `el`, in document order. Must stay identical to the
+ * editor's helper of the same name: both sides have to count the same
+ * equations in the same order for an edit to land on the one the author
+ * touched. */
+function mathsIn(el: XmlElement): XmlElement[] {
+  if (localName(el.name) === "oMath") return [el];
+  return el.children.flatMap(mathsIn);
+}
+
+/** The equation a math intent names: the `index`th under the block. */
+function mathIn(el: XmlElement, index = 0): XmlElement | null {
+  return mathsIn(el)[index] ?? null;
 }
 
 interface RunEntry {

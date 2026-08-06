@@ -89,6 +89,33 @@ describe("DocMD projection", () => {
     expect(agent.project({ mode: "outline" }).text).toBe("# Findings\n## Next steps");
   });
 
+  it("projects a matrix equation and keeps it whole across a neighbouring patch", async () => {
+    const agent = AgentDocument.create();
+    await agent.compose({
+      revision: agent.revision,
+      body: [
+        { type: "paragraph", text: "The rotation is" },
+        { type: "equation", mathText: "[a&b;c&d]" },
+        { type: "paragraph", text: "for small angles." },
+      ],
+    });
+    const projection = agent.project({ mode: "md" });
+    expect(projection.text.split("\n")).toContain("$[a,b;c,d]$");
+
+    // Rewriting the line above leaves the equation alone: it is a non-text
+    // atom, and its OMML stays a real m:m rather than a run of literal text.
+    const line = lineOf(projection, "The rotation is");
+    await agent.patch({
+      revision: projection.revision,
+      mode: "md",
+      edits: [{ startLine: line, endLine: line, newText: "The rotation matrix is" }],
+    });
+    expect(agent.project({ mode: "md" }).text.split("\n")).toContain("$[a,b;c,d]$");
+    const xml = documentXml(agent);
+    expect(xml).toContain("<m:m>");
+    expect(xml).toContain("The rotation matrix is");
+  });
+
   it("maps every projection line to the block and runs it came from", async () => {
     const agent = await brief();
     const md = agent.project({ mode: "md" });

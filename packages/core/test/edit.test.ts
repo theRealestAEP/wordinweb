@@ -2534,6 +2534,40 @@ describe("math editing", () => {
     expect(linearizeMath(parseMathLinear("∜{x+1}"))).toBe("√[4]{x+1}");
   });
 
+  it("linear form covers accents, group characters, limits and arrays", () => {
+    const cases = [
+      "x̂+1",           // m:acc — the combining mark trails its base
+      "{a+b}⃗",         // …over a braced base
+      "⏞{a+b}",        // m:groupChr — the brace leads its argument
+      "{lim}┴{n→∞}f",  // m:limLow — ┴ stacks the limit below
+      "{max}┬xg",      // m:limUpp — ┬ stacks it above; one character needs no braces
+      "█[x=1;y=2]",    // m:eqArr
+      "■[a]",          // a one-cell matrix, which needs the explicit marker
+      "[a&b;c&d]",     // bigger ones do not
+      "{█[x;-x]}┤",    // Word's "cases": a left brace with no closing delimiter
+    ];
+    for (const c of cases) expect(linearizeMath(parseMathLinear(c))).toBe(c);
+  });
+
+  it("a backslash keeps a structural character as plain text", () => {
+    // Word stores plenty of equations where the author simply TYPED "(x)" or
+    // "-1/2"; those characters must come back as characters.
+    for (const c of ["\\(x\\)", "-1\\/2", "a\\^b", "\\{x\\}"]) {
+      expect(linearizeMath(parseMathLinear(c))).toBe(c);
+    }
+    const literal = parseMathLinear("\\(x\\)");
+    expect(literal.length).toBe(1);
+    expect(literal[0].t).toBe("run");
+  });
+
+  it("a script binds to its whole base, not just the last character", () => {
+    const braced = parseMathLinear("{xy}^2");
+    expect(braced[0].t).toBe("sup");
+    if (braced[0].t === "sup") expect(linearizeMath(braced[0].base)).toBe("xy");
+    // and the emitted form keeps the braces so the next parse agrees
+    expect(linearizeMath(braced)).toBe("{xy}^2");
+  });
+
   it("rewrites an equation from linear text", () => {
     const XML = `<w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
       <m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>
@@ -2693,19 +2727,71 @@ describe("math editing safety", () => {
   const MATRIX = `<m:oMath><m:m><m:mr><m:e>${run("a")}</m:e><m:e>${run("b")}</m:e></m:mr><m:mr><m:e>${run("c")}</m:e><m:e>${run("d")}</m:e></m:mr></m:m></m:oMath>`;
   const ACCENT = `<m:oMath><m:acc><m:accPr><m:chr m:val="̂"/></m:accPr><m:e>${run("x")}</m:e></m:acc></m:oMath>`;
   const LIMIT = `<m:oMath><m:limLow><m:e>${run("lim")}</m:e><m:lim>${run("n")}</m:lim></m:limLow></m:oMath>`;
+  const GROUP =
+    `<m:oMath><m:groupChr><m:groupChrPr><m:chr m:val="⏞"/><m:pos m:val="top"/><m:vertJc m:val="bot"/>` +
+    `</m:groupChrPr><m:e>${run("a+b")}</m:e></m:groupChr></m:oMath>`;
+  const EQARR = `<m:oMath><m:eqArr><m:e>${run("x=1")}</m:e><m:e>${run("y=2")}</m:e></m:eqArr></m:oMath>`;
+  // Word's piecewise "cases": a left brace with no closing delimiter, wrapping
+  // an equation array.
+  const CASES =
+    `<m:oMath><m:d><m:dPr><m:begChr m:val="{"/><m:endChr m:val=""/></m:dPr><m:e>` +
+    `<m:eqArr><m:e>${run("x")}</m:e><m:e>${run("-x")}</m:e></m:eqArr></m:e></m:d></m:oMath>`;
 
   it("classifies round-trippable equations as editable", () => {
-    for (const omml of [INTEGRAL, DELIM, MATRIX]) {
+    for (const omml of [INTEGRAL, DELIM, MATRIX, ACCENT, LIMIT, GROUP, EQARR]) {
       const { srcOf } = load(omml);
       expect(isLinearSafe(srcOf())).toBe(true);
     }
   });
 
-  it("classifies structure-only equations (accent, limit) as read-only", () => {
-    for (const omml of [ACCENT, LIMIT]) {
+  it("refuses OMML the linear form cannot name (m:func, m:sSubSup)", () => {
+    const FUNC =
+      `<m:oMath><m:func><m:fName>${run("sin")}</m:fName><m:e>${run("θ")}</m:e></m:func></m:oMath>`;
+    const SUBSUP =
+      `<m:oMath><m:sSubSup><m:e>${run("x")}</m:e><m:sub>${run("a")}</m:sub><m:sup>${run("b")}</m:sup></m:sSubSup></m:oMath>`;
+    for (const omml of [FUNC, SUBSUP]) {
       const { srcOf } = load(omml);
       expect(isLinearSafe(srcOf())).toBe(false);
     }
+  });
+
+  it("keeps a property Word hangs off the slot itself", () => {
+    // Word sometimes writes the m:ctrlPr INSIDE the m:e rather than in the
+    // m:dPr beside it. Refilling the slot must not carry off the rest of its
+    // children with the content.
+    const DELIM_INNER_CTRL =
+      `<m:oMath><m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr>` +
+      `<m:e>${run("x")}<m:ctrlPr><w:rPr><w:i/></w:rPr></m:ctrlPr></m:e></m:d></m:oMath>`;
+    const { doc, srcOf } = load(DELIM_INNER_CTRL);
+    expect(isLinearSafe(srcOf())).toBe(true);
+    expect(setMathLinear(doc, srcOf(), "(y)")).toBe(true);
+    const xml = serializeXml(srcOf());
+    expect(xml).toContain("<m:t>y</m:t>");
+    expect(xml).toContain("<m:ctrlPr><w:rPr><w:i/></w:rPr></m:ctrlPr>");
+  });
+
+  it("re-emits every editable equation byte for byte", () => {
+    for (const omml of [INTEGRAL, DELIM, MATRIX, ACCENT, LIMIT, GROUP, EQARR, CASES]) {
+      const { doc, srcOf } = load(omml);
+      const before = serializeXml(srcOf());
+      expect(setMathLinear(doc, srcOf(), mathLinearOf(doc, srcOf()))).toBe(true);
+      expect(serializeXml(srcOf())).toBe(before);
+    }
+  });
+
+  it("keeps the formatting the linear text does not spell out", () => {
+    // m:limLoc and the run's w:rPr say nothing in linear form; editing the
+    // limit must not drop either.
+    const SUM =
+      `<m:oMath><m:nary><m:naryPr><m:chr m:val="∑"/><m:limLoc m:val="undOvr"/></m:naryPr>` +
+      `<m:sub><m:r><w:rPr><w:rFonts w:ascii="Cambria Math"/></w:rPr><m:t>i=1</m:t></m:r></m:sub>` +
+      `<m:sup>${run("n")}</m:sup><m:e>${run("i")}</m:e></m:nary></m:oMath>`;
+    const { doc, srcOf } = load(SUM);
+    expect(setMathLinear(doc, srcOf(), "∑_{j=1}^n{j}")).toBe(true);
+    const xml = serializeXml(srcOf());
+    expect(xml).toContain('<m:limLoc m:val="undOvr"/>');
+    expect(xml).toContain('w:ascii="Cambria Math"');
+    expect(xml).toContain("<m:t>j=1</m:t>");
   });
 
   it("linear parser reconstructs n-ary, delimiter and matrix structurally", () => {
