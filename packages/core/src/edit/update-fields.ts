@@ -410,8 +410,33 @@ export function applyFieldResults(
         : writeComplexField(doc, src, text, createResultRuns);
     if (written) changed = true;
   }
-  if (changed) doc.refresh();
+  if (changed) {
+    stripPageBreakHints(doc.docRoot);
+    doc.refresh();
+  }
   return changed;
+}
+
+/**
+ * Remove every w:lastRenderedPageBreak from the document. The hints describe
+ * the pagination of the LAST render, and a field update invalidates exactly
+ * the page numbers they encode; Word rewrites them on its own F9 and, when a
+ * consumer's file carries stale ones, repaginates around them (measured on
+ * wild2-med-nccih-protocol: a stale hint ahead of a section start moved
+ * Word's first page ink by 510 twips). We cannot rewrite them — our
+ * pagination is not Word's — so we drop them, which the spec allows: the
+ * element is an ignorable layout hint. Deterministic, so every replica strips
+ * identically.
+ */
+function stripPageBreakHints(el: XmlElement): void {
+  for (let i = el.children.length - 1; i >= 0; i--) {
+    const child = el.children[i];
+    if (localName(child.name) === "lastRenderedPageBreak") {
+      el.children.splice(i, 1);
+    } else {
+      stripPageBreakHints(child);
+    }
+  }
 }
 
 /**

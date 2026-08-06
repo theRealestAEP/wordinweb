@@ -278,3 +278,24 @@ describe("update pass: replication", () => {
     expect(documentXml(replica)).toBe(before);
   });
 });
+
+describe("stale page-break hints", () => {
+  it("strips lastRenderedPageBreak when a field update changes the file", () => {
+    const doc = load(
+      `<w:p><w:r><w:lastRenderedPageBreak/><w:t>lead</w:t></w:r></w:p>` +
+        `<w:p><w:r><w:lastRenderedPageBreak/></w:r>${field("PAGE", "9")}</w:p>`,
+    );
+    const changed = applyFieldResults(doc, ["1"]);
+    expect(changed).toBe(true);
+    expect(documentXml(doc)).not.toContain("lastRenderedPageBreak");
+  });
+
+  it("keeps the hints when nothing changes", () => {
+    const doc = load(
+      `<w:p><w:r><w:lastRenderedPageBreak/><w:t>lead</w:t></w:r>${field("PAGE", "1")}</w:p>`,
+    );
+    const changed = applyFieldResults(doc, ["1"]);
+    expect(changed).toBe(false);
+    expect(documentXml(doc)).toContain("lastRenderedPageBreak");
+  });
+});
