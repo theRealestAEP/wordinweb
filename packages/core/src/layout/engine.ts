@@ -7130,7 +7130,8 @@ class Engine {
    * row: hRule=atLeast rows measure trHeight + top/bottom cell margins + the
    * row's border share, and hRule=exact rows measure trHeight + the top
    * margin only (probe-trheight: atLeast 785.9tw + 100tw margins + sz8
-   * borders -> 50.25pt row; exact 800tw -> 45pt).
+   * borders -> 50.25pt row; exact 800tw -> 45pt). An exact row also gives up
+   * the width of its cells' OWN borders (exactRowCellBorderShare).
    */
   private rowHeightFromTrHeight(tbl: Table, row: TableRow, ri: number, contentHeight: number): number {
     const trHeight = row.props.height!;
@@ -7165,7 +7166,7 @@ class Engine {
         // half the cell-top inset in every continuation row.
         return trHeight + (isLegacyFormLine(row) && isLegacyFormLine(tbl.rows[ri - 1]) ? topPad / 2 : 0);
       }
-      return trHeight + topPad;
+      return Math.max(0, trHeight + topPad - this.exactRowCellBorderShare(tbl, ri));
     }
     if (this.doc.compatibilityMode < 15) {
       const legacyBottomPad = bottomPad >= ptToPx(1) ? bottomPad : 0;
@@ -7177,6 +7178,42 @@ class Engine {
     }
     const borderPad = this.rowBorderShare(tbl, ri);
     return Math.max(contentHeight, trHeight + topPad + bottomPad + borderPad);
+  }
+
+  /**
+   * The height an hRule="exact" row gives up to its cells' OWN borders. Word
+   * draws a `w:tcBorders` rule INSIDE an exact row and takes its width out of
+   * the row, so the row advances that much less; a `w:tblBorders` rule of the
+   * same weight in the same visual position costs nothing, and `w:shd` is
+   * inert. probe-exactrow isolates all three over eight variants of
+   * wild2-legal-ca-agreement's signature rows (exact 495/110/1089tw), measuring
+   * row 0's mark to row 2's: every variant matches Word within the harness's
+   * 0.31px except the two carrying the fixture's own tcBorders, where Word's
+   * distance drops by exactly the sz-12 rule's 1.5pt = 2.00 CSS px.
+   *
+   * Charged per BOUNDARY, half to each adjacent row, exactly as rowBorderShare
+   * charges content-sized rows. The probe fixes that split: row 0's bottom
+   * sz-12 and row 1's top sz-12 are ONE painted rule, and Word takes one border
+   * width out of the pair, not one out of each (which would move the mark
+   * 4.00px, twice what Word does).
+   *
+   * atLeast/auto rows keep their full height - the same probe's atLeast
+   * variants already match Word, and they pay the rule through rowBorderShare
+   * instead. Pre-15 compatibility mode keeps its own measured exact-row
+   * arithmetic above, which was fitted on legacy form templates that rule
+   * themselves with hairline tcBorders.
+   */
+  private exactRowCellBorderShare(tbl: Table, ri: number): number {
+    const rows = tbl.rows;
+    const bw = (b?: Border) =>
+      b && b.style !== "none"
+        ? this.borderPaintWidth({ style: b.style, width: b.rawWidth ?? b.width })
+        : 0;
+    const edge = (r: number, side: "top" | "bottom") =>
+      Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.[side])));
+    const boundary = (k: number) =>
+      Math.max(k > 0 ? edge(k - 1, "bottom") : 0, k < rows.length ? edge(k, "top") : 0);
+    return (boundary(ri) + boundary(ri + 1)) / 2;
   }
 
   /** Widths of the horizontal rules above and below a row. A rule can be
