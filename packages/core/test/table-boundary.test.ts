@@ -169,3 +169,88 @@ describe("table width resolution (wild2-legal-nih-contract probe evidence)", () 
     expect(widths[0]).toBeLessThan(proportional[0] - 10);
   });
 });
+
+describe("exact rows and cell borders", () => {
+  /** w:sz="12" is 1.5pt, which is 2.00 CSS px. */
+  const SZ12 = 2;
+  const edge = (side: string, sz: number) =>
+    `<w:${side} w:val="single" w:sz="${sz}" w:space="0" w:color="auto"/>`;
+
+  /** wild2-legal-ca-agreement's signature rows: row 0 rules its own bottom,
+   * row 1 its own top — one painted rule shared by the pair — and the 1/2
+   * boundary is explicitly nil. */
+  const fixtureCells = [
+    edge("bottom", 12),
+    `${edge("top", 12)}<w:bottom w:val="nil"/>`,
+    `<w:top w:val="nil"/>${edge("bottom", 8)}`,
+  ];
+  /** Every row rules its own top AND bottom at the table's own weight. */
+  const uniformCells = [0, 1, 2].map(() => edge("top", 12) + edge("bottom", 12));
+
+  /** probe-exactrow in miniature: three rows of one declared height, a mark in
+   * the first and the last, and one thing varied at a time. The measurement is
+   * the probe's own — `top(row 2 mark) - top(row 0 mark)`. */
+  function markGap(
+    opts: { rule?: "exact" | "atLeast"; tblBorders?: boolean; cells?: string[]; shading?: boolean } = {},
+  ): number {
+    const tcPr = (own: string | undefined) =>
+      `<w:tcPr><w:tcW w:w="6000" w:type="dxa"/>` +
+      (own ? `<w:tcBorders>${own}</w:tcBorders>` : "") +
+      (opts.shading ? `<w:shd w:val="clear" w:color="auto" w:fill="E0E0E0"/>` : "") +
+      `</w:tcPr>`;
+    const row = (idx: number, body: string) =>
+      `<w:tr><w:trPr><w:trHeight w:hRule="${opts.rule ?? "exact"}" w:val="600"/></w:trPr>` +
+      `<w:tc>${tcPr(opts.cells?.[idx])}${body}</w:tc></w:tr>`;
+    const sides = ["top", "left", "bottom", "right", "insideH", "insideV"];
+    const table =
+      `<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/>` +
+      (opts.tblBorders ? `<w:tblBorders>${sides.map((s) => edge(s, 12)).join("")}</w:tblBorders>` : "") +
+      `</w:tblPr><w:tblGrid><w:gridCol w:w="6000"/></w:tblGrid>` +
+      row(0, p("MARKTOP")) +
+      row(1, p("")) +
+      row(2, p("MARKBOT")) +
+      `</w:tbl>`;
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(table) }));
+    const items = layoutDocument(doc, { measurer: new ApproxMeasurer() }).pages[0].items;
+    const mark = (text: string) => {
+      const item = items.find((candidate) => candidate.kind === "text" && candidate.text === text);
+      if (item?.kind !== "text") throw new Error(`missing ${text}`);
+      return item.lineTop;
+    };
+    return mark("MARKBOT") - mark("MARKTOP");
+  }
+
+  it("takes a cell's own border width out of an exact row", () => {
+    // Row 0's bottom and row 1's top are ONE rule, and Word charges the pair
+    // one border width, not one each.
+    expect(markGap({ tblBorders: true, cells: fixtureCells })).toBeCloseTo(
+      markGap({ tblBorders: true }) - SZ12,
+      5,
+    );
+  });
+
+  it("charges each bordered boundary of an exact row once", () => {
+    // Three boundaries carry a sz-12 rule here (the table top, and both
+    // interior boundaries), and the two rows between the marks pay one width
+    // each. Charging every declared edge in full would cost 4 widths.
+    expect(markGap({ tblBorders: true, cells: uniformCells })).toBeCloseTo(
+      markGap({ tblBorders: true }) - 2 * SZ12,
+      5,
+    );
+  });
+
+  it("leaves an exact row's height to a table-level rule of the same weight", () => {
+    expect(markGap({ tblBorders: true })).toBeCloseTo(markGap(), 5);
+  });
+
+  it("leaves an exact row's height to cell shading", () => {
+    expect(markGap({ tblBorders: true, shading: true })).toBeCloseTo(markGap({ tblBorders: true }), 5);
+  });
+
+  it("leaves an atLeast row's height to its cells' own borders", () => {
+    expect(markGap({ rule: "atLeast", tblBorders: true, cells: fixtureCells })).toBeCloseTo(
+      markGap({ rule: "atLeast", tblBorders: true }),
+      5,
+    );
+  });
+});
