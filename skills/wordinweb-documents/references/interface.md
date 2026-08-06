@@ -763,6 +763,35 @@ Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
 | `resizeTableColumn` | Move a column boundary | `cellRef`, `boundary`, `deltaPx`; optional: `renderedWidths` |
 | `resizeTableRow` | Set row height | `cellRef`, `rowIdx`, `heightPx` |
 | `moveTable` | Float and position a table | `cellRef`, `xPx`, `yPx`, `preservePageStart`, `pageDelta` |
+| `setTableBorders` | Set or clear borders, per edge | `cellRef`, `scope`, `edges`, `border` |
+| `setTableStyle` | Apply a named table style | `cellRef`, `styleId` |
+| `setTableLook` | Toggle which style options apply | `cellRef`, `look` |
+| `setTableWidth` | Set the table's preferred width | `cellRef`, `unit`; optional: `value` |
+| `setTableColumnWidth` | Set one column to an exact width | `cellRef`, `colIdx`, `widthPt` |
+| `setTableLayout` | Switch between fixed and autofit | `cellRef`, `layout`; optional: `renderedWidths` |
+| `setTableCellMargins` | Set cell padding | `cellRef`, `scope`, `margins` |
+| `setTableHeaderRows` | Repeat the first N rows on every page | `cellRef`, `count` |
+
+`setTableBorders` takes `scope: "cell" | "table"`. Table scope accepts the
+edges `top`, `bottom`, `left`, `right`, `insideH`, `insideV`; cell scope
+accepts `top`, `bottom`, `left`, `right` and the diagonals `tl2br`, `tr2bl`.
+A `border` of `null` REMOVES those edges, so they inherit from the table or
+its style again; a `border` of `{ "style": "none" }` instead draws no rule and
+stops the inheritance. That is Word's difference between clearing a border and
+setting No Border.
+
+`setTableWidth` needs `value` unless `unit` is `"auto"`; `value` is points for
+`"pt"` and 0-100 for `"pct"`.
+
+`setTableLayout` with `layout: "fixed"` freezes the columns. Pass
+`renderedWidths` (the measured column widths in px) so the frozen widths match
+what is on screen — an autofit table's grid often says something else.
+`layout: "autofit"` drops the per-cell widths and the width target so the
+columns are measured from content again.
+
+`setTableStyle` applies a style the document's `styles.xml` already defines;
+an unknown id applies nothing. Combine it with `setTableLook` to choose which
+of the style's conditional formats are used.
 
 ### Math
 

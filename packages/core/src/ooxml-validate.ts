@@ -37,8 +37,14 @@ const ALLOWED_ELEMENTS = new Set([
   "tblInd", "tblCellMar", "tblGrid", "gridCol",
   "tr", "trPr", "trHeight", "cantSplit", "tblHeader",
   "tc", "tcPr", "tcW", "tcBorders", "gridSpan", "vMerge", "vAlign", "shd",
+  // A per-cell margin override must travel WHOLE. Off the allowlist it was
+  // unwrapped rather than dropped, spilling bare <w:top w:w="120"/> straight
+  // into w:tcPr, where that element is not a valid child at all.
+  "tcMar",
   // border/margin sides, used inside pBdr / tblBorders / tcBorders / tblCellMar
   "top", "bottom", "left", "right", "start", "end", "insideH", "insideV",
+  // cell diagonals; inert presentation, and the renderer paints them
+  "tl2br", "tr2bl",
 ]);
 
 /** Attributes are validated per-need; these local names are always safe. */

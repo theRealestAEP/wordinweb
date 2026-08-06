@@ -138,6 +138,28 @@ export { printPages, buildPrintHtml } from "./render/dom.js";
 export type { FindMatch } from "./edit/find.js";
 export { cellShadingAt } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";
+export {
+  listTableStyles,
+  setTableBorders,
+  setTableCellMargins,
+  setTableColumnWidth,
+  setTableHeaderRows,
+  setTableLayoutMode,
+  setTableLook,
+  setTableStyle,
+  setTableWidth,
+  tableLookOf,
+  CELL_SCOPE_EDGES,
+  TABLE_BORDER_STYLES,
+  TABLE_SCOPE_EDGES,
+} from "./edit/tables.js";
+export type {
+  CellMarginsPt,
+  TableBorderEdge,
+  TableBorderSpec,
+  TableBorderStyle,
+  TableLookToggles,
+} from "./edit/tables.js";
 export type { ParagraphAlignment, PageLayoutPatch } from "./edit/blocks.js";
 export type { EditorHost } from "./edit/editor.js";
 export { serializeXml } from "./xml.js";

@@ -4,8 +4,25 @@ import { Run } from "../model.js";
 import { XmlElement } from "../xml.js";
 import { insertTableAfter } from "./blocks.js";
 import { setListType } from "./lists.js";
-import { resizeTableRow } from "./tables.js";
 import { applyFieldResults } from "./update-fields.js";
+import {
+  CELL_SCOPE_EDGES,
+  TABLE_BORDER_STYLES,
+  TABLE_SCOPE_EDGES,
+  resizeTableRow,
+  setTableBorders,
+  setTableCellMargins,
+  setTableColumnWidth,
+  setTableHeaderRows,
+  setTableLayoutMode,
+  setTableLook,
+  setTableStyle,
+  setTableWidth,
+  type CellMarginsPt,
+  type TableBorderEdge,
+  type TableBorderSpec,
+  type TableLookToggles,
+} from "./tables.js";
 
 /**
  * The operation registry: ONE declaration per edit operation, read by every
@@ -109,6 +126,14 @@ export interface OperationTarget {
    * operations whose state is reachable only through the model — the checkbox
    * marker parsing hangs on a run's content — rather than from the XML. */
   run: Run | null;
+  /**
+   * For cell addressing: the addressed w:p itself. `el` deliberately widens a
+   * cell address to the owning w:tbl, which is what a table-scoped operation
+   * wants; a CELL-scoped one (per-edge borders, a margin override) needs the
+   * one cell the caret is in, and the paragraph is how it gets there. Null
+   * for run and block addressing, whose addressed element IS `el`.
+   */
+  cellParagraph: XmlElement | null;
 }
 
 export interface OperationContext<Payload> {
@@ -289,12 +314,245 @@ const updateFieldsOperation = defineOperation<{ results: string[] }>()({
   apply: ({ doc, payload }) => applyFieldResults(doc, payload.results, { createResultRuns: false }),
 });
 
+// ---------------------------------------------------------------------------
+// Table formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * The scoped operations below address a paragraph inside a cell. A TABLE-scoped
+ * one uses `target.el` (the owning w:tbl); a CELL-scoped one uses
+ * `target.cellParagraph`, which is the only handle on the single cell the user
+ * is in. Passing the paragraph to a `tables.ts` helper is the same convention
+ * the local editor path uses, where the caret's w:t is passed instead.
+ */
+function cellAnchor(target: OperationTarget): XmlElement | null {
+  return target.cellParagraph;
+}
+
+/** Set or clear per-edge borders on one cell or on the whole table. */
+const setTableBordersOperation = defineOperation<{
+  cellParagraphId: StableId;
+  scope: "cell" | "table";
+  edges: TableBorderEdge[];
+  border: TableBorderSpec | null;
+}>()({
+  kind: "setTableBorders",
+  address: "cell",
+  category: "table",
+  description: "Set or clear table or cell borders, per edge.",
+  fields: [{ name: "scope" }, { name: "edges" }, { name: "border" }],
+  validate: ({ scope, edges, border }) => {
+    if (scope !== "cell" && scope !== "table") return "setTableBorders: bad scope";
+    if (!Array.isArray(edges) || edges.length === 0 || edges.length > 8) {
+      return "setTableBorders: bad edges";
+    }
+    const allowed = scope === "cell" ? CELL_SCOPE_EDGES : TABLE_SCOPE_EDGES;
+    if (edges.some((e) => !allowed.includes(e))) return `setTableBorders: edge not valid at ${scope} scope`;
+    if (border === null) return null;
+    if (!border || !TABLE_BORDER_STYLES.includes(border.style)) return "setTableBorders: bad style";
+    if (border.sz !== undefined && (!Number.isFinite(border.sz) || border.sz < 1 || border.sz > 96)) {
+      return "setTableBorders: bad sz";
+    }
+    if (border.space !== undefined && (!Number.isFinite(border.space) || border.space < 0 || border.space > 31)) {
+      return "setTableBorders: bad space";
+    }
+    if (border.color !== undefined && !/^(#?[0-9A-Fa-f]{6}|auto)$/.test(border.color)) {
+      return "setTableBorders: bad color";
+    }
+    return null;
+  },
+  apply: ({ doc, target, payload }) => {
+    const anchor = cellAnchor(target);
+    return anchor
+      ? setTableBorders(doc, anchor, payload.scope, payload.edges, payload.border)
+      : false;
+  },
+});
+
+/** Apply a named table style, or with null remove the reference. */
+const setTableStyleOperation = defineOperation<{
+  cellParagraphId: StableId;
+  styleId: string | null;
+}>()({
+  kind: "setTableStyle",
+  address: "cell",
+  category: "table",
+  description: "Apply a named table style to a table.",
+  fields: [{ name: "styleId" }],
+  validate: ({ styleId }) => {
+    if (styleId === null) return null;
+    return typeof styleId === "string" && styleId.length > 0 && styleId.length <= 253
+      ? null
+      : "setTableStyle: bad styleId";
+  },
+  apply: ({ doc, target, payload }) => setTableStyle(doc, target.el, payload.styleId),
+});
+
+/** Set some of Word's six table-style option toggles (w:tblLook). */
+const setTableLookOperation = defineOperation<{
+  cellParagraphId: StableId;
+  look: Partial<TableLookToggles>;
+}>()({
+  kind: "setTableLook",
+  address: "cell",
+  category: "table",
+  description: "Toggle which table style options apply (first/last row and column, banding).",
+  fields: [{ name: "look" }],
+  validate: ({ look }) => {
+    if (!look || typeof look !== "object" || Array.isArray(look)) return "setTableLook: bad look";
+    const keys: (keyof TableLookToggles)[] = [
+      "firstRow",
+      "lastRow",
+      "firstColumn",
+      "lastColumn",
+      "bandedRows",
+      "bandedCols",
+    ];
+    const entries = Object.entries(look);
+    if (entries.length === 0) return "setTableLook: empty look";
+    for (const [key, value] of entries) {
+      if (!keys.includes(key as keyof TableLookToggles)) return `setTableLook: unknown toggle ${key}`;
+      if (typeof value !== "boolean") return `setTableLook: ${key} is not a boolean`;
+    }
+    return null;
+  },
+  apply: ({ doc, target, payload }) => setTableLook(doc, target.el, payload.look),
+});
+
+/** Set the table's preferred width (points, percent, or auto). */
+const setTableWidthOperation = defineOperation<{
+  cellParagraphId: StableId;
+  unit: "pt" | "pct" | "auto";
+  value?: number;
+}>()({
+  kind: "setTableWidth",
+  address: "cell",
+  category: "table",
+  description: "Set a table's preferred width in points, as a percent, or to auto.",
+  fields: [{ name: "unit" }, { name: "value", optional: true }],
+  validate: ({ unit, value }) => {
+    if (unit !== "pt" && unit !== "pct" && unit !== "auto") return "setTableWidth: bad unit";
+    if (unit === "auto") return null;
+    if (typeof value !== "number" || !Number.isFinite(value)) return "setTableWidth: value required";
+    const max = unit === "pct" ? 100 : 22 * 72;
+    return value > 0 && value <= max ? null : "setTableWidth: value out of range";
+  },
+  apply: ({ doc, target, payload }) =>
+    setTableWidth(doc, target.el, payload.unit, payload.value ?? 0),
+});
+
+/** Set one grid column to an exact width in points. */
+const setTableColumnWidthOperation = defineOperation<{
+  cellParagraphId: StableId;
+  colIdx: number;
+  widthPt: number;
+}>()({
+  kind: "setTableColumnWidth",
+  address: "cell",
+  category: "table",
+  description: "Set one table column to an exact width in points.",
+  fields: [{ name: "colIdx" }, { name: "widthPt" }],
+  validate: ({ colIdx, widthPt }) => {
+    if (!Number.isInteger(colIdx) || colIdx < 0 || colIdx > 200) return "setTableColumnWidth: bad column";
+    if (typeof widthPt !== "number" || !Number.isFinite(widthPt) || widthPt < 1 || widthPt > 22 * 72) {
+      return "setTableColumnWidth: bad width";
+    }
+    return null;
+  },
+  apply: ({ doc, target, payload }) =>
+    setTableColumnWidth(doc, target.el, payload.colIdx, payload.widthPt),
+});
+
+/** Switch a table between fixed column widths and autofit-to-contents. */
+const setTableLayoutOperation = defineOperation<{
+  cellParagraphId: StableId;
+  layout: "fixed" | "autofit";
+  renderedWidths?: number[];
+}>()({
+  kind: "setTableLayout",
+  address: "cell",
+  category: "table",
+  description: "Switch a table between fixed column widths and autofit.",
+  // renderedWidths is the caller's MEASURED columns; it rides as data so
+  // every replica freezes the same widths when switching to fixed.
+  fields: [{ name: "layout" }, { name: "renderedWidths", optional: true }],
+  validate: ({ layout, renderedWidths }) => {
+    if (layout !== "fixed" && layout !== "autofit") return "setTableLayout: bad layout";
+    if (renderedWidths === undefined) return null;
+    if (!Array.isArray(renderedWidths) || renderedWidths.length > 200) {
+      return "setTableLayout: bad renderedWidths";
+    }
+    return renderedWidths.every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 20000)
+      ? null
+      : "setTableLayout: bad renderedWidths";
+  },
+  apply: ({ doc, target, payload }) =>
+    setTableLayoutMode(doc, target.el, payload.layout, payload.renderedWidths),
+});
+
+/** Set the table's default cell margins, or one cell's override. */
+const setTableCellMarginsOperation = defineOperation<{
+  cellParagraphId: StableId;
+  scope: "cell" | "table";
+  margins: CellMarginsPt | null;
+}>()({
+  kind: "setTableCellMargins",
+  address: "cell",
+  category: "table",
+  description: "Set table default cell margins, or one cell's override, in points.",
+  fields: [{ name: "scope" }, { name: "margins" }],
+  validate: ({ scope, margins }) => {
+    if (scope !== "cell" && scope !== "table") return "setTableCellMargins: bad scope";
+    if (margins === null) return null;
+    if (!margins || typeof margins !== "object" || Array.isArray(margins)) {
+      return "setTableCellMargins: bad margins";
+    }
+    const sides = ["top", "left", "bottom", "right"];
+    const entries = Object.entries(margins);
+    if (entries.length === 0) return "setTableCellMargins: empty margins";
+    for (const [side, value] of entries) {
+      if (!sides.includes(side)) return `setTableCellMargins: unknown side ${side}`;
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 720) {
+        return `setTableCellMargins: bad ${side}`;
+      }
+    }
+    return null;
+  },
+  apply: ({ doc, target, payload }) => {
+    const anchor = cellAnchor(target);
+    return anchor ? setTableCellMargins(doc, anchor, payload.scope, payload.margins) : false;
+  },
+});
+
+/** Mark the first N rows as the repeating header band. */
+const setTableHeaderRowsOperation = defineOperation<{
+  cellParagraphId: StableId;
+  count: number;
+}>()({
+  kind: "setTableHeaderRows",
+  address: "cell",
+  category: "table",
+  description: "Repeat the first N rows as a header band on every page.",
+  fields: [{ name: "count" }],
+  validate: ({ count }) =>
+    Number.isInteger(count) && count >= 0 && count <= 5000 ? null : "setTableHeaderRows: bad count",
+  apply: ({ doc, target, payload }) => setTableHeaderRows(doc, target.el, payload.count),
+});
+
 const OPERATIONS = [
   setListTypeOperation,
   insertTableOperation,
   resizeTableRowOperation,
   toggleCheckboxOperation,
   updateFieldsOperation,
+  setTableBordersOperation,
+  setTableStyleOperation,
+  setTableLookOperation,
+  setTableWidthOperation,
+  setTableColumnWidthOperation,
+  setTableLayoutOperation,
+  setTableCellMarginsOperation,
+  setTableHeaderRowsOperation,
 ] as const;
 
 // ---------------------------------------------------------------------------

@@ -227,6 +227,42 @@ const tableOperation = {
   ],
 };
 
+// Table formatting. "none" is a real border style (Word's No Border, written
+// w:val="nil") and is distinct from a null `border`, which REMOVES the edge so
+// it inherits again — the schema has to admit both.
+const tableBorderSpec = {
+  anyOf: [
+    closedObject({
+      style: {
+        enum: [
+          "single", "thick", "double", "dotted", "dashed", "dotDash",
+          "dotDotDash", "thinThickSmallGap", "triple", "wave", "none",
+        ],
+      },
+      sz: number(1, 96),
+      color: { anyOf: [rgb, { const: "auto" }] },
+      space: number(0, 31),
+    }, ["style"]),
+    { type: "null" },
+  ],
+};
+
+const tableLookToggles = closedObject({
+  firstRow: boolean,
+  lastRow: boolean,
+  firstColumn: boolean,
+  lastColumn: boolean,
+  bandedRows: boolean,
+  bandedCols: boolean,
+});
+
+const cellMarginsPt = {
+  anyOf: [
+    closedObject({ top: number(0, 720), left: number(0, 720), bottom: number(0, 720), right: number(0, 720) }),
+    { type: "null" },
+  ],
+};
+
 const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "formatRun.patch": runFormatPatch,
   "formatRange.patch": runFormatPatch,
@@ -241,6 +277,19 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setSmartArtData.smartArt": smartArtData,
   "setSmartArtTextFormat.format": smartArtTextFormat,
   "tableOp.op": tableOperation,
+  "setTableBorders.border": tableBorderSpec,
+  "setTableBorders.edges": {
+    type: "array",
+    minItems: 1,
+    maxItems: 8,
+    items: { enum: ["top", "bottom", "left", "right", "insideH", "insideV", "tl2br", "tr2bl"] },
+  },
+  "setTableLook.look": tableLookToggles,
+  "setTableCellMargins.margins": cellMarginsPt,
+  "setTableWidth.value": number(0.1, 1584),
+  "setTableColumnWidth.colIdx": integer(0, 200),
+  "setTableColumnWidth.widthPt": number(1, 1584),
+  "setTableHeaderRows.count": integer(0, 5000),
 };
 
 const ENUMS: Record<string, readonly unknown[]> = {
@@ -261,6 +310,10 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "setImageWrap.mode": ["inline", "square", "topAndBottom", "none", "behind"],
   "setDrawingOrder.order": ["front", "back"],
   "ensureHeaderFooter.hfKind": ["header", "footer"],
+  "setTableBorders.scope": ["cell", "table"],
+  "setTableCellMargins.scope": ["cell", "table"],
+  "setTableWidth.unit": ["pt", "pct", "auto"],
+  "setTableLayout.layout": ["fixed", "autofit"],
 };
 
 function schemaForField(kind: Intent["kind"], field: string): JsonSchema {

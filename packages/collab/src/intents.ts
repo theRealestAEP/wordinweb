@@ -465,7 +465,6 @@ export type Intent =
   | SetFloatingPagePositionIntent
   | ResizeDrawingIntent
   | ResizeTableColumnIntent
-  | ResizeTableRowIntent
   | MoveTableIntent
   | RemoveDrawingIntent
   | SetMathLinearIntent
@@ -474,13 +473,15 @@ export type Intent =
   | EnsureHeaderFooterIntent
   | DeleteCommentIntent
   | InsertBookmarkRangeIntent
-  | ToggleCheckboxIntent
   | AcceptRevisionIntent
   | RejectRevisionIntent
   | AcceptAllRevisionsIntent
   | RejectAllRevisionsIntent
-  | InsertTableIntent
-  | UpdateFieldsIntent;
+  // Every registered operation, in one member rather than one per kind: the
+  // whole point of the registry is that a new operation costs no edit here.
+  // The named aliases above (SetListTypeIntent, InsertTableIntent, ...) stay
+  // as the public names for the kinds that had them before.
+  | RegisteredIntent;
 
 /**
  * Every canonical edit operation that is NOT declared in the core operation
