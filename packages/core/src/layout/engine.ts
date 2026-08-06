@@ -285,7 +285,7 @@ interface IncrState {
   lastParaSpacingAfter: number;
   lastParaAfterPad: number;
   lastParaWasEmpty: boolean;
-  trailingSectionBreakMarkGap: number;
+  sectionCloserBreakAfter: number | undefined;
   suppressNextSpaceBefore: boolean;
   docGridDropBefore: boolean;
   gridResyncPending: boolean;
@@ -514,10 +514,13 @@ class Engine {
    * paragraph closing a section must not swallow the next section heading's
    * spacing-before). */
   private lastParaWasEmpty = false;
-  /** A legacy section-closing paragraph whose only line ends in a page break
-   * leaves its paragraph-mark line and spacing-after on the fresh page when
-   * the following section is continuous (NCCIH p4). */
-  private trailingSectionBreakMarkGap = 0;
+  /** Spacing-after of a section-closing paragraph that ended with a hard page
+   * break (a w:sectPr paragraph whose last line carries w:br type="page"),
+   * undefined when the closer did not break the page. The break itself opened
+   * the next section's page, so that page starts at the body top and the
+   * closer's after survives only in the collapse chain with the new page's
+   * first paragraph (NCCIH p4 - see layoutSectionWithBoundary). */
+  private sectionCloserBreakAfter: number | undefined;
   /** Bookmark name -> formatted display page number (PAGEREF rewrite). */
   private bookmarkPages = new Map<string, string>();
   private bookmarkPageIndices = new Map<string, number>();
@@ -877,13 +880,14 @@ class Engine {
           ? (this.doc.effectiveParaProps(closer).spacingAfter ?? 0)
           : undefined;
       const opener = section.blocks[0]?.type === "paragraph" ? section.blocks[0] : undefined;
-      const trailingSectionBreakMarkGap =
-        prevSp !== null &&
-        sp.type === "continuous" &&
-        this.doc.compatibilityMode < 15
-          ? this.trailingSectionBreakMarkGap
-          : 0;
-      this.trailingSectionBreakMarkGap = 0;
+      // Set when the previous section ended with a hard page break inside its
+      // w:sectPr paragraph. That break already opened the page this section
+      // starts on, so the section starts at the BODY TOP: the closer's
+      // paragraph-mark line and its spacing-after stay behind on the old page
+      // (nccih p4 probe - continuous and nextPage behave identically once the
+      // break happened).
+      const closerBreakAfter = prevSp !== null ? this.sectionCloserBreakAfter : undefined;
+      this.sectionCloserBreakAfter = undefined;
       const keepEmptyAfter =
         prevSp !== null &&
         emptyCloserAfter !== undefined &&
@@ -897,13 +901,22 @@ class Engine {
       // section's opener - Word does not zero it just because the mark line is
       // empty (probe3-field-switches p2: the section closer's 8pt after leaves
       // the Heading1 before=12pt opener 4pt below the margin, not the full 12pt).
+      // A closer that broke the page carries its after the same way, in both
+      // modes: the opener of the broken-to page gets max(0, before - after)
+      // (nccih p4 probe, mode 14 - after/before 6/12 -> 6pt, 6/24 -> 18pt,
+      // 24/12 -> 0pt). Such a closer is not "empty" (the w:br run is content),
+      // so its after has to come from the closer itself. A section start with
+      // no preceding break keeps the old behaviour - probe-sectionboundary
+      // shows we already match Word on those.
       const carryAfter = keepEmptyAfter
         ? (emptyCloserAfter ?? 0)
-        : this.doc.compatibilityMode >= 15 && !canContinue && emptyCloserAfter !== undefined
-          ? emptyCloserAfter
-          : this.lastParaWasEmpty
-            ? 0
-            : this.lastParaSpacingAfter;
+        : closerBreakAfter !== undefined
+          ? closerBreakAfter
+          : this.doc.compatibilityMode >= 15 && !canContinue && emptyCloserAfter !== undefined
+            ? emptyCloserAfter
+            : this.lastParaWasEmpty
+              ? 0
+              : this.lastParaSpacingAfter;
       // A new section's first paragraph governs its own spacing-before through
       // the cross-section carry-remainder rule (max(before, carriedAfter) -
       // carriedAfter), NOT the page-break drop. When the previous section ended
@@ -922,7 +935,6 @@ class Engine {
         if (keepEmptyAfter) this.newPage(false);
         else this.newBand();
       } else this.newPage(true);
-      if (trailingSectionBreakMarkGap > 0) this.y += trailingSectionBreakMarkGap;
       if (prevSp !== null) {
         if (carryAfter !== this.lastParaSpacingAfter) this.lastParaAfterPad = 0;
         this.lastParaSpacingAfter = carryAfter;
@@ -1279,7 +1291,7 @@ class Engine {
         lastParaSpacingAfter: this.lastParaSpacingAfter,
         lastParaAfterPad: this.lastParaAfterPad,
         lastParaWasEmpty: this.lastParaWasEmpty,
-        trailingSectionBreakMarkGap: this.trailingSectionBreakMarkGap,
+        sectionCloserBreakAfter: this.sectionCloserBreakAfter,
         suppressNextSpaceBefore: this.suppressNextSpaceBefore,
         docGridDropBefore: this.docGridDropBefore,
         gridResyncPending: this.gridResyncPending,
@@ -1357,7 +1369,7 @@ class Engine {
       this.lastParaSpacingAfter !== s.lastParaSpacingAfter ||
       this.lastParaAfterPad !== s.lastParaAfterPad ||
       this.lastParaWasEmpty !== s.lastParaWasEmpty ||
-      this.trailingSectionBreakMarkGap !== s.trailingSectionBreakMarkGap ||
+      this.sectionCloserBreakAfter !== s.sectionCloserBreakAfter ||
       this.suppressNextSpaceBefore !== s.suppressNextSpaceBefore ||
       this.docGridDropBefore !== s.docGridDropBefore ||
       this.gridResyncPending !== s.gridResyncPending ||
@@ -1428,7 +1440,7 @@ class Engine {
     this.lastParaSpacingAfter = s.lastParaSpacingAfter;
     this.lastParaAfterPad = s.lastParaAfterPad;
     this.lastParaWasEmpty = s.lastParaWasEmpty;
-    this.trailingSectionBreakMarkGap = s.trailingSectionBreakMarkGap;
+    this.sectionCloserBreakAfter = s.sectionCloserBreakAfter;
     this.suppressNextSpaceBefore = s.suppressNextSpaceBefore;
     this.docGridDropBefore = s.docGridDropBefore;
     this.gridResyncPending = s.gridResyncPending;
@@ -4762,13 +4774,12 @@ class Engine {
     // blank next page (wild-multicolumn: an empty <w:br type="page"/> paragraph
     // between the section-2 table and the section-3 columns forced a blank page).
     const endedWithBreak = lines.length > 0 && lines[lines.length - 1].forcedBreakAfter !== undefined;
-    this.trailingSectionBreakMarkGap =
+    this.sectionCloserBreakAfter =
       para.sectionBreak !== undefined &&
-      lines.length === 1 &&
-      lines[0].forcedBreakAfter === "page" &&
-      lines[0].width === 0
-        ? lines[0].height + spacingAfter
-        : 0;
+      lines.length > 0 &&
+      lines[lines.length - 1].forcedBreakAfter === "page"
+        ? spacingAfter
+        : undefined;
     if (!endedWithBreak) this.y += spacingAfter;
     this.lastParaSpacingAfter = endedWithBreak ? 0 : spacingAfter;
     this.lastParaAfterPad = endedWithBreak || mergeBottom ? 0 : borderPadBottom;

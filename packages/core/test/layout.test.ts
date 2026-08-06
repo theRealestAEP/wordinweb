@@ -623,58 +623,85 @@ describe("layout engine", () => {
     expect(openerOffset(render(15, true))).toBeCloseTo(0, 3);
   });
 
-  it("keeps a trailing-break section closer's mark before a continuous section", () => {
+  // Probe fixtures probe-sectcontinuous*.docx (Word reference PDFs) measure a
+  // paragraph that carries BOTH a w:sectPr and a trailing w:br type="page".
+  // The break opens the next section's page, so that page starts at the body
+  // top - the closer's mark line and its space-after stay on the old page -
+  // and the page's first paragraph keeps only max(0, before - that after).
+  // Word treats continuous and nextPage identically once the break happened.
+  describe("a section closer that breaks the page", () => {
     const pageGeometry =
-      `<w:pgSz w:w="6000" w:h="6000"/>` +
-      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>`;
-    const render = (type: "continuous" | "nextPage") => {
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>`;
+    const render = (opts: {
+      type: "continuous" | "nextPage";
+      closerSizePt: number;
+      closerAfterPt: number;
+      openerBeforePt: number;
+    }) => {
+      const sz = `<w:sz w:val="${opts.closerSizePt * 2}"/>`;
       const closer =
-        `<w:p><w:pPr><w:pStyle w:val="Heading2"/><w:sectPr>${pageGeometry}</w:sectPr></w:pPr>` +
-        `<w:r><w:br w:type="page"/></w:r></w:p>`;
+        `<w:p><w:pPr><w:spacing w:after="${opts.closerAfterPt * 20}"/><w:rPr>${sz}</w:rPr>` +
+        `<w:sectPr>${pageGeometry}</w:sectPr></w:pPr>` +
+        `<w:r><w:rPr>${sz}</w:rPr><w:br w:type="page"/></w:r></w:p>`;
       const opener =
-        `<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr>` +
+        `<w:p><w:pPr><w:spacing w:before="${opts.openerBeforePt * 20}"/></w:pPr>` +
         `<w:r><w:t>OPEN</w:t></w:r></w:p>`;
       return layout({
         "word/document.xml": wrapDocument(
-          closer + opener + `<w:sectPr><w:type w:val="${type}"/>${pageGeometry}</w:sectPr>`,
+          `<w:p><w:r><w:t>BODY</w:t></w:r></w:p>` +
+            closer +
+            opener +
+            `<w:sectPr><w:type w:val="${opts.type}"/>${pageGeometry}</w:sectPr>`,
         ),
-        "word/styles.xml": `<?xml version="1.0"?>
-          <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-            <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
-              <w:rPr><w:sz w:val="24"/></w:rPr>
-            </w:style>
-            <w:style w:type="paragraph" w:styleId="Heading2">
-              <w:basedOn w:val="Normal"/>
-              <w:pPr><w:spacing w:before="240" w:after="120" w:line="240" w:lineRule="atLeast"/></w:pPr>
-              <w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/></w:rPr>
-            </w:style>
-          </w:styles>`,
         "word/settings.xml": `<?xml version="1.0"?>
           <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
             <w:compat><w:compatSetting w:name="compatibilityMode" w:val="14"/></w:compat>
           </w:settings>`,
       }).result;
     };
-    const opener = (result: ReturnType<typeof layoutDocument>) => {
+    /** Absolute top of the opener's line, in points (Word PDF coordinates). */
+    const openerTopPt = (result: ReturnType<typeof layoutDocument>) => {
       const page = result.pages[1];
       const item = page.items.find((candidate) => candidate.kind === "text" && candidate.text === "OPEN");
       if (item?.kind !== "text") throw new Error("section opener missing");
-      return { page, item };
+      return item.lineTop * 0.75;
     };
 
-    const continuousResult = render("continuous");
-    const nextPageResult = render("nextPage");
-    const continuous = opener(continuousResult);
-    const nextPage = opener(nextPageResult);
-    expect(continuousResult.totalPages).toBe(2);
-    expect(nextPageResult.totalPages).toBe(2);
-    // NCCIH's Word PDF measures this hidden line at 13.75pt; its 6pt after
-    // remains in addition to the visible Heading2's own 12pt before.
-    expect(continuous.item.lineTop - continuous.page.bodyTop).toBeCloseTo(
-      16 + continuous.item.lineHeight + 8,
-      3,
-    );
-    expect(nextPage.item.lineTop - nextPage.page.bodyTop).toBeCloseTo(16, 3);
+    // Word's page-top origin is the 72pt body top whatever the closer's own
+    // line height (13.80pt at 12pt, 27.60pt at 24pt) and space-after are. We
+    // used to resume at the flow offset the closer left, which re-added both:
+    // 103.80 / 121.80 / 117.60pt against Word's 78.00 / 72.00 / 78.00pt.
+    it("starts the broken-to page at the body top", () => {
+      for (const type of ["continuous", "nextPage"] as const) {
+        expect(
+          openerTopPt(render({ type, closerSizePt: 12, closerAfterPt: 6, openerBeforePt: 12 })),
+        ).toBeCloseTo(78.0, 1);
+        expect(
+          openerTopPt(render({ type, closerSizePt: 12, closerAfterPt: 24, openerBeforePt: 12 })),
+        ).toBeCloseTo(72.0, 1);
+        expect(
+          openerTopPt(render({ type, closerSizePt: 24, closerAfterPt: 6, openerBeforePt: 12 })),
+        ).toBeCloseTo(78.0, 1);
+      }
+    });
+
+    it("collapses the opener's space-before against the closer's space-after", () => {
+      const offsetPt = (closerAfterPt: number, openerBeforePt: number) =>
+        openerTopPt(render({ type: "continuous", closerSizePt: 12, closerAfterPt, openerBeforePt })) - 72;
+      expect(offsetPt(6, 12)).toBeCloseTo(6.0, 1);
+      expect(offsetPt(6, 24)).toBeCloseTo(18.0, 1);
+      expect(offsetPt(24, 12)).toBeCloseTo(0.0, 1);
+    });
+
+    it("does not leave a blank page between the sections", () => {
+      expect(
+        render({ type: "continuous", closerSizePt: 12, closerAfterPt: 6, openerBeforePt: 12 }).totalPages,
+      ).toBe(2);
+      expect(
+        render({ type: "nextPage", closerSizePt: 12, closerAfterPt: 6, openerBeforePt: 12 }).totalPages,
+      ).toBe(2);
+    });
   });
 
   it("lets an ordinary break-only paragraph overflow before applying its page break", () => {
