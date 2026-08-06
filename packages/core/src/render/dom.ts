@@ -3,7 +3,21 @@ import { checkboxStateElement } from "../checkbox.js";
 import { isSafeUrl } from "../url-safety.js";
 import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem, WarpTextItem, ChartItem } from "../layout/types.js";
 import { cssFont, cambriaMathDescentShare, fontWidthScale } from "../layout/measure.js";
-import { Border, type Theme } from "../model.js";
+import { Border, type ChartAxis, type ChartData, type Theme } from "../model.js";
+import {
+  type AxisScale,
+  type Point,
+  type Rect,
+  axisScale,
+  barSlots,
+  chartFrame,
+  defaultOverlap,
+  formatChartNumber,
+  linePath,
+  stackPoints,
+  textWidth,
+  wedgePath,
+} from "./chart-geometry.js";
 import { XmlElement } from "../xml.js";
 import { decodeTiff } from "./tiff.js";
 import { extractOlePackage } from "../parse/ole.js";
@@ -1400,198 +1414,542 @@ function renderMediaSkeleton(item: ImageItem, doc: DocxDocument): HTMLElement {
   return box;
 }
 
+/** accent1..6 of the Office (Aptos) theme, for a document with no theme part. */
 const DEFAULT_CHART_COLORS = ["#156082", "#e97132", "#196b24", "#0f9ed5", "#a02b93", "#4ea72e"];
 
-function chartColors(theme: Theme): string[] {
-  const themed = Array.from({ length: 6 }, (_, index) => theme.colors.get(`accent${index + 1}`));
-  return themed.every((color): color is string => !!color) ? themed : DEFAULT_CHART_COLORS;
+/** Word's default chart text colour and rules: tx1 at 65% luminance for
+ * labels, 15% for the axis lines and gridlines. */
+const CHART_LABEL_COLOR = "#595959";
+const CHART_RULE_COLOR = "#d9d9d9";
+/** Word's default chart title is 14pt and the rest of its text is 9pt. */
+const CHART_TITLE_PX = 14 * (96 / 72);
+const CHART_TEXT_PX = 9 * (96 / 72);
+
+/** Darken a hex colour toward black by `amount` (DrawingML's a:shade). */
+function shade(hex: string, amount: number): string {
+  const channel = (offset: number) =>
+    Math.round(parseInt(hex.slice(offset, offset + 2), 16) * amount).toString(16).padStart(2, "0");
+  return `#${channel(1)}${channel(3)}${channel(5)}`;
 }
 
-function chartScale(values: number[]): { low: number; high: number; step: number } {
-  const rawLow = Math.min(0, ...values);
-  const rawHigh = Math.max(0, ...values);
-  const span = rawHigh - rawLow || 1;
-  const rough = span / 5;
-  const magnitude = 10 ** Math.floor(Math.log10(rough));
-  const fraction = rough / magnitude;
-  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10;
-  const step = niceFraction * magnitude;
-  let low = Math.floor(rawLow / step) * step;
-  let high = Math.ceil(rawHigh / step) * step;
-  if (rawLow < 0 && Math.abs(low - rawLow) < step / 1000) low -= step;
-  if (rawHigh > 0 && Math.abs(high - rawHigh) < step / 1000) high += step;
-  return { low, high, step };
+/**
+ * Word colours chart series from the theme's accent1..6 in order. Past the
+ * sixth it reuses the accents with a luminance variation rather than repeating
+ * them exactly, so a seventh series stays distinguishable from the first.
+ */
+function chartColors(theme: Theme, count: number): string[] {
+  const themed = Array.from({ length: 6 }, (_, index) => theme.colors.get(`accent${index + 1}`));
+  const base = themed.every((color): color is string => !!color) ? themed : DEFAULT_CHART_COLORS;
+  const out: string[] = [];
+  for (let index = 0; index < Math.max(count, base.length); index++) {
+    const cycle = Math.floor(index / base.length);
+    out.push(cycle === 0 ? base[index] : shade(base[index % base.length], 1 - Math.min(cycle, 3) * 0.22));
+  }
+  return out;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** Drawing surface for one chart: an SVG element plus the palette, font and
+ * data every part of the chart needs. */
+interface ChartPen {
+  svg: SVGElement;
+  data: ChartData;
+  colors: string[];
+  size: number;
+  font: string;
+  add: (name: string, attrs: Record<string, string | number>) => SVGElement;
+  label: (x: number, y: number, text: string, attrs?: Record<string, string | number>) => void;
+}
+
+function makeChartPen(item: ChartItem, theme: Theme): ChartPen {
+  const data = item.data;
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${item.width} ${item.height}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", data.title || "Chart");
+  (svg as unknown as HTMLElement).dataset.dxwChart = "1";
+  svg.setAttribute(
+    "style",
+    `position:absolute;left:${item.x}px;top:${item.y}px;width:${item.width}px;height:${item.height}px;` +
+    `pointer-events:none;overflow:visible`,
+  );
+  const font = theme.colors.size ? `${theme.minorFont}, system-ui, sans-serif` : "Aptos, system-ui, sans-serif";
+  const size = data.textSize ?? CHART_TEXT_PX;
+  const add = (name: string, attrs: Record<string, string | number>): SVGElement => {
+    const node = document.createElementNS(SVG_NS, name);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+    svg.appendChild(node);
+    return node;
+  };
+  const label = (x: number, y: number, text: string, attrs: Record<string, string | number> = {}): void => {
+    const node = add("text", { x, y, fill: CHART_LABEL_COLOR, "font-family": font, "font-size": size, ...attrs });
+    node.textContent = text;
+  };
+  return { svg, data, colors: [], size, font, add, label };
+}
+
+/** The colour of one plotted point: an explicit c:dPt fill, then the series'
+ * own c:spPr fill, then its slot in the theme palette. Charts that vary
+ * colours (pie, doughnut, or a single series told to) take a slot per point. */
+function pointColor(pen: ChartPen, seriesIndex: number, pointIndex: number): string {
+  const series = pen.data.series[seriesIndex];
+  const explicit = series?.pointColors?.[pointIndex];
+  if (explicit) return explicit;
+  const vary = pen.data.varyColors ?? (pen.data.type === "pie" || pen.data.type === "doughnut");
+  if (vary && pen.data.series.length <= 1) return pen.colors[pointIndex % pen.colors.length];
+  return series?.color ?? pen.colors[seriesIndex % pen.colors.length];
+}
+
+/** Legend rows: one per point for a varied single series, else one per series. */
+function legendEntries(pen: ChartPen): Array<{ text: string; color: string }> {
+  const vary = pen.data.varyColors ?? (pen.data.type === "pie" || pen.data.type === "doughnut");
+  if (vary && pen.data.series.length <= 1) {
+    return pen.data.categories.map((category, index) => ({
+      text: category || `Point ${index + 1}`,
+      color: pointColor(pen, 0, index),
+    }));
+  }
+  return pen.data.series.map((series, index) => ({ text: series.name, color: pointColor(pen, index, -1) }));
+}
+
+function paintLegend(pen: ChartPen, box: Rect & { vertical: boolean }): void {
+  const entries = legendEntries(pen);
+  const swatch = Math.min(pen.size * 0.85, 11);
+  if (box.vertical) {
+    const step = pen.size * 1.5;
+    entries.forEach((entry, index) => {
+      const y = box.y + step * index + step / 2;
+      pen.add("rect", { x: box.x, y: y - swatch / 2, width: swatch, height: swatch, fill: entry.color });
+      pen.label(box.x + swatch + 6, y + pen.size * 0.35, entry.text);
+    });
+    return;
+  }
+  // A horizontal legend spreads its entries evenly across the chart's width,
+  // which is how Word centres a bottom legend under the plot.
+  const widths = entries.map((entry) => swatch + 5 + textWidth(entry.text, pen.size));
+  const total = widths.reduce((sum, width) => sum + width, 0) + (entries.length - 1) * 14;
+  let x = box.x + Math.max((box.width - total) / 2, 0);
+  const y = box.y + box.height / 2;
+  entries.forEach((entry, index) => {
+    pen.add("rect", { x, y: y - swatch / 2, width: swatch, height: swatch, fill: entry.color });
+    pen.label(x + swatch + 5, y + pen.size * 0.35, entry.text);
+    x += widths[index] + 14;
+  });
+}
+
+/** A chart kind the engine does not paint still occupies its exact box, with
+ * the ChartML's own name for it, so the page keeps its shape and the reason is
+ * legible instead of blank. */
+function paintUnsupported(pen: ChartPen, item: ChartItem): void {
+  pen.add("rect", {
+    x: 0.5, y: 0.5, width: Math.max(item.width - 1, 1), height: Math.max(item.height - 1, 1),
+    fill: "#f5f6f7", stroke: "#c6cbd1", "stroke-width": 1, "stroke-dasharray": "4 3", rx: 4,
+  });
+  const name = pen.data.unsupported ?? "chart";
+  const middle = item.height / 2;
+  pen.label(item.width / 2, middle - 2, pen.data.title || "Chart", {
+    "text-anchor": "middle", fill: "#404040", "font-size": Math.min(pen.size * 1.2, 15),
+  });
+  pen.label(item.width / 2, middle + pen.size * 1.4, `${name} is not rendered`, { "text-anchor": "middle" });
+}
+
+/** Pie and doughnut: one ring of wedges from the first series. */
+function paintPie(pen: ChartPen, plot: Rect): void {
+  const values = pen.data.series[0]?.values ?? [];
+  const total = values.reduce((sum, value) => sum + (Number.isFinite(value) ? Math.abs(value) : 0), 0);
+  if (!total) return;
+  const radius = Math.max(Math.min(plot.width, plot.height) * 0.45, 8);
+  const inner = pen.data.type === "doughnut" ? radius * Math.min(pen.data.holeSize ?? 75, 90) / 100 : 0;
+  const center = { x: plot.x + plot.width / 2, y: plot.y + plot.height / 2 };
+  // Word starts the first wedge at twelve o'clock and sweeps clockwise.
+  let angle = -Math.PI / 2;
+  values.forEach((value, index) => {
+    const share = (Number.isFinite(value) ? Math.abs(value) : 0) / total;
+    if (share <= 0) return;
+    const next = angle + share * Math.PI * 2;
+    pen.add("path", {
+      d: wedgePath(center, radius, inner, angle, next),
+      fill: pointColor(pen, 0, index),
+      stroke: "#fff",
+      "stroke-width": 1,
+    });
+    if (pen.data.dataLabels) {
+      const mid = (angle + next) / 2;
+      const distance = inner ? (radius + inner) / 2 : radius * 0.7;
+      pen.label(center.x + Math.cos(mid) * distance, center.y + Math.sin(mid) * distance + pen.size * 0.35,
+        formatChartNumber(Math.abs(value), pen.data.valueAxis?.format), {
+          "text-anchor": "middle", fill: "#fff", "data-dxw-chart-label": "1",
+        });
+    }
+    angle = next;
+  });
+}
+
+interface Axes {
+  /** Value axis mapping, along the plot's value direction. */
+  value: AxisScale;
+  /** Pixel position of a value on the value axis. */
+  valuePos: (value: number) => number;
+  /** Pixel position of a category's label, along the category axis. */
+  categoryPos: (index: number) => number;
+  /** Pixel positions of the category axis tick marks. Word ticks the category
+   * boundaries, not the label positions, whenever c:crossBetween is "between". */
+  categoryTicks: number[];
+  /** The value axis after the chart's own defaults are folded in. */
+  valueAxis: ChartAxis;
+}
+
+/** Draw gridlines, axis lines, ticks and tick labels around the plot.
+ *
+ * `horizontal` means the value axis runs left-to-right, which is the bar
+ * chart's layout; every other type runs it bottom-to-top. */
+function paintAxes(
+  pen: ChartPen,
+  plot: Rect,
+  axes: Axes,
+  categoryLabels: string[],
+  horizontal: boolean,
+): void {
+  const valueAxis = axes.valueAxis;
+  const categoryAxis = pen.data.categoryAxis ?? {};
+  const format = valueAxis.format;
+  const tickLength = 4;
+
+  if (!valueAxis.hidden) {
+    for (const tick of axes.value.ticks) {
+      const at = axes.valuePos(tick);
+      if (valueAxis.gridlines) {
+        pen.add("line", horizontal
+          ? { x1: at, y1: plot.y, x2: at, y2: plot.y + plot.height, stroke: CHART_RULE_COLOR, "stroke-width": 1 }
+          : { x1: plot.x, y1: at, x2: plot.x + plot.width, y2: at, stroke: CHART_RULE_COLOR, "stroke-width": 1 });
+      }
+      if (valueAxis.majorTick && valueAxis.majorTick !== "none") {
+        const out = valueAxis.majorTick === "in" ? 0 : tickLength;
+        const into = valueAxis.majorTick === "out" ? 0 : tickLength;
+        pen.add("line", horizontal
+          ? { x1: at, y1: plot.y + plot.height + out, x2: at, y2: plot.y + plot.height - into, stroke: CHART_RULE_COLOR, "stroke-width": 1, "data-dxw-chart-tick": "major" }
+          : { x1: plot.x - out, y1: at, x2: plot.x + into, y2: at, stroke: CHART_RULE_COLOR, "stroke-width": 1, "data-dxw-chart-tick": "major" });
+      }
+      if (valueAxis.labels !== false) {
+        pen.label(
+          horizontal ? at : plot.x - tickLength - 3,
+          horizontal ? plot.y + plot.height + pen.size * 1.15 : at + pen.size * 0.35,
+          formatChartNumber(tick, format),
+          { "text-anchor": horizontal ? "middle" : "end" },
+        );
+      }
+    }
+    // The value axis line sits where the category axis crosses it.
+    const base = horizontal ? plot.y + plot.height : plot.x;
+    pen.add("line", horizontal
+      ? { x1: plot.x, y1: base, x2: plot.x + plot.width, y2: base, stroke: CHART_RULE_COLOR, "stroke-width": 1 }
+      : { x1: base, y1: plot.y, x2: base, y2: plot.y + plot.height, stroke: CHART_RULE_COLOR, "stroke-width": 1 });
+  }
+
+  if (!categoryAxis.hidden) {
+    // Word crosses the category axis at value zero (c:crosses autoZero), so a
+    // chart with negative values gets its baseline inside the plot.
+    const zero = axes.valuePos(Math.min(Math.max(0, axes.value.low), axes.value.high));
+    pen.add("line", horizontal
+      ? { x1: zero, y1: plot.y, x2: zero, y2: plot.y + plot.height, stroke: CHART_RULE_COLOR, "stroke-width": 1 }
+      : { x1: plot.x, y1: zero, x2: plot.x + plot.width, y2: zero, stroke: CHART_RULE_COLOR, "stroke-width": 1 });
+    if (categoryAxis.majorTick && categoryAxis.majorTick !== "none") {
+      const out = categoryAxis.majorTick === "in" ? 0 : tickLength;
+      const into = categoryAxis.majorTick === "out" ? 0 : tickLength;
+      for (const at of axes.categoryTicks) {
+        pen.add("line", horizontal
+          ? { x1: zero - out, y1: at, x2: zero + into, y2: at, stroke: CHART_RULE_COLOR, "stroke-width": 1, "data-dxw-chart-tick": "category" }
+          : { x1: at, y1: zero + out, x2: at, y2: zero - into, stroke: CHART_RULE_COLOR, "stroke-width": 1, "data-dxw-chart-tick": "category" });
+      }
+    }
+    if (categoryAxis.labels !== false) {
+      // Labels stay at the low edge of the plot rather than riding the
+      // baseline, so they never land on top of the bars.
+      const every = Math.max(1, Math.ceil(categoryLabels.length / (horizontal ? 12 : 10)));
+      categoryLabels.forEach((text, index) => {
+        if (index % every !== 0 || !text) return;
+        const at = axes.categoryPos(index);
+        pen.label(
+          horizontal ? plot.x - tickLength - 3 : at,
+          horizontal ? at + pen.size * 0.35 : plot.y + plot.height + pen.size * 1.15,
+          text,
+          { "text-anchor": horizontal ? "end" : "middle" },
+        );
+      });
+    }
+  }
+
+  if (valueAxis.title) {
+    const x = horizontal ? plot.x + plot.width / 2 : plot.x - pen.size * 1.2;
+    const y = horizontal ? plot.y + plot.height + pen.size * 2.6 : plot.y + plot.height / 2;
+    pen.label(x, y, valueAxis.title, {
+      "text-anchor": "middle",
+      ...(horizontal ? {} : { transform: `rotate(-90 ${x} ${y})` }),
+    });
+  }
+  if (categoryAxis.title) {
+    const x = horizontal ? plot.x - pen.size * 1.2 : plot.x + plot.width / 2;
+    const y = horizontal ? plot.y + plot.height / 2 : plot.y + plot.height + pen.size * 2.6;
+    pen.label(x, y, categoryAxis.title, {
+      "text-anchor": "middle",
+      ...(horizontal ? { transform: `rotate(-90 ${x} ${y})` } : {}),
+    });
+  }
+}
+
+/** What Word writes for c:crossBetween when it authors this kind of chart, for
+ * the rare file that leaves the element out. */
+function defaultCrossBetween(type: ChartData["type"]): "between" | "midCat" {
+  return type === "line" || type === "area" ? "midCat" : "between";
+}
+
+/**
+ * A percent-stacked chart always fills its category, so Word pins the value
+ * axis at 100% rather than opening an interval above the data the way it does
+ * for an ordinary scale.
+ */
+function percentAxis(data: ChartData): ChartAxis | undefined {
+  if (data.grouping !== "percentStacked") return data.valueAxis;
+  const negative = data.series.some((series) => series.values.some((value) => value < 0));
+  return {
+    ...data.valueAxis,
+    max: data.valueAxis?.max ?? 1,
+    min: data.valueAxis?.min ?? (negative ? -1 : 0),
+    format: data.valueAxis?.format ?? "0%",
+  };
+}
+
+/** Column, bar, line and area: series over a shared category axis. */
+function paintCategoryChart(pen: ChartPen, plot: Rect): void {
+  const data = pen.data;
+  const horizontal = data.type === "bar";
+  const stacks = stackPoints(data.series, data.grouping);
+  const scale = axisScale(stacks.flat().flatMap((point) => [point.base, point.top]), percentAxis(data));
+  const range = scale.high - scale.low || 1;
+  const reversed = data.valueAxis?.reversed ?? false;
+  const valuePos = (value: number): number => {
+    const share = (value - scale.low) / range;
+    const along = reversed ? 1 - share : share;
+    return horizontal ? plot.x + along * plot.width : plot.y + plot.height - along * plot.height;
+  };
+  const categoryCount = Math.max(data.categories.length, ...data.series.map((series) => series.values.length), 1);
+  const length = horizontal ? plot.height : plot.width;
+  const bars = barSlots(
+    length,
+    categoryCount,
+    data.grouping === "stacked" || data.grouping === "percentStacked" ? 1 : data.series.length,
+    data.gapWidth ?? 150,
+    data.overlap ?? defaultOverlap(data.grouping),
+  );
+  // A bar chart's categories run up from the bottom of the plot, so its
+  // category direction is the reverse of a column chart's left-to-right.
+  const toCategory = (offset: number, extent = 0): number =>
+    horizontal ? plot.y + plot.height - offset - extent : plot.x + offset;
+  // "midCat" seats the first and last point on the plot's edges; "between"
+  // insets every point to the middle of its own category band.
+  const midCat = (data.valueAxis?.crossBetween ?? defaultCrossBetween(data.type)) === "midCat";
+  const stride = midCat && categoryCount > 1 ? length / (categoryCount - 1) : bars.band;
+  const categoryPos = (index: number): number =>
+    toCategory(midCat ? index * stride : bars.band * (index + 0.5));
+  const categoryTicks = midCat
+    ? Array.from({ length: categoryCount }, (_, index) => toCategory(index * stride))
+    : Array.from({ length: categoryCount + 1 }, (_, index) => toCategory(bars.band * index));
+
+  paintAxes(
+    pen,
+    plot,
+    { value: scale, valuePos, categoryPos, categoryTicks, valueAxis: percentAxis(data) ?? {} },
+    data.categories,
+    horizontal,
+  );
+
+  const labelValue = (seriesIndex: number, index: number): string =>
+    formatChartNumber(data.series[seriesIndex].values[index], data.valueAxis?.format);
+
+  if (data.type === "column" || data.type === "bar") {
+    // Stacked series share one slot; clustered ones each get their own.
+    const stacked = data.grouping === "stacked" || data.grouping === "percentStacked";
+    data.series.forEach((series, seriesIndex) => {
+      series.values.forEach((value, index) => {
+        if (!Number.isFinite(value)) return;
+        const { base, top } = stacks[seriesIndex][index];
+        const near = valuePos(base);
+        const far = valuePos(top);
+        const thickness = Math.max(bars.size, 1);
+        const offset = toCategory(bars.start(index, stacked ? 0 : seriesIndex), thickness);
+        pen.add("rect", {
+          x: horizontal ? Math.min(near, far) : offset,
+          y: horizontal ? offset : Math.min(near, far),
+          width: horizontal ? Math.max(Math.abs(far - near), 0.5) : thickness,
+          height: horizontal ? thickness : Math.max(Math.abs(far - near), 0.5),
+          fill: pointColor(pen, seriesIndex, index),
+          "data-dxw-chart-bar": "1",
+        });
+        if (data.dataLabels) {
+          const outside = far + (far >= near ? pen.size : -pen.size * 0.4) * (horizontal ? 1 : -1);
+          pen.label(
+            horizontal ? outside + (far >= near ? 2 : -2) : offset + thickness / 2,
+            horizontal ? offset + thickness / 2 + pen.size * 0.35 : outside,
+            labelValue(seriesIndex, index),
+            { "text-anchor": horizontal ? (far >= near ? "start" : "end") : "middle", "data-dxw-chart-label": "1" },
+          );
+        }
+      });
+    });
+    return;
+  }
+
+  const pointAt = (seriesIndex: number, index: number): Point | null => {
+    const value = data.series[seriesIndex].values[index];
+    if (!Number.isFinite(value)) return null;
+    const along = categoryPos(index);
+    const across = valuePos(stacks[seriesIndex][index].top);
+    return horizontal ? { x: across, y: along } : { x: along, y: across };
+  };
+
+  if (data.type === "area") {
+    const baseline = valuePos(Math.min(Math.max(0, scale.low), scale.high));
+    data.series.forEach((series, seriesIndex) => {
+      const tops = series.values.map((_, index) => pointAt(seriesIndex, index));
+      const present = tops.filter((point): point is Point => !!point);
+      if (present.length < 2) return;
+      const stacked = data.grouping === "stacked" || data.grouping === "percentStacked";
+      const under = stacked
+        ? series.values.map((_, index) => ({
+            x: categoryPos(index),
+            y: valuePos(stacks[seriesIndex][index].base),
+          })).filter((_, index) => !!tops[index]).reverse()
+        : [{ x: present[present.length - 1].x, y: baseline }, { x: present[0].x, y: baseline }];
+      const outline = `${linePath(tops)} L ${under.map((point) => `${point.x.toFixed(3)} ${point.y.toFixed(3)}`).join(" L ")} Z`;
+      pen.add("path", { d: outline, fill: pointColor(pen, seriesIndex, -1) });
+    });
+    return;
+  }
+
+  // Line chart.
+  data.series.forEach((series, seriesIndex) => {
+    const points = series.values.map((_, index) => pointAt(seriesIndex, index));
+    const color = pointColor(pen, seriesIndex, -1);
+    pen.add("path", {
+      d: linePath(points, series.smooth ?? false),
+      fill: "none", stroke: color, "stroke-width": 2.25,
+      "stroke-linecap": "round", "stroke-linejoin": "round",
+    });
+    if (data.markers) {
+      points.forEach((point) => {
+        if (!point) return;
+        pen.add("circle", {
+          cx: point.x, cy: point.y, r: 3, fill: color, stroke: "#fff", "stroke-width": 1,
+          "data-dxw-chart-marker": "1",
+        });
+      });
+    }
+    if (data.dataLabels) {
+      points.forEach((point, index) => {
+        if (!point) return;
+        pen.label(point.x, point.y - pen.size * 0.6, labelValue(seriesIndex, index), {
+          "text-anchor": "middle", "data-dxw-chart-label": "1",
+        });
+      });
+    }
+  });
+}
+
+/** Scatter: both axes are value axes, and each series carries its own x list. */
+function paintScatter(pen: ChartPen, plot: Rect): void {
+  const data = pen.data;
+  const xValues = data.series.flatMap((series) => series.xValues ?? series.values.map((_, index) => index + 1));
+  const yValues = data.series.flatMap((series) => series.values);
+  const xScale = axisScale(xValues, data.categoryAxis);
+  const yScale = axisScale(yValues, data.valueAxis);
+  const xRange = xScale.high - xScale.low || 1;
+  const yRange = yScale.high - yScale.low || 1;
+  const toX = (value: number): number => plot.x + ((value - xScale.low) / xRange) * plot.width;
+  const toY = (value: number): number => plot.y + plot.height - ((value - yScale.low) / yRange) * plot.height;
+
+  paintAxes(
+    pen,
+    plot,
+    {
+      value: yScale,
+      valuePos: toY,
+      categoryPos: (index) => toX(xScale.ticks[index] ?? xScale.low),
+      categoryTicks: xScale.ticks.map(toX),
+      valueAxis: data.valueAxis ?? {},
+    },
+    xScale.ticks.map((tick) => formatChartNumber(tick, data.categoryAxis?.format)),
+    false,
+  );
+
+  data.series.forEach((series, seriesIndex) => {
+    const color = pointColor(pen, seriesIndex, -1);
+    const points = series.values.map((value, index) => {
+      const x = series.xValues?.[index] ?? index + 1;
+      return Number.isFinite(value) && Number.isFinite(x) ? { x: toX(x), y: toY(value) } : null;
+    });
+    // Word's default scatter draws markers only; a c:smooth or an explicit line
+    // width turns the connecting line on, which c:smooth is the visible half of.
+    if (series.smooth) {
+      pen.add("path", { d: linePath(points, true), fill: "none", stroke: color, "stroke-width": 2.25 });
+    }
+    points.forEach((point) => {
+      if (!point) return;
+      pen.add("circle", {
+        cx: point.x, cy: point.y, r: 3.5, fill: color, stroke: "#fff", "stroke-width": 1,
+        "data-dxw-chart-marker": "1",
+      });
+    });
+  });
 }
 
 function renderChart(item: ChartItem, theme: Theme): HTMLElement {
-  const ns = "http://www.w3.org/2000/svg";
-  const colors = chartColors(theme);
-  const fontFamily = theme.colors.size ? `${theme.minorFont}, system-ui, sans-serif` : "Aptos, system-ui, sans-serif";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("viewBox", `0 0 ${item.width} ${item.height}`);
-  svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", item.data.title || "Chart");
-  svg.dataset.dxwChart = "1";
-  svg.style.cssText = `position:absolute;left:${item.x}px;top:${item.y}px;width:${item.width}px;height:${item.height}px;pointer-events:none;overflow:visible`;
+  const pen = makeChartPen(item, theme);
+  const data = pen.data;
+  pen.add("rect", { x: 0, y: 0, width: item.width, height: item.height, fill: "#fff" });
 
-  const node = (name: string, attrs: Record<string, string | number> = {}, text?: string): SVGElement => {
-    const result = document.createElementNS(ns, name);
-    for (const [key, value] of Object.entries(attrs)) result.setAttribute(key, String(value));
-    if (text !== undefined) result.textContent = text;
-    return result;
-  };
-  const addText = (x: number, y: number, text: string, attrs: Record<string, string | number> = {}): void => {
-    svg.appendChild(node("text", { x, y, fill: "#404040", "font-family": fontFamily, "font-size": 12, ...attrs }, text));
-  };
-
-  svg.appendChild(node("rect", { x: 0, y: 0, width: item.width, height: item.height, fill: "#fff" }));
-  const titleHeight = item.data.title ? 48 : 12;
-  if (item.data.title) addText(item.width / 2, 34, item.data.title, { "text-anchor": "middle", fill: "#262626", "font-size": 24, "font-weight": 600 });
-  const legendWidth = item.data.series.length > 1 ? Math.min(124, item.width * 0.24) : 0;
-  const plot = { x: 48, y: titleHeight + 5, width: Math.max(item.width - 62 - legendWidth, 40), height: Math.max(item.height - titleHeight - 42, 40) };
-
-  if (item.data.type === "pie") {
-    const values = item.data.series[0]?.values ?? [];
-    const total = values.reduce((sum, value) => sum + Math.max(value, 0), 0) || 1;
-    const radius = Math.max(Math.min(plot.width, plot.height) * 0.42, 8);
-    const cx = plot.x + plot.width / 2;
-    const cy = plot.y + plot.height / 2;
-    let angle = -Math.PI / 2;
-    values.forEach((value, index) => {
-      const next = angle + (Math.max(value, 0) / total) * Math.PI * 2;
-      const x1 = cx + Math.cos(angle) * radius;
-      const y1 = cy + Math.sin(angle) * radius;
-      const x2 = cx + Math.cos(next) * radius;
-      const y2 = cy + Math.sin(next) * radius;
-      const large = next - angle > Math.PI ? 1 : 0;
-      svg.appendChild(node("path", {
-        d: `M ${cx} ${cy} L ${x1} ${y1} A ${radius} ${radius} 0 ${large} 1 ${x2} ${y2} Z`,
-        fill: colors[index % colors.length], stroke: "#fff", "stroke-width": 1,
-      }));
-      angle = next;
-    });
-    const lx = plot.x + plot.width + 8;
-    item.data.categories.forEach((category, index) => {
-      const y = plot.y + 10 + index * 16;
-      svg.appendChild(node("rect", { x: lx, y: y - 8, width: 9, height: 9, fill: colors[index % colors.length] }));
-      addText(lx + 14, y, category);
-    });
-    return svg as unknown as HTMLElement;
+  if (data.unsupported) {
+    paintUnsupported(pen, item);
+    return pen.svg as unknown as HTMLElement;
   }
 
-  const allValues = item.data.series.flatMap((series) => series.values);
-  const { low, high, step: majorStep } = chartScale(allValues);
-  const range = high - low;
-  const valueY = (value: number) => plot.y + plot.height - ((value - low) / range) * plot.height;
-  const valueX = (value: number) => plot.x + ((value - low) / range) * plot.width;
-  const valueTicks: number[] = [];
-  for (let value = low, guard = 0; value <= high + majorStep / 1000 && guard < 100; value += majorStep, guard++) {
-    valueTicks.push(Number(value.toPrecision(12)));
-  }
-  for (const value of valueTicks) {
-    if (item.data.type === "bar") {
-      const x = valueX(value);
-      svg.appendChild(node("line", { x1: x, y1: plot.y, x2: x, y2: plot.y + plot.height, stroke: "#595959", "stroke-width": 1 }));
-      addText(x, plot.y + plot.height + 15, Number(value.toFixed(2)).toString(), { "text-anchor": "middle" });
-    } else {
-      const y = valueY(value);
-      svg.appendChild(node("line", { x1: plot.x, y1: y, x2: plot.x + plot.width, y2: y, stroke: "#595959", "stroke-width": 1 }));
-      addText(plot.x - 6, y + 3, Number(value.toFixed(2)).toString(), { "text-anchor": "end" });
-    }
+  const round = data.type === "pie" || data.type === "doughnut";
+  pen.colors = chartColors(theme, round ? data.categories.length : data.series.length);
+
+  const titleSize = data.titleSize ?? CHART_TITLE_PX;
+  const stacks = round ? [] : stackPoints(data.series, data.grouping);
+  const valueLabels = round
+    ? []
+    : axisScale(stacks.flat().flatMap((point) => [point.base, point.top]), percentAxis(data))
+        .ticks.map((tick) => formatChartNumber(tick, percentAxis(data)?.format));
+  const frame = chartFrame({
+    width: item.width,
+    height: item.height,
+    titleSize,
+    textSize: pen.size,
+    ...(data.title ? { title: data.title } : {}),
+    ...(data.legend ? { legend: data.legend } : {}),
+    legendLabels: legendEntries(pen).map((entry) => entry.text),
+    valueLabels,
+    categoryLabels: data.type === "bar" ? data.categories : [],
+    horizontalValues: data.type === "bar",
+    axes: !round,
+    ...(data.valueAxis?.title ? { valueAxisTitle: data.valueAxis.title } : {}),
+    ...(data.categoryAxis?.title ? { categoryAxisTitle: data.categoryAxis.title } : {}),
+  });
+
+  if (data.title && frame.titleBaseline !== undefined) {
+    pen.label(item.width / 2, frame.titleBaseline, data.title, {
+      "text-anchor": "middle", "font-size": titleSize, fill: CHART_LABEL_COLOR,
+    });
   }
 
-  const categoryCount = Math.max(item.data.categories.length, 1);
-  const seriesCount = Math.max(item.data.series.length, 1);
-  const labelEvery = Math.max(1, Math.ceil(categoryCount / 8));
-  if (item.data.type === "bar") {
-    const band = plot.height / categoryCount;
-    const zero = valueX(0);
-    const axisY = plot.y + plot.height;
-    svg.appendChild(node("line", { x1: plot.x, y1: axisY, x2: plot.x + plot.width, y2: axisY, stroke: "#262626", "stroke-width": 1.25 }));
-    svg.appendChild(node("line", { x1: zero, y1: plot.y, x2: zero, y2: plot.y + plot.height, stroke: "#262626", "stroke-width": 1.25 }));
-    for (const value of valueTicks) {
-      const x = valueX(value);
-      svg.appendChild(node("line", { x1: x, y1: axisY - 4, x2: x, y2: axisY + 4, stroke: "#262626", "stroke-width": 1.25, "data-dxw-chart-tick": "major" }));
-    }
-    for (let index = 0; index < valueTicks.length - 1; index++) {
-      for (let minor = 1; minor < 5; minor++) {
-        const x = valueX(valueTicks[index] + (majorStep * minor) / 5);
-        svg.appendChild(node("line", { x1: x, y1: axisY - 2.5, x2: x, y2: axisY + 2.5, stroke: "#262626", "stroke-width": 1, "data-dxw-chart-tick": "minor" }));
-      }
-    }
-    for (let index = 0; index <= categoryCount; index++) {
-      const y = plot.y + band * index;
-      svg.appendChild(node("line", { x1: zero - 4, y1: y, x2: zero + 4, y2: y, stroke: "#262626", "stroke-width": 1.25, "data-dxw-chart-tick": "category" }));
-    }
-    const barHeight = Math.max(band / (seriesCount + 1.5), 1);
-    item.data.categories.forEach((category, categoryIndex) => {
-      if (categoryIndex % labelEvery === 0) addText(plot.x - 6, plot.y + band * (categoryIndex + 0.5) + 3, category, { "text-anchor": "end" });
-      item.data.series.forEach((series, seriesIndex) => {
-        const value = series.values[categoryIndex] ?? 0;
-        const zero = valueX(0);
-        const edge = valueX(value);
-        svg.appendChild(node("rect", {
-          x: Math.min(zero, edge), y: plot.y + categoryIndex * band + (band - barHeight * seriesCount) / 2 + seriesIndex * barHeight,
-          width: Math.max(Math.abs(edge - zero), 0.5), height: barHeight,
-          fill: colors[seriesIndex % colors.length],
-        }));
-      });
-    });
-  } else {
-    const band = plot.width / categoryCount;
-    const zero = valueY(0);
-    svg.appendChild(node("line", { x1: plot.x, y1: plot.y, x2: plot.x, y2: plot.y + plot.height, stroke: "#262626", "stroke-width": 1.25 }));
-    svg.appendChild(node("line", { x1: plot.x, y1: zero, x2: plot.x + plot.width, y2: zero, stroke: "#262626", "stroke-width": 1.25 }));
-    for (const value of valueTicks) {
-      const y = valueY(value);
-      svg.appendChild(node("line", { x1: plot.x - 4, y1: y, x2: plot.x + 4, y2: y, stroke: "#262626", "stroke-width": 1.25, "data-dxw-chart-tick": "major" }));
-    }
-    for (let index = 0; index < valueTicks.length - 1; index++) {
-      for (let minor = 1; minor < 5; minor++) {
-        const y = valueY(valueTicks[index] + (majorStep * minor) / 5);
-        svg.appendChild(node("line", { x1: plot.x - 2.5, y1: y, x2: plot.x + 2.5, y2: y, stroke: "#262626", "stroke-width": 1, "data-dxw-chart-tick": "minor" }));
-      }
-    }
-    for (let index = 0; index <= categoryCount; index++) {
-      const x = plot.x + band * index;
-      svg.appendChild(node("line", { x1: x, y1: zero - 4, x2: x, y2: zero + 4, stroke: "#262626", "stroke-width": 1.25, "data-dxw-chart-tick": "category" }));
-    }
-    item.data.categories.forEach((category, index) => {
-      if (index % labelEvery === 0) addText(plot.x + band * (index + 0.5), plot.y + plot.height + 15, category, { "text-anchor": "middle" });
-    });
-    if (item.data.type === "column") {
-      const barWidth = Math.max(band / (seriesCount + 1.5), 1);
-      item.data.series.forEach((series, seriesIndex) => series.values.forEach((value, categoryIndex) => {
-        const zero = valueY(0);
-        const edge = valueY(value);
-        svg.appendChild(node("rect", {
-          x: plot.x + categoryIndex * band + (band - barWidth * seriesCount) / 2 + seriesIndex * barWidth,
-          y: Math.min(zero, edge), width: barWidth, height: Math.max(Math.abs(edge - zero), 0.5),
-          fill: colors[seriesIndex % colors.length],
-        }));
-      }));
-    } else {
-      item.data.series.forEach((series, seriesIndex) => {
-        const points = series.values.map((value, index) => `${plot.x + band * (index + 0.5)},${valueY(value)}`).join(" ");
-        svg.appendChild(node("polyline", { points, fill: "none", stroke: colors[seriesIndex % colors.length], "stroke-width": 2 }));
-        series.values.forEach((value, index) => svg.appendChild(node("circle", {
-          cx: plot.x + band * (index + 0.5), cy: valueY(value), r: 2.5,
-          fill: colors[seriesIndex % colors.length], stroke: "#fff", "stroke-width": 1,
-          "data-dxw-chart-marker": "1",
-        })));
-      });
-    }
-  }
+  if (round) paintPie(pen, frame.plot);
+  else if (data.type === "scatter") paintScatter(pen, frame.plot);
+  else paintCategoryChart(pen, frame.plot);
 
-  if (item.data.series.length > 1) {
-    const x = plot.x + plot.width + 10;
-    item.data.series.forEach((series, index) => {
-      const y = plot.y + 11 + index * 17;
-      svg.appendChild(node("rect", { x, y: y - 8, width: 10, height: 10, fill: colors[index % colors.length] }));
-      addText(x + 15, y, series.name);
-    });
-  }
-  return svg as unknown as HTMLElement;
+  if (frame.legend) paintLegend(pen, frame.legend);
+  return pen.svg as unknown as HTMLElement;
 }
 
 function setItemLayer(
@@ -2151,7 +2509,6 @@ function renderWordArt(item: WordArtItem): HTMLElement {
 }
 
 let warpPathSeq = 0;
-const SVG_NS = "http://www.w3.org/2000/svg";
 
 interface WarpGeo {
   d: string;

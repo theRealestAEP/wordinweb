@@ -146,7 +146,7 @@ The object passed to `onReady`. Every command operates on the current selection 
 - `insertEquation(linear)`, `insertSymbol(symbol)` — native editable OMML equations and arbitrary Unicode symbols.
 - `insertShape(preset, text?)` — floating editable DrawingML lines, rectangles, rounded rectangles, ellipses, diamonds, and text boxes. Selected objects expose exact page position, size, outline, wrapping, and layer controls.
 - `insertWordArt(text, preset?)` — editable DrawingML WordArt with plain, arch, wave, and chevron presets.
-- `insertChart(data)`, `updateSelectedChart(data)` — native editable ChartML with its embedded workbook.
+- `insertChart(data)`, `updateSelectedChart(data)` — native editable ChartML with its embedded workbook, in column, bar, line, pie, doughnut, area, and scatter. Word-authored charts of those kinds render from their own `c:chartSpace`: series colors from the theme, axes with their number formats, gridlines, legend, data labels, and title. A 3-D, radar, surface, stock, or bubble plot renders a labeled placeholder at the chart's exact size, and `updateSelectedChart` refuses it rather than flattening it to two dimensions.
 - `insertSmartArt(data)`, `updateSelectedSmartArt(data)` — native editable SmartArt data, layout, style, colors, and cached drawing parts.
 - `setDrawingTool({ kind: "pen", color, width } | { kind: "eraser", size } | { kind: "lasso" } | null)`, `getDrawingTool()` — draw, erase, or lasso-select movable DrawingML ink.
 - `arrangeObject(action)` — align the selected image, shape, or ink group to the page; rotate it 90°; or bring it to the front/send it to the back. Arrow keys nudge selected floating objects by 1px (`Shift` = 10px).
