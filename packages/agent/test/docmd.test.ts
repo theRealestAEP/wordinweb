@@ -7,8 +7,12 @@ import { body, makeDocx } from "./helpers.js";
 
 /** A brief with a heading, a mixed-formatting paragraph, a bullet list, a
  * table, and an equation — one of every projection shape. */
-async function brief(): Promise<AgentDocument> {
-  const agent = AgentDocument.create();
+async function brief(pinned = false): Promise<AgentDocument> {
+  // Tracked-change assertions read the author and date back out of the XML, so
+  // those tests ask for fixed provenance instead of the wall clock.
+  const agent = pinned
+    ? AgentDocument.create({ provenance: { author: "Reviewer", now: () => "2026-01-15T10:00:00Z", nextId: () => "ABCDEF01" } })
+    : AgentDocument.create();
   await agent.compose({
     revision: agent.revision,
     body: [
@@ -473,31 +477,79 @@ describe("DocMD patch", () => {
     })).rejects.toThrow("add text or remove text, not both");
   });
 
-  it("refuses a suggested hunk that only a structural operation could carry", async () => {
-    const agent = await brief();
+  it("tracks a suggested heading-marker change as a paragraph-property revision", async () => {
+    const agent = await brief(true);
     const projection = agent.project({ mode: "md" });
     const heading = lineOf(projection, "# Findings");
-    await expect(agent.patch({
+    const result = await agent.patch({
       revision: projection.revision,
       mode: "md",
       suggest: true,
       edits: [{ startLine: heading, endLine: heading, newText: "## Findings" }],
-    })).rejects.toThrow("cannot change a heading marker");
+    });
+    expect(result.operations).toEqual(["formatParagraph"]);
+    // The NEW style is live and the one it replaced is in the change record,
+    // which is what makes the projection read as the suggested heading.
+    expect(agent.project({ mode: "md" }).text).toContain("## Findings");
+    const xml = documentXml(agent);
+    expect(xml).toContain('<w:pStyle w:val="Heading2"/>');
+    expect(xml).toContain(
+      '<w:pPrChange w:id="1" w:author="Reviewer" w:date="2026-01-15T10:00:00Z">' +
+        '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr></w:pPrChange>',
+    );
+  });
 
+  it("tracks a suggested list-marker change as a paragraph-property revision", async () => {
+    const agent = await brief(true);
+    const projection = agent.project({ mode: "md" });
+    const bullet = lineOf(projection, "- Latency");
+    const result = await agent.patch({
+      revision: projection.revision,
+      mode: "md",
+      suggest: true,
+      edits: [{ startLine: bullet, endLine: bullet, newText: "Latency" }],
+    });
+    expect(result.operations).toEqual(["setListType"]);
+    expect(agent.project({ mode: "md" }).text).toContain("\nLatency\n");
+    // The numbering is gone from the live pPr and recorded in the change.
+    const xml = documentXml(agent);
+    expect(xml).toContain(
+      '<w:p><w:pPr><w:pPrChange w:id="1" w:author="Reviewer" w:date="2026-01-15T10:00:00Z">' +
+        '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:pPrChange>' +
+        '</w:pPr><w:r><w:t xml:space="preserve">Latency</w:t></w:r></w:p>',
+    );
+  });
+
+  it("tracks a suggested paragraph merge as a struck paragraph mark", async () => {
+    const agent = await brief(true);
+    const projection = agent.project({ mode: "md" });
+    const bullet = lineOf(projection, "- Latency");
+    const result = await agent.patch({
+      revision: projection.revision,
+      mode: "md",
+      suggest: true,
+      edits: [{ startLine: bullet, endLine: bullet + 1, newText: "- LatencyCost" }],
+    });
+    expect(result.operations).toEqual(["mergeParagraph"]);
+    // Word keeps both paragraphs until the reviewer accepts, so the projection
+    // still shows two lines; only the pilcrow between them is struck.
+    expect(agent.project({ mode: "md" }).text).toContain("- Latency\n- Cost");
+    expect(documentXml(agent)).toContain(
+      '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>' +
+        '<w:rPr><w:del w:id="1" w:author="Reviewer" w:date="2026-01-15T10:00:00Z"/></w:rPr>',
+    );
+  });
+
+  it("refuses a suggested hunk that merges and rewrites at once", async () => {
+    const agent = await brief();
+    const projection = agent.project({ mode: "md" });
     const bullet = lineOf(projection, "- Latency");
     await expect(agent.patch({
       revision: projection.revision,
       mode: "md",
       suggest: true,
-      edits: [{ startLine: bullet, endLine: bullet, newText: "Latency" }],
-    })).rejects.toThrow("cannot change a list marker");
-
-    await expect(agent.patch({
-      revision: projection.revision,
-      mode: "md",
-      suggest: true,
-      edits: [{ startLine: bullet, endLine: bullet + 1, newText: "- Latency" }],
-    })).rejects.toThrow("cannot remove a paragraph break");
+      edits: [{ startLine: bullet, endLine: bullet + 1, newText: "- Latency and cost" }],
+    })).rejects.toThrow("not both");
     expect(agent.project({ mode: "md" }).text).toBe(projection.text);
   });
 

@@ -3,6 +3,7 @@ import {
   StableIds,
   deleteSuggestedRange,
   markParagraphGlyph,
+  suggestMeta,
   applyInsertText,
   applySplitParagraph,
   applyDeleteRange,
@@ -63,6 +64,7 @@ import {
   moveTableTo,
   removeDrawingRun,
   mergeParagraphBackward,
+  siblingParagraph,
   addComment,
   replyToComment,
   recordedProvenance,
@@ -294,7 +296,7 @@ function applyIntentInner(
       // Whole-run format: a segment with t=null covers the entire run, so
       // applyRunFormat takes the in-place (no-split) path — run id preserved.
       const seg: SelectionSegment = { run: entry.run, t: null, start: 0, end: 0, props: entry.run.props };
-      applyRunFormat(doc, [seg], intent.patch as never);
+      applyRunFormat(doc, [seg], intent.patch as never, suggestMeta(doc, intent.suggest));
       return true;
     }
     case "formatParagraph": {
@@ -303,9 +305,10 @@ function applyIntentInner(
       // setParagraphAlignment/Style resolve the paragraph by walking UP from a
       // target, so pass a descendant w:t (or the block itself as a fallback).
       const target = firstTextDescendant(blockEl) ?? blockEl;
+      const meta = suggestMeta(doc, intent.suggest);
       let changed = false;
-      if (intent.align) changed = setParagraphAlignment(doc, [target], intent.align) || changed;
-      if (intent.styleId !== undefined) changed = setParagraphStyle(doc, [target], intent.styleId) || changed;
+      if (intent.align) changed = setParagraphAlignment(doc, [target], intent.align, meta) || changed;
+      if (intent.styleId !== undefined) changed = setParagraphStyle(doc, [target], intent.styleId, meta) || changed;
       return changed;
     }
     case "formatRange": {
@@ -326,7 +329,7 @@ function applyIntentInner(
       if (localEnd > hit.t.text.length) return false;
       // Sub-range format: splits the run into before/middle/after (all new).
       const seg: SelectionSegment = { run: entry.run, t: hit.t, start: hit.offset, end: localEnd, props: entry.run.props };
-      const formatted = applyRunFormat(doc, [seg], intent.patch as never);
+      const formatted = applyRunFormat(doc, [seg], intent.patch as never, suggestMeta(doc, intent.suggest));
       if (formatted.length === 0) return false;
       // Locate the pieces via the returned middle w:t (robust to whatever
       // parent applyRunFormat spliced into): middle run = parent of middleT;
@@ -377,6 +380,17 @@ function applyIntentInner(
     case "mergeParagraph": {
       const pEl = ids.elOf(intent.blockId);
       if (!pEl) return false;
+      const meta = suggestMeta(doc, intent.suggest);
+      if (meta) {
+        // Tracked merge: strike the pilcrow between the two paragraphs — the
+        // PREVIOUS paragraph's mark — and leave both paragraphs standing. The
+        // editor's Backspace-at-paragraph-start does exactly this locally.
+        const previous = siblingParagraph(doc, pEl, -1);
+        if (!previous) return false;
+        markParagraphGlyph(previous, "del", meta);
+        doc.refresh();
+        return true;
+      }
       const ok = mergeParagraphBackward(doc, pEl);
       if (ok) ids.prune(doc.editableRoots()); // retire the merged paragraph's id
       return ok;
@@ -859,13 +873,13 @@ function applyIntentInner(
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
       const target = firstTextDescendant(blockEl) ?? blockEl;
-      return adjustIndent(doc, [target], intent.direction);
+      return adjustIndent(doc, [target], intent.direction, suggestMeta(doc, intent.suggest));
     }
     case "setSpacing": {
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
       const target = firstTextDescendant(blockEl) ?? blockEl;
-      return setParagraphSpacing(doc, [target], intent.patch as never);
+      return setParagraphSpacing(doc, [target], intent.patch as never, suggestMeta(doc, intent.suggest));
     }
     case "insertPageField": {
       const runEl = ids.elOf(intent.runId);

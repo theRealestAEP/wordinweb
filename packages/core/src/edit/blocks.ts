@@ -2,6 +2,7 @@ import { DocxDocument } from "../docx.js";
 import { Block, Paragraph } from "../model.js";
 import { XmlElement, child, localName } from "../xml.js";
 import { pxToTwips } from "../units.js";
+import { RevisionMeta, appendParagraphProp, recordParagraphFormatChange } from "./suggest.js";
 
 /**
  * Block- and document-level edit commands: table insertion, paragraph
@@ -153,11 +154,14 @@ const JC_VAL: Record<ParagraphAlignment, string> = {
   justify: "both",
 };
 
-/** Set w:jc on the paragraphs containing the given (caret/selection) elements. */
+/** Set w:jc on the paragraphs containing the given (caret/selection) elements.
+ * With `meta` the change is SUGGESTED: each paragraph records the properties
+ * it had in a w:pPrChange first. */
 export function setParagraphAlignment(
   doc: DocxDocument,
   targets: XmlElement[],
   align: ParagraphAlignment,
+  meta?: RevisionMeta,
 ): boolean {
   const paragraphs = new Set<XmlElement>();
   for (const t of targets) {
@@ -167,6 +171,7 @@ export function setParagraphAlignment(
   if (paragraphs.size === 0) return false;
   for (const pEl of paragraphs) {
     const w = prefixOf(pEl);
+    if (meta) recordParagraphFormatChange(pEl, meta);
     let pPr = pEl.children.find((c) => localName(c.name) === "pPr");
     if (!pPr) {
       pPr = el(`${w}pPr`);
@@ -175,7 +180,7 @@ export function setParagraphAlignment(
     const existing = pPr.children.findIndex((c) => localName(c.name) === "jc");
     const jc = el(`${w}jc`, { [`${w}val`]: JC_VAL[align] });
     if (existing !== -1) pPr.children[existing] = jc;
-    else pPr.children.push(jc);
+    else appendParagraphProp(pPr, jc);
   }
   doc.refresh();
   return true;
@@ -524,11 +529,14 @@ export function paragraphStyleIdOf(doc: DocxDocument, target: XmlElement): strin
   return key ? pStyle.attrs[key] : null;
 }
 
-/** Apply (or clear, with null) a paragraph style to the target paragraphs. */
+/** Apply (or clear, with null) a paragraph style to the target paragraphs.
+ * With `meta` the change is SUGGESTED: each paragraph records the properties
+ * it had in a w:pPrChange first. */
 export function setParagraphStyle(
   doc: DocxDocument,
   targets: XmlElement[],
   styleId: string | null,
+  meta?: RevisionMeta,
 ): boolean {
   // Word's built-in styles work without a declaration; inject one if needed.
   if (styleId !== null) doc.ensureParagraphStyle(styleId);
@@ -540,6 +548,7 @@ export function setParagraphStyle(
   if (paragraphs.size === 0) return false;
   for (const pEl of paragraphs) {
     const w = prefixOf(pEl);
+    if (meta) recordParagraphFormatChange(pEl, meta);
     let pPr = pEl.children.find((c) => localName(c.name) === "pPr");
     if (!pPr) {
       pPr = el(`${w}pPr`);

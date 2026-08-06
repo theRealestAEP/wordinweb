@@ -93,6 +93,18 @@ function smartArtError(a: { layout: unknown; items: unknown }, who: string): str
 /** Returns a rejection reason, or null if the intent is well-formed. */
 export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_INTENT_LIMITS): string | null {
   const nonNegInt = (n: number) => Number.isInteger(n) && n >= 0;
+  // Every tracked-change carrier bounds its author/date the same way, so one
+  // check serves them all: absent means a direct (untracked) edit.
+  const badSuggest = (suggest: { author: string; date: string } | undefined): string | null => {
+    if (suggest === undefined) return null;
+    if (typeof suggest.author !== "string" || suggest.author.length > 100) return `${intent.kind}: bad author`;
+    if (typeof suggest.date !== "string" || suggest.date.length > 40) return `${intent.kind}: bad date`;
+    return null;
+  };
+  if ("suggest" in intent && intent.kind !== "suggestRevision") {
+    const bad = badSuggest(intent.suggest);
+    if (bad) return bad;
+  }
   if ("objectIndex" in intent && intent.objectIndex !== undefined &&
       (!Number.isInteger(intent.objectIndex) || intent.objectIndex < 0 || intent.objectIndex > 10000)) {
     return `${intent.kind}: bad objectIndex`;
@@ -131,10 +143,6 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "splitParagraph":
       if (!nonNegInt(intent.at.offset)) return "splitParagraph: bad offset";
       if (!nonNegInt(intent.newBlockId) || !nonNegInt(intent.newRunId)) return "splitParagraph: bad ids";
-      if (intent.suggest !== undefined) {
-        if (typeof intent.suggest.author !== "string" || intent.suggest.author.length > 100) return "splitParagraph: bad author";
-        if (typeof intent.suggest.date !== "string" || intent.suggest.date.length > 40) return "splitParagraph: bad date";
-      }
       return null;
     case "formatRange":
       if (!nonNegInt(intent.start) || !nonNegInt(intent.end) || intent.end <= intent.start) return "formatRange: bad range";

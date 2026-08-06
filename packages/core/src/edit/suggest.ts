@@ -7,9 +7,13 @@ import { XmlElement, cloneXml, localName } from "../xml.js";
  * When the editor is in suggesting mode, edits are recorded as OOXML revisions
  * instead of mutating text in place: inserted text is wrapped in `w:ins`,
  * deleted content is converted to `w:del`/`w:delText` (never actually removed),
- * and paragraph splits/merges mark the paragraph glyph via `pPr/rPr/w:ins` or
- * `pPr/rPr/w:del`. The markup renderer (parse/document.ts) already colors and
- * underlines/strikes these, so pending suggestions show live as you type.
+ * paragraph splits/merges mark the paragraph glyph via `pPr/rPr/w:ins` or
+ * `pPr/rPr/w:del`, and formatting changes stash the properties they replace in
+ * `w:rPrChange`/`w:pPrChange`. The markup renderer (parse/document.ts) already
+ * colors and underlines/strikes the text ones, so pending suggestions show live
+ * as you type; the format ones show as the new formatting, like Word, because
+ * the renderer reads only direct property children and never descends into a
+ * change record.
  *
  * The XML tree stays the source of truth; every helper mutates it and returns
  * the new caret target so the editor can re-place its own caret after refresh.
@@ -24,6 +28,21 @@ export interface RevisionMeta {
   nextId: () => number;
 }
 
+/**
+ * RevisionMeta for the author/date a wire payload carries. Nondeterministic
+ * values are generated once by the originating client and travel with the
+ * edit; the w:id is scan-derived from identical tree state, so every replica
+ * writes byte-identical XML. Undefined `suggest` means a direct (untracked)
+ * edit, which every suggest-aware mutation takes as "no meta".
+ */
+export function suggestMeta(
+  doc: DocxDocument,
+  suggest: { author: string; date: string } | undefined,
+): RevisionMeta | undefined {
+  if (!suggest) return undefined;
+  return { author: suggest.author, date: suggest.date, nextId: () => doc.nextRevisionId() };
+}
+
 /** Where an edit left the caret (the editor re-resolves this after refresh). */
 export interface CaretTarget {
   t: XmlElement;
@@ -31,13 +50,22 @@ export interface CaretTarget {
 }
 
 /** A tracked-change element the review UI can accept or reject. */
-export type RevisionKind = "insertion" | "deletion" | "markInsertion" | "markDeletion";
+export type RevisionKind =
+  | "insertion"
+  | "deletion"
+  | "markInsertion"
+  | "markDeletion"
+  | "runFormat"
+  | "paragraphFormat";
 export interface RevisionRef {
-  /** The w:ins / w:del element (run-level, or the mark ins/del inside rPr). */
+  /** The w:ins / w:del element (run-level, or the mark ins/del inside rPr),
+   * or the w:rPrChange / w:pPrChange element for a format revision. */
   el: XmlElement;
   kind: RevisionKind;
-  /** For mark revisions: the owning w:p. */
+  /** For mark and paragraphFormat revisions: the owning w:p. */
   paragraph?: XmlElement;
+  /** For runFormat revisions: the w:rPr holding the w:rPrChange. */
+  runProps?: XmlElement;
   author?: string;
 }
 
@@ -359,6 +387,68 @@ export function paragraphGlyphRevision(pEl: XmlElement, kind: "ins" | "del"): Xm
   return rPr?.children.find((c) => localName(c.name) === kind) ?? null;
 }
 
+// ---------- formatting revisions (w:rPrChange / w:pPrChange) ----------
+
+/**
+ * Tracked FORMATTING changes. Word records them by keeping the new properties
+ * where they always live — directly in w:rPr / w:pPr, so every renderer shows
+ * the new look with no special casing — and stashing the PREVIOUS properties
+ * in a w:rPrChange / w:pPrChange as the last child of that same element.
+ * Accept drops the change element; reject puts the recorded properties back.
+ *
+ * Both are recorded BEFORE the mutation runs, and only once per pending
+ * suggestion: a second edit to the same run or paragraph refines the same
+ * suggestion, so the recorded properties stay the ones the reviewer would get
+ * back on reject — the state before ANY of it was suggested.
+ */
+
+/** Record the run's current w:rPr as the "previous formatting" of a tracked
+ * format change. Call before mutating rEl's rPr. */
+export function recordRunFormatChange(rEl: XmlElement, meta: RevisionMeta): void {
+  const w = prefixOf(rEl);
+  let rPr = rEl.children.find((c) => localName(c.name) === "rPr");
+  if (rPr?.children.some((c) => localName(c.name) === "rPrChange")) return;
+  if (!rPr) {
+    rPr = el(`${w}rPr`);
+    rEl.children.unshift(rPr);
+  }
+  const previous = el(`${w}rPr`, {}, rPr.children.map(cloneXml));
+  rPr.children.push(el(`${w}rPrChange`, revAttrs(w, meta), [previous]));
+}
+
+/**
+ * The three children that close a w:pPr, in this order. They are also exactly
+ * what a w:pPrChange may NOT carry: its content is CT_PPrBase, which stops
+ * short of the paragraph mark's run properties and the section break.
+ */
+const PPR_TRAILING = new Set(["rPr", "sectPr", "pPrChange"]);
+
+/** Record the paragraph's current w:pPr as the "previous formatting" of a
+ * tracked format change. Call before mutating pEl's pPr. */
+export function recordParagraphFormatChange(pEl: XmlElement, meta: RevisionMeta): void {
+  const w = prefixOf(pEl);
+  let pPr = pEl.children.find((c) => localName(c.name) === "pPr");
+  if (pPr?.children.some((c) => localName(c.name) === "pPrChange")) return;
+  if (!pPr) {
+    pPr = el(`${w}pPr`);
+    pEl.children.unshift(pPr);
+  }
+  const previous = el(
+    `${w}pPr`,
+    {},
+    pPr.children.filter((c) => !PPR_TRAILING.has(localName(c.name))).map(cloneXml),
+  );
+  pPr.children.push(el(`${w}pPrChange`, revAttrs(w, meta), [previous]));
+}
+
+/** Append a CT_PPrBase property to a w:pPr, ahead of the three children that
+ * close the element (see PPR_TRAILING). A paragraph command that appends has
+ * to step over them, or it writes a pPr Word will not read. */
+export function appendParagraphProp(pPr: XmlElement, prop: XmlElement): void {
+  const at = pPr.children.findIndex((c) => PPR_TRAILING.has(localName(c.name)));
+  pPr.children.splice(at === -1 ? pPr.children.length : at, 0, prop);
+}
+
 // ---------- review: locate / accept / reject ----------
 
 /** The run-level revision (w:ins/w:del) enclosing a w:t, if any. */
@@ -443,13 +533,23 @@ export function collectRevisions(doc: DocxDocument): RevisionRef[] {
         author: attrByLocal(el, "author"),
       });
     }
+    if (ln === "r") {
+      const rPr = el.children.find((c) => localName(c.name) === "rPr");
+      const change = rPr?.children.find((c) => localName(c.name) === "rPrChange");
+      if (rPr && change) {
+        out.push({ el: change, kind: "runFormat", runProps: rPr, author: attrByLocal(change, "author") });
+      }
+    }
     for (const c of el.children) walk(c);
     // The paragraph-mark revision is the pilcrow at the paragraph's END, so
     // it follows the paragraph's own runs in document order.
     if (ln === "p") {
-      const rPr = el.children
-        .find((c) => localName(c.name) === "pPr")
-        ?.children.find((c) => localName(c.name) === "rPr");
+      const pPr = el.children.find((c) => localName(c.name) === "pPr");
+      const change = pPr?.children.find((c) => localName(c.name) === "pPrChange");
+      if (change) {
+        out.push({ el: change, kind: "paragraphFormat", paragraph: el, author: attrByLocal(change, "author") });
+      }
+      const rPr = pPr?.children.find((c) => localName(c.name) === "rPr");
       for (const c of rPr?.children ?? []) {
         const cn = localName(c.name);
         if (cn === "ins" || cn === "del") {
@@ -479,7 +579,53 @@ function applyAccept(doc: DocxDocument, ref: RevisionRef): boolean {
       if (!ref.paragraph) return false;
       removeMarkRevision(ref);
       return joinWithNext(doc, ref.paragraph);
+    case "runFormat":
+    case "paragraphFormat":
+      // The new formatting is already the live one; accepting just retires the
+      // record of what it replaced.
+      return removeFormatChange(doc, ref);
   }
+}
+
+/** Drop a w:rPrChange / w:pPrChange from the properties element holding it. */
+function removeFormatChange(doc: DocxDocument, ref: RevisionRef): boolean {
+  const props = ref.kind === "runFormat"
+    ? ref.runProps
+    : ref.paragraph?.children.find((c) => localName(c.name) === "pPr");
+  if (!props) return false;
+  const idx = props.children.indexOf(ref.el);
+  if (idx === -1) return false;
+  props.children.splice(idx, 1);
+  if (props.children.length === 0) removeEl(doc, props);
+  return true;
+}
+
+/**
+ * Reject a formatting revision: the recorded previous properties become the
+ * live ones again. A w:pPrChange records CT_PPrBase only, so the paragraph
+ * mark's w:rPr (which carries mark ins/del revisions) and the w:sectPr stay
+ * exactly as they are and keep their schema position at the end.
+ */
+function restoreFormatChange(doc: DocxDocument, ref: RevisionRef): boolean {
+  const props = ref.kind === "runFormat"
+    ? ref.runProps
+    : ref.paragraph?.children.find((c) => localName(c.name) === "pPr");
+  if (!props || props.children.indexOf(ref.el) === -1) return false;
+  const recorded = ref.el.children[0];
+  const restored = (recorded?.children ?? []).map(cloneXml);
+  const kept = ref.kind === "runFormat"
+    ? []
+    : props.children.filter((c) => {
+        const ln = localName(c.name);
+        // An emptied paragraph-mark rPr — its own revision already reviewed —
+        // is not a property, and keeping it would leave the paragraph in a
+        // shape it was never in.
+        if (ln === "rPr") return c.children.length > 0;
+        return ln === "sectPr";
+      });
+  props.children = [...restored, ...kept];
+  if (props.children.length === 0) removeEl(doc, props);
+  return true;
 }
 
 function applyReject(doc: DocxDocument, ref: RevisionRef): boolean {
@@ -495,13 +641,17 @@ function applyReject(doc: DocxDocument, ref: RevisionRef): boolean {
       return joinWithNext(doc, ref.paragraph);
     case "markDeletion":
       return removeMarkRevision(ref);
+    case "runFormat":
+    case "paragraphFormat":
+      return restoreFormatChange(doc, ref);
   }
 }
 
 /**
  * Accept a single revision: an insertion becomes permanent text, a deletion
  * removes its content, an inserted mark stays split, a deleted mark merges the
- * two paragraphs. Returns false if the element could not be located.
+ * two paragraphs, and a format change keeps the new formatting. Returns false
+ * if the element could not be located.
  */
 export function acceptRevision(doc: DocxDocument, ref: RevisionRef): boolean {
   const ok = applyAccept(doc, ref);
@@ -512,7 +662,8 @@ export function acceptRevision(doc: DocxDocument, ref: RevisionRef): boolean {
 /**
  * Reject a single revision: an insertion disappears, a deletion's content is
  * restored, an inserted mark un-splits (the paragraphs rejoin), a deleted mark
- * is removed (the paragraphs stay separate). Returns false if not located.
+ * is removed (the paragraphs stay separate), and a format change puts the
+ * previous properties back. Returns false if not located.
  */
 export function rejectRevision(doc: DocxDocument, ref: RevisionRef): boolean {
   const ok = applyReject(doc, ref);

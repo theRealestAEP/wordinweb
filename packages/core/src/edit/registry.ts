@@ -4,6 +4,7 @@ import { Run } from "../model.js";
 import { XmlElement } from "../xml.js";
 import { insertTableAfter } from "./blocks.js";
 import { setListType } from "./lists.js";
+import { suggestMeta } from "./suggest.js";
 import { applyFieldResults } from "./update-fields.js";
 import {
   CELL_SCOPE_EDGES,
@@ -194,20 +195,30 @@ export function defineOperation<Payload>() {
 // ---------------------------------------------------------------------------
 
 /** Turn a paragraph into a bullet/numbered list item, or clear its list
- * formatting (listKind null). Mutates w:pPr numbering in place. */
+ * formatting (listKind null). Mutates w:pPr numbering in place. With `suggest`
+ * the change is TRACKED (w:pPrChange) instead of applied outright; the author
+ * and date travel in the payload so every replica writes the same XML. */
 const setListTypeOperation = defineOperation<{
   blockId: StableId;
   listKind: "bullet" | "number" | null;
+  suggest?: { author: string; date: string };
 }>()({
   kind: "setListType",
   address: "block",
   category: "paragraph",
   description: "Set or clear paragraph list formatting.",
-  fields: [{ name: "listKind" }],
+  fields: [{ name: "listKind" }, { name: "suggest", optional: true }],
+  validate: ({ suggest }) => {
+    if (suggest === undefined) return null;
+    if (typeof suggest.author !== "string" || suggest.author.length > 100) return "setListType: bad author";
+    if (typeof suggest.date !== "string" || suggest.date.length > 40) return "setListType: bad date";
+    return null;
+  },
   // setListType resolves the paragraph by walking UP from a target, so pass a
   // descendant w:t when the paragraph has one and the paragraph itself
   // otherwise.
-  apply: ({ doc, target, payload }) => setListType(doc, [target.t ?? target.el], payload.listKind),
+  apply: ({ doc, target, payload }) =>
+    setListType(doc, [target.t ?? target.el], payload.listKind, suggestMeta(doc, payload.suggest)),
 });
 
 /** Insert a rows×cols table after the paragraph containing the anchor run. */

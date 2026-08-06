@@ -2,6 +2,7 @@ import { DocxDocument } from "../docx.js";
 import { Run, RunProps } from "../model.js";
 import { XmlElement, cloneXml, localName, child } from "../xml.js";
 import { paragraphOf } from "./blocks.js";
+import { RevisionMeta, recordRunFormatChange } from "./suggest.js";
 
 /**
  * Editing commands, v1: character formatting over a selection.
@@ -48,10 +49,16 @@ export interface FormattedRange {
   end: number;
 }
 
+/**
+ * Apply `patch` to every selected run (splitting runs at partial boundaries).
+ * With `meta`, the formatting is SUGGESTED: each run that changes first records
+ * the properties it had in a w:rPrChange, so the change is reviewable.
+ */
 export function applyRunFormat(
   doc: DocxDocument,
   segments: SelectionSegment[],
   patch: RunFormatPatch,
+  meta?: RevisionMeta,
 ): FormattedRange[] {
   const formatted: FormattedRange[] = [];
   // Group by run; merge ranges on the same w:t.
@@ -92,6 +99,7 @@ export function applyRunFormat(
 
     if (coversAllTs || !parent || tTargets.size !== 1) {
       // Whole-run formatting (also the safe fallback for multi-t partials).
+      if (meta) recordRunFormatChange(rEl, meta);
       setRunProps(rEl, patch);
       for (const c of rEl.children) {
         if (localName(c.name) === "t") formatted.push({ t: c, start: 0, end: c.text.length });
@@ -100,7 +108,7 @@ export function applyRunFormat(
     }
 
     const [t, range] = Array.from(tTargets)[0];
-    const middleT = splitAndFormat(parent, rEl, t, range.start, range.end, patch);
+    const middleT = splitAndFormat(parent, rEl, t, range.start, range.end, patch, meta);
     if (middleT) formatted.push({ t: middleT, start: 0, end: middleT.text.length });
   }
 
@@ -123,6 +131,7 @@ function splitAndFormat(
   start: number,
   end: number,
   patch: RunFormatPatch,
+  meta?: RevisionMeta,
 ): XmlElement | null {
   const idx = parent.children.indexOf(rEl);
   const tIdx = rEl.children.indexOf(t);
@@ -159,6 +168,8 @@ function splitAndFormat(
 
   const middleT = makeT(text.slice(start, end));
   const middle = makeRun([middleT]);
+  // Only the middle run's formatting changes, so only it records what it had.
+  if (meta) recordRunFormatChange(middle, meta);
   setRunProps(middle, patch);
   newRuns.push(middle);
 
@@ -181,6 +192,9 @@ const RPR_ORDER = [
   "vanish", "webHidden", "color", "spacing", "w", "kern", "position", "sz",
   "szCs", "highlight", "u", "effect", "bdr", "shd", "fitText", "vertAlign",
   "rtl", "cs", "em", "lang", "eastAsianLayout", "specVanish", "oMath",
+  // A recorded tracked-format change closes the element, after everything it
+  // records — so a new property inserts before it, never after.
+  "rPrChange",
 ];
 
 function prefixOf(el: XmlElement): string {
@@ -236,7 +250,12 @@ function prefixAttrs(prefix: string, attrs: Record<string, string>): Record<stri
 export function setRunProps(rEl: XmlElement, patch: RunFormatPatch): void {
   if (Object.keys(patch).length === 0) return;
   if (patch.clear) {
-    rEl.children = rEl.children.filter((c) => localName(c.name) !== "rPr");
+    // Clearing drops every direct property — except a recorded tracked-format
+    // change, which is what a reviewer would restore, not a property itself.
+    const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
+    const change = rPr?.children.find((c) => localName(c.name) === "rPrChange");
+    if (rPr && change) rPr.children = [change];
+    else rEl.children = rEl.children.filter((c) => localName(c.name) !== "rPr");
     return;
   }
   const rPr = ensureRPr(rEl);

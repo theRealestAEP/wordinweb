@@ -55,7 +55,14 @@ export interface SuggestRevisionIntent extends IntentBase {
   kind: "suggestRevision";
   ranges?: { blockId: StableId; runId: StableId; start: number; end: number }[];
   marks?: { blockId: StableId; glyph: "ins" | "del" }[];
-  suggest: { author: string; date: string };
+  suggest: SuggestMeta;
+}
+
+/** Author + date of a tracked change, generated once by the originating
+ * client so every replica writes the same w:author/w:date (rule a above). */
+export interface SuggestMeta {
+  author: string;
+  date: string;
 }
 
 /** Insert `text` at a position. With `suggest`, the insertion is recorded as
@@ -109,6 +116,9 @@ export interface FormatRunIntent extends IntentBase {
   /** RunFormatPatch (bold/italic/underline/strike/color/…). Structural shape
    * mirrors @wordinweb/core's RunFormatPatch; carried verbatim. */
   patch: Record<string, unknown>;
+  /** Tracked-change (suggesting) metadata: the run records the properties it
+   * had in a w:rPrChange instead of losing them. Omit for a direct format. */
+  suggest?: SuggestMeta;
 }
 
 /**
@@ -122,6 +132,9 @@ export interface FormatParagraphIntent extends IntentBase {
   align?: "left" | "center" | "right" | "justify";
   /** Paragraph style id; null clears to Normal. Omit to leave unchanged. */
   styleId?: string | null;
+  /** Tracked-change (suggesting) metadata: the paragraph records the
+   * properties it had in a w:pPrChange. Omit for a direct format. */
+  suggest?: SuggestMeta;
 }
 
 /**
@@ -154,6 +167,9 @@ export interface FormatRangeIntent extends IntentBase {
   beforeId?: StableId;
   middleId: StableId;
   afterId?: StableId;
+  /** Tracked-change (suggesting) metadata: the middle piece records the
+   * properties it had in a w:rPrChange. Omit for a direct format. */
+  suggest?: SuggestMeta;
 }
 
 /**
@@ -194,6 +210,14 @@ export interface MergeParagraphIntent extends IntentBase {
   kind: "mergeParagraph";
   /** The paragraph to merge into the one before it. */
   blockId: StableId;
+  /**
+   * Tracked-change (suggesting) metadata. Word tracks a merge as a DELETED
+   * PARAGRAPH MARK: the pilcrow that separates the two paragraphs — the
+   * PREVIOUS paragraph's mark — gets a w:del in its pPr/rPr, and both
+   * paragraphs stay in place until the reviewer accepts. Omit for a direct
+   * merge.
+   */
+  suggest?: SuggestMeta;
 }
 
 /**
@@ -327,6 +351,8 @@ export interface AdjustIndentIntent extends IntentBase {
   kind: "adjustIndent";
   blockId: StableId;
   direction: 1 | -1;
+  /** Tracked-change (suggesting) metadata; see FormatParagraphIntent. */
+  suggest?: SuggestMeta;
 }
 
 /** Set paragraph line/before/after spacing. Block-level, identity. */
@@ -335,6 +361,8 @@ export interface SetSpacingIntent extends IntentBase {
   blockId: StableId;
   /** ParagraphSpacingPatch (before/after/line/lineRule) — carried verbatim. */
   patch: Record<string, unknown>;
+  /** Tracked-change (suggesting) metadata; see FormatParagraphIntent. */
+  suggest?: SuggestMeta;
 }
 
 /** Insert a page-number field at the end of a run (sibling insertion,

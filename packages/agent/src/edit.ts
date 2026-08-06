@@ -14,6 +14,22 @@ interface CompileContext {
   prepareMedia(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number; iv?: string }>;
 }
 
+/** Operations whose agent-facing `suggest: true` compiles to carried
+ * author/date. Each one has a tracked OOXML form: w:ins for an insertion or a
+ * split mark, w:rPrChange / w:pPrChange for a formatting change, a struck
+ * paragraph mark for a merge. */
+const SUGGESTABLE_KINDS = new Set<Intent["kind"]>([
+  "insertText",
+  "splitParagraph",
+  "mergeParagraph",
+  "formatRun",
+  "formatRange",
+  "formatParagraph",
+  "setListType",
+  "adjustIndent",
+  "setSpacing",
+]);
+
 const INTERNAL_FIELDS = ["clientId", "clientSeq", "base", "nodeIds", "newBlockId", "newRunId", "beforeId", "middleId", "afterId", "blockId", "runId", "objectIndex", "cellParagraphId", "afterBlockId"];
 
 function cloneOperation(operation: AgentOperation): Record<string, unknown> {
@@ -165,7 +181,9 @@ export async function compileAgentOperation(input: AgentOperation, context: Comp
     operation.paraIds ??= [paraId(context), paraId(context)];
   } else if (typedKind === "suggestRevision") {
     operation.suggest ??= { author: context.provenance.author, date: context.provenance.now() };
-  } else if (typedKind === "insertText" || typedKind === "splitParagraph") {
+  } else if (SUGGESTABLE_KINDS.has(typedKind)) {
+    // Agents ask for a tracked change with a boolean; the author and date the
+    // replicas need are stamped here, once, like every other provenance value.
     if (operation.suggest === true) operation.suggest = { author: context.provenance.author, date: context.provenance.now() };
     else delete operation.suggest;
   }
