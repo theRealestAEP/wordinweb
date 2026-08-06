@@ -584,6 +584,100 @@ describe("percentage table width", () => {
 });
 
 // ---------------------------------------------------------------------------
+// How a percentage width is split between the columns
+// ---------------------------------------------------------------------------
+
+describe("percentage column distribution", () => {
+  // Letter with 1in margins: a 9360tw text column, 624px at 15 twips per pixel.
+  const CONTENT_WIDTH = (12240 - 2 * 1440) / 15;
+  const SECTION =
+    `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+
+  /** A compat-15 percentage table over an explicit grid. `marginTw` is one
+   * side's cell margin, so a column reserves twice it. */
+  function pctGrid(gridTw: number[], pct: number, marginTw: number): DocxDocument {
+    const cellMar =
+      `<w:tblCellMar><w:left w:w="${marginTw}" w:type="dxa"/>` +
+      `<w:right w:w="${marginTw}" w:type="dxa"/></w:tblCellMar>`;
+    const tbl =
+      `<w:tbl><w:tblPr><w:tblW w:w="${pct * 50}" w:type="pct"/>` +
+      `<w:tblLayout w:type="fixed"/>${cellMar}</w:tblPr>` +
+      `<w:tblGrid>${gridTw.map((w) => `<w:gridCol w:w="${w}"/>`).join("")}</w:tblGrid>` +
+      `<w:tr>${gridTw
+        .map((w, i) => `<w:tc><w:tcPr><w:tcW w:type="dxa" w:w="${w}"/></w:tcPr>${p(`c${i}`)}</w:tc>`)
+        .join("")}</w:tr></w:tbl>`;
+    return DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(tbl + SECTION),
+        "word/settings.xml":
+          `<?xml version="1.0"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+          `<w:compat><w:compatSetting w:name="compatibilityMode" w:val="15"/></w:compat></w:settings>`,
+      }),
+    );
+  }
+
+  /** Strict proportional scaling — what the columns did before the probe. */
+  const proportional = (gridTw: number[], tableWidth: number): number[] => {
+    const total = gridTw.reduce((a, b) => a + b, 0);
+    return gridTw.map((w) => (w * tableWidth) / total);
+  };
+
+  it("scales each column's CONTENT share, not its whole width", () => {
+    // parity-tables: grid 2160/813/7724 at 90% with 10pt margins. Word paints
+    // 231/95/794 device px at 192 DPI. The content-share model gives
+    // 231.8/95.2/796.1 over this section's 9360tw column — the residual on the
+    // last column is the fixture's own column width, which back-solves to
+    // ~9342tw and lands the model on 231.4/95.1/794.5. Strict proportional
+    // scaling gives 226.8/85.4/811.0, out by 45px across the row, so the shape
+    // is unmistakable either way.
+    const grid = [2160, 813, 7724];
+    const widths = renderedWidths(layout(pctGrid(grid, 90, 200)));
+    expect(widths[0]).toBeCloseTo(115.92, 1);
+    expect(widths[1]).toBeCloseTo(47.61, 1);
+    expect(widths[2]).toBeCloseTo(398.07, 1);
+    // The row still totals the table's percentage width.
+    expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(0.9 * CONTENT_WIDTH, 2);
+    // Every column is materially away from where proportional scaling put it.
+    const before = proportional(grid, 0.9 * CONTENT_WIDTH);
+    widths.forEach((w, i) => expect(Math.abs(w - before[i])).toBeGreaterThan(2));
+  });
+
+  it("agrees with proportional scaling when the margins are zero", () => {
+    // At zero margins the two formulas are the same expression, which is why
+    // the zero-margin fixtures never saw this bug.
+    const grid = [2160, 813, 7724];
+    const widths = renderedWidths(layout(pctGrid(grid, 90, 0)));
+    const expected = proportional(grid, 0.9 * CONTENT_WIDTH);
+    widths.forEach((w, i) => expect(w).toBeCloseTo(expected[i], 2));
+  });
+
+  it("splits an even grid evenly whatever the margins are", () => {
+    for (const marginTw of [0, 200, 500]) {
+      const widths = renderedWidths(layout(pctGrid([3000, 3000, 3000], 90, marginTw)));
+      expect(widths[0]).toBeCloseTo(widths[1], 4);
+      expect(widths[1]).toBeCloseTo(widths[2], 4);
+      expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(0.9 * CONTENT_WIDTH, 2);
+    }
+  });
+
+  it("keeps a column narrower than its own margins at a positive width", () => {
+    // KNOWN GAP: Word floors the content share instead of collapsing it. On
+    // this grid Word paints 56/56/1009 device px at 192 DPI against an
+    // unfloored model's 53.3/53.3/1014.3, which brackets the floor at 20-30tw;
+    // the 25tw the engine uses reproduces the probe to 0.3px. The absolute
+    // numbers below are this section's 9360tw column rather than the probe's
+    // slightly narrower one, so they pin the floor's SHAPE — a real value is
+    // due once a follow-up probe pins the floor itself.
+    const widths = renderedWidths(layout(pctGrid([100, 100, 10000], 90, 200)));
+    expect(widths[0]).toBeGreaterThan(2 * (200 / 15)); // past the bare margin pair
+    expect(widths[0]).toBeCloseTo(widths[1], 4);
+    expect(widths[0] * 2).toBeCloseTo(55.8, 0);
+    expect(widths[2] * 2).toBeCloseTo(1011.5, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Cell margins
 // ---------------------------------------------------------------------------
 
