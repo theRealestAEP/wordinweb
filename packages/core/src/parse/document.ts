@@ -2299,15 +2299,17 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
         const rel = rid ? ctx.rels.get(rid) : undefined;
         if (rel && !rel.external) {
           const style = parseVmlStyle(el.attrs["style"]);
-          // Word draws a VML pict at its style extent rounded to WHOLE POINTS
-          // (both axes). Measured in wild2-math-eq-as-images-word.pdf: every
-          // equation raster lands on integer pt (31.45->31, 49.65->50,
-          // 57.4->57, 120.75->121, 290.75->291, 382.8->383). The height side
-          // decides docGrid rows (31.45pt would take 3 x 15.6pt pitches, the
-          // rounded 31pt takes Word's observed 2), so round at parse time.
-          const wholePt = (px: number) => Math.round((px * 3) / 4) * (4 / 3);
-          const width = wholePt(vmlLength(style.get("width")) || 100);
-          const height = wholePt(vmlLength(style.get("height")) || 100);
+          // Word draws a VML pict at its style extent, unrounded. An earlier
+          // rule rounded both axes to whole points; it was measured against a
+          // stale wild2-math-eq-as-images reference whose Word build placed
+          // every raster on integer pt. The re-exported reference places them
+          // on quarter-points (31.45->31.50, 39.65->39.75, 15.05->14.75), and
+          // the raw style extent predicts Word's docGrid row count for every
+          // image in that file while the rounded one does not: a 31.45pt
+          // equation needs 3 x 15.6pt pitches, and rounding it to 31pt bought
+          // 2, losing a whole pitch on the document's most common equation.
+          const width = vmlLength(style.get("width")) || 100;
+          const height = vmlLength(style.get("height")) || 100;
           if (style.get("position") === "absolute") {
             // Floating VML picture — Word's picture watermark (Design >
             // Watermark > Picture). Takes NO height in the header/body flow;

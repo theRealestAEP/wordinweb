@@ -367,14 +367,18 @@ describe("layout engine", () => {
   });
 
   it("lays a docGrid equation-image line as whole grid pitches, centered, with w:position lowering the image", () => {
-    // wild2-math-eq-as-images eq(48): a 290.75x57.4pt VML pict (rounds to
-    // 291x57pt) on run position -47hp (-23.5pt) in a linePitch=312 (15.6pt)
-    // grid with spacing 348 atLeast. Word's PDF: the line takes 4 pitches
-    // (62.4pt = 83.2px), the image spans 33.5pt above / 23.5pt below the
-    // baseline, and the image top sits (62.4-57)/2 = 2.7pt below the line
-    // top (shading rect 643.44 vs image top 640.75). A 50.6x31.45pt pict at
-    // position -22hp rounds to 31pt and takes exactly 2 pitches (31.2pt) -
-    // unrounded 31.45pt would wrongly take 3.
+    // wild2-math-eq-as-images eq(48): a 290.75x57.4pt VML pict on run
+    // position -47hp (-23.5pt) in a linePitch=312 (15.6pt) grid with spacing
+    // 348 atLeast. Word's PDF: the line takes 4 pitches (62.4pt = 83.2px),
+    // the image spans 33.5pt above / 23.5pt below the baseline, and the image
+    // top sits (62.4-57.4)/2 below the line top.
+    // A 31.45pt pict takes THREE pitches, not two: it is 0.25pt over the
+    // 2-pitch bound of 31.2pt. Pinned on page 2 of the re-exported reference,
+    // where the two 31.45pt equations at position -23hp ((9) and (6), both
+    // before/after 156tw) place their image tops 72.67px apart = 3 pitches
+    // (62.4px) plus the 10.4px paragraph spacing. Rounding the extent to a
+    // whole 31pt bought 2 pitches and lost 20.8px on every such line - the
+    // document's most common equation height, ~12 lines of it.
     const rels = `<?xml version="1.0"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/eq.png"/>
@@ -406,18 +410,19 @@ describe("layout engine", () => {
     expect(images).toHaveLength(2);
     if (labels[0].kind !== "text" || labels[1].kind !== "text" || images[0].kind !== "image" || images[1].kind !== "image") return;
     const pitch = 20.8; // 312tw in px
-    // eq48: extent = rounded 57pt image (76px) -> 4 pitches.
-    expect(images[0].height).toBeCloseTo(76, 3);
+    const eq48H = 57.4 * (4 / 3);
+    // eq48: extent = the 57.4pt image -> 4 pitches.
+    expect(images[0].height).toBeCloseTo(eq48H, 3);
     expect(labels[0].lineHeight).toBeCloseTo(4 * pitch, 3);
     // Centered: image top = line top + (H - extent)/2 (paint baselines
     // quantize to quarter-points, so allow 0.5px).
-    expect(images[0].y - labels[0].lineTop).toBeCloseTo((4 * pitch - 76) / 2, 0);
+    expect(images[0].y - labels[0].lineTop).toBeCloseTo((4 * pitch - eq48H) / 2, 0);
     // The lowered image hangs 23.5pt (31.33px) below the label baseline.
     const baseline48 = labels[0].baseline;
     expect(images[0].y + images[0].height - baseline48).toBeCloseTo(23.5 * (4 / 3), 1);
-    // eq76: 31.45pt rounds to 31pt (41.33px) -> exactly 2 pitches.
-    expect(images[1].height).toBeCloseTo(31 * (4 / 3), 3);
-    expect(labels[1].lineHeight).toBeCloseTo(2 * pitch, 3);
+    // eq76: 31.45pt clears the 2-pitch bound of 31.2pt -> 3 pitches.
+    expect(images[1].height).toBeCloseTo(31.45 * (4 / 3), 3);
+    expect(labels[1].lineHeight).toBeCloseTo(3 * pitch, 3);
   });
 
   it("preserves a section line-grid opt-out through column balancing", () => {

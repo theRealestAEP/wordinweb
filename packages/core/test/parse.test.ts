@@ -55,14 +55,15 @@ describe("document parsing", () => {
     if (para.type !== "paragraph") throw new Error("expected paragraph");
     const objectRun = para.children[1];
     if (objectRun.type !== "run") throw new Error("expected run");
-    // VML pict extents round to whole points (56.5 -> 57pt, 21.4 -> 21pt):
-    // Word's PDF draws every wild2-math-eq-as-images equation raster at
-    // integer pt (31.45->31, 49.65->50, 120.75->121, 290.75->291).
+    // A VML pict keeps its style extent unrounded (56.5pt, 21.4pt). An
+    // earlier rule rounded both axes to whole points; it was measured on a
+    // stale wild2-math-eq-as-images reference, and the re-exported one places
+    // the same rasters on quarter-points instead (31.45->31.50, 15.05->14.75).
     expect(objectRun.content[0]).toMatchObject({
       kind: "image",
       part: "word/media/equation.wmf",
-      width: 76,
-      height: 28,
+      width: 56.5 * (4 / 3),
+      height: 21.4 * (4 / 3),
     });
   });
 
