@@ -294,8 +294,26 @@ export function textWidth(text: string, size: number): number {
 
 const EDGE_PAD = 6;
 const SWATCH = 10;
-const LEGEND_GAP = 16;
 const TICK_GAP = 5;
+
+/**
+ * Clear space Word keeps between the plot's right edge and a side legend,
+ * beyond the tick allowance and edge inset that edge already gives up.
+ *
+ * probe-charts-basic's LINE page, read off the Word PDF's gridlines with
+ * fitz get_drawings() (parity commit a5b5383). The chart space agrees
+ * exactly, so everything below is in its local px:
+ *
+ *                    plot right      legend key      Alpha text
+ *   Word                 375.62          410.02          433.48
+ *   ours, before         396.71          415.33          431.33
+ *
+ * Word leaves 34.4 px between plot and legend where we left 18.62, and 18.62
+ * is exactly what the tick allowance (textSize/2) and the edge inset already
+ * spend. So the missing clearance is this 16, and it lands the plot's right
+ * edge at 375.38 against Word's 375.62.
+ */
+const LEGEND_GAP = 16;
 
 /**
  * Baseline-to-baseline distance in a legend, as a multiple of the chart text
@@ -348,14 +366,23 @@ export function chartFrame(spec: ChartFrameSpec): ChartFrame {
   }
 
   let legend: (Rect & { vertical: boolean }) | undefined;
+  /** The edge a vertical legend took, so the plot can clear it below. */
+  let legendSide: "l" | "r" | undefined;
   if (spec.legend && spec.legendLabels.length) {
     const vertical = spec.legend === "l" || spec.legend === "r" || spec.legend === "tr";
     if (vertical) {
-      const width = SWATCH + 6 + Math.max(...spec.legendLabels.map((label) => textWidth(label, spec.textSize))) + 8;
+      // Word's band on the line page, from its key at 410.02 to the chart
+      // box's own pad: a key segment of the swatch plus one text size (23.46
+      // measured, 23.33 here), the longest label, then EDGE_PAD of trailing.
+      // That puts our key at 410.00.
+      const keySegment = SWATCH + spec.textSize;
+      const width =
+        keySegment + Math.max(...spec.legendLabels.map((label) => textWidth(label, spec.textSize))) + EDGE_PAD;
       const height = spec.legendLabels.length * spec.textSize * LEGEND_LINE_SPACING;
       const x = spec.legend === "l" ? left : right - width;
       const y = spec.legend === "tr" ? top : top + Math.max((bottom - top - height) / 2, 0);
       legend = { x, y, width, height, vertical };
+      legendSide = spec.legend === "l" ? "l" : "r";
       if (spec.legend === "l") left += width; else right -= width;
     } else {
       const height = spec.textSize * LEGEND_LINE_SPACING;
@@ -391,6 +418,16 @@ export function chartFrame(spec: ChartFrameSpec): ChartFrame {
     right -= spec.width * PLOT_EDGE_INSET;
     top += spec.height * PLOT_EDGE_INSET;
     bottom -= spec.height * PLOT_EDGE_INSET;
+    // Clear the side legend. Scoped to a VERTICAL value axis, which is where
+    // the line page measured it: the bar page (horizontal values, same box
+    // and same Alpha/Beta legend) reads Word's plot only 2.83px narrower than
+    // ours, so the two probe pages disagree about this edge by ~13px and no
+    // single reservation fits both. The bar figure predates the gridline
+    // method the line page used and is the one to re-read; until then this
+    // stays on the axis orientation that measured it.
+    if (legendSide && !spec.horizontalValues) {
+      if (legendSide === "l") left += LEGEND_GAP; else right -= LEGEND_GAP;
+    }
   }
 
   return {

@@ -308,8 +308,9 @@ describe("native chart DOM rendering", () => {
       .map((marker) => Number(marker.getAttribute("d")!.match(/-?[\d.]+/)![0]));
     expect(xs).toHaveLength(3);
     // x = 1, 2, 4 puts the third point twice as far from the second as the
-    // second is from the first.
-    expect(xs[2] - xs[1]).toBeCloseTo((xs[1] - xs[0]) * 2, 6);
+    // second is from the first. These come back out of a `d` written with
+    // toFixed(3), so a difference of two of them carries 0.002 of rounding.
+    expect(xs[2] - xs[1]).toBeCloseTo((xs[1] - xs[0]) * 2, 2);
   });
 
   it("fills an area chart down to the baseline", () => {

@@ -258,12 +258,64 @@ describe("chart frame", () => {
 
     // The column page went 161.0 -> 150.24pt against Word's 150.2.
     expect(column.plot.height / pt).toBeCloseTo(150.24, 2);
-    // The bar page gives up the measured 17.9pt, landing at 266.92pt. The
-    // extraction read our own render of this page 2.15pt under what this
-    // function computes, so the difference is what the fit closes and Word's
-    // absolute 264.8 sits that same 2.1pt below.
-    expect(bar.plot.width / pt).toBeCloseTo(266.92, 2);
-    expect(284.85 - bar.plot.width / pt).toBeCloseTo(17.9, 1);
+    // The bar page reads 262.92pt against Word's 264.8. Its give-up is no
+    // longer the edge inset alone - the widened legend band now takes 4pt of
+    // it - so the standing assertion is the absolute, which the band change
+    // moved 2.12pt closer to Word rather than away.
+    expect(bar.plot.width / pt).toBeCloseTo(262.92, 2);
+    expect(Math.abs(bar.plot.width / pt - 264.8)).toBeLessThan(2.12);
+  });
+
+  it("clears a side legend by the width Word left on the probe's line page", () => {
+    // probe-charts-basic's line page (parity a5b5383). Both engines put the
+    // chart box at 134.99, 96.00 .. 614.99, 384.00, so Word's page px come
+    // into the box's local frame by subtracting that origin. Word leaves
+    // 34.4px between its plot right (local 375.62) and its legend key
+    // (410.02); we left 18.62 and put the key at 415.33, overrunning where
+    // Word's plot had already stopped by 21.09.
+    const pt = 96 / 72;
+    const ox = 134.99;
+    const oy = 96;
+    const line = chartFrame({
+      width: 480,
+      height: 288,
+      titleSize: 18 * pt,
+      textSize: 10 * pt,
+      title: "Line",
+      legend: "r" as const,
+      legendLabels: ["Alpha", "Beta"],
+      valueLabels: ["0", "2", "4", "6", "8", "10", "12"],
+      categoryLabels: ["Q1", "Q2", "Q3", "Q4"],
+      horizontalValues: false,
+      axes: true,
+    });
+    const plotRight = line.plot.x + line.plot.width;
+    expect(plotRight).toBeCloseTo(510.61 - ox, 0);
+    expect(line.legend!.x).toBeCloseTo(545.01 - ox, 0);
+    expect(line.legend!.x - plotRight).toBeCloseTo(34.4, 0);
+    // The probe's vertical is closed and this must not disturb it: Word's
+    // 150.40 .. 350.71 against our measured 1.44 / 1.45 below, height to 0.01.
+    expect(line.plot.y - (150.4 - oy)).toBeCloseTo(1.44, 1);
+    expect(line.plot.y + line.plot.height - (350.71 - oy)).toBeCloseTo(1.45, 1);
+    expect(line.plot.height).toBeCloseTo(200.31, 1);
+    // The left edge keeps its own +5.60. Nothing here addresses it.
+    expect(line.plot.x - (170.2 - ox)).toBeCloseTo(5.6, 1);
+  });
+
+  it("leaves a pie's plot rect to its title and legend alone", () => {
+    // A pie sets axes: false, so it takes neither the edge inset nor the
+    // legend clearance - only the band itself. No probe measures Word's pie
+    // plot rect, so this pins the shape rather than a measurement.
+    const bare = chartFrame({ ...base, axes: false });
+    expect(bare.plot).toEqual({ x: 6, y: 6, width: 468, height: 276 });
+    const withLegend = chartFrame({
+      ...base,
+      axes: false,
+      legend: "r",
+      legendLabels: ["Alpha", "Beta"],
+    });
+    expect(withLegend.plot.x).toBe(6);
+    expect(withLegend.plot.x + withLegend.plot.width).toBeCloseTo(withLegend.legend!.x, 6);
   });
 });
 
