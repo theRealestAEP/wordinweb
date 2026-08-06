@@ -4081,9 +4081,12 @@ describe("wild2 legal agreement rules", () => {
     expect(textItem(result, "Body").x).toBeCloseTo(66, 1);
   });
 
-  it("gives a document-opening empty paragraph before a table two mark lines", () => {
-    // PDF-measured on wild2-legal p1: the top table's grid sits at margin +
-    // two mark line heights; the same construct mid-flow takes one line.
+  it("gives a document-opening empty paragraph before a table ONE mark line", () => {
+    // Re-measured on the current-build wild2-legal-ca-agreement reference: the
+    // letterhead table's first exact row is 260tw = 17.33px and the rule under
+    // it sits at 131.71, so Word's table top is 114.38 against a body top of 96
+    // - one 18.4px mark line, not two. The two-line reading came from the stale
+    // 23-page export and cost that document a phantom page.
     const emptyPara = `<w:p><w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:pPr></w:p>`;
     const table =
       `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
@@ -4091,8 +4094,8 @@ describe("wild2 legal agreement rules", () => {
       `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>CELL</w:t></w:r></w:p></w:tc></w:tr>` +
       `</w:tbl><w:p/>`;
     const { result } = layout({ "word/document.xml": wrapDocument(emptyPara + table + SECT) });
-    // margin 96px + 2 x (12pt = 16px x 1.15 = 18.4px) = 132.8px
-    expect(textItem(result, "CELL").lineTop).toBeCloseTo(96 + 2 * 18.4, 1);
+    // margin 96px + 12pt = 16px x 1.15 = 18.4px = 114.4px
+    expect(textItem(result, "CELL").lineTop).toBeCloseTo(96 + 18.4, 1);
   });
 });
 

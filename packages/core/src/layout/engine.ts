@@ -1062,10 +1062,10 @@ class Engine {
     return result;
   }
 
-  /** Some document-opening empty paragraphs reserve a second mark line for
-   * pagination while the following content paints over it on page one. Keep
-   * the reservation in flow so later page breaks stay unchanged, then lift
-   * only the painted first-page body. */
+  /** A document-opening empty paragraph under a grown header reserves a second
+   * mark line for pagination while the following content paints over it on
+   * page one. Keep the reservation in flow so later page breaks stay
+   * unchanged, then lift only the painted first-page body. */
   private applyOpeningFlowOverlap(): void {
     const opening = this.doc.sections[0]?.blocks[0];
     const next = this.doc.sections[0]?.blocks[1];
@@ -1079,8 +1079,6 @@ class Engine {
     ) {
       return;
     }
-    const beforeNegativeTable =
-      next?.type === "table" && (next.props.indent ?? 0) < 0;
     const header = this.doc.headers.get(page.headerRel ?? "");
     const headerAnchors = header?.blocks.flatMap((block) =>
       block.type === "paragraph" ? this.collectAnchors(block) : [],
@@ -1092,19 +1090,16 @@ class Engine {
       headerAnchors.every(
         (shape) => !("wrap" in shape) || shape.wrap === undefined || shape.wrap === "none",
       );
-    if (!beforeNegativeTable && !beforeParagraphUnderUnwrappedHeader) return;
+    if (!beforeParagraphUnderUnwrappedHeader) return;
     const firstBodyItem = page.items.findIndex(
       (item) => item.kind !== "text" || item.text.length > 0,
     );
     if (firstBodyItem < 0) return;
     const paraProps = this.doc.effectiveParaProps(opening);
     const markProps = this.doc.effectiveRunProps(opening, paraProps.markRunProps ?? {});
-    let overlap = this.measurer.metrics(
-      fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"),
-    ).lineHeight;
-    if (beforeParagraphUnderUnwrappedHeader) {
-      overlap += paraProps.spacingAfter ?? 0;
-    }
+    const overlap =
+      this.measurer.metrics(fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"))
+        .lineHeight + (paraProps.spacingAfter ?? 0);
     for (let i = firstBodyItem; i < page.items.length; i++) {
       offsetItem(page.items[i], 0, -overlap);
     }
@@ -3184,28 +3179,35 @@ class Engine {
           }
           return;
         }
-        // PDF-measured (wild2-legal-ca-agreement p1, wild2-med-phase23 p1): the empty
-        // paragraph that OPENS the document can take two slots in Word.
-        // Before a table this reserves two mark lines for pagination; a
-        // negatively-indented table visually overlaps the second line (handled
-        // when the table is painted below). Before a paragraph the doubling
-        // only happens when the HEADER OUTGREW the top margin, and then
-        // includes the mark's spacing-after too:
-        // phase23's first body baseline is at grown bodyTop + 2 x (13.4 line
-        // + 6 after) + ascent (179.05), while its continuation pages start
-        // exactly at bodyTop (140.30). An empty opener before a paragraph
-        // under a NORMAL header takes ONE slot (wild-athabasca p1), and the
-        // same construct mid-flow takes ONE line (wild2-legal-ca-agreement's p14/p22
-        // signature tables match at a single mark line) - gate on the true
-        // document start: first page, nothing placed yet.
+        // PDF-measured (wild2-med-phase23 p1): the empty paragraph that OPENS
+        // the document takes two slots in Word when the HEADER OUTGREW the top
+        // margin, and then includes the mark's spacing-after too: phase23's
+        // first body baseline is at grown bodyTop + 2 x (13.4 line + 6 after)
+        // + ascent (179.05), while its continuation pages start exactly at
+        // bodyTop (140.30). An empty opener before a paragraph under a NORMAL
+        // header takes ONE slot (wild-athabasca p1), and the same construct
+        // mid-flow takes ONE line (wild2-legal-ca-agreement's p14/p22 signature
+        // tables match at a single mark line) - gate on the true document
+        // start: first page, nothing placed yet.
+        //
+        // A doubling BEFORE A TABLE used to be applied here too, cited to
+        // wild2-legal-ca-agreement p1. That is retracted: the reference it was
+        // read from was the stale 23-page export, and the current-build one
+        // puts the opener at ONE line. Word's own letterhead table on that
+        // page starts at 114.38 - the row-2 cell-top rule sits at 131.71 and
+        // the exact row above it is 260tw = 17.33px - against a body top of
+        // 96, so Word charges 18.38px where the opener's mark line is 18.40.
+        // The second line was never painted either: applyOpeningFlowOverlap
+        // lifted the whole first-page body back up by exactly the same amount,
+        // so the reservation only ever moved the FLOW, and it moved it far
+        // enough to spill the document's break-only paragraph onto a 23rd page.
         const docStartEmpty =
           this.pages.length === 1 &&
           this.cur.items.length === 0 &&
           i === 0 &&
           !block.sectionBreak &&
           !paragraphHasContent(block);
-        const beforeTable = blocks[i + 1]?.type === "table";
-        const doubled = docStartEmpty && (beforeTable || this.cur.headerGrown === true);
+        const doubled = docStartEmpty && this.cur.headerGrown === true;
         // A page/margin-anchored floating table LATER in the flow reflows the
         // content before it: register its wrap rect now so this paragraph (and
         // following ones) flow around the absolute footprint (probe3-table-
@@ -3235,9 +3237,7 @@ class Engine {
           this.y += this.measurer.metrics(
             fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"),
           ).lineHeight;
-          // The table case is pinned WITHOUT the after (wild2-legal-ca-agreement's 2 x 13.8
-          // exactly); the paragraph case needs it (phase23's 2 x 19.4).
-          if (!beforeTable) this.y += paraProps.spacingAfter ?? 0;
+          this.y += paraProps.spacingAfter ?? 0; // phase23's 2 x 19.4
         }
       } else {
         this.placeTable(block);
