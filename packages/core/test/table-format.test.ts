@@ -661,19 +661,25 @@ describe("percentage column distribution", () => {
     }
   });
 
-  it("keeps a column narrower than its own margins at a positive width", () => {
-    // KNOWN GAP: Word floors the content share instead of collapsing it. On
-    // this grid Word paints 56/56/1009 device px at 192 DPI against an
-    // unfloored model's 53.3/53.3/1014.3, which brackets the floor at 20-30tw;
-    // the 25tw the engine uses reproduces the probe to 0.3px. The absolute
-    // numbers below are this section's 9360tw column rather than the probe's
-    // slightly narrower one, so they pin the floor's SHAPE — a real value is
-    // due once a follow-up probe pins the floor itself.
+  it("floors a column narrower than its own margins at margins + 1pt", () => {
+    // A column authored under its own margins keeps 1pt of content instead of
+    // collapsing: with 400tw of margins the floor sweep plateaus at 420tw.
     const widths = renderedWidths(layout(pctGrid([100, 100, 10000], 90, 200)));
-    expect(widths[0]).toBeGreaterThan(2 * (200 / 15)); // past the bare margin pair
-    expect(widths[0]).toBeCloseTo(widths[1], 4);
-    expect(widths[0] * 2).toBeCloseTo(55.8, 0);
-    expect(widths[2] * 2).toBeCloseTo(1011.5, 0);
+    expect(widths[0]).toBeCloseTo(420 / 15, 6);
+    expect(widths[1]).toBeCloseTo(420 / 15, 6);
+    // What the two floored columns take over their share comes out of the one
+    // still above the floor, so the row still totals the percentage width.
+    expect(widths[2]).toBeCloseTo((0.9 * 9360 - 2 * 420) / 15, 6);
+    expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(0.9 * CONTENT_WIDTH, 6);
+  });
+
+  it("raises the floor with the margins rather than by a fixed width", () => {
+    // The sweep plateaus at 818tw under 800tw margins, so the floor tracks the
+    // margins; margins + 20tw takes that within 2tw, a quarter of a device
+    // pixel at 192 DPI.
+    const widths = renderedWidths(layout(pctGrid([100, 100, 10000], 90, 400)));
+    expect(widths[0]).toBeCloseTo(820 / 15, 6);
+    expect(Math.abs(widths[0] - 818 / 15) * 2).toBeLessThan(1); // within 1 device px
   });
 });
 

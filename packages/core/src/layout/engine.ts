@@ -8896,25 +8896,28 @@ function spreadSpan(target: number[], floor: number, at: number, span: number, d
  *
  * Word reads each gridCol as a FULL column width with the horizontal cell
  * margins already inside it, so only the CONTENT part of a column takes part
- * in the scaling:
+ * in the scaling, and no column paints narrower than its margins plus 1pt:
  *
- *   painted[i] = margins + (grid[i] − margins) / Σ(grid[j] − margins)
- *                          × (tableWidth − n × margins)
+ *   inner[i]   = max(grid[i] − margins, 0)
+ *   painted[i] = max(margins + inner[i] / Σ(inner) × (tableWidth − n × margins),
+ *                    margins + 20tw)
  *
- * Probed through desktop Word over 10 percentage tables (probe-pctcolumn.docx
- * and its generator in the parity repo, commit ffba22b): this lands within 1px
- * of Word on 9 of the 10 where strict proportional scaling is out by as much as
- * 45px. Cell CONTENT plays no part — an empty middle cell and a wrapping one
- * paint identically. At zero margins the two formulas coincide, which is why
- * the zero-margin fixtures were right all along.
+ * with what a floored column takes over its share coming out of the columns
+ * still above the floor. `margins` is the table's total horizontal cell margin
+ * per column.
  *
- * KNOWN GAP: when grid[i] − margins goes non-positive (a column authored
- * narrower than its own margins) Word floors the content share at a small
- * positive width instead of collapsing it. On a 100/100/10000 grid with 400tw
- * margins Word paints 56/56/1009 device px where an unfloored model gives
- * 53/53/1014; a 25tw floor reproduces 55.8/55.8/1009.3. That 25tw is the middle
- * of the 20–30tw the measurement brackets, not a pinned value — a follow-up
- * probe is due.
+ * Probed through desktop Word: 10 percentage tables for the split
+ * (probe-pctcolumn.docx and its generator in the parity repo, commit ffba22b)
+ * and a two-margin sweep for the floor (commit 4a37be5), exact within 1px on
+ * every case across both. Strict proportional scaling, which this replaces, is
+ * out by as much as 45px. Cell CONTENT plays no part — an empty middle cell and
+ * a wrapping one paint identically. At zero margins the split collapses to the
+ * proportional one, which is why the zero-margin fixtures were right all along.
+ *
+ * The floor rides on the margins rather than being an absolute width: the sweep
+ * plateaus at 420tw under 400tw margins and 818tw under 800tw. The 20tw here
+ * takes the first reading exactly and the second within 2tw, a quarter of a
+ * device pixel at 192dpi and so under the sweep's own resolution.
  */
 function distributePctColumns(grid: number[], tableWidth: number, margins: number): number[] {
   const room = tableWidth - grid.length * margins;
@@ -8923,10 +8926,39 @@ function distributePctColumns(grid: number[], tableWidth: number, margins: numbe
     const total = grid.reduce((a, b) => a + b, 0);
     return grid.map((w) => (w * tableWidth) / total);
   }
-  const minContent = 25 / 15; // 25tw, the provisional floor above
-  const content = grid.map((w) => Math.max(minContent, w - margins));
-  const sum = content.reduce((a, b) => a + b, 0);
-  return content.map((c) => margins + (c * room) / sum);
+  const floorRoom = 20 / 15; // the 1pt a floored column keeps for its content
+  const inner = grid.map((w) => Math.max(0, w - margins));
+  const floored = new Array<boolean>(grid.length).fill(false);
+  let widths = grid.map(() => margins);
+  // Each pass splits the room left over from the already-floored columns; a
+  // column that lands under the floor joins them and the pass repeats.
+  for (let pass = 0; pass < grid.length; pass++) {
+    let freeRoom = room;
+    let freeInner = 0;
+    let freeCols = 0;
+    for (let i = 0; i < grid.length; i++) {
+      if (floored[i]) freeRoom -= floorRoom;
+      else {
+        freeInner += inner[i];
+        freeCols++;
+      }
+    }
+    if (freeCols === 0) return grid.map(() => margins + floorRoom);
+    widths = grid.map((_, i) =>
+      floored[i]
+        ? margins + floorRoom
+        : margins + (freeInner > 0 ? (inner[i] * freeRoom) / freeInner : freeRoom / freeCols),
+    );
+    let sank = false;
+    for (let i = 0; i < grid.length; i++) {
+      if (!floored[i] && widths[i] < margins + floorRoom) {
+        floored[i] = true;
+        sank = true;
+      }
+    }
+    if (!sank) break;
+  }
+  return widths;
 }
 
 function resolveGrid(
