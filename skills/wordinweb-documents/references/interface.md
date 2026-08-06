@@ -733,6 +733,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertDateTimeField` | Insert a DATE or TIME field | `runRef`, `dtKind`, `picture` |
 | `insertField` | Insert an allowlisted Word field | `runRef`, `instruction`; optional: `cachedResult` |
 | `insertTable` | Insert a table | `runRef`, `rows`, `cols` |
+| `insertToc` | Insert a table of contents built from the document's headings | `runRef`, `entryCount`, `levels`, `leader` |
 
 ### Drawing
 
@@ -845,6 +846,28 @@ of the style's conditional formats are used.
 Applying a character style is a run-patch property rather than an operation of
 its own, so it splits the run at a partial range exactly as the other
 properties do.
+
+### Table of contents (`insertToc`)
+
+```ts
+{
+  runRef: string;       // a run in the paragraph the TOC goes after
+  entryCount: number;   // 1-10000; how many entries the TOC will have
+  levels?: [number, number];   // outline levels, default [1, 3]
+  leader?: "dot" | "hyphen" | "underscore" | "none";   // default "dot"
+}
+```
+
+`entryCount` is an ID BUDGET, not an instruction. A TOC's size comes from the
+document — one entry per qualifying heading — while every other insert's size
+comes from its own arguments, so the operation cannot size its carried id
+allocation without being told. Send `tocEntryCount(doc, options)`; the mutation
+still builds its entries from the document's own headings. Too large is
+harmless, too small leaves the last entries without replicated ids.
+
+Page numbers land as placeholders. They come from a layout, and a layout
+depends on the host's font metrics, so they are the value `updateFields`
+exists to carry rather than recompute — run the update pass to fill them in.
 
 ### Style spec (`createStyle.style`)
 

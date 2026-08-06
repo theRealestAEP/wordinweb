@@ -106,6 +106,7 @@ import {
   computeFieldResults,
   findTocFields,
   insertToc,
+  tocEntryCount,
   rebuildToc,
   type TocOptions,
   createMeasurer,
@@ -209,10 +210,13 @@ export interface DocxViewApi {
    */
   updateFields(values?: { fileName?: string; author?: string }): boolean;
   /**
-   * Insert a native Word table of contents at the caret, with its page numbers
-   * already filled in. False in a shared document: a TOC adds a paragraph per
-   * heading and this engine has no wire intent carrying that, so inserting one
-   * locally would diverge the room.
+   * Insert a native Word table of contents at the caret.
+   *
+   * Outside a room the page numbers are filled in immediately, from a layout
+   * this call runs. IN a room the entries land with placeholders: page numbers
+   * come from a layout, a layout depends on the host's font metrics, and that
+   * is precisely the value `updateFields` carries as data instead of letting
+   * each replica recompute it. Run the update pass to fill them.
    */
   insertToc(options?: TocOptions): boolean;
   /**
@@ -1819,7 +1823,19 @@ export function DocxView({
             return true;
           },
           insertToc: (options) => {
-            if (collabRef.current?.submitOp) return false;
+            // In a room the entries land with PLACEHOLDER page numbers. The
+            // real ones come from a layout, which depends on this host's font
+            // metrics, so they are the value updateFields carries as data
+            // rather than a value a replica may recompute for itself.
+            if (
+              collabRunOperation("insertToc", {
+                entryCount: tocEntryCount(doc, options),
+                ...(options?.levels ? { levels: options.levels } : {}),
+                ...(options?.leader ? { leader: options.leader } : {}),
+              })
+            ) {
+              return true;
+            }
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();

@@ -143,8 +143,8 @@ export {
   updateFields,
 } from "./edit/update-fields.js";
 export type { FieldUpdateOptions } from "./edit/update-fields.js";
-export { TOC_EMPTY_TEXT, findTocFields, insertToc, rebuildToc } from "./edit/toc.js";
-export type { TocLevels, TocOptions } from "./edit/toc.js";
+export { TOC_EMPTY_TEXT, TOC_LEADERS, findTocFields, insertToc, rebuildToc, tocEntryCount } from "./edit/toc.js";
+export type { TocLeader, TocLevels, TocOptions } from "./edit/toc.js";
 export {
   drawingFillColor,
   drawingLineStyle,

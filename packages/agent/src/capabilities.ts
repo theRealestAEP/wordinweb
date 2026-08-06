@@ -1,4 +1,4 @@
-import { registeredOperationCapabilities, STYLE_TYPES, type RegisteredOperationKind } from "@wordinweb/core";
+import { registeredOperationCapabilities, STYLE_TYPES, TOC_LEADERS, type RegisteredOperationKind } from "@wordinweb/core";
 import { INTENT_KINDS, type Intent } from "@wordinweb/collab/client";
 
 export interface AgentEditCapability {
@@ -386,6 +386,15 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setTableColumnWidth.colIdx": integer(0, 200),
   "setTableColumnWidth.widthPt": number(1, 1584),
   "setTableHeaderRows.count": integer(0, 5000),
+  // A TOC's size is document-derived, so entryCount is an id BUDGET the
+  // originator computes with tocEntryCount — see the operation's own comment.
+  "insertToc.entryCount": integer(1, 10000),
+  "insertToc.levels": {
+    type: "array",
+    minItems: 2,
+    maxItems: 2,
+    items: integer(1, 9),
+  },
   "createStyle.style": styleSpec,
   "modifyStyle.styleId": styleId,
   "modifyStyle.patch": stylePatch,
@@ -416,6 +425,7 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "setTableBorders.scope": ["cell", "table"],
   "setTableCellMargins.scope": ["cell", "table"],
   "setTableWidth.unit": ["pt", "pct", "auto"],
+  "insertToc.leader": [...TOC_LEADERS],
   "setTableLayout.layout": ["fixed", "autofit"],
 };
 

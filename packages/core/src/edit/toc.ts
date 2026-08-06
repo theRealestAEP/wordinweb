@@ -40,11 +40,17 @@ import { pxToTwips } from "../units.js";
 /** Levels a `\o` switch includes, e.g. [1, 3] for `\o "1-3"`. */
 export type TocLevels = [number, number];
 
+/** The tab leaders a TOC entry can draw. One list, so a validator and a
+ * schema cannot disagree about which exist. */
+export const TOC_LEADERS = ["dot", "hyphen", "underscore", "none"] as const;
+
+export type TocLeader = (typeof TOC_LEADERS)[number];
+
 export interface TocOptions {
   /** Outline levels to include. Default [1, 3], Word's own default. */
   levels?: TocLevels;
   /** Tab leader between an entry's title and its page number. */
-  leader?: "dot" | "hyphen" | "underscore" | "none";
+  leader?: TocLeader;
 }
 
 /** What Word shows for a TOC over a document with no qualifying headings. */
@@ -239,6 +245,24 @@ function paragraphOf(doc: DocxDocument, node: XmlElement): XmlElement | undefine
   let current: XmlElement | undefined = node;
   while (current && localName(current.name) !== "p") current = doc.findParentOf(current);
   return current;
+}
+
+/**
+ * How many entry paragraphs `insertToc` would produce for these options.
+ *
+ * A TOC's size is DOCUMENT-DERIVED — one entry per qualifying heading — but a
+ * replicated insert has to size its carried id allocation BEFORE it mutates
+ * anything, and the registry's `nodeIds` budget sees the payload rather than
+ * the document. The originator asks here and puts the answer in the intent,
+ * which is how the count reaches the budget.
+ *
+ * Zero headings still produces one paragraph: the "no entries found" text
+ * Word writes in place of an empty list.
+ */
+export function tocEntryCount(doc: DocxDocument, options: TocOptions = {}): number {
+  const [min, max] = options.levels ?? [1, 3];
+  if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max > 9 || min > max) return 0;
+  return Math.max(1, collectHeadings(doc, [min, max]).length);
 }
 
 /**

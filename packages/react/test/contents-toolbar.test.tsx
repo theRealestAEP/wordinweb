@@ -63,12 +63,15 @@ async function click(element: HTMLElement) {
   });
 }
 
-/** Mount a real editable view with the real toolbar above it. */
-async function mount() {
+/** Mount a real editable view with the real toolbar above it. Supply `collab`
+ * to mount IN A ROOM, where the api emits an intent instead of mutating. */
+async function mount(inRoom = false) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   const seen: { api: DocxViewApi | null; doc: DocxDocument | null } = { api: null, doc: null };
+  const intents: ({ kind: string } & Record<string, unknown>)[] = [];
+  let nextId = 900_000;
   const bar = document.createElement("div");
   document.body.appendChild(bar);
   const barRoot = createRoot(bar);
@@ -83,6 +86,19 @@ async function mount() {
         onLoad: (info: { document: DocxDocument }) => {
           seen.doc = info.document;
         },
+        ...(inRoom
+          ? {
+              collab: {
+                submit: (intent: unknown) => {
+                  intents.push(intent as { kind: string } & Record<string, unknown>);
+                },
+                submitOp: (intent: { kind: string } & Record<string, unknown>) => {
+                  intents.push(intent);
+                },
+                allocIds: (n: number) => Array.from({ length: n }, () => nextId++),
+              },
+            }
+          : {}),
       }),
     );
   });
@@ -102,6 +118,7 @@ async function mount() {
   await tick();
   return {
     bar,
+    intents,
     api: () => seen.api!,
     xml: () => serializeXml(seen.doc!.docRoot),
     unmount: async () => {
@@ -177,6 +194,34 @@ describe("Insert tab: the Contents menu", () => {
     doc.refresh();
     await pickContents(t.bar, "Update table of contents");
     expect(t.xml()).toContain("Materials");
+    await t.unmount();
+  });
+});
+
+describe("Insert tab: the Contents menu in a room", () => {
+  it("emits an insertToc intent instead of forking the room", async () => {
+    const t = await mount(true);
+    const before = t.xml();
+    await pickContents(t.bar, "Table of contents");
+    const toc = t.intents.find((intent) => intent.kind === "insertToc");
+    expect(toc, `insertToc among ${t.intents.map((i) => i.kind).join(", ")}`).toBeTruthy();
+    // The local document is NOT mutated: in a room the intent is the whole of
+    // the edit, and mutating here as well would apply the insert twice.
+    expect(t.xml()).toBe(before);
+    await t.unmount();
+  });
+
+  it("carries an entry budget sized from the document's own headings", async () => {
+    // THE NUMBER THE WIRE CANNOT DERIVE. Every other insert's size is in its
+    // arguments; a TOC's is in the document. This fixture has three headings
+    // inside the default levels 1-3, so the intent says three — and allocates
+    // eight ids per entry (the paragraph and its seven hyperlink runs) plus
+    // spares for the field runs and the closing paragraph.
+    const t = await mount(true);
+    await pickContents(t.bar, "Table of contents");
+    const toc = t.intents.find((intent) => intent.kind === "insertToc")!;
+    expect(toc.entryCount).toBe(3);
+    expect((toc.nodeIds as number[]).length).toBe(3 * 8 + 8);
     await t.unmount();
   });
 });

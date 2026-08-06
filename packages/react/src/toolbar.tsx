@@ -4324,8 +4324,9 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertPageNumber", feature: "pageNumber" },
   { command: "insertField", feature: "field" },
   // A table of contents IS a field, and it lands in the field group. It
-  // refuses in a room rather than emitting: one paragraph per heading is
-  // more structure than any current intent carries.
+  // emits like any other insert; the entry count rides in the payload so the
+  // carried id allocation can be sized for a mutation whose size comes from
+  // the document rather than from its arguments.
   { command: "insertToc", feature: "field" },
   { command: "insertDateTime", feature: "dateTime" },
   { command: "insertCrossReference", feature: "crossReference" },

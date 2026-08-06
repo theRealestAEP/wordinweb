@@ -22,6 +22,7 @@ import {
   type StylePatch,
 } from "./styles.js";
 import { suggestMeta } from "./suggest.js";
+import { TOC_LEADERS, insertToc, type TocLeader, type TocLevels } from "./toc.js";
 import { applyFieldResults } from "./update-fields.js";
 import {
   CELL_SCOPE_EDGES,
@@ -358,6 +359,68 @@ const updateFieldsOperation = defineOperation<{ results: string[] }>()({
     return null;
   },
   apply: ({ doc, payload }) => applyFieldResults(doc, payload.results, { createResultRuns: false }),
+});
+
+/**
+ * Insert a table of contents after the paragraph holding the anchor run.
+ *
+ * WHY THIS ONE CARRIES A COUNT. Every other insert's size comes from its own
+ * arguments — insertTable is rows×cols — but a TOC's size comes from the
+ * DOCUMENT: one entry paragraph per qualifying heading. The carried id
+ * allocation is sized by `nodeIds`, which sees the payload and not the
+ * document, so the originator asks `tocEntryCount` and sends the answer.
+ *
+ * `entryCount` is therefore a BUDGET, never an instruction: the mutation still
+ * derives its entries from the replica's own headings. Too large wastes ids
+ * harmlessly (the assignment stops at the shorter of the two lists); too small
+ * would leave the tail of the new paragraphs on locally-generated ids, which
+ * is why the budget rounds up. The two cannot disagree in practice because the
+ * operation applies at one sequenced position, where every replica's headings
+ * are the same.
+ *
+ * PAGE NUMBERS STAY PLACEHOLDERS in a room. They come from a layout, and a
+ * layout depends on the host's font metrics — exactly the value updateFields
+ * exists to CARRY rather than recompute. A user who wants them filled runs the
+ * update pass, whose results replicate as data.
+ */
+const insertTocOperation = defineOperation<{
+  runId: StableId;
+  levels?: TocLevels;
+  leader?: TocLeader;
+  entryCount: number;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertToc",
+  address: "run",
+  category: "insert",
+  description: "Insert a table of contents built from the document's headings.",
+  fields: [{ name: "entryCount" }, { name: "levels", optional: true }, { name: "leader", optional: true }],
+  // Per entry: the w:p plus the seven runs of its hyperlink. The spare covers
+  // the three field runs spliced into the first entry and the closing
+  // paragraph with its own run.
+  nodeIds: ({ entryCount }) =>
+    Number.isInteger(entryCount) && entryCount > 0 ? entryCount * 8 + 8 : 8,
+  validate: ({ entryCount, levels, leader }) => {
+    if (!Number.isInteger(entryCount) || entryCount < 1 || entryCount > 10000) {
+      return "insertToc: bad entryCount";
+    }
+    if (levels !== undefined) {
+      if (!Array.isArray(levels) || levels.length !== 2) return "insertToc: bad levels";
+      const [min, max] = levels;
+      if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max > 9 || min > max) {
+        return "insertToc: bad levels";
+      }
+    }
+    if (leader !== undefined && !TOC_LEADERS.includes(leader)) return "insertToc: bad leader";
+    return null;
+  },
+  apply: ({ doc, target, payload }) =>
+    target.t
+      ? insertToc(doc, target.t, {
+          ...(payload.levels ? { levels: payload.levels } : {}),
+          ...(payload.leader ? { leader: payload.leader } : {}),
+        })
+      : false,
 });
 
 // ---------------------------------------------------------------------------
@@ -928,6 +991,7 @@ const OPERATIONS = [
   resizeTableRowOperation,
   toggleCheckboxOperation,
   updateFieldsOperation,
+  insertTocOperation,
   createStyleOperation,
   modifyStyleOperation,
   deleteStyleOperation,
