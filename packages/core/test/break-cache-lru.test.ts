@@ -58,18 +58,23 @@ describe("break cache eviction", () => {
     // 1200 paragraphs, cache capped at 1000. The mount overflows the cap, so
     // eviction runs. The edit at 900 makes the relay walk blocks 900..1200 —
     // ~300 entries, comfortably inside the cap, so LRU must still serve them.
+    //
+    // Unwindowed, which is where full-span entries are the only thing the relay
+    // can be served from: every page is painted, so no block falls back to the
+    // metrics tier. break-cache-metrics-tier.test.ts covers the windowed path,
+    // where an edit's cost is bounded by the pages the relay paints instead.
     __setBreakCacheMax(1000);
     const body = Array.from({ length: 1200 }, (_, i) =>
       p(`para-${i} alpha bravo charlie delta echo foxtrot golf hotel india juliet`),
     ).join("");
     const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body) }));
     const measurer = new CountingMeasurer();
-    const first = layoutDocument(doc, { measurer, windowModel: true });
+    const first = layoutDocument(doc, { measurer });
     const mountCalls = measurer.calls;
 
     const inserted = splitParagraphAt(doc, 900);
     measurer.calls = 0;
-    layoutDocument(doc, { measurer, windowModel: true, prev: first, dirtyHint: inserted });
+    layoutDocument(doc, { measurer, prev: first, dirtyHint: inserted });
 
     // Only the edited paragraph and its neighbours need measuring; the rest of
     // the relay is served from cache. Measured: 24 calls with LRU eviction
