@@ -6408,6 +6408,10 @@ class Engine {
         totalPages: () => total,
         formatPageNumber: (n) => formatNumber(n, PAGE_FMT[sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
         styleRef: (name, lastOnPage) => this.resolveStyleRef(name, lastOnPage, page.physIndex),
+        // A REF names a body bookmark, so it reads the same on every page the
+        // header paints on. Word recomputes it on open here just as it does in
+        // the body, and the update pass caches the value it resolves to.
+        refText: (bookmark) => this.refBookmarkText(bookmark),
       };
       const header = this.doc.headers.get(page.headerRel ?? "");
       if (header && header.blocks.length > 0) {
