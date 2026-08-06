@@ -446,8 +446,31 @@ export interface CollabSession {
    * different message from having nothing to undo), and `unavailable` means
    * this connection has no collaborative undo at all — today the plaintext
    * connection, whose authority lives on the server.
+   *
+   * `queued` means the press was HELD until this user's own edits confirm,
+   * because the undo stack cannot see them yet — see {@link undoQueued}.
    */
   undoLast: () => UndoOutcome;
+  /**
+   * Undo presses waiting for this user's own edits to be confirmed. Typing
+   * and pressing Ctrl+Z before the edit round-trips would otherwise undo an
+   * OLDER action, so the press is held and runs on the drain.
+   *
+   * Nonzero is a transient, normal state — a room under load sits here for a
+   * round trip. Consumers can show that undo is on its way; they do not have
+   * to, because the undo does arrive.
+   */
+  undoQueued: number;
+  /**
+   * The held undos were DROPPED because the pending edits never confirmed —
+   * the connection stopped carrying writes, and reversing a stale action
+   * would have been worse than doing nothing.
+   *
+   * This one DOES need to be visible: the user pressed Ctrl+Z and nothing
+   * happened. It sits beside {@link writesBlocked} and {@link offline}, which
+   * carry the reason. Cleared by the next press.
+   */
+  undoExpired: boolean;
   agentConnections: AgentConnectionInfo[];
   agentChat: AgentChatEnvelope[];
   agentInviteError: { inviteId: string; reason: string } | null;
@@ -565,6 +588,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
   const [agentInviteError, setAgentInviteError] = useState<{ inviteId: string; reason: string } | null>(null);
   const [arrival, setArrival] = useState<{ mode: "replay" | "suggest" | "draft"; tailLength: number; structural: number } | null>(null);
   const [selfHeals, setSelfHeals] = useState(0);
+  const [undoQueue, setUndoQueue] = useState<{ queued: number; expired: boolean }>({ queued: 0, expired: false });
   const [droppedPreReady, setDroppedPreReady] = useState(0);
   const [persistErrors, setPersistErrors] = useState(0);
   /** Storage did not answer the connect-path read within its deadline.
@@ -1098,6 +1122,9 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       }),
       onAgentChat: (message) => setAgentChat((current) => [...current.slice(-199), message]),
       onSelfHeal: () => setSelfHeals((n) => n + 1),
+      // Held undos (see CollabSession.undoQueued): the count is authoritative
+      // in the connection, so it is copied rather than derived here.
+      onUndoQueue: (state) => setUndoQueue(state),
       // A submit that never left the client. Counted, never swallowed.
       onSubmitDropped: () => setDroppedPreReady((n) => n + 1),
       // Async failures with nowhere to return (seal, transport send). Surfaced
@@ -1393,9 +1420,16 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
     // at construction — a pre-existing modelling wrinkle, not this arc's), so
     // the access is structural. The TYPE is the real one now, so a change to
     // UndoOutcome breaks here rather than silently disagreeing.
-    undoLast: () => connectionRef.current === "live"
-      ? (connRef.current as Partial<{ undoLast: () => UndoOutcome }> | null)?.undoLast?.() ?? "unavailable"
-      : "unavailable",
+    undoLast: () => {
+      if (connectionRef.current !== "live") return "unavailable";
+      // A fresh press supersedes a dropped one (see undoExpired). The held
+      // path reports its own state through onUndoQueue; this line is for the
+      // press that runs straight away and fires no callback at all.
+      setUndoQueue((state) => (state.expired ? { queued: state.queued, expired: false } : state));
+      return (connRef.current as Partial<{ undoLast: () => UndoOutcome }> | null)?.undoLast?.() ?? "unavailable";
+    },
+    undoQueued: undoQueue.queued,
+    undoExpired: undoQueue.expired,
     presence: connection === "live" ? presence : EMPTY_PRESENCE,
     refused,
     sessionWarning,

@@ -1217,6 +1217,17 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           <span style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
             Another participant restored the session. Your offline copy is saved as a draft.
           </span>
+        ) : session?.undoExpired ? (
+          // LAST in the chain, and that ordering is the point. An undo is only
+          // ever dropped because this client's edits stopped reaching the room,
+          // so one of the branches above usually carries the REASON — and that
+          // reason is the more serious fact. This branch exists for the one
+          // thing those banners cannot say: the Ctrl+Z you pressed did not
+          // happen. Without it the press is a silent no-op, which is the
+          // failure the pending gate exists to remove.
+          <span data-testid="undo-dropped-banner" style={{ fontSize: 12, background: "#fff3cd", padding: "2px 8px", borderRadius: 6 }}>
+            Your undo was not applied — the changes it would reverse have not reached the room yet. Press undo again once your changes go through.
+          </span>
         ) : null}
         {onDisconnect && (
           <button

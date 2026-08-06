@@ -46,8 +46,13 @@ const UNDO_CLIENT_SEQ_BASE = 1_000_000_000;
  *  nothing-to-undo  the stack is empty
  *  unavailable    this connection has no collaborative undo (plaintext rooms,
  *                 whose authority is the server)
+ *  queued         the press is HELD because this client's own edits are still
+ *                 in flight and the undo stack cannot see them yet. It runs
+ *                 when they confirm, or is dropped at the deadline — either
+ *                 way onUndoQueue reports it (see
+ *                 EncryptedCollabConnection.undoLast)
  */
-export type UndoOutcome = "undone" | "cannot-undo" | "changed-since" | "nothing-to-undo" | "unavailable";
+export type UndoOutcome = "undone" | "cannot-undo" | "changed-since" | "nothing-to-undo" | "unavailable" | "queued";
 
 export type UndoCandidate =
   | { kind: "undoable"; seq: number; inverse: IntentBody }

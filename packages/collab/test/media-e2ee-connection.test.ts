@@ -388,6 +388,12 @@ describe("collaborative undo over two encrypted clients (doc 03 Phase 8)", () =>
 
     expect(a.undoLast()).toBe("undone");
     await until(() => !bodyText(a).includes("TWO"), "second undo target gone");
+    // The first undo is itself an intent in flight now, so the second press
+    // would be HELD by the pending gate (see undoLast, and the accumulation
+    // case in undo-pending-gate.test.ts). Waiting for the drain keeps this
+    // test on its own subject: that undo walks BACK TWO ACTIONS, not that a
+    // press mid-flight is deferred.
+    await until(() => a.pendingCount === 0, "the first undo to confirm");
     expect(a.undoLast()).toBe("undone");
     await until(() => !bodyText(a).includes("ONE"), "first undo target gone");
     expect(bodyText(a)).toBe("ab");

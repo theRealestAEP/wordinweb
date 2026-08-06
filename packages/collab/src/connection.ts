@@ -83,6 +83,19 @@ export interface ConnectionCallbacks {
    */
   onSubmitDropped?: (reason: "not-ready") => void;
   /**
+   * The QUEUED-UNDO count changed (encrypted connection only — see
+   * EncryptedCollabConnection.undoLast). An undo pressed while this client's
+   * own edits are still in flight is held until they are confirmed, so
+   * `queued` is how many presses are waiting; it drops back as they run.
+   *
+   * `expired` means the wait ran out and the held presses were DROPPED — the
+   * connection is not carrying edits to confirmation any more, and executing
+   * the undo against a stale mirror would reverse the wrong action. The
+   * consumer must show something: a press that produces nothing and says
+   * nothing is the failure this whole gate exists to remove.
+   */
+  onUndoQueue?: (state: { queued: number; expired: boolean }) => void;
+  /**
    * Something threw on an async path that has nowhere to return an error —
    * a seal, a transport send, a persistence write. These used to die in a
    * serial chain's `.catch(() => {})`, which is how B13's lost edits and a
