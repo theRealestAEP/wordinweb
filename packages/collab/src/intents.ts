@@ -198,6 +198,14 @@ export interface TableOpIntent extends IntentBase {
    * new tracked nodes (p / r) in document order, so replicas address them
    * alike. */
   nodeIds?: StableId[];
+  /**
+   * Tracked-change (suggesting) metadata; see FormatParagraphIntent. Only the
+   * three FORMATTING ops honour it — cellShading and cellVAlign record a
+   * w:tcPrChange, textWrapping a w:tblPrChange. The structural ops have no
+   * tracked form and ignore it, so the surfaces that enforce suggesting mode
+   * refuse those outright rather than send one.
+   */
+  suggest?: SuggestMeta;
 }
 
 /**

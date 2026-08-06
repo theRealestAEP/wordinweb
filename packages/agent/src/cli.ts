@@ -18,6 +18,7 @@ import {
   type RosterEntry,
 } from "@wordinweb/collab/client";
 import { AgentDocument } from "./document.js";
+import { isSuggestableTableOp } from "./edit.js";
 
 if (!globalThis.crypto) Object.defineProperty(globalThis, "crypto", { value: webcrypto });
 
@@ -99,8 +100,8 @@ function editRequestForMode(request: Record<string, unknown> | undefined, mode: 
     const operation = value as Record<string, unknown>;
     switch (operation.kind) {
       // Every kind with a tracked OOXML form takes the flag; the compiler
-      // stamps the author and date and the engine writes w:ins, w:rPrChange,
-      // w:pPrChange, or a struck paragraph mark.
+      // stamps the author and date and the engine writes w:ins, a `*PrChange`,
+      // or a struck paragraph mark.
       case "insertText":
       case "splitParagraph":
       case "mergeParagraph":
@@ -110,6 +111,25 @@ function editRequestForMode(request: Record<string, unknown> | undefined, mode: 
       case "setListType":
       case "adjustIndent":
       case "setSpacing":
+      case "setTableBorders":
+      case "setTableStyle":
+      case "setTableLook":
+      case "setTableWidth":
+      case "setTableColumnWidth":
+      case "setTableLayout":
+      case "setTableCellMargins":
+      case "setTableHeaderRows":
+        return { ...operation, suggest: true };
+      // tableOp is half formatting and half structure. Shading, vertical
+      // alignment and text wrapping record a `*PrChange`; a row or column
+      // insert or delete, a merge and a split have no tracked form here, so
+      // they keep the refusal the whole operation used to carry.
+      case "tableOp":
+        if (!isSuggestableTableOp(operation.op)) {
+          throw new Error(
+            `tableOp ${String((operation.op as { kind?: unknown } | undefined)?.kind ?? operation.op)} restructures the table and is unavailable in suggestion mode. Ask the inviter to switch this agent to editing mode`,
+          );
+        }
         return { ...operation, suggest: true };
       case "deleteText":
         return {

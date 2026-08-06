@@ -28,7 +28,10 @@ const HAND_WRITTEN_CAPABILITIES: Record<
   formatRun: { category: "text", description: "Format a complete run.", required: ["blockRef", "runRef", "patch"], optional: ["suggest"] },
   formatParagraph: { category: "paragraph", description: "Set paragraph alignment or style.", required: ["blockRef"], optional: ["align", "styleId", "suggest"] },
   formatRange: { category: "text", description: "Format a range within one run.", required: ["blockRef", "runRef", "start", "end", "patch"], optional: ["suggest"] },
-  tableOp: { category: "table", description: "Apply a row, column, cell, or table operation.", required: ["cellRef", "op"] },
+  // `suggest` applies to the three PROPERTY ops (cell shading, cell vertical
+  // alignment, table text wrapping); the structural ones have no tracked form
+  // and are refused in suggestion mode rather than tracked.
+  tableOp: { category: "table", description: "Apply a row, column, cell, or table operation.", required: ["cellRef", "op"], optional: ["suggest"] },
   mergeParagraph: { category: "paragraph", description: "Merge a paragraph into its predecessor.", required: ["blockRef"], optional: ["suggest"] },
   commentRun: { category: "review", description: "Add a review comment to a run.", required: ["runRef", "text"], optional: ["initials"] },
   pasteBlocks: { category: "insert", description: "Insert validated OOXML paragraph blocks.", required: ["afterBlockRef", "blocksXml"] },

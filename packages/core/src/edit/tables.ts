@@ -1,6 +1,13 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, attr, child, cloneXml, localName, onOff } from "../xml.js";
 import { pxToTwips } from "../units.js";
+import {
+  RevisionMeta,
+  recordCellFormatChange,
+  recordRowFormatChange,
+  recordTableFormatChange,
+  recordTableGridChange,
+} from "./suggest.js";
 
 /**
  * Table manipulation: add/remove rows and columns relative to the cell
@@ -8,6 +15,15 @@ import { pxToTwips } from "../units.js";
  *
  * v1 scope: column operations refuse tables using gridSpan (merged cells)
  * rather than corrupt them.
+ *
+ * SUGGESTING MODE. Every formatting operation below takes an optional
+ * RevisionMeta. With one, it records the properties it is about to replace as
+ * a tracked change — w:tblPrChange on the table, w:trPrChange on a row,
+ * w:tcPrChange on a cell — before mutating them, so a reviewer can accept or
+ * reject the change (edit/suggest.ts). Without one it mutates outright, which
+ * is what a direct edit does. STRUCTURAL operations (row and column insert and
+ * delete, merge, split) take no meta: they are not tracked, and the surfaces
+ * that enforce suggesting mode refuse them rather than apply them untracked.
  */
 
 export type TableOp =
@@ -108,8 +124,11 @@ function emptyCellLike(tc: XmlElement, w: string): XmlElement {
   };
 }
 
-/** OOXML tcPr child order (the slice we edit). */
-const TCPR_ORDER = ["tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd", "tcMar", "vAlign"];
+/** OOXML tcPr child order (the slice we edit). w:tcPrChange closes the
+ * element, so a property inserted later still lands ahead of it. */
+const TCPR_ORDER = [
+  "tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd", "tcMar", "vAlign", "tcPrChange",
+];
 
 function ensureTcPr(tc: XmlElement, w: string): XmlElement {
   let tcPr = tc.children.find((c) => localName(c.name) === "tcPr");
@@ -194,18 +213,31 @@ function hasSpans(tbl: XmlElement): boolean {
   return false;
 }
 
-export function applyTableOp(doc: DocxDocument, target: XmlElement, op: TableOp): boolean {
+/**
+ * `meta` tracks the three FORMATTING ops (cell shading, cell vertical
+ * alignment, table text wrapping). The structural ops ignore it: a row or
+ * column insert or delete, a merge and a split have no tracked form here, so
+ * every surface that enforces suggesting mode refuses them instead.
+ */
+export function applyTableOp(
+  doc: DocxDocument,
+  target: XmlElement,
+  op: TableOp,
+  meta?: RevisionMeta,
+): boolean {
   if (typeof op === "object" || op === "mergeRight" || op === "mergeDown" || op === "splitCell") {
     const ctx = cellContextOf(doc, target);
     if (!ctx) return false;
     const { tbl, tr, tc, w } = ctx;
     if (typeof op === "object") {
+      if (op.kind === "textWrapping") {
+        return setTableTextWrapping(doc, tbl, op.wrapping, op.xPx, op.yPx, meta);
+      }
+      if (meta) recordCellFormatChange(tc, meta);
       if (op.kind === "cellShading") {
         setTcPrChild(tc, w, "shd", op.fill === null ? null : { [`${w}val`]: "clear", [`${w}fill`]: op.fill.replace(/^#/, "").toUpperCase() });
-      } else if (op.kind === "cellVAlign") {
-        setTcPrChild(tc, w, "vAlign", { [`${w}val`]: op.v });
       } else {
-        return setTableTextWrapping(doc, tbl, op.wrapping, op.xPx, op.yPx);
+        setTcPrChild(tc, w, "vAlign", { [`${w}val`]: op.v });
       }
       doc.refresh();
       return true;
@@ -517,7 +549,7 @@ function gridColsOf(tblEl: XmlElement): XmlElement[] {
  * spanned tables here made their drags silent no-ops — the rewritten grid
  * stayed untrusted and autofit snapped the columns back.
  */
-function stampCellWidthsFromGrid(tblEl: XmlElement): void {
+function stampCellWidthsFromGrid(tblEl: XmlElement, meta?: RevisionMeta): void {
   const cols = gridColsOf(tblEl);
   for (const tr of rowsOf(tblEl)) {
     let col = 0;
@@ -527,6 +559,10 @@ function stampCellWidthsFromGrid(tblEl: XmlElement): void {
       const total = cols.slice(col, col + span).reduce((a, c) => a + widthAttrOf(c), 0);
       col += span;
       if (!total) continue;
+      // Every restamped cell is its own w:tcPrChange, which is what Word
+      // writes: the width lives per cell, so the record of the old one does
+      // too, and a reviewer rejecting the change gets every cell back.
+      if (meta) recordCellFormatChange(tc, meta);
       setTcPrChild(tc, w, "tcW", { [`${w}type`]: "dxa", [`${w}w`]: String(total) });
     }
   }
@@ -657,12 +693,20 @@ export function setTableTextWrapping(
   wrapping: "none" | "around",
   xPx: number,
   yPx: number,
+  meta?: RevisionMeta,
 ): boolean {
   if (localName(tblEl.name) !== "tbl") return false;
-  if (wrapping === "around") return moveTableTo(doc, tblEl, xPx, yPx);
+  if (wrapping === "around") {
+    // w:tblpPr is a table property, so a tracked float is a w:tblPrChange like
+    // any other. Recorded here rather than inside moveTableTo, which the
+    // editor's drag handler also drives, untracked.
+    if (meta) recordTableFormatChange(tblEl, meta);
+    return moveTableTo(doc, tblEl, xPx, yPx);
+  }
   const tblPr = child(tblEl, "tblPr");
   const position = tblPr ? child(tblPr, "tblpPr") : undefined;
   if (!tblPr || !position) return false;
+  if (meta) recordTableFormatChange(tblEl, meta);
   tblPr.children.splice(tblPr.children.indexOf(position), 1);
   doc.refresh();
   return true;
@@ -842,10 +886,16 @@ const TBLPR_ORDER = [
   "tblLayout",
   "tblCellMar",
   "tblLook",
+  "tblPrChange",
 ];
 
-/** OOXML trPr child order (CT_TrPrBase, the slice we edit). */
-const TRPR_ORDER = ["cantSplit", "trHeight", "tblHeader", "tblCellSpacing", "jc", "hidden"];
+/** OOXML trPr child order (CT_TrPrBase, the slice we edit) followed by the
+ * three CT_TrPr children that close it: the row's own structural revisions
+ * and the formatting record. */
+const TRPR_ORDER = [
+  "cantSplit", "trHeight", "tblHeader", "tblCellSpacing", "jc", "hidden",
+  "ins", "del", "trPrChange",
+];
 
 function ensureTblPr(tblEl: XmlElement, w: string): XmlElement {
   let tblPr = child(tblEl, "tblPr");
@@ -854,6 +904,22 @@ function ensureTblPr(tblEl: XmlElement, w: string): XmlElement {
     tblEl.children.unshift(tblPr);
   }
   return tblPr;
+}
+
+/** The properties element a scoped operation reads, without creating one. */
+function scopedProps(ctx: CellContext, scope: "cell" | "table"): XmlElement | undefined {
+  return scope === "cell" ? child(ctx.tc, "tcPr") : child(ctx.tbl, "tblPr");
+}
+
+/** Record the previous properties of whichever element a scoped operation is
+ * about to mutate: the one cell, or the whole table. */
+function recordScopedFormatChange(
+  ctx: CellContext,
+  scope: "cell" | "table",
+  meta: RevisionMeta,
+): void {
+  if (scope === "cell") recordCellFormatChange(ctx.tc, meta);
+  else recordTableFormatChange(ctx.tbl, meta);
 }
 
 /** Insert `el` into `parent` at the position `order` gives its local name. */
@@ -1020,6 +1086,7 @@ export function setTableBorders(
   scope: "cell" | "table",
   edges: readonly TableBorderEdge[],
   spec: TableBorderSpec | null,
+  meta?: RevisionMeta,
 ): boolean {
   const ctx = cellContextOf(doc, target);
   if (!ctx) return false;
@@ -1027,11 +1094,15 @@ export function setTableBorders(
   const wanted = edges.filter((e) => allowed.includes(e));
   if (wanted.length === 0) return false;
   const { w } = ctx;
-  const holder = scope === "cell" ? ensureTcPr(ctx.tc, w) : ensureTblPr(ctx.tbl, w);
   const containerName = scope === "cell" ? "tcBorders" : "tblBorders";
+  const existing = child(scopedProps(ctx, scope), containerName);
+  if (!existing && spec === null) return false; // nothing to clear
+  // Recorded before the first mutation, and only once the operation is known
+  // to make one — an empty record is a suggestion the reviewer cannot explain.
+  if (meta) recordScopedFormatChange(ctx, scope, meta);
+  const holder = scope === "cell" ? ensureTcPr(ctx.tc, w) : ensureTblPr(ctx.tbl, w);
   let container = child(holder, containerName);
   if (!container) {
-    if (spec === null) return false; // nothing to clear
     container = { name: `${w}${containerName}`, attrs: {}, children: [], text: "" };
     if (scope === "cell") setTcPrChildElement(holder, container);
     else insertOrdered(holder, container, TBLPR_ORDER);
@@ -1126,9 +1197,11 @@ export function setTableLook(
   doc: DocxDocument,
   tblEl: XmlElement,
   patch: Partial<TableLookToggles>,
+  meta?: RevisionMeta,
 ): boolean {
   if (localName(tblEl.name) !== "tbl") return false;
   const w = prefixOf(tblEl);
+  if (meta) recordTableFormatChange(tblEl, meta);
   const next: TableLookToggles = { ...tableLookOf(tblEl), ...patch };
   const bits = {
     firstRow: next.firstRow,
@@ -1177,18 +1250,21 @@ export function setTableStyle(
   doc: DocxDocument,
   tblEl: XmlElement,
   styleId: string | null,
+  meta?: RevisionMeta,
 ): boolean {
   if (localName(tblEl.name) !== "tbl") return false;
   const w = prefixOf(tblEl);
   if (styleId === null) {
     const tblPr = child(tblEl, "tblPr");
     if (!tblPr || !child(tblPr, "tblStyle")) return false;
+    if (meta) recordTableFormatChange(tblEl, meta);
     setTblPrChild(tblEl, w, "tblStyle", null);
     doc.refresh();
     return true;
   }
   const style = doc.styles.byId.get(styleId);
   if (!style || style.type !== "table") return false;
+  if (meta) recordTableFormatChange(tblEl, meta);
   setTblPrChild(tblEl, w, "tblStyle", { [`${w}val`]: styleId });
   doc.refresh();
   return true;
@@ -1212,9 +1288,11 @@ export function setTableWidth(
   tblEl: XmlElement,
   unit: "pt" | "pct" | "auto",
   value = 0,
+  meta?: RevisionMeta,
 ): boolean {
   if (localName(tblEl.name) !== "tbl") return false;
   const w = prefixOf(tblEl);
+  if (meta) recordTableFormatChange(tblEl, meta);
   const attrs =
     unit === "auto"
       ? { [`${w}w`]: "0", [`${w}type`]: "auto" }
@@ -1240,18 +1318,34 @@ export function setTableColumnWidth(
   tblEl: XmlElement,
   colIdx: number,
   widthPt: number,
+  meta?: RevisionMeta,
 ): boolean {
   if (localName(tblEl.name) !== "tbl") return false;
   const cols = gridColsOf(tblEl);
   const col = cols[colIdx];
   if (!col) return false;
+  if (meta) recordColumnWidthChange(tblEl, meta);
   const twips = Math.max(Math.round(widthPt / PT_PER_TWIP), MIN_COL_TWIPS);
   const key = Object.keys(col.attrs).find((k) => localName(k) === "w") ?? prefixOf(col) + "w";
   col.attrs[key] = String(twips);
-  stampCellWidthsFromGrid(tblEl);
+  stampCellWidthsFromGrid(tblEl, meta);
   retotalFixedTableWidth(tblEl, cols);
   doc.refresh();
   return true;
+}
+
+/**
+ * Record everything a column-width change touches. The width is spread across
+ * three places — the w:tblGrid, the w:tblW total, and a w:tcW on every cell —
+ * so a suggestion that recorded only one of them would restore a table whose
+ * three answers disagree. The cells are recorded as they are restamped (see
+ * stampCellWidthsFromGrid); the grid and the table properties are recorded
+ * here, together, because w:tblGridChange carries no author of its own and is
+ * reviewed as part of the table's w:tblPrChange.
+ */
+function recordColumnWidthChange(tblEl: XmlElement, meta: RevisionMeta): void {
+  recordTableFormatChange(tblEl, meta);
+  recordTableGridChange(tblEl, meta);
 }
 
 /** Re-total a dxa w:tblW from the grid. A pct or auto width is a different
@@ -1294,10 +1388,12 @@ export function setTableLayoutMode(
   tblEl: XmlElement,
   layout: "fixed" | "autofit",
   renderedWidths?: number[],
+  meta?: RevisionMeta,
 ): boolean {
   if (localName(tblEl.name) !== "tbl") return false;
   const w = prefixOf(tblEl);
   const cols = gridColsOf(tblEl);
+  if (meta) recordColumnWidthChange(tblEl, meta);
   if (layout === "fixed") {
     if (renderedWidths && renderedWidths.length === cols.length && cols.length > 0) {
       cols.forEach((c, i) => {
@@ -1309,11 +1405,14 @@ export function setTableLayoutMode(
     if (total > 0) {
       setTblPrChild(tblEl, w, "tblW", { [`${w}w`]: String(total), [`${w}type`]: "dxa" });
     }
-    stampCellWidthsFromGrid(tblEl);
+    stampCellWidthsFromGrid(tblEl, meta);
     setTblPrChild(tblEl, w, "tblLayout", { [`${w}type`]: "fixed" });
   } else {
     for (const tr of rowsOf(tblEl)) {
-      for (const tc of cellsOf(tr)) setTcPrChild(tc, prefixOf(tc), "tcW", null);
+      for (const tc of cellsOf(tr)) {
+        if (meta) recordCellFormatChange(tc, meta);
+        setTcPrChild(tc, prefixOf(tc), "tcW", null);
+      }
     }
     setTblPrChild(tblEl, w, "tblW", { [`${w}w`]: "0", [`${w}type`]: "auto" });
     setTblPrChild(tblEl, w, "tblLayout", { [`${w}type`]: "autofit" });
@@ -1351,15 +1450,18 @@ export function setTableCellMargins(
   target: XmlElement,
   scope: "cell" | "table",
   margins: CellMarginsPt | null,
+  meta?: RevisionMeta,
 ): boolean {
   const ctx = cellContextOf(doc, target);
   if (!ctx) return false;
   const { w } = ctx;
   const containerName = scope === "cell" ? "tcMar" : "tblCellMar";
-  const holder = scope === "cell" ? ensureTcPr(ctx.tc, w) : ensureTblPr(ctx.tbl, w);
-  const existing = child(holder, containerName);
+  const ensureHolder = () => (scope === "cell" ? ensureTcPr(ctx.tc, w) : ensureTblPr(ctx.tbl, w));
   if (margins === null) {
+    const existing = child(scopedProps(ctx, scope), containerName);
     if (!existing) return false;
+    if (meta) recordScopedFormatChange(ctx, scope, meta);
+    const holder = ensureHolder();
     holder.children.splice(holder.children.indexOf(existing), 1);
     doc.refresh();
     return true;
@@ -1368,7 +1470,9 @@ export function setTableCellMargins(
     (side) => margins[side] !== undefined,
   );
   if (sides.length === 0) return false;
-  let container = existing;
+  if (meta) recordScopedFormatChange(ctx, scope, meta);
+  const holder = ensureHolder();
+  let container = child(holder, containerName);
   if (!container) {
     container = { name: `${w}${containerName}`, attrs: {}, children: [], text: "" };
     if (scope === "cell") setTcPrChildElement(holder, container);
@@ -1408,7 +1512,12 @@ export function setTableCellMargins(
  * w:tblHeader removed — so the operation is idempotent and cannot leave a
  * stranded header row below a non-header one, which Word ignores.
  */
-export function setTableHeaderRows(doc: DocxDocument, tblEl: XmlElement, count: number): boolean {
+export function setTableHeaderRows(
+  doc: DocxDocument,
+  tblEl: XmlElement,
+  count: number,
+  meta?: RevisionMeta,
+): boolean {
   if (localName(tblEl.name) !== "tbl") return false;
   const rows = rowsOf(tblEl);
   if (rows.length === 0) return false;
@@ -1416,9 +1525,12 @@ export function setTableHeaderRows(doc: DocxDocument, tblEl: XmlElement, count: 
   let changed = false;
   rows.forEach((tr, i) => {
     const w = prefixOf(tr);
-    let trPr = tr.children.find((c) => localName(c.name) === "trPr");
-    const present = trPr ? onOff(child(trPr, "tblHeader")) === true : false;
+    const present = onOff(child(child(tr, "trPr"), "tblHeader")) === true;
     if (present === i < wanted) return;
+    // Only the rows whose band membership actually moves are recorded; the
+    // rest are untouched and have nothing for a reviewer to restore.
+    if (meta) recordRowFormatChange(tr, meta);
+    let trPr = tr.children.find((c) => localName(c.name) === "trPr");
     if (i < wanted) {
       if (!trPr) {
         trPr = { name: `${w}trPr`, attrs: {}, children: [], text: "" };

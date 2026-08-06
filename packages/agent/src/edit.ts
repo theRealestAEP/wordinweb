@@ -16,8 +16,8 @@ interface CompileContext {
 
 /** Operations whose agent-facing `suggest: true` compiles to carried
  * author/date. Each one has a tracked OOXML form: w:ins for an insertion or a
- * split mark, w:rPrChange / w:pPrChange for a formatting change, a struck
- * paragraph mark for a merge. */
+ * split mark, a `*PrChange` for a formatting change, a struck paragraph mark
+ * for a merge. */
 const SUGGESTABLE_KINDS = new Set<Intent["kind"]>([
   "insertText",
   "splitParagraph",
@@ -28,7 +28,34 @@ const SUGGESTABLE_KINDS = new Set<Intent["kind"]>([
   "setListType",
   "adjustIndent",
   "setSpacing",
+  // Table formatting: w:tblPrChange, w:trPrChange, w:tcPrChange.
+  "tableOp",
+  "setTableBorders",
+  "setTableStyle",
+  "setTableLook",
+  "setTableWidth",
+  "setTableColumnWidth",
+  "setTableLayout",
+  "setTableCellMargins",
+  "setTableHeaderRows",
 ]);
+
+/**
+ * The tableOp operations that carry a tracked form: the three that change
+ * PROPERTIES. The rest — every row and column insert and delete, the
+ * whole-table delete, a merge and a split — are STRUCTURAL. Word records those
+ * on the row (w:trPr/w:ins, w:trPr/w:del, with the cell content marked too)
+ * and this engine writes none of it, so suggestion mode refuses them rather
+ * than restructure a table behind the reviewer's back.
+ */
+const SUGGESTABLE_TABLE_OPS = new Set(["cellShading", "cellVAlign", "textWrapping"]);
+
+/** Whether a tableOp's `op` has a tracked form, so it may run while
+ * suggesting. The structural ops are plain strings and never qualify. */
+export function isSuggestableTableOp(op: unknown): boolean {
+  if (!op || typeof op !== "object" || Array.isArray(op)) return false;
+  return SUGGESTABLE_TABLE_OPS.has(String((op as { kind?: unknown }).kind));
+}
 
 const INTERNAL_FIELDS = ["clientId", "clientSeq", "base", "nodeIds", "newBlockId", "newRunId", "beforeId", "middleId", "afterId", "blockId", "runId", "objectIndex", "cellParagraphId", "afterBlockId"];
 

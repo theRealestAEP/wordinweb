@@ -177,8 +177,29 @@ import {
   acceptAllRevisions,
   rejectAllRevisions,
   RevisionMeta,
+  RevisionKind,
   RevisionRef,
 } from "./suggest.js";
+
+/**
+ * What the accept/reject card calls each kind of tracked change, and the ink
+ * it wears. Insertion green and deletion red match the markup renderer, which
+ * underlines and strikes those. A FORMATTING change has no ink there — the
+ * renderer paints it as the new formatting, the way Word does — so its card
+ * takes the editor's accent rather than claim text was added or removed, and
+ * names WHAT was reformatted, which is the only clue the reviewer gets.
+ */
+const REVISION_LABEL: Record<RevisionKind, { text: string; ink: string }> = {
+  insertion: { text: "Suggested insertion", ink: "#188038" },
+  markInsertion: { text: "Suggested paragraph split", ink: "#188038" },
+  deletion: { text: "Suggested deletion", ink: "#D93025" },
+  markDeletion: { text: "Suggested paragraph merge", ink: "#D93025" },
+  runFormat: { text: "Suggested text formatting", ink: "#1a73e8" },
+  paragraphFormat: { text: "Suggested paragraph formatting", ink: "#1a73e8" },
+  tableFormat: { text: "Suggested table formatting", ink: "#1a73e8" },
+  rowFormat: { text: "Suggested row formatting", ink: "#1a73e8" },
+  cellFormat: { text: "Suggested cell formatting", ink: "#1a73e8" },
+};
 
 function drawingCursor(kind: "pen" | "highlighter" | "eraser" | "lasso"): string {
   const svg = {
@@ -4487,8 +4508,12 @@ export class DocxEditor {
    * revision-ink kind chip, and a primary/secondary pill button pair. */
   private showSuggestionPopover(ref: RevisionRef, clientX: number, clientY: number): void {
     this.dismissSuggestionPopover();
-    const isIns = ref.kind === "insertion" || ref.kind === "markInsertion";
-    const ink = isIns ? "#188038" : "#D93025"; // matches the markup renderer's revision colors
+    const label = REVISION_LABEL[ref.kind];
+    // Insertion green and deletion red match the markup renderer's revision
+    // colors. A FORMATTING change gets neither: the renderer paints it as the
+    // new formatting, with no ink of its own, so the card takes the editor's
+    // accent rather than claim text was added or removed.
+    const ink = label.ink;
     // Author + date come off the revision element (w:author / w:date). Word
     // stamps these on every w:ins/w:del; show them so a reviewer sees WHO
     // suggested the change and WHEN, like Google Docs' suggestion card.
@@ -4533,7 +4558,7 @@ export class DocxEditor {
     nameEl.textContent = author;
     const sub = document.createElement("div");
     sub.style.cssText = `font-size:11px;color:${ink};`;
-    sub.textContent = (isIns ? "Suggested insertion" : "Suggested deletion") + (dateText ? ` · ${dateText}` : "");
+    sub.textContent = label.text + (dateText ? ` · ${dateText}` : "");
     who.append(nameEl, sub);
     head.append(avatar, who);
     box.appendChild(head);
@@ -6122,22 +6147,12 @@ export class DocxEditor {
     return ref?.kind === "deletion" && ref.author === this.revisionAuthor;
   }
 
-  /** The revision (run-level ins/del, or the caret paragraph's mark) at the
-   * caret, for accept/reject. */
+  /** The revision at the caret, for accept/reject: a run-level ins/del, the
+   * caret paragraph's mark, or a formatting change on an enclosing run,
+   * paragraph, cell, row or table (see revisionForText for the order). */
   revisionAtCaret(): RevisionRef | null {
     const caret = this.caret;
-    if (!caret) return null;
-    const run = revisionForText(this.host.doc, caret.t);
-    if (run) return run;
-    // A paragraph-mark revision when the caret sits at the end of its line.
-    const pEl = paragraphOf(this.host.doc, caret.t);
-    if (pEl) {
-      const insMark = paragraphGlyphRevision(pEl, "ins");
-      if (insMark) return { el: insMark, kind: "markInsertion", paragraph: pEl };
-      const delMark = paragraphGlyphRevision(pEl, "del");
-      if (delMark) return { el: delMark, kind: "markDeletion", paragraph: pEl };
-    }
-    return null;
+    return caret ? revisionForText(this.host.doc, caret.t) : null;
   }
 
   /** Accept (keep insertion / drop deletion) the given revision, or the one at

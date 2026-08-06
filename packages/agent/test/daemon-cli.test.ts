@@ -373,7 +373,10 @@ process.stdin.on("data", (chunk) => {
         () => collectRevisions(human.doc!).some((revision) => revision.kind === "paragraphFormat"),
         "human receives the tracked paragraph-property change",
       );
-      // A table operation still has no tracked form, so it stays refused.
+      // A STRUCTURAL table operation still has no tracked form, so it stays
+      // refused. The cell-property ones record a w:tcPrChange now and are sent
+      // with the flag instead; this address is a plain paragraph, so what comes
+      // back is the engine's ordinary "names no cell" no-op, not a refusal.
       expect(await cliCommand(["session", sessionId, JSON.stringify({
         command: "edit",
         request: {
@@ -381,6 +384,19 @@ process.stdin.on("data", (chunk) => {
           operations: [{ kind: "tableOp", cellRef: first.ref, op: "deleteRow" }],
         },
       })])).toMatchObject({ ok: false, error: expect.stringContaining("unavailable in suggestion mode") });
+      // The tracked formatParagraph above moved the revision on, and a mode
+      // refusal never reaches the revision check, so this one has to re-sync.
+      const shadingSync = await cliCommand(["session", sessionId, JSON.stringify({ command: "sync" })]);
+      const shading = await cliCommand(["session", sessionId, JSON.stringify({
+        command: "edit",
+        request: {
+          revision: String((shadingSync.result as { revision: string }).revision),
+          operations: [{ kind: "tableOp", cellRef: first.ref, op: { kind: "cellShading", fill: "FF0000" } }],
+        },
+      })]);
+      // This document has no table, so the operation still fails — but on the
+      // ADDRESS, having passed the mode gate that used to stop every tableOp.
+      expect(String(shading.error ?? "")).not.toContain("suggestion mode");
 
       await sendPrivateMessage("message_mode_edit", "\u0000wordinweb-agent-mode:edit");
       let modeEvent: Record<string, unknown> = {};

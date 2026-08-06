@@ -362,7 +362,7 @@ function applyIntentInner(
       // For insert ops, snapshot the tracked-node set so we can find the new
       // nodes afterward and give them the carried ids.
       const before = isInsert ? trackedSet(ids, doc) : null;
-      const ok = applyTableOp(doc, target, intent.op as never);
+      const ok = applyTableOp(doc, target, intent.op as never, suggestMeta(doc, intent.suggest));
       if (!ok) return false;
       if (isInsert && before && intent.nodeIds) {
         // Assign carried ids to the newly created tracked nodes in doc order.
