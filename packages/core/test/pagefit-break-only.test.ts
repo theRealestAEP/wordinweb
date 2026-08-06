@@ -165,4 +165,28 @@ describe("page fit at the foot of a page", () => {
     expect(markerPage(withoutSect, 18)).toBe(1);
     expect(markerPage(withSect, 18)).toBe(2);
   });
+
+  // The coalesce guard, re-derived under the gate. When the sectPr paragraph's
+  // line DOES fit, its w:br makes a page and the section then starts ON that
+  // page rather than leaving it blank. Suppressing newPage's section-start
+  // coalesce for this shape takes BOTH corpus documents carrying it to 24 pages
+  // against Word's 23 (wild2-legal-ca-agreement p77, wild2-med-nccih-protocol
+  // p17), so today's coalesce is right for every case we can lay out.
+  //
+  // Read at room 45 deliberately. At an insufficient room the paragraph spills
+  // under the ordinary test and the page it lands on is blank because the mark
+  // is invisible, not because of anything the coalesce did - that page says
+  // nothing about this rule.
+  it("starts a section on the page its own paragraph's break made", () => {
+    const sectPrInPara =
+      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +
+      '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>' +
+      "</w:sectPr>";
+    const target =
+      `<w:p><w:pPr>${RPR}${sectPrInPara}</w:pPr><w:r>${RPR}<w:br w:type="page"/></w:r></w:p>` +
+      exact(FILLER_TWIPS, "AFTER");
+    const pages = pagesOf(variant(45, target));
+    const blank = pages.filter((pg) => pg.items.filter((i) => i.kind === "text").length === 0);
+    expect([pages.length, blank.length]).toEqual([2, 0]);
+  });
 });
