@@ -8982,7 +8982,8 @@ function resolveGrid(
   // With the allowance the box starts a cell margin left of the text column,
   // so the first and last column's TEXT aligns with the column edges while the
   // borders overhang: nccih p14 (tblW 5000 pct, 12960tw landscape column,
-  // default 108tw margins, no declared mode) renders the authored 13176tw =
+  // default 108tw margins, declared mode 14 — an earlier probe misread it as
+  // absent; both take the legacy branch) renders the authored 13176tw =
   // 12960 + 216 grid raw, rules at margin - 7.2px and margin + 7.2px. Without
   // it the margins sit inside the box: on A4 with 1in margins (a 1203px column
   // at 192dpi), tblW 4500 pct with 10pt left + right margins under mode 15
