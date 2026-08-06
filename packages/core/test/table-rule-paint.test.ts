@@ -13,6 +13,15 @@ function translateY(transform: string): number {
   return total;
 }
 
+/** A rule's PAINTED height. The box is a 1px strip scaled to the declared
+ * width, because a fractional CSS height snaps to a whole pixel where a
+ * transform does not, so the height has to be read through the scale. */
+function paintedHeight(el: HTMLElement): number {
+  const box = parseFloat(el.style.height);
+  const scale = el.style.transform.match(/scaleY\(([\d.]+)\)/);
+  return scale ? box * Number(scale[1]) : box;
+}
+
 describe("table rule paint placement", () => {
   // Browsers round a painted box's position to a whole CSS pixel, so a rule
   // whose layout position is fractional lands up to half a pixel off — two
@@ -69,7 +78,7 @@ describe("table rule paint placement", () => {
 
     // Every rule still paints at its layout position: half the rule's painted
     // width above the boundary, to the last fraction.
-    const half = parseFloat(rules[0].style.height) / 2;
+    const half = paintedHeight(rules[0]) / 2;
     for (const [i, y] of placed.entries()) {
       expect(y + half).toBeCloseTo(layoutRules[i], 6);
     }

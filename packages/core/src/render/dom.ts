@@ -3097,11 +3097,19 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     el.style.transformOrigin = `${rotate.ox}px ${rotate.oy}px`;
   }
   const horizontal = Math.abs(y2 - y1) < 0.01;
-  // Snap authored border widths to whole device pixels. At the parity
-  // renderer's 2x scale Word's default 0.5pt rule is one physical pixel;
-  // using the layout engine's 1px paint floor makes it two pixels instead.
-  // For placement, keep paragraph borders
-  // with w:space on Word's fractional rectangle positions; zero-space table/page
+  // A rule is painted at its DECLARED width. Word paints sz/8 points faithfully
+  // at every weight - as a filled rectangle rather than a stroke, ratio 1.000
+  // across a nine-weight sweep from 0.25 to 6.00pt (scripts/generate-rulewidth-
+  // probe.mjs) - so there is no Word-side quantization to match and the whole
+  // error was ours. Snapping to the device grid made sz=2 50% too heavy, sz=4
+  // (Word's default table rule) 25% too light, and sz=8 flip SIGN with the
+  // display: -25% at 1x, +12.5% at 2x. The snap was justified by a 0.5pt rule
+  // being "one physical pixel" at 2x; it is not - 0.5pt is 1.333 device px at
+  // 2x, and the reference raster at 192 DPI is 1.333 device px too, antialiased
+  // across two rows, which is exactly the unsnapped case.
+  //
+  // PLACEMENT is separate and stays as it was: keep paragraph borders with
+  // w:space on Word's fractional rectangle positions; zero-space table/page
   // thicker rules match Word better on the device grid. Hairlines retain the
   // row layout's fractional position: snapping every accumulated sz-4 row
   // boundary shifts alternating rules by a full CSS pixel in long grids.
@@ -3117,10 +3125,9 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     border.rawWidth !== undefined &&
     border.rawWidth < 0.75;
   const declaredWidth = border.rawWidth ?? border.width;
-  const w =
-    border.rawWidth !== undefined && border.rawWidth < 0.25
-      ? border.rawWidth
-      : Math.max(1 / dpr, Math.round(declaredWidth * dpr) / dpr);
+  // The only floor left is against a rule that declares no width at all
+  // (w:sz="0" with a paintable w:val), which would otherwise paint nothing.
+  const w = declaredWidth > 0 ? declaredWidth : 1 / dpr;
   const snap = (v: number) => Math.round(v * dpr) / dpr;
   const place = border.space === 0 && !deviceHairline ? snap : (v: number) => v;
   // Chromium rounds a painted box's position to a whole CSS pixel - at the
@@ -3215,12 +3222,18 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     } else if (border.style === "triple") {
       el.style.height = "0";
       el.style.borderTop = `${w}px double ${border.color}`;
-    } else if (deviceHairline) {
-      // Chromium expands a fractional-height background to two device rows.
-      // A half-scaled 1px strip preserves Word's one-device-pixel rule.
+    } else if (rotate === undefined) {
+      // Chromium snaps a painted box's SIZE to a whole CSS pixel, so setting a
+      // fractional height paints ONE CSS pixel whatever the number says: 0.25pt
+      // (0.33px), 0.5pt (0.67px) and 1.0pt (1.33px) all came out at 1px of ink.
+      // A TRANSFORM is not snapped, so carry the width as a scale on a 1px box
+      // and the painted mass is exactly w, antialiased across the device rows
+      // it straddles - which is how Word's own thin rules rasterise.
+      // `applyFrac` prepends its translate, giving `translateY(frac) scaleY(w)`:
+      // the scale runs first about the box origin and the translate is unscaled.
       el.style.height = "1px";
       el.style.background = border.color;
-      el.style.transform = "scaleY(.5)";
+      el.style.transform = `scaleY(${w})`;
       el.style.transformOrigin = "0 0";
     } else {
       el.style.height = `${w}px`;
@@ -3249,10 +3262,12 @@ function renderEdge(x1: number, y1: number, x2: number, y2: number, border: Bord
     } else if (border.style === "triple") {
       el.style.width = "0";
       el.style.borderLeft = `${w}px double ${border.color}`;
-    } else if (deviceHairline) {
+    } else if (rotate === undefined) {
+      // See the horizontal branch: a fractional CSS width snaps to a whole
+      // pixel, a scale transform does not.
       el.style.width = "1px";
       el.style.background = border.color;
-      el.style.transform = "scaleX(.5)";
+      el.style.transform = `scaleX(${w})`;
       el.style.transformOrigin = "0 0";
     } else {
       el.style.width = `${w}px`;

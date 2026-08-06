@@ -9148,21 +9148,34 @@ function isPageBreakOnlyParagraph(p: Paragraph): boolean {
  * comes from one pBdr.
  *
  * Two edges match when both paint nothing, or when all four properties that
- * reach the page agree: style, paint width, w:space and colour. An absent edge
- * and an explicit `w:val="none"` are the same thing here - neither paints and
- * neither claims room. `rawWidth` tracks `width`, so it needs no own test.
- * `between` counts as an edge: paragraphs that declare different between rules
- * are not one block.
+ * reach the page agree: style, DECLARED width, w:space and colour. An absent
+ * edge and an explicit `w:val="none"` are the same thing here - neither paints
+ * and neither claims room. `between` counts as an edge: paragraphs that declare
+ * different between rules are not one block.
+ *
+ * The width test is on `rawWidth`, not `width`. `width` floors at 0.75px, so it
+ * SATURATES below w:sz="6" and reports w:sz="2" (0.25pt) and w:sz="4" (0.5pt)
+ * as the same edge. That merged two visibly different rules into one block and
+ * suppressed the boundary between them: probe-rulewidth's sz2 paragraph paints
+ * no rule at all, because the sz4 paragraph below it swallows the shared edge.
+ * Harmless while renderEdge snapped both weights to one painted width; a live
+ * defect once each is painted at its own.
  */
 function sameParagraphBorders(a: ParagraphBorders | undefined, b: ParagraphBorders | undefined): boolean {
   // A paragraph with no pBdr at all never merges with anything.
   if (!a || !b) return false;
   const painted = (e: Border | undefined) => (e && e.style !== "none" ? e : undefined);
+  const declared = (e: Border) => e.rawWidth ?? e.width;
   return (["top", "bottom", "left", "right", "between"] as const).every((side) => {
     const x = painted(a[side]);
     const y = painted(b[side]);
     if (!x || !y) return !x && !y;
-    return x.style === y.style && x.width === y.width && x.space === y.space && x.color === y.color;
+    return (
+      x.style === y.style &&
+      declared(x) === declared(y) &&
+      x.space === y.space &&
+      x.color === y.color
+    );
   });
 }
 
