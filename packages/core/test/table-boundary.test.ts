@@ -254,3 +254,90 @@ describe("exact rows and cell borders", () => {
     );
   });
 });
+
+/**
+ * probe-exactoverflow in miniature: a 260 tw exact row holding far more than
+ * fits. Word CLIPS the overflow to the row box, and the clip is visible in its
+ * own PDF: every one of the 119 text-showing operators the 90-paragraph case
+ * emits is wrapped in the same `72.025 694.97 468.2 12.25 re W* n` rectangle —
+ * the row box, 12.25pt tall. Its 192 DPI raster carries exactly five ink bands
+ * (the paragraph above, the top rule, ONE row line, the bottom rule, the mark
+ * below) whatever the authored amount, and the TOC variant carries four,
+ * because the field's begin paragraph is the line the box holds and it is
+ * empty.
+ *
+ * The overflow is not laid out again on a following page either: the mark below
+ * the table stays 34.33px under the one above it, in Word and here, for every
+ * authored amount from 1 to 160.
+ *
+ * `pdftotext` reports 59 lines for the same page and 12 for the same row at the
+ * page foot. Those are the operators Word emits before the content runs off the
+ * sheet, NOT what Word paints — pdftotext ignores `W* n`. Reading that channel
+ * as paint is what produced the false report that Word grows the row.
+ */
+describe("an exact row clips its overflow to the row box", () => {
+  const LINE = '<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/>';
+  const numbered = (n: number) =>
+    Array.from(
+      { length: n },
+      (_, k) => `<w:p><w:pPr>${LINE}</w:pPr><w:r><w:t>L${String(k + 1).padStart(3, "0")}</w:t></w:r></w:p>`,
+    ).join("");
+
+  /** The row's numbered paragraphs that survive to the page, and the distance
+   * from the mark above the table to the mark below it. */
+  function painted(rowBody: string, rule: "exact" | "atLeast" = "exact") {
+    const body =
+      `<w:p><w:pPr>${LINE}</w:pPr><w:r><w:t>TOP</w:t></w:r></w:p>` +
+      `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblLayout w:type="fixed"/>` +
+      `<w:tblBorders><w:top w:val="single" w:sz="6" w:space="0" w:color="auto"/>` +
+      `<w:bottom w:val="single" w:sz="6" w:space="0" w:color="auto"/></w:tblBorders></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:trHeight w:hRule="${rule}" w:val="260"/></w:trPr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="9360" w:type="dxa"/></w:tcPr>${rowBody}</w:tc></w:tr></w:tbl>` +
+      `<w:p><w:pPr>${LINE}</w:pPr><w:r><w:t>MARK</w:t></w:r></w:p>` +
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body) }));
+    const result = layoutDocument(doc, { measurer: new ApproxMeasurer() });
+    const items = result.pages.flatMap((page) => page.items);
+    const text = (want: string) => {
+      const item = items.find((candidate) => candidate.kind === "text" && candidate.text === want);
+      return item?.kind === "text" ? item : undefined;
+    };
+    const lines = items.filter((it) => it.kind === "text" && /^L\d{3}$/.test(it.text ?? ""));
+    return { lines: lines.length, markGap: text("MARK")!.lineTop - text("TOP")!.lineTop };
+  }
+
+  it("paints the one line the box holds, whatever the authored amount", () => {
+    // A8, A64 and A160: Word's raster is the same five bands for all three.
+    expect(painted(numbered(8)).lines).toBe(1);
+    expect(painted(numbered(64)).lines).toBe(1);
+    expect(painted(numbered(160)).lines).toBe(1);
+  });
+
+  it("keeps the row's flow contribution at its authored height", () => {
+    // Word: 34.33px from TOP to MARK for every authored amount, and MARK never
+    // moves to a second page — the overflow is dropped, not continued.
+    for (const n of [1, 8, 64, 160]) expect(painted(numbered(n)).markGap).toBeCloseTo(34.33, 1);
+  });
+
+  it("spends an exact row's one line on a TOC field's begin paragraph", () => {
+    // F90: Word's raster loses the row's ink band entirely. The begin paragraph
+    // is empty and it is the paragraph the box holds, so nothing shows. This is
+    // the whole of the "a TOC in an exact row renders as nothing" report.
+    const toc =
+      `<w:p><w:pPr>${LINE}</w:pPr>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" \\h \\z \\u </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>` +
+      numbered(90) +
+      `<w:p><w:pPr>${LINE}</w:pPr><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`;
+    expect(painted(toc).lines).toBe(0);
+  });
+
+  it("grows an atLeast row to its content instead of clipping it", () => {
+    const control = painted(numbered(8), "atLeast");
+    expect(control.lines).toBe(8);
+    expect(control.markGap).toBeGreaterThan(8 * 16);
+  });
+});

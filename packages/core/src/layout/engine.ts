@@ -8682,6 +8682,16 @@ class Engine {
       // For Sale flyer's full-page fixed cell). Drop items whose top starts
       // below the row bottom. A vertical-merge restart clips at the end of
       // its full merged cell, not at the end of its first source row.
+      //
+      // probe-exactoverflow sweeps 1..160 paragraphs in a 260tw exact row, plus
+      // a TOC field, w:cantSplit, and the row at the page foot. Word's export
+      // wraps EVERY text operator the row emits in one clip rectangle of the
+      // row box - `72.025 694.97 468.2 12.25 re W* n`, all 119 of them on the
+      // 90-paragraph page - and its raster carries exactly one row line in all
+      // 16 cases. Word emits operators until the content runs off the paper, so
+      // a PDF reader that ignores `W* n` reports 59 painted lines there and 12
+      // at the page foot; that reading is what filed #56 as a defect. The row
+      // box wins - table-boundary.test.ts pins it.
       const clip = row.props.heightRule === "exact";
       const rowBottom = y + (cell.props.vMerge === "restart" ? cellH : rowHeight);
       for (const it of cellLay.items) {
