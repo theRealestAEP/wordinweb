@@ -4102,6 +4102,17 @@ class Engine {
       index !== undefined &&
       siblings?.[index - 2]?.type === "table";
 
+    // An EMPTY paragraph whose only content is a hard page break ALWAYS fits on
+    // the current page, however little room is left; the new page starts after
+    // it. Measured by a four-sweep probe over rooms of 18..45 CSS px against a
+    // paragraph needing 13.3px space-before + 19.4px line: text-with-break,
+    // text-without and empty-without all spill below 33px on both engines, and
+    // only empty-with-break stays put at every room Word was asked for
+    // (phase23-protocol block 1395: 22.1px of room at the foot of p68, where
+    // spilling the break cost a whole extra page, 70 against Word's 69).
+    const pageBreakOnlyFits =
+      lines.length === 1 && lines[0].forcedBreakAfter === "page" && isPageBreakOnlyParagraph(para);
+
     // HTML-style automatic paragraph spacing (w:beforeAutospacing /
     // afterAutospacing, produced by web/HTML-pasted content): Word discards
     // the literal before/after and inserts one blank line's worth of space
@@ -4537,6 +4548,7 @@ class Engine {
           simNotes + noteAdd > 0 && baseNotes === 0 ? this.noteSeparatorReserve(this.cur) : 0;
         const overflowsHere =
           !postTablePageBreak &&
+          !pageBreakOnlyFits &&
           (simBalancing
             ? simY > bottom + 0.01
             : simY + lines[li].fitHeight + (li === lines.length - 1 ? keepNextTail : 0) >
@@ -4669,6 +4681,7 @@ class Engine {
       const balBottomBased = balancing && this.colWidth < 40;
       const overflow =
         !postTablePageBreak &&
+        !pageBreakOnlyFits &&
         (balancing
           ? (balBottomBased ? this.y + line.fitHeight : this.y) > this.bodyBottom + 0.01
           : this.y + line.fitHeight >
@@ -8867,6 +8880,29 @@ function isEmptyParagraph(p: Paragraph): boolean {
     }
   }
   return true;
+}
+
+/** A paragraph whose ONLY rendered content is one or more hard page breaks:
+ * empty text is allowed, everything else (text, tabs, images, drawings, math,
+ * fields, note references, anchors, line and column breaks) disqualifies it.
+ * Such a paragraph always fits on the current page (see pageBreakOnlyFits). */
+function isPageBreakOnlyParagraph(p: Paragraph): boolean {
+  let sawBreak = false;
+  for (const child of p.children) {
+    const runs = child.type === "run" ? [child] : child.runs;
+    for (const r of runs) {
+      for (const rc of r.content) {
+        if (rc.kind === "text") {
+          if (rc.text.length > 0) return false;
+        } else if (rc.kind === "break" && rc.breakType === "page") {
+          sawBreak = true;
+        } else {
+          return false;
+        }
+      }
+    }
+  }
+  return sawBreak;
 }
 
 /** Do these two paragraphs carry the SAME pBdr, in Word's sense?
