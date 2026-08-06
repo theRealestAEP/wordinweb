@@ -367,6 +367,10 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setPageLayout.patch": pageLayoutPatch,
   "setLineNumbering.patch": lineNumberingPatch,
   "insertCoverPage.content": closedObject({ title: string(1000, 1), subtitle: string(1000), author: string(500) }, ["title"]),
+  // Degrees on each axis. Unbounded because the mutation normalizes into
+  // 0..360 itself, which is also why the registry's validate asks only that
+  // each angle be finite.
+  "setModel3DRotation.rotation": closedObject({ x: number(), y: number(), z: number() }, ["x", "y", "z"]),
   "insertChart.chart": chartData,
   "setChartData.chart": chartData,
   "insertSmartArt.smartArt": smartArtData,

@@ -21,6 +21,7 @@ import {
   type StyleSpec,
   type StylePatch,
 } from "./styles.js";
+import { setModel3DRotation, type Model3DRotation } from "./objects.js";
 import { suggestMeta } from "./suggest.js";
 import { TOC_LEADERS, insertToc, type TocLeader, type TocLevels } from "./toc.js";
 import { applyFieldResults } from "./update-fields.js";
@@ -91,8 +92,15 @@ export type StableId = number;
  * rejection predicate from the payload — see updateFields below, whose result
  * count must match the document's field count — and it must carry every value
  * a replica cannot re-derive identically.
+ *
+ * "object" names a DRAWING: the stable id of the run that carries it, plus
+ * which of that run's contents it is. The second half rides in an
+ * `objectIndex` payload field rather than in the table below, because it is an
+ * index into the run and not an id of its own — the same pair the hand-written
+ * drawing intents use. The address still resolves through a stable id, so the
+ * honest-no-op predicate is exactly the one every addressed operation has.
  */
-export type OperationAddress = "run" | "block" | "cell" | "document";
+export type OperationAddress = "run" | "block" | "cell" | "object" | "document";
 
 /** An operation addressed by a stable id, as opposed to document-scoped. */
 export type AddressedOperation = Exclude<OperationAddress, "document">;
@@ -102,6 +110,8 @@ export const ADDRESS_WIRE_FIELD = {
   run: "runId",
   block: "blockId",
   cell: "cellParagraphId",
+  // Plus objectIndex, which an object-addressed operation carries itself.
+  object: "runId",
 } as const satisfies Record<AddressedOperation, string>;
 
 /** The agent-facing reference field, per addressed kind. Agents address content
@@ -110,6 +120,7 @@ export const ADDRESS_AGENT_FIELD = {
   run: "runRef",
   block: "blockRef",
   cell: "cellRef",
+  object: "objectRef",
 } as const satisfies Record<AddressedOperation, string>;
 
 /**
@@ -154,6 +165,9 @@ export interface OperationTarget {
    * for run and block addressing, whose addressed element IS `el`.
    */
   cellParagraph: XmlElement | null;
+  /** For object addressing: the w:drawing (or VML shape) the address named.
+   * Null for every other address kind. */
+  drawing: XmlElement | null;
 }
 
 export interface OperationContext<Payload> {
@@ -992,6 +1006,49 @@ const setTableHeaderRowsOperation = defineOperation<{
 });
 
 // ---------------------------------------------------------------------------
+// Drawings
+// ---------------------------------------------------------------------------
+
+/**
+ * Save a 3D model's orientation — the first object-addressed operation.
+ *
+ * A drag used to mutate the model locally with no wire form and no gate, so it
+ * forked any room it happened in: the `model3D` toolbar flag only hides
+ * INSERTION, and a model already present in an opened file stays draggable.
+ * The rotation is a property of one drawing, which is exactly what the object
+ * address names, so nothing here needs the document escape hatch.
+ *
+ * The angles are CARRIED rather than recomputed. Unlike updateFields that is
+ * not because a replica would derive them differently — it is because they
+ * come from a pointer drag only the originator saw.
+ */
+const setModel3DRotationOperation = defineOperation<{
+  runId: StableId;
+  objectIndex?: number;
+  rotation: Model3DRotation;
+}>()({
+  kind: "setModel3DRotation",
+  address: "object",
+  category: "drawing",
+  description: "Set a 3D model's X/Y/Z orientation, in degrees.",
+  fields: [{ name: "rotation" }],
+  validate: ({ rotation }) => {
+    if (!rotation || typeof rotation !== "object") return "setModel3DRotation: bad rotation";
+    for (const axis of ["x", "y", "z"] as const) {
+      // Any finite angle is legal; the mutation normalizes into 0..360.
+      if (typeof rotation[axis] !== "number" || !Number.isFinite(rotation[axis])) {
+        return `setModel3DRotation: bad ${axis}`;
+      }
+    }
+    return null;
+  },
+  // A drawing that is not a 3D model has no am3d:model3d to write into, which
+  // setModel3DRotation reports as a clean no-op.
+  apply: ({ doc, target, payload }) =>
+    target.drawing ? setModel3DRotation(doc, target.drawing, payload.rotation) : false,
+});
+
+// ---------------------------------------------------------------------------
 // Watermarks
 // ---------------------------------------------------------------------------
 
@@ -1115,6 +1172,7 @@ const OPERATIONS = [
   setTableLayoutOperation,
   setTableCellMarginsOperation,
   setTableHeaderRowsOperation,
+  setModel3DRotationOperation,
   insertWatermarkOperation,
   removeWatermarkOperation,
 ] as const;

@@ -742,6 +742,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
 | `setDrawingRotation` | Rotate a drawing | `objectRef`, `degrees` |
+| `setModel3DRotation` | Set a 3D model's X/Y/Z orientation, in degrees | `objectRef`, `rotation` |
 | `setDrawingFill` | Set or clear fill | `objectRef`, `color` |
 | `setDrawingLineStyle` | Set or clear shape outline or line style | `objectRef`, `color`; optional: `widthPx`, `dash` |
 | `setDrawingOrder` | Move to front or back | `objectRef`, `order` |

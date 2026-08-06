@@ -1617,10 +1617,17 @@ export class DocxEditor {
     }
     if (command === "reset3d") {
       if (context.kind !== "model3d") return false;
-      // 3D rotation has no wire form; honest no-op in collab.
-      if (inCollab) return false;
+      const rotation = { x: 0, y: 0, z: 0 };
       this.host.history?.checkpoint();
-      if (!setModel3DRotation(this.host.doc, src, { x: 0, y: 0, z: 0 })) return false;
+      if (!setModel3DRotation(this.host.doc, src, rotation)) return false;
+      if (collabTarget !== null) {
+        this.host.onIntent!(
+          operationBody("setModel3DRotation", collabTarget.runId, {
+            ...(collabTarget.objectIndex !== undefined ? { objectIndex: collabTarget.objectIndex } : {}),
+            rotation,
+          }),
+        );
+      }
       this.host.rerender(undefined, "local");
       reselect();
       return true;
@@ -2975,18 +2982,25 @@ export class DocxEditor {
     const detail = (event as CustomEvent<Model3DRotation>).detail;
     if (!binding || !src || !detail || ![detail.x, detail.y, detail.z].every(Number.isFinite)) return;
     event.stopPropagation();
-    // Same honest no-op the reset3d command takes for the same core function:
-    // 3D rotation has no wire form, and the model3D toolbar flag only hides
-    // INSERTION — a model already in an opened file is still draggable, so
-    // without this a drag in a room forks the document silently.
-    if (this.host.onIntent && this.host.doc.stableIds) return;
+    // The model3D toolbar flag only hides INSERTION, so a model already in an
+    // opened file is draggable in a room. Address it and emit.
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+    const collabTarget = inCollab ? this.drawingIntentTarget(src) : null;
+    if (inCollab && collabTarget === null) return; // unaddressable: honest no-op
     const rect = binding.el.getBoundingClientRect();
     const near = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
     this.host.history?.checkpoint();
-    if (setModel3DRotation(this.host.doc, src, detail)) {
-      this.host.rerender(undefined, "local");
-      this.reselectImage(src, near);
+    if (!setModel3DRotation(this.host.doc, src, detail)) return;
+    if (collabTarget !== null) {
+      this.host.onIntent!(
+        operationBody("setModel3DRotation", collabTarget.runId, {
+          ...(collabTarget.objectIndex !== undefined ? { objectIndex: collabTarget.objectIndex } : {}),
+          rotation: detail,
+        }),
+      );
     }
+    this.host.rerender(undefined, "local");
+    this.reselectImage(src, near);
   };
 
   /** First click selects a text box as an object; the second click edits only
