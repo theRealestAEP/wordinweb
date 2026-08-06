@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import {
   listTableStyles,
+  readTableProperties,
   setTableBorders,
   setTableCellMargins,
   setTableColumnWidth,
@@ -796,5 +797,67 @@ describe("repeat header rows", () => {
     // Both header rows are re-painted at the top of page 2.
     expect(texts(1).some((t) => t.includes("r0c0"))).toBe(true);
     expect(texts(1).some((t) => t.includes("r1c0"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readTableProperties — the values a Table Properties dialog prefills from
+// ---------------------------------------------------------------------------
+
+describe("readTableProperties", () => {
+  const read = (doc: DocxDocument, cellText = "r0c0") =>
+    readTableProperties(doc, findT(docRoot(doc), cellText));
+
+  it("answers widths in points, from twips", () => {
+    // 2 columns of 2000 twips inside a 4000-twip table: 100pt each, 200pt total.
+    const doc = load(tableXml(2, 2, `<w:tblW w:w="4000" w:type="dxa"/>`));
+    const info = read(doc)!;
+    expect(info.width).toEqual({ unit: "pt", value: 200 });
+    expect(info.columnWidthsPt).toEqual([100, 100]);
+    expect(info.columnCount).toBe(2);
+  });
+
+  it("reads a percent width back as a percentage, not as fiftieths", () => {
+    const doc = load(tableXml(1, 2, `<w:tblW w:w="2500" w:type="pct"/>`));
+    expect(read(doc)!.width).toEqual({ unit: "pct", value: 50 });
+  });
+
+  it("calls a table with no w:tblW auto, which is what the schema means", () => {
+    const doc = load(tableXml(1, 2));
+    expect(read(doc)!.width).toEqual({ unit: "auto", value: 0 });
+  });
+
+  it("reports an undeclared cell margin as ABSENT rather than as zero", () => {
+    const doc = load(tableXml(1, 2));
+    expect(read(doc)!.cellMargins).toEqual({});
+    // A dialog can then tell "inherits the default" from "suppressed to 0".
+    setTableCellMargins(doc, findT(docRoot(doc), "r0c0"), "table", { top: 6, left: 0 });
+    const margins = read(doc)!.cellMargins;
+    expect(margins.top).toBe(6);
+    expect(margins.left).toBe(0);
+    expect(margins.bottom).toBeUndefined();
+  });
+
+  it("counts the header BAND, stopping at the first row outside it", () => {
+    const doc = load(tableXml(4, 2));
+    expect(read(doc)!.headerRows).toBe(0);
+    setTableHeaderRows(doc, tblOf(doc), 2);
+    expect(read(doc)!.headerRows).toBe(2);
+  });
+
+  it("names the caret's GRID column, counting spans to its left", () => {
+    expect(read(load(tableXml(1, 3)), "r0c2")!.columnIdx).toBe(2);
+    // A leading cell spanning two grid columns puts the next cell at index 2,
+    // which is the index setTableColumnWidth addresses.
+    const spanned =
+      `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr>${p("wide")}</w:tc>` +
+      `<w:tc><w:tcPr/>${p("last")}</w:tc></w:tr></w:tbl>`;
+    expect(read(load(spanned), "last")!.columnIdx).toBe(2);
+  });
+
+  it("says nothing about a caret outside a table", () => {
+    const doc = load(p("plain paragraph"));
+    expect(readTableProperties(doc, findT(docRoot(doc), "plain"))).toBeUndefined();
   });
 });

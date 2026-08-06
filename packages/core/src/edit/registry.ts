@@ -15,12 +15,14 @@ import {
   createStyle,
   deleteStyle,
   modifyStyle,
+  STYLE_TYPES,
   type StyleParaPatch,
   type StyleRunPatch,
   type StyleSpec,
   type StylePatch,
 } from "./styles.js";
 import { suggestMeta } from "./suggest.js";
+import { TOC_LEADERS, insertToc, type TocLeader, type TocLevels } from "./toc.js";
 import { applyFieldResults } from "./update-fields.js";
 import {
   CELL_SCOPE_EDGES,
@@ -359,6 +361,68 @@ const updateFieldsOperation = defineOperation<{ results: string[] }>()({
   apply: ({ doc, payload }) => applyFieldResults(doc, payload.results, { createResultRuns: false }),
 });
 
+/**
+ * Insert a table of contents after the paragraph holding the anchor run.
+ *
+ * WHY THIS ONE CARRIES A COUNT. Every other insert's size comes from its own
+ * arguments — insertTable is rows×cols — but a TOC's size comes from the
+ * DOCUMENT: one entry paragraph per qualifying heading. The carried id
+ * allocation is sized by `nodeIds`, which sees the payload and not the
+ * document, so the originator asks `tocEntryCount` and sends the answer.
+ *
+ * `entryCount` is therefore a BUDGET, never an instruction: the mutation still
+ * derives its entries from the replica's own headings. Too large wastes ids
+ * harmlessly (the assignment stops at the shorter of the two lists); too small
+ * would leave the tail of the new paragraphs on locally-generated ids, which
+ * is why the budget rounds up. The two cannot disagree in practice because the
+ * operation applies at one sequenced position, where every replica's headings
+ * are the same.
+ *
+ * PAGE NUMBERS STAY PLACEHOLDERS in a room. They come from a layout, and a
+ * layout depends on the host's font metrics — exactly the value updateFields
+ * exists to CARRY rather than recompute. A user who wants them filled runs the
+ * update pass, whose results replicate as data.
+ */
+const insertTocOperation = defineOperation<{
+  runId: StableId;
+  levels?: TocLevels;
+  leader?: TocLeader;
+  entryCount: number;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertToc",
+  address: "run",
+  category: "insert",
+  description: "Insert a table of contents built from the document's headings.",
+  fields: [{ name: "entryCount" }, { name: "levels", optional: true }, { name: "leader", optional: true }],
+  // Per entry: the w:p plus the seven runs of its hyperlink. The spare covers
+  // the three field runs spliced into the first entry and the closing
+  // paragraph with its own run.
+  nodeIds: ({ entryCount }) =>
+    Number.isInteger(entryCount) && entryCount > 0 ? entryCount * 8 + 8 : 8,
+  validate: ({ entryCount, levels, leader }) => {
+    if (!Number.isInteger(entryCount) || entryCount < 1 || entryCount > 10000) {
+      return "insertToc: bad entryCount";
+    }
+    if (levels !== undefined) {
+      if (!Array.isArray(levels) || levels.length !== 2) return "insertToc: bad levels";
+      const [min, max] = levels;
+      if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max > 9 || min > max) {
+        return "insertToc: bad levels";
+      }
+    }
+    if (leader !== undefined && !TOC_LEADERS.includes(leader)) return "insertToc: bad leader";
+    return null;
+  },
+  apply: ({ doc, target, payload }) =>
+    target.t
+      ? insertToc(doc, target.t, {
+          ...(payload.levels ? { levels: payload.levels } : {}),
+          ...(payload.leader ? { leader: payload.leader } : {}),
+        })
+      : false,
+});
+
 // ---------------------------------------------------------------------------
 // Style definitions
 // ---------------------------------------------------------------------------
@@ -396,6 +460,24 @@ function badNumber(
   if (value === null) return nullable ? null : `${what} is not clearable`;
   if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
     return `${what} out of range`;
+  }
+  return null;
+}
+
+/** One w:tblBorders edge, wherever a border spec is accepted. */
+function badBorderSpec(border: unknown, what: string): string | null {
+  const spec = border as TableBorderSpec | undefined;
+  if (!spec || typeof spec !== "object" || !TABLE_BORDER_STYLES.includes(spec.style)) {
+    return `${what}: bad style`;
+  }
+  if (spec.sz !== undefined && (!Number.isFinite(spec.sz) || spec.sz < 1 || spec.sz > 96)) {
+    return `${what}: bad sz`;
+  }
+  if (spec.space !== undefined && (!Number.isFinite(spec.space) || spec.space < 0 || spec.space > 31)) {
+    return `${what}: bad space`;
+  }
+  if (spec.color !== undefined && !/^(#?[0-9A-Fa-f]{6}|auto)$/.test(spec.color)) {
+    return `${what}: bad color`;
   }
   return null;
 }
@@ -470,21 +552,53 @@ function badStyleName(name: unknown, what: string): string | null {
     : `${what}: bad name`;
 }
 
-/** Add a paragraph or character style definition to styles.xml. */
+/** Add a style definition of any of the four kinds to styles.xml. */
 const createStyleOperation = defineOperation<{ style: StyleSpec }>()({
   kind: "createStyle",
   address: "document",
   category: "document",
-  description: "Create a paragraph or character style definition.",
+  description: "Create a paragraph, character, table, or numbering style definition.",
   fields: [{ name: "style" }],
   validate: ({ style }) => {
     if (!style || typeof style !== "object" || Array.isArray(style)) return "createStyle: bad style";
-    if (style.type !== "paragraph" && style.type !== "character") return "createStyle: bad type";
+    if (!STYLE_TYPES.includes(style.type)) return "createStyle: bad type";
     if (style.type === "character" && style.paragraph) {
       return "createStyle: a character style has no paragraph properties";
     }
     if (style.quickStyle !== undefined && typeof style.quickStyle !== "boolean") {
       return "createStyle: bad quickStyle";
+    }
+    // A numbering style is a NAME for a list definition and carries nothing
+    // else, so its reference is required and its formatting is refused —
+    // both, rather than silently dropping what the caller sent.
+    if (style.type === "numbering") {
+      if (style.paragraph || style.run) return "createStyle: a numbering style carries no formatting";
+      const numId = style.numbering?.numId;
+      if (!style.numbering || typeof numId !== "number" || !Number.isInteger(numId) || numId < 1 || numId > 32767) {
+        return "createStyle: a numbering style needs a numbering definition";
+      }
+    } else if (style.numbering) {
+      return "createStyle: only a numbering style names a numbering definition";
+    }
+    if (style.table) {
+      if (style.type !== "table") return "createStyle: only a table style has table properties";
+      const borders = style.table.borders;
+      if (borders !== undefined) {
+        if (!borders || typeof borders !== "object" || Array.isArray(borders)) return "createStyle: bad borders";
+        for (const [edge, spec] of Object.entries(borders)) {
+          if (!TABLE_SCOPE_EDGES.includes(edge as TableBorderEdge)) return `createStyle: bad border edge ${edge}`;
+          const bad = badBorderSpec(spec, "createStyle");
+          if (bad) return bad;
+        }
+      }
+    }
+    if (style.linked !== undefined) {
+      if (typeof style.linked !== "boolean") return "createStyle: bad linked";
+      // The companion is a CHARACTER style carrying a paragraph style's run
+      // properties. Nothing else has a companion to link to.
+      if (style.linked && style.type !== "paragraph") {
+        return "createStyle: only a paragraph style has a linked companion";
+      }
     }
     for (const key of ["basedOn", "next"] as const) {
       const value = style[key];
@@ -665,17 +779,7 @@ const setTableBordersOperation = defineOperation<{
     const allowed = scope === "cell" ? CELL_SCOPE_EDGES : TABLE_SCOPE_EDGES;
     if (edges.some((e) => !allowed.includes(e))) return `setTableBorders: edge not valid at ${scope} scope`;
     if (border === null) return null;
-    if (!border || !TABLE_BORDER_STYLES.includes(border.style)) return "setTableBorders: bad style";
-    if (border.sz !== undefined && (!Number.isFinite(border.sz) || border.sz < 1 || border.sz > 96)) {
-      return "setTableBorders: bad sz";
-    }
-    if (border.space !== undefined && (!Number.isFinite(border.space) || border.space < 0 || border.space > 31)) {
-      return "setTableBorders: bad space";
-    }
-    if (border.color !== undefined && !/^(#?[0-9A-Fa-f]{6}|auto)$/.test(border.color)) {
-      return "setTableBorders: bad color";
-    }
-    return null;
+    return badBorderSpec(border, "setTableBorders");
   },
   apply: ({ doc, target, payload }) => {
     const anchor = cellAnchor(target);
@@ -887,6 +991,7 @@ const OPERATIONS = [
   resizeTableRowOperation,
   toggleCheckboxOperation,
   updateFieldsOperation,
+  insertTocOperation,
   createStyleOperation,
   modifyStyleOperation,
   deleteStyleOperation,

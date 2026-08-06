@@ -733,6 +733,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertDateTimeField` | Insert a DATE or TIME field | `runRef`, `dtKind`, `picture` |
 | `insertField` | Insert an allowlisted Word field | `runRef`, `instruction`; optional: `cachedResult` |
 | `insertTable` | Insert a table | `runRef`, `rows`, `cols` |
+| `insertToc` | Insert a table of contents built from the document's headings | `runRef`, `entryCount`, `levels`, `leader` |
 
 ### Drawing
 
@@ -812,7 +813,7 @@ of the style's conditional formats are used.
 | `setLineNumbering` | Configure margin line numbers | `patch` |
 | `ensureHeaderFooter` | Create a header or footer story | `hfKind` |
 | `updateFields` | Write recomputed cached results into the document's fields, one per field in document order | `results` |
-| `createStyle` | Create a paragraph or character style definition | `style` |
+| `createStyle` | Create a paragraph, character, table, or numbering style definition | `style` |
 | `modifyStyle` | Change an existing style definition | `styleId`, `patch` |
 | `deleteStyle` | Delete a style definition; content using it falls back to the style it was based on | `styleId` |
 
@@ -846,24 +847,66 @@ Applying a character style is a run-patch property rather than an operation of
 its own, so it splits the run at a partial range exactly as the other
 properties do.
 
+### Table of contents (`insertToc`)
+
+```ts
+{
+  runRef: string;       // a run in the paragraph the TOC goes after
+  entryCount: number;   // 1-10000; how many entries the TOC will have
+  levels?: [number, number];   // outline levels, default [1, 3]
+  leader?: "dot" | "hyphen" | "underscore" | "none";   // default "dot"
+}
+```
+
+`entryCount` is an ID BUDGET, not an instruction. A TOC's size comes from the
+document — one entry per qualifying heading — while every other insert's size
+comes from its own arguments, so the operation cannot size its carried id
+allocation without being told. Send `tocEntryCount(doc, options)`; the mutation
+still builds its entries from the document's own headings. Too large is
+harmless, too small leaves the last entries without replicated ids.
+
+Page numbers land as placeholders. They come from a layout, and a layout
+depends on the host's font metrics, so they are the value `updateFields`
+exists to carry rather than recompute — run the update pass to fill them in.
+
 ### Style spec (`createStyle.style`)
 
 ```ts
 {
   styleId: string;            // [A-Za-z0-9-_], up to 253 chars
-  type: "paragraph" | "character";
+  type: "paragraph" | "character" | "table" | "numbering";
   name: string;               // the display name a gallery shows
-  basedOn?: string | null;    // defaults to Normal / DefaultParagraphFont
+  basedOn?: string | null;    // defaults per type to what Word writes:
+                              // Normal, DefaultParagraphFont, TableNormal, none
   next?: string | null;       // paragraph styles only
   quickStyle?: boolean;       // w:qFormat — show in the quick-style gallery
   uiPriority?: number;        // 0–99, gallery sort order
-  paragraph?: StyleParagraphPatch;
+  paragraph?: StyleParagraphPatch;   // paragraph and table styles
   run?: StyleRunPatch;        // the run format patch without `clear`
+  linked?: boolean;           // paragraph styles only — see below
+  table?: {                   // table styles only
+    borders?: {               // top, bottom, left, right, insideH, insideV
+      [edge: string]: TableBorderSpec;
+    };
+  };
+  numbering?: { numId: number };  // numbering styles only, and required there
 }
 ```
 
 `modifyStyle.patch` is the same shape without `styleId` and `type`; every field
 is optional and an omitted one is left alone.
+
+`linked: true` also writes the linked character companion Word pairs with a
+paragraph style: id `<styleId>Char`, name `<name> Char`, the same run
+properties, and `w:link` in both directions. The operation is REFUSED when
+`<styleId>Char` is already taken — the companion's id is derived, never
+searched for, so every replica reaches the same verdict. A later `modifyStyle`
+carrying `run` on either half applies it to both.
+
+A numbering style is a NAME for a list definition: it needs `numbering.numId`
+and carries no formatting of its own. A table style's `paragraph` and `run` are
+the defaults for every paragraph and run in the table; conditional formats
+(`w:tblStylePr` — banded rows, header row) are not expressible yet.
 
 ### Style paragraph patch
 

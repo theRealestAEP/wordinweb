@@ -1068,6 +1068,25 @@ function borderElement(w: string, edge: TableBorderEdge, spec: TableBorderSpec):
 }
 
 /**
+ * Build a w:tblBorders holding the given edges, in schema order.
+ *
+ * For a caller writing a whole w:tblPr from nothing — a table STYLE
+ * definition, which has no document table to read the existing container off
+ * — rather than patching edges into a table that already exists.
+ */
+export function tableBordersElement(
+  w: string,
+  borders: Partial<Record<TableBorderEdge, TableBorderSpec>>,
+): XmlElement {
+  const container: XmlElement = { name: `${w}tblBorders`, attrs: {}, children: [], text: "" };
+  for (const edge of TABLE_SCOPE_EDGES) {
+    const spec = borders[edge];
+    if (spec) insertOrdered(container, borderElement(w, edge, spec), BORDER_EDGE_ORDER);
+  }
+  return container;
+}
+
+/**
  * Set or clear border edges on one cell or on the whole table.
  *
  * A `spec` of null REMOVES the edge element, so the edge falls back to what
@@ -1546,4 +1565,78 @@ export function setTableHeaderRows(
   });
   if (changed) doc.refresh();
   return changed;
+}
+
+// ---------- reading a table's current properties ----------
+
+/**
+ * What a Table Properties dialog needs to show the table around the caret,
+ * in points throughout so no caller handles twips.
+ *
+ * Read-only, and separate from the setters because Word's dialog PREFILLS:
+ * a width box that opens empty asks the user to retype a number the document
+ * already carries, and one that opens on a guess is worse than empty.
+ */
+export interface TablePropertiesPt {
+  /** Columns in the table's grid. */
+  columnCount: number;
+  /** Grid column the caret sits in, counting gridSpans to its left. */
+  columnIdx: number;
+  /** w:tblW. An absent element IS "auto" — that is what the schema's default
+   * says — so the unit is always answered. */
+  width: { unit: "pt" | "pct" | "auto"; value: number };
+  /** Each grid column's width. */
+  columnWidthsPt: number[];
+  /** The table's default cell margins (w:tblCellMar). A side the table does
+   * not declare is ABSENT rather than zero, so a caller can tell an inherited
+   * margin from a suppressed one. */
+  cellMargins: CellMarginsPt;
+  /** Rows in the repeating header band (see setTableHeaderRows). */
+  headerRows: number;
+}
+
+/** Read the table around `target`, or undefined when it is outside one — the
+ * same "no table here" answer cellShadingAt gives. */
+export function readTableProperties(
+  doc: DocxDocument,
+  target: XmlElement,
+): TablePropertiesPt | undefined {
+  const ctx = cellContextOf(doc, target);
+  if (!ctx) return undefined;
+  const cols = gridColsOf(ctx.tbl);
+  const tblPr = child(ctx.tbl, "tblPr");
+  const tblW = tblPr ? child(tblPr, "tblW") : undefined;
+  const type = tblW ? attr(tblW, "type") ?? "dxa" : "auto";
+  const raw = tblW ? widthAttrOf(tblW) : 0;
+  const width =
+    type === "pct"
+      ? { unit: "pct" as const, value: raw / 50 }
+      : type === "dxa"
+        ? { unit: "pt" as const, value: raw * PT_PER_TWIP }
+        : { unit: "auto" as const, value: 0 };
+
+  const marEl = tblPr ? child(tblPr, "tblCellMar") : undefined;
+  const cellMargins: CellMarginsPt = {};
+  if (marEl) {
+    for (const side of ["top", "left", "bottom", "right"] as const) {
+      const twin = MARGIN_TWIN[side];
+      const el = child(marEl, side) ?? (twin ? child(marEl, twin) : undefined);
+      if (el) cellMargins[side] = widthAttrOf(el) * PT_PER_TWIP;
+    }
+  }
+
+  let headerRows = 0;
+  for (const tr of rowsOf(ctx.tbl)) {
+    if (onOff(child(child(tr, "trPr"), "tblHeader")) !== true) break;
+    headerRows++;
+  }
+
+  return {
+    columnCount: cols.length,
+    columnIdx: gridColOf(ctx.tr, ctx.tc),
+    width,
+    columnWidthsPt: cols.map((c) => widthAttrOf(c) * PT_PER_TWIP),
+    cellMargins,
+    headerRows,
+  };
 }

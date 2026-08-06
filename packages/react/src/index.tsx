@@ -27,6 +27,7 @@ import {
   cellContextOf,
   cellShadingAt,
   listTableStyles,
+  readTableProperties,
   setTableBorders,
   setTableCellMargins,
   setTableColumnWidth,
@@ -105,6 +106,7 @@ import {
   computeFieldResults,
   findTocFields,
   insertToc,
+  tocEntryCount,
   rebuildToc,
   type TocOptions,
   createMeasurer,
@@ -149,6 +151,7 @@ import type {
   TableBorderEdge,
   TableBorderSpec,
   TableLookToggles,
+  TablePropertiesPt,
   RevisionMeta,
 } from "@wordinweb/core";
 
@@ -207,10 +210,13 @@ export interface DocxViewApi {
    */
   updateFields(values?: { fileName?: string; author?: string }): boolean;
   /**
-   * Insert a native Word table of contents at the caret, with its page numbers
-   * already filled in. False in a shared document: a TOC adds a paragraph per
-   * heading and this engine has no wire intent carrying that, so inserting one
-   * locally would diverge the room.
+   * Insert a native Word table of contents at the caret.
+   *
+   * Outside a room the page numbers are filled in immediately, from a layout
+   * this call runs. IN a room the entries land with placeholders: page numbers
+   * come from a layout, a layout depends on the host's font metrics, and that
+   * is precisely the value `updateFields` carries as data instead of letting
+   * each replica recompute it. Run the update pass to fill them.
    */
   insertToc(options?: TocOptions): boolean;
   /**
@@ -276,6 +282,10 @@ export interface DocxViewApi {
   tableOp(op: TableOp): void;
   /** Current table-cell fill, undefined when the caret is outside a table. */
   getTableCellFill(): string | null | undefined;
+  /** What a Table Properties dialog prefills from — the table's width, its
+   * grid columns, the caret's column, the default cell margins and the header
+   * band, in points. Undefined when the caret is outside a table. */
+  getTableProperties(): TablePropertiesPt | undefined;
   /** Set or clear border edges on the caret's cell or its whole table. A null
    * `border` removes the edges so they inherit again; `{ style: "none" }`
    * instead suppresses them, which is Word's No Border. */
@@ -1813,7 +1823,19 @@ export function DocxView({
             return true;
           },
           insertToc: (options) => {
-            if (collabRef.current?.submitOp) return false;
+            // In a room the entries land with PLACEHOLDER page numbers. The
+            // real ones come from a layout, which depends on this host's font
+            // metrics, so they are the value updateFields carries as data
+            // rather than a value a replica may recompute for itself.
+            if (
+              collabRunOperation("insertToc", {
+                entryCount: tocEntryCount(doc, options),
+                ...(options?.levels ? { levels: options.levels } : {}),
+                ...(options?.leader ? { leader: options.leader } : {}),
+              })
+            ) {
+              return true;
+            }
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
@@ -2031,6 +2053,10 @@ export function DocxView({
           getTableCellFill: () => {
             const caret = editor?.getCaretTarget();
             return caret ? cellShadingAt(doc, caret.t) : undefined;
+          },
+          getTableProperties: () => {
+            const caret = editor?.getCaretTarget();
+            return caret ? readTableProperties(doc, caret.t) : undefined;
           },
           setTableBorders: (scope, edges, border) =>
             runTableOperation("setTableBorders", { scope, edges, border }, (caret, meta) =>

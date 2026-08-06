@@ -3,6 +3,7 @@ import {
   Block,
   Border,
   DrawingTextShape,
+  FieldContent,
   HeaderFooter,
   NumberingLevel,
   Paragraph,
@@ -26,6 +27,7 @@ import {
   tableCondOrder,
 } from "../parse/styles.js";
 import { mergeRunProps } from "../parse/properties.js";
+import { bodyStyleRefText } from "../style-ref.js";
 import { ptToPx } from "../units.js";
 import { child, serializeXml, cyrb53, XmlElement } from "../xml.js";
 import {
@@ -2482,7 +2484,31 @@ class Engine {
       refText: (bookmark) => engine.refBookmarkText(bookmark),
       refPosition: (key) => engine.refFieldPosition.get(key),
       refParaNumber: (key) => engine.refFieldParaNumber.get(key),
+      styleRefBody: (_name, key) => engine.resolveBodyStyleRef(key),
     };
+  }
+
+  /**
+   * A body STYLEREF's text: the nearest paragraph of the named style at or
+   * before the field, in document order. src/style-ref.ts holds the rule, and
+   * the update pass reads that same one, so what the screen paints and what a
+   * save writes into the cache cannot disagree.
+   *
+   * Built ON FIRST USE rather than in startRun beside the other document-order
+   * pre-passes. inline.ts consults this hook only for a STYLEREF outside a
+   * header, so a document without one never pays for the walk — and proving
+   * "this document has no body STYLEREF" would cost the same walk that builds
+   * the map.
+   *
+   * Keyed by field identity and derived from the whole model, so neither the
+   * page window nor an incremental relay's reused prefix can change an answer:
+   * a field resolves against the paragraphs before it whether or not those
+   * pages were laid out this time.
+   */
+  private bodyStyleRefs: Map<FieldContent, string> | null = null;
+  private resolveBodyStyleRef(key: object): string | undefined {
+    this.bodyStyleRefs ??= bodyStyleRefText(this.doc);
+    return this.bodyStyleRefs.get(key as FieldContent);
   }
 
   /** Current text of a `_Ref` cross-reference bookmark range (REF fields).

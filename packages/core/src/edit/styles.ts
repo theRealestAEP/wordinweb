@@ -1,8 +1,9 @@
 import { DocxDocument } from "../docx.js";
 import { RunProps } from "../model.js";
 import { resolveCharacterStyleChain, resolveParagraphStyleChain } from "../parse/styles.js";
-import { XmlElement, attr, localName } from "../xml.js";
+import { XmlElement, attr, cloneXml, localName } from "../xml.js";
 import { RunFormatPatch, setRunProps } from "./commands.js";
+import { tableBordersElement, type TableBorderEdge, type TableBorderSpec } from "./tables.js";
 
 /**
  * Style DEFINITION editing: the entries in styles.xml, as opposed to applying
@@ -35,13 +36,33 @@ export interface StyleParaPatch {
  * character formatting; `clear` has no meaning for a definition. */
 export type StyleRunPatch = Omit<RunFormatPatch, "clear">;
 
+/** The four style kinds a w:style can declare. One list, so a validator and
+ * a schema cannot disagree about which types exist. */
+export const STYLE_TYPES = ["paragraph", "character", "table", "numbering"] as const;
+
+export type StyleType = (typeof STYLE_TYPES)[number];
+
+/** What Word bases a new style of each kind on when the caller says nothing.
+ * A numbering style has no parent: Word writes none. */
+const DEFAULT_BASED_ON: Record<StyleType, string | null> = {
+  paragraph: "Normal",
+  character: "DefaultParagraphFont",
+  table: "TableNormal",
+  numbering: null,
+};
+
+/** The suffix Word gives a paragraph style's linked character companion, for
+ * both the styleId and the display name. */
+const LINK_SUFFIX = "Char";
+
 export interface StyleSpec {
   styleId: string;
-  type: "paragraph" | "character";
+  type: StyleType;
   /** The display name (w:name) — what a gallery shows. */
   name: string;
-  /** Parent in the cascade. Defaults to Normal for a paragraph style and
-   * DefaultParagraphFont for a character style, which is what Word writes. */
+  /** Parent in the cascade. Defaults per type to what Word writes: Normal for
+   * a paragraph style, DefaultParagraphFont for a character style,
+   * TableNormal for a table style, and nothing for a numbering style. */
   basedOn?: string | null;
   /** Style applied to the NEXT paragraph after this one (paragraph only). */
   next?: string | null;
@@ -51,6 +72,26 @@ export interface StyleSpec {
   uiPriority?: number;
   paragraph?: StyleParaPatch;
   run?: StyleRunPatch;
+  /**
+   * PARAGRAPH styles only: also write the linked character companion Word
+   * pairs with one, so the same look can be applied to a span of text as well
+   * as to a whole paragraph. The companion takes the id `<styleId>Char` and
+   * the name `<name> Char`, copies the paragraph style's run properties, and
+   * the two point at each other through w:link.
+   *
+   * Refused when `<styleId>Char` is already taken, rather than picking
+   * another id: the companion's id has to be derivable from the paragraph
+   * style's, or two replicas applying the same operation would disagree
+   * about what to call it.
+   */
+  linked?: boolean;
+  /** TABLE styles only: the grid the style draws. Conditional formats
+   * (w:tblStylePr — banded rows, header row) are not expressible yet. */
+  table?: { borders?: Partial<Record<TableBorderEdge, TableBorderSpec>> };
+  /** NUMBERING styles only, and required for them: the w:numId of the
+   * numbering definition the style names. A numbering style is a NAME for a
+   * list definition, so it carries nothing else of its own. */
+  numbering?: { numId: number };
 }
 
 export interface StylePatch {
@@ -264,6 +305,13 @@ export function uniqueStyleId(doc: DocxDocument, base: string): string {
 export function createStyle(doc: DocxDocument, spec: StyleSpec): boolean {
   const root = doc.stylesTree();
   if (!root || doc.styles.byId.has(spec.styleId)) return false;
+  if (spec.type === "numbering" && spec.numbering === undefined) return false;
+  const linked = spec.linked === true && spec.type === "paragraph";
+  const companionId = `${spec.styleId}${LINK_SUFFIX}`;
+  // Checked BEFORE the first mutation: a half-created pair would be worse
+  // than a refusal, and the id is derived rather than searched for so that
+  // every replica of this operation reaches the same verdict.
+  if (linked && doc.styles.byId.has(companionId)) return false;
   const w = prefixOf(root.children.find((c) => localName(c.name) === "style") ?? root) || "w:";
 
   // Attribute order follows Word: type, customStyle, styleId. Everything this
@@ -282,28 +330,93 @@ export function createStyle(doc: DocxDocument, spec: StyleSpec): boolean {
     setOrderedChild(styleEl, STYLE_CHILD_ORDER, w, local, attrs);
 
   set("name", { val: spec.name });
-  const basedOn =
-    spec.basedOn === undefined
-      ? spec.type === "paragraph"
-        ? "Normal"
-        : "DefaultParagraphFont"
-      : spec.basedOn;
+  const basedOn = spec.basedOn === undefined ? DEFAULT_BASED_ON[spec.type] : spec.basedOn;
   if (basedOn !== null) set("basedOn", { val: basedOn });
   if (spec.type === "paragraph") {
     // Word writes w:next only when it differs from the style itself; a body
     // style that follows itself omits it.
     if (spec.next != null && spec.next !== spec.styleId) set("next", { val: spec.next });
   }
+  if (linked) set("link", { val: companionId });
   if (spec.uiPriority !== undefined) set("uiPriority", { val: String(spec.uiPriority) });
   if (spec.quickStyle) set("qFormat", {});
-  if (spec.type === "paragraph" && spec.paragraph) applyParaPatch(styleEl, spec.paragraph);
-  if (spec.run) applyRunPatch(styleEl, spec.run);
+  // A table style's w:pPr and w:rPr are the defaults for every paragraph and
+  // run in the table, so both kinds of patch apply there too. A numbering
+  // style carries only the reference below.
+  if (spec.paragraph && (spec.type === "paragraph" || spec.type === "table")) {
+    applyParaPatch(styleEl, spec.paragraph);
+  }
+  if (spec.run && spec.type !== "numbering") applyRunPatch(styleEl, spec.run);
+  if (spec.type === "numbering" && spec.numbering) {
+    applyNumberingReference(styleEl, w, spec.numbering.numId);
+  }
+  if (spec.type === "table" && spec.table?.borders) {
+    const tblPr: XmlElement = { name: `${w}tblPr`, attrs: {}, children: [], text: "" };
+    tblPr.children.push(tableBordersElement(w, spec.table.borders));
+    insertOrdered(styleEl, STYLE_CHILD_ORDER, tblPr);
+  }
 
   // Word appends new definitions after the existing ones; docDefaults and
   // latentStyles lead the part and are left where they are.
   root.children.push(styleEl);
+  if (linked) root.children.push(linkedCompanion(styleEl, w, spec, companionId));
   doc.markStylesChanged();
   return true;
+}
+
+/** A numbering style's whole content: w:pPr/w:numPr/w:numId naming the
+ * definition in numbering.xml that the style stands for. */
+function applyNumberingReference(styleEl: XmlElement, w: string, numId: number): void {
+  const numPr: XmlElement = { name: `${w}numPr`, attrs: {}, children: [], text: "" };
+  numPr.children.push({
+    name: `${w}numId`,
+    attrs: { [`${w}val`]: String(Math.round(numId)) },
+    children: [],
+    text: "",
+  });
+  const pPr: XmlElement = { name: `${w}pPr`, attrs: {}, children: [numPr], text: "" };
+  insertOrdered(styleEl, STYLE_CHILD_ORDER, pPr);
+}
+
+/**
+ * The character style Word writes beside a linked paragraph style: same run
+ * properties, pointing back through w:link, based on DefaultParagraphFont.
+ *
+ * The run properties are CLONED from the paragraph style rather than
+ * re-derived from the spec, so the pair cannot start out disagreeing about
+ * something applyRunPatch normalised.
+ */
+function linkedCompanion(
+  styleEl: XmlElement,
+  w: string,
+  spec: StyleSpec,
+  companionId: string,
+): XmlElement {
+  const companion: XmlElement = {
+    name: `${w}style`,
+    attrs: {
+      [`${w}type`]: "character",
+      [`${w}customStyle`]: "1",
+      [`${w}styleId`]: companionId,
+    },
+    children: [],
+    text: "",
+  };
+  const set = (local: string, attrs: Record<string, string> | null) =>
+    setOrderedChild(companion, STYLE_CHILD_ORDER, w, local, attrs);
+  set("name", { val: `${spec.name} ${LINK_SUFFIX}` });
+  set("basedOn", { val: "DefaultParagraphFont" });
+  set("link", { val: spec.styleId });
+  if (spec.uiPriority !== undefined) set("uiPriority", { val: String(spec.uiPriority) });
+  const rPr = styleEl.children.find((c) => localName(c.name) === "rPr");
+  if (rPr) insertOrdered(companion, STYLE_CHILD_ORDER, cloneXml(rPr));
+  return companion;
+}
+
+/** The styleId a style's w:link names, if it has one. */
+function linkedIdOf(styleEl: XmlElement): string | undefined {
+  const link = styleEl.children.find((c) => localName(c.name) === "link");
+  return link ? attr(link, "val") : undefined;
 }
 
 /** Patch an existing style definition. False when the style is not declared. */
@@ -326,7 +439,17 @@ export function modifyStyle(doc: DocxDocument, styleId: string, patch: StylePatc
   if (patch.uiPriority !== undefined) set("uiPriority", { val: String(patch.uiPriority) });
   if (patch.quickStyle !== undefined) set("qFormat", patch.quickStyle ? {} : null);
   if (patch.paragraph) applyParaPatch(styleEl, patch.paragraph);
-  if (patch.run) applyRunPatch(styleEl, patch.run);
+  if (patch.run) {
+    applyRunPatch(styleEl, patch.run);
+    // A LINKED PAIR IS ONE LOOK. The character companion exists so a span of
+    // text can be given the paragraph style's formatting; letting the two
+    // drift makes the "Char" half a lie, and Word keeps them equal. The
+    // partner is patched directly rather than through modifyStyle, which
+    // would come straight back here.
+    const partnerId = linkedIdOf(styleEl);
+    const partner = partnerId && partnerId !== styleId ? styleElement(root!, partnerId) : undefined;
+    if (partner) applyRunPatch(partner, patch.run);
+  }
   doc.markStylesChanged();
   return true;
 }
@@ -406,6 +529,15 @@ export function deleteStyle(doc: DocxDocument, styleId: string): boolean {
       }
     }
   }
+  // A surviving half of a linked pair must lose its w:link: the reference
+  // would otherwise name a style styles.xml no longer declares, which is the
+  // dangling reference this function exists to avoid making.
+  for (const other of root.children) {
+    if (localName(other.name) !== "style" || other === styleEl) continue;
+    const idx = other.children.findIndex((c) => localName(c.name) === "link");
+    if (idx !== -1 && referenceValue(other.children[idx]) === styleId) other.children.splice(idx, 1);
+  }
+
   root.children.splice(root.children.indexOf(styleEl), 1);
   doc.markStylesChanged();
   // Content references moved, so the model itself is stale — not just the

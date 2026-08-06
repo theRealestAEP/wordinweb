@@ -107,6 +107,7 @@ export {
   styleUsageCount,
   styleIdFromName,
   uniqueStyleId,
+  STYLE_TYPES,
 } from "./edit/styles.js";
 export type {
   StyleSpec,
@@ -114,6 +115,7 @@ export type {
   StyleParaPatch,
   StyleRunPatch,
   StyleGalleryEntry,
+  StyleType,
 } from "./edit/styles.js";
 export {
   NUMBER_FORMATS,
@@ -141,8 +143,8 @@ export {
   updateFields,
 } from "./edit/update-fields.js";
 export type { FieldUpdateOptions } from "./edit/update-fields.js";
-export { TOC_EMPTY_TEXT, findTocFields, insertToc, rebuildToc } from "./edit/toc.js";
-export type { TocLevels, TocOptions } from "./edit/toc.js";
+export { TOC_EMPTY_TEXT, TOC_LEADERS, findTocFields, insertToc, rebuildToc, tocEntryCount } from "./edit/toc.js";
+export type { TocLeader, TocLevels, TocOptions } from "./edit/toc.js";
 export {
   drawingFillColor,
   drawingLineStyle,
@@ -181,6 +183,7 @@ export { cellShadingAt } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";
 export {
   listTableStyles,
+  readTableProperties,
   setTableBorders,
   setTableCellMargins,
   setTableColumnWidth,
@@ -200,6 +203,7 @@ export type {
   TableBorderSpec,
   TableBorderStyle,
   TableLookToggles,
+  TablePropertiesPt,
 } from "./edit/tables.js";
 export type { ParagraphAlignment, PageLayoutPatch } from "./edit/blocks.js";
 export type { EditorHost } from "./edit/editor.js";

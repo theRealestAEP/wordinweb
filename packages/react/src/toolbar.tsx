@@ -1,6 +1,17 @@
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { availableObjectCommands, requestTextInputDialog, type SelectionFormat } from "@wordinweb/core";
+import {
+  availableObjectCommands,
+  requestTextInputDialog,
+  styleIdFromName,
+  uniqueStyleId,
+  CELL_SCOPE_EDGES,
+  TABLE_BORDER_STYLES,
+  TABLE_SCOPE_EDGES,
+  type SelectionFormat,
+  type TableBorderEdge,
+  type TableBorderStyle,
+} from "@wordinweb/core";
 import type { DocxViewApi } from "./index.js";
 import { HelpGuide } from "./help.js";
 
@@ -1170,6 +1181,43 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/**
+ * Table of contents, and the two update passes that keep a document's field
+ * results current.
+ *
+ * Word puts these on a References tab this ribbon does not have. A TOC IS a
+ * field, so it lands beside the other field controls — the same placement
+ * INSERT_COMMANDS already records for `insertToc`.
+ *
+ * The two updates are different jobs and both are offered: refreshTocs
+ * REBUILDS the entry paragraphs from the document's current headings, while
+ * updateFields only recomputes every field's result (page numbers, dates,
+ * cross-references) against the current layout.
+ */
+function ContentsMenu({ api }: { api: DocxViewApi | null }) {
+  return (
+    <ActionMenu
+      label="Contents"
+      title="Insert or update a table of contents"
+      width={92}
+      groups={[
+        {
+          items: [
+            ["insert", "Table of contents"],
+            ["rebuild", "Update table of contents"],
+            ["fields", "Update fields"],
+          ],
+        },
+      ]}
+      onPick={(value) => {
+        if (value === "insert") api?.insertToc();
+        else if (value === "rebuild") api?.refreshTocs();
+        else api?.updateFields();
+      }}
+    />
+  );
+}
+
 const SYMBOLS = ["Ω", "±", "×", "÷", "≤", "≥", "≠", "≈", "∞", "∑", "√", "∫", "→", "↔", "©", "®", "™", "€", "£", "¥", "✓", "•", "§", "¶"];
 
 function SymbolMenu({ api }: { api: DocxViewApi | null }) {
@@ -2155,6 +2203,503 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/**
+ * Keep a popover under the control that opened it, and close it on a click
+ * outside or on Escape. Returns the fixed position to paint at.
+ *
+ * The layout tab's three custom dialogs each grew their own copy of this
+ * before there was a third; new popovers share this one.
+ */
+function useAnchoredPopover(
+  anchorRef: React.RefObject<HTMLElement | null>,
+  rootRef: React.RefObject<HTMLElement | null>,
+  width: number,
+  onClose: () => void,
+): { left: number; top: number } {
+  const [position, setPosition] = useState({ left: 8, top: 8 });
+  useEffect(() => {
+    const place = () => {
+      const rect = anchorRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const w = Math.min(width, window.innerWidth - 16);
+      // Clamped against the popover's OWN height once it has one, so a tall
+      // form near the bottom of a short window still fits on screen.
+      const height = rootRef.current?.offsetHeight ?? 0;
+      setPosition({
+        left: Math.max(8, Math.min(rect.left, window.innerWidth - w - 8)),
+        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - height - 8)),
+      });
+    };
+    const outside = (event: MouseEvent) => {
+      if (rootRef.current?.contains(event.target as Node)) return;
+      if (anchorRef.current?.contains(event.target as Node)) return;
+      onClose();
+    };
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    place();
+    document.addEventListener("mousedown", outside);
+    document.addEventListener("keydown", keydown);
+    window.addEventListener("resize", place);
+    return () => {
+      document.removeEventListener("mousedown", outside);
+      document.removeEventListener("keydown", keydown);
+      window.removeEventListener("resize", place);
+    };
+  }, [anchorRef, rootRef, onClose, width]);
+  return position;
+}
+
+/**
+ * A popover form anchored under the control that opened it, ending with the
+ * Cancel/Apply pair every form in this bar ends with.
+ */
+function AnchoredDialog({
+  anchorRef,
+  title,
+  label,
+  width = 236,
+  onClose,
+  onApply,
+  applyDisabled,
+  children,
+}: {
+  anchorRef: React.RefObject<HTMLElement | null>;
+  title: string;
+  /** Accessible name; defaults to the visible title. */
+  label?: string;
+  width?: number;
+  onClose: () => void;
+  onApply: () => void;
+  applyDisabled?: boolean;
+  children: React.ReactNode;
+}) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPopover(anchorRef, rootRef, width, onClose);
+  return (
+    <div
+      ref={rootRef}
+      role="dialog"
+      aria-label={label ?? title}
+      onMouseDown={(event) => event.stopPropagation()}
+      style={{
+        position: "fixed", top: position.top, left: position.left, zIndex: 201,
+        width: `min(${width}px, calc(100vw - 16px))`, boxSizing: "border-box",
+        background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
+        boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7, color: T.fg,
+      }}
+    >
+      <strong style={{ fontSize: 13 }}>{title}</strong>
+      {children}
+      {/* Marked, because a field inside the form can be a popover with its own
+          Cancel/Apply pair (the color menu is): "the last button called Apply"
+          is not a safe way to find this one. */}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+        <button type="button" data-dxw-dialog-cancel="" onClick={onClose} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Cancel</button>
+        <button type="button" data-dxw-dialog-apply="" onClick={onApply} disabled={applyDisabled} style={pillBtn}>Apply</button>
+      </div>
+    </div>
+  );
+}
+
+/** Shared row shape for the labelled fields inside an AnchoredDialog. */
+const dialogFieldRow: React.CSSProperties = {
+  display: "grid", gridTemplateColumns: "78px 1fr", gap: 8, alignItems: "center", fontSize: 12,
+};
+
+const dialogInput: React.CSSProperties = {
+  width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`,
+  borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg,
+};
+
+/** A number the user typed, or null when the box is empty or not a number. */
+function typedNumber(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Points, rounded the way a dialog shows them rather than to full float. */
+function showPt(value: number): string {
+  return String(Math.round(value * 100) / 100);
+}
+
+const MARGIN_SIDES = ["top", "left", "bottom", "right"] as const;
+
+/**
+ * Word's Table Properties dialog, for the numbers its ribbon buttons cannot
+ * express: an exact table width, one column's width, the default cell
+ * margins, and the size of the repeating header band.
+ *
+ * It PREFILLS from the document (api.getTableProperties) and applies only the
+ * values the user actually changed. Applying everything would write a w:tblW
+ * onto a table that never had one — and, in suggesting mode, record a tracked
+ * change for a property nobody touched.
+ */
+function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  type Form = {
+    widthUnit: "auto" | "pt" | "pct";
+    widthValue: string;
+    columnWidth: string;
+    margins: Record<(typeof MARGIN_SIDES)[number], string>;
+    headerRows: string;
+  };
+  const [initial, setInitial] = useState<{ form: Form; columnIdx: number; columnCount: number } | null>(null);
+  const [form, setForm] = useState<Form | null>(null);
+
+  const openDialog = () => {
+    const info = api?.getTableProperties();
+    if (!info) return;
+    const next: Form = {
+      widthUnit: info.width.unit,
+      widthValue: info.width.unit === "auto" ? "" : showPt(info.width.value),
+      columnWidth: showPt(info.columnWidthsPt[info.columnIdx] ?? 0),
+      margins: {
+        top: info.cellMargins.top === undefined ? "" : showPt(info.cellMargins.top),
+        left: info.cellMargins.left === undefined ? "" : showPt(info.cellMargins.left),
+        bottom: info.cellMargins.bottom === undefined ? "" : showPt(info.cellMargins.bottom),
+        right: info.cellMargins.right === undefined ? "" : showPt(info.cellMargins.right),
+      },
+      headerRows: String(info.headerRows),
+    };
+    setInitial({ form: next, columnIdx: info.columnIdx, columnCount: info.columnCount });
+    setForm(next);
+    setOpen(true);
+  };
+
+  const close = useCallback(() => setOpen(false), []);
+
+  const widthOk =
+    form === null ||
+    form.widthUnit === "auto" ||
+    (() => {
+      const n = typedNumber(form.widthValue);
+      return n !== null && n > 0 && (form.widthUnit === "pct" ? n <= 100 : n <= 1584);
+    })();
+  const columnOk = form === null || (() => {
+    const n = typedNumber(form.columnWidth);
+    return n !== null && n >= 1 && n <= 1584;
+  })();
+  const marginsOk =
+    form === null ||
+    MARGIN_SIDES.every((side) => {
+      const raw = form.margins[side];
+      if (raw.trim() === "") return true;
+      const n = typedNumber(raw);
+      return n !== null && n >= 0 && n <= 144;
+    });
+  const headerOk = form === null || (() => {
+    const n = typedNumber(form.headerRows);
+    return n !== null && n >= 0 && Number.isInteger(n);
+  })();
+  const valid = widthOk && columnOk && marginsOk && headerOk;
+
+  const apply = () => {
+    if (!form || !initial || !valid) return;
+    const was = initial.form;
+    if (form.widthUnit !== was.widthUnit || form.widthValue !== was.widthValue) {
+      if (form.widthUnit === "auto") api?.setTableWidth("auto");
+      else api?.setTableWidth(form.widthUnit, typedNumber(form.widthValue) ?? 0);
+    }
+    if (form.columnWidth !== was.columnWidth) {
+      api?.setTableColumnWidth(initial.columnIdx, typedNumber(form.columnWidth) ?? 0);
+    }
+    if (MARGIN_SIDES.some((side) => form.margins[side] !== was.margins[side])) {
+      const margins: Record<string, number> = {};
+      for (const side of MARGIN_SIDES) {
+        const n = typedNumber(form.margins[side]);
+        if (n !== null) margins[side] = n;
+      }
+      api?.setTableCellMargins("table", margins);
+    }
+    if (form.headerRows !== was.headerRows) {
+      api?.setTableHeaderRows(typedNumber(form.headerRows) ?? 0);
+    }
+    setOpen(false);
+    onChanged();
+  };
+
+  const marginField = (side: (typeof MARGIN_SIDES)[number], label: string) => (
+    <label key={side} style={{ display: "grid", gap: 3, fontSize: 11, color: T.muted }}>
+      <span>{label}</span>
+      <input
+        aria-label={`${label} cell margin (points)`}
+        type="number"
+        min="0"
+        step="0.5"
+        placeholder="—"
+        value={form?.margins[side] ?? ""}
+        onChange={(event) =>
+          setForm((f) => (f ? { ...f, margins: { ...f.margins, [side]: event.target.value } } : f))
+        }
+        style={dialogInput}
+      />
+    </label>
+  );
+
+  return (
+    <span style={{ display: "contents" }}>
+      <Btn
+        label="Properties"
+        title="Table properties: exact widths, cell margins and header rows"
+        active={open}
+        buttonRef={triggerRef}
+        onClick={() => (open ? close() : openDialog())}
+      />
+      {open && form && initial && (
+        <AnchoredDialog
+          anchorRef={triggerRef}
+          title="Table Properties"
+          width={252}
+          onClose={close}
+          onApply={apply}
+          applyDisabled={!valid}
+        >
+          <label style={dialogFieldRow}>
+            <span>Table width</span>
+            <span style={{ display: "flex", gap: 6 }}>
+              <select
+                aria-label="Table width unit"
+                value={form.widthUnit}
+                onChange={(event) =>
+                  setForm({ ...form, widthUnit: event.target.value as Form["widthUnit"] })
+                }
+                style={{ ...dialogInput, width: 78 }}
+              >
+                <option value="auto">Auto</option>
+                <option value="pt">Points</option>
+                <option value="pct">Percent</option>
+              </select>
+              <input
+                aria-label="Table width"
+                type="number"
+                min="0"
+                step="1"
+                disabled={form.widthUnit === "auto"}
+                value={form.widthUnit === "auto" ? "" : form.widthValue}
+                onChange={(event) => setForm({ ...form, widthValue: event.target.value })}
+                style={dialogInput}
+              />
+            </span>
+          </label>
+          <label style={dialogFieldRow}>
+            <span>{`Column ${initial.columnIdx + 1} of ${initial.columnCount}`}</span>
+            <input
+              aria-label="Column width (points)"
+              type="number"
+              min="1"
+              step="1"
+              value={form.columnWidth}
+              onChange={(event) => setForm({ ...form, columnWidth: event.target.value })}
+              style={dialogInput}
+            />
+          </label>
+          <span style={{ fontSize: 12 }}>Cell margins (points)</span>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+            {marginField("top", "Top")}
+            {marginField("left", "Left")}
+            {marginField("bottom", "Bottom")}
+            {marginField("right", "Right")}
+          </div>
+          <label style={dialogFieldRow}>
+            <span>Header rows</span>
+            <input
+              aria-label="Repeating header rows"
+              type="number"
+              min="0"
+              step="1"
+              value={form.headerRows}
+              onChange={(event) => setForm({ ...form, headerRows: event.target.value })}
+              style={dialogInput}
+            />
+          </label>
+          <span style={{ color: T.muted, fontSize: 11 }}>
+            Only the boxes you change are written. A blank margin keeps the table's current one.
+          </span>
+        </AnchoredDialog>
+      )}
+    </span>
+  );
+}
+
+/** Word's border weights, in points. w:sz counts eighths of a point. */
+const BORDER_WIDTHS_PT = [0.25, 0.5, 0.75, 1, 1.5, 2.25, 3, 4.5, 6];
+
+/** Display names for the border styles the engine writes. */
+const BORDER_STYLE_NAMES: Record<TableBorderStyle, string> = {
+  single: "Single",
+  thick: "Thick",
+  double: "Double",
+  dotted: "Dotted",
+  dashed: "Dashed",
+  dotDash: "Dot dash",
+  dotDotDash: "Dot dot dash",
+  thinThickSmallGap: "Thin then thick",
+  triple: "Triple",
+  wave: "Wave",
+  none: "None (suppress)",
+};
+
+const EDGE_NAMES: Record<TableBorderEdge, string> = {
+  top: "Top",
+  bottom: "Bottom",
+  left: "Left",
+  right: "Right",
+  insideH: "Inside horizontal",
+  insideV: "Inside vertical",
+  tl2br: "Diagonal ↘",
+  tr2bl: "Diagonal ↗",
+};
+
+/**
+ * The full border editor behind the Borders menu's presets: any of the
+ * engine's line styles, any weight w:sz can carry, any color, on whichever
+ * edges the chosen scope allows.
+ *
+ * The scope decides the edge list rather than the user filtering it, because
+ * setTableBorders REFUSES an edge the scope does not own (a table has no
+ * diagonals; a cell has no inside rules) and a checkbox that silently does
+ * nothing is worse than an absent one.
+ */
+function CustomBorderDialog({
+  api,
+  anchorRef,
+  onClose,
+  onChanged,
+}: {
+  api: DocxViewApi | null;
+  anchorRef: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [scope, setScope] = useState<"table" | "cell">("table");
+  const [style, setStyle] = useState<TableBorderStyle>("single");
+  const [widthPt, setWidthPt] = useState("0.5");
+  const [color, setColor] = useState("#000000");
+  const [edges, setEdges] = useState<TableBorderEdge[]>(["top", "bottom", "left", "right"]);
+
+  const allowed = scope === "cell" ? CELL_SCOPE_EDGES : TABLE_SCOPE_EDGES;
+  const chosen = edges.filter((edge) => allowed.includes(edge));
+  const width = typedNumber(widthPt);
+  const validColor = normalizedColor(color);
+  const valid =
+    chosen.length > 0 &&
+    validColor !== null &&
+    (style === "none" || (width !== null && width >= 0.125 && width <= 12));
+
+  const apply = () => {
+    if (!valid) return;
+    api?.setTableBorders(
+      scope,
+      [...chosen],
+      style === "none"
+        ? { style: "none" }
+        : {
+            style,
+            // w:sz is eighths of a point, and the engine takes it in that
+            // unit; the box asks for points because that is what Word's
+            // weight list shows.
+            sz: Math.min(96, Math.max(1, Math.round((width ?? 0.5) * 8))),
+            color: validColor!.slice(1).toUpperCase(),
+          },
+    );
+    onClose();
+    onChanged();
+  };
+
+  return (
+    <AnchoredDialog
+      anchorRef={anchorRef}
+      title="Custom Border"
+      width={244}
+      onClose={onClose}
+      onApply={apply}
+      applyDisabled={!valid}
+    >
+      <label style={dialogFieldRow}>
+        <span>Apply to</span>
+        <select
+          aria-label="Border scope"
+          value={scope}
+          onChange={(event) => setScope(event.target.value as "table" | "cell")}
+          style={dialogInput}
+        >
+          <option value="table">Whole table</option>
+          <option value="cell">This cell</option>
+        </select>
+      </label>
+      <label style={dialogFieldRow}>
+        <span>Style</span>
+        <select
+          aria-label="Border style"
+          value={style}
+          onChange={(event) => setStyle(event.target.value as TableBorderStyle)}
+          style={dialogInput}
+        >
+          {TABLE_BORDER_STYLES.map((value) => (
+            <option key={value} value={value}>{BORDER_STYLE_NAMES[value]}</option>
+          ))}
+        </select>
+      </label>
+      <label style={dialogFieldRow}>
+        <span>Weight</span>
+        <select
+          aria-label="Border width (points)"
+          value={widthPt}
+          disabled={style === "none"}
+          onChange={(event) => setWidthPt(event.target.value)}
+          style={dialogInput}
+        >
+          {BORDER_WIDTHS_PT.map((pt) => (
+            <option key={pt} value={String(pt)}>{`${pt} pt`}</option>
+          ))}
+        </select>
+      </label>
+      <span style={dialogFieldRow}>
+        <span>Color</span>
+        <ColorMenu
+          current={validColor ?? "#000000"}
+          title="Border color"
+          trigger={(
+            <>
+              <span
+                aria-hidden="true"
+                style={{ width: 14, height: 14, borderRadius: 3, border: `1px solid ${T.border}`, background: validColor ?? "#000000" }}
+              />
+              {validColor ?? "#000000"}
+            </>
+          )}
+          onPick={setColor}
+        />
+      </span>
+      <span style={{ fontSize: 12 }}>Edges</span>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
+        {allowed.map((edge) => (
+          <label key={edge} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 11.5 }}>
+            <input
+              type="checkbox"
+              aria-label={EDGE_NAMES[edge]}
+              checked={chosen.includes(edge)}
+              onChange={(event) =>
+                setEdges((current) =>
+                  event.target.checked
+                    ? [...current, edge]
+                    : current.filter((other) => other !== edge),
+                )
+              }
+            />
+            {EDGE_NAMES[edge]}
+          </label>
+        ))}
+      </div>
+    </AnchoredDialog>
+  );
+}
+
 /** Menu value standing for "remove the style reference". */
 const NO_TABLE_STYLE = "(no table style)";
 
@@ -2175,6 +2720,9 @@ function TableFormatTab({
     act();
     onChanged();
   };
+  const [customBorder, setCustomBorder] = useState(false);
+  const borderMenuRef = useRef<HTMLSpanElement | null>(null);
+  const closeCustomBorder = useCallback(() => setCustomBorder(false), []);
   // Word's "No Borders" and its eraser are different edits, and the engine
   // keeps them apart: SUPPRESS writes w:val="nil" so no rule is drawn even
   // when the table style asks for one, while CLEAR removes the direct edges
@@ -2231,32 +2779,46 @@ function TableFormatTab({
         groups={[{ items: [["mergeRight", "Merge right"], ["mergeDown", "Merge down"], ["splitCell", "Split cell"]] }]}
         onPick={(value) => run(value as Parameters<DocxViewApi["tableOp"]>[0])}
       />
-      <ActionMenu
-        label="Borders"
-        title="Set or clear the borders of the table or the current cell"
-        width={92}
-        groups={[
-          {
-            label: "Table",
-            items: [
-              ["tableAll", "All borders"],
-              ["tableOutside", "Outside borders"],
-              ["tableInside", "Inside borders"],
-              ["tableNone", "No borders"],
-              ["tableClear", "Clear direct borders"],
-            ],
-          },
-          {
-            label: "Cell",
-            items: [
-              ["cellAll", "All borders"],
-              ["cellNone", "No borders"],
-              ["cellClear", "Clear direct borders"],
-            ],
-          },
-        ]}
-        onPick={(value) => after(() => borderActions[value]?.())}
-      />
+      <span ref={borderMenuRef} style={{ display: "inline-flex" }}>
+        <ActionMenu
+          label="Borders"
+          title="Set or clear the borders of the table or the current cell"
+          width={92}
+          groups={[
+            {
+              label: "Table",
+              items: [
+                ["tableAll", "All borders"],
+                ["tableOutside", "Outside borders"],
+                ["tableInside", "Inside borders"],
+                ["tableNone", "No borders"],
+                ["tableClear", "Clear direct borders"],
+              ],
+            },
+            {
+              label: "Cell",
+              items: [
+                ["cellAll", "All borders"],
+                ["cellNone", "No borders"],
+                ["cellClear", "Clear direct borders"],
+              ],
+            },
+            { items: [["custom", "Custom border…"]] },
+          ]}
+          onPick={(value) => {
+            if (value === "custom") setCustomBorder(true);
+            else after(() => borderActions[value]?.());
+          }}
+        />
+      </span>
+      {customBorder && (
+        <CustomBorderDialog
+          api={api}
+          anchorRef={borderMenuRef}
+          onClose={closeCustomBorder}
+          onChanged={onChanged}
+        />
+      )}
       <ActionMenu
         label={styleId ? "Style" : "Table style"}
         title="Apply a table style defined in this document"
@@ -2337,7 +2899,384 @@ function TableFormatTab({
         groups={[{ items: [["0", "None"], ["1", "First row"], ["2", "First two rows"]] }]}
         onPick={(value) => after(() => api?.setTableHeaderRows(Number(value)))}
       />
+      <TablePropertiesDialog api={api} onChanged={onChanged} />
       <Btn label="Delete table" title="Delete the current table" onClick={() => run("deleteTable")} />
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------- styles pane
+
+type StyleEntry = ReturnType<NonNullable<DocxViewApi["listStyles"]>>[number];
+
+/** Paint a gallery row the way the style itself would paint text. RunProps
+ * carries a resolved size in PX and a CSS color, so both go straight through. */
+function previewStyle(preview: StyleEntry["preview"]): React.CSSProperties {
+  return {
+    fontFamily: preview.font,
+    fontWeight: preview.bold ? 600 : 400,
+    fontStyle: preview.italic ? "italic" : "normal",
+    textDecoration: preview.underline && preview.underline !== "none" ? "underline" : undefined,
+    // Clamped: a 36pt Title would push every other row off the panel.
+    fontSize: preview.size ? Math.min(18, Math.max(11, preview.size)) : 13,
+    color: preview.color && preview.color !== "auto" ? preview.color : undefined,
+  };
+}
+
+/** The form both "New style" and "Modify style" fill in. */
+interface StyleForm {
+  name: string;
+  type: "paragraph" | "character";
+  basedOn: string;
+  quickStyle: boolean;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  sizePt: string;
+  color: string;
+  /** "" leaves the alignment alone, which for a new style means inherit. */
+  alignment: "" | "left" | "center" | "right" | "both";
+}
+
+const PX_PER_PT = 4 / 3;
+
+function formFor(entry: StyleEntry | null): StyleForm {
+  const preview = entry?.preview ?? {};
+  return {
+    name: entry?.name ?? "",
+    type: entry?.type === "character" ? "character" : "paragraph",
+    basedOn: entry?.basedOn ?? "",
+    quickStyle: entry?.quickStyle ?? true,
+    bold: !!preview.bold,
+    italic: !!preview.italic,
+    underline: !!preview.underline && preview.underline !== "none",
+    sizePt: preview.size ? showPt(preview.size / PX_PER_PT) : "",
+    color: preview.color && preview.color !== "auto" ? preview.color : "",
+    alignment: "",
+  };
+}
+
+/**
+ * Word's Styles pane, as a ribbon popover.
+ *
+ * listStyles/createStyle/modifyStyle/deleteStyle have all been on the api
+ * since the styles work landed, reachable only from the two dropdowns that
+ * APPLY a style. Nothing in the toolbar could define one, rename one, or say
+ * how much of the document a style is holding up.
+ *
+ * Paragraph and character styles only: those are the two an "apply" click at
+ * the caret can honour. A table style is applied through the table tab, where
+ * there is a table to apply it to.
+ *
+ * MODIFY WRITES ONLY WHAT CHANGED. The form prefills from the RESOLVED
+ * preview — what the user is looking at — so saving the whole form would
+ * copy every inherited property onto the definition and quietly cut it out of
+ * its own cascade.
+ */
+function StylesPane({ api, onChanged }: { api: DocxViewApi | null; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<{ entry: StyleEntry | null; form: StyleForm; initial: StyleForm } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const close = useCallback(() => {
+    setOpen(false);
+    setEditing(null);
+    setConfirmDelete(null);
+    setError("");
+  }, []);
+  const position = useAnchoredPopover(triggerRef, rootRef, 300, close);
+
+  const entries = (open ? api?.listStyles?.() ?? [] : []).filter(
+    (entry) => entry.type === "paragraph" || entry.type === "character",
+  );
+
+  const applyStyle = (entry: StyleEntry) => {
+    if (entry.type === "character") api?.applyFormat({ characterStyleId: entry.id });
+    else api?.setParagraphStyle(entry.id);
+    onChanged();
+    close();
+  };
+
+  const remove = (entry: StyleEntry) => {
+    if (!api?.deleteStyle(entry.id)) {
+      setError(`${entry.name} cannot be deleted — the default paragraph style holds up every other one.`);
+      return;
+    }
+    setConfirmDelete(null);
+    onChanged();
+  };
+
+  const startEdit = (entry: StyleEntry | null) => {
+    const form = formFor(entry);
+    setEditing({ entry, form, initial: form });
+    setError("");
+  };
+
+  /** The run properties the user actually moved, and nothing else. */
+  const runPatch = (form: StyleForm, initial: StyleForm) => {
+    const patch: Record<string, unknown> = {};
+    if (form.bold !== initial.bold) patch.bold = form.bold;
+    if (form.italic !== initial.italic) patch.italic = form.italic;
+    if (form.underline !== initial.underline) patch.underline = form.underline;
+    if (form.sizePt !== initial.sizePt) {
+      const pt = typedNumber(form.sizePt);
+      if (pt !== null) patch.fontSizePt = pt;
+    }
+    if (form.color !== initial.color) {
+      const color = normalizedColor(form.color);
+      if (color) patch.color = color.slice(1).toUpperCase();
+    }
+    return patch;
+  };
+
+  const save = () => {
+    if (!editing || !api) return;
+    const { entry, form, initial } = editing;
+    const name = form.name.trim();
+    if (!name) {
+      setError("Give the style a name.");
+      return;
+    }
+    const run = runPatch(form, initial);
+    const paragraph = form.alignment === "" ? undefined : { alignment: form.alignment };
+    if (entry) {
+      const patch = {
+        ...(name === entry.name ? {} : { name }),
+        ...(form.basedOn === (entry.basedOn ?? "") ? {} : { basedOn: form.basedOn === "" ? null : form.basedOn }),
+        ...(form.quickStyle === entry.quickStyle ? {} : { quickStyle: form.quickStyle }),
+        ...(Object.keys(run).length > 0 ? { run } : {}),
+        ...(paragraph && entry.type === "paragraph" ? { paragraph } : {}),
+      };
+      if (Object.keys(patch).length === 0) {
+        setEditing(null);
+        return;
+      }
+      if (!api.modifyStyle(entry.id, patch)) {
+        setError("That change was refused — a style cannot be based on itself.");
+        return;
+      }
+    } else {
+      const styleId = uniqueStyleId(api.document, styleIdFromName(name));
+      const created = api.createStyle({
+        styleId,
+        type: form.type,
+        name,
+        ...(form.basedOn === "" ? {} : { basedOn: form.basedOn }),
+        quickStyle: form.quickStyle,
+        ...(Object.keys(run).length > 0 ? { run } : {}),
+        ...(paragraph && form.type === "paragraph" ? { paragraph } : {}),
+      });
+      if (!created) {
+        setError("The style could not be created. A shared document defines styles through the room.");
+        return;
+      }
+    }
+    setEditing(null);
+    onChanged();
+  };
+
+  const check = (
+    label: string,
+    value: boolean,
+    onToggle: (next: boolean) => void,
+  ) => (
+    <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
+      <input type="checkbox" aria-label={label} checked={value} onChange={(event) => onToggle(event.target.checked)} />
+      {label}
+    </label>
+  );
+
+  const form = editing?.form;
+  return (
+    <span style={{ position: "relative", display: "inline-flex" }}>
+      <Btn
+        label="Styles"
+        title="Styles pane: create, change and remove this document's styles"
+        active={open}
+        buttonRef={triggerRef}
+        onClick={() => (open ? close() : (setOpen(true), setEditing(null)))}
+      />
+      {open && (
+        <div
+          ref={rootRef}
+          role="dialog"
+          aria-label="Styles"
+          data-dxw-styles-pane=""
+          onMouseDown={(event) => event.stopPropagation()}
+          style={{
+            position: "fixed", top: position.top, left: position.left, zIndex: 201,
+            width: "min(300px, calc(100vw - 16px))", boxSizing: "border-box",
+            background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
+            boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7, color: T.fg,
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <strong style={{ fontSize: 13 }}>{editing ? (editing.entry ? "Modify Style" : "New Style") : "Styles"}</strong>
+            {!editing && (
+              <button type="button" style={pillBtn} onClick={() => startEdit(null)}>New style</button>
+            )}
+          </div>
+
+          {!editing && (
+            <div style={{ maxHeight: 260, overflowY: "auto", display: "grid", gap: 1 }}>
+              {entries.map((entry) => (
+                <div key={entry.id} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                  <button
+                    type="button"
+                    title={`Apply ${entry.name}`}
+                    aria-label={`Apply ${entry.name}`}
+                    onClick={() => applyStyle(entry)}
+                    style={{
+                      flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none",
+                      borderRadius: 5, padding: "4px 6px", cursor: "pointer", color: T.fg,
+                      display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline",
+                    }}
+                  >
+                    <span style={{ ...previewStyle(entry.preview), overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {entry.type === "character" ? "\u{1D400} " : "¶ "}
+                      {entry.name}
+                    </span>
+                    <span style={{ color: T.muted, fontSize: 11, flex: "none" }}>
+                      {entry.usageCount === 0 ? "unused" : `${entry.usageCount} use${entry.usageCount === 1 ? "" : "s"}`}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    title={`Modify ${entry.name}`}
+                    aria-label={`Modify ${entry.name}`}
+                    onClick={() => startEdit(entry)}
+                    style={{ ...pillBtn, background: T.popoverBg, color: T.fg, padding: "2px 7px" }}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    title={`Delete ${entry.name}`}
+                    aria-label={confirmDelete === entry.id ? `Confirm delete ${entry.name}` : `Delete ${entry.name}`}
+                    onClick={() => (confirmDelete === entry.id ? remove(entry) : setConfirmDelete(entry.id))}
+                    style={{ ...pillBtn, background: T.popoverBg, color: T.fg, padding: "2px 7px" }}
+                  >
+                    {confirmDelete === entry.id ? "Sure?" : "×"}
+                  </button>
+                </div>
+              ))}
+              {entries.length === 0 && (
+                <span style={{ color: T.muted, fontSize: 12 }}>This document declares no styles yet.</span>
+              )}
+            </div>
+          )}
+
+          {editing && form && (
+            <>
+              <label style={dialogFieldRow}>
+                <span>Name</span>
+                <input
+                  aria-label="Style name"
+                  autoFocus
+                  value={form.name}
+                  onChange={(event) => setEditing({ ...editing, form: { ...form, name: event.target.value } })}
+                  style={dialogInput}
+                />
+              </label>
+              {!editing.entry && (
+                <label style={dialogFieldRow}>
+                  <span>Type</span>
+                  <select
+                    aria-label="Style type"
+                    value={form.type}
+                    onChange={(event) =>
+                      setEditing({ ...editing, form: { ...form, type: event.target.value as StyleForm["type"] } })
+                    }
+                    style={dialogInput}
+                  >
+                    <option value="paragraph">Paragraph</option>
+                    <option value="character">Character</option>
+                  </select>
+                </label>
+              )}
+              <label style={dialogFieldRow}>
+                <span>Based on</span>
+                <select
+                  aria-label="Based on"
+                  value={form.basedOn}
+                  onChange={(event) => setEditing({ ...editing, form: { ...form, basedOn: event.target.value } })}
+                  style={dialogInput}
+                >
+                  <option value="">(none)</option>
+                  {entries
+                    .filter((other) => other.type === form.type && other.id !== editing.entry?.id)
+                    .map((other) => (
+                      <option key={other.id} value={other.id}>{other.name}</option>
+                    ))}
+                </select>
+              </label>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {check("Bold", form.bold, (bold) => setEditing({ ...editing, form: { ...form, bold } }))}
+                {check("Italic", form.italic, (italic) => setEditing({ ...editing, form: { ...form, italic } }))}
+                {check("Underline", form.underline, (underline) => setEditing({ ...editing, form: { ...form, underline } }))}
+              </div>
+              <label style={dialogFieldRow}>
+                <span>Size (pt)</span>
+                <input
+                  aria-label="Style font size (points)"
+                  type="number"
+                  min="1"
+                  step="1"
+                  placeholder="—"
+                  value={form.sizePt}
+                  onChange={(event) => setEditing({ ...editing, form: { ...form, sizePt: event.target.value } })}
+                  style={dialogInput}
+                />
+              </label>
+              <span style={dialogFieldRow}>
+                <span>Color</span>
+                <ColorMenu
+                  current={normalizedColor(form.color) ?? "#000000"}
+                  title="Style text color"
+                  trigger={(
+                    <>
+                      <span
+                        aria-hidden="true"
+                        style={{ width: 14, height: 14, borderRadius: 3, border: `1px solid ${T.border}`, background: normalizedColor(form.color) ?? "#000000" }}
+                      />
+                      {form.color === "" ? "Inherited" : form.color}
+                    </>
+                  )}
+                  onPick={(color) => setEditing({ ...editing, form: { ...form, color } })}
+                />
+              </span>
+              {form.type === "paragraph" && (
+                <label style={dialogFieldRow}>
+                  <span>Alignment</span>
+                  <select
+                    aria-label="Style alignment"
+                    value={form.alignment}
+                    onChange={(event) =>
+                      setEditing({ ...editing, form: { ...form, alignment: event.target.value as StyleForm["alignment"] } })
+                    }
+                    style={dialogInput}
+                  >
+                    <option value="">(unchanged)</option>
+                    <option value="left">Left</option>
+                    <option value="center">Center</option>
+                    <option value="right">Right</option>
+                    <option value="both">Justified</option>
+                  </select>
+                </label>
+              )}
+              {check("Show in the quick-style gallery", form.quickStyle, (quickStyle) =>
+                setEditing({ ...editing, form: { ...form, quickStyle } }))}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+                <button type="button" data-dxw-dialog-cancel="" onClick={() => setEditing(null)} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Cancel</button>
+                <button type="button" data-dxw-dialog-apply="" onClick={save} style={pillBtn}>Save</button>
+              </div>
+            </>
+          )}
+          {error && <span style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</span>}
+        </div>
+      )}
     </span>
   );
 }
@@ -3385,8 +4324,9 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertPageNumber", feature: "pageNumber" },
   { command: "insertField", feature: "field" },
   // A table of contents IS a field, and it lands in the field group. It
-  // refuses in a room rather than emitting: one paragraph per heading is
-  // more structure than any current intent carries.
+  // emits like any other insert; the entry count rides in the payload so the
+  // carried id allocation can be sized for a mutation whose size comes from
+  // the document rather than from its arguments.
   { command: "insertToc", feature: "field" },
   { command: "insertDateTime", feature: "dateTime" },
   { command: "insertCrossReference", feature: "crossReference" },
@@ -3652,6 +4592,7 @@ export function DocxToolbar({
       groups.push({
         key: "styles",
         node: (
+          <>
           <ToolbarMenuSelect
             title="Paragraph style"
             value={curStyle ?? "__normal"}
@@ -3673,6 +4614,14 @@ export function DocxToolbar({
               }
             }}
           />
+          <StylesPane
+            api={api}
+            onChanged={() => {
+              refresh();
+              setCurStyle(api?.getParagraphStyleId?.() ?? null);
+            }}
+          />
+          </>
         ),
       });
     if (on("charStyles")) {
@@ -4173,6 +5122,7 @@ export function DocxToolbar({
               onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)}
             />
           )}
+          {on("field") && <ContentsMenu api={api} />}
           {on("equation") && <EquationMenu api={api} />}
           {on("symbol") && <SymbolMenu api={api} />}
           {on("dropCap") && (
@@ -4263,6 +5213,7 @@ export function DocxToolbar({
               {on("field") && (
                 <ActionMenu label="Field" title="Insert a Word field" width={68} groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]} onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)} />
               )}
+              {on("field") && <ContentsMenu api={api} />}
               {on("equation") && <EquationMenu api={api} />}
               {on("symbol") && <SymbolMenu api={api} />}
               {on("dropCap") && <ActionMenu label="Drop cap" title="Drop cap" width={84} groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]} onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")} />}

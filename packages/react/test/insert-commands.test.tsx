@@ -280,7 +280,7 @@ describe("INVARIANT C — insert commands in collab either EMIT or are ABSENT", 
     // Without this, every command silently no-opping would pass the fork rule
     // and the audit would prove nothing. These are the ones a caret alone is
     // enough for, so they must genuinely ride the wire.
-    const mustEmit = ["insertTable", "insertEquation", "insertShape", "insertChart", "insertSmartArt", "insertBreak", "insertBlankPage", "insertPageNumber"];
+    const mustEmit = ["insertTable", "insertEquation", "insertShape", "insertChart", "insertSmartArt", "insertBreak", "insertBlankPage", "insertPageNumber", "insertToc"];
     const silent = mustEmit.filter((c) => !emittedBy.includes(c));
     expect(silent, `these should have emitted an intent but did not: ${silent.join(", ")}`).toEqual([]);
   });
