@@ -17,6 +17,19 @@ function layout(parts: Record<string, string>) {
   return { doc, result: layoutDocument(doc, { measurer }) };
 }
 
+/** The single-line paragraph whose text is exactly `text`, on page 0. */
+function textItem(result: ReturnType<typeof layoutDocument>, text: string) {
+  const item = result.pages[0].items.find((i) => i.kind === "text" && i.text === text);
+  if (item?.kind !== "text") throw new Error(`no text item "${text}"`);
+  return item;
+}
+
+/** Vertical gap between two single-line paragraphs' line boxes. */
+function paraGap(result: ReturnType<typeof layoutDocument>, above: string, below: string): number {
+  const a = textItem(result, above);
+  return textItem(result, below).lineTop - (a.lineTop + a.lineHeight);
+}
+
 function pageText(result: ReturnType<typeof layoutDocument>, pageIdx: number): string {
   return result.pages[pageIdx].items
     .filter((i) => i.kind === "text")
@@ -2188,22 +2201,104 @@ describe("layout engine", () => {
     expect(gap).toBeCloseTo(20 + 4 / 3 + 0.75, 1);
   });
 
-  it("keeps the single collapsed reserve between merged identical-border paragraphs", () => {
+  it("charges no border reserve at a merged run's interior boundary", () => {
     const bordered = (t: string) =>
       `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:pBdr><w:top w:val="single" w:sz="4" w:space="1"/><w:bottom w:val="single" w:sz="4" w:space="1"/></w:pBdr></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
     const { result } = layout({
       "word/document.xml": wrapDocument(bordered("first") + bordered("second")),
     });
-    const items = result.pages[0].items.filter((i) => i.kind === "text");
-    const a = items.find((i) => i.kind === "text" && i.text === "first");
-    const b = items.find((i) => i.kind === "text" && i.text === "second");
-    if (a?.kind !== "text" || b?.kind !== "text") throw new Error("items missing");
-    // Inside a merged box no rule paints between the paragraphs, but Word
-    // still keeps ONE space+rule reserve of room (the top and bottom pads
-    // collapse against each other, not add) — pre-existing calibrated
-    // behavior (Alex Pickett cover RECIPIENT/ADDRESS block), preserved by
-    // the outside-the-collapse reserve rule.
-    expect(b.lineTop - (a.lineTop + a.lineHeight)).toBeCloseTo(4 / 3 + 0.75, 1);
+    // Word reads the pair as ONE box: the shared edge neither paints nor
+    // claims room, so with before=after=0 the rows abut.
+    expect(paraGap(result, "first", "second")).toBeCloseTo(0, 2);
+  });
+
+  it("keeps a merged bordered pair the same distance apart as unbordered siblings", () => {
+    // wild2-legal-ca-agreement p1: two adjacent clauses carrying the same
+    // `bottom sz=6 space=1` rule sit 15.3px apart — exactly the gap of the
+    // unbordered clauses around them. Charging each paragraph its own border
+    // + w:space adds 1.75pt (2.4px) and gives 17.7px.
+    const pPr = `<w:spacing w:before="0" w:after="120"/><w:ind w:left="-450" w:hanging="270"/>`;
+    const bdr = `<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr>`;
+    const para = (t: string, borders: string) =>
+      `<w:p><w:pPr>${borders}${pPr}</w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        para("plainA", "") + para("plainB", "") + para("boxA", bdr) + para("boxB", bdr),
+      ),
+    });
+    const plainGap = paraGap(result, "plainA", "plainB");
+    expect(plainGap).toBeCloseTo(8, 2); // 120tw after, nothing else
+    expect(paraGap(result, "boxA", "boxB")).toBeCloseTo(plainGap, 2);
+  });
+
+  it("draws a merged run's rules once, above the first and below the last", () => {
+    const bordered = (t: string) =>
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:pBdr><w:top w:val="single" w:sz="6" w:space="1"/><w:bottom w:val="single" w:sz="6" w:space="1"/></w:pBdr></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(bordered("one") + bordered("two") + bordered("three")),
+    });
+    const edges = result.pages[0].items.filter((i) => i.kind === "edge");
+    expect(edges.length).toBe(2);
+    const first = textItem(result, "one");
+    const last = textItem(result, "three");
+    const ys = edges.map((e) => (e.kind === "edge" ? e.y1 : NaN)).sort((x, y) => x - y);
+    expect(ys[0]).toBeLessThan(first.lineTop);
+    expect(ys[1]).toBeGreaterThan(last.lineTop + last.lineHeight);
+  });
+
+  it("draws a declared w:between rule at each interior boundary of the run", () => {
+    // A declared between border fills the boundary the merged top/bottom pair
+    // vacates: three merged paragraphs give one top, one bottom and TWO
+    // between rules. sz=24 (3pt) keeps the between rules telling apart from
+    // the sz=6 (0.75pt) box edges.
+    const bordered = (t: string) =>
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:pBdr>` +
+      `<w:top w:val="single" w:sz="6" w:space="1"/><w:bottom w:val="single" w:sz="6" w:space="1"/>` +
+      `<w:between w:val="single" w:sz="24" w:space="1"/>` +
+      `</w:pBdr></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(bordered("one") + bordered("two") + bordered("three")),
+    });
+    const edges = result.pages[0].items.filter((i) => i.kind === "edge");
+    expect(edges.length).toBe(4);
+    const between = edges.filter((e) => e.kind === "edge" && e.border.width > 2);
+    expect(between.length).toBe(2);
+    const one = textItem(result, "one");
+    const two = textItem(result, "two");
+    // The first between rule sits in the gap below "one", above "two".
+    const y = between[0].kind === "edge" ? between[0].y1 : NaN;
+    expect(y).toBeGreaterThan(one.lineTop + one.lineHeight - 0.01);
+    expect(y).toBeLessThan(two.lineTop + two.lineHeight);
+  });
+
+  it("does not merge adjacent paragraphs whose borders differ", () => {
+    // Different w:sz = different border set: two separate boxes, each drawing
+    // its own rule and charging its own reserve.
+    const bordered = (t: string, sz: number) =>
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:pBdr><w:bottom w:val="single" w:sz="${sz}" w:space="1"/></w:pBdr></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(bordered("thin", 4) + bordered("thick", 12)),
+    });
+    expect(result.pages[0].items.filter((i) => i.kind === "edge").length).toBe(2);
+    // "thin" keeps its own bottom reserve: 1pt space + the 0.75px paint floor.
+    expect(paraGap(result, "thin", "thick")).toBeCloseTo(4 / 3 + 0.75, 2);
+  });
+
+  it("merges borders inherited from a paragraph style", () => {
+    // The merge compares RESOLVED borders: a pBdr that both paragraphs get
+    // from their style merges exactly like a direct one.
+    const styled = (t: string) =>
+      `<w:p><w:pPr><w:pStyle w:val="Boxed"/></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(styled("first") + styled("second")),
+      "word/styles.xml":
+        `<?xml version="1.0"?>\n<w:styles ${W_NS}><w:style w:type="paragraph" w:styleId="Boxed"><w:pPr>` +
+        `<w:spacing w:before="0" w:after="0"/>` +
+        `<w:pBdr><w:top w:val="single" w:sz="6" w:space="1"/><w:bottom w:val="single" w:sz="6" w:space="1"/></w:pBdr>` +
+        `</w:pPr></w:style></w:styles>`,
+    });
+    expect(result.pages[0].items.filter((i) => i.kind === "edge").length).toBe(2);
+    expect(paraGap(result, "first", "second")).toBeCloseTo(0, 2);
   });
 
   it("anchors paint-routed CJK glyph boxes by the browser strut box", () => {
