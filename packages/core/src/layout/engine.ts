@@ -2052,11 +2052,7 @@ class Engine {
   private layoutVerticalSection(section: Section): void {
     const sp = this.sp;
     const page = this.cur;
-    // newPage drops the first line 4 grid rows below the top margin for
-    // docGrid sections (a horizontal-writing rule); vertical text starts at
-    // the top margin, so undo that bump for the column-length axis.
-    const gridBump = sp.docGridLinePitch ? 4 * sp.docGridLinePitch : 0;
-    const bodyTop = page.bodyTop - gridBump;
+    const bodyTop = page.bodyTop;
     const frameWidth = Math.max(4, page.bodyBottom - bodyTop);
     const bodyRight = sp.pageWidth - sp.marginRight;
     this.verticalGridFlow = true;
@@ -2210,11 +2206,13 @@ class Engine {
       page.bandTop = page.bodyTop;
       page.headerGrown = page.bodyTop > sp.marginTop;
     }
-    // w:docGrid: Word reserves four grid rows at a section opening. Heading 1
-    // uses the first row plus its 1.5pt leading; placeParagraph narrows the
-    // reserve once it can inspect the opening paragraph style.
+    // w:docGrid: a section opening under a lines grid starts AT the body top.
+    // Word reserves no grid rows for it (probe-docgrid, six sections: Word's
+    // first line sits at 98.90 against a 96.00 body top under every pitch in
+    // the sweep, where our old four-row reserve put it at 184.52). Two
+    // authored openings do sit lower; placeParagraph drops those once it can
+    // inspect the opening paragraph.
     if (sp.docGridLinePitch && isFirstOfSection) {
-      page.bodyTop += 4 * sp.docGridLinePitch;
       this.docGridDropBefore = true;
     }
     if (sp.marginBottom >= 0) {
@@ -3886,22 +3884,22 @@ class Engine {
     const isLeadingPageBreak = leadBreak?.type === "page" && !props.pageBreakBefore;
     if (breakBeforeForced && !(isLeadingPageBreak && keepSpBeforeAtPageTop)) dropSpaceBefore = true;
     if (this.docGridDropBefore) {
-      // An explicit w:snapToGrid="0" keeps its own spacing-before; a spaced
-      // opening consumes the reserve, while an unspaced opening uses half of
-      // it. Heading 1 instead starts on the first row plus Word's 1.5pt grid
-      // leading. Keep bodyTop aligned with the actual cursor so page-top fit
-      // checks use the same origin.
-      if (props.snapToGrid === false && this.sp.docGridLinePitch) {
-        const reduction =
-          (props.spacingBefore ?? 0) > 0
-            ? 4 * this.sp.docGridLinePitch
-            : 2 * this.sp.docGridLinePitch;
-        this.cur.bodyTop -= reduction;
-        this.y -= reduction;
-      } else if (para.props.styleId === "Heading1" && this.sp.docGridLinePitch) {
-        const reduction = 3 * this.sp.docGridLinePitch - ptToPx(1.5);
-        this.cur.bodyTop -= reduction;
-        this.y -= reduction;
+      // How far the opening paragraph of a lines-grid section sits below the
+      // body top. Ordinary text opens AT it (probe-docgrid). An explicit
+      // w:snapToGrid="0" keeps its own spacing-before when it has one, and
+      // drops two grid rows when it does not; Heading 1 starts on the first
+      // grid row plus Word's 1.5pt grid leading. Keep bodyTop aligned with the
+      // actual cursor so page-top fit checks use the same origin.
+      const pitch = this.sp.docGridLinePitch;
+      if (props.snapToGrid === false && pitch) {
+        if (!((props.spacingBefore ?? 0) > 0)) {
+          this.cur.bodyTop += 2 * pitch;
+          this.y += 2 * pitch;
+        }
+      } else if (para.props.styleId === "Heading1" && pitch) {
+        const drop = pitch + ptToPx(1.5);
+        this.cur.bodyTop += drop;
+        this.y += drop;
         dropSpaceBefore = true;
       } else {
         dropSpaceBefore = true;

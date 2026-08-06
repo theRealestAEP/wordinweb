@@ -2818,10 +2818,13 @@ function finishLine(
     // (SimSun 14pt line = 15.97, atLeast 17.4) lays 2 pitches; the sz28 CSO-
     // acknowledgment block (auto 1.25) and the plain-Normal "Bpohaladuh"
     // heading (auto 1.0) both advance 31.2pt/line in the PDF - the snap
-    // REPLACES the multiplier. The 2% tolerance keeps staging-eastasian's
-    // MS Mincho substitute (1.643em = 18.07pt against its 18pt pitch, a
-    // modeling artifact of the substituted face) on its measured
-    // multiplier x natural pitch.
+    // REPLACES the multiplier. ANY overshoot of the pitch takes the second
+    // row, however small: probe-docgrid's L240 case puts a 16.32 px line
+    // under a 16.00 px pitch and Word advances 32.00, 29 lines to the page.
+    // So the text threshold is the same bare pitch the object rule uses; an
+    // earlier 2% tolerance here (fitted to staging-eastasian's substituted
+    // MS Mincho, which is compat 15 and never reaches this branch) swallowed
+    // exactly that case and left us laying 53 lines.
     const objSnap = maxImage > 0 && extent > pitch + 0.01;
     // TEXT-line snapping is a LEGACY-mode behavior: eq-as-images (compat 12)
     // snaps its oversized text lines, while staging-eastasian (compat 15,
@@ -2830,7 +2833,7 @@ function finishLine(
     // in either mode.
     const textSnap =
       doc.compatibilityMode < 15 &&
-      maxNaturalText > pitch * 1.02 &&
+      maxNaturalText > pitch + 0.01 &&
       (ls?.rule === "atLeast" || !tallestTextIsEa);
     if (objSnap || textSnap) {
       const basis = Math.max(extent, textSnap ? maxNaturalText : 0);

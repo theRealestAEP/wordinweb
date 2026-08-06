@@ -289,16 +289,19 @@ describe("layout engine", () => {
     expect(inheritedTitle?.kind).toBe("text");
     expect(optedOutTitle?.kind).toBe("text");
     if (inheritedTitle?.kind !== "text" || optedOutTitle?.kind !== "text") return;
-    // Inherited grid paragraphs keep the measured four-pitch section reserve
-    // and a pitch-sized line. An explicit opt-out uses a two-pitch reserve and
-    // its natural line box.
-    expect(inherited.pages[0].bodyTop - optedOut.pages[0].bodyTop).toBeCloseTo(48, 3);
-    expect(inheritedTitle.lineTop - optedOutTitle.lineTop).toBeCloseTo(48, 3);
+    // An inherited grid paragraph opens AT the body top (probe-docgrid: Word
+    // reserves no grid rows at a section opening) and takes a pitch-sized
+    // line. An explicit opt-out keeps its natural line box, and still drops
+    // two grid rows - that drop is carried over from the old four-row reserve
+    // and no probe has measured it, so it stays until one does.
+    expect(inherited.pages[0].bodyTop).toBeCloseTo(96, 3);
+    expect(inherited.pages[0].bodyTop - optedOut.pages[0].bodyTop).toBeCloseTo(-48, 3);
+    expect(inheritedTitle.lineTop - optedOutTitle.lineTop).toBeCloseTo(-48, 3);
     expect(inheritedTitle.lineHeight).toBeCloseTo(24, 3);
     expect(optedOutTitle.lineHeight).toBeLessThan(24);
   });
 
-  it("keeps a grid reserve above auto-spaced inline images", () => {
+  it("snaps an auto-spaced inline-image line to whole grid pitches", () => {
     const rels = `<?xml version="1.0"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>
@@ -331,12 +334,15 @@ describe("layout engine", () => {
     const grid = layout(parts()).result;
     const optedOut = layout(parts(`<w:snapToGrid w:val="0"/>`)).result;
 
-    expect(pageText(grid, 0)).not.toContain("(0)");
-    expect(pageText(grid, 1)).toContain("(0)");
+    // Both fit the first page: this section opens at the body top, so the
+    // only difference between the two is the image line's height. (The old
+    // four-row section reserve used to spend 83.2px here and push the grid
+    // case to page 2; probe-docgrid retired it.)
+    expect(pageText(grid, 0)).toContain("(0)");
     expect(pageText(optedOut, 0)).toContain("(0)");
 
-    const gridLabel = grid.pages[1].items.find((item) => item.kind === "text" && item.text === "(0)");
-    const gridImage = grid.pages[1].items.find((item) => item.kind === "image");
+    const gridLabel = grid.pages[0].items.find((item) => item.kind === "text" && item.text === "(0)");
+    const gridImage = grid.pages[0].items.find((item) => item.kind === "image");
     const controlLabel = optedOut.pages[0].items.find((item) => item.kind === "text" && item.text === "(0)");
     const controlImage = optedOut.pages[0].items.find((item) => item.kind === "image");
     expect(gridLabel?.kind).toBe("text");
@@ -355,8 +361,7 @@ describe("layout engine", () => {
     // image + 3.5px text descent = 48.43px extent exceeds the 23.92px text
     // line, so the line takes ceil(48.43/20.8) = 3 pitches = 62.4px and the
     // image top sits (62.4 - 48.43)/2 below the line top. The non-grid
-    // control retains the compact image-line rule (~48.9px) and stays on
-    // page 1; the 62.4px grid box does not fit and breaks to page 2.
+    // control retains the compact image-line rule (~48.9px).
     const extent = 44.93333333333333 + 14 * 0.25;
     const expectedGridHeight = 3 * 20.8;
     expect(gridLabel.lineHeight).toBeCloseTo(expectedGridHeight, 3);
@@ -364,6 +369,39 @@ describe("layout engine", () => {
     expect(gridImage.y - gridLabel.lineTop).toBeCloseTo((expectedGridHeight - extent) / 2, 0);
     expect(Math.abs(controlImage.y - controlLabel.lineTop)).toBeLessThan(0.2);
     expect(controlLabel.lineHeight).toBeLessThan(gridLabel.lineHeight);
+  });
+
+  it("gives a lines-grid text line a whole number of grid rows", () => {
+    // probe-docgrid, case L240 (compat 12): a text line whose natural height
+    // is a hair over the 16.00px pitch takes TWO rows in Word, which advances
+    // 32.00 per line and fits 29 to the page where max(natural, pitch) fit 53.
+    // The pitch is a quantum, not a floor.
+    const gridDocument = (linePitch: number) =>
+      wrapDocument(
+        p("Ravi") +
+          `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+          `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+          `<w:docGrid w:type="lines" w:linePitch="${linePitch}"/></w:sectPr>`,
+      );
+    // The whole-row snap for TEXT lines is a legacy-mode rule, as the probe's
+    // own base package is: compat 15 keeps multiplier x natural (measured on
+    // staging-eastasian), so the probe settles compat < 15 only.
+    const lineHeight = (linePitch: number) => {
+      const result = layout({
+        "word/document.xml": gridDocument(linePitch),
+        "word/settings.xml":
+          `<?xml version="1.0"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+          `<w:compat><w:compatSetting w:name="compatibilityMode" w:val="12"/></w:compat></w:settings>`,
+      }).result;
+      return textItem(result, "Ravi").lineHeight;
+    };
+    const natural = lineHeight(1); // pitch far below the natural line
+    expect(natural).toBeGreaterThan(16);
+    expect(natural).toBeLessThan(32);
+    // A 32px pitch holds the line in ONE row; a 16px pitch needs TWO. Both
+    // land on 32px, which is why the probe's L240 and L480 both fit 29 lines.
+    expect(lineHeight(480)).toBeCloseTo(32, 3);
+    expect(lineHeight(240)).toBeCloseTo(32, 3);
   });
 
   it("lays a docGrid equation-image line as whole grid pitches, centered, with w:position lowering the image", () => {
