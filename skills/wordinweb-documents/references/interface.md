@@ -607,9 +607,10 @@ Rules:
   outside the changed span keep their own formatting.
 - With `suggest: true` a hunk may add text or remove text, not both. Send a
   replacement as two patches.
-- With `suggest: true` a hunk may not change a marker and may not remove a
-  paragraph break. The review model carries no tracked form for either, so a
-  hunk that asks for one is rejected. Send those changes as direct edits.
+- With `suggest: true` a hunk may remove a paragraph break or rewrite the text
+  it joins, not both. A tracked merge only strikes the paragraph mark, so both
+  paragraphs stay in place until the reviewer accepts and a rewrite across the
+  break has no single address. Send the merge and the rewrite as two patches.
 
 Only the blocks a hunk touches must be unchanged. A patch written against an
 older revision still applies when someone else edited a different part of the
@@ -674,8 +675,8 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | --- | --- | --- |
 | `insertText` | Insert text at a position | `at`, `text`; optional: `suggest` |
 | `deleteText` | Delete one run range | `blockRef`, `runRef`, `start`, `end` |
-| `formatRun` | Format a complete run | `blockRef`, `runRef`, `patch` |
-| `formatRange` | Format one run range | `blockRef`, `runRef`, `start`, `end`, `patch` |
+| `formatRun` | Format a complete run | `blockRef`, `runRef`, `patch`; optional: `suggest` |
+| `formatRange` | Format one run range | `blockRef`, `runRef`, `start`, `end`, `patch`; optional: `suggest` |
 | `setLink` | Add a safe hyperlink | `runRef`, `url` |
 | `removeLink` | Remove a hyperlink | `runRef` |
 | `toggleCheckbox` | Toggle a checkbox control | `runRef` |
@@ -685,12 +686,12 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
 | `splitParagraph` | Split at a text position | `at`; optional: `suggest` |
-| `mergeParagraph` | Merge into the previous paragraph | `blockRef` |
-| `formatParagraph` | Set alignment or style | `blockRef`; optional: `align`, `styleId` |
-| `setListType` | Set bullet, number, or normal paragraph | `blockRef`, `listKind` |
+| `mergeParagraph` | Merge into the previous paragraph | `blockRef`; optional: `suggest` |
+| `formatParagraph` | Set alignment or style | `blockRef`; optional: `align`, `styleId`, `suggest` |
+| `setListType` | Set bullet, number, or normal paragraph | `blockRef`, `listKind`; optional: `suggest` |
 | `setListLevel` | Change list nesting | `blockRef`, `delta` |
-| `adjustIndent` | Change indent by one step | `blockRef`, `direction` |
-| `setSpacing` | Set line and paragraph spacing | `blockRef`, `patch` |
+| `adjustIndent` | Change indent by one step | `blockRef`, `direction`; optional: `suggest` |
+| `setSpacing` | Set line and paragraph spacing | `blockRef`, `patch`; optional: `suggest` |
 | `setDropCap` | Set or clear a drop cap | `blockRef`, `mode` |
 | `setDivider` | Set or clear a paragraph divider | `blockRef`, `divider` |
 
@@ -910,7 +911,17 @@ type TableOperation =
 }
 ```
 
-Set `suggest: true` on `insertText` or `splitParagraph` to create a tracked insertion. The interface adds the configured author and date.
+Set `suggest: true` to record an operation as a tracked change instead of applying it outright. The interface adds the configured author and date.
+
+| Operation | Tracked form | Accept | Reject |
+| --- | --- | --- | --- |
+| `insertText` | `w:ins` around the new run | the text stays | the text goes |
+| `splitParagraph` | `w:ins` on the new paragraph mark | the split stays | the paragraphs rejoin |
+| `mergeParagraph` | `w:del` on the previous paragraph mark | the paragraphs join | they stay split |
+| `formatRun`, `formatRange` | `w:rPrChange` holding the previous run properties | the new formatting stays | the previous properties come back |
+| `formatParagraph`, `setListType`, `adjustIndent`, `setSpacing` | `w:pPrChange` holding the previous paragraph properties | the new formatting stays | the previous properties come back |
+
+A tracked formatting change reads as the NEW formatting everywhere, which is what Word shows: the properties in force live where they always live, and only the ones they replaced move into the change record.
 
 ### Fields
 

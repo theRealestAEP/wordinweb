@@ -358,11 +358,27 @@ process.stdin.on("data", (chunk) => {
         .map((revision) => documentText(revision.el))
         .join("");
       expect(trackedText).toContain("reviewed");
+      // A paragraph-property change has a tracked form now, so suggestion mode
+      // sends it with the flag and the engine records a w:pPrChange. The patch
+      // above moved the revision on, so address the one it handed back.
+      const trackedRevision = (suggested.result as { projection: { revision: string } }).projection.revision;
       expect(await cliCommand(["session", sessionId, JSON.stringify({
         command: "edit",
         request: {
-          revision: projection.revision,
+          revision: trackedRevision,
           operations: [{ kind: "formatParagraph", blockRef: first.ref, styleId: "Heading1" }],
+        },
+      })])).toMatchObject({ ok: true, result: { status: "submitted", operations: ["formatParagraph"] } });
+      await until(
+        () => collectRevisions(human.doc!).some((revision) => revision.kind === "paragraphFormat"),
+        "human receives the tracked paragraph-property change",
+      );
+      // A table operation still has no tracked form, so it stays refused.
+      expect(await cliCommand(["session", sessionId, JSON.stringify({
+        command: "edit",
+        request: {
+          revision: trackedRevision,
+          operations: [{ kind: "tableOp", cellRef: first.ref, op: "deleteRow" }],
         },
       })])).toMatchObject({ ok: false, error: expect.stringContaining("unavailable in suggestion mode") });
 

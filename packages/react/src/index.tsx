@@ -108,6 +108,7 @@ import {
   setParagraphAlignment,
   setParagraphStyle,
   summarizeSelection,
+  suggestMeta,
   runWireLength,
   wireOffsetOf,
 } from "@wordinweb/core";
@@ -1208,8 +1209,11 @@ export function DocxView({
             // run and prunes the original id), then emit via the shared
             // helper so the shortcut and the toolbar behave identically.
             const preIds = captureFormatIds(segs);
-            const formatted = applyRunFormat(doc, segs, patch);
-            emitFormatIntents(segs, preIds, formatted, patch as Record<string, unknown>);
+            // One draw per gesture: the same author+date go into the local
+            // w:rPrChange and into the intent every replica applies.
+            const suggest = editor?.suggestionMeta();
+            const formatted = applyRunFormat(doc, segs, patch, suggestMeta(doc, suggest));
+            emitFormatIntents(segs, preIds, formatted, patch as Record<string, unknown>, suggest);
             pages = rerender(doc);
             if (selectedAll) editor?.selectAll();
             else if (formatted.length > 0) editor?.selectRanges(formatted);
@@ -1281,7 +1285,7 @@ export function DocxView({
           const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
           if (targets.length === 0) return;
           history.checkpoint();
-          if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId)) {
+          if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId, suggestMeta(doc, editor?.suggestionMeta()))) {
             pages = rerender(doc);
             document.dispatchEvent(new CustomEvent("dxw-selection"));
           }
@@ -1452,6 +1456,7 @@ export function DocxView({
           preIds: { runId?: number; blockId?: number; runLen: number; cumStart: number }[],
           formatted: { t: XmlElement | null }[],
           patch: Record<string, unknown>,
+          suggest?: { author: string; date: string },
         ): void => {
           const current = collabRef.current;
           if (!current || !doc.stableIds) return;
@@ -1489,7 +1494,7 @@ export function DocxView({
             // matches the local mutation exactly.
             const whole = !seg.t || (span.lo <= 0 && span.hi >= runLen) || (segCountByRun.get(runId) ?? 1) > 1;
             if (whole) {
-              current.submit({ kind: "formatRun", blockId, runId, patch } as never);
+              current.submit({ kind: "formatRun", blockId, runId, patch, ...(suggest ? { suggest } : {}) } as never);
               return;
             }
             const before = cumStart > 0;
@@ -1500,7 +1505,7 @@ export function DocxView({
             const middleId = alloc[k++];
             const afterId = after ? alloc[k++] : undefined;
             if (middleId === undefined) return;
-            current.submit({ kind: "formatRange", blockId, runId, start: cumStart, end: cumEnd, patch, beforeId, middleId, afterId } as never);
+            current.submit({ kind: "formatRange", blockId, runId, start: cumStart, end: cumEnd, patch, beforeId, middleId, afterId, ...(suggest ? { suggest } : {}) } as never);
             const middleT = formatted[i]?.t;
             const middleRun = middleT ? doc.findParentOf(middleT) : null;
             const parent = middleRun ? doc.findParentOf(middleRun) : null;
@@ -1541,8 +1546,9 @@ export function DocxView({
             const selectedAll = editor?.isEntireDocumentSelected() ?? false;
             history.checkpoint();
             const preIds = captureFormatIds(segments);
-            const formatted = applyRunFormat(doc, segments, patch);
-            emitFormatIntents(segments, preIds, formatted, patch as Record<string, unknown>);
+            const suggest = editor?.suggestionMeta();
+            const formatted = applyRunFormat(doc, segments, patch, suggestMeta(doc, suggest));
+            emitFormatIntents(segments, preIds, formatted, patch as Record<string, unknown>, suggest);
             pages = rerender(doc);
             // Keep the formatted text selected so toolbar actions compose.
             if (selectedAll) editor?.selectAll();
@@ -1955,8 +1961,9 @@ export function DocxView({
             const targets = segTs.length > 0 ? segTs : caret ? [caret.t] : [];
             if (targets.length === 0) return;
             history.checkpoint();
-            if (setParagraphAlignment(doc, targets as Parameters<typeof setParagraphAlignment>[1], align)) {
-              emitBlockIntents(targets, (blockId) => ({ kind: "formatParagraph", blockId, align }));
+            const suggest = editor?.suggestionMeta();
+            if (setParagraphAlignment(doc, targets as Parameters<typeof setParagraphAlignment>[1], align, suggestMeta(doc, suggest))) {
+              emitBlockIntents(targets, (blockId) => ({ kind: "formatParagraph", blockId, align, ...(suggest ? { suggest } : {}) }));
               pages = rerender(doc);
             }
           },
@@ -2046,17 +2053,19 @@ export function DocxView({
             const segs = editor?.getSelectionSegments() ?? [];
             const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : editor?.getCaretTarget() ? [editor.getCaretTarget()!.t] : [];
             if (targets.length === 0) return;
-            if (collabBlockOp(targets, (blockId) => ({ kind: "adjustIndent", blockId, direction }))) return;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => ({ kind: "adjustIndent", blockId, direction, ...(suggest ? { suggest } : {}) }))) return;
             history.checkpoint();
-            if (adjustIndent(doc, targets as Parameters<typeof adjustIndent>[1], direction)) pages = rerender(doc);
+            if (adjustIndent(doc, targets as Parameters<typeof adjustIndent>[1], direction, suggestMeta(doc, suggest))) pages = rerender(doc);
           },
           setParagraphSpacing: (patch) => {
             const segs = editor?.getSelectionSegments() ?? [];
             const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : editor?.getCaretTarget() ? [editor.getCaretTarget()!.t] : [];
             if (targets.length === 0) return;
-            if (collabBlockOp(targets, (blockId) => ({ kind: "setSpacing", blockId, patch: patch as Record<string, unknown> }))) return;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => ({ kind: "setSpacing", blockId, patch: patch as Record<string, unknown>, ...(suggest ? { suggest } : {}) }))) return;
             history.checkpoint();
-            if (setParagraphSpacing(doc, targets as Parameters<typeof setParagraphSpacing>[1], patch)) pages = rerender(doc);
+            if (setParagraphSpacing(doc, targets as Parameters<typeof setParagraphSpacing>[1], patch, suggestMeta(doc, suggest))) pages = rerender(doc);
           },
           setParagraphDivider: (divider) => {
             const segs = editor?.getSelectionSegments() ?? [];
@@ -2139,8 +2148,9 @@ export function DocxView({
             const dirtyBlock = targets.length === 1 ? topLevelBlockOf(doc, targets[0]) ?? undefined : undefined;
             history.checkpoint();
             const listKind = current === kind ? null : kind;
-            if (setListType(doc, targets as Parameters<typeof setListType>[1], listKind)) {
-              emitBlockIntents(targets, (blockId) => operationBody("setListType", blockId, { listKind }));
+            const suggest = editor?.suggestionMeta();
+            if (setListType(doc, targets as Parameters<typeof setListType>[1], listKind, suggestMeta(doc, suggest))) {
+              emitBlockIntents(targets, (blockId) => operationBody("setListType", blockId, { listKind, suggest }));
               pages = rerender(doc, dirtyBlock);
               document.dispatchEvent(new CustomEvent("dxw-selection"));
             }
@@ -2155,9 +2165,10 @@ export function DocxView({
             const segs = editor?.getSelectionSegments() ?? [];
             const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
             if (targets.length === 0) return;
-            if (collabBlockOp(targets, (blockId) => ({ kind: "formatParagraph", blockId, styleId }))) return;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => ({ kind: "formatParagraph", blockId, styleId, ...(suggest ? { suggest } : {}) }))) return;
             history.checkpoint();
-            if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId)) {
+            if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId, suggestMeta(doc, suggest))) {
               pages = rerender(doc);
             }
           },

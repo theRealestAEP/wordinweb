@@ -1,6 +1,7 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, cloneXml, localName } from "../xml.js";
 import { paragraphOf } from "./blocks.js";
+import { RevisionMeta, appendParagraphProp, recordParagraphFormatChange } from "./suggest.js";
 
 /**
  * Paragraph-level formatting commands: indent steps and line/paragraph
@@ -36,23 +37,32 @@ function paragraphsOf(doc: DocxDocument, targets: XmlElement[]): Set<XmlElement>
   return out;
 }
 
-/** Step the left indent by ±0.5in like Word's indent buttons (floor 0). */
-export function adjustIndent(doc: DocxDocument, targets: XmlElement[], direction: 1 | -1): boolean {
+/** Step the left indent by ±0.5in like Word's indent buttons (floor 0).
+ * With `meta` the change is SUGGESTED (w:pPrChange). */
+export function adjustIndent(
+  doc: DocxDocument,
+  targets: XmlElement[],
+  direction: 1 | -1,
+  meta?: RevisionMeta,
+): boolean {
   const paragraphs = paragraphsOf(doc, targets);
   if (paragraphs.size === 0) return false;
   let touched = false;
   for (const pEl of paragraphs) {
     const w = prefixOf(pEl);
     const pPr = ensurePPr(pEl);
-    let ind = pPr.children.find((c) => localName(c.name) === "ind");
+    const existing = pPr.children.find((c) => localName(c.name) === "ind");
+    const key = existing ? attrKey(existing, "left", w) : `${w}left`;
+    const cur = parseInt(existing?.attrs[key] ?? "0", 10) || 0;
+    const next = Math.max(0, cur + direction * INDENT_STEP_TWIPS);
+    // At the floor the indent does not move, so there is nothing to suggest.
+    if (next === cur) continue;
+    if (meta) recordParagraphFormatChange(pEl, meta);
+    let ind = existing;
     if (!ind) {
       ind = { name: `${w}ind`, attrs: {}, children: [], text: "" };
-      pPr.children.push(ind);
+      appendParagraphProp(pPr, ind);
     }
-    const key = attrKey(ind, "left", w);
-    const cur = parseInt(ind.attrs[key] ?? "0", 10) || 0;
-    const next = Math.max(0, cur + direction * INDENT_STEP_TWIPS);
-    if (next === cur) continue;
     ind.attrs[key] = String(next);
     touched = true;
   }
@@ -288,21 +298,24 @@ export function setDropCapAt(
   return true;
 }
 
-/** Set line spacing and/or space before/after on the target paragraphs. */
+/** Set line spacing and/or space before/after on the target paragraphs.
+ * With `meta` the change is SUGGESTED (w:pPrChange). */
 export function setParagraphSpacing(
   doc: DocxDocument,
   targets: XmlElement[],
   patch: ParagraphSpacingPatch,
+  meta?: RevisionMeta,
 ): boolean {
   const paragraphs = paragraphsOf(doc, targets);
   if (paragraphs.size === 0) return false;
   for (const pEl of paragraphs) {
     const w = prefixOf(pEl);
+    if (meta) recordParagraphFormatChange(pEl, meta);
     const pPr = ensurePPr(pEl);
     let sp = pPr.children.find((c) => localName(c.name) === "spacing");
     if (!sp) {
       sp = { name: `${w}spacing`, attrs: {}, children: [], text: "" };
-      pPr.children.push(sp);
+      appendParagraphProp(pPr, sp);
     }
     if (patch.exactLinePt !== undefined) {
       sp.attrs[attrKey(sp, "line", w)] = String(Math.round(patch.exactLinePt * 20));

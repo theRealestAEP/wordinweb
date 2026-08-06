@@ -98,16 +98,24 @@ function editRequestForMode(request: Record<string, unknown> | undefined, mode: 
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Each edit operation must be an object");
     const operation = value as Record<string, unknown>;
     switch (operation.kind) {
+      // Every kind with a tracked OOXML form takes the flag; the compiler
+      // stamps the author and date and the engine writes w:ins, w:rPrChange,
+      // w:pPrChange, or a struck paragraph mark.
       case "insertText":
       case "splitParagraph":
+      case "mergeParagraph":
+      case "formatRun":
+      case "formatRange":
+      case "formatParagraph":
+      case "setListType":
+      case "adjustIndent":
+      case "setSpacing":
         return { ...operation, suggest: true };
       case "deleteText":
         return {
           kind: "suggestRevision",
           ranges: [{ blockRef: operation.blockRef, runRef: operation.runRef, start: operation.start, end: operation.end }],
         };
-      case "mergeParagraph":
-        return { kind: "suggestRevision", marks: [{ blockRef: operation.blockRef, glyph: "del" }] };
       case "suggestRevision":
       case "commentRun":
       case "replyComment":

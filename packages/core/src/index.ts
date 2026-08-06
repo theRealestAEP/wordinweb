@@ -60,6 +60,9 @@ export {
   collectRevisions,
   acceptAllRevisions,
   rejectAllRevisions,
+  recordRunFormatChange,
+  recordParagraphFormatChange,
+  suggestMeta,
 } from "./edit/suggest.js";
 export type { RevisionMeta, RevisionRef, RevisionKind, CaretTarget, DeleteRange } from "./edit/suggest.js";
 export { EditHistory } from "./edit/history.js";
@@ -69,7 +72,7 @@ export { applyInsertText, applySplitParagraph, applyDeleteRange } from "./edit/m
 export type { EditCaret, MutationCtx, SplitResult } from "./edit/mutations.js";
 export { defaultProvenance, recordedProvenance } from "./edit/provenance.js";
 export type { EditProvenance } from "./edit/provenance.js";
-export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, paragraphOf, topLevelBlockOf, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";
+export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, siblingParagraph, paragraphOf, topLevelBlockOf, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";
 export { applyTableOp, cellContextOf, resizeDrawing, resizeTableColumn, resizeTableRow, moveTableTo, setTableTextWrapping } from "./edit/tables.js";
 export {
   setImageWrap,

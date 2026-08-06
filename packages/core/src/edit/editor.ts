@@ -6068,6 +6068,19 @@ export class DocxEditor {
     return this.suggesting;
   }
 
+  /**
+   * Author + date for a tracked change the HOST applies — a toolbar formatting
+   * command, which never routes through the editor. Undefined when suggesting
+   * mode is off, which every suggest-aware mutation reads as "apply directly".
+   * The host must put the SAME values in its local mutation and its emitted
+   * intent (doc 05 rule a), so it draws this once per gesture.
+   */
+  suggestionMeta(): { author: string; date: string } | undefined {
+    if (!this.suggesting) return undefined;
+    const { author, date } = this.frozenRevMeta();
+    return { author, date };
+  }
+
   private revMeta(): RevisionMeta {
     return {
       author: this.revisionAuthor,
