@@ -4202,6 +4202,142 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
   );
 }
 
+/** Find & Replace popover: find selects the first match and reports the
+ * count; replace-all reports how many replacements were applied. */
+function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [replacement, setReplacement] = useState("");
+  const [status, setStatus] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    inputRef.current?.focus();
+    const close = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const runFind = () => {
+    const n = api?.find(query) ?? 0;
+    setStatus(n === 1 ? "1 match" : `${n} matches`);
+  };
+  const runReplaceAll = () => {
+    const n = api?.replaceAll(query, replacement) ?? 0;
+    setStatus(n === 1 ? "Replaced 1 match" : `Replaced ${n} matches`);
+  };
+  const field: React.CSSProperties = {
+    width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`,
+    borderRadius: 6, padding: 6, font: "13px system-ui, sans-serif", outline: "none",
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        title="Find & replace"
+        style={btnStyle(open)}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => { setStatus(""); setOpen(!open); }}
+      >
+        Find & replace
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 240, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 6 }}>
+          <input
+            ref={inputRef}
+            aria-label="Find text"
+            placeholder="Find…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                runFind();
+              }
+            }}
+            style={field}
+          />
+          <input
+            aria-label="Replace with"
+            placeholder="Replace with…"
+            value={replacement}
+            onChange={(e) => setReplacement(e.target.value)}
+            style={field}
+          />
+          {status && <div data-dxw-find-status="" style={{ color: T.muted, fontSize: 12 }}>{status}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+            <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} disabled={!query} onClick={runFind}>Find</button>
+            <button style={pillBtn} disabled={!query} onClick={runReplaceAll}>Replace all</button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+/** Word's Review ribbon: track-changes toggle, accept/reject, the live
+ * revision count, comments, and find & replace. All state is read from the
+ * api at render time; the toolbar already re-renders on selectionchange /
+ * dxw-selection (the `refresh` subscription), and each command here calls
+ * `onChanged` (that same refresh) so the count and toggle update at once. */
+function ReviewTab({
+  api,
+  onChanged,
+  showComment,
+  mentions,
+}: {
+  api: DocxViewApi | null;
+  onChanged: () => void;
+  showComment: boolean;
+  mentions?: string[];
+}) {
+  const suggesting = api?.isSuggesting() ?? false;
+  const count = api?.revisionCount() ?? 0;
+  return (
+    <>
+      <Btn
+        label="Track changes"
+        title={suggesting ? "Stop tracking changes" : "Record edits as tracked changes"}
+        active={suggesting}
+        onClick={() => {
+          api?.setSuggesting(!suggesting);
+          onChanged();
+        }}
+      />
+      <Sep />
+      <ActionMenu
+        label="Accept"
+        title="Accept tracked changes"
+        width={72}
+        groups={[{ items: [["next", "Accept and move to next"], ["all", "Accept all changes"]] }]}
+        onPick={(value) => {
+          if (value === "next") api?.acceptRevisionAtCaret();
+          else api?.acceptAllRevisions();
+          onChanged();
+        }}
+      />
+      <ActionMenu
+        label="Reject"
+        title="Reject tracked changes"
+        width={72}
+        groups={[{ items: [["next", "Reject and move to next"], ["all", "Reject all changes"]] }]}
+        onPick={(value) => {
+          if (value === "next") api?.rejectRevisionAtCaret();
+          else api?.rejectAllRevisions();
+          onChanged();
+        }}
+      />
+      <span data-dxw-revision-count="" style={{ color: T.muted, font: "12px system-ui, sans-serif", padding: "0 4px", whiteSpace: "nowrap" }}>
+        {count === 1 ? "1 change" : `${count} changes`}
+      </span>
+      <Sep />
+      {showComment && <CommentMenu api={api} mentions={mentions} />}
+      <FindReplaceMenu api={api} />
+    </>
+  );
+}
+
 type SelectedObjectContext = NonNullable<ReturnType<DocxViewApi["getSelectedObjectContext"]>>;
 
 function SmartArtTextControls({ api, nodeIndex }: { api: DocxViewApi | null; nodeIndex?: number }) {
@@ -4371,6 +4507,7 @@ export type ToolbarFeature =
   | "pageNumber"
   | "break"
   | "layout"
+  | "review"
   | "help"
   | "download";
 
@@ -4439,7 +4576,7 @@ export type ToolbarMode = "simple" | "advanced";
 export interface DocxToolbarProps {
   api: DocxViewApi | null;
   onSave?: (bytes: Uint8Array) => void;
-  /** Simple shows basic Home editing; advanced adds the Insert, Draw, and Layout ribbons. */
+  /** Simple shows basic Home editing; advanced adds the Insert, Draw, Layout, and Review ribbons. */
   mode?: ToolbarMode;
   /** Per-group overrides; every group defaults to enabled. */
   features?: Partial<Record<ToolbarFeature, boolean>>;
@@ -4463,7 +4600,7 @@ export function DocxToolbar({
   const on = (k: ToolbarFeature) => features?.[k] !== false;
   // Ribbon-style tabs: complex tool groups get their own surface instead of
   // one overloaded row (Layout especially).
-  type NormalTab = "home" | "insert" | "draw" | "layout";
+  type NormalTab = "home" | "insert" | "draw" | "layout" | "review";
   const [tab, setTab] = useState<NormalTab | "format" | "tableFormat">("home");
   const priorNormalTab = useRef<NormalTab>("home");
   const [objectContext, setObjectContext] = useState<SelectedObjectContext | null>(null);
@@ -4591,7 +4728,7 @@ export function DocxToolbar({
       setObjectContext(next);
       setTab((current) => {
         if (next) {
-          if (["home", "insert", "draw", "layout"].includes(current)) priorNormalTab.current = current as NormalTab;
+          if (["home", "insert", "draw", "layout", "review"].includes(current)) priorNormalTab.current = current as NormalTab;
           return "format";
         }
         return current === "format"
@@ -4634,7 +4771,7 @@ export function DocxToolbar({
     setTableCellFill(nextTableFill);
     setTab((current) => {
       if (nextTableFill !== undefined && !wasInTable && current !== "format") {
-        if (["home", "insert", "draw", "layout"].includes(current)) priorNormalTab.current = current as NormalTab;
+        if (["home", "insert", "draw", "layout", "review"].includes(current)) priorNormalTab.current = current as NormalTab;
         return "tableFormat";
       }
       if (nextTableFill === undefined && current === "tableFormat") return priorNormalTab.current;
@@ -5018,8 +5155,8 @@ export function DocxToolbar({
       {mode === "advanced" && (
         <>
           <div style={{ display: "flex", gap: 2, marginRight: 8 }}>
-            {(["home", "insert", "draw", "layout"] as const)
-              .filter((t) => (t !== "draw" || on("drawing")) && (t !== "layout" || on("layout")))
+            {(["home", "insert", "draw", "layout", "review"] as const)
+              .filter((t) => (t !== "draw" || on("drawing")) && (t !== "layout" || on("layout")) && (t !== "review" || on("review")))
               .map((t) => (
               <button
                 key={t}
@@ -5379,6 +5516,9 @@ export function DocxToolbar({
         }}
       />
       {mode === "advanced" && tab === "layout" && on("layout") && <LayoutTab api={api} showArrange={on("arrange")} />}
+      {mode === "advanced" && tab === "review" && on("review") && (
+        <ReviewTab api={api} onChanged={refresh} showComment={on("comment")} mentions={commentMentions} />
+      )}
       {mode === "simple" && on("help") && (
         <span style={{ marginLeft: "auto" }}>
           <Btn buttonRef={helpTrigger} label="Help" title={`Help and keyboard shortcuts (${shortcut("/")})`} onClick={() => setHelpOpen(true)} />
