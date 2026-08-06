@@ -215,6 +215,33 @@ describe("native chart DOM rendering", () => {
     expect(shapes.slice(2).every((d) => d.includes(" H ") && d.includes(" V "))).toBe(true);
   });
 
+  it("takes the stroke width, marker symbol and marker size from the series", () => {
+    const series = (index: number, marker: string): string =>
+      `<c:ser><c:idx val="${index}"/>` +
+      `<c:spPr><a:ln w="19050"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></c:spPr>` +
+      marker +
+      `<c:val><c:numRef><c:numCache><c:ptCount val="2"/>` +
+      `<c:pt idx="0"><c:v>2</c:v></c:pt><c:pt idx="1"><c:v>5</c:v></c:pt>` +
+      `</c:numCache></c:numRef></c:val></c:ser>`;
+    const chart = renderChartXml(
+      `<c:chartSpace ${C_NS}><c:chart><c:plotArea><c:layout/><c:lineChart>` +
+      series(0, `<c:marker><c:symbol val="circle"/><c:size val="4"/></c:marker>`) +
+      series(1, `<c:marker><c:symbol val="none"/></c:marker>`) +
+      `<c:marker val="1"/><c:axId val="1"/><c:axId val="2"/></c:lineChart>` +
+      CAT_AXIS + VAL_AXIS + `</c:plotArea></c:chart></c:chartSpace>`,
+    );
+    // 19050 EMU is 1.5pt, which is 2px — not the 3pt Word falls back to.
+    const strokes = Array.from(chart.querySelectorAll('path[stroke-linejoin="round"]'))
+      .map((path) => path.getAttribute("stroke-width"));
+    expect(strokes).toEqual(["2", "2"]);
+
+    // The second series asks for no marker at all, so only the first draws any.
+    const markers = Array.from(chart.querySelectorAll('[data-dxw-chart-marker="1"]'));
+    expect(markers).toHaveLength(2);
+    // A circle is two arcs whose radius is the leading number of each `a`.
+    expect(markers[0].getAttribute("d")).toContain(`a ${(4 * (96 / 72) / 2).toFixed(3)}`);
+  });
+
   it("keys a line legend with a segment and its marker, a column's with a swatch", () => {
     const keys = (type: "line" | "column"): string[] => {
       const chart = renderChart({
@@ -427,6 +454,11 @@ describe("chart round trip", () => {
   const chartPartOf = (doc: DocxDocument): string =>
     Object.keys(doc.pkg.raw()).find((name) => name.startsWith("word/charts/chart"))!;
 
+  const partFor = (data: ChartData): string => {
+    const doc = documentWithChart(data);
+    return strFromU8(doc.pkg.raw()[chartPartOf(doc)]);
+  };
+
   it("renders every kind insertChart can author, read back from the part it wrote", () => {
     for (const type of ["column", "bar", "line", "pie", "doughnut", "area", "scatter"] as const) {
       const doc = documentWithChart({ ...sample, type });
@@ -460,11 +492,6 @@ describe("chart round trip", () => {
     const space = `<c:spPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill>` +
       `<a:ln><a:noFill/></a:ln><a:effectLst/></c:spPr>`;
 
-    const partFor = (data: ChartData): string => {
-      const doc = documentWithChart(data);
-      return strFromU8(doc.pkg.raw()[chartPartOf(doc)]);
-    };
-
     const xml = partFor(sample);
     // The gridlines and both axes carry it. The schema's slot for an axis
     // spPr is after c:tickLblPos and before c:crossAx.
@@ -479,6 +506,67 @@ describe("chart round trip", () => {
     const pie = partFor({ ...sample, type: "pie" });
     expect(pie).not.toContain(rule);
     expect(pie).toContain(`</c:chart>${space}<c:externalData`);
+  });
+
+  it("authors the series stroke and marker Word otherwise picks for itself", () => {
+    // A c:ser with no c:spPr and no c:marker leaves both to Word, which draws a
+    // 3pt stroke and a 9pt marker under a 1pt outline — measured off its export
+    // of a calibration copy of probe-charts-basic. Only a line or a scatter
+    // series has either to state.
+    const shape = (slot: number, symbol: string): string =>
+      `<c:spPr><a:ln w="38100" cap="rnd"><a:solidFill><a:schemeClr val="accent${slot}"/></a:solidFill>` +
+      `<a:round/></a:ln><a:effectLst/></c:spPr>` +
+      `<c:marker><c:symbol val="${symbol}"/><c:size val="9"/>` +
+      `<c:spPr><a:solidFill><a:schemeClr val="accent${slot}"/></a:solidFill>` +
+      `<a:ln w="12700"><a:solidFill><a:schemeClr val="accent${slot}"/></a:solidFill></a:ln>` +
+      `<a:effectLst/></c:spPr></c:marker>`;
+
+    // The schema's slot for both is after c:tx and before the data.
+    const line = partFor({ ...sample, type: "line" });
+    expect(line).toContain(`</c:tx>${shape(1, "diamond")}<c:cat>`);
+    expect(line).toContain(`</c:tx>${shape(2, "square")}<c:cat>`);
+    const scatter = partFor({ ...sample, type: "scatter" });
+    expect(scatter).toContain(`</c:tx>${shape(1, "diamond")}<c:xVal>`);
+    expect(scatter).toContain(`</c:tx>${shape(2, "square")}<c:xVal>`);
+
+    for (const type of ["column", "bar", "area", "pie", "doughnut"] as const) {
+      expect(partFor({ ...sample, type }), type).not.toContain("<c:marker>");
+      expect(partFor({ ...sample, type }), type).not.toContain(`<a:ln w="38100"`);
+    }
+  });
+
+  it("draws a line series at the stroke and marker size its own part states", () => {
+    const chart = renderChart({ ...sample, type: "line" });
+    // The series path is the only one that joins segments; markers do not.
+    const strokes = Array.from(chart.querySelectorAll('path[stroke-linejoin="round"]'))
+      .map((path) => path.getAttribute("stroke-width"));
+    expect(strokes).toEqual([String(3 * (96 / 72)), String(3 * (96 / 72))]);
+
+    // A diamond's `d` alternates x and y from its top vertex, so the spread of
+    // its x values is the width across the marker: the authored 9pt.
+    const markers = Array.from(chart.querySelectorAll('[data-dxw-chart-marker="1"]'));
+    expect(markers).toHaveLength(6);
+    const xs = [...markers[0].getAttribute("d")!.matchAll(/-?[\d.]+/g)]
+      .map(Number)
+      .filter((_, index) => index % 2 === 0);
+    expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(9 * (96 / 72), 3);
+  });
+
+  it("connects a scatter series that carries a stroke and leaves a bare one alone", () => {
+    const authored = renderChart({ ...sample, type: "scatter" });
+    expect(authored.querySelectorAll('path[stroke-linejoin="round"]')).toHaveLength(2);
+
+    // A scatter series that states no stroke keeps its markers and no line.
+    const bare = renderChartXml(
+      `<c:chartSpace ${C_NS}><c:chart><c:plotArea><c:layout/>` +
+      `<c:scatterChart><c:scatterStyle val="lineMarker"/><c:ser><c:idx val="0"/>` +
+      `<c:yVal><c:numRef><c:numCache><c:ptCount val="2"/>` +
+      `<c:pt idx="0"><c:v>2</c:v></c:pt><c:pt idx="1"><c:v>5</c:v></c:pt>` +
+      `</c:numCache></c:numRef></c:yVal></c:ser><c:axId val="1"/><c:axId val="2"/></c:scatterChart>` +
+      CAT_AXIS + VAL_AXIS + `</c:plotArea></c:chart></c:chartSpace>`,
+    );
+    expect(bare.querySelectorAll('path[stroke-linejoin="round"]')).toHaveLength(0);
+    expect(bare.querySelectorAll('[data-dxw-chart-marker="1"]')).toHaveLength(2);
   });
 
   it("saves an untouched chart part and its workbook byte for byte", () => {

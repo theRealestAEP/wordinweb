@@ -647,6 +647,14 @@ export interface ChartSeries {
   pointColors?: Record<number, string>;
   /** c:smooth — draw the line series through a spline instead of segments. */
   smooth?: boolean;
+  /** c:spPr/a:ln/@w, in px. A line or scatter series says here how heavy its
+   * stroke is; a scatter series, whose stroke is optional, says it has one. */
+  lineWidth?: number;
+  /** c:marker/c:symbol, an ST_MarkerStyle name. "none" draws no marker, and a
+   * name with no shape behind it takes the series' slot in Word's sequence. */
+  markerSymbol?: string;
+  /** c:marker/c:size, the width across the marker in px. */
+  markerSize?: number;
 }
 
 export type ChartTickMark = "none" | "in" | "out" | "cross";

@@ -102,13 +102,28 @@ function shapeColor(shape: XmlElement | undefined, theme: Theme | undefined): st
   return lineFill ? solidColorOf(lineFill, theme) : undefined;
 }
 
+/** EMU to px, the ratio every DrawingML length in this file converts by. */
+const EMU_PER_PX = 9525;
+
+/** The a:ln/@w of a shape, in px: how heavy Word draws that shape's stroke. */
+function shapeLineWidth(shape: XmlElement | undefined): number | undefined {
+  const width = intAttr(child(shape, "ln"), "w");
+  return width ? width / EMU_PER_PX : undefined;
+}
+
 /** True when a c:dLbls block turns value labels on. */
 function showsValues(labels: XmlElement | undefined): boolean {
   return !!labels && val(child(labels, "showVal")) === "1";
 }
 
 function parseSeries(element: XmlElement, theme: Theme | undefined): ChartSeries {
-  const explicit = shapeColor(child(element, "spPr"), theme);
+  const shape = child(element, "spPr");
+  const explicit = shapeColor(shape, theme);
+  const lineWidth = shapeLineWidth(shape);
+  const marker = child(element, "marker");
+  // c:size is in points, like every other ST_MarkerSize.
+  const markerSize = intAttr(child(marker, "size"), "val");
+  const markerSymbol = val(child(marker, "symbol"));
   const pointColors: Record<number, string> = {};
   for (const point of children(element, "dPt")) {
     const index = intAttr(child(point, "idx"), "val");
@@ -125,6 +140,9 @@ function parseSeries(element: XmlElement, theme: Theme | undefined): ChartSeries
     ...(explicit ? { color: explicit } : {}),
     ...(Object.keys(pointColors).length ? { pointColors } : {}),
     ...(val(child(element, "smooth")) === "1" ? { smooth: true } : {}),
+    ...(lineWidth !== undefined ? { lineWidth } : {}),
+    ...(markerSymbol ? { markerSymbol } : {}),
+    ...(markerSize ? { markerSize: markerSize * (96 / 72) } : {}),
   };
 }
 

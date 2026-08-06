@@ -155,18 +155,63 @@ function scatterX(categories: string[]): number[] {
   return categories.map((category, index) => (Number.isFinite(Number(category)) ? Number(category) : index + 1));
 }
 
+/**
+ * The stroke and the marker of one line or scatter series, as Word paints them
+ * when the series says nothing.
+ *
+ * A c:ser with no c:spPr and no c:marker leaves both to Word, and the PDF Word
+ * exports of probe-charts-basic says what it picks: a 3.0pt stroke in the
+ * series' accent, and a 9pt marker filled in that accent under a 1.0pt outline
+ * of the same colour. Stating those outright is the same move the gridlines
+ * needed (parity commit 241f276) one level down — this renderer drew a 2.25px
+ * line and a 6px marker against them, which was the whole 30.03% the line probe
+ * had left.
+ *
+ * Both numbers are measured, not assumed: a calibration DOCX carrying exactly
+ * this XML exports from Word as a 3.000pt stroke and a 9.000 x 9.000pt marker
+ * path, which is what its fallback already painted. 28575 EMU (2.25pt), the
+ * weight Word's UI writes into some templates, would move Word's own render.
+ *
+ * Word's shape sequence, one per series, is in MARKER_SHAPES beside the
+ * renderer that draws them; the authored symbol and the drawn one have to stay
+ * the same list.
+ */
+const SERIES_LINE_EMU = 38100;
+const MARKER_LINE_EMU = 12700;
+const MARKER_SIZE_PT = 9;
+const MARKER_SYMBOLS = ["diamond", "square", "triangle", "x", "star", "dot", "dash", "circle", "plus"];
+
+/** Word colours series from the theme's accent1..6 and starts over at the
+ * seventh, which is the slot the renderer paints from too. */
+function seriesAccent(index: number): string {
+  return `<a:schemeClr val="accent${(index % 6) + 1}"/>`;
+}
+
+function seriesShapeXml(index: number): string {
+  const accent = seriesAccent(index);
+  const symbol = MARKER_SYMBOLS[index % MARKER_SYMBOLS.length];
+  return `<c:spPr><a:ln w="${SERIES_LINE_EMU}" cap="rnd"><a:solidFill>${accent}</a:solidFill>` +
+    `<a:round/></a:ln><a:effectLst/></c:spPr>` +
+    `<c:marker><c:symbol val="${symbol}"/><c:size val="${MARKER_SIZE_PT}"/>` +
+    `<c:spPr><a:solidFill>${accent}</a:solidFill>` +
+    `<a:ln w="${MARKER_LINE_EMU}"><a:solidFill>${accent}</a:solidFill></a:ln>` +
+    `<a:effectLst/></c:spPr></c:marker>`;
+}
+
 function chartSeries(data: ChartData): string {
   const lastRow = data.categories.length + 1;
+  const stroked = data.type === "line" || data.type === "scatter";
   return data.series.map((series, index) => {
     const column = columnName(index + 1);
     const name = `<c:tx><c:strRef><c:f>Data!$${column}$1</c:f>${stringCache([series.name])}</c:strRef></c:tx>`;
+    const shape = stroked ? seriesShapeXml(index) : "";
     const values = `<c:numRef><c:f>Data!$${column}$2:$${column}$${lastRow}</c:f>${numberCache(series.values)}</c:numRef>`;
     if (data.type === "scatter") {
-      return `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>${name}` +
+      return `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>${name}${shape}` +
         `<c:xVal><c:numRef><c:f>Data!$A$2:$A$${lastRow}</c:f>${numberCache(scatterX(data.categories))}</c:numRef></c:xVal>` +
         `<c:yVal>${values}</c:yVal><c:smooth val="0"/></c:ser>`;
     }
-    return `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>${name}` +
+    return `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>${name}${shape}` +
       `<c:cat><c:strRef><c:f>Data!$A$2:$A$${lastRow}</c:f>${stringCache(data.categories)}</c:strRef></c:cat>` +
       `<c:val>${values}</c:val>` +
       (data.type === "line" ? `<c:smooth val="0"/>` : "") +
