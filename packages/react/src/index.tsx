@@ -2776,7 +2776,14 @@ export function DocxView({
       if (d && r && d === collab?.doc) {
         const take = collab.takeRenderScope;
         const scope = take ? take() : undefined;
-        if (scope !== null) r(d, scope);
+        if (scope !== null) {
+          r(d, scope);
+          // The toolbar reads api state (revision count, suggesting, formats)
+          // on its dxw-selection refresh; a session-applied op changes that
+          // state without moving the caret, so announce it here — once per
+          // coalesced repaint.
+          document.dispatchEvent(new CustomEvent("dxw-selection"));
+        }
       }
     };
     // rAF coalesces to vsync when THIS window is the foreground one — but the

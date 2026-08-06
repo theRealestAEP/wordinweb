@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   availableObjectCommands,
@@ -4292,6 +4292,21 @@ function ReviewTab({
   showComment: boolean;
   mentions?: string[];
 }) {
+  // The parent's refresh bails out of re-rendering when the selection format
+  // is unchanged (focus sits in the toolbar during accept/reject clicks), and
+  // in a session-backed view the command applies asynchronously — so read the
+  // count on every dxw-selection announcement with an unconditional re-render
+  // of this tab alone.
+  const [, force] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    const bump = () => force();
+    document.addEventListener("dxw-selection", bump);
+    document.addEventListener("selectionchange", bump);
+    return () => {
+      document.removeEventListener("dxw-selection", bump);
+      document.removeEventListener("selectionchange", bump);
+    };
+  }, []);
   const suggesting = api?.isSuggesting() ?? false;
   const count = api?.revisionCount() ?? 0;
   return (
