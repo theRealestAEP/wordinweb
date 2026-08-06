@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import { layoutDocument } from "../src/layout/engine.js";
 import { ApproxMeasurer } from "../src/layout/measure.js";
+import type { FontMetrics } from "../src/layout/measure.js";
+import type { FontSpec } from "../src/layout/types.js";
 import { makeDocx, W_NS } from "./helpers.js";
 
 /**
  * The four sweeps of scripts/generate-pagefit-probe.mjs in the parity repo,
- * as unit cases over our own engine.
+ * plus the five-shape sweep of scripts/generate-sectadvance-probe.mjs, as unit
+ * cases over our own engine.
  *
  * Each variant fills a page with exact-height paragraphs, adds a shim tuned so
  * an exact amount of room is left, and puts one target paragraph there. The
@@ -16,10 +19,28 @@ import { makeDocx, W_NS } from "./helpers.js";
  * Word and we agree on three of the four: a paragraph needs its space-before
  * and its line, and does not need its space-after. The fourth is the exception
  * this file guards — an EMPTY paragraph whose only run content is a page break
- * stays on the current page at any room at all.
+ * demands its SINGLE-SPACED line height, and neither its space-before nor its
+ * w:line multiple.
  */
 
 const measurer = new ApproxMeasurer();
+
+/**
+ * ApproxMeasurer stands every font's line height in at 1.15em. That is fine
+ * for the sweeps below, whose rooms step by 3 px, but the break-only demand IS
+ * a line height, and Word bracketed it on real Calibri — 1.2207em, so 16.28 px
+ * at 10pt against the approximation's 15.33. Read through the approximation
+ * the threshold would pin our arithmetic against a font nobody measured, so
+ * the bracket cases use Calibri's own hhea metrics (ascender 1536, descender
+ * 512, lineGap 452 over a 2048 em).
+ */
+class CalibriMeasurer extends ApproxMeasurer {
+  metrics(font: FontSpec): FontMetrics {
+    return { ascent: font.size * 0.75, descent: font.size * 0.25, lineHeight: font.size * 1.2207 };
+  }
+}
+
+const calibri = new CalibriMeasurer();
 
 /** No header or footer, so the body runs 96..960 CSS px. */
 const SECT =
@@ -59,7 +80,7 @@ function variant(room: number, targetXml: string): string {
   return out + targetXml;
 }
 
-function pagesOf(bodyXml: string) {
+function pagesOf(bodyXml: string, m: ApproxMeasurer = measurer) {
   const doc = DocxDocument.load(
     makeDocx({
       "word/document.xml":
@@ -68,7 +89,7 @@ function pagesOf(bodyXml: string) {
       "word/styles.xml": STYLES,
     }),
   );
-  return layoutDocument(doc, { measurer }).pages;
+  return layoutDocument(doc, { measurer: m }).pages;
 }
 
 /** The 0-based page holding the single text item whose text is `text`. */
@@ -111,7 +132,12 @@ describe("page fit at the foot of a page", () => {
   // Sweep S: phase23's block 1395 — EMPTY, only a page break. The exception.
   // Read through a marker: it lands one page after the filled page when the
   // target stays behind, and two pages after when the target spills.
-  it("keeps an empty paragraph carrying only a page break at any room", () => {
+  //
+  // Every swept room fits, but "at any room" is NOT what that shows: the sweep
+  // floor is 18px and this 11pt paragraph's single-spaced line is 16.9px under
+  // ApproxMeasurer (17.9 under real Calibri metrics), so the floor sits just
+  // above the threshold the brackets below pin.
+  it("keeps an empty paragraph carrying only a page break at every swept room", () => {
     const target =
       `<w:p><w:pPr>${RPR}</w:pPr><w:r>${RPR}<w:br w:type="page"/></w:r></w:p>` +
       exact(FILLER_TWIPS, "AFTER");
@@ -134,54 +160,59 @@ describe("page fit at the foot of a page", () => {
     expect(found).toBe(33);
   });
 
-  // THE DISCRIMINATOR. Sweep S's paragraph again, but its pPr now also carries
-  // the section's w:sectPr — ca-agreement p77 and nccih-protocol p17, the only
-  // two of the corpus's 204 break-only paragraphs that do. There the exception
-  // is OFF and the ordinary threshold applies, which is what leaves the spilled
-  // mark on a page of its own and draws the blank page Word draws. Ungated,
-  // ca-agreement's browser baseline went 23 (matching Word) to 22.
-  it("takes the ordinary test when the break-only paragraph also closes a section", () => {
-    const sectPrInPara =
-      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +
-      '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>' +
-      "</w:sectPr>";
-    const withSect =
-      `<w:p><w:pPr>${RPR}${sectPrInPara}</w:pPr><w:r>${RPR}<w:br w:type="page"/></w:r></w:p>` +
-      exact(FILLER_TWIPS, "AFTER");
-    const withoutSect =
-      `<w:p><w:pPr>${RPR}</w:pPr><w:r>${RPR}<w:br w:type="page"/></w:r></w:p>` +
-      exact(FILLER_TWIPS, "AFTER");
+  // THE BRACKETS. Shapes BK/B2 of the sectadvance probe and shapes NS/N2 of
+  // its no-section control (parity 2ba4f98). Word fits a 10pt break-only
+  // paragraph at 17px of room and spills it at 16; at 20pt it fits at 33 and
+  // spills at 32. The demand DOUBLES with the font size, so it is a line
+  // height and not a constant, and it is the SINGLE-SPACED line: the w:line
+  // multiple would make it 18.72px at 10pt (where Word fits at 17) and the
+  // space-before would make it 32.05px (which is what the text sweeps above
+  // demand and get). The control gives the identical thresholds, so a w:sectPr
+  // on the paragraph changes nothing.
+  //
+  // Read through the marker like sweep S: page 1 when the paragraph stayed
+  // behind, page 2 when it spilled onto a page of its own.
+  const sectPrInPara =
+    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +
+    '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>' +
+    "</w:sectPr>";
 
-    // Rooms far from the fit threshold on either side: ca-agreement's own room
-    // is ~12.7px against a ~13px 10pt line, and no part of this rule should be
-    // read off a sub-pixel comparison.
-    const markerPage = (body: string, room: number) =>
-      pageOfText(pagesOf(variant(room, body)), "AFTER");
+  /** The probe target at a given half-point size, with or without the sectPr. */
+  const breakOnly = (halfPoints: number, sect: boolean) => {
+    const rpr = `<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="${halfPoints}"/></w:rPr>`;
+    return (
+      `<w:p><w:pPr>${rpr}${sect ? sectPrInPara : ""}</w:pPr>` +
+      `<w:r>${rpr}<w:br w:type="page"/></w:r></w:p>` +
+      exact(FILLER_TWIPS, "AFTER")
+    );
+  };
 
-    // Sufficient room: both variants place the paragraph, so they agree.
-    expect(markerPage(withSect, 45)).toBe(markerPage(withoutSect, 45));
-    // Insufficient room: the exception keeps the plain one where it is, and the
-    // sectPr one spills to a page of its own, pushing the marker one further.
-    expect(markerPage(withoutSect, 18)).toBe(1);
-    expect(markerPage(withSect, 18)).toBe(2);
-  });
+  const markerPage = (halfPoints: number, sect: boolean, room: number) =>
+    pageOfText(pagesOf(variant(room, breakOnly(halfPoints, sect)), calibri), "AFTER");
 
-  // The coalesce guard, re-derived under the gate. When the sectPr paragraph's
-  // line DOES fit, its w:br makes a page and the section then starts ON that
-  // page rather than leaving it blank. Suppressing newPage's section-start
-  // coalesce for this shape takes BOTH corpus documents carrying it to 24 pages
-  // against Word's 23 (wild2-legal-ca-agreement p77, wild2-med-nccih-protocol
-  // p17), so today's coalesce is right for every case we can lay out.
+  for (const sect of [false, true]) {
+    const shape = sect ? "with a w:sectPr on it" : "with no w:sectPr";
+    it(`charges a 10pt break-only paragraph one 16.3px line ${shape}`, () => {
+      expect([markerPage(20, sect, 17), markerPage(20, sect, 16)]).toEqual([1, 2]);
+    });
+
+    it(`charges a 20pt break-only paragraph one 32.6px line ${shape}`, () => {
+      expect([markerPage(40, sect, 33), markerPage(40, sect, 32)]).toEqual([1, 2]);
+    });
+  }
+
+  // The coalesce guard. When the sectPr paragraph's line DOES fit, its w:br
+  // makes a page and the section then starts ON that page rather than leaving
+  // it blank. Suppressing newPage's section-start coalesce for this shape takes
+  // BOTH corpus documents carrying it to 24 pages against Word's 23
+  // (wild2-legal-ca-agreement p77, wild2-med-nccih-protocol p17), so today's
+  // coalesce is right for every case we can lay out.
   //
   // Read at room 45 deliberately. At an insufficient room the paragraph spills
-  // under the ordinary test and the page it lands on is blank because the mark
-  // is invisible, not because of anything the coalesce did - that page says
-  // nothing about this rule.
+  // and the page it lands on is blank because the mark is invisible, not
+  // because of anything the coalesce did - that page says nothing about this
+  // rule.
   it("starts a section on the page its own paragraph's break made", () => {
-    const sectPrInPara =
-      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +
-      '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>' +
-      "</w:sectPr>";
     const target =
       `<w:p><w:pPr>${RPR}${sectPrInPara}</w:pPr><w:r>${RPR}<w:br w:type="page"/></w:r></w:p>` +
       exact(FILLER_TWIPS, "AFTER");
