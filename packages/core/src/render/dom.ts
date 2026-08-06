@@ -10,6 +10,7 @@ import {
   type Point,
   type Rect,
   LEGEND_LINE_SPACING,
+  MARKER_SHAPES,
   axisScale,
   barSlots,
   chartFrame,
@@ -1432,6 +1433,20 @@ const CHART_RULE_COLOR = "#d9d9d9";
 const CHART_TITLE_PX = 18 * (96 / 72);
 const CHART_TEXT_PX = 10 * (96 / 72);
 
+/**
+ * What a line or scatter series looks like when it states nothing: a 3pt
+ * stroke, a 9pt marker, and a 1pt marker outline in the series' own colour.
+ *
+ * All three come off the PDF Word exports of probe-charts-basic, where the
+ * series carried neither a c:spPr nor a c:marker and Word supplied these. A
+ * series that does state them wins — insertChartAt states all three now — but
+ * a chart from elsewhere leaves Word's choice standing, so draw what Word
+ * draws rather than the 2.25px line and 6px marker this used to.
+ */
+const SERIES_LINE_PX = 3 * (96 / 72);
+const MARKER_SIZE_PX = 9 * (96 / 72);
+const MARKER_LINE_PX = 96 / 72;
+
 /** Darken a hex colour toward black by `amount` (DrawingML's a:shade). */
 function shade(hex: string, amount: number): string {
   const channel = (offset: number) =>
@@ -1508,6 +1523,24 @@ function pointColor(pen: ChartPen, seriesIndex: number, pointIndex: number): str
   return series?.color ?? pen.colors[seriesIndex % pen.colors.length];
 }
 
+/**
+ * The marker shape of one series: its own c:symbol when it names one this
+ * renderer can draw, else its slot in Word's shape sequence. A series that
+ * asks for "none" — or for a symbol with no shape behind it, like a picture —
+ * gets no marker.
+ */
+function markerOf(pen: ChartPen, seriesIndex: number): MarkerShape | undefined {
+  const symbol = pen.data.series[seriesIndex]?.markerSymbol;
+  if (symbol === "none") return undefined;
+  if (!symbol || symbol === "auto") return markerShapeFor(seriesIndex);
+  return (MARKER_SHAPES as readonly string[]).includes(symbol) ? (symbol as MarkerShape) : undefined;
+}
+
+/** Half the width across a series' marker, which is what markerPath takes. */
+function markerRadius(pen: ChartPen, seriesIndex: number): number {
+  return (pen.data.series[seriesIndex]?.markerSize ?? MARKER_SIZE_PX) / 2;
+}
+
 /** A legend row. `line` and `shape` carry what the series itself draws, which
  * is what Word puts in the key for a line or scatter series. */
 interface LegendEntry {
@@ -1532,7 +1565,7 @@ function legendEntries(pen: ChartPen): LegendEntry[] {
     color: pointColor(pen, index, -1),
     ...(type === "line" || (type === "scatter" && series.smooth) ? { line: true } : {}),
     ...(type === "scatter" || (type === "line" && pen.data.markers)
-      ? { shape: markerShapeFor(index) }
+      ? { shape: markerOf(pen, index) }
       : {}),
   }));
   // A horizontal bar chart runs its categories up the left edge, so the first
@@ -1542,8 +1575,10 @@ function legendEntries(pen: ChartPen): LegendEntry[] {
 }
 
 /**
- * Word draws the series colour in the marker and outlines a closed shape in
- * white, so a marker stays visible where it sits on the line.
+ * Word fills a marker with the series colour and outlines it in that same
+ * colour, 1pt wide — read off its export of probe-charts-basic, where every
+ * marker's stroke and fill are the one accent. An earlier reading of that
+ * render called the outline white; the PDF's own path colours say otherwise.
  *
  * `tag` says where this marker sits — over a plotted point, or in a legend key
  * — because the two carry the same shape and only their place differs.
@@ -1560,8 +1595,8 @@ function paintMarker(
   pen.add("path", {
     d: markerPath(shape, at, r),
     fill: filled ? color : "none",
-    stroke: filled ? "#fff" : color,
-    "stroke-width": filled ? 1 : 1.25,
+    stroke: color,
+    "stroke-width": MARKER_LINE_PX,
     [`data-dxw-chart-${tag}`]: "1",
   });
 }
@@ -1913,13 +1948,14 @@ function paintCategoryChart(pen: ChartPen, plot: Rect): void {
     const color = pointColor(pen, seriesIndex, -1);
     pen.add("path", {
       d: linePath(points, series.smooth ?? false),
-      fill: "none", stroke: color, "stroke-width": 2.25,
+      fill: "none", stroke: color, "stroke-width": series.lineWidth ?? SERIES_LINE_PX,
       "stroke-linecap": "round", "stroke-linejoin": "round",
     });
-    if (data.markers) {
-      const shape = markerShapeFor(seriesIndex);
+    const shape = data.markers ? markerOf(pen, seriesIndex) : undefined;
+    if (shape) {
+      const r = markerRadius(pen, seriesIndex);
       points.forEach((point) => {
-        if (point) paintMarker(pen, point, 3, shape, color);
+        if (point) paintMarker(pen, point, r, shape, color);
       });
     }
     if (data.dataLabels) {
@@ -1965,15 +2001,23 @@ function paintScatter(pen: ChartPen, plot: Rect): void {
       const x = series.xValues?.[index] ?? index + 1;
       return Number.isFinite(value) && Number.isFinite(x) ? { x: toX(x), y: toY(value) } : null;
     });
-    // Word's default scatter draws markers only; a c:smooth or an explicit line
-    // width turns the connecting line on, which c:smooth is the visible half of.
-    if (series.smooth) {
-      pen.add("path", { d: linePath(points, true), fill: "none", stroke: color, "stroke-width": 2.25 });
+    // A scatter series connects its points when it carries a stroke of its own
+    // — the c:spPr/a:ln insertChartAt writes — or when c:smooth bends one
+    // through them. With neither stated, the markers stand alone.
+    if (series.smooth || series.lineWidth !== undefined) {
+      pen.add("path", {
+        d: linePath(points, series.smooth ?? false),
+        fill: "none", stroke: color, "stroke-width": series.lineWidth ?? SERIES_LINE_PX,
+        "stroke-linecap": "round", "stroke-linejoin": "round",
+      });
     }
-    const shape = markerShapeFor(seriesIndex);
-    points.forEach((point) => {
-      if (point) paintMarker(pen, point, 3.5, shape, color);
-    });
+    const shape = markerOf(pen, seriesIndex);
+    if (shape) {
+      const r = markerRadius(pen, seriesIndex);
+      points.forEach((point) => {
+        if (point) paintMarker(pen, point, r, shape, color);
+      });
+    }
   });
 }
 
