@@ -631,18 +631,87 @@ export interface DrawingContent {
   texts?: DrawingTextShape[];
 }
 
-export type ChartType = "column" | "bar" | "line" | "pie";
+/** The c:chartSpace plot kinds the renderer paints. Anything else (3-D, radar,
+ * surface, stock, bubble) parses with `unsupported` set instead. */
+export type ChartType = "column" | "bar" | "line" | "pie" | "doughnut" | "area" | "scatter";
 
 export interface ChartSeries {
   name: string;
   values: number[];
+  /** c:xVal of a scatter series. Every other type shares one category axis,
+   * so only scatter carries per-series x values. */
+  xValues?: number[];
+  /** Explicit series fill/line from c:spPr, overriding the palette slot. */
+  color?: string;
+  /** Explicit c:dPt fills, keyed by point index (pie slices, single bars). */
+  pointColors?: Record<number, string>;
+  /** c:smooth — draw the line series through a spline instead of segments. */
+  smooth?: boolean;
+}
+
+export type ChartTickMark = "none" | "in" | "out" | "cross";
+
+/** One axis of a 2-D chart (c:catAx/c:valAx/c:dateAx). */
+export interface ChartAxis {
+  /** c:delete val="1": Word draws no line, ticks or labels for the axis. */
+  hidden?: boolean;
+  /** A c:majorGridlines child is present. */
+  gridlines?: boolean;
+  /** c:numFmt formatCode applied to the tick labels, e.g. "0.0%". */
+  format?: string;
+  title?: string;
+  /** c:scaling overrides of the automatic scale. */
+  min?: number;
+  max?: number;
+  majorUnit?: number;
+  /** c:scaling/c:orientation val="maxMin". */
+  reversed?: boolean;
+  /** c:majorTickMark / c:minorTickMark. The schema default is "out" for major
+   * and "none" for minor; Word writes both explicitly. */
+  majorTick?: ChartTickMark;
+  minorTick?: ChartTickMark;
+  /** c:tickLblPos val="none" keeps the axis but drops its labels. */
+  labels?: boolean;
+  /** c:crossBetween on a value axis, which decides where the category axis puts
+   * its points: "between" insets them by half a category (Word's choice for
+   * bar and column), "midCat" seats the first and last on the plot's edges
+   * (Word's choice for line and area). */
+  crossBetween?: "between" | "midCat";
 }
 
 export interface ChartData {
   type: ChartType;
+  /** Local name of a plot the renderer does not paint (bar3DChart, radarChart,
+   * …). When set, `type` is a placeholder and the renderer draws a labeled box
+   * rather than pretending the data is a column chart. */
+  unsupported?: string;
   title?: string;
   categories: string[];
   series: ChartSeries[];
+  /** c:grouping — how bar/column/area series stack. */
+  grouping?: "clustered" | "stacked" | "percentStacked";
+  /** Legend edge. Absent when the chart has no c:legend. */
+  legend?: "l" | "r" | "t" | "b" | "tr";
+  /** c:dLbls showVal on the plot or on every series. */
+  dataLabels?: boolean;
+  /** c:varyColors — give each point of a single series its own palette slot. */
+  varyColors?: boolean;
+  categoryAxis?: ChartAxis;
+  valueAxis?: ChartAxis;
+  /** c:holeSize percent of a doughnut (Word's default is 75). */
+  holeSize?: number;
+  /** c:gapWidth percent between bar/column categories (Word's default is 150). */
+  gapWidth?: number;
+  /** c:overlap percent between bars of one category (Word: -27 clustered,
+   * 100 stacked). */
+  overlap?: number;
+  /** c:marker val="1" on a line chart: draw a point marker at each value. */
+  markers?: boolean;
+  /** Font size in px from c:title//a:defRPr@sz. Word's default title is 14pt. */
+  titleSize?: number;
+  /** Font size in px from c:txPr//a:defRPr@sz, the chart-wide text size. Word's
+   * default for axis labels, legend entries and data labels is 9pt. */
+  textSize?: number;
 }
 
 export type SmartArtLayout = "process" | "cycle" | "hierarchy" | "list";

@@ -1023,7 +1023,9 @@ describe("chart insertion", () => {
       .flatMap((item) => item.type === "run" ? item.content : [])
       .find((item) => item.kind === "drawing");
     if (!drawing || drawing.kind !== "drawing") throw new Error("chart drawing missing");
-    expect(drawing.chart).toEqual(DATA);
+    // The parse also recovers the axes and legend the writer emitted, so this
+    // checks the cached data specifically.
+    expect(drawing.chart).toMatchObject(DATA);
     expect(drawing.width).toBeCloseTo(480, 0);
     expect(drawing.height).toBeCloseTo(288, 0);
     expect(drawing.srcDrawing).toBeTruthy();
@@ -1068,7 +1070,31 @@ describe("chart insertion", () => {
       .find((item) => item.kind === "drawing");
     if (!after || after.kind !== "drawing") throw new Error("updated chart missing");
     expect(after.srcDrawing).not.toBe(source);
-    expect(after.chart).toEqual(updated);
+    expect(after.chart).toMatchObject(updated);
+  });
+
+  it("refuses to rewrite a plot kind the writer cannot express", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertChartAt(doc, t, DATA);
+    // Stand a 3-D column chart in the part's place, as a Word file would have.
+    const part = doc.pkg.names().find((name) => name.startsWith("word/charts/chart"))!;
+    doc.pkg.raw()[part] = strToU8(
+      buildChartXml(DATA).replace(/<c:barChart>/, "<c:bar3DChart>").replace(/<\/c:barChart>/, "</c:bar3DChart>"),
+    );
+    doc.markPackageResourceChanged();
+    doc.refresh();
+    const drawing = (doc.sections[0].blocks[0] as Paragraph).children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!drawing || drawing.kind !== "drawing" || !drawing.srcDrawing) throw new Error("chart drawing missing");
+    expect(drawing.chart?.unsupported).toBe("bar3DChart");
+
+    // Rewriting it would flatten the 3-D plot to a 2-D one, so it is refused
+    // and the part is left alone.
+    const before = doc.pkg.text(part);
+    expect(setChartData(doc, drawing.srcDrawing, { ...DATA, title: "Replaced" })).toBe(false);
+    expect(doc.pkg.text(part)).toBe(before);
   });
 
   it("emits the native plot element for every supported chart type", () => {
@@ -1076,6 +1102,12 @@ describe("chart insertion", () => {
     expect(buildChartXml({ ...DATA, type: "bar" })).toContain('<c:barDir val="bar"/>');
     expect(buildChartXml({ ...DATA, type: "line" })).toContain("<c:lineChart>");
     expect(buildChartXml({ ...DATA, type: "pie" })).toContain("<c:pieChart>");
+    expect(buildChartXml({ ...DATA, type: "doughnut" })).toContain("<c:holeSize val=\"75\"/>");
+    expect(buildChartXml({ ...DATA, type: "area" })).toContain("<c:areaChart>");
+    const scatter = buildChartXml({ ...DATA, type: "scatter" });
+    expect(scatter).toContain("<c:scatterChart>");
+    expect(scatter).toContain("<c:xVal>");
+    expect(scatter).toContain("<c:yVal>");
   });
 });
 

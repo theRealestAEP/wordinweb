@@ -2,6 +2,7 @@ import { strToU8, zipSync } from "fflate";
 import { FIXED_ZIP_MTIME } from "../zip.js";
 import { DocxDocument } from "../docx.js";
 import type { ChartData, ChartSeries } from "../model.js";
+import { parseChartPart } from "../parse/chart.js";
 import { parseRelationships, relsPathFor } from "../parse/rels.js";
 import { parseXml, type XmlElement, child, localName } from "../xml.js";
 
@@ -148,42 +149,80 @@ function numberCache(values: number[]): string {
     .join("")}</c:numCache>`;
 }
 
+/** Categories double as the x values of an authored scatter series; a category
+ * that is not a number falls back to its 1-based position. */
+function scatterX(categories: string[]): number[] {
+  return categories.map((category, index) => (Number.isFinite(Number(category)) ? Number(category) : index + 1));
+}
+
 function chartSeries(data: ChartData): string {
   const lastRow = data.categories.length + 1;
   return data.series.map((series, index) => {
     const column = columnName(index + 1);
-    return `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>` +
-      `<c:tx><c:strRef><c:f>Data!$${column}$1</c:f>${stringCache([series.name])}</c:strRef></c:tx>` +
+    const name = `<c:tx><c:strRef><c:f>Data!$${column}$1</c:f>${stringCache([series.name])}</c:strRef></c:tx>`;
+    const values = `<c:numRef><c:f>Data!$${column}$2:$${column}$${lastRow}</c:f>${numberCache(series.values)}</c:numRef>`;
+    if (data.type === "scatter") {
+      return `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>${name}` +
+        `<c:xVal><c:numRef><c:f>Data!$A$2:$A$${lastRow}</c:f>${numberCache(scatterX(data.categories))}</c:numRef></c:xVal>` +
+        `<c:yVal>${values}</c:yVal><c:smooth val="0"/></c:ser>`;
+    }
+    return `<c:ser><c:idx val="${index}"/><c:order val="${index}"/>${name}` +
       `<c:cat><c:strRef><c:f>Data!$A$2:$A$${lastRow}</c:f>${stringCache(data.categories)}</c:strRef></c:cat>` +
-      `<c:val><c:numRef><c:f>Data!$${column}$2:$${column}$${lastRow}</c:f>${numberCache(series.values)}</c:numRef></c:val>` +
+      `<c:val>${values}</c:val>` +
       (data.type === "line" ? `<c:smooth val="0"/>` : "") +
       `</c:ser>`;
   }).join("");
 }
 
+const CATEGORY_AXIS_ID = "48650112";
+const VALUE_AXIS_ID = "48672768";
+
+/** The c:catAx (or, for scatter, the second c:valAx) along the chart's
+ * category direction. */
+function categoryAxisXml(horizontal: boolean, numeric: boolean): string {
+  const shared = `<c:axId val="${CATEGORY_AXIS_ID}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
+    `<c:delete val="0"/><c:axPos val="${horizontal ? "l" : "b"}"/>` +
+    `<c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="out"/>` +
+    `<c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="${VALUE_AXIS_ID}"/>` +
+    `<c:crosses val="autoZero"/>`;
+  return numeric
+    ? `<c:valAx>${shared}<c:crossBetween val="midCat"/></c:valAx>`
+    : `<c:catAx>${shared}<c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/></c:catAx>`;
+}
+
+/** Word seats a line's or area's end points on the plot edges (midCat) and
+ * insets a bar's or column's inside their bands (between). */
+function valueAxisXml(horizontal: boolean, crossBetween: "between" | "midCat"): string {
+  return `<c:valAx><c:axId val="${VALUE_AXIS_ID}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
+    `<c:delete val="0"/><c:axPos val="${horizontal ? "b" : "l"}"/><c:majorGridlines/>` +
+    `<c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="none"/>` +
+    `<c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>` +
+    `<c:crossAx val="${CATEGORY_AXIS_ID}"/><c:crosses val="autoZero"/>` +
+    `<c:crossBetween val="${crossBetween}"/></c:valAx>`;
+}
+
 function chartPlot(data: ChartData): string {
   const series = chartSeries(data);
+  const axIds = `<c:axId val="${CATEGORY_AXIS_ID}"/><c:axId val="${VALUE_AXIS_ID}"/>`;
   if (data.type === "pie") {
     return `<c:pieChart><c:varyColors val="1"/>${series}<c:firstSliceAng val="0"/></c:pieChart>`;
   }
-  const categoryAxisId = "48650112";
-  const valueAxisId = "48672768";
+  if (data.type === "doughnut") {
+    return `<c:doughnutChart><c:varyColors val="1"/>${series}` +
+      `<c:firstSliceAng val="0"/><c:holeSize val="75"/></c:doughnutChart>`;
+  }
   const horizontal = data.type === "bar";
-  const chart = data.type === "line"
+  const plot = data.type === "line"
     ? `<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>${series}` +
-      `<c:marker val="1"/><c:smooth val="0"/><c:axId val="${categoryAxisId}"/><c:axId val="${valueAxisId}"/></c:lineChart>`
-    : `<c:barChart><c:barDir val="${horizontal ? "bar" : "col"}"/><c:grouping val="clustered"/>` +
-      `<c:varyColors val="0"/>${series}<c:gapWidth val="150"/>` +
-      `<c:axId val="${categoryAxisId}"/><c:axId val="${valueAxisId}"/></c:barChart>`;
-  const categoryAxis = `<c:catAx><c:axId val="${categoryAxisId}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
-    `<c:delete val="0"/><c:axPos val="${horizontal ? "l" : "b"}"/><c:tickLblPos val="nextTo"/>` +
-    `<c:crossAx val="${valueAxisId}"/><c:crosses val="autoZero"/><c:auto val="1"/><c:lblAlgn val="ctr"/>` +
-    `<c:lblOffset val="100"/></c:catAx>`;
-  const valueAxis = `<c:valAx><c:axId val="${valueAxisId}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
-    `<c:delete val="0"/><c:axPos val="${horizontal ? "b" : "l"}"/><c:majorGridlines/>` +
-    `<c:numFmt formatCode="General" sourceLinked="1"/><c:tickLblPos val="nextTo"/>` +
-    `<c:crossAx val="${categoryAxisId}"/><c:crosses val="autoZero"/><c:crossBetween val="between"/></c:valAx>`;
-  return chart + categoryAxis + valueAxis;
+      `<c:marker val="1"/><c:smooth val="0"/>${axIds}</c:lineChart>`
+    : data.type === "area"
+      ? `<c:areaChart><c:grouping val="standard"/><c:varyColors val="0"/>${series}${axIds}</c:areaChart>`
+      : data.type === "scatter"
+        ? `<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>${series}${axIds}</c:scatterChart>`
+        : `<c:barChart><c:barDir val="${horizontal ? "bar" : "col"}"/><c:grouping val="clustered"/>` +
+          `<c:varyColors val="0"/>${series}<c:gapWidth val="150"/>${axIds}</c:barChart>`;
+  const crossBetween = data.type === "line" || data.type === "area" ? "midCat" : "between";
+  return plot + categoryAxisXml(horizontal, data.type === "scatter") + valueAxisXml(horizontal, crossBetween);
 }
 
 /** Build native ChartML with cached display data and an editable workbook link. */
@@ -239,6 +278,11 @@ export function setChartData(doc: DocxDocument, drawing: XmlElement, input: Char
   const rels = parseRelationships(parseXml(relsXml), chartRel.target);
   const packageRel = [...rels.values()].find((rel) => rel.type.endsWith("/package") && !rel.external);
   if (!packageRel) return false;
+  // Writing the new data rebuilds the whole part, which would turn a plot this
+  // writer cannot express (a 3-D column, a radar) into a flat one. Refuse
+  // instead of silently replacing the user's chart with a different chart.
+  const existing = doc.pkg.text(chartRel.target);
+  if (existing && parseChartPart(parseXml(existing))?.unsupported) return false;
   const data = normalizeChartData(input);
   doc.pkg.raw()[chartRel.target] = strToU8(buildChartXml(data, packageRel.id));
   doc.pkg.raw()[packageRel.target] = buildChartWorkbook(data);
