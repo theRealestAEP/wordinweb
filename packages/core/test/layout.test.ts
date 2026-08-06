@@ -717,11 +717,7 @@ describe("layout engine", () => {
     });
   });
 
-  it("keeps a break-only paragraph on the page it does not fit on", () => {
-    // The space-after leaves 6 px of room, far under the paragraph's own line.
-    // Word puts it there anyway and starts the new page after it, so no blank
-    // page opens between the two (probe-pagefit sweep S; see
-    // pagefit-break-only.test.ts for the full four-sweep pin).
+  it("lets an ordinary break-only paragraph overflow before applying its page break", () => {
     const body =
       `<w:p><w:pPr><w:spacing w:after="1200"/></w:pPr><w:r><w:t>first page</w:t></w:r></w:p>` +
       `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` +
@@ -730,9 +726,10 @@ describe("layout engine", () => {
       `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
     const { result } = layout({ "word/document.xml": wrapDocument(body) });
 
-    expect(result.totalPages).toBe(2);
+    expect(result.totalPages).toBe(3);
     expect(pageText(result, 0)).toContain("first page");
-    expect(pageText(result, 1)).toContain("second page");
+    expect(pageText(result, 1)).toBe("");
+    expect(pageText(result, 2)).toContain("second page");
   });
 
   it("does not add another empty line after a table's mandatory empty paragraph", () => {
@@ -757,11 +754,7 @@ describe("layout engine", () => {
     expect(pageText(result, 1)).toContain("second page");
   });
 
-  it("opens no blank page after an authored empty paragraph following a table", () => {
-    // The authored spacer (pPr, so NOT the table's own mark paragraph) uses up
-    // the room, and the break-only paragraph after it still has none. It stays
-    // regardless — the exception reads the paragraph's own content, not what
-    // precedes it (probe-pagefit sweep S).
+  it("lets an authored empty paragraph after a table leave a break on a blank page", () => {
     const table = `<w:tbl>
       <w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>
       <w:tr><w:trPr><w:trHeight w:val="900" w:hRule="exact"/></w:trPr>
@@ -778,9 +771,10 @@ describe("layout engine", () => {
       `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>`;
     const { result } = layout({ "word/document.xml": wrapDocument(body) });
 
-    expect(result.totalPages).toBe(2);
+    expect(result.totalPages).toBe(3);
     expect(pageText(result, 0)).toContain("first page");
-    expect(pageText(result, 1)).toContain("third page");
+    expect(pageText(result, 1)).toBe("");
+    expect(pageText(result, 2)).toContain("third page");
   });
 
   it("flows a table's continuation row into the next column at that column's x", () => {
