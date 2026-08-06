@@ -2056,13 +2056,22 @@ class Engine {
       displayNumber,
       headerHeight: 0,
       footerHeight: 0,
-      // Legacy Word keeps a 3pt printable-edge inset when a signed negative
-      // top margin fixes body flow independently of the header. California
-      // pleading paper exposes this exactly: the 24pt body grid begins 3pt
-      // below the raw -66.25pt margin while the header stays at headerDist.
-      bodyTop: sp.marginTop < 0 ? sp.marginTop + ptToPx(3) : sp.marginTop,
-      bandTop: sp.marginTop < 0 ? sp.marginTop + ptToPx(3) : sp.marginTop,
+      // A negative w:top is an ABSOLUTE distance, not a signed one: Word puts
+      // the body top |w:top| below the top of the page, a fixed position that
+      // ignores the header. probe-negmargin sweeps six negative w:top settings
+      // against two header heights and two w:header distances; the body top is
+      // linear in |w:top| with slope 1 and a constant +0.18px residual, and
+      // both header variables are inert (parity ca7493d). Above zero the
+      // header does govern and the block below rebuilds bodyTop, so abs() only
+      // ever bites for a negative margin. bodyBottom reads its own sign the
+      // same way.
+      bodyTop: Math.abs(sp.marginTop),
+      bandTop: Math.abs(sp.marginTop),
       softTop: !sectionStart,
+      // Same absolute reading for a negative w:bottom, which fixes the body
+      // bottom |w:bottom| above the page edge and lets text run over the
+      // footer. ECMA-consistent and symmetric with bodyTop, but no probe row
+      // pins it yet.
       bodyBottom: sp.pageHeight - Math.abs(sp.marginBottom),
       colXs,
       colWidths,
