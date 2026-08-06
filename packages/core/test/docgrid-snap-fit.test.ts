@@ -64,8 +64,9 @@ const TARGET =
   `<w:r>${RPR}<w:t>ALPHA</w:t></w:r><w:r>${RPR}<w:br/></w:r><w:r>${RPR}<w:t>BETA</w:t></w:r></w:p>`;
 
 function pagesWithRoom(room: number) {
-  // The section's first page reserves four grid rows above the body.
-  const bodyTop = 96 + 4 * PITCH_PX;
+  // A lines-grid section opens AT the body top (probe-docgrid retired the
+  // four-grid-row reserve this shim used to add back).
+  const bodyTop = 96;
   const shim = Math.round((960 - bodyTop - room) * 15);
   const doc = DocxDocument.load(
     makeDocx({
