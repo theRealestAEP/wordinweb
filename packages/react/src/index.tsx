@@ -149,6 +149,7 @@ import type {
   TableBorderEdge,
   TableBorderSpec,
   TableLookToggles,
+  RevisionMeta,
 } from "@wordinweb/core";
 
 async function objectPoster(title: string, subtitle: string, glyph: string): Promise<Blob> {
@@ -1540,20 +1541,25 @@ export function DocxView({
         const runTableOperation = <K extends RegisteredOperationKind>(
           kind: K,
           args: RegisteredOperationArgs<K>,
-          local: (caretT: XmlElement) => boolean,
+          local: (caretT: XmlElement, meta: RevisionMeta | undefined) => boolean,
         ): void => {
           const caret = editor?.getCaretTarget();
           if (!caret) return;
+          // One draw per gesture (doc 05 rule a): the same author+date go into
+          // the local *PrChange and into the intent every replica applies.
+          // Every kind routed here declares an optional suggest payload.
+          const suggest = editor?.suggestionMeta();
+          const payload = (suggest ? { ...args, suggest } : args) as RegisteredOperationArgs<K>;
           if (
             collabOp(
-              (anchor, alloc) => operationBody(kind, anchor.blockId, args, alloc) as never,
+              (anchor, alloc) => operationBody(kind, anchor.blockId, payload, alloc) as never,
               { t: caret.t, offset: 0 },
             )
           ) {
             return;
           }
           history.checkpoint();
-          if (local(caret.t)) pages = rerender(doc);
+          if (local(caret.t, suggestMeta(doc, suggest))) pages = rerender(doc);
         };
         /** Document-level ops (page layout, line numbering, cover page). */
         const collabDocOp = (
@@ -2012,17 +2018,23 @@ export function DocxView({
           tableOp: (op) => {
             const caret = editor?.getCaretTarget();
             if (!caret) return;
-            if (collabOp((a, ids) => ({ kind: "tableOp", cellParagraphId: a.blockId, op, nodeIds: ids(16) }), { t: caret.t, offset: 0 })) return;
+            // One draw per gesture, as for the run and paragraph commands: the
+            // same author+date reach the local *PrChange and the intent every
+            // replica applies. The structural ops have no tracked form and
+            // core's applyTableOp ignores the meta for them, so this passes it
+            // unconditionally rather than restating which kinds honour it.
+            const suggest = editor?.suggestionMeta();
+            if (collabOp((a, ids) => ({ kind: "tableOp", cellParagraphId: a.blockId, op, nodeIds: ids(16), ...(suggest ? { suggest } : {}) }), { t: caret.t, offset: 0 })) return;
             history.checkpoint();
-            if (applyTableOp(doc, caret.t, op)) pages = rerender(doc);
+            if (applyTableOp(doc, caret.t, op, suggestMeta(doc, suggest))) pages = rerender(doc);
           },
           getTableCellFill: () => {
             const caret = editor?.getCaretTarget();
             return caret ? cellShadingAt(doc, caret.t) : undefined;
           },
           setTableBorders: (scope, edges, border) =>
-            runTableOperation("setTableBorders", { scope, edges, border }, (caret) =>
-              setTableBorders(doc, caret, scope, edges, border),
+            runTableOperation("setTableBorders", { scope, edges, border }, (caret, meta) =>
+              setTableBorders(doc, caret, scope, edges, border, meta),
             ),
           listTableStyles: () => listTableStyles(doc),
           getTableStyleId: () => {
@@ -2033,28 +2045,28 @@ export function DocxView({
             return style ? attr(style, "val") ?? null : null;
           },
           setTableStyle: (styleId) =>
-            runTableOperation("setTableStyle", { styleId }, () => {
+            runTableOperation("setTableStyle", { styleId }, (_caret, meta) => {
               const tbl = caretTable();
-              return tbl ? setTableStyle(doc, tbl, styleId) : false;
+              return tbl ? setTableStyle(doc, tbl, styleId, meta) : false;
             }),
           getTableLook: () => {
             const tbl = caretTable();
             return tbl ? tableLookOf(tbl) : undefined;
           },
           setTableLook: (patch) =>
-            runTableOperation("setTableLook", { look: patch }, () => {
+            runTableOperation("setTableLook", { look: patch }, (_caret, meta) => {
               const tbl = caretTable();
-              return tbl ? setTableLook(doc, tbl, patch) : false;
+              return tbl ? setTableLook(doc, tbl, patch, meta) : false;
             }),
           setTableWidth: (unit, value) =>
-            runTableOperation("setTableWidth", { unit, value }, () => {
+            runTableOperation("setTableWidth", { unit, value }, (_caret, meta) => {
               const tbl = caretTable();
-              return tbl ? setTableWidth(doc, tbl, unit, value ?? 0) : false;
+              return tbl ? setTableWidth(doc, tbl, unit, value ?? 0, meta) : false;
             }),
           setTableColumnWidth: (colIdx, widthPt) =>
-            runTableOperation("setTableColumnWidth", { colIdx, widthPt }, () => {
+            runTableOperation("setTableColumnWidth", { colIdx, widthPt }, (_caret, meta) => {
               const tbl = caretTable();
-              return tbl ? setTableColumnWidth(doc, tbl, colIdx, widthPt) : false;
+              return tbl ? setTableColumnWidth(doc, tbl, colIdx, widthPt, meta) : false;
             }),
           setTableLayout: (layout) => {
             const tbl = caretTable();
@@ -2063,18 +2075,18 @@ export function DocxView({
             // table has to keep the columns the user can see, and a replica
             // that re-measured them itself could freeze a different table.
             const renderedWidths = layout === "fixed" ? renderedColumnWidths(tbl) : undefined;
-            runTableOperation("setTableLayout", { layout, renderedWidths }, () =>
-              setTableLayoutMode(doc, tbl, layout, renderedWidths),
+            runTableOperation("setTableLayout", { layout, renderedWidths }, (_caret, meta) =>
+              setTableLayoutMode(doc, tbl, layout, renderedWidths, meta),
             );
           },
           setTableCellMargins: (scope, margins) =>
-            runTableOperation("setTableCellMargins", { scope, margins }, (caret) =>
-              setTableCellMargins(doc, caret, scope, margins),
+            runTableOperation("setTableCellMargins", { scope, margins }, (caret, meta) =>
+              setTableCellMargins(doc, caret, scope, margins, meta),
             ),
           setTableHeaderRows: (count) =>
-            runTableOperation("setTableHeaderRows", { count }, () => {
+            runTableOperation("setTableHeaderRows", { count }, (_caret, meta) => {
               const tbl = caretTable();
-              return tbl ? setTableHeaderRows(doc, tbl, count) : false;
+              return tbl ? setTableHeaderRows(doc, tbl, count, meta) : false;
             }),
           imageAccept: () => (collabRef.current?.submitOp && doc.stableIds ? COLLAB_IMAGE_ACCEPT : LOCAL_IMAGE_ACCEPT),
           imageMaxBytes: () => (collabRef.current?.submitOp && doc.stableIds ? collabRef.current.mediaMaxBlobBytes ?? null : null),
@@ -2216,11 +2228,14 @@ export function DocxView({
             }
           },
           setAlignment: (align) => {
-            if (!handle) return;
+            // The EDITOR's selection, like every other paragraph command. The
+            // editor paints its own highlight and keeps the DOM selection in
+            // its hidden input sink, so window.getSelection() is empty while a
+            // range is selected — reading it here aligned whatever paragraph
+            // the caret was left in by the PREVIOUS gesture instead.
             const caret = editor?.getCaretTarget();
-            const segTs = selectionToSegments(handle.bindings)
-              .map((s) => s.t)
-              .filter((t): t is NonNullable<typeof t> => !!t);
+            const segs = editor?.getSelectionSegments() ?? [];
+            const segTs = segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t);
             const targets = segTs.length > 0 ? segTs : caret ? [caret.t] : [];
             if (targets.length === 0) return;
             history.checkpoint();
