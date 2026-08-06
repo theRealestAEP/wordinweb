@@ -1170,6 +1170,43 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/**
+ * Table of contents, and the two update passes that keep a document's field
+ * results current.
+ *
+ * Word puts these on a References tab this ribbon does not have. A TOC IS a
+ * field, so it lands beside the other field controls — the same placement
+ * INSERT_COMMANDS already records for `insertToc`.
+ *
+ * The two updates are different jobs and both are offered: refreshTocs
+ * REBUILDS the entry paragraphs from the document's current headings, while
+ * updateFields only recomputes every field's result (page numbers, dates,
+ * cross-references) against the current layout.
+ */
+function ContentsMenu({ api }: { api: DocxViewApi | null }) {
+  return (
+    <ActionMenu
+      label="Contents"
+      title="Insert or update a table of contents"
+      width={92}
+      groups={[
+        {
+          items: [
+            ["insert", "Table of contents"],
+            ["rebuild", "Update table of contents"],
+            ["fields", "Update fields"],
+          ],
+        },
+      ]}
+      onPick={(value) => {
+        if (value === "insert") api?.insertToc();
+        else if (value === "rebuild") api?.refreshTocs();
+        else api?.updateFields();
+      }}
+    />
+  );
+}
+
 const SYMBOLS = ["Ω", "±", "×", "÷", "≤", "≥", "≠", "≈", "∞", "∑", "√", "∫", "→", "↔", "©", "®", "™", "€", "£", "¥", "✓", "•", "§", "¶"];
 
 function SymbolMenu({ api }: { api: DocxViewApi | null }) {
@@ -4173,6 +4210,7 @@ export function DocxToolbar({
               onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)}
             />
           )}
+          {on("field") && <ContentsMenu api={api} />}
           {on("equation") && <EquationMenu api={api} />}
           {on("symbol") && <SymbolMenu api={api} />}
           {on("dropCap") && (
@@ -4263,6 +4301,7 @@ export function DocxToolbar({
               {on("field") && (
                 <ActionMenu label="Field" title="Insert a Word field" width={68} groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]} onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)} />
               )}
+              {on("field") && <ContentsMenu api={api} />}
               {on("equation") && <EquationMenu api={api} />}
               {on("symbol") && <SymbolMenu api={api} />}
               {on("dropCap") && <ActionMenu label="Drop cap" title="Drop cap" width={84} groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]} onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")} />}
