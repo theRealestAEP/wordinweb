@@ -34,11 +34,12 @@ import { makeDocx, W_NS } from "./helpers.js";
  * D's no-rule height, so Word charges zero. C is the guard: a nil on only ONE
  * side does not suppress, and Word charges the rule in full.
  *
- * Every row here is atLeast, which is all the probe covers. An hRule="exact"
- * row does not grow for a boundary at all, and wild2-legal-ca-agreement's
- * signature rows — exact rows around a both-nil boundary — are Word-measured
- * at a distance the current exact-row arithmetic already reproduces, so the
- * suppression stops at content-sized rows (see rowBorderWidths).
+ * Every row here is atLeast, which is all THIS probe covers. An hRule="exact"
+ * row does not grow for a boundary at all — the rule shows up only as a
+ * content inset — and probe-exactnil (parity 02dff8a) measured that inset
+ * separately. The exact-row describe block below carries its numbers: a live
+ * rule charges its FULL width to the row below the boundary, a both-nil
+ * boundary charges zero, and a one-sided nil suppresses nothing.
  */
 
 const measurer = new ApproxMeasurer();
@@ -156,9 +157,11 @@ describe("nil cell borders at a row boundary", () => {
     expect(boundaryAdvance("F-own24") - boundaryAdvance("E-own12")).toBeCloseTo(RULE_PX, 2);
   });
 
-  it("leaves an exact row's boundary alone", () => {
-    // Unmeasured by this probe and Word-pinned the other way through
-    // ca-agreement's signature rows: an exact row still charges the boundary.
+  it("charges nothing at a both-nil boundary between exact rows too", () => {
+    // probe-exactnil (parity 02dff8a): the both-nil rule reaches the exact-row
+    // content inset exactly as it reaches an atLeast row's height. This used
+    // to assert the opposite on the strength of ca-agreement's stale 44.00
+    // signature-row reading; the probe reads zero for the both-nil boundary.
     const gap = (id: string) => {
       const { mark, borders, r0, r1 } = CASES[id];
       const table =
@@ -182,7 +185,7 @@ describe("nil cell borders at a row boundary", () => {
       };
       return topOf(`${mark}MID`) - topOf(`${mark}TOP`);
     };
-    expect(gap("B-nilboth")).toBeCloseTo(gap("A-none"), 2);
+    expect(gap("A-none") - gap("B-nilboth")).toBeCloseTo(RULE_PX, 2);
   });
 
   it("paints no rule at a both-nil boundary", () => {
@@ -208,5 +211,85 @@ describe("nil cell borders at a row boundary", () => {
       (i) => i.kind === "edge" && i.y1 === i.y2 && Math.abs(i.y1 - mid.lineTop) < 3,
     );
     expect(between).toHaveLength(0);
+  });
+});
+
+/**
+ * probe-exactnil (wordinweb-parity 02dff8a,
+ * scripts/generate-exactnil-probe.mjs) as unit cases: two hRule="exact" rows
+ * sharing one `tblBorders insideH` sz-12 rule. An exact row's height is the
+ * authored value whatever the borders say, so the boundary shows up ONLY as
+ * the lower row's content inset. Word's measured inset, against the authored
+ * 33.00 px row:
+ *
+ *   N    no rule                      33.03   (nothing charged)
+ *   R    insideH sz=12               35.00   (the FULL 2.00 rule, not half)
+ *   RN   insideH, BOTH cells nil     33.00   (zero)
+ *   RO   insideH, only the LOWER nil 35.00   (one-sided nil suppresses nothing)
+ *   RU   insideH, only the UPPER nil 35.00
+ *
+ * Before this rule landed we read 34.00 in all four rule cases — half a rule
+ * always, and nil never.
+ */
+describe("exact-row boundary inset (probe-exactnil)", () => {
+  const tblPrInsideH = (rule: boolean) =>
+    '<w:tblPr><w:tblW w:w="10080" w:type="dxa"/>' +
+    (rule
+      ? '<w:tblBorders><w:insideH w:val="single" w:sz="12" w:space="0" w:color="auto"/></w:tblBorders>'
+      : "") +
+    '<w:tblLayout w:type="fixed"/>' +
+    '<w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/>' +
+    '<w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr>';
+
+  /** top(MK) - top(UP) and the after-table mark's top for one variant. */
+  const measure = (rule: boolean, upper?: [string, string], lower?: [string, string]) => {
+    const table =
+      `<w:tbl>${tblPrInsideH(rule)}` +
+      // 600 tw = 40 px, tall enough that the exact rows do not clip.
+      row(["UP", "upb"], upper, "exact", 600) +
+      row(["MK", "mkb"], lower, "exact", 600) +
+      "</w:tbl>";
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml":
+          `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${W_NS}>` +
+          `<w:body>${table}${line("END")}${SECT}</w:body></w:document>`,
+      }),
+    );
+    const items = layoutDocument(doc, { measurer }).pages[0].items;
+    const topOf = (text: string) => {
+      const it = items.find((i) => i.kind === "text" && i.text === text);
+      if (it?.kind !== "text") throw new Error(`missing ${text}`);
+      return it.lineTop;
+    };
+    return { gap: topOf("MK") - topOf("UP"), end: topOf("END") };
+  };
+  const EXACT_ROW = 40; // 600 tw
+
+  it("charges nothing where no rule is declared", () => {
+    expect(measure(false).gap).toBeCloseTo(EXACT_ROW, 2);
+  });
+
+  it("charges the full rule width to the row below the boundary", () => {
+    expect(measure(true).gap).toBeCloseTo(EXACT_ROW + RULE_PX, 2);
+  });
+
+  it("charges nothing when BOTH cells at the boundary declare nil", () => {
+    expect(measure(true, both(bd("bottom", "nil")), both(bd("top", "nil"))).gap).toBeCloseTo(EXACT_ROW, 2);
+  });
+
+  it("still charges the full rule when only ONE side declares nil", () => {
+    expect(measure(true, undefined, both(bd("top", "nil"))).gap).toBeCloseTo(EXACT_ROW + RULE_PX, 2);
+    expect(measure(true, both(bd("bottom", "nil")), undefined).gap).toBeCloseTo(EXACT_ROW + RULE_PX, 2);
+  });
+
+  it("moves the inset, never the row heights", () => {
+    // The rule is a content inset inside the exact rows: the paragraph after
+    // the table sits at the same place whether the boundary charges or not.
+    expect(measure(true).end).toBeCloseTo(measure(false).end, 2);
+    expect(measure(true, both(bd("bottom", "nil")), both(bd("top", "nil"))).end).toBeCloseTo(
+      measure(false).end,
+      2,
+    );
   });
 });

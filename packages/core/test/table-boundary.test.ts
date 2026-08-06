@@ -220,21 +220,28 @@ describe("exact rows and cell borders", () => {
     return mark("MARKBOT") - mark("MARKTOP");
   }
 
-  it("takes a cell's own border width out of an exact row", () => {
-    // Row 0's bottom and row 1's top are ONE rule, and Word charges the pair
-    // one border width, not one each.
+  it("drops one rule width for the fixture cells' both-nil boundary", () => {
+    // probe-exactrow's Word-measured drop of exactly one sz-12 rule. Its
+    // mechanism is the 1/2 boundary, which both cells declare nil: the mark
+    // row's content inset there goes from the full insideH rule to zero
+    // (probe-exactnil), while row 0's bottom + row 1's top sz-12 pair merely
+    // restates the table rule and changes nothing. The old reading — a
+    // HEIGHT taken out of the rows by their own tcBorders — fit these same
+    // marks but contradicts probe-exactnil's inset numbers.
     expect(markGap({ tblBorders: true, cells: fixtureCells })).toBeCloseTo(
       markGap({ tblBorders: true }) - SZ12,
       5,
     );
   });
 
-  it("charges each bordered boundary of an exact row once", () => {
-    // Three boundaries carry a sz-12 rule here (the table top, and both
-    // interior boundaries), and the two rows between the marks pay one width
-    // each. Charging every declared edge in full would cost 4 widths.
+  it("adds nothing for cell borders that restate every table rule", () => {
+    // Restating tcBorders neither grow an exact row (its height is authored)
+    // nor change any boundary's inset, so the marks stay put. Unmeasured by
+    // probe-exactrow (it has no uniform-tcBorders variant); this pins the
+    // model's prediction, replacing the height-share arithmetic that read
+    // each bordered boundary as a height cost.
     expect(markGap({ tblBorders: true, cells: uniformCells })).toBeCloseTo(
-      markGap({ tblBorders: true }) - 2 * SZ12,
+      markGap({ tblBorders: true }),
       5,
     );
   });

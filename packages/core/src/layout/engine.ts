@@ -7334,8 +7334,10 @@ class Engine {
    * row: hRule=atLeast rows measure trHeight + top/bottom cell margins + the
    * row's border share, and hRule=exact rows measure trHeight + the top
    * margin only (probe-trheight: atLeast 785.9tw + 100tw margins + sz8
-   * borders -> 50.25pt row; exact 800tw -> 45pt). An exact row also gives up
-   * the width of its cells' OWN borders (exactRowCellBorderShare).
+   * borders -> 50.25pt row; exact 800tw -> 45pt). A compat-15 exact row's
+   * height is that authored value whatever its borders say: its rules live
+   * INSIDE the row and charge the content inset instead (see exactInsetRow,
+   * rowTopLead and paintRow).
    */
   private rowHeightFromTrHeight(tbl: Table, row: TableRow, ri: number, contentHeight: number): number {
     const trHeight = row.props.height!;
@@ -7370,7 +7372,7 @@ class Engine {
         // half the cell-top inset in every continuation row.
         return trHeight + (isLegacyFormLine(row) && isLegacyFormLine(tbl.rows[ri - 1]) ? topPad / 2 : 0);
       }
-      return Math.max(0, trHeight + topPad - this.exactRowCellBorderShare(tbl, ri));
+      return Math.max(0, trHeight + topPad);
     }
     if (this.doc.compatibilityMode < 15) {
       const legacyBottomPad = bottomPad >= ptToPx(1) ? bottomPad : 0;
@@ -7385,39 +7387,63 @@ class Engine {
   }
 
   /**
-   * The height an hRule="exact" row gives up to its cells' OWN borders. Word
-   * draws a `w:tcBorders` rule INSIDE an exact row and takes its width out of
-   * the row, so the row advances that much less; a `w:tblBorders` rule of the
-   * same weight in the same visual position costs nothing, and `w:shd` is
-   * inert. probe-exactrow isolates all three over eight variants of
-   * wild2-legal-ca-agreement's signature rows (exact 495/110/1089tw), measuring
-   * row 0's mark to row 2's: every variant matches Word within the harness's
-   * 0.31px except the two carrying the fixture's own tcBorders, where Word's
-   * distance drops by exactly the sz-12 rule's 1.5pt = 2.00 CSS px.
+   * A compat-15 hRule="exact" row occupies exactly trHeight + top margin of
+   * flow. A rule at its TOP (outer or interior, tblBorders or tcBorders)
+   * comes out of its CONTENT in full — no half-rule flow lead — and charges
+   * zero at a both-nil boundary; a rule at its BOTTOM edge of the table sits
+   * wholly below the row and adds its full width to the flow. This is the one
+   * model consistent with every measurement:
    *
-   * Charged per BOUNDARY, half to each adjacent row, exactly as rowBorderShare
-   * charges content-sized rows. The probe fixes that split: row 0's bottom
-   * sz-12 and row 1's top sz-12 are ONE painted rule, and Word takes one border
-   * width out of the pair, not one out of each (which would move the mark
-   * 4.00px, twice what Word does).
+   *  - probe-sidedness (#51b): a lone exact row's tcBorders TOP pushes the
+   *    content down its whole 2.00px from the outside mark; a BOTTOM border
+   *    moves the content top nothing. The top rule is not split
+   *    half-lead/half-inset around the row edge — it is all inset.
+   *  - probe-exactnil (parity 02dff8a): two exact rows under a tblBorders
+   *    insideH sz-12 read 35.00 mark-to-mark where the authored row is 33.00 —
+   *    the FULL rule charged to the row below the boundary — and 33.00
+   *    exactly when both cells declare nil (a one-sided nil suppresses
+   *    nothing, RO = RU = 35.00).
+   *  - probe-exactrow: rows 495/110/1089 with tblBorders everywhere read the
+   *    same mark span as with no borders at all (the full inset above row 0
+   *    cancels the full inset above row 2), and adding ca-agreement's own
+   *    tcBorders — a sz-12 pair at one boundary and a both-nil pair at the
+   *    next — drops the span by exactly one 2.00px rule, which is the
+   *    both-nil boundary's inset going to zero. The earlier reading of that
+   *    drop as a HEIGHT reduction (exactRowCellBorderShare, engine b0b8e2f)
+   *    fit the same in-table marks but contradicts probe-exactnil's inset
+   *    numbers; the share is gone and exact heights are authored, full stop.
+   *  - probe-exactoverflow: TOP to MARK across a bordered one-row exact table
+   *    is 34.33px = 16 (line) + 17.33 (authored row) + 1.00 (one whole sz-6
+   *    rule) — the bottom rule's full width in the flow, the top rule's
+   *    none.
    *
-   * atLeast/auto rows keep their full height - the same probe's atLeast
-   * variants already match Word, and they pay the rule through rowBorderShare
-   * instead. Pre-15 compatibility mode keeps its own measured exact-row
-   * arithmetic above, which was fitted on legacy form templates that rule
-   * themselves with hairline tcBorders.
+   * A boundary between an exact row and a content-sized row keeps the content
+   * row's half-share and charges the exact row's full inset; no probe measures
+   * that mixed case. Pre-15 compatibility mode keeps its own fitted exact-row
+   * arithmetic (legacy form templates ruled with hairline tcBorders) and the
+   * half-lead/half-inset convention it was fitted with.
    */
-  private exactRowCellBorderShare(tbl: Table, ri: number): number {
-    const rows = tbl.rows;
-    const bw = (b?: Border) =>
-      b && b.style !== "none"
-        ? this.borderPaintWidth({ style: b.style, width: b.rawWidth ?? b.width })
-        : 0;
-    const edge = (r: number, side: "top" | "bottom") =>
-      Math.max(0, ...rows[r].cells.map((c) => bw(c.props.borders?.[side])));
-    const boundary = (k: number) =>
-      Math.max(k > 0 ? edge(k - 1, "bottom") : 0, k < rows.length ? edge(k, "top") : 0);
-    return (boundary(ri) + boundary(ri + 1)) / 2;
+  private exactInsetRow(row: TableRow): boolean {
+    return row.props.heightRule === "exact" && this.doc.compatibilityMode >= 15;
+  }
+
+  /** Flow lead above row `ri` when it starts a table segment: half the
+   * boundary rule, except an exact row, which takes none — its top rule is
+   * all content inset (see exactInsetRow). */
+  private rowTopLead(tbl: Table, ri: number): number {
+    if (this.exactInsetRow(tbl.rows[ri])) return 0;
+    return this.rowBorderWidths(tbl, ri).top / 2;
+  }
+
+  /** Flow lead below row `ri` when it ends a table segment: half the boundary
+   * rule, except an exact row, whose bottom rule sits wholly BELOW the fixed
+   * row box and so adds its FULL width (probe-exactoverflow: TOP to MARK is
+   * 34.33px = a 16px line + the authored 17.33px row + one whole sz-6 rule;
+   * the sz-6 top rule adds nothing to the flow because it came out of the
+   * row's content). */
+  private rowBottomLead(tbl: Table, ri: number): number {
+    const w = this.rowBorderWidths(tbl, ri).bottom;
+    return this.exactInsetRow(tbl.rows[ri]) ? w : w / 2;
   }
 
   /** Widths of the horizontal rules above and below a row. A rule can be
@@ -7469,31 +7495,24 @@ class Engine {
     // sz-12 rule costs 2.00 and both-nil returns to 15.33 exactly, while
     // one-sided nil stays at 17.33 with the rule).
     //
-    // Only for rows Word sizes from their content. probe-nilborder is an
-    // atLeast table and pins nothing about hRule="exact", where Word does not
-    // grow the row at all and the boundary shows up only as a content inset:
-    // wild2-legal-ca-agreement's signature rows put a both-nil boundary
-    // between two exact rows, and Word's own 44.00 px from that table's row 0
-    // mark to its row 2 mark is what the current exact-row arithmetic already
-    // reproduces (engine b0b8e2f, fitted on probe-exactrow). Suppressing the
-    // boundary there takes it to 43.00. Leaving the exact case alone keeps
-    // that measurement; what Word insets an exact row by at a suppressed
-    // boundary is unmeasured.
-    const contentSized = (r: number) => rows[r].props.heightRule !== "exact";
+    // Measured in BOTH row-sizing regimes. probe-nilborder pins content-sized
+    // (atLeast) rows through their heights; probe-exactnil (parity 02dff8a)
+    // pins hRule="exact" rows through their content inset, and Word gives the
+    // same answer in each: a live rule costs its full width, a both-nil
+    // boundary costs zero, and a one-sided nil suppresses nothing (the probe's
+    // RO and RU orderings agree to the digit). An earlier guard kept exact
+    // rows charging here on the strength of wild2-legal-ca-agreement's 44.00
+    // signature-row reading; probe-exactnil reads the both-nil exact boundary
+    // at 33.00 against 35.00 with the rule, so that guard is gone. A MIXED
+    // exact/content boundary sits between the two measured endpoints and is
+    // itself unmeasured; it takes the same zero.
     const declaredNil = (r: number, side: "top" | "bottom") =>
       rows[r].cells.length > 0 &&
       rows[r].cells.every((c) => c.props.borders?.[side]?.style === "none");
     const boundary = (k: number): number => {
       if (k === 0) return Math.max(bw(tb?.top), cellTop(0));
       if (k === rows.length) return Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
-      if (
-        contentSized(k - 1) &&
-        contentSized(k) &&
-        declaredNil(k - 1, "bottom") &&
-        declaredNil(k, "top")
-      ) {
-        return 0;
-      }
+      if (declaredNil(k - 1, "bottom") && declaredNil(k, "top")) return 0;
       return Math.max(bw(tb?.insideH), cellBot(k - 1), cellTop(k));
     };
     return { top: boundary(ri), bottom: boundary(ri + 1) };
@@ -7602,7 +7621,7 @@ class Engine {
   private tableLeadHeight(tbl: Table): number {
     this.ensureTableBorders(tbl);
     const widths = this.resolveGridWidths(tbl, this.colWidth);
-    let lead = tbl.rows.length > 0 ? this.rowBorderWidths(tbl, 0).top / 2 : 0;
+    let lead = tbl.rows.length > 0 ? this.rowTopLead(tbl, 0) : 0;
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const laid = this.layoutRow(tbl, tbl.rows[ri], ri, widths);
       let h = laid.height + this.rowBorderShare(tbl, ri);
@@ -7680,10 +7699,10 @@ class Engine {
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
     const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
     const tableHeight =
-      (s2 || this.rowBorderWidths(tbl, 0).top / 2) +
+      (s2 || this.rowTopLead(tbl, 0)) +
       rowHeights.reduce((sum, height) => sum + height, 0) +
       Math.max(0, tbl.rows.length - 1) * s2 +
-      (s2 || this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2);
+      (s2 || this.rowBottomLead(tbl, tbl.rows.length - 1));
 
     // A normal table cannot wrap beside a floating exclusion rectangle. If
     // its footprint would intersect one, Word moves the whole table below the
@@ -7707,7 +7726,7 @@ class Engine {
     // (wild2-legal-nih-contract p29/30: only the 2-line header row of the
     // HANEGABE table fit at the page bottom — Word moves the entire table).
     if (headerRows.length > 0 && headerRows.length < tbl.rows.length && !this.pageIsEmptyAtCursor()) {
-      let lead = this.rowBorderWidths(tbl, 0).top / 2;
+      let lead = this.rowTopLead(tbl, 0);
       for (let ri = 0; ri <= headerRows.length; ri++) lead += rowHeights[ri];
       if (this.y + lead > this.bodyBottom + 0.01) this.nextColumn();
     }
@@ -7737,7 +7756,7 @@ class Engine {
     // the first row. The matching bottom half is added after the final row.
     // Separated-border tables advance 2*spacing instead (outline to first
     // cell box).
-    if (tbl.rows.length > 0) this.y += s2 || this.rowBorderWidths(tbl, 0).top / 2;
+    if (tbl.rows.length > 0) this.y += s2 || this.rowTopLead(tbl, 0);
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
       const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
@@ -7768,7 +7787,7 @@ class Engine {
         segPage = this.cur;
         segHasRows = false;
         const firstRowIdx = !row.props.tblHeader && headerRows.length > 0 ? 0 : ri;
-        this.y += this.rowBorderWidths(tbl, firstRowIdx).top / 2;
+        this.y += this.rowTopLead(tbl, firstRowIdx);
         // Repeat header rows at the top of the continuation page. A repeated
         // header advances by its FULL row height — content + border share +
         // any trHeight floor — exactly like its first-page instance (Word's
@@ -7829,7 +7848,7 @@ class Engine {
         // advance() and the split happens from the page top.
         const atColumnTop =
           this.pageIsEmptyAtCursor() ||
-          this.y <= this.cur.bodyTop + this.rowBorderWidths(tbl, ri).top / 2 + 0.01;
+          this.y <= this.cur.bodyTop + this.rowTopLead(tbl, ri) + 0.01;
         const cantSplitHolds =
           row.props.cantSplit === true &&
           (rowHeight <= this.cur.bodyBottom - this.cur.bodyTop + 0.01 || !atColumnTop);
@@ -7874,7 +7893,7 @@ class Engine {
         }
         // Nothing splittable: at the top of a page the row simply overflows
         // (old behavior); mid-page it moves whole and gets one more chance.
-        const topHalf = this.rowBorderWidths(tbl, ri).top / 2;
+        const topHalf = this.rowTopLead(tbl, ri);
         if (this.pageIsEmptyAtCursor() || this.y <= this.cur.bodyTop + topHalf + 0.01) break;
         advance();
       }
@@ -7903,7 +7922,7 @@ class Engine {
     }
     // Separated-border tables close with a 2*spacing bottom inset then the outer
     // table outline box; ordinary tables add the final half rule.
-    if (tbl.rows.length > 0) this.y += s2 || this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2;
+    if (tbl.rows.length > 0) this.y += s2 || this.rowBottomLead(tbl, tbl.rows.length - 1);
     if (s2) this.paintTableOutline(this.cur, tbl, x0, segTop, this.y, tableWidth);
     this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
   }
@@ -7960,8 +7979,8 @@ class Engine {
       if (cl) cl.spanHeight = ph;
     }
     const nRows = tbl.rows.length;
-    const topLead = nRows > 0 ? s2 || this.rowBorderWidths(tbl, 0).top / 2 : 0;
-    const botLead = nRows > 0 ? s2 || this.rowBorderWidths(tbl, nRows - 1).bottom / 2 : 0;
+    const topLead = nRows > 0 ? s2 || this.rowTopLead(tbl, 0) : 0;
+    const botLead = nRows > 0 ? s2 || this.rowBottomLead(tbl, nRows - 1) : 0;
     const tableHeight =
       topLead + rowHeights.reduce((a, b) => a + b, 0) + Math.max(0, nRows - 1) * s2 + botLead;
 
@@ -8171,7 +8190,7 @@ class Engine {
     this.col = 0;
     this.y = y;
     const frameTop = this.y;
-    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, 0).top / 2;
+    if (tbl.rows.length > 0) this.y += this.rowTopLead(tbl, 0);
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths, fields));
     const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
     for (const [key, ph] of spanPaint) {
@@ -8199,7 +8218,7 @@ class Engine {
         });
       }
     }
-    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2;
+    if (tbl.rows.length > 0) this.y += this.rowBottomLead(tbl, tbl.rows.length - 1);
     // Nested tables are resizable too (the cover-letter layout puts every
     // user table inside a layout cell).
     if (tbl.src) this.emitTableGrips(tbl, fake, x0 + (tbl.props.indent ?? 0), widths, frameTop, this.y);
@@ -8807,12 +8826,24 @@ class Engine {
         });
       }
 
-      // Row height reserves half of each horizontal boundary rule. Place cell
-      // content inside those halves; previously it started on the top rule's
-      // centerline and left both shares below the content, making each table's
-      // paragraph-to-first-line boundary one border width too short.
+      // A content-sized row's height reserves half of each horizontal
+      // boundary rule; place cell content inside those halves (previously it
+      // started on the top rule's centerline and left both shares below the
+      // content, making each table's paragraph-to-first-line boundary one
+      // border width too short).
+      //
+      // An hRule="exact" row does not grow for the boundary at all — the rule
+      // shows up ONLY as this content inset — and Word charges it the FULL
+      // rule width, not half (probe-exactnil, parity 02dff8a: two exact 495tw
+      // rows under a sz-12 insideH read 35.00 mark to mark where the authored
+      // row is 33.00; a both-nil boundary reads 33.00, which rowBorderWidths
+      // already returns as a zero width). The full inset applies at the outer
+      // table edge too — probe-sidedness measured a lone exact row's top
+      // border pushing its content down the whole 2.00px — and the exact row
+      // takes no half-rule flow lead in exchange (see exactInsetRow).
       const rowSpan = cell.props.vMerge === "restart" ? this.vMergeRowSpan(tbl, rowIdx, colStart) : 1;
-      const topInset = this.rowBorderWidths(tbl, rowIdx).top / 2;
+      const topWidth = this.rowBorderWidths(tbl, rowIdx).top;
+      const topInset = this.exactInsetRow(row) ? topWidth : topWidth / 2;
       const bottomInset = this.rowBorderWidths(tbl, rowIdx + rowSpan - 1).bottom / 2;
       const contentH = Math.max(0, cellH - topInset - bottomInset);
       let dy = topInset;
