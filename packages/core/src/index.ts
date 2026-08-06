@@ -181,6 +181,7 @@ export { cellShadingAt } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";
 export {
   listTableStyles,
+  readTableProperties,
   setTableBorders,
   setTableCellMargins,
   setTableColumnWidth,
@@ -200,6 +201,7 @@ export type {
   TableBorderSpec,
   TableBorderStyle,
   TableLookToggles,
+  TablePropertiesPt,
 } from "./edit/tables.js";
 export type { ParagraphAlignment, PageLayoutPatch } from "./edit/blocks.js";
 export type { EditorHost } from "./edit/editor.js";

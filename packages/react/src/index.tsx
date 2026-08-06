@@ -27,6 +27,7 @@ import {
   cellContextOf,
   cellShadingAt,
   listTableStyles,
+  readTableProperties,
   setTableBorders,
   setTableCellMargins,
   setTableColumnWidth,
@@ -149,6 +150,7 @@ import type {
   TableBorderEdge,
   TableBorderSpec,
   TableLookToggles,
+  TablePropertiesPt,
   RevisionMeta,
 } from "@wordinweb/core";
 
@@ -276,6 +278,10 @@ export interface DocxViewApi {
   tableOp(op: TableOp): void;
   /** Current table-cell fill, undefined when the caret is outside a table. */
   getTableCellFill(): string | null | undefined;
+  /** What a Table Properties dialog prefills from — the table's width, its
+   * grid columns, the caret's column, the default cell margins and the header
+   * band, in points. Undefined when the caret is outside a table. */
+  getTableProperties(): TablePropertiesPt | undefined;
   /** Set or clear border edges on the caret's cell or its whole table. A null
    * `border` removes the edges so they inherit again; `{ style: "none" }`
    * instead suppresses them, which is Word's No Border. */
@@ -2031,6 +2037,10 @@ export function DocxView({
           getTableCellFill: () => {
             const caret = editor?.getCaretTarget();
             return caret ? cellShadingAt(doc, caret.t) : undefined;
+          },
+          getTableProperties: () => {
+            const caret = editor?.getCaretTarget();
+            return caret ? readTableProperties(doc, caret.t) : undefined;
           },
           setTableBorders: (scope, edges, border) =>
             runTableOperation("setTableBorders", { scope, edges, border }, (caret, meta) =>
