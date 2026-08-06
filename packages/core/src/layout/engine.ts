@@ -6,6 +6,7 @@ import {
   HeaderFooter,
   NumberingLevel,
   Paragraph,
+  ParagraphBorders,
   ParaProps,
   Run,
   RunProps,
@@ -3585,15 +3586,10 @@ class Engine {
     const sameBorders = (nb?: Block): boolean => {
       if (!nb || nb.type !== "paragraph") return false;
       const np = this.doc.effectiveParaProps(nb);
-      return (
-        JSON.stringify(np.borders ?? null) === JSON.stringify(props.borders ?? null) &&
-        (np.indentLeft ?? 0) - (np.indentHanging ?? 0) ===
-          (props.indentLeft ?? 0) - (props.indentHanging ?? 0) &&
-        (np.indentRight ?? 0) === (props.indentRight ?? 0)
-      );
+      return sameParagraphBorders(np.borders, props.borders) && sameParagraphBorderBox(np, props);
     };
-    const mergeTop = props.borders !== undefined && sameBorders(prev);
-    const mergeBottom = props.borders !== undefined && sameBorders(next);
+    const mergeTop = sameBorders(prev);
+    const mergeBottom = sameBorders(next);
 
     let breakBeforeForced = false;
     // A leading page/column break (the paragraph opens with w:br, content
@@ -4065,8 +4061,14 @@ class Engine {
     // A paragraph border reserves vertical room for its rule + space, so the
     // rule sits in the gap instead of overlapping the neighbor (pleading
     // footer: the caption's top border must clear the page number above).
-    const borderPadTop = this.borderPadImpl(props.borders?.top);
-    const borderPadBottom = this.borderPadImpl(props.borders?.bottom);
+    // A merged interior boundary claims NO reserve: the shared edge does not
+    // paint there, so Word charges neither its rule nor its space, and the two
+    // paragraphs sit exactly as far apart as their plain spacing puts them
+    // (wild2-legal-ca-agreement p1: the two `bottom sz=6 space=1` clauses are
+    // 15.3px apart - the same gap as every unbordered sibling on the page -
+    // where charging the pad gives 17.7px).
+    const borderPadTop = mergeTop ? 0 : this.borderPadImpl(props.borders?.top);
+    const borderPadBottom = mergeBottom ? 0 : this.borderPadImpl(props.borders?.bottom);
     spacingBefore += borderPadTop;
     spacingAfter += borderPadBottom;
     // Border reserves sit OUTSIDE the before/after collapse: Word first
@@ -4074,17 +4076,14 @@ class Engine {
     // edges clear the gap (wild-doerfp p31/p27 section pages: H1 after=360
     // -> boxed Heading1 with before=0 sits 18pt + 1.5pt below, not
     // max(18, 1.5); below the box the 14pt autospacing gap gains the box's
-    // 1.5pt bottom reserve). Between MERGED identical-border paragraphs no
-    // rule paints and the pads stay in the max, where they cancel (Alex
-    // Pickett cover: the RECIPIENT/ADDRESS box rows stay abutted).
+    // 1.5pt bottom reserve).
     // lastParaAfterPad carries the previous paragraph's surviving bottom
     // reserve: the collapse base is the PLAIN previous after, while the
     // cursor has already advanced by the full amount (the pad cancels
     // between target and cursor, so only the base changes here).
     const collapseBefore = (sb: number): number => {
       const base = this.lastParaSpacingAfter - this.lastParaAfterPad;
-      const pad = mergeTop ? 0 : borderPadTop;
-      return Math.max(sb - pad, base) - base + pad;
+      return Math.max(sb - borderPadTop, base) - base + borderPadTop;
     };
 
     let lines = broken.lines;
@@ -4622,6 +4621,7 @@ class Engine {
           this.y,
           fragStartLine === 0 && !mergeTop,
           isLast && !mergeBottom,
+          isLast && mergeBottom,
         );
       }
     };
@@ -4782,7 +4782,7 @@ class Engine {
         : undefined;
     if (!endedWithBreak) this.y += spacingAfter;
     this.lastParaSpacingAfter = endedWithBreak ? 0 : spacingAfter;
-    this.lastParaAfterPad = endedWithBreak || mergeBottom ? 0 : borderPadBottom;
+    this.lastParaAfterPad = endedWithBreak ? 0 : borderPadBottom;
     if (this.sp.docGridLinePitch) {
       // Only a multi-row line whose height comes from the tall CHINESE
       // FALLBACK profile (a Japanese eastAsia face lacking the glyphs -
@@ -5391,6 +5391,10 @@ class Engine {
     bottom: number,
     isFirstFrag: boolean,
     isLastFrag: boolean,
+    /** This fragment ends at an INTERIOR boundary of a merged border run -
+     * where the shared top/bottom rules are suppressed and a declared
+     * w:between draws instead. */
+    betweenBelow = false,
   ): void {
     // Word anchors paragraph borders/shading at the paragraph's leftmost text
     // extent: a hanging indent pulls the box left so the outdented first line
@@ -5422,6 +5426,17 @@ class Engine {
       const y = bottom + b.bottom.space + b.bottom.width / 2;
       const xPad = this.paragraphBorderOverhang(b.bottom);
       page.items.push({ kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.bottom });
+    }
+    // w:between: when a merged run DECLARES a between border, that rule draws
+    // at each interior boundary in place of the suppressed top/bottom pair. It
+    // sits below the upper paragraph at its own w:space - the offset a bottom
+    // border uses - and only that paragraph emits it, so each boundary paints
+    // one rule. It claims no vertical room: a merged boundary charges no
+    // reserve, and we have no measurement of a between rule to say it differs.
+    if (b.between && b.between.style !== "none" && betweenBelow) {
+      const y = bottom + b.between.space + b.between.width / 2;
+      const xPad = this.paragraphBorderOverhang(b.between);
+      page.items.push({ kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.between });
     }
     if (b.left && b.left.style !== "none") {
       const x = left - b.left.space - this.borderPaintWidth(b.left) + b.left.width / 2;
@@ -5496,12 +5511,7 @@ class Engine {
     const frameSameBorders = (a: ParaProps, nb?: Block): boolean => {
       if (!nb || nb.type !== "paragraph") return false;
       const np = this.doc.effectiveParaProps(nb);
-      return (
-        JSON.stringify(np.borders ?? null) === JSON.stringify(a.borders ?? null) &&
-        (np.indentLeft ?? 0) - (np.indentHanging ?? 0) ===
-          (a.indentLeft ?? 0) - (a.indentHanging ?? 0) &&
-        (np.indentRight ?? 0) === (a.indentRight ?? 0)
-      );
+      return sameParagraphBorders(np.borders, a.borders) && sameParagraphBorderBox(np, a);
     };
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
@@ -5568,8 +5578,12 @@ class Engine {
           if (styleOf(blocks[i - 1]) === myStyle) spacingBefore = 0;
           if (styleOf(blocks[i + 1]) === myStyle) spacingAfter = 0;
         }
-        spacingBefore += this.borderPadImpl(props.borders?.top);
-        spacingAfter += this.borderPadImpl(props.borders?.bottom);
+        // Same merge rule as the body flow: an interior boundary of a run of
+        // identically bordered paragraphs paints no rule and claims no room.
+        const mergeTop = frameSameBorders(props, blocks[i - 1]);
+        const mergeBottom = frameSameBorders(props, blocks[i + 1]);
+        if (!mergeTop) spacingBefore += this.borderPadImpl(props.borders?.top);
+        if (!mergeBottom) spacingAfter += this.borderPadImpl(props.borders?.bottom);
         y += Math.max(spacingBefore, framePrevAfter) - framePrevAfter;
         framePrevAfter = spacingAfter;
         const top = y;
@@ -5624,8 +5638,9 @@ class Engine {
           width,
           top,
           y,
-          !(props.borders && frameSameBorders(props, blocks[i - 1])),
-          !(props.borders && frameSameBorders(props, blocks[i + 1])),
+          !mergeTop,
+          !mergeBottom,
+          mergeBottom,
         );
         if (overlayPageFrame && props.alignment === "right") {
           const content = block.children.flatMap((child) =>
@@ -8815,6 +8830,51 @@ function isEmptyParagraph(p: Paragraph): boolean {
     }
   }
   return true;
+}
+
+/** Do these two paragraphs carry the SAME pBdr, in Word's sense?
+ *
+ * Word treats a run of adjacent paragraphs with identical borders as one
+ * bordered block: the shared edges do not paint and no reserve is charged for
+ * them, so the box closes once at the top of the first paragraph and once
+ * under the last.
+ *
+ * The comparison is on the RESOLVED border set, not on the XML: a pBdr a
+ * paragraph inherits from its style counts exactly like a direct one. That is
+ * safe to compare edge-by-edge because mergeParaProps replaces `borders`
+ * wholesale (pBdr is a replace-not-merge element), so a resolved set always
+ * comes from one pBdr.
+ *
+ * Two edges match when both paint nothing, or when all four properties that
+ * reach the page agree: style, paint width, w:space and colour. An absent edge
+ * and an explicit `w:val="none"` are the same thing here - neither paints and
+ * neither claims room. `rawWidth` tracks `width`, so it needs no own test.
+ * `between` counts as an edge: paragraphs that declare different between rules
+ * are not one block.
+ */
+function sameParagraphBorders(a: ParagraphBorders | undefined, b: ParagraphBorders | undefined): boolean {
+  // A paragraph with no pBdr at all never merges with anything.
+  if (!a || !b) return false;
+  const painted = (e: Border | undefined) => (e && e.style !== "none" ? e : undefined);
+  return (["top", "bottom", "left", "right", "between"] as const).every((side) => {
+    const x = painted(a[side]);
+    const y = painted(b[side]);
+    if (!x || !y) return !x && !y;
+    return x.style === y.style && x.width === y.width && x.space === y.space && x.color === y.color;
+  });
+}
+
+/** The two paragraphs also need the same border BOX to merge into one: Word
+ * draws the box across [indentLeft - hanging, right - indentRight], and two
+ * boxes of different widths cannot be one. Whether Word really refuses to
+ * merge on an indent difference alone is UNTESTED - we have no measurement of
+ * that case, so this keeps the conservative reading (differing indents stay
+ * separate boxes, each with its own rules and reserves). */
+function sameParagraphBorderBox(a: ParaProps, b: ParaProps): boolean {
+  return (
+    (a.indentLeft ?? 0) - (a.indentHanging ?? 0) === (b.indentLeft ?? 0) - (b.indentHanging ?? 0) &&
+    (a.indentRight ?? 0) === (b.indentRight ?? 0)
+  );
 }
 
 function isPageFieldFrame(p: Paragraph, props: ParaProps): boolean {
