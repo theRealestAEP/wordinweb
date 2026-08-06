@@ -161,6 +161,7 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertCoverPage: (api) => api.insertCoverPage({ title: "T", subtitle: "S", author: "A", date: "2026" } as never),
   addComment: (api) => api.addComment("note"),
   addFootnote: (api) => api.addFootnote("note"),
+  addEndnote: (api) => api.addEndnote("note"),
   addBookmark: (api) => api.addBookmark("Anchor1"),
 };
 

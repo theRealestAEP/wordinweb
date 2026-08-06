@@ -31,6 +31,7 @@ import {
   adjustFloatingPosition,
   drawingRotation,
   imageAltText,
+  imageCrop,
   isFloatingDrawing,
   replaceImageBlip,
   setDrawingOrder,
@@ -38,7 +39,9 @@ import {
   setFloatingPagePosition,
   setFloatingPosition,
   setImageAltText,
+  setImageCrop,
   setImageWrap,
+  type ImageCrop,
 } from "./images.js";
 import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
 import { requestColorDialog, requestLineStyleDialog, requestNumberPairDialog, requestTextInputDialog } from "./dialog.js";
@@ -75,6 +78,7 @@ export type SelectedObjectCommand =
   | "rotate"
   | "size"
   | "position"
+  | "crop"
   | "wrapInline"
   | "wrapSquare"
   | "wrapTopAndBottom"
@@ -112,6 +116,7 @@ export const SELECTED_OBJECT_COMMANDS: readonly SelectedObjectCommand[] = [
   "wrapBehind",
   "size",
   "position",
+  "crop",
   "rotate",
   "bringForward",
   "sendBackward",
@@ -144,6 +149,10 @@ export function availableObjectCommands(
   if (kind === "image" || kind === "model3d") commands.push("altText");
   commands.push("wrapInline", "wrapSquare", "wrapTopAndBottom", "wrapFront", "wrapBehind");
   commands.push("size", "position");
+  // Cropping selects part of a BITMAP. A shape, line, chart or SmartArt frame
+  // has no bitmap behind it, and a 3D model is re-projected rather than
+  // clipped, so none of them carry an a:srcRect to write.
+  if (kind === "image") commands.push("crop");
   // Rotation only exists for shape-geometry objects; SmartArt/chart graphic
   // frames have no rotatable xfrm, so rotate is not offered for them.
   if (kind === "shape" || kind === "line" || kind === "image" || kind === "model3d") commands.push("rotate");
@@ -1456,6 +1465,15 @@ export class DocxEditor {
       this.host.rerender(undefined, "global");
       reselect();
       return true;
+    }
+    if (command === "crop") {
+      // A toggle: pressing Crop again leaves the mode with whatever the
+      // handle drags already committed.
+      if (this.cropSession) {
+        this.exitCropMode();
+        return true;
+      }
+      return this.enterCropMode();
     }
     if (command === "size") {
       void requestNumberPairDialog(this.host.container, {
@@ -3016,6 +3034,7 @@ export class DocxEditor {
 
   private deselectImage(): void {
     const changed = this.selectedImage !== null;
+    this.exitCropMode();
     this.wordArtTextEditor?.finish(true, false);
     this.smartArtTextEditor?.finish(true, false);
     this.imageOverlay?.remove();
@@ -3227,6 +3246,9 @@ export class DocxEditor {
     if (context?.kind === "image" || context?.kind === "model3d") {
       extra("Alt", "Alternative text", () => { this.runSelectedObjectCommand("altText"); });
     }
+    if (context?.kind === "image") {
+      extra("Crop", "Crop to part of the picture", () => { this.runSelectedObjectCommand("crop"); });
+    }
     extra("Size", "Exact size (px)", () => { this.runSelectedObjectCommand("size"); });
     extra("Position", "Exact page position (px)", () => { this.runSelectedObjectCommand("position"); });
     const drawingBinding = kind === "drawing"
@@ -3300,6 +3322,181 @@ export class DocxEditor {
     this.imageToolbar = bar;
     this.notifyObjectSelection();
     this.focusText();
+  }
+
+  // ---------- crop mode ----------
+
+  /**
+   * Crop mode: the picture's whole bitmap is drawn DIMMED behind a bright
+   * frame showing the part that survives, and the eight handles move that
+   * frame's edges instead of the object's size. This is Word's crop idiom.
+   *
+   * Every measurement here is unzoomed page px in the SURFACE's coordinate
+   * space, the same space the renderer positions image elements in.
+   *
+   * WHERE WORD DIFFERS: Word also shrinks the picture's frame as you crop, so
+   * the kept content holds its scale. This writes a:srcRect only, so the kept
+   * region is re-scaled to fill the box the picture already occupied.
+   */
+  private cropSession: {
+    src: XmlElement;
+    el: HTMLElement;
+    overlay: HTMLDivElement;
+    frame: HTMLDivElement;
+    kept: HTMLImageElement;
+    handles: { el: HTMLDivElement; fx: number; fy: number }[];
+    /** The whole bitmap's drawn size at the current scale. */
+    full: { w: number; h: number };
+    /** The surviving region, relative to the bitmap's top-left. */
+    keep: { x: number; y: number; w: number; h: number };
+  } | null = null;
+
+  private enterCropMode(): boolean {
+    const selected = this.selectedImage;
+    if (!selected || selected.kind !== "image") return false;
+    const { el, src } = selected;
+    // A cropped image renders as an overflow:hidden viewport wrapping an
+    // oversized <img>; an uncropped one renders as the <img> itself.
+    const source = el instanceof HTMLImageElement ? el : el.querySelector("img");
+    const surface = el.parentElement;
+    if (!source || !surface) return false;
+    const boxW = parseFloat(el.style.width) || 0;
+    const boxH = parseFloat(el.style.height) || 0;
+    if (boxW <= 0 || boxH <= 0) return false;
+
+    const crop = imageCrop(src);
+    const full = {
+      w: boxW / Math.max(1 - crop.l - crop.r, 0.01),
+      h: boxH / Math.max(1 - crop.t - crop.b, 0.01),
+    };
+    const keep = { x: full.w * crop.l, y: full.h * crop.t, w: boxW, h: boxH };
+
+    const overlay = document.createElement("div");
+    overlay.dataset.dxwCropOverlay = "1";
+    overlay.style.cssText =
+      `position:absolute;left:${(parseFloat(el.style.left) || 0) - keep.x}px;` +
+      `top:${(parseFloat(el.style.top) || 0) - keep.y}px;width:${full.w}px;height:${full.h}px;` +
+      "pointer-events:none;z-index:2147483647;";
+    if (el.style.transform) {
+      // The overlay's box starts at the bitmap's corner rather than the
+      // picture's, so the rotation centre has to move by the same offset to
+      // stay on the same point of the page.
+      const origin = /^([\d.-]+)px\s+([\d.-]+)px$/.exec(el.style.transformOrigin);
+      const ox = origin ? parseFloat(origin[1]) : boxW / 2;
+      const oy = origin ? parseFloat(origin[2]) : boxH / 2;
+      overlay.style.transform = el.style.transform;
+      overlay.style.transformOrigin = `${keep.x + ox}px ${keep.y + oy}px`;
+    }
+
+    const ghost = source.cloneNode() as HTMLImageElement;
+    ghost.style.cssText = `position:absolute;left:0;top:0;width:${full.w}px;height:${full.h}px;opacity:.35;`;
+    overlay.appendChild(ghost);
+
+    const frame = document.createElement("div");
+    frame.style.cssText = "position:absolute;overflow:hidden;box-sizing:border-box;border:1.5px solid #1a73e8;";
+    const kept = source.cloneNode() as HTMLImageElement;
+    kept.style.cssText = `position:absolute;width:${full.w}px;height:${full.h}px;`;
+    frame.appendChild(kept);
+    overlay.appendChild(frame);
+
+    // The handles sit OUTSIDE the frame: the frame clips to the kept region,
+    // and a handle drawn inside it would lose its outer half to that clip.
+    const handles = DocxEditor.HANDLE_DIRS.map(([dir, fx, fy]) => {
+      const handle = document.createElement("div");
+      handle.style.cssText =
+        `position:absolute;width:${DocxEditor.HANDLE_PX}px;height:${DocxEditor.HANDLE_PX}px;` +
+        "background:#fff;border:1.5px solid #1a73e8;box-sizing:border-box;border-radius:2px;" +
+        `pointer-events:auto;cursor:${DocxEditor.handleCursor(dir)};box-shadow:0 1px 2px rgba(0,0,0,.25);`;
+      handle.dataset.dxwCropHandle = dir;
+      overlay.appendChild(handle);
+      return { el: handle, fx, fy };
+    });
+
+    surface.appendChild(overlay);
+    // The document's own picture would show through the dimmed ghost.
+    el.style.visibility = "hidden";
+    if (this.imageOverlay) this.imageOverlay.style.display = "none";
+    this.cropSession = { src, el, overlay, frame, kept, handles, full, keep };
+    this.paintCrop();
+    return true;
+  }
+
+  /** Move the crop chrome to the session's current keep rect. */
+  private paintCrop(): void {
+    const session = this.cropSession;
+    if (!session) return;
+    const { x, y, w, h } = session.keep;
+    session.frame.style.left = `${x}px`;
+    session.frame.style.top = `${y}px`;
+    session.frame.style.width = `${w}px`;
+    session.frame.style.height = `${h}px`;
+    session.kept.style.left = `${-x}px`;
+    session.kept.style.top = `${-y}px`;
+    const half = DocxEditor.HANDLE_PX / 2;
+    for (const handle of session.handles) {
+      handle.el.style.left = `${x + w * handle.fx - half}px`;
+      handle.el.style.top = `${y + h * handle.fy - half}px`;
+    }
+  }
+
+  private exitCropMode(): void {
+    const session = this.cropSession;
+    if (!session) return;
+    this.cropSession = null;
+    session.overlay.remove();
+    session.el.style.visibility = "";
+    if (this.imageOverlay) this.imageOverlay.style.display = "";
+  }
+
+  /** Whether the picture is in crop mode (the toolbar toggles on this). */
+  isCropping(): boolean {
+    return this.cropSession !== null;
+  }
+
+  /**
+   * Write the dragged frame as a:srcRect, then re-enter crop mode on the
+   * re-rendered picture so the next edge can be dragged without a round trip
+   * through the toolbar. `start` is the frame the drag began from.
+   */
+  private commitCrop(start: { x: number; y: number; w: number; h: number }): void {
+    const session = this.cropSession;
+    if (!session) return;
+    const { keep, full, src, el } = session;
+    const moved = (["x", "y", "w", "h"] as const).some((k) => Math.abs(keep[k] - start[k]) > 0.5);
+    if (!moved) return;
+    const near = { x: el.getBoundingClientRect().left, y: el.getBoundingClientRect().top };
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+    const collabTarget = inCollab ? this.drawingIntentTarget(src) : null;
+    if (inCollab && collabTarget === null) {
+      // Unaddressable in a room: an honest no-op rather than a local-only fork.
+      this.exitCropMode();
+      this.reselectImage(src, near);
+      return;
+    }
+    const crop: ImageCrop = {
+      l: keep.x / full.w,
+      t: keep.y / full.h,
+      r: (full.w - keep.x - keep.w) / full.w,
+      b: (full.h - keep.y - keep.h) / full.h,
+    };
+    this.host.history?.checkpoint();
+    if (!setImageCrop(this.host.doc, src, crop)) {
+      // Nothing was written (a picture with no a:blipFill — a VML shape drawn
+      // as an image). Put the frame back where the drag started.
+      session.keep = start;
+      this.paintCrop();
+      return;
+    }
+    if (collabTarget) {
+      const { runId, objectIndex } = collabTarget;
+      this.host.onIntent?.(
+        operationBody("setCrop", runId, objectIndex === undefined ? { crop } : { objectIndex, crop }),
+      );
+    }
+    this.exitCropMode();
+    this.host.rerender();
+    this.reselectImage(src, near);
+    this.enterCropMode();
   }
 
   private deleteSelectedImage(): void {
@@ -3564,6 +3761,46 @@ export class DocxEditor {
     // The live 3D viewport owns drags once selected; its pointer handler
     // updates the native model orientation instead of moving the picture box.
     if (target.closest?.("[data-dxw-model3d-viewer]")) return true;
+
+    // Crop handles move one edge of the surviving region. Same shape as the
+    // resize drag below — preview in the DOM, write once on release — except
+    // that the frame is bounded by the bitmap rather than by the page.
+    if (target.dataset.dxwCropHandle && this.cropSession) {
+      e.preventDefault();
+      e.stopPropagation();
+      const session = this.cropSession;
+      const dir = target.dataset.dxwCropHandle;
+      const start = { ...session.keep };
+      const startX = e.clientX;
+      const startY = e.clientY;
+      // Leave a grabbable strip on each axis, capped at what is there now so
+      // an already-narrow crop is never forcibly widened (see MIN_DRAG_SIZE_PX).
+      const floorW = Math.min(DocxEditor.MIN_DRAG_SIZE_PX, start.w);
+      const floorH = Math.min(DocxEditor.MIN_DRAG_SIZE_PX, start.h);
+      const onMove = (me: MouseEvent) => {
+        const dx = (me.clientX - startX) / zoom;
+        const dy = (me.clientY - startY) / zoom;
+        let left = start.x;
+        let top = start.y;
+        let right = start.x + start.w;
+        let bottom = start.y + start.h;
+        if (dir.includes("w")) left = Math.min(Math.max(0, start.x + dx), right - floorW);
+        if (dir.includes("e")) right = Math.max(Math.min(session.full.w, right + dx), left + floorW);
+        if (dir.includes("n")) top = Math.min(Math.max(0, start.y + dy), bottom - floorH);
+        if (dir.includes("s")) bottom = Math.max(Math.min(session.full.h, bottom + dy), top + floorH);
+        session.keep = { x: left, y: top, w: right - left, h: bottom - top };
+        this.paintCrop();
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        this.suppressNextMouseUp = true;
+        this.commitCrop(start);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      return true;
+    }
 
     // Resize handles: corners aspect-locked, edges free-stretch (Word).
     // The element previews live; the model updates once on release, and the
@@ -4331,6 +4568,7 @@ export class DocxEditor {
     // the button and the browser never composes its click (the second wrap
     // change in a row silently did nothing).
     if (this.imageOverlay?.contains(e.target as Node) || this.imageToolbar?.contains(e.target as Node)) return;
+    if (this.cropSession?.overlay.contains(e.target as Node)) return;
     if (this.wordArtOverlay?.contains(e.target as Node)) return;
     if (this.wordArtTextEditor?.input.contains(e.target as Node)) return;
     if (this.smartArtTextEditor?.input.contains(e.target as Node)) return;
@@ -5647,6 +5885,13 @@ export class DocxEditor {
     if ((e.key === "Backspace" || e.key === "Delete") && this.selectedImage) {
       e.preventDefault();
       this.deleteSelectedImage(); // collab-aware: emits removeDrawing
+      return;
+    }
+    // Escape leaves crop mode first, keeping the picture selected — one press
+    // per layer of chrome, as with the drawing tool and the textbox story.
+    if (this.cropSession && e.key === "Escape") {
+      e.preventDefault();
+      this.exitCropMode();
       return;
     }
     if (this.selectedImage && e.key === "Escape") {

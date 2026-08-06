@@ -101,6 +101,69 @@ export function setImageAltText(doc: DocxDocument, drawingEl: XmlElement, text: 
   return true;
 }
 
+/** An a:srcRect crop as fractions of the source bitmap trimmed off each edge.
+ * The four together must leave a visible strip on both axes. */
+export interface ImageCrop {
+  l: number;
+  t: number;
+  r: number;
+  b: number;
+}
+
+/** a:srcRect attributes are 1/1000 of a percent, so 100% is 100000. */
+const CROP_UNIT = 100000;
+
+function blipFillOf(drawingEl: XmlElement): XmlElement | undefined {
+  if (localName(drawingEl.name) === "blipFill") return drawingEl;
+  for (const c of drawingEl.children) {
+    const found = blipFillOf(c);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** The drawing's current crop, or zeros when it carries no a:srcRect. */
+export function imageCrop(drawingEl: XmlElement): ImageCrop {
+  const srcRect = blipFillOf(drawingEl)?.children.find((c) => localName(c.name) === "srcRect");
+  const edge = (name: string): number => {
+    if (!srcRect) return 0;
+    const key = Object.keys(srcRect.attrs).find((k) => localName(k) === name);
+    const value = key ? parseInt(srcRect.attrs[key], 10) : NaN;
+    return Number.isFinite(value) ? value / CROP_UNIT : 0;
+  };
+  return { l: edge("l"), t: edge("t"), r: edge("r"), b: edge("b") };
+}
+
+/**
+ * Set the drawing's a:srcRect crop. A crop of all zeros REMOVES the element
+ * rather than writing four zero attributes, so cropping an image and undoing
+ * the crop leaves the blipFill exactly as it was found.
+ *
+ * The extent is left alone: a:srcRect selects which part of the bitmap fills
+ * the box Word already draws, which is why cropping in Word shrinks the
+ * picture's frame only when the user also drags its size handles.
+ */
+export function setImageCrop(doc: DocxDocument, drawingEl: XmlElement, crop: ImageCrop): boolean {
+  const blipFill = blipFillOf(drawingEl);
+  const blip = blipFill?.children.find((c) => localName(c.name) === "blip");
+  if (!blipFill || !blip) return false;
+  blipFill.children = blipFill.children.filter((c) => localName(c.name) !== "srcRect");
+  if (crop.l || crop.t || crop.r || crop.b) {
+    const attrs: Record<string, string> = {};
+    for (const edge of ["l", "t", "r", "b"] as const) {
+      const value = Math.round(crop[edge] * CROP_UNIT);
+      if (value !== 0) attrs[edge] = String(value);
+    }
+    // a:srcRect shares a:blip's namespace, whatever prefix this file binds it
+    // to. CT_BlipFillProperties is a sequence — a:blip, a:srcRect, then the
+    // fill mode (a:stretch / a:tile) — and Word repairs a file that reorders it.
+    const prefix = blip.name.includes(":") ? blip.name.slice(0, blip.name.indexOf(":") + 1) : "";
+    blipFill.children.splice(blipFill.children.indexOf(blip) + 1, 0, el(`${prefix}srcRect`, attrs));
+  }
+  doc.refresh();
+  return true;
+}
+
 /** Point the drawing's a:blip at a different media relationship. */
 export function replaceImageBlip(doc: DocxDocument, drawingEl: XmlElement, relId: string): boolean {
   let blip: XmlElement | undefined;

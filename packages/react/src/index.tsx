@@ -56,6 +56,7 @@ import {
   replyToComment,
   insertImageAt,
   setImageWrap,
+  insertEndnote,
   insertFootnote,
   insertField,
   insertDateTimeField,
@@ -186,6 +187,8 @@ export interface DocxViewApi {
   addComment(text: string): boolean;
   /** Insert a footnote at the caret. False without a caret. */
   addFootnote(text: string): boolean;
+  /** Insert an endnote at the caret. False without a caret. */
+  addEndnote(text: string): boolean;
   /** Insert a dynamic page-number field at the caret (body, header or footer). */
   insertPageNumber(kind?: "page" | "pageOfTotal"): boolean;
   /** Insert any Word field instruction supported by the renderer. */
@@ -1734,6 +1737,17 @@ export function DocxView({
             if (!target) return false;
             history.checkpoint();
             if (insertFootnote(doc, target.t, target.offset, text) !== null) {
+              pages = rerender(doc);
+              return true;
+            }
+            return false;
+          },
+          addEndnote: (text) => {
+            if (collabRunOperation("insertEndnote", { text })) return true;
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (insertEndnote(doc, target.t, target.offset, text) !== null) {
               pages = rerender(doc);
               return true;
             }

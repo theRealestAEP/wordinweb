@@ -721,6 +721,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertShape` | Insert a shape or text box | `runRef`, `preset`; optional: `text` |
 | `insertPageField` | Insert PAGE or PAGE/NUMPAGES | `runRef`, `fieldKind` |
 | `insertFootnote` | Insert a footnote | `runRef`, `text` |
+| `insertEndnote` | Insert an endnote | `runRef`, `text` |
 | `insertBookmark` | Insert a bookmark at a run | `runRef`, `name` |
 | `insertBookmarkRange` | Bookmark a run range | `runRef`, `name`, `start`, `end` |
 | `insertBlankPage` | Insert a blank page | `runRef` |
@@ -747,6 +748,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `resizeDrawing` | Set drawing dimensions | `objectRef`, `widthPx`, `heightPx` |
 | `removeDrawing` | Remove a drawing | `objectRef` |
 | `setImageAltText` | Set image accessibility text | `objectRef`, `alt` |
+| `setCrop` | Crop an image to part of its bitmap | `objectRef`, `crop` |
 | `setImageWrap` | Set inline or floating wrapping | `objectRef`, `mode` |
 | `setDrawingWordArtText` | Replace WordArt text | `objectRef`, `text` |
 | `setDrawingWordArtStyle` | Set WordArt glyph color and opacity | `objectRef`, `color`, `opacity` |
@@ -953,6 +955,22 @@ paragraph rather than at yours.
   afterPt?: number | null;
 }
 ```
+
+### Image crop (`setCrop.crop`)
+
+```ts
+{
+  l: number; // fraction of the bitmap trimmed off the left edge, 0 to 0.99
+  t: number;
+  r: number;
+  b: number;
+}
+```
+
+All four are required. `l + r` and `t + b` must each stay below 1, or the crop
+would leave no picture to show. A crop of all zeros removes the crop. The
+picture keeps the box it already occupies, so the surviving region is scaled up
+to fill it; resize the drawing as well to hold the content at its old scale.
 
 ### Paragraph divider
 

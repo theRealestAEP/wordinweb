@@ -959,7 +959,8 @@ function resolveOperationTarget(
   // A document-scoped operation names no node: the document IS the target, so
   // this address always resolves and the operation's own payload has to carry
   // its rejection predicate (see the registry's OperationAddress comment).
-  if (address === "document") return { el: doc.docRoot, t: null, run: null, cellParagraph: null };
+  const empty = { t: null, run: null, cellParagraph: null, drawing: null };
+  if (address === "document") return { ...empty, el: doc.docRoot };
   const addressId = (intent as unknown as Record<string, number>)[ADDRESS_WIRE_FIELD[address]];
   switch (address) {
     case "run": {
@@ -967,17 +968,24 @@ function resolveOperationTarget(
       if (!el) return null;
       const entry = runOf(el);
       if (!entry) return null;
-      return { el, t: entry.firstT ?? null, run: entry.run, cellParagraph: null };
+      return { ...empty, el, t: entry.firstT ?? null, run: entry.run };
     }
     case "block": {
       const el = ids.elOf(addressId);
       if (!el) return null;
-      return { el, t: firstTextDescendant(el), run: null, cellParagraph: null };
+      return { ...empty, el, t: firstTextDescendant(el) };
     }
     case "cell": {
       const paraEl = ids.elOf(addressId) ?? null;
       const tbl = paraEl ? tableOf(doc, paraEl) : null;
-      return tbl ? { el: tbl, t: null, run: null, cellParagraph: paraEl } : null;
+      return tbl ? { ...empty, el: tbl, cellParagraph: paraEl } : null;
+    }
+    case "object": {
+      const el = ids.elOf(addressId);
+      if (!el) return null;
+      const objectIndex = (intent as unknown as { objectIndex?: number }).objectIndex;
+      const drawing = drawingIn(el, objectIndex, runOf);
+      return drawing ? { ...empty, el, drawing } : null;
     }
   }
 }

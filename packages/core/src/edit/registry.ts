@@ -3,7 +3,9 @@ import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
 import { XmlElement } from "../xml.js";
 import { insertTableAfter } from "./blocks.js";
+import { setImageCrop, type ImageCrop } from "./images.js";
 import { setListType } from "./lists.js";
+import { insertEndnote } from "./notes.js";
 import {
   NUMBER_FORMATS,
   continueNumberingAt,
@@ -90,25 +92,35 @@ export type StableId = number;
  * rejection predicate from the payload — see updateFields below, whose result
  * count must match the document's field count — and it must carry every value
  * a replica cannot re-derive identically.
+ *
+ * "object" names a drawing: the stable id of the run that CARRIES it, plus an
+ * `objectIndex` into that run's content for the second and later drawings in
+ * one run. This is the addressing every hand-written drawing intent already
+ * uses (setImageWrap, resizeDrawing); the id still does the rejecting, and an
+ * objectIndex that no longer names a drawing is a clean no-op like an
+ * unresolvable id.
  */
-export type OperationAddress = "run" | "block" | "cell" | "document";
+export type OperationAddress = "run" | "block" | "cell" | "object" | "document";
 
 /** An operation addressed by a stable id, as opposed to document-scoped. */
 export type AddressedOperation = Exclude<OperationAddress, "document">;
 
-/** The wire field carrying the address, per addressed kind. */
+/** The wire field carrying the address, per addressed kind. An object address
+ * rides on the carrying run's id, narrowed by the payload's objectIndex. */
 export const ADDRESS_WIRE_FIELD = {
   run: "runId",
   block: "blockId",
   cell: "cellParagraphId",
+  object: "runId",
 } as const satisfies Record<AddressedOperation, string>;
 
 /** The agent-facing reference field, per addressed kind. Agents address content
- * with opaque strings ("run:12"), never raw ids. */
+ * with opaque strings ("run:12", "object:12:0"), never raw ids. */
 export const ADDRESS_AGENT_FIELD = {
   run: "runRef",
   block: "blockRef",
   cell: "cellRef",
+  object: "objectRef",
 } as const satisfies Record<AddressedOperation, string>;
 
 /**
@@ -153,6 +165,9 @@ export interface OperationTarget {
    * for run and block addressing, whose addressed element IS `el`.
    */
   cellParagraph: XmlElement | null;
+  /** For object addressing: the w:drawing (or VML shape) the address named.
+   * Null for every other address. */
+  drawing: XmlElement | null;
 }
 
 export interface OperationContext<Payload> {
@@ -985,6 +1000,87 @@ const setTableHeaderRowsOperation = defineOperation<{
     setTableHeaderRows(doc, target.el, payload.count, suggestMeta(doc, payload.suggest)),
 });
 
+// ---------------------------------------------------------------------------
+// Notes and drawings
+// ---------------------------------------------------------------------------
+
+/**
+ * Insert an endnote at the end of the addressed run, with the given body text.
+ *
+ * The reference run is APPENDED after the addressed run, so no existing run's
+ * text moves and the transform stays identity — the registry's position-stable
+ * precondition. (insertNote can also split a run mid-text; that path is the
+ * local editor's, where the caret offset is known and no wire transform is
+ * involved.)
+ *
+ * The id comes from max+1 over endnotes.xml, which is sequenced state, so
+ * every replica allocates the same one and no id has to travel. The MARK a
+ * reader sees — its number format and start value, which a section may set
+ * with w:endnotePr — is derived at layout from document order, so insertion
+ * writes no numbering of its own.
+ */
+const insertEndnoteOperation = defineOperation<{
+  runId: StableId;
+  text: string;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertEndnote",
+  address: "run",
+  category: "insert",
+  description: "Insert an endnote.",
+  fields: [{ name: "text" }],
+  // The reference run and its rPr, plus the note body's paragraph, mark run
+  // and text run; the spare covers a run split when the caret is mid-text.
+  nodeIds: () => 8,
+  validate: ({ text }) => {
+    if (typeof text !== "string" || text.trim().length === 0) return "insertEndnote: empty";
+    if (text.length > 20_000) return "insertEndnote: too long";
+    return null;
+  },
+  apply: ({ doc, target, payload }) =>
+    target.t ? insertEndnote(doc, target.t, target.t.text.length, payload.text) !== null : false,
+});
+
+/**
+ * Crop an image: write the a:srcRect fractions trimmed off each edge.
+ *
+ * This is the first OBJECT-addressed registered operation. It qualifies on the
+ * registry's three preconditions like any other: the carrying run's stable id
+ * does the rejecting, no run's text moves, and there is no wire inverse.
+ */
+const setCropOperation = defineOperation<{
+  runId: StableId;
+  objectIndex?: number;
+  crop: ImageCrop;
+}>()({
+  kind: "setCrop",
+  address: "object",
+  category: "drawing",
+  description: "Crop an image to a fraction of the source bitmap on each edge.",
+  fields: [{ name: "crop" }],
+  validate: ({ crop, objectIndex }) => {
+    if (objectIndex !== undefined && (!Number.isInteger(objectIndex) || objectIndex < 0 || objectIndex > 1000)) {
+      return "setCrop: bad objectIndex";
+    }
+    if (!crop || typeof crop !== "object" || Array.isArray(crop)) return "setCrop: bad crop";
+    const edges = ["l", "t", "r", "b"] as const;
+    for (const key of Object.keys(crop)) {
+      if (!edges.includes(key as (typeof edges)[number])) return `setCrop: unknown edge ${key}`;
+    }
+    for (const edge of edges) {
+      const value = crop[edge];
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value >= 1) {
+        return `setCrop: bad ${edge}`;
+      }
+    }
+    // A crop that trims everything off an axis leaves no picture to draw.
+    if (crop.l + crop.r >= 1 || crop.t + crop.b >= 1) return "setCrop: nothing left to show";
+    return null;
+  },
+  apply: ({ doc, target, payload }) =>
+    target.drawing ? setImageCrop(doc, target.drawing, payload.crop) : false,
+});
+
 const OPERATIONS = [
   setListTypeOperation,
   insertTableOperation,
@@ -1005,6 +1101,8 @@ const OPERATIONS = [
   setTableLayoutOperation,
   setTableCellMarginsOperation,
   setTableHeaderRowsOperation,
+  insertEndnoteOperation,
+  setCropOperation,
 ] as const;
 
 // ---------------------------------------------------------------------------
