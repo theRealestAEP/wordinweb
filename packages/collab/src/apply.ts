@@ -945,7 +945,7 @@ function resolveOperationTarget(
   // A document-scoped operation names no node: the document IS the target, so
   // this address always resolves and the operation's own payload has to carry
   // its rejection predicate (see the registry's OperationAddress comment).
-  if (address === "document") return { el: doc.docRoot, t: null, run: null };
+  if (address === "document") return { el: doc.docRoot, t: null, run: null, cellParagraph: null };
   const addressId = (intent as unknown as Record<string, number>)[ADDRESS_WIRE_FIELD[address]];
   switch (address) {
     case "run": {
