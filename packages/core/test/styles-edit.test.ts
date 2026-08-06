@@ -593,3 +593,170 @@ describe("SCENARIO: a style session survives save and reload", () => {
     expect(savedStylesXml(doc)).toBe(STYLES_XML);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Linked companions (w:link) and the table / numbering style types
+// ---------------------------------------------------------------------------
+
+/** The w:style element for `id`, as XML. */
+function definition(doc: DocxDocument, id: string): string {
+  const xml = stylesXml(doc);
+  const at = xml.indexOf(`w:styleId="${id}"`);
+  expect(at, `definition for ${id}`).toBeGreaterThan(-1);
+  return xml.slice(xml.lastIndexOf("<w:style ", at), xml.indexOf("</w:style>", at) + 10);
+}
+
+describe("createStyle: the linked character companion", () => {
+  const spec = {
+    styleId: "PullQuote",
+    type: "paragraph" as const,
+    name: "Pull Quote",
+    quickStyle: true,
+    uiPriority: 30,
+    run: { italic: true, fontSizePt: 13 },
+  };
+
+  it("writes both halves, pointing at each other", () => {
+    const doc = load(para("body"));
+    expect(createStyle(doc, { ...spec, linked: true })).toBe(true);
+    // Word's naming: the companion takes the id and the name with "Char".
+    expect(definition(doc, "PullQuote")).toContain(`<w:link w:val="PullQuoteChar"/>`);
+    const companion = definition(doc, "PullQuoteChar");
+    expect(companion).toContain(`w:type="character"`);
+    expect(companion).toContain(`<w:name w:val="Pull Quote Char"/>`);
+    expect(companion).toContain(`<w:link w:val="PullQuote"/>`);
+    expect(companion).toContain(`<w:basedOn w:val="DefaultParagraphFont"/>`);
+  });
+
+  it("gives the companion the paragraph style's run properties, and only those", () => {
+    const doc = load(para("body"));
+    createStyle(doc, { ...spec, linked: true, paragraph: { alignment: "center" } });
+    const companion = definition(doc, "PullQuoteChar");
+    expect(companion).toContain(`<w:i/>`);
+    expect(companion).toContain(`<w:sz w:val="26"/>`);
+    // A character style has no paragraph properties, so the alignment stays
+    // on the paragraph half alone.
+    expect(companion).not.toContain(`<w:jc`);
+    expect(definition(doc, "PullQuote")).toContain(`<w:jc w:val="center"/>`);
+  });
+
+  it("is opt-in: without it there is no companion and no w:link", () => {
+    const doc = load(para("body"));
+    createStyle(doc, spec);
+    expect(stylesXml(doc)).not.toContain("PullQuoteChar");
+    expect(definition(doc, "PullQuote")).not.toContain("<w:link");
+  });
+
+  it("refuses rather than renaming when the companion id is taken", () => {
+    const taken =
+      STYLES_XML.replace(
+        "</w:styles>",
+        `<w:style w:type="character" w:styleId="PullQuoteChar"><w:name w:val="Squatter"/></w:style></w:styles>`,
+      );
+    const doc = load(para("body"), taken);
+    // Deterministic refusal, not a second id: two replicas applying the same
+    // operation have to reach the same verdict.
+    expect(createStyle(doc, { ...spec, linked: true })).toBe(false);
+    expect(stylesXml(doc)).not.toContain("PullQuote<");
+    expect(definition(doc, "PullQuoteChar")).toContain("Squatter");
+  });
+
+  it("refuses a companion for a style that cannot have one", () => {
+    const doc = load(para("body"));
+    expect(createStyle(doc, { styleId: "Marker", type: "character", name: "Marker", linked: true })).toBe(true);
+    // The flag is paragraph-only, so it is ignored rather than obeyed.
+    expect(stylesXml(doc)).not.toContain("MarkerChar");
+  });
+});
+
+describe("modifyStyle: a linked pair stays one look", () => {
+  function linkedDoc(): DocxDocument {
+    const doc = load(para("body"));
+    createStyle(doc, {
+      styleId: "Lead", type: "paragraph", name: "Lead", linked: true,
+      run: { bold: true },
+    });
+    return doc;
+  }
+
+  it("carries a run change from the paragraph half to the character half", () => {
+    const doc = linkedDoc();
+    expect(modifyStyle(doc, "Lead", { run: { italic: true, color: "C00000" } })).toBe(true);
+    for (const id of ["Lead", "LeadChar"]) {
+      expect(definition(doc, id), id).toContain(`<w:i/>`);
+      expect(definition(doc, id), id).toContain(`<w:color w:val="C00000"/>`);
+    }
+  });
+
+  it("carries it the other way too", () => {
+    const doc = linkedDoc();
+    expect(modifyStyle(doc, "LeadChar", { run: { fontSizePt: 18 } })).toBe(true);
+    expect(definition(doc, "Lead")).toContain(`<w:sz w:val="36"/>`);
+  });
+
+  it("does NOT carry a rename or a parent change", () => {
+    const doc = linkedDoc();
+    modifyStyle(doc, "Lead", { name: "Standfirst", basedOn: "Heading1" });
+    // Only the run properties are shared; the companion keeps its own name
+    // and its own place in the character cascade.
+    expect(definition(doc, "LeadChar")).toContain(`<w:name w:val="Lead Char"/>`);
+    expect(definition(doc, "LeadChar")).toContain(`<w:basedOn w:val="DefaultParagraphFont"/>`);
+  });
+
+  it("leaves no dangling w:link when half the pair is deleted", () => {
+    const doc = linkedDoc();
+    expect(deleteStyle(doc, "Lead")).toBe(true);
+    expect(stylesXml(doc)).not.toContain(`w:styleId="Lead"`);
+    // The survivor's w:link would otherwise name a style styles.xml no longer
+    // declares — the dangling reference deleteStyle exists to avoid.
+    expect(definition(doc, "LeadChar")).not.toContain("<w:link");
+  });
+});
+
+describe("createStyle: table and numbering styles", () => {
+  it("creates a table style based on TableNormal, with a grid", () => {
+    const doc = load(para("body"));
+    expect(
+      createStyle(doc, {
+        styleId: "Ledger",
+        type: "table",
+        name: "Ledger",
+        table: {
+          borders: {
+            top: { style: "single", sz: 8, color: "4472C4" },
+            insideH: { style: "dotted", sz: 4 },
+          },
+        },
+        run: { bold: true },
+      }),
+    ).toBe(true);
+    const style = definition(doc, "Ledger");
+    expect(style).toContain(`w:type="table"`);
+    // Word's default parent for a table style.
+    expect(style).toContain(`<w:basedOn w:val="TableNormal"/>`);
+    expect(style).toContain(`<w:top w:val="single" w:sz="8" w:space="0" w:color="4472C4"/>`);
+    expect(style).toContain(`<w:insideH w:val="dotted" w:sz="4" w:space="0" w:color="auto"/>`);
+    // A table style's w:rPr is the default for every run in the table.
+    expect(style).toContain(`<w:b/>`);
+    // …and the toolbar's list offers it, which is what makes it applyable.
+    expect(listStyles(doc).some((entry) => entry.id === "Ledger" && entry.type === "table")).toBe(true);
+  });
+
+  it("creates a numbering style naming a numbering definition", () => {
+    const doc = load(para("body"));
+    expect(
+      createStyle(doc, { styleId: "Steps", type: "numbering", name: "Steps", numbering: { numId: 4 } }),
+    ).toBe(true);
+    const style = definition(doc, "Steps");
+    expect(style).toContain(`w:type="numbering"`);
+    expect(style).toContain(`<w:pPr><w:numPr><w:numId w:val="4"/></w:numPr></w:pPr>`);
+    // Word writes no parent for a numbering style.
+    expect(style).not.toContain("<w:basedOn");
+  });
+
+  it("refuses a numbering style with nothing to number", () => {
+    const doc = load(para("body"));
+    expect(createStyle(doc, { styleId: "Steps", type: "numbering", name: "Steps" })).toBe(false);
+    expect(stylesXml(doc)).not.toContain("Steps");
+  });
+});

@@ -107,6 +107,7 @@ export {
   styleUsageCount,
   styleIdFromName,
   uniqueStyleId,
+  STYLE_TYPES,
 } from "./edit/styles.js";
 export type {
   StyleSpec,
@@ -114,6 +115,7 @@ export type {
   StyleParaPatch,
   StyleRunPatch,
   StyleGalleryEntry,
+  StyleType,
 } from "./edit/styles.js";
 export {
   NUMBER_FORMATS,

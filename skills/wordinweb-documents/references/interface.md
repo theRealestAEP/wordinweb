@@ -812,7 +812,7 @@ of the style's conditional formats are used.
 | `setLineNumbering` | Configure margin line numbers | `patch` |
 | `ensureHeaderFooter` | Create a header or footer story | `hfKind` |
 | `updateFields` | Write recomputed cached results into the document's fields, one per field in document order | `results` |
-| `createStyle` | Create a paragraph or character style definition | `style` |
+| `createStyle` | Create a paragraph, character, table, or numbering style definition | `style` |
 | `modifyStyle` | Change an existing style definition | `styleId`, `patch` |
 | `deleteStyle` | Delete a style definition; content using it falls back to the style it was based on | `styleId` |
 
@@ -851,19 +851,39 @@ properties do.
 ```ts
 {
   styleId: string;            // [A-Za-z0-9-_], up to 253 chars
-  type: "paragraph" | "character";
+  type: "paragraph" | "character" | "table" | "numbering";
   name: string;               // the display name a gallery shows
-  basedOn?: string | null;    // defaults to Normal / DefaultParagraphFont
+  basedOn?: string | null;    // defaults per type to what Word writes:
+                              // Normal, DefaultParagraphFont, TableNormal, none
   next?: string | null;       // paragraph styles only
   quickStyle?: boolean;       // w:qFormat — show in the quick-style gallery
   uiPriority?: number;        // 0–99, gallery sort order
-  paragraph?: StyleParagraphPatch;
+  paragraph?: StyleParagraphPatch;   // paragraph and table styles
   run?: StyleRunPatch;        // the run format patch without `clear`
+  linked?: boolean;           // paragraph styles only — see below
+  table?: {                   // table styles only
+    borders?: {               // top, bottom, left, right, insideH, insideV
+      [edge: string]: TableBorderSpec;
+    };
+  };
+  numbering?: { numId: number };  // numbering styles only, and required there
 }
 ```
 
 `modifyStyle.patch` is the same shape without `styleId` and `type`; every field
 is optional and an omitted one is left alone.
+
+`linked: true` also writes the linked character companion Word pairs with a
+paragraph style: id `<styleId>Char`, name `<name> Char`, the same run
+properties, and `w:link` in both directions. The operation is REFUSED when
+`<styleId>Char` is already taken — the companion's id is derived, never
+searched for, so every replica reaches the same verdict. A later `modifyStyle`
+carrying `run` on either half applies it to both.
+
+A numbering style is a NAME for a list definition: it needs `numbering.numId`
+and carries no formatting of its own. A table style's `paragraph` and `run` are
+the defaults for every paragraph and run in the table; conditional formats
+(`w:tblStylePr` — banded rows, header row) are not expressible yet.
 
 ### Style paragraph patch
 

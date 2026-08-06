@@ -15,6 +15,7 @@ import {
   createStyle,
   deleteStyle,
   modifyStyle,
+  STYLE_TYPES,
   type StyleParaPatch,
   type StyleRunPatch,
   type StyleSpec,
@@ -400,6 +401,24 @@ function badNumber(
   return null;
 }
 
+/** One w:tblBorders edge, wherever a border spec is accepted. */
+function badBorderSpec(border: unknown, what: string): string | null {
+  const spec = border as TableBorderSpec | undefined;
+  if (!spec || typeof spec !== "object" || !TABLE_BORDER_STYLES.includes(spec.style)) {
+    return `${what}: bad style`;
+  }
+  if (spec.sz !== undefined && (!Number.isFinite(spec.sz) || spec.sz < 1 || spec.sz > 96)) {
+    return `${what}: bad sz`;
+  }
+  if (spec.space !== undefined && (!Number.isFinite(spec.space) || spec.space < 0 || spec.space > 31)) {
+    return `${what}: bad space`;
+  }
+  if (spec.color !== undefined && !/^(#?[0-9A-Fa-f]{6}|auto)$/.test(spec.color)) {
+    return `${what}: bad color`;
+  }
+  return null;
+}
+
 function badParaPatch(patch: unknown, what: string): string | null {
   if (patch === undefined) return null;
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) return `${what}: bad paragraph`;
@@ -470,21 +489,53 @@ function badStyleName(name: unknown, what: string): string | null {
     : `${what}: bad name`;
 }
 
-/** Add a paragraph or character style definition to styles.xml. */
+/** Add a style definition of any of the four kinds to styles.xml. */
 const createStyleOperation = defineOperation<{ style: StyleSpec }>()({
   kind: "createStyle",
   address: "document",
   category: "document",
-  description: "Create a paragraph or character style definition.",
+  description: "Create a paragraph, character, table, or numbering style definition.",
   fields: [{ name: "style" }],
   validate: ({ style }) => {
     if (!style || typeof style !== "object" || Array.isArray(style)) return "createStyle: bad style";
-    if (style.type !== "paragraph" && style.type !== "character") return "createStyle: bad type";
+    if (!STYLE_TYPES.includes(style.type)) return "createStyle: bad type";
     if (style.type === "character" && style.paragraph) {
       return "createStyle: a character style has no paragraph properties";
     }
     if (style.quickStyle !== undefined && typeof style.quickStyle !== "boolean") {
       return "createStyle: bad quickStyle";
+    }
+    // A numbering style is a NAME for a list definition and carries nothing
+    // else, so its reference is required and its formatting is refused —
+    // both, rather than silently dropping what the caller sent.
+    if (style.type === "numbering") {
+      if (style.paragraph || style.run) return "createStyle: a numbering style carries no formatting";
+      const numId = style.numbering?.numId;
+      if (!style.numbering || typeof numId !== "number" || !Number.isInteger(numId) || numId < 1 || numId > 32767) {
+        return "createStyle: a numbering style needs a numbering definition";
+      }
+    } else if (style.numbering) {
+      return "createStyle: only a numbering style names a numbering definition";
+    }
+    if (style.table) {
+      if (style.type !== "table") return "createStyle: only a table style has table properties";
+      const borders = style.table.borders;
+      if (borders !== undefined) {
+        if (!borders || typeof borders !== "object" || Array.isArray(borders)) return "createStyle: bad borders";
+        for (const [edge, spec] of Object.entries(borders)) {
+          if (!TABLE_SCOPE_EDGES.includes(edge as TableBorderEdge)) return `createStyle: bad border edge ${edge}`;
+          const bad = badBorderSpec(spec, "createStyle");
+          if (bad) return bad;
+        }
+      }
+    }
+    if (style.linked !== undefined) {
+      if (typeof style.linked !== "boolean") return "createStyle: bad linked";
+      // The companion is a CHARACTER style carrying a paragraph style's run
+      // properties. Nothing else has a companion to link to.
+      if (style.linked && style.type !== "paragraph") {
+        return "createStyle: only a paragraph style has a linked companion";
+      }
     }
     for (const key of ["basedOn", "next"] as const) {
       const value = style[key];
@@ -665,17 +716,7 @@ const setTableBordersOperation = defineOperation<{
     const allowed = scope === "cell" ? CELL_SCOPE_EDGES : TABLE_SCOPE_EDGES;
     if (edges.some((e) => !allowed.includes(e))) return `setTableBorders: edge not valid at ${scope} scope`;
     if (border === null) return null;
-    if (!border || !TABLE_BORDER_STYLES.includes(border.style)) return "setTableBorders: bad style";
-    if (border.sz !== undefined && (!Number.isFinite(border.sz) || border.sz < 1 || border.sz > 96)) {
-      return "setTableBorders: bad sz";
-    }
-    if (border.space !== undefined && (!Number.isFinite(border.space) || border.space < 0 || border.space > 31)) {
-      return "setTableBorders: bad space";
-    }
-    if (border.color !== undefined && !/^(#?[0-9A-Fa-f]{6}|auto)$/.test(border.color)) {
-      return "setTableBorders: bad color";
-    }
-    return null;
+    return badBorderSpec(border, "setTableBorders");
   },
   apply: ({ doc, target, payload }) => {
     const anchor = cellAnchor(target);

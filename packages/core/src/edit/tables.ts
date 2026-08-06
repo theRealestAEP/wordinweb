@@ -1068,6 +1068,25 @@ function borderElement(w: string, edge: TableBorderEdge, spec: TableBorderSpec):
 }
 
 /**
+ * Build a w:tblBorders holding the given edges, in schema order.
+ *
+ * For a caller writing a whole w:tblPr from nothing — a table STYLE
+ * definition, which has no document table to read the existing container off
+ * — rather than patching edges into a table that already exists.
+ */
+export function tableBordersElement(
+  w: string,
+  borders: Partial<Record<TableBorderEdge, TableBorderSpec>>,
+): XmlElement {
+  const container: XmlElement = { name: `${w}tblBorders`, attrs: {}, children: [], text: "" };
+  for (const edge of TABLE_SCOPE_EDGES) {
+    const spec = borders[edge];
+    if (spec) insertOrdered(container, borderElement(w, edge, spec), BORDER_EDGE_ORDER);
+  }
+  return container;
+}
+
+/**
  * Set or clear border edges on one cell or on the whole table.
  *
  * A `spec` of null REMOVES the edge element, so the edge falls back to what

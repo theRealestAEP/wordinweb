@@ -1,4 +1,4 @@
-import { registeredOperationCapabilities, type RegisteredOperationKind } from "@wordinweb/core";
+import { registeredOperationCapabilities, STYLE_TYPES, type RegisteredOperationKind } from "@wordinweb/core";
 import { INTENT_KINDS, type Intent } from "@wordinweb/collab/client";
 
 export interface AgentEditCapability {
@@ -131,6 +131,21 @@ const wirePosition = closedObject({
 
 const styleId = { type: "string", pattern: "^[A-Za-z0-9\\-_]{1,253}$" };
 
+/** One w:tblBorders edge. Shared by the table-border operation and by a
+ * table STYLE definition, so the two cannot admit different borders. */
+const borderEdgeSpec = closedObject({
+  style: {
+    enum: [
+      "single", "thick", "double", "dotted", "dashed", "dotDash",
+      "dotDotDash", "thinThickSmallGap", "triple", "wave", "none",
+    ],
+  },
+  sz: number(1, 96),
+  color: { anyOf: [rgb, { const: "auto" }] },
+  space: number(0, 31),
+}, ["style"]);
+
+
 const runFormatPatch = closedObject({
   bold: boolean,
   italic: boolean,
@@ -175,10 +190,25 @@ const styleRunPatch = closedObject({
   characterStyleId: { anyOf: [styleId, { type: "null" }] },
 });
 
+/** The grid a TABLE style draws. Conditional formats (w:tblStylePr) are not
+ * expressible yet, so the schema does not admit them. */
+const styleTableProps = closedObject({
+  borders: closedObject({
+    top: borderEdgeSpec,
+    bottom: borderEdgeSpec,
+    left: borderEdgeSpec,
+    right: borderEdgeSpec,
+    insideH: borderEdgeSpec,
+    insideV: borderEdgeSpec,
+  }),
+});
+
 const styleSpec = closedObject(
   {
     styleId,
-    type: { enum: ["paragraph", "character"] },
+    // Widened from paragraph/character: every payload that validated before
+    // still validates, and a table or numbering style is now expressible.
+    type: { enum: [...STYLE_TYPES] },
     name: string(253, 1),
     basedOn: { anyOf: [styleId, { type: "null" }] },
     next: { anyOf: [styleId, { type: "null" }] },
@@ -186,6 +216,12 @@ const styleSpec = closedObject(
     uiPriority: integer(0, 99),
     paragraph: styleParaPatch,
     run: styleRunPatch,
+    /** Paragraph styles only: also write Word's linked character companion. */
+    linked: boolean,
+    /** Table styles only. */
+    table: styleTableProps,
+    /** Numbering styles only, and required for them. */
+    numbering: closedObject({ numId: integer(1, 32767) }, ["numId"]),
   },
   ["styleId", "type", "name"],
 );
@@ -305,22 +341,7 @@ const tableOperation = {
 // Table formatting. "none" is a real border style (Word's No Border, written
 // w:val="nil") and is distinct from a null `border`, which REMOVES the edge so
 // it inherits again — the schema has to admit both.
-const tableBorderSpec = {
-  anyOf: [
-    closedObject({
-      style: {
-        enum: [
-          "single", "thick", "double", "dotted", "dashed", "dotDash",
-          "dotDotDash", "thinThickSmallGap", "triple", "wave", "none",
-        ],
-      },
-      sz: number(1, 96),
-      color: { anyOf: [rgb, { const: "auto" }] },
-      space: number(0, 31),
-    }, ["style"]),
-    { type: "null" },
-  ],
-};
+const tableBorderSpec = { anyOf: [borderEdgeSpec, { type: "null" }] };
 
 const tableLookToggles = closedObject({
   firstRow: boolean,

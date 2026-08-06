@@ -119,10 +119,19 @@ describe("style definition operations over the wire", () => {
 describe("style payload validation runs before sequencing", () => {
   const cases: [string, Record<string, unknown>][] = [
     ["a styleId with a space", { kind: "createStyle", style: { styleId: "Pull Quote", type: "paragraph", name: "x" } }],
-    ["an unknown style type", { kind: "createStyle", style: { styleId: "X", type: "table", name: "x" } }],
+    ["an unknown style type", { kind: "createStyle", style: { styleId: "X", type: "list", name: "x" } }],
     ["paragraph props on a character style", { kind: "createStyle", style: { styleId: "X", type: "character", name: "x", paragraph: { alignment: "center" } } }],
     ["an unknown paragraph property", { kind: "createStyle", style: { styleId: "X", type: "paragraph", name: "x", paragraph: { leading: 2 } } }],
     ["an out-of-range outline level", { kind: "createStyle", style: { styleId: "X", type: "paragraph", name: "x", paragraph: { outlineLevel: 9 } } }],
+    // The four style types the engine writes, each with the payload that only
+    // makes sense for it — a mismatch is refused rather than dropped.
+    ["a numbering style with no numbering definition", { kind: "createStyle", style: { styleId: "X", type: "numbering", name: "x" } }],
+    ["formatting on a numbering style", { kind: "createStyle", style: { styleId: "X", type: "numbering", name: "x", numbering: { numId: 1 }, run: { bold: true } } }],
+    ["a numbering reference on a paragraph style", { kind: "createStyle", style: { styleId: "X", type: "paragraph", name: "x", numbering: { numId: 1 } } }],
+    ["table properties on a paragraph style", { kind: "createStyle", style: { styleId: "X", type: "paragraph", name: "x", table: { borders: {} } } }],
+    ["a cell-only border edge on a table style", { kind: "createStyle", style: { styleId: "X", type: "table", name: "x", table: { borders: { tl2br: { style: "single" } } } } }],
+    ["an out-of-range border weight on a table style", { kind: "createStyle", style: { styleId: "X", type: "table", name: "x", table: { borders: { top: { style: "single", sz: 200 } } } } }],
+    ["a linked companion for a character style", { kind: "createStyle", style: { styleId: "X", type: "character", name: "x", linked: true } }],
     ["an empty patch", { kind: "modifyStyle", styleId: "Heading1", patch: {} }],
     ["a bad colour", { kind: "modifyStyle", styleId: "Heading1", patch: { run: { color: "red" } } }],
     ["an unknown numbering format", { kind: "setNumberingLevel", blockId: 1, ilvl: 0, patch: { format: "hex" } }],
@@ -160,6 +169,17 @@ describe("style payload validation runs before sequencing", () => {
         patch: { format: "upperRoman", text: "%1)", indentLeftPt: 36 },
       } as never),
     ).toBeNull();
+  });
+
+  it("accepts a linked pair, a table style and a numbering style", () => {
+    const specs = [
+      { styleId: "Lead", type: "paragraph", name: "Lead", linked: true, run: { bold: true } },
+      { styleId: "Ledger", type: "table", name: "Ledger", table: { borders: { top: { style: "single", sz: 8, color: "4472C4" }, insideV: { style: "dotted" } } } },
+      { styleId: "Steps", type: "numbering", name: "Steps", numbering: { numId: 3 } },
+    ];
+    for (const style of specs) {
+      expect(validateIntent({ ...base, kind: "createStyle", style } as never), style.styleId).toBeNull();
+    }
   });
 
   it("bounds the character style a run patch carries", () => {
