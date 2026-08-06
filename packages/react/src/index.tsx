@@ -107,6 +107,9 @@ import {
   computeFieldResults,
   findTocFields,
   insertToc,
+  insertWatermark,
+  removeWatermark,
+  type WatermarkSpec,
   tocEntryCount,
   rebuildToc,
   type TocOptions,
@@ -386,6 +389,13 @@ export interface DocxViewApi {
   modifyStyle(styleId: string, patch: StylePatch): boolean;
   /** Delete a style definition; its users fall back to its basedOn. */
   deleteStyle(styleId: string): boolean;
+  /**
+   * Stamp a text watermark across every page. Word keeps a watermark in the
+   * header parts, so a document with none gets one first.
+   */
+  insertWatermark(spec: WatermarkSpec): boolean;
+  /** Take the watermark back off every page. False when there was none. */
+  removeWatermark(): boolean;
   /** Apply (or with null remove) a character style over the selection. */
   setCharacterStyle(styleId: string | null): void;
   /** Change a list level's number format, label text, or indent. */
@@ -2527,6 +2537,51 @@ export function DocxView({
             if (collabDocOp(() => documentOperationBody("deleteStyle", { styleId }))) return true;
             history.checkpoint();
             if (!deleteStyle(doc, styleId)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertWatermark: (spec) => {
+            // The watermark goes into the header parts, and insertWatermark
+            // will not create one: making a PART (rel + content-type override
+            // + sectPr references) is ensureHeaderFooter's structural intent.
+            // So in a room the two ride the wire in order — the header exists
+            // by the time the watermark operation applies on every replica.
+            if (!doc.hasHfPart("header")) {
+              const created = collabDocOp((ids) => ({
+                kind: "ensureHeaderFooter",
+                hfKind: "header",
+                nodeIds: ids(8),
+              }));
+              if (created) {
+                // The local replica applies its own submission, so the part is
+                // there; ask again with the real count.
+                doc.ensureHfPart("header");
+              } else {
+                history.checkpoint();
+                doc.ensureHfPart("header");
+              }
+            }
+            const headerCount = doc.headerRoots().length;
+            if (headerCount === 0) return false;
+            const args = {
+              text: spec.text,
+              headerCount,
+              ...(spec.diagonal !== undefined ? { diagonal: spec.diagonal } : {}),
+              ...(spec.color !== undefined ? { color: spec.color } : {}),
+              ...(spec.opacity !== undefined ? { opacity: spec.opacity } : {}),
+            };
+            if (collabDocOp((ids) => documentOperationBody("insertWatermark", args, ids))) return true;
+            history.checkpoint();
+            if (!insertWatermark(doc, spec)) return false;
+            // A watermark paints behind every page, so nothing reflows — but
+            // it lives in the header, which the page chrome repaints globally.
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          removeWatermark: () => {
+            if (collabDocOp(() => documentOperationBody("removeWatermark", {}))) return true;
+            history.checkpoint();
+            if (!removeWatermark(doc)) return false;
             pages = rerender(doc, undefined, "global");
             return true;
           },

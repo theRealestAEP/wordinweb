@@ -169,6 +169,19 @@ export { insertModel3DAt, setModel3DRotation, insertWebVideoAt, insertEmbeddedOb
 export type { Model3DInsert, Model3DRotation, WebVideoInsert, EmbeddedObjectInsert } from "./edit/objects.js";
 export { buildOlePackage, extractOlePackage } from "./parse/ole.js";
 export { validBookmarkName, listBookmarks, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference } from "./edit/references.js";
+export {
+  deleteWatermark,
+  headerWatermarks,
+  insertWatermark,
+  removeWatermark,
+  setWordArtOpacity,
+  setWordArtRotation,
+  setWordArtText,
+  wordArtOpacity,
+  wordArtRotation,
+  wordArtText,
+} from "./edit/watermark.js";
+export type { WatermarkSpec } from "./edit/watermark.js";
 export { checkboxStateElement, checkboxChecked, toggleCheckbox } from "./checkbox.js";
 export { isSafeUrl, safeUrlOrBlank } from "./url-safety.js";
 export { validatePastedOoxml, pruneToPastedSubset, DEFAULT_OOXML_LIMITS } from "./ooxml-validate.js";

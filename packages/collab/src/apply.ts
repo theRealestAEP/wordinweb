@@ -981,6 +981,10 @@ function resolveOperationTarget(
       return tbl ? { ...empty, el: tbl, cellParagraph: paraEl } : null;
     }
     case "object": {
+      // BOTH halves have to resolve. A run whose contents moved under a
+      // concurrent edit rejects on every replica rather than mutating
+      // whatever now sits at that index — the honest no-op an unresolvable
+      // id already gives, extended to the index that narrows it.
       const el = ids.elOf(addressId);
       if (!el) return null;
       const objectIndex = (intent as unknown as { objectIndex?: number }).objectIndex;
@@ -991,7 +995,8 @@ function resolveOperationTarget(
 }
 
 /** Apply a registered operation: resolve its address, run the declared
- * mutation, and hand the nodes it created their carried ids. */
+ * mutation, retire the ids of anything it removed, and hand the nodes it
+ * created their carried ids. */
 function applyRegistered(
   doc: DocxDocument,
   ids: StableIds,
@@ -1004,9 +1009,12 @@ function applyRegistered(
   if (!target) return false;
   const nodeIds = "nodeIds" in intent ? intent.nodeIds : undefined;
   const before = nodeIds ? trackedSet(ids, doc) : null;
-  const applied = applyRegisteredOperation(doc, target, intent);
-  if (applied && before && nodeIds) assignFreshTracked(ids, doc, before, nodeIds);
-  return applied;
+  if (!applyRegisteredOperation(doc, target, intent)) return false;
+  // Prune BEFORE handing out carried ids, so a replacing operation
+  // (insertWatermark) leaves no id pointing at a detached run.
+  if (definition.prunesIds) ids.prune(doc.editableRoots());
+  if (before && nodeIds) assignFreshTracked(ids, doc, before, nodeIds);
+  return true;
 }
 
 /** Assign carried ids to tracked nodes created since `before`, in doc order. */

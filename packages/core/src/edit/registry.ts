@@ -23,9 +23,11 @@ import {
   type StyleSpec,
   type StylePatch,
 } from "./styles.js";
+import { setModel3DRotation, type Model3DRotation } from "./objects.js";
 import { suggestMeta } from "./suggest.js";
 import { TOC_LEADERS, insertToc, type TocLeader, type TocLevels } from "./toc.js";
 import { applyFieldResults } from "./update-fields.js";
+import { insertWatermark, removeWatermark } from "./watermark.js";
 import {
   CELL_SCOPE_EDGES,
   TABLE_BORDER_STYLES,
@@ -93,12 +95,18 @@ export type StableId = number;
  * count must match the document's field count — and it must carry every value
  * a replica cannot re-derive identically.
  *
- * "object" names a drawing: the stable id of the run that CARRIES it, plus an
- * `objectIndex` into that run's content for the second and later drawings in
- * one run. This is the addressing every hand-written drawing intent already
- * uses (setImageWrap, resizeDrawing); the id still does the rejecting, and an
- * objectIndex that no longer names a drawing is a clean no-op like an
- * unresolvable id.
+ * "object" names a DRAWING: the stable id of the run that CARRIES it, plus an
+ * `objectIndex` into that run's content picking out which drawing it is (a run
+ * can hold several). This is the addressing every hand-written drawing intent
+ * already uses — setImageWrap, resizeDrawing — so a migrated one keeps its
+ * wire shape. The index is NOT in the table below: it is a position inside the
+ * run rather than an id of its own, which is also why it stays out of the
+ * agent-facing field list, where a raw index is forbidden. BOTH halves reject:
+ * an id nobody has and an index that no longer names a drawing are each the
+ * same clean no-op, so the honest-no-op predicate is exactly the one every
+ * addressed operation has. The index's WELL-FORMEDNESS is checked centrally
+ * (see validateRegisteredOperation) rather than by each operation, for the
+ * same reason the three preconditions above are stated once.
  */
 export type OperationAddress = "run" | "block" | "cell" | "object" | "document";
 
@@ -199,6 +207,11 @@ export interface OperationDefinition<Kind extends string, Payload> {
    * host, the agent compiler) reads this instead of repeating the arithmetic.
    */
   nodeIds?: (args: OperationArgs<Payload>) => number;
+  /** The mutation removes id-tracked nodes, so the caller must retire their
+   * stable ids afterwards. Deletion and pruning are paired everywhere else in
+   * the apply path (mergeParagraph, removeDrawing); declaring it here keeps
+   * the pairing in the operation's single declaration. */
+  prunesIds?: true;
   /**
    * Reject a malformed payload before it is sequenced. Runs on both sides of
    * the wire, so it must be a pure function of the payload.
@@ -1044,7 +1057,7 @@ const insertEndnoteOperation = defineOperation<{
 /**
  * Crop an image: write the a:srcRect fractions trimmed off each edge.
  *
- * This is the first OBJECT-addressed registered operation. It qualifies on the
+ * OBJECT-addressed, like setModel3DRotation below. It qualifies on the
  * registry's three preconditions like any other: the carrying run's stable id
  * does the rejecting, no run's text moves, and there is no wire inverse.
  */
@@ -1058,10 +1071,7 @@ const setCropOperation = defineOperation<{
   category: "drawing",
   description: "Crop an image to a fraction of the source bitmap on each edge.",
   fields: [{ name: "crop" }],
-  validate: ({ crop, objectIndex }) => {
-    if (objectIndex !== undefined && (!Number.isInteger(objectIndex) || objectIndex < 0 || objectIndex > 1000)) {
-      return "setCrop: bad objectIndex";
-    }
+  validate: ({ crop }) => {
     if (!crop || typeof crop !== "object" || Array.isArray(crop)) return "setCrop: bad crop";
     const edges = ["l", "t", "r", "b"] as const;
     for (const key of Object.keys(crop)) {
@@ -1079,6 +1089,149 @@ const setCropOperation = defineOperation<{
   },
   apply: ({ doc, target, payload }) =>
     target.drawing ? setImageCrop(doc, target.drawing, payload.crop) : false,
+});
+
+/**
+ * Save a 3D model's orientation. OBJECT-addressed, like setCrop above.
+ *
+ * A drag used to mutate the model locally with no wire form and no gate, so it
+ * forked any room it happened in: the `model3D` toolbar flag only hides
+ * INSERTION, and a model already present in an opened file stays draggable.
+ * The rotation is a property of one drawing, which is exactly what the object
+ * address names, so nothing here needs the document escape hatch.
+ *
+ * The angles are CARRIED rather than recomputed. Unlike updateFields that is
+ * not because a replica would derive them differently — it is because they
+ * come from a pointer drag only the originator saw.
+ */
+const setModel3DRotationOperation = defineOperation<{
+  runId: StableId;
+  objectIndex?: number;
+  rotation: Model3DRotation;
+}>()({
+  kind: "setModel3DRotation",
+  address: "object",
+  category: "drawing",
+  description: "Set a 3D model's X/Y/Z orientation, in degrees.",
+  fields: [{ name: "rotation" }],
+  validate: ({ rotation }) => {
+    if (!rotation || typeof rotation !== "object") return "setModel3DRotation: bad rotation";
+    for (const axis of ["x", "y", "z"] as const) {
+      // Any finite angle is legal; the mutation normalizes into 0..360.
+      if (typeof rotation[axis] !== "number" || !Number.isFinite(rotation[axis])) {
+        return `setModel3DRotation: bad ${axis}`;
+      }
+    }
+    return null;
+  },
+  // A drawing that is not a 3D model has no am3d:model3d to write into, which
+  // setModel3DRotation reports as a clean no-op.
+  apply: ({ doc, target, payload }) =>
+    target.drawing ? setModel3DRotation(doc, target.drawing, payload.rotation) : false,
+});
+
+// ---------------------------------------------------------------------------
+// Watermarks
+// ---------------------------------------------------------------------------
+
+/**
+ * The two watermark operations are DOCUMENT-scoped because a watermark is a
+ * property of the document, not of a place in it: Word writes one into every
+ * header part so it shows on every page, and there is no single node either
+ * operation could be addressed at.
+ *
+ * `headerCount` is the pattern insertToc established, doing both jobs at once.
+ * As a BUDGET it sizes the carried ids, because `nodeIds` sees the payload and
+ * not the document, and the number of nodes created depends on how many header
+ * parts the document has. As a REJECTION PREDICATE it stands in for the stable
+ * id a document-scoped operation does not have: a replica whose header set has
+ * moved under a concurrent edit applies nothing, and every replica in that
+ * position rejects identically.
+ *
+ * Both are position-stable in the registry's sense. The watermark run is
+ * prepended to a header paragraph that already exists, so no run's text moves
+ * and a concurrent text intent still transforms as identity.
+ *
+ * Neither creates the header part it needs. That is `ensureHeaderFooter`'s
+ * job, which is a structural intent of its own; a caller in a room submits it
+ * first and this one second.
+ */
+
+/** RRGGBB, the colour form every other operation on the wire already uses.
+ * VML would also take a keyword ("silver"), but one convention is worth more
+ * than the second spelling. */
+const HEX_COLOR = /^[0-9A-Fa-f]{6}$/;
+
+function badHeaderCount(count: unknown, what: string): string | null {
+  return Number.isInteger(count) && (count as number) >= 1 && (count as number) <= 50
+    ? null
+    : `${what}: bad headerCount`;
+}
+
+const insertWatermarkOperation = defineOperation<{
+  text: string;
+  headerCount: number;
+  diagonal?: boolean;
+  color?: string;
+  opacity?: number;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertWatermark",
+  address: "document",
+  category: "insert",
+  description: "Stamp a text watermark across every page, in the document's header parts.",
+  fields: [
+    { name: "text" },
+    { name: "headerCount" },
+    { name: "diagonal", optional: true },
+    { name: "color", optional: true },
+    { name: "opacity", optional: true },
+  ],
+  // Per header part: the watermark run, plus the paragraph to host it when the
+  // part has none of its own.
+  nodeIds: ({ headerCount }) => (badHeaderCount(headerCount, "x") ? 2 : headerCount * 2),
+  // Inserting REPLACES any watermark already there, so it deletes runs too.
+  prunesIds: true,
+  validate: ({ text, headerCount, diagonal, color, opacity }) => {
+    if (typeof text !== "string" || text.length === 0 || text.length > 255) {
+      return "insertWatermark: bad text";
+    }
+    const bad = badHeaderCount(headerCount, "insertWatermark");
+    if (bad) return bad;
+    if (diagonal !== undefined && typeof diagonal !== "boolean") return "insertWatermark: bad diagonal";
+    if (color !== undefined && (typeof color !== "string" || !HEX_COLOR.test(color))) {
+      return "insertWatermark: bad color";
+    }
+    if (opacity !== undefined && (typeof opacity !== "number" || !(opacity >= 0 && opacity <= 1))) {
+      return "insertWatermark: bad opacity";
+    }
+    return null;
+  },
+  apply: ({ doc, payload }) =>
+    doc.headerRoots().length === payload.headerCount &&
+    insertWatermark(doc, {
+      text: payload.text,
+      ...(payload.diagonal !== undefined ? { diagonal: payload.diagonal } : {}),
+      ...(payload.color !== undefined ? { color: payload.color } : {}),
+      ...(payload.opacity !== undefined ? { opacity: payload.opacity } : {}),
+    }),
+});
+
+/** A payload with no fields of its own. Not `Record<string, never>`: that
+ * carries an index signature, which would forbid the clientId/clientSeq/base
+ * bookkeeping @wordinweb/collab intersects onto every wire body. */
+type NoPayload = Record<never, never>;
+
+/** Take the watermark back off every page. Its rejection predicate is the
+ * watermark's own existence: a replica with none applies nothing. */
+const removeWatermarkOperation = defineOperation<NoPayload>()({
+  kind: "removeWatermark",
+  address: "document",
+  category: "insert",
+  description: "Remove the text watermark from every page.",
+  fields: [],
+  prunesIds: true,
+  apply: ({ doc }) => removeWatermark(doc),
 });
 
 const OPERATIONS = [
@@ -1103,6 +1256,9 @@ const OPERATIONS = [
   setTableHeaderRowsOperation,
   insertEndnoteOperation,
   setCropOperation,
+  setModel3DRotationOperation,
+  insertWatermarkOperation,
+  removeWatermarkOperation,
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -1179,23 +1335,39 @@ export function operationBody<Kind extends RegisteredOperationKind>(
 }
 
 /** Build a DOCUMENT-SCOPED operation's wire body. It names no node, so there
- * is no address field and no id to allocate — the payload is the whole of it. */
+ * is no address field — but it may still CREATE nodes (insertWatermark adds a
+ * run per header part), and those need carried ids like any other insert. */
 export function documentOperationBody<Kind extends RegisteredOperationKind>(
   kind: Kind,
   args: RegisteredOperationArgs<Kind>,
+  allocIds: (n: number) => StableId[] = () => [],
 ): RegisteredOperationBodyFor<Kind> {
   const definition = BY_KIND.get(kind);
   if (!definition) throw new Error(`${kind} is not a registered operation`);
   if (definition.address !== "document") {
     throw new Error(`${kind} is addressed by ${definition.address}; use operationBody`);
   }
-  return { kind, ...args } as RegisteredOperationBodyFor<Kind>;
+  const body: Record<string, unknown> = { kind, ...args };
+  if (definition.nodeIds) body.nodeIds = allocIds(definition.nodeIds(args as never));
+  return body as RegisteredOperationBodyFor<Kind>;
 }
 
 /** Validate a registered operation's payload. Null means well-formed. */
 export function validateRegisteredOperation(body: RegisteredOperationBody): string | null {
   const definition = BY_KIND.get(body.kind);
   if (!definition) return `${body.kind}: not a registered operation`;
+  // The object address's second half is checked HERE, not per operation: it
+  // belongs to the address rather than to any one payload, so validating it
+  // once means a new object-addressed operation cannot forget to. Absent is
+  // legal — it means the run's first drawing.
+  if (definition.address === "object") {
+    const { objectIndex } = body as { objectIndex?: unknown };
+    if (objectIndex !== undefined) {
+      if (!Number.isInteger(objectIndex) || (objectIndex as number) < 0 || (objectIndex as number) > 1000) {
+        return `${body.kind}: bad objectIndex`;
+      }
+    }
+  }
   return definition.validate ? definition.validate(body as never) : null;
 }
 
