@@ -6467,11 +6467,26 @@ class Engine {
     confineToAvailable = false,
   ): number[] {
     const edgeMargins = this.cellMarginsOf(tbl);
+    // Word 2013 (an EXPLICIT compatibilityMode 15) fits a table's horizontal
+    // cell margins inside its percentage width; every older mode, and a file
+    // that declares no mode at all, adds them around it. Probed through
+    // desktop Word with three settings.xml variants on Letter and A4
+    // (probe-compat15/12/nocompat.docx in the parity repo, built by
+    // scripts/generate-pctwidth-compat-probe.mjs):
+    //
+    //   compatibilityMode 15   -> allowance 0
+    //   compatibilityMode 12   -> allowance 0.240in
+    //   no compatibilityMode   -> allowance 0.240in
+    //
+    // against 0.250in of declared margins — the 0.010in shortfall is the
+    // border stroke. Page size makes no difference.
+    const declaredMode = this.doc.declaredCompatibilityMode;
+    const pctFitsMarginsInside = declaredMode !== undefined && declaredMode >= 15;
     const base = resolveGrid(
       tbl,
       available,
       !nested && !confineToAvailable,
-      (edgeMargins.left ?? 0) + (edgeMargins.right ?? 0),
+      pctFitsMarginsInside ? 0 : (edgeMargins.left ?? 0) + (edgeMargins.right ?? 0),
     );
     if (tbl.props.layout === "fixed") return base;
     const gridTotal = tbl.grid.reduce((a, b) => a + b, 0);
@@ -8885,20 +8900,20 @@ function resolveGrid(
   // the right margin, not shrunk to fit).
   const fixedOverflow = overflowAllowed && tbl.props.layout === "fixed";
   const cap = fixedOverflow ? Number.POSITIVE_INFINITY : available;
-  // A tblW pct width is pct × the text column with the cell margins INSIDE
-  // that box. Measured on A4 with 1in margins (a 1203px column at 192dpi),
-  // tblW 4500 pct and 10pt left + right cell margins: Word paints the table
-  // 1083px = 0.90 × 1203, NOT 0.90 × (1203 + the 53.3px of margins).
+  // A tblW pct width resolves against the text column plus `edgeCellMargins`,
+  // the caller's compatibility-dependent allowance for the table's own
+  // horizontal cell margins (zero under Word 2013 rules, a full margin pair
+  // under the legacy ones — see resolveGridWidths).
   //
-  // tblW 5000 pct on a fixed-layout table is Word's "AutoFit to window", and
-  // that one alone adds the margins: the box starts a cell margin left of the
-  // text column so the first/last column TEXT aligns with the column edges
-  // while the borders overhang. Measured on nccih p14 (tblW 5000 pct, 12960tw
-  // landscape column, default 108tw margins): Word renders the authored
-  // 13176tw = 12960 + 216 grid raw, rules at margin - 7.2px and margin +
-  // 7.2px.
-  const fitToWindow = fixedOverflow && tbl.props.widthPct === 1;
-  const pctBase = fitToWindow ? available + edgeCellMargins : available;
+  // With the allowance the box starts a cell margin left of the text column,
+  // so the first and last column's TEXT aligns with the column edges while the
+  // borders overhang: nccih p14 (tblW 5000 pct, 12960tw landscape column,
+  // default 108tw margins, no declared mode) renders the authored 13176tw =
+  // 12960 + 216 grid raw, rules at margin - 7.2px and margin + 7.2px. Without
+  // it the margins sit inside the box: on A4 with 1in margins (a 1203px column
+  // at 192dpi), tblW 4500 pct with 10pt left + right margins under mode 15
+  // paints 1083px = 0.90 × 1203, not 0.90 × (1203 + 53.3).
+  const pctBase = fixedOverflow ? available + edgeCellMargins : available;
   const target = Math.min(
     cap,
     tbl.props.width ?? (tbl.props.widthPct !== undefined ? tbl.props.widthPct * pctBase : available),

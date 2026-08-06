@@ -4680,9 +4680,11 @@ describe("tail parity rules (textboxes/nccih/hf2/yiddish)", () => {
   });
 
   it("spans a body-level fixed pct table over content width + edge cell margins (nccih p14)", () => {
-    // tblW 5000 pct with tblLayout fixed: Word measures 100% against the
-    // text column PLUS the table's left+right cell margins, rendering the
-    // authored grid (content + 216tw) raw — rules at margin -/+ 7.2px.
+    // tblW 5000 pct with tblLayout fixed: nccih declares no compatibilityMode,
+    // so Word's legacy table metrics apply and it measures the percentage
+    // against the text column PLUS the table's left+right cell margins,
+    // rendering the authored grid (content + 216tw) raw — rules at margin
+    // -/+ 7.2px. table-format.test.ts pins the compat-15 counterpart.
     const content = 9360; // 12240 - 2*1440
     const grid = `<w:gridCol w:w="${content / 2 + 108}"/><w:gridCol w:w="${content / 2 + 108}"/>`;
     const cell = (w: number) =>
@@ -4694,7 +4696,9 @@ describe("tail parity rules (textboxes/nccih/hf2/yiddish)", () => {
       `<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr>` +
       `<w:tblGrid>${grid}</w:tblGrid>` +
       `<w:tr>${cell(content / 2 + 108)}${cell(content / 2 + 108)}</w:tr></w:tbl><w:p/>`;
-    const { result } = layout({ "word/document.xml": wrapDocument(tbl) });
+    const { doc, result } = layout({ "word/document.xml": wrapDocument(tbl) });
+    // The allowance rides on the ABSENT setting, not on the 100% width.
+    expect(doc.declaredCompatibilityMode).toBeUndefined();
     const edges = result.pages[0].items.filter((i) => i.kind === "edge");
     const xs = edges.flatMap((e) => (e.kind === "edge" ? [e.x1, e.x2] : []));
     // The grid renders RAW: rules span content (624px) + 2 x 7.2px cell

@@ -520,22 +520,59 @@ describe("percentage table width", () => {
   /** 10pt left and right cell margins, the pair Word's default table uses. */
   const CELL_MAR =
     `<w:tblCellMar><w:left w:w="200" w:type="dxa"/><w:right w:w="200" w:type="dxa"/></w:tblCellMar>`;
+  /** The 26.67px the two 10pt margins add on each side of the table box. */
+  const EDGE_MARGINS = (2 * 200) / 15;
+
+  /** `mode` undefined leaves settings.xml out altogether, the shape that makes
+   * Word fall back to its legacy table metrics. */
+  function loadWithCompat(bodyXml: string, mode?: number): DocxDocument {
+    const parts: Record<string, string> = { "word/document.xml": wrapDocument(bodyXml) };
+    if (mode !== undefined) {
+      parts["word/settings.xml"] =
+        `<?xml version="1.0"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+        `<w:compat><w:compatSetting w:name="compatibilityMode" w:val="${mode}"/></w:compat></w:settings>`;
+    }
+    return DocxDocument.load(makeDocx(parts));
+  }
 
   const totalWidth = (doc: DocxDocument): number =>
     renderedWidths(layout(doc)).reduce((a, b) => a + b, 0);
 
-  for (const mode of ["autofit", "fixed"] as const) {
-    it(`fits the cell margins inside a ${mode} 90% table`, () => {
-      // Word paints 0.90 x the text column and insets the cell text within
-      // it — the margins do not widen the table box. (A fixed-layout table at
-      // exactly 100% is Word's "AutoFit to window" and is the one case that
-      // does add them; layout.test.ts pins it from nccih p14.)
-      const tblPr =
-        `<w:tblW w:w="4500" w:type="pct"/><w:tblLayout w:type="${mode}"/>` + CELL_MAR;
-      const doc = load(tableXml(1, 2, tblPr, 3000) + SECTION);
-      expect(totalWidth(doc)).toBeCloseTo(0.9 * CONTENT_WIDTH, 2);
+  const pctTable = (layoutMode: "autofit" | "fixed"): string =>
+    tableXml(
+      1,
+      2,
+      `<w:tblW w:w="4500" w:type="pct"/><w:tblLayout w:type="${layoutMode}"/>` + CELL_MAR,
+      3000,
+    ) + SECTION;
+
+  it("fits the cell margins inside a fixed 90% table under compat 15", () => {
+    // Word 2013 metrics: the box is 0.90 x the text column and the margins
+    // inset the cell text within it.
+    const doc = loadWithCompat(pctTable("fixed"), 15);
+    expect(totalWidth(doc)).toBeCloseTo(0.9 * CONTENT_WIDTH, 2);
+  });
+
+  for (const [name, mode] of [
+    ["compat 12", 12],
+    ["no declared compat", undefined],
+  ] as const) {
+    it(`adds the cell margins around a fixed 90% table under ${name}`, () => {
+      // Legacy metrics: the box starts a cell margin left of the column, so
+      // the percentage resolves against the column plus both margins.
+      const doc = loadWithCompat(pctTable("fixed"), mode);
+      expect(totalWidth(doc)).toBeCloseTo(0.9 * (CONTENT_WIDTH + EDGE_MARGINS), 2);
     });
   }
+
+  it("leaves an autofit-layout percentage table on the bare text column", () => {
+    // The allowance belongs to fixed layout; autofit resolves against the
+    // column in either compatibility mode.
+    for (const mode of [15, 12, undefined]) {
+      const doc = loadWithCompat(pctTable("autofit"), mode);
+      expect(totalWidth(doc)).toBeCloseTo(0.9 * CONTENT_WIDTH, 2);
+    }
+  });
 
   it("keeps a dxa width at its declared size whatever the margins are", () => {
     const doc = load(tableXml(1, 2, `<w:tblW w:w="6000" w:type="dxa"/>`, 3000) + SECTION);

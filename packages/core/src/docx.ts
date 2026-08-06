@@ -130,6 +130,12 @@ export class DocxDocument {
    * it (nccih: a Heading1/2 after a page break sits at margin + its before).
    * Absent → treated as current (15). */
   readonly compatibilityMode: number = 15;
+  /** The compatibilityMode settings.xml actually declares, or undefined when
+   * the setting (or settings.xml itself) is missing. `compatibilityMode`
+   * defaults an omitted value to 15, but a table's percentage width needs the
+   * distinction: Word fits the horizontal cell margins inside the table box at
+   * an EXPLICIT 15 and adds them around it when the setting is absent. */
+  readonly declaredCompatibilityMode: number | undefined = undefined;
   /** settings.xml m:mathPr/m:defJc — default justification for display
    * equations whose m:oMathParaPr carries no explicit m:jc (Word default:
    * centerGroup — the rows of a broken equation left-align to each other and
@@ -262,7 +268,10 @@ export class DocxDocument {
       for (const cs of children(compat, "compatSetting")) {
         if (attr(cs, "name") === "compatibilityMode") {
           const v = Number(attr(cs, "val"));
-          if (Number.isFinite(v)) (this as { compatibilityMode: number }).compatibilityMode = v;
+          if (Number.isFinite(v)) {
+            (this as { compatibilityMode: number }).compatibilityMode = v;
+            (this as { declaredCompatibilityMode: number | undefined }).declaredCompatibilityMode = v;
+          }
         }
       }
       const mathPr = child(settings, "mathPr");
