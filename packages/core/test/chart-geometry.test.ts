@@ -45,6 +45,24 @@ describe("chart value axis scale", () => {
     expect(axisScale([0, 0.25, 1], { min: 0, max: 1 }).ticks).toEqual([0, 0.2, 0.4, 0.6, 0.8, 1]);
   });
 
+  // Six single-series column charts that desktop Word rendered at its
+  // defaults, read off probe-charts-autoscale.docx against
+  // parity/probe-charts-autoscale-word.pdf. Word's automatic maximum is the
+  // data maximum plus 5% of the range, rounded up to the next major unit.
+  it.each([
+    { data: [4.2, 7.8, 3.1, 9.6], high: 12, step: 2 },
+    { data: [4.2, 7.8, 3.1, 10], high: 12, step: 2 },
+    { data: [4.2, 7.8, 3.1, 10.4], high: 12, step: 2 },
+    { data: [1.2, 2.8, 1.1, 3.7], high: 4, step: 0.5 },
+    { data: [12, 31, 19, 47], high: 50, step: 5 },
+    { data: [0.2, 0.6, 0.31, 0.85], high: 0.9, step: 0.1 },
+  ])("matches Word's automatic scale for a maximum of $data.3", ({ data, high, step }) => {
+    const scale = axisScale(data);
+    expect(scale.low).toBe(0);
+    expect(scale.high).toBe(high);
+    expect(scale.step).toBe(step);
+  });
+
   it("survives a series with no finite values", () => {
     const scale = axisScale([NaN, NaN]);
     expect(scale.high).toBeGreaterThan(scale.low);
@@ -185,6 +203,17 @@ describe("chart frame", () => {
     expect(bottom.legend?.vertical).toBe(false);
     expect(bottom.plot.height).toBeLessThan(right.plot.height);
     expect(bottom.plot.width).toBeGreaterThan(right.plot.width);
+  });
+
+  it("spaces legend rows at the 18.1pt Word measured for 10pt chart text", () => {
+    const pt = 96 / 72;
+    const legend = chartFrame({
+      ...base,
+      textSize: 10 * pt,
+      legend: "r",
+      legendLabels: ["Alpha", "Beta", "Gamma"],
+    }).legend!;
+    expect(legend.height / 3 / pt).toBeCloseTo(18.1, 3);
   });
 
   it("gives a pie no axis gutters", () => {
