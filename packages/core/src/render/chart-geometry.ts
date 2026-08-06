@@ -305,6 +305,35 @@ const TICK_GAP = 5;
  */
 export const LEGEND_LINE_SPACING = 1.81;
 
+/**
+ * Inset Word keeps on each edge of the plot rectangle, past the title, label
+ * and legend bands, as a fraction of the chart box along the edge's own axis.
+ *
+ * Two pages of probe-charts-basic measure it, each on a different axis of the
+ * same 360 x 216pt chart box. Word's value-axis gridline span beside ours
+ * before this inset (parity commit 6669f9e):
+ *
+ *   column page   plot height  ours 161.0pt   Word 150.2pt   10.8pt too much
+ *   bar page      plot width   ours 282.7pt   Word 264.8pt   17.9pt too much
+ *
+ * The two DIFFERENCES are what this fits, not the two absolute spans. The
+ * extraction reads our own bar page 2.15pt narrower than this function
+ * computes it (284.85pt), where it agrees with the column page exactly, so on
+ * that page it reads both PDFs low and only the difference survives.
+ *
+ * One constant per edge cannot fit both differences — the column asks 5.4pt
+ * and the bar 8.95pt. A fraction of the box can: 10.8 / (2 x 216) is 0.02500
+ * and 17.9 / (2 x 360) is 0.02486. The least-squares fit of the two is the
+ * 0.0249 here. It gives up 10.76pt on the column page against the 10.8
+ * measured and 17.93pt on the bar page against 17.9 — under 0.05pt of residual
+ * on each.
+ *
+ * A fraction is also the shape ChartML states plot geometry in: an explicit
+ * c:plotArea/c:layout gives x, y, w and h as fractions of the chart space, so
+ * Word's automatic layout works in the same units.
+ */
+const PLOT_EDGE_INSET = 0.0249;
+
 /** Carve the chart box into title, legend and plot rectangles. */
 export function chartFrame(spec: ChartFrameSpec): ChartFrame {
   let left = EDGE_PAD;
@@ -356,6 +385,12 @@ export function chartFrame(spec: ChartFrameSpec): ChartFrame {
     // Word leaves room for the topmost tick label to sit beside the axis.
     top += spec.textSize * 0.5;
     right -= spec.textSize * 0.5;
+    // Both probe pages are axis charts, so the inset stays where it was
+    // measured; a pie keeps the whole box its title and legend leave it.
+    left += spec.width * PLOT_EDGE_INSET;
+    right -= spec.width * PLOT_EDGE_INSET;
+    top += spec.height * PLOT_EDGE_INSET;
+    bottom -= spec.height * PLOT_EDGE_INSET;
   }
 
   return {
@@ -395,6 +430,60 @@ export function wedgePath(
   }
   return `M ${at(startAngle, radius)} A ${radius} ${radius} 0 ${large} 1 ${at(endAngle, radius)}` +
     ` L ${at(endAngle, inner)} A ${inner} ${inner} 0 ${large} 0 ${at(startAngle, inner)} Z`;
+}
+
+/**
+ * Marker shapes in the order Word hands them out, one per series.
+ *
+ * The Word render of probe-charts-basic pins the first two: a diamond for
+ * Alpha and a square for Beta (parity commit 6669f9e). The rest follow the
+ * order Office cycles ST_MarkerStyle in. A tenth series starts over at the
+ * diamond.
+ */
+export const MARKER_SHAPES = [
+  "diamond", "square", "triangle", "x", "star", "dot", "dash", "circle", "plus",
+] as const;
+
+export type MarkerShape = (typeof MARKER_SHAPES)[number];
+
+export function markerShapeFor(seriesIndex: number): MarkerShape {
+  return MARKER_SHAPES[seriesIndex % MARKER_SHAPES.length];
+}
+
+/** Word fills the closed marker shapes; the open ones are strokes only. */
+export function markerFilled(shape: MarkerShape): boolean {
+  return shape !== "x" && shape !== "plus" && shape !== "star" && shape !== "dash";
+}
+
+/**
+ * One marker centred on `at`, spanning 2 x `r` across whatever its shape. A
+ * "dot" is Word's small filled circle, half the width of the rest.
+ */
+export function markerPath(shape: MarkerShape, at: Point, r: number): string {
+  const n = (value: number): string => value.toFixed(3);
+  const { x, y } = at;
+  switch (shape) {
+    case "square":
+      return `M ${n(x - r)} ${n(y - r)} H ${n(x + r)} V ${n(y + r)} H ${n(x - r)} Z`;
+    case "triangle":
+      return `M ${n(x)} ${n(y - r)} L ${n(x + r)} ${n(y + r)} L ${n(x - r)} ${n(y + r)} Z`;
+    case "x":
+      return `M ${n(x - r)} ${n(y - r)} L ${n(x + r)} ${n(y + r)}` +
+        ` M ${n(x + r)} ${n(y - r)} L ${n(x - r)} ${n(y + r)}`;
+    case "plus":
+      return `M ${n(x - r)} ${n(y)} L ${n(x + r)} ${n(y)} M ${n(x)} ${n(y - r)} L ${n(x)} ${n(y + r)}`;
+    case "star":
+      return `${markerPath("x", at, r)} ${markerPath("plus", at, r)}`;
+    case "dash":
+      return `M ${n(x - r)} ${n(y)} L ${n(x + r)} ${n(y)}`;
+    case "circle":
+    case "dot": {
+      const radius = shape === "dot" ? r / 2 : r;
+      return `M ${n(x - radius)} ${n(y)} a ${n(radius)} ${n(radius)} 0 1 0 ${n(radius * 2)} 0` +
+        ` a ${n(radius)} ${n(radius)} 0 1 0 ${n(-radius * 2)} 0 Z`;
+    }
+  }
+  return `M ${n(x)} ${n(y - r)} L ${n(x + r)} ${n(y)} L ${n(x)} ${n(y + r)} L ${n(x - r)} ${n(y)} Z`;
 }
 
 /**

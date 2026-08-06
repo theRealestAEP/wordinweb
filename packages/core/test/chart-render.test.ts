@@ -195,6 +195,45 @@ describe("native chart DOM rendering", () => {
     expect((chart.querySelector("path")?.getAttribute("d") ?? "").match(/M /g)).toHaveLength(2);
   });
 
+  it("varies marker shape by series, diamond then square, as Word does", () => {
+    // Word drew Alpha's points as diamonds and Beta's as squares on the line
+    // page of probe-charts-basic; we drew a filled circle for both.
+    const chart = renderChart({
+      type: "line",
+      categories: ["Q1", "Q2"],
+      series: [
+        { name: "Alpha", values: [4.2, 7.8] },
+        { name: "Beta", values: [6.5, 2.4] },
+      ],
+    });
+    const shapes = Array.from(chart.querySelectorAll('[data-dxw-chart-marker="1"]'))
+      .map((marker) => marker.getAttribute("d")!);
+    expect(shapes).toHaveLength(4);
+    // A diamond is four L segments from its top vertex; a square is the H/V
+    // pair. Neither is the arc pair a circle would draw.
+    expect(shapes.slice(0, 2).every((d) => d.match(/ L /g)?.length === 3)).toBe(true);
+    expect(shapes.slice(2).every((d) => d.includes(" H ") && d.includes(" V "))).toBe(true);
+  });
+
+  it("keys a line legend with a segment and its marker, a column's with a swatch", () => {
+    const keys = (type: "line" | "column"): string[] => {
+      const chart = renderChart({
+        type,
+        legend: "r",
+        categories: ["Q1", "Q2"],
+        series: [
+          { name: "Alpha", values: [4.2, 7.8] },
+          { name: "Beta", values: [6.5, 2.4] },
+        ],
+      });
+      return Array.from(chart.querySelectorAll('[data-dxw-chart-legend-key="1"]'))
+        .map((node) => node.tagName.toLowerCase());
+    };
+    // Word's line key is the line segment carrying that series' marker.
+    expect(keys("line")).toEqual(["line", "path", "line", "path"]);
+    expect(keys("column")).toEqual(["rect", "rect"]);
+  });
+
   it("paints pie wedges in proportion and labels them when the file asks", () => {
     const chart = renderChartXml(
       `<c:chartSpace ${C_NS}><c:chart><c:plotArea><c:layout/>` +
@@ -236,8 +275,10 @@ describe("native chart DOM rendering", () => {
       categories: ["1", "2", "4"],
       series: [{ name: "Trial", values: [10, 14, 9] }],
     });
+    // The first series takes the diamond, whose path opens at the top vertex,
+    // so the leading number of each `d` is that marker's centre x.
     const xs = Array.from(chart.querySelectorAll('[data-dxw-chart-marker="1"]'))
-      .map((marker) => Number(marker.getAttribute("cx")));
+      .map((marker) => Number(marker.getAttribute("d")!.match(/-?[\d.]+/)![0]));
     expect(xs).toHaveLength(3);
     // x = 1, 2, 4 puts the third point twice as far from the second as the
     // second is from the first.
@@ -406,6 +447,38 @@ describe("chart round trip", () => {
       expect(chart.childNodes.length, type).toBeGreaterThan(3);
       expect(texts(chart), type).toContain("Insert and reopen");
     }
+  });
+
+  it("authors the gridline, axis and chart-space spPr rather than leaving Word to guess", () => {
+    // Word's fallback for a gridline or axis with no c:spPr is solid black at
+    // 1.0pt, and for a chart space with none it is a hairline frame. Both are
+    // what it painted on probe-charts-basic, and neither is what a chart
+    // inserted through Word's own UI shows.
+    const rule = `<c:spPr><a:noFill/><a:ln w="9525" cap="flat" cmpd="sng" algn="ctr">` +
+      `<a:solidFill><a:schemeClr val="tx1"><a:lumMod val="15000"/><a:lumOff val="85000"/>` +
+      `</a:schemeClr></a:solidFill><a:round/></a:ln><a:effectLst/></c:spPr>`;
+    const space = `<c:spPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill>` +
+      `<a:ln><a:noFill/></a:ln><a:effectLst/></c:spPr>`;
+
+    const partFor = (data: ChartData): string => {
+      const doc = documentWithChart(data);
+      return strFromU8(doc.pkg.raw()[chartPartOf(doc)]);
+    };
+
+    const xml = partFor(sample);
+    // The gridlines and both axes carry it. The schema's slot for an axis
+    // spPr is after c:tickLblPos and before c:crossAx.
+    expect(xml.split(rule)).toHaveLength(4);
+    expect(xml).toContain(`<c:majorGridlines>${rule}</c:majorGridlines>`);
+    expect(xml).toContain(`<c:tickLblPos val="nextTo"/>${rule}<c:crossAx val="48672768"/>`);
+    expect(xml).toContain(`<c:tickLblPos val="nextTo"/>${rule}<c:crossAx val="48650112"/>`);
+    // The chart space carries its own, between c:chart and c:externalData.
+    expect(xml).toContain(`</c:chart>${space}<c:externalData`);
+
+    // A pie has no axes to rule, and still gets the chart space.
+    const pie = partFor({ ...sample, type: "pie" });
+    expect(pie).not.toContain(rule);
+    expect(pie).toContain(`</c:chart>${space}<c:externalData`);
   });
 
   it("saves an untouched chart part and its workbook byte for byte", () => {

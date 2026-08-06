@@ -177,14 +177,39 @@ function chartSeries(data: ChartData): string {
 const CATEGORY_AXIS_ID = "48650112";
 const VALUE_AXIS_ID = "48672768";
 
+/**
+ * The line Word's own UI puts on a chart's gridlines and axes: tx1 at 15%
+ * luminance, which resolves to #D9D9D9, drawn 9525 EMU (0.75pt) wide.
+ *
+ * Authoring it matters. An axis or a c:majorGridlines with no c:spPr makes Word
+ * fall back to solid black at 1.0pt, which is what it painted on
+ * probe-charts-basic and most of that probe's remaining ink weight (parity
+ * commit 6669f9e). No chart inserted through Word's own UI looks like that, and
+ * #D9D9D9 at 0.75pt is what this engine's renderer already draws.
+ */
+const RULE_SPPR = `<c:spPr><a:noFill/><a:ln w="9525" cap="flat" cmpd="sng" algn="ctr">` +
+  `<a:solidFill><a:schemeClr val="tx1"><a:lumMod val="15000"/><a:lumOff val="85000"/></a:schemeClr></a:solidFill>` +
+  `<a:round/></a:ln><a:effectLst/></c:spPr>`;
+
+/**
+ * The chart space: white, with no frame around it.
+ *
+ * Word's fallback for a c:chartSpace with no c:spPr is a black hairline
+ * rectangle, which the Word render of probe-charts-basic shows as a #898989
+ * frame. A chart inserted through Word's UI has no frame, and this renderer
+ * draws none, so state that outright rather than leaving Word to guess.
+ */
+const CHART_SPACE_SPPR = `<c:spPr><a:solidFill><a:schemeClr val="bg1"/></a:solidFill>` +
+  `<a:ln><a:noFill/></a:ln><a:effectLst/></c:spPr>`;
+
 /** The c:catAx (or, for scatter, the second c:valAx) along the chart's
  * category direction. */
 function categoryAxisXml(horizontal: boolean, numeric: boolean): string {
   const shared = `<c:axId val="${CATEGORY_AXIS_ID}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
     `<c:delete val="0"/><c:axPos val="${horizontal ? "l" : "b"}"/>` +
     `<c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="out"/>` +
-    `<c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/><c:crossAx val="${VALUE_AXIS_ID}"/>` +
-    `<c:crosses val="autoZero"/>`;
+    `<c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>${RULE_SPPR}` +
+    `<c:crossAx val="${VALUE_AXIS_ID}"/><c:crosses val="autoZero"/>`;
   return numeric
     ? `<c:valAx>${shared}<c:crossBetween val="midCat"/></c:valAx>`
     : `<c:catAx>${shared}<c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/></c:catAx>`;
@@ -194,9 +219,10 @@ function categoryAxisXml(horizontal: boolean, numeric: boolean): string {
  * insets a bar's or column's inside their bands (between). */
 function valueAxisXml(horizontal: boolean, crossBetween: "between" | "midCat"): string {
   return `<c:valAx><c:axId val="${VALUE_AXIS_ID}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
-    `<c:delete val="0"/><c:axPos val="${horizontal ? "b" : "l"}"/><c:majorGridlines/>` +
+    `<c:delete val="0"/><c:axPos val="${horizontal ? "b" : "l"}"/>` +
+    `<c:majorGridlines>${RULE_SPPR}</c:majorGridlines>` +
     `<c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="none"/>` +
-    `<c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>` +
+    `<c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>${RULE_SPPR}` +
     `<c:crossAx val="${CATEGORY_AXIS_ID}"/><c:crosses val="autoZero"/>` +
     `<c:crossBetween val="${crossBetween}"/></c:valAx>`;
 }
@@ -235,6 +261,7 @@ export function buildChartXml(input: ChartData, workbookRelId = "rId1"): string 
     `<c:plotArea><c:layout/>${chartPlot(data)}</c:plotArea>` +
     `<c:legend><c:legendPos val="r"/><c:layout/><c:overlay val="0"/></c:legend>` +
     `<c:plotVisOnly val="1"/><c:dispBlanksAs val="gap"/><c:showDLblsOverMax val="0"/></c:chart>` +
+    CHART_SPACE_SPPR +
     `<c:externalData r:id="${escapeXml(workbookRelId)}"><c:autoUpdate val="0"/></c:externalData>` +
     `</c:chartSpace>`;
 }

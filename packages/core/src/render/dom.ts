@@ -6,6 +6,7 @@ import { cssFont, cambriaMathDescentShare, fontWidthScale } from "../layout/meas
 import { Border, type ChartAxis, type ChartData, type Theme } from "../model.js";
 import {
   type AxisScale,
+  type MarkerShape,
   type Point,
   type Rect,
   LEGEND_LINE_SPACING,
@@ -15,6 +16,9 @@ import {
   defaultOverlap,
   formatChartNumber,
   linePath,
+  markerFilled,
+  markerPath,
+  markerShapeFor,
   stackPoints,
   textWidth,
   wedgePath,
@@ -1504,9 +1508,19 @@ function pointColor(pen: ChartPen, seriesIndex: number, pointIndex: number): str
   return series?.color ?? pen.colors[seriesIndex % pen.colors.length];
 }
 
+/** A legend row. `line` and `shape` carry what the series itself draws, which
+ * is what Word puts in the key for a line or scatter series. */
+interface LegendEntry {
+  text: string;
+  color: string;
+  line?: boolean;
+  shape?: MarkerShape;
+}
+
 /** Legend rows: one per point for a varied single series, else one per series. */
-function legendEntries(pen: ChartPen): Array<{ text: string; color: string }> {
-  const vary = pen.data.varyColors ?? (pen.data.type === "pie" || pen.data.type === "doughnut");
+function legendEntries(pen: ChartPen): LegendEntry[] {
+  const type = pen.data.type;
+  const vary = pen.data.varyColors ?? (type === "pie" || type === "doughnut");
   if (vary && pen.data.series.length <= 1) {
     return pen.data.categories.map((category, index) => ({
       text: category || `Point ${index + 1}`,
@@ -1516,11 +1530,67 @@ function legendEntries(pen: ChartPen): Array<{ text: string; color: string }> {
   const entries = pen.data.series.map((series, index) => ({
     text: series.name,
     color: pointColor(pen, index, -1),
+    ...(type === "line" || (type === "scatter" && series.smooth) ? { line: true } : {}),
+    ...(type === "scatter" || (type === "line" && pen.data.markers)
+      ? { shape: markerShapeFor(index) }
+      : {}),
   }));
   // A horizontal bar chart runs its categories up the left edge, so the first
   // category sits at the bottom. Word reverses the legend to match: on the
   // probe chart it lists Beta above Alpha.
-  return pen.data.type === "bar" ? entries.reverse() : entries;
+  return type === "bar" ? entries.reverse() : entries;
+}
+
+/**
+ * Word draws the series colour in the marker and outlines a closed shape in
+ * white, so a marker stays visible where it sits on the line.
+ *
+ * `tag` says where this marker sits — over a plotted point, or in a legend key
+ * — because the two carry the same shape and only their place differs.
+ */
+function paintMarker(
+  pen: ChartPen,
+  at: Point,
+  r: number,
+  shape: MarkerShape,
+  color: string,
+  tag: "marker" | "legend-key" = "marker",
+): void {
+  const filled = markerFilled(shape);
+  pen.add("path", {
+    d: markerPath(shape, at, r),
+    fill: filled ? color : "none",
+    stroke: filled ? "#fff" : color,
+    "stroke-width": filled ? 1 : 1.25,
+    [`data-dxw-chart-${tag}`]: "1",
+  });
+}
+
+/**
+ * One legend key at the left of its row.
+ *
+ * Word keys an area or a bar with a filled swatch, and a line or scatter series
+ * with the line segment and marker that series draws — measured on the line
+ * page of probe-charts-basic, where our filled swatch was one of the residuals.
+ */
+function paintLegendKey(pen: ChartPen, entry: LegendEntry, x: number, y: number, size: number): void {
+  if (!entry.line && !entry.shape) {
+    pen.add("rect", {
+      x, y: y - size / 2, width: size, height: size, fill: entry.color,
+      "data-dxw-chart-legend-key": "1",
+    });
+    return;
+  }
+  if (entry.line) {
+    pen.add("line", {
+      x1: x, y1: y, x2: x + size, y2: y,
+      stroke: entry.color, "stroke-width": 2.25, "stroke-linecap": "round",
+      "data-dxw-chart-legend-key": "1",
+    });
+  }
+  if (entry.shape) {
+    paintMarker(pen, { x: x + size / 2, y }, size * 0.35, entry.shape, entry.color, "legend-key");
+  }
 }
 
 function paintLegend(pen: ChartPen, box: Rect & { vertical: boolean }): void {
@@ -1530,7 +1600,7 @@ function paintLegend(pen: ChartPen, box: Rect & { vertical: boolean }): void {
     const step = pen.size * LEGEND_LINE_SPACING;
     entries.forEach((entry, index) => {
       const y = box.y + step * index + step / 2;
-      pen.add("rect", { x: box.x, y: y - swatch / 2, width: swatch, height: swatch, fill: entry.color });
+      paintLegendKey(pen, entry, box.x, y, swatch);
       pen.label(box.x + swatch + 6, y + pen.size * 0.35, entry.text);
     });
     return;
@@ -1542,7 +1612,7 @@ function paintLegend(pen: ChartPen, box: Rect & { vertical: boolean }): void {
   let x = box.x + Math.max((box.width - total) / 2, 0);
   const y = box.y + box.height / 2;
   entries.forEach((entry, index) => {
-    pen.add("rect", { x, y: y - swatch / 2, width: swatch, height: swatch, fill: entry.color });
+    paintLegendKey(pen, entry, x, y, swatch);
     pen.label(x + swatch + 5, y + pen.size * 0.35, entry.text);
     x += widths[index] + 14;
   });
@@ -1847,12 +1917,9 @@ function paintCategoryChart(pen: ChartPen, plot: Rect): void {
       "stroke-linecap": "round", "stroke-linejoin": "round",
     });
     if (data.markers) {
+      const shape = markerShapeFor(seriesIndex);
       points.forEach((point) => {
-        if (!point) return;
-        pen.add("circle", {
-          cx: point.x, cy: point.y, r: 3, fill: color, stroke: "#fff", "stroke-width": 1,
-          "data-dxw-chart-marker": "1",
-        });
+        if (point) paintMarker(pen, point, 3, shape, color);
       });
     }
     if (data.dataLabels) {
@@ -1903,12 +1970,9 @@ function paintScatter(pen: ChartPen, plot: Rect): void {
     if (series.smooth) {
       pen.add("path", { d: linePath(points, true), fill: "none", stroke: color, "stroke-width": 2.25 });
     }
+    const shape = markerShapeFor(seriesIndex);
     points.forEach((point) => {
-      if (!point) return;
-      pen.add("circle", {
-        cx: point.x, cy: point.y, r: 3.5, fill: color, stroke: "#fff", "stroke-width": 1,
-        "data-dxw-chart-marker": "1",
-      });
+      if (point) paintMarker(pen, point, 3.5, shape, color);
     });
   });
 }

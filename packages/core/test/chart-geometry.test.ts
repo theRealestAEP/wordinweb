@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  MARKER_SHAPES,
   axisScale,
   barSlots,
   chartFrame,
   defaultOverlap,
   formatChartNumber,
   linePath,
+  markerFilled,
+  markerPath,
+  markerShapeFor,
   stackPoints,
   wedgePath,
 } from "../src/render/chart-geometry.js";
@@ -219,6 +223,77 @@ describe("chart frame", () => {
   it("gives a pie no axis gutters", () => {
     const pie = chartFrame({ ...base, axes: false });
     expect(pie.plot).toEqual({ x: 6, y: 6, width: 468, height: 276 });
+  });
+
+  it("gives up the plot room Word gives up on the two measured probe pages", () => {
+    // Pages 1 and 4 of probe-charts-basic: the same 480 x 288px (360 x 216pt)
+    // chart box, an 18pt title over 10pt text, ticks 0..12 by 2 and a right
+    // legend of Alpha and Beta. Word's value-axis gridline span was 150.2pt on
+    // the column page and 264.8pt on the bar page, ours 161.0 and 282.7
+    // (parity commit 6669f9e).
+    const pt = 96 / 72;
+    const probe = {
+      width: 480,
+      height: 288,
+      titleSize: 18 * pt,
+      textSize: 10 * pt,
+      legend: "r" as const,
+      valueLabels: ["0", "2", "4", "6", "8", "10", "12"],
+      axes: true,
+    };
+    const column = chartFrame({
+      ...probe,
+      title: "Clustered column",
+      legendLabels: ["Alpha", "Beta"],
+      categoryLabels: [],
+      horizontalValues: false,
+    });
+    const bar = chartFrame({
+      ...probe,
+      title: "Bar",
+      legendLabels: ["Beta", "Alpha"],
+      categoryLabels: ["Q1", "Q2", "Q3", "Q4"],
+      horizontalValues: true,
+    });
+
+    // The column page went 161.0 -> 150.24pt against Word's 150.2.
+    expect(column.plot.height / pt).toBeCloseTo(150.24, 2);
+    // The bar page gives up the measured 17.9pt, landing at 266.92pt. The
+    // extraction read our own render of this page 2.15pt under what this
+    // function computes, so the difference is what the fit closes and Word's
+    // absolute 264.8 sits that same 2.1pt below.
+    expect(bar.plot.width / pt).toBeCloseTo(266.92, 2);
+    expect(284.85 - bar.plot.width / pt).toBeCloseTo(17.9, 1);
+  });
+});
+
+describe("chart markers", () => {
+  it("hands shapes out in Word's order, diamond then square", () => {
+    expect(markerShapeFor(0)).toBe("diamond");
+    expect(markerShapeFor(1)).toBe("square");
+    expect(markerShapeFor(2)).toBe("triangle");
+    // A tenth series starts the nine-shape sequence over.
+    expect(MARKER_SHAPES).toHaveLength(9);
+    expect(markerShapeFor(9)).toBe("diamond");
+  });
+
+  it("centres each shape on its point and spans twice the radius", () => {
+    expect(markerPath("diamond", { x: 10, y: 20 }, 3))
+      .toBe("M 10.000 17.000 L 13.000 20.000 L 10.000 23.000 L 7.000 20.000 Z");
+    expect(markerPath("square", { x: 10, y: 20 }, 3))
+      .toBe("M 7.000 17.000 H 13.000 V 23.000 H 7.000 Z");
+    expect(markerPath("triangle", { x: 0, y: 0 }, 2))
+      .toBe("M 0.000 -2.000 L 2.000 2.000 L -2.000 2.000 Z");
+    expect(markerPath("dash", { x: 0, y: 0 }, 2)).toBe("M -2.000 0.000 L 2.000 0.000");
+    // A star is an x and a plus over each other: four strokes.
+    expect(markerPath("star", { x: 0, y: 0 }, 1).match(/M /g)).toHaveLength(4);
+    // A dot is Word's small filled circle, half the width of the rest.
+    expect(markerPath("dot", { x: 0, y: 0 }, 4)).toContain("a 2.000 2.000");
+  });
+
+  it("fills the closed shapes and strokes the open ones", () => {
+    expect(MARKER_SHAPES.filter(markerFilled))
+      .toEqual(["diamond", "square", "triangle", "dot", "circle"]);
   });
 });
 
