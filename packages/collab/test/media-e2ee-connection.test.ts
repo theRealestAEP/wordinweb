@@ -378,6 +378,13 @@ describe("collaborative undo over two encrypted clients (doc 03 Phase 8)", () =>
     await until(() => bodyText(a).includes("ONE"), "first edit");
     a.submit(ins(5, "TWO"));
     await until(() => bodyText(b).includes("TWO"), "B to see both");
+    // undoLast() takes from A's MIRROR, which advances only by ingesting
+    // sequenced envelopes, and A paints her own edits optimistically before
+    // that. B seeing TWO says nothing about A's mirror: the two clients drain
+    // independent async chains and A's also carries her own sealIntent work,
+    // so A routinely finishes last. Without this wait a slow A undoes ONE —
+    // the only entry her stack holds — and the wait below can never pass.
+    await until(() => a.pendingCount === 0, "A's mirror to confirm both edits");
 
     expect(a.undoLast()).toBe("undone");
     await until(() => !bodyText(a).includes("TWO"), "second undo target gone");

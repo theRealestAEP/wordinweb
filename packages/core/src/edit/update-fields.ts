@@ -30,10 +30,17 @@ import { XmlElement, attr, localName } from "../xml.js";
  * MERGEFIELD, DOCPROPERTY …) has a cache that is the best value available, and
  * overwriting it with a guess would lose information the file still holds.
  *
- * HEADERS AND FOOTERS ARE OUT OF SCOPE, by nature rather than by omission. A
- * header PAGE field has a different value on every page; there is no single
- * result to cache. Word stores one stale result there too and recomputes on
- * open, exactly as this engine does at layout.
+ * HEADERS AND FOOTERS are walked too, but only for the instructions whose
+ * value does not depend on how the document paginated. A header renders once
+ * per page, so a header PAGE field has a different value on every page and
+ * there is no single result to cache; SECTIONPAGES, SEQ and STYLEREF vary the
+ * same way (the layout resolves a header STYLEREF against whichever paragraph
+ * starts on the field's own page — see finalizeHeadersFooters), and NUMPAGES
+ * and PAGEREF, though constant across pages, still answer out of a pagination
+ * this host's font stack produced. Word leaves all of them stale in the file
+ * and recomputes on open, exactly as this engine does at layout. DATE, TIME,
+ * FILENAME, AUTHOR and a REF to a body bookmark read the same on every page
+ * however the document broke, so each has one result worth writing.
  *
  * DETERMINISM UNDER REPLICATION. Layout is NOT replica-independent: font
  * metrics differ between hosts, so pagination — and therefore every page
@@ -55,6 +62,15 @@ const LOCALLY_RESOLVED = new Set(["DATE", "TIME", "FILENAME", "AUTHOR", "STYLERE
 export const UPDATABLE_FIELD_KEYWORDS: readonly string[] = Object.freeze(
   [...LAYOUT_RESOLVED, ...LOCALLY_RESOLVED].sort(),
 );
+
+/**
+ * The instructions the pass recomputes inside a header or footer: exactly
+ * those whose value does not depend on how the document paginated. A header
+ * paints once per page, so anything pagination-dependent (PAGE, NUMPAGES,
+ * SECTIONPAGES, PAGEREF, SEQ, STYLEREF) has no single result to cache and
+ * keeps the one the file holds.
+ */
+const HF_SINGLE_VALUED = new Set(["DATE", "TIME", "FILENAME", "AUTHOR", "REF"]);
 
 export interface FieldUpdateOptions {
   /**
@@ -83,10 +99,18 @@ function keywordOf(instruction: string): string {
 }
 
 /**
- * Every field in the document body that the pass can address, in document
- * order. This enumeration is the operation's addressing scheme: a replicated
- * update carries one result per site, positionally, so both sides must walk
- * the document the same way.
+ * Every field the pass can address: the body in document order, then each
+ * header part, then each footer part, taking only the single-valued
+ * instructions inside a header or footer. This enumeration is the operation's
+ * addressing scheme: a replicated update carries one result per site,
+ * positionally, so both sides must walk the document the same way.
+ *
+ * The part order is the order document.xml.rels declares the parts, which is
+ * what `doc.headers` and `doc.footers` iterate — every replica loads the same
+ * package and creates any later part through the same sequenced operation, so
+ * every replica walks the parts in the same order. A part shared by several
+ * sections is visited once, because it IS one part; the sections referencing
+ * it do not multiply its fields.
  *
  * A field with no `src` came from a shape this pass cannot write back to (a
  * legacy w:pgNum run has no field XML of its own) and is skipped on both
@@ -94,12 +118,13 @@ function keywordOf(instruction: string): string {
  */
 export function collectFieldSites(doc: DocxDocument): FieldSite[] {
   const sites: FieldSite[] = [];
-  const visitRun = (run: Run): void => {
-    for (const content of run.content) {
-      if (content.kind === "field" && content.src) sites.push({ field: content, run });
-    }
-  };
-  const visitBlocks = (blocks: Block[]): void => {
+  const visitBlocks = (blocks: Block[], accept: (keyword: string) => boolean): void => {
+    const visitRun = (run: Run): void => {
+      for (const content of run.content) {
+        if (content.kind !== "field" || !content.src) continue;
+        if (accept(keywordOf(content.instruction))) sites.push({ field: content, run });
+      }
+    };
     for (const block of blocks) {
       if (block.type === "paragraph") {
         for (const child of block.children) {
@@ -107,11 +132,18 @@ export function collectFieldSites(doc: DocxDocument): FieldSite[] {
           else for (const run of child.runs) visitRun(run);
         }
       } else {
-        for (const row of block.rows) for (const cell of row.cells) visitBlocks(cell.blocks);
+        for (const row of block.rows) for (const cell of row.cells) visitBlocks(cell.blocks, accept);
       }
     }
   };
-  for (const section of doc.sections) visitBlocks(section.blocks);
+  // The body takes every field, updatable or not: a site the pass cannot
+  // recompute still reports its own cached result, so the array stays a
+  // complete snapshot of the body.
+  const anyInstruction = (): boolean => true;
+  const singleValued = (keyword: string): boolean => HF_SINGLE_VALUED.has(keyword);
+  for (const section of doc.sections) visitBlocks(section.blocks, anyInstruction);
+  for (const header of doc.headers.values()) visitBlocks(header.blocks, singleValued);
+  for (const footer of doc.footers.values()) visitBlocks(footer.blocks, singleValued);
   return sites;
 }
 
@@ -125,16 +157,20 @@ export function collectFieldSites(doc: DocxDocument): FieldSite[] {
  * Field atoms are pushed with `src.t === null` ("format the whole run": a
  * field is atomic, so no source w:t backs its glyphs), which is what separates
  * them from the run's ordinary text. A run laid out on more than one page — a
- * repeated table header row — keeps its FIRST page's text, the same rule Word
- * uses when it caches one result for a repeated row.
+ * repeated table header row, or any run in a header — keeps its FIRST page's
+ * text, the same rule Word uses when it caches one result for a repeated row.
+ *
+ * Both bands of the page are read, body and header/footer. One map covers both
+ * because the two never share a run: a page's items up to `hfStart` come from
+ * the body, and the rest from that page's header and footer parts. The header
+ * fields that would be wrong to harvest from one page are excluded earlier, by
+ * collectFieldSites, so they never reach this map.
  */
 function harvestFieldText(layout: LayoutResult): Map<Run, string> {
   const harvested = new Map<Run, string>();
   for (const page of layout.pages) {
     const onThisPage = new Map<Run, string>();
-    const limit = page.hfStart > 0 ? page.hfStart : page.items.length;
-    for (let i = 0; i < limit; i++) {
-      const item = page.items[i];
+    for (const item of page.items) {
       if (item.kind !== "text" || !item.src || item.src.t !== null) continue;
       onThisPage.set(item.src.run, (onThisPage.get(item.src.run) ?? "") + item.text);
     }

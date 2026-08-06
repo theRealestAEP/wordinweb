@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { strFromU8, unzipSync } from "fflate";
 import { DocxDocument } from "../src/docx.js";
 import { computeFieldResults, applyFieldResults, updateFields } from "../src/edit/update-fields.js";
 import { layoutDocument } from "../src/layout/engine.js";
 import { ApproxMeasurer } from "../src/layout/measure.js";
 import { Block } from "../src/model.js";
 import { serializeXml } from "../src/xml.js";
-import { makeDocx, wrapDocument } from "./helpers.js";
+import { makeDocx, p, W_NS, wrapDocument } from "./helpers.js";
 
 const measurer = new ApproxMeasurer();
 
@@ -37,11 +38,11 @@ function documentXml(doc: DocxDocument): string {
   return serializeXml(doc.docRoot);
 }
 
-/** Every cached result now in the file, in document order. */
-function caches(doc: DocxDocument): string[] {
+/** Every cached result in `blocks`, in document order. */
+function cachesIn(blocks: Block[]): string[] {
   const out: string[] = [];
-  const visit = (blocks: Block[]): void => {
-    for (const block of blocks) {
+  const visit = (bs: Block[]): void => {
+    for (const block of bs) {
       if (block.type !== "paragraph") {
         for (const row of block.rows) for (const cell of row.cells) visit(cell.blocks);
         continue;
@@ -55,8 +56,13 @@ function caches(doc: DocxDocument): string[] {
       }
     }
   };
-  for (const section of doc.sections) visit(section.blocks);
+  visit(blocks);
   return out;
+}
+
+/** Every cached result now in the body, in document order. */
+function caches(doc: DocxDocument): string[] {
+  return doc.sections.flatMap((section) => cachesIn(section.blocks));
 }
 
 describe("update pass: locally resolved instructions", () => {
@@ -297,5 +303,151 @@ describe("stale page-break hints", () => {
     const changed = applyFieldResults(doc, ["1"]);
     expect(changed).toBe(false);
     expect(documentXml(doc)).toContain("lastRenderedPageBreak");
+  });
+});
+
+const R_NS = `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"`;
+
+/**
+ * A document whose single section references one header part and one footer
+ * part. document.xml.rels declares the header first, which is the order the
+ * site walk visits the parts in.
+ */
+function loadWithHf(body: string, headerBody: string, footerBody: string): DocxDocument {
+  const documentXml =
+    `<?xml version="1.0"?><w:document ${W_NS}><w:body>${body}` +
+    `<w:sectPr ${R_NS}>` +
+    `<w:headerReference w:type="default" r:id="rIdH"/>` +
+    `<w:footerReference w:type="default" r:id="rIdF"/>` +
+    `<w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>` +
+    `</w:sectPr></w:body></w:document>`;
+  return DocxDocument.load(
+    makeDocx({
+      "word/document.xml": documentXml,
+      "word/styles.xml": STYLES_XML,
+      "word/header1.xml": `<?xml version="1.0"?><w:hdr ${W_NS}>${headerBody}</w:hdr>`,
+      "word/footer1.xml": `<?xml version="1.0"?><w:ftr ${W_NS}>${footerBody}</w:ftr>`,
+      "word/_rels/document.xml.rels":
+        `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>` +
+        `<Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>` +
+        `</Relationships>`,
+    }),
+  );
+}
+
+const headerCaches = (doc: DocxDocument): string[] => cachesIn([...doc.headers.values()][0].blocks);
+const footerCaches = (doc: DocxDocument): string[] => cachesIn([...doc.footers.values()][0].blocks);
+/** Every mutable XML root, for the checks that must see the header parts too. */
+const allXml = (doc: DocxDocument): string => doc.editableRoots().map((r) => serializeXml(r)).join("|");
+
+describe("update pass: headers and footers", () => {
+  const clock = new Date(Date.UTC(2024, 2, 14, 15, 9, 26));
+  const pageBreak = `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
+  const heading = (text: string) =>
+    `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+
+  it("a header DATE and a footer FILENAME take the recomputed value", () => {
+    const doc = loadWithHf(
+      p("body"),
+      `<w:p>${field('DATE \\@ "yyyy"', "1999")}</w:p>`,
+      `<w:p>${field("FILENAME", "old.docx")}</w:p>`,
+    );
+    expect(updateFields(doc, { now: clock, fileName: "report.docx" })).toBe(true);
+    expect(headerCaches(doc)).toEqual(["2024"]);
+    expect(footerCaches(doc)).toEqual(["report.docx"]);
+  });
+
+  it("a header PAGE and NUMPAGES keep their caches: a header paints once per page", () => {
+    const doc = loadWithHf(
+      `<w:p>${field("PAGE", "99")}</w:p>` + pageBreak + p("second"),
+      `<w:p>${field("PAGE", "99")}${field("NUMPAGES", "99")}</w:p>`,
+      p("plain footer"),
+    );
+    updateFields(doc, { layout: layoutDocument(doc, { measurer }) });
+    expect(caches(doc)).toEqual(["1"]);
+    expect(headerCaches(doc)).toEqual(["99", "99"]);
+  });
+
+  it("a header STYLEREF keeps its cache: it resolves against the field's own page", () => {
+    const doc = loadWithHf(
+      heading("Chapter One"),
+      `<w:p>${field('STYLEREF "Heading 1"', "STALE")}</w:p>`,
+      p("plain footer"),
+    );
+    expect(updateFields(doc, { layout: layoutDocument(doc, { measurer }) })).toBe(false);
+    expect(headerCaches(doc)).toEqual(["STALE"]);
+  });
+
+  it("a header REF re-renders the body bookmark it names", () => {
+    const doc = loadWithHf(
+      `<w:p><w:bookmarkStart w:id="1" w:name="bk"/><w:r><w:t xml:space="preserve">Introduction</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>`,
+      `<w:p>${field("REF bk \\h", "STALE")}</w:p>`,
+      p("plain footer"),
+    );
+    updateFields(doc, { layout: layoutDocument(doc, { measurer }) });
+    expect(headerCaches(doc)).toEqual(["Introduction"]);
+  });
+
+  it("enumerates the body first, then the header part, then the footer part", () => {
+    const doc = loadWithHf(
+      `<w:p>${field('DATE \\@ "yyyy"', "1999")}</w:p>`,
+      `<w:p>${field("FILENAME", "old.docx")}</w:p>`,
+      `<w:p>${field("AUTHOR", "Nobody")}</w:p>`,
+    );
+    const results = computeFieldResults(doc, {
+      now: clock,
+      fileName: "report.docx",
+      author: "A. Pickett",
+    });
+    expect(results).toEqual(["2024", "report.docx", "A. Pickett"]);
+  });
+
+  it("saving re-serializes the header part the update changed", () => {
+    const doc = loadWithHf(p("body"), `<w:p>${field('DATE \\@ "yyyy"', "1999")}</w:p>`, p("plain footer"));
+    updateFields(doc, { now: clock });
+    expect(strFromU8(unzipSync(doc.save())["word/header1.xml"])).toContain(">2024<");
+  });
+
+  it("leaves every part byte-identical when no header field is updatable", () => {
+    const doc = loadWithHf(
+      p("body"),
+      `<w:p>${field("PAGE", "99")}</w:p>`,
+      `<w:p>${field("FILENAME", "kept.docx")}</w:p>`,
+    );
+    const before = allXml(doc);
+    expect(updateFields(doc, { now: clock, layout: layoutDocument(doc, { measurer }) })).toBe(false);
+    expect(allXml(doc)).toBe(before);
+  });
+
+  it("results computed on one replica apply identically on another", () => {
+    const make = () =>
+      loadWithHf(
+        `<w:p>${field("AUTHOR", "Nobody")}</w:p>`,
+        `<w:p>${field('DATE \\@ "yyyy"', "1999")}</w:p>`,
+        `<w:p>${field("FILENAME", "old.docx")}</w:p>`,
+      );
+    const origin = make();
+    const replica = make();
+    const results = computeFieldResults(origin, {
+      now: clock,
+      author: "A. Pickett",
+      fileName: "report.docx",
+    });
+    expect(applyFieldResults(origin, results)).toBe(true);
+    expect(applyFieldResults(replica, results)).toBe(true);
+    expect(allXml(replica)).toBe(allXml(origin));
+  });
+
+  it("a replica whose header gained a field rejects the whole update", () => {
+    const replica = loadWithHf(
+      p("body"),
+      `<w:p>${field("AUTHOR", "One")}${field("AUTHOR", "Two")}</w:p>`,
+      p("plain footer"),
+    );
+    const before = allXml(replica);
+    expect(applyFieldResults(replica, ["A. Pickett"])).toBe(false);
+    expect(allXml(replica)).toBe(before);
   });
 });

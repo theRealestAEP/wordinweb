@@ -36,6 +36,39 @@ function makeDoc(body: string): DocxDocument {
   );
 }
 
+/** A document whose section references a header part holding a DATE field. */
+function makeDocWithHeader(): DocxDocument {
+  const w = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"`;
+  const r = `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"`;
+  return DocxDocument.load(
+    zipSync({
+      "[Content_Types].xml": strToU8(
+        `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+          `<Default Extension="xml" ContentType="application/xml"/>` +
+          `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+          `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+      ),
+      "_rels/.rels": strToU8(
+        `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+          `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+      ),
+      "word/document.xml": strToU8(
+        `<?xml version="1.0"?><w:document ${w}><w:body>` +
+          `<w:p>${field("AUTHOR", "Nobody")}</w:p>` +
+          `<w:sectPr ${r}><w:headerReference w:type="default" r:id="rIdH"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>` +
+          `</w:body></w:document>`,
+      ),
+      "word/header1.xml": strToU8(
+        `<?xml version="1.0"?><w:hdr ${w}><w:p>${field('DATE \\@ "yyyy"', "1999")}</w:p></w:hdr>`,
+      ),
+      "word/_rels/document.xml.rels": strToU8(
+        `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+          `<Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`,
+      ),
+    }),
+  );
+}
+
 const BODY =
   `<w:p>${field('DATE \\@ "yyyy"', "1999")}</w:p>` +
   `<w:p>${field("AUTHOR", "Nobody")}</w:p>` +
@@ -61,6 +94,29 @@ describe("updateFields: a document-scoped registered operation", () => {
     expect(xmlOf(a)).toBe(xmlOf(b));
     expect(xmlOf(a)).toContain(`<w:t xml:space="preserve">2026</w:t>`);
     expect(xmlOf(a)).toContain(`<w:t xml:space="preserve">A. Pickett</w:t>`);
+  });
+
+  it("carries the header's single-valued results too, so the parts converge", () => {
+    // A header part is shared by every section that references it, and it is a
+    // separate XML root — xmlOf covers it, so a replica that walked the parts
+    // in another order or skipped one would show up here.
+    const a = new DocumentSession(makeDocWithHeader());
+    const b = new DocumentSession(makeDocWithHeader());
+    const intent = {
+      kind: "updateFields" as const,
+      clientId: "a",
+      clientSeq: 1,
+      base: 0,
+      // Body AUTHOR, then the header's DATE — the body comes first, the header
+      // parts follow in the order document.xml.rels declares them.
+      results: ["A. Pickett", "2026"],
+    };
+    expect(a.submit(intent).kind).toBe("applied");
+    expect(b.submit(intent).kind).toBe("applied");
+    expect(xmlOf(a)).toBe(xmlOf(b));
+    // The body carries no DATE field, so only the header part can hold this.
+    expect(serializeXml(a.doc.docRoot)).not.toContain("2026");
+    expect(xmlOf(a)).toContain(`<w:t xml:space="preserve">2026</w:t>`);
   });
 
   it("rejects when the replica's field count has moved, changing nothing", () => {
