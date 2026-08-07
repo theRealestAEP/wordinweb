@@ -7,7 +7,7 @@ import { TextItem } from "../layout/types.js";
 import { selectionToSegments } from "./selection.js";
 import { runWireLength, wireOffsetOf, type EncodedCaret } from "./ids.js";
 import { EditHistory } from "./history.js";
-import { advanceCell, cellRangeBetween, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
+import { advanceCell, applyTableOp, cellRangeBetween, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
 import { pxToTwips } from "../units.js";
 import { listLevelAt, listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
@@ -342,7 +342,7 @@ export type EditorIntent =
   | { kind: "insertBreak"; runId: number; breakKind: "page" | "column"; nodeIds: number[] }
   | { kind: "resizeTableColumn"; cellParagraphId: number; boundary: number; deltaPx: number; renderedWidths?: number[] }
   | { kind: "moveTable"; cellParagraphId: number; xPx: number; yPx: number; preservePageStart: boolean; pageDelta: number }
-  | { kind: "tableOp"; cellParagraphId: number; op: { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number } }
+  | { kind: "tableOp"; cellParagraphId: number; op: "deleteTable" | { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number } }
   | { kind: "removeDrawing"; runId: number; objectIndex?: number }
   | { kind: "setMathLinear"; blockId: number; mathIndex: number; mathText: string }
   | { kind: "deleteMath"; blockId: number; mathIndex: number }
@@ -383,6 +383,17 @@ function deepTextNode(el: HTMLElement): Node | null {
 function trackedNodeCount(total: number, el: XmlElement): number {
   const ln = localName(el.name);
   return el.children.reduce(trackedNodeCount, total + (ln === "p" || ln === "tbl" || ln === "r" ? 1 : 0));
+}
+
+/** First w:p under `el` in document order (the wire address a tableOp needs:
+ * a paragraph inside the target table's first cell). */
+function firstParagraphIn(el: XmlElement): XmlElement | null {
+  if (localName(el.name) === "p") return el;
+  for (const c of el.children) {
+    const p = firstParagraphIn(c);
+    if (p) return p;
+  }
+  return null;
 }
 
 function textElements(el: XmlElement): XmlElement[] {
@@ -7351,23 +7362,29 @@ export class DocxEditor {
     // Cell-granular (G12): Word CLEARS the covered cells and never removes
     // structure or list formatting, so the whole-table/unbullet fast paths
     // stay out of the cell path.
-    if (!collabEmit && !cellRange) {
+    if (!cellRange) {
       for (const paragraph of fullySelectedParagraphs) {
-        const paragraphProperties = paragraph.children.find(
-          (child) => localName(child.name) === "pPr",
-        );
-        const paragraphTexts = textElements(paragraph).filter((text) => text.text.length > 0);
-        const style = paragraphProperties?.children.find((child) => localName(child.name) === "pStyle");
-        const styleNumbering = resolveParagraphStyleChain(
-          this.host.doc.styles,
-          attr(style, "val"),
-          false,
-        ).pPr.numbering;
-        const isList = paragraphTexts.some((text) => listTypeAt(this.host.doc, text)) || !!styleNumbering;
-        if (paragraphProperties && isList) {
-          paragraphProperties.children = paragraphProperties.children.filter(
-            (child) => localName(child.name) !== "numPr" && localName(child.name) !== "pStyle",
+        // The list-formatting strip is a local-only mutation with no wire
+        // form — collab mounts skip it (the delete degrades to text-only,
+        // identically everywhere). A fully selected TABLE, by contrast, now
+        // has a canonical block removal (tableOp deleteTable) in both modes.
+        if (!collabEmit) {
+          const paragraphProperties = paragraph.children.find(
+            (child) => localName(child.name) === "pPr",
           );
+          const paragraphTexts = textElements(paragraph).filter((text) => text.text.length > 0);
+          const style = paragraphProperties?.children.find((child) => localName(child.name) === "pStyle");
+          const styleNumbering = resolveParagraphStyleChain(
+            this.host.doc.styles,
+            attr(style, "val"),
+            false,
+          ).pPr.numbering;
+          const isList = paragraphTexts.some((text) => listTypeAt(this.host.doc, text)) || !!styleNumbering;
+          if (paragraphProperties && isList) {
+            paragraphProperties.children = paragraphProperties.children.filter(
+              (child) => localName(child.name) !== "numPr" && localName(child.name) !== "pStyle",
+            );
+          }
         }
         let ancestor = this.host.doc.findParentOf(paragraph);
         while (ancestor && localName(ancestor.name) !== "tbl") {
@@ -7404,6 +7421,27 @@ export class DocxEditor {
     for (const table of fullySelectedTables) {
       const parent = this.host.doc.findParentOf(table);
       if (!parent) continue;
+      if (collabEmit) {
+        // G7 residual: a fully selected table deletes AS A BLOCK in collab
+        // too — the canonical tableOp("deleteTable") mutation + intent
+        // (transform identity; the apply prunes the retired ids), so every
+        // replica splices out the same element. Address and caret-rescue
+        // target are captured BEFORE the splice retires them.
+        const cellP = firstParagraphIn(table);
+        const cellParagraphId = cellP ? this.host.doc.stableIds!.idOf(cellP) : undefined;
+        if (!cellP || cellParagraphId === undefined) continue; // unaddressable: degrade to text-only
+        let rescueT: XmlElement | null = null;
+        if (first && textElements(table).includes(first.t)) {
+          const idx = parent.children.indexOf(table);
+          const following = parent.children.slice(idx + 1).find((c) => localName(c.name) === "p");
+          const preceding = [...parent.children.slice(0, idx)].reverse().find((c) => localName(c.name) === "p");
+          rescueT = (following && firstTextOf(following)) ?? (preceding && lastTextOf(preceding)) ?? null;
+        }
+        if (!applyTableOp(this.host.doc, textElements(cellP)[0] ?? cellP, "deleteTable")) continue;
+        this.host.onIntent?.({ kind: "tableOp", cellParagraphId, op: "deleteTable" });
+        if (rescueT && first) first = { t: rescueT, run: first.run, offset: 0 };
+        continue;
+      }
       const empty = emptyParagraphLike(table);
       parent.children.splice(parent.children.indexOf(table), 1, empty.paragraph);
       if (first && textElements(table).includes(first.t)) {

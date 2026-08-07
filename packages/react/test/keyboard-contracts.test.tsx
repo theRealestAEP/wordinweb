@@ -297,6 +297,26 @@ describe("keyboard contracts replicate (collab mount)", () => {
     await ed.unmount(); // per-range deleteText intents rode the wire byte-exactly
   });
 
+  it("G7: select-all + delete removes a table as a block, on every replica", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-g7", "alice");
+    await ed.click();
+    await ed.typed("ab");
+    ed.api().insertTable(2, 2);
+    await settle();
+    await ed.keys(["ArrowRight"]); // into cell r0c0
+    await ed.typed("cd");
+    // Step through the remaining cells into the trailing paragraph and give
+    // it text too (the conformance fixture's shape: text on both sides).
+    await ed.keys(["ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight"]);
+    await ed.typed("ef");
+    await ed.keys([{ key: "a", ctrl: true }, "Backspace"]); // deleteText + tableOp(deleteTable) + merges
+    const xml = serializeXml(ed.clientDoc().docRoot);
+    expect(xml).not.toContain("<w:tbl");
+    expect(ed.texts()).toEqual([""]); // one empty paragraph — Word's contract
+    await ed.unmount();
+  });
+
   it("G14: Enter over a selection deletes it then splits, on every replica", async () => {
     const hub = new CollabHub(provider);
     const ed = await mountCollab(hub, "kc-g14", "alice");

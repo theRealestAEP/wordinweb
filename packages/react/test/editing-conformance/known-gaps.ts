@@ -48,10 +48,12 @@ export const KNOWN_GAPS: Record<string, string> = {
   // now folds consecutive inline nodes into ONE paragraph of formatted runs
   // (clipboard.ts appendHtmlBlocks) instead of one paragraph per element.
 
-  // G7 (residual after the 734b6a8 spanning-merge fix) — select-all + delete
-  // in a document WITH A TABLE leaves the table standing on the session
-  // mount; Word removes it and leaves one empty paragraph.
-  "session/selectall.delete-with-table": "select-all + delete leaves the table standing (Word removes it, leaving one empty paragraph)",
+  // G7 — FIXED (residual included): the spanning merge (734b6a8) closed the
+  // session/local fork for plain paragraphs, and a fully selected table now
+  // deletes AS A BLOCK on the session mount too — the canonical
+  // tableOp("deleteTable") mutation + intent (the same apply every replica
+  // runs), composed with the ordinary deleteText + mergeParagraph intents,
+  // leaves one empty paragraph exactly like Word.
 
   // G18 — FIXED with G13: mergeParagraphBackward leaves the merged
   // paragraph's blank placeholder runs behind, so the unbullet/merge path
