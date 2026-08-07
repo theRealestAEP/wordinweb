@@ -534,6 +534,12 @@ export class DocxEditor {
   private imeOverlay: HTMLSpanElement | null = null;
   private composing = false;
 
+  /** Word's pending format: Cmd+B/I/U at a COLLAPSED caret queues a toggle
+   * that applies to the next typed text. Members are toggle keys (pressing
+   * the same shortcut twice cancels). Consumed by insertText; cleared by any
+   * other gesture (caret movement, clicks, deletes — Word's behavior). */
+  private pendingFormat: Set<"bold" | "italic" | "underline"> | null = null;
+
   /** Suggesting mode: edits record as OOXML revisions (w:ins/w:del) instead of
    * mutating text directly. Toggled via setSuggesting; forces markup view so a
    * pending suggestion shows live (underlined/struck) as you type. */
@@ -2519,6 +2525,7 @@ export class DocxEditor {
   /** Track a potential drag-selection from a text mousedown. */
   private beginSelectionDrag(e: MouseEvent): void {
     if (e.button !== 0) return;
+    this.pendingFormat = null; // clicking moves the caret: pending format dies
     const anchor = this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     if (!anchor) return;
     // Respect the header/footer gate for selection too, in both directions:
@@ -4655,6 +4662,7 @@ export class DocxEditor {
     }
     this.pendingClickTypeCheckpoint = false;
     this.clickTypeCheckpointUntil = 0;
+    this.pendingFormat = null; // clicking moves the caret: pending format dies
     if (this.dragSelecting) {
       // Finalize a drag-selection: keep it, don't collapse to a caret.
       this.dragSelecting = false;
@@ -5930,6 +5938,16 @@ export class DocxEditor {
       this.pendingClickTypeCheckpoint = false;
       this.clickTypeCheckpointUntil = 0;
     }
+    // Pending caret format (Cmd+B/I/U with no selection) survives only until
+    // the next gesture: a plain typed character consumes it (insertText), the
+    // format shortcuts themselves stack/toggle it, and everything else — any
+    // caret movement, delete, Enter, shortcut — clears it, like Word.
+    if (this.pendingFormat) {
+      const mod = e.metaKey || e.ctrlKey;
+      const isFormatKey = mod && !e.altKey && ["b", "i", "u"].includes(e.key.toLowerCase());
+      const isPlainChar = e.key.length === 1 && !mod && !e.altKey;
+      if (!isFormatKey && !isPlainChar) this.pendingFormat = null;
+    }
     if (this.textContextMenu) {
       if (e.key === "Escape") e.preventDefault();
       this.dismissTextContextMenu();
@@ -6161,9 +6179,18 @@ export class DocxEditor {
         return;
       }
       if (k === "b" || k === "i" || k === "u") {
+        const kind = k === "b" ? "bold" : k === "i" ? "italic" : "underline";
         if (this.hasSelection()) {
           e.preventDefault();
-          this.host.onFormatShortcut?.(k === "b" ? "bold" : k === "i" ? "italic" : "underline");
+          this.host.onFormatShortcut?.(kind);
+        } else if (this.caret) {
+          // Word's pending format: with no selection the shortcut queues a
+          // toggle for the NEXT typed text (consumed by insertText; the same
+          // shortcut again cancels it).
+          e.preventDefault();
+          const pending = (this.pendingFormat ??= new Set());
+          if (pending.has(kind)) pending.delete(kind);
+          else pending.add(kind);
         }
         return;
       }
@@ -6597,6 +6624,8 @@ export class DocxEditor {
     const suggestEmit = this.suggesting && !!this.caret && !!this.host.onIntent;
     const frozen = suggestEmit ? this.frozenRevMeta() : null;
     const emitPos = (!this.suggesting || suggestEmit) && this.host.onIntent && this.caret ? this.encodeCaretForIntent() : null;
+    const pending = this.pendingFormat;
+    this.pendingFormat = null;
     this.insertTextCore(text, frozen ?? undefined);
     this.commit(textOnly);
     if (emitPos) {
@@ -6606,7 +6635,35 @@ export class DocxEditor {
           : { kind: "insertText", at: emitPos, text },
       );
     }
+    // Pending caret format (Cmd+B/I/U before typing): format the just-typed
+    // range through the host's shortcut path — the same canonical mutation +
+    // intents (formatRun/formatRange, suggest-aware) the toolbar and the
+    // selection shortcut use — then collapse back to a trailing caret.
+    if (pending && pending.size > 0) this.applyPendingFormat(pending, text.length);
     return true;
+  }
+
+  /** Apply queued Cmd+B/I/U toggles to the last `len` typed characters. The
+   * typed text inherited the caret run's format, so toggling it through the
+   * selection-format path lands exactly the queued state; the caret then sits
+   * inside the formatted run and further typing continues in that format. */
+  private applyPendingFormat(kinds: Set<"bold" | "italic" | "underline">, len: number): void {
+    const caret = this.caret;
+    if (!caret || len <= 0 || !this.host.onFormatShortcut) return;
+    const end = caret.offset;
+    const start = end - len;
+    if (start < 0) return;
+    this.selectRanges([{ t: caret.t, start, end }]);
+    // onFormatShortcut re-selects the formatted range (selectRanges), so the
+    // next toggle operates on the same — possibly re-split — text.
+    for (const kind of kinds) this.host.onFormatShortcut(kind);
+    const focus = this.selection?.focus;
+    this.clearSelection();
+    if (focus) {
+      this.caret = { t: focus.t, run: this.caret?.run ?? caret.run, offset: focus.offset, bias: "end" };
+      this.positionCaret();
+    }
+    this.focusText();
   }
 
   /** Stable id of the run carrying a drawing. The

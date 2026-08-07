@@ -28,11 +28,11 @@ export const KNOWN_GAPS: Record<string, string> = {
   "session/tab.plain-paragraph": "Tab in a body paragraph is a no-op (Word inserts a tab character)",
   "local/tab.plain-paragraph": "Tab in a body paragraph is a no-op (Word inserts a tab character)",
 
-  // G4 — Cmd+B/I/U at a collapsed caret set no pending format: the next typed
-  // character comes out unformatted. Word toggles formatting for what is
-  // typed next. (onKeyDown only forwards the shortcut when hasSelection().)
-  "session/format.caret-*": "Cmd+B/I/U at a collapsed caret is a no-op (Word makes the next typed text formatted)",
-  "local/format.caret-*": "Cmd+B/I/U at a collapsed caret is a no-op (Word makes the next typed text formatted)",
+  // G4 — FIXED: Cmd+B/I/U at a collapsed caret queue a pending toggle
+  // (editor.pendingFormat) that the next insertText consumes by formatting
+  // the typed range through the host's shortcut path (canonical
+  // formatRun/formatRange intents, suggest-aware). Any other gesture —
+  // arrows, clicks, deletes — clears the queue, like Word.
 
   // G5 — rich (text/html) paste is always BLOCK-level: a one-paragraph rich
   // paste splits the target paragraph, inserts its own paragraph, and strands

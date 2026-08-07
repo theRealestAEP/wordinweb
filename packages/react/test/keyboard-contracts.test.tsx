@@ -158,6 +158,44 @@ describe("keyboard contracts replicate (collab mount)", () => {
     await ed.unmount();
   });
 
+  it("G4: pending Cmd+B at a caret makes the next typed text bold, on every replica", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-g4", "alice");
+    await ed.click();
+    await ed.typed("ab");
+    await ed.keys([{ key: "b", ctrl: true }]); // pending bold (no selection)
+    await ed.typed("cd"); // first char consumes the toggle; second continues bold
+    expect(ed.texts()).toEqual(["abcd"]);
+    const xml = serializeXml(ed.clientDoc().docRoot);
+    expect(xml).toMatch(/<w:b\/>/);
+    expect(xml).toContain("cd"); // the bold tail stayed one run's text
+    await ed.unmount(); // formatRange/formatRun rode the wire byte-exactly
+  });
+
+  it("G4: the same shortcut twice cancels the pending toggle", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-g4b", "alice");
+    await ed.click();
+    await ed.typed("ab");
+    await ed.keys([{ key: "b", ctrl: true }, { key: "b", ctrl: true }]);
+    await ed.typed("c");
+    expect(ed.texts()).toEqual(["abc"]);
+    expect(serializeXml(ed.clientDoc().docRoot)).not.toMatch(/<w:b\/>/);
+    await ed.unmount();
+  });
+
+  it("G4: caret movement clears the pending toggle", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-g4c", "alice");
+    await ed.click();
+    await ed.typed("ab");
+    await ed.keys([{ key: "b", ctrl: true }, "ArrowLeft", "ArrowRight"]);
+    await ed.typed("c");
+    expect(ed.texts()).toEqual(["abc"]);
+    expect(serializeXml(ed.clientDoc().docRoot)).not.toMatch(/<w:b\/>/);
+    await ed.unmount();
+  });
+
   it("G14: Enter over a selection deletes it then splits, on every replica", async () => {
     const hub = new CollabHub(provider);
     const ed = await mountCollab(hub, "kc-g14", "alice");
