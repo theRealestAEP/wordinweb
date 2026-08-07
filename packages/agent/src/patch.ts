@@ -74,13 +74,12 @@ function textEdit(source: ProjectedLine, targetBody: string, suggest: boolean): 
     if (suggest) ranges.unshift(range);
     else operations.push({ kind: "deleteText", ...range });
   }
-  // A tracked deletion wraps the struck text in w:del and splits the run
-  // around it, so the run this hunk would insert into no longer exists by the
-  // time the insertion runs. One or the other applies cleanly; both in one
-  // transaction do not.
-  if (ranges.length > 0 && inserted.length > 0) {
-    throw new Error("A suggested hunk can add text or remove text, not both. Send the removal and the addition as separate patches.");
-  }
+  // A combined rewrite compiles to a tracked deletion followed by a tracked
+  // insertion in ONE transaction — the side-by-side w:del/w:ins pair Word
+  // writes for a replacement. The order works because a tracked deletion
+  // keeps the addressed run element in place holding whatever precedes the
+  // strike (down to an empty w:t when nothing does), so the insertion
+  // addressed at the strike's left edge still resolves after it.
   if (ranges.length > 0) operations.push({ kind: "suggestRevision", ranges });
   if (inserted.length === 0) return operations;
 

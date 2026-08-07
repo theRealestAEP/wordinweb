@@ -491,17 +491,22 @@ describe("DocMD patch", () => {
     expect(result.operations).toEqual(["suggestRevision"]);
     expect(documentXml(removed)).toMatch(/<w:del\b/);
 
-    // A tracked deletion re-splits the run the insertion would target, so the
-    // two halves of a replacement have to arrive as separate patches.
+    // A replacement compiles to the tracked deletion plus the tracked
+    // insertion in ONE transaction — the side-by-side pair Word writes.
     const both = await brief();
     projection = both.project({ mode: "md" });
     line = lineOf(projection, "Decision: adopt the managed platform.");
-    await expect(both.patch({
+    result = await both.patch({
       revision: projection.revision,
       mode: "md",
       suggest: true,
       edits: [{ startLine: line, endLine: line, newText: "Decision: adopt the custom stack." }],
-    })).rejects.toThrow("add text or remove text, not both");
+    });
+    expect(result.operations).toEqual(["suggestRevision", "insertText"]);
+    const xml = documentXml(both);
+    expect(xml).toMatch(/<w:del\b/);
+    expect(xml).toMatch(/<w:ins\b/);
+    expect(result.projection.text).toContain("Decision: adopt the custom stack.");
   });
 
   it("tracks a suggested heading-marker change as a paragraph-property revision", async () => {

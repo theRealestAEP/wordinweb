@@ -311,35 +311,34 @@ function deleteOneRange(
   const idx = parent.children.indexOf(rEl);
   if (tIdx === -1 || idx === -1) return null;
 
-  const preceding = rEl.children.slice(0, tIdx).filter((c) => localName(c.name) !== "rPr");
   const following = rEl.children.slice(tIdx + 1);
   const delTextName = w + "delText";
 
-  const replacement: XmlElement[] = [];
-  let beforeT: XmlElement | null = null;
-  const beforeChildren = [...preceding];
-  if (start > 0) {
-    beforeT = textLike(t, t.name, t.text.slice(0, start));
-    beforeChildren.push(beforeT);
-  }
-  if (beforeChildren.length > 0) replacement.push(runLike(rEl, rPr, beforeChildren));
-
   const deletedT = textLike(t, delTextName, t.text.slice(start, end));
-  const del = el(`${w}del`, revAttrs(w, meta), [runLike(rEl, rPr, [deletedT])]);
-  replacement.push(del);
-
   const afterChildren: XmlElement[] = [];
   if (end < t.text.length) afterChildren.push(textLike(t, t.name, t.text.slice(end)));
   afterChildren.push(...following);
+
+  // The ADDRESSED run element stays in the tree holding everything before the
+  // strike: t is truncated in place — kept even when emptied, so the strike's
+  // left edge stays an addressable text position — and the run sheds its
+  // tail. The run's stable id, and any address a later intent in the same
+  // transaction holds (the insertion half of a combined replacement), survive
+  // the strike: the same contract insertSuggestedText keeps.
+  t.text = t.text.slice(0, start);
+  t.attrs["xml:space"] = "preserve";
+  rEl.children = rEl.children.slice(0, tIdx + 1);
+
+  const del = el(`${w}del`, revAttrs(w, meta), [runLike(rEl, rPr, [deletedT])]);
+  const replacement: XmlElement[] = [rEl, del];
   if (afterChildren.length > 0) replacement.push(runLike(rEl, rPr, afterChildren));
 
   parent.children.splice(idx, 1, ...replacement);
   coalesceDeletions(parent, del, meta.author);
 
   // Caret at the left edge of the struck text so the next Backspace keeps
-  // eating leftward. Prefer the end of the surviving "before" run.
-  if (beforeT) return { t: beforeT, offset: beforeT.text.length };
-  return { t: deletedT, offset: 0 };
+  // eating leftward: the end of the surviving "before" piece.
+  return { t, offset: t.text.length };
 }
 
 /** Merge a fresh w:del with adjacent same-author w:del siblings (keeps the XML

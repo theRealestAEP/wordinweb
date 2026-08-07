@@ -151,3 +151,76 @@ describe("paragraph creation while suggesting", () => {
     })).rejects.toThrow('insertText whose text contains "\\n"');
   });
 });
+
+/**
+ * A same-line tracked replacement is ONE patch call: the hunk compiles into a
+ * tracked deletion followed by a tracked insertion in the same transaction —
+ * the side-by-side w:del/w:ins pair Word writes. The insertion resolves after
+ * the strike because the tracked deletion keeps the addressed run element in
+ * place holding whatever precedes the struck text.
+ */
+describe("combined tracked replacement in one patch", () => {
+  async function replace(xml: string, newText: string) {
+    const { session, agent, tool } = connect(xml);
+    const projection = agent.project({ mode: "md" });
+    const result = await tool("word_document_patch").execute({
+      revision: projection.revision,
+      mode: "md",
+      edits: [{ startLine: 1, endLine: 1, newText }],
+      suggest: true,
+    }) as { operations: string[] };
+    return { session, result };
+  }
+
+  it("replaces mid-line text with strike and insert side by side", async () => {
+    const { session, result } = await replace(
+      body(`<w:p><w:r><w:t>The quick brown fox jumps.</w:t></w:r></w:p>`),
+      "The lazy old fox jumps.",
+    );
+    expect(result.operations).toEqual(["suggestRevision", "insertText"]);
+    const xml = serializeXml(session.doc.docRoot);
+    expect(xml).toContain("<w:del ");
+    expect(xml).toContain("<w:ins ");
+    expect(xml).toContain(">quick brown</w:delText>");
+
+    const accepted = copyOf(session.doc);
+    acceptAllRevisions(accepted);
+    expect(paragraphTexts(accepted)).toEqual(["The lazy old fox jumps."]);
+
+    const rejected = copyOf(session.doc);
+    rejectAllRevisions(rejected);
+    expect(paragraphTexts(rejected)).toEqual(["The quick brown fox jumps."]);
+  });
+
+  it("replaces a whole line whose run is struck from its very start", async () => {
+    const { session, result } = await replace(
+      body(`<w:p><w:r><w:t>Alpha</w:t></w:r></w:p>`),
+      "Omega!",
+    );
+    expect(result.operations).toEqual(["suggestRevision", "insertText"]);
+
+    const accepted = copyOf(session.doc);
+    acceptAllRevisions(accepted);
+    expect(paragraphTexts(accepted)).toEqual(["Omega!"]);
+
+    const rejected = copyOf(session.doc);
+    rejectAllRevisions(rejected);
+    expect(paragraphTexts(rejected)).toEqual(["Alpha"]);
+  });
+
+  it("rewrites one line into several with removal and addition in one hunk", async () => {
+    const { session, result } = await replace(
+      body(`<w:p><w:r><w:t>Everything on one line.</w:t></w:r></w:p>`),
+      "First thought.\nSecond thought.",
+    );
+    expect(result.operations).toEqual(["suggestRevision", "splitParagraph", "insertText", "insertText"]);
+
+    const accepted = copyOf(session.doc);
+    acceptAllRevisions(accepted);
+    expect(paragraphTexts(accepted)).toEqual(["First thought.", "Second thought."]);
+
+    const rejected = copyOf(session.doc);
+    rejectAllRevisions(rejected);
+    expect(paragraphTexts(rejected)).toEqual(["Everything on one line."]);
+  });
+});
