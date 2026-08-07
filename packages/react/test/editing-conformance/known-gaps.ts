@@ -48,26 +48,24 @@ export const KNOWN_GAPS: Record<string, string> = {
   "session/paste.html-inline-runs": "inline HTML formatting chunks each become their own paragraph on paste",
   "local/paste.html-inline-runs": "inline HTML formatting chunks each become their own paragraph on paste",
 
-  // G7 — SESSION ONLY: select-all + delete/type leaves every emptied
-  // paragraph in place (three empty w:p from a three-paragraph body); Word —
-  // and the LOCAL mount — collapse the whole selection to a single paragraph.
-  // The collab-gated removal path lacks the multi-block merge the local path
-  // has.
-  "session/selectall.*": "session mount only: select-all + delete/type leaves one empty paragraph per former paragraph (local mount and Word leave exactly one)",
+  // G7 (residual after the 734b6a8 spanning-merge fix) — select-all + delete
+  // in a document WITH A TABLE leaves the table standing on the session
+  // mount; Word removes it and leaves one empty paragraph.
+  "session/selectall.delete-with-table": "select-all + delete leaves the table standing (Word removes it, leaving one empty paragraph)",
+
+  // G18 (introduced/exposed by 734b6a8) — deleting an empty list item and
+  // then a character strands a zero-length run where the unbullet/merge
+  // rebind happened. Structural-lint class; visible only in the XML.
+  "session/backspace.list-item-empty-then-char": "the unbullet/merge path strands a zero-length run",
+  "local/backspace.list-item-empty-then-char": "the unbullet/merge path strands a zero-length run",
 
   // G8 — deleting a selection that spans a paragraph boundary deletes the
   // characters but KEEPS the boundary; Word merges the two paragraphs.
-  "session/backspace.across-para-selection": "deleting an across-paragraph selection keeps the paragraph boundary (Word merges)",
-  "local/backspace.across-para-selection": "deleting an across-paragraph selection keeps the paragraph boundary (Word merges)",
-  "session/type.over-across-para-selection": "typing over an across-paragraph selection keeps the paragraph boundary (Word merges)",
-  "local/type.over-across-para-selection": "typing over an across-paragraph selection keeps the paragraph boundary (Word merges)",
 
   // G9 — Backspace at the start of a list item deletes/merges the paragraph
   // immediately; Word first removes the bullet (the paragraph survives as
   // plain text) and only a second Backspace merges. The empty-item variant is
   // the reported "undeletable/mishandled empty list item" family.
-  "session/backspace.list-*": "Backspace at list-item start merges/deletes at once (Word removes the bullet first, keeping the paragraph)",
-  "local/backspace.list-*": "Backspace at list-item start merges/deletes at once (Word removes the bullet first, keeping the paragraph)",
 
   // G10 — Enter at the end of a heading carries Heading1 onto the new
   // paragraph; Word applies the style's next-style (Normal).
