@@ -1039,6 +1039,20 @@ export class DocxEditor {
       anchor: { t: first.t, offset: first.start },
       focus: { t: last.t, offset: last.end },
     };
+    // Rebind the (hidden) caret into the post-edit tree. A format over a
+    // selection SPLITS the caret's run (applyRunFormat), detaching the old
+    // caret element — and every later history checkpoint records the caret
+    // as a structural path, so a stale element made checkpoints fall back to
+    // a path from the PRE-split tree shape. Undo then resolved that path to
+    // a different element (an rPr), and the next Enter split the paragraph
+    // around it, stranding a properties-only w:r (conformance G17, fuzz
+    // seeds 6+7). The formatted range's start is the caret's honest home.
+    const binding = this.host.getHandle()?.bindings.find((b) => b.item.src?.t === first.t);
+    this.caret = {
+      t: first.t,
+      run: binding?.item.src?.run ?? this.caret?.run ?? ({} as Caret["run"]),
+      offset: first.start,
+    };
     this.paintSelection();
     this.notifySelection();
   }

@@ -105,11 +105,15 @@ export const KNOWN_GAPS: Record<string, string> = {
   // (the session mount exercises this since its undo came alive, G1).
   // Regression tests: packages/agent/test/local-undo.test.ts (both seeds).
 
-  // G17 — undo of a format-over-selection then Enter strands structure
-  // (fuzzer, seeds 6 and 7): a properties-only w:r shell in the local mount;
-  // the session mount (undo now live, G1) strands the same shell.
-  "local/undo.format-selection-strands-run": "undo of Cmd+B-over-selection then Enter strands a properties-only w:r shell",
-  "session/undo.format-selection-strands-run": "undo of Cmd+B-over-selection then Enter strands a properties-only w:r shell",
+  // G17 — FIXED (fuzzer, seeds 6 and 7): the strand was a STALE CARET PATH,
+  // not a lint problem. applyRunFormat's split detached the caret element,
+  // so the next checkpoint's caret ref fell back to a structural path from
+  // the pre-split tree shape; undo resolved that path to a DIFFERENT element
+  // (an rPr) and the following Enter split the paragraph around it —
+  // stranding a properties-only w:r. Two-sided fix: selectRanges rebinds the
+  // caret into the post-format tree (the record side), and history's
+  // restoreCaret refuses to bind anything but a text leaf (the restore side
+  // — a stale path can no longer corrupt a structural gesture).
 };
 
 /** Match a case id against the table (exact first, then prefix entries). */

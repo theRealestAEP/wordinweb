@@ -314,7 +314,14 @@ export class EditHistory {
   private restoreCaret(roots: XmlElement[], caret: CaretRef | null): void {
     if (!caret || !this.setCaret) return;
     const el = this.resolve(roots, caret);
-    if (!el) return;
+    // Caret refs are only ever CREATED from text leaves, so a path that now
+    // resolves to anything else proves the ref went stale across a structural
+    // change (e.g. the lastCaret fallback recorded before a run split). A
+    // caret bound to a non-text element corrupts the next structural gesture
+    // (G17: Enter split a paragraph around an rPr, stranding a
+    // properties-only run) — refuse it and let the editor's post-undo
+    // reconciliation land a caret instead.
+    if (!el || !isTextLeaf(el)) return;
     this.setCaret(el, caret.offset);
     this.lastCaret = caret;
   }
@@ -358,6 +365,11 @@ export class EditHistory {
   private resolve(roots: XmlElement[], ref: CaretRef): XmlElement | null {
     return this.resolvePath(roots, ref.rootIdx, ref.path);
   }
+}
+
+function isTextLeaf(el: XmlElement): boolean {
+  const local = el.name.includes(":") ? el.name.slice(el.name.indexOf(":") + 1) : el.name;
+  return local === "t" || local === "delText";
 }
 
 function applyLeaf(el: XmlElement, state: LeafState): void {
