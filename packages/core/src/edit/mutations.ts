@@ -111,26 +111,57 @@ export function applySplitParagraph(
   if (!pParent) return null;
   const runIdx = pEl.children.indexOf(rEl);
   const tIdx = rEl.children.indexOf(caret.t);
-  if (runIdx === -1 || tIdx === -1) return null;
+  if (tIdx === -1) return null;
 
   const prefix = pEl.name.includes(":") ? pEl.name.slice(0, pEl.name.indexOf(":") + 1) : "";
   const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
 
-  // Split the caret run: text after the caret moves to a new run.
-  const afterT: XmlElement = {
-    name: caret.t.name,
-    attrs: { ...caret.t.attrs, "xml:space": "preserve" },
-    text: caret.t.text.slice(caret.offset),
-    children: [],
-  };
-  const afterRun: XmlElement = {
-    name: rEl.name,
-    attrs: { ...rEl.attrs },
-    text: "",
-    children: [...(rPr ? [cloneXml(rPr)] : []), afterT, ...rEl.children.slice(tIdx + 1)],
-  };
-  caret.t.text = caret.t.text.slice(0, caret.offset);
-  rEl.children = rEl.children.slice(0, tIdx + 1);
+  let afterT: XmlElement;
+  let afterRun: XmlElement;
+  /** Index in pEl.children after which content moves to the new paragraph. */
+  let splitIdx = runIdx;
+  if (runIdx !== -1) {
+    // Split the caret run: text after the caret moves to a new run.
+    afterT = {
+      name: caret.t.name,
+      attrs: { ...caret.t.attrs, "xml:space": "preserve" },
+      text: caret.t.text.slice(caret.offset),
+      children: [],
+    };
+    afterRun = {
+      name: rEl.name,
+      attrs: { ...rEl.attrs },
+      text: "",
+      children: [...(rPr ? [cloneXml(rPr)] : []), afterT, ...rEl.children.slice(tIdx + 1)],
+    };
+    caret.t.text = caret.t.text.slice(0, caret.offset);
+    rEl.children = rEl.children.slice(0, tIdx + 1);
+  } else {
+    // The caret run rides inside a tracked-insert wrapper (w:ins) — the user
+    // splits right after a suggested insertion (Enter, or a multi-line paste
+    // in suggesting mode). Only the END-of-wrapper split has a simple form:
+    // nothing after the caret needs to leave the wrapper, so the new
+    // paragraph seeds with a plain empty run and takes the following
+    // siblings. A mid-suggestion split stays a no-op, as before.
+    const wrapper = doc.findParentOf(rEl);
+    const wrapperIdx = wrapper ? pEl.children.indexOf(wrapper) : -1;
+    if (!wrapper || localName(wrapper.name) !== "ins" || wrapperIdx === -1) return null;
+    if (caret.offset < caret.t.text.length || tIdx < rEl.children.length - 1) return null;
+    if (wrapper.children.indexOf(rEl) !== wrapper.children.length - 1) return null;
+    afterT = {
+      name: caret.t.name,
+      attrs: { ...caret.t.attrs, "xml:space": "preserve" },
+      text: "",
+      children: [],
+    };
+    afterRun = {
+      name: rEl.name,
+      attrs: { ...rEl.attrs },
+      text: "",
+      children: [...(rPr ? [cloneXml(rPr)] : []), afterT],
+    };
+    splitIdx = wrapperIdx;
+  }
 
   // New paragraph: cloned pPr (minus any section break!) + moved content.
   const pPrEl = pEl.children.find((c) => localName(c.name) === "pPr");
@@ -138,8 +169,8 @@ export function applySplitParagraph(
   if (newPPr) {
     newPPr.children = newPPr.children.filter((c) => localName(c.name) !== "sectPr");
   }
-  const moved = pEl.children.slice(runIdx + 1);
-  pEl.children = pEl.children.slice(0, runIdx + 1);
+  const moved = pEl.children.slice(splitIdx + 1);
+  pEl.children = pEl.children.slice(0, splitIdx + 1);
   const newP: XmlElement = {
     name: prefix + "p",
     attrs: {},

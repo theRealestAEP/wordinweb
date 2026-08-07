@@ -37,8 +37,13 @@ describe("suggesting-mode emission audit", () => {
     expect(glyphCalls).toBeGreaterThan(1);
   });
 
-  it("suggesting paste is gated in collab (direct-core mutation, no emission path yet)", () => {
-    expect(src).toContain("if (this.suggesting && this.host.onIntent) {");
+  it("suggesting paste rides the emitting typing loop (no gated direct-core branch left)", () => {
+    // The old narrow gate (decline suggesting paste in a session) is gone:
+    // the collab paste branch no longer excludes suggesting, so every chunk
+    // goes through this.insertText / splitParagraphNoHistory — both
+    // suggest-aware AND emitting (tracked w:ins + tracked paragraph split).
+    expect(src).not.toContain("if (this.suggesting && this.host.onIntent) {");
+    expect(src).toContain("if (this.host.onIntent && this.host.doc.stableIds) {");
   });
 
   it("frozen revision meta is used at emission sites (per-call dates would straddle seconds and diverge)", () => {

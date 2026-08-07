@@ -113,7 +113,10 @@ describe("local-session undo", () => {
       ),
       "one\ntwo",
     );
-    expect(paragraphTexts(doc)).toEqual(["hello", "one", "two", " world"]);
+    // Word fragment semantics: the first fragment joins the caret paragraph
+    // (formatting preserved), the last fragment joins the moved tail.
+    expect(paragraphTexts(doc)).toEqual(["helloone", "two world"]);
+    expect(serializeXml(doc.editableRoots()[0])).toContain("<w:b/>");
     const after = serializeXml(doc.editableRoots()[0]);
     const revisionAfterPaste = session.getRevision();
 
@@ -126,6 +129,27 @@ describe("local-session undo", () => {
     editor.applyHistory("redo");
     expect(serializeXml(doc.editableRoots()[0])).toBe(after);
     expect(session.getRevision(), "redo bumps the session revision").toBeGreaterThan(revisionAfterUndo);
+  });
+
+  it("undoes an INLINE rich paste (one formatted paragraph, no split) as ONE step, byte-identically", () => {
+    const { doc, container, editor } = mount(HELLO);
+    caretInFirstRun(editor, doc, 5);
+    const before = serializeXml(doc.editableRoots()[0]);
+
+    paste(
+      container,
+      clipboardHtml(`<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">mid</w:t></w:r></w:p>`, "<p>mid</p>"),
+      "mid",
+    );
+    // A one-paragraph paste lands inline: same paragraph count, formatted run.
+    expect(paragraphTexts(doc)).toEqual(["hellomid world"]);
+    expect(serializeXml(doc.editableRoots()[0])).toContain("<w:b/>");
+    const after = serializeXml(doc.editableRoots()[0]);
+
+    editor.applyHistory("undo");
+    expect(serializeXml(doc.editableRoots()[0])).toBe(before);
+    editor.applyHistory("redo");
+    expect(serializeXml(doc.editableRoots()[0])).toBe(after);
   });
 
   it("undoes a multi-line plain-text paste as ONE step", () => {

@@ -5,7 +5,7 @@ import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
 import { DrawingBinding, GripBinding, ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
 import { TextItem } from "../layout/types.js";
 import { selectionToSegments } from "./selection.js";
-import { type EncodedCaret } from "./ids.js";
+import { runWireLength, wireOffsetOf, type EncodedCaret } from "./ids.js";
 import { EditHistory } from "./history.js";
 import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
 import { pxToTwips } from "../units.js";
@@ -26,7 +26,7 @@ import {
   type DrawingTool,
 } from "./drawings.js";
 import { ensureParagraphAfterTerminalBlock, exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph, topLevelBlockOf } from "./blocks.js";
-import { SelectionSegment, selectionTextLogical } from "./commands.js";
+import { applyRunFormat, SelectionSegment, selectionTextLogical } from "./commands.js";
 import {
   adjustFloatingPosition,
   drawingRotation,
@@ -172,7 +172,9 @@ import { resolveParagraphStyleChain } from "../parse/styles.js";
 import {
   clipboardBlocksHtml,
   htmlClipboardBlocks,
+  inlinePasteSpans,
   selectionClipboardBlocks,
+  type InlinePasteSpan,
 } from "./clipboard.js";
 import {
   insertSuggestedText,
@@ -1829,7 +1831,7 @@ export class DocxEditor {
   private pasteText(text: string): void {
     const hadSelection = this.hasSelection();
     const chunks = text.replace(/\r\n?/g, "\n").split("\n");
-    if (this.host.onIntent && this.host.doc.stableIds && !this.suggesting) {
+    if (this.host.onIntent && this.host.doc.stableIds) {
       // Collab: plain-text paste reached the document through the NON-emitting
       // cores below (insertPlainTextParagraphs splices the paragraphs by hand;
       // insertTextCore is the core insert without its intent), so every
@@ -1837,6 +1839,10 @@ export class DocxEditor {
       // primitives typing and Enter use. That is one commit per line rather
       // than one for the paste — the cost of a wire edit per created
       // paragraph, and the same shape as click-and-type's collab path.
+      // SUGGESTING rides the same loop: insertText records the tracked w:ins
+      // exactly like typing, and splitParagraphNoHistory emits the tracked
+      // paragraph split — the multiline expansion handles the paragraph parts.
+      // (Suggesting paste used to be refused outright in a session.)
       this.host.history?.checkpoint();
       if (hadSelection) this.removeSelectedText();
       if (!this.caret) return;
@@ -1854,15 +1860,6 @@ export class DocxEditor {
     if (!this.suggesting && chunks.length > 1) {
       this.insertPlainTextParagraphs(chunks);
       this.commit(false, large ? "background" : "global");
-      return;
-    }
-    if (this.suggesting && this.host.onIntent) {
-      // Collab gate (narrow): paste in suggesting mode routes through
-      // insertTextCore/splitParagraphCore DIRECTLY (no emission), so in a
-      // live session it would mutate locally with no peer ever seeing it —
-      // refused per the standing audit rule (no mutation branch without an
-      // emission). Suggesting TYPING emits fine; suggesting PASTE is the
-      // tracked follow-on. Local mode is unaffected.
       return;
     }
     for (let i = 0; i < chunks.length; i++) {
@@ -1951,28 +1948,49 @@ export class DocxEditor {
   }
 
   /**
-   * Splice pasted blocks in at the caret: split the paragraph in two and put
-   * the blocks between the halves.
+   * Paste rich blocks at the caret with Word's FRAGMENT semantics: a leading
+   * simple-text paragraph fragment joins the caret paragraph inline, middle
+   * blocks stand alone between the split halves, and a trailing fragment
+   * joins the moved tail — so a one-paragraph paste lands entirely inline
+   * (no split, no stranded empty paragraph), which is what Word does.
+   * Fragments an inline insert cannot express (tables, breaks, drawings)
+   * keep the block-level splice.
    *
    * Collab: rich paste was a LOCAL-ONLY mutation — the whole fragment landed
    * on the pasting replica and nothing rode the wire, so one paste forked the
-   * room permanently. It now emits the delete of any replaced selection
-   * (removeSelectedText), the split, and a pasteBlocks carrying the same XML
-   * this replica just spliced plus carried ids for every p/tbl/r in it, so
-   * every replica ends with the same tree AND the same id table. Honest
-   * no-op: when the target paragraph has no stable id, the caret is not
-   * id-addressable, or the split does not happen, the paste does nothing
-   * rather than mutating this replica alone.
+   * room permanently. Every part of the paste now emits: the delete of any
+   * replaced selection (removeSelectedText), insertText/formatRun/formatRange
+   * for the inline fragments (see insertInlineSpans), the split, and a
+   * pasteBlocks carrying the same XML this replica just spliced plus carried
+   * ids for every p/tbl/r in it, so every replica ends with the same tree AND
+   * the same id table. Honest no-op: when the target paragraph has no stable
+   * id, the caret is not id-addressable, or the split does not happen, the
+   * paste does nothing rather than mutating this replica alone.
    */
   private pasteBlocks(blocks: XmlElement[], background: boolean): void {
-    const ids = this.host.doc.stableIds;
+    const doc = this.host.doc;
+    const ids = doc.stableIds;
     const inCollab = !!(this.host.onIntent && ids);
     if (inCollab && this.pasteAnchorId() === null) return;
     this.host.history?.checkpoint();
     if (this.hasSelection()) this.removeSelectedText();
     if (!this.caret) return;
+
+    const destProps = this.caret.run?.props ?? {};
+    const head = inlinePasteSpans(blocks[0], destProps);
+    if (blocks.length === 1 && head) {
+      // Single-paragraph fragment: entirely inline at the caret.
+      this.insertInlineSpans(head);
+      this.commit(false, background ? "background" : "global");
+      return;
+    }
+    const tailSpans = blocks.length > 1 ? inlinePasteSpans(blocks[blocks.length - 1], destProps) : null;
+    const middles = blocks.slice(head ? 1 : 0, blocks.length - (tailSpans ? 1 : 0));
+
     const splitPos = inCollab ? this.encodeCaretForIntent() : null;
     if (inCollab && !splitPos) return;
+    const headT = this.caret.t;
+    const headOffset = this.caret.offset;
     const split = this.splitParagraphCore();
     if (!this.caret || (inCollab && !split)) return;
     if (ids && split && splitPos && this.host.onIntent) {
@@ -1989,31 +2007,165 @@ export class DocxEditor {
         newRunId: newRunEl ? ids.assign(newRunEl, alloc[1]) : newBlockId,
       });
     }
-    const tail = paragraphOf(this.host.doc, this.caret.t);
-    const parent = tail ? this.host.doc.findParentOf(tail) : undefined;
+    if (split && head) {
+      // First fragment: its runs join the caret paragraph at the split point.
+      this.caret = { t: headT, run: this.caret.run, offset: headOffset, bias: "end" };
+      this.insertInlineSpans(head);
+    }
+    const tail = split ? split.after : paragraphOf(doc, this.caret.t);
+    const parent = tail ? doc.findParentOf(tail) : undefined;
     if (!tail || !parent) return;
     const afterBlockId = ids && split ? ids.idOf(split.before) : undefined;
     if (inCollab && afterBlockId === undefined) return;
-    const tracked = inCollab ? this.trackedNodeSet() : null;
-    const copies = blocks.map(cloneXml);
-    parent.children.splice(parent.children.indexOf(tail), 0, ...copies);
-    if (tracked && afterBlockId !== undefined && this.host.onIntent) {
-      const nodeIds = this.host.allocIds?.(copies.reduce(trackedNodeCount, 0)) ?? [];
-      this.assignFreshTrackedIds(tracked, nodeIds);
-      this.host.onIntent({
-        kind: "pasteBlocks",
-        afterBlockId,
-        blocksXml: copies.map((block) => serializeXml(block)).join(""),
-        nodeIds,
-      });
+    const spliced = split ? middles : blocks;
+    const copies = spliced.map(cloneXml);
+    if (copies.length) {
+      const tracked = inCollab ? this.trackedNodeSet() : null;
+      parent.children.splice(parent.children.indexOf(tail), 0, ...copies);
+      if (tracked && afterBlockId !== undefined && this.host.onIntent) {
+        const nodeIds = this.host.allocIds?.(copies.reduce(trackedNodeCount, 0)) ?? [];
+        this.assignFreshTrackedIds(tracked, nodeIds);
+        this.host.onIntent({
+          kind: "pasteBlocks",
+          afterBlockId,
+          blocksXml: copies.map((block) => serializeXml(block)).join(""),
+          nodeIds,
+        });
+      }
     }
-    for (let i = copies.length - 1; i >= 0; i--) {
-      const t = lastTextOf(copies[i]);
-      if (!t) continue;
-      this.caret = { t, run: this.caret.run, offset: t.text.length, bias: "end" };
-      break;
+    if (split && tailSpans) {
+      // Last fragment: its runs join the tail the split moved down.
+      const tailT = firstTextOf(split.after);
+      if (tailT) {
+        this.caret = { t: tailT, run: this.caret.run, offset: 0 };
+        this.insertInlineSpans(tailSpans);
+      }
+    } else {
+      for (let i = copies.length - 1; i >= 0; i--) {
+        const t = lastTextOf(copies[i]);
+        if (!t) continue;
+        this.caret = { t, run: this.caret.run, offset: t.text.length, bias: "end" };
+        break;
+      }
     }
     this.commit(false, background ? "background" : "global");
+  }
+
+  /**
+   * Insert simple-text spans inline at the caret, each span carrying the run
+   * patch that reproduces its source character formatting (null = the
+   * destination formatting already matches). One text splice, then one
+   * run-format per formatted span — applied through the SAME core mutations
+   * the collab apply path runs (applyInsertText, applyRunFormat) and emitted
+   * as the matching insertText / formatRun / formatRange intents with carried
+   * piece ids, so a replica replaying the emission converges byte-for-byte
+   * with this one. Caller owns history and commit.
+   */
+  private insertInlineSpans(spans: InlinePasteSpan[]): void {
+    const caret = this.caret;
+    if (!caret || checkboxStateElement(caret.run, caret.t)) return;
+    const whole = spans.map((span) => span.text).join("");
+    if (!whole) return;
+    const doc = this.host.doc;
+    const ids = doc.stableIds;
+    const inCollab = !!(this.host.onIntent && ids);
+    const at = inCollab ? this.encodeCaretForIntent() : null;
+    if (inCollab && !at) return; // honest no-op: caret not id-addressable
+    const insT = caret.t;
+    const insStart = caret.offset;
+    this.insertTextCore(whole);
+    if (at) this.host.onIntent?.({ kind: "insertText", at, text: whole });
+    // Chain the formatted spans through the run splits applyRunFormat makes:
+    // `cur` is the (w:t, local offset) where the REMAINING inserted text
+    // begins. Every patch was computed against the destination formatting the
+    // whole insertion inherited, so unformatted spans just stay in place.
+    let cur = { t: insT, offset: insStart };
+    for (const span of spans) {
+      if (!span.text) continue;
+      const end = cur.offset + span.text.length;
+      if (!span.patch) {
+        cur = { t: cur.t, offset: end };
+        continue;
+      }
+      const rEl = doc.findParentOf(cur.t);
+      const pEl = rEl ? doc.findParentOf(rEl) : undefined;
+      if (!rEl || localName(rEl.name) !== "r" || !pEl || localName(pEl.name) !== "p") {
+        cur = { t: cur.t, offset: end };
+        continue;
+      }
+      const runLen = runWireLength(rEl);
+      const wireStart = wireOffsetOf(rEl, cur.t, cur.offset);
+      const blockId = ids?.idOf(pEl);
+      const runId = ids?.idOf(rEl);
+      if (wireStart === null || (inCollab && (blockId === undefined || runId === undefined))) {
+        cur = { t: cur.t, offset: end };
+        continue;
+      }
+      const wireEnd = wireStart + span.text.length;
+      const patch = span.patch as Record<string, unknown>;
+      const seg: SelectionSegment = {
+        run: { type: "run", props: {}, content: [], src: rEl, srcParent: pEl } as Run,
+        t: cur.t,
+        start: cur.offset,
+        end,
+        props: {},
+      };
+      const soleT = rEl.children.filter((c) => localName(c.name) === "t").length === 1;
+      if (wireStart === 0 && wireEnd === runLen && soleT) {
+        // The span covers the whole run: format it in place (no split, run id
+        // preserved) — the same decision applyRunFormat takes, mirrored so
+        // the emission matches the local mutation exactly.
+        applyRunFormat(doc, [seg], span.patch);
+        if (inCollab) this.host.onIntent?.({ kind: "formatRun", blockId: blockId!, runId: runId!, patch });
+        cur = { t: cur.t, offset: end };
+        continue;
+      }
+      const hasBefore = wireStart > 0;
+      const hasAfter = wireEnd < runLen;
+      const alloc = inCollab ? this.host.allocIds?.((hasBefore ? 1 : 0) + 1 + (hasAfter ? 1 : 0)) ?? [] : [];
+      let k = 0;
+      const beforeId = hasBefore ? alloc[k++] : undefined;
+      const middleId = alloc[k++];
+      const afterId = hasAfter ? alloc[k++] : undefined;
+      const formatted = applyRunFormat(doc, [seg], span.patch);
+      const middleT = formatted[0]?.t;
+      const middleRun = middleT ? doc.findParentOf(middleT) : undefined;
+      const container = middleRun ? doc.findParentOf(middleRun) : undefined;
+      if (!middleT || !middleRun || !container) break; // text landed; stop formatting
+      const mIdx = container.children.indexOf(middleRun);
+      if (inCollab && ids && middleId !== undefined) {
+        // Re-key the local pieces to the carried ids — the same walk the
+        // canonical apply performs, so every replica addresses them alike.
+        const isRun = (el: XmlElement | undefined): boolean => !!el && localName(el.name) === "r";
+        ids.reassign(middleRun, middleId);
+        if (hasBefore && beforeId !== undefined && isRun(container.children[mIdx - 1])) {
+          ids.reassign(container.children[mIdx - 1], beforeId);
+        }
+        if (hasAfter && afterId !== undefined && isRun(container.children[mIdx + 1])) {
+          ids.reassign(container.children[mIdx + 1], afterId);
+        }
+        this.host.onIntent?.({
+          kind: "formatRange",
+          blockId: blockId!,
+          runId: runId!,
+          start: wireStart,
+          end: wireEnd,
+          patch,
+          beforeId,
+          middleId,
+          afterId,
+        });
+      }
+      if (hasAfter) {
+        const afterRun = container.children[mIdx + 1];
+        const afterT = afterRun?.children.find((c) => localName(c.name) === "t");
+        if (!afterT) break;
+        cur = { t: afterT, offset: 0 };
+      } else {
+        cur = { t: middleT, offset: middleT.text.length };
+      }
+    }
+    this.caret = { t: cur.t, run: caret.run, offset: cur.offset, bias: "end" };
   }
 
   // ---------- table drag-move and resize ----------

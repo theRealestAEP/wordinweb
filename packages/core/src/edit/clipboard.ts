@@ -1,10 +1,10 @@
 import { DocxDocument } from "../docx.js";
 import { RunProps } from "../model.js";
 import { DEFAULT_OOXML_LIMITS, pruneToPastedSubset, validatePastedOoxml } from "../ooxml-validate.js";
-import { XmlElement, child, cloneXml, localName, parseXml, serializeXml } from "../xml.js";
+import { XmlElement, attr, child, cloneXml, localName, parseXml, serializeXml } from "../xml.js";
 import { pxToTwips } from "../units.js";
 import { topLevelBlockOf } from "./blocks.js";
-import { SelectionSegment } from "./commands.js";
+import { RunFormatPatch, SelectionSegment } from "./commands.js";
 
 /**
  * CLIPBOARD PAYLOAD CONTRACT
@@ -330,6 +330,55 @@ function htmlTable(node: Element, w: string, contentTwips: number): XmlElement {
   ]);
 }
 
+/** HTML block-level elements: each converts to its own w:p (or w:tbl). Any
+ * other node — text, or an inline element like span/b/i/u/a/code — groups
+ * with its inline neighbors into ONE paragraph of formatted runs, which is
+ * how Word reads `<b>x</b> plus <i>y</i>` (one paragraph, three runs). */
+const BLOCK_TAG =
+  /^(address|article|aside|blockquote|center|dd|details|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|summary|table|tbody|td|tfoot|th|thead|tr|ul)$/;
+
+function isBlockNode(node: Node): boolean {
+  return node.nodeType === Node.ELEMENT_NODE && BLOCK_TAG.test((node as Element).tagName.toLowerCase());
+}
+
+/** Convert a container's children into blocks: consecutive inline nodes fold
+ * into one paragraph; a block element converts on its own, and a container
+ * block that holds further blocks (div of p's, ul of li's) recurses. */
+function appendHtmlBlocks(container: Element, w: string, contentTwips: number, blocks: XmlElement[]): void {
+  let inline: Node[] = [];
+  const flush = (): void => {
+    const nodes = inline;
+    inline = [];
+    // Whitespace between block elements is formatting noise, not a paragraph.
+    const hasContent = nodes.some(
+      (node) =>
+        (node.textContent ?? "").trim().length > 0 ||
+        (node.nodeType === Node.ELEMENT_NODE &&
+          ((node as Element).tagName.toLowerCase() === "br" || (node as Element).querySelector("br"))),
+    );
+    if (!hasContent) return;
+    const runs = nodes.flatMap((node) => inlineRuns(node, w));
+    if (runs.length) blocks.push(el(`${w}p`, {}, runs));
+  };
+  for (const node of Array.from(container.childNodes)) {
+    if (!isBlockNode(node)) {
+      if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.ELEMENT_NODE) inline.push(node);
+      continue;
+    }
+    flush();
+    const element = node as Element;
+    const tag = element.tagName.toLowerCase();
+    if (tag === "table") blocks.push(htmlTable(element, w, contentTwips));
+    else if (tag === "hr") continue;
+    else if (!/^(p|h[1-6]|li|pre|blockquote)$/.test(tag) && Array.from(element.childNodes).some(isBlockNode)) {
+      appendHtmlBlocks(element, w, contentTwips, blocks);
+    } else {
+      blocks.push(htmlParagraph(element, w));
+    }
+  }
+  flush();
+}
+
 /**
  * Convert a text/html clipboard payload into blocks the editor can insert.
  *
@@ -356,30 +405,129 @@ export function htmlClipboardBlocks(html: string, contentWidthPx: number): XmlEl
     // rendering of the same content.
     if (blocks.length > 0) return blocks;
   }
-  const w = "w:";
-  const contentTwips = pxToTwips(contentWidthPx);
   const blocks: XmlElement[] = [];
-  for (const node of Array.from(body.childNodes)) {
-    if (node.nodeType === Node.TEXT_NODE) {
-      if (node.textContent?.trim()) {
-        const paragraph = body.ownerDocument.createElement("p");
-        paragraph.textContent = node.textContent;
-        blocks.push(htmlParagraph(paragraph, w));
-      }
-      continue;
-    }
-    if (node.nodeType !== Node.ELEMENT_NODE) continue;
-    const element = node as Element;
-    const tag = element.tagName.toLowerCase();
-    if (tag === "table") blocks.push(htmlTable(element, w, contentTwips));
-    else if (/^(p|div|h[1-6]|li|pre|blockquote)$/.test(tag)) blocks.push(htmlParagraph(element, w));
-    else if (element.textContent?.trim()) blocks.push(htmlParagraph(element, w));
-  }
+  appendHtmlBlocks(body, "w:", pxToTwips(contentWidthPx), blocks);
   // The converter above only builds allowlisted elements, so this gate is
   // really about the node and depth caps: a paste that exceeds them would be
   // accepted here and REJECTED by every peer's apply, which is a fork. Refuse
   // it on the originating client too, and let plain text carry the paste.
   return validatePastedOoxml(blocks, DEFAULT_OOXML_LIMITS).ok ? blocks : [];
+}
+
+// ---------- inline paste fragments (Word fragment semantics) ----------
+
+/** One pasted run reduced to inline-insertable form: its text plus the run
+ * patch that reproduces its direct character formatting at the destination
+ * (null when the formatting already matches — a plain text insert). */
+export interface InlinePasteSpan {
+  text: string;
+  patch: RunFormatPatch | null;
+}
+
+/** The character formatting a paste compares across source and destination —
+ * exactly the properties a RunFormatPatch can express. */
+interface PasteRunFormat {
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  strike: boolean;
+  /** Uppercase hex without '#'. */
+  color?: string;
+  highlight?: string;
+  /** w:sz half-points. */
+  sizeHalf?: number;
+  font?: string;
+  verticalAlign?: "superscript" | "subscript";
+}
+
+function formatFromRPr(rPr: XmlElement | undefined): PasteRunFormat {
+  const on = (name: string): boolean => {
+    const prop = child(rPr, name);
+    if (!prop) return false;
+    const val = attr(prop, "val");
+    return val === undefined || !/^(0|false|off|none)$/i.test(val);
+  };
+  const out: PasteRunFormat = { bold: on("b"), italic: on("i"), strike: on("strike"), underline: false };
+  const u = attr(child(rPr, "u"), "val");
+  out.underline = u !== undefined && u !== "none";
+  const color = attr(child(rPr, "color"), "val");
+  if (color && color !== "auto") out.color = color.toUpperCase();
+  const highlight = attr(child(rPr, "highlight"), "val");
+  if (highlight && highlight !== "none") out.highlight = highlight;
+  const sz = Number(attr(child(rPr, "sz"), "val"));
+  if (Number.isFinite(sz) && sz > 0) out.sizeHalf = sz;
+  const rFonts = child(rPr, "rFonts");
+  const font = attr(rFonts, "ascii") ?? attr(rFonts, "hAnsi");
+  if (font) out.font = font;
+  const vertAlign = attr(child(rPr, "vertAlign"), "val");
+  if (vertAlign === "superscript" || vertAlign === "subscript") out.verticalAlign = vertAlign;
+  return out;
+}
+
+function formatFromProps(props: RunProps): PasteRunFormat {
+  return {
+    bold: !!props.bold,
+    italic: !!props.italic,
+    underline: props.underline !== undefined && props.underline !== "none",
+    strike: !!props.strike,
+    color: colorValue(props.color),
+    highlight: props.highlight,
+    sizeHalf: props.size !== undefined ? Math.round(props.size * 1.5) : undefined,
+    font: props.font,
+    verticalAlign:
+      props.verticalAlign === "superscript" || props.verticalAlign === "subscript"
+        ? props.verticalAlign
+        : undefined,
+  };
+}
+
+/** The patch that turns destination-formatted text into the source run's
+ * formatting. Booleans compare both ways (a plain source turns a bold
+ * destination OFF); value properties only apply when the source declares
+ * them, so a source with no direct color never fights a destination style. */
+function spanPatch(src: PasteRunFormat, dest: PasteRunFormat): RunFormatPatch | null {
+  const patch: RunFormatPatch = {};
+  if (src.bold !== dest.bold) patch.bold = src.bold;
+  if (src.italic !== dest.italic) patch.italic = src.italic;
+  if (src.underline !== dest.underline) patch.underline = src.underline;
+  if (src.strike !== dest.strike) patch.strike = src.strike;
+  if (src.color !== undefined && src.color !== dest.color) patch.color = `#${src.color}`;
+  if (src.highlight !== undefined && src.highlight !== dest.highlight) patch.highlight = src.highlight;
+  if (src.sizeHalf !== undefined && src.sizeHalf !== dest.sizeHalf) patch.fontSizePt = src.sizeHalf / 2;
+  if (src.font !== undefined && src.font !== dest.font) patch.fontFamily = src.font;
+  if (src.verticalAlign !== dest.verticalAlign) patch.verticalAlign = src.verticalAlign ?? null;
+  return Object.keys(patch).length ? patch : null;
+}
+
+/**
+ * Reduce a pasted w:p to spans an INLINE insert can express — Word's fragment
+ * semantics, where a paragraph fragment at a paste edge joins the destination
+ * paragraph instead of standing alone. `destProps` is the effective formatting
+ * of the run at the caret; each span carries the patch that reproduces its
+ * source formatting there. Null when the paragraph holds anything beyond
+ * simple text runs (breaks, tabs, drawings, fields, tracked content) — those
+ * keep the block-level paste path.
+ */
+export function inlinePasteSpans(block: XmlElement, destProps: RunProps): InlinePasteSpan[] | null {
+  if (localName(block.name) !== "p") return null;
+  const dest = formatFromProps(destProps);
+  const spans: InlinePasteSpan[] = [];
+  for (const node of block.children) {
+    const name = localName(node.name);
+    if (name === "pPr") continue;
+    if (name !== "r") return null;
+    let text = "";
+    let rPr: XmlElement | undefined;
+    for (const c of node.children) {
+      const cn = localName(c.name);
+      if (cn === "rPr") rPr = c;
+      else if (cn === "t") text += c.text;
+      else return null;
+    }
+    if (!text) continue;
+    spans.push({ text, patch: spanPatch(formatFromRPr(rPr), dest) });
+  }
+  return spans;
 }
 
 function escapeHtml(value: string): string {
