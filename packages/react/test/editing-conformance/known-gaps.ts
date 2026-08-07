@@ -80,10 +80,9 @@ export const KNOWN_GAPS: Record<string, string> = {
   // splicing them beside real content. Char-wise deletes that empty ONE w:t
   // beside populated runs can still strand (fuzz family stays counted).
 
-  // G14 — Enter with an active selection is a complete no-op; Word deletes
-  // the selection and splits the paragraph at that point.
-  "session/enter.over-selection": "Enter with an active selection is a no-op (Word deletes the selection, then splits)",
-  "local/enter.over-selection": "Enter with an active selection is a no-op (Word deletes the selection, then splits)",
+  // G14 — FIXED: Enter with an active selection now composes
+  // removeSelectedText (canonical delete + intents) with the ordinary split,
+  // exactly like typing over a selection.
 
   // G15 — FIXED: the Shift+Arrow-into-empty-paragraph wedge. A selection with
   // no character segments now still collapses (arrow keys use the selection

@@ -7313,6 +7313,12 @@ export class DocxEditor {
   /** Enter: split the paragraph at the caret into two w:p elements. */
   private splitParagraph(): void {
     this.host.history?.checkpoint();
+    // Word: Enter over an active selection deletes the selection FIRST, then
+    // splits at the collapse point — the same composition typing over a
+    // selection uses (insertText), so the delete emits its own canonical
+    // intents and the split below is encoded against the post-delete state.
+    // Suggesting mode composes the same way: strike, then suggested split.
+    if (this.hasSelection()) this.removeSelectedText();
     this.splitParagraphNoHistory();
   }
 
