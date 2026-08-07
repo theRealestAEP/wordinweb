@@ -2,7 +2,7 @@ import { DocxDocument, localName, runWireLength, serializeXml, type Block, type 
 import { INTENT_KINDS, applyIntentScoped, resyncScope, type Intent, type IntentBody, type PresencePosition } from "@wordinweb/collab/client";
 import { agentCapabilities, agentOperationSchema, type AgentEditCapability } from "./capabilities.js";
 import { AGENT_COMPOSE_SCHEMA, composeDocxBytes } from "./compose.js";
-import { compileAgentOperation, localMedia } from "./edit.js";
+import { compileAgentOperations, localMedia } from "./edit.js";
 import { SemanticInspector } from "./inspect.js";
 import { hunksFromUnifiedDiff, patchOperations } from "./patch.js";
 import { projectStory, projectedLines } from "./project.js";
@@ -787,7 +787,7 @@ export class AgentDocument {
     const kinds: string[] = [];
     for (const input of request.operations) {
       const sourceAsset = typeof input.assetRef === "string" ? this.asset(input.assetRef) : undefined;
-      const operation = await compileAgentOperation(input, {
+      const operations = await compileAgentOperations(input, {
         doc: trial.doc,
         ids: trial.ids,
         allocateIds,
@@ -795,12 +795,14 @@ export class AgentDocument {
         asset: (ref) => this.asset(ref),
         prepareMedia: localMedia,
       });
-      const full = { ...operation, clientId: "local-agent", clientSeq: 0, base: 0 } as Intent;
-      const result = applyIntentScoped(trial.doc, trial.ids, full);
-      if (!result.applied) throw new Error(`${operation.kind} could not apply to the referenced document state`);
-      resyncScope(trial.doc, trial.ids, result);
-      installPreparedImage(trial.doc, operation, sourceAsset);
-      kinds.push(operation.kind);
+      for (const operation of operations) {
+        const full = { ...operation, clientId: "local-agent", clientSeq: 0, base: 0 } as Intent;
+        const result = applyIntentScoped(trial.doc, trial.ids, full);
+        if (!result.applied) throw new Error(`${operation.kind} could not apply to the referenced document state`);
+        resyncScope(trial.doc, trial.ids, result);
+        installPreparedImage(trial.doc, operation, sourceAsset);
+        kinds.push(operation.kind);
+      }
     }
     this.localDoc = trial.doc;
     this.localRevision++;
@@ -819,7 +821,7 @@ export class AgentDocument {
     let presence: PresencePosition | null = null;
     for (const input of request.operations) {
       const sourceAsset = typeof input.assetRef === "string" ? this.asset(input.assetRef) : undefined;
-      const operation = await compileAgentOperation(input, {
+      const operations = await compileAgentOperations(input, {
         doc: trial.doc,
         ids: trial.ids,
         allocateIds: (count) => target.allocateIds(count),
@@ -832,13 +834,15 @@ export class AgentDocument {
           return prepared;
         },
       });
-      const hint = presenceHint(trial.doc, operation);
-      const result = applyIntentScoped(trial.doc, trial.ids, { ...operation, clientId: "agent-trial", clientSeq: 0, base: 0 } as Intent);
-      if (!result.applied) throw new Error(`${operation.kind} could not apply to the referenced document state`);
-      resyncScope(trial.doc, trial.ids, result);
-      installPreparedImage(trial.doc, operation, sourceAsset);
-      presence = presenceAfterOperation(trial.doc, operation, hint) ?? presence;
-      compiled.push({ operation, asset: sourceAsset });
+      for (const operation of operations) {
+        const hint = presenceHint(trial.doc, operation);
+        const result = applyIntentScoped(trial.doc, trial.ids, { ...operation, clientId: "agent-trial", clientSeq: 0, base: 0 } as Intent);
+        if (!result.applied) throw new Error(`${operation.kind} could not apply to the referenced document state`);
+        resyncScope(trial.doc, trial.ids, result);
+        installPreparedImage(trial.doc, operation, sourceAsset);
+        presence = presenceAfterOperation(trial.doc, operation, hint) ?? presence;
+        compiled.push({ operation, asset: sourceAsset });
+      }
     }
     if (!this.revisionMatchesEdit(request)) throw new Error("The document revision is stale");
     for (const { operation } of compiled) await target.submit(operation);

@@ -127,6 +127,56 @@ function imageExtension(mediaType: string): string {
   return extension;
 }
 
+/**
+ * Compile one agent operation into the intent(s) the replicas apply.
+ *
+ * insertText with embedded line breaks expands into a paragraph-split chain:
+ * the intent's text lands verbatim in one w:t, and a raw "\n" there is a
+ * character the layout engine measures (~zero advance) but the DOM painter —
+ * `white-space: pre` — renders as a real line break, painting the remainder
+ * of the span on top of the engine-placed spans below (the ghost-text overlap
+ * bug). Line breaks between paragraphs mean paragraphs, so the expansion uses
+ * the same decomposition the editor's paste and the patch tool use:
+ * splitParagraph per boundary plus insertText per non-empty line. "\v" (Word's
+ * soft line break on the wire) also splits — the intent set has no
+ * line-break insert, and a paragraph break is the closest tracked form.
+ */
+export async function compileAgentOperations(input: AgentOperation, context: CompileContext): Promise<IntentBody[]> {
+  if (input.kind !== "insertText" || typeof input.text !== "string" || !/[\n\v\r]/.test(input.text)) {
+    return [await compileAgentOperation(input, context)];
+  }
+  const shapeError = validateAgentOperationShape(input);
+  if (shapeError) throw new Error(shapeError);
+  const chunks = input.text.replace(/\r\n?/g, "\n").replace(/\v/g, "\n").split("\n");
+  // Resolve the position and stamp the suggest metadata once, through the
+  // normal single-line path (the placeholder text is discarded).
+  const base = await compileAgentOperation({ ...input, text: "-" }, context) as Extract<IntentBody, { kind: "insertText" }>;
+  const suggest = base.suggest ? { suggest: base.suggest } : {};
+
+  // Splits first, each addressed at the tail run the previous split created:
+  // that leaves every paragraph but the last carrying the new (tracked)
+  // paragraph mark — the shape Word writes for Enter — and never addresses a
+  // run a suggested insert has already replaced. The inserts then fill each
+  // paragraph; empty lines stay empty paragraphs.
+  const operations: IntentBody[] = [];
+  const inserts: IntentBody[] = [];
+  let at = { ...base.at };
+  for (let index = 0; index < chunks.length; index++) {
+    if (chunks[index]) inserts.push({ kind: "insertText", at, text: chunks[index], ...suggest } as IntentBody);
+    if (index < chunks.length - 1) {
+      const [newBlockId, newRunId] = context.allocateIds(2);
+      operations.push({ kind: "splitParagraph", at, newBlockId, newRunId, ...suggest } as IntentBody);
+      at = { blockId: newBlockId, runId: newRunId, offset: 0 };
+    }
+  }
+  operations.push(...inserts);
+  for (const operation of operations) {
+    const error = validateIntent({ ...operation, clientId: "agent-validation", clientSeq: 0, base: 0 } as Intent);
+    if (error) throw new Error(error);
+  }
+  return operations;
+}
+
 export async function compileAgentOperation(input: AgentOperation, context: CompileContext): Promise<IntentBody> {
   const operation = cloneOperation(input);
   const kind = operation.kind;
