@@ -1,3 +1,4 @@
+import { citationText, documentBibliography } from "../citations.js";
 import { DocxDocument } from "../docx.js";
 import { FieldContext, resolveField } from "../layout/inline.js";
 import { LayoutResult } from "../layout/types.js";
@@ -32,9 +33,18 @@ import { XmlElement, attr, localName } from "../xml.js";
  *    still get its STYLEREFs refreshed. Sharing the function is what keeps the
  *    painted text and the written cache equal.
  *
+ *  - MERGEFIELD and CITATION are computed here through the same shared-rule
+ *    pattern as body STYLEREF: layout resolves both too, and the rule lives
+ *    above both consumers (resolveField's MERGEFIELD case; src/citations.ts).
+ *    A MERGEFIELD's non-empty cache IS its value — the last merged text, which
+ *    no data source here could recompute — so only an empty cache is filled,
+ *    with the «Name» placeholder Word shows when no data source is attached.
+ *    A CITATION re-renders from the document's own sources part and keeps its
+ *    cache when the resolver cannot model it.
+ *
  * Every other instruction keeps its cached result untouched. That is not a
  * gap to fill later — an instruction this engine cannot evaluate (INCLUDETEXT,
- * MERGEFIELD, DOCPROPERTY …) has a cache that is the best value available, and
+ * DOCPROPERTY …) has a cache that is the best value available, and
  * overwriting it with a guess would lose information the file still holds.
  *
  * HEADERS AND FOOTERS are walked too, but only for the instructions whose
@@ -63,7 +73,7 @@ import { XmlElement, attr, localName } from "../xml.js";
 const LAYOUT_RESOLVED = new Set(["PAGE", "NUMPAGES", "SECTIONPAGES", "PAGEREF", "REF", "SEQ"]);
 
 /** Instructions the update pass evaluates itself. */
-const LOCALLY_RESOLVED = new Set(["DATE", "TIME", "FILENAME", "AUTHOR", "STYLEREF"]);
+const LOCALLY_RESOLVED = new Set(["DATE", "TIME", "FILENAME", "AUTHOR", "STYLEREF", "MERGEFIELD", "CITATION"]);
 
 /** Every instruction this pass can recompute. Anything else keeps its cache. */
 export const UPDATABLE_FIELD_KEYWORDS: readonly string[] = Object.freeze(
@@ -77,7 +87,7 @@ export const UPDATABLE_FIELD_KEYWORDS: readonly string[] = Object.freeze(
  * SECTIONPAGES, PAGEREF, SEQ, STYLEREF) has no single result to cache and
  * keeps the one the file holds.
  */
-const HF_SINGLE_VALUED = new Set(["DATE", "TIME", "FILENAME", "AUTHOR", "REF"]);
+const HF_SINGLE_VALUED = new Set(["DATE", "TIME", "FILENAME", "AUTHOR", "REF", "MERGEFIELD", "CITATION"]);
 
 export interface FieldUpdateOptions {
   /**
@@ -200,6 +210,9 @@ export function computeFieldResults(doc: DocxDocument, options: FieldUpdateOptio
   const sites = collectFieldSites(doc);
   const harvested = options.layout ? harvestFieldText(options.layout) : new Map<Run, string>();
   const styleRefs = bodyStyleRefText(doc);
+  // Read once per pass, like styleRefs; null when the package has no sources
+  // part, in which case every CITATION keeps its cache.
+  const bibliography = documentBibliography(doc);
 
   return sites.map(({ field, run }) => {
     const keyword = keywordOf(field.instruction);
@@ -218,6 +231,7 @@ export function computeFieldResults(doc: DocxDocument, options: FieldUpdateOptio
       fileName: options.fileName,
       author: options.author,
       styleRefBody: (_name, key) => styleRefs.get(key as FieldContent),
+      citation: (instruction) => (bibliography ? citationText(instruction, bibliography) : undefined),
     };
     return resolveField(field.instruction, field.cachedResult, context, field);
   });

@@ -73,12 +73,18 @@ function insertElementsAt(
  * The list is the field types that read nothing outside the document: what the
  * engine evaluates itself (layout/inline.ts resolveField, edit/update-fields.ts)
  * plus the document-property fields, which are inert text.
+ *
+ * MERGEFIELD and CITATION qualify: a MERGEFIELD instruction names a data
+ * column, never a resource (the data-source connection lives in settings.xml
+ * w:mailMerge, which this editor never writes), and a CITATION reads the
+ * package's own sources part.
  */
 const INSERTABLE_FIELD_KEYWORDS = new Set([
   "PAGE", "NUMPAGES", "SECTIONPAGES", "SECTION", "DATE", "TIME",
   "CREATEDATE", "SAVEDATE", "PRINTDATE", "AUTHOR", "TITLE", "SUBJECT",
   "KEYWORDS", "COMMENTS", "FILENAME", "NUMWORDS", "NUMCHARS", "PAGEREF",
   "REF", "SEQ", "STYLEREF", "TOC", "INDEX", "LISTNUM", "QUOTE",
+  "MERGEFIELD", "CITATION",
 ]);
 
 /** Longest instruction this engine writes. Real ones are far shorter; the cap
@@ -151,6 +157,55 @@ export function insertPageField(
   const inserted: XmlElement[] =
     kind === "page" ? [fld("PAGE")] : [textRun("Page "), fld("PAGE"), textRun(" of "), fld("NUMPAGES")];
   return insertElementsAt(doc, t, offset, inserted);
+}
+
+/** A merge-field NAME an insert accepts: printable ASCII with no quote or
+ * backslash, so the name cannot smuggle a switch or a second instruction into
+ * the w:instrText it is spliced into. */
+export function isValidMergeFieldName(name: string): boolean {
+  return (
+    typeof name === "string" &&
+    name.length > 0 &&
+    name.length <= 64 &&
+    name.trim().length > 0 &&
+    /^[\x20-\x7e]+$/.test(name) &&
+    !/["\\]/.test(name)
+  );
+}
+
+/**
+ * Insert a MERGEFIELD at a text position. With no data source attached the
+ * field displays its «Name» placeholder, exactly what Word inserts, so that
+ * placeholder is written as the cached result.
+ */
+export function insertMergeField(doc: DocxDocument, t: XmlElement, offset: number, name: string): boolean {
+  if (!isValidMergeFieldName(name)) return false;
+  const quoted = /\s/.test(name) ? `"${name}"` : name;
+  return insertField(doc, t, offset, `MERGEFIELD ${quoted} \\* MERGEFORMAT`, `«${name}»`);
+}
+
+/** A citation source TAG an insert accepts: the alphanumeric shape Word's own
+ * Source Manager creates (plus _ and -), so the tag splices into a
+ * w:instrText verbatim. */
+export function isValidCitationTag(tag: string): boolean {
+  return typeof tag === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(tag);
+}
+
+/**
+ * Insert a CITATION at a text position. `cachedResult` is the display text
+ * the caller resolved from the document's sources part (src/citations.ts);
+ * the instruction carries Word's `\l 1033` locale switch, which its own
+ * inserts write.
+ */
+export function insertCitationField(
+  doc: DocxDocument,
+  t: XmlElement,
+  offset: number,
+  tag: string,
+  cachedResult: string,
+): boolean {
+  if (!isValidCitationTag(tag)) return false;
+  return insertField(doc, t, offset, `CITATION ${tag} \\l 1033`, cachedResult);
 }
 
 /** Insert a live DATE or TIME field using Word's date-picture syntax. */

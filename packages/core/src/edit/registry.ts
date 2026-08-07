@@ -1,8 +1,15 @@
 import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
+import { citationText, documentBibliography } from "../citations.js";
 import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
 import { XmlElement } from "../xml.js";
 import { insertTableAfter } from "./blocks.js";
+import {
+  insertCitationField,
+  insertMergeField,
+  isValidCitationTag,
+  isValidMergeFieldName,
+} from "./fields.js";
 import { setImageCrop, type ImageCrop } from "./images.js";
 import { setListType } from "./lists.js";
 import { insertEndnote } from "./notes.js";
@@ -1150,6 +1157,60 @@ const setModel3DRotationOperation = defineOperation<{
     target.drawing ? setModel3DRotation(doc, target.drawing, payload.rotation) : false,
 });
 
+/**
+ * Insert a MERGEFIELD at the end of the anchor run. With no mail-merge data
+ * source attached — this editor never attaches one — the field displays the
+ * «Name» placeholder, which is what Word inserts too; the placeholder is
+ * written as the cached result so the file shows it everywhere.
+ */
+const insertMergeFieldOperation = defineOperation<{
+  runId: StableId;
+  name: string;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertMergeField",
+  address: "run",
+  category: "insert",
+  description: "Insert a mail-merge placeholder field («Name»).",
+  fields: [{ name: "name" }],
+  // The fldSimple's result run, plus the runs a mid-text split creates; the
+  // budget matches the hand-written insertField intent's.
+  nodeIds: () => 8,
+  validate: ({ name }) => (isValidMergeFieldName(name) ? null : "insertMergeField: bad name"),
+  apply: ({ doc, target, payload }) =>
+    target.t ? insertMergeField(doc, target.t, target.t.text.length, payload.name) : false,
+});
+
+/**
+ * Insert a CITATION to a source the document's bibliography already holds.
+ *
+ * The tag must name a source in the package's sources part — a tag that does
+ * not is the operation's honest no-op, and every replica agrees because the
+ * sources part is package state, identical at the intent's sequenced
+ * position. The cached display text is DERIVED on each replica from that same
+ * part (src/citations.ts), so nothing nondeterministic needs carrying.
+ */
+const insertCitationOperation = defineOperation<{
+  runId: StableId;
+  tag: string;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertCitation",
+  address: "run",
+  category: "insert",
+  description: "Insert a citation to a bibliography source the document already has, by source tag.",
+  fields: [{ name: "tag" }],
+  nodeIds: () => 8,
+  validate: ({ tag }) => (isValidCitationTag(tag) ? null : "insertCitation: bad tag"),
+  apply: ({ doc, target, payload }) => {
+    if (!target.t) return false;
+    const bibliography = documentBibliography(doc);
+    if (!bibliography || !bibliography.sources.has(payload.tag)) return false;
+    const display = citationText(`CITATION ${payload.tag} \\l 1033`, bibliography) ?? "";
+    return insertCitationField(doc, target.t, target.t.text.length, payload.tag, display);
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Watermarks
 // ---------------------------------------------------------------------------
@@ -1277,6 +1338,8 @@ const OPERATIONS = [
   insertEndnoteOperation,
   setCropOperation,
   setModel3DRotationOperation,
+  insertMergeFieldOperation,
+  insertCitationOperation,
   insertWatermarkOperation,
   removeWatermarkOperation,
 ] as const;
