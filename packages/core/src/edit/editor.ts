@@ -804,6 +804,16 @@ export class DocxEditor {
     return null;
   }
 
+  /** The owned selection's anchor and focus in paint order (a keyboard
+   * selection extended leftward has its focus before its anchor). Falls back
+   * to anchor-then-focus when either point cannot be ranked (unpainted). */
+  private orderedSelectionPoints(): [SelPoint, SelPoint] {
+    const sel = this.selection!;
+    const a = this.pointIndex(sel.anchor);
+    const f = this.pointIndex(sel.focus);
+    return a !== null && f !== null && f < a ? [sel.focus, sel.anchor] : [sel.anchor, sel.focus];
+  }
+
   /** Step a point by one character across item boundaries in paint order. */
   private stepPoint(pt: SelPoint, delta: -1 | 1): SelPoint | null {
     // Grapheme-cluster step (see moveCaret): shift+arrow selection extends by
@@ -6216,18 +6226,20 @@ export class DocxEditor {
       const delta = e.key === "ArrowLeft" ? -1 : 1;
       if (e.shiftKey) this.moveFocus((pt) => this.stepPoint(pt, delta), true);
       else if (this.hasSelection()) {
-        // Collapse to the corresponding edge, like every editor.
-        const segs = this.getSelectionSegments();
-        const edge = delta === -1 ? segs[0] : segs[segs.length - 1];
-        if (edge?.t) {
-          this.clearSelection();
-          this.caret = {
-            t: edge.t as XmlElement,
-            run: this.caret?.run ?? ({} as Caret["run"]),
-            offset: delta === -1 ? edge.start : edge.end,
-          };
-          this.positionCaret();
-        }
+        // Collapse to the corresponding edge, like every editor. Derived from
+        // the selection POINTS, not the character segments: a selection whose
+        // focus sits in an empty paragraph covers no characters (G15, the
+        // wedge), and collapsing must still land a caret.
+        const [startPt, endPt] = this.orderedSelectionPoints();
+        const edge = delta === -1 ? startPt : endPt;
+        this.clearSelection();
+        this.caret = {
+          t: edge.t,
+          run: this.caret?.run ?? ({} as Caret["run"]),
+          offset: edge.offset,
+          bias: edge.bias,
+        };
+        this.positionCaret();
       } else if (this.caret) this.moveCaret(delta);
     } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       e.preventDefault();
@@ -6825,7 +6837,15 @@ export class DocxEditor {
             : undefined;
           if (mergeParagraphBackward(this.host.doc, next)) {
             if (mergeNextId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeNextId });
-            invalidateParagraphSignature(pEl);
+            // When THIS paragraph was empty, the merge drops it whole and the
+            // NEXT paragraph survives (Word keeps the surviving text's style).
+            // The caret's w:t left the tree with it — rebind to the surviving
+            // paragraph's first text or every later gesture dangles detached.
+            if (!paragraphOf(this.host.doc, caret.t)) {
+              const t = firstTextOf(next);
+              if (t) this.caret = { t, run: caret.run, offset: 0 };
+            }
+            invalidateParagraphSignature(paragraphOf(this.host.doc, this.caret?.t ?? caret.t) ?? pEl);
             this.commit(false, "local", true);
           }
           return;
@@ -6980,6 +7000,25 @@ export class DocxEditor {
       }
     }
     const segments = this.getSelectionSegments();
+    // G15 (the wedge): a keyboard selection can cover ONLY a paragraph
+    // boundary — Shift+ArrowRight from a paragraph end into an EMPTY
+    // paragraph selects the paragraph mark and nothing else, so no character
+    // segment exists. The mark is still selected content (Word deletes it:
+    // the paragraphs merge), so derive the covered paragraphs and the caret
+    // home from the selection's endpoints instead of wedging dead.
+    let boundaryParagraphs: XmlElement[] = [];
+    let boundaryCaret: Caret | null = null;
+    if (segments.length === 0 && this.selection) {
+      const [startPt, endPt] = this.orderedSelectionPoints();
+      const pa = paragraphOf(this.host.doc, startPt.t);
+      const pb = paragraphOf(this.host.doc, endPt.t);
+      if (pa && pb) boundaryParagraphs = this.paragraphSpan(pa === pb ? [pa] : [pa, pb]);
+      boundaryCaret = {
+        t: startPt.t,
+        run: this.caret?.run ?? ({} as Caret["run"]),
+        offset: startPt.offset,
+      };
+    }
     if (this.suggesting) {
       const ranges = segments
         .filter((s) => s.t)
@@ -7002,7 +7041,8 @@ export class DocxEditor {
       // "del" glyph a caret paragraph-merge suggests — so a fully-selected
       // list item reads as deleted, marker included, until accept/reject.
       const marks: { blockId: number; glyph: "ins" | "del" }[] = [];
-      for (const pEl of this.spannedParagraphs(segments).slice(0, -1)) {
+      const suggestSpanned = segments.length > 0 ? this.spannedParagraphs(segments) : boundaryParagraphs;
+      for (const pEl of suggestSpanned.slice(0, -1)) {
         if (paragraphGlyphRevision(pEl, "del")) continue;
         markParagraphGlyph(pEl, "del", meta);
         const blockId = this.host.doc.stableIds?.idOf(pEl);
@@ -7012,11 +7052,12 @@ export class DocxEditor {
       this.clearSelection();
       const run = segments[0]?.run;
       if (c && run) this.caret = { t: c.t, run, offset: c.offset };
+      else if (boundaryCaret) this.caret = boundaryCaret;
       return false;
     }
     // Group ranges per w:t, delete from the end so offsets stay valid.
     const byT = new Map<XmlElement, { start: number; end: number }[]>();
-    let first: Caret | null = null;
+    let first: Caret | null = boundaryCaret;
     for (const seg of segments) {
       if (!seg.t) continue;
       const t = seg.t as XmlElement;
@@ -7110,7 +7151,7 @@ export class DocxEditor {
     // bullet markers (they used to survive as empty marker-only paragraphs)
     // and the two boundary paragraphs join. Same mutation + intent as caret
     // Backspace at a paragraph start, so every replica converges.
-    const spanned = this.spannedParagraphs(segments);
+    const spanned = segments.length > 0 ? this.spannedParagraphs(segments) : boundaryParagraphs;
     let merged = false;
     for (let i = 1; i < spanned.length; i++) {
       const pEl = spanned[i];
@@ -7158,6 +7199,13 @@ export class DocxEditor {
       const pEl = paragraphOf(doc, seg.t as XmlElement);
       if (pEl && !touched.includes(pEl)) touched.push(pEl);
     }
+    return this.paragraphSpan(touched);
+  }
+
+  /** Fill sibling gaps between consecutive touched paragraphs (see
+   * spannedParagraphs; also used for a zero-segment boundary selection). */
+  private paragraphSpan(touched: XmlElement[]): XmlElement[] {
+    const doc = this.host.doc;
     const out: XmlElement[] = [];
     for (let i = 0; i < touched.length; i++) {
       out.push(touched[i]);

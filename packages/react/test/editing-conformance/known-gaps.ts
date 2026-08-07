@@ -53,11 +53,9 @@ export const KNOWN_GAPS: Record<string, string> = {
   // mount; Word removes it and leaves one empty paragraph.
   "session/selectall.delete-with-table": "select-all + delete leaves the table standing (Word removes it, leaving one empty paragraph)",
 
-  // G18 (introduced/exposed by 734b6a8) — deleting an empty list item and
-  // then a character strands a zero-length run where the unbullet/merge
-  // rebind happened. Structural-lint class; visible only in the XML.
-  "session/backspace.list-item-empty-then-char": "the unbullet/merge path strands a zero-length run",
-  "local/backspace.list-item-empty-then-char": "the unbullet/merge path strands a zero-length run",
+  // G18 — FIXED with G13: mergeParagraphBackward leaves the merged
+  // paragraph's blank placeholder runs behind, so the unbullet/merge path
+  // strands nothing.
 
   // G8 — deleting a selection that spans a paragraph boundary deletes the
   // characters but KEEPS the boundary; Word merges the two paragraphs.
@@ -77,26 +75,21 @@ export const KNOWN_GAPS: Record<string, string> = {
   "session/shifttab.list-item-level0": "Shift+Tab at list level 0 is a no-op (Word converts the item to a body paragraph)",
   "local/shifttab.list-item-level0": "Shift+Tab at list level 0 is a no-op (Word converts the item to a body paragraph)",
 
-  // G13 — removing an empty paragraph (Backspace inside it, or Backspace at
-  // the following paragraph's start) merges the empty paragraph's placeholder
-  // run into the neighbor, stranding a zero-length w:t beside real content —
-  // a structural-lint violation, not just a cosmetic one.
-  "session/backspace.empty-paragraph": "deleting an empty paragraph strands its zero-length placeholder w:t inside the merged paragraph",
-  "local/backspace.empty-paragraph": "deleting an empty paragraph strands its zero-length placeholder w:t inside the merged paragraph",
+  // G13 — FIXED (merge half): mergeParagraphBackward drops the merged
+  // paragraph's blank placeholder runs (rPr + zero-length w:t) instead of
+  // splicing them beside real content. Char-wise deletes that empty ONE w:t
+  // beside populated runs can still strand (fuzz family stays counted).
 
   // G14 — Enter with an active selection is a complete no-op; Word deletes
   // the selection and splits the paragraph at that point.
   "session/enter.over-selection": "Enter with an active selection is a no-op (Word deletes the selection, then splits)",
   "local/enter.over-selection": "Enter with an active selection is a no-op (Word deletes the selection, then splits)",
 
-  // G15 — THE WEDGE (found by the fuzzer, seeds 1 and 2): Shift+ArrowRight at
-  // the end of a paragraph whose NEXT paragraph is empty produces a zero-width
-  // focus selection with no caret — after it, no caret or selection is
-  // reported, arrow keys cannot collapse, and every typed character is
-  // swallowed until a mouse click. Crossing into a NONEMPTY paragraph works
-  // (select.shift-arrow-mid-text and the across-para cases pass).
-  "session/select.shift-arrow-empty-para": "Shift+Arrow at a paragraph end before an empty paragraph wedges the editor (no caret/selection, typing dead until a mouse click)",
-  "local/select.shift-arrow-empty-para": "Shift+Arrow at a paragraph end before an empty paragraph wedges the editor (no caret/selection, typing dead until a mouse click)",
+  // G15 — FIXED: the Shift+Arrow-into-empty-paragraph wedge. A selection with
+  // no character segments now still collapses (arrow keys use the selection
+  // POINTS) and still deletes its covered paragraph mark (removeSelectedText
+  // derives the spanned paragraphs from the selection endpoints), so typing
+  // over it merges the paragraphs and lands the character — Word's contract.
 
   // G12 — a selection extended across a table-cell boundary deletes
   // character-wise; Word switches to whole-cell selection and clears the
