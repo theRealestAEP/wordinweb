@@ -7547,12 +7547,17 @@ class Engine {
    *
    * A boundary between an exact row and a content-sized row keeps the content
    * row's half-share and charges the exact row's full inset; no probe measures
-   * that mixed case. Pre-15 compatibility mode keeps its own fitted exact-row
-   * arithmetic (legacy form templates ruled with hairline tcBorders) and the
-   * half-lead/half-inset convention it was fitted with.
+   * that mixed case. The convention is compat-INVARIANT: probe-exactouter11
+   * reads digit-identical to probe-exactouter15 on every case — a live outer
+   * rule above an exact first row charges the flow nothing (XFR/YFR = the
+   * no-border control) while the same rule below an exact last row charges
+   * its full 1.5pt (XLR/YLR = control + 1.52pt) — so the pre-15 half-lead
+   * convention this method used to keep charged +0.75pt at the top edge and
+   * -0.75pt at the bottom against Word. probe-exactnil11's full 2.00px inset
+   * of the row below a live insideH pins the inset half in compat 11 too.
    */
   private exactInsetRow(row: TableRow): boolean {
-    return row.props.heightRule === "exact" && this.doc.compatibilityMode >= 15;
+    return row.props.heightRule === "exact";
   }
 
   /** Flow lead above row `ri` when it starts a table segment: half the
@@ -7572,6 +7577,23 @@ class Engine {
   private rowBottomLead(tbl: Table, ri: number): number {
     const w = this.rowBorderWidths(tbl, ri).bottom;
     return this.exactInsetRow(tbl.rows[ri]) ? w : w / 2;
+  }
+
+  /** The tblBorders top rule width that row 0's all-nil cell borders suppress
+   * (rowBorderWidths charges zero at that outer edge). A continuation page's
+   * repeated tblHeader stack still charges it in full: the us-courts answer
+   * body table declares top nil on row 0 under a live sz-8 tblBorders, and
+   * its pages 2-7 hold 0.00 only with the charge kept — probe-exactouter
+   * pins the zero at the table's TRUE start, and no probe measures a
+   * repeated-header segment top, so that path keeps the fixture-calibrated
+   * charge. */
+  private nilSuppressedOuterTop(tbl: Table): number {
+    const first = tbl.rows[0];
+    if (!first || first.cells.length === 0) return 0;
+    if (!first.cells.every((c) => c.props.borders?.top?.style === "none")) return 0;
+    const b = tbl.props.borders?.top;
+    if (!b || b.style === "none") return 0;
+    return this.borderPaintWidth({ style: b.style, width: b.rawWidth ?? b.width });
   }
 
   /** Widths of the horizontal rules above and below a row. A rule can be
@@ -7637,9 +7659,22 @@ class Engine {
     const declaredNil = (r: number, side: "top" | "bottom") =>
       rows[r].cells.length > 0 &&
       rows[r].cells.every((c) => c.props.borders?.[side]?.style === "none");
+    // An OUTER edge has only one cell facing it, so the row's own nil alone
+    // overrides the table's top/bottom rule — no second declarer exists.
+    // Measured by probe-exactouter11/15 (parity #100, each package exported
+    // with the self-reproduction control): against the no-border controls a
+    // live sz-12 outer rule charges the flow its full 1.5pt (content rows on
+    // both edges, exact rows at the bottom edge), and every nil variant —
+    // XFN/XLN/YFN/YLN/CFN/CLN — reads the control to the digit, in compat 11
+    // and 15 alike. probe-exactmar's V1 first showed the overcharge: all-nil
+    // cells under a live sz-8 tblBorders read +2.0pt (one rule per outer
+    // edge) against Word until the nils are honored here.
     const boundary = (k: number): number => {
-      if (k === 0) return Math.max(bw(tb?.top), cellTop(0));
-      if (k === rows.length) return Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
+      if (k === 0) return declaredNil(0, "top") ? 0 : Math.max(bw(tb?.top), cellTop(0));
+      if (k === rows.length)
+        return declaredNil(rows.length - 1, "bottom")
+          ? 0
+          : Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
       if (declaredNil(k - 1, "bottom") && declaredNil(k, "top")) return 0;
       return Math.max(bw(tb?.insideH), cellBot(k - 1), cellTop(k));
     };
@@ -7915,7 +7950,11 @@ class Engine {
         segPage = this.cur;
         segHasRows = false;
         const firstRowIdx = !row.props.tblHeader && headerRows.length > 0 ? 0 : ri;
-        this.y += this.rowTopLead(tbl, firstRowIdx);
+        // A repeated header stack keeps the nil-suppressed outer top charge
+        // (half as segment lead, half in row 0's instance — the split the
+        // pre-nil arithmetic used); see nilSuppressedOuterTop.
+        const nilTop = firstRowIdx === 0 && ri !== 0 ? this.nilSuppressedOuterTop(tbl) : 0;
+        this.y += this.rowTopLead(tbl, firstRowIdx) + nilTop / 2;
         // Repeat header rows at the top of the continuation page. A repeated
         // header advances by its FULL row height — content + border share +
         // any trHeight floor — exactly like its first-page instance (Word's
@@ -7936,6 +7975,7 @@ class Engine {
             if (this.doc.compatibilityMode < 15 && hr.props.heightRule === "exact") {
               hH -= this.rowBottomPad(tbl, hr) / 2;
             }
+            if (hIdx === 0) hH += nilTop / 2;
             markTableStart();
             this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hH);
             segHasRows = true;
