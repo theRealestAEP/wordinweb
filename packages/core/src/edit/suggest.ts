@@ -182,19 +182,28 @@ export function insertSuggestedText(
   const preceding = rEl.children.slice(0, tIdx).filter((c) => localName(c.name) !== "rPr");
   const following = rEl.children.slice(tIdx + 1);
 
-  const replacement: XmlElement[] = [];
-  const beforeChildren = [...preceding];
-  if (offset > 0) beforeChildren.push(textLike(t, t.name, t.text.slice(0, offset)));
-  if (beforeChildren.length > 0) replacement.push(runLike(rEl, rPr, beforeChildren));
-
   const newT = textLike(t, t.name, text);
   const ins = el(`${w}ins`, revAttrs(w, meta), [runLike(rEl, rPr, [newT])]);
-  replacement.push(ins);
 
-  const afterChildren: XmlElement[] = [];
-  if (offset < t.text.length) afterChildren.push(textLike(t, t.name, t.text.slice(offset)));
-  afterChildren.push(...following);
-  if (afterChildren.length > 0) replacement.push(runLike(rEl, rPr, afterChildren));
+  // The addressed run element stays in the tree, so its stable id — and any
+  // reference a caller still holds — survives the insertion. When the caret
+  // is at the run's start the whole run moves after the w:ins untouched;
+  // otherwise the run keeps the content before the caret (t truncated in
+  // place, the way applySplitParagraph splits a run) and a new run carries
+  // the content after.
+  const replacement: XmlElement[] = [];
+  if (offset === 0 && preceding.length === 0) {
+    replacement.push(ins, rEl);
+  } else {
+    const afterChildren: XmlElement[] = [];
+    if (offset < t.text.length) afterChildren.push(textLike(t, t.name, t.text.slice(offset)));
+    afterChildren.push(...following);
+    t.text = t.text.slice(0, offset);
+    t.attrs["xml:space"] = "preserve";
+    rEl.children = rEl.children.slice(0, tIdx + 1);
+    replacement.push(rEl, ins);
+    if (afterChildren.length > 0) replacement.push(runLike(rEl, rPr, afterChildren));
+  }
 
   // A second author can type inside another author's pending insertion. OOXML
   // revisions must stay as siblings, so split the outer insertion around the

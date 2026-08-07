@@ -8,8 +8,10 @@ import type { AgentAnchorLine, AgentAnchorSegment, AgentOperation, AgentPatchHun
  * an anchor segment, so the agent never sees a wire offset and the engine
  * never guesses a rendered one. Structural work is expressed so that no
  * operation has to name a paragraph a previous operation created: merges run
- * before the text they concatenate, and splits run last, back to front, at
- * offsets inside a run that already exists.
+ * before the text they concatenate; a pure split runs back to front at
+ * offsets inside a run that already exists; a rewrite that also splits
+ * carries its paragraph breaks as "\n" inside one insertText, which the edit
+ * compiler expands into splits with carried ids.
  */
 
 /** A marker change is a paragraph-property change, so a suggested hunk sends
@@ -39,12 +41,7 @@ function insertPosition(anchor: AgentAnchorLine, column: number): { runRef: stri
   throw new Error(`Projection line ${anchor.line} column ${column} is not inside editable text`);
 }
 
-interface TextEdit {
-  operations: AgentOperation[];
-  insert?: { runRef: string; offset: number; column: number };
-}
-
-function textEdit(source: ProjectedLine, targetBody: string, suggest: boolean, clampPrefix: number, allowSuffix: boolean): TextEdit {
+function textEdit(source: ProjectedLine, targetBody: string, suggest: boolean): AgentOperation[] {
   const anchor = source.anchor;
   const blockRef = anchor.blockRef!;
   const base = anchor.marker;
@@ -52,12 +49,9 @@ function textEdit(source: ProjectedLine, targetBody: string, suggest: boolean, c
 
   let prefix = 0;
   while (prefix < current.length && prefix < targetBody.length && current[prefix] === targetBody[prefix]) prefix++;
-  prefix = Math.min(prefix, clampPrefix);
   let suffix = 0;
-  if (allowSuffix) {
-    while (suffix < current.length - prefix && suffix < targetBody.length - prefix
-      && current[current.length - 1 - suffix] === targetBody[targetBody.length - 1 - suffix]) suffix++;
-  }
+  while (suffix < current.length - prefix && suffix < targetBody.length - prefix
+    && current[current.length - 1 - suffix] === targetBody[targetBody.length - 1 - suffix]) suffix++;
   const start = base + prefix;
   const end = base + current.length - suffix;
   const inserted = targetBody.slice(prefix, targetBody.length - suffix);
@@ -88,7 +82,7 @@ function textEdit(source: ProjectedLine, targetBody: string, suggest: boolean, c
     throw new Error("A suggested hunk can add text or remove text, not both. Send the removal and the addition as separate patches.");
   }
   if (ranges.length > 0) operations.push({ kind: "suggestRevision", ranges });
-  if (inserted.length === 0) return { operations };
+  if (inserted.length === 0) return operations;
 
   // The insertion point is the start of the removed span, which every removal
   // above left alone.
@@ -99,57 +93,73 @@ function textEdit(source: ProjectedLine, targetBody: string, suggest: boolean, c
     text: inserted,
     ...(suggest ? { suggest: true } : {}),
   });
-  return { operations, insert: { ...at, column: start } };
+  return operations;
+}
+
+function shapesEqual(left: MarkerShape, right: MarkerShape): boolean {
+  return left.heading === right.heading && left.list === right.list;
 }
 
 function paragraphOperations(source: ProjectedLine, targets: string[], mode: AgentProjectionMode, suggest: boolean): AgentOperation[] {
   const anchor = source.anchor;
   const blockRef = anchor.blockRef!;
   const shapes = targets.map((line) => markerShape(line, mode));
-  for (const shape of shapes) {
-    if (shape.width !== shapes[0].width || shape.heading !== shapes[0].heading || shape.list !== shapes[0].list) {
-      throw new Error("Every line a paragraph splits into must repeat the first line's structural marker");
+  for (const shape of shapes.slice(1)) {
+    if (!shapesEqual(shape, shapes[1])) {
+      throw new Error("Lines 2 and later of a paragraph split must all share one structural marker");
     }
   }
+  const sourceShape = markerShape(source.text.slice(0, anchor.marker), mode);
   const bodies = targets.map((line, index) => line.slice(shapes[index].width));
-  const operations = markerOperations(blockRef, markerShape(source.text.slice(0, anchor.marker), mode), shapes[0], suggest);
+  const markerOps = markerOperations(blockRef, sourceShape, shapes[0], suggest);
   const body = bodies.join("");
   const current = source.text.slice(anchor.marker);
 
   if (targets.length === 1) {
-    if (current !== body) operations.push(...textEdit(source, body, suggest, Number.POSITIVE_INFINITY, true).operations);
-    return operations;
+    if (current === body) return markerOps;
+    return [...markerOps, ...textEdit(source, body, suggest)];
   }
 
-  const boundaries: number[] = [];
-  let at = 0;
-  for (let index = 0; index < bodies.length - 1; index++) {
-    at += bodies[index].length;
-    boundaries.push(at);
+  // A split clones the source paragraph's properties into the paragraphs it
+  // creates, so the lines after the first inherit whatever the FIRST
+  // paragraph carries at split time. Ordering resolves the two supported
+  // shapes: markers uniform across all lines → restyle first and split after
+  // (the clones inherit the new marker); a distinct first line (a heading
+  // over body text) → split first and restyle the first paragraph last,
+  // which requires the rest to repeat the source's marker.
+  const uniform = shapesEqual(shapes[1], shapes[0]);
+  if (!uniform && !shapesEqual(shapes[1], sourceShape)) {
+    throw new Error(
+      "Lines after the first must repeat either the first line's structural marker or the source paragraph's marker. "
+      + "Split with matching markers in this patch, then change the markers with a second patch.",
+    );
   }
 
+  const textOps: AgentOperation[] = [];
   if (current === body) {
     // A pure split rewrites nothing, so every run keeps its own formatting.
     // Back to front: a split only moves content that follows its point, so
     // the offsets of the earlier boundaries never shift.
+    const boundaries: number[] = [];
+    let at = 0;
+    for (let index = 0; index < bodies.length - 1; index++) {
+      at += bodies[index].length;
+      boundaries.push(at);
+    }
     for (let index = boundaries.length - 1; index >= 0; index--) {
       const position = insertPosition(anchor, anchor.marker + boundaries[index]);
-      operations.push({ kind: "splitParagraph", at: { blockRef, runRef: position.runRef, offset: position.offset }, ...(suggest ? { suggest: true } : {}) });
+      textOps.push({ kind: "splitParagraph", at: { blockRef, runRef: position.runRef, offset: position.offset }, ...(suggest ? { suggest: true } : {}) });
     }
-    return operations;
+  } else {
+    // A rewrite that also splits sends ONE insertText with "\n" at each
+    // boundary; the edit compiler expands it into tracked splits plus per-line
+    // insertions with carried ids. The old shape — insert the joined text,
+    // then split inside it — cannot work while suggesting, because a tracked
+    // insertion moves the text into its own w:ins run and the split's
+    // addressed run no longer holds the boundary offsets.
+    textOps.push(...textEdit(source, bodies.join("\n"), suggest));
   }
-
-  // Keep the text before the first boundary and insert everything from there
-  // as one span, so every boundary lands in one run at a known wire offset.
-  const edit = textEdit(source, body, suggest, boundaries[0], false);
-  operations.push(...edit.operations);
-  const insert = edit.insert;
-  if (!insert) throw new Error("The patch could not place the split text");
-  for (let index = boundaries.length - 1; index >= 0; index--) {
-    const offset = insert.offset + (anchor.marker + boundaries[index] - insert.column);
-    operations.push({ kind: "splitParagraph", at: { blockRef, runRef: insert.runRef, offset }, ...(suggest ? { suggest: true } : {}) });
-  }
-  return operations;
+  return uniform ? [...markerOps, ...textOps] : [...textOps, ...markerOps];
 }
 
 /** A merge keeps every run's identity and its offsets inside that run, so the

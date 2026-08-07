@@ -44,6 +44,10 @@ export class LocalDocumentSession implements AgentCollaborativeTarget {
 
   allocateIds(count: number): number[] {
     if (!Number.isInteger(count) || count < 0) throw new Error("ID count must be a non-negative integer");
+    // A suggested insertion creates nodes whose ids come from the id table's
+    // own counter (scoped reparse), not from this allocator — resync before
+    // handing out numbers, or the next carried id collides with them.
+    this.nextId = Math.max(this.nextId, this.doc.enableStableIds().nextId());
     return Array.from({ length: count }, () => this.nextId++);
   }
 

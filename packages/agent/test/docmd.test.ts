@@ -339,7 +339,7 @@ describe("DocMD patch", () => {
       mode: "md",
       edits: [{ startLine: line, endLine: line, newText: "Schedule the review.\nName an owner." }],
     });
-    expect(result.operations).toEqual(["insertText", "splitParagraph"]);
+    expect(result.operations).toEqual(["splitParagraph", "insertText"]);
     expect(result.projection.text.split("\n").slice(-2)).toEqual(["Schedule the review.", "Name an owner."]);
 
     // A pure split rewrites no text at all, so every run keeps its formatting.
@@ -406,7 +406,7 @@ describe("DocMD patch", () => {
     const math = lineOf(projection, "$E=mc^(2)$");
     await expect(request(math, math, "rewritten")).rejects.toThrow("across a non-text atom");
     await expect(request(1, 99, "x")).rejects.toThrow("outside the projected");
-    await expect(request(1, 1, "# A\n## B")).rejects.toThrow("repeat the first line's structural marker");
+    await expect(request(1, 1, "# A\n## B")).rejects.toThrow("structural marker");
     await expect(agent.patch({ revision: projection.revision, mode: "md" })).rejects.toThrow("either edits or diff");
     // Nothing above reached the document.
     expect(agent.revision).toBe(projection.revision);
@@ -457,7 +457,7 @@ describe("DocMD patch", () => {
       mode: "md",
       diff: "@@ -12,1 +12,2 @@\n-Schedule the review.\n+Schedule the review.\n+Name an owner.\n",
     });
-    expect(result.operations).toEqual(["insertText", "splitParagraph"]);
+    expect(result.operations).toEqual(["splitParagraph", "insertText"]);
     expect(result.projection.text.split("\n").slice(-2)).toEqual(["Schedule the review.", "Name an owner."]);
 
     const next = agent.project({ mode: "md" });

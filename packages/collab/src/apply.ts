@@ -203,8 +203,9 @@ function applyIntentInner(
   out: { scope: Scope },
 ): boolean {
   const runOf = makeRunLookup(doc, ids);
-  // Headless apply does not yet support suggesting mode (needs provenance
-  // threaded through the intent); the session forbids it upstream.
+  // Suggesting mode rides on the intent itself: kinds with a tracked form
+  // carry `suggest` (author/date) and build their own suggesting ctx below.
+  // This default ctx serves the rest, which never suggest.
   const ctx = { suggesting: false, revMeta: () => { throw new Error("suggesting mode unsupported headlessly"); } };
 
   // Registered operations carry their mutation in the core registry. Narrowing
