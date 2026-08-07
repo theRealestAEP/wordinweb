@@ -190,6 +190,14 @@ function OverflowMenu({ children }: { children: React.ReactNode }) {
 
 const icon = { width: 16, height: 16, display: "block" } as const;
 
+function ExpandChevronIcon({ up }: { up: boolean }) {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      {up ? <path d="M4 9.5L8 5.5l4 4" /> : <path d="M4 6.5l4 4 4-4" />}
+    </svg>
+  );
+}
+
 function ImageIcon() {
   return (
     <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -4601,7 +4609,14 @@ export interface DocxToolbarProps {
   style?: React.CSSProperties;
   /** Connected collaborator names offered as @mention shortcuts in comments. */
   commentMentions?: string[];
+  /** Start with the toolbar expanded (all groups inline, wrapping onto extra
+   * rows). A choice the user makes via the chevron toggle is persisted in
+   * localStorage and wins over this default. */
+  defaultExpanded?: boolean;
 }
+
+/** localStorage key for the expand/collapse chevron choice. */
+const EXPANDED_KEY = "dxw-toolbar-expanded";
 
 export function DocxToolbar({
   api,
@@ -4611,6 +4626,7 @@ export function DocxToolbar({
   className,
   style,
   commentMentions,
+  defaultExpanded = false,
 }: DocxToolbarProps) {
   const on = (k: ToolbarFeature) => features?.[k] !== false;
   // Ribbon-style tabs: complex tool groups get their own surface instead of
@@ -4726,6 +4742,29 @@ export function DocxToolbar({
   // e2e specs (1400px) are unchanged.
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [tier, setTier] = useState(0);
+  // Expanded: the chevron at the right edge disables the overflow folding so
+  // every group of the active tab stays inline and wraps onto extra rows (the
+  // toolbar grows downward). Persisted so the choice survives reloads.
+  const [expanded, setExpanded] = useState(() => {
+    try {
+      const stored = localStorage.getItem(EXPANDED_KEY);
+      if (stored !== null) return stored === "1";
+    } catch {
+      /* storage may be unavailable (SSR, privacy mode) */
+    }
+    return defaultExpanded;
+  });
+  const toggleExpanded = () =>
+    setExpanded((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(EXPANDED_KEY, next ? "1" : "0");
+      } catch {
+        /* storage may be unavailable */
+      }
+      return next;
+    });
+  const effectiveTier = expanded ? 0 : tier;
   useEffect(() => {
     if (!on("help")) return;
     const keydown = (event: KeyboardEvent) => {
@@ -5097,9 +5136,9 @@ export function DocxToolbar({
 
     // Per-tier overflow: which group keys fold into ⋮. Tier 0 keeps all inline.
     const overflowKeys =
-      tier === 0
+      effectiveTier === 0
         ? new Set<string>()
-        : tier === 1
+        : effectiveTier === 1
           ? new Set(["styles", "indent", "spacing"])
           : new Set(["styles", "font", "size", "color", "highlight", "alignment", "indent", "spacing"]);
     const inline = groups.filter((g) => !overflowKeys.has(g.key));
@@ -5286,7 +5325,7 @@ export function DocxToolbar({
           )}
           {on("icon") && <Btn label="Icons" title="Insert SVG icon" onClick={() => iconInput.current?.click()} />}
           {on("screenshot") && <ScreenshotButton api={api} />}
-          {tier === 0 ? (
+          {effectiveTier === 0 ? (
             <>
           {on("model3D") && <Btn label="3D Models" title="Insert a GLB 3D model" onClick={() => modelInput.current?.click()} />}
           {on("smartArt") && <SmartArtMenu api={api} />}
@@ -5545,6 +5584,17 @@ export function DocxToolbar({
           <Btn label="Download" title="Save edited .docx" onClick={() => api && onSave(api.save())} />
         </>
       )}
+      <button
+        type="button"
+        title={expanded ? "Collapse the toolbar" : "Expand the toolbar"}
+        aria-expanded={expanded}
+        data-dxw-toolbar-expand=""
+        style={{ ...btnStyle(expanded), marginLeft: "auto", flexShrink: 0 }}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={toggleExpanded}
+      >
+        <ExpandChevronIcon up={expanded} />
+      </button>
       <HelpGuide open={helpOpen} onClose={closeHelp} returnFocus={helpTrigger} />
     </div>
   );
