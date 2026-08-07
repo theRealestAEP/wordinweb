@@ -90,6 +90,39 @@ export function cellContextOf(doc: DocxDocument, target: XmlElement): CellContex
   return null;
 }
 
+/**
+ * Word's cell-granular selection: when two (caret) elements sit in DIFFERENT
+ * cells of the SAME table, the selection covers the whole rectangular grid
+ * range between the two cells. Returns those cells in document order, or null
+ * when the elements are not in distinct cells of one table (same cell, only
+ * one inside a table, or different/nested tables) — the caller then keeps
+ * character-granular behavior.
+ */
+export function cellRangeBetween(
+  doc: DocxDocument,
+  targetA: XmlElement,
+  targetB: XmlElement,
+): XmlElement[] | null {
+  const a = cellContextOf(doc, targetA);
+  const b = cellContextOf(doc, targetB);
+  if (!a || !b || a.tbl !== b.tbl || a.tc === b.tc) return null;
+  const rows = rowsOf(a.tbl);
+  const colA = gridColOf(a.tr, a.tc);
+  const colB = gridColOf(b.tr, b.tc);
+  const rowLo = Math.min(a.rowIdx, b.rowIdx);
+  const rowHi = Math.max(a.rowIdx, b.rowIdx);
+  const colLo = Math.min(colA, colB);
+  const colHi = Math.max(colA, colB);
+  const out: XmlElement[] = [];
+  for (let ri = rowLo; ri <= rowHi; ri++) {
+    for (const tc of cellsOf(rows[ri])) {
+      const col = gridColOf(rows[ri], tc);
+      if (col <= colHi && col + gridSpanOf(tc) - 1 >= colLo) out.push(tc);
+    }
+  }
+  return out;
+}
+
 /** Current cell fill, undefined outside a table and null for no direct fill. */
 export function cellShadingAt(doc: DocxDocument, target: XmlElement): string | null | undefined {
   const ctx = cellContextOf(doc, target);

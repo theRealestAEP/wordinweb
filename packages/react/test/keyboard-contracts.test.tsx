@@ -271,6 +271,32 @@ describe("keyboard contracts replicate (collab mount)", () => {
     await ed.unmount(); // setListLevel + setListType rode the wire byte-exactly
   });
 
+  it("G12: a cross-cell delete clears whole cells and converges", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-g12", "alice");
+    await ed.click();
+    await ed.typed("ab");
+    ed.api().insertTable(2, 2);
+    await settle();
+    await ed.keys(["ArrowRight"]); // into cell r0c0
+    await ed.typed("cd");
+    await ed.keys(["Tab"]); // cell r0c1
+    await ed.typed("ef");
+    // Extend the selection back across the cell boundary into r0c0.
+    await ed.keys([
+      { key: "ArrowLeft", shift: true },
+      { key: "ArrowLeft", shift: true },
+      { key: "ArrowLeft", shift: true },
+    ]);
+    await ed.keys(["Backspace"]); // Word: clears BOTH covered cells
+    const xml = serializeXml(ed.clientDoc().docRoot);
+    expect(xml).toContain("<w:tbl>");
+    expect((xml.match(/<w:tc[ >]/g) ?? []).length).toBe(4);
+    expect(xml).not.toContain(">cd<");
+    expect(xml).not.toContain(">ef<");
+    await ed.unmount(); // per-range deleteText intents rode the wire byte-exactly
+  });
+
   it("G14: Enter over a selection deletes it then splits, on every replica", async () => {
     const hub = new CollabHub(provider);
     const ed = await mountCollab(hub, "kc-g14", "alice");

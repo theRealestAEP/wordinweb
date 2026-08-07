@@ -7,7 +7,7 @@ import { TextItem } from "../layout/types.js";
 import { selectionToSegments } from "./selection.js";
 import { runWireLength, wireOffsetOf, type EncodedCaret } from "./ids.js";
 import { EditHistory } from "./history.js";
-import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
+import { advanceCell, cellRangeBetween, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
 import { pxToTwips } from "../units.js";
 import { listLevelAt, listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
@@ -7239,7 +7239,16 @@ export class DocxEditor {
         return true;
       }
     }
-    const segments = this.getSelectionSegments();
+    // G12 — Word's cell-selection model: a selection whose endpoints sit in
+    // DIFFERENT cells of the same table selects WHOLE cells (the rectangular
+    // grid range between the endpoint cells), and a delete CLEARS those
+    // cells' contents while the table structure survives. The segments simply
+    // expand to the covered cells' full text; everything downstream is the
+    // ordinary machinery — per-range deletes (+ deleteText intents), then
+    // in-cell paragraph merges (the merge primitive refuses cross-cell
+    // joins, so each cell collapses to one empty paragraph independently).
+    const cellRange = this.selectedCellRange();
+    const segments = cellRange ? this.wholeCellSegments(cellRange) : this.getSelectionSegments();
     // G15 (the wedge): a keyboard selection can cover ONLY a paragraph
     // boundary — Shift+ArrowRight from a paragraph end into an EMPTY
     // paragraph selects the paragraph mark and nothing else, so no character
@@ -7287,8 +7296,15 @@ export class DocxEditor {
       // "del" glyph a caret paragraph-merge suggests — so a fully-selected
       // list item reads as deleted, marker included, until accept/reject.
       const marks: { blockId: number; glyph: "ins" | "del" }[] = [];
+      // Cell-granular (G12): no cross-cell merge exists to suggest, so strike
+      // paragraph marks only WITHIN each covered cell (all but the cell's
+      // last — the pilcrows that would merge away on accept). Otherwise the
+      // spanned list's all-but-last are the marks the delete would remove.
       const suggestSpanned = segments.length > 0 ? this.spannedParagraphs(segments) : boundaryParagraphs;
-      for (const pEl of suggestSpanned.slice(0, -1)) {
+      const markParagraphs = cellRange
+        ? cellRange.flatMap((tc) => tc.children.filter((c) => localName(c.name) === "p").slice(0, -1))
+        : suggestSpanned.slice(0, -1);
+      for (const pEl of markParagraphs) {
         if (paragraphGlyphRevision(pEl, "del")) continue;
         markParagraphGlyph(pEl, "del", meta);
         const blockId = this.host.doc.stableIds?.idOf(pEl);
@@ -7332,7 +7348,10 @@ export class DocxEditor {
       return texts.length > 0 && texts.every((text) => fullySelected.has(text));
     });
     const fullySelectedTables = new Set<XmlElement>();
-    if (!collabEmit) {
+    // Cell-granular (G12): Word CLEARS the covered cells and never removes
+    // structure or list formatting, so the whole-table/unbullet fast paths
+    // stay out of the cell path.
+    if (!collabEmit && !cellRange) {
       for (const paragraph of fullySelectedParagraphs) {
         const paragraphProperties = paragraph.children.find(
           (child) => localName(child.name) === "pPr",
@@ -7427,7 +7446,44 @@ export class DocxEditor {
     }
     this.clearSelection();
     if (first) this.caret = first;
-    return merged;
+    // A cell-granular clear repaints structurally like a merge: several cells
+    // (possibly several rows) changed, not one caret paragraph.
+    return merged || cellRange !== null;
+  }
+
+  /** G12 — the covered cells when the current selection is cell-granular
+   * (endpoints in different cells of one table), else null. */
+  private selectedCellRange(): XmlElement[] | null {
+    if (!this.selection || this.selectedAll) return null;
+    const [startPt, endPt] = this.orderedSelectionPoints();
+    return cellRangeBetween(this.host.doc, startPt.t, endPt.t);
+  }
+
+  /** Whole-cell selection segments: every painted text item of the covered
+   * cells, merged per w:t — the same builder shape the selected-all segments
+   * use. */
+  private wholeCellSegments(cells: XmlElement[]): SelectionSegment[] {
+    const covered = new Set<XmlElement>();
+    for (const tc of cells) for (const t of textElements(tc)) covered.add(t);
+    const segments: SelectionSegment[] = [];
+    for (const item of this.activeTextItems()) {
+      const src = item.src!;
+      if (item.text.length === 0 || !covered.has(src.t as XmlElement)) continue;
+      const segment: SelectionSegment = {
+        run: src.run,
+        t: src.t,
+        start: src.offset,
+        end: src.offset + item.text.length,
+        props: item.props,
+      };
+      const previous = segments[segments.length - 1];
+      if (previous && previous.t === segment.t && segment.start <= previous.end + 1) {
+        previous.end = Math.max(previous.end, segment.end);
+      } else {
+        segments.push(segment);
+      }
+    }
+    return segments;
   }
 
   /** Paragraphs the selection touches, in document order, INCLUDING

@@ -90,12 +90,11 @@ export const KNOWN_GAPS: Record<string, string> = {
   // derives the spanned paragraphs from the selection endpoints), so typing
   // over it merges the paragraphs and lands the character — Word's contract.
 
-  // G12 — a selection extended across a table-cell boundary deletes
-  // character-wise; Word switches to whole-cell selection and clears the
-  // selected cells' contents (structure survives in both — that hard
-  // invariant is asserted separately and passes).
-  "session/backspace.across-cell-word-semantics": "cross-cell delete is character-wise (Word clears whole selected cells)",
-  "local/backspace.across-cell-word-semantics": "cross-cell delete is character-wise (Word clears whole selected cells)",
+  // G12 — FIXED: a selection whose endpoints sit in different cells of one
+  // table is cell-granular (Word's model): delete/typing-over expands to the
+  // rectangular cell range and CLEARS the covered cells' contents — via the
+  // ordinary per-range deletes (deleteText intents) plus in-cell paragraph
+  // merges, so structure, ids, and replicas all survive identically.
 
   // G16 — FIXED: the keystroke after undoing a type-over-keyboard-selection
   // threw "TypeError: run.content is not iterable" (fuzzer, seeds 5 and 6).

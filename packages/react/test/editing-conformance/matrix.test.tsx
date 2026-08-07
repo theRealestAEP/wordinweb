@@ -335,7 +335,11 @@ const CASES: CaseDef[] = [
     expectAfter: (ed) => {
       expect(rows(ed)).toBe(2);
       expect(cells(ed)).toBe(4);
-      expect(ed.text()).toContain("cell r0c0");
+      // Word semantics (G12): the covered cells' CONTENT is cleared, so the
+      // uncovered cell's text is the survival witness here. (The original
+      // "cell r0c0 text survives" assertion encoded the char-wise divergence,
+      // not the contract — authored while G12 was ledgered.)
+      expect(ed.text()).toContain("cell r1c0");
     },
   },
   {
