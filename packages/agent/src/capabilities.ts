@@ -377,6 +377,11 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setSmartArtData.smartArt": smartArtData,
   "setSmartArtTextFormat.format": smartArtTextFormat,
   "tableOp.op": tableOperation,
+  "insertTable.cells": {
+    type: "array",
+    maxItems: 50,
+    items: { type: "array", maxItems: 50, items: string(2000) },
+  },
   "setTableBorders.border": tableBorderSpec,
   "setTableBorders.edges": {
     type: "array",
@@ -476,7 +481,7 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
       },
     };
   }
-  if (field === "suggest" || field === "preservePageStart" || field === "diagonal") return { type: "boolean" };
+  if (field === "suggest" || field === "preservePageStart" || field === "diagonal" || field === "headerRow") return { type: "boolean" };
   // insertWatermark's headerCount is both its carried-id budget and its
   // rejection predicate; the cap matches its own validate in the registry.
   if (field === "headerCount") return integer(1, 50);

@@ -171,6 +171,16 @@ export async function compileAgentOperation(input: AgentOperation, context: Comp
   if (shapeError) throw new Error(shapeError);
   requireFields(operation, AGENT_EDIT_CAPABILITIES[typedKind].required);
 
+  // The agent schema admits "#RRGGBB" for cell shading; the wire wants bare
+  // hex. Normalize here so the one agent-only spelling cannot be rejected
+  // after it passed the schema.
+  if (typedKind === "tableOp") {
+    const op = operation.op as { kind?: unknown; fill?: unknown } | string | undefined;
+    if (op && typeof op === "object" && op.kind === "cellShading" && typeof op.fill === "string") {
+      op.fill = op.fill.replace(/^#/, "");
+    }
+  }
+
   if ("blockRef" in operation) {
     operation.blockId = resolveParagraphRef(context.ids, operation.blockRef);
     delete operation.blockRef;

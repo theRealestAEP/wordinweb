@@ -40,4 +40,27 @@ describe("insertTable intent (toolbar table insertion)", () => {
     };
     expect(build()).toBe(build());
   });
+  it("authors cell texts and a header row in the same intent", () => {
+    const s = new DocumentSession(makeDoc("above"));
+    const e = s.submit({ kind: "insertTable", clientId: "a", clientSeq: 1, base: 0, runId: runId(s), rows: 2, cols: 2, cells: [["H1", "H2"], ["a", "b"]], headerRow: true, nodeIds: Array.from({ length: 16 }, (_, i) => 900 + i) });
+    expect(e.kind).toBe("applied");
+    const xml = serializeXml(s.doc.docRoot);
+    for (const text of ["H1", "H2", "a", "b"]) expect(xml).toContain(`>${text}</w:t>`);
+    expect(xml).toContain("<w:tblHeader");
+    expect((xml.match(/<w:b\s*\/>/g) ?? []).length).toBe(2);
+  });
+  it("rejects malformed cells", () => {
+    const s = new DocumentSession(makeDoc("x"));
+    // More cell rows than the table has, and a non-string cell.
+    expect(s.submit({ kind: "insertTable", clientId: "a", clientSeq: 1, base: 0, runId: runId(s), rows: 1, cols: 2, cells: [["a"], ["b"]], nodeIds: [] } as never).kind).toBe("rejected");
+    expect(s.submit({ kind: "insertTable", clientId: "a", clientSeq: 2, base: 0, runId: runId(s), rows: 1, cols: 2, cells: [[1]], nodeIds: [] } as never).kind).toBe("rejected");
+  });
+  it("deterministic across replicas with authored content", () => {
+    const build = () => {
+      const s = new DocumentSession(makeDoc("z"));
+      s.submit({ kind: "insertTable", clientId: "a", clientSeq: 1, base: 0, runId: runId(s), rows: 2, cols: 2, cells: [["H1", "H2"], ["a", "b"]], headerRow: true, nodeIds: Array.from({ length: 16 }, (_, i) => 900 + i) });
+      return serializeXml(s.doc.docRoot);
+    };
+    expect(build()).toBe(build());
+  });
 });

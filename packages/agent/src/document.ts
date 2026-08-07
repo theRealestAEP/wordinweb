@@ -895,6 +895,15 @@ export class AgentDocument {
   }
 
   tools(): AgentTool[] {
+    // Compose exists only on a fresh AgentDocument.create() document.
+    // Advertising it on a connected or loaded document hands the model a
+    // guaranteed-error call, so the tool is simply absent there.
+    const composeTool: AgentTool = {
+      name: "word_document_compose",
+      description: "Create a complete new document from schema-enforced blocks, tables, media, native objects, headers, and footers.",
+      inputSchema: AGENT_COMPOSE_SCHEMA,
+      execute: async (input) => this.compose(asObject(input) as unknown as AgentComposeRequest),
+    };
     return [
       {
         name: "word_document_capabilities",
@@ -912,12 +921,7 @@ export class AgentDocument {
           return this.capabilities(value.category as AgentEditCapability["category"] | undefined, value.kind as Intent["kind"] | undefined);
         },
       },
-      {
-        name: "word_document_compose",
-        description: "Create a complete new document from schema-enforced blocks, tables, media, native objects, headers, and footers.",
-        inputSchema: AGENT_COMPOSE_SCHEMA,
-        execute: async (input) => this.compose(asObject(input) as unknown as AgentComposeRequest),
-      },
+      ...(this.composeAvailable && !this.target ? [composeTool] : []),
       {
         name: "word_document_inspect",
         description: "Inspect compact bulk text context, overview, a detailed story range, search results, one object, or page geometry.",

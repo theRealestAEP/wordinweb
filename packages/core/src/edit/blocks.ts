@@ -53,15 +53,25 @@ export function topLevelBlockOf(doc: DocxDocument, target: XmlElement): XmlEleme
 
 // ---------- tables ----------
 
+/** Initial content for an inserted table, filled at insert time. */
+export interface TableContent {
+  /** Cell texts, row-major. Missing entries leave their cells empty. */
+  cells?: readonly (readonly string[])[];
+  /** Bold the first row's runs and mark it a repeating header row. */
+  headerRow?: boolean;
+}
+
 /**
  * Insert a rows×cols bordered table after the paragraph containing `caretT`.
- * Column widths split the section's content width evenly.
+ * Column widths split the section's content width evenly. With `content`,
+ * cell texts and the header row are authored as part of the same insert.
  */
 export function insertTableAfter(
   doc: DocxDocument,
   caretT: XmlElement,
   rows: number,
   cols: number,
+  content?: TableContent,
 ): boolean {
   const pEl = paragraphOf(doc, caretT);
   if (!pEl) return false;
@@ -84,13 +94,22 @@ export function insertTableAfter(
     {},
     Array.from({ length: cols }, () => el(`${w}gridCol`, { [`${w}w`]: String(colTwips) })),
   );
-  const makeCell = () =>
-    el(`${w}tc`, {}, [
-      el(`${w}tcPr`, {}, [el(`${w}tcW`, { [`${w}w`]: String(colTwips), [`${w}type`]: "dxa" })]),
-      el(`${w}p`, {}, [el(`${w}r`, {}, [el(`${w}t`, { "xml:space": "preserve" })])]),
+  const makeCell = (row: number, col: number) => {
+    const bold = content?.headerRow === true && row === 0;
+    const run = el(`${w}r`, {}, [
+      ...(bold ? [el(`${w}rPr`, {}, [el(`${w}b`)])] : []),
+      el(`${w}t`, { "xml:space": "preserve" }, [], content?.cells?.[row]?.[col] ?? ""),
     ]);
-  const trs = Array.from({ length: rows }, () =>
-    el(`${w}tr`, {}, Array.from({ length: cols }, makeCell)),
+    return el(`${w}tc`, {}, [
+      el(`${w}tcPr`, {}, [el(`${w}tcW`, { [`${w}w`]: String(colTwips), [`${w}type`]: "dxa" })]),
+      el(`${w}p`, {}, [run]),
+    ]);
+  };
+  const trs = Array.from({ length: rows }, (_, row) =>
+    el(`${w}tr`, {}, [
+      ...(content?.headerRow === true && row === 0 ? [el(`${w}trPr`, {}, [el(`${w}tblHeader`)])] : []),
+      ...Array.from({ length: cols }, (_, col) => makeCell(row, col)),
+    ]),
   );
   const tbl = el(`${w}tbl`, {}, [tblPr, grid, ...trs]);
 

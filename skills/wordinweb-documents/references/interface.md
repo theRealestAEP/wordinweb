@@ -733,7 +733,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertSmartArt` | Insert a SmartArt diagram | `runRef`, `smartArt` |
 | `insertDateTimeField` | Insert a DATE or TIME field | `runRef`, `dtKind`, `picture` |
 | `insertField` | Insert an allowlisted Word field | `runRef`, `instruction`; optional: `cachedResult` |
-| `insertTable` | Insert a table | `runRef`, `rows`, `cols` |
+| `insertTable` | Insert a table, with its whole content (cell texts, header row) authored in the same operation | `runRef`, `rows`, `cols`; optional: `cells`, `headerRow` |
 | `insertToc` | Insert a table of contents built from the document's headings | `runRef`, `entryCount`, `levels`, `leader` |
 | `insertWatermark` | Stamp a text watermark across every page, in the document's header parts | `text`, `headerCount`; optional: `diagonal`, `color`, `opacity` |
 | `removeWatermark` | Remove the text watermark from every page | — |

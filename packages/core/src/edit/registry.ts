@@ -285,30 +285,50 @@ const setListTypeOperation = defineOperation<{
     setListType(doc, [target.t ?? target.el], payload.listKind, suggestMeta(doc, payload.suggest)),
 });
 
-/** Insert a rows×cols table after the paragraph containing the anchor run. */
+/** Insert a rows×cols table after the paragraph containing the anchor run.
+ * `cells` and `headerRow` author the table's content in the same insert. */
 const insertTableOperation = defineOperation<{
   runId: StableId;
   rows: number;
   cols: number;
+  cells?: string[][];
+  headerRow?: boolean;
   nodeIds: StableId[];
 }>()({
   kind: "insertTable",
   address: "run",
   category: "insert",
-  description: "Insert a table.",
-  fields: [{ name: "rows" }, { name: "cols" }],
+  description: "Insert a table. Pass cells (row-major cell texts) and headerRow to author the whole table — content and bold header row included — in this one operation.",
+  fields: [{ name: "rows" }, { name: "cols" }, { name: "cells", optional: true }, { name: "headerRow", optional: true }],
   // A cell is a paragraph inside a run inside a row; the spare 8 cover the
-  // table element and the trailing paragraph.
+  // table element and the trailing paragraph. Cell text lives inside those
+  // runs, so authored content needs no extra ids.
   nodeIds: ({ rows, cols }) =>
     Number.isInteger(rows) && Number.isInteger(cols) && rows > 0 && cols > 0
       ? rows * cols * 2 + 8
       : 8,
-  validate: ({ rows, cols }) => {
+  validate: ({ rows, cols, cells, headerRow }) => {
     const okDim = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 50;
-    return okDim(rows) && okDim(cols) ? null : "insertTable: bad dimensions";
+    if (!okDim(rows) || !okDim(cols)) return "insertTable: bad dimensions";
+    if (headerRow !== undefined && typeof headerRow !== "boolean") return "insertTable: bad headerRow";
+    if (cells !== undefined) {
+      if (!Array.isArray(cells) || cells.length > rows) return "insertTable: bad cells";
+      for (const row of cells) {
+        if (!Array.isArray(row) || row.length > cols) return "insertTable: bad cells";
+        for (const cell of row) {
+          if (typeof cell !== "string" || cell.length > 2000) return "insertTable: bad cells";
+        }
+      }
+    }
+    return null;
   },
   apply: ({ doc, target, payload }) =>
-    target.t ? insertTableAfter(doc, target.t, payload.rows, payload.cols) : false,
+    target.t
+      ? insertTableAfter(doc, target.t, payload.rows, payload.cols, {
+          cells: payload.cells,
+          headerRow: payload.headerRow,
+        })
+      : false,
 });
 
 /** Set the height of one table row, addressed by a paragraph in the table. */

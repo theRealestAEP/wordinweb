@@ -52,6 +52,36 @@ describe("AgentDocument local tools", () => {
     expect(DocxDocument.load(agent.save()).styles.byId.has("Heading1")).toBe(true);
   });
 
+  it("authors a whole table, content and header included, in one insertTable operation", async () => {
+    const agent = AgentDocument.load(makeDocx(body(`<w:p><w:r><w:t>intro</w:t></w:r></w:p>`)));
+    const read = agent.inspect({ kind: "read" });
+    if (!("blocks" in read) || read.blocks[0].type !== "paragraph") throw new Error("missing paragraph");
+    const paragraph = read.blocks[0];
+    await agent.edit({
+      revision: agent.revision,
+      operations: [{
+        kind: "insertTable",
+        runRef: paragraph.runs[0].ref,
+        rows: 2,
+        cols: 3,
+        cells: [["Quarter", "Region", "Sales"], ["Q1", "West", "100"]],
+        headerRow: true,
+      }],
+    });
+    const overview = agent.inspect({ kind: "overview" });
+    expect(overview).toMatchObject({ blocks: { tables: 1 } });
+    const saved = textOf(DocxDocument.load(agent.save()));
+    for (const text of ["Quarter", "Region", "Sales", "Q1", "West", "100"]) expect(saved).toContain(text);
+    expect(validateAgentOperationShape({ kind: "insertTable", runRef: "run:1", rows: 2, cols: 2, cells: [[1]] })).toContain("cells");
+  });
+
+  it("advertises the compose tool only where compose can succeed", () => {
+    const created = AgentDocument.create().tools().map((tool) => tool.name);
+    expect(created).toContain("word_document_compose");
+    const loaded = AgentDocument.load(makeDocx(body(`<w:p><w:r><w:t>x</w:t></w:r></w:p>`)));
+    expect(loaded.tools().map((tool) => tool.name)).not.toContain("word_document_compose");
+  });
+
   it("composes a rich new document in one schema-enforced request", async () => {
     const agent = AgentDocument.create();
     const logo = agent.addAsset(PNG, "image/png");

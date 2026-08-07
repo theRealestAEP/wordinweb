@@ -539,6 +539,26 @@ describe("block commands", () => {
     expect(reloaded.sections[0].blocks[1].type).toBe("table");
   });
 
+  it("authors cell content and a bold header row at insert time", async () => {
+    const { insertTableAfter } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(p("before"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    expect(
+      insertTableAfter(doc, t as never, 2, 3, {
+        cells: [["Quarter", "Region", "Sales"], ["Q1", "West"]],
+        headerRow: true,
+      }),
+    ).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    for (const text of ["Quarter", "Region", "Sales", "Q1", "West"]) expect(xml).toContain(text);
+    expect(xml).toContain("<w:tblHeader");
+    // The three header runs are bold; the body row's runs stay plain.
+    expect((xml.match(/<w:b\s*\/>/g) ?? []).length).toBe(3);
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.sections[0].blocks[1].type).toBe("table");
+  });
+
   it("sets paragraph alignment", async () => {
     const { setParagraphAlignment } = await import("../src/edit/blocks.js");
     const doc = loadDoc(p("some text"));
