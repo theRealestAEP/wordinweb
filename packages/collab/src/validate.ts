@@ -137,6 +137,10 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (intent.text.length > limits.maxInsertLength) return "insertText: too long";
       if (!nonNegInt(intent.at.offset)) return "insertText: bad offset";
       return null;
+    case "insertSeparator":
+      if (intent.separator !== "br" && intent.separator !== "tab") return "insertSeparator: bad separator";
+      if (!nonNegInt(intent.at.offset)) return "insertSeparator: bad offset";
+      return null;
     case "suggestRevision": {
       const nRanges = intent.ranges?.length ?? 0;
       const nMarks = intent.marks?.length ?? 0;

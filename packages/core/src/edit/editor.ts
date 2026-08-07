@@ -166,7 +166,7 @@ export function availableObjectCommands(
 }
 import { graphemeStep } from "./grapheme.js";
 import { EditProvenance, defaultProvenance } from "./provenance.js";
-import { applyInsertText, applySplitParagraph, applyDeleteRange, MutationCtx } from "./mutations.js";
+import { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator, MutationCtx } from "./mutations.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
 import { resolveParagraphStyleChain } from "../parse/styles.js";
 import {
@@ -307,6 +307,7 @@ export interface EditorHost {
 export type EditorIntent =
   | RegisteredOperationBody
   | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string; suggest?: { author: string; date: string } }
+  | { kind: "insertSeparator"; at: { blockId: number; runId: number; offset: number }; separator: "br" | "tab"; suggest?: { author: string; date: string } }
   | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
   | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number; suggest?: { author: string; date: string } }
   | { kind: "formatRun"; blockId: number; runId: number; patch: Record<string, unknown> }
@@ -6247,7 +6248,10 @@ export class DocxEditor {
       this.revealCaret();
     } else if (e.key === "Enter") {
       e.preventDefault();
-      this.splitParagraph();
+      // Word: Shift+Enter is a SOFT line break (w:br) inside the paragraph —
+      // one paragraph, one list item, one style — never a split.
+      if (e.shiftKey) this.insertSeparatorAtCaret("br");
+      else this.splitParagraph();
     } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       e.preventDefault();
       const delta = e.key === "ArrowLeft" ? -1 : 1;
@@ -7365,6 +7369,39 @@ export class DocxEditor {
     this.commit(false, "local", !!reparsed);
     this.focusText();
     return true;
+  }
+
+  /** Shift+Enter (soft line break, w:br) and Tab in a body paragraph
+   * (w:tab): insert an inline separator at the caret via the canonical
+   * mutation, emitting the insertSeparator intent. Plain mode keeps the
+   * caret's run (in-run w:t split — a one-unit wire insert); suggesting mode
+   * records the separator as a w:ins the same shape a typed suggestion has. */
+  private insertSeparatorAtCaret(separator: "br" | "tab"): void {
+    this.host.history?.checkpoint();
+    // Like Enter and typing: an active selection is deleted first, and the
+    // separator is encoded against the post-delete state.
+    if (this.hasSelection()) this.removeSelectedText();
+    const caret = this.caret;
+    if (!caret) return;
+    const suggestEmit = this.suggesting && !!this.host.onIntent;
+    const frozen = suggestEmit ? this.frozenRevMeta() : null;
+    const emitPos = (!this.suggesting || suggestEmit) && this.host.onIntent ? this.encodeCaretForIntent() : null;
+    const ctx = frozen ? { suggesting: true, revMeta: () => frozen } : this.mutationCtx();
+    const next = applyInsertSeparator(this.host.doc, caret, separator, ctx);
+    if (!next) return;
+    this.caret = next;
+    const pEl = paragraphOf(this.host.doc, next.t);
+    const reparsed = pEl ? this.host.doc.reparseBodyParagraph(pEl) : null;
+    if (pEl && reparsed) invalidateParagraphSignature(pEl);
+    this.commit(false, "local", !!reparsed);
+    if (emitPos) {
+      this.host.onIntent?.(
+        frozen
+          ? { kind: "insertSeparator", at: emitPos, separator, suggest: { author: frozen.author, date: frozen.date } }
+          : { kind: "insertSeparator", at: emitPos, separator },
+      );
+    }
+    this.focusText();
   }
 
   /** Enter: split the paragraph at the caret into two w:p elements. */

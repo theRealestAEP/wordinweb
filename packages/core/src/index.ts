@@ -53,6 +53,7 @@ export { requestColorDialog, requestLineStyleDialog, requestNumberPairDialog, re
 export type { ColorDialogOptions, LineStyleDialogValue, NumberPairDialogOptions, NumberPairDialogValue, TextInputDialogOptions } from "./edit/dialog.js";
 export {
   insertSuggestedText,
+  insertSuggestedSeparator,
   deleteSuggestedRange,
   markParagraphGlyph,
   paragraphGlyphRevision,
@@ -81,7 +82,7 @@ export type {
 export { EditHistory } from "./edit/history.js";
 export { StableIds, textsUnderRun, resolveRunOffset, runContentItems, runWireLength, wireOffsetOf } from "./edit/ids.js";
 export type { EncodedCaret } from "./edit/ids.js";
-export { applyInsertText, applySplitParagraph, applyDeleteRange } from "./edit/mutations.js";
+export { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator } from "./edit/mutations.js";
 export type { EditCaret, MutationCtx, SplitResult } from "./edit/mutations.js";
 export { defaultProvenance, recordedProvenance } from "./edit/provenance.js";
 export type { EditProvenance } from "./edit/provenance.js";

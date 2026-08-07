@@ -18,10 +18,12 @@ export const KNOWN_GAPS: Record<string, string> = {
   // useAgentDocumentSession via collab.noteLocalHistory), so every
   // session/undoredo.* companion passes.
 
-  // G2 — Shift+Enter splits the paragraph exactly like Enter; Word inserts a
-  // soft line break (w:br) and keeps one paragraph.
-  "session/shiftenter.*": "Shift+Enter splits the paragraph instead of inserting a w:br soft line break",
-  "local/shiftenter.*": "Shift+Enter splits the paragraph instead of inserting a w:br soft line break",
+  // G2 — FIXED: Shift+Enter inserts a w:br soft line break in-paragraph via
+  // applyInsertSeparator (in-run w:t split; insertSeparator intent — a
+  // one-unit wire insert). Word-contract residual, recorded honestly:
+  // Backspace/Delete are not yet separator-aware, so the caret steps PAST a
+  // soft break and deletes the neighboring character instead of the break
+  // itself; the break disappears only with its paragraph.
 
   // G3 — Tab in a plain body paragraph is a silent no-op; Word inserts a tab
   // character (or first-line indent at paragraph start).

@@ -196,6 +196,34 @@ describe("keyboard contracts replicate (collab mount)", () => {
     await ed.unmount();
   });
 
+  it("G2: Shift+Enter inserts a w:br soft break in-paragraph, on every replica", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-g2", "alice");
+    await ed.click();
+    await ed.typed("ab");
+    await ed.keys([{ key: "a", ctrl: true }, "ArrowLeft", "ArrowRight"]); // caret after "a"
+    await ed.keys([{ key: "Enter", shift: true }]); // insertSeparator intent
+    await ed.typed("z"); // caret landed after the break
+    expect(ed.texts()).toEqual(["azb"]); // ONE paragraph
+    expect(serializeXml(ed.clientDoc().docRoot)).toMatch(/<w:br\/>/);
+    await ed.unmount();
+  });
+
+  it("G2: suggesting Shift+Enter records the break as a w:ins and converges", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-g2s", "alice");
+    await ed.click();
+    await ed.typed("ab");
+    await ed.keys([{ key: "a", ctrl: true }, "ArrowLeft", "ArrowRight"]);
+    ed.api().setSuggesting(true, "Alice");
+    await tick();
+    await ed.keys([{ key: "Enter", shift: true }]);
+    const xml = serializeXml(ed.clientDoc().docRoot);
+    expect(xml).toMatch(/<w:ins [^>]*>.*<w:br\/>/);
+    expect(ed.texts()).toEqual(["ab"]); // nothing removed, one paragraph
+    await ed.unmount();
+  });
+
   it("G14: Enter over a selection deletes it then splits, on every replica", async () => {
     const hub = new CollabHub(provider);
     const ed = await mountCollab(hub, "kc-g14", "alice");

@@ -2,7 +2,7 @@ import { XmlElement, cloneXml, localName } from "../xml.js";
 import { Run } from "../model.js";
 import { DocxDocument } from "../docx.js";
 import { checkboxStateElement } from "../checkbox.js";
-import { insertSuggestedText, markParagraphGlyph, RevisionMeta } from "./suggest.js";
+import { insertSuggestedSeparator, insertSuggestedText, markParagraphGlyph, RevisionMeta } from "./suggest.js";
 
 /**
  * Editor-level document mutations, extracted from DocxEditor so they operate
@@ -78,6 +78,61 @@ export function applyDeleteRange(
   if (lo >= hi) return caret;
   caret.t.text = caret.t.text.slice(0, lo) + caret.t.text.slice(hi);
   return { t: caret.t, run: caret.run, offset: lo, bias: "end" };
+}
+
+/**
+ * Insert an inline separator — a soft line break (w:br, Shift+Enter) or a
+ * tab character (w:tab, Tab in a body paragraph) — at the caret.
+ *
+ * Plain mode splits the caret's w:t IN PLACE inside its run
+ * (`…<w:t>head</w:t><w:br/><w:t>tail</w:t>…`): no new run is created, so
+ * every stable id survives, and on the wire the edit is a ONE-UNIT insert in
+ * the run's separator-counting offset basis (see runWireLength) — the same
+ * transform shape as inserting one character. At the very end of the text
+ * the tail w:t is a zero-length caret home (the placeholder the caret model
+ * needs to type after a trailing separator; Word's own files just end with
+ * the bare separator). Suggesting mode records the separator as a w:ins
+ * sibling instead (insertSuggestedSeparator).
+ *
+ * Returns the caret AFTER the separator, or null when the caret is not
+ * inside a run.
+ */
+export function applyInsertSeparator(
+  doc: DocxDocument,
+  caret: EditCaret,
+  separator: "br" | "tab",
+  ctx: MutationCtx,
+): EditCaret | null {
+  if (checkboxStateElement(caret.run, caret.t)) return null;
+  const rEl = doc.findParentOf(caret.t);
+  if (!rEl || localName(rEl.name) !== "r") return null;
+  if (ctx.suggesting) {
+    const nc = insertSuggestedSeparator(doc, caret.t, caret.offset, separator, ctx.revMeta());
+    return nc ? { t: nc.t, run: caret.run, offset: nc.offset } : null;
+  }
+  const w = rEl.name.includes(":") ? rEl.name.slice(0, rEl.name.indexOf(":") + 1) : "";
+  const sepEl: XmlElement = { name: `${w}${separator}`, attrs: {}, children: [], text: "" };
+  const tIdx = rEl.children.indexOf(caret.t);
+  if (tIdx === -1) return null;
+  if (caret.offset <= 0) {
+    // No split needed: the separator lands before the whole w:t, which stays
+    // the caret home (it IS the text after the break).
+    rEl.children.splice(tIdx, 0, sepEl);
+    doc.noteParent(sepEl, rEl);
+    return { t: caret.t, run: caret.run, offset: 0 };
+  }
+  const tailT: XmlElement = {
+    name: caret.t.name,
+    attrs: { ...caret.t.attrs, "xml:space": "preserve" },
+    text: caret.t.text.slice(caret.offset),
+    children: [],
+  };
+  caret.t.text = caret.t.text.slice(0, caret.offset);
+  caret.t.attrs["xml:space"] = "preserve";
+  rEl.children.splice(tIdx + 1, 0, sepEl, tailT);
+  doc.noteParent(sepEl, rEl);
+  doc.noteParent(tailT, rEl);
+  return { t: tailT, run: caret.run, offset: 0 };
 }
 
 /** Result of a paragraph split: the two sibling paragraph elements and the
