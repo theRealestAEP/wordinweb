@@ -1,5 +1,23 @@
 # Interactive-editing conformance — failure inventory
 
+> **Keyboard-contract wave addendum (branch `keyboard-contracts`).** The
+> following findings below are FIXED and un-ledgered (see known-gaps.ts for
+> the per-fix notes): F1/G15 (the Shift+Arrow empty-paragraph wedge — plus a
+> previously masked caret loss on forward-Delete in an empty paragraph),
+> F2/G14 (Enter over a selection), F6/G13's merge half and G18
+> (mergeParagraphBackward no longer strands placeholder runs), F7/G2
+> (Shift+Enter now inserts a w:br via the new insertSeparator intent),
+> F8/G4 (pending Cmd+B/I/U at a collapsed caret), F10/G10 (next-style on
+> Enter at a styled paragraph end), F11/G11 (Shift+Tab level-0 unbullet),
+> F12/G3 (Tab types a w:tab in body paragraphs; Word's first-line-indent
+> nuance at the exact paragraph start remains a recorded divergence).
+> Residuals recorded honestly: Backspace/Delete are not separator-aware
+> (a soft break is stepped past, not deleted), and char-wise deletes can
+> still empty one w:t beside populated runs (the surviving G13 fuzz
+> family). The fuzzer's allowed "I3" family is deleted — any caret/
+> selection resolvability loss now fails loudly. Sweep results for this
+> wave are at the bottom of this file.
+
 Produced by the suite in this directory at engine tip `2bcb71c` (branch
 `edit-conformance`). Two mounts are exercised everywhere:
 

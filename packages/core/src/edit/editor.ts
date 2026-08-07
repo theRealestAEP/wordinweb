@@ -6441,6 +6441,20 @@ export class DocxEditor {
     const changed = kind === "undo" ? h.undo() : h.redo();
     if (!changed) return;
     this.host.onLocalHistory?.();
+    // A history install replaces subtrees, so an active selection now
+    // references detached elements — clear it (Word collapses the selection
+    // on undo). And when the entry restored no caret (its checkpoint was
+    // taken mid-selection, before any caret location was ever banked) or the
+    // caret's element left the tree, land the caret at the document start:
+    // editing must never go dead after Cmd+Z (fuzz I3; seeds 3/4/6 found the
+    // stale-selection and no-caret variants once the wedge family stopped
+    // being an allowed violation).
+    if (this.hasSelection()) this.clearSelection();
+    if (!this.caret || !paragraphOf(this.host.doc, this.caret.t)) {
+      const home = firstTextOf(this.host.doc.editableRoots()[0]);
+      if (home) this.caret = { t: home, run: this.caret?.run ?? ({} as Caret["run"]), offset: 0 };
+      else this.caret = null;
+    }
     const textChanges = h.lastTextChanges;
     if (textChanges) {
       const blocks = new Set<XmlElement>();
@@ -7086,12 +7100,18 @@ export class DocxEditor {
       const [startPt, endPt] = this.orderedSelectionPoints();
       const pa = paragraphOf(this.host.doc, startPt.t);
       const pb = paragraphOf(this.host.doc, endPt.t);
-      if (pa && pb) boundaryParagraphs = this.paragraphSpan(pa === pb ? [pa] : [pa, pb]);
-      boundaryCaret = {
-        t: startPt.t,
-        run: this.caret?.run ?? ({} as Caret["run"]),
-        offset: startPt.offset,
-      };
+      // Only endpoints still IN the tree count: a stale selection (its
+      // elements replaced by a history install) must not donate a detached
+      // caret home — dropping the selection and keeping the current caret is
+      // the honest outcome there.
+      if (pa && pb) {
+        boundaryParagraphs = this.paragraphSpan(pa === pb ? [pa] : [pa, pb]);
+        boundaryCaret = {
+          t: startPt.t,
+          run: this.caret?.run ?? ({} as Caret["run"]),
+          offset: startPt.offset,
+        };
+      }
     }
     if (this.suggesting) {
       const ranges = segments
