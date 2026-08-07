@@ -273,6 +273,16 @@ export interface EditorHost {
    * honest no-op in collab, never a local mutation.
    */
   onCollabUndo?: () => void;
+  /**
+   * Single-process session marker (LocalDocumentSession). The session emits
+   * intents (onIntent is set, stable ids are on) but has NO peers, so the
+   * fork-the-room argument behind the collab undo gate does not apply: the
+   * local history stack is authoritative and undo/redo replay it. The hook
+   * fires after each applied undo/redo so the session can bump its revision
+   * (its agent-facing caches key on it). A REAL room must leave this unset —
+   * there undo routes to onCollabUndo (or declines).
+   */
+  onLocalHistory?: () => void;
   /** Collaboration presence hook: called when the local caret moves, with its
    * stable-id address (null when the caret leaves id-tracked content). The
    * host forwards it to the collab connection's setPresence so remote
@@ -6351,12 +6361,17 @@ export class DocxEditor {
     // SEQUENCED action as an ordinary intent; with no hook wired, decline
     // rather than mutate — the A18 rule that a collab-mode command is an
     // honest no-op before it is a local edit.
-    if (this.host.onIntent && this.host.doc.stableIds) {
+    //
+    // EXCEPTION: a single-process session (onLocalHistory set) has no peers
+    // to fork — its local stack is the ONLY history, so replaying it is
+    // exactly right and gives paste/typing full undo AND redo.
+    if (this.host.onIntent && this.host.doc.stableIds && !this.host.onLocalHistory) {
       if (kind === "undo") this.host.onCollabUndo?.();
       return;
     }
     const changed = kind === "undo" ? h.undo() : h.redo();
     if (!changed) return;
+    this.host.onLocalHistory?.();
     const textChanges = h.lastTextChanges;
     if (textChanges) {
       const blocks = new Set<XmlElement>();

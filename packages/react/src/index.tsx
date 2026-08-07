@@ -631,6 +631,12 @@ export interface DocxViewProps {
      * stack would edit this replica with nothing on the wire. Absent ⇒ undo
      * declines rather than mutating. */
     undoLast?: () => void;
+    /** Single-process session marker (useAgentDocumentSession over a
+     * LocalDocumentSession). Its presence tells the editor there are NO peers,
+     * so undo/redo replay the local history stack; it fires after each applied
+     * undo/redo so the session can bump its revision. A REAL room must leave
+     * this unset, or Cmd+Z would fork it. */
+    noteLocalHistory?: () => void;
   };
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
@@ -654,6 +660,9 @@ export interface AgentDocumentViewBinding {
   submitOp(intent: { kind: string } & Record<string, unknown>): void;
   allocIds(count: number): number[];
   uploadMedia?(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number; iv?: string } | null>;
+  /** Bump the session revision after a local history undo/redo mutated the
+   * document outside the intent path. See collab.noteLocalHistory. */
+  noteHistory?(): void;
   takeRenderScope():
     | { kind: "doc" }
     | { kind: "block"; blocks: XmlElement[] }
@@ -676,6 +685,9 @@ export function useAgentDocumentSession(binding: AgentDocumentViewBinding): Pick
       allocIds: binding.allocIds,
       uploadMedia: binding.uploadMedia,
       takeRenderScope: binding.takeRenderScope,
+      // A local session has no peers: undo/redo replay the editor's own
+      // history stack, and the session only needs its revision bumped.
+      noteLocalHistory: binding.noteHistory,
     },
   };
 }
@@ -1368,6 +1380,10 @@ export function DocxView({
           // without this hook the editor declines rather than replaying local
           // history (which would fork the room silently).
           onCollabUndo: collab?.undoLast ? () => collabRef.current?.undoLast?.() : undefined,
+          // A single-process session (LocalDocumentSession) instead replays
+          // the local history stack; this tells the editor so and lets the
+          // session bump its revision after each applied undo/redo.
+          onLocalHistory: collab?.noteLocalHistory ? () => collabRef.current?.noteLocalHistory?.() : undefined,
           // Presence: broadcast the local caret so remote participants can
           // draw this user's cursor (the anchor mirrors the intent addressing).
           // The caret is recorded here and sent by flushPresence together with

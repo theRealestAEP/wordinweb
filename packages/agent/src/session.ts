@@ -81,6 +81,14 @@ export class LocalDocumentSession implements AgentCollaborativeTarget {
 
   submitOp = (operation: IntentBody): void => this.submit(operation);
 
+  /** Record a local history undo/redo that mutated the shared doc outside the
+   * intent path (the editor already re-rendered itself). Matches the
+   * pre-applied contract: bump the revision so agent-side caches keyed on it
+   * (projections, inspection fingerprints) never serve the pre-undo tree. */
+  noteHistory = (): void => {
+    this.revision++;
+  };
+
   /** Record an operation that DocxView already applied to this same object. */
   submitPreApplied = (operation: IntentBody): void => {
     const error = validateIntent(this.fullIntent(operation));
@@ -119,6 +127,7 @@ export interface LocalDocumentViewBinding {
   submitOp(operation: IntentBody): void;
   allocIds(count: number): number[];
   uploadMedia(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number }>;
+  noteHistory(): void;
   takeRenderScope():
     | { kind: "doc" }
     | { kind: "block"; blocks: XmlElement[] }
@@ -135,6 +144,7 @@ export function localDocumentViewBinding(session: LocalDocumentSession): LocalDo
     submitOp: session.submitOp,
     allocIds: session.allocIds,
     uploadMedia: (bytes) => session.uploadMedia(bytes),
+    noteHistory: session.noteHistory,
     takeRenderScope: session.takeRenderScope,
   };
 }
