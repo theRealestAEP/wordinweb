@@ -96,8 +96,17 @@ export interface SealedCheckpoint {
  *       (Word's continuity semantics). An e13 peer ignores the field and
  *       formats only the addressed paragraph, so mixed clients diverge on
  *       the first multi-paragraph list toggle.
+ *   e15 keyboard-contract + editor-residual waves: new intents
+ *       insertSeparator (Shift+Enter / body Tab; the keyboard-contracts
+ *       wave shipped it without this bump — covered here) and
+ *       deleteSeparator (separator-aware Backspace/Delete), plus new
+ *       editor emissions an e14 peer never produces or applies: cross-cell
+ *       deletes clear whole cells, and a fully selected table rides
+ *       tableOp("deleteTable") from the selection-delete path. An e14 peer
+ *       rejects the very intents an e15 peer applies — fork on the first
+ *       soft-break delete.
  */
-export const ENGINE_VERSION = "e14";
+export const ENGINE_VERSION = "e15";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-
