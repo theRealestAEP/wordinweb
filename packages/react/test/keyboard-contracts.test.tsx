@@ -224,6 +224,21 @@ describe("keyboard contracts replicate (collab mount)", () => {
     await ed.unmount();
   });
 
+  it("G10: Enter at the end of a heading starts a Normal paragraph, on every replica", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-g10", "alice");
+    await ed.click();
+    await ed.typed("Head");
+    ed.api().setParagraphStyle("Heading1");
+    await settle();
+    await ed.keys(["End", "Enter"]); // splitParagraph — next-style applies in the shared mutation
+    await ed.typed("x");
+    expect(ed.texts()).toEqual(["Head", "x"]);
+    const xml = serializeXml(ed.clientDoc().docRoot);
+    expect((xml.match(/Heading1/g) ?? []).length).toBe(1); // body: the heading only
+    await ed.unmount(); // server derived the same next-style from the same styles part
+  });
+
   it("G14: Enter over a selection deletes it then splits, on every replica", async () => {
     const hub = new CollabHub(provider);
     const ed = await mountCollab(hub, "kc-g14", "alice");

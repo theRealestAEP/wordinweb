@@ -212,9 +212,88 @@ export function applySplitParagraph(
   doc.noteParent(afterT, afterRun);
   for (const child of moved) doc.noteParent(child, newP);
 
+  // Word's next-style rule: Enter at the very END of a styled paragraph (the
+  // new paragraph is empty) starts the style's w:next — a heading is followed
+  // by Normal, never another heading. Mid-paragraph splits keep the style on
+  // both halves. Runs here AND in the collab apply (this same function), so
+  // every replica derives the identical style from identical styles.xml.
+  if (!splitParagraphHasContent(newP)) applyNextStyleToSplit(doc, newP);
+
   // Suggesting mode: the split introduces a new paragraph mark at the end of
   // the FIRST paragraph — record it as an inserted glyph (pPr/rPr/w:ins).
   if (ctx.suggesting) markParagraphGlyph(pEl, "ins", ctx.revMeta());
 
   return { before: pEl, after: newP, caret: { t: afterT, run: caret.run, offset: 0 } };
+}
+
+/** Any visible content in a split-off paragraph: nonempty text, or any inline
+ * element beyond properties (br/tab/drawing/field/…). */
+function splitParagraphHasContent(pEl: XmlElement): boolean {
+  const scan = (e: XmlElement): boolean => {
+    for (const c of e.children) {
+      const n = localName(c.name);
+      if (n === "pPr" || n === "rPr") continue;
+      if (n === "t" || n === "delText") {
+        if (c.text.length > 0) return true;
+        continue;
+      }
+      if (n === "r" || n === "ins" || n === "del" || n === "hyperlink" || n === "smartTag" || n === "sdt" || n === "sdtContent") {
+        if (scan(c)) return true;
+        continue;
+      }
+      return true; // br, tab, drawing, field chrome, … all count as content
+    }
+    return false;
+  };
+  return scan(pEl);
+}
+
+/**
+ * Apply the split paragraph's style's next-style (w:next) to the freshly
+ * created empty paragraph. Word's rules, resolved from styles.xml:
+ *  - an explicit w:next different from the style itself wins;
+ *  - a HEADING definition without w:next takes Normal (Word's built-in
+ *    headings all declare next=Normal; minimal styles parts omit it);
+ *  - any other style without w:next continues itself (the OOXML default —
+ *    ListParagraph, Quote, … keep chaining on Enter).
+ * "Normal" (or the document's default paragraph style) applies by REMOVING
+ * the pStyle reference — the shape Word writes for default-styled text.
+ */
+function applyNextStyleToSplit(doc: DocxDocument, newP: XmlElement): void {
+  const pPr = newP.children.find((c) => localName(c.name) === "pPr");
+  const pStyle = pPr?.children.find((c) => localName(c.name) === "pStyle");
+  if (!pPr || !pStyle) return;
+  const valKey = Object.keys(pStyle.attrs).find((k) => localName(k) === "val");
+  const styleId = valKey ? pStyle.attrs[valKey] : undefined;
+  if (!styleId) return;
+
+  const stylesRoot = doc.stylesTree();
+  const styleEl = stylesRoot?.children.find(
+    (c) =>
+      localName(c.name) === "style" &&
+      Object.entries(c.attrs).some(([k, v]) => localName(k) === "styleId" && v === styleId),
+  );
+  const nextEl = styleEl?.children.find((c) => localName(c.name) === "next");
+  const nextVal = nextEl
+    ? Object.entries(nextEl.attrs).find(([k]) => localName(k) === "val")?.[1]
+    : undefined;
+
+  let nextId: string | undefined = nextVal;
+  if (nextId === undefined) {
+    const stylePPr = styleEl?.children.find((c) => localName(c.name) === "pPr");
+    const isHeading =
+      /^Heading\d+$/i.test(styleId) ||
+      !!stylePPr?.children.some((c) => localName(c.name) === "outlineLvl");
+    if (!isHeading) return; // no w:next, not a heading: the style continues
+    nextId = "Normal";
+  }
+  if (nextId === styleId) return;
+
+  const isDefault =
+    nextId === "Normal" || nextId === doc.styles.defaultParagraphStyle;
+  if (isDefault) {
+    pPr.children = pPr.children.filter((c) => c !== pStyle);
+  } else {
+    pStyle.attrs[valKey!] = nextId;
+  }
 }

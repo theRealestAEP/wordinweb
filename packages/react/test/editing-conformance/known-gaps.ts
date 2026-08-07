@@ -67,10 +67,10 @@ export const KNOWN_GAPS: Record<string, string> = {
   // plain text) and only a second Backspace merges. The empty-item variant is
   // the reported "undeletable/mishandled empty list item" family.
 
-  // G10 — Enter at the end of a heading carries Heading1 onto the new
-  // paragraph; Word applies the style's next-style (Normal).
-  "session/enter.heading-end": "the paragraph created after a heading keeps the heading style (Word switches to Normal)",
-  "local/enter.heading-end": "the paragraph created after a heading keeps the heading style (Word switches to Normal)",
+  // G10 — FIXED: applySplitParagraph applies the style's next-style (w:next;
+  // a heading without one defaults to Normal, other styles continue
+  // themselves) to the empty paragraph an end-of-paragraph Enter creates —
+  // in the shared mutation, so every replica derives the same style.
 
   // G11 — Shift+Tab on a level-0 list item is a no-op; Word promotes the item
   // out of the list into a body paragraph.
