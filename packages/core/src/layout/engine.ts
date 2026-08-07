@@ -5707,12 +5707,17 @@ class Engine {
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (block.type === "paragraph") {
-        // The mandatory empty paragraph OOXML places after a table (and before
-        // the cell/frame end) collapses to zero height in Word - it does NOT
+        // The mandatory empty paragraph OOXML places after a nested table
+        // (before the cell end) collapses to zero height in Word - it does NOT
         // add a blank line under a nested table (parity2-nestedtables: the
         // trailing <w:p/> after the L3 and L2 tables). A non-empty paragraph
-        // after a table renders normally.
+        // after a table renders normally. CELLS ONLY: in a header story Word
+        // charges the same construct its full paragraph height
+        // (parity-hftemplates p2, Ion Light: body top = headerDistance 35.4pt
+        // + table row 36.0pt + trailing empty <w:p/> ~22.5pt = 93.9pt; the
+        // arithmetic closes to 0.1pt only with the paragraph charged).
         if (
+          inCell &&
           i > 0 &&
           blocks[i - 1].type === "table" &&
           !block.sectionBreak &&
