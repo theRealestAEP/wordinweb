@@ -26,7 +26,7 @@ import { insertDateTimeField, insertField, insertPageField } from "../src/edit/f
 import { insertBlankPageAt, insertBreakAt, insertCoverPage, sectionContextAt } from "../src/edit/sections.js";
 import { drawingLineStyle, drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingLineStyle, setDrawingWordArtStyle, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
 import { buildChartXml, insertChartAt, setChartData } from "../src/edit/charts.js";
-import { buildSmartArtDataXml, buildSmartArtDrawingXml, insertSmartArtAt, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "../src/edit/smartart.js";
+import { buildSmartArtColorsXml, buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "../src/edit/smartart.js";
 import { insertEmbeddedObjectAt, insertModel3DAt, insertWebVideoAt } from "../src/edit/objects.js";
 import { buildOlePackage, extractOlePackage } from "../src/parse/ole.js";
 import { insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, listBookmarks, validBookmarkName } from "../src/edit/references.js";
@@ -1162,13 +1162,56 @@ describe("SmartArt insertion", () => {
         expect(Number(cx)).toBeGreaterThan(0);
         expect(Number(cy)).toBeGreaterThan(0);
       }
-      expect(xml).toMatch(/<a:xfrm[^>]+flip[HV]="1"/);
+      if (layout === "hierarchy") expect(xml).toMatch(/<a:xfrm[^>]+flip[HV]="1"/);
       for (const id of ["1", "2", "3"]) expect(xml).toContain(`modelId="${id}"`);
       const dataXml = buildSmartArtDataXml({ layout, items: ["One", "Two", "Three"] }, "rIdDrawing");
       for (const [, id] of xml.matchAll(/<dsp:sp modelId="([^"]+)"/g)) {
         expect(id).toMatch(/^\d+$/);
         expect(dataXml).toContain(`modelId="${id}"`);
       }
+    }
+  });
+
+  it("keeps the cycle layout definition consistent with the cached drawing", () => {
+    // Word re-evaluates the layoutDef and ignores the cached drawing, so both
+    // must describe the same art. Geometry calibrated against desktop Word
+    // exports of word-interop-smartart-only (wordinweb-parity).
+    const data: SmartArtData = { layout: "cycle", items: ["One", "Two", "Three"] };
+    const layoutXml = buildSmartArtLayoutXml(data);
+    const drawingXml = buildSmartArtDrawingXml(data);
+
+    // Same shape family, and no connectors on either side.
+    expect(layoutXml).toContain('<dgm:alg type="cycle">');
+    expect(layoutXml).toContain('<dgm:shape type="ellipse"/>');
+    expect(drawingXml).not.toContain('prst="line"');
+    expect([...drawingXml.matchAll(/prst="ellipse"/g)]).toHaveLength(3);
+
+    // Pinned font with no autofit rule; the cache stores the same 12pt.
+    expect(layoutXml).toContain('type="primFontSz" for="ch" forName="node" val="12"');
+    expect(layoutXml).not.toContain("<dgm:rule ");
+    expect(drawingXml).toContain('sz="1200"');
+
+    // The cache's per-node fills are the colorsDef list, in order.
+    const colorsXml = buildSmartArtColorsXml();
+    const fillList = colorsXml.match(/<dgm:fillClrLst meth="repeat">((?:<a:srgbClr val="[0-9A-F]{6}"\/>)+)<\/dgm:fillClrLst>/);
+    expect(fillList).not.toBeNull();
+    const palette = [...fillList![1].matchAll(/val="([0-9A-F]{6})"/g)].map((m) => m[1]);
+    const cachedFills = [...drawingXml.matchAll(/<a:solidFill><a:srgbClr val="([0-9A-F]{6})"\/><\/a:solidFill><a:ln /g)].map((m) => m[1]);
+    expect(cachedFills).toEqual(palette.slice(0, 3));
+
+    // Geometry: three 90x54pt ellipses on a 54pt-radius circle, first at
+    // twelve o'clock, bounding box centered in the 360x180pt canvas — the
+    // positions desktop Word computes from this layoutDef.
+    const boxes = [...drawingXml.matchAll(/<a:off x="(\d+)" y="(\d+)"\/><a:ext cx="(\d+)" cy="(\d+)"\/>/g)]
+      .map((m) => m.slice(1, 5).map(Number));
+    expect(boxes.map((b) => [Math.round(b[0] / 127) / 100, Math.round(b[1] / 127) / 100])).toEqual([
+      [135, 22.5],
+      [181.77, 103.5],
+      [88.23, 103.5],
+    ]);
+    for (const [, , cx, cy] of boxes) {
+      expect(cx / 12700).toBe(90);
+      expect(cy / 12700).toBe(54);
     }
   });
 
