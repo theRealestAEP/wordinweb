@@ -9,7 +9,11 @@ import {
   type MarkerShape,
   type Point,
   type Rect,
+  LEGEND_LINE_KEY,
   LEGEND_LINE_SPACING,
+  LEGEND_SAMPLE,
+  LEGEND_SWATCH,
+  LEGEND_SWATCH_KEY,
   MARKER_SHAPES,
   axisScale,
   barSlots,
@@ -1624,7 +1628,7 @@ function paintLegendKey(pen: ChartPen, entry: LegendEntry, x: number, y: number,
     });
   }
   if (entry.shape) {
-    paintMarker(pen, { x: x + size / 2, y }, size * 0.35, entry.shape, entry.color, "legend-key");
+    paintMarker(pen, { x: x + size / 2, y }, Math.min(size, 11) * 0.35, entry.shape, entry.color, "legend-key");
   }
 }
 
@@ -1632,11 +1636,14 @@ function paintLegend(pen: ChartPen, box: Rect & { vertical: boolean }): void {
   const entries = legendEntries(pen);
   const swatch = Math.min(pen.size * 0.85, 11);
   if (box.vertical) {
+    // Word's measured band (probe-legendedge): a 5.49pt swatch or a 19.2pt
+    // line sample at the band's left, labels in a column 8.05pt (line: 21.42)
+    // right of it.
     const step = pen.size * LEGEND_LINE_SPACING;
     entries.forEach((entry, index) => {
       const y = box.y + step * index + step / 2;
-      paintLegendKey(pen, entry, box.x, y, swatch);
-      pen.label(box.x + swatch + 6, y + pen.size * 0.35, entry.text);
+      paintLegendKey(pen, entry, box.x, y, entry.line ? LEGEND_SAMPLE : LEGEND_SWATCH);
+      pen.label(box.x + (entry.line ? LEGEND_LINE_KEY : LEGEND_SWATCH_KEY), y + pen.size * 0.35, entry.text);
     });
     return;
   }
@@ -2040,6 +2047,16 @@ function renderChart(item: ChartItem, theme: Theme): HTMLElement {
     ? []
     : axisScale(stacks.flat().flatMap((point) => [point.base, point.top]), percentAxis(data))
         .ticks.map((tick) => formatChartNumber(tick, percentAxis(data)?.format));
+  const legendKeys = legendEntries(pen);
+  // The bottom-axis label that centres on the plot's right edge: a bar
+  // chart's last value tick, a line or area chart's last category. A column
+  // chart centres its categories inside their bands, so nothing overhangs.
+  const rightOverhangLabel =
+    data.type === "bar"
+      ? valueLabels[valueLabels.length - 1]
+      : data.type === "line" || data.type === "area"
+        ? data.categories[data.categories.length - 1]
+        : undefined;
   const frame = chartFrame({
     width: item.width,
     height: item.height,
@@ -2047,11 +2064,13 @@ function renderChart(item: ChartItem, theme: Theme): HTMLElement {
     textSize: pen.size,
     ...(data.title ? { title: data.title } : {}),
     ...(data.legend ? { legend: data.legend } : {}),
-    legendLabels: legendEntries(pen).map((entry) => entry.text),
+    legendLabels: legendKeys.map((entry) => entry.text),
     valueLabels,
     categoryLabels: data.type === "bar" ? data.categories : [],
     horizontalValues: data.type === "bar",
     axes: !round,
+    legendLineKeys: legendKeys.some((entry) => entry.line),
+    ...(rightOverhangLabel !== undefined ? { rightOverhangLabel } : {}),
     ...(data.valueAxis?.title ? { valueAxisTitle: data.valueAxis.title } : {}),
     ...(data.categoryAxis?.title ? { categoryAxisTitle: data.categoryAxis.title } : {}),
   });

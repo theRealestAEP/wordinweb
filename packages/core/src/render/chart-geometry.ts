@@ -275,6 +275,15 @@ export interface ChartFrameSpec {
   horizontalValues: boolean;
   /** Charts without axes (pie, doughnut) reserve no label gutters. */
   axes: boolean;
+  /** True when the legend keys its entries with a line sample rather than a
+   * filled swatch (line and scatter series); the sample band is wider. */
+  legendLineKeys?: boolean;
+  /** The bottom-axis label that centres on the plot's right edge, when the
+   * chart has one: a bar chart's last value label, a line or area chart's
+   * last category. Half its width is reserved right of the plot. A column
+   * chart centres its category labels inside their bands, so it passes
+   * nothing. */
+  rightOverhangLabel?: string;
   valueAxisTitle?: string;
   categoryAxisTitle?: string;
 }
@@ -293,7 +302,6 @@ export function textWidth(text: string, size: number): number {
 }
 
 const EDGE_PAD = 6;
-const SWATCH = 10;
 const TICK_GAP = 5;
 
 /**
@@ -314,6 +322,34 @@ const TICK_GAP = 5;
  * edge at 375.38 against Word's 375.62.
  */
 const LEGEND_GAP = 16;
+
+/**
+ * A right-side legend's band and the plot edge beside it, measured on
+ * probe-legendedge.docx (parity #84): bar, line and pie, each at 360x216pt
+ * AND 240x144pt, read from Word's own PDF vectors with fitz get_drawings().
+ * Every quantity below is identical at both box sizes, so the band is fixed
+ * in pt at Word's default 10pt chart text — nothing about this edge scales
+ * with the box, which retires the fractional inset and the flat LEGEND_GAP
+ * on it. In CSS px (pt x 4/3):
+ *
+ *   swatch key, left edge to label left   8.05pt  (5.49pt swatch + 2.56 gap)
+ *   line-sample key, same span           21.42pt  (19.2pt sample + 2.2 gap)
+ *   label right edge to chart right       9.87pt
+ *   plot right edge to key left          16.00pt + the overhanging label
+ *
+ * The per-type gaps decompose as 16pt plus half the width of the bottom-axis
+ * label that centres on the plot's right edge: bar 16 + 5.30 ("12") = 21.30
+ * against 21.33 measured, line 16 + 6.31 ("Q4") = 22.31 against 21.99, area
+ * (probe-charts-basic) 16 + 6.31 = 22.31 against 22.33, column 16 + 0 =
+ * 16.00 against 16.00 — a column's category labels sit inside their bands
+ * and overhang nothing.
+ */
+export const LEGEND_SWATCH_KEY = 10.73;
+export const LEGEND_LINE_KEY = 28.56;
+const LEGEND_TRAILING = 13.16;
+const LEGEND_CLEARANCE = 21.33;
+export const LEGEND_SWATCH = 7.32;
+export const LEGEND_SAMPLE = 25.6;
 
 /**
  * Baseline-to-baseline distance in a legend, as a multiple of the chart text
@@ -371,13 +407,13 @@ export function chartFrame(spec: ChartFrameSpec): ChartFrame {
   if (spec.legend && spec.legendLabels.length) {
     const vertical = spec.legend === "l" || spec.legend === "r" || spec.legend === "tr";
     if (vertical) {
-      // Word's band on the line page, from its key at 410.02 to the chart
-      // box's own pad: a key segment of the swatch plus one text size (23.46
-      // measured, 23.33 here), the longest label, then EDGE_PAD of trailing.
-      // That puts our key at 410.00.
-      const keySegment = SWATCH + spec.textSize;
+      // Word's band, measured on probe-legendedge (see the constants above):
+      // the key segment, the longest label, then 9.87pt of trailing space to
+      // the chart's own edge. The trailing constant already covers EDGE_PAD.
+      const keySegment = spec.legendLineKeys ? LEGEND_LINE_KEY : LEGEND_SWATCH_KEY;
       const width =
-        keySegment + Math.max(...spec.legendLabels.map((label) => textWidth(label, spec.textSize))) + EDGE_PAD;
+        keySegment + Math.max(...spec.legendLabels.map((label) => textWidth(label, spec.textSize))) +
+        (LEGEND_TRAILING - EDGE_PAD);
       const height = spec.legendLabels.length * spec.textSize * LEGEND_LINE_SPACING;
       const x = spec.legend === "l" ? left : right - width;
       const y = spec.legend === "tr" ? top : top + Math.max((bottom - top - height) / 2, 0);
@@ -411,23 +447,37 @@ export function chartFrame(spec: ChartFrameSpec): ChartFrame {
     }
     // Word leaves room for the topmost tick label to sit beside the axis.
     top += spec.textSize * 0.5;
-    right -= spec.textSize * 0.5;
+    if (legendSide !== "r") right -= spec.textSize * 0.5;
     // Both probe pages are axis charts, so the inset stays where it was
     // measured; a pie keeps the whole box its title and legend leave it.
     left += spec.width * PLOT_EDGE_INSET;
-    right -= spec.width * PLOT_EDGE_INSET;
+    if (legendSide !== "r") right -= spec.width * PLOT_EDGE_INSET;
     top += spec.height * PLOT_EDGE_INSET;
     bottom -= spec.height * PLOT_EDGE_INSET;
-    // Clear the side legend. Scoped to a VERTICAL value axis, which is where
-    // the line page measured it: the bar page (horizontal values, same box
-    // and same Alpha/Beta legend) reads Word's plot only 2.83px narrower than
-    // ours, so the two probe pages disagree about this edge by ~13px and no
-    // single reservation fits both. The bar figure predates the gridline
-    // method the line page used and is the one to re-read; until then this
-    // stays on the axis orientation that measured it.
-    if (legendSide && !spec.horizontalValues) {
-      if (legendSide === "l") left += LEGEND_GAP; else right -= LEGEND_GAP;
+    if (legendSide === "r" && legend) {
+      // Beside a right legend the edge is measured directly (probe-legendedge,
+      // both box sizes): the plot stops 16pt short of the legend key, plus
+      // half the bottom-axis label that centres on the edge. This replaces the
+      // tick allowance, the fractional inset and the flat gap on this edge —
+      // all three were fitted at one box size, and the two-size sweep shows
+      // the reservation is fixed in pt, not fractional.
+      const overhang = spec.rightOverhangLabel
+        ? textWidth(spec.rightOverhangLabel, spec.textSize) / 2
+        : 0;
+      right = legend.x - LEGEND_CLEARANCE - overhang;
+    } else if (legendSide === "l" && !spec.horizontalValues) {
+      // The left-legend clearance keeps its old flat value; no measurement
+      // covers it yet.
+      left += LEGEND_GAP;
     }
+  }
+
+  if (!spec.axes && legendSide === "r" && legend) {
+    // Word centres a pie in the band left of a right legend, measured from
+    // the chart's own left edge to 4.7pt short of the legend key — centre
+    // x = (keyLeft - 4.7pt)/2 at both probe-legendedge box sizes.
+    left = 0;
+    right = legend.x - 6.27;
   }
 
   return {
