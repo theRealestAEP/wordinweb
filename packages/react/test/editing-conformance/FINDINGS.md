@@ -15,8 +15,14 @@
 > (a soft break is stepped past, not deleted), and char-wise deletes can
 > still empty one w:t beside populated runs (the surviving G13 fuzz
 > family). The fuzzer's allowed "I3" family is deleted — any caret/
-> selection resolvability loss now fails loudly. Sweep results for this
-> wave are at the bottom of this file.
+> selection resolvability loss now fails loudly — and deleting it paid
+> off immediately: the first full sweep surfaced three UNDO-path caret
+> losses the family had been masking (a stale selection kept after a
+> history install, and no caret restored when the checkpoint had been
+> taken mid-selection), fixed by applyHistory's post-replay
+> reconciliation (clear the selection, land a caret) plus an attachment
+> guard on the boundary-selection fallback. Sweep results for this wave
+> are at the bottom of this file.
 
 Produced by the suite in this directory at engine tip `2bcb71c` (branch
 `edit-conformance`). Two mounts are exercised everywhere:
@@ -210,3 +216,25 @@ it, undo may stop at the horizon but redo must still replay byte-exactly. Scale:
 fuzz.test.tsx header). Any new violation is ddmin-minimized (wall-clock
 bounded) and fails with `seed`, `mode`, `step`, and the minimal gesture
 script as JSON.
+
+## Keyboard-contract wave sweep (branch `keyboard-contracts`, 2,500 steps x seeds 1-10 x both modes)
+
+All 20 seed-runs green — 50,000 steps, zero hard violations. The blanket
+"I3" allowance is gone, so a wedge or any caret/selection resolvability
+loss now fails the sweep outright; the first run at this scale proved the
+point by surfacing three undo-path caret losses (seeds 3/4/6, session),
+fixed before this final run (applyHistory reconciliation + the
+boundary-selection attachment guard). Remaining allowed families:
+
+- G13 residual (char-wise deletes emptying ONE w:t beside populated
+  runs): 237-3,205 step-observations per seed-run — down from the
+  baseline's ~30k-56k per seed now that paragraph merges drop placeholder
+  runs instead of stranding them.
+- I5-depth: exactly one per seed-run (2,500 steps exceed the designed
+  200-entry undo horizon; redo replayed byte-exactly every time).
+- G17 (properties-only w:r after undo of format-over-selection): zero
+  hits this sweep; its matrix cases remain ledgered.
+
+No listener threw, every periodic save/reload round-tripped, and undo
+returned the pre-sequence bytes (or the horizon, redo-exact) on every
+seed in both mounts.
