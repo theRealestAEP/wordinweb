@@ -28,6 +28,7 @@ import {
 } from "../parse/styles.js";
 import { mergeRunProps } from "../parse/properties.js";
 import { bodyStyleRefText } from "../style-ref.js";
+import { citationText, documentBibliography, type Bibliography } from "../citations.js";
 import { ptToPx } from "../units.js";
 import { child, serializeXml, cyrb53, XmlElement } from "../xml.js";
 import {
@@ -2572,7 +2573,21 @@ class Engine {
       refPosition: (key) => engine.refFieldPosition.get(key),
       refParaNumber: (key) => engine.refFieldParaNumber.get(key),
       styleRefBody: (_name, key) => engine.resolveBodyStyleRef(key),
+      citation: (instruction) => engine.resolveCitation(instruction),
     };
+  }
+
+  /**
+   * A CITATION's display text from the document's sources part, in its
+   * citation style. Built on first use like bodyStyleRefs below: a document
+   * with no CITATION field never reads the part. src/citations.ts holds the
+   * rule and the update pass reads that same one, so the painted text and the
+   * written cache cannot disagree.
+   */
+  private bibliography: Bibliography | null | undefined;
+  private resolveCitation(instruction: string): string | undefined {
+    if (this.bibliography === undefined) this.bibliography = documentBibliography(this.doc);
+    return this.bibliography ? citationText(instruction, this.bibliography) : undefined;
   }
 
   /**

@@ -137,7 +137,19 @@ export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, Dr
 export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertEndnote, insertFootnote } from "./edit/notes.js";
-export { MAX_FIELD_INSTRUCTION, insertField, insertPageField, insertDateTimeField, isInsertableFieldInstruction } from "./edit/fields.js";
+export {
+  MAX_FIELD_INSTRUCTION,
+  insertCitationField,
+  insertField,
+  insertMergeField,
+  insertPageField,
+  insertDateTimeField,
+  isInsertableFieldInstruction,
+  isValidCitationTag,
+  isValidMergeFieldName,
+} from "./edit/fields.js";
+export { citationText, documentBibliography } from "./citations.js";
+export type { Bibliography, BibliographySource } from "./citations.js";
 export {
   UPDATABLE_FIELD_KEYWORDS,
   applyFieldResults,

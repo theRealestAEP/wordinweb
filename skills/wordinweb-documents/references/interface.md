@@ -733,6 +733,8 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertSmartArt` | Insert a SmartArt diagram | `runRef`, `smartArt` |
 | `insertDateTimeField` | Insert a DATE or TIME field | `runRef`, `dtKind`, `picture` |
 | `insertField` | Insert an allowlisted Word field | `runRef`, `instruction`; optional: `cachedResult` |
+| `insertMergeField` | Insert a mail-merge placeholder field («Name») | `runRef`, `name` |
+| `insertCitation` | Insert a citation to a bibliography source the document already has | `runRef`, `tag` |
 | `insertTable` | Insert a table, with its whole content (cell texts, header row) authored in the same operation | `runRef`, `rows`, `cols`; optional: `cells`, `headerRow` |
 | `insertToc` | Insert a table of contents built from the document's headings | `runRef`, `entryCount`, `levels`, `leader` |
 | `insertWatermark` | Stamp a text watermark across every page, in the document's header parts | `text`, `headerCount`; optional: `diagonal`, `color`, `opacity` |
@@ -1122,7 +1124,9 @@ A column width lives in three places at once — the grid, the table's total wid
 
 `insertField` accepts these field types as the first instruction token:
 
-`PAGE`, `NUMPAGES`, `SECTIONPAGES`, `SECTION`, `DATE`, `TIME`, `CREATEDATE`, `SAVEDATE`, `PRINTDATE`, `AUTHOR`, `TITLE`, `SUBJECT`, `KEYWORDS`, `COMMENTS`, `FILENAME`, `NUMWORDS`, `NUMCHARS`, `PAGEREF`, `REF`, `SEQ`, `STYLEREF`, `TOC`, `INDEX`, `LISTNUM`, and `QUOTE`.
+`PAGE`, `NUMPAGES`, `SECTIONPAGES`, `SECTION`, `DATE`, `TIME`, `CREATEDATE`, `SAVEDATE`, `PRINTDATE`, `AUTHOR`, `TITLE`, `SUBJECT`, `KEYWORDS`, `COMMENTS`, `FILENAME`, `NUMWORDS`, `NUMCHARS`, `PAGEREF`, `REF`, `SEQ`, `STYLEREF`, `TOC`, `INDEX`, `LISTNUM`, `QUOTE`, `MERGEFIELD`, and `CITATION`.
+
+A `MERGEFIELD` with no attached data source displays its `«Name»` placeholder — prefer `insertMergeField`, which writes the placeholder for you. A `CITATION` must name a source tag in the document's bibliography sources part — prefer `insertCitation`, which resolves the display text ("(Author, Year)" in the document's citation style) and is a clean no-op for an unknown tag.
 
 ## JavaScript API
 

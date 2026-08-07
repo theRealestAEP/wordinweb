@@ -84,6 +84,11 @@ export interface FieldContext {
    * only outside a header/footer, so `styleRef`'s page-relative answer is
    * always the one a header field gets. */
   styleRefBody?: (styleName: string, fieldKey: object) => string | undefined;
+  /** CITATION: the display text for a citation instruction, resolved from the
+   * document's sources part in its citation style (src/citations.ts).
+   * undefined — unknown tag, unmodeled switch, or no sources part — keeps
+   * the cache. */
+  citation?: (instruction: string) => string | undefined;
   /** FILENAME: the host's name for the open document. Absent keeps the cache —
    * the engine has no filesystem of its own. */
   fileName?: string;
@@ -4037,6 +4042,23 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
     }
     case "AUTHOR":
       return ctx.author !== undefined ? ctx.author : cachedResult || "";
+    case "MERGEFIELD": {
+      // No mail-merge data source is ever attached here, which is Word's
+      // "no data source" state: the field shows its cached result (the last
+      // merged value, or the «Name» placeholder Word wrote on insertion), and
+      // a field that has never held one shows the placeholder.
+      if (cachedResult) return cachedResult;
+      const m = /^MERGEFIELD\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(instr);
+      const name = m?.[1] ?? m?.[2];
+      return name ? `«${name}»` : "";
+    }
+    case "CITATION": {
+      // Resolved from the document's own sources part (src/citations.ts) in
+      // the selected citation style; a tag or switch the resolver cannot
+      // model keeps the cache, which is Word's own rendering.
+      const text = ctx.citation?.(instr);
+      return text !== undefined ? text : cachedResult || "";
+    }
     case "CREATEDATE":
     case "SAVEDATE":
       // These reference stored document moments — the cache IS the value.

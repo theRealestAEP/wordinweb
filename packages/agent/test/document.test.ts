@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { strToU8, zipSync } from "fflate";
 import { DocxDocument, localName, type XmlElement } from "@wordinweb/core";
 import { INTENT_KINDS } from "@wordinweb/collab/client";
 import { AgentDocument, validateAgentOperationShape } from "../src/index.js";
@@ -584,5 +585,56 @@ describe("AgentDocument local tools", () => {
     // The schema takes the field and rejects a negative one.
     expect(validateAgentOperationShape({ kind: "deleteMath", blockRef: "block:1", mathIndex: 2 })).toBeNull();
     expect(validateAgentOperationShape({ kind: "deleteMath", blockRef: "block:1", mathIndex: -1 })).toContain("minimum");
+  });
+
+  it("exposes insertMergeField and insertCitation, and applies both", async () => {
+    // Capability rows come straight from the core registry declaration.
+    const capabilities = AgentDocument.create().capabilities();
+    const byKind = new Map(capabilities.map((capability) => [capability.kind, capability]));
+    expect(byKind.get("insertMergeField")).toMatchObject({ category: "insert", required: ["runRef", "name"] });
+    expect(byKind.get("insertCitation")).toMatchObject({ category: "insert", required: ["runRef", "tag"] });
+    expect(validateAgentOperationShape({ kind: "insertCitation", runRef: "run:1", tag: "Doe03" })).toBeNull();
+    expect(validateAgentOperationShape({ kind: "insertCitation", runRef: "run:1", tag: "no spaces" })).not.toBeNull();
+
+    const agent = AgentDocument.load(
+      zipSync({
+        "[Content_Types].xml": strToU8(
+          `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+            `<Default Extension="xml" ContentType="application/xml"/>` +
+            `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+            `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+        ),
+        "_rels/.rels": strToU8(
+          `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+            `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+        ),
+        "word/_rels/document.xml.rels": strToU8(
+          `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+            `<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item1.xml"/></Relationships>`,
+        ),
+        "customXml/item1.xml": strToU8(
+          `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+            `<b:Sources xmlns:b="http://schemas.openxmlformats.org/officeDocument/2006/bibliography" StyleName="APA">` +
+            `<b:Source><b:Tag>Doe03</b:Tag>` +
+            `<b:Author><b:Author><b:NameList><b:Person><b:Last>Doe</b:Last></b:Person></b:NameList></b:Author></b:Author>` +
+            `<b:Title>A Study of Things</b:Title><b:Year>2003</b:Year></b:Source></b:Sources>`,
+        ),
+        "word/document.xml": strToU8(body(`<w:p><w:r><w:t xml:space="preserve">anchor</w:t></w:r></w:p>`)),
+      }),
+    );
+    const read = agent.inspect({ kind: "read" });
+    if (!("blocks" in read) || read.blocks[0].type !== "paragraph") throw new Error("missing paragraph");
+    const runRef = read.blocks[0].runs[0].ref;
+    const result = await agent.edit({
+      revision: agent.revision,
+      operations: [
+        { kind: "insertMergeField", runRef, name: "First Name" },
+        { kind: "insertCitation", runRef, tag: "Doe03" },
+      ],
+    });
+    expect(result.status).toBe("applied");
+    const saved = DocxDocument.load(agent.save());
+    expect(textOf(saved)).toContain("«First Name»");
+    expect(textOf(saved)).toContain("(Doe, 2003)");
   });
 });

@@ -404,6 +404,11 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
     maxItems: 2,
     items: integer(1, 9),
   },
+  // The core registry's own validate is stricter (printable ASCII, no quote
+  // or backslash in a name; Word's alphanumeric tag shape); the schema carries
+  // the length caps and the tag pattern.
+  "insertMergeField.name": string(64, 1),
+  "insertCitation.tag": { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$" },
   "createStyle.style": styleSpec,
   "modifyStyle.styleId": styleId,
   "modifyStyle.patch": stylePatch,
