@@ -1415,7 +1415,7 @@ function breakParagraphImpl(
         src: { run: anchorSrc.run, t: anchorSrc.t, offset: 0 },
       });
     }
-    const line = finishLine(cur, curLineWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak, minLineHeight, opts?.inTableCell === true);
+    const line = finishLine(cur, curLineWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak, minLineHeight, opts?.inTableCell === true, opts?.verticalGridResync === true);
     line.forcedBreakAfter = forced;
     line.floatYOffset = lineFloatOffset;
     // Alignment
@@ -2489,6 +2489,7 @@ function finishLine(
   endsWithBreak: boolean,
   minLineHeight?: number,
   inCell = false,
+  verticalFlow = false,
 ): LineBox {
   // w:snapToGrid="0" turns the per-line grid snap off. The PARAGRAPH flag is
   // handled at breakParagraphImpl's top (minLineHeight arrives undefined);
@@ -2848,15 +2849,32 @@ function finishLine(
     // MS Mincho, which is compat 15 and never reaches this branch) swallowed
     // exactly that case and left us laying 53 lines.
     const objSnap = maxImage > 0 && extent > pitch + 0.01;
-    // TEXT-line snapping is a LEGACY-mode behavior: eq-as-images (compat 12)
-    // snaps its oversized text lines, while staging-eastasian (compat 15,
-    // same docGrid type=lines) lays multiplier x natural for faces well
-    // above its pitch. Oversized East Asian faces keep multiplier x natural
-    // in either mode.
+    // TEXT-line snapping applies in EVERY compat mode: probe-docgrid15
+    // (compat 15, Word-exported, self-reproducing) advances Calibri Light
+    // 16/18pt lines 2 rows at pitch 360tw and Calibri 11/16pt lines 2 rows
+    // at 240tw, exactly like the compat-12 probes, and its glyph-centered
+    // first baselines (31.37/32.37px into the 48px band) match this branch's
+    // centering formula to 0.08px. The old `compatibilityMode < 15` gate
+    // cited staging-eastasian's Chinese-fallback lines, where snap
+    // (2 x 24 = 48) and multiplier x natural (44.48 x 1.0792 = 48.0) are
+    // numerically identical - that case discriminated nothing, and the
+    // fixture's Heading1 lines (natural 26.04 > pitch 24, Word advances 48)
+    // are what the gate broke. The EA carve-out stays: Word DOES snap an
+    // oversized EA line (probe-docgrid15 F360 advances 48), but our
+    // substituted Hiragino/PingFang profiles overstate the raw box, so
+    // arming them here would snap Japanese 11pt lines (raw box 24.10 >
+    // pitch 24) that Word lays at one row; the corpus EA lines land right
+    // through the auto path (staging-eastasian zh baselines +0.09px), so
+    // the carve-out is kept until the EA profiles carry Word-em snap
+    // metrics. A VERTICAL (tbRl) flow keeps the old compat gate: enabling
+    // the snap there moved probe2-ruby-vertical p2 from 0.02% to 12.05%
+    // against its clean reference, so Word's vertical column pitch does not
+    // take this rule; the vertical case is unprobed beyond that and is
+    // deliberately left at its measured-good behavior.
     const textSnap =
-      doc.compatibilityMode < 15 &&
       maxNaturalText > pitch + 0.01 &&
-      (ls?.rule === "atLeast" || !tallestTextIsEa);
+      (ls?.rule === "atLeast" || !tallestTextIsEa) &&
+      (!verticalFlow || doc.compatibilityMode < 15);
     if (objSnap || textSnap) {
       const basis = Math.max(extent, textSnap ? maxNaturalText : 0);
       height = Math.ceil(basis / pitch - 1e-4) * pitch;

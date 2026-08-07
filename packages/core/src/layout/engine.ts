@@ -4903,9 +4903,32 @@ class Engine {
       floatOffset = clearBannerForLine(line, li, floatOffset);
 
       this.y += floatOffset;
+      // w:suppressTopSpacing (settings.xml w:compat): the FIRST line of a
+      // page whose EXACT line spacing exceeds its character height takes the
+      // natural line instead - Word charges min(exact, natural). Measured by
+      // probe-emptyexact (every export self-reproducing): the 12 empty
+      // exact-480 (32px) paragraphs of wild3-template-caed-pleading span
+      // 19.32 + 11 x 32 = 371.32px in Word's PDF; the probe reads the same
+      // collapse at a positive top margin (P12), for 9/12/18pt runs alike
+      // (M9/M18), and an exact-240 line UNDER its natural stays 16px (Q6) -
+      // the suppression only shrinks. Our Arial 12pt natural is 18.40 where
+      // Word's collapsed line measures 19.32, so ~0.9px per suppressed line
+      // stays open. The break PLAN does not mirror this: only caed-pleading
+      // and probe-negmargin carry the flag, and neither has a fit decision
+      // within 13px of a page bottom.
+      let placedLine = line;
+      if (
+        this.doc.suppressTopSpacing &&
+        props.lineSpacing?.rule === "exact" &&
+        line.height > line.naturalHeight + 0.01 &&
+        this.cur.physIndex !== -1 &&
+        this.y <= this.cur.bodyTop + 0.01
+      ) {
+        placedLine = { ...line, height: line.naturalHeight, baselineH: line.naturalHeight };
+      }
       const lineItemStart = this.cur.items.length;
       if (paintless) this.cur.discarded = true;
-      else this.emitLine(line, this.cur, this.colX, this.y);
+      else this.emitLine(placedLine, this.cur, this.colX, this.y);
       // w:tab val="bar": not a tab stop — a vertical rule painted at the bar
       // position on EVERY line of the paragraph, spanning the line box, and
       // through the paragraph's after-spacing band on the last line
@@ -4917,7 +4940,7 @@ class Engine {
           if (t.align === "bar" && !t.clear) {
             const bx = this.colX + t.pos;
             const barBottom =
-              this.y + line.height + (li === lines.length - 1 ? (props.spacingAfter ?? 0) : 0);
+              this.y + placedLine.height + (li === lines.length - 1 ? (props.spacingAfter ?? 0) : 0);
             this.cur.items.push({
               kind: "edge",
               x1: bx,
@@ -4957,7 +4980,7 @@ class Engine {
         const pg = this.cur.physIndex === -1 ? this.lastRealPage : this.cur;
         if (pg) this.recordStyleRef(para, pg.physIndex);
       }
-      this.y += line.height;
+      this.y += placedLine.height;
 
       if (line.forcedBreakAfter) {
         closeFragment(li + 1, li === lines.length - 1);
@@ -5800,14 +5823,45 @@ class Engine {
         const top = y;
         // Cell-anchored floats are emitted BEFORE the paragraph breaks so the
         // paragraph's own lines wrap around them (Box 202 in
-        // staging-tblextreme). Other frames keep the emit-after order.
-        const preAnchors = inCell ? this.collectAnchors(block) : [];
+        // staging-tblextreme). Other frames keep the emit-after order for
+        // shapes anchored to their own paragraph - probe-headeranchor2:
+        // a paragraph-positioned wrapTopAndBottom bar leaves its carrier's
+        // text at the header top (HDT40/HDT72 paint at 48.64 beside the
+        // band), so the carrier must not wrap around its own anchor. A
+        // PAGE/MARGIN-positioned wrapped shape is the exception Word makes:
+        // parity-hftemplates p3/p4 headers are a single carrier paragraph
+        // whose full-width (p3, wrapSquare behindDoc) or right-edge (p4,
+        // wrapTopAndBottom) bar is positioned from the page, and Word lays
+        // the carrier's own line BELOW the bar - body top = bar bottom
+        // (+distB) + the line + its spacing-after, closing to 0.6px on p3
+        // and 0.2px on p4 against the reference PDF.
+        const allAnchors = this.collectAnchors(block);
+        const preAnchors = inCell
+          ? allAnchors
+          : allAnchors.filter(
+              (s) =>
+                (s.vRel === "page" || s.vRel === "margin") &&
+                "wrap" in s &&
+                s.wrap !== undefined &&
+                s.wrap !== "none",
+            );
         if (preAnchors.length > 0) {
           this.emitAnchors(preAnchors, fake, fields, 0, top, origin);
         }
-        const cellBounds =
-          inCell && (this.floats.get(fake)?.length ?? 0) > 0
-            ? this.makeBoundsAt(top, { page: fake, colX: 0, colW: width })
+        // Floats present on the frame page (a previous paragraph's, or this
+        // paragraph's own page-positioned ones) bound the line breaker in
+        // every frame story, not only cells: a header paragraph wraps below
+        // a page-positioned bar exactly like body text would. paraTop and
+        // colX shift by the frame's page origin because header floats are
+        // registered in page coordinates (cells pass no origin, so this is
+        // the identity there).
+        const frameBounds =
+          (this.floats.get(fake)?.length ?? 0) > 0
+            ? this.makeBoundsAt(top + (origin?.y ?? 0), {
+                page: fake,
+                colX: origin?.x ?? 0,
+                colW: width,
+              })
             : undefined;
         const broken = breakParagraph(
           this.doc,
@@ -5816,14 +5870,16 @@ class Engine {
           width,
           fields,
           label,
-          cellBounds,
+          frameBounds,
           this.sp?.docGridLinePitch,
           inCell || this.verticalGridFlow
             ? { inTableCell: inCell === true, verticalGridResync: this.verticalGridFlow }
             : undefined,
         );
         if (!inCell && broken.anchors.length > 0) {
-          this.emitAnchors(broken.anchors, fake, fields, 0, top, origin);
+          const pre = new Set<object>(preAnchors);
+          const rest = broken.anchors.filter((s) => !pre.has(s));
+          if (rest.length > 0) this.emitAnchors(rest, fake, fields, 0, top, origin);
         }
         for (const line of broken.lines) {
           // A line pushed down by a cell-anchored float (skipTo/clearY in the
@@ -5992,8 +6048,15 @@ class Engine {
         ? Math.max(bottom, itemEnd)
         : bottom;
     }, 0);
+    // Only a topAndBottom float's band extends the frame's content bottom: a
+    // SQUARE float hanging below the header's text does not move the body
+    // top (probe-headeranchor2 S40/S72: Word's marker stays at 64.64 with
+    // the bar reaching 40/72pt below, while T40/T72 sit exactly at the bar
+    // bottom). A square bar that displaces the header's own LINE below it
+    // (hftemplates p3) is already covered by `y`.
     const wrappedBottom = (this.floats.get(fake) ?? []).reduce(
-      (bottom, float) => Math.max(bottom, float.y1 - (origin?.y ?? 0)),
+      (bottom, float) =>
+        float.mode === "topAndBottom" ? Math.max(bottom, float.y1 - (origin?.y ?? 0)) : bottom,
       0,
     );
     this.floats.delete(fake);
@@ -6151,6 +6214,25 @@ class Engine {
         }
         for (const ts of shape.texts ?? []) {
           this.emitDrawingText(ts, ox - fx, oy - fy, page, fields, !shape.behind, rotate, shape.z);
+        }
+        // FRAME stories only: a wrapped art shape excludes its band like a
+        // text box does. probe-headeranchor2 (Word-exported twice, byte
+        // identical): a wrapTopAndBottom bar in a header puts the body top
+        // exactly at the bar's bottom (+distB) at both 40pt and 72pt extents,
+        // and hftemplates p3/p4 lay the header's own line below their
+        // page-positioned bars. Body flow ignores art wrap, as before - no
+        // body-flow fixture measures a wrapped art shape.
+        if (page.physIndex === -1 && shape.wrap && shape.wrap !== "none") {
+          const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
+          const list = this.floats.get(page) ?? [];
+          list.push({
+            x0: ox - d.l,
+            x1: ox + shape.width + d.r,
+            y0: oy - d.t,
+            y1: oy + shape.height + d.b,
+            mode: shape.wrap === "topAndBottom" ? "topAndBottom" : "square",
+          });
+          this.floats.set(page, list);
         }
         continue;
       }
@@ -6462,7 +6544,12 @@ class Engine {
         }
 
         // Body text flows around a wrapping text box (square / tight / topAndBottom).
-        if (shape.wrap && shape.wrap !== "none" && !shape.behind) {
+        // In a FRAME story (header/footer/cell, physIndex -1) an explicit wrap
+        // registers even on a behindDoc shape: parity-hftemplates p3's Banded
+        // bar is behindDoc="1" WITH wrapSquare, and Word still lays the
+        // header's own line below it. Body flow keeps the old behind gate -
+        // no body-flow fixture measures a behind+wrapped shape.
+        if (shape.wrap && shape.wrap !== "none" && (!shape.behind || page.physIndex === -1)) {
           const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
           const list = this.floats.get(page) ?? [];
           list.push({

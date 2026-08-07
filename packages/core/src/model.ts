@@ -533,6 +533,11 @@ export interface ShapeArt {
   behind?: boolean;
   /** a:xfrm rotation, degrees clockwise. */
   rotation?: number;
+  /** wp:wrapSquare/.../wrapTopAndBottom on the anchor. Only FRAME stories
+   * (header/footer/cell) act on it - body flow ignores art wrap, as before. */
+  wrap?: WrapMode;
+  /** wp:anchor dist* in px, used with `wrap`. */
+  dist?: { t: number; b: number; l: number; r: number };
   lines: DrawingLine[];
   images: DrawingImage[];
   paths: DrawingPath[];

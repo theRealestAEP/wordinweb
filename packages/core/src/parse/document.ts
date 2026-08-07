@@ -1648,6 +1648,20 @@ function parseDrawing(
         vRel: rel(posV),
         hAlign,
         vAlign,
+        // Wrap mode + distances, acted on only inside frame stories
+        // (probe-headeranchor2: a wrapTopAndBottom bar in a header sets the
+        // body top to its bottom edge; body flow ignores art wrap as before).
+        wrap: child(anchor, "wrapNone")
+          ? "none"
+          : child(anchor, "wrapTopAndBottom")
+            ? "topAndBottom"
+            : "square",
+        dist: {
+          t: emuToPx(intAttr(anchor, "distT") ?? 0),
+          b: emuToPx(intAttr(anchor, "distB") ?? 0),
+          l: emuToPx(intAttr(anchor, "distL") ?? 0),
+          r: emuToPx(intAttr(anchor, "distR") ?? 0),
+        },
         behind: attr(anchor, "behindDoc") === "1",
         ...(artRot ? { rotation: artRot / 60000 } : {}),
         lines,
