@@ -6738,8 +6738,8 @@ export class DocxEditor {
     if (direction === undefined) {
       const selectedAll = this.selectedAll;
       this.host.history?.checkpoint();
-      this.removeSelectedText();
-      this.commit(false, selectedAll ? "global" : "local");
+      const merged = this.removeSelectedText();
+      this.commit(false, selectedAll || merged ? "global" : "local");
       return;
     }
     const caret = this.caret;
@@ -6753,11 +6753,17 @@ export class DocxEditor {
       if (caret.offset === 0) {
         const pEl = paragraphOf(this.host.doc, caret.t);
         if (pEl && firstTextOf(pEl) === caret.t) {
+          this.host.history?.checkpoint();
+          // Word: the FIRST press at the start of a list item removes the
+          // numbering — the item becomes a plain paragraph, marker gone,
+          // text kept — and only the NEXT press merges. Also the only
+          // escape for a list item at the very start of a document or
+          // cell, where there is no previous paragraph to merge into.
+          if (this.clearListAtCaret()) return;
           // Start of paragraph: merge into the previous paragraph.
           const prev = siblingParagraph(this.host.doc, pEl, -1);
           if (!prev) return;
           const junction = lastTextOf(prev);
-          this.host.history?.checkpoint();
           // Collab: capture the merged paragraph's stable id BEFORE the merge
           // retires it, and emit the intent so every replica merges too (this
           // was a silent local-only mutation — Backspace across a paragraph
@@ -6846,6 +6852,24 @@ export class DocxEditor {
       if (caret.offset === 0) {
         const pEl = paragraphOf(doc, caret.t);
         if (pEl && firstTextOf(pEl) === caret.t) {
+          // Word: the first press at the start of a list item removes the
+          // numbering, recorded as a TRACKED format change (w:pPrChange) —
+          // the same shape the toolbar toggle suggests. Later presses
+          // suggest the merge below.
+          if (listTypeAt(doc, caret.t) !== null) {
+            const meta = this.frozenRevMeta();
+            const blockId = doc.stableIds?.idOf(pEl);
+            if (setListType(doc, [caret.t], null, meta)) {
+              if (blockId !== undefined && this.host.onIntent) {
+                this.host.onIntent(operationBody("setListType", blockId, {
+                  listKind: null,
+                  suggest: { author: meta.author, date: meta.date },
+                }));
+              }
+              this.commit(false, "global");
+              return;
+            }
+          }
           // Start of paragraph: suggest deleting the PREVIOUS paragraph's mark
           // (a merge). Don't actually join — Word keeps both until accepted.
           const prev = siblingParagraph(doc, pEl, -1);
@@ -6909,8 +6933,10 @@ export class DocxEditor {
     this.commit();
   }
 
-  /** Delete the owned selection's text from the XML; caret → start. */
-  private removeSelectedText(): void {
+  /** Delete the owned selection's text from the XML; caret → start.
+   * Returns true when the delete also merged paragraphs (a selection that
+   * spanned paragraph marks), so callers repaint structurally. */
+  private removeSelectedText(): boolean {
     // Collab: selection deletes were a silent LOCAL-ONLY mutation — nothing
     // rode the wire (review finding), so any select+Backspace/type-over
     // desynced the room. The generic branch below now emits a deleteText per
@@ -6935,7 +6961,7 @@ export class DocxEditor {
           run: { type: "run", props: {}, content: [] },
           offset: 0,
         };
-        return;
+        return true;
       }
     }
     const segments = this.getSelectionSegments();
@@ -6957,11 +6983,21 @@ export class DocxEditor {
         })
         .filter((r): r is NonNullable<typeof r> => r !== null);
       const c = deleteSuggestedRange(this.host.doc, ranges, meta);
-      this.emitSuggestRevision(meta, wireRanges);
+      // Word strikes the paragraph MARKS inside the selection too — the same
+      // "del" glyph a caret paragraph-merge suggests — so a fully-selected
+      // list item reads as deleted, marker included, until accept/reject.
+      const marks: { blockId: number; glyph: "ins" | "del" }[] = [];
+      for (const pEl of this.spannedParagraphs(segments).slice(0, -1)) {
+        if (paragraphGlyphRevision(pEl, "del")) continue;
+        markParagraphGlyph(pEl, "del", meta);
+        const blockId = this.host.doc.stableIds?.idOf(pEl);
+        if (blockId !== undefined) marks.push({ blockId, glyph: "del" });
+      }
+      this.emitSuggestRevision(meta, wireRanges, marks.length > 0 ? marks : undefined);
       this.clearSelection();
       const run = segments[0]?.run;
       if (c && run) this.caret = { t: c.t, run, offset: c.offset };
-      return;
+      return false;
     }
     // Group ranges per w:t, delete from the end so offsets stay valid.
     const byT = new Map<XmlElement, { start: number; end: number }[]>();
@@ -7053,8 +7089,74 @@ export class DocxEditor {
         first = { t: empty.text, run: first.run, offset: 0 };
       }
     }
+    // Word: a selection that spans paragraph boundaries deletes the paragraph
+    // MARKS inside it too — every spanned paragraph after the first merges
+    // into its predecessor. Fully-selected list items disappear WITH their
+    // bullet markers (they used to survive as empty marker-only paragraphs)
+    // and the two boundary paragraphs join. Same mutation + intent as caret
+    // Backspace at a paragraph start, so every replica converges.
+    const spanned = this.spannedParagraphs(segments);
+    let merged = false;
+    for (let i = 1; i < spanned.length; i++) {
+      const pEl = spanned[i];
+      if (!this.host.doc.findParentOf(pEl)) continue; // inside a removed table
+      const mergeId = collabEmit ? this.host.doc.stableIds!.idOf(pEl) : undefined;
+      if (mergeParagraphBackward(this.host.doc, pEl)) {
+        if (mergeId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeId });
+        merged = true;
+      }
+    }
+    if (merged) {
+      for (const pEl of spanned) {
+        if (this.host.doc.findParentOf(pEl)) invalidateParagraphSignature(pEl);
+      }
+      // The caret home may have ridden a paragraph the merge dropped whole
+      // (the empty-previous branch discards its children); land on the first
+      // surviving spanned paragraph instead.
+      if (first && !paragraphOf(this.host.doc, first.t)) {
+        for (const pEl of spanned) {
+          const t = this.host.doc.findParentOf(pEl) ? firstTextOf(pEl) : null;
+          if (t) {
+            first = { t, run: first.run, offset: 0 };
+            break;
+          }
+        }
+      }
+    }
     this.clearSelection();
     if (first) this.caret = first;
+    return merged;
+  }
+
+  /** Paragraphs the selection touches, in document order, INCLUDING
+   * marker-only paragraphs between them: an empty list item paints no text
+   * bindings, so it never appears in the segments — but a selection whose
+   * ends bracket it still covers it (the user's page of undeletable empty
+   * bullets). Sibling gaps are filled only under a shared parent; a
+   * cross-container selection (table cells) keeps just the segment
+   * paragraphs, and the merge primitive refuses cross-parent joins anyway. */
+  private spannedParagraphs(segments: SelectionSegment[]): XmlElement[] {
+    const doc = this.host.doc;
+    const touched: XmlElement[] = [];
+    for (const seg of segments) {
+      if (!seg.t) continue;
+      const pEl = paragraphOf(doc, seg.t as XmlElement);
+      if (pEl && !touched.includes(pEl)) touched.push(pEl);
+    }
+    const out: XmlElement[] = [];
+    for (let i = 0; i < touched.length; i++) {
+      out.push(touched[i]);
+      const next = touched[i + 1];
+      if (!next) break;
+      const parent = doc.findParentOf(touched[i]);
+      if (!parent || doc.findParentOf(next) !== parent) continue;
+      const a = parent.children.indexOf(touched[i]);
+      const b = parent.children.indexOf(next);
+      for (let k = a + 1; k < b; k++) {
+        if (localName(parent.children[k].name) === "p") out.push(parent.children[k]);
+      }
+    }
+    return out;
   }
 
   private moveCaret(delta: -1 | 1): void {
@@ -7104,6 +7206,47 @@ export class DocxEditor {
     return true;
   }
 
+  /** Word's "unbullet" step: remove the caret paragraph's list formatting so
+   * it becomes a plain paragraph (marker gone, text kept). Backspace at the
+   * start of a list item does this on its FIRST press, and Enter on an empty
+   * list item exits the list through it. Returns true when numbering was
+   * removed. Collab mounts take the CANONICAL setListType(null) mutation +
+   * intent (clearListParagraphFormatting is editor-local and was never
+   * replicated — a local-only exit desynced the doc). */
+  private clearListAtCaret(): boolean {
+    const caret = this.caret;
+    if (!caret) return false;
+    const paragraph = paragraphOf(this.host.doc, caret.t);
+    if (!paragraph) return false;
+    if (this.host.onIntent && this.host.doc.stableIds && listTypeAt(this.host.doc, caret.t) !== null) {
+      const blockId = this.host.doc.stableIds.idOf(paragraph);
+      if (blockId !== undefined && setListType(this.host.doc, [caret.t], null)) {
+        this.host.onIntent(operationBody("setListType", blockId, { listKind: null }));
+        this.commit(false, "global");
+        this.focusText();
+        return true;
+      }
+    }
+    if (!clearListParagraphFormatting(this.host.doc, paragraph)) return false;
+    const reparsed = this.host.doc.reparseBodyParagraph(paragraph);
+    if (reparsed) {
+      for (const child of reparsed.children) {
+        const runs = child.type === "run" ? [child] : child.runs;
+        const run = runs.find((candidate) =>
+          candidate.content.some((content) => content.kind === "text" && content.srcT === caret.t),
+        );
+        if (run) {
+          caret.run = run;
+          break;
+        }
+      }
+      invalidateParagraphSignature(paragraph);
+    }
+    this.commit(false, "local", !!reparsed);
+    this.focusText();
+    return true;
+  }
+
   /** Enter: split the paragraph at the caret into two w:p elements. */
   private splitParagraph(): void {
     this.host.history?.checkpoint();
@@ -7111,42 +7254,11 @@ export class DocxEditor {
   }
 
   private splitParagraphNoHistory(): void {
-    if (this.caret && this.host.onIntent && this.host.doc.stableIds) {
-      // Collab: Enter on an empty list item exits the list via the CANONICAL
-      // setListType(null) mutation + intent (clearListParagraphFormatting is
-      // editor-local and was never replicated — the exit desynced the doc).
-      const paragraph = paragraphOf(this.host.doc, this.caret.t);
-      if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && listTypeAt(this.host.doc, this.caret.t) !== null) {
-        const blockId = this.host.doc.stableIds.idOf(paragraph);
-        if (blockId !== undefined && setListType(this.host.doc, [this.caret.t], null)) {
-          this.host.onIntent(operationBody("setListType", blockId, { listKind: null }));
-          this.commit(false, "global");
-          this.focusText();
-          return;
-        }
-      }
-    }
     if (this.caret) {
+      // Enter on an EMPTY list item exits the list (Word) instead of adding
+      // another bullet — the same unbullet step Backspace takes first.
       const paragraph = paragraphOf(this.host.doc, this.caret.t);
-      if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && clearListParagraphFormatting(this.host.doc, paragraph)) {
-        const reparsed = this.host.doc.reparseBodyParagraph(paragraph);
-        if (reparsed) {
-          for (const child of reparsed.children) {
-            const runs = child.type === "run" ? [child] : child.runs;
-            const run = runs.find((candidate) =>
-              candidate.content.some((content) => content.kind === "text" && content.srcT === this.caret!.t),
-            );
-            if (run) {
-              this.caret.run = run;
-              break;
-            }
-          }
-          invalidateParagraphSignature(paragraph);
-        }
-        this.commit(false, "local", !!reparsed);
-        this.focusText();
-        return;
-      }
+      if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && this.clearListAtCaret()) return;
     }
     const insertedBefore = this.host.onIntent ? null : this.insertBlankParagraphBeforeAtStart();
     if (insertedBefore) {
