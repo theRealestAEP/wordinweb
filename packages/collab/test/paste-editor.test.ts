@@ -140,7 +140,7 @@ function paragraphTexts(doc: DocxDocument): string[] {
 }
 
 describe("rich paste from the editor", () => {
-  it("reaches the second replica instead of forking the room", () => {
+  it("reaches the second replica instead of forking the room (fragment semantics)", () => {
     const hub = new CollabHubLoopback(docBytes);
     const a = new CollabConnection(hub.connect(), "a");
     const b = new CollabConnection(hub.connect(), "b");
@@ -161,15 +161,17 @@ describe("rich paste from the editor", () => {
       "one\ntwo",
     );
 
-    expect(paragraphTexts(a.doc!), "the paster's own replica").toEqual(["hello", "one", "two", " world"]);
-    expect(paragraphTexts(b.doc!), "the other replica in the room").toEqual(["hello", "one", "two", " world"]);
+    // Word fragment semantics: the first fragment joins the caret paragraph,
+    // the last fragment joins the moved tail.
+    expect(paragraphTexts(a.doc!), "the paster's own replica").toEqual(["helloone", "two world"]);
+    expect(paragraphTexts(b.doc!), "the other replica in the room").toEqual(["helloone", "two world"]);
     expect(serializeXml(b.doc!.editableRoots()[0])).toBe(serializeXml(a.doc!.editableRoots()[0]));
-    // The pasted run kept its formatting — the fragment travelled, not the text.
+    // The pasted run kept its formatting — carried by the formatRange.
     expect(serializeXml(b.doc!.editableRoots()[0])).toContain("<w:b/>");
-    expect(emitted.map((i) => i.kind)).toEqual(["splitParagraph", "pasteBlocks"]);
+    expect(emitted.map((i) => i.kind)).toEqual(["splitParagraph", "insertText", "formatRange", "insertText"]);
   });
 
-  it("gives both replicas the same ids for the pasted nodes", () => {
+  it("gives both replicas the same ids for the formatted inline pieces", () => {
     const hub = new CollabHubLoopback(docBytes);
     const a = new CollabConnection(hub.connect(), "a");
     const b = new CollabConnection(hub.connect(), "b");
@@ -178,20 +180,80 @@ describe("rich paste from the editor", () => {
 
     const emitted: EditorIntent[] = [];
     const { container, editor } = mountEditor(a, "a", emitted);
-    caretAtStart(editor, a.doc!, 11);
-    paste(container, clipboardHtml(`<w:p><w:r><w:t xml:space="preserve">tail</w:t></w:r></w:p>`, "<p>tail</p>"), "tail");
+    caretAtStart(editor, a.doc!, 5); // mid-run: the format splits before/middle/after
+    paste(
+      container,
+      clipboardHtml(`<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">mid</w:t></w:r></w:p>`, "<p>mid</p>"),
+      "mid",
+    );
 
-    const intent = emitted.find((i) => i.kind === "pasteBlocks")!;
-    expect(intent.kind).toBe("pasteBlocks");
-    const nodeIds = (intent as Extract<EditorIntent, { kind: "pasteBlocks" }>).nodeIds;
-    expect(nodeIds.length, "one carried id per pasted p/r").toBe(2);
-    // Both replicas resolve those ids to the same content, which is what makes
-    // a follow-up edit addressed at the pasted text apply everywhere.
-    for (const id of nodeIds) {
+    // A one-paragraph paste is INLINE: no split, no pasteBlocks.
+    expect(paragraphTexts(a.doc!)).toEqual(["hellomid world"]);
+    expect(serializeXml(b.doc!.editableRoots()[0])).toBe(serializeXml(a.doc!.editableRoots()[0]));
+    expect(emitted.map((i) => i.kind)).toEqual(["insertText", "formatRange"]);
+    const range = emitted.find((i) => i.kind === "formatRange") as Extract<EditorIntent, { kind: "formatRange" }>;
+    // Both replicas resolve the carried piece ids to the same content, which
+    // is what makes a follow-up edit addressed at the pasted text apply
+    // everywhere.
+    for (const id of [range.beforeId!, range.middleId, range.afterId!]) {
+      expect(id, "piece id carried").toBeDefined();
       expect(a.doc!.stableIds!.elOf(id), `id ${id} on the paster`).toBeTruthy();
       expect(b.doc!.stableIds!.elOf(id), `id ${id} on the peer`).toBeTruthy();
       expect(serializeXml(b.doc!.stableIds!.elOf(id)!)).toBe(serializeXml(a.doc!.stableIds!.elOf(id)!));
     }
+  });
+
+  it("formats the whole run in place (formatRun) when the paste fills an emptied paragraph", () => {
+    const hub = new CollabHubLoopback(docBytes);
+    const a = new CollabConnection(hub.connect(), "a");
+    const b = new CollabConnection(hub.connect(), "b");
+    a.join("d");
+    b.join("d");
+
+    const emitted: EditorIntent[] = [];
+    const { container, editor } = mountEditor(a, "a", emitted);
+    const paragraph = bodyOf(a.doc!).children.find((c) => localName(c.name) === "p")!;
+    const t = paragraph.children[0].children.find((c) => localName(c.name) === "t")!;
+    editor.selectRanges([{ t, start: 0, end: 11 }]); // the whole text
+    paste(
+      container,
+      clipboardHtml(`<w:p><w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">all</w:t></w:r></w:p>`, "<p>all</p>"),
+      "all",
+    );
+
+    // The inserted text covers the whole run, so the format applies in place
+    // — no split, run id preserved — as formatRun on the wire.
+    expect(paragraphTexts(a.doc!)).toEqual(["all"]);
+    expect(serializeXml(a.doc!.editableRoots()[0])).toContain("<w:i/>");
+    expect(serializeXml(b.doc!.editableRoots()[0])).toBe(serializeXml(a.doc!.editableRoots()[0]));
+    expect(emitted.map((i) => i.kind)).toEqual(["deleteText", "insertText", "formatRun"]);
+  });
+
+  it("carries middle blocks as pasteBlocks between the joined fragments", () => {
+    const hub = new CollabHubLoopback(docBytes);
+    const a = new CollabConnection(hub.connect(), "a");
+    const b = new CollabConnection(hub.connect(), "b");
+    a.join("d");
+    b.join("d");
+
+    const emitted: EditorIntent[] = [];
+    const { container, editor } = mountEditor(a, "a", emitted);
+    caretAtStart(editor, a.doc!, 5);
+    paste(
+      container,
+      clipboardHtml(
+        `<w:p><w:r><w:t xml:space="preserve">one</w:t></w:r></w:p>` +
+          `<w:p><w:r><w:t xml:space="preserve">mid</w:t></w:r></w:p>` +
+          `<w:p><w:r><w:t xml:space="preserve">two</w:t></w:r></w:p>`,
+        "<p>one</p><p>mid</p><p>two</p>",
+      ),
+      "one\nmid\ntwo",
+    );
+
+    expect(paragraphTexts(a.doc!)).toEqual(["helloone", "mid", "two world"]);
+    expect(paragraphTexts(b.doc!)).toEqual(["helloone", "mid", "two world"]);
+    expect(serializeXml(b.doc!.editableRoots()[0])).toBe(serializeXml(a.doc!.editableRoots()[0]));
+    expect(emitted.map((i) => i.kind)).toEqual(["splitParagraph", "insertText", "pasteBlocks", "insertText"]);
   });
 
   it("replaces the selection on both replicas when the paste types over one", () => {
@@ -208,9 +270,9 @@ describe("rich paste from the editor", () => {
     editor.selectRanges([{ t, start: 0, end: 5 }]); // "hello"
     paste(container, clipboardHtml(`<w:p><w:r><w:t xml:space="preserve">bye</w:t></w:r></w:p>`, "<p>bye</p>"), "bye");
 
-    expect(paragraphTexts(a.doc!)).toEqual(["", "bye", " world"]);
+    expect(paragraphTexts(a.doc!)).toEqual(["bye world"]);
     expect(serializeXml(b.doc!.editableRoots()[0])).toBe(serializeXml(a.doc!.editableRoots()[0]));
-    expect(emitted.map((i) => i.kind)).toEqual(["deleteText", "splitParagraph", "pasteBlocks"]);
+    expect(emitted.map((i) => i.kind)).toEqual(["deleteText", "insertText"]);
   });
 
   it("cuts on both replicas, and the copy carries the OOXML fragment", () => {
@@ -254,7 +316,8 @@ describe("rich paste from the editor", () => {
     caretAtStart(editor, a.doc!, 11);
     paste(container, written["text/html"], written["text/plain"]);
 
-    expect(paragraphTexts(a.doc!)).toEqual(["hello world", "hello", ""]);
+    // A one-paragraph copy restores INLINE at the caret (Word), not as a block.
+    expect(paragraphTexts(a.doc!)).toEqual(["hello worldhello"]);
     expect(serializeXml(b.doc!.editableRoots()[0])).toBe(serializeXml(a.doc!.editableRoots()[0]));
   });
 
@@ -297,7 +360,31 @@ describe("rich paste from the editor", () => {
     const xml = serializeXml(a.doc!.editableRoots()[0]);
     expect(xml).not.toContain("instrText");
     expect(xml).not.toContain("INCLUDETEXT");
-    expect(paragraphTexts(a.doc!)).toEqual(["hello world", "plain", ""]);
+    expect(paragraphTexts(a.doc!)).toEqual(["hello worldplain"]);
     expect(serializeXml(b.doc!.editableRoots()[0])).toBe(xml);
+  });
+
+  it("records a suggesting-mode paste as tracked insertions on both replicas", () => {
+    const hub = new CollabHubLoopback(docBytes);
+    const a = new CollabConnection(hub.connect(), "a");
+    const b = new CollabConnection(hub.connect(), "b");
+    a.join("d");
+    b.join("d");
+
+    const emitted: EditorIntent[] = [];
+    const { container, editor } = mountEditor(a, "a", emitted);
+    editor.setSuggesting(true, "Reviewer");
+    caretAtStart(editor, a.doc!, 5);
+    // Suggesting paste rides the typing path: rich flavors degrade to the
+    // plain text, inserted as tracked w:ins like typing (was refused before).
+    paste(container, clipboardHtml(`<w:p><w:r><w:t xml:space="preserve">one</w:t></w:r></w:p>`, "<p>one</p>"), "one\ntwo");
+
+    expect(paragraphTexts(a.doc!)).toEqual(["helloone", "two world"]);
+    expect(serializeXml(a.doc!.editableRoots()[0])).toContain("<w:ins ");
+    expect(serializeXml(b.doc!.editableRoots()[0])).toBe(serializeXml(a.doc!.editableRoots()[0]));
+    expect(emitted.map((i) => i.kind)).toEqual(["insertText", "splitParagraph", "insertText"]);
+    for (const intent of emitted) {
+      expect("suggest" in intent && intent.suggest?.author).toBe("Reviewer");
+    }
   });
 });

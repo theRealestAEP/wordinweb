@@ -34,19 +34,16 @@ export const KNOWN_GAPS: Record<string, string> = {
   "session/format.caret-*": "Cmd+B/I/U at a collapsed caret is a no-op (Word makes the next typed text formatted)",
   "local/format.caret-*": "Cmd+B/I/U at a collapsed caret is a no-op (Word makes the next typed text formatted)",
 
-  // G5 — rich (text/html) paste is always BLOCK-level: a one-paragraph rich
-  // paste splits the target paragraph, inserts its own paragraph, and strands
-  // an empty paragraph; Word merges a one-paragraph paste inline at the caret.
-  "session/paste.rich-*": "rich paste lands as separate paragraphs plus a stranded empty paragraph (Word pastes a single-paragraph copy inline)",
-  "local/paste.rich-*": "rich paste lands as separate paragraphs plus a stranded empty paragraph (Word pastes a single-paragraph copy inline)",
-  "session/paste.cutpaste-roundtrip": "cut+paste of an inline snippet lands as its own paragraph (Word restores it inline)",
-  "local/paste.cutpaste-roundtrip": "cut+paste of an inline snippet lands as its own paragraph (Word restores it inline)",
+  // G5 — FIXED: rich (text/html and internal OOXML-flavor) paste now follows
+  // Word's fragment semantics — a one-paragraph paste lands INLINE at the
+  // caret (runs join the target paragraph, formatting preserved), a
+  // multi-paragraph paste joins its first fragment at the caret and its last
+  // fragment to the moved tail — instead of always splicing whole blocks and
+  // stranding an empty paragraph (editor.ts pasteBlocks/insertInlineSpans).
 
-  // G6 — external HTML with inline markup (<b>x</b> plus <i>y</i>) shatters
-  // into one paragraph PER inline element; Word keeps one paragraph with
-  // formatted runs.
-  "session/paste.html-inline-runs": "inline HTML formatting chunks each become their own paragraph on paste",
-  "local/paste.html-inline-runs": "inline HTML formatting chunks each become their own paragraph on paste",
+  // G6 — FIXED: external HTML with inline markup (<b>x</b> plus <i>y</i>)
+  // now folds consecutive inline nodes into ONE paragraph of formatted runs
+  // (clipboard.ts appendHtmlBlocks) instead of one paragraph per element.
 
   // G7 (residual after the 734b6a8 spanning-merge fix) — select-all + delete
   // in a document WITH A TABLE leaves the table standing on the session
