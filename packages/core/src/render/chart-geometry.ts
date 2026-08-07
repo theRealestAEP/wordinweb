@@ -472,6 +472,14 @@ export function chartFrame(spec: ChartFrameSpec): ChartFrame {
     }
   }
 
+  if (!spec.axes && legendSide === "r" && legend) {
+    // Word centres a pie in the band left of a right legend, measured from
+    // the chart's own left edge to 4.7pt short of the legend key — centre
+    // x = (keyLeft - 4.7pt)/2 at both probe-legendedge box sizes.
+    left = 0;
+    right = legend.x - 6.27;
+  }
+
   return {
     plot: { x: left, y: top, width: Math.max(right - left, 8), height: Math.max(bottom - top, 8) },
     ...(titleBaseline !== undefined ? { titleBaseline } : {}),

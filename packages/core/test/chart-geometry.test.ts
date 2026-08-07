@@ -312,8 +312,9 @@ describe("chart frame", () => {
 
   it("leaves a pie's plot rect to its title and legend alone", () => {
     // A pie sets axes: false, so it takes neither the edge inset nor the
-    // legend clearance - only the band itself. No probe measures Word's pie
-    // plot rect, so this pins the shape rather than a measurement.
+    // legend clearance. Bare, only the pads shape it; beside a right legend,
+    // probe-legendedge measured Word's band from the chart's own left edge
+    // to 4.7pt (6.27px) short of the legend key, at both box sizes.
     const bare = chartFrame({ ...base, axes: false });
     expect(bare.plot).toEqual({ x: 6, y: 6, width: 468, height: 276 });
     const withLegend = chartFrame({
@@ -322,8 +323,8 @@ describe("chart frame", () => {
       legend: "r",
       legendLabels: ["Alpha", "Beta"],
     });
-    expect(withLegend.plot.x).toBe(6);
-    expect(withLegend.plot.x + withLegend.plot.width).toBeCloseTo(withLegend.legend!.x, 6);
+    expect(withLegend.plot.x).toBe(0);
+    expect(withLegend.plot.x + withLegend.plot.width).toBeCloseTo(withLegend.legend!.x - 6.27, 6);
   });
 });
 
