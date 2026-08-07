@@ -103,14 +103,11 @@ describe("suggested multi-paragraph agent insert", () => {
     await cleanup();
   });
 
-  it('treats "\\v" as a paragraph break too', async () => {
-    const { container, session, cleanup } = await insertMultiline("First line\vSecond line");
-
-    expect(container.textContent).toContain("First line");
-    expect(container.textContent).toContain("Second line");
-    expect(brokenSpans(container)).toEqual([]);
-    const paragraphs = session.doc.sections[0]?.blocks.filter((block) => block.type === "paragraph") ?? [];
-    expect(paragraphs.length).toBe(2);
-    await cleanup();
+  it('refuses "\\v" with an actionable error and paints nothing', async () => {
+    // A vertical tab is Word's soft line break, not a paragraph break — the
+    // agent layer refuses it rather than guess, naming "\n" as the route.
+    // The refusal must reach the caller and the document must stay clean:
+    // no half-applied insert, no control character in any painted span.
+    await expect(insertMultiline("First line\vSecond line")).rejects.toThrow(/Use "\\n"/);
   });
 });
