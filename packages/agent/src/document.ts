@@ -276,79 +276,48 @@ function asObject(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
+// The Anthropic Messages API rejects anyOf/oneOf/allOf at the top level of a
+// tool's input_schema, so the kind-discriminated union is flattened into one
+// object schema. Which fields go with which kind is stated on the fields and
+// enforced by the handler, which reports a violation as a normal tool error.
 const inspectToolSchema: Record<string, unknown> = {
-  anyOf: [
-    {
-      type: "object",
-      properties: { kind: { const: "overview" } },
-      required: ["kind"],
-      additionalProperties: false,
+  type: "object",
+  properties: {
+    kind: {
+      enum: ["overview", "context", "read", "search", "object", "spatial"],
+      description:
+        "overview: whole-document shape. context: bulk text for stories. read: one story range. search: find text (requires query). object: one object (requires ref). spatial: page geometry.",
     },
-    {
+    stories: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1 }, description: "context only" },
+    maxBlocks: { type: "integer", minimum: 1, maximum: 200, description: "context or read" },
+    maxCharacters: { type: "integer", minimum: 1, maximum: 100000, description: "context or read" },
+    include: { type: "array", uniqueItems: true, items: { enum: ["bookmarks", "objects"] }, description: "context only" },
+    includeEmpty: { type: "boolean", description: "context only" },
+    story: { type: "string", minLength: 1, description: "read only" },
+    cursor: {
       type: "object",
-      properties: {
-        kind: { const: "context" },
-        stories: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1 } },
-        maxBlocks: { type: "integer", minimum: 1, maximum: 200 },
-        maxCharacters: { type: "integer", minimum: 1, maximum: 100000 },
-        include: { type: "array", uniqueItems: true, items: { enum: ["bookmarks", "objects"] } },
-        includeEmpty: { type: "boolean" },
-      },
-      required: ["kind"],
+      properties: { value: { type: "string", minLength: 1 } },
+      required: ["value"],
       additionalProperties: false,
+      description: "read only",
     },
-    {
-      type: "object",
-      properties: {
-        kind: { const: "read" },
-        story: { type: "string", minLength: 1 },
-        cursor: {
-          type: "object",
-          properties: { value: { type: "string", minLength: 1 } },
-          required: ["value"],
-          additionalProperties: false,
-        },
-        maxBlocks: { type: "integer", minimum: 1, maximum: 200 },
-        maxCharacters: { type: "integer", minimum: 1, maximum: 100000 },
-      },
-      required: ["kind"],
-      additionalProperties: false,
-    },
-    {
+    query: { type: "string", minLength: 1, maxLength: 1000, description: "search only, required" },
+    maxResults: { type: "integer", minimum: 1, maximum: 500, description: "search only" },
+    ref: { type: "string", pattern: "^(object|view):", description: "object only, required" },
+    pages: {
       type: "object",
       properties: {
-        kind: { const: "search" },
-        query: { type: "string", minLength: 1, maxLength: 1000 },
-        maxResults: { type: "integer", minimum: 1, maximum: 500 },
+        start: { type: "integer", minimum: 1 },
+        count: { type: "integer", minimum: 1, maximum: 100 },
       },
-      required: ["kind", "query"],
+      required: ["start", "count"],
       additionalProperties: false,
+      description: "spatial only",
     },
-    {
-      type: "object",
-      properties: { kind: { const: "object" }, ref: { type: "string", pattern: "^(object|view):" } },
-      required: ["kind", "ref"],
-      additionalProperties: false,
-    },
-    {
-      type: "object",
-      properties: {
-        kind: { const: "spatial" },
-        pages: {
-          type: "object",
-          properties: {
-            start: { type: "integer", minimum: 1 },
-            count: { type: "integer", minimum: 1, maximum: 100 },
-          },
-          required: ["start", "count"],
-          additionalProperties: false,
-        },
-        includeOverlaps: { type: "boolean" },
-      },
-      required: ["kind"],
-      additionalProperties: false,
-    },
-  ],
+    includeOverlaps: { type: "boolean", description: "spatial only" },
+  },
+  required: ["kind"],
+  additionalProperties: false,
 };
 
 const editToolSchema: Record<string, unknown> = {
