@@ -156,6 +156,9 @@ export class DocxDocument {
    * inside (right) edge so the binding margin stays on the inner side of
    * each spread. */
   readonly mirrorMargins: boolean = false;
+  /** settings.xml w:compat w:suppressTopSpacing: the first line of a page
+   * takes its character height, not its authored (exact) line spacing. */
+  readonly suppressTopSpacing: boolean = false;
   /** settings.xml w:defaultTabStop in px (Word default 0.5"). */
   readonly defaultTabStop: number = 48;
   /** settings.xml w:compat compatibilityMode (12=Word2007, 14=Word2010,
@@ -304,6 +307,11 @@ export class DocxDocument {
       const tabStop = intAttr(child(settings, "defaultTabStop"), "val");
       if (tabStop !== undefined && tabStop > 0) this.defaultTabStop = twipsToPx(tabStop);
       const compat = child(settings, "compat");
+      // w:suppressTopSpacing (legacy compat option): line spacing beyond the
+      // character height is suppressed for the first line of a page. See the
+      // engine's page-top exact-line collapse for the measured behavior.
+      (this as { suppressTopSpacing: boolean }).suppressTopSpacing =
+        onOff(child(compat, "suppressTopSpacing")) ?? false;
       for (const cs of children(compat, "compatSetting")) {
         if (attr(cs, "name") === "compatibilityMode") {
           const v = Number(attr(cs, "val"));

@@ -4888,9 +4888,32 @@ class Engine {
       floatOffset = clearBannerForLine(line, li, floatOffset);
 
       this.y += floatOffset;
+      // w:suppressTopSpacing (settings.xml w:compat): the FIRST line of a
+      // page whose EXACT line spacing exceeds its character height takes the
+      // natural line instead - Word charges min(exact, natural). Measured by
+      // probe-emptyexact (every export self-reproducing): the 12 empty
+      // exact-480 (32px) paragraphs of wild3-template-caed-pleading span
+      // 19.32 + 11 x 32 = 371.32px in Word's PDF; the probe reads the same
+      // collapse at a positive top margin (P12), for 9/12/18pt runs alike
+      // (M9/M18), and an exact-240 line UNDER its natural stays 16px (Q6) -
+      // the suppression only shrinks. Our Arial 12pt natural is 18.40 where
+      // Word's collapsed line measures 19.32, so ~0.9px per suppressed line
+      // stays open. The break PLAN does not mirror this: only caed-pleading
+      // and probe-negmargin carry the flag, and neither has a fit decision
+      // within 13px of a page bottom.
+      let placedLine = line;
+      if (
+        this.doc.suppressTopSpacing &&
+        props.lineSpacing?.rule === "exact" &&
+        line.height > line.naturalHeight + 0.01 &&
+        this.cur.physIndex !== -1 &&
+        this.y <= this.cur.bodyTop + 0.01
+      ) {
+        placedLine = { ...line, height: line.naturalHeight, baselineH: line.naturalHeight };
+      }
       const lineItemStart = this.cur.items.length;
       if (paintless) this.cur.discarded = true;
-      else this.emitLine(line, this.cur, this.colX, this.y);
+      else this.emitLine(placedLine, this.cur, this.colX, this.y);
       // w:tab val="bar": not a tab stop — a vertical rule painted at the bar
       // position on EVERY line of the paragraph, spanning the line box, and
       // through the paragraph's after-spacing band on the last line
@@ -4902,7 +4925,7 @@ class Engine {
           if (t.align === "bar" && !t.clear) {
             const bx = this.colX + t.pos;
             const barBottom =
-              this.y + line.height + (li === lines.length - 1 ? (props.spacingAfter ?? 0) : 0);
+              this.y + placedLine.height + (li === lines.length - 1 ? (props.spacingAfter ?? 0) : 0);
             this.cur.items.push({
               kind: "edge",
               x1: bx,
@@ -4942,7 +4965,7 @@ class Engine {
         const pg = this.cur.physIndex === -1 ? this.lastRealPage : this.cur;
         if (pg) this.recordStyleRef(para, pg.physIndex);
       }
-      this.y += line.height;
+      this.y += placedLine.height;
 
       if (line.forcedBreakAfter) {
         closeFragment(li + 1, li === lines.length - 1);
