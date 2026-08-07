@@ -11,6 +11,7 @@ import {
   markerPath,
   markerShapeFor,
   stackPoints,
+  textWidth,
   wedgePath,
 } from "../src/render/chart-geometry.js";
 
@@ -254,25 +255,29 @@ describe("chart frame", () => {
       legendLabels: ["Beta", "Alpha"],
       categoryLabels: ["Q1", "Q2", "Q3", "Q4"],
       horizontalValues: true,
+      // A bar chart's last value tick centres on the plot's right edge.
+      rightOverhangLabel: "12",
     });
 
     // The column page went 161.0 -> 150.24pt against Word's 150.2.
     expect(column.plot.height / pt).toBeCloseTo(150.24, 2);
-    // The bar page reads 262.92pt against Word's 264.8. Its give-up is no
-    // longer the edge inset alone - the widened legend band now takes 4pt of
-    // it - so the standing assertion is the absolute, which the band change
-    // moved 2.12pt closer to Word rather than away.
-    expect(bar.plot.width / pt).toBeCloseTo(262.92, 2);
-    expect(Math.abs(bar.plot.width / pt - 264.8)).toBeLessThan(2.12);
+    // probe-legendedge (parity #84) re-read the bar page's Word plot as
+    // 28.40..295.74pt local — width 267.34pt, confirming the 2.54pt
+    // extraction offset the 264.8 of 6669f9e carried. The measured right
+    // edge lands within 0.9pt of Word's; the remaining ~2.2pt sits in the
+    // left gutter, which no probe has decomposed yet.
+    expect(bar.plot.width / pt).toBeCloseTo(264.27, 2);
+    expect(Math.abs(bar.plot.width / pt - 267.34)).toBeLessThan(3.1);
   });
 
   it("clears a side legend by the width Word left on the probe's line page", () => {
-    // probe-charts-basic's line page (parity a5b5383). Both engines put the
-    // chart box at 134.99, 96.00 .. 614.99, 384.00, so Word's page px come
-    // into the box's local frame by subtracting that origin. Word leaves
-    // 34.4px between its plot right (local 375.62) and its legend key
-    // (410.02); we left 18.62 and put the key at 415.33, overrunning where
-    // Word's plot had already stopped by 21.09.
+    // probe-charts-basic's line page, re-measured by probe-legendedge
+    // (parity #84) at TWO box sizes: Word's plot right sits 16pt plus half
+    // the overhanging "Q4" label left of the legend's line-sample key, and
+    // every quantity is identical at 360x216 and 240x144pt. In the box's
+    // local CSS px Word puts the sample at 404.95 and the plot right at
+    // 375.63. Our textWidth approximation carries ~1.4px of label-width
+    // error into the band, so the tolerances here are its, not the rule's.
     const pt = 96 / 72;
     const ox = 134.99;
     const oy = 96;
@@ -288,11 +293,14 @@ describe("chart frame", () => {
       categoryLabels: ["Q1", "Q2", "Q3", "Q4"],
       horizontalValues: false,
       axes: true,
+      legendLineKeys: true,
+      rightOverhangLabel: "Q4",
     });
     const plotRight = line.plot.x + line.plot.width;
-    expect(plotRight).toBeCloseTo(510.61 - ox, 0);
-    expect(line.legend!.x).toBeCloseTo(545.01 - ox, 0);
-    expect(line.legend!.x - plotRight).toBeCloseTo(34.4, 0);
+    expect(Math.abs(plotRight - 375.63)).toBeLessThan(0.5);
+    expect(Math.abs(line.legend!.x - 404.95)).toBeLessThan(1.5);
+    // The model identity: 16pt of clearance plus half the "Q4" label.
+    expect(line.legend!.x - plotRight).toBeCloseTo(21.33 + textWidth("Q4", 10 * pt) / 2, 5);
     // The probe's vertical is closed and this must not disturb it: Word's
     // 150.40 .. 350.71 against our measured 1.44 / 1.45 below, height to 0.01.
     expect(line.plot.y - (150.4 - oy)).toBeCloseTo(1.44, 1);
