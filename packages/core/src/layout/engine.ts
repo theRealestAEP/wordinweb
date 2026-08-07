@@ -7436,6 +7436,16 @@ class Engine {
   /** Effective default cell margins: direct tblCellMar, else the table
    * style chain, else the default table style, else 0 (the spec default —
    * Word's usual 108-twip side margins come from the TableNormal style). */
+  /** A row's bottom cell margin: the table default, raised by any cell's own
+   * tcMar override. */
+  private rowBottomPad(tbl: Table, row: TableRow): number {
+    let pad = this.cellMarginsOf(tbl).bottom ?? 0;
+    for (const cell of row.cells) {
+      if (cell.props.margins?.bottom !== undefined) pad = Math.max(pad, cell.props.margins.bottom);
+    }
+    return pad;
+  }
+
   /**
    * Word treats trHeight as the height of the cell CONTENT box, not the full
    * row: hRule=atLeast rows measure trHeight + top/bottom cell margins + the
@@ -7450,11 +7460,10 @@ class Engine {
     const trHeight = row.props.height!;
     const defaults = this.cellMarginsOf(tbl);
     let topPad = defaults.top ?? 0;
-    let bottomPad = defaults.bottom ?? 0;
     for (const cell of row.cells) {
       if (cell.props.margins?.top !== undefined) topPad = Math.max(topPad, cell.props.margins.top);
-      if (cell.props.margins?.bottom !== undefined) bottomPad = Math.max(bottomPad, cell.props.margins.bottom);
     }
+    const bottomPad = this.rowBottomPad(tbl, row);
     if (row.props.heightRule === "exact") {
       if (this.doc.compatibilityMode < 15) {
         const hasHairlineBottom = (r: TableRow) =>
@@ -7477,7 +7486,19 @@ class Engine {
         // Legacy form templates commonly repeat exact-height label/underline
         // rows. Word keeps the first row at its declared height, then includes
         // half the cell-top inset in every continuation row.
-        return trHeight + (isLegacyFormLine(row) && isLegacyFormLine(tbl.rows[ri - 1]) ? topPad / 2 : 0);
+        if (isLegacyFormLine(row) && isLegacyFormLine(tbl.rows[ri - 1])) return trHeight + topPad / 2;
+        // A pre-15 exact row's flow charges its BOTTOM cell margin - and only
+        // that: the top margin adds nothing. Measured on the us-courts caption
+        // table's exact-115 spacer (parity probe-exactpad: the exact row's
+        // tcMar varied one side at a time over the fixture's own rows, each
+        // package exported twice): against the (top 0, bottom 0) control the
+        // 'for the'->'Rewugofi of' gap moves +1.52pt at (58,29), +3.00pt at
+        // (29,58), 0.00pt at (58,0) and +1.25pt at (0,29) - it tracks the
+        // bottom value alone. The compat-15 branch below charges topPad
+        // instead (probe-trheight); the regimes really do disagree. Every
+        // zero-margin variant (probe-exactnil11, probe-exactclip: 115-495tw
+        // rows, sz-8/sz-12 rules, nil or live) reads plain trHeight in both.
+        return trHeight + bottomPad;
       }
       return Math.max(0, trHeight + topPad);
     }
@@ -7905,7 +7926,16 @@ class Engine {
           for (const hr of headerRows) {
             const hIdx = tbl.rows.indexOf(hr);
             const hLaid = this.layoutRow(tbl, hr, hIdx, widths);
-            const hH = rowHeights[hIdx];
+            let hH = rowHeights[hIdx];
+            // EXCEPT a pre-15 exact row's bottom cell margin, which the
+            // repeated instance charges at HALF: the us-courts caption's
+            // tblHeader stack ends in an exact-144 row with tcMar bottom 29,
+            // and Word's Vop-to-first-data gap is 22.81pt on p1 but 22.08 on
+            // p2 and p7 - bottomPad/2 = 0.73pt apart, against the original's
+            // full charge (probe-exactpad).
+            if (this.doc.compatibilityMode < 15 && hr.props.heightRule === "exact") {
+              hH -= this.rowBottomPad(tbl, hr) / 2;
+            }
             markTableStart();
             this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hH);
             segHasRows = true;
