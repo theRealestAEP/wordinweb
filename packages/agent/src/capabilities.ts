@@ -22,12 +22,12 @@ const HAND_WRITTEN_CAPABILITIES: Record<
   Exclude<Intent["kind"], RegisteredOperationKind>,
   AgentEditCapability
 > = {
-  insertText: { category: "text", description: "Insert text at a run offset.", required: ["at", "text"], optional: ["suggest"] },
-  deleteText: { category: "text", description: "Delete a range within one run.", required: ["blockRef", "runRef", "start", "end"] },
-  splitParagraph: { category: "paragraph", description: "Split a paragraph at a run offset.", required: ["at"], optional: ["suggest"] },
+  insertText: { category: "text", description: 'Insert text at a run offset. Each "\\n" in the text creates a real new paragraph.', required: ["at", "text"], optional: ["suggest"] },
+  deleteText: { category: "text", description: "Delete a range within one run. start/end are offsets within that run's own text, not the paragraph.", required: ["blockRef", "runRef", "start", "end"] },
+  splitParagraph: { category: "paragraph", description: "Split a paragraph at a run offset (with suggest, the new paragraph mark is a tracked insertion).", required: ["at"], optional: ["suggest"] },
   formatRun: { category: "text", description: "Format a complete run.", required: ["blockRef", "runRef", "patch"], optional: ["suggest"] },
   formatParagraph: { category: "paragraph", description: "Set paragraph alignment or style.", required: ["blockRef"], optional: ["align", "styleId", "suggest"] },
-  formatRange: { category: "text", description: "Format a range within one run.", required: ["blockRef", "runRef", "start", "end", "patch"], optional: ["suggest"] },
+  formatRange: { category: "text", description: "Format a range within one run. start/end are offsets within that run's own text, not the paragraph; the range splits into its own run, so re-inspect before addressing this run again.", required: ["blockRef", "runRef", "start", "end", "patch"], optional: ["suggest"] },
   // `suggest` applies to the three PROPERTY ops (cell shading, cell vertical
   // alignment, table text wrapping); the structural ones have no tracked form
   // and are refused in suggestion mode rather than tracked.

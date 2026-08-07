@@ -127,7 +127,41 @@ function imageExtension(mediaType: string): string {
   return extension;
 }
 
-export async function compileAgentOperation(input: AgentOperation, context: CompileContext): Promise<IntentBody> {
+/**
+ * Expand an insertText whose text contains newlines into the intent sequence
+ * that creates real paragraphs: one splitParagraph per "\n" (each with carried
+ * ids, all at the original caret, so no split addresses a run an insertion
+ * created), then one insertText per non-empty line into a run known ahead of
+ * time. Front-to-back splits at one point stack the new paragraphs directly
+ * after the addressed one, with the original tail in the paragraph the FIRST
+ * split created — so line k lands in the paragraph from split n-k.
+ */
+function expandInsertText(operation: Record<string, unknown>, context: CompileContext): Array<Record<string, unknown>> {
+  const text = String(operation.text).replace(/\r\n?/g, "\n");
+  if (/[\v\f]/.test(text)) {
+    throw new Error('insertText text may not contain vertical-tab or form-feed characters. Use "\\n" to start a new paragraph.');
+  }
+  if (!text.includes("\n")) return [{ ...operation, text }];
+  const at = operation.at as { blockId: number; runId: number; offset: number };
+  const suggest = operation.suggest;
+  const lines = text.split("\n");
+  const intents: Array<Record<string, unknown>> = [];
+  const created: Array<{ blockId: number; runId: number }> = [];
+  for (let index = 0; index < lines.length - 1; index++) {
+    const [newBlockId, newRunId] = context.allocateIds(2);
+    intents.push({ kind: "splitParagraph", at: { ...at }, newBlockId, newRunId, ...(suggest ? { suggest } : {}) });
+    created.push({ blockId: newBlockId, runId: newRunId });
+  }
+  if (lines[0]) intents.push({ kind: "insertText", at: { ...at }, text: lines[0], ...(suggest ? { suggest } : {}) });
+  for (let index = 1; index < lines.length; index++) {
+    if (!lines[index]) continue;
+    const target = created[lines.length - 1 - index];
+    intents.push({ kind: "insertText", at: { blockId: target.blockId, runId: target.runId, offset: 0 }, text: lines[index], ...(suggest ? { suggest } : {}) });
+  }
+  return intents;
+}
+
+export async function compileAgentOperation(input: AgentOperation, context: CompileContext): Promise<IntentBody[]> {
   const operation = cloneOperation(input);
   const kind = operation.kind;
   if (typeof kind !== "string" || !(kind in AGENT_EDIT_CAPABILITIES)) throw new Error("Unknown edit operation");
@@ -227,11 +261,13 @@ export async function compileAgentOperation(input: AgentOperation, context: Comp
     if (prepared.iv) operation.iv = prepared.iv;
   }
 
-  const body = operation as unknown as IntentBody;
-  const full = { ...body, clientId: "agent-validation", clientSeq: 0, base: 0 } as Intent;
-  const error = validateIntent(full);
-  if (error) throw new Error(error);
-  return body;
+  const bodies = (typedKind === "insertText" ? expandInsertText(operation, context) : [operation]) as unknown as IntentBody[];
+  for (const body of bodies) {
+    const full = { ...body, clientId: "agent-validation", clientSeq: 0, base: 0 } as Intent;
+    const error = validateIntent(full);
+    if (error) throw new Error(error);
+  }
+  return bodies;
 }
 
 export async function localMedia(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number }> {

@@ -109,6 +109,29 @@ describe("suggesting mode — insertion", () => {
     rejectRevision(doc, priya);
     expect(finalText(doc)).toBe("HiAB");
   });
+
+  it("keeps the addressed run element in the tree, so callers' references survive", () => {
+    // Mid-run insertion: the run keeps the text before the caret.
+    const doc = loadDoc(p("Hello world"));
+    const t = firstT(doc);
+    const rEl = doc.findParentOf(t)!;
+    insertSuggestedText(doc, t, 5, " brave", meta());
+    doc.refresh();
+    expect(paraEl(doc).children).toContain(rEl);
+    expect(serializeXml(rEl)).toContain("Hello");
+    expect(finalText(doc)).toBe("Hello brave world");
+
+    // Caret at the run's start: the run moves whole after the w:ins,
+    // untouched.
+    const doc2 = loadDoc(p("world"));
+    const t2 = firstT(doc2);
+    const rEl2 = doc2.findParentOf(t2)!;
+    insertSuggestedText(doc2, t2, 0, "Hello ", meta());
+    doc2.refresh();
+    expect(paraEl(doc2).children).toContain(rEl2);
+    expect(serializeXml(rEl2)).toContain("world");
+    expect(finalText(doc2)).toBe("Hello world");
+  });
 });
 
 describe("suggesting mode — deletion", () => {

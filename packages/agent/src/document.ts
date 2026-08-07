@@ -515,6 +515,19 @@ function componentBlock(block: AgentComposeBlock): boolean {
   return ["equation", "chart", "smartArt", "image", "shape", "wordArt", "pageNumber"].includes(block.type);
 }
 
+/** An operation compiled but the engine could not place it. Name the usual
+ * cause and the working alternative, so the model is never stranded. */
+function applyFailure(kind: string): Error {
+  const paragraphHint = kind === "splitParagraph"
+    ? ' To create paragraphs, one insertText whose text contains "\\n" between paragraphs also works, in one operation.'
+    : "";
+  return new Error(
+    `${kind} could not apply to the referenced document state. `
+    + "A reference or offset is likely stale: an earlier operation in this transaction can restructure the runs it touched. "
+    + `Re-inspect and send the remaining operations in a new transaction.${paragraphHint}`,
+  );
+}
+
 export class AgentDocument {
   private localDoc: DocxDocument | null;
   private localRevision = 0;
@@ -783,11 +796,21 @@ export class AgentDocument {
     const currentIds = current.enableStableIds();
     const trial = cloneWithIds(current, currentIds);
     let nextId = trial.ids.nextId();
-    const allocateIds = (count: number) => Array.from({ length: count }, () => nextId++);
+    // Skip ids the trial already holds: applying a suggested insertion mid
+    // transaction assigns table-counter ids to the runs it creates, and a
+    // carried id that collides with one of those is a hard reject.
+    const allocateIds = (count: number): number[] => {
+      const out: number[] = [];
+      while (out.length < count) {
+        if (!trial.ids.elOf(nextId)) out.push(nextId);
+        nextId++;
+      }
+      return out;
+    };
     const kinds: string[] = [];
     for (const input of request.operations) {
       const sourceAsset = typeof input.assetRef === "string" ? this.asset(input.assetRef) : undefined;
-      const operation = await compileAgentOperation(input, {
+      const operations = await compileAgentOperation(input, {
         doc: trial.doc,
         ids: trial.ids,
         allocateIds,
@@ -795,12 +818,14 @@ export class AgentDocument {
         asset: (ref) => this.asset(ref),
         prepareMedia: localMedia,
       });
-      const full = { ...operation, clientId: "local-agent", clientSeq: 0, base: 0 } as Intent;
-      const result = applyIntentScoped(trial.doc, trial.ids, full);
-      if (!result.applied) throw new Error(`${operation.kind} could not apply to the referenced document state`);
-      resyncScope(trial.doc, trial.ids, result);
-      installPreparedImage(trial.doc, operation, sourceAsset);
-      kinds.push(operation.kind);
+      for (const operation of operations) {
+        const full = { ...operation, clientId: "local-agent", clientSeq: 0, base: 0 } as Intent;
+        const result = applyIntentScoped(trial.doc, trial.ids, full);
+        if (!result.applied) throw applyFailure(operation.kind);
+        resyncScope(trial.doc, trial.ids, result);
+        installPreparedImage(trial.doc, operation, sourceAsset);
+        kinds.push(operation.kind);
+      }
     }
     this.localDoc = trial.doc;
     this.localRevision++;
@@ -819,10 +844,22 @@ export class AgentDocument {
     let presence: PresencePosition | null = null;
     for (const input of request.operations) {
       const sourceAsset = typeof input.assetRef === "string" ? this.asset(input.assetRef) : undefined;
-      const operation = await compileAgentOperation(input, {
+      const operations = await compileAgentOperation(input, {
         doc: trial.doc,
         ids: trial.ids,
-        allocateIds: (count) => target.allocateIds(count),
+        // Drop allocated ids the trial already holds (allocators never reuse
+        // a number, so a skipped id just leaks): applying a suggested
+        // insertion mid transaction assigns table-counter ids to the runs it
+        // creates, and a carried id colliding with one is a hard reject.
+        allocateIds: (count) => {
+          const out: number[] = [];
+          while (out.length < count) {
+            for (const id of target.allocateIds(count - out.length)) {
+              if (!trial.ids.elOf(id)) out.push(id);
+            }
+          }
+          return out;
+        },
         provenance: this.provenance,
         asset: (ref) => this.asset(ref),
         prepareMedia: async (bytes) => {
@@ -832,13 +869,15 @@ export class AgentDocument {
           return prepared;
         },
       });
-      const hint = presenceHint(trial.doc, operation);
-      const result = applyIntentScoped(trial.doc, trial.ids, { ...operation, clientId: "agent-trial", clientSeq: 0, base: 0 } as Intent);
-      if (!result.applied) throw new Error(`${operation.kind} could not apply to the referenced document state`);
-      resyncScope(trial.doc, trial.ids, result);
-      installPreparedImage(trial.doc, operation, sourceAsset);
-      presence = presenceAfterOperation(trial.doc, operation, hint) ?? presence;
-      compiled.push({ operation, asset: sourceAsset });
+      for (const operation of operations) {
+        const hint = presenceHint(trial.doc, operation);
+        const result = applyIntentScoped(trial.doc, trial.ids, { ...operation, clientId: "agent-trial", clientSeq: 0, base: 0 } as Intent);
+        if (!result.applied) throw applyFailure(operation.kind);
+        resyncScope(trial.doc, trial.ids, result);
+        installPreparedImage(trial.doc, operation, sourceAsset);
+        presence = presenceAfterOperation(trial.doc, operation, hint) ?? presence;
+        compiled.push({ operation, asset: sourceAsset });
+      }
     }
     if (!this.revisionMatchesEdit(request)) throw new Error("The document revision is stale");
     for (const { operation } of compiled) await target.submit(operation);
