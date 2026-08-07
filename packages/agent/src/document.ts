@@ -268,7 +268,7 @@ function presenceAfterOperation(doc: DocxDocument, operation: IntentBody, hint: 
 }
 
 function projectionKey(story: string, mode: string, cursor: string | null, revision: string): string {
-  return [revision, story, mode, cursor ?? ""].join(" ");
+  return [revision, story, mode, cursor ?? ""].join("\u0000");
 }
 
 function asObject(input: unknown): Record<string, unknown> {
