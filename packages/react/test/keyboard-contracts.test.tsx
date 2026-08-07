@@ -239,6 +239,38 @@ describe("keyboard contracts replicate (collab mount)", () => {
     await ed.unmount(); // server derived the same next-style from the same styles part
   });
 
+  it("G3: Tab in a body paragraph inserts a w:tab character, on every replica", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-g3", "alice");
+    await ed.click();
+    await ed.typed("ab");
+    await ed.keys([{ key: "a", ctrl: true }, "ArrowLeft", "ArrowRight"]); // caret after "a"
+    await ed.keys(["Tab"]); // insertSeparator("tab") intent
+    expect(ed.texts()).toEqual(["ab"]);
+    expect(serializeXml(ed.clientDoc().docRoot)).toMatch(/<w:tab\/>/);
+    await ed.unmount();
+  });
+
+  it("G11: Shift+Tab promotes a level-0 list item to a body paragraph, on every replica", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-g11", "alice");
+    await ed.click();
+    await ed.typed("item");
+    await ed.keys([{ key: "a", ctrl: true }]);
+    ed.api().toggleList("bullet");
+    await settle();
+    expect(serializeXml(ed.clientDoc().docRoot)).toContain("<w:numPr>");
+    await ed.keys(["End"]);
+    // Tab demotes to level 1 (setListLevel intent), Shift+Tab back to 0…
+    await ed.keys(["Tab", { key: "Tab", shift: true }]);
+    expect(serializeXml(ed.clientDoc().docRoot)).toContain("<w:numPr>");
+    // …and Shift+Tab at level 0 unbullets (canonical setListType(null)).
+    await ed.keys([{ key: "Tab", shift: true }]);
+    expect(serializeXml(ed.clientDoc().docRoot)).not.toContain("<w:numPr>");
+    expect(ed.texts()).toEqual(["item"]);
+    await ed.unmount(); // setListLevel + setListType rode the wire byte-exactly
+  });
+
   it("G14: Enter over a selection deletes it then splits, on every replica", async () => {
     const hub = new CollabHub(provider);
     const ed = await mountCollab(hub, "kc-g14", "alice");

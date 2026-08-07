@@ -9,7 +9,7 @@ import { type EncodedCaret } from "./ids.js";
 import { EditHistory } from "./history.js";
 import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
 import { pxToTwips } from "../units.js";
-import { listTypeAt, setListLevel, setListType } from "./lists.js";
+import { listLevelAt, listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
 import { documentOperationBody, operationBody, type RegisteredOperationBody } from "./registry.js";
 import { deleteMath, isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
@@ -314,6 +314,7 @@ export type EditorIntent =
   | { kind: "formatRange"; blockId: number; runId: number; start: number; end: number; patch: Record<string, unknown>; beforeId?: number; middleId: number; afterId?: number }
   | { kind: "formatParagraph"; blockId: number; align?: "left" | "center" | "right" | "justify"; styleId?: string | null }
   | { kind: "mergeParagraph"; blockId: number }
+  | { kind: "setListLevel"; blockId: number; delta: 1 | -1 }
   | { kind: "pasteBlocks"; afterBlockId: number; blocksXml: string; nodeIds: number[] }
   | {
       kind: "suggestRevision";
@@ -6148,9 +6149,34 @@ export class DocxEditor {
       if (listTypeAt(this.host.doc, this.caret.t)) {
         e.preventDefault();
         this.host.history?.checkpoint();
+        // Word: Shift+Tab on a LEVEL-0 item promotes it OUT of the list into
+        // a body paragraph — the same canonical unbullet Backspace-at-start
+        // takes (setListType(null) + intent; tracked pPrChange in suggesting).
+        if (e.shiftKey && listLevelAt(this.host.doc, this.caret.t) === 0) {
+          if (this.suggesting && this.suggestUnbulletAtCaret()) return;
+          this.clearListAtCaret();
+          return;
+        }
+        const levelBlockId = this.host.onIntent && this.host.doc.stableIds
+          ? this.host.doc.stableIds.idOf(paragraphOf(this.host.doc, this.caret.t) ?? this.caret.t)
+          : undefined;
         if (setListLevel(this.host.doc, [this.caret.t], e.shiftKey ? -1 : 1)) {
+          // Replicate the step (this was a silent local-only mutation: Tab
+          // list indent never rode the wire).
+          if (levelBlockId !== undefined) {
+            this.host.onIntent?.({ kind: "setListLevel", blockId: levelBlockId, delta: e.shiftKey ? -1 : 1 });
+          }
           this.commit();
         }
+        return;
+      }
+      // G3 — Tab in a plain body paragraph inserts a tab character (Word; at
+      // the exact paragraph start Word instead steps the first-line indent —
+      // the tab character is the implemented approximation, recorded in the
+      // conformance notes). Shift+Tab stays a no-op outside tables and lists.
+      if (!e.shiftKey) {
+        e.preventDefault();
+        this.insertSeparatorAtCaret("tab");
         return;
       }
     }
@@ -6952,20 +6978,7 @@ export class DocxEditor {
           // numbering, recorded as a TRACKED format change (w:pPrChange) —
           // the same shape the toolbar toggle suggests. Later presses
           // suggest the merge below.
-          if (listTypeAt(doc, caret.t) !== null) {
-            const meta = this.frozenRevMeta();
-            const blockId = doc.stableIds?.idOf(pEl);
-            if (setListType(doc, [caret.t], null, meta)) {
-              if (blockId !== undefined && this.host.onIntent) {
-                this.host.onIntent(operationBody("setListType", blockId, {
-                  listKind: null,
-                  suggest: { author: meta.author, date: meta.date },
-                }));
-              }
-              this.commit(false, "global");
-              return;
-            }
-          }
+          if (this.suggestUnbulletAtCaret()) return;
           // Start of paragraph: suggest deleting the PREVIOUS paragraph's mark
           // (a merge). Don't actually join — Word keeps both until accepted.
           const prev = siblingParagraph(doc, pEl, -1);
@@ -7327,6 +7340,31 @@ export class DocxEditor {
       run: src.run,
       offset: delta === -1 ? src.offset + neighbor.item.text.length : src.offset,
     };
+    return true;
+  }
+
+  /** Suggesting-mode unbullet: remove the caret paragraph's numbering as a
+   * TRACKED format change (w:pPrChange) — the same shape the toolbar toggle
+   * suggests — and emit the suggestable setListType(null) intent. Shared by
+   * suggesting Backspace at a list-item start and suggesting Shift+Tab on a
+   * level-0 item. Returns true when a tracked unbullet was recorded. */
+  private suggestUnbulletAtCaret(): boolean {
+    const caret = this.caret;
+    if (!caret) return false;
+    const doc = this.host.doc;
+    if (listTypeAt(doc, caret.t) === null) return false;
+    const pEl = paragraphOf(doc, caret.t);
+    if (!pEl) return false;
+    const meta = this.frozenRevMeta();
+    const blockId = doc.stableIds?.idOf(pEl);
+    if (!setListType(doc, [caret.t], null, meta)) return false;
+    if (blockId !== undefined && this.host.onIntent) {
+      this.host.onIntent(operationBody("setListType", blockId, {
+        listKind: null,
+        suggest: { author: meta.author, date: meta.date },
+      }));
+    }
+    this.commit(false, "global");
     return true;
   }
 

@@ -25,10 +25,11 @@ export const KNOWN_GAPS: Record<string, string> = {
   // soft break and deletes the neighboring character instead of the break
   // itself; the break disappears only with its paragraph.
 
-  // G3 — Tab in a plain body paragraph is a silent no-op; Word inserts a tab
-  // character (or first-line indent at paragraph start).
-  "session/tab.plain-paragraph": "Tab in a body paragraph is a no-op (Word inserts a tab character)",
-  "local/tab.plain-paragraph": "Tab in a body paragraph is a no-op (Word inserts a tab character)",
+  // G3 — FIXED (with a documented approximation): Tab in a plain body
+  // paragraph inserts a w:tab character via the insertSeparator machinery.
+  // Word nuance kept as a divergence, honestly: at the EXACT paragraph start
+  // Word steps the first-line indent instead of inserting a tab character;
+  // the engine inserts the tab character there too.
 
   // G4 — FIXED: Cmd+B/I/U at a collapsed caret queue a pending toggle
   // (editor.pendingFormat) that the next insertText consumes by formatting
@@ -72,10 +73,10 @@ export const KNOWN_GAPS: Record<string, string> = {
   // themselves) to the empty paragraph an end-of-paragraph Enter creates —
   // in the shared mutation, so every replica derives the same style.
 
-  // G11 — Shift+Tab on a level-0 list item is a no-op; Word promotes the item
-  // out of the list into a body paragraph.
-  "session/shifttab.list-item-level0": "Shift+Tab at list level 0 is a no-op (Word converts the item to a body paragraph)",
-  "local/shifttab.list-item-level0": "Shift+Tab at list level 0 is a no-op (Word converts the item to a body paragraph)",
+  // G11 — FIXED: Shift+Tab on a level-0 list item promotes it out of the
+  // list into a body paragraph — the same canonical unbullet Backspace at a
+  // list-item start uses (setListType(null) + intent; tracked w:pPrChange in
+  // suggesting mode). Deeper levels still step one level per press.
 
   // G13 — FIXED (merge half): mergeParagraphBackward drops the merged
   // paragraph's blank placeholder runs (rPr + zero-length w:t) instead of
