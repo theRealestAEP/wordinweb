@@ -2,7 +2,7 @@ import { XmlElement, cloneXml, localName } from "../xml.js";
 import { Run } from "../model.js";
 import { DocxDocument } from "../docx.js";
 import { checkboxStateElement } from "../checkbox.js";
-import { insertSuggestedSeparator, insertSuggestedText, markParagraphGlyph, RevisionMeta } from "./suggest.js";
+import { deleteSuggestedSeparator, insertSuggestedSeparator, insertSuggestedText, markParagraphGlyph, RevisionMeta } from "./suggest.js";
 
 /**
  * Editor-level document mutations, extracted from DocxEditor so they operate
@@ -133,6 +133,54 @@ export function applyInsertSeparator(
   doc.noteParent(sepEl, rEl);
   doc.noteParent(tailT, rEl);
   return { t: tailT, run: caret.run, offset: 0 };
+}
+
+/** Result of applyDeleteSeparator: the mutation ran; `caret` is the position
+ * at the removal point (null only when no text neighbors the separator —
+ * the caller keeps its caret). */
+export interface DeleteSeparatorResult {
+  caret: { t: XmlElement; offset: number } | null;
+}
+
+/**
+ * Delete an inline separator (w:br / w:tab / w:cr) — the INVERSE of
+ * applyInsertSeparator, for a separator-aware Backspace/Delete.
+ *
+ * Plain mode removes the separator element and, when the removal leaves two
+ * w:t siblings adjacent in the same parent (the `head|sep|tail` shape the
+ * insert's in-run split produced), joins them back into ONE w:t (head
+ * absorbs tail) — so insert+delete round-trips and no placeholder strands
+ * beside real content. On the wire this is a ONE-UNIT delete in the run's
+ * separator-counting offset basis. Suggesting mode records the separator as
+ * a tracked deletion instead (deleteSuggestedSeparator: a w:del around the
+ * separator's own run slice).
+ *
+ * Returns null when the separator is not deletable in place (detached, or
+ * nested in a shape the suggest split does not handle) — a clean no-op.
+ */
+export function applyDeleteSeparator(
+  doc: DocxDocument,
+  sepEl: XmlElement,
+  ctx: MutationCtx,
+): DeleteSeparatorResult | null {
+  if (ctx.suggesting) return deleteSuggestedSeparator(doc, sepEl, ctx.revMeta());
+  const parent = doc.findParentOf(sepEl);
+  if (!parent) return null;
+  const idx = parent.children.indexOf(sepEl);
+  if (idx === -1) return null;
+  parent.children.splice(idx, 1);
+  const prev = parent.children[idx - 1];
+  const next = parent.children[idx];
+  if (prev && next && localName(prev.name) === "t" && localName(next.name) === "t") {
+    const at = prev.text.length;
+    prev.text += next.text;
+    prev.attrs["xml:space"] = "preserve";
+    parent.children.splice(idx, 1);
+    return { caret: { t: prev, offset: at } };
+  }
+  if (prev && localName(prev.name) === "t") return { caret: { t: prev, offset: prev.text.length } };
+  if (next && localName(next.name) === "t") return { caret: { t: next, offset: 0 } };
+  return { caret: null };
 }
 
 /** Result of a paragraph split: the two sibling paragraph elements and the

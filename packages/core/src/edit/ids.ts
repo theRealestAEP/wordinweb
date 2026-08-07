@@ -45,17 +45,18 @@ export interface EncodedCaret {
 }
 
 /** Inline content items of a run in document order: its w:t elements and
- * the separators (tab/br/cr) between them. The run's wire-offset domain. */
-export function runContentItems(el: XmlElement): { t: XmlElement | null; sep: boolean }[] {
-  const out: { t: XmlElement | null; sep: boolean }[] = [];
+ * the separators (tab/br/cr) between them. The run's wire-offset domain.
+ * `el` is the concrete element either way (the w:t, or the separator). */
+export function runContentItems(el: XmlElement): { t: XmlElement | null; sep: boolean; el: XmlElement }[] {
+  const out: { t: XmlElement | null; sep: boolean; el: XmlElement }[] = [];
   const walk = (cur: XmlElement): void => {
     const ln = localName(cur.name);
     if (ln === "t") {
-      out.push({ t: cur, sep: false });
+      out.push({ t: cur, sep: false, el: cur });
       return;
     }
     if (ln === "tab" || ln === "br" || ln === "cr") {
-      out.push({ t: null, sep: true });
+      out.push({ t: null, sep: true, el: cur });
       return;
     }
     for (const c of cur.children) walk(c);
@@ -64,6 +65,34 @@ export function runContentItems(el: XmlElement): { t: XmlElement | null; sep: bo
   // shadow its content.
   for (const c of el.children) walk(c);
   return out;
+}
+
+/** Wire offset of an inline separator element within its run — the ONE unit
+ * it occupies is [offset, offset+1). Null when `sepEl` isn't in the run. */
+export function wireOffsetOfSeparator(runEl: XmlElement, sepEl: XmlElement): number | null {
+  let acc = 0;
+  for (const item of runContentItems(runEl)) {
+    if (item.el === sepEl) return acc;
+    acc += item.sep ? 1 : item.t!.text.length;
+  }
+  return null;
+}
+
+/** The separator element occupying wire unit [offset, offset+1) of the run —
+ * the decoder half of wireOffsetOfSeparator. Null when that unit is not a
+ * separator (a concurrent edit moved it: the caller no-ops cleanly). */
+export function separatorAtWireOffset(runEl: XmlElement, offset: number): XmlElement | null {
+  let acc = 0;
+  for (const item of runContentItems(runEl)) {
+    if (item.sep) {
+      if (acc === offset) return item.el;
+      acc += 1;
+    } else {
+      acc += item.t!.text.length;
+    }
+    if (acc > offset) return null;
+  }
+  return null;
 }
 
 /** All w:t elements under `el` in document order (a run may hold several,

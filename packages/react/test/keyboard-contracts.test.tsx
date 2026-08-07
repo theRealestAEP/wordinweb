@@ -224,6 +224,36 @@ describe("keyboard contracts replicate (collab mount)", () => {
     await ed.unmount();
   });
 
+  it("separator-aware Backspace deletes a soft break, on every replica", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-sepdel", "alice");
+    await ed.click();
+    await ed.typed("ab");
+    await ed.keys([{ key: "a", ctrl: true }, "ArrowLeft", "ArrowRight"]); // caret after "a"
+    await ed.keys([{ key: "Enter", shift: true }]); // w:br (insertSeparator intent)
+    expect(serializeXml(ed.clientDoc().docRoot)).toMatch(/<w:br\/>/);
+    await ed.keys(["Backspace"]); // deleteSeparator intent — the break itself
+    expect(ed.texts()).toEqual(["ab"]);
+    expect(serializeXml(ed.clientDoc().docRoot)).not.toMatch(/<w:br\/>/);
+    await ed.unmount(); // insert+delete round-tripped byte-exactly everywhere
+  });
+
+  it("suggesting Backspace records a soft-break deletion as a w:del and converges", async () => {
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "kc-sepdels", "alice");
+    await ed.click();
+    await ed.typed("ab");
+    await ed.keys([{ key: "a", ctrl: true }, "ArrowLeft", "ArrowRight"]);
+    await ed.keys([{ key: "Enter", shift: true }]); // plain w:br
+    ed.api().setSuggesting(true, "Alice");
+    await tick();
+    await ed.keys(["Backspace"]); // tracked deletion of the separator
+    const xml = serializeXml(ed.clientDoc().docRoot);
+    expect(xml).toMatch(/<w:del [^>]*>.*<w:br\/>/);
+    expect(ed.texts()).toEqual(["ab"]); // nothing removed until accept
+    await ed.unmount();
+  });
+
   it("G10: Enter at the end of a heading starts a Normal paragraph, on every replica", async () => {
     const hub = new CollabHub(provider);
     const ed = await mountCollab(hub, "kc-g10", "alice");

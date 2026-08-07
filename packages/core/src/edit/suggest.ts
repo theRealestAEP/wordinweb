@@ -310,6 +310,97 @@ export function insertSuggestedSeparator(
   return { t: home, offset: 0 };
 }
 
+/**
+ * Record an inline separator (w:br / w:tab / w:cr) as a TRACKED deletion —
+ * the suggesting inverse of insertSuggestedSeparator, for a separator-aware
+ * Backspace/Delete. A revision wrapper may not nest inside a run, so the
+ * separator moves into its own run inside a w:del sibling, the host run
+ * splitting exactly like a text strike (deleteOneRange). A separator inside
+ * one's own pending w:ins is removed PHYSICALLY instead (un-suggesting your
+ * own not-yet-accepted insertion, which Word also does), unwinding the run
+ * and wrapper when they empty.
+ *
+ * Returns the caret at the removal's left edge (null caret when no text
+ * neighbors the separator), or null when the separator's shape is not
+ * handled — inside another author's wrapper, or nested deeper than a run
+ * child — a clean no-op on every replica.
+ */
+export function deleteSuggestedSeparator(
+  doc: DocxDocument,
+  sepEl: XmlElement,
+  meta: RevisionMeta,
+): { caret: { t: XmlElement; offset: number } | null } | null {
+  let rEl: XmlElement | undefined = doc.findParentOf(sepEl);
+  while (rEl && localName(rEl.name) !== "r") rEl = doc.findParentOf(rEl);
+  if (!rEl) return null;
+  const parent = doc.findParentOf(rEl);
+  if (!parent) return null;
+  const sIdx = rEl.children.indexOf(sepEl);
+  if (sIdx === -1) return null;
+
+  // Un-suggesting my own pending separator: remove it physically, joining
+  // the w:t halves its insert split (the plain inverse) and unwinding the
+  // run/wrapper when the removal empties them.
+  if (ownRevisionWrapper(parent, "ins", meta.author)) {
+    rEl.children.splice(sIdx, 1);
+    let caret: { t: XmlElement; offset: number } | null = null;
+    const prev = rEl.children[sIdx - 1];
+    const next = rEl.children[sIdx];
+    if (prev && next && localName(prev.name) === "t" && localName(next.name) === "t") {
+      const at = prev.text.length;
+      prev.text += next.text;
+      prev.attrs["xml:space"] = "preserve";
+      rEl.children.splice(sIdx, 1);
+      caret = { t: prev, offset: at };
+    } else if (prev && localName(prev.name) === "t") {
+      caret = { t: prev, offset: prev.text.length };
+    } else if (next && localName(next.name) === "t") {
+      caret = { t: next, offset: 0 };
+    }
+    if (!rEl.children.some((c) => localName(c.name) !== "rPr")) {
+      parent.children.splice(parent.children.indexOf(rEl), 1);
+      if (parent.children.length === 0) {
+        const grand = doc.findParentOf(parent);
+        if (grand) grand.children.splice(grand.children.indexOf(parent), 1);
+      }
+    }
+    return { caret };
+  }
+
+  // Another author's wrapper: revisions must stay siblings, and splitting
+  // someone else's wrapper around a new w:del is not modeled — no-op.
+  if (localName(parent.name) === "ins" || localName(parent.name) === "del") return null;
+
+  const w = prefixOf(rEl);
+  const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
+  const idx = parent.children.indexOf(rEl);
+  if (idx === -1) return null;
+  const before = rEl.children.slice(0, sIdx);
+  const after = rEl.children.slice(sIdx + 1);
+  const beforeContent = before.filter((c) => localName(c.name) !== "rPr");
+  const del = el(`${w}del`, revAttrs(w, meta), [runLike(rEl, rPr, [sepEl])]);
+  const replacement: XmlElement[] = [];
+  if (beforeContent.length > 0) {
+    // The addressed run keeps everything before the strike (its stable id
+    // survives — the contract the text strike keeps too).
+    rEl.children = before;
+    replacement.push(rEl, del);
+    if (after.length > 0) replacement.push(runLike(rEl, rPr, after));
+  } else {
+    // Separator leads the run: the run keeps its identity holding the tail.
+    rEl.children = [...(rPr ? [rPr] : []), ...after];
+    replacement.push(del);
+    if (rEl.children.some((c) => localName(c.name) !== "rPr")) replacement.push(rEl);
+  }
+  parent.children.splice(idx, 1, ...replacement);
+  coalesceDeletions(parent, del, meta.author);
+  const beforeT = [...beforeContent].reverse().find((c) => localName(c.name) === "t");
+  if (beforeT) return { caret: { t: beforeT, offset: beforeT.text.length } };
+  const afterT = after.find((c) => localName(c.name) === "t");
+  if (afterT) return { caret: { t: afterT, offset: 0 } };
+  return { caret: null };
+}
+
 // ---------- deletion ----------
 
 /** A (t, start, end) slice of text to record as deleted. */

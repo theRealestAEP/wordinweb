@@ -20,10 +20,14 @@ export const KNOWN_GAPS: Record<string, string> = {
 
   // G2 — FIXED: Shift+Enter inserts a w:br soft line break in-paragraph via
   // applyInsertSeparator (in-run w:t split; insertSeparator intent — a
-  // one-unit wire insert). Word-contract residual, recorded honestly:
-  // Backspace/Delete are not yet separator-aware, so the caret steps PAST a
-  // soft break and deletes the neighboring character instead of the break
-  // itself; the break disappears only with its paragraph.
+  // one-unit wire insert). The separator-awareness residual is fixed too:
+  // Backspace/Delete adjacent to a soft break or tab now delete the
+  // SEPARATOR itself via applyDeleteSeparator (the insert's inverse: the
+  // element leaves the run and the split w:t halves rejoin — insert+delete
+  // round-trips byte-exactly), riding the deleteSeparator intent (a one-unit
+  // wire delete); suggesting mode records a w:del around the separator's own
+  // run slice (deleteSuggestedSeparator). Pinned by backspace.soft-break,
+  // delete.soft-break, and backspace.tab-char.
 
   // G3 — FIXED (with a documented approximation): Tab in a plain body
   // paragraph inserts a w:tab character via the insertSeparator machinery.

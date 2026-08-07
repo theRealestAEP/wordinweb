@@ -614,6 +614,51 @@ const CASES: CaseDef[] = [
     },
   },
 
+  // ----- separator-aware Backspace/Delete -----------------------------------
+  {
+    id: "backspace.soft-break",
+    contract: "Backspace right after a soft line break deletes the BREAK itself (not the neighboring character), restoring one line",
+    fixture: plainDoc,
+    run: async (ed) => {
+      await ed.caretAt("alpha", "end");
+      await ed.press("Enter", { shift: true }); // w:br; caret lands after it
+      await ed.press("Backspace");
+    },
+    expectAfter: (ed) => {
+      expect(ed.text()).toBe("alpha one\nbravo two\ncharlie three");
+      expect(ed.xml()).not.toContain("<w:br");
+    },
+  },
+  {
+    id: "delete.soft-break",
+    contract: "Forward Delete just before a soft line break deletes the BREAK itself",
+    fixture: plainDoc,
+    run: async (ed) => {
+      await ed.caretAt("alpha", "end");
+      await ed.press("Enter", { shift: true });
+      await ed.press("ArrowLeft"); // back before the break
+      await ed.press("Delete");
+    },
+    expectAfter: (ed) => {
+      expect(ed.text()).toBe("alpha one\nbravo two\ncharlie three");
+      expect(ed.xml()).not.toContain("<w:br");
+    },
+  },
+  {
+    id: "backspace.tab-char",
+    contract: "Backspace right after a typed tab character deletes the w:tab itself",
+    fixture: plainDoc,
+    run: async (ed) => {
+      await ed.caretAt("bravo", "start");
+      await ed.press("Tab");
+      await ed.press("Backspace");
+    },
+    expectAfter: (ed) => {
+      expect(ed.text()).toBe("alpha one\nbravo two\ncharlie three");
+      expect(ed.xml()).not.toContain("<w:tab");
+    },
+  },
+
   // ----- Tab / Shift+Tab ----------------------------------------------------
   {
     id: "tab.plain-paragraph",

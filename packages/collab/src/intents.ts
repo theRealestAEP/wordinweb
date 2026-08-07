@@ -92,6 +92,23 @@ export interface InsertSeparatorIntent extends IntentBase {
   suggest?: SuggestMeta;
 }
 
+/**
+ * Delete the inline separator (w:br / w:tab / w:cr) occupying wire unit
+ * [at.offset, at.offset+1) of the addressed run — insertSeparator's inverse
+ * (a separator-aware Backspace/Delete). The plain mutation removes the
+ * separator element and joins the two w:t halves its insert split, so the
+ * transform is exactly a deleteText of length one in the separator-counting
+ * wire basis. With `suggest` the separator is recorded as a tracked deletion
+ * instead (deleteSuggestedSeparator: a w:del around the separator's own run
+ * slice, the host run splitting like a text strike). A unit that no longer
+ * holds a separator (concurrent edit) is a clean no-op on every replica.
+ */
+export interface DeleteSeparatorIntent extends IntentBase {
+  kind: "deleteSeparator";
+  at: Position;
+  suggest?: SuggestMeta;
+}
+
 /** Delete `[start, end)` characters within a single run. */
 export interface DeleteTextIntent extends IntentBase {
   kind: "deleteText";
@@ -472,6 +489,7 @@ export function isRegisteredIntent(intent: Intent): intent is RegisteredIntent {
 export type Intent =
   | InsertTextIntent
   | InsertSeparatorIntent
+  | DeleteSeparatorIntent
   | DeleteTextIntent
   | SplitParagraphIntent
   | FormatRunIntent
@@ -560,6 +578,7 @@ const HAND_WRITTEN_INTENT_KIND_MAP: Record<
 > = {
   insertText: true,
   insertSeparator: true,
+  deleteSeparator: true,
   deleteText: true,
   splitParagraph: true,
   formatRun: true,

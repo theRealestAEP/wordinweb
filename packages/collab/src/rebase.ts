@@ -64,6 +64,8 @@ export function toSuggestions(
       suggestions.push({ kind: "insertText", at: intent.at, text: intent.text, suggest: { author, date } } as never);
     } else if (intent.kind === "insertSeparator") {
       suggestions.push({ kind: "insertSeparator", at: intent.at, separator: intent.separator, suggest: { author, date } } as never);
+    } else if (intent.kind === "deleteSeparator") {
+      suggestions.push({ kind: "deleteSeparator", at: intent.at, suggest: { author, date } } as never);
     } else if (intent.kind === "deleteText") {
       suggestions.push({
         kind: "suggestRevision",

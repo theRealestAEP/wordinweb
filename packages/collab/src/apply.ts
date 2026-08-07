@@ -8,6 +8,8 @@ import {
   applySplitParagraph,
   applyDeleteRange,
   applyInsertSeparator,
+  applyDeleteSeparator,
+  separatorAtWireOffset,
   applyRunFormat,
   setParagraphAlignment,
   setParagraphStyle,
@@ -267,6 +269,32 @@ function applyIntentInner(
       // Plain: an in-run w:t split around the separator — no run is created
       // or removed, so no id changes and the paragraph is the blast radius.
       if (!applyInsertSeparator(doc, caret, intent.separator, ctx)) return false;
+      out.scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+      return true;
+    }
+    case "deleteSeparator": {
+      const runEl = ids.elOf(intent.at.runId);
+      if (!runEl) return false;
+      // Resolve the addressed wire unit to the concrete separator element; a
+      // unit that no longer holds one (concurrent edit) is a clean no-op.
+      const sepEl = separatorAtWireOffset(runEl, intent.at.offset);
+      if (!sepEl) return false;
+      if (intent.suggest) {
+        // Tracked separator deletion: the host run splits around a w:del
+        // (same scoped-reparse discipline the suggest text strike uses —
+        // run splits without carried ids resync by parse order).
+        const s = intent.suggest;
+        const suggestCtx = { suggesting: true, revMeta: () => ({ author: s.author, date: s.date, nextId: () => doc.nextRevisionId() }) };
+        const scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+        if (!applyDeleteSeparator(doc, sepEl, suggestCtx)) return false;
+        if (doc.stableIds) resyncScope(doc, ids, scope);
+        out.scope = scope;
+        return true;
+      }
+      // Plain: the separator element leaves the run and its two w:t halves
+      // join — the insert's exact inverse; no tracked node changes, and the
+      // paragraph is the whole blast radius.
+      if (!applyDeleteSeparator(doc, sepEl, ctx)) return false;
       out.scope = blockScope(ids, intent.at.blockId, intent.at.runId);
       return true;
     }

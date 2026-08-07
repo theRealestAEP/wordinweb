@@ -40,6 +40,13 @@ export function runEditsOf(intent: Intent): RunEdit[] {
       // In-run w:t split around a one-unit separator: exactly an insert of
       // length one in the run's separator-counting wire basis.
       return [{ runId: intent.at.runId, at: intent.at.offset, del: 0, ins: 1 }];
+    case "deleteSeparator":
+      // The inverse: exactly a delete of length one in the same basis. The
+      // SUGGEST form wraps instead of removing (run splits at the strike,
+      // like suggestRevision) — no run edit is modeled, and a concurrent
+      // same-run position past the boundary resolves-or-rejects identically
+      // on every replica (degraded fidelity, never divergence).
+      return intent.suggest ? [] : [{ runId: intent.at.runId, at: intent.at.offset, del: 1, ins: 0 }];
     case "deleteText":
       return [{ runId: intent.runId, at: intent.start, del: intent.end - intent.start, ins: 0 }];
     case "splitParagraph":
@@ -241,6 +248,11 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "insertText":
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
     case "insertSeparator":
+      return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
+    case "deleteSeparator":
+      // The separator's unit start shifts like any position; if a prior
+      // delete swallowed it, the unit no longer resolves to a separator and
+      // the apply no-ops cleanly.
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
     case "splitParagraph":
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };

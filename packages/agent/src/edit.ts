@@ -21,6 +21,7 @@ interface CompileContext {
 const SUGGESTABLE_KINDS = new Set<Intent["kind"]>([
   "insertText",
   "insertSeparator",
+  "deleteSeparator",
   "splitParagraph",
   "mergeParagraph",
   "formatRun",

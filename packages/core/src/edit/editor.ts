@@ -5,7 +5,7 @@ import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
 import { DrawingBinding, GripBinding, ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
 import { TextItem } from "../layout/types.js";
 import { selectionToSegments } from "./selection.js";
-import { runWireLength, wireOffsetOf, type EncodedCaret } from "./ids.js";
+import { runWireLength, wireOffsetOf, wireOffsetOfSeparator, type EncodedCaret } from "./ids.js";
 import { EditHistory } from "./history.js";
 import { advanceCell, applyTableOp, cellRangeBetween, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
 import { pxToTwips } from "../units.js";
@@ -166,7 +166,7 @@ export function availableObjectCommands(
 }
 import { graphemeStep } from "./grapheme.js";
 import { EditProvenance, defaultProvenance } from "./provenance.js";
-import { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator, MutationCtx } from "./mutations.js";
+import { applyDeleteSeparator, applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator, MutationCtx } from "./mutations.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
 import { resolveParagraphStyleChain } from "../parse/styles.js";
 import {
@@ -310,6 +310,7 @@ export type EditorIntent =
   | RegisteredOperationBody
   | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string; suggest?: { author: string; date: string } }
   | { kind: "insertSeparator"; at: { blockId: number; runId: number; offset: number }; separator: "br" | "tab"; suggest?: { author: string; date: string } }
+  | { kind: "deleteSeparator"; at: { blockId: number; runId: number; offset: number }; suggest?: { author: string; date: string } }
   | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
   | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number; suggest?: { author: string; date: string } }
   | { kind: "formatRun"; blockId: number; runId: number; patch: Record<string, unknown> }
@@ -7050,6 +7051,10 @@ export class DocxEditor {
     const caret = this.caret;
     if (!caret) return;
     this.host.history?.checkpoint("deleting");
+    // Separator-aware Backspace/Delete (both modes): a soft line break or a
+    // tab character adjacent to the caret deletes ITSELF — the
+    // insertSeparator machinery's inverse — instead of being stepped past.
+    if (this.deleteAdjacentSeparator(direction)) return;
     if (this.suggesting) {
       this.suggestDelete(direction);
       return;
@@ -7720,6 +7725,108 @@ export class DocxEditor {
       );
     }
     this.focusText();
+  }
+
+  /** The inline separator (w:br / w:tab / w:cr) immediately adjacent to the
+   * caret in the caret paragraph's content order, or null. direction -1 =
+   * the atom before a caret at its w:t's start (Backspace), +1 = the atom
+   * after a caret at its w:t's end (Delete). Atoms are w:t and w:delText
+   * (struck text blocks adjacency) plus the separators themselves, crossing
+   * run boundaries — a separator at the end of the previous run is adjacent
+   * too. */
+  private adjacentSeparator(direction: -1 | 1): XmlElement | null {
+    const caret = this.caret;
+    if (!caret) return null;
+    if (direction === -1 && caret.offset !== 0) return null;
+    if (direction === 1 && caret.offset < caret.t.text.length) return null;
+    const pEl = paragraphOf(this.host.doc, caret.t);
+    if (!pEl) return null;
+    const atoms: XmlElement[] = [];
+    const collect = (e: XmlElement): void => {
+      for (const c of e.children) {
+        const n = localName(c.name);
+        if (n === "pPr" || n === "rPr") continue;
+        if (n === "t" || n === "delText" || n === "br" || n === "tab" || n === "cr") atoms.push(c);
+        else collect(c);
+      }
+    };
+    collect(pEl);
+    const i = atoms.indexOf(caret.t);
+    if (i === -1) return null;
+    const neighbor = atoms[i + direction];
+    if (!neighbor) return null;
+    const n = localName(neighbor.name);
+    return n === "br" || n === "tab" || n === "cr" ? neighbor : null;
+  }
+
+  /** True when `el` sits anywhere inside a w:del — already-deleted content
+   * a separator delete must not touch again. */
+  private insideDeletion(el: XmlElement): boolean {
+    for (let cur = this.host.doc.findParentOf(el); cur; cur = this.host.doc.findParentOf(cur)) {
+      if (localName(cur.name) === "del") return true;
+    }
+    return false;
+  }
+
+  /** Wire address of a separator element: its run's ids plus the ONE wire
+   * unit [offset, offset+1) the separator occupies. Null off the wire. */
+  private encodeSeparatorForIntent(sepEl: XmlElement): { blockId: number; runId: number; offset: number } | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids || !this.host.onIntent) return null;
+    let runEl = this.host.doc.findParentOf(sepEl);
+    while (runEl && localName(runEl.name) !== "r") runEl = this.host.doc.findParentOf(runEl);
+    if (!runEl) return null;
+    const runId = ids.idOf(runEl);
+    let blockEl = this.host.doc.findParentOf(runEl);
+    while (blockEl && localName(blockEl.name) !== "p" && localName(blockEl.name) !== "tbl") {
+      blockEl = this.host.doc.findParentOf(blockEl);
+    }
+    const blockId = blockEl ? ids.idOf(blockEl) : undefined;
+    if (runId === undefined || blockId === undefined) return null;
+    const offset = wireOffsetOfSeparator(runEl, sepEl);
+    return offset === null ? null : { blockId, runId, offset };
+  }
+
+  /** Backspace/Delete beside an inline separator: remove the separator
+   * itself via the canonical mutation (applyDeleteSeparator — the
+   * insertSeparator machinery's inverse), emitting the deleteSeparator
+   * intent. Suggesting mode records it as a tracked deletion (w:del around
+   * the separator's run slice). Returns true when the gesture was handled. */
+  private deleteAdjacentSeparator(direction: -1 | 1): boolean {
+    const caret = this.caret;
+    if (!caret) return false;
+    const sepEl = this.adjacentSeparator(direction);
+    if (!sepEl) return false;
+    // A separator already inside a w:del is deleted content — step past it
+    // like the text paths do.
+    if (this.insideDeletion(sepEl)) return false;
+    this.host.history?.checkpoint();
+    const suggestEmit = this.suggesting && !!this.host.onIntent;
+    const frozen = suggestEmit ? this.frozenRevMeta() : null;
+    const emitPos = (!this.suggesting || suggestEmit) && this.host.onIntent ? this.encodeSeparatorForIntent(sepEl) : null;
+    const ctx = frozen ? { suggesting: true, revMeta: () => frozen } : this.mutationCtx();
+    const res = applyDeleteSeparator(this.host.doc, sepEl, ctx);
+    if (!res) return false;
+    if (res.caret) {
+      this.caret = { t: res.caret.t, run: caret.run, offset: res.caret.offset, bias: "end" };
+    } else if (!paragraphOf(this.host.doc, caret.t)) {
+      // No neighboring text and the old caret element left the tree: land at
+      // the document start rather than dangling detached.
+      const home = firstTextOf(this.host.doc.editableRoots()[0]);
+      if (home) this.caret = { t: home, run: caret.run, offset: 0 };
+    }
+    const pEl = paragraphOf(this.host.doc, this.caret?.t ?? caret.t);
+    const reparsed = pEl ? this.host.doc.reparseBodyParagraph(pEl) : null;
+    if (pEl && reparsed) invalidateParagraphSignature(pEl);
+    this.commit(false, "local", !!reparsed);
+    if (emitPos) {
+      this.host.onIntent?.(
+        frozen
+          ? { kind: "deleteSeparator", at: emitPos, suggest: { author: frozen.author, date: frozen.date } }
+          : { kind: "deleteSeparator", at: emitPos },
+      );
+    }
+    return true;
   }
 
   /** Enter: split the paragraph at the caret into two w:p elements. */

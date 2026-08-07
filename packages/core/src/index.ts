@@ -80,10 +80,10 @@ export type {
   DeleteRange,
 } from "./edit/suggest.js";
 export { EditHistory } from "./edit/history.js";
-export { StableIds, textsUnderRun, resolveRunOffset, runContentItems, runWireLength, wireOffsetOf } from "./edit/ids.js";
+export { StableIds, textsUnderRun, resolveRunOffset, runContentItems, runWireLength, wireOffsetOf, wireOffsetOfSeparator, separatorAtWireOffset } from "./edit/ids.js";
 export type { EncodedCaret } from "./edit/ids.js";
-export { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator } from "./edit/mutations.js";
-export type { EditCaret, MutationCtx, SplitResult } from "./edit/mutations.js";
+export { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator, applyDeleteSeparator } from "./edit/mutations.js";
+export type { EditCaret, MutationCtx, SplitResult, DeleteSeparatorResult } from "./edit/mutations.js";
 export { defaultProvenance, recordedProvenance } from "./edit/provenance.js";
 export type { EditProvenance } from "./edit/provenance.js";
 export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, siblingParagraph, paragraphOf, topLevelBlockOf, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";

@@ -675,6 +675,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | --- | --- | --- |
 | `insertText` | Insert text at a position | `at`, `text`; optional: `suggest` |
 | `insertSeparator` | Insert a soft line break (`br`) or a tab character (`tab`) at a position | `at`, `separator`; optional: `suggest` |
+| `deleteSeparator` | Delete the inline separator occupying one wire unit at a position | `at`; optional: `suggest` |
 | `deleteText` | Delete one run range | `blockRef`, `runRef`, `start`, `end` |
 | `formatRun` | Format a complete run | `blockRef`, `runRef`, `patch`; optional: `suggest` |
 | `formatRange` | Format one run range | `blockRef`, `runRef`, `start`, `end`, `patch`; optional: `suggest` |

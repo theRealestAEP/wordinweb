@@ -1,5 +1,26 @@
 # Interactive-editing conformance — failure inventory
 
+> **Editor-residuals wave addendum (branch `editor-residuals`).** The last
+> ledgered findings are FIXED and the KNOWN_GAPS table is EMPTY:
+> F13/G12 (a selection whose endpoints sit in different cells of one table
+> is now cell-granular — delete clears the whole covered cells through the
+> ordinary deleteText/merge machinery; the across-cell-structure case's
+> incidental "r0c0 text survives" assertion was amended to the uncovered
+> cell), F5/G7's table residual (a fully selected table now deletes AS A
+> BLOCK on the session mount via the canonical tableOp("deleteTable")
+> mutation + intent), and F15/G17 (root-caused to a STALE CARET PATH: the
+> checkpoint after applyRunFormat's split fell back to a pre-split
+> structural path, undo resolved it to an rPr, and Enter split a paragraph
+> around it — fixed by rebinding the caret in selectRanges plus a
+> text-leaf guard in history's restoreCaret, not by lint-scrubbing). The
+> separator-awareness residual recorded below is fixed too: Backspace/
+> Delete adjacent to a soft break or tab delete the SEPARATOR itself
+> (applyDeleteSeparator — applyInsertSeparator's exact inverse, a one-unit
+> deleteSeparator wire intent; a w:del around the separator's run slice in
+> suggesting mode), pinned by backspace.soft-break, delete.soft-break, and
+> backspace.tab-char. Sweep results for this wave are at the bottom of
+> this file.
+
 > **Keyboard-contract wave addendum (branch `keyboard-contracts`).** The
 > following findings below are FIXED and un-ledgered (see known-gaps.ts for
 > the per-fix notes): F1/G15 (the Shift+Arrow empty-paragraph wedge — plus a

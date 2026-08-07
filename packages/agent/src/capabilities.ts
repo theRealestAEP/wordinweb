@@ -24,6 +24,7 @@ const HAND_WRITTEN_CAPABILITIES: Record<
 > = {
   insertText: { category: "text", description: 'Insert text at a run offset. Each "\\n" in the text creates a real new paragraph.', required: ["at", "text"], optional: ["suggest"] },
   insertSeparator: { category: "text", description: "Insert an inline separator at a run offset: a soft line break (br) or a tab character (tab).", required: ["at", "separator"], optional: ["suggest"] },
+  deleteSeparator: { category: "text", description: "Delete the inline separator (soft line break, tab) occupying one wire unit at a run offset — insertSeparator's inverse.", required: ["at"], optional: ["suggest"] },
   deleteText: { category: "text", description: "Delete a range within one run. start/end are offsets within that run's own text, not the paragraph.", required: ["blockRef", "runRef", "start", "end"] },
   splitParagraph: { category: "paragraph", description: "Split a paragraph at a run offset (with suggest, the new paragraph mark is a tracked insertion).", required: ["at"], optional: ["suggest"] },
   formatRun: { category: "text", description: "Format a complete run.", required: ["blockRef", "runRef", "patch"], optional: ["suggest"] },
