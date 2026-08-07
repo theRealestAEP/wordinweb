@@ -107,9 +107,10 @@ async function mountLocal() {
 
 /** Type a bulleted list the way a user does: bullet the first paragraph via
  * the toolbar, then Enter + type extends the list (the split carries the
- * numbering). One toggleList call on ONE paragraph keeps the fixture clear of
- * the pre-existing multi-paragraph toggle divergence in collab (each
- * per-block setListType intent mints a fresh numId on the server). */
+ * numbering). The toggle lands on ONE paragraph here, which exercises the
+ * split-carries-numbering path; the multi-paragraph toolbar toggle (formerly
+ * divergent in collab — per-block setListType intents each minted a fresh
+ * numId on the server) is covered by its own suite below. */
 async function typeBulletedList(
   ed: { click(): Promise<void>; typed(t: string): Promise<void>; keys(seq: Key[]): Promise<void>; api(): DocxViewApi; shapes(): string[] },
   items: string[],
@@ -372,6 +373,43 @@ describe("list deletion replicates (collab mount)", () => {
     expect(ed.shapes()).toEqual(["bullet:c"]);
     expect(paragraphShapes(serverDoc(hub, "ld-span"))).toEqual(["bullet:c"]);
     await ed.unmount();
+  });
+
+  it("multi-paragraph toolbar toggle shares ONE numbering definition and converges byte-for-byte", async () => {
+    // THE BUG this suite documented: toggleList over a selection emitted one
+    // setListType intent PER paragraph, and each server-side apply minted a
+    // fresh numbering definition — the client (one shared mint) had numId
+    // 1,1,1 while the server had 1,2,3 (three lists each restarting at 1).
+    // The toggle is now ONE intent (blockId + moreBlockIds) whose single
+    // apply mints one shared definition on every replica.
+    const hub = new CollabHub(provider);
+    const ed = await mountCollab(hub, "ld-multi-toggle", "alice");
+    await ed.click();
+    await ed.typed("aa");
+    await ed.keys(["Enter"]);
+    await ed.typed("bb");
+    await ed.keys(["Enter"]);
+    await ed.typed("cc");
+    await settle();
+    expect(ed.shapes()).toEqual(["plain:aa", "plain:bb", "plain:cc"]);
+    await ed.keys([{ key: "a", ctrl: true }]);
+    ed.api().toggleList("number");
+    await settle();
+    expect(ed.shapes()).toEqual(["bullet:aa", "bullet:bb", "bullet:cc"]);
+    // Continuity: all three paragraphs point at the SAME live numId on the
+    // client AND the server (a shared decimal list renders 1. 2. 3.).
+    for (const doc of [ed.clientDoc(), serverDoc(hub, "ld-multi-toggle")]) {
+      const xml = serializeXml(doc.docRoot);
+      const ids = [...xml.matchAll(/<w:numId w:val="(\d+)"\/>/g)].map((m) => m[1]);
+      expect(ids).toHaveLength(3);
+      expect(new Set(ids).size).toBe(1);
+    }
+    // Toggle back OFF across the same selection — also one intent.
+    await ed.keys([{ key: "a", ctrl: true }]);
+    ed.api().toggleList("number");
+    await settle();
+    expect(ed.shapes()).toEqual(["plain:aa", "plain:bb", "plain:cc"]);
+    await ed.unmount(); // byte-parity guard: client == server
   });
 
   it("suggesting: Backspace on a list item records a tracked unbullet; a spanning delete strikes the marks — and converges", async () => {

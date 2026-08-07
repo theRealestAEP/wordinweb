@@ -91,8 +91,13 @@ export interface SealedCheckpoint {
  *       e11 peer rejects this canonical intent while an e12 peer applies it.
  *   e13 drawing line edits accept a null color to clear an outline. An e12
  *       peer rejects the canonical clear while an e13 peer applies it.
+ *   e14 setListType can carry moreBlockIds: a multi-paragraph toggle is ONE
+ *       intent whose single apply mints ONE shared numbering definition
+ *       (Word's continuity semantics). An e13 peer ignores the field and
+ *       formats only the addressed paragraph, so mixed clients diverge on
+ *       the first multi-paragraph list toggle.
  */
-export const ENGINE_VERSION = "e13";
+export const ENGINE_VERSION = "e14";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-

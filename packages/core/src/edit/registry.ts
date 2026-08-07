@@ -2,7 +2,7 @@ import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
 import { citationText, documentBibliography } from "../citations.js";
 import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
-import { XmlElement } from "../xml.js";
+import { XmlElement, localName } from "../xml.js";
 import { insertTableAfter } from "./blocks.js";
 import {
   insertCitationField,
@@ -271,25 +271,66 @@ function badSuggest(kind: string, { suggest }: SuggestablePayload): string | nul
   return null;
 }
 
+/** First w:t under an element, or null. Mirrors the resolution the block
+ * address applies to the primary target: setListType resolves paragraphs by
+ * walking UP from a target, so each extra paragraph is named by a descendant
+ * w:t when it has one and by the paragraph element itself otherwise. */
+function firstTextDescendantOf(el: XmlElement): XmlElement | null {
+  if (localName(el.name) === "t") return el;
+  for (const c of el.children) {
+    const found = firstTextDescendantOf(c);
+    if (found) return found;
+  }
+  return null;
+}
+
 /** Turn a paragraph into a bullet/numbered list item, or clear its list
  * formatting (listKind null). Mutates w:pPr numbering in place. With `suggest`
  * the change is TRACKED (w:pPrChange) instead of applied outright; the author
- * and date travel in the payload so every replica writes the same XML. */
+ * and date travel in the payload so every replica writes the same XML.
+ *
+ * `moreBlockIds` extends the operation to a MULTI-PARAGRAPH selection: every
+ * listed paragraph is formatted by the SAME mutation call, so exactly one
+ * numbering definition is minted and shared — Word's semantics (one list,
+ * continuous 1,2,3) and the only convergent shape. One intent per paragraph
+ * (the old emission) minted a FRESH definition per apply on the server while
+ * the originating client's single local mutation shared one: numId 1,1,1
+ * locally vs 1,2,3 canonically — byte divergence plus per-paragraph restarts.
+ * An id that no longer resolves is skipped (clean per-target no-op — the id
+ * table is identical on every replica, so every replica skips the same ones). */
 const setListTypeOperation = defineOperation<{
   blockId: StableId;
   listKind: "bullet" | "number" | null;
+  /** Additional target paragraphs beyond the addressed one, sharing its
+   * minted numbering definition. Absent = the old single-paragraph form. */
+  moreBlockIds?: StableId[];
 } & SuggestablePayload>()({
   kind: "setListType",
   address: "block",
   category: "paragraph",
   description: "Set or clear paragraph list formatting.",
   fields: [{ name: "listKind" }, SUGGEST_FIELD],
-  validate: (payload) => badSuggest("setListType", payload),
+  validate: (payload) => {
+    const more = payload.moreBlockIds;
+    if (more !== undefined) {
+      if (!Array.isArray(more) || more.length > 10_000 ||
+          more.some((id) => typeof id !== "number" || !Number.isInteger(id) || id < 0)) {
+        return "setListType: bad moreBlockIds";
+      }
+    }
+    return badSuggest("setListType", payload);
+  },
   // setListType resolves the paragraph by walking UP from a target, so pass a
   // descendant w:t when the paragraph has one and the paragraph itself
   // otherwise.
-  apply: ({ doc, target, payload }) =>
-    setListType(doc, [target.t ?? target.el], payload.listKind, suggestMeta(doc, payload.suggest)),
+  apply: ({ doc, target, payload }) => {
+    const targets = [target.t ?? target.el];
+    for (const id of payload.moreBlockIds ?? []) {
+      const el = doc.stableIds?.elOf(id);
+      if (el) targets.push(firstTextDescendantOf(el) ?? el);
+    }
+    return setListType(doc, targets, payload.listKind, suggestMeta(doc, payload.suggest));
+  },
 });
 
 /** Insert a rows×cols table after the paragraph containing the anchor run.

@@ -142,6 +142,13 @@ export interface FormatParagraphIntent extends IntentBase {
  * formatting (kind null). Block-level: mutates w:pPr/numbering, preserves the
  * block id, moves no text — transform identity.
  *
+ * A multi-paragraph selection rides in ONE intent (optional `moreBlockIds`
+ * beyond the addressed paragraph): the single apply mints ONE numbering
+ * definition shared by every target, which is both Word's semantics (one
+ * continuous list) and the only convergent shape — per-paragraph intents
+ * each minted a fresh definition at apply, diverging from the originator's
+ * single shared-definition local mutation.
+ *
  * REGISTERED: shape and wiring come from the core operation registry (see
  * RegisteredIntent below). The alias keeps the published type name.
  */

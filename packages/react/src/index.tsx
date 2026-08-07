@@ -1094,6 +1094,24 @@ export function DocxView({
       }
     };
 
+    // Collaboration: emit ONE intent covering every distinct paragraph the
+    // targets belong to (in selection order). setListType uses this instead of
+    // emitBlockIntents because its apply MINTS a numbering definition: one
+    // intent per paragraph mints one per apply, so replicas diverge from the
+    // originator's single shared-definition mutation (see toggleList).
+    const emitListIntent = (targets: XmlElement[], make: (blockIds: number[]) => EditorIntent): void => {
+      const d = docCacheRef.current?.doc;
+      const current = collabRef.current;
+      if (!current || !d?.stableIds) return;
+      const blockIds: number[] = [];
+      for (const t of targets) {
+        const p = paragraphOf(d, t);
+        const blockId = p ? d.stableIds.idOf(p) : undefined;
+        if (blockId !== undefined && !blockIds.includes(blockId)) blockIds.push(blockId);
+      }
+      if (blockIds.length > 0) current.submit(make(blockIds));
+    };
+
     // Draw remote participants' carets over the current render (collab mode).
     const drawCollabPresence = (): void => {
       const handle = handleRef.current;
@@ -2494,7 +2512,17 @@ export function DocxView({
             const listKind = current === kind ? null : kind;
             const suggest = editor?.suggestionMeta();
             if (setListType(doc, targets as Parameters<typeof setListType>[1], listKind, suggestMeta(doc, suggest))) {
-              emitBlockIntents(targets, (blockId) => operationBody("setListType", blockId, { listKind, suggest }));
+              // ONE intent for the whole selection (moreBlockIds carries the
+              // paragraphs beyond the first): per-paragraph intents each
+              // minted a fresh numbering definition at apply, so the server
+              // numbered a multi-paragraph toggle 1,2,3 (three restarting
+              // lists) while this client's single mutation above shared one
+              // definition (1,1,1) — byte divergence and wrong semantics.
+              emitListIntent(targets, (blockIds) =>
+                operationBody("setListType", blockIds[0], {
+                  listKind, suggest,
+                  ...(blockIds.length > 1 ? { moreBlockIds: blockIds.slice(1) } : {}),
+                }));
               pages = rerender(doc, dirtyBlock);
               document.dispatchEvent(new CustomEvent("dxw-selection"));
             }
