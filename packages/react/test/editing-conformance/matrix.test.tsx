@@ -26,6 +26,7 @@ import {
   tableDoc,
   headingDoc,
   trackedDoc,
+  kitchenSinkDoc,
 } from "./fixtures.js";
 
 interface CaseDef {
@@ -965,6 +966,45 @@ const CASES: CaseDef[] = [
       await ed.press("k");
     },
     expectAfter: (ed) => expect(ed.text()).toBe("abovekempty\n\nbelow empty"),
+  },
+
+  // ----- undo interaction sequences (fuzzer-found, local history) -----------
+  {
+    id: "undo.crash-after-type-over-selection",
+    contract:
+      "Undo after typing over a keyboard selection, then typing again, never throws (fuzz seeds 5+6; minimized: pasteHtml bold, Backspace, Home, Shift+ArrowLeft, type, Cmd+Z, type)",
+    fixture: kitchenSinkDoc,
+    run: async (ed) => {
+      await ed.caretAt("alpha", "end");
+      await ed.paste({ "text/html": "<b>bold</b>", "text/plain": "bold" });
+      await ed.press("Backspace");
+      await ed.press("Home");
+      await ed.press("ArrowLeft", { shift: true });
+      await ed.press("f");
+      await ed.undo();
+      await ed.press("f");
+    },
+    // The blanket checks (listener no-throw, lint, save/reload) carry this
+    // case; the crash surfaces through ed.errors.
+    expectAfter: () => {},
+  },
+  {
+    id: "undo.format-selection-strands-run",
+    contract:
+      "Undo of a format-over-selection, then Enter, strands no properties-only run (fuzz seeds 6+7; minimized: Enter, type, Shift+ArrowLeft, Cmd+B, type, Cmd+Z, Enter)",
+    fixture: kitchenSinkDoc,
+    run: async (ed) => {
+      await ed.caretAt("alpha", "end");
+      await ed.press("Enter");
+      await ed.press("j");
+      await ed.press("ArrowLeft", { shift: true });
+      await ed.press("b", { meta: true });
+      await ed.press("e");
+      await ed.undo();
+      await ed.press("Enter");
+    },
+    // The blanket structural-lint check carries this case.
+    expectAfter: () => {},
   },
 
   // ----- select-all ---------------------------------------------------------

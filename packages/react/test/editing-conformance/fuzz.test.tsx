@@ -11,10 +11,12 @@
  *       nowhere — the reporting-only variant is a counted known finding);
  *   I4  the document saves and reloads cleanly (checked periodically);
  *   I5  undo pressed repeatedly returns the document byte-identical to the
- *       pre-sequence state, and redo the same number of times returns it to
- *       the post-sequence state (LOCAL mount; in the session mount undo is a
- *       known dead gesture — KNOWN_GAPS G1 — so the invariant weakens to
- *       "undo never changes the document").
+ *       pre-sequence state — within EditHistory's designed 200-entry depth;
+ *       a longer sequence may legitimately stop at the undo horizon, but
+ *       redo must always replay byte-exactly back to the post-sequence
+ *       state (LOCAL mount; in the session mount undo is a known dead
+ *       gesture — KNOWN_GAPS G1 — so the invariant weakens to "undo never
+ *       changes the document").
  *
  * Deterministic: mulberry32 PRNG, the seed printed with every run and every
  * violation. Violations in KNOWN families (FUZZ_ALLOWED) are counted and
@@ -148,6 +150,16 @@ const FUZZ_ALLOWED: { match: string; family: string }[] = [
     family:
       "G15 — Shift+Arrow at a paragraph end before an empty paragraph wedges the editor: no caret/selection reported, arrows cannot collapse, typing dead until a mouse click (KNOWN_GAPS select.shift-arrow-empty-para; fuzz repro: Enter, ArrowLeft, Shift+ArrowRight)",
   },
+  {
+    match: "run.content is not iterable",
+    family:
+      "G16 — crash: keystroke after undo of type-over-selection throws TypeError: run.content is not iterable (KNOWN_GAPS undo.crash-after-type-over-selection; fuzz seeds 5+6)",
+  },
+  {
+    match: "w:r holding only properties",
+    family:
+      "G17 — undo of format-over-selection then Enter strands a properties-only w:r shell (KNOWN_GAPS undo.format-selection-strands-run; fuzz seeds 6+7)",
+  },
 ];
 
 interface Violation {
@@ -187,14 +199,23 @@ async function checkResolvable(ed: Editor): Promise<string | null> {
   return "I3-soft caret/selection unreported (typing still lands)";
 }
 
-/** Undo until byte-identical to `goal` (consecutive identical states are
- * legal — caret-only checkpoints), bounded. Returns presses, or -1. */
+/** EditHistory's designed depth (core/src/edit/history.ts `limit = 200`,
+ * oldest entries evicted on push). Byte-identity to the PRE-SEQUENCE
+ * document is only promised while the whole sequence fits inside this
+ * horizon; past it, undo legitimately stops at the oldest surviving
+ * checkpoint — but redo must STILL replay byte-exactly to the final state. */
+const UNDO_DEPTH = 200;
+
+/** Undo until byte-identical to `goal`, the stack empties, or `cap` presses
+ * (consecutive identical states are legal — caret-only checkpoints).
+ * Returns the number of presses made. */
 async function undoTo(ed: Editor, goal: string, cap: number): Promise<number> {
-  for (let i = 0; ; i++) {
-    if (ed.xml() === goal) return i;
-    if (i >= cap) return -1;
+  let i = 0;
+  while (ed.xml() !== goal && ed.api.canUndo() && i < cap) {
     await ed.undo();
+    i++;
   }
+  return i;
 }
 
 /** Drive one full fuzz round (generation or replay). Returns the executed
@@ -232,13 +253,28 @@ async function drive(
     // I5 — the undo/redo ladder.
     const final = ed.xml();
     if (mode === "local") {
-      const undos = await undoTo(ed, base, script.length * 2 + 10);
-      if (undos < 0) {
-        return {
-          script,
-          violation: { step: script.length, problems: ["I5 undo never returns the pre-sequence document (byte-compare)"] },
-          allowedHits,
-        };
+      const undos = await undoTo(ed, base, script.length * 2 + 20);
+      if (ed.xml() !== base) {
+        // Short of base with entries left, or exhausted well inside the
+        // designed horizon: the stack lost state it should still hold.
+        if (ed.api.canUndo() || undos < UNDO_DEPTH - 20) {
+          return {
+            script,
+            violation: {
+              step: script.length,
+              problems: [`I5 undo (x${undos}, canUndo=${ed.api.canUndo()}) never returns the pre-sequence document (byte-compare)`],
+            },
+            allowedHits,
+          };
+        }
+        // Depth-bounded unwind: the sequence outran the 200-entry cap — by
+        // design, counted (not failed); redo-exactness below still applies.
+        allowedHits.set(
+          "I5-depth — sequence exceeded EditHistory's designed 200-entry undo depth; unwound to the horizon (redo-exactness still enforced)",
+          (allowedHits.get(
+            "I5-depth — sequence exceeded EditHistory's designed 200-entry undo depth; unwound to the horizon (redo-exactness still enforced)",
+          ) ?? 0) + 1,
+        );
       }
       for (let i = 0; i < undos; i++) await ed.redo();
       if (ed.xml() !== final) {

@@ -15,7 +15,9 @@ All gestures are dispatched as real `KeyboardEvent` / `ClipboardEvent` /
 `KNOWN_GAPS` entry, enforced in both directions (an unlisted failure fails
 the suite; a listed entry that starts passing also fails the suite). The
 fuzzer ran 50,000 steps (2,500 x seeds 1-10 x both modes, mulberry32,
-deterministic) plus the default smoke run.
+deterministic) plus the default smoke run. Final suite shape: 80 cases x 2
+modes + companions = 321 matrix tests, 36 KNOWN_GAPS entries covering 115
+case results.
 
 ## The three known bugs (excluded from ranking — harness validation)
 
@@ -38,9 +40,9 @@ deterministic) plus the default smoke run.
 
 ## Ranked findings
 
-Severity ranks user impact of the interactive loop. "Layer" is the suspected
-owning code, from reading the gesture path (`core/src/edit/editor.ts` unless
-noted).
+Severity ranks user impact of the interactive loop; F-numbers are discovery
+order, the list is severity order. "Layer" is the suspected owning code, from
+reading the gesture path (`core/src/edit/editor.ts` unless noted).
 
 **F1 - CRITICAL - G15 — keyboard selection wedges the editor at an empty
 paragraph.** `Shift+ArrowRight` at the end of a paragraph whose next
@@ -53,6 +55,28 @@ keystroke is swallowed until a mouse click. Both mounts. Found by the fuzzer
 Fuzz observed the wedged state ~800-1,100 step-observations per session
 seed. Layer: `moveFocus`/`stepPoint` + selection-segment derivation for
 empty-paragraph placeholder runs.
+
+**F14 - CRITICAL (crash) - G16 — keystroke after undo of
+type-over-selection throws.** In the local mount (real undo), undoing a
+character typed over a keyboard selection leaves a caret/run binding whose
+shape the next keystroke cannot consume: the keydown listener throws
+`TypeError: run.content is not iterable` and the gesture is lost. Found by
+the fuzzer, two independent seeds; minimal repros (kitchen-sink fixture,
+caret after "alpha"): seed 5 — `pasteHtml <b>bold</b>, Backspace, Home,
+Shift+ArrowLeft, type f, Cmd+Z, type f`; seed 6 — `Shift+Enter, Backspace,
+Backspace, Delete, Shift+ArrowLeft, type i, Cmd+Z, Backspace`. Pinned as
+`undo.crash-after-type-over-selection`. The session mount is immune only
+because its undo is dead (G1) — fixing G1 without fixing this imports the
+crash into likeoffice. Layer: history restore -> caret rebinding
+(`applyHistory` / `positionCaret` run binding).
+
+**F15 - MEDIUM-HIGH - G17 — undo of format-over-selection then Enter strands
+a properties-only run.** Local mount: `Enter, type j, Shift+ArrowLeft,
+Cmd+B, type e, Cmd+Z, Enter` leaves a `w:r` holding only `rPr` (structural
+lint violation; fuzz seeds 6 and 7). In the session mount the same sequence
+strands a zero-length `w:t` instead (G13 family). Pinned as
+`undo.format-selection-strands-run`. Layer: history text-leaf restore vs
+runs created by `applyRunFormat` splitting.
 
 **F2 - HIGH - G14 — Enter with an active selection is a complete no-op.**
 Word deletes the selection and splits at that point. Both mounts
@@ -129,13 +153,29 @@ safety half — table structure always survives — PASSES
 (`backspace.across-cell-structure`). Layer: `edit/selection.ts` has no
 cell-granular selection mode.
 
+## Sweep summary (2,500 steps x seeds 1-10 x mode)
+
+- session: all 10 seeds green; known families counted — G13 strands
+  (~30k-56k step-observations per seed once a strand persists) and G15
+  wedge states (~640-1,100 per seed). No crash, no save/reload failure.
+- local: all 10 seeds green after G16/G17 were pinned; G16 crash hit in
+  seeds 5, 6, 9; G17 strand in seeds 6, 7, 9; every seed exceeded the
+  200-entry undo depth exactly once and redo replayed byte-exactly from the
+  horizon every time.
+
 ## What held (worth knowing)
 
-- No listener ever threw across the fuzz sweep + the matrix (I1).
+- No listener ever threw across the fuzz sweep + the matrix (I1) — except
+  the G16 crash family above, which is pinned and counted.
 - Every post-gesture document saved and reloaded byte-stably (I4) — no case
   or fuzz step produced an unloadable .docx.
 - LOCAL undo/redo is byte-exact for every matrix case and every fuzz seed
-  once the ladder unwinds multi-checkpoint gestures (I5).
+  once the ladder unwinds multi-checkpoint gestures (I5). One spec discovery
+  (not a defect): `EditHistory` keeps a designed 200-entry undo depth
+  (`core/src/edit/history.ts` `limit = 200`, oldest evicted) — a 2,500-step
+  sequence therefore unwinds only to the horizon. The I5 invariant respects
+  the horizon, and REDO from it still replays byte-exactly to the final
+  state on every seed.
 - Table integrity: no gesture sequence ever merged/destroyed cells or rows
   outside explicit table ops; Tab nav/append-row and cell-local editing all
   conform.
@@ -146,7 +186,9 @@ cell-granular selection mode.
 ## Fuzzer runbook
 
 Default (CI smoke): 120 steps x seeds {1,2} x both modes, green with known
-families counted. Scale: `FUZZ_STEPS=2500 FUZZ_SEEDS=1,...,10` (see
+families counted. The undo invariant honors EditHistory's designed
+200-entry depth: within it, undo must return the pre-sequence bytes; past
+it, undo may stop at the horizon but redo must still replay byte-exactly. Scale: `FUZZ_STEPS=2500 FUZZ_SEEDS=1,...,10` (see
 fuzz.test.tsx header). Any new violation is ddmin-minimized (wall-clock
 bounded) and fails with `seed`, `mode`, `step`, and the minimal gesture
 script as JSON.

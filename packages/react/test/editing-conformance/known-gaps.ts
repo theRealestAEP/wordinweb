@@ -106,6 +106,21 @@ export const KNOWN_GAPS: Record<string, string> = {
   // invariant is asserted separately and passes).
   "session/backspace.across-cell-word-semantics": "cross-cell delete is character-wise (Word clears whole selected cells)",
   "local/backspace.across-cell-word-semantics": "cross-cell delete is character-wise (Word clears whole selected cells)",
+
+  // G16 — CRASH (found by the fuzzer, seeds 5 and 6, local mount): the next
+  // keystroke after undoing a type-over-keyboard-selection throws
+  // "TypeError: run.content is not iterable" from the keydown listener — the
+  // history restore leaves a caret/run binding of the wrong shape. The
+  // session mount is immune only because its undo is dead (G1).
+  "local/undo.crash-after-type-over-selection": "next keystroke after undo of type-over-selection throws TypeError: run.content is not iterable",
+  "local/undoredo.undo.crash-after-type-over-selection": "the undo/redo ladder over the G16 sequence hits the same TypeError",
+
+  // G17 — undo of a format-over-selection then Enter strands structure
+  // (fuzzer, seeds 6 and 7): a properties-only w:r shell in the local mount
+  // (real undo); in the session mount (undo dead) the same sequence strands
+  // a zero-length w:t — the G13 family.
+  "local/undo.format-selection-strands-run": "undo of Cmd+B-over-selection then Enter strands a properties-only w:r shell",
+  "session/undo.format-selection-strands-run": "the same sequence with dead undo strands a zero-length w:t (G13 family)",
 };
 
 /** Match a case id against the table (exact first, then prefix entries). */
