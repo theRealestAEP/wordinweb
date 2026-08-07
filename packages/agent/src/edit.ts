@@ -20,6 +20,7 @@ interface CompileContext {
  * for a merge. */
 const SUGGESTABLE_KINDS = new Set<Intent["kind"]>([
   "insertText",
+  "insertSeparator",
   "splitParagraph",
   "mergeParagraph",
   "formatRun",

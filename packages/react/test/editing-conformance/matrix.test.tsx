@@ -1054,7 +1054,11 @@ const shiftEnterTable = CASES.find((c) => c.id === "shiftenter.table-cell")!;
 shiftEnterTable.expectAfter = (ed) => {
   expect(ed.xml()).toContain("<w:br");
   expect(cells(ed)).toBe(4);
-  expect(paras(ed)).toBe(7); // 5 cell/body paras + before/after — unchanged
+  // Unchanged paragraph count: before + 4 cell paras + after. (The guard
+  // originally said 7 while its own comment said "unchanged" — authored
+  // while the whole shiftenter family was ledgered, so it had never run
+  // green; 6 is the fixture's actual count.)
+  expect(paras(ed)).toBe(6);
 };
 
 // ---------------------------------------------------------------------------

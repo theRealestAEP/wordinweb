@@ -36,6 +36,10 @@ export function runEditsOf(intent: Intent): RunEdit[] {
   switch (intent.kind) {
     case "insertText":
       return [{ runId: intent.at.runId, at: intent.at.offset, del: 0, ins: intent.text.length }];
+    case "insertSeparator":
+      // In-run w:t split around a one-unit separator: exactly an insert of
+      // length one in the run's separator-counting wire basis.
+      return [{ runId: intent.at.runId, at: intent.at.offset, del: 0, ins: 1 }];
     case "deleteText":
       return [{ runId: intent.runId, at: intent.start, del: intent.end - intent.start, ins: 0 }];
     case "splitParagraph":
@@ -235,6 +239,8 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
   if (isRegisteredIntent(intent)) return { ...intent, base: newBase };
   switch (intent.kind) {
     case "insertText":
+      return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
+    case "insertSeparator":
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
     case "splitParagraph":
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };

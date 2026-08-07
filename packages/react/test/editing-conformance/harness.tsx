@@ -283,8 +283,30 @@ export function structuralLint(doc: DocxDocument): string[] {
       }
       const ts = runs.flatMap((r) => r.children.filter((c) => localName(c.name) === "t"));
       const emptyTs = ts.filter((t) => t.text.length === 0);
-      if (emptyTs.length > 0 && (ts.length > 1 || runs.length > 1))
-        problems.push("zero-length w:t stranded beside other content");
+      if (emptyTs.length > 0 && (ts.length > 1 || runs.length > 1)) {
+        // Exemption: a zero-length w:t ADJACENT to an inline separator
+        // (br/tab/cr) in the paragraph's content order is the caret home a
+        // soft line break / tab needs (Word's files just end the run with
+        // the bare separator; our caret model keeps a placeholder to type
+        // into). Everything else is a stranded run no load path produces.
+        const atoms: (XmlElement | "sep")[] = [];
+        const collectAtoms = (e: XmlElement): void => {
+          for (const c of e.children) {
+            const n = localName(c.name);
+            if (n === "pPr" || n === "rPr") continue;
+            if (n === "t") atoms.push(c);
+            else if (n === "br" || n === "tab" || n === "cr") atoms.push("sep");
+            else collectAtoms(c);
+          }
+        };
+        collectAtoms(el);
+        const exempt = (t: XmlElement): boolean => {
+          const i = atoms.indexOf(t);
+          return i !== -1 && (atoms[i - 1] === "sep" || atoms[i + 1] === "sep");
+        };
+        if (emptyTs.some((t) => !exempt(t)))
+          problems.push("zero-length w:t stranded beside other content");
+      }
     }
     if (name === "ins" || name === "del") {
       if (el.children.length === 0) problems.push(`empty tracked-change marker w:${name}`);

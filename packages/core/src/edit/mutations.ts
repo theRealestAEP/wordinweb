@@ -2,7 +2,7 @@ import { XmlElement, cloneXml, localName } from "../xml.js";
 import { Run } from "../model.js";
 import { DocxDocument } from "../docx.js";
 import { checkboxStateElement } from "../checkbox.js";
-import { insertSuggestedText, markParagraphGlyph, RevisionMeta } from "./suggest.js";
+import { insertSuggestedSeparator, insertSuggestedText, markParagraphGlyph, RevisionMeta } from "./suggest.js";
 
 /**
  * Editor-level document mutations, extracted from DocxEditor so they operate
@@ -78,6 +78,61 @@ export function applyDeleteRange(
   if (lo >= hi) return caret;
   caret.t.text = caret.t.text.slice(0, lo) + caret.t.text.slice(hi);
   return { t: caret.t, run: caret.run, offset: lo, bias: "end" };
+}
+
+/**
+ * Insert an inline separator — a soft line break (w:br, Shift+Enter) or a
+ * tab character (w:tab, Tab in a body paragraph) — at the caret.
+ *
+ * Plain mode splits the caret's w:t IN PLACE inside its run
+ * (`…<w:t>head</w:t><w:br/><w:t>tail</w:t>…`): no new run is created, so
+ * every stable id survives, and on the wire the edit is a ONE-UNIT insert in
+ * the run's separator-counting offset basis (see runWireLength) — the same
+ * transform shape as inserting one character. At the very end of the text
+ * the tail w:t is a zero-length caret home (the placeholder the caret model
+ * needs to type after a trailing separator; Word's own files just end with
+ * the bare separator). Suggesting mode records the separator as a w:ins
+ * sibling instead (insertSuggestedSeparator).
+ *
+ * Returns the caret AFTER the separator, or null when the caret is not
+ * inside a run.
+ */
+export function applyInsertSeparator(
+  doc: DocxDocument,
+  caret: EditCaret,
+  separator: "br" | "tab",
+  ctx: MutationCtx,
+): EditCaret | null {
+  if (checkboxStateElement(caret.run, caret.t)) return null;
+  const rEl = doc.findParentOf(caret.t);
+  if (!rEl || localName(rEl.name) !== "r") return null;
+  if (ctx.suggesting) {
+    const nc = insertSuggestedSeparator(doc, caret.t, caret.offset, separator, ctx.revMeta());
+    return nc ? { t: nc.t, run: caret.run, offset: nc.offset } : null;
+  }
+  const w = rEl.name.includes(":") ? rEl.name.slice(0, rEl.name.indexOf(":") + 1) : "";
+  const sepEl: XmlElement = { name: `${w}${separator}`, attrs: {}, children: [], text: "" };
+  const tIdx = rEl.children.indexOf(caret.t);
+  if (tIdx === -1) return null;
+  if (caret.offset <= 0) {
+    // No split needed: the separator lands before the whole w:t, which stays
+    // the caret home (it IS the text after the break).
+    rEl.children.splice(tIdx, 0, sepEl);
+    doc.noteParent(sepEl, rEl);
+    return { t: caret.t, run: caret.run, offset: 0 };
+  }
+  const tailT: XmlElement = {
+    name: caret.t.name,
+    attrs: { ...caret.t.attrs, "xml:space": "preserve" },
+    text: caret.t.text.slice(caret.offset),
+    children: [],
+  };
+  caret.t.text = caret.t.text.slice(0, caret.offset);
+  caret.t.attrs["xml:space"] = "preserve";
+  rEl.children.splice(tIdx + 1, 0, sepEl, tailT);
+  doc.noteParent(sepEl, rEl);
+  doc.noteParent(tailT, rEl);
+  return { t: tailT, run: caret.run, offset: 0 };
 }
 
 /** Result of a paragraph split: the two sibling paragraph elements and the
@@ -188,9 +243,88 @@ export function applySplitParagraph(
   doc.noteParent(afterT, afterRun);
   for (const child of moved) doc.noteParent(child, newP);
 
+  // Word's next-style rule: Enter at the very END of a styled paragraph (the
+  // new paragraph is empty) starts the style's w:next — a heading is followed
+  // by Normal, never another heading. Mid-paragraph splits keep the style on
+  // both halves. Runs here AND in the collab apply (this same function), so
+  // every replica derives the identical style from identical styles.xml.
+  if (!splitParagraphHasContent(newP)) applyNextStyleToSplit(doc, newP);
+
   // Suggesting mode: the split introduces a new paragraph mark at the end of
   // the FIRST paragraph — record it as an inserted glyph (pPr/rPr/w:ins).
   if (ctx.suggesting) markParagraphGlyph(pEl, "ins", ctx.revMeta());
 
   return { before: pEl, after: newP, caret: { t: afterT, run: caret.run, offset: 0 } };
+}
+
+/** Any visible content in a split-off paragraph: nonempty text, or any inline
+ * element beyond properties (br/tab/drawing/field/…). */
+function splitParagraphHasContent(pEl: XmlElement): boolean {
+  const scan = (e: XmlElement): boolean => {
+    for (const c of e.children) {
+      const n = localName(c.name);
+      if (n === "pPr" || n === "rPr") continue;
+      if (n === "t" || n === "delText") {
+        if (c.text.length > 0) return true;
+        continue;
+      }
+      if (n === "r" || n === "ins" || n === "del" || n === "hyperlink" || n === "smartTag" || n === "sdt" || n === "sdtContent") {
+        if (scan(c)) return true;
+        continue;
+      }
+      return true; // br, tab, drawing, field chrome, … all count as content
+    }
+    return false;
+  };
+  return scan(pEl);
+}
+
+/**
+ * Apply the split paragraph's style's next-style (w:next) to the freshly
+ * created empty paragraph. Word's rules, resolved from styles.xml:
+ *  - an explicit w:next different from the style itself wins;
+ *  - a HEADING definition without w:next takes Normal (Word's built-in
+ *    headings all declare next=Normal; minimal styles parts omit it);
+ *  - any other style without w:next continues itself (the OOXML default —
+ *    ListParagraph, Quote, … keep chaining on Enter).
+ * "Normal" (or the document's default paragraph style) applies by REMOVING
+ * the pStyle reference — the shape Word writes for default-styled text.
+ */
+function applyNextStyleToSplit(doc: DocxDocument, newP: XmlElement): void {
+  const pPr = newP.children.find((c) => localName(c.name) === "pPr");
+  const pStyle = pPr?.children.find((c) => localName(c.name) === "pStyle");
+  if (!pPr || !pStyle) return;
+  const valKey = Object.keys(pStyle.attrs).find((k) => localName(k) === "val");
+  const styleId = valKey ? pStyle.attrs[valKey] : undefined;
+  if (!styleId) return;
+
+  const stylesRoot = doc.stylesTree();
+  const styleEl = stylesRoot?.children.find(
+    (c) =>
+      localName(c.name) === "style" &&
+      Object.entries(c.attrs).some(([k, v]) => localName(k) === "styleId" && v === styleId),
+  );
+  const nextEl = styleEl?.children.find((c) => localName(c.name) === "next");
+  const nextVal = nextEl
+    ? Object.entries(nextEl.attrs).find(([k]) => localName(k) === "val")?.[1]
+    : undefined;
+
+  let nextId: string | undefined = nextVal;
+  if (nextId === undefined) {
+    const stylePPr = styleEl?.children.find((c) => localName(c.name) === "pPr");
+    const isHeading =
+      /^Heading\d+$/i.test(styleId) ||
+      !!stylePPr?.children.some((c) => localName(c.name) === "outlineLvl");
+    if (!isHeading) return; // no w:next, not a heading: the style continues
+    nextId = "Normal";
+  }
+  if (nextId === styleId) return;
+
+  const isDefault =
+    nextId === "Normal" || nextId === doc.styles.defaultParagraphStyle;
+  if (isDefault) {
+    pPr.children = pPr.children.filter((c) => c !== pStyle);
+  } else {
+    pStyle.attrs[valKey!] = nextId;
+  }
 }

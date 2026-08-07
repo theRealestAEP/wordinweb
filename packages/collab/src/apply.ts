@@ -7,6 +7,7 @@ import {
   applyInsertText,
   applySplitParagraph,
   applyDeleteRange,
+  applyInsertSeparator,
   applyRunFormat,
   setParagraphAlignment,
   setParagraphStyle,
@@ -245,6 +246,27 @@ function applyIntentInner(
       applyInsertText(doc, caret, intent.text, ctx);
       // Plain typing splices characters into one w:t — the whole blast radius
       // is the addressed paragraph (perf B9/B10: this is THE hot path).
+      out.scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+      return true;
+    }
+    case "insertSeparator": {
+      const caret = resolveCaret(ids, runOf, intent.at);
+      if (!caret) return false;
+      if (intent.suggest) {
+        // Tracked separator: a w:ins sibling with carried author/date (the
+        // same scoped-reparse discipline the suggest insertText apply uses —
+        // run splits without carried ids resync by parse order).
+        const s = intent.suggest;
+        const suggestCtx = { suggesting: true, revMeta: () => ({ author: s.author, date: s.date, nextId: () => doc.nextRevisionId() }) };
+        const scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+        if (!applyInsertSeparator(doc, caret, intent.separator, suggestCtx)) return false;
+        if (doc.stableIds) resyncScope(doc, ids, scope);
+        out.scope = scope;
+        return true;
+      }
+      // Plain: an in-run w:t split around the separator — no run is created
+      // or removed, so no id changes and the paragraph is the blast radius.
+      if (!applyInsertSeparator(doc, caret, intent.separator, ctx)) return false;
       out.scope = blockScope(ids, intent.at.blockId, intent.at.runId);
       return true;
     }

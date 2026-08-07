@@ -76,6 +76,22 @@ export interface InsertTextIntent extends IntentBase {
   suggest?: { author: string; date: string };
 }
 
+/**
+ * Insert an inline separator — a soft line break (w:br, Shift+Enter) or a
+ * tab character (w:tab, Tab in a body paragraph) — at a position. The
+ * mutation splits the addressed run's w:t IN PLACE (no new run, every stable
+ * id preserved), and a separator counts ONE unit in the run's wire-offset
+ * basis (core runWireLength), so the transform is exactly an insertText of
+ * length one. With `suggest` the separator is recorded as a w:ins sibling
+ * (insertSuggestedSeparator) like a typed suggestion.
+ */
+export interface InsertSeparatorIntent extends IntentBase {
+  kind: "insertSeparator";
+  at: Position;
+  separator: "br" | "tab";
+  suggest?: SuggestMeta;
+}
+
 /** Delete `[start, end)` characters within a single run. */
 export interface DeleteTextIntent extends IntentBase {
   kind: "deleteText";
@@ -455,6 +471,7 @@ export function isRegisteredIntent(intent: Intent): intent is RegisteredIntent {
 
 export type Intent =
   | InsertTextIntent
+  | InsertSeparatorIntent
   | DeleteTextIntent
   | SplitParagraphIntent
   | FormatRunIntent
@@ -542,6 +559,7 @@ const HAND_WRITTEN_INTENT_KIND_MAP: Record<
   true
 > = {
   insertText: true,
+  insertSeparator: true,
   deleteText: true,
   splitParagraph: true,
   formatRun: true,

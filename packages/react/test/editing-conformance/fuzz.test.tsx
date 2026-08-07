@@ -142,13 +142,12 @@ async function applyGesture(ed: Editor, g: Gesture): Promise<void> {
 const FUZZ_ALLOWED: { match: string; family: string }[] = [
   {
     match: "zero-length w:t stranded",
-    family: "G13 — paragraph merges strand a zero-length placeholder w:t (KNOWN_GAPS backspace.empty-paragraph / backspace.list-*)",
+    family: "G13 (residual) — char-wise deletes can empty ONE w:t beside populated runs; the merge half is FIXED (mergeParagraphBackward drops placeholder runs)",
   },
-  {
-    match: "I3",
-    family:
-      "G15 — Shift+Arrow at a paragraph end before an empty paragraph wedges the editor: no caret/selection reported, arrows cannot collapse, typing dead until a mouse click (KNOWN_GAPS select.shift-arrow-empty-para; fuzz repro: Enter, ArrowLeft, Shift+ArrowRight)",
-  },
+  // G15 (the Shift+Arrow-into-empty-paragraph wedge, formerly the "I3" family
+  // here) is FIXED — zero-segment selections collapse via selection points and
+  // delete their covered paragraph mark. Deliberately NOT allowed anymore: a
+  // recurrence of any I3 resolvability loss must fail loudly with a repro.
   // G16 (keystroke after undo of type-over-selection threw "run.content is
   // not iterable") is FIXED — checkboxStateElement tolerates unbound
   // placeholder caret runs. Deliberately NOT allowed here anymore: a

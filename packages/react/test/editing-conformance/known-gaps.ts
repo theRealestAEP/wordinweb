@@ -18,21 +18,24 @@ export const KNOWN_GAPS: Record<string, string> = {
   // useAgentDocumentSession via collab.noteLocalHistory), so every
   // session/undoredo.* companion passes.
 
-  // G2 — Shift+Enter splits the paragraph exactly like Enter; Word inserts a
-  // soft line break (w:br) and keeps one paragraph.
-  "session/shiftenter.*": "Shift+Enter splits the paragraph instead of inserting a w:br soft line break",
-  "local/shiftenter.*": "Shift+Enter splits the paragraph instead of inserting a w:br soft line break",
+  // G2 — FIXED: Shift+Enter inserts a w:br soft line break in-paragraph via
+  // applyInsertSeparator (in-run w:t split; insertSeparator intent — a
+  // one-unit wire insert). Word-contract residual, recorded honestly:
+  // Backspace/Delete are not yet separator-aware, so the caret steps PAST a
+  // soft break and deletes the neighboring character instead of the break
+  // itself; the break disappears only with its paragraph.
 
-  // G3 — Tab in a plain body paragraph is a silent no-op; Word inserts a tab
-  // character (or first-line indent at paragraph start).
-  "session/tab.plain-paragraph": "Tab in a body paragraph is a no-op (Word inserts a tab character)",
-  "local/tab.plain-paragraph": "Tab in a body paragraph is a no-op (Word inserts a tab character)",
+  // G3 — FIXED (with a documented approximation): Tab in a plain body
+  // paragraph inserts a w:tab character via the insertSeparator machinery.
+  // Word nuance kept as a divergence, honestly: at the EXACT paragraph start
+  // Word steps the first-line indent instead of inserting a tab character;
+  // the engine inserts the tab character there too.
 
-  // G4 — Cmd+B/I/U at a collapsed caret set no pending format: the next typed
-  // character comes out unformatted. Word toggles formatting for what is
-  // typed next. (onKeyDown only forwards the shortcut when hasSelection().)
-  "session/format.caret-*": "Cmd+B/I/U at a collapsed caret is a no-op (Word makes the next typed text formatted)",
-  "local/format.caret-*": "Cmd+B/I/U at a collapsed caret is a no-op (Word makes the next typed text formatted)",
+  // G4 — FIXED: Cmd+B/I/U at a collapsed caret queue a pending toggle
+  // (editor.pendingFormat) that the next insertText consumes by formatting
+  // the typed range through the host's shortcut path (canonical
+  // formatRun/formatRange intents, suggest-aware). Any other gesture —
+  // arrows, clicks, deletes — clears the queue, like Word.
 
   // G5 — FIXED: rich (text/html and internal OOXML-flavor) paste now follows
   // Word's fragment semantics — a one-paragraph paste lands INLINE at the
@@ -50,11 +53,9 @@ export const KNOWN_GAPS: Record<string, string> = {
   // mount; Word removes it and leaves one empty paragraph.
   "session/selectall.delete-with-table": "select-all + delete leaves the table standing (Word removes it, leaving one empty paragraph)",
 
-  // G18 (introduced/exposed by 734b6a8) — deleting an empty list item and
-  // then a character strands a zero-length run where the unbullet/merge
-  // rebind happened. Structural-lint class; visible only in the XML.
-  "session/backspace.list-item-empty-then-char": "the unbullet/merge path strands a zero-length run",
-  "local/backspace.list-item-empty-then-char": "the unbullet/merge path strands a zero-length run",
+  // G18 — FIXED with G13: mergeParagraphBackward leaves the merged
+  // paragraph's blank placeholder runs behind, so the unbullet/merge path
+  // strands nothing.
 
   // G8 — deleting a selection that spans a paragraph boundary deletes the
   // characters but KEEPS the boundary; Word merges the two paragraphs.
@@ -64,36 +65,30 @@ export const KNOWN_GAPS: Record<string, string> = {
   // plain text) and only a second Backspace merges. The empty-item variant is
   // the reported "undeletable/mishandled empty list item" family.
 
-  // G10 — Enter at the end of a heading carries Heading1 onto the new
-  // paragraph; Word applies the style's next-style (Normal).
-  "session/enter.heading-end": "the paragraph created after a heading keeps the heading style (Word switches to Normal)",
-  "local/enter.heading-end": "the paragraph created after a heading keeps the heading style (Word switches to Normal)",
+  // G10 — FIXED: applySplitParagraph applies the style's next-style (w:next;
+  // a heading without one defaults to Normal, other styles continue
+  // themselves) to the empty paragraph an end-of-paragraph Enter creates —
+  // in the shared mutation, so every replica derives the same style.
 
-  // G11 — Shift+Tab on a level-0 list item is a no-op; Word promotes the item
-  // out of the list into a body paragraph.
-  "session/shifttab.list-item-level0": "Shift+Tab at list level 0 is a no-op (Word converts the item to a body paragraph)",
-  "local/shifttab.list-item-level0": "Shift+Tab at list level 0 is a no-op (Word converts the item to a body paragraph)",
+  // G11 — FIXED: Shift+Tab on a level-0 list item promotes it out of the
+  // list into a body paragraph — the same canonical unbullet Backspace at a
+  // list-item start uses (setListType(null) + intent; tracked w:pPrChange in
+  // suggesting mode). Deeper levels still step one level per press.
 
-  // G13 — removing an empty paragraph (Backspace inside it, or Backspace at
-  // the following paragraph's start) merges the empty paragraph's placeholder
-  // run into the neighbor, stranding a zero-length w:t beside real content —
-  // a structural-lint violation, not just a cosmetic one.
-  "session/backspace.empty-paragraph": "deleting an empty paragraph strands its zero-length placeholder w:t inside the merged paragraph",
-  "local/backspace.empty-paragraph": "deleting an empty paragraph strands its zero-length placeholder w:t inside the merged paragraph",
+  // G13 — FIXED (merge half): mergeParagraphBackward drops the merged
+  // paragraph's blank placeholder runs (rPr + zero-length w:t) instead of
+  // splicing them beside real content. Char-wise deletes that empty ONE w:t
+  // beside populated runs can still strand (fuzz family stays counted).
 
-  // G14 — Enter with an active selection is a complete no-op; Word deletes
-  // the selection and splits the paragraph at that point.
-  "session/enter.over-selection": "Enter with an active selection is a no-op (Word deletes the selection, then splits)",
-  "local/enter.over-selection": "Enter with an active selection is a no-op (Word deletes the selection, then splits)",
+  // G14 — FIXED: Enter with an active selection now composes
+  // removeSelectedText (canonical delete + intents) with the ordinary split,
+  // exactly like typing over a selection.
 
-  // G15 — THE WEDGE (found by the fuzzer, seeds 1 and 2): Shift+ArrowRight at
-  // the end of a paragraph whose NEXT paragraph is empty produces a zero-width
-  // focus selection with no caret — after it, no caret or selection is
-  // reported, arrow keys cannot collapse, and every typed character is
-  // swallowed until a mouse click. Crossing into a NONEMPTY paragraph works
-  // (select.shift-arrow-mid-text and the across-para cases pass).
-  "session/select.shift-arrow-empty-para": "Shift+Arrow at a paragraph end before an empty paragraph wedges the editor (no caret/selection, typing dead until a mouse click)",
-  "local/select.shift-arrow-empty-para": "Shift+Arrow at a paragraph end before an empty paragraph wedges the editor (no caret/selection, typing dead until a mouse click)",
+  // G15 — FIXED: the Shift+Arrow-into-empty-paragraph wedge. A selection with
+  // no character segments now still collapses (arrow keys use the selection
+  // POINTS) and still deletes its covered paragraph mark (removeSelectedText
+  // derives the spanned paragraphs from the selection endpoints), so typing
+  // over it merges the paragraphs and lands the character — Word's contract.
 
   // G12 — a selection extended across a table-cell boundary deletes
   // character-wise; Word switches to whole-cell selection and clears the

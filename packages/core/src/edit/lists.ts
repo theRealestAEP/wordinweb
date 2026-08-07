@@ -83,6 +83,19 @@ function createListNum(doc: DocxDocument, kind: ListKind): number | null {
   return numId;
 }
 
+/** The direct-numPr list level (0..8) of the paragraph containing `target`,
+ * or null when it is not a direct list item. */
+export function listLevelAt(doc: DocxDocument, target: XmlElement): number | null {
+  const pEl = paragraphOf(doc, target);
+  if (!pEl) return null;
+  const pPr = pEl.children.find((c) => localName(c.name) === "pPr");
+  const numPr = pPr?.children.find((c) => localName(c.name) === "numPr");
+  if (!numPr) return null;
+  const ilvl = numPr.children.find((c) => localName(c.name) === "ilvl");
+  if (!ilvl) return 0;
+  return parseInt(attr(ilvl, "val") ?? "0", 10) || 0;
+}
+
 /** Step the list level of the target paragraphs (Tab / Shift-Tab), 0..8. */
 export function setListLevel(doc: DocxDocument, targets: XmlElement[], delta: 1 | -1): boolean {
   const paragraphs = new Set<XmlElement>();

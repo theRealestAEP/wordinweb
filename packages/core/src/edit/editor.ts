@@ -9,7 +9,7 @@ import { runWireLength, wireOffsetOf, type EncodedCaret } from "./ids.js";
 import { EditHistory } from "./history.js";
 import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
 import { pxToTwips } from "../units.js";
-import { listTypeAt, setListLevel, setListType } from "./lists.js";
+import { listLevelAt, listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
 import { documentOperationBody, operationBody, type RegisteredOperationBody } from "./registry.js";
 import { deleteMath, isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
@@ -166,7 +166,7 @@ export function availableObjectCommands(
 }
 import { graphemeStep } from "./grapheme.js";
 import { EditProvenance, defaultProvenance } from "./provenance.js";
-import { applyInsertText, applySplitParagraph, applyDeleteRange, MutationCtx } from "./mutations.js";
+import { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator, MutationCtx } from "./mutations.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
 import { resolveParagraphStyleChain } from "../parse/styles.js";
 import {
@@ -309,12 +309,14 @@ export interface EditorHost {
 export type EditorIntent =
   | RegisteredOperationBody
   | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string; suggest?: { author: string; date: string } }
+  | { kind: "insertSeparator"; at: { blockId: number; runId: number; offset: number }; separator: "br" | "tab"; suggest?: { author: string; date: string } }
   | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
   | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number; suggest?: { author: string; date: string } }
   | { kind: "formatRun"; blockId: number; runId: number; patch: Record<string, unknown> }
   | { kind: "formatRange"; blockId: number; runId: number; start: number; end: number; patch: Record<string, unknown>; beforeId?: number; middleId: number; afterId?: number }
   | { kind: "formatParagraph"; blockId: number; align?: "left" | "center" | "right" | "justify"; styleId?: string | null }
   | { kind: "mergeParagraph"; blockId: number }
+  | { kind: "setListLevel"; blockId: number; delta: 1 | -1 }
   | { kind: "pasteBlocks"; afterBlockId: number; blocksXml: string; nodeIds: number[] }
   | {
       kind: "suggestRevision";
@@ -535,6 +537,12 @@ export class DocxEditor {
   private imeEl: HTMLTextAreaElement;
   private imeOverlay: HTMLSpanElement | null = null;
   private composing = false;
+
+  /** Word's pending format: Cmd+B/I/U at a COLLAPSED caret queues a toggle
+   * that applies to the next typed text. Members are toggle keys (pressing
+   * the same shortcut twice cancels). Consumed by insertText; cleared by any
+   * other gesture (caret movement, clicks, deletes — Word's behavior). */
+  private pendingFormat: Set<"bold" | "italic" | "underline"> | null = null;
 
   /** Suggesting mode: edits record as OOXML revisions (w:ins/w:del) instead of
    * mutating text directly. Toggled via setSuggesting; forces markup view so a
@@ -804,6 +812,16 @@ export class DocxEditor {
     if (this.selection) return this.selection.anchor;
     if (this.caret) return { t: this.caret.t, offset: this.caret.offset };
     return null;
+  }
+
+  /** The owned selection's anchor and focus in paint order (a keyboard
+   * selection extended leftward has its focus before its anchor). Falls back
+   * to anchor-then-focus when either point cannot be ranked (unpainted). */
+  private orderedSelectionPoints(): [SelPoint, SelPoint] {
+    const sel = this.selection!;
+    const a = this.pointIndex(sel.anchor);
+    const f = this.pointIndex(sel.focus);
+    return a !== null && f !== null && f < a ? [sel.focus, sel.anchor] : [sel.anchor, sel.focus];
   }
 
   /** Step a point by one character across item boundaries in paint order. */
@@ -2661,6 +2679,7 @@ export class DocxEditor {
   /** Track a potential drag-selection from a text mousedown. */
   private beginSelectionDrag(e: MouseEvent): void {
     if (e.button !== 0) return;
+    this.pendingFormat = null; // clicking moves the caret: pending format dies
     const anchor = this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     if (!anchor) return;
     // Respect the header/footer gate for selection too, in both directions:
@@ -4797,6 +4816,7 @@ export class DocxEditor {
     }
     this.pendingClickTypeCheckpoint = false;
     this.clickTypeCheckpointUntil = 0;
+    this.pendingFormat = null; // clicking moves the caret: pending format dies
     if (this.dragSelecting) {
       // Finalize a drag-selection: keep it, don't collapse to a caret.
       this.dragSelecting = false;
@@ -6072,6 +6092,16 @@ export class DocxEditor {
       this.pendingClickTypeCheckpoint = false;
       this.clickTypeCheckpointUntil = 0;
     }
+    // Pending caret format (Cmd+B/I/U with no selection) survives only until
+    // the next gesture: a plain typed character consumes it (insertText), the
+    // format shortcuts themselves stack/toggle it, and everything else — any
+    // caret movement, delete, Enter, shortcut — clears it, like Word.
+    if (this.pendingFormat) {
+      const mod = e.metaKey || e.ctrlKey;
+      const isFormatKey = mod && !e.altKey && ["b", "i", "u"].includes(e.key.toLowerCase());
+      const isPlainChar = e.key.length === 1 && !mod && !e.altKey;
+      if (!isFormatKey && !isPlainChar) this.pendingFormat = null;
+    }
     if (this.textContextMenu) {
       if (e.key === "Escape") e.preventDefault();
       this.dismissTextContextMenu();
@@ -6271,9 +6301,34 @@ export class DocxEditor {
       if (listTypeAt(this.host.doc, this.caret.t)) {
         e.preventDefault();
         this.host.history?.checkpoint();
+        // Word: Shift+Tab on a LEVEL-0 item promotes it OUT of the list into
+        // a body paragraph — the same canonical unbullet Backspace-at-start
+        // takes (setListType(null) + intent; tracked pPrChange in suggesting).
+        if (e.shiftKey && listLevelAt(this.host.doc, this.caret.t) === 0) {
+          if (this.suggesting && this.suggestUnbulletAtCaret()) return;
+          this.clearListAtCaret();
+          return;
+        }
+        const levelBlockId = this.host.onIntent && this.host.doc.stableIds
+          ? this.host.doc.stableIds.idOf(paragraphOf(this.host.doc, this.caret.t) ?? this.caret.t)
+          : undefined;
         if (setListLevel(this.host.doc, [this.caret.t], e.shiftKey ? -1 : 1)) {
+          // Replicate the step (this was a silent local-only mutation: Tab
+          // list indent never rode the wire).
+          if (levelBlockId !== undefined) {
+            this.host.onIntent?.({ kind: "setListLevel", blockId: levelBlockId, delta: e.shiftKey ? -1 : 1 });
+          }
           this.commit();
         }
+        return;
+      }
+      // G3 — Tab in a plain body paragraph inserts a tab character (Word; at
+      // the exact paragraph start Word instead steps the first-line indent —
+      // the tab character is the implemented approximation, recorded in the
+      // conformance notes). Shift+Tab stays a no-op outside tables and lists.
+      if (!e.shiftKey) {
+        e.preventDefault();
+        this.insertSeparatorAtCaret("tab");
         return;
       }
     }
@@ -6303,9 +6358,18 @@ export class DocxEditor {
         return;
       }
       if (k === "b" || k === "i" || k === "u") {
+        const kind = k === "b" ? "bold" : k === "i" ? "italic" : "underline";
         if (this.hasSelection()) {
           e.preventDefault();
-          this.host.onFormatShortcut?.(k === "b" ? "bold" : k === "i" ? "italic" : "underline");
+          this.host.onFormatShortcut?.(kind);
+        } else if (this.caret) {
+          // Word's pending format: with no selection the shortcut queues a
+          // toggle for the NEXT typed text (consumed by insertText; the same
+          // shortcut again cancels it).
+          e.preventDefault();
+          const pending = (this.pendingFormat ??= new Set());
+          if (pending.has(kind)) pending.delete(kind);
+          else pending.add(kind);
         }
         return;
       }
@@ -6362,24 +6426,29 @@ export class DocxEditor {
       this.revealCaret();
     } else if (e.key === "Enter") {
       e.preventDefault();
-      this.splitParagraph();
+      // Word: Shift+Enter is a SOFT line break (w:br) inside the paragraph —
+      // one paragraph, one list item, one style — never a split.
+      if (e.shiftKey) this.insertSeparatorAtCaret("br");
+      else this.splitParagraph();
     } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       e.preventDefault();
       const delta = e.key === "ArrowLeft" ? -1 : 1;
       if (e.shiftKey) this.moveFocus((pt) => this.stepPoint(pt, delta), true);
       else if (this.hasSelection()) {
-        // Collapse to the corresponding edge, like every editor.
-        const segs = this.getSelectionSegments();
-        const edge = delta === -1 ? segs[0] : segs[segs.length - 1];
-        if (edge?.t) {
-          this.clearSelection();
-          this.caret = {
-            t: edge.t as XmlElement,
-            run: this.caret?.run ?? ({} as Caret["run"]),
-            offset: delta === -1 ? edge.start : edge.end,
-          };
-          this.positionCaret();
-        }
+        // Collapse to the corresponding edge, like every editor. Derived from
+        // the selection POINTS, not the character segments: a selection whose
+        // focus sits in an empty paragraph covers no characters (G15, the
+        // wedge), and collapsing must still land a caret.
+        const [startPt, endPt] = this.orderedSelectionPoints();
+        const edge = delta === -1 ? startPt : endPt;
+        this.clearSelection();
+        this.caret = {
+          t: edge.t,
+          run: this.caret?.run ?? ({} as Caret["run"]),
+          offset: edge.offset,
+          bias: edge.bias,
+        };
+        this.positionCaret();
       } else if (this.caret) this.moveCaret(delta);
     } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       e.preventDefault();
@@ -6524,6 +6593,20 @@ export class DocxEditor {
     const changed = kind === "undo" ? h.undo() : h.redo();
     if (!changed) return;
     this.host.onLocalHistory?.();
+    // A history install replaces subtrees, so an active selection now
+    // references detached elements — clear it (Word collapses the selection
+    // on undo). And when the entry restored no caret (its checkpoint was
+    // taken mid-selection, before any caret location was ever banked) or the
+    // caret's element left the tree, land the caret at the document start:
+    // editing must never go dead after Cmd+Z (fuzz I3; seeds 3/4/6 found the
+    // stale-selection and no-caret variants once the wedge family stopped
+    // being an allowed violation).
+    if (this.hasSelection()) this.clearSelection();
+    if (!this.caret || !paragraphOf(this.host.doc, this.caret.t)) {
+      const home = firstTextOf(this.host.doc.editableRoots()[0]);
+      if (home) this.caret = { t: home, run: this.caret?.run ?? ({} as Caret["run"]), offset: 0 };
+      else this.caret = null;
+    }
     const textChanges = h.lastTextChanges;
     if (textChanges) {
       const blocks = new Set<XmlElement>();
@@ -6737,6 +6820,8 @@ export class DocxEditor {
     const suggestEmit = this.suggesting && !!this.caret && !!this.host.onIntent;
     const frozen = suggestEmit ? this.frozenRevMeta() : null;
     const emitPos = (!this.suggesting || suggestEmit) && this.host.onIntent && this.caret ? this.encodeCaretForIntent() : null;
+    const pending = this.pendingFormat;
+    this.pendingFormat = null;
     this.insertTextCore(text, frozen ?? undefined);
     this.commit(textOnly);
     if (emitPos) {
@@ -6746,7 +6831,35 @@ export class DocxEditor {
           : { kind: "insertText", at: emitPos, text },
       );
     }
+    // Pending caret format (Cmd+B/I/U before typing): format the just-typed
+    // range through the host's shortcut path — the same canonical mutation +
+    // intents (formatRun/formatRange, suggest-aware) the toolbar and the
+    // selection shortcut use — then collapse back to a trailing caret.
+    if (pending && pending.size > 0) this.applyPendingFormat(pending, text.length);
     return true;
+  }
+
+  /** Apply queued Cmd+B/I/U toggles to the last `len` typed characters. The
+   * typed text inherited the caret run's format, so toggling it through the
+   * selection-format path lands exactly the queued state; the caret then sits
+   * inside the formatted run and further typing continues in that format. */
+  private applyPendingFormat(kinds: Set<"bold" | "italic" | "underline">, len: number): void {
+    const caret = this.caret;
+    if (!caret || len <= 0 || !this.host.onFormatShortcut) return;
+    const end = caret.offset;
+    const start = end - len;
+    if (start < 0) return;
+    this.selectRanges([{ t: caret.t, start, end }]);
+    // onFormatShortcut re-selects the formatted range (selectRanges), so the
+    // next toggle operates on the same — possibly re-split — text.
+    for (const kind of kinds) this.host.onFormatShortcut(kind);
+    const focus = this.selection?.focus;
+    this.clearSelection();
+    if (focus) {
+      this.caret = { t: focus.t, run: this.caret?.run ?? caret.run, offset: focus.offset, bias: "end" };
+      this.positionCaret();
+    }
+    this.focusText();
   }
 
   /** Stable id of the run carrying a drawing. The
@@ -6977,7 +7090,15 @@ export class DocxEditor {
             : undefined;
           if (mergeParagraphBackward(this.host.doc, next)) {
             if (mergeNextId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeNextId });
-            invalidateParagraphSignature(pEl);
+            // When THIS paragraph was empty, the merge drops it whole and the
+            // NEXT paragraph survives (Word keeps the surviving text's style).
+            // The caret's w:t left the tree with it — rebind to the surviving
+            // paragraph's first text or every later gesture dangles detached.
+            if (!paragraphOf(this.host.doc, caret.t)) {
+              const t = firstTextOf(next);
+              if (t) this.caret = { t, run: caret.run, offset: 0 };
+            }
+            invalidateParagraphSignature(paragraphOf(this.host.doc, this.caret?.t ?? caret.t) ?? pEl);
             this.commit(false, "local", true);
           }
           return;
@@ -7023,20 +7144,7 @@ export class DocxEditor {
           // numbering, recorded as a TRACKED format change (w:pPrChange) —
           // the same shape the toolbar toggle suggests. Later presses
           // suggest the merge below.
-          if (listTypeAt(doc, caret.t) !== null) {
-            const meta = this.frozenRevMeta();
-            const blockId = doc.stableIds?.idOf(pEl);
-            if (setListType(doc, [caret.t], null, meta)) {
-              if (blockId !== undefined && this.host.onIntent) {
-                this.host.onIntent(operationBody("setListType", blockId, {
-                  listKind: null,
-                  suggest: { author: meta.author, date: meta.date },
-                }));
-              }
-              this.commit(false, "global");
-              return;
-            }
-          }
+          if (this.suggestUnbulletAtCaret()) return;
           // Start of paragraph: suggest deleting the PREVIOUS paragraph's mark
           // (a merge). Don't actually join — Word keeps both until accepted.
           const prev = siblingParagraph(doc, pEl, -1);
@@ -7132,6 +7240,31 @@ export class DocxEditor {
       }
     }
     const segments = this.getSelectionSegments();
+    // G15 (the wedge): a keyboard selection can cover ONLY a paragraph
+    // boundary — Shift+ArrowRight from a paragraph end into an EMPTY
+    // paragraph selects the paragraph mark and nothing else, so no character
+    // segment exists. The mark is still selected content (Word deletes it:
+    // the paragraphs merge), so derive the covered paragraphs and the caret
+    // home from the selection's endpoints instead of wedging dead.
+    let boundaryParagraphs: XmlElement[] = [];
+    let boundaryCaret: Caret | null = null;
+    if (segments.length === 0 && this.selection) {
+      const [startPt, endPt] = this.orderedSelectionPoints();
+      const pa = paragraphOf(this.host.doc, startPt.t);
+      const pb = paragraphOf(this.host.doc, endPt.t);
+      // Only endpoints still IN the tree count: a stale selection (its
+      // elements replaced by a history install) must not donate a detached
+      // caret home — dropping the selection and keeping the current caret is
+      // the honest outcome there.
+      if (pa && pb) {
+        boundaryParagraphs = this.paragraphSpan(pa === pb ? [pa] : [pa, pb]);
+        boundaryCaret = {
+          t: startPt.t,
+          run: this.caret?.run ?? ({} as Caret["run"]),
+          offset: startPt.offset,
+        };
+      }
+    }
     if (this.suggesting) {
       const ranges = segments
         .filter((s) => s.t)
@@ -7154,7 +7287,8 @@ export class DocxEditor {
       // "del" glyph a caret paragraph-merge suggests — so a fully-selected
       // list item reads as deleted, marker included, until accept/reject.
       const marks: { blockId: number; glyph: "ins" | "del" }[] = [];
-      for (const pEl of this.spannedParagraphs(segments).slice(0, -1)) {
+      const suggestSpanned = segments.length > 0 ? this.spannedParagraphs(segments) : boundaryParagraphs;
+      for (const pEl of suggestSpanned.slice(0, -1)) {
         if (paragraphGlyphRevision(pEl, "del")) continue;
         markParagraphGlyph(pEl, "del", meta);
         const blockId = this.host.doc.stableIds?.idOf(pEl);
@@ -7164,11 +7298,12 @@ export class DocxEditor {
       this.clearSelection();
       const run = segments[0]?.run;
       if (c && run) this.caret = { t: c.t, run, offset: c.offset };
+      else if (boundaryCaret) this.caret = boundaryCaret;
       return false;
     }
     // Group ranges per w:t, delete from the end so offsets stay valid.
     const byT = new Map<XmlElement, { start: number; end: number }[]>();
-    let first: Caret | null = null;
+    let first: Caret | null = boundaryCaret;
     for (const seg of segments) {
       if (!seg.t) continue;
       const t = seg.t as XmlElement;
@@ -7262,7 +7397,7 @@ export class DocxEditor {
     // bullet markers (they used to survive as empty marker-only paragraphs)
     // and the two boundary paragraphs join. Same mutation + intent as caret
     // Backspace at a paragraph start, so every replica converges.
-    const spanned = this.spannedParagraphs(segments);
+    const spanned = segments.length > 0 ? this.spannedParagraphs(segments) : boundaryParagraphs;
     let merged = false;
     for (let i = 1; i < spanned.length; i++) {
       const pEl = spanned[i];
@@ -7310,6 +7445,13 @@ export class DocxEditor {
       const pEl = paragraphOf(doc, seg.t as XmlElement);
       if (pEl && !touched.includes(pEl)) touched.push(pEl);
     }
+    return this.paragraphSpan(touched);
+  }
+
+  /** Fill sibling gaps between consecutive touched paragraphs (see
+   * spannedParagraphs; also used for a zero-segment boundary selection). */
+  private paragraphSpan(touched: XmlElement[]): XmlElement[] {
+    const doc = this.host.doc;
     const out: XmlElement[] = [];
     for (let i = 0; i < touched.length; i++) {
       out.push(touched[i]);
@@ -7373,6 +7515,31 @@ export class DocxEditor {
     return true;
   }
 
+  /** Suggesting-mode unbullet: remove the caret paragraph's numbering as a
+   * TRACKED format change (w:pPrChange) — the same shape the toolbar toggle
+   * suggests — and emit the suggestable setListType(null) intent. Shared by
+   * suggesting Backspace at a list-item start and suggesting Shift+Tab on a
+   * level-0 item. Returns true when a tracked unbullet was recorded. */
+  private suggestUnbulletAtCaret(): boolean {
+    const caret = this.caret;
+    if (!caret) return false;
+    const doc = this.host.doc;
+    if (listTypeAt(doc, caret.t) === null) return false;
+    const pEl = paragraphOf(doc, caret.t);
+    if (!pEl) return false;
+    const meta = this.frozenRevMeta();
+    const blockId = doc.stableIds?.idOf(pEl);
+    if (!setListType(doc, [caret.t], null, meta)) return false;
+    if (blockId !== undefined && this.host.onIntent) {
+      this.host.onIntent(operationBody("setListType", blockId, {
+        listKind: null,
+        suggest: { author: meta.author, date: meta.date },
+      }));
+    }
+    this.commit(false, "global");
+    return true;
+  }
+
   /** Word's "unbullet" step: remove the caret paragraph's list formatting so
    * it becomes a plain paragraph (marker gone, text kept). Backspace at the
    * start of a list item does this on its FIRST press, and Enter on an empty
@@ -7414,9 +7581,48 @@ export class DocxEditor {
     return true;
   }
 
+  /** Shift+Enter (soft line break, w:br) and Tab in a body paragraph
+   * (w:tab): insert an inline separator at the caret via the canonical
+   * mutation, emitting the insertSeparator intent. Plain mode keeps the
+   * caret's run (in-run w:t split — a one-unit wire insert); suggesting mode
+   * records the separator as a w:ins the same shape a typed suggestion has. */
+  private insertSeparatorAtCaret(separator: "br" | "tab"): void {
+    this.host.history?.checkpoint();
+    // Like Enter and typing: an active selection is deleted first, and the
+    // separator is encoded against the post-delete state.
+    if (this.hasSelection()) this.removeSelectedText();
+    const caret = this.caret;
+    if (!caret) return;
+    const suggestEmit = this.suggesting && !!this.host.onIntent;
+    const frozen = suggestEmit ? this.frozenRevMeta() : null;
+    const emitPos = (!this.suggesting || suggestEmit) && this.host.onIntent ? this.encodeCaretForIntent() : null;
+    const ctx = frozen ? { suggesting: true, revMeta: () => frozen } : this.mutationCtx();
+    const next = applyInsertSeparator(this.host.doc, caret, separator, ctx);
+    if (!next) return;
+    this.caret = next;
+    const pEl = paragraphOf(this.host.doc, next.t);
+    const reparsed = pEl ? this.host.doc.reparseBodyParagraph(pEl) : null;
+    if (pEl && reparsed) invalidateParagraphSignature(pEl);
+    this.commit(false, "local", !!reparsed);
+    if (emitPos) {
+      this.host.onIntent?.(
+        frozen
+          ? { kind: "insertSeparator", at: emitPos, separator, suggest: { author: frozen.author, date: frozen.date } }
+          : { kind: "insertSeparator", at: emitPos, separator },
+      );
+    }
+    this.focusText();
+  }
+
   /** Enter: split the paragraph at the caret into two w:p elements. */
   private splitParagraph(): void {
     this.host.history?.checkpoint();
+    // Word: Enter over an active selection deletes the selection FIRST, then
+    // splits at the collapse point — the same composition typing over a
+    // selection uses (insertText), so the delete emits its own canonical
+    // intents and the split below is encoded against the post-delete state.
+    // Suggesting mode composes the same way: strike, then suggested split.
+    if (this.hasSelection()) this.removeSelectedText();
     this.splitParagraphNoHistory();
   }
 

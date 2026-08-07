@@ -400,7 +400,15 @@ export function mergeParagraphBackward(doc: DocxDocument, pEl: XmlElement): bool
     return finishMerge(pEl);
   }
 
-  const moved = pEl.children.filter((c) => localName(c.name) !== "pPr");
+  // The merged paragraph's blank placeholder runs (rPr + zero-length w:t
+  // only) stay behind: spliced beside the previous paragraph's real content
+  // they become stranded zero-length runs — a structural-lint violation no
+  // load path produces (conformance finding G13). Word's merge carries no
+  // empty paragraph placeholder either.
+  const isPlaceholderRun = (c: XmlElement): boolean =>
+    localName(c.name) === "r" &&
+    c.children.every((k) => localName(k.name) === "rPr" || (localName(k.name) === "t" && k.text.length === 0));
+  const moved = pEl.children.filter((c) => localName(c.name) !== "pPr" && !isPlaceholderRun(c));
   prev.children.push(...moved);
   parent.children.splice(idx, 1);
   return finishMerge(prev);

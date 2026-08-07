@@ -234,6 +234,82 @@ export function insertSuggestedText(
   return { t: newT, offset: text.length };
 }
 
+/**
+ * Record an inline separator — a soft line break (w:br) or a tab (w:tab) —
+ * as a tracked insertion at (t, offset). A revision wrapper may not nest
+ * inside a run, so the separator rides its own run inside a w:ins sibling,
+ * the host run splitting exactly like insertSuggestedText; inside one's own
+ * pending w:ins it joins in-run (the whole run is already marked inserted).
+ * Returns the caret AFTER the separator (the start of the tail text — an
+ * empty placeholder w:t when the separator lands at the very end).
+ */
+export function insertSuggestedSeparator(
+  doc: DocxDocument,
+  t: XmlElement,
+  offset: number,
+  separator: "br" | "tab",
+  meta: RevisionMeta,
+): CaretTarget | null {
+  const found = findRun(doc, t);
+  if (!found) return null;
+  const { rEl, parent } = found;
+  const w = prefixOf(rEl);
+  const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
+  const tIdx = rEl.children.indexOf(t);
+  if (tIdx === -1) return null;
+
+  // Already inside my own pending insertion: the separator joins it in-run.
+  if (ownRevisionWrapper(parent, "ins", meta.author)) {
+    if (offset <= 0) {
+      rEl.children.splice(tIdx, 0, el(`${w}${separator}`));
+      return { t, offset: 0 };
+    }
+    const tailT = textLike(t, t.name, t.text.slice(offset));
+    t.text = t.text.slice(0, offset);
+    t.attrs["xml:space"] = "preserve";
+    rEl.children.splice(tIdx + 1, 0, el(`${w}${separator}`), tailT);
+    return { t: tailT, offset: 0 };
+  }
+
+  const ins = el(`${w}ins`, revAttrs(w, meta), [runLike(rEl, rPr, [el(`${w}${separator}`)])]);
+
+  // Inside ANOTHER author's revision wrapper: revisions must stay siblings,
+  // so drop the new w:ins beside the wrapper (before at offset 0, after
+  // otherwise) with its own caret-home run — no wrapper splitting.
+  if (localName(parent.name) === "ins" || localName(parent.name) === "del") {
+    const grand = doc.findParentOf(parent);
+    if (!grand) return null;
+    const wrapIdx = grand.children.indexOf(parent);
+    if (wrapIdx === -1) return null;
+    const homeT = textLike(t, t.name.endsWith("delText") ? t.name.replace("delText", "t") : t.name, "");
+    const home = runLike(rEl, rPr, [homeT]);
+    const at = offset <= 0 ? wrapIdx : wrapIdx + 1;
+    grand.children.splice(at, 0, ins, home);
+    return { t: homeT, offset: 0 };
+  }
+
+  const idx = parent.children.indexOf(rEl);
+  if (idx === -1) return null;
+  const preceding = rEl.children.slice(0, tIdx).filter((c) => localName(c.name) !== "rPr");
+  const following = rEl.children.slice(tIdx + 1);
+  const replacement: XmlElement[] = [];
+  let home: XmlElement;
+  if (offset <= 0 && preceding.length === 0) {
+    // Break before the whole run: the run itself stays the caret home.
+    replacement.push(ins, rEl);
+    home = t;
+  } else {
+    const tailT = textLike(t, t.name, offset < t.text.length ? t.text.slice(offset) : "");
+    t.text = t.text.slice(0, offset);
+    t.attrs["xml:space"] = "preserve";
+    rEl.children = rEl.children.slice(0, tIdx + 1);
+    replacement.push(rEl, ins, runLike(rEl, rPr, [tailT, ...following]));
+    home = tailT;
+  }
+  parent.children.splice(idx, 1, ...replacement);
+  return { t: home, offset: 0 };
+}
+
 // ---------- deletion ----------
 
 /** A (t, start, end) slice of text to record as deleted. */
