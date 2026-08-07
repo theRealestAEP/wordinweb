@@ -14,9 +14,8 @@
  *       pre-sequence state — within EditHistory's designed 200-entry depth;
  *       a longer sequence may legitimately stop at the undo horizon, but
  *       redo must always replay byte-exactly back to the post-sequence
- *       state (LOCAL mount; in the session mount undo is a known dead
- *       gesture — KNOWN_GAPS G1 — so the invariant weakens to "undo never
- *       changes the document").
+ *       state. BOTH mounts: the session mount replays local history too
+ *       since the G1 fix (EditorHost.onLocalHistory).
  *
  * Deterministic: mulberry32 PRNG, the seed printed with every run and every
  * violation. Violations in KNOWN families (FUZZ_ALLOWED) are counted and
@@ -150,11 +149,10 @@ const FUZZ_ALLOWED: { match: string; family: string }[] = [
     family:
       "G15 — Shift+Arrow at a paragraph end before an empty paragraph wedges the editor: no caret/selection reported, arrows cannot collapse, typing dead until a mouse click (KNOWN_GAPS select.shift-arrow-empty-para; fuzz repro: Enter, ArrowLeft, Shift+ArrowRight)",
   },
-  {
-    match: "run.content is not iterable",
-    family:
-      "G16 — crash: keystroke after undo of type-over-selection throws TypeError: run.content is not iterable (KNOWN_GAPS undo.crash-after-type-over-selection; fuzz seeds 5+6)",
-  },
+  // G16 (keystroke after undo of type-over-selection threw "run.content is
+  // not iterable") is FIXED — checkboxStateElement tolerates unbound
+  // placeholder caret runs. Deliberately NOT allowed here anymore: a
+  // recurrence must fail loudly with a minimized repro.
   {
     match: "w:r holding only properties",
     family:
@@ -250,49 +248,39 @@ async function drive(
       bump(allowed);
       if (hard.length > 0) return { script, violation: { step: i, problems: hard }, allowedHits };
     }
-    // I5 — the undo/redo ladder.
+    // I5 — the undo/redo ladder. Both mounts: since the G1 fix the session
+    // mount replays local history exactly like the local one.
     const final = ed.xml();
-    if (mode === "local") {
-      const undos = await undoTo(ed, base, script.length * 2 + 20);
-      if (ed.xml() !== base) {
-        // Short of base with entries left, or exhausted well inside the
-        // designed horizon: the stack lost state it should still hold.
-        if (ed.api.canUndo() || undos < UNDO_DEPTH - 20) {
-          return {
-            script,
-            violation: {
-              step: script.length,
-              problems: [`I5 undo (x${undos}, canUndo=${ed.api.canUndo()}) never returns the pre-sequence document (byte-compare)`],
-            },
-            allowedHits,
-          };
-        }
-        // Depth-bounded unwind: the sequence outran the 200-entry cap — by
-        // design, counted (not failed); redo-exactness below still applies.
-        allowedHits.set(
+    const undos = await undoTo(ed, base, script.length * 2 + 20);
+    if (ed.xml() !== base) {
+      // Short of base with entries left, or exhausted well inside the
+      // designed horizon: the stack lost state it should still hold.
+      if (ed.api.canUndo() || undos < UNDO_DEPTH - 20) {
+        return {
+          script,
+          violation: {
+            step: script.length,
+            problems: [`I5 undo (x${undos}, canUndo=${ed.api.canUndo()}) never returns the pre-sequence document (byte-compare)`],
+          },
+          allowedHits,
+        };
+      }
+      // Depth-bounded unwind: the sequence outran the 200-entry cap — by
+      // design, counted (not failed); redo-exactness below still applies.
+      allowedHits.set(
+        "I5-depth — sequence exceeded EditHistory's designed 200-entry undo depth; unwound to the horizon (redo-exactness still enforced)",
+        (allowedHits.get(
           "I5-depth — sequence exceeded EditHistory's designed 200-entry undo depth; unwound to the horizon (redo-exactness still enforced)",
-          (allowedHits.get(
-            "I5-depth — sequence exceeded EditHistory's designed 200-entry undo depth; unwound to the horizon (redo-exactness still enforced)",
-          ) ?? 0) + 1,
-        );
-      }
-      for (let i = 0; i < undos; i++) await ed.redo();
-      if (ed.xml() !== final) {
-        return {
-          script,
-          violation: { step: script.length, problems: [`I5 redo (x${undos}) did not return to the post-sequence state`] },
-          allowedHits,
-        };
-      }
-    } else {
-      await ed.undo();
-      if (ed.xml() !== final) {
-        return {
-          script,
-          violation: { step: script.length, problems: ["I5(session) undo changed the document — must be wired through the session or stay a no-op"] },
-          allowedHits,
-        };
-      }
+        ) ?? 0) + 1,
+      );
+    }
+    for (let i = 0; i < undos; i++) await ed.redo();
+    if (ed.xml() !== final) {
+      return {
+        script,
+        violation: { step: script.length, problems: [`I5 redo (x${undos}) did not return to the post-sequence state`] },
+        allowedHits,
+      };
     }
     return { script, violation: null, allowedHits };
   } finally {

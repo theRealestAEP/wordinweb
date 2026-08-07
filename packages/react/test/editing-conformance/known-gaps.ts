@@ -12,11 +12,11 @@
  * the key a prefix that covers a family of cases.
  */
 export const KNOWN_GAPS: Record<string, string> = {
-  // G1 — undo/redo are DEAD in the session mount: applyHistory routes to
-  // onCollabUndo (editor.ts ~6354), and LocalDocumentSession wires no undoLast
-  // hook, so Cmd+Z / Cmd+Shift+Z decline for EVERY gesture (this generalizes
-  // the reported "paste undo dead" bug — being fixed by a sibling change).
-  "session/undoredo.*": "undo/redo decline entirely in the session mount (no undoLast hook wired)",
+  // G1 — FIXED: undo/redo were DEAD in the session mount (applyHistory routed
+  // to an unwired onCollabUndo hook). The single-process session now replays
+  // the local history stack (EditorHost.onLocalHistory, set by
+  // useAgentDocumentSession via collab.noteLocalHistory), so every
+  // session/undoredo.* companion passes.
 
   // G2 — Shift+Enter splits the paragraph exactly like Enter; Word inserts a
   // soft line break (w:br) and keeps one paragraph.
@@ -105,20 +105,18 @@ export const KNOWN_GAPS: Record<string, string> = {
   "session/backspace.across-cell-word-semantics": "cross-cell delete is character-wise (Word clears whole selected cells)",
   "local/backspace.across-cell-word-semantics": "cross-cell delete is character-wise (Word clears whole selected cells)",
 
-  // G16 — CRASH (found by the fuzzer, seeds 5 and 6, local mount): the next
-  // keystroke after undoing a type-over-keyboard-selection throws
-  // "TypeError: run.content is not iterable" from the keydown listener — the
-  // history restore leaves a caret/run binding of the wrong shape. The
-  // session mount is immune only because its undo is dead (G1).
-  "local/undo.crash-after-type-over-selection": "next keystroke after undo of type-over-selection throws TypeError: run.content is not iterable",
-  "local/undoredo.undo.crash-after-type-over-selection": "the undo/redo ladder over the G16 sequence hits the same TypeError",
+  // G16 — FIXED: the keystroke after undoing a type-over-keyboard-selection
+  // threw "TypeError: run.content is not iterable" (fuzzer, seeds 5 and 6).
+  // checkboxStateElement now tolerates the editor's unbound placeholder
+  // caret runs, so the keystroke lands instead of throwing — in both mounts
+  // (the session mount exercises this since its undo came alive, G1).
+  // Regression tests: packages/agent/test/local-undo.test.ts (both seeds).
 
   // G17 — undo of a format-over-selection then Enter strands structure
-  // (fuzzer, seeds 6 and 7): a properties-only w:r shell in the local mount
-  // (real undo); in the session mount (undo dead) the same sequence strands
-  // a zero-length w:t — the G13 family.
+  // (fuzzer, seeds 6 and 7): a properties-only w:r shell in the local mount;
+  // the session mount (undo now live, G1) strands the same shell.
   "local/undo.format-selection-strands-run": "undo of Cmd+B-over-selection then Enter strands a properties-only w:r shell",
-  "session/undo.format-selection-strands-run": "the same sequence with dead undo strands a zero-length w:t (G13 family)",
+  "session/undo.format-selection-strands-run": "undo of Cmd+B-over-selection then Enter strands a properties-only w:r shell",
 };
 
 /** Match a case id against the table (exact first, then prefix entries). */
