@@ -2631,8 +2631,14 @@ function finishLine(
   // solid content: a lone 12pt space run between 10pt words (wild2 legal
   // p17) leaves the line at the 10pt pitch. Whitespace metrics count only
   // when the line holds nothing else.
+  // A hidden field's zero-width strut (metricsStrut) sizes a line only when
+  // nothing visible shares it: Word lays the us-courts caption row — a
+  // default-12pt hidden SEQ beside 8pt text — at the 8pt Times natural
+  // 12.37px, not the strut's 18.40 (probe-repeathdr2: Word's W3 stack is
+  // 12.37 + the exact row's authored 9.6; charging the strut read every
+  // model ~5.15px short of the authored trHeight).
   const solidSpans = metricSpans.filter(
-    (s) => s.metricsStrut || s.image || s.drawing || s.math || s.leader || s.text === undefined || !/^[ \t]*$/.test(s.text),
+    (s) => !s.metricsStrut && (s.image || s.drawing || s.math || s.leader || s.text === undefined || !/^[ \t]*$/.test(s.text)),
   );
   if (solidSpans.length > 0) metricSpans = solidSpans;
   const styledLoweredIntegral =

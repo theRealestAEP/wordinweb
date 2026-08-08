@@ -2190,15 +2190,14 @@ class Engine {
     page.footerHeight = footerH;
 
     if (sp.marginTop >= 0) {
-      const headerBodyHeight =
-        this.doc.compatibilityMode < 15 &&
-        header?.blocks.every((block) => block.type === "paragraph" && !paragraphHasContent(block))
-          ? ptToPx(7)
-          : headerH;
-      page.bodyTop = Math.max(
-        sp.marginTop,
-        headerBodyHeight > 0 ? sp.headerDistance + headerBodyHeight : 0,
-      );
+      // An all-empty-paragraph header charges its measured height like any
+      // other: us-courts-answer (compat 11, empty header, headerDistance 48px
+      // = marginTop 48px) puts Word's caption row top at 70.87 = 48 + the
+      // empty paragraph's full 18.55px default-12pt line + tcMar 3.87 + the
+      // 8pt glyph offset, to 0.1pt. The flat 7pt this branch used to charge
+      // carried no probe and was canceling against the hidden-SEQ strut
+      // oversizing the caption line (see inline.ts solidSpans).
+      page.bodyTop = Math.max(sp.marginTop, headerH > 0 ? sp.headerDistance + headerH : 0);
       page.bandTop = page.bodyTop;
       page.headerGrown = page.bodyTop > sp.marginTop;
     }
@@ -7993,16 +7992,17 @@ class Engine {
           for (const hr of headerRows) {
             const hIdx = tbl.rows.indexOf(hr);
             const hLaid = this.layoutRow(tbl, hr, hIdx, widths);
-            let hH = rowHeights[hIdx];
-            // EXCEPT a pre-15 exact row's bottom cell margin, which the
-            // repeated instance charges at HALF: the us-courts caption's
-            // tblHeader stack ends in an exact-144 row with tcMar bottom 29,
-            // and Word's Vop-to-first-data gap is 22.81pt on p1 but 22.08 on
-            // p2 and p7 - bottomPad/2 = 0.73pt apart, against the original's
-            // full charge (probe-exactpad).
-            if (this.doc.compatibilityMode < 15 && hr.props.heightRule === "exact") {
-              hH -= this.rowBottomPad(tbl, hr) / 2;
-            }
+            const hH = rowHeights[hIdx];
+            // A repeated exact row charges its FULL height, bottom cell
+            // margin included. probe-repeathdr3 (us-courts base, compat 11,
+            // exported twice, ink-identical) sweeps the follower row's tcMar
+            // top (0/29/58) against the exact row's tcMar bottom (0/29/58):
+            // the continuation stack equals the first-page stack to 0.03px
+            // in every one of the five cases. The half-bottom-margin charge
+            // this path used to take was read off the fixture's Vop-to-
+            // first-data gap (probe-exactpad), where the continuation page's
+            // first data row is a DIFFERENT row from p1's — a confound, not
+            // a rule.
             markTableStart();
             this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hH);
             segHasRows = true;
