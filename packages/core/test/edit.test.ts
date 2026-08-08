@@ -1862,6 +1862,9 @@ describe("WordArt insertion", () => {
       ["archDown", "textArchDown"],
       ["wave", "textWave1"],
       ["chevron", "textChevron"],
+      ["chevronDown", "textChevronInverted"],
+      ["circle", "textCircle"],
+      ["button", "textButton"],
     ];
     for (const [preset, warp] of presets) {
       const doc = loadDoc(p("Anchor"));
@@ -1889,6 +1892,36 @@ describe("WordArt insertion", () => {
     const { run } = firstRun(doc);
     const t = (run.content[0] as TextContent).srcT!;
     expect(insertWordArtAt(doc, t, "", "plain")).toBeNull();
+  });
+
+  it("writes a gallery style's fill, outline and shadow run effects", () => {
+    const doc = loadDoc(p("Anchor"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    expect(insertWordArtAt(doc, t, "Styled", "plain", {
+      fill: "FFFFFF",
+      outline: { color: "4472C4", widthPt: 1 },
+      shadow: true,
+    })).not.toBeNull();
+    const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml")!;
+    // The legacy fallback colour follows the style fill.
+    expect(xml).toContain('<w:color w:val="FFFFFF"');
+    expect(xml).toContain('<w14:textFill');
+    expect(xml).toContain('<w14:srgbClr w14:val="FFFFFF"');
+    expect(xml).toContain('<w14:textOutline');
+    expect(xml).toContain('w14:w="12700"');
+    expect(xml).toContain('<w14:srgbClr w14:val="4472C4"');
+    expect(xml).toContain('<w14:shadow');
+
+    // The reparsed run carries the effects for the renderer.
+    const reloaded = DocxDocument.load(doc.save());
+    const para = reloaded.sections[0].blocks[0] as Paragraph;
+    const anchor = para.children.flatMap((child) => child.type === "run" ? child.content : []).find((content) => content.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("WordArt missing");
+    const artRun = (anchor.shape.blocks[0] as Paragraph).children[0] as Run;
+    expect(artRun.props.color).toBe("#FFFFFF");
+    expect(artRun.props.textOutline).toEqual({ color: "#4472C4", width: 4 / 3 });
+    expect(artRun.props.textShadow).toBe(true);
   });
 
   it("uses tight plain-text bounds and edits DrawingML text through save/reopen", () => {

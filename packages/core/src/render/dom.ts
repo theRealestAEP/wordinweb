@@ -2834,6 +2834,16 @@ function renderWarpText(item: WarpTextItem): HTMLElement {
   svg.style.pointerEvents = "none";
   setItemLayer(svg, item);
 
+  // WordArt gallery style effects: an offset shadow rides the whole svg; an
+  // outline strokes each glyph UNDER its fill (paint-order), like Word.
+  if (item.shadow) svg.style.filter = "drop-shadow(2px 2px 3px rgba(0,0,0,0.6))";
+  const strokeGlyph = (glyph: SVGElement): void => {
+    if (!item.outline) return;
+    glyph.setAttribute("stroke", item.outline.color);
+    glyph.setAttribute("stroke-width", String(item.outline.width));
+    glyph.setAttribute("paint-order", "stroke");
+  };
+
   const geo = warpBaseline(item.warp, W, H);
   const weight = item.bold ? "bold" : "normal";
   const style = item.italic ? "italic" : "normal";
@@ -2882,6 +2892,7 @@ function renderWarpText(item: WarpTextItem): HTMLElement {
         "transform",
         `translate(${x.toFixed(2)} ${baseline.toFixed(2)}) scale(${scaleX.toFixed(5)} 1)`,
       );
+      strokeGlyph(glyph);
       glyph.textContent = ch;
       svg.appendChild(glyph);
     });
@@ -2932,6 +2943,7 @@ function renderWarpText(item: WarpTextItem): HTMLElement {
         "transform",
         `translate(${x.toFixed(2)} ${y.toFixed(2)}) rotate(${((angle * 180) / Math.PI).toFixed(2)})`,
       );
+      strokeGlyph(glyph);
       glyph.textContent = ch;
       svg.appendChild(glyph);
     });
@@ -2957,6 +2969,7 @@ function renderWarpText(item: WarpTextItem): HTMLElement {
 
   const text = document.createElementNS(SVG_NS, "text");
   text.setAttribute("fill", item.fill);
+  strokeGlyph(text);
   text.setAttribute("font-family", family);
   text.setAttribute("font-size", `${fontPx.toFixed(2)}`);
   text.setAttribute("font-weight", weight);
@@ -3122,6 +3135,14 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
     el.style.textShadow = "1px 1px 0 #a6a6a6";
   } else if (props.imprint) {
     el.style.textShadow = "-1px -1px 0 #a6a6a6";
+  }
+  // w14:textOutline / w14:shadow (WordArt gallery styles on plain runs).
+  if (props.textOutline) {
+    el.style.webkitTextStroke = `${props.textOutline.width}px ${props.textOutline.color}`;
+  }
+  if (props.textShadow && !props.emboss && !props.imprint) {
+    // The authored w14:shadow: 1.5pt offset at 45°, 3pt blur, 60% black.
+    el.style.textShadow = "2px 2px 4px rgba(0,0,0,0.6)";
   }
 
   if (item.mathSrc) {

@@ -277,7 +277,19 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "insertWordArt": {
       if (typeof intent.text !== "string" || intent.text.length === 0) return "insertWordArt: empty text";
       if (intent.text.length > 500) return "insertWordArt: text too long";
-      if (!["plain", "archUp", "archDown", "wave", "chevron"].includes(intent.preset)) return "insertWordArt: bad preset";
+      if (!["plain", "archUp", "archDown", "wave", "chevron", "circle", "button", "chevronDown"].includes(intent.preset)) return "insertWordArt: bad preset";
+      if (intent.style !== undefined) {
+        const style = intent.style;
+        if (typeof style !== "object" || style === null) return "insertWordArt: bad style";
+        if (!/^[0-9a-fA-F]{6}$/.test(style.fill)) return "insertWordArt: bad style fill";
+        if (style.shadow !== undefined && typeof style.shadow !== "boolean") return "insertWordArt: bad style shadow";
+        if (style.outline !== undefined) {
+          if (typeof style.outline !== "object" || style.outline === null) return "insertWordArt: bad style outline";
+          if (!/^[0-9a-fA-F]{6}$/.test(style.outline.color)) return "insertWordArt: bad outline color";
+          const width = style.outline.widthPt;
+          if (typeof width !== "number" || !Number.isFinite(width) || width <= 0 || width > 50) return "insertWordArt: bad outline width";
+        }
+      }
       return null;
     }
     case "insertChart":

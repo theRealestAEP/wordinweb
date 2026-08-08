@@ -124,9 +124,12 @@ export interface SealedCheckpoint {
  *       7 named presets to the whole core preset-geometry table (165
  *       ST_ShapeType names — Word's shape gallery), and insertChart /
  *       setChartData additionally carry doughnut/area/scatter types plus a
- *       grouping field (stacked / percentStacked bar, column and area). An
- *       e17 peer rejects ("bad preset" / "bad type") the very intents an
- *       e18 peer applies — fork on the first heart insert or stacked chart.
+ *       grouping field (stacked / percentStacked bar, column and area);
+ *       insertWordArt gains three transform presets (circle, button,
+ *       chevronDown) and an optional gallery style (fill / outline /
+ *       shadow run effects). An e17 peer rejects ("bad preset" /
+ *       "bad type") the very intents an e18 peer applies — fork on the
+ *       first heart insert, stacked chart, or styled WordArt.
  */
 export const ENGINE_VERSION = "e18";
 

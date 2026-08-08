@@ -125,6 +125,10 @@ export interface RunProps {
   raise?: number;
   /** w:outline — hollow stroked glyphs. */
   outline?: boolean;
+  /** w14:textOutline — glyph outline stroke (WordArt gallery styles). */
+  textOutline?: { color: string; width: number };
+  /** w:shadow / w14:shadow — offset glyph shadow. */
+  textShadow?: boolean;
   /** w:emboss / w:imprint — Word triple-draws offset copies. */
   emboss?: boolean;
   imprint?: boolean;

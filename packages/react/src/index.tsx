@@ -131,6 +131,7 @@ import {
   resolveWireRange,
   type ShapePreset,
   type WordArtPreset,
+  type WordArtStyle,
   type DrawingTool,
   type DrawingLineDash,
   type CoverPageContent,
@@ -338,7 +339,7 @@ export interface DocxViewApi {
     lineStyle?: { color: string; width: number; dash: DrawingLineDash },
   ): boolean;
   /** Insert editable DrawingML WordArt at the caret. */
-  insertWordArt(text: string, preset?: WordArtPreset): boolean;
+  insertWordArt(text: string, preset?: WordArtPreset, style?: WordArtStyle): boolean;
   /** Insert a native editable ChartML chart at the caret. */
   insertChart(data: ChartData): boolean;
   /** Replace the selected native chart's type and data. */
@@ -2305,12 +2306,12 @@ export function DocxView({
             editor?.reselectDrawing(drawing);
             return true;
           },
-          insertWordArt: (text, preset = "plain") => {
-            if (collabOp((a, ids) => ({ kind: "insertWordArt", runId: a.runId, text, preset, nodeIds: ids(12) }))) return true;
+          insertWordArt: (text, preset = "plain", style) => {
+            if (collabOp((a, ids) => ({ kind: "insertWordArt", runId: a.runId, text, preset, ...(style ? { style } : {}), nodeIds: ids(12) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
-            if (!insertWordArtAt(doc, target.t, text, preset)) return false;
+            if (!insertWordArtAt(doc, target.t, text, preset, style)) return false;
             pages = rerender(doc, undefined, "global");
             return true;
           },

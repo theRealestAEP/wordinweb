@@ -65,8 +65,8 @@ type AgentComposeBlock =
   | { type: "chart"; chart: ChartData; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
   | { type: "smartArt"; smartArt: SmartArtData; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
   | { type: "image"; assetRef: string; widthPx: number; heightPx: number; alt?: string; align?: "left" | "center" | "right"; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; position?: { xPx: number; yPx: number } }
-  | { type: "shape"; preset: "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox"; text?: string; textStyle?: AgentComposeTextStyle; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; fill?: string | null; line?: { color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" } | null; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
-  | { type: "wordArt"; text: string; preset: "plain" | "archUp" | "archDown" | "wave" | "chevron"; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; rotation?: number; fill?: string; opacity?: number; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
+  | { type: "shape"; preset: "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox" | string; text?: string; textStyle?: AgentComposeTextStyle; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; fill?: string | null; line?: { color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" } | null; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
+  | { type: "wordArt"; text: string; preset: "plain" | "archUp" | "archDown" | "wave" | "chevron" | "circle" | "button" | "chevronDown"; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; rotation?: number; fill?: string; opacity?: number; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
   | { type: "pageNumber"; fieldKind: "page" | "pageOfTotal"; align?: "left" | "center" | "right"; color?: string; fontSizePt?: number; fontFamily?: string; bold?: boolean }
   | { type: "pageBreak" };
 
@@ -724,7 +724,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertImage` | Insert a registered image | `runRef`, `assetRef`, `widthPx`, `heightPx` |
 | `insertBreak` | Insert a page or column break | `runRef`, `breakKind` |
 | `insertMath` | Insert native Word math | `runRef`, `mathText` |
-| `insertShape` | Insert a shape or text box | `runRef`, `preset`; optional: `text` |
+| `insertShape` | Insert a shape or text box. `preset` is a legacy name (`line`, `verticalLine`, `rectangle`, `roundedRectangle`, `ellipse`, `diamond`, `textBox`) or any DrawingML ST_ShapeType name from the shape gallery (e.g. "heart", "star5", "rightArrow", "flowChartDecision", "cloudCallout") | `runRef`, `preset`; optional: `text` |
 | `insertPageField` | Insert PAGE or PAGE/NUMPAGES | `runRef`, `fieldKind` |
 | `insertFootnote` | Insert a footnote | `runRef`, `text` |
 | `insertEndnote` | Insert an endnote | `runRef`, `text` |
@@ -734,7 +734,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertSectionBreak` | Insert a section boundary | `runRef`, `breakType` |
 | `insertCrossRef` | Insert a bookmark reference | `runRef`, `bookmark`, `refKind` |
 | `insertCoverPage` | Insert a native cover page | `content` |
-| `insertWordArt` | Insert decorative WordArt | `runRef`, `text`, `preset` |
+| `insertWordArt` | Insert decorative WordArt. `preset` is a transform (`plain`, `archUp`, `archDown`, `wave`, `chevron`, `circle`, `button`, `chevronDown`); optional `style` is a gallery style `{ fill: "RRGGBB", outline?: { color: "RRGGBB", widthPt }, shadow?: boolean }` | `runRef`, `text`, `preset`; optional: `style` |
 | `insertChart` | Insert a chart and workbook | `runRef`, `chart` |
 | `insertSmartArt` | Insert a SmartArt diagram | `runRef`, `smartArt` |
 | `insertDateTimeField` | Insert a DATE or TIME field | `runRef`, `dtKind`, `picture` |
@@ -1086,14 +1086,18 @@ to fill it; resize the drawing as well to hold the content at its old scale.
 
 ```ts
 {
-  type: "column" | "bar" | "line" | "pie";
+  type: "column" | "bar" | "line" | "pie" | "doughnut" | "area" | "scatter";
   title?: string;
   categories: string[];
   series: Array<{ name: string; values: number[] }>;
+  grouping?: "clustered" | "stacked" | "percentStacked"; // bar, column, area
 }
 ```
 
-Each series must contain the same number of values as `categories`.
+Each series must contain the same number of values as `categories`. A pie or
+doughnut chart uses the first series only. A scatter chart reads `categories`
+as its numeric X values (a non-numeric category falls back to its 1-based
+position).
 
 ### SmartArt data
 

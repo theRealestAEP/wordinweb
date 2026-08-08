@@ -33,7 +33,18 @@ export function shapePresetGeometry(preset: ShapePreset): string | undefined {
 export function isValidShapePreset(preset: string): boolean {
   return shapePresetGeometry(preset) !== undefined;
 }
-export type WordArtPreset = "plain" | "archUp" | "archDown" | "wave" | "chevron";
+export type WordArtPreset =
+  | "plain" | "archUp" | "archDown" | "wave" | "chevron"
+  | "circle" | "button" | "chevronDown";
+
+/** A WordArt gallery style: glyph fill plus optional outline and shadow
+ * (w14:textFill / w14:textOutline / w14:shadow run effects). */
+export interface WordArtStyle {
+  /** 6-hex-digit RGB, with or without "#". */
+  fill: string;
+  outline?: { color: string; widthPt: number };
+  shadow?: boolean;
+}
 export type DrawingLineDash = "solid" | "dashed" | "dotted";
 export interface InkPoint { x: number; y: number }
 export type DrawingTool =
@@ -168,6 +179,7 @@ export function insertWordArtAt(
   caretT: XmlElement,
   text: string,
   preset: WordArtPreset = "plain",
+  style?: WordArtStyle,
 ): XmlElement | null {
   if (!text) return null;
   const drawing = insertShapeAt(doc, caretT, "textBox", text);
@@ -179,6 +191,9 @@ export function insertWordArtAt(
     archDown: "textArchDown",
     wave: "textWave1",
     chevron: "textChevron",
+    circle: "textCircle",
+    button: "textButton",
+    chevronDown: "textChevronInverted",
   }[preset];
   const docPr = descendant(drawing, "docPr");
   if (docPr) docPr.attrs.name = `WordArt ${docPr.attrs.id}`;
@@ -215,6 +230,7 @@ export function insertWordArtAt(
     const size = rPr.children.find((child) => localName(child.name) === "sz");
     if (color) color.attrs[Object.keys(color.attrs).find((key) => localName(key) === "val") ?? `${prefixOf(color)}val`] = "2E74B5";
     if (size) size.attrs[Object.keys(size.attrs).find((key) => localName(key) === "val") ?? `${prefixOf(size)}val`] = "40";
+    if (style) applyWordArtStyle(rPr, style);
   }
 
   const paragraphProperties = descendant(drawing, "pPr");
@@ -257,6 +273,38 @@ export function insertWordArtAt(
   }
   doc.refresh();
   return drawing;
+}
+
+const EMU_PER_PT = 12700;
+
+/** Write a WordArt gallery style's run effects: the legacy w:color fallback
+ * plus w14:shadow / w14:textOutline / w14:textFill (Word's element order). */
+function applyWordArtStyle(rPr: XmlElement, style: WordArtStyle): void {
+  const hex = style.fill.replace(/^#/, "").toUpperCase();
+  const color = rPr.children.find((child) => localName(child.name) === "color");
+  if (color) color.attrs[Object.keys(color.attrs).find((key) => localName(key) === "val") ?? `${prefixOf(color)}val`] = hex;
+  if (style.shadow) {
+    // Word's WordArt gallery offset-shadow: 3pt blur, 1.5pt at 45°, 60% black.
+    rPr.children.push(el("w14:shadow", {
+      "xmlns:w14": NS_W14,
+      "w14:blurRad": "38100", "w14:dist": "19050", "w14:dir": "2700000",
+      "w14:sx": "100000", "w14:sy": "100000", "w14:kx": "0", "w14:ky": "0", "w14:algn": "bl",
+    }, [el("w14:srgbClr", { "w14:val": "000000" }, [el("w14:alpha", { "w14:val": "60000" })])]));
+  }
+  if (style.outline) {
+    rPr.children.push(el("w14:textOutline", {
+      "xmlns:w14": NS_W14,
+      "w14:w": String(Math.max(1, Math.round(style.outline.widthPt * EMU_PER_PT))),
+      "w14:cap": "flat", "w14:cmpd": "sng", "w14:algn": "ctr",
+    }, [
+      el("w14:solidFill", {}, [el("w14:srgbClr", { "w14:val": style.outline.color.replace(/^#/, "").toUpperCase() })]),
+      el("w14:prstDash", { "w14:val": "solid" }),
+      el("w14:round"),
+    ]));
+  }
+  rPr.children.push(el("w14:textFill", { "xmlns:w14": NS_W14 }, [
+    el("w14:solidFill", {}, [el("w14:srgbClr", { "w14:val": hex })]),
+  ]));
 }
 
 export function isDrawingWordArt(drawing: XmlElement): boolean {

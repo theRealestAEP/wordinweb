@@ -299,6 +299,10 @@ export interface WarpTextItem {
   fill: string;
   /** WordArt glyph alpha, 0..1. */
   opacity?: number;
+  /** w14:textOutline glyph stroke. */
+  outline?: { color: string; width: number };
+  /** w14:shadow / w:shadow offset glyph shadow. */
+  shadow?: boolean;
   /** Preset name (textArchUp, textWave1, textChevron, textCirclePour, …). */
   warp: string;
   rotate?: { deg: number; ox: number; oy: number };

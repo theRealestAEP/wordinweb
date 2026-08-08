@@ -59,8 +59,8 @@ type AgentComposeBlock =
   | { type: "chart"; chart: ChartData; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
   | { type: "smartArt"; smartArt: SmartArtData; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
   | { type: "image"; assetRef: string; widthPx: number; heightPx: number; alt?: string; align?: "left" | "center" | "right"; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; position?: { xPx: number; yPx: number } }
-  | { type: "shape"; preset: "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox"; text?: string; textStyle?: AgentComposeTextStyle; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; fill?: string | null; line?: DrawingLine | null; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
-  | { type: "wordArt"; text: string; preset: "plain" | "archUp" | "archDown" | "wave" | "chevron"; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; rotation?: number; fill?: string; opacity?: number; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
+  | { type: "shape"; preset: "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox" | string; text?: string; textStyle?: AgentComposeTextStyle; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; fill?: string | null; line?: DrawingLine | null; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
+  | { type: "wordArt"; text: string; preset: "plain" | "archUp" | "archDown" | "wave" | "chevron" | "circle" | "button" | "chevronDown"; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; rotation?: number; fill?: string; opacity?: number; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
   | { type: "pageNumber"; fieldKind: "page" | "pageOfTotal"; align?: "left" | "center" | "right"; color?: string; fontSizePt?: number; fontFamily?: string; bold?: boolean }
   | { type: "pageBreak" };
 
@@ -100,10 +100,11 @@ interface DrawingLine {
 }
 
 interface ChartData {
-  type: "column" | "bar" | "line" | "pie";
+  type: "column" | "bar" | "line" | "pie" | "doughnut" | "area" | "scatter";
   title?: string;
   categories: string[];
   series: Array<{ name: string; values: number[] }>;
+  grouping?: "clustered" | "stacked" | "percentStacked"; // bar, column, area
 }
 
 interface SmartArtData {
@@ -113,7 +114,7 @@ interface SmartArtData {
 ```
 
 Use either `text` or `runs` in a paragraph or table cell. Use `textStyle` for
-shape text. Set `line: null` for a borderless shape. Supply both drawing
+shape text. Set `line: null` for a borderless shape. Beyond the legacy named presets, `preset` accepts any DrawingML ST_ShapeType name from the shape gallery (e.g. "heart", "star5", "rightArrow", "flowChartDecision", "cloudCallout").  Supply both drawing
 dimensions when you supply either one. Use `heading` for the native outline.
 Consecutive list paragraphs share one Word numbering sequence.
 

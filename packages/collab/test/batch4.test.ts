@@ -64,6 +64,24 @@ describe("more intents batch 4 (page layout / list level / wordart)", () => {
     const rid = addr(s).runId;
     expect(s.submit({ kind: "insertWordArt", clientId: "a", clientSeq: 1, base: 0, runId: rid, text: "", preset: "wave", nodeIds: [900] }).kind).toBe("rejected");
     expect(s.submit({ kind: "insertWordArt", clientId: "a", clientSeq: 2, base: 0, runId: rid, text: "hi", preset: "spiral" as never, nodeIds: [900] }).kind).toBe("rejected");
+    expect(s.submit({ kind: "insertWordArt", clientId: "a", clientSeq: 3, base: 0, runId: rid, text: "hi", preset: "circle", style: { fill: "not-hex" }, nodeIds: [900] }).kind).toBe("rejected");
+    expect(s.submit({ kind: "insertWordArt", clientId: "a", clientSeq: 4, base: 0, runId: rid, text: "hi", preset: "circle", style: { fill: "4472C4", outline: { color: "FFFFFF", widthPt: 900 } }, nodeIds: [900] }).kind).toBe("rejected");
+  });
+
+  it("applies a gallery style (fill / outline / shadow) on the wire", () => {
+    const s = new DocumentSession(makeDoc("x"));
+    const e = s.submit({
+      kind: "insertWordArt", clientId: "a", clientSeq: 1, base: 0, runId: addr(s).runId,
+      text: "Styled", preset: "button",
+      style: { fill: "FFC000", outline: { color: "000000", widthPt: 1 }, shadow: true },
+      nodeIds: Array.from({ length: 12 }, (_, i) => 900 + i),
+    });
+    expect(e.kind).toBe("applied");
+    const xml = serializeXml(s.doc.docRoot);
+    expect(xml).toContain('prst="textButton"');
+    expect(xml).toContain("w14:textOutline");
+    expect(xml).toContain("w14:shadow");
+    expect(xml).toContain('w14:val="FFC000"');
   });
 
   it("determinism for page layout", () => {

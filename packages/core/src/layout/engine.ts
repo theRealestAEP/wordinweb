@@ -6501,6 +6501,8 @@ class Engine {
               italic: f.italic,
               fill: shape.wordArtFill ?? (col && col !== "auto" ? col : "#000000"),
               ...(shape.wordArtOpacity !== undefined ? { opacity: shape.wordArtOpacity } : {}),
+              ...(texts[0].props.textOutline ? { outline: texts[0].props.textOutline } : {}),
+              ...(texts[0].props.textShadow ? { shadow: true } : {}),
               warp: shape.warp,
               ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
               ...(behind ? { behind: true } : {}),

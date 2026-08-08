@@ -57,7 +57,7 @@ const HAND_WRITTEN_CAPABILITIES: Record<
   insertCoverPage: { category: "insert", description: "Insert a cover page.", required: ["content"] },
   setPageLayout: { category: "document", description: "Set page layout properties.", required: ["patch"] },
   setListLevel: { category: "paragraph", description: "Change a list nesting level.", required: ["blockRef", "delta"] },
-  insertWordArt: { category: "insert", description: "Insert WordArt.", required: ["runRef", "text", "preset"] },
+  insertWordArt: { category: "insert", description: "Insert WordArt.", required: ["runRef", "text", "preset"], optional: ["style"] },
   insertChart: { category: "insert", description: "Insert a chart.", required: ["runRef", "chart"] },
   insertSmartArt: { category: "insert", description: "Insert SmartArt.", required: ["runRef", "smartArt"] },
   setLineNumbering: { category: "document", description: "Configure margin line numbering.", required: ["patch"] },
@@ -397,6 +397,14 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   // 0..360 itself, which is also why the registry's validate asks only that
   // each angle be finite.
   "setModel3DRotation.rotation": closedObject({ x: number(), y: number(), z: number() }, ["x", "y", "z"]),
+  "insertWordArt.style": closedObject({
+    fill: { type: "string", pattern: "^[0-9A-Fa-f]{6}$" },
+    outline: closedObject({
+      color: { type: "string", pattern: "^[0-9A-Fa-f]{6}$" },
+      widthPt: number(0.25, 50),
+    }, ["color", "widthPt"]),
+    shadow: boolean,
+  }, ["fill"]),
   "insertChart.chart": chartData,
   "setChartData.chart": chartData,
   "insertSmartArt.smartArt": smartArtData,
@@ -534,7 +542,7 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "insertSectionBreak.breakType": ["nextPage", "continuous"],
   "insertCrossRef.refKind": ["text", "page"],
   "setListLevel.delta": [1, -1],
-  "insertWordArt.preset": ["plain", "archUp", "archDown", "wave", "chevron"],
+  "insertWordArt.preset": ["plain", "archUp", "archDown", "wave", "chevron", "circle", "button", "chevronDown"],
   "insertDateTimeField.dtKind": ["date", "time"],
   "setDrawingLineStyle.dash": ["solid", "dashed", "dotted"],
   "setImageWrap.mode": ["inline", "square", "topAndBottom", "none", "behind"],

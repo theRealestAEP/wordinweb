@@ -718,7 +718,9 @@ export interface InsertWordArtIntent extends IntentBase {
   kind: "insertWordArt";
   runId: StableId;
   text: string;
-  preset: "plain" | "archUp" | "archDown" | "wave" | "chevron";
+  preset: "plain" | "archUp" | "archDown" | "wave" | "chevron" | "circle" | "button" | "chevronDown";
+  /** Gallery style: glyph fill plus optional outline and shadow. */
+  style?: { fill: string; outline?: { color: string; widthPt: number }; shadow?: boolean };
   nodeIds: StableId[];
 }
 

@@ -2050,11 +2050,26 @@ const WORD_ART = [
   ["archDown", "Arch down", "⌣"],
   ["wave", "Wave", "∿"],
   ["chevron", "Chevron", "⌃"],
+  ["chevronDown", "Chevron down", "⌄"],
+  ["circle", "Circle", "◌"],
+  ["button", "Button", "◉"],
 ] as const;
+
+/** Word's WordArt gallery styles: fill / outline / shadow combinations. */
+const WORD_ART_STYLES: { label: string; style?: { fill: string; outline?: { color: string; widthPt: number }; shadow?: boolean } }[] = [
+  { label: "Classic blue" },
+  { label: "Blue, shadow", style: { fill: "4472C4", shadow: true } },
+  { label: "Black, shadow", style: { fill: "000000", shadow: true } },
+  { label: "Orange, shadow", style: { fill: "ED7D31", shadow: true } },
+  { label: "Gold, shadow", style: { fill: "FFC000", shadow: true } },
+  { label: "White, blue outline, shadow", style: { fill: "FFFFFF", outline: { color: "4472C4", widthPt: 1 }, shadow: true } },
+  { label: "Blue, darker outline", style: { fill: "4472C4", outline: { color: "2F5597", widthPt: 1 } } },
+];
 
 function WordArtMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("Your text here");
+  const [styleIndex, setStyleIndex] = useState(0);
   const rootRef = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
     if (!open) return;
@@ -2077,14 +2092,45 @@ function WordArtMenu({ api }: { api: DocxViewApi | null }) {
             onChange={(event) => setText(event.target.value)}
             style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
           />
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
+          <div style={{ marginTop: 8, color: T.muted, font: "11px system-ui, sans-serif" }}>Style</div>
+          <div role="radiogroup" aria-label="WordArt style" style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginTop: 4 }}>
+            {WORD_ART_STYLES.map((entry, index) => {
+              const fill = entry.style ? `#${entry.style.fill}` : "#2e74b5";
+              const selected = index === styleIndex;
+              return (
+                <button
+                  key={entry.label}
+                  role="radio"
+                  aria-checked={selected}
+                  title={entry.label}
+                  aria-label={`WordArt style ${entry.label}`}
+                  onClick={() => setStyleIndex(index)}
+                  style={{
+                    height: 34,
+                    border: `1px solid ${selected ? T.accent : T.border}`,
+                    borderRadius: 5,
+                    background: selected ? T.tabActiveBg : T.popoverBg,
+                    cursor: "pointer",
+                    font: "700 17px Georgia, serif",
+                    color: fill,
+                    WebkitTextStroke: entry.style?.outline ? `0.6px #${entry.style.outline.color}` : undefined,
+                    textShadow: entry.style?.shadow ? "1px 1px 2px rgba(0,0,0,0.55)" : undefined,
+                  }}
+                >
+                  A
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 8, color: T.muted, font: "11px system-ui, sans-serif" }}>Transform</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 4 }}>
             {WORD_ART.map(([preset, label, glyph]) => (
               <button
                 key={preset}
                 title={`Insert WordArt ${label}`}
                 disabled={!text}
                 onClick={() => {
-                  if (api?.insertWordArt(text, preset)) setOpen(false);
+                  if (api?.insertWordArt(text, preset, WORD_ART_STYLES[styleIndex]?.style)) setOpen(false);
                 }}
                 style={{ minHeight: 48, border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: "#2e74b5", cursor: text ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}
               >

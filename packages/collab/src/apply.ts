@@ -634,7 +634,7 @@ function applyIntentInner(
       const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
-      const drawing = insertWordArtAt(doc, entry.firstT, intent.text, intent.preset);
+      const drawing = insertWordArtAt(doc, entry.firstT, intent.text, intent.preset, intent.style);
       if (!drawing) return false;
       assignFreshTracked(ids, doc, before, intent.nodeIds);
       return true;

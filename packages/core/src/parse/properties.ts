@@ -19,7 +19,7 @@ import {
   TabStop,
   Theme,
 } from "../model.js";
-import { eighthPtToPx, halfPtToPx, ptToPx, twipsToPx } from "../units.js";
+import { eighthPtToPx, emuToPx, halfPtToPx, ptToPx, twipsToPx } from "../units.js";
 
 export interface ParseContext {
   theme?: Theme;
@@ -284,6 +284,26 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
   // the line box by the full shift (a +6pt raise adds exactly 6pt of pitch).
   const position = intAttr(child(rPr, "position"), "val");
   if (position !== undefined && position !== 0) props.raise = (position / 2) * (4 / 3);
+
+  // w14 run effects (Office 2010 extensions) — the WordArt gallery's
+  // fill/outline/shadow combos — plus the legacy w:shadow toggle. Solid
+  // colours only; gradient fills keep the w:color fallback Word writes.
+  const w14Solid = (holder: XmlElement | undefined): string | undefined => {
+    const fill = holder ? child(holder, "solidFill") : undefined;
+    const val = attr(child(fill, "srgbClr"), "val");
+    return val && /^[0-9a-fA-F]{6}$/.test(val) ? `#${val.toUpperCase()}` : undefined;
+  };
+  const textFillColor = w14Solid(child(rPr, "textFill"));
+  if (textFillColor) props.color = textFillColor;
+  const textOutlineEl = child(rPr, "textOutline");
+  const textOutlineColor = w14Solid(textOutlineEl);
+  if (textOutlineEl && textOutlineColor) {
+    props.textOutline = { color: textOutlineColor, width: Math.max(emuToPx(intAttr(textOutlineEl, "w") ?? 0), 0.75) };
+  }
+  for (const effect of rPr.children) {
+    if (localName(effect.name) !== "shadow") continue;
+    if (effect.name.startsWith("w14") || (onOff(effect) ?? true)) props.textShadow = true;
+  }
 
   const rStyle = childVal(rPr, "rStyle");
   if (rStyle) props.styleId = rStyle;
