@@ -130,7 +130,15 @@ function fmt(value: number): string {
  * tan t = (rw/rh)·tan theta.
  */
 function ellipsePoint(rw: number, rh: number, theta: number): { x: number; y: number } {
-  const t = Math.atan2(rw * Math.sin(theta), rh * Math.cos(theta));
+  // Snap the trig of quarter-turn angles to exact 0: with a degenerate radius
+  // (rh = 0, a bracket arm) the float noise in sin(2π) ≈ -2.4e-16 would win
+  // the atan2 against an exact rh·cos = 0 and collapse the endpoint to the
+  // wrong end of the segment.
+  let s = Math.sin(theta);
+  let c = Math.cos(theta);
+  if (Math.abs(s) < 1e-12) s = 0;
+  if (Math.abs(c) < 1e-12) c = 0;
+  const t = Math.atan2(rw * s, rh * c);
   return { x: rw * Math.cos(t), y: rh * Math.sin(t) };
 }
 
@@ -149,9 +157,20 @@ function arcTo(
   stAngUnits: number,
   swAngUnits: number,
 ): { x: number; y: number } {
-  if (rw <= 0 || rh <= 0 || swAngUnits === 0) return { x, y };
+  if (swAngUnits === 0) return { x, y };
   const start = rad(stAngUnits);
   const sweep = rad(swAngUnits);
+  if (rw <= 0 || rh <= 0) {
+    // Degenerate ellipse (e.g. a bracket with adj=0): the arc collapses to a
+    // straight segment to its endpoint — SVG's zero-radius rule, and what Word
+    // paints (wild2-med-phase23-protocol p14's rightBracket arms).
+    const startPt = ellipsePoint(rw, rh, start);
+    const endPt = ellipsePoint(rw, rh, start + sweep);
+    const nx = x - startPt.x + endPt.x;
+    const ny = y - startPt.y + endPt.y;
+    out.push(`L ${fmt(nx)} ${fmt(ny)}`);
+    return { x: nx, y: ny };
+  }
   const startPt = ellipsePoint(rw, rh, start);
   const cx = x - startPt.x;
   const cy = y - startPt.y;
