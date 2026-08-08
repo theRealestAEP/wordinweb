@@ -307,6 +307,75 @@ function allSectPrs(doc: DocxDocument): XmlElement[] {
   return out;
 }
 
+// ---------- header/footer page variants (w:titlePg, w:evenAndOddHeaders) ----------
+
+/** Whether any section requests a different first-page header/footer. */
+export function titlePageEnabled(doc: DocxDocument): boolean {
+  return allSectPrs(doc).some((sectPr) =>
+    sectPr.children.some((c) => localName(c.name) === "titlePg" && attr(c, "val") !== "0" && attr(c, "val") !== "false"),
+  );
+}
+
+/**
+ * Toggle Word's "Different First Page" (w:titlePg, ECMA-376 §17.10.6) on every
+ * section. Enabling also creates the missing first-page header and footer
+ * parts (empty, referenced w:type="first" from each section — §17.10.5,
+ * ST_HdrFtr §17.18.36), the way Word materializes the bands when the box is
+ * first checked. Disabling removes only the toggle: parts and references stay,
+ * so re-enabling restores their content, exactly as Word does. False when the
+ * document is already in the requested state (honest no-op).
+ */
+export function setTitlePage(doc: DocxDocument, enabled: boolean): boolean {
+  if (enabled) {
+    // Creates the missing first-page parts, and materializes the default body
+    // sectPr when a minimal document has none at all.
+    const partsAdded = doc.ensureHfVariantParts("first");
+    const missingToggle = allSectPrs(doc).filter(
+      (sectPr) => !sectPr.children.some((c) => localName(c.name) === "titlePg"),
+    );
+    for (const sectPr of missingToggle) insertTitlePg(sectPr);
+    if (missingToggle.length === 0 && !partsAdded) return false;
+    doc.refresh();
+    return true;
+  }
+  let changed = false;
+  for (const sectPr of allSectPrs(doc)) {
+    const before = sectPr.children.length;
+    sectPr.children = sectPr.children.filter((c) => localName(c.name) !== "titlePg");
+    changed = changed || sectPr.children.length !== before;
+  }
+  if (changed) doc.refresh();
+  return changed;
+}
+
+function insertTitlePg(sectPr: XmlElement): void {
+  const w = prefixOf(sectPr) || "w:";
+  insertInOrder(sectPr, el(`${w}titlePg`));
+}
+
+/**
+ * Toggle Word's "Different Odd & Even Pages": the document-global
+ * w:evenAndOddHeaders switch in settings.xml (ECMA-376 §17.10.1). Enabling
+ * also creates the missing even-page header and footer parts (empty,
+ * referenced w:type="even" from each section), because with the switch on an
+ * even page uses ONLY the even variant — a chain that never declares one gets
+ * a blank band. Disabling removes only the switch. False when already in the
+ * requested state.
+ */
+export function setEvenOddHeaders(doc: DocxDocument, enabled: boolean): boolean {
+  if (enabled) {
+    const partsAdded = doc.ensureHfVariantParts("even");
+    if (doc.evenAndOddHeaders && !partsAdded) return false;
+    doc.setEvenAndOddHeaders(true);
+    doc.refresh();
+    return true;
+  }
+  if (!doc.evenAndOddHeaders) return false;
+  doc.setEvenAndOddHeaders(false);
+  doc.refresh();
+  return true;
+}
+
 export interface LineNumberingPatch {
   /** Turn margin line numbering on/off for the target section(s). */
   enabled: boolean;

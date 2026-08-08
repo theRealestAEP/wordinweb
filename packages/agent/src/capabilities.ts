@@ -489,7 +489,7 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
       },
     };
   }
-  if (field === "suggest" || field === "preservePageStart" || field === "diagonal" || field === "headerRow") return { type: "boolean" };
+  if (field === "suggest" || field === "preservePageStart" || field === "diagonal" || field === "headerRow" || field === "enabled") return { type: "boolean" };
   // insertWatermark's headerCount is both its carried-id budget and its
   // rejection predicate; the cap matches its own validate in the registry.
   if (field === "headerCount") return integer(1, 50);

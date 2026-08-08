@@ -850,6 +850,8 @@ the equation into something else.
 | `setPageLayout` | Set margins, page size, columns, or borders | `patch` |
 | `setLineNumbering` | Configure margin line numbers | `patch` |
 | `ensureHeaderFooter` | Create a header or footer story | `hfKind` |
+| `setTitlePage` | Toggle different-first-page headers and footers; enabling creates the empty first-page parts | `enabled` |
+| `setEvenOddHeaders` | Toggle different odd & even page headers and footers; enabling creates the empty even-page parts | `enabled` |
 | `updateFields` | Write recomputed cached results into the document's fields, one per field in document order | `results` |
 | `createStyle` | Create a paragraph, character, table, or numbering style definition | `style` |
 | `modifyStyle` | Change an existing style definition | `styleId`, `patch` |

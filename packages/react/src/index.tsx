@@ -84,6 +84,9 @@ import {
   sectionContextAt,
   setLineNumbering,
   lineNumberingAt,
+  setTitlePage,
+  titlePageEnabled,
+  setEvenOddHeaders,
   type XmlElement,
   type EncodedCaret,
   type ShapePreset,
@@ -425,6 +428,15 @@ export interface DocxViewApi {
   closeHeaderFooter(): void;
   /** Enter and, if needed, create the header or footer on the caret's page. */
   openHeaderFooter(kind: "header" | "footer"): boolean;
+  /** Word's "Different First Page" (w:titlePg). Enabling creates the empty
+   * first-page header/footer parts; disabling keeps them for re-enable. */
+  setDifferentFirstPage(on: boolean): boolean;
+  /** Whether any section requests a different first page. */
+  getDifferentFirstPage(): boolean;
+  /** Word's "Different Odd & Even Pages" (settings.xml w:evenAndOddHeaders).
+   * Enabling creates the empty even-page header/footer parts. */
+  setOddEvenHeaders(on: boolean): boolean;
+  getOddEvenHeaders(): boolean;
   /** Effective formatting of the current selection (toolbar state), or null. */
   getSelectionFormat(): SelectionFormat | null;
   /** Print the rendered pages (browser print dialog / save as PDF). */
@@ -2331,6 +2343,22 @@ export function DocxView({
           },
           closeHeaderFooter: () => editor?.exitHeaderFooter(),
           openHeaderFooter: (kind) => editor?.enterHeaderFooter(kind) ?? false,
+          setDifferentFirstPage: (on) => {
+            if (collabDocOp((ids) => documentOperationBody("setTitlePage", { enabled: on }, ids))) return true;
+            history.checkpoint();
+            if (!setTitlePage(doc, on)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          getDifferentFirstPage: () => titlePageEnabled(doc),
+          setOddEvenHeaders: (on) => {
+            if (collabDocOp((ids) => documentOperationBody("setEvenOddHeaders", { enabled: on }, ids))) return true;
+            history.checkpoint();
+            if (!setEvenOddHeaders(doc, on)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          getOddEvenHeaders: () => doc.evenAndOddHeaders,
           insertBreak: (kind) => {
             let target = editor?.getCaretTarget() ?? null;
             if (!target) {

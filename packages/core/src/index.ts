@@ -203,7 +203,19 @@ export type { OoxmlValidationResult, OoxmlValidationLimits } from "./ooxml-valid
 // the editor wrote and lifts the WordprocessingML out of it, so it can ALSO
 // write the native Word clipboard format. Payload contract: edit/clipboard.ts.
 export { CLIPBOARD_OOXML_ATTR, extractClipboardOoxml, encodeClipboardOoxml, decodeClipboardOoxml } from "./edit/clipboard.js";
-export { sectPrAt, sectionContextAt, insertBreakAt, insertBlankPageAt, insertCoverPage, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
+export {
+  sectPrAt,
+  sectionContextAt,
+  insertBreakAt,
+  insertBlankPageAt,
+  insertCoverPage,
+  insertSectionBreak,
+  setLineNumbering,
+  lineNumberingAt,
+  setTitlePage,
+  titlePageEnabled,
+  setEvenOddHeaders,
+} from "./edit/sections.js";
 export type { BreakInsertion, CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages, buildPrintHtml } from "./render/dom.js";

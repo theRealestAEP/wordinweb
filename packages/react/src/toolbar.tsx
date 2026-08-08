@@ -1516,6 +1516,40 @@ function TextBoxMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/** Insert-tab Header & Footer menu: enter either band, plus Word's two
+ * page-variant toggles (different first page / different odd & even). The
+ * toggle state is read from the api at render time; picking one re-reads it
+ * immediately (this menu re-renders on its own, ahead of the next
+ * dxw-selection announcement). */
+function HeaderFooterMenu({ api }: { api: DocxViewApi | null }) {
+  const [, force] = useReducer((n: number) => n + 1, 0);
+  const first = api?.getDifferentFirstPage() ?? false;
+  const oddEven = api?.getOddEvenHeaders() ?? false;
+  return (
+    <ActionMenu
+      label="Header & footer"
+      title="Edit the repeating header or footer"
+      width={118}
+      groups={[
+        { items: [["header", "Header"], ["footer", "Footer"]] },
+        {
+          label: "Page setup",
+          items: [
+            ["first", `${first ? "✓ " : ""}Different first page`],
+            ["oddEven", `${oddEven ? "✓ " : ""}Different odd & even pages`],
+          ],
+        },
+      ]}
+      onPick={(value) => {
+        if (value === "header" || value === "footer") api?.openHeaderFooter(value);
+        else if (value === "first") api?.setDifferentFirstPage(!first);
+        else if (value === "oddEven") api?.setOddEvenHeaders(!oddEven);
+        force();
+      }}
+    />
+  );
+}
+
 /** Word's own gallery presets, the four people actually reach for. */
 const WATERMARKS = ["CONFIDENTIAL", "DO NOT COPY", "DRAFT", "SAMPLE"] as const;
 
@@ -5341,15 +5375,7 @@ export function DocxToolbar({
           {on("footnote") && <NoteMenu api={api} kind="endnote" />}
           {on("bookmark") && <BookmarkMenu api={api} />}
           {on("crossReference") && <CrossReferenceMenu api={api} />}
-          {on("headerFooter") && (
-            <ActionMenu
-              label="Header & footer"
-              title="Edit the repeating header or footer"
-              width={118}
-              groups={[{ items: [["header", "Header"], ["footer", "Footer"]] }]}
-              onPick={(value) => api?.openHeaderFooter(value as "header" | "footer")}
-            />
-          )}
+          {on("headerFooter") && <HeaderFooterMenu api={api} />}
           {on("watermark") && <WatermarkMenu api={api} />}
           <Sep />
           {on("pageNumber") && (
@@ -5441,28 +5467,20 @@ export function DocxToolbar({
               {on("footnote") && <NoteMenu api={api} kind="endnote" />}
               {on("bookmark") && <BookmarkMenu api={api} />}
               {on("crossReference") && <CrossReferenceMenu api={api} />}
-              {on("headerFooter") && (
-                <ActionMenu
-                  label="Header & footer"
-                  title="Edit the repeating header or footer"
-                  width={118}
-                  groups={[{ items: [["header", "Header"], ["footer", "Footer"]] }]}
-                  onPick={(value) => api?.openHeaderFooter(value as "header" | "footer")}
-                />
-              )}
+              {on("headerFooter") && <HeaderFooterMenu api={api} />}
               {on("watermark") && <WatermarkMenu api={api} />}
               {on("pageNumber") && (
-                <ActionMenu
-                  label="Page number"
-                  title="Insert a dynamic page number at the caret"
-                  width={104}
-                  groups={[{ items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] }]}
-                  onPick={(v) => {
-                    if (v === "pn:page") api?.insertPageNumber("page");
-                    else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
-                  }}
-                />
-              )}
+            <ActionMenu
+              label="Page number"
+              title="Insert a dynamic page number at the caret"
+              width={104}
+              groups={[{ items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] }]}
+              onPick={(v) => {
+                if (v === "pn:page") api?.insertPageNumber("page");
+                else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
+              }}
+            />
+          )}
               {on("break") && (
                 <>
                   <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />

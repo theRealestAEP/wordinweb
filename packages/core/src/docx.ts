@@ -625,6 +625,7 @@ export class DocxDocument {
   refresh(): void {
     this._layoutGlobalSig = null;
     (this as { mirrorMargins: boolean }).mirrorMargins = onOff(child(this.settingsRoot, "mirrorMargins")) ?? false;
+    (this as { evenAndOddHeaders: boolean }).evenAndOddHeaders = onOff(child(this.settingsRoot, "evenAndOddHeaders")) ?? false;
     const body = child(this.docRoot, "body");
     if (!body) throw new Error("document.xml has no w:body");
     // Some content (SmartArt cached drawings) lives in parts reachable only
@@ -1275,9 +1276,101 @@ export class DocxDocument {
     const isHeader = kind === "header";
     const existing = this.hfParts.find((p2) => p2.isHeader === isHeader);
     if (existing) return existing.root;
+    const { relId, root } = this.createHfPart(kind);
+    // A minimal document (the blank the demo starts from) has NO sectPr at
+    // all, so the reference walk below had nowhere to put the reference: the
+    // part was created, never referenced, never laid out, and the caller found
+    // no caret target — "the header won't open". Materialize the default body
+    // section first, exactly as setPageLayout/setLineNumbering do for the same
+    // shape of document.
+    this.ensureBodySectPr();
+    // Reference from every sectPr (schema: hf references lead the sectPr).
+    const refName = isHeader ? "w:headerReference" : "w:footerReference";
+    const addRef = (e: XmlElement): void => {
+      if (localName(e.name) === "sectPr") {
+        e.children.unshift(this.hfReference(refName, "default", relId));
+        return;
+      }
+      for (const c of e.children) addRef(c);
+    };
+    addRef(this.docRoot);
+    this.refresh();
+    return root;
+  }
+
+  /** A w:headerReference / w:footerReference element. */
+  private hfReference(refName: string, type: "default" | "first" | "even", relId: string): XmlElement {
+    return {
+      name: refName,
+      attrs: {
+        "xmlns:r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        "w:type": type,
+        "r:id": relId,
+      },
+      children: [],
+      text: "",
+    };
+  }
+
+  /** Materialize the default body-level sectPr when the document declares no
+   * section properties at all (schema: the body's sectPr is its LAST child). */
+  private ensureBodySectPr(): void {
+    const bodyEl = child(this.docRoot, "body");
+    if (bodyEl && !this.hasSectPr()) {
+      const w = bodyEl.name.includes(":") ? bodyEl.name.slice(0, bodyEl.name.indexOf(":") + 1) : "";
+      bodyEl.children.push({ name: `${w}sectPr`, attrs: {}, children: [], text: "" });
+    }
+  }
+
+  /**
+   * Give every section a header and footer reference of the given variant
+   * type, creating one empty part per band the way Word does the first time
+   * "different first page" (type "first") or "different odd & even pages"
+   * (type "even") is enabled. Sections that already carry a reference of the
+   * type keep it — and its part's content. True when anything was added.
+   */
+  ensureHfVariantParts(type: "first" | "even"): boolean {
+    this.ensureBodySectPr();
+    const sectPrs: XmlElement[] = [];
+    const walk = (e: XmlElement): void => {
+      if (localName(e.name) === "sectPr") sectPrs.push(e);
+      else for (const c of e.children) walk(c);
+    };
+    walk(this.docRoot);
+    if (sectPrs.length === 0) return false;
+    let changed = false;
+    for (const kind of ["header", "footer"] as const) {
+      const refLocal = kind === "header" ? "headerReference" : "footerReference";
+      const missing = sectPrs.filter(
+        (sectPr) => !sectPr.children.some(
+          (c) => localName(c.name) === refLocal && attr(c, "type") === type,
+        ),
+      );
+      if (missing.length === 0) continue;
+      const { relId } = this.createHfPart(kind);
+      for (const sectPr of missing) {
+        sectPr.children.unshift(this.hfReference(`w:${refLocal}`, type, relId));
+      }
+      changed = true;
+    }
+    if (changed) this.refresh();
+    return changed;
+  }
+
+  /** Create and register a new empty header/footer part — package part,
+   * document relationship, content-type override, hfParts entry — with no
+   * section references of its own; the caller decides which sectPrs point at
+   * it and with which w:type. */
+  private createHfPart(kind: "header" | "footer"): { relId: string; root: XmlElement } {
+    const isHeader = kind === "header";
     const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
     let n = 1;
-    while (this.pkg.has(`${docDir}${kind}${n}.xml`)) n++;
+    // A part created earlier in this session is not in the package until
+    // save(), so the numbering probe checks both stores.
+    while (
+      this.pkg.has(`${docDir}${kind}${n}.xml`) ||
+      this.hfParts.some((p) => p.target === `${docDir}${kind}${n}.xml`)
+    ) n++;
     const target = `${docDir}${kind}${n}.xml`;
     const rootName = isHeader ? "w:hdr" : "w:ftr";
     const root: XmlElement = {
@@ -1332,39 +1425,7 @@ export class DocxDocument {
       }
     }
     this.hfParts.push({ relId, target, root, isHeader, rels: new Map(), relsRoot: null });
-    // A minimal document (the blank the demo starts from) has NO sectPr at
-    // all, so the reference walk below had nowhere to put the reference: the
-    // part was created, never referenced, never laid out, and the caller found
-    // no caret target — "the header won't open". Materialize the default body
-    // section first, exactly as setPageLayout/setLineNumbering do for the same
-    // shape of document.
-    const bodyEl = child(this.docRoot, "body");
-    if (bodyEl && !this.hasSectPr()) {
-      const w = bodyEl.name.includes(":") ? bodyEl.name.slice(0, bodyEl.name.indexOf(":") + 1) : "";
-      // Schema: the body's sectPr is its LAST child.
-      bodyEl.children.push({ name: `${w}sectPr`, attrs: {}, children: [], text: "" });
-    }
-    // Reference from every sectPr (schema: hf references lead the sectPr).
-    const refName = isHeader ? "w:headerReference" : "w:footerReference";
-    const addRef = (e: XmlElement): void => {
-      if (localName(e.name) === "sectPr") {
-        e.children.unshift({
-          name: refName,
-          attrs: {
-            "xmlns:r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-            "w:type": "default",
-            "r:id": relId,
-          },
-          children: [],
-          text: "",
-        });
-        return;
-      }
-      for (const c of e.children) addRef(c);
-    };
-    addRef(this.docRoot);
-    this.refresh();
-    return root;
+    return { relId, root };
   }
 
   markFootnotesChanged(): void {
@@ -1543,25 +1604,59 @@ export class DocxDocument {
     return roots;
   }
 
+  /** CT_Settings children that precede w:mirrorMargins in the schema sequence
+   * (§17.15.1.78). Insertions go before the first child that is not a
+   * predecessor, so Word never has to repair settings.xml. */
+  private static readonly SETTINGS_BEFORE_MIRROR = [
+    "writeProtection", "view", "zoom", "removePersonalInformation", "removeDateAndTime",
+    "doNotDisplayPageBoundaries", "displayBackgroundShape", "printPostScriptOverText",
+    "printFractionalCharacterWidth", "printFormsData", "embedTrueTypeFonts",
+    "embedSystemFonts", "saveSubsetFonts", "saveFormsData",
+  ];
+
+  /** The schema predecessors of w:evenAndOddHeaders (§17.10.1): everything up
+   * to mirrorMargins, then the sequence through defaultTableStyle. */
+  private static readonly SETTINGS_BEFORE_EVEN_AND_ODD = [
+    ...DocxDocument.SETTINGS_BEFORE_MIRROR,
+    "mirrorMargins", "alignBordersAndEdges", "bordersDoNotSurroundHeader",
+    "bordersDoNotSurroundFooter", "gutterAtTop", "hideSpellingErrors", "hideGrammaticalErrors",
+    "activeWritingStyle", "proofState", "formsDesign", "attachedTemplate", "linkStyles",
+    "stylePaneFormatFilter", "stylePaneSortMethod", "documentType", "mailMerge", "revisionView",
+    "trackChanges", "doNotTrackMoves", "doNotTrackFormatting", "documentProtection",
+    "autoFormatOverride", "styleLockTheme", "styleLockQFSet", "defaultTabStop",
+    "autoHyphenation", "consecutiveHyphenLimit", "hyphenationZone", "doNotHyphenateCaps",
+    "showEnvelope", "summaryLength", "clickAndTypeStyle", "defaultTableStyle",
+  ];
+
+  /** Set or remove one on/off settings.xml toggle at its schema position. */
+  private setSettingsToggle(local: string, predecessors: readonly string[], enabled: boolean): void {
+    this.settingsRoot.children = this.settingsRoot.children.filter((c) => localName(c.name) !== local);
+    if (enabled) {
+      const before = new Set(predecessors);
+      const index = this.settingsRoot.children.findIndex((c) => !before.has(localName(c.name)));
+      const el = { name: `w:${local}`, attrs: {}, children: [], text: "" };
+      this.settingsRoot.children.splice(index === -1 ? this.settingsRoot.children.length : index, 0, el);
+    }
+    this.registerSettingsPart();
+    this.settingsDirty = true;
+  }
+
   /** Toggle the document-global facing-page margin mode in settings.xml. */
   setMirrorMargins(enabled: boolean): void {
-    this.settingsRoot.children = this.settingsRoot.children.filter((c) => localName(c.name) !== "mirrorMargins");
-    if (enabled) {
-      // CT_Settings is a sequence. mirrorMargins follows saveFormsData and
-      // precedes alignBordersAndEdges/proofState/defaultTabStop/compat. Insert
-      // before the first child that is not one of its schema predecessors so
-      // Word never has to repair settings.xml.
-      const beforeMirror = new Set([
-        "writeProtection", "view", "zoom", "removePersonalInformation", "removeDateAndTime",
-        "doNotDisplayPageBoundaries", "displayBackgroundShape", "printPostScriptOverText",
-        "printFractionalCharacterWidth", "printFormsData", "embedTrueTypeFonts",
-        "embedSystemFonts", "saveSubsetFonts", "saveFormsData",
-      ]);
-      const index = this.settingsRoot.children.findIndex((c) => !beforeMirror.has(localName(c.name)));
-      const mirror = { name: "w:mirrorMargins", attrs: {}, children: [], text: "" };
-      this.settingsRoot.children.splice(index === -1 ? this.settingsRoot.children.length : index, 0, mirror);
-    }
+    this.setSettingsToggle("mirrorMargins", DocxDocument.SETTINGS_BEFORE_MIRROR, enabled);
+    (this as { mirrorMargins: boolean }).mirrorMargins = enabled;
+  }
 
+  /** Toggle w:evenAndOddHeaders (§17.10.1) — the document-global switch that
+   * makes even pages use the "even" header/footer variants. */
+  setEvenAndOddHeaders(enabled: boolean): void {
+    this.setSettingsToggle("evenAndOddHeaders", DocxDocument.SETTINGS_BEFORE_EVEN_AND_ODD, enabled);
+    (this as { evenAndOddHeaders: boolean }).evenAndOddHeaders = enabled;
+  }
+
+  /** Register settings.xml in document.xml.rels and [Content_Types].xml when
+   * the package was born without it (a minimal document). */
+  private registerSettingsPart(): void {
     const rels = this.ensureRelsRoot();
     const settingsRelType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings";
     if (!rels.children.some((r) => r.attrs["Type"]?.endsWith("/settings"))) {
@@ -1595,8 +1690,6 @@ export class DocxDocument {
         });
       }
     }
-    this.settingsDirty = true;
-    (this as { mirrorMargins: boolean }).mirrorMargins = enabled;
   }
 
   /**
