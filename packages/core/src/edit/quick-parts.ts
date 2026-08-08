@@ -64,18 +64,19 @@ export interface CreateBuildingBlockSpec {
   blocksXml: string;
 }
 
-const CREATE_SPEC_KEYS = ["name", "category", "blocksXml"];
-
 /** Reject a malformed create spec. Null means well-formed. The blocksXml
  * itself is checked structurally by decodeClipboardOoxml at apply time (the
  * same OOXML allowlist gate pasteBlocks uses), not here — validate must stay
- * a pure, cheap function of the payload shape. */
+ * a pure, cheap function of the payload shape.
+ *
+ * NO top-level "unknown property" scan: as a registered operation's
+ * validate, this runs against the WHOLE wire intent (clientId/clientSeq/
+ * base/kind included, the editCitationSource precedent), not a payload this
+ * function owns exclusively — it checks only the three fields it cares
+ * about and ignores the rest. */
 export function badBuildingBlockSpec(spec: unknown): string | null {
   if (!spec || typeof spec !== "object" || Array.isArray(spec)) return "createBuildingBlock: bad spec";
   const s = spec as Record<string, unknown>;
-  for (const key of Object.keys(s)) {
-    if (!CREATE_SPEC_KEYS.includes(key)) return `createBuildingBlock: unknown property ${key}`;
-  }
   if (!isValidBuildingBlockName(s.name)) return "createBuildingBlock: bad name";
   if (s.category !== undefined && !isValidBuildingBlockCategory(s.category)) {
     return "createBuildingBlock: bad category";

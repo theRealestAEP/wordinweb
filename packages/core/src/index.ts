@@ -179,6 +179,16 @@ export {
 } from "./edit/sources.js";
 export type { CitationSourcePatch, CitationSourceSpec, CitationSourceType } from "./edit/sources.js";
 export {
+  buildingBlockNodeCount,
+  createBuildingBlock,
+  deleteBuildingBlock,
+  insertBuildingBlock,
+  isValidBuildingBlockCategory,
+  isValidBuildingBlockName,
+  listBuildingBlocks,
+} from "./edit/quick-parts.js";
+export type { BuildingBlockInfo, CreateBuildingBlockSpec } from "./edit/quick-parts.js";
+export {
   UPDATABLE_FIELD_KEYWORDS,
   applyFieldResults,
   collectFieldSites,
