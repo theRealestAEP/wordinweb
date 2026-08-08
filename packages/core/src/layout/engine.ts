@@ -29,6 +29,7 @@ import {
 import { mergeRunProps } from "../parse/properties.js";
 import { bodyStyleRefText } from "../style-ref.js";
 import { citationText, documentBibliography, type Bibliography } from "../citations.js";
+import { documentTextStatistics, type TextStatistics } from "../word-count.js";
 import { ptToPx } from "../units.js";
 import { child, serializeXml, cyrb53, XmlElement } from "../xml.js";
 import {
@@ -2580,7 +2581,20 @@ class Engine {
       refParaNumber: (key) => engine.refFieldParaNumber.get(key),
       styleRefBody: (_name, key) => engine.resolveBodyStyleRef(key),
       citation: (instruction) => engine.resolveCitation(instruction),
+      textStats: () => engine.resolveTextStats(),
     };
+  }
+
+  /**
+   * NUMWORDS/NUMCHARS statistics, built on first use like the bibliography
+   * above: a document with neither field never pays for the body walk.
+   * src/word-count.ts holds the rule and the update pass reads that same one,
+   * so the painted text and the written cache cannot disagree.
+   */
+  private textStats: TextStatistics | undefined;
+  private resolveTextStats(): TextStatistics {
+    this.textStats ??= documentTextStatistics(this.doc);
+    return this.textStats;
   }
 
   /**
@@ -6744,6 +6758,8 @@ class Engine {
         // header paints on. Word recomputes it on open here just as it does in
         // the body, and the update pass caches the value it resolves to.
         refText: (bookmark) => this.refBookmarkText(bookmark),
+        // Body statistics read the same on every page too.
+        textStats: () => this.resolveTextStats(),
       };
       const header = this.doc.headers.get(page.headerRel ?? "");
       if (header && header.blocks.length > 0) {

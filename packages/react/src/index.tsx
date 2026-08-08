@@ -91,6 +91,7 @@ import {
   pageNumberFormatAt,
   setCommentResolved,
   editCommentText,
+  documentTextStatistics,
   type PageNumberFormat,
   type PageNumberFormatPatch,
   type XmlElement,
@@ -457,6 +458,9 @@ export interface DocxViewApi {
    * navigation). Returns the focused thread's comment id, or null when the
    * document has no anchored comments. */
   stepComment(delta: 1 | -1): string | null;
+  /** Word Count: body text statistics from the model plus the page count
+   * from the latest layout. */
+  wordCount(): { words: number; characters: number; charactersWithSpaces: number; paragraphs: number; pages: number };
   /** Effective formatting of the current selection (toolbar state), or null. */
   getSelectionFormat(): SelectionFormat | null;
   /** Print the rendered pages (browser print dialog / save as PDF). */
@@ -2453,6 +2457,7 @@ export function DocxView({
             }
             return comment.id;
           },
+          wordCount: () => ({ ...documentTextStatistics(doc), pages }),
           insertBreak: (kind) => {
             let target = editor?.getCaretTarget() ?? null;
             if (!target) {

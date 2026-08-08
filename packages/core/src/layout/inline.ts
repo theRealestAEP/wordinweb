@@ -94,6 +94,11 @@ export interface FieldContext {
   fileName?: string;
   /** AUTHOR: the host's document author. Absent keeps the cache. */
   author?: string;
+  /** NUMWORDS / NUMCHARS: the document's body text statistics
+   * (src/word-count.ts holds the rule; the update pass reads that same one,
+   * so the painted text and the written cache stay equal). Absent keeps the
+   * cache. */
+  textStats?: () => { words: number; characters: number };
 }
 
 // ---------- atoms ----------
@@ -4011,6 +4016,16 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
     case "NUMPAGES":
     case "SECTIONPAGES": {
       const n = ctx.totalPages();
+      return starNumberFormat(instr, n) ?? String(n);
+    }
+    case "NUMWORDS":
+    case "NUMCHARS": {
+      // Word recomputes both on F9/print, not continuously; this engine
+      // resolves them at layout so the screen is never stale, and the update
+      // pass writes the same shared-rule value into the file's cache.
+      if (!ctx.textStats) return cachedResult || "";
+      const stats = ctx.textStats();
+      const n = keyword === "NUMWORDS" ? stats.words : stats.characters;
       return starNumberFormat(instr, n) ?? String(n);
     }
     case "SEQ": {

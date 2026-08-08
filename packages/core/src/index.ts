@@ -220,6 +220,8 @@ export {
   pageNumberFormatAt,
 } from "./edit/sections.js";
 export type { BreakInsertion, CoverPageContent, LineNumberingPatch, PageNumberFormat, PageNumberFormatPatch } from "./edit/sections.js";
+export { documentTextStatistics } from "./word-count.js";
+export type { TextStatistics } from "./word-count.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages, buildPrintHtml } from "./render/dom.js";
 export type { FindMatch } from "./edit/find.js";
