@@ -30,6 +30,7 @@ import {
   type StyleSpec,
   type StylePatch,
 } from "./styles.js";
+import { insertBibliography, refreshBibliographies } from "./bibliography.js";
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
 import {
   badCitationSource,
@@ -1270,6 +1271,70 @@ const insertCitationOperation = defineOperation<{
   },
 });
 
+/**
+ * Insert a bibliography after the paragraph holding the anchor run: a
+ * BIBLIOGRAPHY field whose entries are GENERATED from the package's sources
+ * part (edit/bibliography.ts).
+ *
+ * `entryCount` is the insertToc budget pattern — the field's size comes from
+ * the DOCUMENT (one paragraph per source), so the originator asks
+ * bibliographyEntryCount and carries the answer to size the id allocation.
+ * Unlike a TOC there is no placeholder phase: the entries are a pure function
+ * of the sources part, which is sequenced state, so every replica derives
+ * identical bytes with nothing else carried.
+ */
+const insertBibliographyOperation = defineOperation<{
+  runId: StableId;
+  entryCount: number;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertBibliography",
+  address: "run",
+  category: "insert",
+  description: "Insert a bibliography built from the document's citation sources.",
+  fields: [{ name: "entryCount" }],
+  // Per entry: the w:p and its text run. The spare covers the three field
+  // runs spliced into the first entry and the closing paragraph and run.
+  nodeIds: ({ entryCount }) =>
+    Number.isInteger(entryCount) && entryCount > 0 ? entryCount * 2 + 8 : 8,
+  validate: ({ entryCount }) =>
+    Number.isInteger(entryCount) && entryCount >= 1 && entryCount <= 10000
+      ? null
+      : "insertBibliography: bad entryCount",
+  apply: ({ doc, target }) => (target.t ? insertBibliography(doc, target.t) : false),
+});
+
+/**
+ * Regenerate every bibliography's entries from the current sources part —
+ * the structural half of keeping one current, the rebuildToc split: entry
+ * paragraphs are replaced outright, which the string-carrying updateFields
+ * pass can never do. DOCUMENT-scoped with the refreshed content derived per
+ * replica (deterministic, unlike a TOC rebuild whose page numbers come from
+ * a layout — which is why TOC rebuilds stay local-only while this rides the
+ * wire). Its rejection predicate is the change itself: a replica whose
+ * bibliographies already match the sources part applies nothing, and every
+ * replica compares identical sequenced state. `entryCount` is the carried-id
+ * budget: total fresh entry paragraphs across every bibliography field.
+ */
+const refreshBibliographyOperation = defineOperation<{
+  entryCount: number;
+  nodeIds: StableId[];
+}>()({
+  kind: "refreshBibliography",
+  address: "document",
+  category: "document",
+  description: "Regenerate every bibliography from the document's citation sources.",
+  fields: [{ name: "entryCount" }],
+  nodeIds: ({ entryCount }) =>
+    Number.isInteger(entryCount) && entryCount > 0 ? entryCount * 2 + 8 : 8,
+  prunesIds: true,
+  validate: ({ entryCount }) =>
+    Number.isInteger(entryCount) && entryCount >= 1 && entryCount <= 10000
+      ? null
+      : "refreshBibliography: bad entryCount",
+  apply: ({ doc }) => refreshBibliographies(doc),
+});
+
 // ---------------------------------------------------------------------------
 // Bibliography sources
 // ---------------------------------------------------------------------------
@@ -1670,6 +1735,8 @@ const OPERATIONS = [
   setModel3DRotationOperation,
   insertMergeFieldOperation,
   insertCitationOperation,
+  insertBibliographyOperation,
+  refreshBibliographyOperation,
   createCitationSourceOperation,
   editCitationSourceOperation,
   deleteCitationSourceOperation,

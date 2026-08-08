@@ -739,6 +739,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertField` | Insert an allowlisted Word field | `runRef`, `instruction`; optional: `cachedResult` |
 | `insertMergeField` | Insert a mail-merge placeholder field («Name») | `runRef`, `name` |
 | `insertCitation` | Insert a citation to a bibliography source the document already has | `runRef`, `tag` |
+| `insertBibliography` | Insert a bibliography built from the document's citation sources | `runRef`, `entryCount` |
 | `insertTable` | Insert a table, with its whole content (cell texts, header row) authored in the same operation | `runRef`, `rows`, `cols`; optional: `cells`, `headerRow` |
 | `insertToc` | Insert a table of contents built from the document's headings | `runRef`, `entryCount`, `levels`, `leader` |
 | `insertWatermark` | Stamp a text watermark across every page, in the document's header parts | `text`, `headerCount`; optional: `diagonal`, `color`, `opacity` |
@@ -862,6 +863,7 @@ the equation into something else.
 | `createStyle` | Create a paragraph, character, table, or numbering style definition | `style` |
 | `modifyStyle` | Change an existing style definition | `styleId`, `patch` |
 | `deleteStyle` | Delete a style definition; content using it falls back to the style it was based on | `styleId` |
+| `refreshBibliography` | Regenerate every bibliography from the document's citation sources; `entryCount` is the id budget (sources × bibliography fields) | `entryCount` |
 | `createCitationSource` | Add a bibliography source (book, article, website, report), creating the sources part when the document has none | `source` |
 | `editCitationSource` | Change a bibliography source's fields, by tag; run `updateFields` afterwards to refresh citation text | `tag`, `patch` |
 | `deleteCitationSource` | Delete a bibliography source; refused while a CITATION field still cites it | `tag` |

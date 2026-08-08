@@ -426,6 +426,10 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   // A TOC's size is document-derived, so entryCount is an id BUDGET the
   // originator computes with tocEntryCount — see the operation's own comment.
   "insertToc.entryCount": integer(1, 10000),
+  // Same budget pattern: one entry per bibliography source, computed with
+  // bibliographyEntryCount (× the field count for a refresh).
+  "insertBibliography.entryCount": integer(1, 10000),
+  "refreshBibliography.entryCount": integer(1, 10000),
   "insertToc.levels": {
     type: "array",
     minItems: 2,

@@ -107,6 +107,13 @@ const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
       <w:pPr><w:spacing w:after="80"/></w:pPr>
       <w:rPr><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr>
     </w:style>`,
+    // Word's built-in "Bibliography" look: Normal with the utility flags Word
+    // writes. A generated bibliography references it by pStyle, so a document
+    // that has never held one still needs it the moment one is inserted.
+    Bibliography: `<w:style ${W} w:type="paragraph" w:styleId="Bibliography">
+      <w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:uiPriority w:val="37"/><w:semiHidden/><w:unhideWhenUsed/>
+    </w:style>`,
   };
 })();
 
