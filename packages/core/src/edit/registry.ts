@@ -45,6 +45,14 @@ import {
   type CitationSourceSpec,
 } from "./sources.js";
 import {
+  badBuildingBlockSpec,
+  createBuildingBlock,
+  deleteBuildingBlock,
+  insertBuildingBlock,
+  isValidBuildingBlockName,
+  type CreateBuildingBlockSpec,
+} from "./quick-parts.js";
+import {
   MAX_TAB_STOP_PT,
   PARAGRAPH_BORDER_EDGES,
   TAB_STOP_ALIGNMENTS,
@@ -1655,6 +1663,66 @@ const setCitationStyleOperation = defineOperation<{ style: CitationStyle }>()({
 });
 
 // ---------------------------------------------------------------------------
+// Quick Parts / Building Blocks (the glossary part, ECMA-376 §17.12)
+// ---------------------------------------------------------------------------
+
+/**
+ * The three operations below edit the glossary part (word/glossary/
+ * document.xml's w:docParts) rather than content the way the sources-part
+ * operations do — see DocxDocument.glossaryTree. createBuildingBlock and
+ * deleteBuildingBlock are DOCUMENT-scoped for the same reason
+ * createCitationSource is: the part is sequenced state, every property comes
+ * from the payload, and no run's text moves; the rejection predicate is the
+ * building-block NAME, exactly like a source tag. insertBuildingBlock is
+ * RUN-scoped like insertBibliography/insertCitation: its content is a pure
+ * function of already-synced glossary state plus the payload's `name`, so it
+ * needs no carried OOXML of its own — only the carried-id BUDGET every
+ * content-creating registered operation declares.
+ */
+
+const createBuildingBlockOperation = defineOperation<CreateBuildingBlockSpec>()({
+  kind: "createBuildingBlock",
+  address: "document",
+  category: "document",
+  description: "Save the current selection as a named Quick Part (building block), creating the glossary part when the document has none.",
+  fields: [{ name: "name" }, { name: "category", optional: true }, { name: "blocksXml" }],
+  validate: (spec) => badBuildingBlockSpec(spec),
+  apply: ({ doc, payload }) => createBuildingBlock(doc, payload),
+});
+
+const insertBuildingBlockOperation = defineOperation<{
+  name: string;
+  /** The carried-id budget, computed by the caller from the SAME already-
+   * synced glossary state the apply side reads (buildingBlockNodeCount) —
+   * the insertBibliography entryCount pattern. */
+  blockCount: number;
+}>()({
+  kind: "insertBuildingBlock",
+  address: "run",
+  category: "insert",
+  description: "Insert a named Quick Part (building block) at the caret, cloning its stored content from the glossary part.",
+  fields: [{ name: "name" }, { name: "blockCount" }],
+  nodeIds: ({ blockCount }) => (Number.isInteger(blockCount) && blockCount > 0 ? blockCount : 0),
+  validate: ({ name, blockCount }) =>
+    !isValidBuildingBlockName(name)
+      ? "insertBuildingBlock: bad name"
+      : Number.isInteger(blockCount) && blockCount >= 0 && blockCount <= 5000
+        ? null
+        : "insertBuildingBlock: bad blockCount",
+  apply: ({ doc, target, payload }) => (target.t ? insertBuildingBlock(doc, target.t, payload.name) : false),
+});
+
+const deleteBuildingBlockOperation = defineOperation<{ name: string }>()({
+  kind: "deleteBuildingBlock",
+  address: "document",
+  category: "document",
+  description: "Delete a Quick Part (building block) from the glossary part, by name.",
+  fields: [{ name: "name" }],
+  validate: ({ name }) => (isValidBuildingBlockName(name) ? null : "deleteBuildingBlock: bad name"),
+  apply: ({ doc, payload }) => deleteBuildingBlock(doc, payload.name),
+});
+
+// ---------------------------------------------------------------------------
 // Watermarks
 // ---------------------------------------------------------------------------
 
@@ -2201,6 +2269,9 @@ const OPERATIONS = [
   editCitationSourceOperation,
   deleteCitationSourceOperation,
   setCitationStyleOperation,
+  createBuildingBlockOperation,
+  insertBuildingBlockOperation,
+  deleteBuildingBlockOperation,
   insertWatermarkOperation,
   removeWatermarkOperation,
   setTitlePageOperation,

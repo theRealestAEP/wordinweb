@@ -266,6 +266,17 @@ export class DocxDocument {
   /** Companion parts written when THIS session created the sources part
    * (itemProps + its .rels); an arriving part keeps its own companions. */
   private sourcesAux: Record<string, string> | null = null;
+  /** Retained glossary document part (word/glossary/document.xml, ECMA-376
+   * §17.12: glossaryDocument/docParts/docPart — Word's Quick Parts / Building
+   * Blocks store), when present. Building-block editing mutates this tree in
+   * place; a document with none gets the part on first create. Unlike
+   * headers/footers, a docPart's body is never caret-editable — it is only
+   * ever cloned INTO the main document body (insertBuildingBlock) or captured
+   * OUT of a selection (createBuildingBlock) — so this part carries no
+   * editableRoots()/stable-id integration of its own. */
+  private glossaryPart: string | null = null;
+  private glossaryRoot: XmlElement | null = null;
+  private glossaryDirty = false;
   /** Serialize retained optional parts only once actually mutated, keeping
    * untouched parts byte-identical through save(). */
   private stylesDirty = false;
@@ -371,6 +382,19 @@ export class DocxDocument {
       if (!isSourcesRoot(root)) continue;
       this.sourcesPart = rel.target;
       this.sourcesRoot = root;
+      break;
+    }
+
+    // Glossary document (word/glossary/document.xml, ECMA-376 §17.12): the
+    // Quick Parts / Building Blocks store. Found by relationship TYPE, unlike
+    // the sources part's content sniffing — a package holds at most one, and
+    // the type alone identifies it unambiguously.
+    for (const rel of this.documentRels.values()) {
+      if (!rel.type.endsWith("/glossaryDocument") || rel.external) continue;
+      const root = this.readXmlOptional(rel.target);
+      if (!root) continue;
+      this.glossaryPart = rel.target;
+      this.glossaryRoot = root;
       break;
     }
 
@@ -1392,6 +1416,87 @@ export class DocxDocument {
   }
 
   /**
+   * Retained glossary document tree (w:glossaryDocument), or null when the
+   * package has no glossary part. With create=true, a missing part is
+   * created and registered — package part, document relationship,
+   * content-type override — the createNotesPart discipline.
+   *
+   * The glossary part gets none of the sources part's companion machinery
+   * (no datastore item, no random itemID): it is an ordinary WordprocessingML
+   * part named by relationship TYPE, so creation just mints an empty
+   * `<w:glossaryDocument><w:docParts/></w:glossaryDocument>` and wires it up
+   * — closer to createNotesPart than to sourcesTree. A real Word-authored
+   * glossary part additionally carries its own styles.xml / settings.xml /
+   * fontTable.xml; this engine writes none of them, because a docPart's
+   * content is read once — to clone its blocks into the main document, where
+   * they resolve styles against the MAIN document's own styles.xml — and is
+   * never laid out or rendered as its own story the way a header/footer is.
+   *
+   * DETERMINISM: nothing here depends on Word's random draws (no GUID is
+   * written at all — w:docPartPr/w:guid is optional and this engine never
+   * reads it back), so two replicas creating the part through the same
+   * sequenced operation write identical bytes.
+   */
+  glossaryTree(create = false): XmlElement | null {
+    if (this.glossaryRoot || !create) return this.glossaryRoot;
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    this.glossaryPart = `${docDir}glossary/document.xml`;
+    this.glossaryRoot = {
+      name: "w:glossaryDocument",
+      attrs: { "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main" },
+      children: [{ name: "w:docParts", attrs: {}, children: [], text: "" }],
+      text: "",
+    };
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const r of rels.children) {
+      const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+      if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+    }
+    const relId = `rId${maxId + 1}`;
+    rels.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: relId,
+        Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/glossaryDocument",
+        Target: "glossary/document.xml",
+      },
+      children: [],
+      text: "",
+    });
+    this.documentRels.set(relId, {
+      id: relId,
+      type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/glossaryDocument",
+      target: this.glossaryPart,
+      external: false,
+    });
+    if (this.contentTypesRoot) {
+      const partName = "/" + this.glossaryPart;
+      if (!this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) {
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: {
+            PartName: partName,
+            ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document.glossary+xml",
+          },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    this.glossaryDirty = true;
+    return this.glossaryRoot;
+  }
+
+  /** Invalidate what a glossary-part edit changes: nothing downstream, since
+   * createBuildingBlock/deleteBuildingBlock touch only the glossary tree, not
+   * any paragraph the layout reads. Exists for the same "explicit intent to
+   * persist" reason markSourcesChanged does. */
+  markGlossaryChanged(): void {
+    this.glossaryDirty = true;
+  }
+
+  /**
    * Retained footnotes tree. With create=true, a missing footnotes.xml part
    * is created and registered (with Word's required separator footnotes) so
    * inserted footnotes serialize and round-trip.
@@ -2254,6 +2359,9 @@ export class DocxDocument {
     }
     if (this.sourcesAux) {
       for (const [name, xml] of Object.entries(this.sourcesAux)) files[name] = strToU8(xml);
+    }
+    if (this.glossaryDirty && this.glossaryRoot && this.glossaryPart) {
+      files[this.glossaryPart] = strToU8(serializeXml(this.glossaryRoot, true));
     }
     if (this.settingsDirty) files[this.settingsPart] = strToU8(serializeXml(this.settingsRoot, true));
     if (this.relsRoot) this.writeModeledXml(files, this.relsPath, this.relsRoot);
