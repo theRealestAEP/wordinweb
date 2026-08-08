@@ -469,6 +469,16 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "editCitationSource.tag": citationTag,
   "editCitationSource.patch": closedObject(citationSourceFields),
   "deleteCitationSource.tag": citationTag,
+  // Word's own AutoText/Quick-Part name length (the core registry's own
+  // isValidBuildingBlockName is stricter still: no control characters).
+  "createBuildingBlock.name": string(64, 1),
+  "createBuildingBlock.category": string(64),
+  "insertBuildingBlock.name": string(64, 1),
+  "deleteBuildingBlock.name": string(64, 1),
+  // The insertBibliography entryCount budget pattern: the caller computes
+  // this with buildingBlockNodeCount from the SAME already-synced glossary
+  // state the apply side reads.
+  "insertBuildingBlock.blockCount": integer(0, 5000),
   "insertToc.captionLabel": { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]{0,31}$" },
   "insertCaption.label": { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]{0,31}$" },
   "insertCaption.text": string(2000, 0),

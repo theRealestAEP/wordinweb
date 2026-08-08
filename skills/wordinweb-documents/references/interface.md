@@ -742,6 +742,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertMergeField` | Insert a mail-merge placeholder field («Name») | `runRef`, `name` |
 | `insertCitation` | Insert a citation to a bibliography source the document already has | `runRef`, `tag` |
 | `insertBibliography` | Insert a bibliography built from the document's citation sources | `runRef`, `entryCount` |
+| `insertBuildingBlock` | Insert a named Quick Part (building block) at a position, cloning its stored content from the glossary part; `blockCount` is the id budget (from buildingBlockNodeCount) | `runRef`, `name`, `blockCount` |
 | `insertTable` | Insert a table, with its whole content (cell texts, header row) authored in the same operation | `runRef`, `rows`, `cols`; optional: `cells`, `headerRow` |
 | `insertToc` | Insert a table of contents built from the document's headings, or a table of figures from a caption label | `runRef`, `entryCount`; optional: `levels`, `leader`, `captionLabel` |
 | `insertIndexEntry` | Mark an index entry: an invisible XE field; a colon makes a subentry ("Widgets:assembly") | `runRef`, `entry` |
@@ -882,6 +883,8 @@ the equation into something else.
 | `editCitationSource` | Change a bibliography source's fields, by tag; run `updateFields` afterwards to refresh citation text | `tag`, `patch` |
 | `deleteCitationSource` | Delete a bibliography source; refused while a CITATION field still cites it | `tag` |
 | `setCitationStyle` | Select the citation style (APA or MLA) for citations and the bibliography | `style` |
+| `createBuildingBlock` | Save the current selection as a named Quick Part (building block), creating the glossary part when the document has none | `name`, `blocksXml`; optional: `category` |
+| `deleteBuildingBlock` | Delete a Quick Part (building block) from the glossary part, by name | `name` |
 
 ## Nested value shapes
 
