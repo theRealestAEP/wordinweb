@@ -815,14 +815,16 @@ function parseRun(
           }
         } else if (type === "separate") {
           field.mode = "result";
-          // HYPERLINK, TOC and BIBLIOGRAPHY results are verbatim styled
-          // content: let the result runs render themselves (their own rPr
-          // wins in Word, not the field carrier's - nccih p5's TOC fldChar
-          // runs carry <w:i/> but Word paints the entries upright from the
-          // result runs' rPr). BIBLIOGRAPHY additionally spans paragraphs,
-          // so swallowing its result into one cachedResult would collapse
-          // one paragraph per entry into a single inline string.
-          field.live = /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY)\b/i.test(field.instruction);
+          // HYPERLINK, TOC, BIBLIOGRAPHY and INDEX results are verbatim
+          // styled content: let the result runs render themselves (their own
+          // rPr wins in Word, not the field carrier's - nccih p5's TOC
+          // fldChar runs carry <w:i/> but Word paints the entries upright
+          // from the result runs' rPr). BIBLIOGRAPHY and INDEX additionally
+          // span paragraphs, so swallowing a result into one cachedResult
+          // would collapse one paragraph per entry into a single inline
+          // string. (\b keeps INDEX from matching an XE mark, which has no
+          // separate and never reaches here anyway.)
+          field.live = /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY|INDEX)\b/i.test(field.instruction);
         } else if (type === "end") {
           if (!field.live) {
             const carrier = field.carrier ?? run;

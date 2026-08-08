@@ -744,6 +744,8 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertBibliography` | Insert a bibliography built from the document's citation sources | `runRef`, `entryCount` |
 | `insertTable` | Insert a table, with its whole content (cell texts, header row) authored in the same operation | `runRef`, `rows`, `cols`; optional: `cells`, `headerRow` |
 | `insertToc` | Insert a table of contents built from the document's headings, or a table of figures from a caption label | `runRef`, `entryCount`; optional: `levels`, `leader`, `captionLabel` |
+| `insertIndexEntry` | Mark an index entry: an invisible XE field; a colon makes a subentry ("Widgets:assembly") | `runRef`, `entry` |
+| `insertIndex` | Insert an alphabetized index built from the document's XE entry marks; `entryCount` is the id budget (from indexEntryCount) | `runRef`, `entryCount` |
 | `insertCaption` | Insert a caption ("Figure 1", "Table 2", …) below or above the addressed paragraph or its table | `blockRef`, `label`; optional: `text`, `position` |
 | `ensureRefBookmark` | Wrap the addressed paragraph in a hidden _Ref bookmark for cross-referencing | `blockRef`, `name` |
 | `insertWatermark` | Stamp a text watermark across every page, in the document's header parts | `text`, `headerCount`; optional: `diagonal`, `color`, `opacity` |
@@ -869,6 +871,7 @@ the equation into something else.
 | `modifyStyle` | Change an existing style definition | `styleId`, `patch` |
 | `deleteStyle` | Delete a style definition; content using it falls back to the style it was based on | `styleId` |
 | `refreshBibliography` | Regenerate every bibliography from the document's citation sources; `entryCount` is the id budget (sources × bibliography fields) | `entryCount` |
+| `refreshIndex` | Rebuild every index from the document's XE entry marks; `entryCount` is the id budget (index entries × index fields) | `entryCount` |
 | `createCitationSource` | Add a bibliography source (book, article, website, report), creating the sources part when the document has none | `source` |
 | `editCitationSource` | Change a bibliography source's fields, by tag; run `updateFields` afterwards to refresh citation text | `tag`, `patch` |
 | `deleteCitationSource` | Delete a bibliography source; refused while a CITATION field still cites it | `tag` |

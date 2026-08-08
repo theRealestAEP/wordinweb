@@ -128,6 +128,19 @@ const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
       <w:uiPriority w:val="99"/><w:unhideWhenUsed/>
       <w:pPr><w:spacing w:after="100"/></w:pPr>
     </w:style>`,
+    // Word's "index 1"/"index 2": Normal, hanging-indented one step per
+    // level, no inter-entry spacing. A generated INDEX references them by
+    // pStyle, so a document that never held one needs them at insert.
+    Index1: `<w:style ${W} w:type="paragraph" w:styleId="Index1">
+      <w:name w:val="index 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:autoRedefine/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>
+      <w:pPr><w:spacing w:after="0"/><w:ind w:left="220" w:hanging="220"/></w:pPr>
+    </w:style>`,
+    Index2: `<w:style ${W} w:type="paragraph" w:styleId="Index2">
+      <w:name w:val="index 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:autoRedefine/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>
+      <w:pPr><w:spacing w:after="0"/><w:ind w:left="440" w:hanging="220"/></w:pPr>
+    </w:style>`,
   };
 })();
 

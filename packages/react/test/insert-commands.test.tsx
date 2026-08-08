@@ -157,6 +157,9 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertPageNumber: (api) => api.insertPageNumber("page"),
   insertField: (api) => api.insertField("AUTHOR", "me"),
   insertToc: (api) => api.insertToc(),
+  // An explicit entry, because the blank mount has no selection to mark.
+  addIndexEntry: (api) => api.addIndexEntry("Widgets:assembly"),
+  insertIndex: (api) => api.insertIndex(),
   // A blank room has no sources part, so the citation is the honest no-op
   // path in collab (emits nothing, mutates nothing) — allowed by the rule.
   insertCitation: (api) => api.insertCitation("Doe03"),

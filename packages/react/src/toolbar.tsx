@@ -1325,11 +1325,20 @@ function ContentsMenu({ api }: { api: DocxViewApi | null }) {
             ["fields", "Update fields"],
           ],
         },
+        {
+          label: "Index",
+          items: [
+            ["markEntry", "Mark index entry"],
+            ["index", "Insert index"],
+          ],
+        },
       ]}
       onPick={(value) => {
         if (value === "insert") api?.insertToc();
         else if (value === "figures") api?.insertToc({ captionLabel: "Figure" });
         else if (value === "rebuild") api?.refreshTocs();
+        else if (value === "markEntry") api?.addIndexEntry();
+        else if (value === "index") api?.insertIndex();
         else api?.updateFields();
       }}
     />
@@ -5450,6 +5459,10 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   // carried id allocation can be sized for a mutation whose size comes from
   // the document rather than from its arguments.
   { command: "insertToc", feature: "field" },
+  // The index cluster lands beside the TOC: XE marks and the INDEX field are
+  // fields, offered from the same Contents menu.
+  { command: "addIndexEntry", feature: "field" },
+  { command: "insertIndex", feature: "field" },
   // Citations are fields too, but they get their own group: the whole
   // References cluster (insert citation, bibliography, source manager,
   // style) hangs together and a host hides or shows it as one.

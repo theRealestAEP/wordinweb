@@ -32,6 +32,7 @@ import {
 } from "./styles.js";
 import { insertBibliography, refreshBibliographies } from "./bibliography.js";
 import { formulaInstruction, insertTableFormula } from "./formula.js";
+import { insertIndex, insertIndexEntry, isValidIndexEntry, refreshIndexes } from "./index-field.js";
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
 import {
   badCitationSource,
@@ -599,6 +600,83 @@ const ensureRefBookmarkOperation = defineOperation<{
   validate: ({ name }) =>
     typeof name === "string" && /^_Ref\d{1,12}$/.test(name) ? null : "ensureRefBookmark: bad name",
   apply: ({ doc, target, payload }) => ensureRefBookmark(doc, target.el, payload.name),
+});
+
+/**
+ * Mark an index entry: an invisible XE field (§17.16.5.31) at the end of the
+ * addressed run, entry text (with optional `Main:Sub` colon) in the payload.
+ */
+const insertIndexEntryOperation = defineOperation<{
+  runId: StableId;
+  entry: string;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertIndexEntry",
+  address: "run",
+  category: "insert",
+  description: 'Mark an index entry: an invisible XE field for the INDEX build. Use a colon for a subentry ("Widgets:assembly").',
+  fields: [{ name: "entry" }],
+  // The three field runs, plus the runs a mid-text split creates.
+  nodeIds: () => 8,
+  validate: ({ entry }) => (isValidIndexEntry(entry) ? null : "insertIndexEntry: bad entry"),
+  apply: ({ doc, target, payload }) =>
+    target.t ? insertIndexEntry(doc, target.t, target.t.text.length, payload.entry) : false,
+});
+
+/**
+ * Insert an INDEX built from the document's XE marks — the insertToc budget
+ * pattern: `entryCount` (one per entry paragraph, asked of indexEntryCount)
+ * sizes the carried ids. Entries derive from sequenced state on every
+ * replica (deterministic `_Idx` bookmark names, locale-free sort); page
+ * numbers land as PAGEREF placeholders and are filled by updateFields, whose
+ * results ride as data.
+ */
+const insertIndexOperation = defineOperation<{
+  runId: StableId;
+  entryCount: number;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertIndex",
+  address: "run",
+  category: "insert",
+  description: "Insert an alphabetized index built from the document's XE entry marks.",
+  fields: [{ name: "entryCount" }],
+  // Per entry paragraph: the w:p, its entry text run, and up to ~3 page
+  // references at 7 runs each (", " + the five field runs, rounded up).
+  // Excess references fall back to parse-order ids, which every replica
+  // derives identically (the convertTextToTable rule).
+  nodeIds: ({ entryCount }) =>
+    Number.isInteger(entryCount) && entryCount > 0 ? entryCount * 24 + 8 : 8,
+  validate: ({ entryCount }) =>
+    Number.isInteger(entryCount) && entryCount >= 1 && entryCount <= 10000
+      ? null
+      : "insertIndex: bad entryCount",
+  apply: ({ doc, target }) => (target.t ? insertIndex(doc, target.t) : false),
+});
+
+/**
+ * Rebuild every index from the current XE marks — refreshBibliography's
+ * shape: document-scoped, structural, rejection predicate the change itself
+ * (the comparison blanks harvested page numbers, so an index whose entry
+ * structure is unchanged applies nothing and keeps its numbers).
+ */
+const refreshIndexOperation = defineOperation<{
+  entryCount: number;
+  nodeIds: StableId[];
+}>()({
+  kind: "refreshIndex",
+  address: "document",
+  category: "document",
+  description: "Rebuild every index from the document's XE entry marks.",
+  fields: [{ name: "entryCount" }],
+  nodeIds: ({ entryCount }) =>
+    Number.isInteger(entryCount) && entryCount > 0 ? entryCount * 24 + 8 : 8,
+  prunesIds: true,
+  validate: ({ entryCount }) =>
+    Number.isInteger(entryCount) && entryCount >= 1 && entryCount <= 10000
+      ? null
+      : "refreshIndex: bad entryCount",
+  apply: ({ doc }) => refreshIndexes(doc),
 });
 
 // ---------------------------------------------------------------------------
@@ -1875,6 +1953,9 @@ const OPERATIONS = [
   insertTocOperation,
   insertCaptionOperation,
   ensureRefBookmarkOperation,
+  insertIndexEntryOperation,
+  insertIndexOperation,
+  refreshIndexOperation,
   createStyleOperation,
   modifyStyleOperation,
   deleteStyleOperation,

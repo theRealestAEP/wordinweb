@@ -193,6 +193,15 @@ export {
   insertBibliography,
   refreshBibliographies,
 } from "./edit/bibliography.js";
+export {
+  INDEX_EMPTY_TEXT,
+  findIndexFields,
+  indexEntryCount,
+  insertIndex,
+  insertIndexEntry,
+  isValidIndexEntry,
+  refreshIndexes,
+} from "./edit/index-field.js";
 export type { TocLeader, TocLevels, TocOptions } from "./edit/toc.js";
 export {
   drawingFillColor,

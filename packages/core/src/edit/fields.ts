@@ -12,7 +12,10 @@ function cloneDeep(e: XmlElement): XmlElement {
   return { name: e.name, attrs: { ...e.attrs }, children: e.children.map(cloneDeep), text: e.text };
 }
 
-function insertElementsAt(
+/** Splice run-level elements into a paragraph at a text position, preserving
+ * the surrounding run's formatting on both halves of a mid-text split. Also
+ * the entry point index-field.ts uses to place an XE field's runs. */
+export function insertElementsAt(
   doc: DocxDocument,
   t: XmlElement,
   offset: number,
@@ -84,7 +87,7 @@ const INSERTABLE_FIELD_KEYWORDS = new Set([
   "PAGE", "NUMPAGES", "SECTIONPAGES", "SECTION", "DATE", "TIME",
   "CREATEDATE", "SAVEDATE", "PRINTDATE", "AUTHOR", "TITLE", "SUBJECT",
   "KEYWORDS", "COMMENTS", "FILENAME", "NUMWORDS", "NUMCHARS", "PAGEREF",
-  "REF", "SEQ", "STYLEREF", "TOC", "INDEX", "LISTNUM", "QUOTE",
+  "REF", "SEQ", "STYLEREF", "TOC", "INDEX", "XE", "LISTNUM", "QUOTE",
   "MERGEFIELD", "CITATION",
 ]);
 

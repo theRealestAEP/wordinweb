@@ -1086,11 +1086,27 @@ function applyRegistered(
   return true;
 }
 
-/** Assign carried ids to tracked nodes created since `before`, in doc order. */
+/**
+ * Assign carried ids to tracked nodes created since `before`, in doc order.
+ *
+ * The fresh nodes' AUTO ids are dropped first. A refresh inside the mutation
+ * auto-assigns sequential ids starting at the table's `next`, and after an
+ * earlier intent whose batch was only partly consumed, `next` sits INSIDE
+ * that batch's range — so an auto id here can equal a LATER id of THIS
+ * intent's carried batch, and reassign would reject a perfectly good intent
+ * as a collision (found by the index wave: mark an XE entry, then
+ * insertIndex). Dropping the autos first makes the batch land regardless;
+ * fresh nodes beyond the batch re-auto-assign ABOVE the carried maximum
+ * (reassign bumps `next`), which every replica derives identically.
+ */
 function assignFreshTracked(ids: StableIds, doc: DocxDocument, before: Set<XmlElement>, nodeIds: number[]): void {
   const fresh: XmlElement[] = [];
   walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
-  for (let k = 0; k < fresh.length && k < nodeIds.length; k++) ids.reassign(fresh[k], nodeIds[k]);
+  for (const el of fresh) ids.unassign(el);
+  for (let k = 0; k < fresh.length; k++) {
+    if (k < nodeIds.length) ids.reassign(fresh[k], nodeIds[k]);
+    else ids.assign(fresh[k]);
+  }
 }
 
 function base64ToBytes(b64: string): Uint8Array {
