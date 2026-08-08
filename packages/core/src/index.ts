@@ -150,6 +150,17 @@ export {
   isValidMergeFieldName,
 } from "./edit/fields.js";
 export {
+  FORMULA_FUNCTIONS,
+  FORMULA_ZERO_DIVIDE,
+  evaluateTableFormula,
+  formatFormulaNumber,
+  formulaInstruction,
+  insertTableFormula,
+  isValidFormulaInstruction,
+  isValidFormulaNumberFormat,
+  parseTableFormula,
+} from "./edit/formula.js";
+export {
   BIBLIOGRAPHY_EMPTY_TEXT,
   CITATION_STYLES,
   bibliographyEntries,

@@ -120,8 +120,13 @@ export interface SealedCheckpoint {
  *       ignore and build a HEADING table instead — byte divergence, not
  *       just rejection. An e16 peer rejects (or misapplies) the very
  *       intents an e17 peer applies.
+ *   e18 fields/find/index depth wave: new registered operation
+ *       insertTableFormula (`=SUM(ABOVE)` field in a cell, result derived
+ *       per replica from the table's cell texts); field-instruction
+ *       validation additionally accepts formula instructions. An e17 peer
+ *       rejects the very intents an e18 peer applies.
  */
-export const ENGINE_VERSION = "e17";
+export const ENGINE_VERSION = "e18";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-

@@ -35,6 +35,7 @@ import {
   setTableLayoutMode,
   setTableLook,
   sortTableRows,
+  insertTableFormula,
   setTableStyle,
   setTableWidth,
   tableLookOf,
@@ -428,6 +429,10 @@ export interface DocxViewApi {
   /** Convert the caret's table into paragraphs, one per row, cell texts
    * joined by the separator. */
   convertTableToText(separator: "tab" | "comma"): boolean;
+  /** Insert a table formula field ("=SUM(ABOVE)", "=A1+B2", …) at the caret's
+   * cell paragraph, with an optional \# number format like "#,##0.00". The
+   * result is evaluated immediately; updateFields recomputes it. */
+  insertTableFormula(formula: string, numFmt?: string): boolean;
   /** Insert an image file at the caret (inline, natural size clamped to column).
    * The result is REPORTED rather than swallowed: a picker that accepts a file
    * and then does nothing is indistinguishable from a broken button. */
@@ -2538,6 +2543,26 @@ export function DocxView({
             history.checkpoint();
             const tbl = caretTable();
             if (tbl && sortTableRows(doc, tbl, colIdx, order, compare, hasHeader ?? false)) pages = rerender(doc);
+          },
+          insertTableFormula: (formula, numFmt) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return false;
+            const p = paragraphOf(doc, caret.t);
+            // Refuse outside a table BEFORE the collab gate: the wire apply
+            // would be an honest no-op there anyway, and a false return is
+            // what lets the dialog say so.
+            if (!p || !cellContextOf(doc, caret.t)) return false;
+            const args = { formula, ...(numFmt !== undefined ? { numFmt } : {}) };
+            if (
+              collabOp(
+                (a, alloc) => operationBody("insertTableFormula", a.blockId, args, alloc) as never,
+                { t: caret.t, offset: 0 },
+              )
+            ) return true;
+            history.checkpoint();
+            if (!insertTableFormula(doc, p, formula, numFmt)) return false;
+            pages = rerender(doc);
+            return true;
           },
           convertTextToTable: (separator) => {
             const caret = editor?.getCaretTarget();

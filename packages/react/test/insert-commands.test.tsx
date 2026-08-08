@@ -140,6 +140,9 @@ async function mountCollab() {
  * audit is about EMISSION, not about what each command produces. */
 const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertTable: (api) => api.insertTable(2, 2),
+  // The caret sits in a body paragraph, not a table cell, so this declines —
+  // the honest no-op branch of the fork rule, audited on purpose.
+  insertTableFormula: (api) => api.insertTableFormula("SUM(ABOVE)"),
   insertImage: (api) => api.insertImage(new Blob([PNG], { type: "image/png" })),
   insertScreenshot: (api) => api.insertScreenshot(),
   insertModel3D: (api) => api.insertModel3D(new Blob([GLB]), new Blob([PNG], { type: "image/png" })),

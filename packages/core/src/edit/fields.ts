@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, localName } from "../xml.js";
+import { isValidFormulaInstruction } from "./formula.js";
 
 /** Field insertion as `w:fldSimple`, which the parser resolves at layout time. */
 
@@ -106,6 +107,10 @@ export function isInsertableFieldInstruction(instruction: string): boolean {
   // can split one instruction into two when Word re-reads it, smuggling a
   // second keyword past the check above.
   if (!/^[\x20-\x7e]+$/.test(instruction)) return false;
+  // A table formula (`=SUM(ABOVE)`, §17.16.5.22) has no keyword; it is
+  // insertable exactly when the formula grammar accepts it, which reads
+  // nothing outside the containing table.
+  if (instruction.trim().startsWith("=")) return isValidFormulaInstruction(instruction);
   const keyword = instruction.trim().split(/\s+/)[0]?.toUpperCase();
   return !!keyword && INSERTABLE_FIELD_KEYWORDS.has(keyword);
 }

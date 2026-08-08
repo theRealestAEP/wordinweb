@@ -792,6 +792,7 @@ Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
 | `setTableCellMargins` | Set cell padding | `cellRef`, `scope`, `margins`; optional: `suggest` |
 | `setTableHeaderRows` | Repeat the first N rows on every page | `cellRef`, `count`; optional: `suggest` |
 | `sortTableRows` | Sort body rows by one column (text or number, asc or desc) | `cellRef`, `colIdx`, `order`, `compare`; optional: `hasHeader` |
+| `insertTableFormula` | Insert a table formula field (`=SUM(ABOVE)`, `=A1+B2`) in the addressed cell, with an optional `\#` number format | `cellRef`, `formula`; optional: `numFmt` |
 | `convertTextToTable` | Convert a paragraph into a table (rows split on a separator) | `blockRef`, `separator`, `cellCount` |
 | `convertTableToText` | Convert a table into paragraphs, one per row | `cellRef`, `separator`, `rowCount` |
 

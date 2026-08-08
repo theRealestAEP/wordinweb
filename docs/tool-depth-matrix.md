@@ -474,3 +474,21 @@ Rows moved:
 
 Wire: ENGINE_VERSION e16 → e17 (setTabStops, setParagraphBorders,
 insertCaption, ensureRefBookmark, insertToc.captionLabel).
+
+## Wave 3 delta, lane A (2026-08-08, branch wave3-fields)
+
+- §6 Tables: Formula (=SUM(ABOVE)…) ABSENT → CORE. `insertTableFormula`
+  registry op writes the `=FORMULA` field (§17.16.5.22) as a w:fldSimple in
+  the caret's cell, cached result EVALUATED from the containing table's cell
+  texts — locale-free numeric parse (the sortTableRows rule), so every collab
+  replica derives identical bytes with nothing carried; updateFields
+  recomputes it (edit/formula.ts). Grammar: + - * / ^, parentheses, cell refs
+  A1 / ranges A1:B3, ABOVE/BELOW/LEFT/RIGHT, SUM/AVERAGE/COUNT/MAX/MIN/
+  PRODUCT, `\#` numeric picture (sections pos;neg;zero, tokens # 0 . , % and
+  literals). Directional scans stop at the first empty cell (Word's
+  documented SUM(ABOVE) behavior); text cells count as 0. UI: Table Format
+  tab "Formula" dialog (instruction + number format, live grammar
+  validation). Gap (documented at edit/formula.ts): comparison operators and
+  boolean/rounding functions (IF/AND/OR/ABS/INT/MOD/ROUND…), bookmark
+  operands, cross-table references, gridSpan-aware cell addressing; arriving
+  fields holding those render their cached result and keep it.

@@ -31,6 +31,7 @@ import {
   type StylePatch,
 } from "./styles.js";
 import { insertBibliography, refreshBibliographies } from "./bibliography.js";
+import { formulaInstruction, insertTableFormula } from "./formula.js";
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
 import {
   badCitationSource,
@@ -1211,6 +1212,34 @@ const setTableCellMarginsOperation = defineOperation<{
   },
 });
 
+/**
+ * Insert a table formula field (`=SUM(ABOVE)` …, §17.16.5.22) at the end of
+ * the addressed cell paragraph. The cached result is EVALUATED on each
+ * replica from the containing table's cell texts — a pure function of
+ * sequenced state, evaluated locale-free (edit/formula.ts), so nothing
+ * nondeterministic needs carrying; updateFields recomputes it thereafter.
+ */
+const insertTableFormulaOperation = defineOperation<{
+  cellParagraphId: StableId;
+  formula: string;
+  numFmt?: string;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertTableFormula",
+  address: "cell",
+  category: "table",
+  description: 'Insert a table formula field ("=SUM(ABOVE)", "=A1+B2", …) in the addressed cell, with an optional \\# number format like "#,##0.00".',
+  fields: [{ name: "formula" }, { name: "numFmt", optional: true }],
+  // The fldSimple's result run; the spare covers nothing else today.
+  nodeIds: () => 4,
+  validate: ({ formula, numFmt }) =>
+    formulaInstruction(formula, numFmt) !== null ? null : "insertTableFormula: bad formula",
+  apply: ({ doc, target, payload }) => {
+    const anchor = cellAnchor(target);
+    return anchor ? insertTableFormula(doc, anchor, payload.formula, payload.numFmt) : false;
+  },
+});
+
 /** Mark the first N rows as the repeating header band. */
 const setTableHeaderRowsOperation = defineOperation<{
   cellParagraphId: StableId;
@@ -1861,6 +1890,7 @@ const OPERATIONS = [
   setTableLayoutOperation,
   setTableCellMarginsOperation,
   setTableHeaderRowsOperation,
+  insertTableFormulaOperation,
   sortTableRowsOperation,
   convertTextToTableOperation,
   convertTableToTextOperation,

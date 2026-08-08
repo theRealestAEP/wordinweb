@@ -8,6 +8,7 @@ import {
   CELL_SCOPE_EDGES,
   TABLE_BORDER_STYLES,
   TABLE_SCOPE_EDGES,
+  formulaInstruction,
   NUMBERING_PRESETS,
   type NumberingPresetId,
   type SelectionFormat,
@@ -2849,6 +2850,73 @@ function showPt(value: number): string {
   return String(Math.round(value * 100) / 100);
 }
 
+/**
+ * Word's Table → Formula dialog, simple tier: the instruction ("=SUM(ABOVE)"
+ * prefilled, Word's own default) and an optional \# number format. The
+ * formula grammar is validated live through the same core rule the insert
+ * enforces, so Apply can never submit an instruction the engine refuses.
+ */
+function TableFormulaDialog({ api, onChanged }: { api: DocxViewApi | null; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [formula, setFormula] = useState("=SUM(ABOVE)");
+  const [numFmt, setNumFmt] = useState("");
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
+  const fmt = numFmt.trim() === "" ? undefined : numFmt.trim();
+  const valid = formulaInstruction(formula, fmt) !== null;
+  const apply = () => {
+    if (!valid) return;
+    if (api?.insertTableFormula(formula, fmt)) {
+      setOpen(false);
+      onChanged();
+    }
+  };
+  return (
+    <span style={{ display: "contents" }}>
+      <Btn
+        label="Formula"
+        title='Insert a formula field ("=SUM(ABOVE)") in the current cell'
+        active={open}
+        buttonRef={triggerRef}
+        onClick={() => setOpen(!open)}
+      />
+      {open && (
+        <AnchoredDialog
+          anchorRef={triggerRef}
+          title="Formula"
+          width={244}
+          onClose={close}
+          onApply={apply}
+          applyDisabled={!valid}
+        >
+          <label style={dialogFieldRow}>
+            <span>Formula</span>
+            <input
+              aria-label="Formula"
+              value={formula}
+              onChange={(event) => setFormula(event.target.value)}
+              style={dialogInput}
+            />
+          </label>
+          <label style={dialogFieldRow}>
+            <span>Number format</span>
+            <input
+              aria-label="Number format"
+              placeholder="#,##0.00"
+              value={numFmt}
+              onChange={(event) => setNumFmt(event.target.value)}
+              style={dialogInput}
+            />
+          </label>
+          <span style={{ fontSize: 11, color: T.muted }}>
+            SUM, AVERAGE, COUNT, MAX, MIN, PRODUCT over ABOVE, BELOW, LEFT, RIGHT, cell references (A1, A1:B3), and arithmetic.
+          </span>
+        </AnchoredDialog>
+      )}
+    </span>
+  );
+}
+
 const MARGIN_SIDES = ["top", "left", "bottom", "right"] as const;
 
 /**
@@ -3717,6 +3785,7 @@ function TableFormatTab({
         groups={[{ items: [["0", "None"], ["1", "First row"], ["2", "First two rows"]] }]}
         onPick={(value) => after(() => api?.setTableHeaderRows(Number(value)))}
       />
+      <TableFormulaDialog api={api} onChanged={onChanged} />
       <TablePropertiesDialog api={api} onChanged={onChanged} />
       <Btn label="Delete table" title="Delete the current table" onClick={() => run("deleteTable")} />
     </span>
@@ -5351,6 +5420,10 @@ export interface InsertCommandSpec {
 
 export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertTable", feature: "table" },
+  // A formula is a field in a cell; the Table Format tab offers it, so it
+  // gates with the table group. Outside a table it declines — the honest
+  // no-op branch of the rule.
+  { command: "insertTableFormula", feature: "table" },
   { command: "insertImage", feature: "image" },
   { command: "insertScreenshot", feature: "screenshot" },
   { command: "insertModel3D", feature: "model3D" },
