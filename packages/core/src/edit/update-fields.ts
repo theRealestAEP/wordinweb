@@ -1,4 +1,5 @@
 import { citationText, documentBibliography } from "../citations.js";
+import { documentTextStatistics, type TextStatistics } from "../word-count.js";
 import { DocxDocument } from "../docx.js";
 import { FieldContext, resolveField } from "../layout/inline.js";
 import { LayoutResult } from "../layout/types.js";
@@ -72,8 +73,10 @@ import { XmlElement, attr, localName } from "../xml.js";
 /** Instructions whose result the update pass takes from a layout. */
 const LAYOUT_RESOLVED = new Set(["PAGE", "NUMPAGES", "SECTIONPAGES", "PAGEREF", "REF", "SEQ"]);
 
-/** Instructions the update pass evaluates itself. */
-const LOCALLY_RESOLVED = new Set(["DATE", "TIME", "FILENAME", "AUTHOR", "STYLEREF", "MERGEFIELD", "CITATION"]);
+/** Instructions the update pass evaluates itself. NUMWORDS and NUMCHARS are
+ * computed from the body model through src/word-count.ts — the same shared
+ * rule layout paints them with, per the body-STYLEREF pattern above. */
+const LOCALLY_RESOLVED = new Set(["DATE", "TIME", "FILENAME", "AUTHOR", "STYLEREF", "MERGEFIELD", "CITATION", "NUMWORDS", "NUMCHARS"]);
 
 /** Every instruction this pass can recompute. Anything else keeps its cache. */
 export const UPDATABLE_FIELD_KEYWORDS: readonly string[] = Object.freeze(
@@ -213,6 +216,8 @@ export function computeFieldResults(doc: DocxDocument, options: FieldUpdateOptio
   // Read once per pass, like styleRefs; null when the package has no sources
   // part, in which case every CITATION keeps its cache.
   const bibliography = documentBibliography(doc);
+  // Computed on first use: a document with no NUMWORDS/NUMCHARS never walks.
+  let textStats: TextStatistics | undefined;
 
   return sites.map(({ field, run }) => {
     const keyword = keywordOf(field.instruction);
@@ -232,6 +237,10 @@ export function computeFieldResults(doc: DocxDocument, options: FieldUpdateOptio
       author: options.author,
       styleRefBody: (_name, key) => styleRefs.get(key as FieldContent),
       citation: (instruction) => (bibliography ? citationText(instruction, bibliography) : undefined),
+      textStats: () => {
+        textStats ??= documentTextStatistics(doc);
+        return textStats;
+      },
     };
     return resolveField(field.instruction, field.cachedResult, context, field);
   });

@@ -86,7 +86,9 @@ const HAND_WRITTEN_CAPABILITIES: Record<
   deleteMath: { category: "math", description: "Delete an equation.", required: ["blockRef"], optional: ["mathIndex"] },
   moveMath: { category: "math", description: "Move an equation to a text position.", required: ["blockRef", "at"], optional: ["mathIndex"] },
   ensureHeaderFooter: { category: "document", description: "Create a header or footer story.", required: ["hfKind"] },
-  deleteComment: { category: "review", description: "Delete a comment thread.", required: ["commentId"] },
+  deleteComment: { category: "review", description: "Delete a comment (a thread-parent id deletes the whole thread; a reply id deletes just that reply).", required: ["commentId"] },
+  resolveComment: { category: "review", description: "Resolve or reopen a comment thread.", required: ["commentId", "resolved"] },
+  editComment: { category: "review", description: "Replace a comment's text.", required: ["commentId", "text"] },
   insertBookmarkRange: { category: "insert", description: "Wrap a run range in a bookmark.", required: ["runRef", "name", "start", "end"] },
   acceptRevision: { category: "review", description: "Accept one tracked revision.", required: ["index"] },
   rejectRevision: { category: "review", description: "Reject one tracked revision.", required: ["index"] },
@@ -421,6 +423,12 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setNumberingLevel.ilvl": { anyOf: [integer(0, 8), { type: "null" }] },
   "setNumberingLevel.patch": numberingLevelPatch,
   "setNumberingRestart.start": { anyOf: [integer(0, 32767), { type: "null" }] },
+  // w:pgNumType. null clears the attribute (fmt back to decimal; start back
+  // to "continue from previous section").
+  "setPageNumberFormat.fmt": {
+    anyOf: [{ enum: ["decimal", "lowerRoman", "upperRoman", "lowerLetter", "upperLetter"] }, { type: "null" }],
+  },
+  "setPageNumberFormat.start": { anyOf: [integer(0, 32767), { type: "null" }] },
   // Fractions of the source bitmap trimmed off each edge; the registry's own
   // validate additionally refuses a crop that leaves no visible strip.
   "setCrop.crop": closedObject(
@@ -496,7 +504,7 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
       },
     };
   }
-  if (field === "suggest" || field === "preservePageStart" || field === "diagonal" || field === "headerRow" || field === "hasHeader") return { type: "boolean" };
+  if (field === "suggest" || field === "preservePageStart" || field === "diagonal" || field === "headerRow" || field === "hasHeader" || field === "enabled" || field === "resolved") return { type: "boolean" };
   // insertWatermark's headerCount is both its carried-id budget and its
   // rejection predicate; the cap matches its own validate in the registry.
   if (field === "headerCount") return integer(1, 50);

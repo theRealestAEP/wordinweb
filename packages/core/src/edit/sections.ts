@@ -307,6 +307,167 @@ function allSectPrs(doc: DocxDocument): XmlElement[] {
   return out;
 }
 
+// ---------- header/footer page variants (w:titlePg, w:evenAndOddHeaders) ----------
+
+/** Whether any section requests a different first-page header/footer. */
+export function titlePageEnabled(doc: DocxDocument): boolean {
+  return allSectPrs(doc).some((sectPr) =>
+    sectPr.children.some((c) => localName(c.name) === "titlePg" && attr(c, "val") !== "0" && attr(c, "val") !== "false"),
+  );
+}
+
+/**
+ * Toggle Word's "Different First Page" (w:titlePg, ECMA-376 §17.10.6) on every
+ * section. Enabling also creates the missing first-page header and footer
+ * parts (empty, referenced w:type="first" from each section — §17.10.5,
+ * ST_HdrFtr §17.18.36), the way Word materializes the bands when the box is
+ * first checked. Disabling removes only the toggle: parts and references stay,
+ * so re-enabling restores their content, exactly as Word does. False when the
+ * document is already in the requested state (honest no-op).
+ */
+export function setTitlePage(doc: DocxDocument, enabled: boolean): boolean {
+  if (enabled) {
+    // Creates the missing first-page parts, and materializes the default body
+    // sectPr when a minimal document has none at all.
+    const partsAdded = doc.ensureHfVariantParts("first");
+    const missingToggle = allSectPrs(doc).filter(
+      (sectPr) => !sectPr.children.some((c) => localName(c.name) === "titlePg"),
+    );
+    for (const sectPr of missingToggle) insertTitlePg(sectPr);
+    if (missingToggle.length === 0 && !partsAdded) return false;
+    doc.refresh();
+    return true;
+  }
+  let changed = false;
+  for (const sectPr of allSectPrs(doc)) {
+    const before = sectPr.children.length;
+    sectPr.children = sectPr.children.filter((c) => localName(c.name) !== "titlePg");
+    changed = changed || sectPr.children.length !== before;
+  }
+  if (changed) doc.refresh();
+  return changed;
+}
+
+function insertTitlePg(sectPr: XmlElement): void {
+  const w = prefixOf(sectPr) || "w:";
+  insertInOrder(sectPr, el(`${w}titlePg`));
+}
+
+/**
+ * Toggle Word's "Different Odd & Even Pages": the document-global
+ * w:evenAndOddHeaders switch in settings.xml (ECMA-376 §17.10.1). Enabling
+ * also creates the missing even-page header and footer parts (empty,
+ * referenced w:type="even" from each section), because with the switch on an
+ * even page uses ONLY the even variant — a chain that never declares one gets
+ * a blank band. Disabling removes only the switch. False when already in the
+ * requested state.
+ */
+export function setEvenOddHeaders(doc: DocxDocument, enabled: boolean): boolean {
+  if (enabled) {
+    const partsAdded = doc.ensureHfVariantParts("even");
+    if (doc.evenAndOddHeaders && !partsAdded) return false;
+    doc.setEvenAndOddHeaders(true);
+    doc.refresh();
+    return true;
+  }
+  if (!doc.evenAndOddHeaders) return false;
+  doc.setEvenAndOddHeaders(false);
+  doc.refresh();
+  return true;
+}
+
+// ---------- page number format (w:pgNumType) ----------
+
+/** The w:pgNumType number formats the layout engine paints (its PAGE_FMT
+ * table); the editable subset of ST_NumberFormat (ECMA-376 §17.18.59). */
+export const PAGE_NUMBER_FORMATS = [
+  "decimal", "lowerRoman", "upperRoman", "lowerLetter", "upperLetter",
+] as const;
+
+export type PageNumberFormat = (typeof PAGE_NUMBER_FORMATS)[number];
+
+export interface PageNumberFormatPatch {
+  /** w:pgNumType@fmt. null removes the attribute (back to decimal). */
+  fmt?: PageNumberFormat | null;
+  /** w:pgNumType@start. null removes it (numbering continues from the
+   * previous section, the OOXML default). */
+  start?: number | null;
+}
+
+/** Current w:pgNumType settings for the section governing `t`. */
+export function pageNumberFormatAt(
+  doc: DocxDocument,
+  t: XmlElement,
+): { fmt: PageNumberFormat; start: number | null } {
+  const sectPr = sectPrAt(doc, t);
+  const pg = sectPr?.children.find((c) => localName(c.name) === "pgNumType");
+  const fmt = pg ? attr(pg, "fmt") : undefined;
+  const start = pg ? attr(pg, "start") : undefined;
+  return {
+    fmt: (PAGE_NUMBER_FORMATS as readonly string[]).includes(fmt ?? "") ? (fmt as PageNumberFormat) : "decimal",
+    start: start !== undefined && Number.isFinite(parseInt(start, 10)) ? parseInt(start, 10) : null,
+  };
+}
+
+/**
+ * Set the page-number format and/or start-at value (w:pgNumType,
+ * ECMA-376 §17.6.12). With `target` (a sectPr) only that section changes;
+ * otherwise every section in the document updates. An attribute set to null
+ * is removed; a w:pgNumType left with no attributes is removed entirely.
+ * False when nothing changed.
+ */
+export function setPageNumberFormat(
+  doc: DocxDocument,
+  patch: PageNumberFormatPatch,
+  target?: XmlElement,
+): boolean {
+  let sectPrs = target ? [target] : allSectPrs(doc);
+  if (sectPrs.length === 0 && !target) {
+    // sectPr-less minimal doc: materialize the default body section (see
+    // setLineNumbering) so the control isn't a dead no-op.
+    const root = doc.editableRoots()[0];
+    const body = root && (localName(root.name) === "body"
+      ? root
+      : root.children.find((c) => localName(c.name) === "body"));
+    if (body) {
+      const w = prefixOf(body) || "w:";
+      const created: XmlElement = { name: `${w}sectPr`, attrs: {}, children: [], text: "" };
+      body.children.push(created);
+      sectPrs = [created];
+    }
+  }
+  if (sectPrs.length === 0) return false;
+  let changed = false;
+  for (const sectPr of sectPrs) {
+    const w = prefixOf(sectPr) || "w:";
+    let pg = sectPr.children.find((c) => localName(c.name) === "pgNumType");
+    const setA = (local: string, v: string | null) => {
+      if (!pg) {
+        if (v === null) return;
+        pg = el(`${w}pgNumType`);
+        insertInOrder(sectPr, pg);
+      }
+      const key = Object.keys(pg.attrs).find((k) => localName(k) === local) ?? `${w}${local}`;
+      if (v === null) {
+        if (key in pg.attrs) {
+          delete pg.attrs[key];
+          changed = true;
+        }
+      } else if (pg.attrs[key] !== v) {
+        pg.attrs[key] = v;
+        changed = true;
+      }
+    };
+    if (patch.fmt !== undefined) setA("fmt", patch.fmt === "decimal" ? null : patch.fmt);
+    if (patch.start !== undefined) setA("start", patch.start === null ? null : String(patch.start));
+    if (pg && Object.keys(pg.attrs).length === 0) {
+      sectPr.children = sectPr.children.filter((c) => c !== pg);
+    }
+  }
+  if (changed) doc.refresh();
+  return changed;
+}
+
 export interface LineNumberingPatch {
   /** Turn margin line numbering on/off for the target section(s). */
   enabled: boolean;

@@ -705,7 +705,9 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | --- | --- | --- |
 | `commentRun` | Add a comment to a run | `runRef`, `text`; optional: `initials` |
 | `replyComment` | Reply to a comment | `parentId`, `text`; optional: `initials` |
-| `deleteComment` | Delete a comment thread | `commentId` |
+| `deleteComment` | Delete a comment (a thread-parent id deletes the whole thread; a reply id deletes just that reply) | `commentId` |
+| `resolveComment` | Resolve or reopen a comment thread | `commentId`, `resolved` |
+| `editComment` | Replace a comment's text | `commentId`, `text` |
 | `suggestRevision` | Suggest text or paragraph deletion | optional: `ranges`, `marks` |
 | `acceptRevision` | Accept one revision | `index` |
 | `rejectRevision` | Reject one revision | `index` |
@@ -853,6 +855,9 @@ the equation into something else.
 | `setPageLayout` | Set margins, page size, columns, or borders | `patch` |
 | `setLineNumbering` | Configure margin line numbers | `patch` |
 | `ensureHeaderFooter` | Create a header or footer story | `hfKind` |
+| `setTitlePage` | Toggle different-first-page headers and footers; enabling creates the empty first-page parts | `enabled` |
+| `setEvenOddHeaders` | Toggle different odd & even page headers and footers; enabling creates the empty even-page parts | `enabled` |
+| `setPageNumberFormat` | Set the page-number format (decimal, roman, letter) and/or the start-at value | optional: `fmt`, `start` |
 | `updateFields` | Write recomputed cached results into the document's fields, one per field in document order | `results` |
 | `createStyle` | Create a paragraph, character, table, or numbering style definition | `style` |
 | `modifyStyle` | Change an existing style definition | `styleId`, `patch` |

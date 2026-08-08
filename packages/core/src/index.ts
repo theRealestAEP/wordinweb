@@ -100,7 +100,7 @@ export {
   setImageCrop,
 } from "./edit/images.js";
 export type { ImageCrop } from "./edit/images.js";
-export { addComment, deleteComment, replyToComment } from "./edit/comments.js";
+export { addComment, deleteComment, replyToComment, setCommentResolved, editCommentText } from "./edit/comments.js";
 export { setListType, listTypeAt, setListLevel } from "./edit/lists.js";
 export type { ListKind } from "./edit/lists.js";
 export {
@@ -203,8 +203,25 @@ export type { OoxmlValidationResult, OoxmlValidationLimits } from "./ooxml-valid
 // the editor wrote and lifts the WordprocessingML out of it, so it can ALSO
 // write the native Word clipboard format. Payload contract: edit/clipboard.ts.
 export { CLIPBOARD_OOXML_ATTR, extractClipboardOoxml, encodeClipboardOoxml, decodeClipboardOoxml } from "./edit/clipboard.js";
-export { sectPrAt, sectionContextAt, insertBreakAt, insertBlankPageAt, insertCoverPage, insertSectionBreak, setLineNumbering, lineNumberingAt } from "./edit/sections.js";
-export type { BreakInsertion, CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
+export {
+  sectPrAt,
+  sectionContextAt,
+  insertBreakAt,
+  insertBlankPageAt,
+  insertCoverPage,
+  insertSectionBreak,
+  setLineNumbering,
+  lineNumberingAt,
+  setTitlePage,
+  titlePageEnabled,
+  setEvenOddHeaders,
+  PAGE_NUMBER_FORMATS,
+  setPageNumberFormat,
+  pageNumberFormatAt,
+} from "./edit/sections.js";
+export type { BreakInsertion, CoverPageContent, LineNumberingPatch, PageNumberFormat, PageNumberFormatPatch } from "./edit/sections.js";
+export { documentTextStatistics } from "./word-count.js";
+export type { TextStatistics } from "./word-count.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages, buildPrintHtml } from "./render/dom.js";
 export type { FindMatch, FindOptions, FindStory, ReplaceAllResult } from "./edit/find.js";

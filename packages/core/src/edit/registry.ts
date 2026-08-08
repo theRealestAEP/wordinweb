@@ -31,6 +31,13 @@ import {
   type StylePatch,
 } from "./styles.js";
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
+import {
+  PAGE_NUMBER_FORMATS,
+  setEvenOddHeaders,
+  setPageNumberFormat,
+  setTitlePage,
+  type PageNumberFormat,
+} from "./sections.js";
 import { suggestMeta } from "./suggest.js";
 import { TOC_LEADERS, insertToc, type TocLeader, type TocLevels } from "./toc.js";
 import { applyFieldResults } from "./update-fields.js";
@@ -1461,6 +1468,89 @@ const convertTableToTextOperation = defineOperation<{
   apply: ({ doc, target, payload }) => convertTableToText(doc, target.el, payload.separator),
 });
 
+/**
+ * Toggle Word's "Different First Page" (w:titlePg — ECMA-376 §17.10.6) on
+ * every section. Enabling creates the missing first-page header and footer
+ * parts (empty, referenced w:type="first" — §17.10.5) the way Word does when
+ * the box is first checked; the created part's paragraph and run take carried
+ * ids so later edits in the band address them identically everywhere.
+ * Disabling removes only the toggle — parts and their content stay, so
+ * re-enabling restores them. The rejection predicate is the document's own
+ * state: a replica already in the requested state applies nothing, and every
+ * replica at the sequenced position shares that state.
+ */
+const setTitlePageOperation = defineOperation<{
+  enabled: boolean;
+  nodeIds: StableId[];
+}>()({
+  kind: "setTitlePage",
+  address: "document",
+  category: "document",
+  description: "Toggle different-first-page headers and footers (w:titlePg), creating the empty first-page parts on enable.",
+  fields: [{ name: "enabled" }],
+  // At most one new header part and one new footer part, each holding one
+  // paragraph with one run.
+  nodeIds: () => 4,
+  validate: ({ enabled }) => (typeof enabled === "boolean" ? null : "setTitlePage: bad enabled"),
+  apply: ({ doc, payload }) => setTitlePage(doc, payload.enabled),
+});
+
+/**
+ * Toggle Word's "Different Odd & Even Pages" — the document-global
+ * w:evenAndOddHeaders switch in settings.xml (ECMA-376 §17.10.1). Enabling
+ * creates the missing even-page header and footer parts (empty, referenced
+ * w:type="even") because an even page then uses ONLY the even variant.
+ * Same shape as setTitlePage in every other respect.
+ */
+const setEvenOddHeadersOperation = defineOperation<{
+  enabled: boolean;
+  nodeIds: StableId[];
+}>()({
+  kind: "setEvenOddHeaders",
+  address: "document",
+  category: "document",
+  description: "Toggle different odd & even page headers and footers (w:evenAndOddHeaders), creating the empty even-page parts on enable.",
+  fields: [{ name: "enabled" }],
+  nodeIds: () => 4,
+  validate: ({ enabled }) => (typeof enabled === "boolean" ? null : "setEvenOddHeaders: bad enabled"),
+  apply: ({ doc, payload }) => setEvenOddHeaders(doc, payload.enabled),
+});
+
+/**
+ * Set the page-number format and/or start-at value (w:pgNumType —
+ * ECMA-376 §17.6.12; formats are the editable subset of ST_NumberFormat
+ * §17.18.59 the layout paints). Document-level like setPageLayout: every
+ * section updates, which is the demo's section-scope limitation in a room.
+ * A null fmt or start removes the attribute; an empty w:pgNumType is removed
+ * entirely. Rejects (honest no-op) when nothing would change.
+ */
+const setPageNumberFormatOperation = defineOperation<{
+  fmt?: PageNumberFormat | null;
+  start?: number | null;
+}>()({
+  kind: "setPageNumberFormat",
+  address: "document",
+  category: "document",
+  description: "Set the page-number format (decimal, roman, letter) and/or the start-at value for the document's sections.",
+  fields: [{ name: "fmt", optional: true }, { name: "start", optional: true }],
+  validate: ({ fmt, start }) => {
+    if (fmt === undefined && start === undefined) return "setPageNumberFormat: empty patch";
+    if (fmt !== undefined && fmt !== null && !PAGE_NUMBER_FORMATS.includes(fmt)) {
+      return "setPageNumberFormat: bad fmt";
+    }
+    if (start !== undefined && start !== null &&
+        (!Number.isInteger(start) || start < 0 || start > 32767)) {
+      return "setPageNumberFormat: bad start";
+    }
+    return null;
+  },
+  apply: ({ doc, payload }) =>
+    setPageNumberFormat(doc, {
+      ...(payload.fmt !== undefined ? { fmt: payload.fmt } : {}),
+      ...(payload.start !== undefined ? { start: payload.start } : {}),
+    }),
+});
+
 /** A payload with no fields of its own. Not `Record<string, never>`: that
  * carries an index signature, which would forbid the clientId/clientSeq/base
  * bookkeeping @wordinweb/collab intersects onto every wire body. */
@@ -1508,6 +1598,9 @@ const OPERATIONS = [
   insertCitationOperation,
   insertWatermarkOperation,
   removeWatermarkOperation,
+  setTitlePageOperation,
+  setEvenOddHeadersOperation,
+  setPageNumberFormatOperation,
 ] as const;
 
 // ---------------------------------------------------------------------------

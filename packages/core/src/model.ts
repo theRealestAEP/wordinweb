@@ -1058,6 +1058,10 @@ export interface DocComment {
   paraId?: string;
   /** Parent comment id when this comment is a reply (commentsExtended). */
   parentId?: string;
+  /** Thread resolved (w15:commentEx w15:done="1" — the [MS-DOCX] CT_CommentEx
+   * extension; ECMA-376 itself has no resolved state). Meaningful on the
+   * thread parent; Word grays the whole thread from the parent's flag. */
+  resolved?: boolean;
 }
 
 // ---------- headers / footers ----------
