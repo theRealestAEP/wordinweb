@@ -611,3 +611,86 @@ style).
   "apply failed" on every replica (any second large registered insert in one
   room could hit it, e.g. TOC after TOC). Fresh nodes' autos are now dropped
   before the carried batch lands; overflow nodes re-auto-assign above it.
+
+## Wave 3 delta, lane C: page-number and header/footer galleries (2026-08-08, branch wave3-galleries2)
+
+Three new registered operations (`packages/core/src/edit/hf-gallery.ts`),
+each composed entirely from machinery this engine already has — no new field
+instructions, no new part kinds, no ENGINE_VERSION fence (an old peer that
+does not know the kind rejects it cleanly through the existing registry
+gate, the same shape the citations-cluster wave shipped without a bump).
+
+- §11 Header & Footer, Page numbers row: gap "position gallery,
+  remove-page-number" CLOSES (the row's other historical gaps — formats,
+  start-at — were already closed by wave 1 without the row text being
+  rewritten; this doc's per-row tables are the ORIGINAL audit snapshot,
+  never edited in place — see the file header. Current state is always the
+  union of the base table plus every delta below it).
+  `insertPageNumberPosition` (registry.ts) inserts a single live PAGE field
+  into the header ("top") or footer ("bottom"), aligned left/center/right —
+  Word's six "Plain Number" gallery entries — by composing `ensureHfPart`
+  (the same part-creation `ensureHeaderFooter` uses) with the PAGE field
+  vocabulary fields.ts already allows. A pick REPLACES the part's content,
+  matching Word's own gallery (and insertWatermark's precedent), so the
+  operation always applies rather than checking an unchanged-content no-op.
+  `removePageNumbers` strips PAGE/NUMPAGES content from every header and
+  footer part — both this engine's own `w:fldSimple` fields AND a same-
+  paragraph Word-authored complex-field span (`w:fldChar` begin/instrText/
+  separate/end), plus the adjacent "Page "/" of " literals the "Page X of Y"
+  form writes, removed only when directly adjacent to a removed field so
+  unrelated text is untouched. UI: Insert ▸ Page number gains a Top/Bottom ×
+  Left/Center/Right group and a Remove entry (toolbar.tsx PageNumberMenu).
+- Header & Footer preset gallery (Insert ▸ Header & footer): NEW capability,
+  not tied to a specific pre-existing gap row (the original audit had no
+  "preset gallery" line item for headers/footers beyond page numbers).
+  `insertHeaderFooterPreset` replaces a header or footer's content with one
+  of four layouts — blank, centered title, title + date, three-column —
+  composed from literal placeholder text, the existing DATE and PAGE field
+  vocabulary, and `setTabStops` (the wave-2 tab-stop op) for the
+  three-column layout's center/right tab positions, computed from the
+  document's own page width and margins. UI: HeaderFooterMenu gains a
+  four-entry preset group per band.
+- §12 Text, Cover page row: gap "design gallery" NARROWS. `insertCoverPage`
+  (a hand-written intent, unchanged wire shape) gains an optional
+  `content.layout`: "title" (unchanged, the default), "banner" (the title
+  paragraph shaded into a colored band via `setParagraphBorders`' shading —
+  reusing the wave-2 paragraph-shading op rather than inventing a second way
+  to paint a fill), and "sidebar" (left-aligned, lower on the page, with a
+  colored left accent rule via the same op's per-edge borders). Remaining
+  gap: the rest of Word's ~16-design gallery; these three distinct layouts
+  are the simple tier. UI: CoverPageMenu gains a three-way layout picker.
+
+Filed, not shipped: **Quick Parts** (save-selection-as-building-block +
+insert-from-gallery), item 3 of this wave's priority list. VERIFIED first,
+per the wave's instruction: this engine has ZERO existing support for
+OOXML's glossary document (`word/glossary/document.xml`, ECMA-376 §17.12) —
+no parser read path, no part in `DocxDocument`'s tracked-part model
+(`hfParts`/`footnotesRoot`/`commentsRoot`/`sourcesTree` are the precedent
+for what a new part kind costs: each needed its own content-type override,
+relationship, and — for anything the caret can enter —
+`editableRoots()`/stable-id integration). Building the real glossary part
+with `w:docPart`/`docPartPr` gallery metadata is a wave-sized lane of its
+own, comparable to the wave-2 citations cluster.
+
+The instruction's own escape hatch — "an honest document-settings-based
+store is acceptable" — was evaluated concretely: OOXML's CT_Settings does
+have a legitimate, schema-legal extension point for exactly this (`w:docVars`,
+§17.15.1.34, arbitrary name/value string pairs Word itself exposes as VBA
+`ActiveDocument.Variables`), and the natural design reuses machinery this
+engine already has end to end: `saveQuickPart` would validate a selection's
+serialized OOXML through the SAME `validatePastedOoxml` gate `pasteBlocks`
+already puts untrusted fragments through, and `insertQuickPart` would splice
+it back exactly the way `pasteBlocks`' apply does (parse, validate, splice,
+assign carried ids to the fresh nodes). That reuse is sound. What blocked
+shipping it in this wave is placing `w:docVars` at its correct position in
+CT_Settings' long sequence — every settings writer in this codebase
+(`SETTINGS_BEFORE_MIRROR`, `SETTINGS_BEFORE_EVEN_AND_ODD` in docx.ts) hand-
+maintains an exact ordered predecessor list so Word never has to repair the
+file, and `w:docVars` sits deep in that sequence (after `w:compat`, before
+`w:rsids`) — far enough past the existing lists that transcribing it from
+memory rather than a schema reference was a real correctness risk to a real
+Word file, not a cosmetic one. Recommended follow-up: a wave that opens the
+ECMA-376 CT_Settings schema (or a real Word-saved settings.xml with docVars
+present) to get the ordering right, then wires `saveQuickPart` /
+`insertQuickPart` / `deleteQuickPart` as hand-written intents on top of the
+verified write path.
