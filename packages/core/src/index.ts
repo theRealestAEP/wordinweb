@@ -217,6 +217,7 @@ export {
   setTableCellMargins,
   setTableColumnWidth,
   setTableHeaderRows,
+  sortTableRows,
   setTableLayoutMode,
   setTableLook,
   setTableStyle,

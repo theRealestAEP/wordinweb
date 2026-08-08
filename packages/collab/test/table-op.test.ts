@@ -203,6 +203,26 @@ describe("DocumentSession tableOp merge/split (wire)", () => {
     expect(serializeXml(remote.doc.docRoot)).toBe(serverXml);
   });
 
+  it("sortTableRows (registered) reorders rows identically on every replica", () => {
+    const initial = tableDocBytes();
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const remote = new ClientReplica(initial);
+    const cellA = paraIdByText(server, "A");
+    // Rows are A|B then C|D — descending by column 0 swaps them.
+    const e = server.submit({ kind: "sortTableRows", clientId: "a", clientSeq: 1, base: 0, cellParagraphId: cellA, colIdx: 0, order: "desc", compare: "text" });
+    expect(e.kind).toBe("applied");
+    remote.receive([e]);
+    expect(tableText(server.doc)).toBe("C|D|A|B|after");
+    expect(serializeXml(remote.doc.docRoot)).toBe(serializeXml(server.doc.docRoot));
+    // Rows kept element identity: the moved cell paragraph is still addressable.
+    const ins = server.submit({ kind: "insertText", clientId: "a", clientSeq: 2, base: server.seq, at: { blockId: cellA, runId: 99999, offset: 0 }, text: "x" });
+    // (Wrong runId: rejected for the run, not because the block id was retired.)
+    expect(ins.kind).toBe("rejected");
+    const validOp = server.submit({ kind: "sortTableRows", clientId: "a", clientSeq: 3, base: server.seq, cellParagraphId: cellA, colIdx: 0, order: "asc", compare: "text" });
+    expect(validOp.kind).toBe("applied");
+    expect(tableText(server.doc)).toBe("A|B|C|D|after");
+  });
+
   it("a merge into a concurrently edited cell keeps the edit (transform identity)", () => {
     const initial = tableDocBytes();
     const server = new DocumentSession(DocxDocument.load(initial));

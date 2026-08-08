@@ -34,6 +34,7 @@ import {
   setTableHeaderRows,
   setTableLayoutMode,
   setTableLook,
+  sortTableRows,
   setTableStyle,
   setTableWidth,
   tableLookOf,
@@ -326,6 +327,10 @@ export interface DocxViewApi {
   setTableCellMargins(scope: "cell" | "table", margins: CellMarginsPt | null): void;
   /** Repeat the first `count` rows as a header band on every page. */
   setTableHeaderRows(count: number): void;
+  /** Sort the caret table's body rows by one grid column, as text or as
+   * numbers. The repeating header band always stays in place; `hasHeader`
+   * additionally pins the first row. Refuses tables with merged cells. */
+  sortTableRows(colIdx: number, order: "asc" | "desc", compare: "text" | "number", hasHeader?: boolean): void;
   /** Insert an image file at the caret (inline, natural size clamped to column).
    * The result is REPORTED rather than swallowed: a picker that accepts a file
    * and then does nothing is indistinguishable from a broken button. */
@@ -2180,6 +2185,17 @@ export function DocxView({
               const tbl = caretTable();
               return tbl ? setTableHeaderRows(doc, tbl, count, meta) : false;
             }),
+          sortTableRows: (colIdx, order, compare, hasHeader) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return;
+            // STRUCTURAL like insertTable: no tracked form, so no suggest
+            // payload rides along — the sort applies untracked in any mode.
+            const args = { colIdx, order, compare, ...(hasHeader !== undefined ? { hasHeader } : {}) };
+            if (collabOp((a) => operationBody("sortTableRows", a.blockId, args) as never, { t: caret.t, offset: 0 })) return;
+            history.checkpoint();
+            const tbl = caretTable();
+            if (tbl && sortTableRows(doc, tbl, colIdx, order, compare, hasHeader ?? false)) pages = rerender(doc);
+          },
           imageAccept: () => (collabRef.current?.submitOp && doc.stableIds ? COLLAB_IMAGE_ACCEPT : LOCAL_IMAGE_ACCEPT),
           imageMaxBytes: () => (collabRef.current?.submitOp && doc.stableIds ? collabRef.current.mediaMaxBlobBytes ?? null : null),
           insertImage: async (file) => {

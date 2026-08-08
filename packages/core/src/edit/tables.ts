@@ -1600,6 +1600,99 @@ export function setTableHeaderRows(
   return changed;
 }
 
+// ---------- sort rows ----------
+
+/** All text under a cell, in document order. */
+function cellText(tc: XmlElement): string {
+  let out = "";
+  const walk = (e: XmlElement): void => {
+    if (localName(e.name) === "t") out += e.text;
+    e.children.forEach(walk);
+  };
+  contentOf(tc).forEach(walk);
+  return out;
+}
+
+/** True when any cell of the table spans columns or rows. Sorting a table
+ * with merged cells would tear the merged regions apart, so — like Word —
+ * the sort refuses such tables. */
+function hasMergedCells(tblEl: XmlElement): boolean {
+  for (const tr of rowsOf(tblEl)) {
+    for (const tc of cellsOf(tr)) {
+      const tcPr = child(tc, "tcPr");
+      if (tcPr && (child(tcPr, "gridSpan") || child(tcPr, "vMerge"))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Sort the table's body rows by the text of one grid column, ascending or
+ * descending, comparing as text or as numbers. Rows keep their element
+ * identity (they only reorder), so ids, bookmarks, and comments inside them
+ * survive.
+ *
+ * The repeating header band (w:tblHeader rows) always stays in place;
+ * `hasHeader` additionally pins the first row, Word's "my list has a header
+ * row". Equal keys keep document order (Array.prototype.sort is stable).
+ *
+ * The comparisons are deliberately locale-free (code-unit order over
+ * lower-cased text; parseFloat for numbers): a collab replica must sort
+ * identically on every host, so no Intl machinery may be consulted at apply
+ * (plan doc 05).
+ */
+export function sortTableRows(
+  doc: DocxDocument,
+  tblEl: XmlElement,
+  colIdx: number,
+  order: "asc" | "desc",
+  compare: "text" | "number",
+  hasHeader = false,
+): boolean {
+  if (localName(tblEl.name) !== "tbl") return false;
+  if (hasMergedCells(tblEl)) return false;
+  const rows = rowsOf(tblEl);
+  let pinned = 0;
+  while (pinned < rows.length && onOff(child(child(rows[pinned], "trPr"), "tblHeader")) === true) pinned++;
+  if (hasHeader && pinned === 0) pinned = 1;
+  const body = rows.slice(pinned);
+  if (body.length < 2) return false;
+
+  const keyOf = (tr: XmlElement): string => {
+    const tc = cellAtGridCol(tr, colIdx);
+    return tc ? cellText(tc).trim() : "";
+  };
+  const numeric = (s: string): number => parseFloat(s.replace(/[^0-9.eE+-]/g, ""));
+  const compareRows = (a: XmlElement, b: XmlElement): number => {
+    const ka = keyOf(a);
+    const kb = keyOf(b);
+    let d: number;
+    if (compare === "number") {
+      const na = numeric(ka);
+      const nb = numeric(kb);
+      // Non-numbers sort after every number, in both directions.
+      d = Number.isNaN(na) && Number.isNaN(nb) ? 0 : Number.isNaN(na) ? 1 : Number.isNaN(nb) ? -1 : na - nb;
+      if (Number.isNaN(na) !== Number.isNaN(nb)) return d;
+    } else {
+      const la = ka.toLowerCase();
+      const lb = kb.toLowerCase();
+      d = la < lb ? -1 : la > lb ? 1 : 0;
+    }
+    return order === "asc" ? d : -d;
+  };
+
+  const sorted = [...body].sort(compareRows);
+  if (sorted.every((tr, i) => tr === body[i])) return false; // already in order
+  // Reorder in place: the sortable rows take each other's slots in
+  // tbl.children; everything else (tblPr, tblGrid, header rows) stays put.
+  const slots = body.map((tr) => tblEl.children.indexOf(tr));
+  sorted.forEach((tr, i) => {
+    tblEl.children[slots[i]] = tr;
+  });
+  doc.refresh();
+  return true;
+}
+
 // ---------- reading a table's current properties ----------
 
 /**

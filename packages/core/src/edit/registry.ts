@@ -41,6 +41,7 @@ import {
   TABLE_SCOPE_EDGES,
   resizeTableRow,
   setTableBorders,
+  sortTableRows,
   setTableCellMargins,
   setTableColumnWidth,
   setTableHeaderRows,
@@ -1339,6 +1340,47 @@ const insertWatermarkOperation = defineOperation<{
     }),
 });
 
+/**
+ * Sort a table's body rows by one grid column. STRUCTURAL (rows reorder, no
+ * tracked form), so suggestion-mode surfaces refuse it like the other
+ * structural table ops; rows keep their element identity, so every stable id
+ * survives and the transform stays identity. The mutation's comparisons are
+ * locale-free by design — see sortTableRows — so every replica orders the
+ * rows identically.
+ */
+const sortTableRowsOperation = defineOperation<{
+  cellParagraphId: StableId;
+  colIdx: number;
+  order: "asc" | "desc";
+  /** "kind" would collide with the intent discriminant, hence "compare". */
+  compare: "text" | "number";
+  hasHeader?: boolean;
+}>()({
+  kind: "sortTableRows",
+  address: "cell",
+  category: "table",
+  description: "Sort a table's body rows by one column, as text or as numbers.",
+  fields: [
+    { name: "colIdx" },
+    { name: "order" },
+    { name: "compare" },
+    { name: "hasHeader", optional: true },
+  ],
+  validate: (payload) => {
+    if (!Number.isInteger(payload.colIdx) || payload.colIdx < 0 || payload.colIdx > 200) {
+      return "sortTableRows: bad column";
+    }
+    if (payload.order !== "asc" && payload.order !== "desc") return "sortTableRows: bad order";
+    if (payload.compare !== "text" && payload.compare !== "number") return "sortTableRows: bad compare";
+    if (payload.hasHeader !== undefined && typeof payload.hasHeader !== "boolean") {
+      return "sortTableRows: bad hasHeader";
+    }
+    return null;
+  },
+  apply: ({ doc, target, payload }) =>
+    sortTableRows(doc, target.el, payload.colIdx, payload.order, payload.compare, payload.hasHeader ?? false),
+});
+
 /** A payload with no fields of its own. Not `Record<string, never>`: that
  * carries an index signature, which would forbid the clientId/clientSeq/base
  * bookkeeping @wordinweb/collab intersects onto every wire body. */
@@ -1376,6 +1418,7 @@ const OPERATIONS = [
   setTableLayoutOperation,
   setTableCellMarginsOperation,
   setTableHeaderRowsOperation,
+  sortTableRowsOperation,
   insertEndnoteOperation,
   setCropOperation,
   setModel3DRotationOperation,

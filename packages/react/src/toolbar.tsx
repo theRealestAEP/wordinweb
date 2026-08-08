@@ -2876,6 +2876,20 @@ function TableFormatTab({
         groups={[{ items: [["mergeRight", "Merge right"], ["mergeDown", "Merge down"], ["splitCell", "Split cell"]] }]}
         onPick={(value) => run(value as Parameters<DocxViewApi["tableOp"]>[0])}
       />
+      <ActionMenu
+        label="Sort"
+        title="Sort rows by the current column (repeating header rows stay in place)"
+        width={64}
+        groups={[
+          { label: "Text", items: [["text:asc", "Sort A → Z"], ["text:desc", "Sort Z → A"]] },
+          { label: "Numbers", items: [["number:asc", "Sort 0 → 9"], ["number:desc", "Sort 9 → 0"]] },
+        ]}
+        onPick={(value) => {
+          const [compare, order] = value.split(":") as ["text" | "number", "asc" | "desc"];
+          const colIdx = api?.getTableProperties()?.columnIdx ?? 0;
+          after(() => api?.sortTableRows(colIdx, order, compare));
+        }}
+      />
       <span ref={borderMenuRef} style={{ display: "inline-flex" }}>
         <ActionMenu
           label="Borders"

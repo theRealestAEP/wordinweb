@@ -7,7 +7,7 @@ import { setListType, setListLevel } from "../src/edit/lists.js";
 import { setLink, removeLink, linkAt } from "../src/edit/links.js";
 import { adjustIndent, paragraphDividerAt, setDropCapAt, setParagraphDivider, setParagraphSpacing } from "../src/edit/paragraph.js";
 import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
-import { applyTableOp, cellShadingAt, resizeDrawing } from "../src/edit/tables.js";
+import { applyTableOp, cellShadingAt, resizeDrawing, setTableHeaderRows, sortTableRows } from "../src/edit/tables.js";
 import {
   adjustFloatingPosition,
   drawingRotation,
@@ -34,7 +34,7 @@ import { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, in
 import { XmlElement, localName } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, makeDocxWithMedia, wrapDocument, p, W_NS } from "./helpers.js";
-import { Paragraph, Run, TextContent } from "../src/model.js";
+import { Paragraph, Run, Table, TextContent } from "../src/model.js";
 import { layoutDocument } from "../src/layout/engine.js";
 import type { ChartData, SmartArtData } from "../src/model.js";
 import { Package } from "../src/zip.js";
@@ -2331,6 +2331,66 @@ describe("find & replace depth (whole word, stories, cross-paragraph)", () => {
     expect(tail.t.text).toBe("Beta");
     expect(tail.offset).toBe(4);
     expect(bookmarkTextTarget(doc, "missing")).toBeNull();
+  });
+});
+
+describe("sort table rows", () => {
+  const tblXml = (rows: string[][], firstRowHeader = false) =>
+    `<w:tbl><w:tblPr/><w:tblGrid>${'<w:gridCol w:w="2400"/>'.repeat(rows[0].length)}</w:tblGrid>` +
+    rows
+      .map(
+        (r, i) =>
+          `<w:tr>${i === 0 && firstRowHeader ? "<w:trPr><w:tblHeader/></w:trPr>" : ""}${r
+            .map((c) => `<w:tc><w:p><w:r><w:t xml:space="preserve">${c}</w:t></w:r></w:p></w:tc>`)
+            .join("")}</w:tr>`,
+      )
+      .join("") +
+    `</w:tbl>`;
+  const rowTexts = (doc: DocxDocument): string[] => {
+    const tbl = doc.sections[0].blocks[0] as Table;
+    return tbl.rows.map((r) => r.cells.map((c) => textOf(c.blocks[0] as Paragraph)).join("|"));
+  };
+  const tblEl = (doc: DocxDocument) => (doc.sections[0].blocks[0] as Table).src!;
+
+  it("sorts as text, ascending and descending, by any column", () => {
+    const doc = loadDoc(tblXml([["banana", "3"], ["Apple", "1"], ["cherry", "2"]]));
+    expect(sortTableRows(doc, tblEl(doc), 0, "asc", "text")).toBe(true);
+    expect(rowTexts(doc)).toEqual(["Apple|1", "banana|3", "cherry|2"]);
+    expect(sortTableRows(doc, tblEl(doc), 1, "desc", "text")).toBe(true);
+    expect(rowTexts(doc)).toEqual(["banana|3", "cherry|2", "Apple|1"]);
+    // Already in that order: an honest no-op.
+    expect(sortTableRows(doc, tblEl(doc), 1, "desc", "text")).toBe(false);
+  });
+
+  it("sorts as numbers, ignoring currency noise, non-numbers last", () => {
+    const doc = loadDoc(tblXml([["$10"], ["9"], ["2.5"], ["n/a"]]));
+    expect(sortTableRows(doc, tblEl(doc), 0, "asc", "number")).toBe(true);
+    expect(rowTexts(doc)).toEqual(["2.5", "9", "$10", "n/a"]);
+  });
+
+  it("pins the repeating header band and, with hasHeader, the first row", () => {
+    const doc = loadDoc(tblXml([["Name"], ["zeta"], ["alpha"]], true));
+    expect(sortTableRows(doc, tblEl(doc), 0, "asc", "text")).toBe(true);
+    expect(rowTexts(doc)).toEqual(["Name", "alpha", "zeta"]);
+
+    const doc2 = loadDoc(tblXml([["Name"], ["zeta"], ["alpha"]]));
+    expect(sortTableRows(doc2, tblEl(doc2), 0, "asc", "text", true)).toBe(true);
+    expect(rowTexts(doc2)).toEqual(["Name", "alpha", "zeta"]);
+
+    // setTableHeaderRows composes with sorting: mark two rows, sort the rest.
+    const doc3 = loadDoc(tblXml([["h1"], ["h2"], ["b"], ["a"]]));
+    expect(setTableHeaderRows(doc3, tblEl(doc3), 2)).toBe(true);
+    expect(sortTableRows(doc3, tblEl(doc3), 0, "asc", "text")).toBe(true);
+    expect(rowTexts(doc3)).toEqual(["h1", "h2", "a", "b"]);
+  });
+
+  it("refuses tables with merged cells", () => {
+    const doc = loadDoc(
+      `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>` +
+        `<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr>` +
+        `<w:tr><w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`,
+    );
+    expect(sortTableRows(doc, tblEl(doc), 0, "asc", "text")).toBe(false);
   });
 });
 

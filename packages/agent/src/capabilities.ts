@@ -395,6 +395,7 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setTableCellMargins.margins": cellMarginsPt,
   "setTableWidth.value": number(0.1, 1584),
   "setTableColumnWidth.colIdx": integer(0, 200),
+  "sortTableRows.colIdx": integer(0, 200),
   "setTableColumnWidth.widthPt": number(1, 1584),
   "setTableHeaderRows.count": integer(0, 5000),
   // A TOC's size is document-derived, so entryCount is an id BUDGET the
@@ -450,6 +451,8 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "setTableWidth.unit": ["pt", "pct", "auto"],
   "insertToc.leader": [...TOC_LEADERS],
   "setTableLayout.layout": ["fixed", "autofit"],
+  "sortTableRows.order": ["asc", "desc"],
+  "sortTableRows.compare": ["text", "number"],
 };
 
 function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
@@ -489,7 +492,7 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
       },
     };
   }
-  if (field === "suggest" || field === "preservePageStart" || field === "diagonal" || field === "headerRow") return { type: "boolean" };
+  if (field === "suggest" || field === "preservePageStart" || field === "diagonal" || field === "headerRow" || field === "hasHeader") return { type: "boolean" };
   // insertWatermark's headerCount is both its carried-id budget and its
   // rejection predicate; the cap matches its own validate in the registry.
   if (field === "headerCount") return integer(1, 50);
