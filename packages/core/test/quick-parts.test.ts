@@ -137,6 +137,48 @@ describe("an arriving Word glossary part", () => {
     expect(listBuildingBlocks(reloaded)).toEqual([{ name: "Signature Block", category: "Legal" }]);
     expect(savedParts(reloaded)["word/glossary/document.xml"]).toBe(GLOSSARY_XML);
   });
+
+  it("word interop: a full Word-shaped glossary part (own styles/settings/fontTable/rels) loads cleanly, lists, inserts, and every companion part survives byte-stably", () => {
+    // Real Word writes a whole part family for the glossary, mirroring the
+    // main document's own — this engine reads only word/glossary/document.xml
+    // (DocxDocument.glossaryTree's doc comment) and never touches the rest,
+    // so they must round-trip through the generic byte-preservation path
+    // (buildPackageFiles starts from the untouched raw package) rather than
+    // any glossary-specific code.
+    const glossaryStyles =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<w:styles ${W_NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>`;
+    const glossarySettings = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings ${W_NS}/>`;
+    const glossaryFontTable = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:fonts ${W_NS}/>`;
+    const glossaryRels =
+      `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
+      `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>` +
+      `<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>` +
+      `</Relationships>`;
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(p("anchor")),
+        "word/_rels/document.xml.rels": DOC_RELS_WITH_GLOSSARY,
+        "word/glossary/document.xml": GLOSSARY_XML,
+        "word/glossary/styles.xml": glossaryStyles,
+        "word/glossary/settings.xml": glossarySettings,
+        "word/glossary/fontTable.xml": glossaryFontTable,
+        "word/glossary/_rels/document.xml.rels": glossaryRels,
+      }),
+    );
+    expect(listBuildingBlocks(doc)).toEqual([{ name: "Signature Block", category: "Legal" }]);
+    const anchor = doc.docRoot.children.find((c) => c.name === "w:body")!.children[0].children[0].children[0];
+    expect(insertBuildingBlock(doc, anchor, "Signature Block")).toBe(true);
+
+    const reloaded = DocxDocument.load(doc.save());
+    expect(listBuildingBlocks(reloaded)).toEqual([{ name: "Signature Block", category: "Legal" }]);
+    const parts = savedParts(doc);
+    expect(parts["word/glossary/styles.xml"]).toBe(glossaryStyles);
+    expect(parts["word/glossary/settings.xml"]).toBe(glossarySettings);
+    expect(parts["word/glossary/fontTable.xml"]).toBe(glossaryFontTable);
+    expect(parts["word/glossary/_rels/document.xml.rels"]).toBe(glossaryRels);
+  });
 });
 
 describe("insertBuildingBlock", () => {

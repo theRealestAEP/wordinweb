@@ -765,3 +765,44 @@ the textEffect patch field).
   only the second occurrence of that shape, not worth abstracting yet, and
   touching the existing (tested, working) WordArt path was unnecessary risk
   for this change.
+
+## Wave 5: Quick Parts / Building Blocks (2026-08-08, branch quick-parts)
+
+Closes the item wave3-galleries2 filed rather than shipped: "this engine has
+ZERO existing support for OOXML's glossary document." §12 row moves:
+
+- Quick Parts / Building Blocks / AutoText ABSENT → CORE. The real OOXML
+  glossary part (`word/glossary/document.xml`, ECMA-376 §17.12), not the
+  filed `w:docVars` fallback — DocxDocument.glossaryTree creates the whole
+  part stack (relationship + content-type override, the createNotesPart
+  discipline; no datastore-item companions, no `w:docPartPr/w:guid`, unlike
+  the citations-cluster sources part) when the package has none, and retains
+  an arriving one byte-stably (edit/quick-parts.ts, docx.ts glossaryTree).
+  `createBuildingBlock` validates the current selection's serialized OOXML
+  through `decodeClipboardOoxml` — the SAME allowlist gate `pasteBlocks`/
+  paste already put untrusted fragments through — before it enters the
+  part, and is refused for a name already taken (the tag-collision
+  predicate `createCitationSource` established). `insertBuildingBlock`
+  deep-clones a named docPart's stored blocks after the caret's paragraph
+  (the `insertBibliography`/`insertCoverPage` precedent); its content is a
+  pure function of already-synced glossary state, so — unlike `pasteBlocks`
+  — it carries no OOXML of its own over the wire, only the standard
+  carried-id BUDGET (`blockCount`, the `entryCount` pattern). All three ride
+  the generic registered-operation machinery (collab validate/apply/
+  transform, agent capability rows) with zero per-kind wiring beyond the
+  registry declaration. `deleteBuildingBlock` is an honest no-op when the
+  name is absent. UI: Insert-tab "Quick Parts" menu (toolbar.tsx
+  QuickPartsMenu) — save-selection-as-Quick-Part form (name + category,
+  category default "General"), a gallery grouped by category with
+  Insert/Delete affordances, the CitationsMenu popover idiom. Word interop:
+  an arriving Word glossary part's companion parts (its own styles/
+  settings/fontTable/rels, which real Word writes and this engine never
+  reads) survive save() byte-stably through the generic untouched-part
+  path, not any glossary-specific code. Gap: no `w:docPartPr/w:guid` or
+  gallery vocabulary beyond the one Word uses for a user's own "Save
+  Selection to Quick Part Gallery" (`docParts`); Word's built-in Building
+  Blocks Organizer content (page-number/watermark/cover-page galleries this
+  engine already authors directly) is not imported as glossary entries; no
+  in-place editing of a stored block short of delete-and-resave.
+
+§12 counts: DEEP 2 · CORE 5 · STUB 0 · ABSENT 1.
