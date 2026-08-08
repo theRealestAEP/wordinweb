@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, attr, localName } from "../xml.js";
+import { setParagraphBorders } from "./paragraph.js";
 
 /**
  * Section editing: resolve the sectPr governing a caret position, insert
@@ -34,10 +35,21 @@ function containsEl(root: XmlElement, target: XmlElement): boolean {
   return false;
 }
 
+/** The cover-page design gallery. "title" is Word's plain centered title
+ * block (this engine's original single form). "banner" shades the title
+ * paragraph into a colored band — Word's "Sideline"/"Facet" family look —
+ * reusing setParagraphBorders' shading rather than inventing a second way to
+ * paint a fill. "sidebar" left-aligns the block lower on the page with a
+ * colored accent rule on the title, the same reuse for the rule itself. */
+export const COVER_PAGE_LAYOUTS = ["title", "banner", "sidebar"] as const;
+export type CoverPageLayout = (typeof COVER_PAGE_LAYOUTS)[number];
+
 export interface CoverPageContent {
   title: string;
   subtitle?: string;
   author?: string;
+  /** Defaults to "title" — the original single layout, unchanged. */
+  layout?: CoverPageLayout;
 }
 
 /** Insert an editable, Word-native cover page before the current document body. */
@@ -45,6 +57,8 @@ export function insertCoverPage(doc: DocxDocument, content: CoverPageContent): b
   const body = bodyOf(doc);
   if (!body || !content.title.trim()) return false;
   const w = body.name.includes(":") ? body.name.slice(0, body.name.indexOf(":") + 1) : "w:";
+  const layout = content.layout ?? "title";
+  const align = layout === "sidebar" ? "left" : "center";
   const paragraph = (
     text: string,
     style: string | null,
@@ -56,7 +70,7 @@ export function insertCoverPage(doc: DocxDocument, content: CoverPageContent): b
     el(`${w}pPr`, {}, [
       ...(style ? [el(`${w}pStyle`, { [`${w}val`]: style })] : []),
       el(`${w}spacing`, { [`${w}before`]: String(before), [`${w}after`]: "180" }),
-      el(`${w}jc`, { [`${w}val`]: "center" }),
+      el(`${w}jc`, { [`${w}val`]: align }),
     ]),
     el(`${w}r`, {}, [
       el(`${w}rPr`, {}, [
@@ -68,8 +82,18 @@ export function insertCoverPage(doc: DocxDocument, content: CoverPageContent): b
       el(`${w}t`, { "xml:space": "preserve" }, [], text),
     ]),
   ]);
+  const titleColor = layout === "banner" ? "FFFFFF" : "2F5597";
+  const titleBefore = layout === "sidebar" ? 5040 : 3600;
+  const titlePara = paragraph(content.title.trim(), "Title", 64, titleColor, titleBefore, true);
+  if (layout === "banner") {
+    setParagraphBorders(doc, [titlePara], { shading: "2F5597" });
+  } else if (layout === "sidebar") {
+    setParagraphBorders(doc, [titlePara], {
+      borders: { left: { style: "single", sz: 36, color: "2F5597", space: 240 } },
+    });
+  }
   const cover = [
-    paragraph(content.title.trim(), "Title", 64, "2F5597", 3600, true),
+    titlePara,
     ...(content.subtitle?.trim() ? [paragraph(content.subtitle.trim(), "Subtitle", 30, "5B6573", 120)] : []),
     ...(content.author?.trim() ? [paragraph(content.author.trim(), null, 22, "404040", 720)] : []),
     el(`${w}p`, {}, [el(`${w}r`, {}, [el(`${w}br`, { [`${w}type`]: "page" })])]),
