@@ -1103,10 +1103,17 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
 
 function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
-  const [bookmark, setBookmark] = useState("");
+  const [refType, setRefType] = useState<"bookmark" | "heading" | "caption" | "numberedItem">("bookmark");
+  const [choice, setChoice] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  const bookmarks = open ? api?.listBookmarks() ?? [] : [];
-  const selected = bookmarks.includes(bookmark) ? bookmark : bookmarks[0] ?? "";
+  const bookmarks = open && refType === "bookmark" ? api?.listBookmarks() ?? [] : [];
+  const targets = open && refType !== "bookmark"
+    ? (api?.listCrossRefTargets() ?? []).filter((target) => target.kind === refType)
+    : [];
+  const options = refType === "bookmark"
+    ? bookmarks.map((name) => ({ value: `b:${name}`, label: name }))
+    : targets.map((target) => ({ value: `t:${target.key}`, label: target.text }));
+  const selected = options.some((option) => option.value === choice) ? choice : options[0]?.value ?? "";
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -1116,7 +1123,11 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const insert = (kind: "text" | "page") => {
-    if (selected && api?.insertCrossReference(selected, kind)) setOpen(false);
+    if (!selected) return;
+    const done = selected.startsWith("b:")
+      ? api?.insertCrossReference(selected.slice(2), kind)
+      : api?.insertCrossRefToTarget(selected.slice(2), kind);
+    if (done) setOpen(false);
   };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
@@ -1124,26 +1135,104 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
         Cross-reference
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 260, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          {bookmarks.length === 0 ? (
-            <div style={{ color: T.muted, fontSize: 12 }}>Add a bookmark first, then reference its text or page.</div>
+        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 280, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 8 }}>
+          <ToolbarMenuSelect
+            value={refType}
+            ariaLabel="Reference type"
+            width="100%"
+            menuWidth={240}
+            options={[
+              { value: "bookmark", label: "Bookmark" },
+              { value: "heading", label: "Heading" },
+              { value: "caption", label: "Caption" },
+              { value: "numberedItem", label: "Numbered item" },
+            ]}
+            onChange={(value) => { setRefType(value as "bookmark" | "heading" | "caption" | "numberedItem"); setChoice(""); }}
+            style={{ borderColor: T.border }}
+          />
+          {options.length === 0 ? (
+            <div style={{ color: T.muted, fontSize: 12 }}>
+              {refType === "bookmark"
+                ? "Add a bookmark first, then reference its text or page."
+                : "Nothing of this type to reference yet."}
+            </div>
           ) : (
             <>
               <ToolbarMenuSelect
                 value={selected}
-                ariaLabel="Bookmark to reference"
+                ariaLabel="Target to reference"
                 width="100%"
-                menuWidth={240}
-                options={bookmarks.map((name) => ({ value: name, label: name }))}
-                onChange={setBookmark}
+                menuWidth={260}
+                options={options}
+                onChange={setChoice}
                 style={{ borderColor: T.border }}
               />
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
                 <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => insert("page")}>Page number</button>
-                <button style={pillBtn} onClick={() => insert("text")}>Bookmark text</button>
+                <button style={pillBtn} onClick={() => insert("text")}>Referenced text</button>
               </div>
             </>
           )}
+        </div>
+      )}
+    </span>
+  );
+}
+
+/** Word's Insert Caption, popover-sized: label, optional text, above/below. */
+function CaptionMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [label, setLabel] = useState("Figure");
+  const [text, setText] = useState("");
+  const [position, setPosition] = useState<"below" | "above">("below");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert a caption for the selected object or table" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        Caption
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 250, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 7 }}>
+          <label style={dialogFieldRow}>
+            <span>Label</span>
+            <select aria-label="Caption label" value={label} onChange={(event) => setLabel(event.target.value)} style={dialogInput}>
+              <option value="Figure">Figure</option>
+              <option value="Table">Table</option>
+              <option value="Equation">Equation</option>
+            </select>
+          </label>
+          <label style={dialogFieldRow}>
+            <span>Text</span>
+            <input aria-label="Caption text" value={text} onChange={(event) => setText(event.target.value)} placeholder="optional" style={dialogInput} />
+          </label>
+          <label style={dialogFieldRow}>
+            <span>Position</span>
+            <select aria-label="Caption position" value={position} onChange={(event) => setPosition(event.target.value as "below" | "above")} style={dialogInput}>
+              <option value="below">Below</option>
+              <option value="above">Above</option>
+            </select>
+          </label>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button
+              style={pillBtn}
+              onClick={() => {
+                if (api?.insertCaption(label, text.trim(), position)) {
+                  setText("");
+                  setOpen(false);
+                }
+              }}
+            >
+              Insert
+            </button>
+          </div>
         </div>
       )}
     </span>
@@ -1228,6 +1317,7 @@ function ContentsMenu({ api }: { api: DocxViewApi | null }) {
         {
           items: [
             ["insert", "Table of contents"],
+            ["figures", "Table of figures"],
             ["rebuild", "Update table of contents"],
             ["fields", "Update fields"],
           ],
@@ -1235,6 +1325,7 @@ function ContentsMenu({ api }: { api: DocxViewApi | null }) {
       ]}
       onPick={(value) => {
         if (value === "insert") api?.insertToc();
+        else if (value === "figures") api?.insertToc({ captionLabel: "Figure" });
         else if (value === "rebuild") api?.refreshTocs();
         else api?.updateFields();
       }}
@@ -5050,6 +5141,8 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertToc", feature: "field" },
   { command: "insertDateTime", feature: "dateTime" },
   { command: "insertCrossReference", feature: "crossReference" },
+  { command: "insertCrossRefToTarget", feature: "crossReference" },
+  { command: "insertCaption", feature: "crossReference" },
   { command: "insertBreak", feature: "break" },
   { command: "insertBlankPage", feature: "break" },
   { command: "insertCoverPage", feature: "coverPage" },
@@ -5865,6 +5958,7 @@ export function DocxToolbar({
           {on("footnote") && <NoteMenu api={api} kind="endnote" />}
           {on("bookmark") && <BookmarkMenu api={api} />}
           {on("crossReference") && <CrossReferenceMenu api={api} />}
+          {on("crossReference") && <CaptionMenu api={api} />}
           {on("headerFooter") && <HeaderFooterMenu api={api} />}
           {on("watermark") && <WatermarkMenu api={api} />}
           <Sep />
@@ -5946,6 +6040,7 @@ export function DocxToolbar({
               {on("footnote") && <NoteMenu api={api} kind="endnote" />}
               {on("bookmark") && <BookmarkMenu api={api} />}
               {on("crossReference") && <CrossReferenceMenu api={api} />}
+              {on("crossReference") && <CaptionMenu api={api} />}
               {on("headerFooter") && <HeaderFooterMenu api={api} />}
               {on("watermark") && <WatermarkMenu api={api} />}
               {on("pageNumber") && <PageNumberMenu api={api} />}

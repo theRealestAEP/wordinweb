@@ -106,6 +106,20 @@ const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
       <w:pPr><w:spacing w:after="80"/></w:pPr>
       <w:rPr><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr>
     </w:style>`,
+    // Word's caption style: italic 9pt in the theme's dark accent, keep-next
+    // so a caption never separates from its figure.
+    Caption: `<w:style ${W} w:type="paragraph" w:styleId="Caption">
+      <w:name w:val="caption"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:uiPriority w:val="35"/><w:unhideWhenUsed/><w:qFormat/>
+      <w:pPr><w:keepNext/><w:spacing w:after="200"/></w:pPr>
+      <w:rPr><w:i/><w:iCs/><w:color w:val="44546A"/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr>
+    </w:style>`,
+    // Word's "table of figures": Normal plus the TOC entries' after-spacing.
+    TableofFigures: `<w:style ${W} w:type="paragraph" w:styleId="TableofFigures">
+      <w:name w:val="table of figures"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:uiPriority w:val="99"/><w:unhideWhenUsed/>
+      <w:pPr><w:spacing w:after="100"/></w:pPr>
+    </w:style>`,
   };
 })();
 

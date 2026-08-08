@@ -49,7 +49,8 @@ import {
   type PageNumberFormat,
 } from "./sections.js";
 import { suggestMeta } from "./suggest.js";
-import { TOC_LEADERS, insertToc, type TocLeader, type TocLevels } from "./toc.js";
+import { TOC_LEADERS, insertToc, isValidCaptionLabel, type TocLeader, type TocLevels } from "./toc.js";
+import { ensureRefBookmark, insertCaptionAt } from "./references.js";
 import { applyFieldResults } from "./update-fields.js";
 import { insertWatermark, removeWatermark } from "./watermark.js";
 import {
@@ -501,20 +502,23 @@ const insertTocOperation = defineOperation<{
   runId: StableId;
   levels?: TocLevels;
   leader?: TocLeader;
+  /** With a label the field is a TABLE OF FIGURES (`TOC \c "Label"`): the
+   * entries come from the label's caption paragraphs instead of headings. */
+  captionLabel?: string;
   entryCount: number;
   nodeIds: StableId[];
 }>()({
   kind: "insertToc",
   address: "run",
   category: "insert",
-  description: "Insert a table of contents built from the document's headings.",
-  fields: [{ name: "entryCount" }, { name: "levels", optional: true }, { name: "leader", optional: true }],
+  description: "Insert a table of contents built from the document's headings, or — with captionLabel — a table of figures built from that label's captions.",
+  fields: [{ name: "entryCount" }, { name: "levels", optional: true }, { name: "leader", optional: true }, { name: "captionLabel", optional: true }],
   // Per entry: the w:p plus the seven runs of its hyperlink. The spare covers
   // the three field runs spliced into the first entry and the closing
   // paragraph with its own run.
   nodeIds: ({ entryCount }) =>
     Number.isInteger(entryCount) && entryCount > 0 ? entryCount * 8 + 8 : 8,
-  validate: ({ entryCount, levels, leader }) => {
+  validate: ({ entryCount, levels, leader, captionLabel }) => {
     if (!Number.isInteger(entryCount) || entryCount < 1 || entryCount > 10000) {
       return "insertToc: bad entryCount";
     }
@@ -526,6 +530,7 @@ const insertTocOperation = defineOperation<{
       }
     }
     if (leader !== undefined && !TOC_LEADERS.includes(leader)) return "insertToc: bad leader";
+    if (captionLabel !== undefined && !isValidCaptionLabel(captionLabel)) return "insertToc: bad captionLabel";
     return null;
   },
   apply: ({ doc, target, payload }) =>
@@ -533,8 +538,55 @@ const insertTocOperation = defineOperation<{
       ? insertToc(doc, target.t, {
           ...(payload.levels ? { levels: payload.levels } : {}),
           ...(payload.leader ? { leader: payload.leader } : {}),
+          ...(payload.captionLabel ? { captionLabel: payload.captionLabel } : {}),
         })
       : false,
+});
+
+/** Insert a Word caption — "<label> <SEQ n>" plus optional text, Caption
+ * style — below or above the addressed paragraph's block (the containing
+ * table when the paragraph sits in a cell). The SEQ number seeds from
+ * document order (deterministic); updateFields renumbers the set. */
+const insertCaptionOperation = defineOperation<{
+  blockId: StableId;
+  label: string;
+  text?: string;
+  position?: "below" | "above";
+  nodeIds: StableId[];
+}>()({
+  kind: "insertCaption",
+  address: "block",
+  category: "insert",
+  description: 'Insert a caption ("Figure 1", "Table 2", …) below or above the addressed paragraph or its table.',
+  fields: [{ name: "label" }, { name: "text", optional: true }, { name: "position", optional: true }],
+  // The caption paragraph plus its label run, SEQ result run, and text run.
+  nodeIds: () => 8,
+  validate: ({ label, text, position }) => {
+    if (typeof label !== "string" || !isValidCaptionLabel(label)) return "insertCaption: bad label";
+    if (text !== undefined && (typeof text !== "string" || text.length > 2000)) return "insertCaption: bad text";
+    if (position !== undefined && position !== "below" && position !== "above") return "insertCaption: bad position";
+    return null;
+  },
+  apply: ({ doc, target, payload }) =>
+    insertCaptionAt(doc, target.el, payload.label, payload.text ?? "", payload.position ?? "below"),
+});
+
+/** Wrap the addressed paragraph in a hidden `_Ref` bookmark so REF/PAGEREF
+ * fields can point at it — the plumbing half of a cross-reference to a
+ * heading, caption, or numbered item. The name is the originator's (carried,
+ * sequential `_RefN`); a paragraph that already has one is a clean no-op. */
+const ensureRefBookmarkOperation = defineOperation<{
+  blockId: StableId;
+  name: string;
+}>()({
+  kind: "ensureRefBookmark",
+  address: "block",
+  category: "insert",
+  description: "Wrap the addressed paragraph in a hidden _Ref bookmark for cross-referencing.",
+  fields: [{ name: "name" }],
+  validate: ({ name }) =>
+    typeof name === "string" && /^_Ref\d{1,12}$/.test(name) ? null : "ensureRefBookmark: bad name",
+  apply: ({ doc, target, payload }) => ensureRefBookmark(doc, target.el, payload.name),
 });
 
 // ---------------------------------------------------------------------------
@@ -1653,6 +1705,8 @@ const OPERATIONS = [
   toggleCheckboxOperation,
   updateFieldsOperation,
   insertTocOperation,
+  insertCaptionOperation,
+  ensureRefBookmarkOperation,
   createStyleOperation,
   modifyStyleOperation,
   deleteStyleOperation,

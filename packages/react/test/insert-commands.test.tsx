@@ -156,6 +156,10 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertToc: (api) => api.insertToc(),
   insertDateTime: (api) => api.insertDateTime("date"),
   insertCrossReference: (api) => api.insertCrossReference("Anchor1", "page"),
+  // A blank document lists no headings/captions, so this declines — the
+  // honest no-op branch of the fork rule, audited on purpose.
+  insertCrossRefToTarget: (api) => { api.listCrossRefTargets(); return api.insertCrossRefToTarget("0", "page"); },
+  insertCaption: (api) => api.insertCaption("Figure", "audit", "below"),
   insertBreak: (api) => api.insertBreak("page"),
   insertBlankPage: (api) => api.insertBlankPage(),
   insertCoverPage: (api) => api.insertCoverPage({ title: "T", subtitle: "S", author: "A", date: "2026" } as never),

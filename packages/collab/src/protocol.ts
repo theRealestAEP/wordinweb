@@ -112,10 +112,14 @@ export interface SealedCheckpoint {
  *       An e15 peer rejects the very intents an e16 peer applies — fork on
  *       the first merged cell, row sort, or conversion.
  *   e17 paragraph/references depth wave: new registered operations
- *       setTabStops (direct w:tabs editing) and setParagraphBorders
- *       (per-edge w:pBdr + w:shd fill). An e16 peer rejects the very
- *       intents an e17 peer applies — fork on the first tab-stop or
- *       paragraph-border edit.
+ *       setTabStops (direct w:tabs editing), setParagraphBorders (per-edge
+ *       w:pBdr + w:shd fill), insertCaption (SEQ caption paragraph), and
+ *       ensureRefBookmark (hidden _Ref bookmark for heading/caption
+ *       cross-references); insertToc additionally accepts captionLabel
+ *       (table of figures, `TOC \c`), which an e16 peer would silently
+ *       ignore and build a HEADING table instead — byte divergence, not
+ *       just rejection. An e16 peer rejects (or misapplies) the very
+ *       intents an e17 peer applies.
  */
 export const ENGINE_VERSION = "e17";
 

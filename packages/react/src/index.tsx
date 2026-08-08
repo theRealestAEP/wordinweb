@@ -76,6 +76,11 @@ import {
   insertBookmarkAroundSelection,
   insertBookmarkAt,
   insertCrossReference,
+  insertCaptionAt,
+  listCrossRefTargets,
+  ensureRefBookmark,
+  nextRefBookmarkName,
+  type CrossRefTarget,
   insertMathAt,
   insertShapeAt,
   setDrawingLineStyle,
@@ -232,6 +237,26 @@ export interface DocxViewApi {
   addBookmark(name: string): boolean;
   /** Insert a live text or page reference to a bookmark. */
   insertCrossReference(bookmark: string, kind: "text" | "page"): boolean;
+  /**
+   * Cross-reference targets beyond plain bookmarks, in document order:
+   * headings, captions (SEQ paragraphs), and numbered list items — what
+   * Word's Cross-reference dialog lists per reference type. The keys stay
+   * valid until the next call (or a document change).
+   */
+  listCrossRefTargets(): { key: string; kind: "heading" | "caption" | "numberedItem"; text: string }[];
+  /**
+   * Insert a live text or page reference to a listed target. A target with
+   * no hidden `_Ref` bookmark gets one first (Word's own mechanism), so the
+   * REF/PAGEREF has something durable to point at.
+   */
+  insertCrossRefToTarget(key: string, kind: "text" | "page"): boolean;
+  /**
+   * Insert a Word caption — "<label> <n>" in the Caption style, the number a
+   * live SEQ field — below or above the selected object (or the caret's
+   * block; a caret inside a table captions the table). updateFields
+   * renumbers the whole label sequence.
+   */
+  insertCaption(label: string, text?: string, position?: "below" | "above"): boolean;
   /**
    * Recompute every supported field's cached result — Word's F9, and what a
    * host calls before printing or exporting so the file it hands on carries
@@ -1598,6 +1623,8 @@ export function DocxView({
         };
         pages = rerender(doc); // re-render with the delete affordance wired
         let findState: { matches: ReturnType<typeof findAll>; index: number } = { matches: [], index: 0 };
+        // Cross-reference dialog targets (listCrossRefTargets), keyed by index.
+        let crossRefTargets: CrossRefTarget[] = [];
         // Review-tab comment navigation cursor (-1 = not started).
         let commentNav = -1;
         const selectMatch = (i: number) => {
@@ -1975,6 +2002,77 @@ export function DocxView({
             pages = rerender(doc);
             return true;
           },
+          listCrossRefTargets: () => {
+            crossRefTargets = listCrossRefTargets(doc);
+            return crossRefTargets.map((target, i) => ({
+              key: String(i),
+              kind: target.kind,
+              text: target.text.length > 80 ? `${target.text.slice(0, 79)}…` : target.text,
+            }));
+          },
+          insertCrossRefToTarget: (key, kind) => {
+            const target = crossRefTargets[Number(key)];
+            if (!target) return false;
+            let name = target.bookmark;
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              // The hidden bookmark rides its own registered intent first;
+              // the REF then names it like any user bookmark. Both carry the
+              // originator's values, so every replica writes the same XML.
+              if (!name) {
+                name = nextRefBookmarkName(doc);
+                const blockId = doc.stableIds.idOf(target.paragraph);
+                if (blockId === undefined) return true; // honest no-op (see collabOp)
+                history.checkpoint();
+                current.submitOp(operationBody("ensureRefBookmark", blockId, { name }) as never);
+              }
+              const bookmark = name;
+              return collabOp((a, ids) => ({ kind: "insertCrossRef", runId: a.runId, bookmark, refKind: kind, nodeIds: ids(8) }));
+            }
+            const at = insertionTarget();
+            if (!at) return false;
+            history.checkpoint();
+            if (!name) {
+              name = nextRefBookmarkName(doc);
+              if (!ensureRefBookmark(doc, target.paragraph, name)) return false;
+            }
+            if (!insertCrossReference(doc, at.t, at.offset, name, kind)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          insertCaption: (label, text = "", position = "below") => {
+            // The caption anchors at the SELECTED OBJECT's paragraph when an
+            // object is selected, else at the caret's block (a caret inside a
+            // table captions the table — the mutation hoists).
+            const drawing = editor?.getSelectedDrawingSource();
+            const caret = editor?.getCaretTarget();
+            const anchorTarget = drawing ?? caret?.t;
+            if (!anchorTarget) return false;
+            let pEl: XmlElement | null = null;
+            for (let cur: XmlElement | null = anchorTarget; cur; cur = doc.findParentOf(cur) ?? null) {
+              if (localName(cur.name) === "p") {
+                pEl = cur;
+                break;
+              }
+            }
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              const blockId = pEl ? doc.stableIds.idOf(pEl) : undefined;
+              if (blockId === undefined) return true; // honest no-op (see collabOp)
+              history.checkpoint();
+              current.submitOp(operationBody(
+                "insertCaption",
+                blockId,
+                { label, ...(text ? { text } : {}), position },
+                (n) => current.allocIds?.(n) ?? [],
+              ) as never);
+              return true;
+            }
+            history.checkpoint();
+            if (!insertCaptionAt(doc, anchorTarget, label, text, position)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
           updateFields: (values) => {
             // The results are computed HERE, on the acting client, and carried
             // on the wire. Page numbers come out of a layout and layout depends
@@ -2001,6 +2099,7 @@ export function DocxView({
                 entryCount: tocEntryCount(doc, options),
                 ...(options?.levels ? { levels: options.levels } : {}),
                 ...(options?.leader ? { leader: options.leader } : {}),
+                ...(options?.captionLabel ? { captionLabel: options.captionLabel } : {}),
               })
             ) {
               return true;

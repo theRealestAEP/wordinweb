@@ -159,7 +159,7 @@ export {
   updateFields,
 } from "./edit/update-fields.js";
 export type { FieldUpdateOptions } from "./edit/update-fields.js";
-export { TOC_EMPTY_TEXT, TOC_LEADERS, findTocFields, insertToc, rebuildToc, tocEntryCount } from "./edit/toc.js";
+export { TOC_EMPTY_TEXT, TOC_LEADERS, findTocFields, insertToc, isValidCaptionLabel, rebuildToc, tocEntryCount } from "./edit/toc.js";
 export type { TocLeader, TocLevels, TocOptions } from "./edit/toc.js";
 export {
   drawingFillColor,
@@ -181,7 +181,8 @@ export type { SmartArtTextFormat } from "./edit/smartart.js";
 export { insertModel3DAt, setModel3DRotation, insertWebVideoAt, insertEmbeddedObjectAt, normalizeWebVideoUrl } from "./edit/objects.js";
 export type { Model3DInsert, Model3DRotation, WebVideoInsert, EmbeddedObjectInsert } from "./edit/objects.js";
 export { buildOlePackage, extractOlePackage } from "./parse/ole.js";
-export { validBookmarkName, listBookmarks, bookmarkTextTarget, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference } from "./edit/references.js";
+export { validBookmarkName, listBookmarks, bookmarkTextTarget, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, insertCaptionAt, listCrossRefTargets, ensureRefBookmark, nextRefBookmarkName, CAPTION_LABELS } from "./edit/references.js";
+export type { CrossRefTarget } from "./edit/references.js";
 export {
   deleteWatermark,
   headerWatermarks,

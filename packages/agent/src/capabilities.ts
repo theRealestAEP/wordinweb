@@ -416,6 +416,10 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   // the length caps and the tag pattern.
   "insertMergeField.name": string(64, 1),
   "insertCitation.tag": { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$" },
+  "insertToc.captionLabel": { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]{0,31}$" },
+  "insertCaption.label": { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]{0,31}$" },
+  "insertCaption.text": string(2000, 0),
+  "ensureRefBookmark.name": { type: "string", pattern: "^_Ref[0-9]{1,12}$" },
   "createStyle.style": styleSpec,
   "modifyStyle.styleId": styleId,
   "modifyStyle.patch": stylePatch,
@@ -509,6 +513,7 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "sortTableRows.compare": ["text", "number"],
   "convertTextToTable.separator": ["tab", "comma"],
   "convertTableToText.separator": ["tab", "comma"],
+  "insertCaption.position": ["below", "above"],
 };
 
 function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
