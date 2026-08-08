@@ -175,9 +175,13 @@ export {
   updateFields,
 } from "./edit/update-fields.js";
 export type { FieldUpdateOptions } from "./edit/update-fields.js";
-export { TOC_EMPTY_TEXT, TOC_LEADERS, findBibliographyFields, findTocFields, insertBibliography, insertToc, isValidCaptionLabel, rebuildToc, refreshBibliographies, tocEntryCount, tocEntryCount } from "./edit/toc.js";
+export { TOC_EMPTY_TEXT, TOC_LEADERS, findTocFields, insertToc, isValidCaptionLabel, rebuildToc, tocEntryCount } from "./edit/toc.js";
 export {
-  bibliographyEntryCount } from "./edit/toc.js";
+  bibliographyEntryCount,
+  findBibliographyFields,
+  insertBibliography,
+  refreshBibliographies,
+} from "./edit/bibliography.js";
 export type { TocLeader, TocLevels, TocOptions } from "./edit/toc.js";
 export {
   drawingFillColor,

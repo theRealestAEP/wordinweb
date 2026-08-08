@@ -113,6 +113,7 @@ const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
     Bibliography: `<w:style ${W} w:type="paragraph" w:styleId="Bibliography">
       <w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
       <w:uiPriority w:val="37"/><w:semiHidden/><w:unhideWhenUsed/>
+    </w:style>`,
     // Word's caption style: italic 9pt in the theme's dark accent, keep-next
     // so a caption never separates from its figure.
     Caption: `<w:style ${W} w:type="paragraph" w:styleId="Caption">

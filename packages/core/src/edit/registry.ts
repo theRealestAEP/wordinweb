@@ -42,6 +42,7 @@ import {
   type CitationSourcePatch,
   type CitationSourceSpec,
 } from "./sources.js";
+import {
   MAX_TAB_STOP_PT,
   PARAGRAPH_BORDER_EDGES,
   TAB_STOP_ALIGNMENTS,
