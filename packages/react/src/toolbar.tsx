@@ -4455,6 +4455,8 @@ function ReviewTab({
       </span>
       <Sep />
       {showComment && <CommentMenu api={api} mentions={mentions} />}
+      <Btn label="◀" title="Go to previous comment" onClick={() => api?.stepComment(-1)} />
+      <Btn label="▶" title="Go to next comment" onClick={() => api?.stepComment(1)} />
       <FindReplaceMenu api={api} />
     </>
   );

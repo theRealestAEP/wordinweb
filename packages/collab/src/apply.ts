@@ -52,6 +52,8 @@ import {
   deleteMath,
   moveMath,
   deleteComment,
+  setCommentResolved,
+  editCommentText,
   insertBookmarkAroundSelection,
   collectRevisions,
   acceptRevision,
@@ -853,6 +855,12 @@ function applyIntentInner(
     }
     case "deleteComment":
       return deleteComment(doc, intent.commentId);
+    case "resolveComment":
+      // The carried paraId candidate is consumed only when the thread parent's
+      // body paragraph lacks one (recordedProvenance draws at most one value).
+      return setCommentResolved(doc, intent.commentId, intent.resolved, recordedProvenance({ paraIds: [intent.paraId] }));
+    case "editComment":
+      return editCommentText(doc, intent.commentId, intent.text);
     case "insertBookmarkRange": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;

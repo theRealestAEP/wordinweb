@@ -100,7 +100,7 @@ export {
   setImageCrop,
 } from "./edit/images.js";
 export type { ImageCrop } from "./edit/images.js";
-export { addComment, deleteComment, replyToComment } from "./edit/comments.js";
+export { addComment, deleteComment, replyToComment, setCommentResolved, editCommentText } from "./edit/comments.js";
 export { setListType, listTypeAt, setListLevel } from "./edit/lists.js";
 export type { ListKind } from "./edit/lists.js";
 export {

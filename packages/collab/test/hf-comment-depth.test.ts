@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { zipSync, strToU8 } from "fflate";
-import { DocxDocument, serializeXml, localName, type XmlElement } from "@wordinweb/core";
+import { DocxDocument, serializeXml, localName, type Paragraph, type Run, type XmlElement } from "@wordinweb/core";
 import { DocumentSession } from "../src/session.js";
 
 /**
@@ -17,6 +17,12 @@ function makeDoc(text = "body"): DocxDocument {
     "_rels/.rels": strToU8(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`),
     "word/document.xml": strToU8(documentXml),
   }));
+}
+
+function firstRunId(s: DocumentSession): number {
+  const para = s.doc.sections[0].blocks[0] as Paragraph;
+  const run = para.children[0] as Run;
+  return s.ids.idOf(run.src!)!;
 }
 
 const seq = (n: number, base = 700) => Array.from({ length: n }, (_, i) => base + i);
@@ -100,5 +106,43 @@ describe("setPageNumberFormat on the wire", () => {
     expect(s.submit({ kind: "setPageNumberFormat", clientId: "a", clientSeq: 1, base: 0 } as never).kind).toBe("rejected");
     expect(s.submit({ kind: "setPageNumberFormat", clientId: "a", clientSeq: 2, base: 0, fmt: "ordinal" as never }).kind).toBe("rejected");
     expect(s.submit({ kind: "setPageNumberFormat", clientId: "a", clientSeq: 3, base: 0, start: -1 }).kind).toBe("rejected");
+  });
+});
+
+describe("resolveComment / editComment on the wire", () => {
+  const withComment = (): { s: DocumentSession; id: string } => {
+    const s = new DocumentSession(makeDoc("commented text"));
+    expect(s.submit({ kind: "commentRun", clientId: "a", clientSeq: 1, base: 0, runId: firstRunId(s), text: "Note", author: "Reviewer", date: "2026-01-01T00:00:00Z", paraId: "11111111" }).kind).toBe("applied");
+    return { s, id: s.doc.comments[0].id };
+  };
+
+  it("resolves and reopens a thread; the resolved flag derives from w15:done", () => {
+    const { s, id } = withComment();
+    expect(s.submit({ kind: "resolveComment", clientId: "b", clientSeq: 1, base: s.seq, commentId: id, resolved: true, paraId: "22222222" }).kind).toBe("applied");
+    expect(s.doc.comments[0].resolved).toBe(true);
+    // Same state again: honest no-op, identical rejection everywhere.
+    expect(s.submit({ kind: "resolveComment", clientId: "b", clientSeq: 2, base: s.seq, commentId: id, resolved: true, paraId: "33333333" }).kind).toBe("rejected");
+    expect(s.submit({ kind: "resolveComment", clientId: "b", clientSeq: 3, base: s.seq, commentId: id, resolved: false, paraId: "44444444" }).kind).toBe("applied");
+    expect(s.doc.comments[0].resolved).toBeUndefined();
+    expect(s.submit({ kind: "resolveComment", clientId: "b", clientSeq: 4, base: s.seq, commentId: "ghost", resolved: true, paraId: "55555555" }).kind).toBe("rejected");
+  });
+
+  it("two sessions resolving with the same carried paraId converge byte-identically", () => {
+    const build = () => {
+      const { s, id } = withComment();
+      s.submit({ kind: "resolveComment", clientId: "b", clientSeq: 1, base: s.seq, commentId: id, resolved: true, paraId: "22222222" });
+      return allRootsXml(s.doc);
+    };
+    expect(build()).toBe(build());
+  });
+
+  it("edits a comment's text; unchanged or unknown edits reject", () => {
+    const { s, id } = withComment();
+    expect(s.submit({ kind: "editComment", clientId: "a", clientSeq: 2, base: s.seq, commentId: id, text: "Sharper note" }).kind).toBe("applied");
+    expect(s.doc.comments[0].text).toBe("Sharper note");
+    expect(s.submit({ kind: "editComment", clientId: "a", clientSeq: 3, base: s.seq, commentId: id, text: "Sharper note" }).kind).toBe("rejected");
+    expect(s.submit({ kind: "editComment", clientId: "a", clientSeq: 4, base: s.seq, commentId: "ghost", text: "x" }).kind).toBe("rejected");
+    expect(s.submit({ kind: "editComment", clientId: "a", clientSeq: 5, base: s.seq, commentId: id, text: "" }).kind).toBe("rejected");
+    expect(s.submit({ kind: "editComment", clientId: "a", clientSeq: 6, base: s.seq, commentId: id, text: "x".repeat(20_001) }).kind).toBe("rejected");
   });
 });

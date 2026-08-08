@@ -55,6 +55,15 @@ export interface RenderOptions {
   /** Called when the user submits a reply from a balloon's reply box. The
    * reply box only renders when this is provided. */
   onReplyComment?: (id: string, text: string) => void;
+  /** Called when the user resolves (true) or reopens (false) a thread from
+   * its balloon. The button only renders when this is provided. */
+  onResolveComment?: (id: string, resolved: boolean) => void;
+  /** Called when the user commits an in-balloon edit of a comment's text.
+   * Offered only on comments whose author matches `commentAuthor`. */
+  onEditComment?: (id: string, text: string) => void;
+  /** The local user's comment author name — gates the edit affordance to
+   * their own comments (Word's edit-my-comment rule). */
+  commentAuthor?: string;
 }
 
 export interface TextBinding {
@@ -659,7 +668,7 @@ export function renderToDom(
   const redrawComments = (): void => {
     clearComments();
     if (drawComments) {
-      renderComments(doc, root, handle.bindings, zoom, options.onDeleteComment, options.onReplyComment);
+      renderComments(doc, root, handle.bindings, zoom, options);
     }
   };
 
@@ -1056,11 +1065,51 @@ function renderComments(
   root: HTMLElement,
   bindings: TextBinding[],
   zoom: number,
-  onDelete?: (id: string) => void,
-  onReply?: (id: string, text: string) => void,
+  options: RenderOptions,
 ): void {
+  const { onDeleteComment: onDelete, onReplyComment: onReply, onResolveComment: onResolve, onEditComment: onEdit } = options;
   const allAnchors = doc.commentAnchors();
   if (allAnchors.size === 0) return;
+
+  /** A head-row action button (resolve / edit / delete share the chrome). */
+  const actionButton = (className: string, title: string, glyph: string, onClick: () => void): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.className = className;
+    button.title = title;
+    button.textContent = glyph;
+    button.addEventListener("mousedown", (e) => e.stopPropagation());
+    button.addEventListener("click", (e) => {
+      e.stopPropagation();
+      onClick();
+    });
+    return button;
+  };
+
+  /** Swap a balloon's text for an in-place editor (Enter commits, Esc cancels). */
+  const startEdit = (body: HTMLElement, comment: { id: string; text: string }): void => {
+    if (!onEdit || body.querySelector("textarea")) return;
+    const area = document.createElement("textarea");
+    area.className = "dxw-comment-edit-input";
+    area.value = comment.text;
+    // The editor listens on the container — keep typing out of the doc.
+    for (const evt of ["mousedown", "mouseup", "click", "keyup"] as const) {
+      area.addEventListener(evt, (e) => e.stopPropagation());
+    }
+    area.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        const next = area.value.trim();
+        if (next && next !== comment.text) onEdit(comment.id, next);
+        else body.textContent = comment.text;
+      } else if (e.key === "Escape") {
+        body.textContent = comment.text;
+      }
+    });
+    body.textContent = "";
+    body.appendChild(area);
+    area.focus();
+  };
 
   // Replies share the parent's range and render inside its balloon — only
   // top-level comments get their own highlight and balloon.
@@ -1104,12 +1153,13 @@ function renderComments(
 
   // Continuous per-line highlight rects (word-granular spans would leave
   // gaps at every space if each span carried its own background).
+  const resolvedIds = new Set(doc.comments.filter((c) => c.resolved && !c.parentId).map((c) => c.id));
   for (const [id] of anchors) {
     let run: { surface: HTMLElement; top: number; height: number; x0: number; x1: number } | null = null;
     const flush = (): void => {
       if (run && run.x1 > run.x0) {
         const hl = document.createElement("div");
-        hl.className = "dxw-comment-hl";
+        hl.className = "dxw-comment-hl" + (resolvedIds.has(id) ? " dxw-comment-resolved-hl" : "");
         hl.dataset.dxwCommentId = id;
         hl.style.cssText =
           `position:absolute;left:${run.x0}px;top:${run.top}px;width:${run.x1 - run.x0}px;` +
@@ -1181,22 +1231,24 @@ function renderComments(
     meta.textContent = dateText;
     who.append(author, meta);
     head.append(avatar, who);
-    if (onDelete) {
-      const del = document.createElement("button");
-      del.className = "dxw-comment-delete";
-      del.title = "Delete comment";
-      del.textContent = "×";
-      del.addEventListener("mousedown", (e) => e.stopPropagation());
-      del.addEventListener("click", (e) => {
-        e.stopPropagation();
-        onDelete(comment.id);
-      });
-      head.append(del);
-    }
-
+    if (comment.resolved) card.classList.add("dxw-comment-resolved");
     const body = document.createElement("div");
     body.className = "dxw-comment-text";
     body.textContent = comment.text;
+    if (onResolve) {
+      head.append(actionButton(
+        "dxw-comment-resolve" + (comment.resolved ? " dxw-resolved" : ""),
+        comment.resolved ? "Reopen thread" : "Resolve thread",
+        comment.resolved ? "↺" : "✓",
+        () => onResolve(comment.id, !comment.resolved),
+      ));
+    }
+    if (onEdit && comment.author === options.commentAuthor) {
+      head.append(actionButton("dxw-comment-edit", "Edit comment", "✎", () => startEdit(body, comment)));
+    }
+    if (onDelete) {
+      head.append(actionButton("dxw-comment-delete", "Delete comment", "×", () => onDelete(comment.id)));
+    }
     card.append(head, body);
 
     // Reply thread, nested inside the parent balloon like Word.
@@ -1220,26 +1272,22 @@ function renderComments(
       rMeta.textContent = rWhen && !isNaN(rWhen.getTime()) ? rWhen.toLocaleDateString() : "";
       rWho.append(rAuthor, rMeta);
       rHead.append(rAvatar, rWho);
-      if (onDelete) {
-        const rDel = document.createElement("button");
-        rDel.className = "dxw-comment-delete";
-        rDel.title = "Delete reply";
-        rDel.textContent = "×";
-        rDel.addEventListener("mousedown", (e) => e.stopPropagation());
-        rDel.addEventListener("click", (e) => {
-          e.stopPropagation();
-          onDelete(reply.id);
-        });
-        rHead.append(rDel);
-      }
       const rBody = document.createElement("div");
       rBody.className = "dxw-comment-text";
       rBody.textContent = reply.text;
+      if (onEdit && reply.author === options.commentAuthor) {
+        rHead.append(actionButton("dxw-comment-edit", "Edit reply", "✎", () => startEdit(rBody, reply)));
+      }
+      if (onDelete) {
+        // Deleting a REPLY removes just that reply; deleting the parent above
+        // removes the whole thread (deleteComment cascades from the given id).
+        rHead.append(actionButton("dxw-comment-delete", "Delete reply", "×", () => onDelete(reply.id)));
+      }
       row.append(rHead, rBody);
       card.append(row);
     }
 
-    if (onReply) {
+    if (onReply && !comment.resolved) {
       const input = document.createElement("input");
       input.className = "dxw-comment-reply-input";
       input.placeholder = "Reply…";
@@ -1328,6 +1376,8 @@ function ensureStylesheet(): void {
 .dxw-body-mode .dxw-page [data-dxw-drawing][data-dxw-hf]:not([data-dxw-textbox-story-object]) { pointer-events: none; }
 .dxw-comment-hl { background: var(--dxw-comment-hl, rgba(255, 200, 90, .38)); }
 .dxw-comment-hl.dxw-hot { background: var(--dxw-comment-hl-active, rgba(255, 170, 0, .55)); }
+/* Word grays a resolved thread's anchor rather than keeping it hot. */
+.dxw-comment-hl.dxw-comment-resolved-hl { background: var(--dxw-comment-hl-resolved, rgba(160, 160, 160, .22)); }
 .dxw-comment-card {
   position: absolute;
   width: 220px;
@@ -1351,15 +1401,31 @@ function ensureStylesheet(): void {
 .dxw-comment-who { min-width: 0; }
 .dxw-comment-author { font-weight: 600; line-height: 1.2; overflow-wrap: break-word; }
 .dxw-comment-date { color: #5f6368; font-size: 11px; line-height: 1.2; }
-.dxw-comment-delete {
-  margin-left: auto; flex: none; border: none; background: transparent;
+.dxw-comment-delete, .dxw-comment-resolve, .dxw-comment-edit {
+  flex: none; border: none; background: transparent;
   width: 20px; height: 20px; border-radius: 4px; cursor: pointer;
   color: #5f6368; font-size: 15px; line-height: 1; padding: 0;
   visibility: hidden;
 }
-.dxw-comment-card:hover .dxw-comment-delete { visibility: visible; }
+.dxw-comment-resolve, .dxw-comment-edit { font-size: 12px; }
+/* The first action button after the author block pushes the group right. */
+.dxw-comment-who + button { margin-left: auto; }
+.dxw-comment-card:hover .dxw-comment-delete,
+.dxw-comment-card:hover .dxw-comment-resolve,
+.dxw-comment-card:hover .dxw-comment-edit { visibility: visible; }
 .dxw-comment-delete:hover { background: #f1f3f4; color: #a50e0e; }
+.dxw-comment-resolve:hover, .dxw-comment-edit:hover { background: #f1f3f4; color: #1a73e8; }
+/* A resolved thread stays discoverable: its reopen button is always shown. */
+.dxw-comment-resolve.dxw-resolved { visibility: visible; }
+.dxw-comment-resolved { opacity: .72; }
+.dxw-comment-resolved .dxw-comment-text { color: #5f6368; }
 .dxw-comment-text { white-space: pre-wrap; overflow-wrap: break-word; }
+.dxw-comment-edit-input {
+  width: 100%; box-sizing: border-box; min-height: 48px; resize: vertical;
+  border: 1px solid #dadce0; border-radius: 6px; padding: 4px 8px;
+  font: 12px system-ui, sans-serif; color: #3c4043; outline: none;
+}
+.dxw-comment-edit-input:focus { border-color: var(--dxw-accent, #1a73e8); }
 .dxw-comment-reply { margin-top: 8px; padding: 8px 0 0 10px; border-top: 1px solid #f1f3f4; border-left: 2px solid #e8eaed; }
 .dxw-comment-reply-input {
   width: 100%; box-sizing: border-box; margin-top: 8px;

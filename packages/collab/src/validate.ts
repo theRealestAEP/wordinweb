@@ -376,6 +376,16 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "deleteComment":
       if (typeof intent.commentId !== "string" || intent.commentId.length === 0 || intent.commentId.length > 64) return "deleteComment: bad id";
       return null;
+    case "resolveComment":
+      if (typeof intent.commentId !== "string" || intent.commentId.length === 0 || intent.commentId.length > 64) return "resolveComment: bad id";
+      if (typeof intent.resolved !== "boolean") return "resolveComment: bad resolved";
+      if (typeof intent.paraId !== "string" || intent.paraId.length === 0 || intent.paraId.length > 16) return "resolveComment: bad paraId";
+      return null;
+    case "editComment":
+      if (typeof intent.commentId !== "string" || intent.commentId.length === 0 || intent.commentId.length > 64) return "editComment: bad id";
+      if (typeof intent.text !== "string" || intent.text.length === 0) return "editComment: empty";
+      if (intent.text.length > limits.maxCommentLength) return "editComment: too long";
+      return null;
     case "insertBookmarkRange":
       // Bookmark names: letters/digits/underscore, must start with letter/_.
       if (typeof intent.name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,39}$/.test(intent.name)) return "insertBookmarkRange: bad name";

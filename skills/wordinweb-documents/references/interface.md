@@ -705,7 +705,9 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | --- | --- | --- |
 | `commentRun` | Add a comment to a run | `runRef`, `text`; optional: `initials` |
 | `replyComment` | Reply to a comment | `parentId`, `text`; optional: `initials` |
-| `deleteComment` | Delete a comment thread | `commentId` |
+| `deleteComment` | Delete a comment (a thread-parent id deletes the whole thread; a reply id deletes just that reply) | `commentId` |
+| `resolveComment` | Resolve or reopen a comment thread | `commentId`, `resolved` |
+| `editComment` | Replace a comment's text | `commentId`, `text` |
 | `suggestRevision` | Suggest text or paragraph deletion | optional: `ranges`, `marks` |
 | `acceptRevision` | Accept one revision | `index` |
 | `rejectRevision` | Reject one revision | `index` |

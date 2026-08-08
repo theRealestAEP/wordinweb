@@ -89,6 +89,8 @@ import {
   setEvenOddHeaders,
   setPageNumberFormat,
   pageNumberFormatAt,
+  setCommentResolved,
+  editCommentText,
   type PageNumberFormat,
   type PageNumberFormatPatch,
   type XmlElement,
@@ -447,6 +449,14 @@ export interface DocxViewApi {
   setPageNumberFormat(patch: PageNumberFormatPatch, scope?: "document" | "section"): boolean;
   /** Current page-number settings for the caret's section. */
   getPageNumberFormat(): { fmt: PageNumberFormat; start: number | null };
+  /** Resolve (true) or reopen (false) a comment thread. */
+  resolveComment(id: string, resolved: boolean): boolean;
+  /** Replace a comment's body text (Word's edit-my-comment). */
+  editComment(id: string, text: string): boolean;
+  /** Select and scroll to the next/previous commented range (Review-tab
+   * navigation). Returns the focused thread's comment id, or null when the
+   * document has no anchored comments. */
+  stepComment(delta: 1 | -1): string | null;
   /** Effective formatting of the current selection (toolbar state), or null. */
   getSelectionFormat(): SelectionFormat | null;
   /** Print the rendered pages (browser print dialog / save as PDF). */
@@ -887,6 +897,8 @@ export function DocxView({
     let detachPresenceSender: (() => void) | null = null;
     let onDeleteComment: ((id: string) => void) | undefined;
     let onReplyComment: ((id: string, text: string) => void) | undefined;
+    let onResolveComment: ((id: string, resolved: boolean) => void) | undefined;
+    let onEditComment: ((id: string, text: string) => void) | undefined;
     let applyStyleShortcut: ((styleId: string | null) => void) | undefined;
     // Mutable current zoom for this document's lifetime: rerender() reads it and
     // applyZoomRef updates it in place, so a zoom change re-paints without
@@ -975,6 +987,9 @@ export function DocxView({
         comments: showComments,
         onDeleteComment,
         onReplyComment,
+        onResolveComment,
+        onEditComment,
+        commentAuthor,
         onViewportChange: () => editor?.afterViewportChange(),
       }, prev ?? undefined);
       const tDom = perf ? performance.now() : 0;
@@ -1492,6 +1507,16 @@ export function DocxView({
           history.checkpoint();
           if (deleteComment(doc, id)) pages = rerender(doc);
         };
+        onResolveComment = (id, resolved) => {
+          if (collabDocOp(() => ({ kind: "resolveComment", commentId: id, resolved, paraId: hex8() }))) return;
+          history.checkpoint();
+          if (setCommentResolved(doc, id, resolved)) pages = rerender(doc);
+        };
+        onEditComment = (id, text) => {
+          if (collabDocOp(() => ({ kind: "editComment", commentId: id, text }))) return;
+          history.checkpoint();
+          if (editCommentText(doc, id, text)) pages = rerender(doc);
+        };
         onReplyComment = (id, text) => {
           if (collabDocOp(() => ({
             kind: "replyComment", parentId: id, text, author: commentAuthor,
@@ -1511,6 +1536,8 @@ export function DocxView({
         };
         pages = rerender(doc); // re-render with the delete affordance wired
         let findState: { matches: ReturnType<typeof findAll>; index: number } = { matches: [], index: 0 };
+        // Review-tab comment navigation cursor (-1 = not started).
+        let commentNav = -1;
         const selectMatch = (i: number) => {
           const m = findState.matches[i];
           if (!m || !editor) return;
@@ -2387,6 +2414,44 @@ export function DocxView({
           getPageNumberFormat: () => {
             const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t ?? documentStart()?.t;
             return t ? pageNumberFormatAt(doc, t) : { fmt: "decimal", start: null };
+          },
+          resolveComment: (id, resolved) => {
+            if (collabDocOp(() => ({ kind: "resolveComment", commentId: id, resolved, paraId: hex8() }))) return true;
+            history.checkpoint();
+            if (!setCommentResolved(doc, id, resolved)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          editComment: (id, text) => {
+            if (collabDocOp(() => ({ kind: "editComment", commentId: id, text }))) return true;
+            history.checkpoint();
+            if (!editCommentText(doc, id, text)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          stepComment: (delta) => {
+            const anchors = doc.commentAnchors();
+            const threads = doc.comments.filter(
+              (c) => !c.parentId && (anchors.get(c.id)?.length ?? 0) > 0,
+            );
+            if (threads.length === 0) return null;
+            commentNav = commentNav < 0
+              ? (delta === 1 ? 0 : threads.length - 1)
+              : (commentNav + delta + threads.length) % threads.length;
+            const comment = threads[commentNav];
+            const ranges = anchors.get(comment.id)!.map((t) => ({ t, start: 0, end: t.text.length }));
+            if (editor && ranges.length > 0) {
+              // Bring the anchor into view (same dance as find's selectMatch:
+              // a virtualized page must be mounted before it can scroll).
+              const restore = handle?._virtualized ? handle.materializeAll?.() : undefined;
+              editor.selectRanges(ranges);
+              const el = handle?.bindingsByText.get(ranges[0].t)?.[0]?.el;
+              el?.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+              restore?.();
+              handle?.updateViewport?.();
+              editor.selectRanges(ranges);
+            }
+            return comment.id;
           },
           insertBreak: (kind) => {
             let target = editor?.getCaretTarget() ?? null;

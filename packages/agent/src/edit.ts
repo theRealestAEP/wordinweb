@@ -252,6 +252,9 @@ export async function compileAgentOperation(input: AgentOperation, context: Comp
     operation.author ??= context.provenance.author;
     operation.date ??= context.provenance.now();
     operation.paraIds ??= [paraId(context), paraId(context)];
+  } else if (typedKind === "resolveComment") {
+    // Consumed only when the thread parent's paragraph lacks a w14:paraId.
+    operation.paraId ??= paraId(context);
   } else if (typedKind === "suggestRevision") {
     operation.suggest ??= { author: context.provenance.author, date: context.provenance.now() };
   } else if (SUGGESTABLE_KINDS.has(typedKind)) {

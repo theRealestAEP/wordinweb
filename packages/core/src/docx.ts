@@ -1021,19 +1021,23 @@ export class DocxDocument {
         paraId,
       });
     }
-    // commentsExtended threading: paraIdParent links a reply to its parent.
+    // commentsExtended threading: paraIdParent links a reply to its parent,
+    // and w15:done marks the thread resolved.
     if (this.commentsExtRoot) {
       const parentOf = new Map<string, string>();
+      const doneOf = new Map<string, boolean>();
       for (const ex of this.commentsExtRoot.children) {
         if (localName(ex.name) !== "commentEx") continue;
         const pid = attr(ex, "paraId");
         const parent = attr(ex, "paraIdParent");
         if (pid && parent) parentOf.set(pid, parent);
+        if (pid) doneOf.set(pid, attr(ex, "done") === "1");
       }
       const byParaId = new Map(out.filter((c) => c.paraId).map((c) => [c.paraId!, c]));
       for (const c of out) {
         const parentPara = c.paraId ? parentOf.get(c.paraId) : undefined;
         if (parentPara) c.parentId = byParaId.get(parentPara)?.id;
+        if (c.paraId && doneOf.get(c.paraId)) c.resolved = true;
       }
     }
     return out;

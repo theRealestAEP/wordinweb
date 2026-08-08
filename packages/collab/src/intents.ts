@@ -550,6 +550,8 @@ export type Intent =
   | MoveMathIntent
   | EnsureHeaderFooterIntent
   | DeleteCommentIntent
+  | ResolveCommentIntent
+  | EditCommentIntent
   | InsertBookmarkRangeIntent
   | AcceptRevisionIntent
   | RejectRevisionIntent
@@ -638,6 +640,8 @@ const HAND_WRITTEN_INTENT_KIND_MAP: Record<
   moveMath: true,
   ensureHeaderFooter: true,
   deleteComment: true,
+  resolveComment: true,
+  editComment: true,
   insertBookmarkRange: true,
   acceptRevision: true,
   rejectRevision: true,
@@ -984,10 +988,37 @@ export interface EnsureHeaderFooterIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
-/** Delete a comment (and its reply thread) by id. */
+/** Delete a comment (and its reply thread) by id. Addressed with a reply's
+ * id it deletes just that reply — the thread/reply distinction is the id. */
 export interface DeleteCommentIntent extends IntentBase {
   kind: "deleteComment";
   commentId: string;
+}
+
+/**
+ * Resolve (true) or reopen (false) a comment thread. Addressed like
+ * deleteComment, by the comment's deterministic string id (a reply id
+ * resolves its thread's parent). The mutation writes w15:done on the thread
+ * parent's commentsExtended entry; when the parent's body paragraph carries
+ * no w14:paraId yet, the carried `paraId` candidate is consumed to mint one
+ * (provenance rule a — generated once by the originator, identical XML on
+ * every replica). No document run's text moves — identity transform.
+ */
+export interface ResolveCommentIntent extends IntentBase {
+  kind: "resolveComment";
+  commentId: string;
+  resolved: boolean;
+  /** paraId candidate, consumed only when the thread parent lacks one. */
+  paraId: string;
+}
+
+/** Replace a comment's body text (Word's edit-my-comment). Author, date, id,
+ * anchors and threading stay; deterministic given the carried text — identity
+ * transform, clean no-op for an unknown id or unchanged text. */
+export interface EditCommentIntent extends IntentBase {
+  kind: "editComment";
+  commentId: string;
+  text: string;
 }
 
 /** Wrap a sub-range of a run's text in a named bookmark. */

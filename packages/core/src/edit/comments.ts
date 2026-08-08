@@ -264,6 +264,116 @@ export function replyToComment(
   return true;
 }
 
+/**
+ * Resolve or reopen a comment thread like Word: w15:done="1" (resolved) or
+ * "0" (open) on the THREAD PARENT's w15:commentEx in commentsExtended.xml.
+ * That marker is the [MS-DOCX] CT_CommentEx extension (the 2012 wordml
+ * namespace Word 2013+ writes); ECMA-376 itself defines no resolved state.
+ * Word grays the whole thread from the parent's flag, and replies keep their
+ * own entries untouched. A reply id resolves its thread's parent.
+ *
+ * The parent's body paragraph may lack a w14:paraId (older producers); one is
+ * then minted through `prov` so a replicated caller can carry it (the same
+ * provenance rule replyToComment follows). False when the comment is unknown
+ * or already in the requested state.
+ */
+export function setCommentResolved(
+  doc: DocxDocument,
+  id: string,
+  resolved: boolean,
+  prov: EditProvenance = defaultProvenance(),
+): boolean {
+  let target = doc.comments.find((c) => c.id === id);
+  while (target?.parentId) {
+    target = doc.comments.find((c) => c.id === target!.parentId);
+  }
+  if (!target) return false;
+
+  // The thread parent needs a w14:paraId for its commentsExtended entry.
+  let paraId = target.paraId;
+  if (!paraId) {
+    const commentsRoot = doc.commentsTree();
+    const parentEl = commentsRoot?.children.find(
+      (c) => localName(c.name) === "comment" && attr(c, "id") === target!.id,
+    );
+    let lastP: XmlElement | undefined;
+    const findP = (e: XmlElement): void => {
+      if (localName(e.name) === "p") {
+        lastP = e;
+        return;
+      }
+      for (const ch of e.children) findP(ch);
+    };
+    if (parentEl) for (const ch of parentEl.children) findP(ch);
+    if (!lastP) return false;
+    const used = new Set(doc.comments.map((c) => c.paraId).filter(Boolean));
+    do {
+      paraId = prov.paraId();
+    } while (used.has(paraId));
+    lastP.attrs["xmlns:w14"] = "http://schemas.microsoft.com/office/word/2010/wordml";
+    lastP.attrs["w14:paraId"] = paraId;
+  }
+
+  const extRoot = doc.commentsExtendedTree(true);
+  if (!extRoot) return false;
+  const entry = extRoot.children.find(
+    (c) => localName(c.name) === "commentEx" && attr(c, "paraId") === paraId,
+  );
+  const done = resolved ? "1" : "0";
+  if (entry) {
+    const doneKey = Object.keys(entry.attrs).find((k) => localName(k) === "done") ?? "w15:done";
+    if (entry.attrs[doneKey] === done) return false;
+    entry.attrs[doneKey] = done;
+  } else {
+    if (!resolved) return false; // absent entry already means "open"
+    extRoot.children.push(el("w15:commentEx", { "w15:paraId": paraId, "w15:done": done }));
+  }
+  doc.markCommentsExtendedChanged();
+  doc.markCommentsChanged();
+  doc.refresh();
+  return true;
+}
+
+/**
+ * Replace a comment's body text like Word's in-balloon edit. The author,
+ * date, id, anchors and threading all stay; only the body paragraphs are
+ * rewritten. Newlines in `text` become separate paragraphs, and the LAST
+ * paragraph keeps the original last paragraph's attributes — that carries the
+ * w14:paraId threading key, so replies and the resolved marker keep pointing
+ * at this comment. False for an unknown id, empty text, or unchanged text.
+ */
+export function editCommentText(doc: DocxDocument, id: string, text: string): boolean {
+  const commentsRoot = doc.commentsTree();
+  const existing = doc.comments.find((c) => c.id === id);
+  if (!commentsRoot || !existing || !text.trim() || existing.text === text) return false;
+  const commentEl = commentsRoot.children.find(
+    (c) => localName(c.name) === "comment" && attr(c, "id") === id,
+  );
+  if (!commentEl) return false;
+  const w = commentsRoot.name.includes(":") ? commentsRoot.name.slice(0, commentsRoot.name.indexOf(":") + 1) : "";
+
+  let lastP: XmlElement | undefined;
+  const findP = (e: XmlElement): void => {
+    if (localName(e.name) === "p") {
+      lastP = e;
+      return;
+    }
+    for (const ch of e.children) findP(ch);
+  };
+  for (const ch of commentEl.children) findP(ch);
+
+  const lines = text.split("\n");
+  const paragraph = (line: string, attrs: Record<string, string>): XmlElement =>
+    el(`${w}p`, attrs, [el(`${w}r`, {}, [el(`${w}t`, { "xml:space": "preserve" }, [], line)])]);
+  commentEl.children = lines.map((line, i) =>
+    paragraph(line, i === lines.length - 1 && lastP ? { ...lastP.attrs } : {}),
+  );
+
+  doc.markCommentsChanged();
+  doc.refresh();
+  return true;
+}
+
 /** Insert the reply's range markers/reference adjacent to the parent's. */
 function insertReplyMarkers(el0: XmlElement, parentId: string, newId: string, w: string): boolean {
   let touched = false;
