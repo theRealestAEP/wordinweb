@@ -1893,6 +1893,49 @@ const setEvenOddHeadersOperation = defineOperation<{
 });
 
 /**
+ * Patch the hyphenation settings — w:autoHyphenation, w:hyphenationZone (in
+ * points on the wire, the api's unit convention), w:doNotHyphenateCaps.
+ * DOCUMENT-scoped like the other settings.xml toggles; rejection predicate is
+ * the change itself (doc.setHyphenation returns false when every present key
+ * already holds its value, identically on every replica). NOTE: this engine's
+ * layout does not hyphenate automatically — the settings are round-trip state
+ * that governs Word's rendering of the file.
+ */
+const setHyphenationOperation = defineOperation<{
+  auto?: boolean;
+  zonePt?: number | null;
+  noCaps?: boolean;
+}>()({
+  kind: "setHyphenation",
+  address: "document",
+  category: "document",
+  description: "Set automatic-hyphenation settings: on/off, the hyphenation zone in points, and whether words in capitals stay whole.",
+  fields: [
+    { name: "auto", optional: true },
+    { name: "zonePt", optional: true },
+    { name: "noCaps", optional: true },
+  ],
+  validate: ({ auto, zonePt, noCaps }) => {
+    if (auto === undefined && zonePt === undefined && noCaps === undefined) return "setHyphenation: empty patch";
+    if (auto !== undefined && typeof auto !== "boolean") return "setHyphenation: bad auto";
+    if (zonePt !== undefined && zonePt !== null &&
+        (typeof zonePt !== "number" || !Number.isFinite(zonePt) || zonePt <= 0 || zonePt > 1584)) {
+      return "setHyphenation: bad zonePt";
+    }
+    if (noCaps !== undefined && typeof noCaps !== "boolean") return "setHyphenation: bad noCaps";
+    return null;
+  },
+  apply: ({ doc, payload }) =>
+    doc.setHyphenation({
+      ...(payload.auto !== undefined ? { auto: payload.auto } : {}),
+      ...(payload.zonePt !== undefined
+        ? { zoneTwips: payload.zonePt === null ? null : Math.round(payload.zonePt * 20) }
+        : {}),
+      ...(payload.noCaps !== undefined ? { noCaps: payload.noCaps } : {}),
+    }),
+});
+
+/**
  * Set the page-number format and/or start-at value (w:pgNumType —
  * ECMA-376 §17.6.12; formats are the editable subset of ST_NumberFormat
  * §17.18.59 the layout paints). Document-level like setPageLayout: every
@@ -1991,6 +2034,7 @@ const OPERATIONS = [
   setTitlePageOperation,
   setEvenOddHeadersOperation,
   setPageNumberFormatOperation,
+  setHyphenationOperation,
 ] as const;
 
 // ---------------------------------------------------------------------------

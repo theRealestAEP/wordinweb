@@ -518,6 +518,9 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
     anyOf: [{ enum: ["decimal", "lowerRoman", "upperRoman", "lowerLetter", "upperLetter"] }, { type: "null" }],
   },
   "setPageNumberFormat.start": { anyOf: [integer(0, 32767), { type: "null" }] },
+  "setHyphenation.auto": boolean,
+  "setHyphenation.noCaps": boolean,
+  "setHyphenation.zonePt": { anyOf: [number(0.1, 1584), { type: "null" }] },
   // Fractions of the source bitmap trimmed off each edge; the registry's own
   // validate additionally refuses a crop that leaves no visible strip.
   "setCrop.crop": closedObject(

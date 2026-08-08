@@ -125,9 +125,12 @@ export interface SealedCheckpoint {
  *       per replica from the table's cell texts), insertIndexEntry (XE
  *       mark), insertIndex, and refreshIndex (index built/rebuilt from XE
  *       marks, deterministic per replica; page numbers ride in updateFields
- *       results); field-instruction validation additionally accepts formula
- *       instructions and XE. An e17 peer rejects the very intents an e18
- *       peer applies.
+ *       results), and setHyphenation (settings.xml w:autoHyphenation
+ *       cluster); field-instruction validation additionally accepts formula
+ *       instructions and XE. Also: assignFreshTracked now drops mid-apply
+ *       auto ids before a carried batch lands, so a second large registered
+ *       insert no longer risks a spurious "apply failed" rejection. An e17
+ *       peer rejects the very intents an e18 peer applies.
  */
 export const ENGINE_VERSION = "e18";
 

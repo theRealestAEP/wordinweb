@@ -866,6 +866,7 @@ the equation into something else.
 | `setTitlePage` | Toggle different-first-page headers and footers; enabling creates the empty first-page parts | `enabled` |
 | `setEvenOddHeaders` | Toggle different odd & even page headers and footers; enabling creates the empty even-page parts | `enabled` |
 | `setPageNumberFormat` | Set the page-number format (decimal, roman, letter) and/or the start-at value | optional: `fmt`, `start` |
+| `setHyphenation` | Set automatic-hyphenation settings: on/off, the hyphenation zone in points (null clears), keep-CAPS-whole. Round-trip state for Word's rendering; this engine's layout does not hyphenate | optional: `auto`, `zonePt`, `noCaps` |
 | `updateFields` | Write recomputed cached results into the document's fields, one per field in document order | `results` |
 | `createStyle` | Create a paragraph, character, table, or numbering style definition | `style` |
 | `modifyStyle` | Change an existing style definition | `styleId`, `patch` |

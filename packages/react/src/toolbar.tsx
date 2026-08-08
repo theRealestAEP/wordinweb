@@ -4970,6 +4970,24 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
           else setLn({ enabled: true, countBy: 10 });
         }}
       />
+      {/* Hyphenation is document-global settings.xml state (w:autoHyphenation
+          — §17.15.1.10), not per-section, so it ignores the scope selector.
+          This engine's own layout does not hyphenate; the setting governs
+          Word's rendering when the document is opened there. */}
+      <LayoutMenu
+        name="hyphenation"
+        label="Hyphenation"
+        {...menuState("hyphenation")}
+        options={[
+          { value: "off", label: "None", description: "No automatic hyphenation", preview: <PagePreview kind="hyphenation" /> },
+          { value: "auto", label: "Automatic", description: "Word hyphenates line ends when it opens this document", preview: <PagePreview kind="hyphenation" /> },
+          { value: "autoNoCaps", label: "Automatic, keep CAPS whole", description: "Automatic, but words in capitals are not hyphenated", preview: <PagePreview kind="hyphenation" /> },
+        ]}
+        onPick={(value) => {
+          if (value === "off") api?.setHyphenation({ auto: false });
+          else api?.setHyphenation({ auto: true, noCaps: value === "autoNoCaps" });
+        }}
+      />
       {showArrange && objectSelected && (
         <>
           <Sep />

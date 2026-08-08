@@ -527,7 +527,40 @@ insertCaption, ensureRefBookmark, insertToc.captionLabel).
   columns, \h letter headings, or per-entry formatting; same-page duplicate
   marks paint a duplicated number until refresh cannot dedupe them (numbers
   are placeholders at build time).
-- Collab fix surfaced by this wave (packages/collab apply.ts
+- §14 Page Setup: Hyphenation ABSENT → STUB-plus (the SETTINGS half).
+  VERIFIED first (the wave's instruction): layout ignores soft hyphens
+  entirely — w:softHyphen parses to a plain U+00AD character atom
+  (parse/document.ts:919), which is NOT in the layout's in-word break set
+  (layout/inline.ts hyphenBreaks: only - / U+2010 between alphanumerics, and
+  digit-flanked U+2013 at compat ≥ 15), and no code path paints a hyphen
+  glyph at a break; nothing anywhere read w:autoHyphenation. What SHIPPED:
+  the settings write path — DocxDocument.setHyphenation writes
+  w:autoHyphenation / w:hyphenationZone (valued, twips) / w:doNotHyphenateCaps
+  at their CT_Settings schema positions (creating + registering settings.xml
+  when absent), parse + refresh read them back, `setHyphenation` registered
+  op (zonePt on the wire, points convention; honest no-op via the change
+  itself), api get/set, and a Layout-tab Hyphenation menu (None / Automatic /
+  Automatic-keep-CAPS; zone via API only). The UI and op docs state honestly
+  that this engine's layout does not hyphenate — the settings govern Word's
+  rendering of the file.
+  NOT shipped, filed honestly: break-opportunity honoring for EXPLICIT
+  w:softHyphen. What Word does (per the engine's own probe2-hyphenation
+  findings): a w:softHyphen is invisible mid-line, is a break opportunity,
+  and paints a hyphen glyph when the line breaks there (a raw U+00AD typed
+  into w:t is the OTHER thing — always-visible, never-breaking — and parse
+  already maps it to U+2011). Implementing it needs three coupled layout
+  changes: (1) zero-width measurement for U+00AD inside the cumulative
+  prefix-measurement scheme (canvas measureText for U+00AD is host-dependent
+  — today's behavior silently embeds that indeterminacy in line breaking for
+  any wild document carrying w:softHyphen, itself a latent parity/determinism
+  smell); (2) a breakAfter split at each U+00AD in the atom builder; (3) the
+  line packer painting a synthetic hyphen item at a soft break AND reserving
+  its width in the fit walk. PARITY RISK, stated plainly for the next parity
+  wave to sentinel: wild2-sci-ieee-2col (85→91% when soft-hyphen handling
+  last changed) and any corpus fixture carrying w:softHyphen are calibrated
+  against the current inert behavior; the change cannot be validated without
+  Word-export probes, so it should land in a parity wave with
+  probe-softhyphen fixtures, not here.
   assignFreshTracked + core StableIds.unassign): a refresh inside a mutation
   auto-assigns sequential ids to fresh nodes, and after an earlier intent's
   partly-consumed carried batch those autos could land inside the NEXT

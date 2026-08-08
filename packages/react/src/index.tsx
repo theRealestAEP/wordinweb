@@ -599,6 +599,13 @@ export interface DocxViewApi {
   setPageNumberFormat(patch: PageNumberFormatPatch, scope?: "document" | "section"): boolean;
   /** Current page-number settings for the caret's section. */
   getPageNumberFormat(): { fmt: PageNumberFormat; start: number | null };
+  /** Patch the automatic-hyphenation settings (w:autoHyphenation,
+   * w:hyphenationZone in points, w:doNotHyphenateCaps). Round-trip state:
+   * this engine's layout does not hyphenate automatically — the settings
+   * govern Word's own rendering of the document. */
+  setHyphenation(patch: { auto?: boolean; zonePt?: number | null; noCaps?: boolean }): boolean;
+  /** Current hyphenation settings (zonePt null = Word's default 18pt). */
+  getHyphenation(): { auto: boolean; zonePt: number | null; noCaps: boolean };
   /** Resolve (true) or reopen (false) a comment thread. */
   resolveComment(id: string, resolved: boolean): boolean;
   /** Replace a comment's body text (Word's edit-my-comment). */
@@ -2888,6 +2895,24 @@ export function DocxView({
             const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t ?? documentStart()?.t;
             return t ? pageNumberFormatAt(doc, t) : { fmt: "decimal", start: null };
           },
+          setHyphenation: (patch) => {
+            if (collabDocOp(() => documentOperationBody("setHyphenation", patch))) return true;
+            history.checkpoint();
+            // Settings-only state: this engine's layout does not hyphenate,
+            // so nothing painted changes and no rerender is needed.
+            return doc.setHyphenation({
+              ...(patch.auto !== undefined ? { auto: patch.auto } : {}),
+              ...(patch.zonePt !== undefined
+                ? { zoneTwips: patch.zonePt === null ? null : Math.round(patch.zonePt * 20) }
+                : {}),
+              ...(patch.noCaps !== undefined ? { noCaps: patch.noCaps } : {}),
+            });
+          },
+          getHyphenation: () => ({
+            auto: doc.autoHyphenation,
+            zonePt: doc.hyphenationZoneTwips === null ? null : doc.hyphenationZoneTwips / 20,
+            noCaps: doc.doNotHyphenateCaps,
+          }),
           resolveComment: (id, resolved) => {
             if (collabDocOp(() => ({ kind: "resolveComment", commentId: id, resolved, paraId: hex8() }))) return true;
             history.checkpoint();
