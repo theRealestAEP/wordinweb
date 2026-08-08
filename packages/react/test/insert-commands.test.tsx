@@ -165,6 +165,9 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   // path in collab (emits nothing, mutates nothing) — allowed by the rule.
   insertCitation: (api) => api.insertCitation("Doe03"),
   insertBibliography: (api) => api.insertBibliography(),
+  // A blank room has no glossary part, so this is the honest no-op path in
+  // collab too (emits nothing, mutates nothing) — allowed by the rule.
+  insertBuildingBlock: (api) => api.insertBuildingBlock("Signature Block"),
   insertDateTime: (api) => api.insertDateTime("date"),
   insertCrossReference: (api) => api.insertCrossReference("Anchor1", "page"),
   // A blank document lists no headings/captions, so this declines — the

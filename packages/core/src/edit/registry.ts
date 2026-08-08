@@ -50,7 +50,6 @@ import {
   deleteBuildingBlock,
   insertBuildingBlock,
   isValidBuildingBlockName,
-  type CreateBuildingBlockSpec,
 } from "./quick-parts.js";
 import {
   MAX_TAB_STOP_PT,
@@ -1680,7 +1679,11 @@ const setCitationStyleOperation = defineOperation<{ style: CitationStyle }>()({
  * content-creating registered operation declares.
  */
 
-const createBuildingBlockOperation = defineOperation<CreateBuildingBlockSpec>()({
+const createBuildingBlockOperation = defineOperation<{
+  name: string;
+  category?: string;
+  blocksXml: string;
+}>()({
   kind: "createBuildingBlock",
   address: "document",
   category: "document",

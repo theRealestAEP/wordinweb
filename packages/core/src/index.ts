@@ -265,7 +265,7 @@ export type { OoxmlValidationResult, OoxmlValidationLimits } from "./ooxml-valid
 // The clipboard's OOXML flavor. A desktop shell reads the text/html payload
 // the editor wrote and lifts the WordprocessingML out of it, so it can ALSO
 // write the native Word clipboard format. Payload contract: edit/clipboard.ts.
-export { CLIPBOARD_OOXML_ATTR, extractClipboardOoxml, encodeClipboardOoxml, decodeClipboardOoxml } from "./edit/clipboard.js";
+export { CLIPBOARD_OOXML_ATTR, extractClipboardOoxml, encodeClipboardOoxml, decodeClipboardOoxml, selectionClipboardBlocks } from "./edit/clipboard.js";
 export {
   sectPrAt,
   sectionContextAt,

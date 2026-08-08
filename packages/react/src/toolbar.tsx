@@ -1819,6 +1819,133 @@ function CitationsMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/**
+ * Quick Parts (building blocks): save the current selection into the
+ * document's glossary part under a name, then insert any saved block at the
+ * caret from a gallery grouped by category — the CitationsMenu popover idiom
+ * (list view / form view in one popover, toggled by `saving`).
+ */
+function QuickPartsMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [blocks, setBlocks] = useState<{ name: string; category: string }[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState("");
+  const [category, setCategory] = useState("");
+  const [error, setError] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const refresh = () => setBlocks(api?.listBuildingBlocks() ?? []);
+  const toggle = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    refresh();
+    setSaving(false);
+    setError("");
+    setOpen(true);
+  };
+  const openSaveForm = () => {
+    setName("");
+    setCategory("");
+    setError("");
+    setSaving(true);
+  };
+  const submitSave = () => {
+    if (!api?.createBuildingBlock(name.trim(), category.trim())) {
+      setError("Could not save the selection — select some content first, or pick a different name.");
+      return;
+    }
+    setSaving(false);
+    refresh();
+  };
+  const insert = (blockName: string) => {
+    if (api?.insertBuildingBlock(blockName)) setOpen(false);
+  };
+  const remove = (blockName: string) => {
+    if (api?.deleteBuildingBlock(blockName)) refresh();
+  };
+
+  const byCategory = new Map<string, { name: string; category: string }[]>();
+  for (const block of blocks) {
+    const group = byCategory.get(block.category) ?? [];
+    group.push(block);
+    byCategory.set(block.category, group);
+  }
+
+  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
+  const viewportWidth = typeof window === "undefined" ? 340 : window.innerWidth;
+  const popoverWidth = Math.min(320, viewportWidth - 16);
+  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
+  const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+  const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
+  const rowBtn: React.CSSProperties = { border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif", padding: "3px 8px" };
+
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Quick Parts: save and reuse content" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>
+        Quick Parts
+      </button>
+      {open && (
+        <div data-dxw-quickparts-menu="" style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, maxHeight: "calc(100vh - 48px)", overflow: "auto", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <strong style={{ color: T.fg, font: "600 13px system-ui, sans-serif" }}>Quick Parts</strong>
+          {!saving ? (
+            <>
+              <div role="list" aria-label="Quick Parts gallery" style={{ display: "grid", gap: 8 }}>
+                {blocks.length === 0 && (
+                  <div style={{ color: T.muted, font: "12px system-ui, sans-serif" }}>No Quick Parts yet. Save a selection to reuse it.</div>
+                )}
+                {[...byCategory.entries()].map(([groupName, groupBlocks]) => (
+                  <div key={groupName} style={{ display: "grid", gap: 4 }}>
+                    <span style={{ color: T.muted, font: "600 10.5px system-ui, sans-serif", textTransform: "uppercase" }}>{groupName}</span>
+                    {groupBlocks.map((block) => (
+                      <div key={block.name} role="listitem" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.fg, font: "12px system-ui, sans-serif" }} title={block.name}>
+                          {block.name}
+                        </span>
+                        <button type="button" title={`Insert ${block.name}`} style={rowBtn} onClick={() => insert(block.name)}>Insert</button>
+                        <button type="button" title={`Delete ${block.name}`} style={rowBtn} onClick={() => remove(block.name)}>✕</button>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              {error && <div role="alert" style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</div>}
+              <div style={{ display: "flex", justifyContent: "flex-end", borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>
+                <button type="button" style={pillBtn} onClick={openSaveForm}>Save selection as Quick Part</button>
+              </div>
+            </>
+          ) : (
+            <div role="group" aria-label="Save selection as Quick Part" style={{ display: "grid", gap: 7 }}>
+              <label style={fieldLabelStyle}>
+                <span>Name</span>
+                <input aria-label="Quick Part name" autoFocus value={name} onChange={(event) => setName(event.target.value)} style={fieldStyle} />
+              </label>
+              <label style={fieldLabelStyle}>
+                <span>Category (blank = General)</span>
+                <input aria-label="Quick Part category" value={category} onChange={(event) => setCategory(event.target.value)} placeholder="General" style={fieldStyle} />
+              </label>
+              {error && <div role="alert" style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</div>}
+              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                <button type="button" style={rowBtn} onClick={() => { setSaving(false); setError(""); }}>Cancel</button>
+                <button type="button" style={pillBtn} onClick={submitSave} disabled={!name.trim()}>Save</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
 const SYMBOLS = ["Ω", "±", "×", "÷", "≤", "≥", "≠", "≈", "∞", "∑", "√", "∫", "→", "↔", "©", "®", "™", "€", "£", "¥", "✓", "•", "§", "¶"];
 
 function SymbolMenu({ api }: { api: DocxViewApi | null }) {
@@ -5839,6 +5966,7 @@ export type ToolbarFeature =
   | "dateTime"
   | "field"
   | "citations"
+  | "quickParts"
   | "equation"
   | "symbol"
   | "shape"
@@ -5918,6 +6046,9 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   // style) hangs together and a host hides or shows it as one.
   { command: "insertCitation", feature: "citations" },
   { command: "insertBibliography", feature: "citations" },
+  // A Quick Part is a stored building block, not a field, so it gets its own
+  // group rather than folding into "field" the way TOC/index do.
+  { command: "insertBuildingBlock", feature: "quickParts" },
   { command: "insertDateTime", feature: "dateTime" },
   { command: "insertCrossReference", feature: "crossReference" },
   { command: "insertCrossRefToTarget", feature: "crossReference" },
@@ -6805,6 +6936,7 @@ export function DocxToolbar({
           )}
           {on("field") && <ContentsMenu api={api} />}
           {on("citations") && <CitationsMenu api={api} />}
+          {on("quickParts") && <QuickPartsMenu api={api} />}
           {on("equation") && <EquationMenu api={api} />}
           {on("symbol") && <SymbolMenu api={api} />}
           {on("dropCap") && (
@@ -6882,6 +7014,7 @@ export function DocxToolbar({
               )}
               {on("field") && <ContentsMenu api={api} />}
               {on("citations") && <CitationsMenu api={api} />}
+              {on("quickParts") && <QuickPartsMenu api={api} />}
               {on("equation") && <EquationMenu api={api} />}
               {on("symbol") && <SymbolMenu api={api} />}
               {on("dropCap") && <ActionMenu label="Drop cap" title="Drop cap" width={84} groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]} onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")} />}
