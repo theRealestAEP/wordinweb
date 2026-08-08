@@ -428,6 +428,10 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setTableWidth.value": number(0.1, 1584),
   "setTableColumnWidth.colIdx": integer(0, 200),
   "sortTableRows.colIdx": integer(0, 200),
+  // The registry's validate parses the whole grammar; the schema carries the
+  // length caps ("=SUM(ABOVE)" body, "#,##0.00" picture).
+  "insertTableFormula.formula": string(129, 1),
+  "insertTableFormula.numFmt": string(32, 1),
   "convertTextToTable.cellCount": integer(1, 10000),
   "convertTableToText.rowCount": integer(1, 10000),
   "setTableColumnWidth.widthPt": number(1, 1584),
@@ -439,6 +443,11 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   // bibliographyEntryCount (× the field count for a refresh).
   "insertBibliography.entryCount": integer(1, 10000),
   "refreshBibliography.entryCount": integer(1, 10000),
+  // Same budget pattern again: one per index entry paragraph, computed with
+  // indexEntryCount (× the field count for a refresh).
+  "insertIndex.entryCount": integer(1, 10000),
+  "refreshIndex.entryCount": integer(1, 10000),
+  "insertIndexEntry.entry": string(128, 1),
   "insertToc.levels": {
     type: "array",
     minItems: 2,
@@ -518,6 +527,9 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
     anyOf: [{ enum: ["decimal", "lowerRoman", "upperRoman", "lowerLetter", "upperLetter"] }, { type: "null" }],
   },
   "setPageNumberFormat.start": { anyOf: [integer(0, 32767), { type: "null" }] },
+  "setHyphenation.auto": boolean,
+  "setHyphenation.noCaps": boolean,
+  "setHyphenation.zonePt": { anyOf: [number(0.1, 1584), { type: "null" }] },
   // Fractions of the source bitmap trimmed off each edge; the registry's own
   // validate additionally refuses a crop that leaves no visible strip.
   "setCrop.crop": closedObject(

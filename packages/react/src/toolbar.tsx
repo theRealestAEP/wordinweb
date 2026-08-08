@@ -8,6 +8,7 @@ import {
   CELL_SCOPE_EDGES,
   TABLE_BORDER_STYLES,
   TABLE_SCOPE_EDGES,
+  formulaInstruction,
   NUMBERING_PRESETS,
   SHAPE_GALLERY,
   presetShapeGeometry,
@@ -1326,11 +1327,20 @@ function ContentsMenu({ api }: { api: DocxViewApi | null }) {
             ["fields", "Update fields"],
           ],
         },
+        {
+          label: "Index",
+          items: [
+            ["markEntry", "Mark index entry"],
+            ["index", "Insert index"],
+          ],
+        },
       ]}
       onPick={(value) => {
         if (value === "insert") api?.insertToc();
         else if (value === "figures") api?.insertToc({ captionLabel: "Figure" });
         else if (value === "rebuild") api?.refreshTocs();
+        else if (value === "markEntry") api?.addIndexEntry();
+        else if (value === "index") api?.insertIndex();
         else api?.updateFields();
       }}
     />
@@ -2957,6 +2967,73 @@ function showPt(value: number): string {
   return String(Math.round(value * 100) / 100);
 }
 
+/**
+ * Word's Table → Formula dialog, simple tier: the instruction ("=SUM(ABOVE)"
+ * prefilled, Word's own default) and an optional \# number format. The
+ * formula grammar is validated live through the same core rule the insert
+ * enforces, so Apply can never submit an instruction the engine refuses.
+ */
+function TableFormulaDialog({ api, onChanged }: { api: DocxViewApi | null; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [formula, setFormula] = useState("=SUM(ABOVE)");
+  const [numFmt, setNumFmt] = useState("");
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
+  const fmt = numFmt.trim() === "" ? undefined : numFmt.trim();
+  const valid = formulaInstruction(formula, fmt) !== null;
+  const apply = () => {
+    if (!valid) return;
+    if (api?.insertTableFormula(formula, fmt)) {
+      setOpen(false);
+      onChanged();
+    }
+  };
+  return (
+    <span style={{ display: "contents" }}>
+      <Btn
+        label="Formula"
+        title='Insert a formula field ("=SUM(ABOVE)") in the current cell'
+        active={open}
+        buttonRef={triggerRef}
+        onClick={() => setOpen(!open)}
+      />
+      {open && (
+        <AnchoredDialog
+          anchorRef={triggerRef}
+          title="Formula"
+          width={244}
+          onClose={close}
+          onApply={apply}
+          applyDisabled={!valid}
+        >
+          <label style={dialogFieldRow}>
+            <span>Formula</span>
+            <input
+              aria-label="Formula"
+              value={formula}
+              onChange={(event) => setFormula(event.target.value)}
+              style={dialogInput}
+            />
+          </label>
+          <label style={dialogFieldRow}>
+            <span>Number format</span>
+            <input
+              aria-label="Number format"
+              placeholder="#,##0.00"
+              value={numFmt}
+              onChange={(event) => setNumFmt(event.target.value)}
+              style={dialogInput}
+            />
+          </label>
+          <span style={{ fontSize: 11, color: T.muted }}>
+            SUM, AVERAGE, COUNT, MAX, MIN, PRODUCT over ABOVE, BELOW, LEFT, RIGHT, cell references (A1, A1:B3), and arithmetic.
+          </span>
+        </AnchoredDialog>
+      )}
+    </span>
+  );
+}
+
 const MARGIN_SIDES = ["top", "left", "bottom", "right"] as const;
 
 /**
@@ -3825,6 +3902,7 @@ function TableFormatTab({
         groups={[{ items: [["0", "None"], ["1", "First row"], ["2", "First two rows"]] }]}
         onPick={(value) => after(() => api?.setTableHeaderRows(Number(value)))}
       />
+      <TableFormulaDialog api={api} onChanged={onChanged} />
       <TablePropertiesDialog api={api} onChanged={onChanged} />
       <Btn label="Delete table" title="Delete the current table" onClick={() => run("deleteTable")} />
     </span>
@@ -5000,6 +5078,24 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
           else setLn({ enabled: true, countBy: 10 });
         }}
       />
+      {/* Hyphenation is document-global settings.xml state (w:autoHyphenation
+          — §17.15.1.10), not per-section, so it ignores the scope selector.
+          This engine's own layout does not hyphenate; the setting governs
+          Word's rendering when the document is opened there. */}
+      <LayoutMenu
+        name="hyphenation"
+        label="Hyphenation"
+        {...menuState("hyphenation")}
+        options={[
+          { value: "off", label: "None", description: "No automatic hyphenation", preview: <PagePreview kind="hyphenation" /> },
+          { value: "auto", label: "Automatic", description: "Word hyphenates line ends when it opens this document", preview: <PagePreview kind="hyphenation" /> },
+          { value: "autoNoCaps", label: "Automatic, keep CAPS whole", description: "Automatic, but words in capitals are not hyphenated", preview: <PagePreview kind="hyphenation" /> },
+        ]}
+        onPick={(value) => {
+          if (value === "off") api?.setHyphenation({ auto: false });
+          else api?.setHyphenation({ auto: true, noCaps: value === "autoNoCaps" });
+        }}
+      />
       {showArrange && objectSelected && (
         <>
           <Sep />
@@ -5054,6 +5150,7 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
   const [replacement, setReplacement] = useState("");
   const [matchCase, setMatchCase] = useState(false);
   const [wholeWord, setWholeWord] = useState(false);
+  const [wildcards, setWildcards] = useState(false);
   const [gotoPage, setGotoPage] = useState("");
   const [status, setStatus] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
@@ -5067,7 +5164,7 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
-  const opts = { matchCase, wholeWord };
+  const opts = { matchCase, wholeWord, wildcards };
   const runFind = () => {
     const n = api?.find(query, opts) ?? 0;
     setStatus(n === 1 ? "1 match" : `${n} matches`);
@@ -5125,14 +5222,21 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
             onChange={(e) => setReplacement(e.target.value)}
             style={field}
           />
-          <div style={{ display: "flex", gap: 10 }}>
-            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
-              <input type="checkbox" checked={matchCase} onChange={(e) => setMatchCase(e.target.checked)} />
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {/* Wildcard matching is always case-sensitive and carries its own
+                word boundaries (< >), so the two flags grey out — Word's own
+                dialog behavior. */}
+            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12, opacity: wildcards ? 0.5 : 1 }}>
+              <input type="checkbox" disabled={wildcards} checked={matchCase} onChange={(e) => setMatchCase(e.target.checked)} />
               Match case
             </label>
-            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
-              <input type="checkbox" checked={wholeWord} onChange={(e) => setWholeWord(e.target.checked)} />
+            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12, opacity: wildcards ? 0.5 : 1 }}>
+              <input type="checkbox" disabled={wildcards} checked={wholeWord} onChange={(e) => setWholeWord(e.target.checked)} />
               Whole word
+            </label>
+            <label title="Word's wildcard patterns: ? * [ ] [! ] @ < > \" style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
+              <input type="checkbox" checked={wildcards} onChange={(e) => setWildcards(e.target.checked)} />
+              Wildcards
             </label>
           </div>
           {status && <div data-dxw-find-status="" style={{ color: T.muted, fontSize: 12 }}>{status}</div>}
@@ -5459,6 +5563,10 @@ export interface InsertCommandSpec {
 
 export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertTable", feature: "table" },
+  // A formula is a field in a cell; the Table Format tab offers it, so it
+  // gates with the table group. Outside a table it declines — the honest
+  // no-op branch of the rule.
+  { command: "insertTableFormula", feature: "table" },
   { command: "insertImage", feature: "image" },
   { command: "insertScreenshot", feature: "screenshot" },
   { command: "insertModel3D", feature: "model3D" },
@@ -5477,6 +5585,10 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   // carried id allocation can be sized for a mutation whose size comes from
   // the document rather than from its arguments.
   { command: "insertToc", feature: "field" },
+  // The index cluster lands beside the TOC: XE marks and the INDEX field are
+  // fields, offered from the same Contents menu.
+  { command: "addIndexEntry", feature: "field" },
+  { command: "insertIndex", feature: "field" },
   // Citations are fields too, but they get their own group: the whole
   // References cluster (insert citation, bibliography, source manager,
   // style) hangs together and a host hides or shows it as one.

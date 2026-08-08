@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, localName } from "../xml.js";
+import { isValidFormulaInstruction } from "./formula.js";
 
 /** Field insertion as `w:fldSimple`, which the parser resolves at layout time. */
 
@@ -11,7 +12,10 @@ function cloneDeep(e: XmlElement): XmlElement {
   return { name: e.name, attrs: { ...e.attrs }, children: e.children.map(cloneDeep), text: e.text };
 }
 
-function insertElementsAt(
+/** Splice run-level elements into a paragraph at a text position, preserving
+ * the surrounding run's formatting on both halves of a mid-text split. Also
+ * the entry point index-field.ts uses to place an XE field's runs. */
+export function insertElementsAt(
   doc: DocxDocument,
   t: XmlElement,
   offset: number,
@@ -83,7 +87,7 @@ const INSERTABLE_FIELD_KEYWORDS = new Set([
   "PAGE", "NUMPAGES", "SECTIONPAGES", "SECTION", "DATE", "TIME",
   "CREATEDATE", "SAVEDATE", "PRINTDATE", "AUTHOR", "TITLE", "SUBJECT",
   "KEYWORDS", "COMMENTS", "FILENAME", "NUMWORDS", "NUMCHARS", "PAGEREF",
-  "REF", "SEQ", "STYLEREF", "TOC", "INDEX", "LISTNUM", "QUOTE",
+  "REF", "SEQ", "STYLEREF", "TOC", "INDEX", "XE", "LISTNUM", "QUOTE",
   "MERGEFIELD", "CITATION",
 ]);
 
@@ -106,6 +110,10 @@ export function isInsertableFieldInstruction(instruction: string): boolean {
   // can split one instruction into two when Word re-reads it, smuggling a
   // second keyword past the check above.
   if (!/^[\x20-\x7e]+$/.test(instruction)) return false;
+  // A table formula (`=SUM(ABOVE)`, §17.16.5.22) has no keyword; it is
+  // insertable exactly when the formula grammar accepts it, which reads
+  // nothing outside the containing table.
+  if (instruction.trim().startsWith("=")) return isValidFormulaInstruction(instruction);
   const keyword = instruction.trim().split(/\s+/)[0]?.toUpperCase();
   return !!keyword && INSERTABLE_FIELD_KEYWORDS.has(keyword);
 }

@@ -140,6 +140,9 @@ async function mountCollab() {
  * audit is about EMISSION, not about what each command produces. */
 const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertTable: (api) => api.insertTable(2, 2),
+  // The caret sits in a body paragraph, not a table cell, so this declines —
+  // the honest no-op branch of the fork rule, audited on purpose.
+  insertTableFormula: (api) => api.insertTableFormula("SUM(ABOVE)"),
   insertImage: (api) => api.insertImage(new Blob([PNG], { type: "image/png" })),
   insertScreenshot: (api) => api.insertScreenshot(),
   insertModel3D: (api) => api.insertModel3D(new Blob([GLB]), new Blob([PNG], { type: "image/png" })),
@@ -154,6 +157,9 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertPageNumber: (api) => api.insertPageNumber("page"),
   insertField: (api) => api.insertField("AUTHOR", "me"),
   insertToc: (api) => api.insertToc(),
+  // An explicit entry, because the blank mount has no selection to mark.
+  addIndexEntry: (api) => api.addIndexEntry("Widgets:assembly"),
+  insertIndex: (api) => api.insertIndex(),
   // A blank room has no sources part, so the citation is the honest no-op
   // path in collab (emits nothing, mutates nothing) — allowed by the rule.
   insertCitation: (api) => api.insertCitation("Doe03"),

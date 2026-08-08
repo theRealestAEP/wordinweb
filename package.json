@@ -41,5 +41,8 @@
     "vite": "^5.4.0",
     "vitest": "^2.0.0",
     "ws": "^8.21.1"
+  },
+  "allowScripts": {
+    "esbuild@0.27.7": true
   }
 }

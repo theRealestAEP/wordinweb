@@ -150,7 +150,7 @@ describe("the Review tab", () => {
     const replaceAll = [...t.container.querySelectorAll<HTMLButtonElement>("button")]
       .find((b) => b.textContent === "Replace all");
     await click(replaceAll!);
-    expect(t.replaceAll).toHaveBeenCalledWith("cat", "dog", { matchCase: false, wholeWord: false });
+    expect(t.replaceAll).toHaveBeenCalledWith("cat", "dog", { matchCase: false, wholeWord: false, wildcards: false });
     expect(t.container.querySelector("[data-dxw-find-status]")?.textContent).toBe(
       "Replaced 3 matches (2 in body, 1 in headers)",
     );
@@ -175,7 +175,7 @@ describe("the Review tab", () => {
     const findBtn = [...t.container.querySelectorAll<HTMLButtonElement>("button")]
       .find((b) => b.textContent === "Find");
     await click(findBtn!);
-    expect(t.find).toHaveBeenCalledWith("Cat", { matchCase: true, wholeWord: true });
+    expect(t.find).toHaveBeenCalledWith("Cat", { matchCase: true, wholeWord: true, wildcards: false });
     await t.unmount();
   });
 

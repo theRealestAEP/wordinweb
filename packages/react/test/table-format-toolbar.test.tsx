@@ -35,6 +35,7 @@ function tableApi(options: { styleId?: string | null; look?: Look } = {}) {
     setTableWidth: vi.fn(),
     setTableLayout: vi.fn(),
     setTableHeaderRows: vi.fn(),
+    insertTableFormula: vi.fn(() => true),
   };
   const methods = {
     ...spies,
@@ -206,6 +207,44 @@ describe("Table Format tab: borders, style, autofit, header rows", () => {
     expect(t.setTableHeaderRows).toHaveBeenLastCalledWith(2);
     await pick(t.container, HEADERS, "None");
     expect(t.setTableHeaderRows).toHaveBeenLastCalledWith(0);
+    await t.unmount();
+  });
+
+  it("inserts a formula through the Formula dialog, validating the grammar live", async () => {
+    const t = await mountToolbar();
+    const trigger = t.container.querySelector<HTMLButtonElement>(
+      'button[title=\'Insert a formula field ("=SUM(ABOVE)") in the current cell\']',
+    );
+    expect(trigger, "Formula button").toBeTruthy();
+    await click(trigger!);
+    const dialog = t.container.querySelector<HTMLElement>('[role="dialog"][aria-label="Formula"]');
+    expect(dialog, "Formula dialog").toBeTruthy();
+    const apply = dialog!.querySelector<HTMLButtonElement>("[data-dxw-dialog-apply]")!;
+    // Prefilled with Word's own default, so Apply starts enabled.
+    const formula = dialog!.querySelector<HTMLInputElement>('input[aria-label="Formula"]')!;
+    expect(formula.value).toBe("=SUM(ABOVE)");
+    expect(apply.disabled).toBe(false);
+    // A formula outside the simple tier disables Apply rather than submitting
+    // an instruction the engine refuses.
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(formula, "=IF(1,2,3)");
+      formula.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(dialog!.querySelector<HTMLButtonElement>("[data-dxw-dialog-apply]")!.disabled).toBe(true);
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(formula, "=SUM(LEFT)");
+      formula.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const fmt = dialog!.querySelector<HTMLInputElement>('input[aria-label="Number format"]')!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(fmt, "#,##0.00");
+      fmt.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await click(t.container.querySelector<HTMLButtonElement>("[data-dxw-dialog-apply]")!);
+    expect(t.insertTableFormula).toHaveBeenLastCalledWith("=SUM(LEFT)", "#,##0.00");
     await t.unmount();
   });
 });

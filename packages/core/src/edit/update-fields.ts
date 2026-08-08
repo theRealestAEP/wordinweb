@@ -1,4 +1,5 @@
 import { citationText, documentBibliography } from "../citations.js";
+import { evaluateTableFormula } from "./formula.js";
 import { documentTextStatistics, type TextStatistics } from "../word-count.js";
 import { DocxDocument } from "../docx.js";
 import { FieldContext, resolveField } from "../layout/inline.js";
@@ -92,6 +93,12 @@ export const UPDATABLE_FIELD_KEYWORDS: readonly string[] = Object.freeze(
  */
 const HF_SINGLE_VALUED = new Set(["DATE", "TIME", "FILENAME", "AUTHOR", "REF", "MERGEFIELD", "CITATION"]);
 
+/** A table formula (`=SUM(ABOVE)`) has no keyword; it reads only its own
+ * table's cell texts, so it is recomputable and single-valued everywhere. */
+function isFormulaKeyword(keyword: string): boolean {
+  return keyword.startsWith("=");
+}
+
 export interface FieldUpdateOptions {
   /**
    * A layout of this document. Without one the page-dependent instructions
@@ -160,7 +167,8 @@ export function collectFieldSites(doc: DocxDocument): FieldSite[] {
   // recompute still reports its own cached result, so the array stays a
   // complete snapshot of the body.
   const anyInstruction = (): boolean => true;
-  const singleValued = (keyword: string): boolean => HF_SINGLE_VALUED.has(keyword);
+  const singleValued = (keyword: string): boolean =>
+    HF_SINGLE_VALUED.has(keyword) || isFormulaKeyword(keyword);
   for (const section of doc.sections) visitBlocks(section.blocks, anyInstruction);
   for (const header of doc.headers.values()) visitBlocks(header.blocks, singleValued);
   for (const footer of doc.footers.values()) visitBlocks(footer.blocks, singleValued);
@@ -221,6 +229,14 @@ export function computeFieldResults(doc: DocxDocument, options: FieldUpdateOptio
 
   return sites.map(({ field, run }) => {
     const keyword = keywordOf(field.instruction);
+    // A table formula recomputes from its containing table's cell texts — a
+    // pure function of document state, evaluated here through the field's own
+    // XML (the cell is found by walking up from it). A formula the evaluator
+    // cannot model keeps its cache, like any other unsupported instruction.
+    if (isFormulaKeyword(keyword)) {
+      const value = field.src ? evaluateTableFormula(doc, field.src, field.instruction) : null;
+      return value ?? field.cachedResult;
+    }
     // Harvested text is keyed by the run the parser hung the field on, which
     // is one field per run: a complex field's content lands on the run holding
     // its fldChar begin, and a w:fldSimple gets a synthesized run of its own.

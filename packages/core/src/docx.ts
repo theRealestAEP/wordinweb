@@ -128,6 +128,19 @@ const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
       <w:uiPriority w:val="99"/><w:unhideWhenUsed/>
       <w:pPr><w:spacing w:after="100"/></w:pPr>
     </w:style>`,
+    // Word's "index 1"/"index 2": Normal, hanging-indented one step per
+    // level, no inter-entry spacing. A generated INDEX references them by
+    // pStyle, so a document that never held one needs them at insert.
+    Index1: `<w:style ${W} w:type="paragraph" w:styleId="Index1">
+      <w:name w:val="index 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:autoRedefine/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>
+      <w:pPr><w:spacing w:after="0"/><w:ind w:left="220" w:hanging="220"/></w:pPr>
+    </w:style>`,
+    Index2: `<w:style ${W} w:type="paragraph" w:styleId="Index2">
+      <w:name w:val="index 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:autoRedefine/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>
+      <w:pPr><w:spacing w:after="0"/><w:ind w:left="440" w:hanging="220"/></w:pPr>
+    </w:style>`,
   };
 })();
 
@@ -173,6 +186,15 @@ export class DocxDocument {
   readonly documentRels: Relationships;
   /** settings.xml w:evenAndOddHeaders — enables the "even" header/footer variants. */
   readonly evenAndOddHeaders: boolean = false;
+  /** settings.xml w:autoHyphenation (§17.15.1.10). This engine's layout does
+   * not hyphenate automatically — the setting is round-trip state that
+   * governs Word's own rendering of the document. */
+  readonly autoHyphenation: boolean = false;
+  /** settings.xml w:hyphenationZone/@w:val in twips (§17.15.1.53); null when
+   * the document does not declare one (Word defaults to 360 = 0.25"). */
+  readonly hyphenationZoneTwips: number | null = null;
+  /** settings.xml w:doNotHyphenateCaps (§17.15.1.41). */
+  readonly doNotHyphenateCaps: boolean = false;
   /** settings.xml w:mirrorMargins — facing-page (book fold) margins: even
    * (verso) pages swap the left/right margins and place the gutter on the
    * inside (right) edge so the binding margin stays on the inner side of
@@ -355,6 +377,11 @@ export class DocxDocument {
     if (settings) {
       this.evenAndOddHeaders = onOff(child(settings, "evenAndOddHeaders")) ?? false;
       (this as { mirrorMargins: boolean }).mirrorMargins = onOff(child(settings, "mirrorMargins")) ?? false;
+      (this as { autoHyphenation: boolean }).autoHyphenation = onOff(child(settings, "autoHyphenation")) ?? false;
+      const zone = intAttr(child(settings, "hyphenationZone"), "val");
+      (this as { hyphenationZoneTwips: number | null }).hyphenationZoneTwips =
+        zone !== undefined && zone > 0 ? zone : null;
+      (this as { doNotHyphenateCaps: boolean }).doNotHyphenateCaps = onOff(child(settings, "doNotHyphenateCaps")) ?? false;
       const tabStop = intAttr(child(settings, "defaultTabStop"), "val");
       if (tabStop !== undefined && tabStop > 0) this.defaultTabStop = twipsToPx(tabStop);
       const compat = child(settings, "compat");
@@ -677,6 +704,13 @@ export class DocxDocument {
     this._layoutGlobalSig = null;
     (this as { mirrorMargins: boolean }).mirrorMargins = onOff(child(this.settingsRoot, "mirrorMargins")) ?? false;
     (this as { evenAndOddHeaders: boolean }).evenAndOddHeaders = onOff(child(this.settingsRoot, "evenAndOddHeaders")) ?? false;
+    (this as { autoHyphenation: boolean }).autoHyphenation = onOff(child(this.settingsRoot, "autoHyphenation")) ?? false;
+    {
+      const zone = intAttr(child(this.settingsRoot, "hyphenationZone"), "val");
+      (this as { hyphenationZoneTwips: number | null }).hyphenationZoneTwips =
+        zone !== undefined && zone > 0 ? zone : null;
+    }
+    (this as { doNotHyphenateCaps: boolean }).doNotHyphenateCaps = onOff(child(this.settingsRoot, "doNotHyphenateCaps")) ?? false;
     const body = child(this.docRoot, "body");
     if (!body) throw new Error("document.xml has no w:body");
     // Some content (SmartArt cached drawings) lives in parts reachable only
@@ -1795,17 +1829,75 @@ export class DocxDocument {
     "showEnvelope", "summaryLength", "clickAndTypeStyle", "defaultTableStyle",
   ];
 
-  /** Set or remove one on/off settings.xml toggle at its schema position. */
-  private setSettingsToggle(local: string, predecessors: readonly string[], enabled: boolean): void {
+  /** Set or remove one settings.xml element at its schema position. Null
+   * removes; otherwise the element is (re)inserted before the first child
+   * that is not a schema predecessor. */
+  private setSettingsElement(local: string, predecessors: readonly string[], el: XmlElement | null): void {
     this.settingsRoot.children = this.settingsRoot.children.filter((c) => localName(c.name) !== local);
-    if (enabled) {
+    if (el) {
       const before = new Set(predecessors);
       const index = this.settingsRoot.children.findIndex((c) => !before.has(localName(c.name)));
-      const el = { name: `w:${local}`, attrs: {}, children: [], text: "" };
       this.settingsRoot.children.splice(index === -1 ? this.settingsRoot.children.length : index, 0, el);
     }
     this.registerSettingsPart();
     this.settingsDirty = true;
+  }
+
+  /** Set or remove one on/off settings.xml toggle at its schema position. */
+  private setSettingsToggle(local: string, predecessors: readonly string[], enabled: boolean): void {
+    this.setSettingsElement(
+      local,
+      predecessors,
+      enabled ? { name: `w:${local}`, attrs: {}, children: [], text: "" } : null,
+    );
+  }
+
+  /** The schema predecessors of w:autoHyphenation: everything through
+   * w:defaultTabStop (§17.15.1.78). Its cluster mates append in order. */
+  private static readonly SETTINGS_BEFORE_AUTO_HYPHENATION =
+    DocxDocument.SETTINGS_BEFORE_EVEN_AND_ODD.slice(
+      0,
+      DocxDocument.SETTINGS_BEFORE_EVEN_AND_ODD.indexOf("autoHyphenation"),
+    );
+
+  /**
+   * Patch the hyphenation settings (w:autoHyphenation §17.15.1.10,
+   * w:hyphenationZone §17.15.1.53, w:doNotHyphenateCaps §17.15.1.41). Each
+   * present key is written; `zoneTwips: null` removes the zone element. True
+   * when anything changed — the honest no-op a replicated document-scoped
+   * operation needs. This engine's layout does not hyphenate automatically;
+   * the settings govern Word's own rendering of the file.
+   */
+  setHyphenation(patch: { auto?: boolean; zoneTwips?: number | null; noCaps?: boolean }): boolean {
+    let changed = false;
+    const preds = DocxDocument.SETTINGS_BEFORE_AUTO_HYPHENATION;
+    if (patch.auto !== undefined && patch.auto !== this.autoHyphenation) {
+      this.setSettingsToggle("autoHyphenation", preds, patch.auto);
+      (this as { autoHyphenation: boolean }).autoHyphenation = patch.auto;
+      changed = true;
+    }
+    if (patch.zoneTwips !== undefined && patch.zoneTwips !== this.hyphenationZoneTwips) {
+      this.setSettingsElement(
+        "hyphenationZone",
+        [...preds, "autoHyphenation", "consecutiveHyphenLimit"],
+        patch.zoneTwips === null
+          ? null
+          : { name: "w:hyphenationZone", attrs: { "w:val": String(Math.round(patch.zoneTwips)) }, children: [], text: "" },
+      );
+      (this as { hyphenationZoneTwips: number | null }).hyphenationZoneTwips =
+        patch.zoneTwips === null ? null : Math.round(patch.zoneTwips);
+      changed = true;
+    }
+    if (patch.noCaps !== undefined && patch.noCaps !== this.doNotHyphenateCaps) {
+      this.setSettingsToggle(
+        "doNotHyphenateCaps",
+        [...preds, "autoHyphenation", "consecutiveHyphenLimit", "hyphenationZone"],
+        patch.noCaps,
+      );
+      (this as { doNotHyphenateCaps: boolean }).doNotHyphenateCaps = patch.noCaps;
+      changed = true;
+    }
+    return changed;
   }
 
   /** Toggle the document-global facing-page margin mode in settings.xml. */

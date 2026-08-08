@@ -744,6 +744,8 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertBibliography` | Insert a bibliography built from the document's citation sources | `runRef`, `entryCount` |
 | `insertTable` | Insert a table, with its whole content (cell texts, header row) authored in the same operation | `runRef`, `rows`, `cols`; optional: `cells`, `headerRow` |
 | `insertToc` | Insert a table of contents built from the document's headings, or a table of figures from a caption label | `runRef`, `entryCount`; optional: `levels`, `leader`, `captionLabel` |
+| `insertIndexEntry` | Mark an index entry: an invisible XE field; a colon makes a subentry ("Widgets:assembly") | `runRef`, `entry` |
+| `insertIndex` | Insert an alphabetized index built from the document's XE entry marks; `entryCount` is the id budget (from indexEntryCount) | `runRef`, `entryCount` |
 | `insertCaption` | Insert a caption ("Figure 1", "Table 2", …) below or above the addressed paragraph or its table | `blockRef`, `label`; optional: `text`, `position` |
 | `ensureRefBookmark` | Wrap the addressed paragraph in a hidden _Ref bookmark for cross-referencing | `blockRef`, `name` |
 | `insertWatermark` | Stamp a text watermark across every page, in the document's header parts | `text`, `headerCount`; optional: `diagonal`, `color`, `opacity` |
@@ -792,6 +794,7 @@ Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
 | `setTableCellMargins` | Set cell padding | `cellRef`, `scope`, `margins`; optional: `suggest` |
 | `setTableHeaderRows` | Repeat the first N rows on every page | `cellRef`, `count`; optional: `suggest` |
 | `sortTableRows` | Sort body rows by one column (text or number, asc or desc) | `cellRef`, `colIdx`, `order`, `compare`; optional: `hasHeader` |
+| `insertTableFormula` | Insert a table formula field (`=SUM(ABOVE)`, `=A1+B2`) in the addressed cell, with an optional `\#` number format | `cellRef`, `formula`; optional: `numFmt` |
 | `convertTextToTable` | Convert a paragraph into a table (rows split on a separator) | `blockRef`, `separator`, `cellCount` |
 | `convertTableToText` | Convert a table into paragraphs, one per row | `cellRef`, `separator`, `rowCount` |
 
@@ -863,11 +866,13 @@ the equation into something else.
 | `setTitlePage` | Toggle different-first-page headers and footers; enabling creates the empty first-page parts | `enabled` |
 | `setEvenOddHeaders` | Toggle different odd & even page headers and footers; enabling creates the empty even-page parts | `enabled` |
 | `setPageNumberFormat` | Set the page-number format (decimal, roman, letter) and/or the start-at value | optional: `fmt`, `start` |
+| `setHyphenation` | Set automatic-hyphenation settings: on/off, the hyphenation zone in points (null clears), keep-CAPS-whole. Round-trip state for Word's rendering; this engine's layout does not hyphenate | optional: `auto`, `zonePt`, `noCaps` |
 | `updateFields` | Write recomputed cached results into the document's fields, one per field in document order | `results` |
 | `createStyle` | Create a paragraph, character, table, or numbering style definition | `style` |
 | `modifyStyle` | Change an existing style definition | `styleId`, `patch` |
 | `deleteStyle` | Delete a style definition; content using it falls back to the style it was based on | `styleId` |
 | `refreshBibliography` | Regenerate every bibliography from the document's citation sources; `entryCount` is the id budget (sources × bibliography fields) | `entryCount` |
+| `refreshIndex` | Rebuild every index from the document's XE entry marks; `entryCount` is the id budget (index entries × index fields) | `entryCount` |
 | `createCitationSource` | Add a bibliography source (book, article, website, report), creating the sources part when the document has none | `source` |
 | `editCitationSource` | Change a bibliography source's fields, by tag; run `updateFields` afterwards to refresh citation text | `tag`, `patch` |
 | `deleteCitationSource` | Delete a bibliography source; refused while a CITATION field still cites it | `tag` |

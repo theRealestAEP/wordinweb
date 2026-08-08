@@ -252,6 +252,19 @@ export class StableIds {
     if (id >= this.next) this.next = id + 1;
   }
 
+  /** Drop an element's mapping entirely; its id retires (never reused —
+   * `next` stays monotonic). Used before carried-id assignment: a refresh
+   * inside a mutation auto-assigns sequential ids to the nodes it created,
+   * and one of those autos can equal a LATER id of the same carried batch,
+   * which would make reassign throw on a perfectly good intent. No-op for an
+   * unmapped element. */
+  unassign(el: XmlElement): void {
+    const id = this.byEl.get(el);
+    if (id === undefined) return;
+    this.byEl.delete(el);
+    this.byId.delete(id);
+  }
+
   private install(el: XmlElement, id: StableId): void {
     this.byEl.set(el, id);
     this.byId.set(id, el);

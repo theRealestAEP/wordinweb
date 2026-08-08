@@ -517,3 +517,97 @@ Rows moved / gaps narrowed:
 Wire: ENGINE_VERSION e17 → e18 (insertShape preset vocabulary = the preset
 table; insertChart/setChartData types + grouping; insertWordArt presets +
 style).
+
+## Wave 3 delta, lane A (2026-08-08, branch wave3-fields)
+
+- §6 Tables: Formula (=SUM(ABOVE)…) ABSENT → CORE. `insertTableFormula`
+  registry op writes the `=FORMULA` field (§17.16.5.22) as a w:fldSimple in
+  the caret's cell, cached result EVALUATED from the containing table's cell
+  texts — locale-free numeric parse (the sortTableRows rule), so every collab
+  replica derives identical bytes with nothing carried; updateFields
+  recomputes it (edit/formula.ts). Grammar: + - * / ^, parentheses, cell refs
+  A1 / ranges A1:B3, ABOVE/BELOW/LEFT/RIGHT, SUM/AVERAGE/COUNT/MAX/MIN/
+  PRODUCT, `\#` numeric picture (sections pos;neg;zero, tokens # 0 . , % and
+  literals). Directional scans stop at the first empty cell (Word's
+  documented SUM(ABOVE) behavior); text cells count as 0. UI: Table Format
+  tab "Formula" dialog (instruction + number format, live grammar
+  validation). Gap (documented at edit/formula.ts): comparison operators and
+  boolean/rounding functions (IF/AND/OR/ABS/INT/MOD/ROUND…), bookmark
+  operands, cross-table references, gridSpan-aware cell addressing; arriving
+  fields holding those render their cached result and keep it.
+- §5 Editing: Advanced find residue closed to CORE — wildcards + special
+  characters (format search remains). Wildcard mode (`FindOptions.wildcards`,
+  "Wildcards" checkbox) implements Word's documented subset: `? * [abc]
+  [!abc] [a-z] @ < > \x ^13 ^9` — translated to a JS regex by a per-token
+  compiler (never string splicing), pattern capped at 256 chars and 8
+  quantifiers, malformed patterns report zero matches; always case-sensitive
+  and wholeWord-free, Word's own dialog rule (the checkboxes grey out). NOT
+  modeled: `{n,m}` counts, `(…)` groups/backrefs, `^0nnn` codes beyond
+  ^13/^9. Literal mode now interprets Word's caret escapes: ^p (paragraph
+  mark over the existing "\n" join), ^t (real w:tab — tabs and line breaks
+  now join the searchable text as unaddressable characters), ^l (w:br), ^#
+  ^$ ^? ^w ^s ^~ ^- ^^; unknown escapes stay literal. Limits documented in
+  find.ts: a match must cover at least one real text character, and matched
+  paragraph marks/tabs survive a replacement (only text is replaced);
+  replacement strings take no escapes. Works in rooms unchanged — replace
+  compiles to per-match intents on the originator, so no wire change.
+- §16 References: Index (XE / INDEX) ABSENT → CORE (previously filed under
+  "arguably out-of-scope"; the generation machinery TOC/bibliography built
+  made the simple tier cheap). `insertIndexEntry` writes Word's invisible XE
+  complex field (§17.16.5.31) after the selection ("Mark index entry", the
+  selected text as the entry, colon = one subentry level); `insertIndex`
+  builds the alphabetized index as a complex INDEX field (§17.16.5.32) —
+  Index1/Index2 paragraphs (built-in styles injected), locale-free sort, and
+  page numbers as PAGEREF subfields over hidden `_Idx` bookmarks wrapped
+  around each mark's paragraph (the TOC entry mechanism), so the build is a
+  pure function of sequenced state and replicates; updateFields harvests the
+  real numbers as data and `refreshIndex` rebuilds structurally (rides the
+  wire like refreshBibliography; its change test blanks harvested numbers so
+  an unchanged index keeps them). Parser now treats INDEX as a live
+  multi-paragraph field, so arriving Word indexes render their entries
+  verbatim. Limits documented in edit/index-field.ts: main + one subentry
+  level only; no cross-references (\t "See …"), page ranges (\r), \c
+  columns, \h letter headings, or per-entry formatting; same-page duplicate
+  marks paint a duplicated number until refresh cannot dedupe them (numbers
+  are placeholders at build time).
+- §14 Page Setup: Hyphenation ABSENT → STUB-plus (the SETTINGS half).
+  VERIFIED first (the wave's instruction): layout ignores soft hyphens
+  entirely — w:softHyphen parses to a plain U+00AD character atom
+  (parse/document.ts:919), which is NOT in the layout's in-word break set
+  (layout/inline.ts hyphenBreaks: only - / U+2010 between alphanumerics, and
+  digit-flanked U+2013 at compat ≥ 15), and no code path paints a hyphen
+  glyph at a break; nothing anywhere read w:autoHyphenation. What SHIPPED:
+  the settings write path — DocxDocument.setHyphenation writes
+  w:autoHyphenation / w:hyphenationZone (valued, twips) / w:doNotHyphenateCaps
+  at their CT_Settings schema positions (creating + registering settings.xml
+  when absent), parse + refresh read them back, `setHyphenation` registered
+  op (zonePt on the wire, points convention; honest no-op via the change
+  itself), api get/set, and a Layout-tab Hyphenation menu (None / Automatic /
+  Automatic-keep-CAPS; zone via API only). The UI and op docs state honestly
+  that this engine's layout does not hyphenate — the settings govern Word's
+  rendering of the file.
+  NOT shipped, filed honestly: break-opportunity honoring for EXPLICIT
+  w:softHyphen. What Word does (per the engine's own probe2-hyphenation
+  findings): a w:softHyphen is invisible mid-line, is a break opportunity,
+  and paints a hyphen glyph when the line breaks there (a raw U+00AD typed
+  into w:t is the OTHER thing — always-visible, never-breaking — and parse
+  already maps it to U+2011). Implementing it needs three coupled layout
+  changes: (1) zero-width measurement for U+00AD inside the cumulative
+  prefix-measurement scheme (canvas measureText for U+00AD is host-dependent
+  — today's behavior silently embeds that indeterminacy in line breaking for
+  any wild document carrying w:softHyphen, itself a latent parity/determinism
+  smell); (2) a breakAfter split at each U+00AD in the atom builder; (3) the
+  line packer painting a synthetic hyphen item at a soft break AND reserving
+  its width in the fit walk. PARITY RISK, stated plainly for the next parity
+  wave to sentinel: wild2-sci-ieee-2col (85→91% when soft-hyphen handling
+  last changed) and any corpus fixture carrying w:softHyphen are calibrated
+  against the current inert behavior; the change cannot be validated without
+  Word-export probes, so it should land in a parity wave with
+  probe-softhyphen fixtures, not here.
+  assignFreshTracked + core StableIds.unassign): a refresh inside a mutation
+  auto-assigns sequential ids to fresh nodes, and after an earlier intent's
+  partly-consumed carried batch those autos could land inside the NEXT
+  batch's carried range — reassign then threw and the intent was rejected as
+  "apply failed" on every replica (any second large registered insert in one
+  room could hit it, e.g. TOC after TOC). Fresh nodes' autos are now dropped
+  before the carried batch lands; overflow nodes re-auto-assign above it.

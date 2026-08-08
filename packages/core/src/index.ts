@@ -135,7 +135,7 @@ export type { NumberingPresetId, LevelPatch, NumberFormat } from "./edit/numberi
 export { setLink, removeLink, linkAt } from "./edit/links.js";
 export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpacing, setDropCapAt, setTabStops, tabStopsAt, MAX_TAB_STOP_PT, TAB_STOP_ALIGNMENTS, TAB_STOP_LEADERS, PARAGRAPH_BORDER_EDGES, paragraphBordersAt, setParagraphBorders } from "./edit/paragraph.js";
 export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode, TabStopSpec, ParagraphBorderEdge, ParagraphBordersPatch } from "./edit/paragraph.js";
-export { compileReplaceAll, compileReplaceMatch, findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
+export { MAX_FIND_PATTERN, compileFindQuery, compileReplaceAll, compileReplaceMatch, findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertEndnote, insertFootnote } from "./edit/notes.js";
 export {
@@ -149,6 +149,17 @@ export {
   isValidCitationTag,
   isValidMergeFieldName,
 } from "./edit/fields.js";
+export {
+  FORMULA_FUNCTIONS,
+  FORMULA_ZERO_DIVIDE,
+  evaluateTableFormula,
+  formatFormulaNumber,
+  formulaInstruction,
+  insertTableFormula,
+  isValidFormulaInstruction,
+  isValidFormulaNumberFormat,
+  parseTableFormula,
+} from "./edit/formula.js";
 export {
   BIBLIOGRAPHY_EMPTY_TEXT,
   CITATION_STYLES,
@@ -182,6 +193,15 @@ export {
   insertBibliography,
   refreshBibliographies,
 } from "./edit/bibliography.js";
+export {
+  INDEX_EMPTY_TEXT,
+  findIndexFields,
+  indexEntryCount,
+  insertIndex,
+  insertIndexEntry,
+  isValidIndexEntry,
+  refreshIndexes,
+} from "./edit/index-field.js";
 export type { TocLeader, TocLevels, TocOptions } from "./edit/toc.js";
 export {
   drawingFillColor,
