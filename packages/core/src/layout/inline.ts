@@ -126,6 +126,9 @@ interface FragAtom {
   ruby?: RubyData;
   /** A word-internal hyphen ends this fragment: Word may break the line here. */
   breakAfter?: boolean;
+  /** This fragment ends at a <w:softHyphen/>: breaking here paints a hyphen
+   * glyph when it fits (probe-softhyphen). */
+  softHyphen?: boolean;
   /** Footnote id when this fragment is a footnote reference mark. */
   noteId?: number;
   /** PAGEREF bookmark name (final-pass page-number rewrite). */
@@ -444,6 +447,8 @@ export interface LineSpan {
   noteId?: number;
   /** A word-internal hyphen ends this span: a line may break after it. */
   breakAfter?: boolean;
+  /** This span ends at a <w:softHyphen/> (see FragAtom.softHyphen). */
+  softHyphen?: boolean;
   /** PAGEREF bookmark name (final-pass page-number rewrite). */
   pageRef?: string;
   /** Bidi embedding level for visual reordering (0 = LTR, odd = RTL). */
@@ -1552,6 +1557,7 @@ function breakParagraphImpl(
         continue;
       }
       const sliceOff = atom.text.length - rest.length;
+      const finalPiece = take === rest.length;
       cur.push({
         x,
         width: w,
@@ -1562,6 +1568,11 @@ function breakParagraphImpl(
         src: atom.src ? { ...atom.src, offset: atom.src.offset + sliceOff } : undefined,
         metricsFont: atom.metricsFont,
         metricsStrut: atom.metricsStrut,
+        // The last piece ends where the atom ends: a soft-hyphen opportunity
+        // there survives the character wrap (probe-softhyphen H24: the
+        // emergency-wrapped "o" still takes the soft break and its hyphen).
+        breakAfter: finalPiece ? atom.breakAfter : undefined,
+        softHyphen: finalPiece ? atom.softHyphen : undefined,
         rtl: atom.rtl,
         rtlLevel: levelOf(atom.rtl),
       });
@@ -2084,6 +2095,14 @@ function breakParagraphImpl(
     if (!fits && curLineWidth > 0) {
       let hi = cur.length;
       let headW = 0;
+      // Nearest soft-hyphen opportunity passed over because its hyphen glyph
+      // would not fit. Word's break demand at a soft hyphen is prefix PLUS
+      // the hyphen it paints (probe-softhyphen H49-54: Word passes the nearer
+      // soft hyphen whose prefix+hyphen overflows and breaks at the earlier
+      // one) — but with no other opportunity on the line it still breaks at
+      // the passed-over one and omits the hyphen (H27-29).
+      let shFallbackHi = -1;
+      let shFallbackHeadW = 0;
       while (hi > minSpans) {
         const s = cur[hi - 1];
         // A noBreak space (word glued to a following NBSP) is not a break
@@ -2091,9 +2110,23 @@ function breakParagraphImpl(
         if ((s.isSpace && !s.noBreak) || !s.text || s.text === "\t" || s.image || s.drawing) break;
         // A hyphen break opportunity ends the head: the hyphenated left part
         // stays on this line, only the current segment (+tail) moves down.
-        if (s.breakAfter) break;
+        if (s.breakAfter) {
+          if (
+            s.softHyphen &&
+            x - headW + measurer.width("-", s.font, s.props.letterSpacing) > lineEnd + fitTolerance
+          ) {
+            if (shFallbackHi < 0) {
+              shFallbackHi = hi;
+              shFallbackHeadW = headW;
+            }
+          } else break;
+        }
         headW += s.width;
         hi--;
+      }
+      if (hi === minSpans && shFallbackHi >= 0) {
+        hi = shFallbackHi;
+        headW = shFallbackHeadW;
       }
       let tailW = 0;
       if (!atom.breakAfter) {
@@ -2220,6 +2253,27 @@ function breakParagraphImpl(
         if (moved) {
           x = lineStartX(lineIndex);
         } else {
+          // A line that WRAPS at a soft hyphen paints the hyphen glyph — but
+          // only when the glyph itself fits the remaining room. Word omits it
+          // otherwise (probe-softhyphen H27-29 break at the soft hyphen and
+          // paint nothing; H24's emergency-wrapped "o-" line paints it).
+          const brk = cur[cur.length - 1];
+          if (brk?.softHyphen && brk.text) {
+            const hw = measurer.width("-", brk.font, brk.props.letterSpacing);
+            if (brk.x + brk.width + hw <= lineEnd + fitTolerance) {
+              cur.push({
+                x: brk.x + brk.width,
+                width: hw,
+                text: "-",
+                props: brk.props,
+                font: brk.font,
+                metricsFont: brk.metricsFont,
+                rtl: brk.rtl,
+                rtlLevel: brk.rtlLevel,
+              });
+              curLineWidth += hw;
+            }
+          }
           // Any trailing spaces (the wrap separator and consecutive typed
           // spaces) hang at the end of the flushed line - Word never starts
           // a wrapped line with a space.
@@ -2234,13 +2288,35 @@ function breakParagraphImpl(
         // The moved head is glued to this fragment at the fresh line's start;
         // if the fragment still cannot fit, no break opportunity can ever
         // appear before it — emergency-break at the line edge like Word.
+        // UNLESS the head itself ends at a soft hyphen whose glyph fits:
+        // Word breaks there again (probe-softhyphen H52-54, [hydro-] then
+        // [matic-] then [graphs]) rather than character-wrapping.
         if (
           head.length > 0 &&
           curClearY === undefined &&
           x + atom.width > lineStartX(lineIndex) + availFor(lineIndex) + 0.01
         ) {
-          hardWrapFrag(atom);
-          continue;
+          const brk = cur[cur.length - 1];
+          const hw = brk?.softHyphen && brk.text ? measurer.width("-", brk.font, brk.props.letterSpacing) : -1;
+          if (hw >= 0 && brk.x + brk.width + hw <= lineStartX(lineIndex) + availFor(lineIndex) + fitTolerance) {
+            cur.push({
+              x: brk.x + brk.width,
+              width: hw,
+              text: "-",
+              props: brk.props,
+              font: brk.font,
+              metricsFont: brk.metricsFont,
+              rtl: brk.rtl,
+              rtlLevel: brk.rtlLevel,
+            });
+            curLineWidth += hw;
+            flush(false, false);
+            // The atom now starts the fresh line; the standard width checks
+            // below hard-wrap it only if it is too wide for a whole line.
+          } else {
+            hardWrapFrag(atom);
+            continue;
+          }
         }
       }
     }
@@ -2285,7 +2361,7 @@ function breakParagraphImpl(
     // this atom to a fresh line, where a mid-segment continuation re-insets.
     const padL = bdrPad && (!sameBdrAtom(atoms[ai - 1], atom) || curLineWidth === 0) ? bdrPad : 0;
     x += padL;
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, metricsStrut: atom.metricsStrut, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, metricsStrut: atom.metricsStrut, breakAfter: atom.breakAfter, softHyphen: atom.softHyphen, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
     curLineWidth += padL + atom.width + bdrPadR;
     x += atom.width + bdrPadR;
     // A packed word may continue across formatting-run fragments, but an
@@ -3787,6 +3863,14 @@ function buildAtoms(
         // an even/LTR level and must be its own frag so reorderVisual places it
         // in RTL visual order — probe2-arabic-rtl's "99.9٪"/"ISO 8601").
         const hyBreaks = hyphenBreaks(part, doc.compatibilityMode >= 15);
+        // <w:softHyphen/> (U+00AD): Word's conditional hyphen. Zero-width
+        // (the measurer strips it), a break-after opportunity, and the packer
+        // paints a hyphen glyph when a line breaks there (probe-softhyphen;
+        // compat-invariant, 11 and 15 ink-identical).
+        const softBreaks = [];
+        if (part.includes("\u00AD")) {
+          for (let i = 0; i < part.length; i++) if (part[i] === "\u00AD") softBreaks.push(i + 1);
+        }
         if ((part[0] === "-" || part[0] === "‐") && isWordAlnum(part[1])) {
           const prev = atoms[atoms.length - 1];
           const beforePrev = atoms[atoms.length - 2];
@@ -3799,15 +3883,18 @@ function buildAtoms(
               isWordAlnum(beforeText[beforeText.length - 1]));
           if (runBoundaryWordBefore) hyBreaks.unshift(1);
         }
-        let breaks = hyBreaks;
+        let breaks = softBreaks.length
+          ? [...new Set([...hyBreaks, ...softBreaks])].sort((a, b) => a - b)
+          : hyBreaks;
         if (charRtl) {
-          const set = new Set(hyBreaks);
+          const set = new Set(breaks);
           for (let i = 1; i < part.length; i++) {
             if (charRtl[offset + i] !== charRtl[offset + i - 1]) set.add(i);
           }
           breaks = [...set].sort((a, b) => a - b);
         }
         const hySet = new Set(hyBreaks);
+        const shSet = new Set(softBreaks);
         // A pure-digit word is a European Number regardless of the run's
         // w:rtl flag (UAX#9: EN takes an EVEN embedding level inside an RTL
         // paragraph). Keeping it odd reverses the ORDER of split digit spans
@@ -3845,7 +3932,8 @@ function buildAtoms(
               src: src ? { run: src.run, t: src.t, offset: src.offset + segStart } : undefined,
               metricsFont,
               // Only a hyphen is a line-break opportunity; a bidi split is not.
-              breakAfter: hySet.has(segEnd) ? true : undefined,
+              breakAfter: hySet.has(segEnd) || shSet.has(segEnd) ? true : undefined,
+              softHyphen: shSet.has(segEnd) ? true : undefined,
               rtl: charRtl ? charRtl[offset + segStart] : props.rtl && !/^[0-9]+$/.test(seg),
             });
             segPrevCum = segCum;

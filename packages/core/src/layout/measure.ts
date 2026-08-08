@@ -339,6 +339,12 @@ export class CanvasMeasurer implements TextMeasurer {
   }
 
   width(text: string, font: FontSpec, letterSpacing = 0): number {
+    // A soft hyphen (U+00AD, <w:softHyphen/>) measures ZERO by explicit rule.
+    // Canvas measureText for U+00AD is host-dependent (some faces carry a
+    // real hyphen-width glyph), which would silently embed the host in line
+    // breaking. Word gives it no advance anywhere; the line packer adds the
+    // hyphen GLYPH itself at a soft break (probe-softhyphen).
+    if (text.includes("\u00AD")) text = text.replace(/\u00AD/g, "");
     if (text.length === 0) return 0;
     const key = fontKey(font) + "\0" + text;
     let w = this.widthCache.get(key);
@@ -443,6 +449,8 @@ export class CanvasMeasurer implements TextMeasurer {
  */
 export class ApproxMeasurer implements TextMeasurer {
   width(text: string, font: FontSpec, letterSpacing = 0): number {
+    // Same explicit soft-hyphen rule as CanvasMeasurer: U+00AD is zero-width.
+    if (text.includes("\u00AD")) text = text.replace(/\u00AD/g, "");
     let w = 0;
     for (const ch of text) w += charWidth(ch, font);
     return w * fontWidthScale(font) + letterSpacing * text.length;
