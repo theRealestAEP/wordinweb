@@ -2567,27 +2567,35 @@ function finishLine(
       return;
     }
     let m = measurer.metrics(font);
-    // East Asian line pitch: the tall macOS substitute faces (Hiragino Mincho
-    // for MS Mincho, PingFang/Songti for the Chinese fallback) overstate the
-    // line height of Word's real faces. Scale the substitute metric to the
-    // Word-measured em in the two contexts that use the font's NATURAL pitch:
+    // East Asian line pitch: the tall macOS substitute faces for the CHINESE
+    // fallback (PingFang/Songti) overstate the line height of Word's real
+    // face. Scale the substitute metric to the Word-measured em in the two
+    // contexts that use the font's NATURAL pitch:
     //   - docGrid type="charsAndLines" (compat 15) — probe3-chargrid.
     //   - NO docGrid at all (minLineHeight undefined) — plain CJK paragraphs
     //     and tbRl/btLr table cells (probe2-ruby-vertical p1: the vertical
     //     cell columns pitch 20.5px like Word's MS Mincho, not Hiragino's
     //     26px, and the ruby lines stop drifting the table down the page).
-    // A docGrid type="lines" section (staging-eastasian, this file's own p2
-    // vertical flow) keeps the snap-tuned raw profile — its line height is the
-    // grid pitch, not the natural em — so it is EXCLUDED here.
-    // 1.296em Japanese / 1.733em Chinese fallback, both x the auto 1.08
-    // multiplier give the Word-measured advances.
-    if ((doc.charGridEa || minLineHeight === undefined) && font.size > 0) {
+    // A docGrid type="lines" section keeps the raw profile — for the zh
+    // fallback its snap metric is unmeasured, so it is EXCLUDED here.
+    // The JAPANESE faces need no rescale: the hiragino profiles in
+    // WORD_FONT_METRICS carry Word's measured 1.296em natural directly
+    // (probe-docgrid15b), so their raw metric is right in every context.
+    // 1.733em Chinese fallback x the auto 1.08 multiplier gives the
+    // Word-measured advances.
+    if (font.size > 0) {
       const fam = font.family.toLowerCase();
-      const targetEm = /hiragino/.test(fam)
-        ? 1.296
-        : /pingfang|songti|heiti/.test(fam)
-          ? 1.733
-          : undefined;
+      // Vertical (tbRl) lines-grid flow keeps the pre-docgrid15b 1.643em ja
+      // column pitch: Word's vertical pitch does not take the horizontal
+      // snap rules (probe2-ruby-vertical p2 was measured good at 1.643 and
+      // is unprobed beyond that), so the 1.296em natural profile is scaled
+      // back up there and nowhere else.
+      const targetEm =
+        verticalFlow && minLineHeight !== undefined && !doc.charGridEa && /hiragino/.test(fam)
+          ? 1.643
+          : (doc.charGridEa || minLineHeight === undefined) && /pingfang|songti|heiti/.test(fam)
+            ? 1.733
+            : undefined;
       if (targetEm !== undefined && m.lineHeight > 0) {
         const scale = (targetEm * font.size) / m.lineHeight;
         m = {
@@ -2746,7 +2754,14 @@ function finishLine(
           maxBorderedDescent = Math.max(maxBorderedDescent, textMetrics.descent + pad);
         }
         if (textMetrics.lineHeight >= maxNaturalText) {
-          tallestTextIsEa = EA_FAMILY_RE.test((s.metricsFont ?? s.font).family);
+          // The textSnap carve-out exists because a substitute face's profile
+          // can overstate Word's natural and false-snap. The hiragino (ja)
+          // profiles now carry Word's measured 1.296em snap natural
+          // (probe-docgrid15b: ja 16pt snaps 2 rows at pitch 360tw and our
+          // snap must fire with it), so they take the snap like Latin faces;
+          // only the unmeasured zh/ko fallback faces stay carved out.
+          const fam = (s.metricsFont ?? s.font).family;
+          tallestTextIsEa = EA_FAMILY_RE.test(fam) && !/hiragino/i.test(fam);
         }
       }
       const r = s.props.raise;
@@ -2865,14 +2880,17 @@ function finishLine(
     // (2 x 24 = 48) and multiplier x natural (44.48 x 1.0792 = 48.0) are
     // numerically identical - that case discriminated nothing, and the
     // fixture's Heading1 lines (natural 26.04 > pitch 24, Word advances 48)
-    // are what the gate broke. The EA carve-out stays: Word DOES snap an
-    // oversized EA line (probe-docgrid15 F360 advances 48), but our
-    // substituted Hiragino/PingFang profiles overstate the raw box, so
-    // arming them here would snap Japanese 11pt lines (raw box 24.10 >
-    // pitch 24) that Word lays at one row; the corpus EA lines land right
-    // through the auto path (staging-eastasian zh baselines +0.09px), so
-    // the carve-out is kept until the EA profiles carry Word-em snap
-    // metrics. A VERTICAL (tbRl) flow keeps the old compat gate: enabling
+    // are what the gate broke. Word DOES snap an oversized EA line
+    // (probe-docgrid15 F360 advances 48). The JAPANESE faces now take the
+    // snap: their hiragino profiles carry Word's measured 1.296em natural
+    // (probe-docgrid15b brackets the snap natural in (1.25, 1.3125) over a
+    // 240..480tw pitch sweep), so ja 16pt snaps to 2 rows at pitch 360 and
+    // ja 11pt lays 1 row, both like Word. Only the zh/ko fallback faces
+    // (PingFang/Songti et al) keep the carve-out - their profiles still
+    // overstate the raw box and their snap metric is unmeasured
+    // (tallestTextIsEa is set only for them; the corpus zh lines land right
+    // through the auto path, staging-eastasian zh baselines +0.09px).
+    // A VERTICAL (tbRl) flow keeps the old compat gate: enabling
     // the snap there moved probe2-ruby-vertical p2 from 0.02% to 12.05%
     // against its clean reference, so Word's vertical column pitch does not
     // take this rule; the vertical case is unprobed beyond that and is

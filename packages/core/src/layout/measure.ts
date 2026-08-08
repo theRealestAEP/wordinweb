@@ -116,13 +116,22 @@ const WORD_FONT_METRICS: Record<string, { asc: number; desc: number; gap: number
   verdana: { asc: 1.005371, desc: 0.209039, gap: 0 }, // fitted total 1.21441
   tahoma: { asc: 1.000488, desc: 0.206543, gap: 0 },
   garamond: { asc: 0.861816, desc: 0.263184, gap: 0 },
-  // East Asian line pitch, measured from staging-eastasian's Word PDF (11pt
-  // CJK runs, docDefaults line=259 -> x1.0792). MS Mincho advances 19.5pt/line
-  // (single 18.07pt = 1.643em, baseline 1.364em below the line top). Simplified
-  // Chinese isn't covered by MS Mincho, so Word falls back to Microsoft JhengHei
-  // whose line box is far taller: 36pt/line (single 33.36pt = 3.033em).
-  "hiragino mincho pron": { asc: 1.3636, desc: 0.2794, gap: 0 },
-  "hiragino sans": { asc: 1.3636, desc: 0.2794, gap: 0 },
+  // East Asian: Word's MS Mincho NATURAL line is 1.296em, pinned two ways.
+  // probe-docgrid15b (ja 10/11/12/16pt over lines-grid pitches 240..480tw,
+  // exported twice, ink-identical) snaps 2 rows at every em-threshold
+  // <= 1.25 and 1 row at every threshold >= 1.3125, bracketing the snap
+  // natural in (1.25, 1.3125); the natural-pitch contexts measure the same
+  // em (probe2-ruby-vertical's 20.5px vertical columns = 1.296 x the 1.0792
+  // auto multiplier at 11pt). The old 1.643em here was reverse-engineered
+  // from staging-eastasian's 19.5pt/line advance, which is that fixture's
+  // GRID pitch (360tw x 1.0792), not a natural - it overstated the raw box
+  // (ja 11pt read 24.10px > pitch 24 where Word reads 19.0) and forced the
+  // textSnap EA carve-out. Split kept proportional (baseline 1.0756em below
+  // the line top). Simplified Chinese isn't covered by MS Mincho, so Word
+  // falls back to Microsoft JhengHei whose line box is far taller:
+  // 36pt/line (single 33.36pt = 3.033em).
+  "hiragino mincho pron": { asc: 1.0756, desc: 0.2204, gap: 0 },
+  "hiragino sans": { asc: 1.0756, desc: 0.2204, gap: 0 },
   "pingfang tc": { asc: 2.2700, desc: 0.7627, gap: 0 },
   // Word's glyph-fallback face for symbol characters a symbol-encoded font
   // can't cover (numberingLabel routes literal-Unicode bullets here). Real MS
