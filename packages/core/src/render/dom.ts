@@ -2990,7 +2990,14 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
   el.style.setProperty("-webkit-font-smoothing", "antialiased");
 
   const props = item.props;
-  if (item.font.kerning) el.style.fontKerning = "normal";
+  // The `font` shorthand above resets font-kerning and font-variant-ligatures
+  // to their initial values, and an inline style outranks the
+  // `.dxw-page span` stylesheet rule — so the "off" state must be inline too.
+  // The measurer computes nominal (unkerned, unligated) advances, which is
+  // what Word lays out; letting Chrome kern the paint drifts glyphs left of
+  // both (uspto-follow-on p1: bold Times "TA" kerns -1.19px per pair).
+  el.style.fontKerning = item.font.kerning ? "normal" : "none";
+  el.style.fontVariantLigatures = "none";
   let color = props.color && props.color !== "auto" ? props.color : "#000000";
   el.style.color = color;
   if (item.opacity !== undefined) el.style.opacity = String(item.opacity);
