@@ -392,3 +392,17 @@ reason to stay out of a v1 editor:
 - **Office Clipboard pane** — Word-ism with low modern usage.
 - **Stock media libraries** (stock images, icon library, 3D library) — licensing/CDN
   concerns; the file-upload mechanisms already exist.
+
+---
+
+## Wave 1 delta (2026-08-08, engine 9016ffe / app bda9993)
+
+Rows moved since the audit at ff5b00e:
+
+- §5 Editing: Find CORE → DEEP (all stories, cross-paragraph, whole-word, matchCase UI); Go To ABSENT → CORE (page + bookmark); Replace gains options + per-story counts. Advanced-find residue: wildcards, format search, special characters. NEW FILED: replaceAll is local-only in collab (#112).
+- §6 Tables: Merge/split cells CORE → DEEP (collab wire closed, e16); Sort ABSENT → DEEP (single-key); Convert text↔table ABSENT → CORE.
+- §10 Comments: Resolve/reopen, edit text, prev/next navigation ABSENT → DEEP (w15:done extension marker).
+- §11 Header & Footer: different-first/odd-even STUB → DEEP; page-number formats + start-at close (position gallery and chapter numbers remain).
+- §18 Review: Word count ABSENT → DEEP (API + NUMWORDS/NUMCHARS recompute + app status pill); Proofing ABSENT → CORE (app-side hunspell spellcheck, native suggestion menu through the editing path, custom dictionary, language setting — grammar absent).
+
+Revised totals: 44 DEEP / 43 CORE / 5 STUB / 46 ABSENT.
