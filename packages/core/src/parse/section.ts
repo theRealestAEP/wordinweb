@@ -183,6 +183,12 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     if (fmt) props.footnoteNumFmt = fmt;
     const start = intAttr(child(fnPr, "numStart"), "val");
     if (start !== undefined) props.footnoteNumStart = start;
+    const restart = attr(child(fnPr, "numRestart"), "val");
+    if (restart === "continuous" || restart === "eachSect" || restart === "eachPage") {
+      props.footnoteNumRestart = restart;
+    }
+    const pos = attr(child(fnPr, "pos"), "val");
+    if (pos === "pageBottom" || pos === "beneathText") props.footnotePos = pos;
   }
   const enPr = child(sectPr, "endnotePr");
   if (enPr) {
@@ -190,6 +196,12 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     if (fmt) props.endnoteNumFmt = fmt;
     const start = intAttr(child(enPr, "numStart"), "val");
     if (start !== undefined) props.endnoteNumStart = start;
+    const restart = attr(child(enPr, "numRestart"), "val");
+    if (restart === "continuous" || restart === "eachSect" || restart === "eachPage") {
+      props.endnoteNumRestart = restart;
+    }
+    const pos = attr(child(enPr, "pos"), "val");
+    if (pos === "sectEnd" || pos === "docEnd") props.endnotePos = pos;
   }
 
   return props;

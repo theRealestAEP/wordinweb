@@ -3003,6 +3003,36 @@ describe("footnotes and endnotes", () => {
     const marks = result.pages[0].items.filter((i) => i.kind === "text" && i.text === "*");
     expect(marks.length).toBe(2);
   });
+
+  it("restarts footnote numbering at eachSect (w:numRestart), continuous by default", () => {
+    const geometry = `<w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:r><w:t>One</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>` +
+          `<w:p><w:r><w:t>Two</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p>` +
+          // Closes section 1 — plain sectPr, default (continuous) restart.
+          `<w:p><w:pPr><w:sectPr>${geometry}</w:sectPr></w:pPr></w:p>` +
+          `<w:p><w:r><w:t>Three</w:t></w:r><w:r><w:footnoteReference w:id="3"/></w:r></w:p>` +
+          // Section 2's own (trailing, body-level) sectPr: restarts.
+          `<w:sectPr><w:footnotePr><w:numRestart w:val="eachSect"/></w:footnotePr>${geometry}</w:sectPr>`,
+      ),
+      "word/_rels/document.xml.rels": FN_RELS,
+      "word/footnotes.xml": footnotesXml(
+        note("footnote", 1, "first note") + note("footnote", 2, "second note") + note("footnote", 3, "third note"),
+      ),
+    });
+    // Default section break is nextPage, so each section lands on its own page.
+    expect(result.totalPages).toBe(2);
+    const marksOn = (page: number, text: string) =>
+      result.pages[page].items.filter((i) => i.kind === "text" && i.text === text && i.props.verticalAlign === "superscript").length;
+    // Section 1: continuous default, marks 1 then 2 (reference + own mark each).
+    expect(marksOn(0, "1")).toBe(2);
+    expect(marksOn(0, "2")).toBe(2);
+    // Section 2 restarts: footnote 3 reads "1" again, not "3".
+    expect(marksOn(1, "1")).toBe(2);
+    expect(marksOn(1, "3")).toBe(0);
+  });
 });
 
 describe("justified line breaking (Word pack-vs-break rule)", () => {

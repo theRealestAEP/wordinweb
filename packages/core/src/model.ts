@@ -1039,6 +1039,16 @@ export interface SectionProps {
   footnoteNumStart?: number;
   endnoteNumFmt?: string;
   endnoteNumStart?: number;
+  /** w:numRestart: when the mark counter resets. Absent means "continuous"
+   * (the whole document shares one counter — this engine's only honored
+   * value; eachSect/eachPage are round-trip preserved but not laid out). */
+  footnoteNumRestart?: "continuous" | "eachSect" | "eachPage";
+  endnoteNumRestart?: "continuous" | "eachSect" | "eachPage";
+  /** w:pos: where the note text is placed. Round-trip preserved only — the
+   * layout always places footnotes at the page bottom and endnotes at the
+   * document end, regardless of this value. */
+  footnotePos?: "pageBottom" | "beneathText";
+  endnotePos?: "sectEnd" | "docEnd";
   /** w:textDirection tbRl: the whole section flows as East-Asian vertical
    * writing — lines run top-to-bottom, progressing right-to-left. */
   textDirection?: "tbRl";

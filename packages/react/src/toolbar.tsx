@@ -944,6 +944,140 @@ function NoteMenu({ api, kind }: { api: DocxViewApi | null; kind: "footnote" | "
   );
 }
 
+type FootnoteOpts = ReturnType<NonNullable<DocxViewApi>["getFootnoteOptions"]>;
+type EndnoteOpts = ReturnType<NonNullable<DocxViewApi>["getEndnoteOptions"]>;
+type FootnotePatch = Parameters<NonNullable<DocxViewApi>["setFootnoteOptions"]>[0];
+type EndnotePatch = Parameters<NonNullable<DocxViewApi>["setEndnoteOptions"]>[0];
+
+const noteOptionsFieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 7px", font: "12.5px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+const noteOptionsLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
+
+/** One note type's fields (number format, restart rule, start-at, position):
+ * shared markup for the footnote and endnote halves of NoteOptionsMenu — the
+ * two differ only in their position vocabulary and which setter applies. */
+function NoteOptionsFields({
+  title,
+  fieldPrefix,
+  values,
+  onPatch,
+  posOptions,
+}: {
+  title: string;
+  fieldPrefix: string;
+  values: { fmt: string; start: number | null; restart: string; pos: string };
+  onPatch: (patch: { fmt?: string; start?: number | null; restart?: string; pos?: string }) => void;
+  posOptions: readonly (readonly [string, string])[];
+}) {
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{title}</strong>
+      <label style={noteOptionsLabelStyle}>
+        <span>Number format</span>
+        <select aria-label={`${fieldPrefix} number format`} value={values.fmt} onChange={(event) => onPatch({ fmt: event.target.value })} style={noteOptionsFieldStyle}>
+          <option value="decimal">1, 2, 3</option>
+          <option value="lowerRoman">i, ii, iii</option>
+          <option value="upperRoman">I, II, III</option>
+          <option value="lowerLetter">a, b, c</option>
+          <option value="upperLetter">A, B, C</option>
+          <option value="chicago">*, †, ‡, §</option>
+        </select>
+      </label>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        <label style={noteOptionsLabelStyle}>
+          <span>Restart</span>
+          <select aria-label={`${fieldPrefix} restart`} value={values.restart} onChange={(event) => onPatch({ restart: event.target.value })} style={noteOptionsFieldStyle}>
+            <option value="continuous">Continuous</option>
+            <option value="eachSect">Each section</option>
+            <option value="eachPage">Each page</option>
+          </select>
+        </label>
+        <label style={noteOptionsLabelStyle}>
+          <span>Start at</span>
+          <input
+            aria-label={`${fieldPrefix} start at`}
+            type="number"
+            min={0}
+            value={values.start ?? ""}
+            placeholder="1"
+            onChange={(event) => {
+              const raw = event.target.value.trim();
+              const n = raw === "" ? null : parseInt(raw, 10);
+              if (n === null || (Number.isInteger(n) && n >= 0)) onPatch({ start: n });
+            }}
+            style={noteOptionsFieldStyle}
+          />
+        </label>
+      </div>
+      <label style={noteOptionsLabelStyle}>
+        <span>Position</span>
+        <select aria-label={`${fieldPrefix} position`} value={values.pos} onChange={(event) => onPatch({ pos: event.target.value })} style={noteOptionsFieldStyle}>
+          {posOptions.map(([value, label]) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
+}
+
+const FOOTNOTE_POS_OPTIONS = [["pageBottom", "Bottom of page"], ["beneathText", "Beneath text"]] as const;
+const ENDNOTE_POS_OPTIONS = [["sectEnd", "End of section"], ["docEnd", "End of document"]] as const;
+
+/**
+ * Word's Footnote and Endnote "options" dialog (the small launcher arrow in
+ * the References > Footnotes group): number format, restart rule, start-at,
+ * and position, for both note types in one popover beside the insert
+ * controls. Every change applies immediately (no separate Apply/Insert step,
+ * like WatermarkMenu) since each field is independent document-wide state.
+ */
+function NoteOptionsMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const [fn, setFn] = useState<FootnoteOpts>(() => api?.getFootnoteOptions() ?? { fmt: "decimal", start: null, restart: "continuous", pos: "pageBottom" });
+  const [en, setEn] = useState<EndnoteOpts>(() => api?.getEndnoteOptions() ?? { fmt: "lowerRoman", start: null, restart: "continuous", pos: "docEnd" });
+  useEffect(() => {
+    if (!open) return;
+    if (api?.getFootnoteOptions) setFn(api.getFootnoteOptions());
+    if (api?.getEndnoteOptions) setEn(api.getEndnoteOptions());
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Footnote and endnote options" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ fontSize: 12.5 }}>Note options</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 250, padding: 10, display: "grid", gap: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <NoteOptionsFields
+            title="Footnotes"
+            fieldPrefix="Footnote"
+            values={fn}
+            posOptions={FOOTNOTE_POS_OPTIONS}
+            onPatch={(patch) => {
+              if (api?.setFootnoteOptions(patch as FootnotePatch)) setFn({ ...fn, ...patch } as FootnoteOpts);
+            }}
+          />
+          <div style={{ borderTop: `1px solid ${T.border}` }} />
+          <NoteOptionsFields
+            title="Endnotes"
+            fieldPrefix="Endnote"
+            values={en}
+            posOptions={ENDNOTE_POS_OPTIONS}
+            onPatch={(patch) => {
+              if (api?.setEndnoteOptions(patch as EndnotePatch)) setEn({ ...en, ...patch } as EndnoteOpts);
+            }}
+          />
+        </div>
+      )}
+    </span>
+  );
+}
+
 /** Google-Docs-style "add comment": popover with a text box, anchored to the
  * current selection (the editor keeps its owned selection while typing). */
 function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions?: string[] }) {
@@ -6465,6 +6599,7 @@ export function DocxToolbar({
           {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
           {on("footnote") && <NoteMenu api={api} kind="footnote" />}
           {on("footnote") && <NoteMenu api={api} kind="endnote" />}
+          {on("footnote") && <NoteOptionsMenu api={api} />}
           {on("bookmark") && <BookmarkMenu api={api} />}
           {on("crossReference") && <CrossReferenceMenu api={api} />}
           {on("crossReference") && <CaptionMenu api={api} />}
@@ -6548,6 +6683,7 @@ export function DocxToolbar({
               {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
               {on("footnote") && <NoteMenu api={api} kind="footnote" />}
               {on("footnote") && <NoteMenu api={api} kind="endnote" />}
+              {on("footnote") && <NoteOptionsMenu api={api} />}
               {on("bookmark") && <BookmarkMenu api={api} />}
               {on("crossReference") && <CrossReferenceMenu api={api} />}
               {on("crossReference") && <CaptionMenu api={api} />}

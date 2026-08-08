@@ -271,8 +271,24 @@ export {
   PAGE_NUMBER_FORMATS,
   setPageNumberFormat,
   pageNumberFormatAt,
+  NOTE_NUMBER_FORMATS,
+  NOTE_RESTART_VALUES,
+  setFootnoteOptions,
+  footnoteOptionsAt,
+  setEndnoteOptions,
+  endnoteOptionsAt,
 } from "./edit/sections.js";
-export type { BreakInsertion, CoverPageContent, LineNumberingPatch, PageNumberFormat, PageNumberFormatPatch } from "./edit/sections.js";
+export type {
+  BreakInsertion,
+  CoverPageContent,
+  LineNumberingPatch,
+  PageNumberFormat,
+  PageNumberFormatPatch,
+  NoteNumberFormat,
+  NoteRestart,
+  FootnoteOptionsPatch,
+  EndnoteOptionsPatch,
+} from "./edit/sections.js";
 export { documentTextStatistics } from "./word-count.js";
 export type { TextStatistics } from "./word-count.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";

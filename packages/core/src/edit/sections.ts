@@ -468,6 +468,189 @@ export function setPageNumberFormat(
   return changed;
 }
 
+// ---------- footnote / endnote options (w:footnotePr / w:endnotePr) ----------
+
+/** Note-mark numbering formats the layout engine paints (formatNoteMark's
+ * table): the page-number format subset plus "chicago", Word's symbol style
+ * (*, †, ‡, §) — footnotes' traditional default in some templates. */
+export const NOTE_NUMBER_FORMATS = [...PAGE_NUMBER_FORMATS, "chicago"] as const;
+export type NoteNumberFormat = (typeof NOTE_NUMBER_FORMATS)[number];
+
+/** ST_RestartNumber (ECMA-376 §17.18.81): when the mark counter resets.
+ * Only "eachSect" is honored by layout (assignNoteNumbers); "continuous" is
+ * the OOXML default; "eachPage" round-trips but is not laid out — see
+ * assignNoteNumbers' comment for why. */
+export const NOTE_RESTART_VALUES = ["continuous", "eachSect", "eachPage"] as const;
+export type NoteRestart = (typeof NOTE_RESTART_VALUES)[number];
+
+export interface FootnoteOptionsPatch {
+  /** w:footnotePr/w:numFmt@val. null removes it (back to decimal). */
+  fmt?: NoteNumberFormat | null;
+  /** w:footnotePr/w:numStart@val. null removes it (back to 1). */
+  start?: number | null;
+  /** w:footnotePr/w:numRestart@val. null removes it (back to continuous). */
+  restart?: NoteRestart | null;
+  /** w:footnotePr/w:pos@val (§17.11.21). null removes it (back to pageBottom). */
+  pos?: "pageBottom" | "beneathText" | null;
+}
+
+export interface EndnoteOptionsPatch {
+  fmt?: NoteNumberFormat | null;
+  start?: number | null;
+  restart?: NoteRestart | null;
+  /** w:endnotePr/w:pos@val. null removes it (back to docEnd). */
+  pos?: "sectEnd" | "docEnd" | null;
+}
+
+/** Child order inside CT_FtnProps / CT_EdnProps (ECMA-376): pos, numFmt,
+ * numStart, numRestart, then any w:footnote/w:endnote separator refs. */
+const NOTE_PR_ORDER = ["pos", "numFmt", "numStart", "numRestart", "footnote", "endnote"];
+
+function insertInNotePrOrder(pr: XmlElement, childEl: XmlElement): void {
+  const rank = (e: XmlElement) => {
+    const i = NOTE_PR_ORDER.indexOf(localName(e.name));
+    return i === -1 ? NOTE_PR_ORDER.length : i;
+  };
+  const r = rank(childEl);
+  const at = pr.children.findIndex((c) => rank(c) > r);
+  if (at === -1) pr.children.push(childEl);
+  else pr.children.splice(at, 0, childEl);
+}
+
+/** Current w:footnotePr settings for the section governing `t`. */
+export function footnoteOptionsAt(
+  doc: DocxDocument,
+  t: XmlElement,
+): { fmt: NoteNumberFormat; start: number | null; restart: NoteRestart; pos: "pageBottom" | "beneathText" } {
+  const sectPr = sectPrAt(doc, t);
+  const pr = sectPr?.children.find((c) => localName(c.name) === "footnotePr");
+  const fmt = pr ? attr(pr.children.find((c) => localName(c.name) === "numFmt"), "val") : undefined;
+  const start = pr ? attr(pr.children.find((c) => localName(c.name) === "numStart"), "val") : undefined;
+  const restart = pr ? attr(pr.children.find((c) => localName(c.name) === "numRestart"), "val") : undefined;
+  const pos = pr ? attr(pr.children.find((c) => localName(c.name) === "pos"), "val") : undefined;
+  return {
+    fmt: (NOTE_NUMBER_FORMATS as readonly string[]).includes(fmt ?? "") ? (fmt as NoteNumberFormat) : "decimal",
+    start: start !== undefined && Number.isFinite(parseInt(start, 10)) ? parseInt(start, 10) : null,
+    restart: restart === "eachSect" || restart === "eachPage" ? restart : "continuous",
+    pos: pos === "beneathText" ? "beneathText" : "pageBottom",
+  };
+}
+
+/** Current w:endnotePr settings for the section governing `t`. */
+export function endnoteOptionsAt(
+  doc: DocxDocument,
+  t: XmlElement,
+): { fmt: NoteNumberFormat; start: number | null; restart: NoteRestart; pos: "sectEnd" | "docEnd" } {
+  const sectPr = sectPrAt(doc, t);
+  const pr = sectPr?.children.find((c) => localName(c.name) === "endnotePr");
+  const fmt = pr ? attr(pr.children.find((c) => localName(c.name) === "numFmt"), "val") : undefined;
+  const start = pr ? attr(pr.children.find((c) => localName(c.name) === "numStart"), "val") : undefined;
+  const restart = pr ? attr(pr.children.find((c) => localName(c.name) === "numRestart"), "val") : undefined;
+  const pos = pr ? attr(pr.children.find((c) => localName(c.name) === "pos"), "val") : undefined;
+  return {
+    fmt: (NOTE_NUMBER_FORMATS as readonly string[]).includes(fmt ?? "") ? (fmt as NoteNumberFormat) : "lowerRoman",
+    start: start !== undefined && Number.isFinite(parseInt(start, 10)) ? parseInt(start, 10) : null,
+    restart: restart === "eachSect" || restart === "eachPage" ? restart : "continuous",
+    pos: pos === "sectEnd" ? "sectEnd" : "docEnd",
+  };
+}
+
+/**
+ * Shared write path for w:footnotePr / w:endnotePr (identical shape, only
+ * the element name and each field's OOXML default differ). With `target` (a
+ * sectPr) only that section changes; otherwise every section in the
+ * document updates, like setPageNumberFormat. An attribute set to null (or
+ * equal to its default) removes the child element; a w:footnotePr /
+ * w:endnotePr left with no children is removed entirely. False when nothing
+ * changed.
+ */
+function setNoteOptions(
+  doc: DocxDocument,
+  prLocalName: "footnotePr" | "endnotePr",
+  defaultFmt: NoteNumberFormat,
+  defaultPos: string,
+  patch: { fmt?: string | null; start?: number | null; restart?: string | null; pos?: string | null },
+  target?: XmlElement,
+): boolean {
+  let sectPrs = target ? [target] : allSectPrs(doc);
+  if (sectPrs.length === 0 && !target) {
+    // sectPr-less minimal doc: materialize the default body section (see
+    // setPageNumberFormat) so the control isn't a dead no-op.
+    const root = doc.editableRoots()[0];
+    const body = root && (localName(root.name) === "body"
+      ? root
+      : root.children.find((c) => localName(c.name) === "body"));
+    if (body) {
+      const w = prefixOf(body) || "w:";
+      const created: XmlElement = { name: `${w}sectPr`, attrs: {}, children: [], text: "" };
+      body.children.push(created);
+      sectPrs = [created];
+    }
+  }
+  if (sectPrs.length === 0) return false;
+  let changed = false;
+  for (const sectPr of sectPrs) {
+    const w = prefixOf(sectPr) || "w:";
+    let pr = sectPr.children.find((c) => localName(c.name) === prLocalName);
+    const ensurePr = (): XmlElement => {
+      if (!pr) {
+        pr = el(`${w}${prLocalName}`);
+        insertInOrder(sectPr, pr);
+      }
+      return pr;
+    };
+    const setChild = (local: string, v: string | null) => {
+      const existing = pr?.children.find((c) => localName(c.name) === local);
+      if (v === null) {
+        if (existing) {
+          ensurePr().children = ensurePr().children.filter((c) => c !== existing);
+          changed = true;
+        }
+        return;
+      }
+      if (existing) {
+        const key = Object.keys(existing.attrs).find((k) => localName(k) === "val") ?? `${w}val`;
+        if (existing.attrs[key] !== v) {
+          existing.attrs[key] = v;
+          changed = true;
+        }
+      } else {
+        insertInNotePrOrder(ensurePr(), el(`${w}${local}`, { [`${w}val`]: v }));
+        changed = true;
+      }
+    };
+    if (patch.pos !== undefined) setChild("pos", patch.pos === null || patch.pos === defaultPos ? null : patch.pos);
+    if (patch.fmt !== undefined) setChild("numFmt", patch.fmt === null || patch.fmt === defaultFmt ? null : patch.fmt);
+    if (patch.start !== undefined) setChild("numStart", patch.start === null ? null : String(patch.start));
+    if (patch.restart !== undefined) {
+      setChild("numRestart", patch.restart === null || patch.restart === "continuous" ? null : patch.restart);
+    }
+    if (pr && pr.children.length === 0) {
+      sectPr.children = sectPr.children.filter((c) => c !== pr);
+    }
+  }
+  if (changed) doc.refresh();
+  return changed;
+}
+
+/**
+ * Set footnote options — number format (w:numFmt, §17.11.17), restart rule
+ * (w:numRestart, §17.11.19), start-at (w:numStart), and position (w:pos,
+ * §17.11.21). The mark's format and start already drive the number layout
+ * paints (formatNoteMark); restart honors "eachSect" (see assignNoteNumbers)
+ * but not "eachPage"; position round-trips but layout always places
+ * footnotes at the page bottom regardless of the value written here.
+ */
+export function setFootnoteOptions(doc: DocxDocument, patch: FootnoteOptionsPatch, target?: XmlElement): boolean {
+  return setNoteOptions(doc, "footnotePr", "decimal", "pageBottom", patch, target);
+}
+
+/** Set endnote options — same shape as setFootnoteOptions; endnotes' OOXML
+ * defaults differ (lowerRoman marks, position "docEnd"). */
+export function setEndnoteOptions(doc: DocxDocument, patch: EndnoteOptionsPatch, target?: XmlElement): boolean {
+  return setNoteOptions(doc, "endnotePr", "lowerRoman", "docEnd", patch, target);
+}
+
 export interface LineNumberingPatch {
   /** Turn margin line numbering on/off for the target section(s). */
   enabled: boolean;

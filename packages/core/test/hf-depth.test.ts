@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import { strFromU8, unzipSync } from "fflate";
 import { DocxDocument } from "../src/docx.js";
 import {
+  endnoteOptionsAt,
+  footnoteOptionsAt,
   pageNumberFormatAt,
   sectPrAt,
+  setEndnoteOptions,
   setEvenOddHeaders,
+  setFootnoteOptions,
   setPageNumberFormat,
   setTitlePage,
   titlePageEnabled,
@@ -159,6 +163,70 @@ describe("setPageNumberFormat (w:pgNumType)", () => {
     const sectPr = sectPrAt(doc, t)!;
     expect(sectPr.children.some((c) => localName(c.name) === "pgNumType")).toBe(false);
     expect(setPageNumberFormat(doc, { fmt: null })).toBe(false); // nothing to clear
+  });
+});
+
+describe("setFootnoteOptions (w:footnotePr)", () => {
+  it("writes pos/numFmt/numStart/numRestart in schema order, readable via footnoteOptionsAt", () => {
+    const doc = loadDoc(p("Body text") + SECT);
+    const t = firstT(doc);
+    expect(setFootnoteOptions(doc, { fmt: "upperRoman", start: 3, restart: "eachSect", pos: "beneathText" })).toBe(true);
+    expect(footnoteOptionsAt(doc, t)).toEqual({ fmt: "upperRoman", start: 3, restart: "eachSect", pos: "beneathText" });
+    expect(doc.sections[0].props.footnoteNumFmt).toBe("upperRoman");
+    expect(doc.sections[0].props.footnoteNumStart).toBe(3);
+    expect(doc.sections[0].props.footnoteNumRestart).toBe("eachSect");
+    expect(doc.sections[0].props.footnotePos).toBe("beneathText");
+    const sectPr = sectPrAt(doc, t)!;
+    const pr = sectPr.children.find((c) => localName(c.name) === "footnotePr")!;
+    expect(pr).toBeTruthy();
+    const names = pr.children.map((c) => localName(c.name));
+    // CT_FtnProps order: pos, numFmt, numStart, numRestart.
+    expect(names).toEqual(["pos", "numFmt", "numStart", "numRestart"]);
+    // footnotePr itself sits after headerReference/footerReference, before endnotePr/type/pgMar.
+    const sectNames = sectPr.children.map((c) => localName(c.name));
+    expect(sectNames.indexOf("footnotePr")).toBeLessThan(sectNames.indexOf("pgMar"));
+  });
+
+  it("defaults are decimal/continuous/pageBottom; null clears an attribute back to default", () => {
+    const doc = loadDoc(p("Body text") + SECT);
+    const t = firstT(doc);
+    expect(footnoteOptionsAt(doc, t)).toEqual({ fmt: "decimal", start: null, restart: "continuous", pos: "pageBottom" });
+    expect(setFootnoteOptions(doc, { fmt: "lowerLetter", pos: "beneathText" })).toBe(true);
+    expect(setFootnoteOptions(doc, { fmt: "lowerLetter" })).toBe(false); // unchanged
+    expect(setFootnoteOptions(doc, { pos: null })).toBe(true);
+    expect(footnoteOptionsAt(doc, t)).toEqual({ fmt: "lowerLetter", start: null, restart: "continuous", pos: "pageBottom" });
+    // fmt back to its default clears the child; footnotePr goes away entirely once empty.
+    expect(setFootnoteOptions(doc, { fmt: "decimal" })).toBe(true);
+    const sectPr = sectPrAt(doc, t)!;
+    expect(sectPr.children.some((c) => localName(c.name) === "footnotePr")).toBe(false);
+    expect(setFootnoteOptions(doc, { fmt: null })).toBe(false); // nothing to clear
+  });
+
+  it("accepts chicago (Word's symbol mark style)", () => {
+    const doc = loadDoc(p("Body text") + SECT);
+    const t = firstT(doc);
+    expect(setFootnoteOptions(doc, { fmt: "chicago" })).toBe(true);
+    expect(footnoteOptionsAt(doc, t).fmt).toBe("chicago");
+  });
+});
+
+describe("setEndnoteOptions (w:endnotePr)", () => {
+  it("writes pos/numFmt/numStart/numRestart, readable via endnoteOptionsAt", () => {
+    const doc = loadDoc(p("Body text") + SECT);
+    const t = firstT(doc);
+    expect(setEndnoteOptions(doc, { fmt: "lowerLetter", start: 2, restart: "eachSect", pos: "sectEnd" })).toBe(true);
+    expect(endnoteOptionsAt(doc, t)).toEqual({ fmt: "lowerLetter", start: 2, restart: "eachSect", pos: "sectEnd" });
+    expect(doc.sections[0].props.endnoteNumFmt).toBe("lowerLetter");
+    expect(doc.sections[0].props.endnoteNumRestart).toBe("eachSect");
+    expect(doc.sections[0].props.endnotePos).toBe("sectEnd");
+  });
+
+  it("endnotes default to lowerRoman/continuous/docEnd, distinct from footnotes' defaults", () => {
+    const doc = loadDoc(p("Body text") + SECT);
+    const t = firstT(doc);
+    expect(endnoteOptionsAt(doc, t)).toEqual({ fmt: "lowerRoman", start: null, restart: "continuous", pos: "docEnd" });
+    // Setting the endnote default explicitly is a no-op write (matches the default, so nothing to add).
+    expect(setEndnoteOptions(doc, { fmt: "lowerRoman", pos: "docEnd" })).toBe(false);
   });
 });
 
