@@ -61,6 +61,18 @@ import {
   setTitlePage,
   type PageNumberFormat,
 } from "./sections.js";
+import {
+  HEADER_FOOTER_PRESETS,
+  HEADER_FOOTER_PRESET_NODE_BUDGET,
+  PAGE_NUMBER_ALIGNMENTS,
+  PAGE_NUMBER_POSITIONS,
+  insertHeaderFooterPreset,
+  insertPageNumberPosition,
+  removePageNumberFields,
+  type HeaderFooterPreset,
+  type PageNumberGalleryAlign,
+  type PageNumberGalleryPosition,
+} from "./hf-gallery.js";
 import { suggestMeta } from "./suggest.js";
 import { TOC_LEADERS, insertToc, isValidCaptionLabel, type TocLeader, type TocLevels } from "./toc.js";
 import { ensureRefBookmark, insertCaptionAt } from "./references.js";
@@ -1970,6 +1982,77 @@ const setPageNumberFormatOperation = defineOperation<{
     }),
 });
 
+/**
+ * Word's Insert > Page Number > Top/Bottom of Page position gallery: a
+ * single live PAGE field in the header ("top") or footer ("bottom"),
+ * aligned left/center/right. Composed from ensureHfPart (the same part
+ * creation `ensureHeaderFooter` uses) plus the PAGE field vocabulary
+ * fields.ts already allows — no new wire vocabulary. Like insertWatermark,
+ * a pick REPLACES the part's content, matching Word's own gallery, so it
+ * always applies rather than checking for an unchanged-content no-op.
+ */
+const insertPageNumberPositionOperation = defineOperation<{
+  position: PageNumberGalleryPosition;
+  align: PageNumberGalleryAlign;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertPageNumberPosition",
+  address: "document",
+  category: "insert",
+  description: "Insert a page number into the header (top) or footer (bottom), aligned left/center/right — the page-number position gallery.",
+  fields: [{ name: "position" }, { name: "align" }],
+  // The gallery paragraph plus the fldSimple's one result run.
+  nodeIds: () => 2,
+  prunesIds: true,
+  validate: ({ position, align }) => {
+    if (!(PAGE_NUMBER_POSITIONS as readonly string[]).includes(position)) return "insertPageNumberPosition: bad position";
+    if (!(PAGE_NUMBER_ALIGNMENTS as readonly string[]).includes(align)) return "insertPageNumberPosition: bad align";
+    return null;
+  },
+  apply: ({ doc, payload }) => insertPageNumberPosition(doc, payload.position, payload.align),
+});
+
+/** Word's "Remove Page Numbers": strip PAGE/NUMPAGES fields from every
+ * header and footer part. Rejection predicate is what it found: a document
+ * with no page-number fields applies nothing. */
+const removePageNumbersOperation = defineOperation<Record<never, never>>()({
+  kind: "removePageNumbers",
+  address: "document",
+  category: "insert",
+  description: "Remove page-number fields from every header and footer part.",
+  fields: [],
+  prunesIds: true,
+  apply: ({ doc }) => removePageNumberFields(doc),
+});
+
+/**
+ * The Header & Footer preset gallery: replace a header or footer's content
+ * with one of four preset layouts (blank, centered title, title + date,
+ * three-column). Composed from literal placeholder text, the existing DATE
+ * and PAGE field vocabulary, and setTabStops (the wave-2 tab-stop op) for
+ * the three-column layout's tab positions — see hf-gallery.ts. Same
+ * always-applies shape as insertPageNumberPosition.
+ */
+const insertHeaderFooterPresetOperation = defineOperation<{
+  hfKind: "header" | "footer";
+  preset: HeaderFooterPreset;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertHeaderFooterPreset",
+  address: "document",
+  category: "insert",
+  description: "Replace a header or footer's content with a preset layout: blank, centered title, title + date, or three-column.",
+  fields: [{ name: "hfKind" }, { name: "preset" }],
+  nodeIds: ({ preset }) => HEADER_FOOTER_PRESET_NODE_BUDGET[preset] ?? 2,
+  prunesIds: true,
+  validate: ({ hfKind, preset }) => {
+    if (hfKind !== "header" && hfKind !== "footer") return "insertHeaderFooterPreset: bad hfKind";
+    if (!(HEADER_FOOTER_PRESETS as readonly string[]).includes(preset)) return "insertHeaderFooterPreset: bad preset";
+    return null;
+  },
+  apply: ({ doc, payload }) => insertHeaderFooterPreset(doc, payload.hfKind, payload.preset),
+});
+
 /** A payload with no fields of its own. Not `Record<string, never>`: that
  * carries an index signature, which would forbid the clientId/clientSeq/base
  * bookkeeping @wordinweb/collab intersects onto every wire body. */
@@ -2035,6 +2118,9 @@ const OPERATIONS = [
   setEvenOddHeadersOperation,
   setPageNumberFormatOperation,
   setHyphenationOperation,
+  insertPageNumberPositionOperation,
+  removePageNumbersOperation,
+  insertHeaderFooterPresetOperation,
 ] as const;
 
 // ---------------------------------------------------------------------------

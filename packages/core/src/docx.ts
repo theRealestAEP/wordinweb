@@ -1963,6 +1963,13 @@ export class DocxDocument {
     return this.hfParts.filter((p) => p.isHeader).map((p) => p.root);
   }
 
+  /** The footer part roots, in package order — headerRoots' counterpart, for
+   * operations that walk both bands (the page-number gallery's removal
+   * sweep). */
+  footerRoots(): XmlElement[] {
+    return this.hfParts.filter((p) => !p.isHeader).map((p) => p.root);
+  }
+
   /** XML roots that can carry tracked changes: body, headers/footers, notes. */
   revisionRoots(): XmlElement[] {
     return this.contentRoots();
