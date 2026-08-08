@@ -1244,6 +1244,35 @@ function CaptionMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/**
+ * Structure gallery: each button inserts a ready-made linear-grammar template
+ * with □ placeholder tokens through the same insertEquation path the manual
+ * input uses — Word's "click a structure, then fill in the boxes" workflow.
+ *
+ * Palette is exactly the set of structures the linear grammar (edit/math.ts)
+ * round-trips: fraction, sup/sub, radical, the three n-ary operators, a
+ * delimiter pair, a stacked limit, and a matrix — every one covered by the
+ * math-corpus round-trip test. Word's "Function" structures (sin, cos, log…)
+ * are NOT included: they author m:func, which the linear grammar does not
+ * model (isLinearSafe refuses it — math-corpus.test.ts's dense fixture notes
+ * "4 m:func equations" as the read-only ones), so a Function button would
+ * insert an equation the user could never open again to edit.
+ */
+const EQUATION_STRUCTURES = [
+  ["fraction", "Fraction", "𝑎/𝑏", "□/□"],
+  ["superscript", "Superscript", "𝑥²", "□^□"],
+  ["subscript", "Subscript", "𝑥₂", "□_□"],
+  ["radical", "Radical", "√𝑥", "√□"],
+  ["integral", "Integral", "∫", "∫_□^□□"],
+  ["sum", "Summation", "∑", "∑_□^□□"],
+  ["product", "Product", "∏", "∏_□^□□"],
+  ["brackets", "Brackets", "( )", "(□)"],
+  // "┴" is the linear grammar's own limLow glyph (edit/math.ts LIM_LOW) —
+  // this is exactly what linearizing an m:limLow produces.
+  ["limit", "Limit", "lim", "{lim}┴□"],
+  ["matrix", "Matrix (2×2)", "▦", "[□&□;□&□]"],
+] as const;
+
 function EquationMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [linear, setLinear] = useState("x={-b±√{b^2-4ac}}/{2a}");
@@ -1259,8 +1288,8 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
-  const submit = () => {
-    if (api?.insertEquation(linear)) {
+  const submit = (text: string) => {
+    if (api?.insertEquation(text)) {
       setError("");
       setOpen(false);
     } else {
@@ -1279,19 +1308,34 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
       </button>
       {open && (
         <div data-dxw-equation-menu="" style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg }}>Linear equation</div>
+          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg }}>Structures</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 5, marginBottom: 8 }}>
+            {EQUATION_STRUCTURES.map(([key, title, glyph, template]) => (
+              <button
+                key={key}
+                type="button"
+                title={title}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => submit(template)}
+                style={{ height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "15px 'Cambria Math', serif" }}
+              >
+                {glyph}
+              </button>
+            ))}
+          </div>
+          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg, borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>Linear equation</div>
           <input
             ref={inputRef}
             aria-label="Linear equation"
             value={linear}
             onChange={(event) => { setLinear(event.target.value); setError(""); }}
-            onKeyDown={(event) => event.key === "Enter" && submit()}
+            onKeyDown={(event) => event.key === "Enter" && submit(linear)}
             style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "15px 'Cambria Math', serif", outline: "none" }}
           />
           <div style={{ color: T.muted, fontSize: 11.5, marginTop: 5 }}>Use ^, _, /, √&#123;…&#125;, ∫, matrices [a&amp;b;c&amp;d], and grouped &#123;…&#125; expressions.</div>
           {error && <div style={{ color: "#c5221f", fontSize: 11.5, marginTop: 5 }}>{error}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
-            <button style={pillBtn} disabled={!linear.trim()} onClick={submit}>Insert</button>
+            <button style={pillBtn} disabled={!linear.trim()} onClick={() => submit(linear)}>Insert</button>
           </div>
         </div>
       )}
