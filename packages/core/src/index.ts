@@ -217,7 +217,7 @@ export {
   setDrawingWordArtStyle,
   setDrawingWordArtText,
 } from "./edit/drawings.js";
-export type { DrawingLineDash, DrawingTool, InkPoint, ShapePreset, WordArtPreset, WordArtStyle } from "./edit/drawings.js";
+export type { DrawingLineDash, DrawingTool, InkPoint, RunTextEffectPatch, ShapePreset, WordArtPreset, WordArtStyle } from "./edit/drawings.js";
 export {
   isKnownShapeGeometry,
   knownShapeGeometryNames,

@@ -329,6 +329,51 @@ describe("run formatting commands", () => {
     const after = firstRun(doc).run;
     expect(after.props.highlight).toBeUndefined();
   });
+
+  it("writes w14 outline/shadow text effects on an ordinary run, not just WordArt", () => {
+    const doc = loadDoc(p("Poster text"));
+    const { run } = firstRun(doc);
+    applyRunFormat(doc, [segFor(run, 0, 6)], {
+      color: "#FFFFFF",
+      textEffect: { outline: { color: "#4472C4", widthPt: 1 }, shadow: true },
+    });
+    const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml")!;
+    expect(xml).toContain('<w:color w:val="FFFFFF"');
+    expect(xml).toContain('<w14:textOutline');
+    expect(xml).toContain('w14:w="12700"');
+    expect(xml).toContain('<w14:srgbClr w14:val="4472C4"');
+    expect(xml).toContain('<w14:shadow');
+    // No forced fill: this feature keeps whatever color the patch set (or the
+    // run already had), unlike WordArt insertion's applyWordArtStyle.
+    expect(xml).not.toContain('<w14:textFill');
+
+    const reloaded = DocxDocument.load(doc.save());
+    const styled = (reloaded.sections[0].blocks[0] as Paragraph).children[0] as Run;
+    expect(styled.props.color).toBe("#FFFFFF");
+    expect(styled.props.textOutline).toEqual({ color: "#4472C4", width: 4 / 3 });
+    expect(styled.props.textShadow).toBe(true);
+
+    // null clears every w14 effect and leaves the color alone.
+    const { run: styledRun } = firstRun(doc);
+    applyRunFormat(doc, [segFor(styledRun, 0, 6)], { textEffect: null });
+    const cleared = firstRun(doc).run;
+    expect(cleared.props.textOutline).toBeUndefined();
+    expect(cleared.props.textShadow).toBeUndefined();
+    expect(cleared.props.color).toBe("#FFFFFF");
+  });
+
+  it("text-effect clear does not touch the legacy w:shadow toggle (different feature, same local name)", () => {
+    const doc = loadDoc(
+      `<w:p><w:r><w:rPr><w:shadow/></w:rPr><w:t>engraved</w:t></w:r></w:p>`,
+    );
+    const { run } = firstRun(doc);
+    expect(run.props.emboss).toBeUndefined();
+    applyRunFormat(doc, [segFor(run, 0, 8)], { textEffect: null });
+    const after = firstRun(doc).run;
+    const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml")!;
+    expect(xml).toContain("<w:shadow");
+    expect(after.props.textShadow).toBe(true); // legacy w:shadow still reads as the boolean
+  });
 });
 
 describe("paragraph styles", () => {

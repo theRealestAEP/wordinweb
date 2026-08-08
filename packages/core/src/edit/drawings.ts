@@ -307,6 +307,50 @@ function applyWordArtStyle(rPr: XmlElement, style: WordArtStyle): void {
   ]));
 }
 
+/** Outline/shadow for an ordinary run — Word's Home-tab "Text Effects and
+ * Typography" gallery, distinct from inserting a WordArt object. */
+export interface RunTextEffectPatch {
+  outline?: { color: string; widthPt: number } | null;
+  shadow?: boolean;
+}
+
+/**
+ * Apply (or clear, when `effect` is null) the w14 outline/shadow run-effects
+ * vocabulary directly on an ordinary run's rPr. Same element shapes and
+ * "Word's element order" as applyWordArtStyle's outline/shadow above, minus
+ * the fill: text-effect presets keep the run's existing color (a preset that
+ * wants a specific one sets it through the ordinary `color` run-format field
+ * in the same patch — commands.ts's setRunProps already handles w:color).
+ */
+export function applyRunTextEffect(rPr: XmlElement, effect: RunTextEffectPatch | null): void {
+  // w14:shadow shares its local name with the legacy w:shadow toggle
+  // (§17.3.2.36, an unrelated engrave-style effect) — strip only the w14 one.
+  // textFill is also stripped so "clear" fully undoes a run that picked up
+  // one some other way (arriving Word content, say).
+  rPr.children = rPr.children.filter((child) =>
+    !(child.name.startsWith("w14:") && ["textOutline", "shadow", "textFill"].includes(localName(child.name))));
+  if (!effect) return;
+  if (effect.shadow) {
+    // Word's WordArt gallery offset-shadow: 3pt blur, 1.5pt at 45°, 60% black.
+    rPr.children.push(el("w14:shadow", {
+      "xmlns:w14": NS_W14,
+      "w14:blurRad": "38100", "w14:dist": "19050", "w14:dir": "2700000",
+      "w14:sx": "100000", "w14:sy": "100000", "w14:kx": "0", "w14:ky": "0", "w14:algn": "bl",
+    }, [el("w14:srgbClr", { "w14:val": "000000" }, [el("w14:alpha", { "w14:val": "60000" })])]));
+  }
+  if (effect.outline) {
+    rPr.children.push(el("w14:textOutline", {
+      "xmlns:w14": NS_W14,
+      "w14:w": String(Math.max(1, Math.round(effect.outline.widthPt * EMU_PER_PT))),
+      "w14:cap": "flat", "w14:cmpd": "sng", "w14:algn": "ctr",
+    }, [
+      el("w14:solidFill", {}, [el("w14:srgbClr", { "w14:val": effect.outline.color.replace(/^#/, "").toUpperCase() })]),
+      el("w14:prstDash", { "w14:val": "solid" }),
+      el("w14:round"),
+    ]));
+  }
+}
+
 export function isDrawingWordArt(drawing: XmlElement): boolean {
   return (descendant(drawing, "docPr")?.attrs.name ?? "").startsWith("WordArt ") ||
     (["shape", "rect"].includes(localName(drawing.name)) && Boolean(descendant(drawing, "textpath")));

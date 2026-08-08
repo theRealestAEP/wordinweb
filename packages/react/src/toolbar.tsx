@@ -776,6 +776,72 @@ function ClearFormatIcon() {
   );
 }
 
+/** The w14 outline/shadow vocabulary that a WordArt object's text carries
+ * (WordArtMenu's gallery), applied directly to an ordinary run instead —
+ * Word's Home-tab "Text Effects and Typography" gallery. A small preset row,
+ * not the ~20-swatch gallery WordArt gets: outline, shadow, three tasteful
+ * combos, and a way back to plain text. Two presets set a fixed color
+ * alongside the effect (a genuine gallery "look"); the rest keep whatever
+ * color the run already has. */
+const TEXT_EFFECT_PRESETS: {
+  label: string;
+  color?: string;
+  effect: Parameters<DocxViewApi["applyFormat"]>[0]["textEffect"];
+}[] = [
+  { label: "No effect", effect: null },
+  { label: "Outline", effect: { outline: { color: "#000000", widthPt: 0.75 } } },
+  { label: "Shadow", effect: { shadow: true } },
+  { label: "Outline, shadow", effect: { outline: { color: "#000000", widthPt: 0.75 }, shadow: true } },
+  { label: "Bold red outline", effect: { outline: { color: "#C00000", widthPt: 1.5 } } },
+  { label: "White, blue outline, shadow", color: "#FFFFFF", effect: { outline: { color: "#4472C4", widthPt: 1 }, shadow: true } },
+];
+
+function TextEffectsMenu({ apply }: { apply: (patch: Parameters<DocxViewApi["applyFormat"]>[0]) => void }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Text Effects and Typography" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ color: "#2e74b5", fontWeight: 700, fontSize: 14, WebkitTextStroke: "0.5px #1F4E79" }}>A</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 216, padding: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 4 }}>
+            {TEXT_EFFECT_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                title={preset.label}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  apply(preset.color ? { color: preset.color, textEffect: preset.effect } : { textEffect: preset.effect });
+                  setOpen(false);
+                }}
+                style={{
+                  height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, cursor: "pointer",
+                  font: "700 15px Georgia, serif",
+                  color: preset.color ?? T.fg,
+                  WebkitTextStroke: preset.effect?.outline ? `0.6px ${preset.effect.outline.color}` : undefined,
+                  textShadow: preset.effect?.shadow ? "1px 1px 2px rgba(0,0,0,0.55)" : undefined,
+                }}
+              >
+                A
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 function IndentIcon({ dir }: { dir: 1 | -1 }) {
   return (
     <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -6215,6 +6281,7 @@ export function DocxToolbar({
               active={fmt?.verticalAlign === "subscript"}
               onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "subscript" ? null : "subscript" })}
             />
+            <TextEffectsMenu apply={apply} />
             <Btn label={<ClearFormatIcon />} title="Clear formatting" onClick={() => apply({ clear: true })} />
             <ActionMenu
               label="Aa"

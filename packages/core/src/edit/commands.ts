@@ -3,6 +3,7 @@ import { Run, RunProps } from "../model.js";
 import { XmlElement, cloneXml, localName, child } from "../xml.js";
 import { paragraphOf } from "./blocks.js";
 import { RevisionMeta, recordRunFormatChange } from "./suggest.js";
+import { applyRunTextEffect, type RunTextEffectPatch } from "./drawings.js";
 
 /**
  * Editing commands, v1: character formatting over a selection.
@@ -47,6 +48,15 @@ export interface RunFormatPatch {
    * already handles with its carried before/middle/after piece ids.
    */
   characterStyleId?: string | null;
+  /**
+   * w14 outline/shadow run effects (Word's Home-tab "Text Effects and
+   * Typography" gallery) — the same vocabulary a WordArt object's text
+   * carries, applied directly to ordinary runs. null removes every w14
+   * effect, reverting to plain text. Rides the run patch rather than an
+   * operation of its own for the same reason characterStyleId does: applying
+   * it to PART of a run splits the run, which formatRange already handles.
+   */
+  textEffect?: RunTextEffectPatch | null;
   /** Remove all direct character formatting (and character style). */
   clear?: boolean;
 }
@@ -301,6 +311,9 @@ export function setRunProps(rEl: XmlElement, patch: RunFormatPatch): void {
   }
   if (patch.verticalAlign !== undefined) {
     setProp(rPr, "vertAlign", patch.verticalAlign === null ? null : { val: patch.verticalAlign });
+  }
+  if (patch.textEffect !== undefined) {
+    applyRunTextEffect(rPr, patch.textEffect);
   }
 }
 

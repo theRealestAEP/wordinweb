@@ -141,8 +141,18 @@ export interface SealedCheckpoint {
  *       auto ids before a carried batch lands, so a second large registered
  *       insert no longer risks a spurious "apply failed" rejection. An e17
  *       peer rejects the very intents an e18 peer applies.
+ *   e19 tool-depth wave 4: new registered operations setFootnoteOptions and
+ *       setEndnoteOptions (w:footnotePr/w:endnotePr number format, restart
+ *       rule, start-at, position). An e18 peer rejects ("not a registered
+ *       operation") the very intents an e19 peer applies. Also, formatRun /
+ *       formatRange's patch gains textEffect (w14:textOutline/w14:shadow run
+ *       effects on an ordinary run — the WordArt gallery's vocabulary,
+ *       previously WordArt-only). This is NOT a clean rejection: an e18
+ *       peer's setRunProps has no branch for the new property, so it
+ *       silently drops it and writes the run without the effect — byte
+ *       divergence, not a rejection, on the first text-effect preset.
  */
-export const ENGINE_VERSION = "e18";
+export const ENGINE_VERSION = "e19";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-
