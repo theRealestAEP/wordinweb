@@ -100,6 +100,8 @@ import {
   type PageNumberFormatPatch,
   type XmlElement,
   type EncodedCaret,
+  type WireRange,
+  resolveWireRange,
   type ShapePreset,
   type WordArtPreset,
   type DrawingTool,
@@ -406,6 +408,18 @@ export interface DocxViewApi {
   goToPage(page: number): boolean;
   /** Go To: move the caret to a named bookmark and scroll it into view. */
   goToBookmark(name: string): boolean;
+  /**
+   * Select an exact text range by stable address — the `{blockId, runId,
+   * start, end}` shape the wire, presence, and suggestRevision already use
+   * (offsets in the run's wire basis; see getEncodedCaret for the caret
+   * half). Several ranges select together, for a word split across runs.
+   * Selection and scroll ride find-navigation's machinery; the view only
+   * scrolls when the range is off screen. In a local document the first call
+   * populates the stable-id table (enableStableIds), so hosts — the desktop
+   * spellcheck's select-and-replace — can address text without a collab
+   * mount. False when no range resolves to text.
+   */
+  selectRange(range: WireRange | WireRange[]): boolean;
   /** Paragraph styles for the style menu (declared + Word built-ins). */
   listParagraphStyles(): { id: string; name: string }[];
   /** pStyle id of the caret paragraph (null = Normal). */
@@ -517,9 +531,11 @@ export interface DocxViewApi {
   acceptAllRevisions(): number;
   /** Reject every tracked change (one undo step). Returns how many applied. */
   rejectAllRevisions(): number;
-  /** Current caret as stable-id addresses (collab), or null. The encoding
-   * survives a reconciliation reload, so it can be captured from a view
-   * about to remount and restored into its replacement. */
+  /** Current caret as stable-id addresses, or null. The encoding survives a
+   * reconciliation reload, so it can be captured from a view about to
+   * remount and restored into its replacement. In a local document the first
+   * call populates the stable-id table (like selectRange), so hosts can
+   * capture addresses outside a collab mount too. */
   getEncodedCaret(): EncodedCaret | null;
   /** Restore a caret captured by getEncodedCaret. False when the position no
    * longer resolves (or outside collab mode). */
@@ -2769,6 +2785,30 @@ export function DocxView({
             handle.updateViewport?.();
             return !!el;
           },
+          selectRange: (range) => {
+            if (!editor) return false;
+            const ids = doc.stableIds ?? doc.enableStableIds();
+            const resolved: { t: XmlElement; start: number; end: number }[] = [];
+            for (const r of Array.isArray(range) ? range : [range]) {
+              if (!Number.isInteger(r.start) || !Number.isInteger(r.end) || r.end <= r.start || r.start < 0) continue;
+              const runEl = ids.elOf(r.runId);
+              if (!runEl) continue;
+              resolved.push(...resolveWireRange(runEl, r.start, r.end));
+            }
+            if (resolved.length === 0) return false;
+            // Find-navigation's materialize dance (selectMatch): a far range
+            // may live on a virtualized-out page. "nearest" instead of
+            // "center" so a range already on screen — the spellcheck's word
+            // under the pointer — never jumps the view.
+            const restore = handle?._virtualized ? handle.materializeAll?.() : undefined;
+            editor.selectRanges(resolved);
+            const el = handle?.bindingsByText.get(resolved[0].t)?.[0]?.el;
+            el?.scrollIntoView({ block: "nearest", behavior: "instant" as ScrollBehavior });
+            restore?.();
+            handle?.updateViewport?.();
+            editor.selectRanges(resolved);
+            return true;
+          },
           toggleList: (kind) => {
             const caret = editor?.getCaretTarget();
             const segs = editor?.getSelectionSegments() ?? [];
@@ -2972,7 +3012,10 @@ export function DocxView({
           revisionCount: () => collectRevisions(doc).length,
           acceptAllRevisions: () => editor?.acceptAllRevisions() ?? 0,
           rejectAllRevisions: () => editor?.rejectAllRevisions() ?? 0,
-          getEncodedCaret: () => editor?.getEncodedCaret() ?? null,
+          getEncodedCaret: () => {
+            doc.enableStableIds(); // local documents encode too (see the API doc)
+            return editor?.getEncodedCaret() ?? null;
+          },
           setCaretFromEncoded: (pos) => editor?.setCaretFromEncoded(pos) ?? false,
           revealPresence: (participant) => {
             // Read the CURRENT presence (presenceRef), not a render's snapshot:
@@ -3233,7 +3276,7 @@ export function DocxView({
 }
 
 export { DocxDocument, layoutDocument, renderToDom, printPages } from "@wordinweb/core";
-export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset } from "@wordinweb/core";
+export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset, WireRange, EncodedCaret } from "@wordinweb/core";
 export { DocxToolbar, ToolbarMenuSelect, INSERT_COMMANDS } from "./toolbar.js";
 export type {
   DocxToolbarProps,

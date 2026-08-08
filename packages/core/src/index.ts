@@ -80,7 +80,7 @@ export type {
   DeleteRange,
 } from "./edit/suggest.js";
 export { EditHistory } from "./edit/history.js";
-export { StableIds, textsUnderRun, resolveRunOffset, runContentItems, runWireLength, wireOffsetOf, wireOffsetOfSeparator, separatorAtWireOffset } from "./edit/ids.js";
+export { StableIds, textsUnderRun, resolveRunOffset, resolveWireRange, runContentItems, runWireLength, wireOffsetOf, wireOffsetOfSeparator, separatorAtWireOffset } from "./edit/ids.js";
 export type { EncodedCaret } from "./edit/ids.js";
 export { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator, applyDeleteSeparator } from "./edit/mutations.js";
 export type { EditCaret, MutationCtx, SplitResult, DeleteSeparatorResult } from "./edit/mutations.js";
