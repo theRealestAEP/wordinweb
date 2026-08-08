@@ -142,6 +142,12 @@ import {
   type DrawingTool,
   type DrawingLineDash,
   type CoverPageContent,
+  type PageNumberGalleryPosition,
+  type PageNumberGalleryAlign,
+  type HeaderFooterPreset,
+  insertPageNumberPosition,
+  removePageNumberFields,
+  insertHeaderFooterPreset,
   type ObjectArrangeAction,
   type SelectedObjectCommand,
   type SelectedObjectKind,
@@ -607,6 +613,17 @@ export interface DocxViewApi {
   setHyphenation(patch: { auto?: boolean; zonePt?: number | null; noCaps?: boolean }): boolean;
   /** Current hyphenation settings (zonePt null = Word's default 18pt). */
   getHyphenation(): { auto: boolean; zonePt: number | null; noCaps: boolean };
+  /** Word's page-number position gallery: a single live PAGE field in the
+   * header (top) or footer (bottom), aligned left/center/right. Creates the
+   * part on demand and replaces its content — a gallery pick, not a merge. */
+  insertPageNumberPosition(position: PageNumberGalleryPosition, align: PageNumberGalleryAlign): boolean;
+  /** Word's "Remove Page Numbers": strips PAGE/NUMPAGES fields from every
+   * header and footer part. */
+  removePageNumbers(): boolean;
+  /** The Header & Footer preset gallery: replace a header or footer's
+   * content with a preset layout (blank / centered title / title + date /
+   * three-column). */
+  insertHeaderFooterPreset(kind: "header" | "footer", preset: HeaderFooterPreset): boolean;
   /** Resolve (true) or reopen (false) a comment thread. */
   resolveComment(id: string, resolved: boolean): boolean;
   /** Replace a comment's body text (Word's edit-my-comment). */
@@ -2914,6 +2931,27 @@ export function DocxView({
             zonePt: doc.hyphenationZoneTwips === null ? null : doc.hyphenationZoneTwips / 20,
             noCaps: doc.doNotHyphenateCaps,
           }),
+          insertPageNumberPosition: (position, align) => {
+            if (collabDocOp((ids) => documentOperationBody("insertPageNumberPosition", { position, align }, ids))) return true;
+            history.checkpoint();
+            if (!insertPageNumberPosition(doc, position, align)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          removePageNumbers: () => {
+            if (collabDocOp(() => documentOperationBody("removePageNumbers", {}))) return true;
+            history.checkpoint();
+            if (!removePageNumberFields(doc)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertHeaderFooterPreset: (kind, preset) => {
+            if (collabDocOp((ids) => documentOperationBody("insertHeaderFooterPreset", { hfKind: kind, preset }, ids))) return true;
+            history.checkpoint();
+            if (!insertHeaderFooterPreset(doc, kind, preset)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
           resolveComment: (id, resolved) => {
             if (collabDocOp(() => ({ kind: "resolveComment", commentId: id, resolved, paraId: hex8() }))) return true;
             history.checkpoint();

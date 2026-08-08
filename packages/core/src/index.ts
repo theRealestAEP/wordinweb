@@ -272,7 +272,17 @@ export {
   setPageNumberFormat,
   pageNumberFormatAt,
 } from "./edit/sections.js";
-export type { BreakInsertion, CoverPageContent, LineNumberingPatch, PageNumberFormat, PageNumberFormatPatch } from "./edit/sections.js";
+export type { BreakInsertion, CoverPageContent, CoverPageLayout, LineNumberingPatch, PageNumberFormat, PageNumberFormatPatch } from "./edit/sections.js";
+export { COVER_PAGE_LAYOUTS } from "./edit/sections.js";
+export {
+  PAGE_NUMBER_POSITIONS,
+  PAGE_NUMBER_ALIGNMENTS,
+  insertPageNumberPosition,
+  removePageNumberFields,
+  HEADER_FOOTER_PRESETS,
+  insertHeaderFooterPreset,
+} from "./edit/hf-gallery.js";
+export type { PageNumberGalleryPosition, PageNumberGalleryAlign, HeaderFooterPreset } from "./edit/hf-gallery.js";
 export { documentTextStatistics } from "./word-count.js";
 export type { TextStatistics } from "./word-count.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";

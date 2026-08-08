@@ -17,6 +17,7 @@ import {
   type TabStopSpec,
   type TableBorderEdge,
   type TableBorderStyle,
+  type CoverPageLayout,
 } from "@wordinweb/core";
 import type { DocxViewApi } from "./index.js";
 import { HelpGuide } from "./help.js";
@@ -1898,6 +1899,24 @@ function HeaderFooterMenu({ api }: { api: DocxViewApi | null }) {
       groups={[
         { items: [["header", "Header"], ["footer", "Footer"]] },
         {
+          label: "Header presets",
+          items: [
+            ["hpreset:blank", "Blank"],
+            ["hpreset:centeredTitle", "Centered title"],
+            ["hpreset:titleAndDate", "Title and date"],
+            ["hpreset:threeColumn", "Three column"],
+          ],
+        },
+        {
+          label: "Footer presets",
+          items: [
+            ["fpreset:blank", "Blank"],
+            ["fpreset:centeredTitle", "Centered title"],
+            ["fpreset:titleAndDate", "Title and date"],
+            ["fpreset:threeColumn", "Three column"],
+          ],
+        },
+        {
           label: "Page setup",
           items: [
             ["first", `${first ? "✓ " : ""}Different first page`],
@@ -1909,6 +1928,11 @@ function HeaderFooterMenu({ api }: { api: DocxViewApi | null }) {
         if (value === "header" || value === "footer") api?.openHeaderFooter(value);
         else if (value === "first") api?.setDifferentFirstPage(!first);
         else if (value === "oddEven") api?.setOddEvenHeaders(!oddEven);
+        else if (value.startsWith("hpreset:")) {
+          api?.insertHeaderFooterPreset("header", value.slice(8) as Parameters<NonNullable<typeof api>["insertHeaderFooterPreset"]>[1]);
+        } else if (value.startsWith("fpreset:")) {
+          api?.insertHeaderFooterPreset("footer", value.slice(8) as Parameters<NonNullable<typeof api>["insertHeaderFooterPreset"]>[1]);
+        }
         force();
       }}
     />
@@ -1931,6 +1955,23 @@ function PageNumberMenu({ api }: { api: DocxViewApi | null }) {
         groups={[
           { items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] },
           {
+            label: "Top of page",
+            items: [
+              ["pos:top:left", "Left"],
+              ["pos:top:center", "Center"],
+              ["pos:top:right", "Right"],
+            ],
+          },
+          {
+            label: "Bottom of page",
+            items: [
+              ["pos:bottom:left", "Left"],
+              ["pos:bottom:center", "Center"],
+              ["pos:bottom:right", "Right"],
+            ],
+          },
+          { items: [["remove", "Remove page numbers"]] },
+          {
             label: "Number format",
             items: [
               ["fmt:decimal", `${mark("decimal")}1, 2, 3`],
@@ -1951,7 +1992,14 @@ function PageNumberMenu({ api }: { api: DocxViewApi | null }) {
         onPick={(value) => {
           if (value === "pn:page") api?.insertPageNumber("page");
           else if (value === "pn:pageof") api?.insertPageNumber("pageOfTotal");
-          else if (value.startsWith("fmt:")) {
+          else if (value === "remove") api?.removePageNumbers();
+          else if (value.startsWith("pos:")) {
+            const [, position, align] = value.split(":");
+            api?.insertPageNumberPosition(
+              position as Parameters<NonNullable<typeof api>["insertPageNumberPosition"]>[0],
+              align as Parameters<NonNullable<typeof api>["insertPageNumberPosition"]>[1],
+            );
+          } else if (value.startsWith("fmt:")) {
             api?.setPageNumberFormat({ fmt: value.slice(4) as Parameters<NonNullable<typeof api>["setPageNumberFormat"]>[0]["fmt"] });
           } else if (value === "start:continue") api?.setPageNumberFormat({ start: null });
           else if (value === "start:set") {
@@ -2660,11 +2708,18 @@ function ScreenshotButton({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+const COVER_PAGE_LAYOUT_LABELS: [CoverPageLayout, string][] = [
+  ["title", "Title"],
+  ["banner", "Banner"],
+  ["sidebar", "Sidebar"],
+];
+
 function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
   const [author, setAuthor] = useState("");
+  const [layout, setLayout] = useState<CoverPageLayout>("title");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
     if (!open) return;
@@ -2675,7 +2730,7 @@ function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const insert = () => {
-    if (!title.trim() || !api?.insertCoverPage({ title, subtitle, author })) return;
+    if (!title.trim() || !api?.insertCoverPage({ title, subtitle, author, layout })) return;
     setOpen(false);
     setTitle("");
     setSubtitle("");
@@ -2695,6 +2750,29 @@ function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
       <button title="Insert cover page" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Cover page</button>
       {open && (
         <div style={{ position: "absolute", top: 30, left: 0, zIndex: 100, width: 260, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div role="radiogroup" aria-label="Cover page design" style={{ display: "flex", gap: 4 }}>
+            {COVER_PAGE_LAYOUT_LABELS.map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={layout === value}
+                onClick={() => setLayout(value)}
+                style={{
+                  flex: 1,
+                  border: `1px solid ${layout === value ? T.accent : T.border}`,
+                  borderRadius: 6,
+                  padding: "5px 6px",
+                  background: layout === value ? T.accent : "transparent",
+                  color: layout === value ? T.accentFg : T.fg,
+                  cursor: "pointer",
+                  font: "12px system-ui, sans-serif",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           {input("Cover title", title, setTitle)}
           {input("Cover subtitle", subtitle, setSubtitle)}
           {input("Cover author", author, setAuthor)}
@@ -5579,6 +5657,8 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertEquation", feature: "equation" },
   { command: "insertSymbol", feature: "symbol" },
   { command: "insertPageNumber", feature: "pageNumber" },
+  // The position gallery lands in the same Page Number menu as insertPageNumber.
+  { command: "insertPageNumberPosition", feature: "pageNumber" },
   { command: "insertField", feature: "field" },
   // A table of contents IS a field, and it lands in the field group. It
   // emits like any other insert; the entry count rides in the payload so the
@@ -5601,6 +5681,8 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertBreak", feature: "break" },
   { command: "insertBlankPage", feature: "break" },
   { command: "insertCoverPage", feature: "coverPage" },
+  // The preset gallery lands in the Header & Footer menu, like openHeaderFooter.
+  { command: "insertHeaderFooterPreset", feature: "headerFooter" },
   // A watermark lands in the header parts rather than at the caret, so it
   // needs no addressable position — but it is an insert, and the rule the
   // list exists for applies to it unchanged.

@@ -733,7 +733,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertBlankPage` | Insert a blank page | `runRef` |
 | `insertSectionBreak` | Insert a section boundary | `runRef`, `breakType` |
 | `insertCrossRef` | Insert a bookmark reference | `runRef`, `bookmark`, `refKind` |
-| `insertCoverPage` | Insert a native cover page | `content` |
+| `insertCoverPage` | Insert a native cover page; `content.layout` picks the design (title / banner / sidebar), default "title" | `content` |
 | `insertWordArt` | Insert decorative WordArt. `preset` is a transform (`plain`, `archUp`, `archDown`, `wave`, `chevron`, `circle`, `button`, `chevronDown`); optional `style` is a gallery style `{ fill: "RRGGBB", outline?: { color: "RRGGBB", widthPt }, shadow?: boolean }` | `runRef`, `text`, `preset`; optional: `style` |
 | `insertChart` | Insert a chart and workbook | `runRef`, `chart` |
 | `insertSmartArt` | Insert a SmartArt diagram | `runRef`, `smartArt` |
@@ -866,6 +866,9 @@ the equation into something else.
 | `setTitlePage` | Toggle different-first-page headers and footers; enabling creates the empty first-page parts | `enabled` |
 | `setEvenOddHeaders` | Toggle different odd & even page headers and footers; enabling creates the empty even-page parts | `enabled` |
 | `setPageNumberFormat` | Set the page-number format (decimal, roman, letter) and/or the start-at value | optional: `fmt`, `start` |
+| `insertPageNumberPosition` | Insert a page number into the header (top) or footer (bottom), aligned left/center/right — the page-number position gallery | `position`, `align` |
+| `removePageNumbers` | Remove page-number fields from every header and footer part | (none) |
+| `insertHeaderFooterPreset` | Replace a header or footer's content with a preset layout: blank, centered title, title + date, or three-column | `hfKind`, `preset` |
 | `setHyphenation` | Set automatic-hyphenation settings: on/off, the hyphenation zone in points (null clears), keep-CAPS-whole. Round-trip state for Word's rendering; this engine's layout does not hyphenate | optional: `auto`, `zonePt`, `noCaps` |
 | `updateFields` | Write recomputed cached results into the document's fields, one per field in document order | `results` |
 | `createStyle` | Create a paragraph, character, table, or numbering style definition | `style` |

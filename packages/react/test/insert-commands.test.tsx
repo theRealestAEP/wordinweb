@@ -155,6 +155,7 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertEquation: (api) => api.insertEquation("a+b"),
   insertSymbol: (api) => api.insertSymbol("§"),
   insertPageNumber: (api) => api.insertPageNumber("page"),
+  insertPageNumberPosition: (api) => api.insertPageNumberPosition("top", "center"),
   insertField: (api) => api.insertField("AUTHOR", "me"),
   insertToc: (api) => api.insertToc(),
   // An explicit entry, because the blank mount has no selection to mark.
@@ -174,6 +175,7 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertBlankPage: (api) => api.insertBlankPage(),
   insertCoverPage: (api) => api.insertCoverPage({ title: "T", subtitle: "S", author: "A", date: "2026" } as never),
   insertWatermark: (api) => api.insertWatermark({ text: "DRAFT" }),
+  insertHeaderFooterPreset: (api) => api.insertHeaderFooterPreset("header", "blank"),
   addComment: (api) => api.addComment("note"),
   addFootnote: (api) => api.addFootnote("note"),
   addEndnote: (api) => api.addEndnote("note"),

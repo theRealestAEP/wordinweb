@@ -1,4 +1,4 @@
-import { CITATION_SOURCE_TYPES, CITATION_STYLES, knownShapeGeometryNames, registeredOperationCapabilities, STYLE_TYPES, TOC_LEADERS, type RegisteredOperationKind } from "@wordinweb/core";
+import { CITATION_SOURCE_TYPES, CITATION_STYLES, COVER_PAGE_LAYOUTS, HEADER_FOOTER_PRESETS, knownShapeGeometryNames, PAGE_NUMBER_ALIGNMENTS, PAGE_NUMBER_POSITIONS, registeredOperationCapabilities, STYLE_TYPES, TOC_LEADERS, type RegisteredOperationKind } from "@wordinweb/core";
 import { INTENT_KINDS, type Intent } from "@wordinweb/collab/client";
 
 export interface AgentEditCapability {
@@ -392,7 +392,10 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setDivider.divider": { anyOf: [paragraphDivider, { type: "null" }] },
   "setPageLayout.patch": pageLayoutPatch,
   "setLineNumbering.patch": lineNumberingPatch,
-  "insertCoverPage.content": closedObject({ title: string(1000, 1), subtitle: string(1000), author: string(500) }, ["title"]),
+  "insertCoverPage.content": closedObject(
+    { title: string(1000, 1), subtitle: string(1000), author: string(500), layout: { type: "string", enum: [...COVER_PAGE_LAYOUTS] } },
+    ["title"],
+  ),
   // Degrees on each axis. Unbounded because the mutation normalizes into
   // 0..360 itself, which is also why the registry's validate asks only that
   // each angle be finite.
@@ -571,6 +574,10 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "convertTableToText.separator": ["tab", "comma"],
   "setCitationStyle.style": [...CITATION_STYLES],
   "insertCaption.position": ["below", "above"],
+  "insertPageNumberPosition.position": [...PAGE_NUMBER_POSITIONS],
+  "insertPageNumberPosition.align": [...PAGE_NUMBER_ALIGNMENTS],
+  "insertHeaderFooterPreset.hfKind": ["header", "footer"],
+  "insertHeaderFooterPreset.preset": [...HEADER_FOOTER_PRESETS],
 };
 
 function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
