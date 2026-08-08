@@ -137,9 +137,12 @@ export function applyInsertSeparator(
 
 /** Result of applyDeleteSeparator: the mutation ran; `caret` is the position
  * at the removal point (null only when no text neighbors the separator —
- * the caller keeps its caret). */
+ * the caller keeps its caret). `removedRun` reports that an emptied
+ * separator-only run (and any emptied wrapper above it) was dropped, so the
+ * collab apply retires the dead ids. */
 export interface DeleteSeparatorResult {
   caret: { t: XmlElement; offset: number } | null;
+  removedRun?: boolean;
 }
 
 /**
@@ -180,7 +183,27 @@ export function applyDeleteSeparator(
   }
   if (prev && localName(prev.name) === "t") return { caret: { t: prev, offset: prev.text.length } };
   if (next && localName(next.name) === "t") return { caret: { t: next, offset: 0 } };
-  return { caret: null };
+  // A separator-only run (a format-split piece, or a loaded break-only run)
+  // EMPTIES when its separator leaves — drop the shell, and any run wrapper
+  // (w:ins/w:del) the drop empties in turn: lint forbids empty runs and
+  // empty revision markers, and no load path produces them. (50k-sweep
+  // finding: pending-format typing right after Shift+Enter splits the run
+  // around the break, so Backspace then removed the break out of a run that
+  // held nothing else.)
+  let removedRun = false;
+  let shell: XmlElement | undefined = parent;
+  while (
+    shell &&
+    ["r", "ins", "del"].includes(localName(shell.name)) &&
+    !shell.children.some((c) => localName(c.name) !== "rPr")
+  ) {
+    const up = doc.findParentOf(shell);
+    if (!up) break;
+    up.children.splice(up.children.indexOf(shell), 1);
+    removedRun = true;
+    shell = up;
+  }
+  return { caret: null, removedRun };
 }
 
 /** Result of a paragraph split: the two sibling paragraph elements and the

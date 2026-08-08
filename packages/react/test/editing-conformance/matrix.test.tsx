@@ -645,6 +645,24 @@ const CASES: CaseDef[] = [
     },
   },
   {
+    id: "backspace.soft-break-only-run",
+    contract:
+      "Backspace beside a soft break that sits ALONE in its run (a format-split piece) deletes the break and strands no empty run (50k-sweep find, seed 2)",
+    fixture: plainDoc,
+    run: async (ed) => {
+      await ed.caretAt("bravo", "start");
+      await ed.press("Enter", { shift: true }); // br lands BEFORE the text, same run
+      await ed.press("b", { meta: true }); // pending bold at the collapsed caret
+      await ed.type("i"); // consuming it splits the run: [br] piece + bold "i" + rest
+      await ed.press("Home"); // start of the line after the break
+      await ed.press("Backspace"); // deletes the BREAK out of its now-lone run
+    },
+    expectAfter: (ed) => {
+      expect(ed.text()).toBe("alpha one\nibravo two\ncharlie three");
+      expect(ed.xml()).not.toContain("<w:br");
+    },
+  },
+  {
     id: "backspace.tab-char",
     contract: "Backspace right after a typed tab character deletes the w:tab itself",
     fixture: plainDoc,

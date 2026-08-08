@@ -292,10 +292,15 @@ function applyIntentInner(
         return true;
       }
       // Plain: the separator element leaves the run and its two w:t halves
-      // join — the insert's exact inverse; no tracked node changes, and the
-      // paragraph is the whole blast radius.
-      if (!applyDeleteSeparator(doc, sepEl, ctx)) return false;
-      out.scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+      // join — the insert's exact inverse; the paragraph is the whole blast
+      // radius. Scope resolves BEFORE the mutation: an emptied
+      // separator-only run is dropped by the mutation, and its retired id
+      // is pruned.
+      const scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+      const res = applyDeleteSeparator(doc, sepEl, ctx);
+      if (!res) return false;
+      if (res.removedRun) ids.prune(doc.editableRoots());
+      out.scope = scope;
       return true;
     }
     case "deleteText": {

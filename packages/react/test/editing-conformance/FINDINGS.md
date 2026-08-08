@@ -259,3 +259,32 @@ boundary-selection attachment guard). Remaining allowed families:
 No listener threw, every periodic save/reload round-tripped, and undo
 returned the pre-sequence bytes (or the horizon, redo-exact) on every
 seed in both mounts.
+
+## Editor-residuals wave sweep (branch `editor-residuals`, 2,500 steps x seeds 1-10 x both modes)
+
+All 20 seed-runs green — 50,000 steps, zero hard violations, with the
+KNOWN_GAPS ledger EMPTY for the first time. The first full sweep at this
+state earned its keep: it caught an empty-run strand in the brand-new
+separator deletion (seeds 2 and 4, local — a soft break inserted at a
+paragraph start shares a run with the text; pending-format typing then
+SPLITS that run around the break, and deleting the break emptied the
+lone-separator run). Fixed inside applyDeleteSeparator (the emptied
+separator-only run — and any run wrapper it empties in turn — is
+dropped, and the collab apply prunes the retired ids), pinned as matrix
+case backspace.soft-break-only-run (verified load-bearing: it fails in
+both mounts with the unwinding disabled), then this clean rerun.
+Remaining allowed families:
+
+- G13 residual (char-wise deletes emptying ONE w:t beside populated
+  runs): 229-3,095 step-observations per seed-run — same band as the
+  previous wave.
+- I5-depth: exactly one per seed-run (2,500 steps exceed the designed
+  200-entry undo horizon; redo replayed byte-exactly every time).
+
+No listener threw, every periodic save/reload round-tripped, and undo
+returned the pre-sequence bytes (or the horizon, redo-exact) on every
+seed in both mounts. The new gesture surface this wave adds — cell-
+granular cross-cell deletes, block-level table deletion under
+select-all, separator deletion (the fuzzer's vocabulary already covers
+all three via shift-arrows, Cmd+A, Shift+Enter, and Backspace/Delete) —
+held every invariant across the sweep.
