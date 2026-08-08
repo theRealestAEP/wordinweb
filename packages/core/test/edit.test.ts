@@ -29,7 +29,7 @@ import { buildChartXml, insertChartAt, setChartData } from "../src/edit/charts.j
 import { buildSmartArtColorsXml, buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "../src/edit/smartart.js";
 import { insertEmbeddedObjectAt, insertModel3DAt, insertWebVideoAt } from "../src/edit/objects.js";
 import { buildOlePackage, extractOlePackage } from "../src/parse/ole.js";
-import { insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, listBookmarks, validBookmarkName } from "../src/edit/references.js";
+import { bookmarkTextTarget, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, listBookmarks, validBookmarkName } from "../src/edit/references.js";
 import { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf, isLinearSafe } from "../src/edit/math.js";
 import { XmlElement, localName } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
@@ -2228,7 +2228,8 @@ describe("find & replace / case", () => {
     expect(hits.length).toBe(2);
     expect(hits[0].ranges.length).toBeGreaterThan(1); // spans split runs
     const n = replaceAll(doc, "cat", "dog");
-    expect(n).toBe(2);
+    expect(n.total).toBe(2);
+    expect(n.byStory).toEqual({ body: 2 });
     expect(textOf(doc.sections[0].blocks[0] as Paragraph)).toBe("The dog sat on the dog mat");
   });
 
@@ -2248,6 +2249,88 @@ describe("find & replace / case", () => {
     const para = doc.sections[0].blocks[0] as Paragraph;
     const r = para.children[0];
     expect(r.type === "run" ? r.props.bold : true).toBeUndefined();
+  });
+});
+
+describe("find & replace depth (whole word, stories, cross-paragraph)", () => {
+  /** A document with matches in the body, a header, and a footnote. */
+  const storiesDoc = () =>
+    loadDoc(`${p("Body cat one")}${p("Second cat here")}`, {
+      "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+  <Relationship Id="rIdFn" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>
+</Relationships>`,
+      "[Content_Types].xml": `<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+  <Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>
+</Types>`,
+      "word/header1.xml": `<?xml version="1.0"?>
+<w:hdr ${W_NS}>${p("Header cat text")}</w:hdr>`,
+      "word/footnotes.xml": `<?xml version="1.0"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>
+  <w:footnote w:id="1"><w:p><w:r><w:t xml:space="preserve">Note cat text</w:t></w:r></w:p></w:footnote>
+</w:footnotes>`,
+    });
+
+  it("matches whole words only when asked", () => {
+    const doc = loadDoc(p("The cat concatenates cats"));
+    expect(findAll(doc, "cat").length).toBe(3);
+    expect(findAll(doc, "cat", { wholeWord: true }).length).toBe(1);
+    expect(findAll(doc, "Cat", { wholeWord: true, matchCase: true }).length).toBe(0);
+  });
+
+  it("finds in headers and footnotes with story labels", () => {
+    const doc = storiesDoc();
+    const hits = findAll(doc, "cat");
+    expect(hits.map((h) => h.story)).toEqual(["body", "body", "header", "footnote"]);
+  });
+
+  it("replaceAll reaches every story and reports counts per story", () => {
+    const doc = storiesDoc();
+    const result = replaceAll(doc, "cat", "dog");
+    expect(result.total).toBe(4);
+    expect(result.byStory).toEqual({ body: 2, header: 1, footnote: 1 });
+    const header = doc.headers.get("rId1")!.blocks[0] as Paragraph;
+    expect(textOf(header)).toBe("Header dog text");
+    const note = doc.footnotes.get(1)![0] as Paragraph;
+    expect(textOf(note)).toBe("Note dog text");
+    expect(findAll(doc, "cat").length).toBe(0);
+  });
+
+  it("a query containing \\n matches across the paragraph boundary", () => {
+    const doc = loadDoc(`${p("one two")}${p("three four")}`);
+    expect(findAll(doc, "two three").length).toBe(0); // space is not a paragraph mark
+    const hits = findAll(doc, "two\nthree");
+    expect(hits.length).toBe(1);
+    // The ranges cover both paragraphs' text (the mark itself has no w:t).
+    const owners = new Set(hits[0].ranges.map((r) => r.t));
+    expect(owners.size).toBe(2);
+    // Replacing keeps the paragraph mark: only the text is replaced.
+    const result = replaceAll(doc, "two\nthree", "X");
+    expect(result.total).toBe(1);
+    expect(doc.sections[0].blocks.length).toBe(2);
+    expect(textOf(doc.sections[0].blocks[0] as Paragraph)).toBe("one X");
+    expect(textOf(doc.sections[0].blocks[1] as Paragraph)).toBe(" four");
+  });
+
+  it("bookmarkTextTarget resolves Go To positions", () => {
+    const doc = loadDoc(
+      `${p("Alpha")}<w:bookmarkStart w:id="1" w:name="mid"/><w:bookmarkEnd w:id="1"/>${p("Beta")}<w:bookmarkStart w:id="2" w:name="tail"/><w:bookmarkEnd w:id="2"/>`,
+    );
+    const mid = bookmarkTextTarget(doc, "mid")!;
+    expect(mid.t.text).toBe("Beta");
+    expect(mid.offset).toBe(0);
+    // A bookmark after the last text lands at the end of the text before it.
+    const tail = bookmarkTextTarget(doc, "tail")!;
+    expect(tail.t.text).toBe("Beta");
+    expect(tail.offset).toBe(4);
+    expect(bookmarkTextTarget(doc, "missing")).toBeNull();
   });
 });
 

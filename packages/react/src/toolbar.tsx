@@ -4210,12 +4210,22 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
   );
 }
 
+/** Match-count status suffix: per-story breakdown when replacements landed
+ * outside the body ("2 in headers, 1 in footnotes"). */
+const FIND_STORY_LABELS: Record<string, string> = {
+  body: "body", header: "headers", footer: "footers", footnote: "footnotes", endnote: "endnotes",
+};
+
 /** Find & Replace popover: find selects the first match and reports the
- * count; replace-all reports how many replacements were applied. */
+ * count; replace-all reports how many replacements were applied, per story.
+ * The Go To row jumps to a page number or a named bookmark. */
 function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [replacement, setReplacement] = useState("");
+  const [matchCase, setMatchCase] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
+  const [gotoPage, setGotoPage] = useState("");
   const [status, setStatus] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -4228,14 +4238,27 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
+  const opts = { matchCase, wholeWord };
   const runFind = () => {
-    const n = api?.find(query) ?? 0;
+    const n = api?.find(query, opts) ?? 0;
     setStatus(n === 1 ? "1 match" : `${n} matches`);
   };
   const runReplaceAll = () => {
-    const n = api?.replaceAll(query, replacement) ?? 0;
-    setStatus(n === 1 ? "Replaced 1 match" : `Replaced ${n} matches`);
+    const result = api?.replaceAll(query, replacement, opts);
+    if (!result) return;
+    const head = result.total === 1 ? "Replaced 1 match" : `Replaced ${result.total} matches`;
+    const stories = Object.entries(result.byStory);
+    const breakdown = stories
+      .map(([story, n]) => `${n} in ${FIND_STORY_LABELS[story] ?? story}`)
+      .join(", ");
+    setStatus(stories.length > 1 || (stories.length === 1 && stories[0][0] !== "body") ? `${head} (${breakdown})` : head);
   };
+  const runGoToPage = () => {
+    const n = Number.parseInt(gotoPage, 10);
+    if (!Number.isInteger(n) || n < 1) return;
+    setStatus(api?.goToPage(n) ? `Page ${n}` : `No page ${n}`);
+  };
+  const bookmarks = open ? api?.listBookmarks() ?? [] : [];
   const field: React.CSSProperties = {
     width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`,
     borderRadius: 6, padding: 6, font: "13px system-ui, sans-serif", outline: "none",
@@ -4273,10 +4296,52 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
             onChange={(e) => setReplacement(e.target.value)}
             style={field}
           />
+          <div style={{ display: "flex", gap: 10 }}>
+            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
+              <input type="checkbox" checked={matchCase} onChange={(e) => setMatchCase(e.target.checked)} />
+              Match case
+            </label>
+            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
+              <input type="checkbox" checked={wholeWord} onChange={(e) => setWholeWord(e.target.checked)} />
+              Whole word
+            </label>
+          </div>
           {status && <div data-dxw-find-status="" style={{ color: T.muted, fontSize: 12 }}>{status}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
             <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} disabled={!query} onClick={runFind}>Find</button>
             <button style={pillBtn} disabled={!query} onClick={runReplaceAll}>Replace all</button>
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", borderTop: `1px solid ${T.border}`, paddingTop: 6 }}>
+            <input
+              aria-label="Go to page"
+              placeholder="Page…"
+              inputMode="numeric"
+              value={gotoPage}
+              onChange={(e) => setGotoPage(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  runGoToPage();
+                }
+              }}
+              style={{ ...field, width: 64 }}
+            />
+            <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} disabled={!gotoPage} onClick={runGoToPage}>Go</button>
+            <select
+              aria-label="Go to bookmark"
+              value=""
+              disabled={bookmarks.length === 0}
+              onChange={(e) => {
+                const name = e.target.value;
+                if (name) setStatus(api?.goToBookmark(name) ? `Bookmark ${name}` : `Bookmark ${name} not found`);
+              }}
+              style={{ flex: 1, minWidth: 0, border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 4px", background: T.popoverBg, color: T.fg, font: "12px system-ui, sans-serif" }}
+            >
+              <option value="">Bookmark…</option>
+              {bookmarks.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
           </div>
         </div>
       )}

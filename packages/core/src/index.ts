@@ -181,7 +181,7 @@ export type { SmartArtTextFormat } from "./edit/smartart.js";
 export { insertModel3DAt, setModel3DRotation, insertWebVideoAt, insertEmbeddedObjectAt, normalizeWebVideoUrl } from "./edit/objects.js";
 export type { Model3DInsert, Model3DRotation, WebVideoInsert, EmbeddedObjectInsert } from "./edit/objects.js";
 export { buildOlePackage, extractOlePackage } from "./parse/ole.js";
-export { validBookmarkName, listBookmarks, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference } from "./edit/references.js";
+export { validBookmarkName, listBookmarks, bookmarkTextTarget, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference } from "./edit/references.js";
 export {
   deleteWatermark,
   headerWatermarks,
@@ -207,7 +207,7 @@ export { sectPrAt, sectionContextAt, insertBreakAt, insertBlankPageAt, insertCov
 export type { BreakInsertion, CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages, buildPrintHtml } from "./render/dom.js";
-export type { FindMatch } from "./edit/find.js";
+export type { FindMatch, FindOptions, FindStory, ReplaceAllResult } from "./edit/find.js";
 export { cellShadingAt } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";
 export {

@@ -37,6 +37,46 @@ export function listBookmarks(doc: DocxDocument): string[] {
   return names;
 }
 
+/**
+ * Where Go To should land for a named bookmark: the first w:t after the
+ * bookmark's start marker in document order (offset 0), or — for a bookmark
+ * with nothing textual after it — the last w:t before the marker (at its
+ * end). Null when the bookmark does not exist or its part holds no text.
+ */
+export function bookmarkTextTarget(
+  doc: DocxDocument,
+  name: string,
+): { t: XmlElement; offset: number } | null {
+  for (const root of doc.editableRoots()) {
+    let seen = false;
+    let lastBefore: XmlElement | null = null;
+    let firstAfter: XmlElement | null = null;
+    const visit = (node: XmlElement): void => {
+      if (firstAfter) return;
+      if (localName(node.name) === "bookmarkStart" && attr(node, "name") === name) seen = true;
+      else if (localName(node.name) === "t") {
+        if (seen) {
+          firstAfter = node;
+          return;
+        }
+        lastBefore = node;
+      }
+      for (const child of node.children) visit(child);
+    };
+    visit(root);
+    if (firstAfter) {
+      const t: XmlElement = firstAfter;
+      return { t, offset: 0 };
+    }
+    if (seen && lastBefore) {
+      const t: XmlElement = lastBefore;
+      return { t, offset: t.text.length };
+    }
+    if (seen) return null;
+  }
+  return null;
+}
+
 function nextBookmarkId(doc: DocxDocument): string {
   let next = 0;
   for (const root of doc.editableRoots()) {

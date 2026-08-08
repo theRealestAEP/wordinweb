@@ -21,7 +21,10 @@ function reviewApi() {
     acceptRevisionAtCaret: vi.fn(() => true),
     acceptAllRevisions: vi.fn(() => 2),
     rejectAllRevisions: vi.fn(() => 2),
-    replaceAll: vi.fn(() => 3),
+    find: vi.fn(() => 2),
+    replaceAll: vi.fn(() => ({ total: 3, byStory: { body: 2, header: 1 } })),
+    goToPage: vi.fn(() => true),
+    goToBookmark: vi.fn(() => true),
   };
   const methods = {
     ...spies,
@@ -34,6 +37,7 @@ function reviewApi() {
     getListType: () => null,
     listParagraphStyles: () => [],
     listStyles: () => [],
+    listBookmarks: () => ["alpha"],
     imageAccept: () => "image/png,image/jpeg",
   };
   const api = new Proxy(methods, {
@@ -130,7 +134,7 @@ describe("the Review tab", () => {
     await t.unmount();
   });
 
-  it("Replace all reports how many replacements applied", async () => {
+  it("Replace all reports how many replacements applied, per story", async () => {
     const t = await mountToolbar();
     await openReviewTab(t);
     await click(button(t.container, "Find & replace")!);
@@ -146,8 +150,57 @@ describe("the Review tab", () => {
     const replaceAll = [...t.container.querySelectorAll<HTMLButtonElement>("button")]
       .find((b) => b.textContent === "Replace all");
     await click(replaceAll!);
-    expect(t.replaceAll).toHaveBeenCalledWith("cat", "dog");
-    expect(t.container.querySelector("[data-dxw-find-status]")?.textContent).toBe("Replaced 3 matches");
+    expect(t.replaceAll).toHaveBeenCalledWith("cat", "dog", { matchCase: false, wholeWord: false });
+    expect(t.container.querySelector("[data-dxw-find-status]")?.textContent).toBe(
+      "Replaced 3 matches (2 in body, 1 in headers)",
+    );
+    await t.unmount();
+  });
+
+  it("the match-case and whole-word checkboxes ride the find call", async () => {
+    const t = await mountToolbar();
+    await openReviewTab(t);
+    await click(button(t.container, "Find & replace")!);
+    const find = t.container.querySelector<HTMLInputElement>('input[aria-label="Find text"]')!;
+    await act(async () => {
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      set.call(find, "Cat");
+      find.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const boxes = [...t.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+    const byLabel = (text: string) =>
+      boxes.find((b) => b.closest("label")?.textContent?.includes(text))!;
+    await click(byLabel("Match case"));
+    await click(byLabel("Whole word"));
+    const findBtn = [...t.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((b) => b.textContent === "Find");
+    await click(findBtn!);
+    expect(t.find).toHaveBeenCalledWith("Cat", { matchCase: true, wholeWord: true });
+    await t.unmount();
+  });
+
+  it("the Go To row jumps to a page and to a bookmark", async () => {
+    const t = await mountToolbar();
+    await openReviewTab(t);
+    await click(button(t.container, "Find & replace")!);
+    const page = t.container.querySelector<HTMLInputElement>('input[aria-label="Go to page"]')!;
+    await act(async () => {
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      set.call(page, "3");
+      page.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const go = [...t.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((b) => b.textContent === "Go");
+    await click(go!);
+    expect(t.goToPage).toHaveBeenCalledWith(3);
+    expect(t.container.querySelector("[data-dxw-find-status]")?.textContent).toBe("Page 3");
+    const select = t.container.querySelector<HTMLSelectElement>('select[aria-label="Go to bookmark"]')!;
+    await act(async () => {
+      const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
+      set.call(select, "alpha");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(t.goToBookmark).toHaveBeenCalledWith("alpha");
     await t.unmount();
   });
 });

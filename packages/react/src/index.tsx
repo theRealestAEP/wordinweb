@@ -62,6 +62,7 @@ import {
   insertDateTimeField,
   insertPageField,
   listBookmarks,
+  bookmarkTextTarget,
   insertBookmarkAroundSelection,
   insertBookmarkAt,
   insertCrossReference,
@@ -95,6 +96,8 @@ import {
   type SelectedObjectCommand,
   type SelectedObjectKind,
   type ParagraphDivider,
+  type FindOptions,
+  type ReplaceAllResult,
   type ChartData,
   type SmartArtData,
   type SmartArtTextFormat,
@@ -364,14 +367,19 @@ export interface DocxViewApi {
   clearFormatting(): void;
   /** Change the selection's case. */
   changeCase(mode: "upper" | "lower" | "title"): void;
-  /** Find matches for a query; selects the first and returns the count. */
-  find(query: string, opts?: { matchCase?: boolean }): number;
+  /** Find matches for a query across every story (body, headers, footers,
+   * footnotes, endnotes); selects the first and returns the count. */
+  find(query: string, opts?: FindOptions): number;
   /** Select the next/previous match; returns 1-based index or 0. */
   findStep(delta: 1 | -1): number;
   /** Replace the current match; returns remaining match count. */
   replaceCurrent(replacement: string): number;
-  /** Replace every match; returns how many were replaced. */
-  replaceAll(query: string, replacement: string): number;
+  /** Replace every match; reports how many were replaced, per story. */
+  replaceAll(query: string, replacement: string, opts?: FindOptions): ReplaceAllResult;
+  /** Go To: scroll the given 1-based page into view. */
+  goToPage(page: number): boolean;
+  /** Go To: move the caret to a named bookmark and scroll it into view. */
+  goToBookmark(name: string): boolean;
   /** Paragraph styles for the style menu (declared + Word built-ins). */
   listParagraphStyles(): { id: string; name: string }[];
   /** pStyle id of the caret paragraph (null = Normal). */
@@ -2494,12 +2502,34 @@ export function DocxView({
             if (findState.matches.length > 0) selectMatch(findState.index);
             return findState.matches.length;
           },
-          replaceAll: (query, replacement) => {
+          replaceAll: (query, replacement, opts) => {
             history.checkpoint();
-            const n = replaceAll(doc, query, replacement);
-            if (n > 0) pages = rerender(doc);
+            const result = replaceAll(doc, query, replacement, opts);
+            if (result.total > 0) pages = rerender(doc);
             findState = { matches: [], index: 0 };
-            return n;
+            return result;
+          },
+          goToPage: (page) => {
+            if (!handle) return false;
+            // A far page may be virtualized out: mount all pages, scroll,
+            // restore the window — find navigation's pattern (selectMatch).
+            const restore = handle._virtualized ? handle.materializeAll?.() : undefined;
+            const el = handle.root.querySelectorAll<HTMLElement>(".dxw-page")[page - 1];
+            el?.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+            restore?.();
+            handle.updateViewport?.();
+            return !!el;
+          },
+          goToBookmark: (name) => {
+            const target = bookmarkTextTarget(doc, name);
+            if (!target || !handle) return false;
+            const restore = handle._virtualized ? handle.materializeAll?.() : undefined;
+            editor?.selectRanges([{ t: target.t, start: target.offset, end: target.offset }]);
+            const el = handle.bindingsByText.get(target.t)?.[0]?.el;
+            el?.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+            restore?.();
+            handle.updateViewport?.();
+            return !!el;
           },
           toggleList: (kind) => {
             const caret = editor?.getCaretTarget();
