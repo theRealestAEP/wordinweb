@@ -133,8 +133,8 @@ export {
 } from "./edit/numbering.js";
 export type { LevelPatch, NumberFormat } from "./edit/numbering.js";
 export { setLink, removeLink, linkAt } from "./edit/links.js";
-export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpacing, setDropCapAt, setTabStops, tabStopsAt, MAX_TAB_STOP_PT, TAB_STOP_ALIGNMENTS, TAB_STOP_LEADERS } from "./edit/paragraph.js";
-export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode, TabStopSpec } from "./edit/paragraph.js";
+export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpacing, setDropCapAt, setTabStops, tabStopsAt, MAX_TAB_STOP_PT, TAB_STOP_ALIGNMENTS, TAB_STOP_LEADERS, PARAGRAPH_BORDER_EDGES, paragraphBordersAt, setParagraphBorders } from "./edit/paragraph.js";
+export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode, TabStopSpec, ParagraphBorderEdge, ParagraphBordersPatch } from "./edit/paragraph.js";
 export { compileReplaceAll, compileReplaceMatch, findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertEndnote, insertFootnote } from "./edit/notes.js";

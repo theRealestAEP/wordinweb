@@ -56,6 +56,10 @@ import {
   setTabStops,
   tabStopsAt,
   type TabStopSpec,
+  setParagraphBorders,
+  paragraphBordersAt,
+  type ParagraphBorderEdge,
+  type ParagraphBordersPatch,
   setDropCapAt,
   transformCase,
   exactLineHeightAt,
@@ -397,6 +401,12 @@ export interface DocxViewApi {
   setTabStops(stops: TabStopSpec[]): boolean;
   /** Direct tab stops on the caret paragraph, sorted by position. */
   getTabStops(): TabStopSpec[];
+  /** Patch the selected paragraphs' border edges (w:pBdr) and/or shading
+   * fill (w:shd). Each named edge is set (spec) or cleared (null); absent
+   * edges stay. `shading: null` removes the fill. */
+  setParagraphBorders(patch: ParagraphBordersPatch): boolean;
+  /** Direct borders and shading on the caret paragraph. */
+  getParagraphBorders(): { borders: Partial<Record<ParagraphBorderEdge, TableBorderSpec>>; shading: string | null };
   /** Apply or remove a native Word drop cap on the caret paragraph. */
   setDropCap(mode: "drop" | "margin" | null, lines?: number): boolean;
   /** Remove direct character formatting from the selection. */
@@ -2710,6 +2720,26 @@ export function DocxView({
           getTabStops: () => {
             const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
             return target ? tabStopsAt(doc, target) : [];
+          },
+          setParagraphBorders: (patch) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const caret = editor?.getCaretTarget();
+            const targets = segs.length > 0
+              ? segs.map((segment) => segment.t).filter((target): target is NonNullable<typeof target> => !!target)
+              : caret
+                ? [caret.t]
+                : [];
+            if (targets.length === 0) return false;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => operationBody("setParagraphBorders", blockId, { patch, suggest }) as never)) return true;
+            history.checkpoint();
+            if (!setParagraphBorders(doc, targets, patch, suggestMeta(doc, suggest))) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          getParagraphBorders: () => {
+            const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
+            return target ? paragraphBordersAt(doc, target) : { borders: {}, shading: null };
           },
           setDropCap: (mode, lines = 3) => {
             if (collabOp((a, ids) => ({ kind: "setDropCap", blockId: a.blockId, mode, nodeIds: ids(8) }))) return true;

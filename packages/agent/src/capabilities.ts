@@ -423,6 +423,37 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setNumberingLevel.ilvl": { anyOf: [integer(0, 8), { type: "null" }] },
   "setNumberingLevel.patch": numberingLevelPatch,
   "setNumberingRestart.start": { anyOf: [integer(0, 32767), { type: "null" }] },
+  // The registry's own validate is the wire authority (edge/style/range caps).
+  "setParagraphBorders.patch": {
+    type: "object",
+    properties: {
+      borders: {
+        type: "object",
+        additionalProperties: false,
+        properties: Object.fromEntries(
+          ["top", "left", "bottom", "right", "between", "bar"].map((edge) => [
+            edge,
+            {
+              anyOf: [
+                closedObject(
+                  {
+                    style: { enum: ["single", "thick", "double", "dotted", "dashed", "dotDash", "dotDotDash", "thinThickSmallGap", "triple", "wave", "none"] },
+                    sz: number(1, 96),
+                    color: { type: "string" },
+                    space: number(0, 31),
+                  },
+                  ["style"],
+                ),
+                { type: "null" },
+              ],
+            },
+          ]),
+        ),
+      },
+      shading: { anyOf: [{ type: "string", pattern: "^#?[0-9A-Fa-f]{6}$" }, { type: "null" }] },
+    },
+    additionalProperties: false,
+  },
   // The registry's own validate is the wire authority (count and range caps).
   "setTabStops.stops": {
     type: "array",

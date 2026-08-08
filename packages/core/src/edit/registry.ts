@@ -33,9 +33,12 @@ import {
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
 import {
   MAX_TAB_STOP_PT,
+  PARAGRAPH_BORDER_EDGES,
   TAB_STOP_ALIGNMENTS,
   TAB_STOP_LEADERS,
+  setParagraphBorders,
   setTabStops,
+  type ParagraphBordersPatch,
   type TabStopSpec,
 } from "./paragraph.js";
 import {
@@ -868,6 +871,43 @@ function cellAnchor(target: OperationTarget): XmlElement | null {
 
 
 /** Set or clear per-edge borders on one cell or on the whole table. */
+const HEX_FILL = /^#?[0-9A-Fa-f]{6}$/;
+
+/** Patch a paragraph's DIRECT borders (per edge, w:pBdr §17.3.1.24) and/or
+ * shading fill (w:shd §17.3.1.31). Position-stable (pPr only) — transform
+ * identity; with `suggest` the paragraph records a w:pPrChange. */
+const setParagraphBordersOperation = defineOperation<{
+  blockId: StableId;
+  patch: ParagraphBordersPatch;
+} & SuggestablePayload>()({
+  kind: "setParagraphBorders",
+  address: "block",
+  category: "paragraph",
+  description: "Set or clear the paragraph's border edges and shading fill.",
+  fields: [{ name: "patch" }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const patch = payload.patch;
+    if (!patch || typeof patch !== "object") return "setParagraphBorders: bad patch";
+    const edges = Object.entries(patch.borders ?? {});
+    if (edges.length === 0 && patch.shading === undefined) return "setParagraphBorders: empty patch";
+    for (const [edge, spec] of edges) {
+      if (!(PARAGRAPH_BORDER_EDGES as readonly string[]).includes(edge)) return "setParagraphBorders: bad edge";
+      if (spec === null) continue;
+      if (!spec || typeof spec !== "object") return "setParagraphBorders: bad border";
+      if (!(TABLE_BORDER_STYLES as readonly string[]).includes(spec.style)) return "setParagraphBorders: bad style";
+      if (spec.sz !== undefined && (typeof spec.sz !== "number" || spec.sz < 1 || spec.sz > 96)) return "setParagraphBorders: bad sz";
+      if (spec.space !== undefined && (typeof spec.space !== "number" || spec.space < 0 || spec.space > 31)) return "setParagraphBorders: bad space";
+      if (spec.color !== undefined && !(spec.color === "auto" || HEX_FILL.test(spec.color))) return "setParagraphBorders: bad color";
+    }
+    if (patch.shading !== undefined && patch.shading !== null && !HEX_FILL.test(patch.shading)) {
+      return "setParagraphBorders: bad shading";
+    }
+    return badSuggest("setParagraphBorders", payload);
+  },
+  apply: ({ doc, target, payload }) =>
+    setParagraphBorders(doc, [target.t ?? target.el], payload.patch, suggestMeta(doc, payload.suggest)),
+});
+
 /** Replace a paragraph's DIRECT tab stops (w:tabs, §17.3.1.38). An empty
  * list removes the element so style stops and the default grid apply again.
  * Position-stable (pPr only), so the transform is identity; with `suggest`
@@ -1618,6 +1658,7 @@ const OPERATIONS = [
   deleteStyleOperation,
   setNumberingLevelOperation,
   setNumberingRestartOperation,
+  setParagraphBordersOperation,
   setTabStopsOperation,
   setTableBordersOperation,
   setTableStyleOperation,

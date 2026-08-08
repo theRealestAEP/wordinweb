@@ -699,6 +699,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `setNumberingLevel` | Change a list level's number format, label text, or indent | `blockRef`, `ilvl`, `patch` |
 | `setNumberingRestart` | Restart list numbering here, or continue the preceding list | `blockRef`, `start` |
 | `setTabStops` | Replace the paragraph's tab stops (position, alignment, leader); an empty list removes them | `blockRef`, `stops`; optional: `suggest` |
+| `setParagraphBorders` | Set or clear the paragraph's border edges and shading fill | `blockRef`, `patch`; optional: `suggest` |
 
 ### Review
 

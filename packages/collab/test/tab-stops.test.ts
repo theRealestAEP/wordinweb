@@ -92,3 +92,52 @@ describe("setTabStops on the wire (registered operation)", () => {
     expect(validateIntent({ kind: "setTabStops", blockId: 1, stops: [{ posPt: 10, align: "left", leader: "none" }], ...base } as Intent)).toBeNull();
   });
 });
+
+describe("setParagraphBorders on the wire (registered operation)", () => {
+  it("applies on every replica byte-identically", () => {
+    const initial = docBytes(["one", "two"]);
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const a = new ClientReplica(initial);
+    const b = new ClientReplica(initial);
+    const rule = { style: "single" as const, sz: 4, color: "auto" };
+
+    const set: Intent = {
+      ...operationBody("setParagraphBorders", blockIdOf(server, 0), {
+        patch: { borders: { top: rule, bottom: rule, left: rule, right: rule }, shading: "FFF2CC" },
+      }),
+      clientId: "a", clientSeq: 1, base: 0,
+    } as Intent;
+    a.submitLocal(set);
+    const e1 = server.submit(set);
+    a.receive([e1]);
+    b.receive([e1]);
+
+    const serverXml = serializeXml(server.doc.docRoot);
+    expect(serializeXml(a.doc.docRoot)).toBe(serverXml);
+    expect(serializeXml(b.doc.docRoot)).toBe(serverXml);
+    expect(serverXml).toContain("<w:pBdr>");
+    expect(serverXml).toContain(`w:fill="FFF2CC"`);
+
+    const clear: Intent = {
+      ...operationBody("setParagraphBorders", blockIdOf(server, 0), {
+        patch: { borders: { top: null, bottom: null, left: null, right: null }, shading: null },
+      }),
+      clientId: "b", clientSeq: 1, base: server.seq,
+    } as Intent;
+    b.submitLocal(clear);
+    const e2 = server.submit(clear);
+    a.receive([e2]);
+    b.receive([e2]);
+    expect(serializeXml(a.doc.docRoot)).toBe(serializeXml(server.doc.docRoot));
+    expect(serializeXml(server.doc.docRoot)).not.toContain("pBdr");
+  });
+
+  it("rejects malformed payloads at validation", async () => {
+    const { validateIntent } = await import("../src/validate.js");
+    const base = { clientId: "a", clientSeq: 1, base: 0 };
+    expect(validateIntent({ kind: "setParagraphBorders", blockId: 1, patch: {}, ...base } as Intent)).toContain("empty patch");
+    expect(validateIntent({ kind: "setParagraphBorders", blockId: 1, patch: { borders: { diag: { style: "single" } } }, ...base } as Intent)).toContain("bad edge");
+    expect(validateIntent({ kind: "setParagraphBorders", blockId: 1, patch: { shading: "not-a-color" }, ...base } as Intent)).toContain("bad shading");
+    expect(validateIntent({ kind: "setParagraphBorders", blockId: 1, patch: { borders: { top: { style: "single" } } }, ...base } as Intent)).toBeNull();
+  });
+});

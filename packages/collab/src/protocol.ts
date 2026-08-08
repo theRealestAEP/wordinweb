@@ -111,9 +111,11 @@ export interface SealedCheckpoint {
  *       operations sortTableRows, convertTextToTable and convertTableToText.
  *       An e15 peer rejects the very intents an e16 peer applies — fork on
  *       the first merged cell, row sort, or conversion.
- *   e17 paragraph/references depth wave: new registered operation
- *       setTabStops (direct w:tabs editing). An e16 peer rejects the very
- *       intents an e17 peer applies — fork on the first tab-stop edit.
+ *   e17 paragraph/references depth wave: new registered operations
+ *       setTabStops (direct w:tabs editing) and setParagraphBorders
+ *       (per-edge w:pBdr + w:shd fill). An e16 peer rejects the very
+ *       intents an e17 peer applies — fork on the first tab-stop or
+ *       paragraph-border edit.
  */
 export const ENGINE_VERSION = "e17";
 
