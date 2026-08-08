@@ -376,6 +376,98 @@ export function setEvenOddHeaders(doc: DocxDocument, enabled: boolean): boolean 
   return true;
 }
 
+// ---------- page number format (w:pgNumType) ----------
+
+/** The w:pgNumType number formats the layout engine paints (its PAGE_FMT
+ * table); the editable subset of ST_NumberFormat (ECMA-376 §17.18.59). */
+export const PAGE_NUMBER_FORMATS = [
+  "decimal", "lowerRoman", "upperRoman", "lowerLetter", "upperLetter",
+] as const;
+
+export type PageNumberFormat = (typeof PAGE_NUMBER_FORMATS)[number];
+
+export interface PageNumberFormatPatch {
+  /** w:pgNumType@fmt. null removes the attribute (back to decimal). */
+  fmt?: PageNumberFormat | null;
+  /** w:pgNumType@start. null removes it (numbering continues from the
+   * previous section, the OOXML default). */
+  start?: number | null;
+}
+
+/** Current w:pgNumType settings for the section governing `t`. */
+export function pageNumberFormatAt(
+  doc: DocxDocument,
+  t: XmlElement,
+): { fmt: PageNumberFormat; start: number | null } {
+  const sectPr = sectPrAt(doc, t);
+  const pg = sectPr?.children.find((c) => localName(c.name) === "pgNumType");
+  const fmt = pg ? attr(pg, "fmt") : undefined;
+  const start = pg ? attr(pg, "start") : undefined;
+  return {
+    fmt: (PAGE_NUMBER_FORMATS as readonly string[]).includes(fmt ?? "") ? (fmt as PageNumberFormat) : "decimal",
+    start: start !== undefined && Number.isFinite(parseInt(start, 10)) ? parseInt(start, 10) : null,
+  };
+}
+
+/**
+ * Set the page-number format and/or start-at value (w:pgNumType,
+ * ECMA-376 §17.6.12). With `target` (a sectPr) only that section changes;
+ * otherwise every section in the document updates. An attribute set to null
+ * is removed; a w:pgNumType left with no attributes is removed entirely.
+ * False when nothing changed.
+ */
+export function setPageNumberFormat(
+  doc: DocxDocument,
+  patch: PageNumberFormatPatch,
+  target?: XmlElement,
+): boolean {
+  let sectPrs = target ? [target] : allSectPrs(doc);
+  if (sectPrs.length === 0 && !target) {
+    // sectPr-less minimal doc: materialize the default body section (see
+    // setLineNumbering) so the control isn't a dead no-op.
+    const root = doc.editableRoots()[0];
+    const body = root && (localName(root.name) === "body"
+      ? root
+      : root.children.find((c) => localName(c.name) === "body"));
+    if (body) {
+      const w = prefixOf(body) || "w:";
+      const created: XmlElement = { name: `${w}sectPr`, attrs: {}, children: [], text: "" };
+      body.children.push(created);
+      sectPrs = [created];
+    }
+  }
+  if (sectPrs.length === 0) return false;
+  let changed = false;
+  for (const sectPr of sectPrs) {
+    const w = prefixOf(sectPr) || "w:";
+    let pg = sectPr.children.find((c) => localName(c.name) === "pgNumType");
+    const setA = (local: string, v: string | null) => {
+      if (!pg) {
+        if (v === null) return;
+        pg = el(`${w}pgNumType`);
+        insertInOrder(sectPr, pg);
+      }
+      const key = Object.keys(pg.attrs).find((k) => localName(k) === local) ?? `${w}${local}`;
+      if (v === null) {
+        if (key in pg.attrs) {
+          delete pg.attrs[key];
+          changed = true;
+        }
+      } else if (pg.attrs[key] !== v) {
+        pg.attrs[key] = v;
+        changed = true;
+      }
+    };
+    if (patch.fmt !== undefined) setA("fmt", patch.fmt === "decimal" ? null : patch.fmt);
+    if (patch.start !== undefined) setA("start", patch.start === null ? null : String(patch.start));
+    if (pg && Object.keys(pg.attrs).length === 0) {
+      sectPr.children = sectPr.children.filter((c) => c !== pg);
+    }
+  }
+  if (changed) doc.refresh();
+  return changed;
+}
+
 export interface LineNumberingPatch {
   /** Turn margin line numbering on/off for the target section(s). */
   enabled: boolean;

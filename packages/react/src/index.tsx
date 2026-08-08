@@ -87,6 +87,10 @@ import {
   setTitlePage,
   titlePageEnabled,
   setEvenOddHeaders,
+  setPageNumberFormat,
+  pageNumberFormatAt,
+  type PageNumberFormat,
+  type PageNumberFormatPatch,
   type XmlElement,
   type EncodedCaret,
   type ShapePreset,
@@ -437,6 +441,12 @@ export interface DocxViewApi {
    * Enabling creates the empty even-page header/footer parts. */
   setOddEvenHeaders(on: boolean): boolean;
   getOddEvenHeaders(): boolean;
+  /** Page-number format and start-at (w:pgNumType): decimal / roman / letter
+   * numbering, restart value. scope "section" targets the caret's section;
+   * "document" (and any shared document) every section. */
+  setPageNumberFormat(patch: PageNumberFormatPatch, scope?: "document" | "section"): boolean;
+  /** Current page-number settings for the caret's section. */
+  getPageNumberFormat(): { fmt: PageNumberFormat; start: number | null };
   /** Effective formatting of the current selection (toolbar state), or null. */
   getSelectionFormat(): SelectionFormat | null;
   /** Print the rendered pages (browser print dialog / save as PDF). */
@@ -2359,6 +2369,25 @@ export function DocxView({
             return true;
           },
           getOddEvenHeaders: () => doc.evenAndOddHeaders,
+          setPageNumberFormat: (patch, scope) => {
+            // Collab: document-level; a "section" scope falls back to all
+            // sections (consistent everywhere, demo limitation — see
+            // setPageLayout).
+            if (collabDocOp(() => documentOperationBody("setPageNumberFormat", patch))) return true;
+            history.checkpoint();
+            let target: XmlElement | undefined;
+            if (scope === "section") {
+              const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t;
+              if (t) target = sectPrAt(doc, t) ?? undefined;
+            }
+            if (!setPageNumberFormat(doc, patch, target)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          getPageNumberFormat: () => {
+            const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t ?? documentStart()?.t;
+            return t ? pageNumberFormatAt(doc, t) : { fmt: "decimal", start: null };
+          },
           insertBreak: (kind) => {
             let target = editor?.getCaretTarget() ?? null;
             if (!target) {

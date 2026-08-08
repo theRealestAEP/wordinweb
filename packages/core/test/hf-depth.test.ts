@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { strFromU8, unzipSync } from "fflate";
 import { DocxDocument } from "../src/docx.js";
-import { setEvenOddHeaders, setTitlePage, titlePageEnabled } from "../src/edit/sections.js";
+import {
+  pageNumberFormatAt,
+  sectPrAt,
+  setEvenOddHeaders,
+  setPageNumberFormat,
+  setTitlePage,
+  titlePageEnabled,
+} from "../src/edit/sections.js";
 import { XmlElement, attr, localName } from "../src/xml.js";
 import { makeDocx, wrapDocument, p } from "./helpers.js";
 
@@ -125,3 +132,46 @@ describe("setEvenOddHeaders (different odd & even pages)", () => {
     expect(refsOf(bodySectPr(doc), "headerReference").some((r) => r.type === "even")).toBe(true);
   });
 });
+
+describe("setPageNumberFormat (w:pgNumType)", () => {
+  it("writes fmt and start, readable via pageNumberFormatAt and the section props", () => {
+    const doc = loadDoc(p("Body text") + SECT);
+    const t = firstT(doc);
+    expect(setPageNumberFormat(doc, { fmt: "lowerRoman", start: 1 })).toBe(true);
+    expect(pageNumberFormatAt(doc, t)).toEqual({ fmt: "lowerRoman", start: 1 });
+    expect(doc.sections[0].props.pageNumberFormat).toBe("lowerRoman");
+    expect(doc.sections[0].props.pageNumberStart).toBe(1);
+    // Schema-ordered: pgNumType sits after lnNumType/pgBorders, before cols.
+    const sectPr = sectPrAt(doc, t)!;
+    const names = sectPr.children.map((c) => localName(c.name));
+    expect(names.indexOf("pgNumType")).toBeGreaterThan(names.indexOf("pgMar"));
+  });
+
+  it("null clears one attribute; an empty pgNumType is removed; unchanged patches reject", () => {
+    const doc = loadDoc(p("Body text") + SECT);
+    const t = firstT(doc);
+    expect(setPageNumberFormat(doc, { fmt: "upperRoman", start: 5 })).toBe(true);
+    expect(setPageNumberFormat(doc, { fmt: "upperRoman" })).toBe(false); // unchanged
+    expect(setPageNumberFormat(doc, { start: null })).toBe(true);
+    expect(pageNumberFormatAt(doc, t)).toEqual({ fmt: "upperRoman", start: null });
+    // fmt "decimal" is the default and clears the attribute — pgNumType goes away.
+    expect(setPageNumberFormat(doc, { fmt: "decimal" })).toBe(true);
+    const sectPr = sectPrAt(doc, t)!;
+    expect(sectPr.children.some((c) => localName(c.name) === "pgNumType")).toBe(false);
+    expect(setPageNumberFormat(doc, { fmt: null })).toBe(false); // nothing to clear
+  });
+});
+
+function firstT(doc: DocxDocument): XmlElement {
+  const find = (e: XmlElement): XmlElement | null => {
+    if (localName(e.name) === "t") return e;
+    for (const c of e.children) {
+      const f = find(c);
+      if (f) return f;
+    }
+    return null;
+  };
+  const t = find(doc.docRoot);
+  expect(t).toBeTruthy();
+  return t!;
+}

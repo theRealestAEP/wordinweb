@@ -1550,6 +1550,71 @@ function HeaderFooterMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/** Insert-tab Page Number menu: the two field inserts plus the section's
+ * number format (w:pgNumType fmt) and start-at value. */
+function PageNumberMenu({ api }: { api: DocxViewApi | null }) {
+  const [, force] = useReducer((n: number) => n + 1, 0);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const current = api?.getPageNumberFormat() ?? { fmt: "decimal" as const, start: null };
+  const mark = (fmt: string) => (current.fmt === fmt ? "✓ " : "");
+  return (
+    <span ref={rootRef} style={{ display: "inline-block" }}>
+      <ActionMenu
+        label="Page number"
+        title="Insert a page number and choose its format"
+        width={104}
+        groups={[
+          { items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] },
+          {
+            label: "Number format",
+            items: [
+              ["fmt:decimal", `${mark("decimal")}1, 2, 3`],
+              ["fmt:lowerRoman", `${mark("lowerRoman")}i, ii, iii`],
+              ["fmt:upperRoman", `${mark("upperRoman")}I, II, III`],
+              ["fmt:lowerLetter", `${mark("lowerLetter")}a, b, c`],
+              ["fmt:upperLetter", `${mark("upperLetter")}A, B, C`],
+            ],
+          },
+          {
+            label: "Page numbering",
+            items: [
+              ["start:set", current.start !== null ? `Start at ${current.start}…` : "Start at…"],
+              ["start:continue", `${current.start === null ? "✓ " : ""}Continue from previous`],
+            ],
+          },
+        ]}
+        onPick={(value) => {
+          if (value === "pn:page") api?.insertPageNumber("page");
+          else if (value === "pn:pageof") api?.insertPageNumber("pageOfTotal");
+          else if (value.startsWith("fmt:")) {
+            api?.setPageNumberFormat({ fmt: value.slice(4) as Parameters<NonNullable<typeof api>["setPageNumberFormat"]>[0]["fmt"] });
+          } else if (value === "start:continue") api?.setPageNumberFormat({ start: null });
+          else if (value === "start:set") {
+            const anchor = rootRef.current;
+            if (!anchor) return;
+            void requestTextInputDialog(anchor, {
+              title: "Page numbering",
+              label: "Start at",
+              value: String(current.start ?? 1),
+              submitLabel: "Apply",
+              inputType: "number",
+              min: 0,
+              step: 1,
+            }).then((next) => {
+              if (next === null) return;
+              const start = parseInt(next.trim(), 10);
+              if (Number.isInteger(start) && start >= 0) api?.setPageNumberFormat({ start });
+              force();
+            });
+            return;
+          }
+          force();
+        }}
+      />
+    </span>
+  );
+}
+
 /** Word's own gallery presets, the four people actually reach for. */
 const WATERMARKS = ["CONFIDENTIAL", "DO NOT COPY", "DRAFT", "SAMPLE"] as const;
 
@@ -5378,18 +5443,7 @@ export function DocxToolbar({
           {on("headerFooter") && <HeaderFooterMenu api={api} />}
           {on("watermark") && <WatermarkMenu api={api} />}
           <Sep />
-          {on("pageNumber") && (
-            <ActionMenu
-              label="Page number"
-              title="Insert a dynamic page number at the caret"
-              width={104}
-              groups={[{ items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] }]}
-              onPick={(v) => {
-                if (v === "pn:page") api?.insertPageNumber("page");
-                else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
-              }}
-            />
-          )}
+          {on("pageNumber") && <PageNumberMenu api={api} />}
           {on("break") && (
             <>
               <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />
@@ -5469,18 +5523,7 @@ export function DocxToolbar({
               {on("crossReference") && <CrossReferenceMenu api={api} />}
               {on("headerFooter") && <HeaderFooterMenu api={api} />}
               {on("watermark") && <WatermarkMenu api={api} />}
-              {on("pageNumber") && (
-            <ActionMenu
-              label="Page number"
-              title="Insert a dynamic page number at the caret"
-              width={104}
-              groups={[{ items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] }]}
-              onPick={(v) => {
-                if (v === "pn:page") api?.insertPageNumber("page");
-                else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
-              }}
-            />
-          )}
+              {on("pageNumber") && <PageNumberMenu api={api} />}
               {on("break") && (
                 <>
                   <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />

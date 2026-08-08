@@ -418,6 +418,12 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setNumberingLevel.ilvl": { anyOf: [integer(0, 8), { type: "null" }] },
   "setNumberingLevel.patch": numberingLevelPatch,
   "setNumberingRestart.start": { anyOf: [integer(0, 32767), { type: "null" }] },
+  // w:pgNumType. null clears the attribute (fmt back to decimal; start back
+  // to "continue from previous section").
+  "setPageNumberFormat.fmt": {
+    anyOf: [{ enum: ["decimal", "lowerRoman", "upperRoman", "lowerLetter", "upperLetter"] }, { type: "null" }],
+  },
+  "setPageNumberFormat.start": { anyOf: [integer(0, 32767), { type: "null" }] },
   // Fractions of the source bitmap trimmed off each edge; the registry's own
   // validate additionally refuses a crop that leaves no visible strip.
   "setCrop.crop": closedObject(

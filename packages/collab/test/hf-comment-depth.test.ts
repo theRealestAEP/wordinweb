@@ -82,3 +82,23 @@ describe("setTitlePage / setEvenOddHeaders on the wire", () => {
     expect(s.submit({ kind: "setTitlePage", clientId: "a", clientSeq: 1, base: 0, enabled: "yes" as never, nodeIds: seq(4) }).kind).toBe("rejected");
   });
 });
+
+describe("setPageNumberFormat on the wire", () => {
+  it("writes w:pgNumType fmt/start; a no-change patch rejects", () => {
+    const s = new DocumentSession(makeDoc());
+    const e = s.submit({ kind: "setPageNumberFormat", clientId: "a", clientSeq: 1, base: 0, fmt: "lowerRoman", start: 1 });
+    expect(e.kind).toBe("applied");
+    expect(s.doc.sections[0].props.pageNumberFormat).toBe("lowerRoman");
+    expect(s.doc.sections[0].props.pageNumberStart).toBe(1);
+    expect(s.submit({ kind: "setPageNumberFormat", clientId: "a", clientSeq: 2, base: s.seq, fmt: "lowerRoman" }).kind).toBe("rejected");
+    expect(s.submit({ kind: "setPageNumberFormat", clientId: "a", clientSeq: 3, base: s.seq, fmt: null, start: null }).kind).toBe("applied");
+    expect(bodySectPr(s.doc).children.some((c) => localName(c.name) === "pgNumType")).toBe(false);
+  });
+
+  it("rejects malformed payloads before sequencing", () => {
+    const s = new DocumentSession(makeDoc());
+    expect(s.submit({ kind: "setPageNumberFormat", clientId: "a", clientSeq: 1, base: 0 } as never).kind).toBe("rejected");
+    expect(s.submit({ kind: "setPageNumberFormat", clientId: "a", clientSeq: 2, base: 0, fmt: "ordinal" as never }).kind).toBe("rejected");
+    expect(s.submit({ kind: "setPageNumberFormat", clientId: "a", clientSeq: 3, base: 0, start: -1 }).kind).toBe("rejected");
+  });
+});

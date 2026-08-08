@@ -31,7 +31,13 @@ import {
   type StylePatch,
 } from "./styles.js";
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
-import { setEvenOddHeaders, setTitlePage } from "./sections.js";
+import {
+  PAGE_NUMBER_FORMATS,
+  setEvenOddHeaders,
+  setPageNumberFormat,
+  setTitlePage,
+  type PageNumberFormat,
+} from "./sections.js";
 import { suggestMeta } from "./suggest.js";
 import { TOC_LEADERS, insertToc, type TocLeader, type TocLevels } from "./toc.js";
 import { applyFieldResults } from "./update-fields.js";
@@ -1388,6 +1394,41 @@ const setEvenOddHeadersOperation = defineOperation<{
   apply: ({ doc, payload }) => setEvenOddHeaders(doc, payload.enabled),
 });
 
+/**
+ * Set the page-number format and/or start-at value (w:pgNumType —
+ * ECMA-376 §17.6.12; formats are the editable subset of ST_NumberFormat
+ * §17.18.59 the layout paints). Document-level like setPageLayout: every
+ * section updates, which is the demo's section-scope limitation in a room.
+ * A null fmt or start removes the attribute; an empty w:pgNumType is removed
+ * entirely. Rejects (honest no-op) when nothing would change.
+ */
+const setPageNumberFormatOperation = defineOperation<{
+  fmt?: PageNumberFormat | null;
+  start?: number | null;
+}>()({
+  kind: "setPageNumberFormat",
+  address: "document",
+  category: "document",
+  description: "Set the page-number format (decimal, roman, letter) and/or the start-at value for the document's sections.",
+  fields: [{ name: "fmt", optional: true }, { name: "start", optional: true }],
+  validate: ({ fmt, start }) => {
+    if (fmt === undefined && start === undefined) return "setPageNumberFormat: empty patch";
+    if (fmt !== undefined && fmt !== null && !PAGE_NUMBER_FORMATS.includes(fmt)) {
+      return "setPageNumberFormat: bad fmt";
+    }
+    if (start !== undefined && start !== null &&
+        (!Number.isInteger(start) || start < 0 || start > 32767)) {
+      return "setPageNumberFormat: bad start";
+    }
+    return null;
+  },
+  apply: ({ doc, payload }) =>
+    setPageNumberFormat(doc, {
+      ...(payload.fmt !== undefined ? { fmt: payload.fmt } : {}),
+      ...(payload.start !== undefined ? { start: payload.start } : {}),
+    }),
+});
+
 /** A payload with no fields of its own. Not `Record<string, never>`: that
  * carries an index signature, which would forbid the clientId/clientSeq/base
  * bookkeeping @wordinweb/collab intersects onto every wire body. */
@@ -1434,6 +1475,7 @@ const OPERATIONS = [
   removeWatermarkOperation,
   setTitlePageOperation,
   setEvenOddHeadersOperation,
+  setPageNumberFormatOperation,
 ] as const;
 
 // ---------------------------------------------------------------------------

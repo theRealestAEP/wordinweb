@@ -215,8 +215,11 @@ export {
   setTitlePage,
   titlePageEnabled,
   setEvenOddHeaders,
+  PAGE_NUMBER_FORMATS,
+  setPageNumberFormat,
+  pageNumberFormatAt,
 } from "./edit/sections.js";
-export type { BreakInsertion, CoverPageContent, LineNumberingPatch } from "./edit/sections.js";
+export type { BreakInsertion, CoverPageContent, LineNumberingPatch, PageNumberFormat, PageNumberFormatPatch } from "./edit/sections.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages, buildPrintHtml } from "./render/dom.js";
 export type { FindMatch } from "./edit/find.js";
