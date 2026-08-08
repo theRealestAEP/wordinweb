@@ -777,6 +777,72 @@ function ClearFormatIcon() {
   );
 }
 
+/** The w14 outline/shadow vocabulary that a WordArt object's text carries
+ * (WordArtMenu's gallery), applied directly to an ordinary run instead —
+ * Word's Home-tab "Text Effects and Typography" gallery. A small preset row,
+ * not the ~20-swatch gallery WordArt gets: outline, shadow, three tasteful
+ * combos, and a way back to plain text. Two presets set a fixed color
+ * alongside the effect (a genuine gallery "look"); the rest keep whatever
+ * color the run already has. */
+const TEXT_EFFECT_PRESETS: {
+  label: string;
+  color?: string;
+  effect: Parameters<DocxViewApi["applyFormat"]>[0]["textEffect"];
+}[] = [
+  { label: "No effect", effect: null },
+  { label: "Outline", effect: { outline: { color: "#000000", widthPt: 0.75 } } },
+  { label: "Shadow", effect: { shadow: true } },
+  { label: "Outline, shadow", effect: { outline: { color: "#000000", widthPt: 0.75 }, shadow: true } },
+  { label: "Bold red outline", effect: { outline: { color: "#C00000", widthPt: 1.5 } } },
+  { label: "White, blue outline, shadow", color: "#FFFFFF", effect: { outline: { color: "#4472C4", widthPt: 1 }, shadow: true } },
+];
+
+function TextEffectsMenu({ apply }: { apply: (patch: Parameters<DocxViewApi["applyFormat"]>[0]) => void }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Text Effects and Typography" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ color: "#2e74b5", fontWeight: 700, fontSize: 14, WebkitTextStroke: "0.5px #1F4E79" }}>A</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 216, padding: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 4 }}>
+            {TEXT_EFFECT_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                title={preset.label}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  apply(preset.color ? { color: preset.color, textEffect: preset.effect } : { textEffect: preset.effect });
+                  setOpen(false);
+                }}
+                style={{
+                  height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, cursor: "pointer",
+                  font: "700 15px Georgia, serif",
+                  color: preset.color ?? T.fg,
+                  WebkitTextStroke: preset.effect?.outline ? `0.6px ${preset.effect.outline.color}` : undefined,
+                  textShadow: preset.effect?.shadow ? "1px 1px 2px rgba(0,0,0,0.55)" : undefined,
+                }}
+              >
+                A
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 function IndentIcon({ dir }: { dir: 1 | -1 }) {
   return (
     <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -939,6 +1005,140 @@ function NoteMenu({ api, kind }: { api: DocxViewApi | null; kind: "footnote" | "
             <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => setOpen(false)}>Cancel</button>
             <button style={pillBtn} disabled={!text.trim()} onClick={submit}>Insert</button>
           </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+type FootnoteOpts = ReturnType<NonNullable<DocxViewApi>["getFootnoteOptions"]>;
+type EndnoteOpts = ReturnType<NonNullable<DocxViewApi>["getEndnoteOptions"]>;
+type FootnotePatch = Parameters<NonNullable<DocxViewApi>["setFootnoteOptions"]>[0];
+type EndnotePatch = Parameters<NonNullable<DocxViewApi>["setEndnoteOptions"]>[0];
+
+const noteOptionsFieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 7px", font: "12.5px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+const noteOptionsLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
+
+/** One note type's fields (number format, restart rule, start-at, position):
+ * shared markup for the footnote and endnote halves of NoteOptionsMenu — the
+ * two differ only in their position vocabulary and which setter applies. */
+function NoteOptionsFields({
+  title,
+  fieldPrefix,
+  values,
+  onPatch,
+  posOptions,
+}: {
+  title: string;
+  fieldPrefix: string;
+  values: { fmt: string; start: number | null; restart: string; pos: string };
+  onPatch: (patch: { fmt?: string; start?: number | null; restart?: string; pos?: string }) => void;
+  posOptions: readonly (readonly [string, string])[];
+}) {
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{title}</strong>
+      <label style={noteOptionsLabelStyle}>
+        <span>Number format</span>
+        <select aria-label={`${fieldPrefix} number format`} value={values.fmt} onChange={(event) => onPatch({ fmt: event.target.value })} style={noteOptionsFieldStyle}>
+          <option value="decimal">1, 2, 3</option>
+          <option value="lowerRoman">i, ii, iii</option>
+          <option value="upperRoman">I, II, III</option>
+          <option value="lowerLetter">a, b, c</option>
+          <option value="upperLetter">A, B, C</option>
+          <option value="chicago">*, †, ‡, §</option>
+        </select>
+      </label>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        <label style={noteOptionsLabelStyle}>
+          <span>Restart</span>
+          <select aria-label={`${fieldPrefix} restart`} value={values.restart} onChange={(event) => onPatch({ restart: event.target.value })} style={noteOptionsFieldStyle}>
+            <option value="continuous">Continuous</option>
+            <option value="eachSect">Each section</option>
+            <option value="eachPage">Each page</option>
+          </select>
+        </label>
+        <label style={noteOptionsLabelStyle}>
+          <span>Start at</span>
+          <input
+            aria-label={`${fieldPrefix} start at`}
+            type="number"
+            min={0}
+            value={values.start ?? ""}
+            placeholder="1"
+            onChange={(event) => {
+              const raw = event.target.value.trim();
+              const n = raw === "" ? null : parseInt(raw, 10);
+              if (n === null || (Number.isInteger(n) && n >= 0)) onPatch({ start: n });
+            }}
+            style={noteOptionsFieldStyle}
+          />
+        </label>
+      </div>
+      <label style={noteOptionsLabelStyle}>
+        <span>Position</span>
+        <select aria-label={`${fieldPrefix} position`} value={values.pos} onChange={(event) => onPatch({ pos: event.target.value })} style={noteOptionsFieldStyle}>
+          {posOptions.map(([value, label]) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
+}
+
+const FOOTNOTE_POS_OPTIONS = [["pageBottom", "Bottom of page"], ["beneathText", "Beneath text"]] as const;
+const ENDNOTE_POS_OPTIONS = [["sectEnd", "End of section"], ["docEnd", "End of document"]] as const;
+
+/**
+ * Word's Footnote and Endnote "options" dialog (the small launcher arrow in
+ * the References > Footnotes group): number format, restart rule, start-at,
+ * and position, for both note types in one popover beside the insert
+ * controls. Every change applies immediately (no separate Apply/Insert step,
+ * like WatermarkMenu) since each field is independent document-wide state.
+ */
+function NoteOptionsMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const [fn, setFn] = useState<FootnoteOpts>(() => api?.getFootnoteOptions() ?? { fmt: "decimal", start: null, restart: "continuous", pos: "pageBottom" });
+  const [en, setEn] = useState<EndnoteOpts>(() => api?.getEndnoteOptions() ?? { fmt: "lowerRoman", start: null, restart: "continuous", pos: "docEnd" });
+  useEffect(() => {
+    if (!open) return;
+    if (api?.getFootnoteOptions) setFn(api.getFootnoteOptions());
+    if (api?.getEndnoteOptions) setEn(api.getEndnoteOptions());
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Footnote and endnote options" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ fontSize: 12.5 }}>Note options</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 250, padding: 10, display: "grid", gap: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <NoteOptionsFields
+            title="Footnotes"
+            fieldPrefix="Footnote"
+            values={fn}
+            posOptions={FOOTNOTE_POS_OPTIONS}
+            onPatch={(patch) => {
+              if (api?.setFootnoteOptions(patch as FootnotePatch)) setFn({ ...fn, ...patch } as FootnoteOpts);
+            }}
+          />
+          <div style={{ borderTop: `1px solid ${T.border}` }} />
+          <NoteOptionsFields
+            title="Endnotes"
+            fieldPrefix="Endnote"
+            values={en}
+            posOptions={ENDNOTE_POS_OPTIONS}
+            onPatch={(patch) => {
+              if (api?.setEndnoteOptions(patch as EndnotePatch)) setEn({ ...en, ...patch } as EndnoteOpts);
+            }}
+          />
         </div>
       )}
     </span>
@@ -1245,6 +1445,35 @@ function CaptionMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/**
+ * Structure gallery: each button inserts a ready-made linear-grammar template
+ * with □ placeholder tokens through the same insertEquation path the manual
+ * input uses — Word's "click a structure, then fill in the boxes" workflow.
+ *
+ * Palette is exactly the set of structures the linear grammar (edit/math.ts)
+ * round-trips: fraction, sup/sub, radical, the three n-ary operators, a
+ * delimiter pair, a stacked limit, and a matrix — every one covered by the
+ * math-corpus round-trip test. Word's "Function" structures (sin, cos, log…)
+ * are NOT included: they author m:func, which the linear grammar does not
+ * model (isLinearSafe refuses it — math-corpus.test.ts's dense fixture notes
+ * "4 m:func equations" as the read-only ones), so a Function button would
+ * insert an equation the user could never open again to edit.
+ */
+const EQUATION_STRUCTURES = [
+  ["fraction", "Fraction", "𝑎/𝑏", "□/□"],
+  ["superscript", "Superscript", "𝑥²", "□^□"],
+  ["subscript", "Subscript", "𝑥₂", "□_□"],
+  ["radical", "Radical", "√𝑥", "√□"],
+  ["integral", "Integral", "∫", "∫_□^□□"],
+  ["sum", "Summation", "∑", "∑_□^□□"],
+  ["product", "Product", "∏", "∏_□^□□"],
+  ["brackets", "Brackets", "( )", "(□)"],
+  // "┴" is the linear grammar's own limLow glyph (edit/math.ts LIM_LOW) —
+  // this is exactly what linearizing an m:limLow produces.
+  ["limit", "Limit", "lim", "{lim}┴□"],
+  ["matrix", "Matrix (2×2)", "▦", "[□&□;□&□]"],
+] as const;
+
 function EquationMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [linear, setLinear] = useState("x={-b±√{b^2-4ac}}/{2a}");
@@ -1260,8 +1489,8 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
-  const submit = () => {
-    if (api?.insertEquation(linear)) {
+  const submit = (text: string) => {
+    if (api?.insertEquation(text)) {
       setError("");
       setOpen(false);
     } else {
@@ -1280,19 +1509,34 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
       </button>
       {open && (
         <div data-dxw-equation-menu="" style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg }}>Linear equation</div>
+          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg }}>Structures</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 5, marginBottom: 8 }}>
+            {EQUATION_STRUCTURES.map(([key, title, glyph, template]) => (
+              <button
+                key={key}
+                type="button"
+                title={title}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => submit(template)}
+                style={{ height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "15px 'Cambria Math', serif" }}
+              >
+                {glyph}
+              </button>
+            ))}
+          </div>
+          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg, borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>Linear equation</div>
           <input
             ref={inputRef}
             aria-label="Linear equation"
             value={linear}
             onChange={(event) => { setLinear(event.target.value); setError(""); }}
-            onKeyDown={(event) => event.key === "Enter" && submit()}
+            onKeyDown={(event) => event.key === "Enter" && submit(linear)}
             style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "15px 'Cambria Math', serif", outline: "none" }}
           />
           <div style={{ color: T.muted, fontSize: 11.5, marginTop: 5 }}>Use ^, _, /, √&#123;…&#125;, ∫, matrices [a&amp;b;c&amp;d], and grouped &#123;…&#125; expressions.</div>
           {error && <div style={{ color: "#c5221f", fontSize: 11.5, marginTop: 5 }}>{error}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
-            <button style={pillBtn} disabled={!linear.trim()} onClick={submit}>Insert</button>
+            <button style={pillBtn} disabled={!linear.trim()} onClick={() => submit(linear)}>Insert</button>
           </div>
         </div>
       )}
@@ -6119,6 +6363,7 @@ export function DocxToolbar({
               active={fmt?.verticalAlign === "subscript"}
               onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "subscript" ? null : "subscript" })}
             />
+            <TextEffectsMenu apply={apply} />
             <Btn label={<ClearFormatIcon />} title="Clear formatting" onClick={() => apply({ clear: true })} />
             <ActionMenu
               label="Aa"
@@ -6503,6 +6748,7 @@ export function DocxToolbar({
           {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
           {on("footnote") && <NoteMenu api={api} kind="footnote" />}
           {on("footnote") && <NoteMenu api={api} kind="endnote" />}
+          {on("footnote") && <NoteOptionsMenu api={api} />}
           {on("bookmark") && <BookmarkMenu api={api} />}
           {on("crossReference") && <CrossReferenceMenu api={api} />}
           {on("crossReference") && <CaptionMenu api={api} />}
@@ -6586,6 +6832,7 @@ export function DocxToolbar({
               {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
               {on("footnote") && <NoteMenu api={api} kind="footnote" />}
               {on("footnote") && <NoteMenu api={api} kind="endnote" />}
+              {on("footnote") && <NoteOptionsMenu api={api} />}
               {on("bookmark") && <BookmarkMenu api={api} />}
               {on("crossReference") && <CrossReferenceMenu api={api} />}
               {on("crossReference") && <CaptionMenu api={api} />}

@@ -195,4 +195,23 @@ describe("style payload validation runs before sequencing", () => {
     expect(validateIntent(patch("has space") as never)).not.toBeNull();
     expect(validateIntent(patch("x".repeat(300)) as never)).not.toBeNull();
   });
+
+  it("bounds the text-effect a run patch carries", () => {
+    const patch = (textEffect: unknown) => ({
+      ...base,
+      kind: "formatRun",
+      blockId: 1,
+      runId: 2,
+      patch: { textEffect },
+    });
+    expect(validateIntent(patch(null) as never)).toBeNull();
+    expect(validateIntent(patch({ shadow: true }) as never)).toBeNull();
+    expect(validateIntent(patch({ outline: { color: "#4472C4", widthPt: 1 } }) as never)).toBeNull();
+    expect(validateIntent(patch({ outline: null, shadow: false }) as never)).toBeNull();
+    expect(validateIntent(patch({ shadow: "yes" }) as never)).not.toBeNull();
+    expect(validateIntent(patch({ outline: { color: "not-a-color", widthPt: 1 } }) as never)).not.toBeNull();
+    expect(validateIntent(patch({ outline: { color: "#4472C4", widthPt: 0 } }) as never)).not.toBeNull();
+    expect(validateIntent(patch({ outline: { color: "#4472C4", widthPt: 100 } }) as never)).not.toBeNull();
+    expect(validateIntent(patch("bogus") as never)).not.toBeNull();
+  });
 });

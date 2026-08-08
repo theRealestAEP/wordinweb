@@ -55,10 +55,16 @@ import {
   type TabStopSpec,
 } from "./paragraph.js";
 import {
+  NOTE_NUMBER_FORMATS,
+  NOTE_RESTART_VALUES,
   PAGE_NUMBER_FORMATS,
+  setEndnoteOptions,
   setEvenOddHeaders,
+  setFootnoteOptions,
   setPageNumberFormat,
   setTitlePage,
+  type NoteNumberFormat,
+  type NoteRestart,
   type PageNumberFormat,
 } from "./sections.js";
 import {
@@ -2053,6 +2059,89 @@ const insertHeaderFooterPresetOperation = defineOperation<{
   apply: ({ doc, payload }) => insertHeaderFooterPreset(doc, payload.hfKind, payload.preset),
 });
 
+const validateNoteOptionsPatch = (
+  kind: string,
+  payload: { fmt?: NoteNumberFormat | null; start?: number | null; restart?: string | null; pos?: string | null },
+  posValues: readonly string[],
+): string | null => {
+  const { fmt, start, restart, pos } = payload;
+  if (fmt === undefined && start === undefined && restart === undefined && pos === undefined) {
+    return `${kind}: empty patch`;
+  }
+  if (fmt !== undefined && fmt !== null && !NOTE_NUMBER_FORMATS.includes(fmt)) return `${kind}: bad fmt`;
+  if (start !== undefined && start !== null && (!Number.isInteger(start) || start < 0 || start > 32767)) {
+    return `${kind}: bad start`;
+  }
+  if (restart !== undefined && restart !== null && !NOTE_RESTART_VALUES.includes(restart as never)) {
+    return `${kind}: bad restart`;
+  }
+  if (pos !== undefined && pos !== null && !posValues.includes(pos)) return `${kind}: bad pos`;
+  return null;
+};
+
+/**
+ * Set footnote options — number format (w:footnotePr/w:numFmt — §17.11.17),
+ * start-at (w:numStart), restart rule (w:numRestart — §17.11.19), and
+ * position (w:pos — §17.11.21). Document-level like setPageNumberFormat:
+ * every section updates. A null field removes that child element (back to
+ * its OOXML default); an empty w:footnotePr is removed entirely. Format and
+ * start already drive the mark layout paints; restart honors "eachSect" only
+ * (see assignNoteNumbers); position round-trips without being laid out.
+ */
+const setFootnoteOptionsOperation = defineOperation<{
+  fmt?: NoteNumberFormat | null;
+  start?: number | null;
+  restart?: NoteRestart | null;
+  pos?: "pageBottom" | "beneathText" | null;
+}>()({
+  kind: "setFootnoteOptions",
+  address: "document",
+  category: "document",
+  description: "Set footnote number format, start-at, restart rule, and position.",
+  fields: [
+    { name: "fmt", optional: true },
+    { name: "start", optional: true },
+    { name: "restart", optional: true },
+    { name: "pos", optional: true },
+  ],
+  validate: (payload) => validateNoteOptionsPatch("setFootnoteOptions", payload, ["pageBottom", "beneathText"]),
+  apply: ({ doc, payload }) =>
+    setFootnoteOptions(doc, {
+      ...(payload.fmt !== undefined ? { fmt: payload.fmt } : {}),
+      ...(payload.start !== undefined ? { start: payload.start } : {}),
+      ...(payload.restart !== undefined ? { restart: payload.restart } : {}),
+      ...(payload.pos !== undefined ? { pos: payload.pos } : {}),
+    }),
+});
+
+/** Set endnote options — same shape as setFootnoteOptions; endnotes' position
+ * vocabulary differs (sectEnd / docEnd, §17.11.21's other half). */
+const setEndnoteOptionsOperation = defineOperation<{
+  fmt?: NoteNumberFormat | null;
+  start?: number | null;
+  restart?: NoteRestart | null;
+  pos?: "sectEnd" | "docEnd" | null;
+}>()({
+  kind: "setEndnoteOptions",
+  address: "document",
+  category: "document",
+  description: "Set endnote number format, start-at, restart rule, and position.",
+  fields: [
+    { name: "fmt", optional: true },
+    { name: "start", optional: true },
+    { name: "restart", optional: true },
+    { name: "pos", optional: true },
+  ],
+  validate: (payload) => validateNoteOptionsPatch("setEndnoteOptions", payload, ["sectEnd", "docEnd"]),
+  apply: ({ doc, payload }) =>
+    setEndnoteOptions(doc, {
+      ...(payload.fmt !== undefined ? { fmt: payload.fmt } : {}),
+      ...(payload.start !== undefined ? { start: payload.start } : {}),
+      ...(payload.restart !== undefined ? { restart: payload.restart } : {}),
+      ...(payload.pos !== undefined ? { pos: payload.pos } : {}),
+    }),
+});
+
 /** A payload with no fields of its own. Not `Record<string, never>`: that
  * carries an index signature, which would forbid the clientId/clientSeq/base
  * bookkeeping @wordinweb/collab intersects onto every wire body. */
@@ -2121,6 +2210,8 @@ const OPERATIONS = [
   insertPageNumberPositionOperation,
   removePageNumbersOperation,
   insertHeaderFooterPresetOperation,
+  setFootnoteOptionsOperation,
+  setEndnoteOptionsOperation,
 ] as const;
 
 // ---------------------------------------------------------------------------

@@ -109,6 +109,61 @@ describe("setPageNumberFormat on the wire", () => {
   });
 });
 
+describe("setFootnoteOptions / setEndnoteOptions on the wire", () => {
+  it("writes w:footnotePr pos/numFmt/numStart/numRestart; a no-change patch rejects", () => {
+    const s = new DocumentSession(makeDoc());
+    const e = s.submit({
+      kind: "setFootnoteOptions", clientId: "a", clientSeq: 1, base: 0,
+      fmt: "upperRoman", start: 3, restart: "eachSect", pos: "beneathText",
+    });
+    expect(e.kind).toBe("applied");
+    expect(s.doc.sections[0].props.footnoteNumFmt).toBe("upperRoman");
+    expect(s.doc.sections[0].props.footnoteNumStart).toBe(3);
+    expect(s.doc.sections[0].props.footnoteNumRestart).toBe("eachSect");
+    expect(s.doc.sections[0].props.footnotePos).toBe("beneathText");
+    const pr = bodySectPr(s.doc).children.find((c) => localName(c.name) === "footnotePr")!;
+    expect(pr.children.map((c) => localName(c.name))).toEqual(["pos", "numFmt", "numStart", "numRestart"]);
+    expect(s.submit({ kind: "setFootnoteOptions", clientId: "a", clientSeq: 2, base: s.seq, fmt: "upperRoman" }).kind).toBe("rejected");
+    expect(s.submit({
+      kind: "setFootnoteOptions", clientId: "a", clientSeq: 3, base: s.seq,
+      fmt: null, start: null, restart: null, pos: null,
+    }).kind).toBe("applied");
+    expect(bodySectPr(s.doc).children.some((c) => localName(c.name) === "footnotePr")).toBe(false);
+  });
+
+  it("writes w:endnotePr with endnotes' own defaults and position vocabulary", () => {
+    const s = new DocumentSession(makeDoc());
+    const e = s.submit({
+      kind: "setEndnoteOptions", clientId: "a", clientSeq: 1, base: 0,
+      fmt: "lowerLetter", start: 2, restart: "eachSect", pos: "sectEnd",
+    });
+    expect(e.kind).toBe("applied");
+    expect(s.doc.sections[0].props.endnoteNumFmt).toBe("lowerLetter");
+    expect(s.doc.sections[0].props.endnoteNumRestart).toBe("eachSect");
+    expect(s.doc.sections[0].props.endnotePos).toBe("sectEnd");
+  });
+
+  it("rejects malformed payloads before sequencing", () => {
+    const s = new DocumentSession(makeDoc());
+    expect(s.submit({ kind: "setFootnoteOptions", clientId: "a", clientSeq: 1, base: 0 } as never).kind).toBe("rejected");
+    expect(s.submit({ kind: "setFootnoteOptions", clientId: "a", clientSeq: 2, base: 0, fmt: "ordinal" as never }).kind).toBe("rejected");
+    expect(s.submit({ kind: "setFootnoteOptions", clientId: "a", clientSeq: 3, base: 0, start: -1 }).kind).toBe("rejected");
+    expect(s.submit({ kind: "setFootnoteOptions", clientId: "a", clientSeq: 4, base: 0, restart: "newPage" as never }).kind).toBe("rejected");
+    expect(s.submit({ kind: "setFootnoteOptions", clientId: "a", clientSeq: 5, base: 0, pos: "sectEnd" as never }).kind).toBe("rejected");
+    expect(s.submit({ kind: "setEndnoteOptions", clientId: "a", clientSeq: 6, base: 0, pos: "pageBottom" as never }).kind).toBe("rejected");
+  });
+
+  it("two sessions converge byte-identically on the whole package", () => {
+    const build = () => {
+      const s = new DocumentSession(makeDoc());
+      s.submit({ kind: "setFootnoteOptions", clientId: "a", clientSeq: 1, base: 0, fmt: "chicago", restart: "eachSect" });
+      s.submit({ kind: "setEndnoteOptions", clientId: "a", clientSeq: 2, base: s.seq, fmt: "upperLetter", pos: "sectEnd" });
+      return allRootsXml(s.doc);
+    };
+    expect(build()).toBe(build());
+  });
+});
+
 describe("resolveComment / editComment on the wire", () => {
   const withComment = (): { s: DocumentSession; id: string } => {
     const s = new DocumentSession(makeDoc("commented text"));

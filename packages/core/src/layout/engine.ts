@@ -2937,13 +2937,20 @@ class Engine {
 
   // ---------- footnotes / endnotes ----------
 
-  /** Marks are numbered by document order of their references, not layout order. */
+  /**
+   * Marks are numbered by document order of their references, not layout
+   * order. w:numRestart's "eachSect" value resets the running counter to
+   * that section's own numStart when the section begins — cheap to honor
+   * here since sections are already visited in order. "eachPage" is NOT
+   * honored: numbers are assigned in this one document-order pass before
+   * pagination runs, so which page a note lands on isn't known yet; the
+   * value round-trips (parse/section.ts, setFootnoteOptions/
+   * setEndnoteOptions) but the layout keeps counting continuously.
+   */
   private assignNoteNumbers(): void {
-    let fn = 0;
-    let en = 0;
     const sp0 = this.doc.sections[0]?.props;
-    const fnStart = sp0?.footnoteNumStart ?? 1;
-    const enStart = sp0?.endnoteNumStart ?? 1;
+    let fnCounter = (sp0?.footnoteNumStart ?? 1) - 1;
+    let enCounter = (sp0?.endnoteNumStart ?? 1) - 1;
     const visit = (blocks: Block[]) => {
       for (const b of blocks) {
         if (b.type === "paragraph") {
@@ -2953,9 +2960,9 @@ class Engine {
               for (const rc of r.content) {
                 if (rc.kind !== "noteRef" || rc.self || rc.customMarkFollows) continue;
                 if (rc.noteType === "footnote" && this.doc.footnotes.has(rc.id) && !this.footnoteNumbers.has(rc.id)) {
-                  this.footnoteNumbers.set(rc.id, fnStart + fn++);
+                  this.footnoteNumbers.set(rc.id, ++fnCounter);
                 } else if (rc.noteType === "endnote" && this.doc.endnotes.has(rc.id) && !this.endnoteNumbers.has(rc.id)) {
-                  this.endnoteNumbers.set(rc.id, enStart + en++);
+                  this.endnoteNumbers.set(rc.id, ++enCounter);
                 }
               }
             }
@@ -2965,7 +2972,14 @@ class Engine {
         }
       }
     };
-    for (const s of this.doc.sections) visit(s.blocks);
+    const sections = this.doc.sections;
+    for (const s of sections) {
+      if (s !== sections[0]) {
+        if (s.props.footnoteNumRestart === "eachSect") fnCounter = (s.props.footnoteNumStart ?? 1) - 1;
+        if (s.props.endnoteNumRestart === "eachSect") enCounter = (s.props.endnoteNumStart ?? 1) - 1;
+      }
+      visit(s.blocks);
+    }
   }
 
   private footnoteMark(id: number): string {

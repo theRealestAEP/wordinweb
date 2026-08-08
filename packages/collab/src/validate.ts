@@ -92,7 +92,7 @@ function smartArtError(a: { layout: unknown; items: unknown }, who: string): str
 }
 
 /**
- * Bound the one run-patch property that is not a scalar with a fixed shape:
+ * Bound a run-patch property that is not a scalar with a fixed shape:
  * characterStyleId is written verbatim into a w:rStyle attribute, so it gets
  * the same styleId bound every registered style operation applies.
  */
@@ -102,6 +102,25 @@ function badCharacterStyle(patch: Record<string, unknown>, who: string): string 
   return typeof id === "string" && /^[A-Za-z0-9\-_]{1,253}$/.test(id)
     ? null
     : `${who}: bad characterStyleId`;
+}
+
+/** Bound the other non-scalar run-patch property: textEffect's nested
+ * outline color/width, written into w14:textOutline (applyRunTextEffect). */
+function badTextEffect(patch: Record<string, unknown>, who: string): string | null {
+  const effect = patch?.textEffect;
+  if (effect === undefined || effect === null) return null;
+  if (typeof effect !== "object") return `${who}: bad textEffect`;
+  const e = effect as { outline?: unknown; shadow?: unknown };
+  if (e.shadow !== undefined && typeof e.shadow !== "boolean") return `${who}: bad textEffect.shadow`;
+  if (e.outline !== undefined && e.outline !== null) {
+    if (typeof e.outline !== "object") return `${who}: bad textEffect.outline`;
+    const o = e.outline as { color?: unknown; widthPt?: unknown };
+    if (typeof o.color !== "string" || !/^#?[0-9a-fA-F]{6}$/.test(o.color)) return `${who}: bad textEffect.outline.color`;
+    if (typeof o.widthPt !== "number" || !Number.isFinite(o.widthPt) || o.widthPt <= 0 || o.widthPt > 50) {
+      return `${who}: bad textEffect.outline.widthPt`;
+    }
+  }
+  return null;
 }
 
 /** Returns a rejection reason, or null if the intent is well-formed. */
@@ -173,7 +192,7 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "formatRange":
       if (!nonNegInt(intent.start) || !nonNegInt(intent.end) || intent.end <= intent.start) return "formatRange: bad range";
       if (!nonNegInt(intent.middleId)) return "formatRange: bad middleId";
-      return badCharacterStyle(intent.patch, "formatRange");
+      return badCharacterStyle(intent.patch, "formatRange") ?? badTextEffect(intent.patch, "formatRange");
     case "commentRun":
       if (typeof intent.text !== "string" || intent.text.length === 0) return "commentRun: empty";
       if (intent.text.length > limits.maxCommentLength) return "commentRun: too long";
@@ -444,9 +463,10 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null;
     case "formatRun":
       // The patch is otherwise free-form but every property setRunProps reads
-      // is a bounded scalar. characterStyleId is the exception: it lands
-      // verbatim in a w:rStyle attribute, so it is bounded here.
-      return badCharacterStyle(intent.patch, "formatRun");
+      // is a bounded scalar. characterStyleId and textEffect are the
+      // exceptions: one lands verbatim in a w:rStyle attribute, the other
+      // carries a nested outline color/width, so both are bounded here.
+      return badCharacterStyle(intent.patch, "formatRun") ?? badTextEffect(intent.patch, "formatRun");
     case "formatParagraph":
     case "mergeParagraph":
       // Id-addressed, no free-form payload to bound here.

@@ -127,11 +127,17 @@ import {
   setEvenOddHeaders,
   setPageNumberFormat,
   pageNumberFormatAt,
+  setFootnoteOptions,
+  footnoteOptionsAt,
+  setEndnoteOptions,
+  endnoteOptionsAt,
   setCommentResolved,
   editCommentText,
   documentTextStatistics,
   type PageNumberFormat,
   type PageNumberFormatPatch,
+  type FootnoteOptionsPatch,
+  type EndnoteOptionsPatch,
   type XmlElement,
   type EncodedCaret,
   type WireRange,
@@ -624,6 +630,19 @@ export interface DocxViewApi {
    * content with a preset layout (blank / centered title / title + date /
    * three-column). */
   insertHeaderFooterPreset(kind: "header" | "footer", preset: HeaderFooterPreset): boolean;
+  /** Footnote options (w:footnotePr): number format, restart rule, start-at,
+   * and position (§17.11.17/19/21). scope "section" targets the caret's
+   * section; "document" (and any shared document) every section. Format and
+   * start drive the painted marks; restart honors "eachSect" only; position
+   * round-trips without changing where footnotes lay out (always page
+   * bottom in this engine). */
+  setFootnoteOptions(patch: FootnoteOptionsPatch, scope?: "document" | "section"): boolean;
+  /** Current footnote options for the caret's section. */
+  getFootnoteOptions(): ReturnType<typeof footnoteOptionsAt>;
+  /** Same as setFootnoteOptions, for endnotes — position vocabulary differs
+   * (sectEnd / docEnd). */
+  setEndnoteOptions(patch: EndnoteOptionsPatch, scope?: "document" | "section"): boolean;
+  getEndnoteOptions(): ReturnType<typeof endnoteOptionsAt>;
   /** Resolve (true) or reopen (false) a comment thread. */
   resolveComment(id: string, resolved: boolean): boolean;
   /** Replace a comment's body text (Word's edit-my-comment). */
@@ -2951,6 +2970,39 @@ export function DocxView({
             if (!insertHeaderFooterPreset(doc, kind, preset)) return false;
             pages = rerender(doc, undefined, "global");
             return true;
+          },
+          setFootnoteOptions: (patch, scope) => {
+            // Same document/section-scope shape as setPageNumberFormat.
+            if (collabDocOp(() => documentOperationBody("setFootnoteOptions", patch))) return true;
+            history.checkpoint();
+            let target: XmlElement | undefined;
+            if (scope === "section") {
+              const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t;
+              if (t) target = sectPrAt(doc, t) ?? undefined;
+            }
+            if (!setFootnoteOptions(doc, patch, target)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          getFootnoteOptions: () => {
+            const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t ?? documentStart()?.t;
+            return t ? footnoteOptionsAt(doc, t) : { fmt: "decimal", start: null, restart: "continuous", pos: "pageBottom" };
+          },
+          setEndnoteOptions: (patch, scope) => {
+            if (collabDocOp(() => documentOperationBody("setEndnoteOptions", patch))) return true;
+            history.checkpoint();
+            let target: XmlElement | undefined;
+            if (scope === "section") {
+              const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t;
+              if (t) target = sectPrAt(doc, t) ?? undefined;
+            }
+            if (!setEndnoteOptions(doc, patch, target)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          getEndnoteOptions: () => {
+            const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t ?? documentStart()?.t;
+            return t ? endnoteOptionsAt(doc, t) : { fmt: "lowerRoman", start: null, restart: "continuous", pos: "docEnd" };
           },
           resolveComment: (id, resolved) => {
             if (collabDocOp(() => ({ kind: "resolveComment", commentId: id, resolved, paraId: hex8() }))) return true;

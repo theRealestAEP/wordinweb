@@ -694,3 +694,74 @@ ECMA-376 CT_Settings schema (or a real Word-saved settings.xml with docVars
 present) to get the ordering right, then wires `saveQuickPart` /
 `insertQuickPart` / `deleteQuickPart` as hand-written intents on top of the
 verified write path.
+
+## Wave 4 delta, engine lane (2026-08-08, branch wave4-eq-notes)
+
+Three rows this wave, all VERIFY-first per instruction. Wire: ENGINE_VERSION
+e18 → e19 (setFootnoteOptions, setEndnoteOptions; formatRun/formatRange gain
+the textEffect patch field).
+
+- §13 Symbols/Equations: Equation's gap narrows. VERIFIED first (hand-traced
+  the parser/linearizer, cross-checked against math-corpus.test.ts's
+  round-trip gate): the linear grammar names fraction, superscript,
+  subscript, radical, the three n-ary operators (integral/sum/product plus
+  the rest of NARY_CHRS), one delimiter pair, a stacked limit, and a matrix —
+  every one of those round-trips byte-for-byte. A "Structures" gallery on the
+  existing EquationMenu (toolbar.tsx) inserts a ready-made template with □
+  placeholders for each, through the SAME api.insertEquation path the manual
+  linear-text field already used — no core changes needed; the templates are
+  just the grammar's own syntax. Word's "Function" structures (sin, cos,
+  log…) are deliberately NOT in the palette: they author m:func, which
+  edit/math.ts does not model — isLinearSafe already refuses arriving m:func
+  equations (math-corpus.test.ts: "dense refuses four m:func equations"), so
+  a Function button would insert an equation the user could never edit again.
+  Extending the grammar to cover m:func would touch tagOf/buildOmml/
+  ommlToNodes/sameShape/withSource/graft plus new parser syntax — not the
+  "small, fully tested" bar the wave's instruction set for a grammar
+  extension, so it stays filed as a gap rather than rushed.
+- §16 References: Footnotes/Endnotes gap narrows ("options dialog (number
+  format, restart, location)"). VERIFIED first: numFmt/numStart already drove
+  the painted mark (formatNoteMark reuses the page-number formatter plus a
+  "chicago" symbol style — parse/section.ts already read both into
+  SectionProps), but numRestart and pos were parsed nowhere, and none of the
+  four had a write path — footnotePr/endnotePr sat in the sectPr
+  round-trip-preserved-verbatim tree with no editor sitting on top. Shipped:
+  registered ops setFootnoteOptions / setEndnoteOptions write w:footnotePr /
+  w:endnotePr at their CT_FtnProps/CT_EdnProps schema position (pos, numFmt,
+  numStart, numRestart — ECMA-376 §17.11.17/19/21), document- or
+  section-scoped like setPageNumberFormat; a "Note options" popover beside
+  the existing footnote/endnote insert controls exposes all four fields for
+  both note types. assignNoteNumbers (layout/engine.ts) now honors
+  numRestart="eachSect" (resets the running mark counter to that section's
+  own numStart when a section begins) — a section-scoped counter reset was
+  cheap since sections are already visited in document order. numRestart=
+  "eachPage" round-trips but is NOT laid out, filed honestly in both the code
+  and the op's doc comment: mark numbers are assigned in one whole-document
+  pass before pagination runs, so which page a note will land on isn't known
+  yet: honoring it needs numbering folded into the pagination pass itself, a
+  materially bigger change than a settings write path. pos (page-bottom vs.
+  beneath-text; section-end vs. document-end) round-trips without changing
+  layout — this engine always places footnotes at the page bottom and
+  endnotes at the document end, regardless of the value written.
+- §2 Font: Text effects STUB → CORE. The wave3-drawing STUB note said "the
+  only edit surface is WordArt insertion, not arbitrary runs." VERIFIED:
+  formatRange's rPr patch was the right fit, not a new registry op — applying
+  an effect to PART of a run splits the run (the registry can't do that;
+  formatRange already carries before/middle/after piece ids for exactly this
+  reason, the same argument characterStyleId's doc comment already makes).
+  RunFormatPatch gains textEffect (outline + shadow, null clears); a new
+  edit/drawings.ts function applyRunTextEffect writes/strips the w14
+  elements directly on an ordinary run's rPr, careful to distinguish w14:
+  shadow from the schema-unrelated legacy w:shadow toggle that shares its
+  local name (§17.3.2.36 — a real collision the code comments and a
+  dedicated test call out). A small Home-tab "Text Effects and Typography"
+  preset row (toolbar.tsx) offers outline, shadow, an outline+shadow combo,
+  a bold-outline combo, and one fixed-palette white/blue/shadow combo — six
+  buttons including a "no effect" clear, not WordArt's ~20-swatch gallery.
+  collab/validate.ts bounds the new nested patch shape (outline color/width)
+  the same way it already bounds characterStyleId. Deliberately NOT
+  refactored: WordArt insertion's own applyWordArtStyle (edit/drawings.ts)
+  duplicates the outline/shadow XML construction rather than sharing it —
+  only the second occurrence of that shape, not worth abstracting yet, and
+  touching the existing (tested, working) WordArt path was unnecessary risk
+  for this change.
