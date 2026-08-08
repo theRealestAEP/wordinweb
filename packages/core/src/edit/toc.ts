@@ -51,6 +51,16 @@ export interface TocOptions {
   levels?: TocLevels;
   /** Tab leader between an entry's title and its page number. */
   leader?: TocLeader;
+  /** Build a TABLE OF FIGURES instead: entries are the caption paragraphs
+   * whose SEQ field carries this label ("Figure", "Table", …), and the field
+   * instruction takes Word's `\c "Label"` switch (§17.16.5.68). */
+  captionLabel?: string;
+}
+
+/** A caption label an instruction accepts: a bare identifier, so it cannot
+ * smuggle a second switch into the instruction it is quoted into. */
+export function isValidCaptionLabel(label: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9]{0,31}$/.test(label);
 }
 
 /** What Word shows for a TOC over a document with no qualifying headings. */
@@ -71,17 +81,51 @@ function prefixOf(node: XmlElement): string {
   return node.name.includes(":") ? node.name.slice(0, node.name.indexOf(":") + 1) : "";
 }
 
-function paragraphText(para: Paragraph): string {
+function paragraphText(para: Paragraph, withFields = false): string {
   let out = "";
   for (const child of para.children) {
     for (const run of child.type === "run" ? [child] : child.runs) {
       for (const content of run.content) {
         if (content.kind === "text") out += content.text;
         else if (content.kind === "tab") out += "\t";
+        // A caption's number IS a field (SEQ): entry text must include it.
+        else if (withFields && content.kind === "field") out += content.cachedResult;
       }
     }
   }
   return out.trim();
+}
+
+/** True when the paragraph carries a `SEQ <label>` field — Word's definition
+ * of a caption for `TOC \c` collection and cross-reference targets. */
+export function paragraphHasSeqLabel(para: Paragraph, label: string): boolean {
+  const re = new RegExp(`^\\s*SEQ\\s+${label}(\\s|$)`, "i");
+  for (const child of para.children) {
+    for (const run of child.type === "run" ? [child] : child.runs) {
+      for (const content of run.content) {
+        if (content.kind === "field" && re.test(content.instruction)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Caption paragraphs for a label, in document order — `TOC \c`'s entry set. */
+function collectCaptions(doc: DocxDocument, label: string): Heading[] {
+  const captions: Heading[] = [];
+  const visit = (blocks: Block[]): void => {
+    for (const block of blocks) {
+      if (block.type !== "paragraph") {
+        for (const row of block.rows) for (const cell of row.cells) visit(cell.blocks);
+        continue;
+      }
+      if (!paragraphHasSeqLabel(block, label)) continue;
+      const text = paragraphText(block, true);
+      if (text) captions.push({ para: block, level: 1, text });
+    }
+  };
+  for (const section of doc.sections) visit(section.blocks);
+  return captions;
 }
 
 /**
@@ -186,7 +230,7 @@ function buildEntryParagraphs(
 
   return headings.map((heading, i) => {
     const bookmark = bookmarks[i];
-    const style = `TOC${Math.min(9, heading.level)}`;
+    const style = options.captionLabel ? "TableofFigures" : `TOC${Math.min(9, heading.level)}`;
     doc.ensureParagraphStyle(style);
     const pPr = el(`${w}pPr`, {}, [
       el(`${w}pStyle`, { [`${w}val`]: style }),
@@ -219,9 +263,13 @@ function buildEntryParagraphs(
  */
 function buildTocParagraphs(doc: DocxDocument, w: string, options: TocOptions): XmlElement[] {
   const [min, max] = options.levels ?? [1, 3];
-  const headings = collectHeadings(doc, [min, max]);
+  const headings = options.captionLabel
+    ? collectCaptions(doc, options.captionLabel)
+    : collectHeadings(doc, [min, max]);
   const bookmarks = ensureTocBookmarks(doc, headings);
-  const instruction = ` TOC \\o "${min}-${max}" \\h \\z \\u `;
+  const instruction = options.captionLabel
+    ? ` TOC \\h \\z \\c "${options.captionLabel}" `
+    : ` TOC \\o "${min}-${max}" \\h \\z \\u `;
   const fldRun = (content: XmlElement) => el(`${w}r`, {}, [content]);
 
   const entries =
@@ -260,6 +308,10 @@ function paragraphOf(doc: DocxDocument, node: XmlElement): XmlElement | undefine
  * Word writes in place of an empty list.
  */
 export function tocEntryCount(doc: DocxDocument, options: TocOptions = {}): number {
+  if (options.captionLabel) {
+    if (!isValidCaptionLabel(options.captionLabel)) return 0;
+    return Math.max(1, collectCaptions(doc, options.captionLabel).length);
+  }
   const [min, max] = options.levels ?? [1, 3];
   if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max > 9 || min > max) return 0;
   return Math.max(1, collectHeadings(doc, [min, max]).length);
@@ -273,6 +325,7 @@ export function tocEntryCount(doc: DocxDocument, options: TocOptions = {}): numb
  * them current later, so there is no separate first-paint path to maintain.
  */
 export function insertToc(doc: DocxDocument, caretT: XmlElement, options: TocOptions = {}): boolean {
+  if (options.captionLabel !== undefined && !isValidCaptionLabel(options.captionLabel)) return false;
   const [min, max] = options.levels ?? [1, 3];
   if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max > 9 || min > max) return false;
   const pEl = paragraphOf(doc, caretT);
@@ -358,7 +411,25 @@ export function rebuildToc(doc: DocxDocument, tocBegin: XmlElement, options: Toc
   }
   if (to < 0) return false;
 
-  const rebuilt = buildTocParagraphs(doc, prefixOf(firstPara), options);
+  // A `\c` (table-of-figures) field must rebuild as one: read the label off
+  // the existing instruction when the caller did not name it, so "Update
+  // table of contents" cannot clobber a figures table with heading entries.
+  let effective = options;
+  if (effective.captionLabel === undefined) {
+    let instruction = "";
+    const findInstr = (node: XmlElement): void => {
+      if (instruction) return;
+      if (localName(node.name) === "instrText" && /^\s*TOC(\s|$)/i.test(node.text)) {
+        instruction = node.text;
+        return;
+      }
+      for (const c of node.children) findInstr(c);
+    };
+    findInstr(firstPara);
+    const m = /\\c\s+"?([A-Za-z][A-Za-z0-9]*)"?/.exec(instruction);
+    if (m) effective = { ...options, captionLabel: m[1] };
+  }
+  const rebuilt = buildTocParagraphs(doc, prefixOf(firstPara), effective);
   parent.children.splice(from, to - from + 1, ...rebuilt);
   doc.refresh();
   return true;

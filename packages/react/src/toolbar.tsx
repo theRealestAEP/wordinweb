@@ -8,7 +8,10 @@ import {
   CELL_SCOPE_EDGES,
   TABLE_BORDER_STYLES,
   TABLE_SCOPE_EDGES,
+  NUMBERING_PRESETS,
+  type NumberingPresetId,
   type SelectionFormat,
+  type TabStopSpec,
   type TableBorderEdge,
   type TableBorderStyle,
 } from "@wordinweb/core";
@@ -1102,10 +1105,17 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
 
 function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
-  const [bookmark, setBookmark] = useState("");
+  const [refType, setRefType] = useState<"bookmark" | "heading" | "caption" | "numberedItem">("bookmark");
+  const [choice, setChoice] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  const bookmarks = open ? api?.listBookmarks() ?? [] : [];
-  const selected = bookmarks.includes(bookmark) ? bookmark : bookmarks[0] ?? "";
+  const bookmarks = open && refType === "bookmark" ? api?.listBookmarks() ?? [] : [];
+  const targets = open && refType !== "bookmark"
+    ? (api?.listCrossRefTargets() ?? []).filter((target) => target.kind === refType)
+    : [];
+  const options = refType === "bookmark"
+    ? bookmarks.map((name) => ({ value: `b:${name}`, label: name }))
+    : targets.map((target) => ({ value: `t:${target.key}`, label: target.text }));
+  const selected = options.some((option) => option.value === choice) ? choice : options[0]?.value ?? "";
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -1115,7 +1125,11 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const insert = (kind: "text" | "page") => {
-    if (selected && api?.insertCrossReference(selected, kind)) setOpen(false);
+    if (!selected) return;
+    const done = selected.startsWith("b:")
+      ? api?.insertCrossReference(selected.slice(2), kind)
+      : api?.insertCrossRefToTarget(selected.slice(2), kind);
+    if (done) setOpen(false);
   };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
@@ -1123,26 +1137,104 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
         Cross-reference
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 260, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          {bookmarks.length === 0 ? (
-            <div style={{ color: T.muted, fontSize: 12 }}>Add a bookmark first, then reference its text or page.</div>
+        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 280, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 8 }}>
+          <ToolbarMenuSelect
+            value={refType}
+            ariaLabel="Reference type"
+            width="100%"
+            menuWidth={240}
+            options={[
+              { value: "bookmark", label: "Bookmark" },
+              { value: "heading", label: "Heading" },
+              { value: "caption", label: "Caption" },
+              { value: "numberedItem", label: "Numbered item" },
+            ]}
+            onChange={(value) => { setRefType(value as "bookmark" | "heading" | "caption" | "numberedItem"); setChoice(""); }}
+            style={{ borderColor: T.border }}
+          />
+          {options.length === 0 ? (
+            <div style={{ color: T.muted, fontSize: 12 }}>
+              {refType === "bookmark"
+                ? "Add a bookmark first, then reference its text or page."
+                : "Nothing of this type to reference yet."}
+            </div>
           ) : (
             <>
               <ToolbarMenuSelect
                 value={selected}
-                ariaLabel="Bookmark to reference"
+                ariaLabel="Target to reference"
                 width="100%"
-                menuWidth={240}
-                options={bookmarks.map((name) => ({ value: name, label: name }))}
-                onChange={setBookmark}
+                menuWidth={260}
+                options={options}
+                onChange={setChoice}
                 style={{ borderColor: T.border }}
               />
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
                 <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => insert("page")}>Page number</button>
-                <button style={pillBtn} onClick={() => insert("text")}>Bookmark text</button>
+                <button style={pillBtn} onClick={() => insert("text")}>Referenced text</button>
               </div>
             </>
           )}
+        </div>
+      )}
+    </span>
+  );
+}
+
+/** Word's Insert Caption, popover-sized: label, optional text, above/below. */
+function CaptionMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [label, setLabel] = useState("Figure");
+  const [text, setText] = useState("");
+  const [position, setPosition] = useState<"below" | "above">("below");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert a caption for the selected object or table" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        Caption
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 250, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 7 }}>
+          <label style={dialogFieldRow}>
+            <span>Label</span>
+            <select aria-label="Caption label" value={label} onChange={(event) => setLabel(event.target.value)} style={dialogInput}>
+              <option value="Figure">Figure</option>
+              <option value="Table">Table</option>
+              <option value="Equation">Equation</option>
+            </select>
+          </label>
+          <label style={dialogFieldRow}>
+            <span>Text</span>
+            <input aria-label="Caption text" value={text} onChange={(event) => setText(event.target.value)} placeholder="optional" style={dialogInput} />
+          </label>
+          <label style={dialogFieldRow}>
+            <span>Position</span>
+            <select aria-label="Caption position" value={position} onChange={(event) => setPosition(event.target.value as "below" | "above")} style={dialogInput}>
+              <option value="below">Below</option>
+              <option value="above">Above</option>
+            </select>
+          </label>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button
+              style={pillBtn}
+              onClick={() => {
+                if (api?.insertCaption(label, text.trim(), position)) {
+                  setText("");
+                  setOpen(false);
+                }
+              }}
+            >
+              Insert
+            </button>
+          </div>
         </div>
       )}
     </span>
@@ -1227,6 +1319,7 @@ function ContentsMenu({ api }: { api: DocxViewApi | null }) {
         {
           items: [
             ["insert", "Table of contents"],
+            ["figures", "Table of figures"],
             ["rebuild", "Update table of contents"],
             ["fields", "Update fields"],
           ],
@@ -1234,6 +1327,7 @@ function ContentsMenu({ api }: { api: DocxViewApi | null }) {
       ]}
       onPick={(value) => {
         if (value === "insert") api?.insertToc();
+        else if (value === "figures") api?.insertToc({ captionLabel: "Figure" });
         else if (value === "rebuild") api?.refreshTocs();
         else api?.updateFields();
       }}
@@ -3129,6 +3223,280 @@ function CustomBorderDialog({
   );
 }
 
+const TAB_ALIGN_NAMES: Record<TabStopSpec["align"], string> = {
+  left: "Left",
+  center: "Center",
+  right: "Right",
+  decimal: "Decimal",
+  bar: "Bar",
+};
+
+const TAB_LEADER_NAMES: Record<TabStopSpec["leader"], string> = {
+  none: "None",
+  dot: "Dots ….",
+  hyphen: "Hyphens ---",
+  underscore: "Underline ___",
+  middleDot: "Middle dots ···",
+};
+
+/**
+ * Word's Tabs dialog, popover-sized: the paragraph's direct tab stops as
+ * editable rows (position in points, alignment, leader), plus add and
+ * remove. Apply replaces the whole list; applying an empty list clears
+ * w:tabs so style stops and the default grid take over again.
+ */
+function TabStopsDialog({
+  api,
+  anchorRef,
+  onClose,
+}: {
+  api: DocxViewApi | null;
+  anchorRef: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+}) {
+  const [rows, setRows] = useState<{ pos: string; align: TabStopSpec["align"]; leader: TabStopSpec["leader"] }[]>(
+    () => (api?.getTabStops() ?? []).map((stop) => ({ pos: showPt(stop.posPt), align: stop.align, leader: stop.leader })),
+  );
+  const parsed = rows.map((row) => ({ ...row, posPt: typedNumber(row.pos) }));
+  const valid = parsed.every((row) => row.posPt !== null && row.posPt >= 0 && row.posPt <= 1584);
+  const patch = (index: number, part: Partial<(typeof rows)[number]>) =>
+    setRows((current) => current.map((row, i) => (i === index ? { ...row, ...part } : row)));
+  const apply = () => {
+    if (!valid) return;
+    api?.setTabStops(parsed.map((row) => ({ posPt: row.posPt!, align: row.align, leader: row.leader })));
+    onClose();
+  };
+  return (
+    <AnchoredDialog
+      anchorRef={anchorRef}
+      title="Tab stops"
+      width={288}
+      onClose={onClose}
+      onApply={apply}
+      applyDisabled={!valid}
+    >
+      {rows.length === 0 && (
+        <span style={{ fontSize: 12, color: T.muted }}>
+          No custom stops — tabs use the default half-inch grid.
+        </span>
+      )}
+      {rows.map((row, index) => (
+        <div key={index} style={{ display: "grid", gridTemplateColumns: "64px 1fr 1fr 22px", gap: 6, alignItems: "center" }}>
+          <input
+            aria-label={`Tab stop ${index + 1} position (points)`}
+            type="number"
+            min={0}
+            max={1584}
+            step={1}
+            value={row.pos}
+            onChange={(event) => patch(index, { pos: event.target.value })}
+            style={dialogInput}
+          />
+          <select
+            aria-label={`Tab stop ${index + 1} alignment`}
+            value={row.align}
+            onChange={(event) => patch(index, { align: event.target.value as TabStopSpec["align"] })}
+            style={dialogInput}
+          >
+            {(Object.keys(TAB_ALIGN_NAMES) as TabStopSpec["align"][]).map((align) => (
+              <option key={align} value={align}>{TAB_ALIGN_NAMES[align]}</option>
+            ))}
+          </select>
+          <select
+            aria-label={`Tab stop ${index + 1} leader`}
+            value={row.leader}
+            onChange={(event) => patch(index, { leader: event.target.value as TabStopSpec["leader"] })}
+            style={dialogInput}
+          >
+            {(Object.keys(TAB_LEADER_NAMES) as TabStopSpec["leader"][]).map((leader) => (
+              <option key={leader} value={leader}>{TAB_LEADER_NAMES[leader]}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            aria-label={`Remove tab stop ${index + 1}`}
+            title="Remove this stop"
+            onClick={() => setRows((current) => current.filter((_, i) => i !== index))}
+            style={{ ...pillBtn, background: T.popoverBg, color: T.fg, padding: "2px 6px" }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <div>
+        <button
+          type="button"
+          onClick={() =>
+            setRows((current) => {
+              const last = typedNumber(current[current.length - 1]?.pos ?? "");
+              return [...current, { pos: showPt((last ?? 0) + 36), align: "left", leader: "none" }];
+            })
+          }
+          style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}
+        >
+          Add stop
+        </button>
+      </div>
+    </AnchoredDialog>
+  );
+}
+
+const PARA_EDGE_NAMES: Record<"top" | "left" | "bottom" | "right" | "between", string> = {
+  top: "Top",
+  left: "Left",
+  bottom: "Bottom",
+  right: "Right",
+  between: "Between paragraphs",
+};
+
+/**
+ * Word's Borders and Shading dialog for PARAGRAPHS, popover-sized. The
+ * style/weight/color rows are the table border picker's vocabulary; edges
+ * are the paragraph's own (top/left/bottom/right/between), and the shading
+ * row drives w:shd.
+ */
+function ParagraphBorderDialog({
+  api,
+  anchorRef,
+  onClose,
+}: {
+  api: DocxViewApi | null;
+  anchorRef: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+}) {
+  const [style, setStyle] = useState<TableBorderStyle>("single");
+  const [widthPt, setWidthPt] = useState("0.5");
+  const [color, setColor] = useState("#000000");
+  const [edges, setEdges] = useState<(keyof typeof PARA_EDGE_NAMES)[]>(["top", "bottom", "left", "right"]);
+  const [shading, setShading] = useState<string | null>(() => api?.getParagraphBorders().shading ?? null);
+
+  const width = typedNumber(widthPt);
+  const validColor = normalizedColor(color);
+  const valid =
+    validColor !== null &&
+    (style === "none" || (width !== null && width >= 0.125 && width <= 12));
+
+  const apply = () => {
+    if (!valid) return;
+    const spec =
+      style === "none"
+        ? { style: "none" as const }
+        : {
+            style,
+            sz: Math.min(96, Math.max(1, Math.round((width ?? 0.5) * 8))),
+            color: validColor!.slice(1).toUpperCase(),
+          };
+    const borders = Object.fromEntries(edges.map((edge) => [edge, spec]));
+    api?.setParagraphBorders({
+      ...(edges.length > 0 ? { borders } : {}),
+      shading: shading === null ? null : shading.replace(/^#/, "").toUpperCase(),
+    });
+    onClose();
+  };
+
+  return (
+    <AnchoredDialog
+      anchorRef={anchorRef}
+      title="Paragraph borders"
+      width={252}
+      onClose={onClose}
+      onApply={apply}
+      applyDisabled={!valid}
+    >
+      <label style={dialogFieldRow}>
+        <span>Style</span>
+        <select
+          aria-label="Paragraph border style"
+          value={style}
+          onChange={(event) => setStyle(event.target.value as TableBorderStyle)}
+          style={dialogInput}
+        >
+          {TABLE_BORDER_STYLES.map((value) => (
+            <option key={value} value={value}>{BORDER_STYLE_NAMES[value]}</option>
+          ))}
+        </select>
+      </label>
+      <label style={dialogFieldRow}>
+        <span>Weight</span>
+        <select
+          aria-label="Paragraph border width (points)"
+          value={widthPt}
+          disabled={style === "none"}
+          onChange={(event) => setWidthPt(event.target.value)}
+          style={dialogInput}
+        >
+          {BORDER_WIDTHS_PT.map((pt) => (
+            <option key={pt} value={String(pt)}>{`${pt} pt`}</option>
+          ))}
+        </select>
+      </label>
+      <span style={dialogFieldRow}>
+        <span>Color</span>
+        <ColorMenu
+          current={validColor ?? "#000000"}
+          title="Paragraph border color"
+          trigger={(
+            <>
+              <span
+                aria-hidden="true"
+                style={{ width: 14, height: 14, borderRadius: 3, border: `1px solid ${T.border}`, background: validColor ?? "#000000" }}
+              />
+              {validColor ?? "#000000"}
+            </>
+          )}
+          onPick={setColor}
+        />
+      </span>
+      <span style={{ fontSize: 12 }}>Edges</span>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
+        {(Object.keys(PARA_EDGE_NAMES) as (keyof typeof PARA_EDGE_NAMES)[]).map((edge) => (
+          <label key={edge} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 11.5 }}>
+            <input
+              type="checkbox"
+              aria-label={PARA_EDGE_NAMES[edge]}
+              checked={edges.includes(edge)}
+              onChange={(event) =>
+                setEdges((list) =>
+                  event.target.checked ? [...list, edge] : list.filter((other) => other !== edge),
+                )
+              }
+            />
+            {PARA_EDGE_NAMES[edge]}
+          </label>
+        ))}
+      </div>
+      <span style={dialogFieldRow}>
+        <span>Shading</span>
+        <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+          <ColorMenu
+            current={shading ?? "#FFFF99"}
+            title="Paragraph shading fill"
+            trigger={(
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 14, height: 14, borderRadius: 3, border: `1px solid ${T.border}`,
+                  background: shading ?? "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
+                }}
+              />
+            )}
+            onPick={setShading}
+          />
+          {shading !== null && (
+            <button
+              type="button"
+              onClick={() => setShading(null)}
+              style={{ ...pillBtn, background: T.popoverBg, color: T.fg, padding: "2px 8px" }}
+            >
+              No fill
+            </button>
+          )}
+        </span>
+      </span>
+    </AnchoredDialog>
+  );
+}
+
 /** Menu value standing for "remove the style reference". */
 const NO_TABLE_STYLE = "(no table style)";
 
@@ -4920,6 +5288,7 @@ export type ToolbarFeature =
   | "spacing"
   | "link"
   | "lists"
+  | "borders"
   | "table"
   | "image"
   | "icon"
@@ -5007,6 +5376,8 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertBibliography", feature: "citations" },
   { command: "insertDateTime", feature: "dateTime" },
   { command: "insertCrossReference", feature: "crossReference" },
+  { command: "insertCrossRefToTarget", feature: "crossReference" },
+  { command: "insertCaption", feature: "crossReference" },
   { command: "insertBreak", feature: "break" },
   { command: "insertBlankPage", feature: "break" },
   { command: "insertCoverPage", feature: "coverPage" },
@@ -5068,6 +5439,10 @@ export function DocxToolbar({
     setTab(next);
   };
   const [helpOpen, setHelpOpen] = useState(false);
+  const [tabStopsOpen, setTabStopsOpen] = useState(false);
+  const tabStopsAnchorRef = useRef<HTMLSpanElement | null>(null);
+  const [paraBordersOpen, setParaBordersOpen] = useState(false);
+  const paraBordersAnchorRef = useRef<HTMLSpanElement | null>(null);
   const apple = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const shortcut = (key: string) => apple ? `⌘${key}` : `Ctrl+${key}`;
   const closeHelp = useCallback(() => setHelpOpen(false), []);
@@ -5495,6 +5870,12 @@ export function DocxToolbar({
           <>
             <Btn label={<IndentIcon dir={-1} />} title="Decrease indent" onClick={() => api?.adjustIndent(-1)} />
             <Btn label={<IndentIcon dir={1} />} title="Increase indent" onClick={() => api?.adjustIndent(1)} />
+            <span ref={tabStopsAnchorRef} style={{ display: "inline-flex" }}>
+              <Btn label={"⇥"} title="Tab stops" onClick={() => setTabStopsOpen(true)} />
+            </span>
+            {tabStopsOpen && (
+              <TabStopsDialog api={api} anchorRef={tabStopsAnchorRef} onClose={() => setTabStopsOpen(false)} />
+            )}
           </>
         ),
       });
@@ -5555,6 +5936,61 @@ export function DocxToolbar({
               active={listKind === "number"}
               onClick={() => { api?.toggleList("number"); refresh(); }}
             />
+            <ActionMenu
+              label="⇶"
+              title="Multilevel list gallery"
+              width={44}
+              groups={[{
+                label: "Multilevel list",
+                items: Object.entries(NUMBERING_PRESETS).map(([id, preset]) => [id, preset.name] as [string, string]),
+              }]}
+              onPick={(value) => { api?.applyNumberingPreset(value as NumberingPresetId); refresh(); }}
+            />
+            <Sep />
+          </>
+        ),
+      });
+    if (on("borders"))
+      groups.push({
+        key: "borders",
+        node: (
+          <>
+            <span ref={paraBordersAnchorRef} style={{ display: "inline-flex" }}>
+              <ActionMenu
+                label="▦"
+                title="Paragraph borders and shading"
+                width={44}
+                groups={[
+                  {
+                    label: "Borders",
+                    items: [
+                      ["outside", "Outside borders"],
+                      ["all", "All borders"],
+                      ["top", "Top border"],
+                      ["bottom", "Bottom border"],
+                      ["left", "Left border"],
+                      ["right", "Right border"],
+                      ["none", "No border"],
+                    ],
+                  },
+                  { items: [["custom", "Borders and shading…"]] },
+                ]}
+                onPick={(v) => {
+                  const rule = { style: "single" as const, sz: 4, color: "auto" };
+                  if (v === "custom") setParaBordersOpen(true);
+                  else if (v === "none")
+                    api?.setParagraphBorders({ borders: { top: null, left: null, bottom: null, right: null, between: null, bar: null } });
+                  else if (v === "outside")
+                    api?.setParagraphBorders({ borders: { top: rule, bottom: rule, left: rule, right: rule } });
+                  else if (v === "all")
+                    api?.setParagraphBorders({ borders: { top: rule, bottom: rule, left: rule, right: rule, between: rule } });
+                  else api?.setParagraphBorders({ borders: { [v]: rule } });
+                }}
+              />
+            </span>
+            {paraBordersOpen && (
+              <ParagraphBorderDialog api={api} anchorRef={paraBordersAnchorRef} onClose={() => setParaBordersOpen(false)} />
+            )}
             <Sep />
           </>
         ),
@@ -5767,6 +6203,7 @@ export function DocxToolbar({
           {on("footnote") && <NoteMenu api={api} kind="endnote" />}
           {on("bookmark") && <BookmarkMenu api={api} />}
           {on("crossReference") && <CrossReferenceMenu api={api} />}
+          {on("crossReference") && <CaptionMenu api={api} />}
           {on("headerFooter") && <HeaderFooterMenu api={api} />}
           {on("watermark") && <WatermarkMenu api={api} />}
           <Sep />
@@ -5849,6 +6286,7 @@ export function DocxToolbar({
               {on("footnote") && <NoteMenu api={api} kind="endnote" />}
               {on("bookmark") && <BookmarkMenu api={api} />}
               {on("crossReference") && <CrossReferenceMenu api={api} />}
+              {on("crossReference") && <CaptionMenu api={api} />}
               {on("headerFooter") && <HeaderFooterMenu api={api} />}
               {on("watermark") && <WatermarkMenu api={api} />}
               {on("pageNumber") && <PageNumberMenu api={api} />}

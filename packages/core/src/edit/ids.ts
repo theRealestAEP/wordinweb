@@ -150,6 +150,31 @@ export function resolveRunOffset(runEl: XmlElement, offset: number): { t: XmlEle
   return last;
 }
 
+/** Resolve a wire span [start, end) of a run to the per-w:t local ranges it
+ * covers, in document order — the decoder for a stable-addressed RANGE, the
+ * way resolveRunOffset decodes a stable-addressed caret. Separator units
+ * inside the span contribute no range (they hold no selectable text). */
+export function resolveWireRange(
+  runEl: XmlElement,
+  start: number,
+  end: number,
+): { t: XmlElement; start: number; end: number }[] {
+  const out: { t: XmlElement; start: number; end: number }[] = [];
+  let acc = 0;
+  for (const item of runContentItems(runEl)) {
+    if (item.sep) {
+      acc += 1;
+      continue;
+    }
+    const t = item.t!;
+    const s = Math.max(start, acc);
+    const e = Math.min(end, acc + t.text.length);
+    if (e > s) out.push({ t, start: s - acc, end: e - acc });
+    acc += t.text.length;
+  }
+  return out;
+}
+
 export class StableIds {
   private byEl = new Map<XmlElement, StableId>();
   private byId = new Map<StableId, XmlElement>();

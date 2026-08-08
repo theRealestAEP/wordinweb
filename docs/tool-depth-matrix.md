@@ -442,3 +442,35 @@ bibliography. §16 rows moved:
 
 §16 counts: DEEP 0 · CORE 7 · STUB 2 · ABSENT 3. Revised totals:
 44 DEEP / 46 CORE / 4 STUB / 44 ABSENT.
+
+## Wave 2 delta, lane A (2026-08-08, branch depth2-para-refs)
+
+Rows moved:
+
+- §5 Editing: #112 CLOSED — replaceAll (and replaceCurrent) in collab compile
+  to per-match deleteText/insertText intents (strike-then-insert while
+  suggesting), per-story counts preserved; the local-only fork is gone.
+  NEW: `DocxViewApi.selectRange` (#111) — exact-range selection by the
+  stable-addressed wire shape, local mounts enable ids on demand (the desktop
+  spellcheck's select-and-replace seam).
+- §3 Paragraph: Tab stops ABSENT → DEEP (layout already rendered w:tabs incl.
+  leaders and bar tabs — VERIFIED; the gap was purely the edit surface:
+  registry op setTabStops, get/set API, toolbar Tabs popover). Paragraph
+  borders CORE → DEEP and Paragraph shading ABSENT → DEEP (layout already
+  painted pBdr all edges + w:shd — VERIFIED; registry op setParagraphBorders,
+  per-edge patch + fill, Home-tab Borders menu + dialog, table border-picker
+  vocabulary). Multilevel galleries: CORE gap narrowed (preset gallery
+  1.1.1 / outline / Article-Section / Chapter over the existing per-level
+  ops; define-new dialog and heading-link remain).
+- §9 Cross-references: CORE → DEEP — targets now include headings, captions,
+  and numbered items (hidden `_Ref` bookmarks via the new registered
+  ensureRefBookmark op; REF/PAGEREF resolution already existed).
+- §16 References: Captions STUB → DEEP (insertCaption registry op: SEQ-field
+  label+number paragraph below/above, table-hoisting, Caption style
+  injected, deterministic seed + updateFields renumber). Table of figures
+  STUB → CORE (insertToc captionLabel → `TOC \h \z \c "Label"`, entries from
+  captions, TableofFigures style, rebuild keeps the \c label; gallery
+  formats and per-label UI beyond Figure remain).
+
+Wire: ENGINE_VERSION e16 → e17 (setTabStops, setParagraphBorders,
+insertCaption, ensureRefBookmark, insertToc.captionLabel).

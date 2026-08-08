@@ -5,8 +5,8 @@ import { applyRunFormat, SelectionSegment, selectionTextLogical } from "../src/e
 import { addComment } from "../src/edit/comments.js";
 import { setListType, setListLevel } from "../src/edit/lists.js";
 import { setLink, removeLink, linkAt } from "../src/edit/links.js";
-import { adjustIndent, paragraphDividerAt, setDropCapAt, setParagraphDivider, setParagraphSpacing } from "../src/edit/paragraph.js";
-import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
+import { adjustIndent, paragraphBordersAt, paragraphDividerAt, setDropCapAt, setParagraphBorders, setParagraphDivider, setParagraphSpacing, setTabStops, tabStopsAt } from "../src/edit/paragraph.js";
+import { compileReplaceAll, findAll, replaceAll, transformCase } from "../src/edit/find.js";
 import { applyTableOp, cellShadingAt, resizeDrawing, setTableHeaderRows, sortTableRows } from "../src/edit/tables.js";
 import {
   adjustFloatingPosition,
@@ -2279,6 +2279,12 @@ describe("find & replace depth (whole word, stories, cross-paragraph)", () => {
 </w:footnotes>`,
     });
 
+  const storiesDocWithIds = () => {
+    const doc = storiesDoc();
+    doc.enableStableIds();
+    return doc;
+  };
+
   it("matches whole words only when asked", () => {
     const doc = loadDoc(p("The cat concatenates cats"));
     expect(findAll(doc, "cat").length).toBe(3);
@@ -2302,6 +2308,28 @@ describe("find & replace depth (whole word, stories, cross-paragraph)", () => {
     const note = doc.footnotes.get(1)![0] as Paragraph;
     expect(textOf(note)).toBe("Note dog text");
     expect(findAll(doc, "cat").length).toBe(0);
+  });
+
+  it("compileReplaceAll reaches every story with the local pass's counts (#112)", () => {
+    const doc = storiesDoc();
+    doc.enableStableIds();
+    const { intents, result } = compileReplaceAll(doc, "cat", "dog");
+    expect(result.total).toBe(4);
+    expect(result.byStory).toEqual({ body: 2, header: 1, footnote: 1 });
+    // One deleteText + one insertText per single-range match, back-to-front.
+    expect(intents.map((i) => i.kind)).toEqual(
+      ["deleteText", "insertText", "deleteText", "insertText", "deleteText", "insertText", "deleteText", "insertText"],
+    );
+    // Suggesting compiles the strike-then-insert pair with the carried meta.
+    const meta = { author: "R", date: "2026-08-08T00:00:00Z" };
+    const suggested = compileReplaceAll(storiesDocWithIds(), "cat", "dog", undefined, meta);
+    expect(suggested.result).toEqual(result);
+    expect(suggested.intents.map((i) => i.kind)).toEqual(
+      ["suggestRevision", "insertText", "suggestRevision", "insertText", "suggestRevision", "insertText", "suggestRevision", "insertText"],
+    );
+    for (const intent of suggested.intents) {
+      expect((intent as { suggest?: unknown }).suggest).toEqual(meta);
+    }
   });
 
   it("a query containing \\n matches across the paragraph boundary", () => {
@@ -2332,6 +2360,105 @@ describe("find & replace depth (whole word, stories, cross-paragraph)", () => {
     expect(tail.t.text).toBe("Beta");
     expect(tail.offset).toBe(4);
     expect(bookmarkTextTarget(doc, "missing")).toBeNull();
+  });
+});
+
+describe("paragraph borders & shading (setParagraphBorders / paragraphBordersAt)", () => {
+  const firstT = (doc: DocxDocument) =>
+    ((doc.sections[0].blocks[0] as Paragraph).children[0] as Run).content.find((c) => c.kind === "text")!.srcT!;
+
+  it("writes per-edge w:pBdr rules and a w:shd fill the layout model picks up", () => {
+    const doc = loadDoc(p("boxed"));
+    const rule = { style: "double" as const, sz: 8, color: "FF0000", space: 2 };
+    expect(setParagraphBorders(doc, [firstT(doc)], {
+      borders: { top: rule, bottom: rule, left: rule, right: rule },
+      shading: "D9E2F3",
+    })).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain(`<w:top w:val="double" w:sz="8" w:space="2" w:color="FF0000"/>`);
+    expect(xml).toContain(`<w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/>`);
+    // CT_PBdr order and pPr position: pBdr before shd.
+    expect(xml.indexOf("<w:pBdr>")).toBeLessThan(xml.indexOf("<w:shd"));
+    // The parsed model (what the layout paints) carries both.
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    expect(para.props.borders?.top).toBeTruthy();
+    expect(para.props.borders?.left).toBeTruthy();
+    expect(para.props.shading).toBeTruthy();
+    // Read-back for the dialog prefill.
+    const read = paragraphBordersAt(doc, firstT(doc));
+    expect(read.shading).toBe("#D9E2F3");
+    expect(read.borders.top).toEqual(rule);
+  });
+
+  it("null edges and null shading clear; an emptied pBdr is dropped", () => {
+    const doc = loadDoc(p("clear me"));
+    const rule = { style: "single" as const, sz: 4, color: "auto" };
+    setParagraphBorders(doc, [firstT(doc)], { borders: { top: rule, bottom: rule }, shading: "EEEEEE" });
+    expect(setParagraphBorders(doc, [firstT(doc)], {
+      borders: { top: null, bottom: null },
+      shading: null,
+    })).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).not.toContain("pBdr");
+    expect(xml).not.toContain("w:shd");
+    // An empty patch is an honest no-op.
+    expect(setParagraphBorders(doc, [firstT(doc)], {})).toBe(false);
+  });
+
+  it("suggesting records a w:pPrChange", () => {
+    const doc = loadDoc(p("tracked box"));
+    const meta = { author: "R", date: "2026-08-08T00:00:00Z", nextId: () => doc.nextRevisionId() };
+    expect(setParagraphBorders(doc, [firstT(doc)], { shading: "FFFF00" }, meta)).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain("w:pPrChange");
+    expect(xml).toContain(`w:author="R"`);
+  });
+});
+
+describe("tab stops (setTabStops / tabStopsAt)", () => {
+  const firstT = (doc: DocxDocument) =>
+    ((doc.sections[0].blocks[0] as Paragraph).children[0] as Run).content.find((c) => c.kind === "text")!.srcT!;
+
+  it("writes w:tabs with val/leader/pos, sorted, and reads them back", () => {
+    const doc = loadDoc(p("resume line"));
+    expect(tabStopsAt(doc, firstT(doc))).toEqual([]);
+    expect(setTabStops(doc, [firstT(doc)], [
+      { posPt: 216, align: "right", leader: "dot" },
+      { posPt: 72, align: "left", leader: "none" },
+    ])).toBe(true);
+    expect(tabStopsAt(doc, firstT(doc))).toEqual([
+      { posPt: 72, align: "left", leader: "none" },
+      { posPt: 216, align: "right", leader: "dot" },
+    ]);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain(`<w:tab w:val="left" w:pos="1440"/>`);
+    expect(xml).toContain(`<w:tab w:val="right" w:leader="dot" w:pos="4320"/>`);
+    // The parsed model the layout reads carries the stops.
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    expect(para.props.tabs?.map((t) => t.align)).toEqual(["left", "right"]);
+    // Survives save/load in schema order.
+    const reloaded = DocxDocument.load(doc.save());
+    const rt = ((reloaded.sections[0].blocks[0] as Paragraph).children[0] as Run).content.find((c) => c.kind === "text")!.srcT!;
+    expect(tabStopsAt(reloaded, rt)).toHaveLength(2);
+  });
+
+  it("an empty list removes w:tabs; w:tabs lands before w:jc", () => {
+    const doc = loadDoc(`<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">x</w:t></w:r></w:p>`);
+    expect(setTabStops(doc, [firstT(doc)], [{ posPt: 36, align: "center", leader: "none" }])).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml.indexOf("<w:tabs>")).toBeLessThan(xml.indexOf("<w:jc"));
+    expect(setTabStops(doc, [firstT(doc)], [])).toBe(true);
+    expect(serializeXml(doc.docRoot)).not.toContain("w:tabs");
+  });
+
+  it("suggesting records the prior properties in a w:pPrChange", () => {
+    const doc = loadDoc(p("tracked"));
+    const meta = { author: "R", date: "2026-08-08T00:00:00Z", nextId: () => doc.nextRevisionId() };
+    expect(setTabStops(doc, [firstT(doc)], [{ posPt: 144, align: "decimal", leader: "hyphen" }], meta)).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain("w:pPrChange");
+    expect(xml).toContain(`w:author="R"`);
+    expect(xml).toContain(`<w:tab w:val="decimal" w:leader="hyphen" w:pos="2880"/>`);
   });
 });
 

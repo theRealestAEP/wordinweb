@@ -2,6 +2,7 @@ import { DocxDocument } from "../docx.js";
 import { XmlElement, cloneXml, localName } from "../xml.js";
 import { paragraphOf } from "./blocks.js";
 import { RevisionMeta, appendParagraphProp, recordParagraphFormatChange } from "./suggest.js";
+import { TABLE_BORDER_STYLES, type TableBorderSpec, type TableBorderStyle } from "./tables.js";
 
 /**
  * Paragraph-level formatting commands: indent steps and line/paragraph
@@ -31,7 +32,9 @@ function attrKey(el: XmlElement, name: string, w: string): string {
 function paragraphsOf(doc: DocxDocument, targets: XmlElement[]): Set<XmlElement> {
   const out = new Set<XmlElement>();
   for (const t of targets) {
-    const p = paragraphOf(doc, t);
+    // A block address may resolve to the w:p ITSELF when the paragraph holds
+    // no text; paragraphOf walks up from parents and would miss it.
+    const p = localName(t.name) === "p" ? t : paragraphOf(doc, t);
     if (p) out.add(p);
   }
   return out;
@@ -159,6 +162,220 @@ export function setParagraphDivider(
       [`${w}space`]: String(Math.max(0, Math.round(divider.spacePt))),
       [`${w}color`]: divider.color.replace(/^#/, "").toUpperCase(),
     };
+  }
+  doc.refresh();
+  return true;
+}
+
+// ---------- paragraph borders & shading (w:pBdr §17.3.1.24, w:shd §17.3.1.31) ----------
+
+export const PARAGRAPH_BORDER_EDGES = ["top", "left", "bottom", "right", "between", "bar"] as const;
+export type ParagraphBorderEdge = (typeof PARAGRAPH_BORDER_EDGES)[number];
+
+export interface ParagraphBordersPatch {
+  /** Edges to change: a spec writes the rule, null removes the direct edge.
+   * Absent edges are left alone. The spec vocabulary is the table border
+   * picker's (style / sz in eighths / color / space in points). */
+  borders?: Partial<Record<ParagraphBorderEdge, TableBorderSpec | null>>;
+  /** Paragraph shading fill "RRGGBB"; null removes the direct w:shd.
+   * Undefined leaves shading alone. */
+  shading?: string | null;
+}
+
+/** The DIRECT paragraph borders and shading on the target's paragraph. */
+export function paragraphBordersAt(
+  doc: DocxDocument,
+  target: XmlElement,
+): { borders: Partial<Record<ParagraphBorderEdge, TableBorderSpec>>; shading: string | null } {
+  const paragraph = localName(target.name) === "p" ? target : paragraphOf(doc, target);
+  const pPr = paragraph?.children.find((child) => localName(child.name) === "pPr");
+  const read = (el: XmlElement, name: string) => el.attrs[Object.keys(el.attrs).find((key) => localName(key) === name) ?? ""];
+  const borders: Partial<Record<ParagraphBorderEdge, TableBorderSpec>> = {};
+  const pBdr = pPr?.children.find((child) => localName(child.name) === "pBdr");
+  for (const edge of PARAGRAPH_BORDER_EDGES) {
+    const el = pBdr?.children.find((child) => localName(child.name) === edge);
+    if (!el) continue;
+    const val = read(el, "val") ?? "single";
+    borders[edge] = {
+      style: val === "nil" || val === "none" ? "none" : (TABLE_BORDER_STYLES.includes(val as TableBorderStyle) ? (val as TableBorderStyle) : "single"),
+      sz: parseInt(read(el, "sz") ?? "4", 10) || 4,
+      color: read(el, "color") ?? "auto",
+      space: parseInt(read(el, "space") ?? "0", 10) || 0,
+    };
+  }
+  const shd = pPr?.children.find((child) => localName(child.name) === "shd");
+  const fill = shd ? read(shd, "fill") : undefined;
+  return { borders, shading: fill && fill !== "auto" ? `#${fill.toUpperCase()}` : null };
+}
+
+/** CT_PPr children AFTER w:pBdr; w:shd is first among them. */
+const AFTER_PBDR = new Set(["shd", "tabs"]);
+
+function paragraphBorderElement(w: string, edge: ParagraphBorderEdge, spec: TableBorderSpec): XmlElement {
+  if (spec.style === "none") {
+    return { name: `${w}${edge}`, attrs: { [`${w}val`]: "nil" }, children: [], text: "" };
+  }
+  const color = (spec.color ?? "auto").replace(/^#/, "");
+  return {
+    name: `${w}${edge}`,
+    attrs: {
+      [`${w}val`]: spec.style,
+      [`${w}sz`]: String(Math.round(spec.sz ?? 4)),
+      [`${w}space`]: String(Math.round(spec.space ?? 0)),
+      [`${w}color`]: color.toLowerCase() === "auto" ? "auto" : color.toUpperCase(),
+    },
+    children: [],
+    text: "",
+  };
+}
+
+/**
+ * Patch the target paragraphs' DIRECT borders (per edge) and/or shading.
+ * With `meta` the change is SUGGESTED (w:pPrChange).
+ */
+export function setParagraphBorders(
+  doc: DocxDocument,
+  targets: XmlElement[],
+  patch: ParagraphBordersPatch,
+  meta?: RevisionMeta,
+): boolean {
+  const paragraphs = paragraphsOf(doc, targets);
+  const edges = Object.entries(patch.borders ?? {}) as [ParagraphBorderEdge, TableBorderSpec | null][];
+  if (paragraphs.size === 0 || (edges.length === 0 && patch.shading === undefined)) return false;
+  for (const paragraph of paragraphs) {
+    const w = prefixOf(paragraph);
+    if (meta) recordParagraphFormatChange(paragraph, meta);
+    const pPr = ensurePPr(paragraph);
+    if (edges.length > 0) {
+      let pBdr = pPr.children.find((child) => localName(child.name) === "pBdr");
+      if (!pBdr) {
+        pBdr = { name: `${w}pBdr`, attrs: {}, children: [], text: "" };
+        const index = pPr.children.findIndex((child) => AFTER_PBDR.has(localName(child.name)) || AFTER_TABS.has(localName(child.name)));
+        pPr.children.splice(index === -1 ? pPr.children.length : index, 0, pBdr);
+      }
+      for (const [edge, spec] of edges) {
+        const at = pBdr.children.findIndex((child) => localName(child.name) === edge);
+        if (at !== -1) pBdr.children.splice(at, 1);
+        if (spec !== null) {
+          // CT_PBdr sequence: top, left, bottom, right, between, bar.
+          const after = PARAGRAPH_BORDER_EDGES.slice(PARAGRAPH_BORDER_EDGES.indexOf(edge) + 1);
+          const index = pBdr.children.findIndex((child) => (after as readonly string[]).includes(localName(child.name)));
+          pBdr.children.splice(index === -1 ? pBdr.children.length : index, 0, paragraphBorderElement(w, edge, spec));
+        }
+      }
+      if (pBdr.children.length === 0) pPr.children.splice(pPr.children.indexOf(pBdr), 1);
+    }
+    if (patch.shading !== undefined) {
+      const existing = pPr.children.findIndex((child) => localName(child.name) === "shd");
+      if (existing !== -1) pPr.children.splice(existing, 1);
+      if (patch.shading !== null) {
+        const shd: XmlElement = {
+          name: `${w}shd`,
+          attrs: {
+            [`${w}val`]: "clear",
+            [`${w}color`]: "auto",
+            [`${w}fill`]: patch.shading.replace(/^#/, "").toUpperCase(),
+          },
+          children: [],
+          text: "",
+        };
+        const index = pPr.children.findIndex((child) => AFTER_TABS.has(localName(child.name)) || localName(child.name) === "tabs");
+        pPr.children.splice(index === -1 ? pPr.children.length : index, 0, shd);
+      }
+    }
+  }
+  doc.refresh();
+  return true;
+}
+
+// ---------- tab stops (w:tabs, §17.3.1.38) ----------
+
+export const TAB_STOP_ALIGNMENTS = ["left", "center", "right", "decimal", "bar"] as const;
+export const TAB_STOP_LEADERS = ["none", "dot", "hyphen", "underscore", "middleDot"] as const;
+
+export interface TabStopSpec {
+  /** Position in points from the left text edge. */
+  posPt: number;
+  align: (typeof TAB_STOP_ALIGNMENTS)[number];
+  leader: (typeof TAB_STOP_LEADERS)[number];
+}
+
+/** Word's Tabs dialog cap: 22 inches. */
+export const MAX_TAB_STOP_PT = 1584;
+
+/** The DIRECT w:tabs list on the target's paragraph (style-inherited stops
+ * are not editable per paragraph; the layout still honors them). Empty when
+ * the paragraph declares none. */
+export function tabStopsAt(doc: DocxDocument, target: XmlElement): TabStopSpec[] {
+  const paragraph = paragraphOf(doc, target);
+  const pPr = paragraph?.children.find((child) => localName(child.name) === "pPr");
+  const tabs = pPr?.children.find((child) => localName(child.name) === "tabs");
+  if (!tabs) return [];
+  const out: TabStopSpec[] = [];
+  for (const tab of tabs.children) {
+    if (localName(tab.name) !== "tab") continue;
+    const read = (name: string) => tab.attrs[Object.keys(tab.attrs).find((key) => localName(key) === name) ?? ""];
+    const val = read("val") ?? "left";
+    if (val === "clear") continue;
+    const pos = parseInt(read("pos") ?? "", 10);
+    if (!Number.isFinite(pos)) continue;
+    out.push({
+      posPt: pos / 20,
+      align: (TAB_STOP_ALIGNMENTS as readonly string[]).includes(val) ? (val as TabStopSpec["align"]) : "left",
+      leader: (TAB_STOP_LEADERS as readonly string[]).includes(read("leader") ?? "") ? (read("leader") as TabStopSpec["leader"]) : "none",
+    });
+  }
+  out.sort((a, b) => a.posPt - b.posPt);
+  return out;
+}
+
+/** CT_PPr children AFTER w:tabs in the schema sequence (§17.3.1.26), so the
+ * element lands where Word expects it. */
+const AFTER_TABS = new Set([
+  "suppressAutoHyphens", "kinsoku", "wordWrap", "overflowPunct", "topLinePunct", "autoSpaceDE",
+  "autoSpaceDN", "bidi", "adjustRightInd", "snapToGrid", "spacing", "ind", "contextualSpacing",
+  "mirrorIndents", "suppressOverlap", "jc", "textDirection", "textAlignment", "textboxTightWrap",
+  "outlineLvl", "divId", "cnfStyle", "rPr", "sectPr", "pPrChange",
+]);
+
+/**
+ * Replace the target paragraphs' DIRECT tab stops with `stops` (an empty
+ * list removes w:tabs entirely, falling back to style stops and defaults).
+ * With `meta` the change is SUGGESTED (w:pPrChange).
+ */
+export function setTabStops(
+  doc: DocxDocument,
+  targets: XmlElement[],
+  stops: TabStopSpec[],
+  meta?: RevisionMeta,
+): boolean {
+  const paragraphs = paragraphsOf(doc, targets);
+  if (paragraphs.size === 0) return false;
+  const ordered = [...stops].sort((a, b) => a.posPt - b.posPt);
+  for (const paragraph of paragraphs) {
+    const w = prefixOf(paragraph);
+    if (meta) recordParagraphFormatChange(paragraph, meta);
+    const pPr = ensurePPr(paragraph);
+    let tabs = pPr.children.find((child) => localName(child.name) === "tabs");
+    if (ordered.length === 0) {
+      if (tabs) pPr.children.splice(pPr.children.indexOf(tabs), 1);
+      continue;
+    }
+    if (!tabs) {
+      tabs = { name: `${w}tabs`, attrs: {}, children: [], text: "" };
+      const index = pPr.children.findIndex((child) => AFTER_TABS.has(localName(child.name)));
+      pPr.children.splice(index === -1 ? pPr.children.length : index, 0, tabs);
+    }
+    tabs.children = ordered.map((stop) => ({
+      name: `${w}tab`,
+      attrs: {
+        [`${w}val`]: stop.align,
+        ...(stop.leader !== "none" ? { [`${w}leader`]: stop.leader } : {}),
+        [`${w}pos`]: String(Math.round(stop.posPt * 20)),
+      },
+      children: [],
+      text: "",
+    }));
   }
   doc.refresh();
   return true;

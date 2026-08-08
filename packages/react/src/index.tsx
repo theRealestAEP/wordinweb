@@ -42,6 +42,8 @@ import {
   adjustIndent,
   paragraphDividerAt,
   deleteComment,
+  compileReplaceAll,
+  compileReplaceMatch,
   findAll,
   linkAt,
   removeLink,
@@ -51,6 +53,13 @@ import {
   setLink,
   setParagraphDivider,
   setParagraphSpacing,
+  setTabStops,
+  tabStopsAt,
+  type TabStopSpec,
+  setParagraphBorders,
+  paragraphBordersAt,
+  type ParagraphBorderEdge,
+  type ParagraphBordersPatch,
   setDropCapAt,
   transformCase,
   exactLineHeightAt,
@@ -82,6 +91,11 @@ import {
   insertBookmarkAroundSelection,
   insertBookmarkAt,
   insertCrossReference,
+  insertCaptionAt,
+  listCrossRefTargets,
+  ensureRefBookmark,
+  nextRefBookmarkName,
+  type CrossRefTarget,
   insertMathAt,
   insertShapeAt,
   setDrawingLineStyle,
@@ -113,6 +127,8 @@ import {
   type PageNumberFormatPatch,
   type XmlElement,
   type EncodedCaret,
+  type WireRange,
+  resolveWireRange,
   type ShapePreset,
   type WordArtPreset,
   type DrawingTool,
@@ -170,6 +186,8 @@ import {
   deleteStyle,
   listStyles,
   setNumberingLevelAt,
+  NUMBERING_PRESETS,
+  type NumberingPresetId,
   restartNumberingAt,
   continueNumberingAt,
   formatPatchFrom,
@@ -236,6 +254,26 @@ export interface DocxViewApi {
   addBookmark(name: string): boolean;
   /** Insert a live text or page reference to a bookmark. */
   insertCrossReference(bookmark: string, kind: "text" | "page"): boolean;
+  /**
+   * Cross-reference targets beyond plain bookmarks, in document order:
+   * headings, captions (SEQ paragraphs), and numbered list items — what
+   * Word's Cross-reference dialog lists per reference type. The keys stay
+   * valid until the next call (or a document change).
+   */
+  listCrossRefTargets(): { key: string; kind: "heading" | "caption" | "numberedItem"; text: string }[];
+  /**
+   * Insert a live text or page reference to a listed target. A target with
+   * no hidden `_Ref` bookmark gets one first (Word's own mechanism), so the
+   * REF/PAGEREF has something durable to point at.
+   */
+  insertCrossRefToTarget(key: string, kind: "text" | "page"): boolean;
+  /**
+   * Insert a Word caption — "<label> <n>" in the Caption style, the number a
+   * live SEQ field — below or above the selected object (or the caret's
+   * block; a caret inside a table captions the table). updateFields
+   * renumbers the whole label sequence.
+   */
+  insertCaption(label: string, text?: string, position?: "below" | "above"): boolean;
   /**
    * Recompute every supported field's cached result — Word's F9, and what a
    * host calls before printing or exporting so the file it hands on carries
@@ -425,6 +463,17 @@ export interface DocxViewApi {
   setParagraphDivider(divider: ParagraphDivider | null): boolean;
   /** Direct bottom-border divider on the caret paragraph. */
   getParagraphDivider(): ParagraphDivider | null;
+  /** Replace the selected paragraphs' direct tab stops (w:tabs). An empty
+   * list removes them, so style stops and the default grid apply again. */
+  setTabStops(stops: TabStopSpec[]): boolean;
+  /** Direct tab stops on the caret paragraph, sorted by position. */
+  getTabStops(): TabStopSpec[];
+  /** Patch the selected paragraphs' border edges (w:pBdr) and/or shading
+   * fill (w:shd). Each named edge is set (spec) or cleared (null); absent
+   * edges stay. `shading: null` removes the fill. */
+  setParagraphBorders(patch: ParagraphBordersPatch): boolean;
+  /** Direct borders and shading on the caret paragraph. */
+  getParagraphBorders(): { borders: Partial<Record<ParagraphBorderEdge, TableBorderSpec>>; shading: string | null };
   /** Apply or remove a native Word drop cap on the caret paragraph. */
   setDropCap(mode: "drop" | "margin" | null, lines?: number): boolean;
   /** Remove direct character formatting from the selection. */
@@ -444,6 +493,18 @@ export interface DocxViewApi {
   goToPage(page: number): boolean;
   /** Go To: move the caret to a named bookmark and scroll it into view. */
   goToBookmark(name: string): boolean;
+  /**
+   * Select an exact text range by stable address — the `{blockId, runId,
+   * start, end}` shape the wire, presence, and suggestRevision already use
+   * (offsets in the run's wire basis; see getEncodedCaret for the caret
+   * half). Several ranges select together, for a word split across runs.
+   * Selection and scroll ride find-navigation's machinery; the view only
+   * scrolls when the range is off screen. In a local document the first call
+   * populates the stable-id table (enableStableIds), so hosts — the desktop
+   * spellcheck's select-and-replace — can address text without a collab
+   * mount. False when no range resolves to text.
+   */
+  selectRange(range: WireRange | WireRange[]): boolean;
   /** Paragraph styles for the style menu (declared + Word built-ins). */
   listParagraphStyles(): { id: string; name: string }[];
   /** pStyle id of the caret paragraph (null = Normal). */
@@ -472,6 +533,13 @@ export interface DocxViewApi {
   setCharacterStyle(styleId: string | null): void;
   /** Change a list level's number format, label text, or indent. */
   setNumberingLevel(ilvl: number | null, patch: LevelPatch): boolean;
+  /**
+   * Apply a preset multilevel definition (Word's multilevel gallery) to the
+   * caret's list — the paragraphs join a numbered list first when they are
+   * not in one. Compiles onto the existing per-level patch operation, so it
+   * rides the same wire ops and converges like any level edit.
+   */
+  applyNumberingPreset(preset: NumberingPresetId): boolean;
   /** Restart list numbering at the caret, or (null) continue the preceding list. */
   setNumberingRestart(start: number | null): boolean;
   /** Format painter, half one: the selection's formatting, or null. */
@@ -555,9 +623,11 @@ export interface DocxViewApi {
   acceptAllRevisions(): number;
   /** Reject every tracked change (one undo step). Returns how many applied. */
   rejectAllRevisions(): number;
-  /** Current caret as stable-id addresses (collab), or null. The encoding
-   * survives a reconciliation reload, so it can be captured from a view
-   * about to remount and restored into its replacement. */
+  /** Current caret as stable-id addresses, or null. The encoding survives a
+   * reconciliation reload, so it can be captured from a view about to
+   * remount and restored into its replacement. In a local document the first
+   * call populates the stable-id table (like selectRange), so hosts can
+   * capture addresses outside a collab mount too. */
   getEncodedCaret(): EncodedCaret | null;
   /** Restore a caret captured by getEncodedCaret. False when the position no
    * longer resolves (or outside collab mode). */
@@ -582,6 +652,13 @@ export interface DocxViewApi {
 }
 
 export type ScreenshotInsertResult = "inserted" | "unsupported" | "cancelled" | "error" | "no-caret";
+
+/**
+ * Word's multilevel-list gallery, expressed as per-level patches over the
+ * existing deep numbering ops. One entry per preset; index = ilvl.
+ */
+export { NUMBERING_PRESETS } from "@wordinweb/core";
+export type { NumberingPresetId } from "@wordinweb/core";
 
 /**
  * Image formats a SHARED document accepts, and the single source of truth for
@@ -1602,6 +1679,8 @@ export function DocxView({
         };
         pages = rerender(doc); // re-render with the delete affordance wired
         let findState: { matches: ReturnType<typeof findAll>; index: number } = { matches: [], index: 0 };
+        // Cross-reference dialog targets (listCrossRefTargets), keyed by index.
+        let crossRefTargets: CrossRefTarget[] = [];
         // Review-tab comment navigation cursor (-1 = not started).
         let commentNav = -1;
         const selectMatch = (i: number) => {
@@ -1979,6 +2058,77 @@ export function DocxView({
             pages = rerender(doc);
             return true;
           },
+          listCrossRefTargets: () => {
+            crossRefTargets = listCrossRefTargets(doc);
+            return crossRefTargets.map((target, i) => ({
+              key: String(i),
+              kind: target.kind,
+              text: target.text.length > 80 ? `${target.text.slice(0, 79)}…` : target.text,
+            }));
+          },
+          insertCrossRefToTarget: (key, kind) => {
+            const target = crossRefTargets[Number(key)];
+            if (!target) return false;
+            let name = target.bookmark;
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              // The hidden bookmark rides its own registered intent first;
+              // the REF then names it like any user bookmark. Both carry the
+              // originator's values, so every replica writes the same XML.
+              if (!name) {
+                name = nextRefBookmarkName(doc);
+                const blockId = doc.stableIds.idOf(target.paragraph);
+                if (blockId === undefined) return true; // honest no-op (see collabOp)
+                history.checkpoint();
+                current.submitOp(operationBody("ensureRefBookmark", blockId, { name }) as never);
+              }
+              const bookmark = name;
+              return collabOp((a, ids) => ({ kind: "insertCrossRef", runId: a.runId, bookmark, refKind: kind, nodeIds: ids(8) }));
+            }
+            const at = insertionTarget();
+            if (!at) return false;
+            history.checkpoint();
+            if (!name) {
+              name = nextRefBookmarkName(doc);
+              if (!ensureRefBookmark(doc, target.paragraph, name)) return false;
+            }
+            if (!insertCrossReference(doc, at.t, at.offset, name, kind)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          insertCaption: (label, text = "", position = "below") => {
+            // The caption anchors at the SELECTED OBJECT's paragraph when an
+            // object is selected, else at the caret's block (a caret inside a
+            // table captions the table — the mutation hoists).
+            const drawing = editor?.getSelectedDrawingSource();
+            const caret = editor?.getCaretTarget();
+            const anchorTarget = drawing ?? caret?.t;
+            if (!anchorTarget) return false;
+            let pEl: XmlElement | null = null;
+            for (let cur: XmlElement | null = anchorTarget; cur; cur = doc.findParentOf(cur) ?? null) {
+              if (localName(cur.name) === "p") {
+                pEl = cur;
+                break;
+              }
+            }
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              const blockId = pEl ? doc.stableIds.idOf(pEl) : undefined;
+              if (blockId === undefined) return true; // honest no-op (see collabOp)
+              history.checkpoint();
+              current.submitOp(operationBody(
+                "insertCaption",
+                blockId,
+                { label, ...(text ? { text } : {}), position },
+                (n) => current.allocIds?.(n) ?? [],
+              ) as never);
+              return true;
+            }
+            history.checkpoint();
+            if (!insertCaptionAt(doc, anchorTarget, label, text, position)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
           updateFields: (values) => {
             // Bibliographies first — Word's F9 regenerates them too. Their
             // rebuild is STRUCTURAL (paragraphs replaced), so it is its own
@@ -2032,6 +2182,7 @@ export function DocxView({
                 entryCount: tocEntryCount(doc, options),
                 ...(options?.levels ? { levels: options.levels } : {}),
                 ...(options?.leader ? { leader: options.leader } : {}),
+                ...(options?.captionLabel ? { captionLabel: options.captionLabel } : {}),
               })
             ) {
               return true;
@@ -2795,6 +2946,46 @@ export function DocxView({
             const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
             return target ? paragraphDividerAt(doc, target) : null;
           },
+          setTabStops: (stops) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const caret = editor?.getCaretTarget();
+            const targets = segs.length > 0
+              ? segs.map((segment) => segment.t).filter((target): target is NonNullable<typeof target> => !!target)
+              : caret
+                ? [caret.t]
+                : [];
+            if (targets.length === 0) return false;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => operationBody("setTabStops", blockId, { stops, suggest }) as never)) return true;
+            history.checkpoint();
+            if (!setTabStops(doc, targets, stops, suggestMeta(doc, suggest))) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          getTabStops: () => {
+            const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
+            return target ? tabStopsAt(doc, target) : [];
+          },
+          setParagraphBorders: (patch) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const caret = editor?.getCaretTarget();
+            const targets = segs.length > 0
+              ? segs.map((segment) => segment.t).filter((target): target is NonNullable<typeof target> => !!target)
+              : caret
+                ? [caret.t]
+                : [];
+            if (targets.length === 0) return false;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => operationBody("setParagraphBorders", blockId, { patch, suggest }) as never)) return true;
+            history.checkpoint();
+            if (!setParagraphBorders(doc, targets, patch, suggestMeta(doc, suggest))) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          getParagraphBorders: () => {
+            const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
+            return target ? paragraphBordersAt(doc, target) : { borders: {}, shading: null };
+          },
           setDropCap: (mode, lines = 3) => {
             if (collabOp((a, ids) => ({ kind: "setDropCap", blockId: a.blockId, mode, nodeIds: ids(8) }))) return true;
             const target = insertionTarget();
@@ -2833,15 +3024,42 @@ export function DocxView({
           replaceCurrent: (replacement) => {
             const m = findState.matches[findState.index];
             if (!m) return 0;
-            history.checkpoint();
-            replaceMatch(doc, m, replacement);
-            pages = rerender(doc);
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              // In a room the replacement rides the wire as the canonical
+              // deleteText/insertText intents (strike-then-insert while
+              // suggesting) — the local mutation below never replicates. An
+              // unaddressable match is an honest no-op (see collabOp).
+              const intents = compileReplaceMatch(doc, m, replacement, editor?.suggestionMeta());
+              if (intents) {
+                history.checkpoint();
+                for (const intent of intents) current.submitOp(intent);
+              }
+            } else {
+              history.checkpoint();
+              replaceMatch(doc, m, replacement);
+              pages = rerender(doc);
+            }
             findState.matches.splice(findState.index, 1);
             if (findState.index >= findState.matches.length) findState.index = 0;
             if (findState.matches.length > 0) selectMatch(findState.index);
             return findState.matches.length;
           },
           replaceAll: (query, replacement, opts) => {
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              // One fixed find pass compiled to per-match intents, submitted
+              // back-to-front (the compiled order) so every offset encoded
+              // against the pre-replace tree stays valid as the optimistic
+              // applies land. One checkpoint: the whole sweep is one gesture.
+              const { intents, result } = compileReplaceAll(doc, query, replacement, opts, editor?.suggestionMeta());
+              if (intents.length > 0) {
+                history.checkpoint();
+                for (const intent of intents) current.submitOp(intent);
+              }
+              findState = { matches: [], index: 0 };
+              return result;
+            }
             history.checkpoint();
             const result = replaceAll(doc, query, replacement, opts);
             if (result.total > 0) pages = rerender(doc);
@@ -2869,6 +3087,30 @@ export function DocxView({
             restore?.();
             handle.updateViewport?.();
             return !!el;
+          },
+          selectRange: (range) => {
+            if (!editor) return false;
+            const ids = doc.stableIds ?? doc.enableStableIds();
+            const resolved: { t: XmlElement; start: number; end: number }[] = [];
+            for (const r of Array.isArray(range) ? range : [range]) {
+              if (!Number.isInteger(r.start) || !Number.isInteger(r.end) || r.end <= r.start || r.start < 0) continue;
+              const runEl = ids.elOf(r.runId);
+              if (!runEl) continue;
+              resolved.push(...resolveWireRange(runEl, r.start, r.end));
+            }
+            if (resolved.length === 0) return false;
+            // Find-navigation's materialize dance (selectMatch): a far range
+            // may live on a virtualized-out page. "nearest" instead of
+            // "center" so a range already on screen — the spellcheck's word
+            // under the pointer — never jumps the view.
+            const restore = handle?._virtualized ? handle.materializeAll?.() : undefined;
+            editor.selectRanges(resolved);
+            const el = handle?.bindingsByText.get(resolved[0].t)?.[0]?.el;
+            el?.scrollIntoView({ block: "nearest", behavior: "instant" as ScrollBehavior });
+            restore?.();
+            handle?.updateViewport?.();
+            editor.selectRanges(resolved);
+            return true;
           },
           toggleList: (kind) => {
             const caret = editor?.getCaretTarget();
@@ -3018,6 +3260,16 @@ export function DocxView({
             pages = rerender(doc, undefined, "global");
             return true;
           },
+          applyNumberingPreset: (preset) => {
+            const spec = NUMBERING_PRESETS[preset];
+            if (!spec) return false;
+            if (api.getListType() !== "number") api.toggleList("number");
+            let applied = true;
+            for (let ilvl = 0; ilvl < spec.levels.length; ilvl++) {
+              applied = api.setNumberingLevel(ilvl, spec.levels[ilvl]) && applied;
+            }
+            return applied;
+          },
           setNumberingRestart: (start) => {
             const caret = editor?.getCaretTarget();
             if (!caret) return false;
@@ -3073,7 +3325,10 @@ export function DocxView({
           revisionCount: () => collectRevisions(doc).length,
           acceptAllRevisions: () => editor?.acceptAllRevisions() ?? 0,
           rejectAllRevisions: () => editor?.rejectAllRevisions() ?? 0,
-          getEncodedCaret: () => editor?.getEncodedCaret() ?? null,
+          getEncodedCaret: () => {
+            doc.enableStableIds(); // local documents encode too (see the API doc)
+            return editor?.getEncodedCaret() ?? null;
+          },
           setCaretFromEncoded: (pos) => editor?.setCaretFromEncoded(pos) ?? false,
           revealPresence: (participant) => {
             // Read the CURRENT presence (presenceRef), not a render's snapshot:
@@ -3334,7 +3589,7 @@ export function DocxView({
 }
 
 export { DocxDocument, layoutDocument, renderToDom, printPages } from "@wordinweb/core";
-export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset } from "@wordinweb/core";
+export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset, WireRange, EncodedCaret } from "@wordinweb/core";
 export { DocxToolbar, ToolbarMenuSelect, INSERT_COMMANDS } from "./toolbar.js";
 export type {
   DocxToolbarProps,

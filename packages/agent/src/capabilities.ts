@@ -448,6 +448,10 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "editCitationSource.tag": citationTag,
   "editCitationSource.patch": closedObject(citationSourceFields),
   "deleteCitationSource.tag": citationTag,
+  "insertToc.captionLabel": { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]{0,31}$" },
+  "insertCaption.label": { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]{0,31}$" },
+  "insertCaption.text": string(2000, 0),
+  "ensureRefBookmark.name": { type: "string", pattern: "^_Ref[0-9]{1,12}$" },
   "createStyle.style": styleSpec,
   "modifyStyle.styleId": styleId,
   "modifyStyle.patch": stylePatch,
@@ -455,6 +459,50 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setNumberingLevel.ilvl": { anyOf: [integer(0, 8), { type: "null" }] },
   "setNumberingLevel.patch": numberingLevelPatch,
   "setNumberingRestart.start": { anyOf: [integer(0, 32767), { type: "null" }] },
+  // The registry's own validate is the wire authority (edge/style/range caps).
+  "setParagraphBorders.patch": {
+    type: "object",
+    properties: {
+      borders: {
+        type: "object",
+        additionalProperties: false,
+        properties: Object.fromEntries(
+          ["top", "left", "bottom", "right", "between", "bar"].map((edge) => [
+            edge,
+            {
+              anyOf: [
+                closedObject(
+                  {
+                    style: { enum: ["single", "thick", "double", "dotted", "dashed", "dotDash", "dotDotDash", "thinThickSmallGap", "triple", "wave", "none"] },
+                    sz: number(1, 96),
+                    color: { type: "string" },
+                    space: number(0, 31),
+                  },
+                  ["style"],
+                ),
+                { type: "null" },
+              ],
+            },
+          ]),
+        ),
+      },
+      shading: { anyOf: [{ type: "string", pattern: "^#?[0-9A-Fa-f]{6}$" }, { type: "null" }] },
+    },
+    additionalProperties: false,
+  },
+  // The registry's own validate is the wire authority (count and range caps).
+  "setTabStops.stops": {
+    type: "array",
+    maxItems: 64,
+    items: closedObject(
+      {
+        posPt: number(-1584, 1584),
+        align: { enum: ["left", "center", "right", "decimal", "bar"] },
+        leader: { enum: ["none", "dot", "hyphen", "underscore", "middleDot"] },
+      },
+      ["posPt", "align", "leader"],
+    ),
+  },
   // w:pgNumType. null clears the attribute (fmt back to decimal; start back
   // to "continue from previous section").
   "setPageNumberFormat.fmt": {
@@ -498,6 +546,7 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "convertTextToTable.separator": ["tab", "comma"],
   "convertTableToText.separator": ["tab", "comma"],
   "setCitationStyle.style": [...CITATION_STYLES],
+  "insertCaption.position": ["below", "above"],
 };
 
 function schemaForField(kind: Intent["kind"], field: string): JsonSchema {

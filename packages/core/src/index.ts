@@ -80,7 +80,7 @@ export type {
   DeleteRange,
 } from "./edit/suggest.js";
 export { EditHistory } from "./edit/history.js";
-export { StableIds, textsUnderRun, resolveRunOffset, runContentItems, runWireLength, wireOffsetOf, wireOffsetOfSeparator, separatorAtWireOffset } from "./edit/ids.js";
+export { StableIds, textsUnderRun, resolveRunOffset, resolveWireRange, runContentItems, runWireLength, wireOffsetOf, wireOffsetOfSeparator, separatorAtWireOffset } from "./edit/ids.js";
 export type { EncodedCaret } from "./edit/ids.js";
 export { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator, applyDeleteSeparator } from "./edit/mutations.js";
 export type { EditCaret, MutationCtx, SplitResult, DeleteSeparatorResult } from "./edit/mutations.js";
@@ -121,7 +121,7 @@ export type {
   StyleGalleryEntry,
   StyleType,
 } from "./edit/styles.js";
-export {
+export { NUMBERING_PRESETS,
   NUMBER_FORMATS,
   listInstanceAt,
   setNumberingLevel,
@@ -131,11 +131,11 @@ export {
   continueNumberingAt,
   detachNumbering,
 } from "./edit/numbering.js";
-export type { LevelPatch, NumberFormat } from "./edit/numbering.js";
+export type { NumberingPresetId, LevelPatch, NumberFormat } from "./edit/numbering.js";
 export { setLink, removeLink, linkAt } from "./edit/links.js";
-export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpacing, setDropCapAt } from "./edit/paragraph.js";
-export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode } from "./edit/paragraph.js";
-export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
+export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpacing, setDropCapAt, setTabStops, tabStopsAt, MAX_TAB_STOP_PT, TAB_STOP_ALIGNMENTS, TAB_STOP_LEADERS, PARAGRAPH_BORDER_EDGES, paragraphBordersAt, setParagraphBorders } from "./edit/paragraph.js";
+export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode, TabStopSpec, ParagraphBorderEdge, ParagraphBordersPatch } from "./edit/paragraph.js";
+export { compileReplaceAll, compileReplaceMatch, findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertEndnote, insertFootnote } from "./edit/notes.js";
 export {
@@ -175,13 +175,9 @@ export {
   updateFields,
 } from "./edit/update-fields.js";
 export type { FieldUpdateOptions } from "./edit/update-fields.js";
-export { TOC_EMPTY_TEXT, TOC_LEADERS, findTocFields, insertToc, rebuildToc, tocEntryCount } from "./edit/toc.js";
+export { TOC_EMPTY_TEXT, TOC_LEADERS, findBibliographyFields, findTocFields, insertBibliography, insertToc, isValidCaptionLabel, rebuildToc, refreshBibliographies, tocEntryCount, tocEntryCount } from "./edit/toc.js";
 export {
-  bibliographyEntryCount,
-  findBibliographyFields,
-  insertBibliography,
-  refreshBibliographies,
-} from "./edit/bibliography.js";
+  bibliographyEntryCount } from "./edit/toc.js";
 export type { TocLeader, TocLevels, TocOptions } from "./edit/toc.js";
 export {
   drawingFillColor,
@@ -203,7 +199,8 @@ export type { SmartArtTextFormat } from "./edit/smartart.js";
 export { insertModel3DAt, setModel3DRotation, insertWebVideoAt, insertEmbeddedObjectAt, normalizeWebVideoUrl } from "./edit/objects.js";
 export type { Model3DInsert, Model3DRotation, WebVideoInsert, EmbeddedObjectInsert } from "./edit/objects.js";
 export { buildOlePackage, extractOlePackage } from "./parse/ole.js";
-export { validBookmarkName, listBookmarks, bookmarkTextTarget, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference } from "./edit/references.js";
+export { validBookmarkName, listBookmarks, bookmarkTextTarget, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, insertCaptionAt, listCrossRefTargets, ensureRefBookmark, nextRefBookmarkName, CAPTION_LABELS } from "./edit/references.js";
+export type { CrossRefTarget } from "./edit/references.js";
 export {
   deleteWatermark,
   headerWatermarks,
@@ -246,7 +243,7 @@ export { documentTextStatistics } from "./word-count.js";
 export type { TextStatistics } from "./word-count.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages, buildPrintHtml } from "./render/dom.js";
-export type { FindMatch, FindOptions, FindStory, ReplaceAllResult } from "./edit/find.js";
+export type { FindMatch, FindOptions, FindStory, ReplaceAllResult, ReplaceAllCompilation, ReplaceIntentBody, WireRange } from "./edit/find.js";
 export { cellShadingAt } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";
 export {

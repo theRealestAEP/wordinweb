@@ -698,6 +698,8 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `setDivider` | Set or clear a paragraph divider | `blockRef`, `divider` |
 | `setNumberingLevel` | Change a list level's number format, label text, or indent | `blockRef`, `ilvl`, `patch` |
 | `setNumberingRestart` | Restart list numbering here, or continue the preceding list | `blockRef`, `start` |
+| `setTabStops` | Replace the paragraph's tab stops (position, alignment, leader); an empty list removes them | `blockRef`, `stops`; optional: `suggest` |
+| `setParagraphBorders` | Set or clear the paragraph's border edges and shading fill | `blockRef`, `patch`; optional: `suggest` |
 
 ### Review
 
@@ -741,7 +743,9 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertCitation` | Insert a citation to a bibliography source the document already has | `runRef`, `tag` |
 | `insertBibliography` | Insert a bibliography built from the document's citation sources | `runRef`, `entryCount` |
 | `insertTable` | Insert a table, with its whole content (cell texts, header row) authored in the same operation | `runRef`, `rows`, `cols`; optional: `cells`, `headerRow` |
-| `insertToc` | Insert a table of contents built from the document's headings | `runRef`, `entryCount`, `levels`, `leader` |
+| `insertToc` | Insert a table of contents built from the document's headings, or a table of figures from a caption label | `runRef`, `entryCount`; optional: `levels`, `leader`, `captionLabel` |
+| `insertCaption` | Insert a caption ("Figure 1", "Table 2", …) below or above the addressed paragraph or its table | `blockRef`, `label`; optional: `text`, `position` |
+| `ensureRefBookmark` | Wrap the addressed paragraph in a hidden _Ref bookmark for cross-referencing | `blockRef`, `name` |
 | `insertWatermark` | Stamp a text watermark across every page, in the document's header parts | `text`, `headerCount`; optional: `diagonal`, `color`, `opacity` |
 | `removeWatermark` | Remove the text watermark from every page | — |
 

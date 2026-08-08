@@ -42,6 +42,15 @@ import {
   type CitationSourcePatch,
   type CitationSourceSpec,
 } from "./sources.js";
+  MAX_TAB_STOP_PT,
+  PARAGRAPH_BORDER_EDGES,
+  TAB_STOP_ALIGNMENTS,
+  TAB_STOP_LEADERS,
+  setParagraphBorders,
+  setTabStops,
+  type ParagraphBordersPatch,
+  type TabStopSpec,
+} from "./paragraph.js";
 import {
   PAGE_NUMBER_FORMATS,
   setEvenOddHeaders,
@@ -50,7 +59,8 @@ import {
   type PageNumberFormat,
 } from "./sections.js";
 import { suggestMeta } from "./suggest.js";
-import { TOC_LEADERS, insertToc, type TocLeader, type TocLevels } from "./toc.js";
+import { TOC_LEADERS, insertToc, isValidCaptionLabel, type TocLeader, type TocLevels } from "./toc.js";
+import { ensureRefBookmark, insertCaptionAt } from "./references.js";
 import { applyFieldResults } from "./update-fields.js";
 import { insertWatermark, removeWatermark } from "./watermark.js";
 import {
@@ -502,20 +512,23 @@ const insertTocOperation = defineOperation<{
   runId: StableId;
   levels?: TocLevels;
   leader?: TocLeader;
+  /** With a label the field is a TABLE OF FIGURES (`TOC \c "Label"`): the
+   * entries come from the label's caption paragraphs instead of headings. */
+  captionLabel?: string;
   entryCount: number;
   nodeIds: StableId[];
 }>()({
   kind: "insertToc",
   address: "run",
   category: "insert",
-  description: "Insert a table of contents built from the document's headings.",
-  fields: [{ name: "entryCount" }, { name: "levels", optional: true }, { name: "leader", optional: true }],
+  description: "Insert a table of contents built from the document's headings, or — with captionLabel — a table of figures built from that label's captions.",
+  fields: [{ name: "entryCount" }, { name: "levels", optional: true }, { name: "leader", optional: true }, { name: "captionLabel", optional: true }],
   // Per entry: the w:p plus the seven runs of its hyperlink. The spare covers
   // the three field runs spliced into the first entry and the closing
   // paragraph with its own run.
   nodeIds: ({ entryCount }) =>
     Number.isInteger(entryCount) && entryCount > 0 ? entryCount * 8 + 8 : 8,
-  validate: ({ entryCount, levels, leader }) => {
+  validate: ({ entryCount, levels, leader, captionLabel }) => {
     if (!Number.isInteger(entryCount) || entryCount < 1 || entryCount > 10000) {
       return "insertToc: bad entryCount";
     }
@@ -527,6 +540,7 @@ const insertTocOperation = defineOperation<{
       }
     }
     if (leader !== undefined && !TOC_LEADERS.includes(leader)) return "insertToc: bad leader";
+    if (captionLabel !== undefined && !isValidCaptionLabel(captionLabel)) return "insertToc: bad captionLabel";
     return null;
   },
   apply: ({ doc, target, payload }) =>
@@ -534,8 +548,55 @@ const insertTocOperation = defineOperation<{
       ? insertToc(doc, target.t, {
           ...(payload.levels ? { levels: payload.levels } : {}),
           ...(payload.leader ? { leader: payload.leader } : {}),
+          ...(payload.captionLabel ? { captionLabel: payload.captionLabel } : {}),
         })
       : false,
+});
+
+/** Insert a Word caption — "<label> <SEQ n>" plus optional text, Caption
+ * style — below or above the addressed paragraph's block (the containing
+ * table when the paragraph sits in a cell). The SEQ number seeds from
+ * document order (deterministic); updateFields renumbers the set. */
+const insertCaptionOperation = defineOperation<{
+  blockId: StableId;
+  label: string;
+  text?: string;
+  position?: "below" | "above";
+  nodeIds: StableId[];
+}>()({
+  kind: "insertCaption",
+  address: "block",
+  category: "insert",
+  description: 'Insert a caption ("Figure 1", "Table 2", …) below or above the addressed paragraph or its table.',
+  fields: [{ name: "label" }, { name: "text", optional: true }, { name: "position", optional: true }],
+  // The caption paragraph plus its label run, SEQ result run, and text run.
+  nodeIds: () => 8,
+  validate: ({ label, text, position }) => {
+    if (typeof label !== "string" || !isValidCaptionLabel(label)) return "insertCaption: bad label";
+    if (text !== undefined && (typeof text !== "string" || text.length > 2000)) return "insertCaption: bad text";
+    if (position !== undefined && position !== "below" && position !== "above") return "insertCaption: bad position";
+    return null;
+  },
+  apply: ({ doc, target, payload }) =>
+    insertCaptionAt(doc, target.el, payload.label, payload.text ?? "", payload.position ?? "below"),
+});
+
+/** Wrap the addressed paragraph in a hidden `_Ref` bookmark so REF/PAGEREF
+ * fields can point at it — the plumbing half of a cross-reference to a
+ * heading, caption, or numbered item. The name is the originator's (carried,
+ * sequential `_RefN`); a paragraph that already has one is a clean no-op. */
+const ensureRefBookmarkOperation = defineOperation<{
+  blockId: StableId;
+  name: string;
+}>()({
+  kind: "ensureRefBookmark",
+  address: "block",
+  category: "insert",
+  description: "Wrap the addressed paragraph in a hidden _Ref bookmark for cross-referencing.",
+  fields: [{ name: "name" }],
+  validate: ({ name }) =>
+    typeof name === "string" && /^_Ref\d{1,12}$/.test(name) ? null : "ensureRefBookmark: bad name",
+  apply: ({ doc, target, payload }) => ensureRefBookmark(doc, target.el, payload.name),
 });
 
 // ---------------------------------------------------------------------------
@@ -872,6 +933,74 @@ function cellAnchor(target: OperationTarget): XmlElement | null {
 
 
 /** Set or clear per-edge borders on one cell or on the whole table. */
+const HEX_FILL = /^#?[0-9A-Fa-f]{6}$/;
+
+/** Patch a paragraph's DIRECT borders (per edge, w:pBdr §17.3.1.24) and/or
+ * shading fill (w:shd §17.3.1.31). Position-stable (pPr only) — transform
+ * identity; with `suggest` the paragraph records a w:pPrChange. */
+const setParagraphBordersOperation = defineOperation<{
+  blockId: StableId;
+  patch: ParagraphBordersPatch;
+} & SuggestablePayload>()({
+  kind: "setParagraphBorders",
+  address: "block",
+  category: "paragraph",
+  description: "Set or clear the paragraph's border edges and shading fill.",
+  fields: [{ name: "patch" }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const patch = payload.patch;
+    if (!patch || typeof patch !== "object") return "setParagraphBorders: bad patch";
+    const edges = Object.entries(patch.borders ?? {});
+    if (edges.length === 0 && patch.shading === undefined) return "setParagraphBorders: empty patch";
+    for (const [edge, spec] of edges) {
+      if (!(PARAGRAPH_BORDER_EDGES as readonly string[]).includes(edge)) return "setParagraphBorders: bad edge";
+      if (spec === null) continue;
+      if (!spec || typeof spec !== "object") return "setParagraphBorders: bad border";
+      if (!(TABLE_BORDER_STYLES as readonly string[]).includes(spec.style)) return "setParagraphBorders: bad style";
+      if (spec.sz !== undefined && (typeof spec.sz !== "number" || spec.sz < 1 || spec.sz > 96)) return "setParagraphBorders: bad sz";
+      if (spec.space !== undefined && (typeof spec.space !== "number" || spec.space < 0 || spec.space > 31)) return "setParagraphBorders: bad space";
+      if (spec.color !== undefined && !(spec.color === "auto" || HEX_FILL.test(spec.color))) return "setParagraphBorders: bad color";
+    }
+    if (patch.shading !== undefined && patch.shading !== null && !HEX_FILL.test(patch.shading)) {
+      return "setParagraphBorders: bad shading";
+    }
+    return badSuggest("setParagraphBorders", payload);
+  },
+  apply: ({ doc, target, payload }) =>
+    setParagraphBorders(doc, [target.t ?? target.el], payload.patch, suggestMeta(doc, payload.suggest)),
+});
+
+/** Replace a paragraph's DIRECT tab stops (w:tabs, §17.3.1.38). An empty
+ * list removes the element so style stops and the default grid apply again.
+ * Position-stable (pPr only), so the transform is identity; with `suggest`
+ * the paragraph records its prior properties in a w:pPrChange. */
+const setTabStopsOperation = defineOperation<{
+  blockId: StableId;
+  stops: TabStopSpec[];
+} & SuggestablePayload>()({
+  kind: "setTabStops",
+  address: "block",
+  category: "paragraph",
+  description: "Replace the paragraph's tab stops (position, alignment, leader). An empty list removes them.",
+  fields: [{ name: "stops" }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const stops = payload.stops;
+    if (!Array.isArray(stops) || stops.length > 64) return "setTabStops: bad stops";
+    for (const stop of stops) {
+      if (!stop || typeof stop !== "object") return "setTabStops: bad stop";
+      if (typeof stop.posPt !== "number" || !Number.isFinite(stop.posPt) ||
+          stop.posPt < -MAX_TAB_STOP_PT || stop.posPt > MAX_TAB_STOP_PT) {
+        return "setTabStops: bad pos";
+      }
+      if (!(TAB_STOP_ALIGNMENTS as readonly string[]).includes(stop.align)) return "setTabStops: bad align";
+      if (!(TAB_STOP_LEADERS as readonly string[]).includes(stop.leader)) return "setTabStops: bad leader";
+    }
+    return badSuggest("setTabStops", payload);
+  },
+  apply: ({ doc, target, payload }) =>
+    setTabStops(doc, [target.t ?? target.el], payload.stops, suggestMeta(doc, payload.suggest)),
+});
+
 const setTableBordersOperation = defineOperation<{
   cellParagraphId: StableId;
   scope: "cell" | "table";
@@ -1714,11 +1843,15 @@ const OPERATIONS = [
   toggleCheckboxOperation,
   updateFieldsOperation,
   insertTocOperation,
+  insertCaptionOperation,
+  ensureRefBookmarkOperation,
   createStyleOperation,
   modifyStyleOperation,
   deleteStyleOperation,
   setNumberingLevelOperation,
   setNumberingRestartOperation,
+  setParagraphBordersOperation,
+  setTabStopsOperation,
   setTableBordersOperation,
   setTableStyleOperation,
   setTableLookOperation,

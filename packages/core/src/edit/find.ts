@@ -2,6 +2,7 @@ import { DocxDocument } from "../docx.js";
 import { Block, Paragraph, Run } from "../model.js";
 import { XmlElement } from "../xml.js";
 import { FormattedRange, SelectionSegment } from "./commands.js";
+import { EncodedCaret } from "./ids.js";
 
 /**
  * Find & replace and selection text transforms. Matching runs over the
@@ -167,6 +168,99 @@ export function replaceAll(
   const byStory: Partial<Record<FindStory, number>> = {};
   for (const m of matches) byStory[m.story] = (byStory[m.story] ?? 0) + 1;
   return { total: matches.length, byStory };
+}
+
+/** A wire range inside one run: the shape suggestRevision and presence use. */
+export interface WireRange {
+  blockId: number;
+  runId: number;
+  start: number;
+  end: number;
+}
+
+/** Intent bodies a compiled replace produces (IntentBase fields are the
+ * submitting client's to add). */
+export type ReplaceIntentBody =
+  | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
+  | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string; suggest?: { author: string; date: string } }
+  | { kind: "suggestRevision"; ranges: WireRange[]; suggest: { author: string; date: string } };
+
+export interface ReplaceAllCompilation {
+  intents: ReplaceIntentBody[];
+  result: ReplaceAllResult;
+}
+
+/**
+ * Compile one match into wire intents against the CURRENT tree, in the order
+ * they must apply. Plain: per-range deleteText, rightmost first, then the
+ * replacement inserted at the match's left edge. Suggesting: one
+ * suggestRevision striking every range, then a tracked insertText at the left
+ * edge — the patch machinery's strike-then-insert shape (a strike keeps the
+ * addressed run in place holding everything before it, so the insertion
+ * still resolves). Null when any range is not id-addressable (math
+ * internals): in a room an unaddressable replace must be an honest no-op.
+ */
+export function compileReplaceMatch(
+  doc: DocxDocument,
+  match: FindMatch,
+  replacement: string,
+  suggest?: { author: string; date: string },
+): ReplaceIntentBody[] | null {
+  const ids = doc.stableIds;
+  if (!ids || match.ranges.length === 0) return null;
+  const wire: WireRange[] = [];
+  for (const r of match.ranges) {
+    const enc: EncodedCaret | null = ids.encodeCaret(r.t, r.start, (el) => doc.findParentOf(el) ?? null);
+    if (!enc) return null;
+    wire.push({ blockId: enc.blockId, runId: enc.runId, start: enc.offset, end: enc.offset + (r.end - r.start) });
+  }
+  const first = wire[0];
+  const intents: ReplaceIntentBody[] = [];
+  if (suggest) {
+    intents.push({ kind: "suggestRevision", ranges: wire, suggest });
+    if (replacement.length > 0) {
+      intents.push({ kind: "insertText", at: { blockId: first.blockId, runId: first.runId, offset: first.start }, text: replacement, suggest });
+    }
+    return intents;
+  }
+  for (let i = wire.length - 1; i >= 0; i--) {
+    const r = wire[i];
+    intents.push({ kind: "deleteText", blockId: r.blockId, runId: r.runId, start: r.start, end: r.end });
+  }
+  if (replacement.length > 0) {
+    intents.push({ kind: "insertText", at: { blockId: first.blockId, runId: first.runId, offset: first.start }, text: replacement });
+  }
+  return intents;
+}
+
+/**
+ * Compile a whole replace-all into wire intents (collab's replaceAll). One
+ * find pass fixed up front, compiled back-to-front: every intent's offsets
+ * are encoded against the pristine tree, and processing later matches first
+ * keeps them valid — a mutation at offset p never moves text before p, and
+ * both suggest mutations keep the addressed run (and its truncated-in-place
+ * w:t) holding everything before the edit. Unaddressable matches are skipped
+ * and excluded from the counts.
+ */
+export function compileReplaceAll(
+  doc: DocxDocument,
+  query: string,
+  replacement: string,
+  opts?: FindOptions,
+  suggest?: { author: string; date: string },
+): ReplaceAllCompilation {
+  const matches = findAll(doc, query, opts);
+  const intents: ReplaceIntentBody[] = [];
+  const byStory: Partial<Record<FindStory, number>> = {};
+  let total = 0;
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const compiled = compileReplaceMatch(doc, matches[i], replacement, suggest);
+    if (!compiled) continue;
+    intents.push(...compiled);
+    total++;
+    byStory[matches[i].story] = (byStory[matches[i].story] ?? 0) + 1;
+  }
+  return { intents, result: { total, byStory } };
 }
 
 /** Change the case of the selected text (mutates w:t text in place). */
