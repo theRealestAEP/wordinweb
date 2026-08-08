@@ -2104,6 +2104,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [type, setType] = useState<Chart["type"]>("column");
+  const [grouping, setGrouping] = useState<NonNullable<Chart["grouping"]>>("clustered");
   const [title, setTitle] = useState("");
   const [categories, setCategories] = useState(["", ""]);
   const [series, setSeries] = useState([{ name: "", values: ["", ""] }]);
@@ -2117,17 +2118,19 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
+  const sliced = type === "pie" || type === "doughnut";
+  const stackable = type === "column" || type === "bar" || type === "area";
   const submit = () => {
     const categoryValues = categories.map((value) => value.trim());
-    const rawSeries = (type === "pie" ? series.slice(0, 1) : series).map((entry) => ({
+    const rawSeries = (sliced ? series.slice(0, 1) : series).map((entry) => ({
       name: entry.name.trim(),
       values: entry.values.map((value) => value.trim()),
     }));
     if (categoryValues.some((value) => !value)) {
-      setError(type === "pie" ? "Enter a label for every slice." : "Enter a name for every category.");
+      setError(sliced ? "Enter a label for every slice." : "Enter a name for every category.");
       return;
     }
-    if (type !== "pie" && rawSeries.some((entry) => !entry.name)) {
+    if (!sliced && rawSeries.some((entry) => !entry.name)) {
       setError("Enter a name for every series.");
       return;
     }
@@ -2135,19 +2138,25 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
       setError("Enter a number in every value field.");
       return;
     }
-    if (type === "pie" && rawSeries.some((entry) => entry.values.some((value) => Number(value) < 0))) {
-      setError("Pie chart values must be zero or greater.");
+    if (sliced && rawSeries.some((entry) => entry.values.some((value) => Number(value) < 0))) {
+      setError("Slice values must be zero or greater.");
       return;
     }
-    if (type === "pie" && rawSeries.every((entry) => entry.values.every((value) => Number(value) === 0))) {
-      setError("Enter at least one pie chart value greater than zero.");
+    if (sliced && rawSeries.every((entry) => entry.values.every((value) => Number(value) === 0))) {
+      setError("Enter at least one slice value greater than zero.");
       return;
     }
     const seriesValues = rawSeries.map((entry) => ({
-      name: type === "pie" ? entry.name || "Values" : entry.name,
+      name: sliced ? entry.name || "Values" : entry.name,
       values: entry.values.map(Number),
     }));
-    const data: Chart = { type, title: title.trim(), categories: categoryValues, series: seriesValues };
+    const data: Chart = {
+      type,
+      title: title.trim(),
+      categories: categoryValues,
+      series: seriesValues,
+      ...(stackable && grouping !== "clustered" ? { grouping } : {}),
+    };
     if (api?.updateSelectedChart(data) || api?.insertChart(data)) {
       setError("");
       setOpen(false);
@@ -2164,7 +2173,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
   };
   const changeType = (next: Chart["type"]) => {
     setType(next);
-    if (next === "pie") {
+    if (next === "pie" || next === "doughnut") {
       setSeries((current) => [
         current[0] ?? { name: "Values", values: categories.map(() => "") },
       ]);
@@ -2194,9 +2203,10 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
       : [{ name: "", values: nextCategories.map(() => "") }];
     setEditing(!!selected);
     setType(selected?.type ?? "column");
+    setGrouping(selected?.grouping === "stacked" || selected?.grouping === "percentStacked" ? selected.grouping : "clustered");
     setTitle(selected?.title ?? "");
     setCategories(nextCategories);
-    setSeries(selected?.type === "pie" ? nextSeries.slice(0, 1) : nextSeries);
+    setSeries(selected?.type === "pie" || selected?.type === "doughnut" ? nextSeries.slice(0, 1) : nextSeries);
     setError("");
     setOpen(true);
   };
@@ -2204,7 +2214,10 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
     { value: "column", label: "Column" },
     { value: "bar", label: "Bar" },
     { value: "line", label: "Line" },
+    { value: "area", label: "Area" },
+    { value: "scatter", label: "Scatter" },
     { value: "pie", label: "Pie" },
+    { value: "doughnut", label: "Doughnut" },
   ];
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
@@ -2240,15 +2253,30 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
               })}
             </div>
           </fieldset>
+          {stackable && (
+            <label style={fieldLabelStyle}>
+              <span>Grouping</span>
+              <select
+                aria-label="Series grouping"
+                value={grouping}
+                onChange={(event) => setGrouping(event.target.value as typeof grouping)}
+                style={fieldStyle}
+              >
+                <option value="clustered">{type === "area" ? "Standard" : "Clustered"}</option>
+                <option value="stacked">Stacked</option>
+                <option value="percentStacked">100% stacked</option>
+              </select>
+            </label>
+          )}
           <label style={fieldLabelStyle}>
             <span>Chart title (optional)</span>
             <input aria-label="Chart title" value={title} onChange={(event) => setTitle(event.target.value)} style={fieldStyle} />
           </label>
           <div role="group" aria-label="Chart data" style={{ display: "grid", gap: 7 }}>
-            <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{type === "pie" ? "Slices" : "Chart data"}</strong>
+            <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{sliced ? "Slices" : "Chart data"}</strong>
             <div style={{ overflowX: "auto" }}>
-              {type === "pie" ? (
-                <table aria-label="Pie chart data" style={{ width: "100%", borderCollapse: "collapse" }}>
+              {sliced ? (
+                <table aria-label={`${type} chart data`} style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr>
                       <th scope="col" style={tableHeaderStyle}>Slice label</th>
@@ -2295,7 +2323,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                 <table aria-label={`${type} chart data`} style={{ minWidth: series.length > 2 ? 430 : undefined, width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr>
-                      <th scope="col" style={tableHeaderStyle}>Category</th>
+                      <th scope="col" style={tableHeaderStyle}>{type === "scatter" ? "X value" : "Category"}</th>
                       {series.map((entry, seriesIndex) => (
                         <th key={seriesIndex} scope="col" style={tableHeaderStyle}>
                           <label style={fieldLabelStyle}>
@@ -2318,7 +2346,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                       <tr key={categoryIndex}>
                         <th scope="row" style={{ ...tableCellStyle, minWidth: 120, fontWeight: 400 }}>
                           <label style={fieldLabelStyle}>
-                            <span>Category {categoryIndex + 1}</span>
+                            <span>{type === "scatter" ? `X value ${categoryIndex + 1}` : `Category ${categoryIndex + 1}`}</span>
                             <input
                               aria-label={`Chart category ${categoryIndex + 1}`}
                               value={category}
@@ -2352,8 +2380,8 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
               )}
             </div>
             <div style={{ display: "flex", gap: 6 }}>
-              {type !== "pie" && <button type="button" onClick={() => setSeries([...series, { name: "", values: categories.map(() => "") }])} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Add series</button>}
-              <button type="button" onClick={addCategory} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>{type === "pie" ? "Add slice" : "Add category"}</button>
+              {!sliced && <button type="button" onClick={() => setSeries([...series, { name: "", values: categories.map(() => "") }])} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Add series</button>}
+              <button type="button" onClick={addCategory} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>{sliced ? "Add slice" : "Add category"}</button>
             </div>
           </div>
           {error && <div role="alert" style={{ color: "#c5221f", font: "11.5px system-ui, sans-serif" }}>{error}</div>}

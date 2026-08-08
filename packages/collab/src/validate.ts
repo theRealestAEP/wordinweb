@@ -63,13 +63,14 @@ export const DEFAULT_INTENT_LIMITS: IntentLimits = {
 };
 
 interface ChartShape {
-  type: unknown; title?: unknown; categories: unknown; series: unknown;
+  type: unknown; title?: unknown; categories: unknown; series: unknown; grouping?: unknown;
 }
 /** Shared chart-payload validation (insertChart + setChartData carry the same
  * shape): a positive type allowlist plus size/element bounds. */
 function chartError(c: ChartShape, who: string): string | null {
   if (typeof c !== "object" || c === null) return `${who}: bad chart`;
-  if (!["column", "bar", "line", "pie"].includes(c.type as string)) return `${who}: bad type`;
+  if (!["column", "bar", "line", "pie", "doughnut", "area", "scatter"].includes(c.type as string)) return `${who}: bad type`;
+  if (c.grouping !== undefined && !["clustered", "stacked", "percentStacked"].includes(c.grouping as string)) return `${who}: bad grouping`;
   if (!Array.isArray(c.categories) || c.categories.length === 0 || c.categories.length > 100) return `${who}: bad categories`;
   if (c.categories.some((x) => typeof x !== "string" || x.length > 200)) return `${who}: bad category`;
   if (c.title !== undefined && (typeof c.title !== "string" || c.title.length > 200)) return `${who}: bad title`;

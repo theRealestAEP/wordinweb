@@ -27,6 +27,7 @@ import { insertBlankPageAt, insertBreakAt, insertCoverPage, sectionContextAt } f
 import { convertTableToText, convertTextToTable } from "../src/edit/blocks.js";
 import { drawingLineStyle, drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingLineStyle, setDrawingWordArtStyle, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
 import { buildChartXml, insertChartAt, setChartData } from "../src/edit/charts.js";
+import { parseChartPart } from "../src/parse/chart.js";
 import { buildSmartArtColorsXml, buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "../src/edit/smartart.js";
 import { insertEmbeddedObjectAt, insertModel3DAt, insertWebVideoAt } from "../src/edit/objects.js";
 import { buildOlePackage, extractOlePackage } from "../src/parse/ole.js";
@@ -1131,6 +1132,25 @@ describe("chart insertion", () => {
     expect(scatter).toContain("<c:scatterChart>");
     expect(scatter).toContain("<c:xVal>");
     expect(scatter).toContain("<c:yVal>");
+  });
+
+  it("authors stacked and percent-stacked groupings the parser reads back", () => {
+    const stacked = buildChartXml({ ...DATA, grouping: "stacked" });
+    expect(stacked).toContain('<c:grouping val="stacked"/>');
+    // Word's stacked presets put every series in one slot per category.
+    expect(stacked).toContain('<c:overlap val="100"/>');
+    expect(parseChartPart(parseXml(stacked))?.grouping).toBe("stacked");
+
+    const percent = buildChartXml({ ...DATA, type: "area", grouping: "percentStacked" });
+    expect(percent).toContain('<c:grouping val="percentStacked"/>');
+    expect(percent).toContain('<c:numFmt formatCode="0%" sourceLinked="0"/>');
+    expect(parseChartPart(parseXml(percent))?.grouping).toBe("percentStacked");
+
+    // Clustered stays byte-identical to the pre-grouping writer.
+    expect(buildChartXml({ ...DATA, grouping: "clustered" })).toBe(buildChartXml(DATA));
+    // Groupings mean nothing to a pie/line/scatter plot and are dropped.
+    expect(buildChartXml({ ...DATA, type: "pie", grouping: "stacked" })).not.toContain('val="stacked"');
+    expect(buildChartXml({ ...DATA, type: "line", grouping: "stacked" })).not.toContain('val="stacked"');
   });
 });
 

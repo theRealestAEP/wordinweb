@@ -357,7 +357,7 @@ export type AgentComposeBlock =
   | { type: "heading"; level: 1 | 2 | 3; text: string }
   | { type: "table"; rows: Array<Array<string | AgentComposeCell>>; headerRows?: number; headerFill?: string; headerTextColor?: string; columnWidths?: number[] }
   | { type: "equation"; mathText: string; align?: "left" | "center" | "right" }
-  | { type: "chart"; chart: { type: "column" | "bar" | "line" | "pie"; title?: string; categories: string[]; series: Array<{ name: string; values: number[] }> }; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
+  | { type: "chart"; chart: { type: "column" | "bar" | "line" | "pie" | "doughnut" | "area" | "scatter"; title?: string; categories: string[]; series: Array<{ name: string; values: number[] }>; grouping?: "clustered" | "stacked" | "percentStacked" }; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
   | { type: "smartArt"; smartArt: { layout: "process" | "cycle" | "hierarchy" | "list"; items: string[] }; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
   | { type: "image"; assetRef: string; widthPx: number; heightPx: number; alt?: string; align?: "left" | "center" | "right"; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; position?: { xPx: number; yPx: number } }
   | { type: "shape"; preset: string; text?: string; textStyle?: AgentComposeTextStyle; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; fill?: string | null; line?: { color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" } | null; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }

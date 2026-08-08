@@ -50,10 +50,18 @@ function columnName(index: number): string {
   return name;
 }
 
+/** The chart types this writer can author, and which of them stack. */
+export const AUTHORABLE_CHART_TYPES = ["column", "bar", "line", "pie", "doughnut", "area", "scatter"] as const;
+export const STACKABLE_CHART_TYPES = ["column", "bar", "area"] as const;
+
 /** Make the cached chart data and its workbook use the same rectangular range. */
 export function normalizeChartData(data: ChartData): ChartData {
   const categories = data.categories.length ? data.categories.map(String) : ["Category 1"];
   const inputSeries: ChartSeries[] = data.series.length ? data.series : [{ name: "Series 1", values: [] }];
+  const stackable = (STACKABLE_CHART_TYPES as readonly string[]).includes(data.type);
+  const grouping = stackable && (data.grouping === "stacked" || data.grouping === "percentStacked")
+    ? data.grouping
+    : undefined;
   return {
     type: data.type,
     ...(data.title?.trim() ? { title: data.title.trim() } : {}),
@@ -65,6 +73,7 @@ export function normalizeChartData(data: ChartData): ChartData {
         return Number.isFinite(value) ? value : 0;
       }),
     })),
+    ...(grouping ? { grouping } : {}),
   };
 }
 
@@ -261,12 +270,16 @@ function categoryAxisXml(horizontal: boolean, numeric: boolean): string {
 }
 
 /** Word seats a line's or area's end points on the plot edges (midCat) and
- * insets a bar's or column's inside their bands (between). */
-function valueAxisXml(horizontal: boolean, crossBetween: "between" | "midCat"): string {
+ * insets a bar's or column's inside their bands (between). A percent-stacked
+ * plot gets Word's "0%" axis format. */
+function valueAxisXml(horizontal: boolean, crossBetween: "between" | "midCat", percent = false): string {
   return `<c:valAx><c:axId val="${VALUE_AXIS_ID}"/><c:scaling><c:orientation val="minMax"/></c:scaling>` +
     `<c:delete val="0"/><c:axPos val="${horizontal ? "b" : "l"}"/>` +
     `<c:majorGridlines>${RULE_SPPR}</c:majorGridlines>` +
-    `<c:numFmt formatCode="General" sourceLinked="1"/><c:majorTickMark val="none"/>` +
+    (percent
+      ? `<c:numFmt formatCode="0%" sourceLinked="0"/>`
+      : `<c:numFmt formatCode="General" sourceLinked="1"/>`) +
+    `<c:majorTickMark val="none"/>` +
     `<c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>${RULE_SPPR}` +
     `<c:crossAx val="${CATEGORY_AXIS_ID}"/><c:crosses val="autoZero"/>` +
     `<c:crossBetween val="${crossBetween}"/></c:valAx>`;
@@ -283,17 +296,25 @@ function chartPlot(data: ChartData): string {
       `<c:firstSliceAng val="0"/><c:holeSize val="75"/></c:doughnutChart>`;
   }
   const horizontal = data.type === "bar";
+  const stacked = data.grouping === "stacked" || data.grouping === "percentStacked";
   const plot = data.type === "line"
     ? `<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>${series}` +
       `<c:marker val="1"/><c:smooth val="0"/>${axIds}</c:lineChart>`
     : data.type === "area"
-      ? `<c:areaChart><c:grouping val="standard"/><c:varyColors val="0"/>${series}${axIds}</c:areaChart>`
+      ? `<c:areaChart><c:grouping val="${stacked ? data.grouping : "standard"}"/>` +
+        `<c:varyColors val="0"/>${series}${axIds}</c:areaChart>`
       : data.type === "scatter"
         ? `<c:scatterChart><c:scatterStyle val="lineMarker"/><c:varyColors val="0"/>${series}${axIds}</c:scatterChart>`
-        : `<c:barChart><c:barDir val="${horizontal ? "bar" : "col"}"/><c:grouping val="clustered"/>` +
-          `<c:varyColors val="0"/>${series}<c:gapWidth val="150"/>${axIds}</c:barChart>`;
+        : `<c:barChart><c:barDir val="${horizontal ? "bar" : "col"}"/>` +
+          `<c:grouping val="${stacked ? data.grouping : "clustered"}"/>` +
+          `<c:varyColors val="0"/>${series}<c:gapWidth val="150"/>` +
+          // Word writes overlap=100 for its stacked bar/column presets: every
+          // series shares one slot per category.
+          (stacked ? `<c:overlap val="100"/>` : "") +
+          `${axIds}</c:barChart>`;
   const crossBetween = data.type === "line" || data.type === "area" ? "midCat" : "between";
-  return plot + categoryAxisXml(horizontal, data.type === "scatter") + valueAxisXml(horizontal, crossBetween);
+  return plot + categoryAxisXml(horizontal, data.type === "scatter") +
+    valueAxisXml(horizontal, crossBetween, data.grouping === "percentStacked");
 }
 
 /** Build native ChartML with cached display data and an editable workbook link. */

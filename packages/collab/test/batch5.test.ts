@@ -76,9 +76,12 @@ describe("more intents batch 5 (chart / smartart / line numbering / fields)", ()
     const rid = runId(s);
     expect(s.submit({ kind: "insertChart", clientId: "a", clientSeq: 1, base: 0, runId: rid, chart: { type: "donut" as never, categories: ["x"], series: [{ name: "A", values: [1] }] }, nodeIds: ids(4) }).kind).toBe("rejected");
     expect(s.submit({ kind: "insertChart", clientId: "a", clientSeq: 2, base: 0, runId: rid, chart: { type: "pie", categories: [], series: [{ name: "A", values: [1] }] }, nodeIds: ids(4) }).kind).toBe("rejected");
-    expect(s.submit({ kind: "insertSmartArt", clientId: "a", clientSeq: 3, base: 0, runId: rid, smartArt: { layout: "spiral" as never, items: ["a"] }, nodeIds: ids(4) }).kind).toBe("rejected");
-    expect(s.submit({ kind: "setLineNumbering", clientId: "a", clientSeq: 4, base: 0, patch: { enabled: true, countBy: 9999 } }).kind).toBe("rejected");
-    expect(s.submit({ kind: "insertDateTimeField", clientId: "a", clientSeq: 5, base: 0, runId: rid, dtKind: "date", picture: 'bad"{char}', nodeIds: ids(4) }).kind).toBe("rejected");
+    expect(s.submit({ kind: "insertChart", clientId: "a", clientSeq: 3, base: 0, runId: rid, chart: { type: "column", categories: ["x"], series: [{ name: "A", values: [1] }], grouping: "sideways" as never }, nodeIds: ids(4) }).kind).toBe("rejected");
+    expect(s.submit({ kind: "insertChart", clientId: "a", clientSeq: 4, base: 0, runId: rid, chart: { type: "doughnut", categories: ["x"], series: [{ name: "A", values: [1] }] }, nodeIds: ids(20, 2000) }).kind).toBe("applied");
+    expect(s.submit({ kind: "insertChart", clientId: "a", clientSeq: 5, base: 0, runId: rid, chart: { type: "column", categories: ["x"], series: [{ name: "A", values: [1] }], grouping: "stacked" }, nodeIds: ids(20, 2100) }).kind).toBe("applied");
+    expect(s.submit({ kind: "insertSmartArt", clientId: "a", clientSeq: 6, base: 0, runId: rid, smartArt: { layout: "spiral" as never, items: ["a"] }, nodeIds: ids(4) }).kind).toBe("rejected");
+    expect(s.submit({ kind: "setLineNumbering", clientId: "a", clientSeq: 7, base: 0, patch: { enabled: true, countBy: 9999 } }).kind).toBe("rejected");
+    expect(s.submit({ kind: "insertDateTimeField", clientId: "a", clientSeq: 8, base: 0, runId: rid, dtKind: "date", picture: 'bad"{char}', nodeIds: ids(4) }).kind).toBe("rejected");
   });
 
   it("determinism for chart insertion", () => {

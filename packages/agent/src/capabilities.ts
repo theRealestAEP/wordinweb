@@ -269,7 +269,7 @@ const paragraphDivider = closedObject({
 }, ["style", "color", "widthPt", "spacePt"]);
 
 const chartData = closedObject({
-  type: { enum: ["column", "bar", "line", "pie"] },
+  type: { enum: ["column", "bar", "line", "pie", "doughnut", "area", "scatter"] },
   title: string(200),
   categories: { type: "array", minItems: 1, maxItems: 100, items: string(200) },
   series: {
@@ -281,6 +281,7 @@ const chartData = closedObject({
       values: { type: "array", maxItems: 100, items: number() },
     }, ["name", "values"]),
   },
+  grouping: { enum: ["clustered", "stacked", "percentStacked"] },
 }, ["type", "categories", "series"]);
 
 const smartArtData = closedObject({

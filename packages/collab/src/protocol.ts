@@ -122,9 +122,11 @@ export interface SealedCheckpoint {
  *       intents an e17 peer applies.
  *   e18 drawing depth wave: insertShape's preset vocabulary grows from the
  *       7 named presets to the whole core preset-geometry table (165
- *       ST_ShapeType names — Word's shape gallery). An e17 peer rejects
- *       ("insertShape: bad preset") the very intents an e18 peer applies —
- *       fork on the first heart/star5/flowchart insert.
+ *       ST_ShapeType names — Word's shape gallery), and insertChart /
+ *       setChartData additionally carry doughnut/area/scatter types plus a
+ *       grouping field (stacked / percentStacked bar, column and area). An
+ *       e17 peer rejects ("bad preset" / "bad type") the very intents an
+ *       e18 peer applies — fork on the first heart insert or stacked chart.
  */
 export const ENGINE_VERSION = "e18";
 

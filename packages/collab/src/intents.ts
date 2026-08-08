@@ -722,16 +722,18 @@ export interface InsertWordArtIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
-/** Insert a data chart (column/bar/line/pie) at the end of a run. The chart
- * data is carried verbatim; the workbook part is generated deterministically. */
+/** Insert a data chart at the end of a run. The chart data is carried
+ * verbatim; the workbook part is generated deterministically. */
 export interface InsertChartIntent extends IntentBase {
   kind: "insertChart";
   runId: StableId;
   chart: {
-    type: "column" | "bar" | "line" | "pie";
+    type: "column" | "bar" | "line" | "pie" | "doughnut" | "area" | "scatter";
     title?: string;
     categories: string[];
     series: { name: string; values: number[] }[];
+    /** How bar/column/area series group; absent = clustered. */
+    grouping?: "clustered" | "stacked" | "percentStacked";
   };
   nodeIds: StableId[];
 }
@@ -802,12 +804,7 @@ export interface SetDrawingFillIntent extends IntentBase, DrawingTarget {
 export interface SetChartDataIntent extends IntentBase, DrawingTarget {
   kind: "setChartData";
   runId: StableId;
-  chart: {
-    type: "column" | "bar" | "line" | "pie";
-    title?: string;
-    categories: string[];
-    series: { name: string; values: number[] }[];
-  };
+  chart: InsertChartIntent["chart"];
 }
 
 /** Set the text of one node of the SmartArt diagram carried by a run. */
