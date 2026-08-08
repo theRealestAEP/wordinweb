@@ -371,11 +371,14 @@ export interface InsertMathIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
-/** Insert a shape/textbox drawing at the end of a run (sibling — identity). */
+/** Insert a shape/textbox drawing at the end of a run (sibling — identity).
+ * `preset` is a legacy named preset (line/verticalLine/rectangle/
+ * roundedRectangle/ellipse/diamond/textBox) or any ST_ShapeType name core's
+ * preset-geometry table knows; validated with isValidShapePreset. */
 export interface InsertShapeIntent extends IntentBase {
   kind: "insertShape";
   runId: StableId;
-  preset: "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox";
+  preset: string;
   text?: string;
   nodeIds: StableId[];
 }

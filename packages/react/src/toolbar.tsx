@@ -9,6 +9,8 @@ import {
   TABLE_BORDER_STYLES,
   TABLE_SCOPE_EDGES,
   NUMBERING_PRESETS,
+  SHAPE_GALLERY,
+  presetShapeGeometry,
   type NumberingPresetId,
   type SelectionFormat,
   type TabStopSpec,
@@ -1619,15 +1621,25 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
-const SHAPES = [
+/** The picker's Lines/Text row: presets with no gallery geometry of their own. */
+const SHAPE_TOOLS = [
   ["line", "Line", "―"],
   ["verticalLine", "Vertical line", "│"],
-  ["rectangle", "Rectangle", "▭"],
-  ["roundedRectangle", "Rounded rectangle", "▢"],
-  ["ellipse", "Ellipse", "◯"],
-  ["diamond", "Diamond", "◇"],
   ["textBox", "Text box", "T"],
 ] as const;
+
+/** A gallery icon: the shape's own preset outline evaluated at icon size. */
+function ShapeGlyph({ preset }: { preset: string }) {
+  const geom = presetShapeGeometry(preset, 26, 20);
+  if (!geom) return null;
+  return (
+    <svg viewBox="-1 -1 28 22" width={26} height={20} aria-hidden="true" style={{ display: "block" }}>
+      {geom.paths.map((path, index) => (
+        <path key={index} d={path.d} fill="none" stroke="currentColor" strokeWidth={1.2} strokeLinejoin="round" />
+      ))}
+    </svg>
+  );
+}
 
 function DividerMenu({ api }: { api: DocxViewApi | null }) {
   type Divider = NonNullable<ReturnType<DocxViewApi["getParagraphDivider"]>>;
@@ -1782,11 +1794,33 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
             </label>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
-            {SHAPES.map(([preset, label, glyph]) => (
-              <button key={preset} title={`Insert ${label}`} onClick={() => insert(preset)} style={{ minHeight: 48, border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif" }}>
-                <span style={{ display: "block", fontSize: 20, lineHeight: 1 }}>{glyph}</span>
+            {SHAPE_TOOLS.map(([preset, label, glyph]) => (
+              <button key={preset} title={`Insert ${label}`} onClick={() => insert(preset)} style={{ minHeight: 40, border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif" }}>
+                <span style={{ display: "block", fontSize: 17, lineHeight: 1 }}>{glyph}</span>
                 <span>{label}</span>
               </button>
+            ))}
+          </div>
+          <div style={{ maxHeight: 320, overflowY: "auto", marginTop: 8, paddingRight: 2 }}>
+            {SHAPE_GALLERY.map((section) => (
+              <div key={section.category}>
+                <div style={{ margin: "7px 0 4px", color: T.muted, font: "600 11px system-ui, sans-serif" }}>{section.category}</div>
+                <div role="group" aria-label={section.category} style={{ display: "grid", gridTemplateColumns: "repeat(8, 1fr)", gap: 2 }}>
+                  {section.items.map((entry) => (
+                    <button
+                      key={entry.preset}
+                      title={entry.label}
+                      aria-label={`Insert ${entry.label}`}
+                      onClick={() => insert(entry.preset)}
+                      style={{ padding: "4px 2px", border: "1px solid transparent", borderRadius: 4, background: "none", color: T.fg, cursor: "pointer", display: "flex", justifyContent: "center" }}
+                      onMouseEnter={(event) => { event.currentTarget.style.borderColor = T.border; event.currentTarget.style.background = T.hoverBg; }}
+                      onMouseLeave={(event) => { event.currentTarget.style.borderColor = "transparent"; event.currentTarget.style.background = "none"; }}
+                    >
+                      <ShapeGlyph preset={entry.preset} />
+                    </button>
+                  ))}
+                </div>
+              </div>
             ))}
           </div>
         </div>

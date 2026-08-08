@@ -35,6 +35,7 @@ import { parseSectionProps, defaultSectionProps } from "./section.js";
 import { Relationships, parseRelationships, relsPathFor } from "./rels.js";
 import { parseChartPart } from "./chart.js";
 import { parseSmartArtParts } from "./smartart.js";
+import { presetFillColor, presetShapeGeometry, type PresetGeom } from "../preset-geometry.js";
 
 export interface DocParseContext extends ParseContext {
   rels: Relationships;
@@ -1340,19 +1341,21 @@ function parseDrawing(
         const ext = child(xfrm, "ext");
         const w = (intAttr(ext, "cx") ?? 0) * sx;
         const h = (intAttr(ext, "cy") ?? 0) * sy;
-        const d = presetPathD(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
-        if (d && w > 0 && h > 0) {
-          paths.push({
-            x: emuToPx(ox + (intAttr(off, "x") ?? 0) * sx),
-            y: emuToPx(oy + (intAttr(off, "y") ?? 0) * sy),
-            width: emuToPx(w),
-            height: emuToPx(h),
-            d,
-            viewW: w,
-            viewH: h,
-            fill,
-            stroke,
-          });
+        if (w > 0 && h > 0) {
+          const geom = presetGeomFor(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
+          for (const sub of resolvePresetPaths(geom, fill, !!stroke)) {
+            paths.push({
+              x: emuToPx(ox + (intAttr(off, "x") ?? 0) * sx),
+              y: emuToPx(oy + (intAttr(off, "y") ?? 0) * sy),
+              width: emuToPx(w),
+              height: emuToPx(h),
+              d: sub.d,
+              viewW: w,
+              viewH: h,
+              fill: sub.fill,
+              stroke: sub.stroke ? stroke : undefined,
+            });
+          }
         }
       }
       // Textboxes inside shapes are handled by the VML fallback or the
@@ -1506,15 +1509,15 @@ function parseDrawing(
     // Non-rect preset geometry (oval, diamond, flowchart shapes): paint the
     // real outline and lay the text inside the geometry's text rectangle.
     const prstA = attr(child(spPr, "prstGeom"), "prst") ?? "rect";
-    const geomD =
+    const presetGeom =
       prstA !== "rect" && cx > 0 && cy > 0
-        ? presetPathD(prstA, cx, cy, child(child(spPr, "prstGeom"), "avLst"))
+        ? presetGeomFor(prstA, cx, cy, child(child(spPr, "prstGeom"), "avLst"))
         : undefined;
-    const gIns = presetTextRectInsets(prstA);
-    const gL = gIns ? gIns.l * emuToPx(cx) : 0;
-    const gT = gIns ? gIns.t * emuToPx(cy) : 0;
-    const gR = gIns ? gIns.r * emuToPx(cx) : 0;
-    const gB = gIns ? gIns.b * emuToPx(cy) : 0;
+    const tr = presetGeom?.textRect;
+    const gL = tr ? emuToPx(tr.l) : 0;
+    const gT = tr ? emuToPx(tr.t) : 0;
+    const gR = tr ? emuToPx(cx - tr.r) : 0;
+    const gB = tr ? emuToPx(cy - tr.b) : 0;
     // a:spAutoFit grows the box height to its text. a:normAutofit stores a
     // fontScale / lnSpcReduction that shrinks the text to fit the fixed box,
     // but Word IGNORES those on import and renders at full size, clipping the
@@ -1559,7 +1562,9 @@ function parseDrawing(
           r: insetOf("rIns", 9.6) + gR,
           b: insetOf("bIns", 4.8) + gB,
         },
-        ...(geomD ? { geom: { d: geomD, viewW: cx, viewH: cy } } : {}),
+        ...(presetGeom
+          ? { geom: { viewW: cx, viewH: cy, paths: resolvePresetPaths(presetGeom, fill, !!strokeColor) } }
+          : {}),
         ...(noAutofit ? { clipText: true } : {}),
         ...(spAutoFit ? { autofitHeight: true } : {}),
         ...(warp ? { warp } : {}),
@@ -1772,115 +1777,49 @@ function parseDrawing(
 }
 
 
-/** Rounded rectangle path with per-corner radii (clockwise from top-left). */
-function roundedRectD(w: number, h: number, tl: number, tr: number, br: number, bl: number): string {
+/** The a:avLst adjustment overrides of an a:prstGeom, as gd name → value. */
+function adjustValuesOf(avLst: XmlElement | undefined): Record<string, number> | undefined {
+  if (!avLst) return undefined;
+  let out: Record<string, number> | undefined;
+  for (const gd of children(avLst, "gd")) {
+    const name = attr(gd, "name");
+    const m = name ? /^val (-?[\d.]+)/.exec(attr(gd, "fmla") ?? "") : null;
+    if (m) (out ??= {})[name!] = parseFloat(m[1]);
+  }
+  return out;
+}
+
+/**
+ * Evaluate an a:prstGeom outline into SVG sub-paths in a `w x h` coordinate
+ * space (the DrawingML guide-formula evaluator over the canonical preset
+ * definitions). Anything unrecognized renders as its bounding rectangle.
+ * Text wraps inside the geometry's text rectangle (presetShapeDefinitions),
+ * not the bounding box — verified against phase23 p12's Word PDF: oval
+ * "Was 0 / B" first line top = shape top + 0.1464*h + tIns; flowChartDecision
+ * text top = apex + h/4 + tIns; both wrap at the inset width.
+ */
+function presetGeomFor(prst: string, w: number, h: number, avLst: XmlElement | undefined): PresetGeom {
   return (
-    `M ${tl} 0 L ${w - tr} 0 ` +
-    (tr ? `A ${tr} ${tr} 0 0 1 ${w} ${tr} ` : "") +
-    `L ${w} ${h - br} ` +
-    (br ? `A ${br} ${br} 0 0 1 ${w - br} ${h} ` : "") +
-    `L ${bl} ${h} ` +
-    (bl ? `A ${bl} ${bl} 0 0 1 0 ${h - bl} ` : "") +
-    `L 0 ${tl} ` +
-    (tl ? `A ${tl} ${tl} 0 0 1 ${tl} 0 ` : "") +
-    "Z"
+    presetShapeGeometry(prst, w, h, adjustValuesOf(avLst)) ?? {
+      paths: [{ d: `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`, fill: "norm", stroke: true }],
+    }
   );
 }
 
-/**
- * SVG path data for an a:prstGeom outline, in a `w x h` coordinate space.
- * Covers the presets that appear in SmartArt cached drawings and flowchart
- * groups; anything unrecognized renders as its bounding rectangle.
- */
-function presetPathD(prst: string, w: number, h: number, avLst: XmlElement | undefined): string | undefined {
-  const adj = (name: string, dflt: number): number => {
-    const gd = children(avLst, "gd").find((g) => attr(g, "name") === name);
-    const m = gd ? /^val (-?\d+)/.exec(attr(gd, "fmla") ?? "") : null;
-    return m ? parseInt(m[1], 10) : dflt;
-  };
-  const min = Math.min(w, h);
-  switch (prst) {
-    case "rect":
-    case "flowChartProcess":
-      return `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`;
-    case "roundRect": {
-      const r = (min * adj("adj", 16667)) / 100000;
-      return roundedRectD(w, h, r, r, r, r);
-    }
-    case "round2SameRect": {
-      // adj1: top corner radius, adj2: bottom corner radius (fraction of the
-      // smaller side, val/100000) — the SmartArt "tab" pill.
-      const r1 = (min * adj("adj1", 16667)) / 100000;
-      const r2 = (min * adj("adj2", 0)) / 100000;
-      return roundedRectD(w, h, r1, r1, r2, r2);
-    }
-    case "ellipse":
-      return `M 0 ${h / 2} A ${w / 2} ${h / 2} 0 1 0 ${w} ${h / 2} A ${w / 2} ${h / 2} 0 1 0 0 ${h / 2} Z`;
-    case "triangle": {
-      // Isosceles triangle; adj = apex x as a fraction of the width.
-      const ax = (w * adj("adj", 50000)) / 100000;
-      return `M 0 ${h} L ${ax} 0 L ${w} ${h} Z`;
-    }
-    case "diamond":
-    case "flowChartDecision":
-      return `M 0 ${h / 2} L ${w / 2} 0 L ${w} ${h / 2} L ${w / 2} ${h} Z`;
-    case "downArrow": {
-      // adj1: shaft width / w, adj2: arrowhead height / min(w,h).
-      const a1 = Math.max(0, Math.min(adj("adj1", 50000), 100000));
-      const maxA2 = min > 0 ? (100000 * h) / min : 100000;
-      const a2 = Math.max(0, Math.min(adj("adj2", 50000), maxA2));
-      const headTop = h - (min * a2) / 100000;
-      const half = (w * a1) / 200000;
-      const x1 = w / 2 - half;
-      const x2 = w / 2 + half;
-      return `M ${x1} 0 L ${x2} 0 L ${x2} ${headTop} L ${w} ${headTop} L ${w / 2} ${h} L 0 ${headTop} L ${x1} ${headTop} Z`;
-    }
-    case "upArrow": {
-      const a1 = Math.max(0, Math.min(adj("adj1", 50000), 100000));
-      const maxA2 = min > 0 ? (100000 * h) / min : 100000;
-      const a2 = Math.max(0, Math.min(adj("adj2", 50000), maxA2));
-      const headBot = (min * a2) / 100000;
-      const half = (w * a1) / 200000;
-      const x1 = w / 2 - half;
-      const x2 = w / 2 + half;
-      return `M ${w / 2} 0 L ${w} ${headBot} L ${x2} ${headBot} L ${x2} ${h} L ${x1} ${h} L ${x1} ${headBot} L 0 ${headBot} Z`;
-    }
-    case "leftBracket": {
-      const r = Math.min((h * adj("adj", 8333)) / 100000, h / 2);
-      return `M ${w} 0 A ${w} ${r} 0 0 0 0 ${r} L 0 ${h - r} A ${w} ${r} 0 0 0 ${w} ${h}`;
-    }
-    case "rightBracket": {
-      const r = Math.min((h * adj("adj", 8333)) / 100000, h / 2);
-      return `M 0 0 A ${w} ${r} 0 0 1 ${w} ${r} L ${w} ${h - r} A ${w} ${r} 0 0 1 0 ${h}`;
-    }
-    default:
-      return `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`;
+/** Resolve evaluated preset sub-paths against the shape's fill and stroke;
+ * sub-paths that end up with neither ink are dropped. */
+function resolvePresetPaths(
+  geom: PresetGeom,
+  fill: string | undefined,
+  hasStroke: boolean,
+): { d: string; fill?: string; stroke: boolean }[] {
+  const out: { d: string; fill?: string; stroke: boolean }[] = [];
+  for (const path of geom.paths) {
+    const resolved = presetFillColor(fill, path.fill);
+    const stroke = hasStroke && path.stroke;
+    if (resolved || stroke) out.push({ d: path.d, ...(resolved ? { fill: resolved } : {}), stroke });
   }
-}
-
-/**
- * A preset geometry's TEXT RECTANGLE insets, as fractions of the shape's
- * width/height. Word wraps and anchors shape text inside the geometry's rect
- * (presetShapeDefinitions), not the bounding box — an ellipse's text lives in
- * the inscribed rectangle, a diamond's in the middle-half rect. Verified
- * against phase23 p12's Word PDF: oval "Was 0 / B" first line top = shape top
- * + 0.1464*h + tIns; flowChartDecision text top = apex + h/4 + tIns; both
- * wrap at the inset width (the oval breaks after "B").
- */
-function presetTextRectInsets(prst: string): { l: number; t: number; r: number; b: number } | undefined {
-  switch (prst) {
-    case "ellipse": {
-      const k = 0.146447; // (1 - cos45)/2
-      return { l: k, t: k, r: k, b: k };
-    }
-    case "diamond":
-    case "flowChartDecision":
-      return { l: 0.25, t: 0.25, r: 0.25, b: 0.25 };
-    case "triangle":
-      return { l: 0.25, t: 0.5, r: 0.25, b: 0 };
-    default:
-      return undefined;
-  }
+  return out;
 }
 
 /**
@@ -1981,18 +1920,18 @@ function collectDiagramShapes(
       const nodeIndex = smartArtNodeIndex++;
       const fill = child(spPr, "noFill") ? undefined : solidFillColor(spPr, ctx.theme);
       if ((fill || stroke) && w > 0 && h > 0) {
-        const d = presetPathD(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
-        if (d) {
+        const geom = presetGeomFor(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
+        for (const sub of resolvePresetPaths(geom, fill, !!stroke)) {
           out.paths.push({
             x: dx + emuToPx(x),
             y: dy + emuToPx(y),
             width: emuToPx(w),
             height: emuToPx(h),
-            d,
+            d: sub.d,
             viewW: w,
             viewH: h,
-            fill,
-            stroke,
+            fill: sub.fill,
+            stroke: sub.stroke ? stroke : undefined,
             smartArtNodeIndex: nodeIndex,
           });
         }

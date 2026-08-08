@@ -6387,22 +6387,26 @@ class Engine {
         // real outline+fill as a path; the rect fill/edges below stay for
         // plain text boxes.
         if (shape.geom && (shape.fill || shape.stroke)) {
-          page.items.push({
-            kind: "path",
-            x: ox - fx,
-            y: oy - fy,
-            width,
-            height,
-            d: shape.geom.d,
-            viewW: shape.geom.viewW,
-            viewH: shape.geom.viewH,
-            fill: shape.fill,
-            ...(shape.stroke ? { stroke: { color: shape.stroke.color, width: shape.stroke.weight } } : {}),
-            ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
-            ...(behind ? { behind: true } : {}),
-            ...(front ? { front: true } : {}),
-            z: shape.z,
-          });
+          for (const sub of shape.geom.paths) {
+            page.items.push({
+              kind: "path",
+              x: ox - fx,
+              y: oy - fy,
+              width,
+              height,
+              d: sub.d,
+              viewW: shape.geom.viewW,
+              viewH: shape.geom.viewH,
+              fill: sub.fill,
+              ...(sub.stroke && shape.stroke
+                ? { stroke: { color: shape.stroke.color, width: shape.stroke.weight } }
+                : {}),
+              ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
+              ...(behind ? { behind: true } : {}),
+              ...(front ? { front: true } : {}),
+              z: shape.z,
+            });
+          }
         }
         if (shape.fill && !shape.geom) {
           page.items.push({

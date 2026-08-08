@@ -444,9 +444,11 @@ export interface ShapeTextbox {
    * non-rect preset geometries these INCLUDE the geometry's text-rectangle
    * insets (ellipse: inscribed rect; diamond: middle-half rect). */
   insets?: { l: number; t: number; r: number; b: number };
-  /** Non-rect preset geometry: paint this outline (in a viewW x viewH space
-   * scaled to the shape box) instead of a rectangle. */
-  geom?: { d: string; viewW: number; viewH: number };
+  /** Non-rect preset geometry: paint these outline paths (in a viewW x viewH
+   * space scaled to the shape box) instead of a rectangle. Each path carries
+   * its resolved fill colour (undefined = unfilled) and whether the shape's
+   * stroke applies to it. */
+  geom?: { viewW: number; viewH: number; paths: { d: string; fill?: string; stroke: boolean }[] };
   /** bodyPr a:noAutofit: the box does NOT grow with its text — Word hides
    * whole lines that stick out past the shape bottom (phase23 p12 ovals:
    * "Was 0 / B" visible, the wrapped tail rows hidden). */

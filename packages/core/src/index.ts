@@ -191,12 +191,22 @@ export {
   insertWordArtAt,
   insertInkAt,
   isDrawingWordArt,
+  isValidShapePreset,
   setDrawingFill,
   setDrawingLineStyle,
   setDrawingWordArtStyle,
   setDrawingWordArtText,
 } from "./edit/drawings.js";
 export type { DrawingLineDash, DrawingTool, InkPoint, ShapePreset, WordArtPreset } from "./edit/drawings.js";
+export {
+  isKnownShapeGeometry,
+  knownShapeGeometryNames,
+  presetFillColor,
+  presetShapeGeometry,
+} from "./preset-geometry.js";
+export type { PresetFillMode, PresetGeom, PresetGeomPath } from "./preset-geometry.js";
+export { SHAPE_GALLERY, shapeGalleryLabel } from "./shape-gallery.js";
+export type { ShapeGalleryCategory } from "./shape-gallery.js";
 export { buildChartWorkbook, buildChartXml, insertChartAt, normalizeChartData, setChartData } from "./edit/charts.js";
 export { buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, normalizeSmartArtData, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "./edit/smartart.js";
 export type { SmartArtTextFormat } from "./edit/smartart.js";

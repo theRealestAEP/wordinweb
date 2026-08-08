@@ -1,4 +1,4 @@
-import { CITATION_SOURCE_TYPES, CITATION_STYLES, registeredOperationCapabilities, STYLE_TYPES, TOC_LEADERS, type RegisteredOperationKind } from "@wordinweb/core";
+import { CITATION_SOURCE_TYPES, CITATION_STYLES, knownShapeGeometryNames, registeredOperationCapabilities, STYLE_TYPES, TOC_LEADERS, type RegisteredOperationKind } from "@wordinweb/core";
 import { INTENT_KINDS, type Intent } from "@wordinweb/collab/client";
 
 export interface AgentEditCapability {
@@ -523,7 +523,10 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "tableOp.op": ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight", "mergeRight", "mergeDown", "splitCell"],
   "insertBreak.breakKind": ["page", "column"],
   "insertSeparator.separator": ["br", "tab"],
-  "insertShape.preset": ["line", "verticalLine", "rectangle", "roundedRectangle", "ellipse", "diamond", "textBox"],
+  "insertShape.preset": [...new Set([
+    "line", "verticalLine", "rectangle", "roundedRectangle", "ellipse", "diamond", "textBox",
+    ...knownShapeGeometryNames(),
+  ])],
   "adjustIndent.direction": [1, -1],
   "insertPageField.fieldKind": ["page", "pageOfTotal"],
   "setDropCap.mode": ["drop", "margin", null],

@@ -1169,7 +1169,7 @@ describe("SmartArt cached drawing", () => {
     const pill = drawing.paths![0];
     expect(pill.fill).toBe("#5b9bd5");
     expect(pill.width).toBeCloseTo(1535430 / 9525, 1);
-    const r = Math.min(1535430, 219775) * 0.1667;
+    const r = Math.round(Math.min(1535430, 219775) * 0.1667 * 100) / 100;
     expect(pill.d).toContain(`A ${r} ${r}`);
 
     // The pill's text: white 11pt Calibri, centered, box from dsp:txXfrm.
@@ -1353,7 +1353,8 @@ describe("phase23 fidelity rules", () => {
     if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("expected textbox anchor");
     const shape = anchor.shape;
     // Real ellipse outline (arc commands), white fill + black stroke.
-    expect(shape.geom?.d).toContain("A");
+    expect(shape.geom?.paths[0]?.d).toContain("A");
+    expect(shape.geom?.paths[0]?.fill?.toLowerCase()).toBe("#ffffff");
     expect(shape.fill?.toLowerCase()).toBe("#ffffff");
     expect(shape.stroke?.color).toBe("#000000");
     // Insets = bodyPr insets + the ellipse's inscribed text rectangle

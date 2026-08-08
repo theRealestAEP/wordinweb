@@ -120,8 +120,13 @@ export interface SealedCheckpoint {
  *       ignore and build a HEADING table instead — byte divergence, not
  *       just rejection. An e16 peer rejects (or misapplies) the very
  *       intents an e17 peer applies.
+ *   e18 drawing depth wave: insertShape's preset vocabulary grows from the
+ *       7 named presets to the whole core preset-geometry table (165
+ *       ST_ShapeType names — Word's shape gallery). An e17 peer rejects
+ *       ("insertShape: bad preset") the very intents an e18 peer applies —
+ *       fork on the first heart/star5/flowchart insert.
  */
-export const ENGINE_VERSION = "e17";
+export const ENGINE_VERSION = "e18";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-

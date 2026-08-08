@@ -1,4 +1,4 @@
-import { isInsertableFieldInstruction, validateRegisteredOperation } from "@wordinweb/core";
+import { isInsertableFieldInstruction, isValidShapePreset, validateRegisteredOperation } from "@wordinweb/core";
 import { Intent, isRegisteredIntent } from "./intents.js";
 
 /**
@@ -200,11 +200,10 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (typeof intent.mathText !== "string" || intent.mathText.length === 0) return "insertMath: empty";
       if (intent.mathText.length > 10_000) return "insertMath: too long";
       return null;
-    case "insertShape": {
-      const presets = ["line", "verticalLine", "rectangle", "roundedRectangle", "ellipse", "diamond", "textBox"];
-      if (!presets.includes(intent.preset)) return "insertShape: bad preset";
+    case "insertShape":
+      // Legacy named presets plus the whole core preset-geometry table.
+      if (typeof intent.preset !== "string" || !isValidShapePreset(intent.preset)) return "insertShape: bad preset";
       return null;
-    }
     case "replyComment":
       if (typeof intent.text !== "string" || intent.text.length === 0) return "replyComment: empty";
       if (intent.text.length > 20_000) return "replyComment: too long";

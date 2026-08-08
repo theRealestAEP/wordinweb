@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, localName } from "../xml.js";
+import { isKnownShapeGeometry } from "../preset-geometry.js";
 
 const EMU_PER_PX = 9525;
 const NS_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
@@ -7,7 +8,31 @@ const NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const NS_WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
 const NS_W14 = "http://schemas.microsoft.com/office/word/2010/wordml";
 
-export type ShapePreset = "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox";
+/** The legacy named presets, or any DrawingML ST_ShapeType name the preset
+ * geometry table knows (isValidShapePreset). */
+export type ShapePreset =
+  | "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox"
+  | (string & {});
+
+/** Map an accepted preset to the a:prstGeom name it authors. */
+export function shapePresetGeometry(preset: ShapePreset): string | undefined {
+  switch (preset) {
+    case "line":
+    case "verticalLine":
+      return "line";
+    case "rectangle":
+    case "textBox":
+      return "rect";
+    case "roundedRectangle":
+      return "roundRect";
+    default:
+      return isKnownShapeGeometry(preset) ? preset : undefined;
+  }
+}
+
+export function isValidShapePreset(preset: string): boolean {
+  return shapePresetGeometry(preset) !== undefined;
+}
 export type WordArtPreset = "plain" | "archUp" | "archDown" | "wave" | "chevron";
 export type DrawingLineDash = "solid" | "dashed" | "dotted";
 export interface InkPoint { x: number; y: number }
@@ -55,20 +80,23 @@ export function insertShapeAt(
   const parent = caretRun && doc.findParentOf(caretRun);
   if (!caretRun || !parent || localName(caretRun.name) !== "r") return null;
 
+  const geometry = shapePresetGeometry(preset);
+  if (!geometry) return null;
   const w = prefixOf(caretRun);
   const id = String(doc.nextDrawingId());
   const isLine = preset === "line" || preset === "verticalLine";
   const isVerticalLine = preset === "verticalLine";
-  const width = isVerticalLine ? 2 : isLine ? 240 : preset === "textBox" ? 240 : 192;
-  const height = isVerticalLine ? 240 : isLine ? 2 : preset === "textBox" ? 72 : 96;
+  const legacyBox = ["rectangle", "roundedRectangle", "ellipse", "diamond"].includes(preset);
+  // Legacy presets keep their historical sizes; gallery presets insert as a
+  // Word-like 1.33in square.
+  const width = isVerticalLine ? 2 : isLine ? 240 : preset === "textBox" ? 240 : legacyBox ? 192 : 128;
+  const height = isVerticalLine ? 240 : isLine ? 2 : preset === "textBox" ? 72 : legacyBox ? 96 : 128;
   const cx = String(Math.round(width * EMU_PER_PX));
   const cy = String(Math.round(height * EMU_PER_PX));
   // Keep the line geometry horizontal while the outer extent retains enough
   // height to provide a usable selection target and resize handles.
   const shapeCx = isVerticalLine ? "0" : cx;
   const shapeCy = isLine && !isVerticalLine ? "0" : cy;
-  const geometry =
-    isLine ? "line" : preset === "roundedRectangle" ? "roundRect" : preset === "rectangle" || preset === "textBox" ? "rect" : preset;
   const isTextBox = preset === "textBox";
   const shapeName = isLine ? `Line ${id}` : isTextBox ? `Text Box ${id}` : `Shape ${id}`;
 
