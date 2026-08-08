@@ -785,6 +785,8 @@ Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
 | `setTableCellMargins` | Set cell padding | `cellRef`, `scope`, `margins`; optional: `suggest` |
 | `setTableHeaderRows` | Repeat the first N rows on every page | `cellRef`, `count`; optional: `suggest` |
 | `sortTableRows` | Sort body rows by one column (text or number, asc or desc) | `cellRef`, `colIdx`, `order`, `compare`; optional: `hasHeader` |
+| `convertTextToTable` | Convert a paragraph into a table (rows split on a separator) | `blockRef`, `separator`, `cellCount` |
+| `convertTableToText` | Convert a table into paragraphs, one per row | `cellRef`, `separator`, `rowCount` |
 
 `setTableBorders` takes `scope: "cell" | "table"`. Table scope accepts the
 edges `top`, `bottom`, `left`, `right`, `insideH`, `insideV`; cell scope
@@ -1122,7 +1124,7 @@ A tracked formatting change reads as the NEW formatting everywhere, which is wha
 
 A column width lives in three places at once — the grid, the table's total width, and a width on every cell — so a tracked width change writes a record for each. Accepting or rejecting the table's record carries the grid record with it, because `w:tblGridChange` carries no author of its own.
 
-`tableOp` is only partly suggestible. Cell shading, cell vertical alignment and table text wrapping change PROPERTIES and are tracked. Every row and column insert and delete, the whole-table delete, and cell merge and split are STRUCTURAL, have no tracked form here, and are refused in suggestion mode — ask the inviter for editing mode instead. `sortTableRows` is structural in the same way and equally refused.
+`tableOp` is only partly suggestible. Cell shading, cell vertical alignment and table text wrapping change PROPERTIES and are tracked. Every row and column insert and delete, the whole-table delete, and cell merge and split are STRUCTURAL, have no tracked form here, and are refused in suggestion mode — ask the inviter for editing mode instead. `sortTableRows`, `convertTextToTable` and `convertTableToText` are structural in the same way and equally refused.
 
 ### Fields
 

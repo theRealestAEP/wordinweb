@@ -24,6 +24,7 @@ import {
 import { insertEndnote, insertFootnote } from "../src/edit/notes.js";
 import { insertDateTimeField, insertField, insertPageField } from "../src/edit/fields.js";
 import { insertBlankPageAt, insertBreakAt, insertCoverPage, sectionContextAt } from "../src/edit/sections.js";
+import { convertTableToText, convertTextToTable } from "../src/edit/blocks.js";
 import { drawingLineStyle, drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingLineStyle, setDrawingWordArtStyle, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
 import { buildChartXml, insertChartAt, setChartData } from "../src/edit/charts.js";
 import { buildSmartArtColorsXml, buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "../src/edit/smartart.js";
@@ -2391,6 +2392,42 @@ describe("sort table rows", () => {
         `<w:tr><w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`,
     );
     expect(sortTableRows(doc, tblEl(doc), 0, "asc", "text")).toBe(false);
+  });
+});
+
+describe("convert text <-> table", () => {
+  it("converts tab-separated paragraphs into a table and back", () => {
+    const doc = loadDoc(`${p("a\tb")}${p("c\td\te")}${p("after")}`);
+    const paras = doc.sections[0].blocks.slice(0, 2).map((b) => b.src!);
+    expect(convertTextToTable(doc, paras, "tab")).toBe(true);
+    const tbl = doc.sections[0].blocks[0] as Table;
+    expect(tbl.type).toBe("table");
+    expect(tbl.rows.length).toBe(2);
+    expect(tbl.rows[1].cells.map((c) => textOf(c.blocks[0] as Paragraph))).toEqual(["c", "d", "e"]);
+    // Short rows pad with empty cells to the widest row.
+    expect(tbl.rows[0].cells.map((c) => textOf(c.blocks[0] as Paragraph))).toEqual(["a", "b", ""]);
+    // The trailing "after" paragraph survives, after the required empty one.
+    const texts = doc.sections[0].blocks.filter((b): b is Paragraph => b.type === "paragraph").map(textOf);
+    expect(texts).toContain("after");
+
+    // And back: one paragraph per row, cells joined by tabs.
+    expect(convertTableToText(doc, tbl.src!, "tab")).toBe(true);
+    const first = doc.sections[0].blocks[0] as Paragraph;
+    expect(first.type).toBe("paragraph");
+    expect(textOf(first)).toBe("ab"); // tab separators carry no w:t text
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain("<w:tab/>");
+    expect(xml).not.toContain("<w:tbl>");
+  });
+
+  it("converts with a comma separator both ways", () => {
+    const doc = loadDoc(p("x,y,z"));
+    const para = doc.sections[0].blocks[0].src!;
+    expect(convertTextToTable(doc, [para], "comma")).toBe(true);
+    const tbl = doc.sections[0].blocks[0] as Table;
+    expect(tbl.rows[0].cells.map((c) => textOf(c.blocks[0] as Paragraph))).toEqual(["x", "y", "z"]);
+    expect(convertTableToText(doc, tbl.src!, "comma")).toBe(true);
+    expect(textOf(doc.sections[0].blocks[0] as Paragraph)).toBe("x,y,z");
   });
 });
 

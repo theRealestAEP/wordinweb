@@ -3,7 +3,7 @@ import { citationText, documentBibliography } from "../citations.js";
 import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
 import { XmlElement, localName } from "../xml.js";
-import { insertTableAfter } from "./blocks.js";
+import { convertTableToText, convertTextToTable, insertTableAfter } from "./blocks.js";
 import {
   insertCitationField,
   insertMergeField,
@@ -1381,6 +1381,86 @@ const sortTableRowsOperation = defineOperation<{
     sortTableRows(doc, target.el, payload.colIdx, payload.order, payload.compare, payload.hasHeader ?? false),
 });
 
+/**
+ * Convert paragraphs into a table (Word's Convert Text to Table): each
+ * paragraph becomes a row, split on the separator into cells. STRUCTURAL —
+ * the paragraphs are replaced by a fresh table, so the removed ids are pruned
+ * and the new table's nodes take carried ids. `moreBlockIds` extends the
+ * conversion to the rest of a multi-paragraph selection, exactly one intent
+ * for the whole gesture (the setListType shape). `cellCount` is the
+ * originator's carried-id BUDGET (rows × columns as it computed them);
+ * replicas whose apply mints more nodes fall back to parse-order ids for the
+ * excess, which every replica derives identically.
+ */
+const convertTextToTableOperation = defineOperation<{
+  blockId: StableId;
+  moreBlockIds?: StableId[];
+  separator: "tab" | "comma";
+  cellCount: number;
+  nodeIds: StableId[];
+}>()({
+  kind: "convertTextToTable",
+  address: "block",
+  category: "table",
+  description: "Convert paragraphs into a table, one row per paragraph, cells split on a separator.",
+  fields: [{ name: "separator" }, { name: "cellCount" }],
+  // tbl + one p and r per cell + the trailing empty paragraph's p and r.
+  nodeIds: (args) => 3 + 2 * Math.max(1, Math.min(args.cellCount, 10_000)),
+  prunesIds: true,
+  validate: (payload) => {
+    if (payload.separator !== "tab" && payload.separator !== "comma") return "convertTextToTable: bad separator";
+    if (!Number.isInteger(payload.cellCount) || payload.cellCount < 1 || payload.cellCount > 10_000) {
+      return "convertTextToTable: bad cellCount";
+    }
+    const more = payload.moreBlockIds;
+    if (more !== undefined) {
+      if (!Array.isArray(more) || more.length > 10_000 ||
+          more.some((id) => typeof id !== "number" || !Number.isInteger(id) || id < 0)) {
+        return "convertTextToTable: bad moreBlockIds";
+      }
+    }
+    return null;
+  },
+  apply: ({ doc, target, payload }) => {
+    const targets = [target.el];
+    for (const id of payload.moreBlockIds ?? []) {
+      const el = doc.stableIds?.elOf(id);
+      if (el) targets.push(el);
+    }
+    return convertTextToTable(doc, targets, payload.separator);
+  },
+});
+
+/**
+ * Convert a table into paragraphs (Word's Convert Table to Text), one per
+ * row, cell texts joined by tabs or commas. STRUCTURAL — the table is
+ * replaced, so its ids are pruned and the new paragraphs take carried ids.
+ * `rowCount` is the originator's carried-id budget, like cellCount above.
+ */
+const convertTableToTextOperation = defineOperation<{
+  cellParagraphId: StableId;
+  separator: "tab" | "comma";
+  rowCount: number;
+  nodeIds: StableId[];
+}>()({
+  kind: "convertTableToText",
+  address: "cell",
+  category: "table",
+  description: "Convert a table into paragraphs, one per row, cells joined by a separator.",
+  fields: [{ name: "separator" }, { name: "rowCount" }],
+  // One p and one r per row.
+  nodeIds: (args) => 2 * Math.max(1, Math.min(args.rowCount, 10_000)),
+  prunesIds: true,
+  validate: (payload) => {
+    if (payload.separator !== "tab" && payload.separator !== "comma") return "convertTableToText: bad separator";
+    if (!Number.isInteger(payload.rowCount) || payload.rowCount < 1 || payload.rowCount > 10_000) {
+      return "convertTableToText: bad rowCount";
+    }
+    return null;
+  },
+  apply: ({ doc, target, payload }) => convertTableToText(doc, target.el, payload.separator),
+});
+
 /** A payload with no fields of its own. Not `Record<string, never>`: that
  * carries an index signature, which would forbid the clientId/clientSeq/base
  * bookkeeping @wordinweb/collab intersects onto every wire body. */
@@ -1419,6 +1499,8 @@ const OPERATIONS = [
   setTableCellMarginsOperation,
   setTableHeaderRowsOperation,
   sortTableRowsOperation,
+  convertTextToTableOperation,
+  convertTableToTextOperation,
   insertEndnoteOperation,
   setCropOperation,
   setModel3DRotationOperation,

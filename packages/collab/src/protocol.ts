@@ -107,10 +107,10 @@ export interface SealedCheckpoint {
  *       soft-break delete.
  *   e16 cell merge/split on the wire: tableOp now carries mergeRight/
  *       mergeDown/splitCell (they existed only as local mutations, a silent
- *       local-only divergence in shared documents), and the new registered
- *       operation sortTableRows reorders a table's body rows. An e15 peer
- *       rejects the very intents an e16 peer applies — fork on the first
- *       merged cell or row sort.
+ *       local-only divergence in shared documents), plus new registered
+ *       operations sortTableRows, convertTextToTable and convertTableToText.
+ *       An e15 peer rejects the very intents an e16 peer applies — fork on
+ *       the first merged cell, row sort, or conversion.
  */
 export const ENGINE_VERSION = "e16";
 

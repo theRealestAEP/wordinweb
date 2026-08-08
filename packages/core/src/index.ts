@@ -86,7 +86,7 @@ export { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSepa
 export type { EditCaret, MutationCtx, SplitResult, DeleteSeparatorResult } from "./edit/mutations.js";
 export { defaultProvenance, recordedProvenance } from "./edit/provenance.js";
 export type { EditProvenance } from "./edit/provenance.js";
-export { insertTableAfter, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, siblingParagraph, paragraphOf, topLevelBlockOf, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";
+export { insertTableAfter, convertTextToTable, convertTableToText, plainTextOf, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, siblingParagraph, paragraphOf, topLevelBlockOf, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";
 export { applyTableOp, cellContextOf, resizeDrawing, resizeTableColumn, resizeTableRow, moveTableTo, setTableTextWrapping } from "./edit/tables.js";
 export {
   setImageWrap,

@@ -223,6 +223,36 @@ describe("DocumentSession tableOp merge/split (wire)", () => {
     expect(tableText(server.doc)).toBe("A|B|C|D|after");
   });
 
+  it("convertTableToText and convertTextToTable (registered) converge with carried ids", () => {
+    const initial = tableDocBytes();
+    const server = new DocumentSession(DocxDocument.load(initial));
+    const remote = new ClientReplica(initial);
+    const cellA = paraIdByText(server, "A");
+    const e1 = server.submit({ kind: "convertTableToText", clientId: "a", clientSeq: 1, base: 0, cellParagraphId: cellA, separator: "tab", rowCount: 2, nodeIds: [800, 801, 802, 803] });
+    expect(e1.kind).toBe("applied");
+    remote.receive([e1]);
+    const xml = serializeXml(server.doc.docRoot);
+    expect(xml).not.toContain("<w:tbl>");
+    expect(xml).toContain("<w:tab/>");
+    expect(serializeXml(remote.doc.docRoot)).toBe(xml);
+    // The first new paragraph took its carried ids: it is addressable.
+    const ins = server.submit({ kind: "insertText", clientId: "a", clientSeq: 2, base: server.seq, at: { blockId: 800, runId: 801, offset: 0 }, text: "X" });
+    expect(ins.kind).toBe("applied");
+    remote.receive([ins]);
+    expect(tableText(server.doc)).toContain("XA");
+
+    // Back to a table: the addressed paragraph becomes a one-row table.
+    const e2 = server.submit({ kind: "convertTextToTable", clientId: "a", clientSeq: 3, base: server.seq, blockId: 800, separator: "tab", cellCount: 2, nodeIds: [900, 901, 902, 903, 904, 905, 906] });
+    expect(e2.kind).toBe("applied");
+    remote.receive([e2]);
+    const xml2 = serializeXml(server.doc.docRoot);
+    expect(xml2).toContain("<w:tbl>");
+    expect(serializeXml(remote.doc.docRoot)).toBe(xml2);
+    // An edit addressed to the converted-away paragraph is now rejected.
+    const stale = server.submit({ kind: "insertText", clientId: "a", clientSeq: 4, base: server.seq, at: { blockId: 800, runId: 801, offset: 0 }, text: "y" });
+    expect(stale.kind).toBe("rejected");
+  });
+
   it("a merge into a concurrently edited cell keeps the edit (transform identity)", () => {
     const initial = tableDocBytes();
     const server = new DocumentSession(DocxDocument.load(initial));

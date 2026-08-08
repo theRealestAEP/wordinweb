@@ -103,6 +103,9 @@ import {
   type SmartArtData,
   type SmartArtTextFormat,
   insertTableAfter,
+  convertTextToTable,
+  convertTableToText,
+  plainTextOf,
   operationBody,
   documentOperationBody,
   type RegisteredOperationArgs,
@@ -331,6 +334,12 @@ export interface DocxViewApi {
    * numbers. The repeating header band always stays in place; `hasHeader`
    * additionally pins the first row. Refuses tables with merged cells. */
   sortTableRows(colIdx: number, order: "asc" | "desc", compare: "text" | "number", hasHeader?: boolean): void;
+  /** Convert the selected paragraphs (or the caret paragraph) into a table,
+   * one row per paragraph, cells split on the separator. */
+  convertTextToTable(separator: "tab" | "comma"): boolean;
+  /** Convert the caret's table into paragraphs, one per row, cell texts
+   * joined by the separator. */
+  convertTableToText(separator: "tab" | "comma"): boolean;
   /** Insert an image file at the caret (inline, natural size clamped to column).
    * The result is REPORTED rather than swallowed: a picker that accepts a file
    * and then does nothing is indistinguishable from a broken button. */
@@ -2195,6 +2204,63 @@ export function DocxView({
             history.checkpoint();
             const tbl = caretTable();
             if (tbl && sortTableRows(doc, tbl, colIdx, order, compare, hasHeader ?? false)) pages = rerender(doc);
+          },
+          convertTextToTable: (separator) => {
+            const caret = editor?.getCaretTarget();
+            const segs = editor?.getSelectionSegments() ?? [];
+            const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
+            if (targets.length === 0) return false;
+            const paras: XmlElement[] = [];
+            for (const t of targets) {
+              const p = paragraphOf(doc, t);
+              if (p && !paras.includes(p)) paras.push(p);
+            }
+            if (paras.length === 0) return false;
+            // The id budget rides as data: rows × columns as THIS replica
+            // computed them (the insertToc entryCount pattern).
+            const sep = separator === "tab" ? "\t" : ",";
+            const cols = Math.max(1, ...paras.map((p) => plainTextOf(p).split(sep).length));
+            const cellCount = Math.min(paras.length * cols, 10_000);
+            const blockIds = doc.stableIds
+              ? paras.map((p) => doc.stableIds!.idOf(p)).filter((n): n is number => n !== undefined)
+              : [];
+            if (
+              collabOp(
+                (anchor, alloc) =>
+                  blockIds.length === 0
+                    ? null
+                    : (operationBody("convertTextToTable", blockIds[0], {
+                        separator,
+                        cellCount,
+                        ...(blockIds.length > 1 ? { moreBlockIds: blockIds.slice(1) } : {}),
+                      }, alloc) as never),
+                { t: targets[0], offset: 0 },
+              )
+            ) return true;
+            history.checkpoint();
+            if (!convertTextToTable(doc, paras, separator)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          convertTableToText: (separator) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return false;
+            const tbl = caretTable();
+            if (!tbl) return false;
+            const rowCount = Math.min(
+              Math.max(tbl.children.filter((c) => localName(c.name) === "tr").length, 1),
+              10_000,
+            );
+            if (
+              collabOp(
+                (anchor, alloc) => operationBody("convertTableToText", anchor.blockId, { separator, rowCount }, alloc) as never,
+                { t: caret.t, offset: 0 },
+              )
+            ) return true;
+            history.checkpoint();
+            if (!convertTableToText(doc, tbl, separator)) return false;
+            pages = rerender(doc);
+            return true;
           },
           imageAccept: () => (collabRef.current?.submitOp && doc.stableIds ? COLLAB_IMAGE_ACCEPT : LOCAL_IMAGE_ACCEPT),
           imageMaxBytes: () => (collabRef.current?.submitOp && doc.stableIds ? collabRef.current.mediaMaxBlobBytes ?? null : null),

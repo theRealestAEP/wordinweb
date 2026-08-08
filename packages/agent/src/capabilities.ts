@@ -396,6 +396,8 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setTableWidth.value": number(0.1, 1584),
   "setTableColumnWidth.colIdx": integer(0, 200),
   "sortTableRows.colIdx": integer(0, 200),
+  "convertTextToTable.cellCount": integer(1, 10000),
+  "convertTableToText.rowCount": integer(1, 10000),
   "setTableColumnWidth.widthPt": number(1, 1584),
   "setTableHeaderRows.count": integer(0, 5000),
   // A TOC's size is document-derived, so entryCount is an id BUDGET the
@@ -453,6 +455,8 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "setTableLayout.layout": ["fixed", "autofit"],
   "sortTableRows.order": ["asc", "desc"],
   "sortTableRows.compare": ["text", "number"],
+  "convertTextToTable.separator": ["tab", "comma"],
+  "convertTableToText.separator": ["tab", "comma"],
 };
 
 function schemaForField(kind: Intent["kind"], field: string): JsonSchema {

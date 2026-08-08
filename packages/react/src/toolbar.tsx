@@ -2196,6 +2196,8 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
     ["valign:top", "Cell align top"],
     ["valign:center", "Cell align middle"],
     ["valign:bottom", "Cell align bottom"],
+    ["convert:text", "Convert text to table"],
+    ["convert:table", "Convert table to text"],
     ["deleteTable", "Delete table"],
   ];
   const CELL_FILLS = ["FFF2CC", "D9E2F3", "E2EFDA", "FCE4EC", "F1F3F4"];
@@ -2262,6 +2264,10 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
                 onClick={() => {
                   if (op.startsWith("valign:")) {
                     api?.tableOp({ kind: "cellVAlign", v: op.slice(7) as "top" | "center" | "bottom" });
+                  } else if (op === "convert:text") {
+                    api?.convertTextToTable("tab");
+                  } else if (op === "convert:table") {
+                    api?.convertTableToText("tab");
                   } else {
                     api?.tableOp(op as Parameters<NonNullable<typeof api>["tableOp"]>[0]);
                   }
@@ -2889,6 +2895,13 @@ function TableFormatTab({
           const colIdx = api?.getTableProperties()?.columnIdx ?? 0;
           after(() => api?.sortTableRows(colIdx, order, compare));
         }}
+      />
+      <ActionMenu
+        label="Convert"
+        title="Convert this table to text"
+        width={82}
+        groups={[{ items: [["tab", "To text (tabs)"], ["comma", "To text (commas)"]] }]}
+        onPick={(value) => after(() => api?.convertTableToText(value as "tab" | "comma"))}
       />
       <span ref={borderMenuRef} style={{ display: "inline-flex" }}>
         <ActionMenu
