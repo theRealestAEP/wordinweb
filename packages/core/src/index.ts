@@ -135,7 +135,7 @@ export type { LevelPatch, NumberFormat } from "./edit/numbering.js";
 export { setLink, removeLink, linkAt } from "./edit/links.js";
 export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpacing, setDropCapAt } from "./edit/paragraph.js";
 export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode } from "./edit/paragraph.js";
-export { findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
+export { compileReplaceAll, compileReplaceMatch, findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertEndnote, insertFootnote } from "./edit/notes.js";
 export {
@@ -224,7 +224,7 @@ export { documentTextStatistics } from "./word-count.js";
 export type { TextStatistics } from "./word-count.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages, buildPrintHtml } from "./render/dom.js";
-export type { FindMatch, FindOptions, FindStory, ReplaceAllResult } from "./edit/find.js";
+export type { FindMatch, FindOptions, FindStory, ReplaceAllResult, ReplaceAllCompilation, ReplaceIntentBody, WireRange } from "./edit/find.js";
 export { cellShadingAt } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";
 export {

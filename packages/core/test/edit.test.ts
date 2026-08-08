@@ -6,7 +6,7 @@ import { addComment } from "../src/edit/comments.js";
 import { setListType, setListLevel } from "../src/edit/lists.js";
 import { setLink, removeLink, linkAt } from "../src/edit/links.js";
 import { adjustIndent, paragraphDividerAt, setDropCapAt, setParagraphDivider, setParagraphSpacing } from "../src/edit/paragraph.js";
-import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
+import { compileReplaceAll, findAll, replaceAll, transformCase } from "../src/edit/find.js";
 import { applyTableOp, cellShadingAt, resizeDrawing, setTableHeaderRows, sortTableRows } from "../src/edit/tables.js";
 import {
   adjustFloatingPosition,
@@ -2279,6 +2279,12 @@ describe("find & replace depth (whole word, stories, cross-paragraph)", () => {
 </w:footnotes>`,
     });
 
+  const storiesDocWithIds = () => {
+    const doc = storiesDoc();
+    doc.enableStableIds();
+    return doc;
+  };
+
   it("matches whole words only when asked", () => {
     const doc = loadDoc(p("The cat concatenates cats"));
     expect(findAll(doc, "cat").length).toBe(3);
@@ -2302,6 +2308,28 @@ describe("find & replace depth (whole word, stories, cross-paragraph)", () => {
     const note = doc.footnotes.get(1)![0] as Paragraph;
     expect(textOf(note)).toBe("Note dog text");
     expect(findAll(doc, "cat").length).toBe(0);
+  });
+
+  it("compileReplaceAll reaches every story with the local pass's counts (#112)", () => {
+    const doc = storiesDoc();
+    doc.enableStableIds();
+    const { intents, result } = compileReplaceAll(doc, "cat", "dog");
+    expect(result.total).toBe(4);
+    expect(result.byStory).toEqual({ body: 2, header: 1, footnote: 1 });
+    // One deleteText + one insertText per single-range match, back-to-front.
+    expect(intents.map((i) => i.kind)).toEqual(
+      ["deleteText", "insertText", "deleteText", "insertText", "deleteText", "insertText", "deleteText", "insertText"],
+    );
+    // Suggesting compiles the strike-then-insert pair with the carried meta.
+    const meta = { author: "R", date: "2026-08-08T00:00:00Z" };
+    const suggested = compileReplaceAll(storiesDocWithIds(), "cat", "dog", undefined, meta);
+    expect(suggested.result).toEqual(result);
+    expect(suggested.intents.map((i) => i.kind)).toEqual(
+      ["suggestRevision", "insertText", "suggestRevision", "insertText", "suggestRevision", "insertText", "suggestRevision", "insertText"],
+    );
+    for (const intent of suggested.intents) {
+      expect((intent as { suggest?: unknown }).suggest).toEqual(meta);
+    }
   });
 
   it("a query containing \\n matches across the paragraph boundary", () => {

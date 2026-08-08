@@ -42,6 +42,8 @@ import {
   adjustIndent,
   paragraphDividerAt,
   deleteComment,
+  compileReplaceAll,
+  compileReplaceMatch,
   findAll,
   linkAt,
   removeLink,
@@ -2703,15 +2705,42 @@ export function DocxView({
           replaceCurrent: (replacement) => {
             const m = findState.matches[findState.index];
             if (!m) return 0;
-            history.checkpoint();
-            replaceMatch(doc, m, replacement);
-            pages = rerender(doc);
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              // In a room the replacement rides the wire as the canonical
+              // deleteText/insertText intents (strike-then-insert while
+              // suggesting) — the local mutation below never replicates. An
+              // unaddressable match is an honest no-op (see collabOp).
+              const intents = compileReplaceMatch(doc, m, replacement, editor?.suggestionMeta());
+              if (intents) {
+                history.checkpoint();
+                for (const intent of intents) current.submitOp(intent);
+              }
+            } else {
+              history.checkpoint();
+              replaceMatch(doc, m, replacement);
+              pages = rerender(doc);
+            }
             findState.matches.splice(findState.index, 1);
             if (findState.index >= findState.matches.length) findState.index = 0;
             if (findState.matches.length > 0) selectMatch(findState.index);
             return findState.matches.length;
           },
           replaceAll: (query, replacement, opts) => {
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              // One fixed find pass compiled to per-match intents, submitted
+              // back-to-front (the compiled order) so every offset encoded
+              // against the pre-replace tree stays valid as the optimistic
+              // applies land. One checkpoint: the whole sweep is one gesture.
+              const { intents, result } = compileReplaceAll(doc, query, replacement, opts, editor?.suggestionMeta());
+              if (intents.length > 0) {
+                history.checkpoint();
+                for (const intent of intents) current.submitOp(intent);
+              }
+              findState = { matches: [], index: 0 };
+              return result;
+            }
             history.checkpoint();
             const result = replaceAll(doc, query, replacement, opts);
             if (result.total > 0) pages = rerender(doc);
