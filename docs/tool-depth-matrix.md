@@ -406,3 +406,39 @@ Rows moved since the audit at ff5b00e:
 - §18 Review: Word count ABSENT → DEEP (API + NUMWORDS/NUMCHARS recompute + app status pill); Proofing ABSENT → CORE (app-side hunspell spellcheck, native suggestion menu through the editing path, custom dictionary, language setting — grammar absent).
 
 Revised totals: 44 DEEP / 43 CORE / 5 STUB / 46 ABSENT.
+
+## Wave 2 delta, lane B: the citations cluster (2026-08-08, branch depth2-citations)
+
+Build-list item 10 ("citations pipeline completion — the missing third makes
+the whole cluster unusable for a fresh document") is closed: a fresh document
+can now create sources, cite them, pick a style, and hold a generated
+bibliography. §16 rows moved:
+
+- Manage sources ABSENT → CORE. `createCitationSource` / `editCitationSource`
+  / `deleteCitationSource` registry ops write the b:Sources custom XML part
+  (ECMA-376 §22.6) — creating the whole part stack (itemN.xml + itemProps +
+  rels + content types, deterministic itemID) when the package has none —
+  edit/sources.ts, docx.ts sourcesTree. Delete honestly refuses while a
+  CITATION still cites the tag. UI: Citations popover on the Insert tab
+  (source list + New Source form — toolbar.tsx CitationsMenu). Gap: four
+  source types (book, article, website, report) and the common fields; Word's
+  Source Manager offers ~17 types, master/current lists, and more fields.
+- Insert citation stays CORE, gap changed. The old gap (pre-existing sources
+  part required) is gone; the remaining gap is the simple-tier display rule
+  (APA-shaped author-date + MLA author-page; other styles fall back to the
+  APA shape) — citations.ts.
+- Bibliography STUB → CORE. `insertBibliography` writes Word's
+  multi-paragraph BIBLIOGRAPHY field with entries GENERATED from the sources
+  part (alphabetical, honest APA/MLA entry shapes — edit/bibliography.ts);
+  `refreshBibliography` regenerates on updateFields, replicated (entries are
+  a pure function of the sequenced sources part, so unlike TOC rebuilds it
+  works in a room). Arriving Word bibliographies also render their entry
+  paragraphs verbatim now (parse live-field fix). Gap: no SDT/docPartObj
+  gallery wrapper or heading paragraph; entry fidelity is the simple tier.
+- Citation style ABSENT → CORE. `setCitationStyle` flips
+  b:Sources/@StyleName (+ SelectedStyle), one attribute both the
+  parenthetical and the bibliography formatter read; APA/MLA in the UI. Gap:
+  Word ships an XSL per style (Chicago, IEEE, …).
+
+§16 counts: DEEP 0 · CORE 7 · STUB 2 · ABSENT 3. Revised totals:
+44 DEEP / 46 CORE / 4 STUB / 44 ABSENT.
