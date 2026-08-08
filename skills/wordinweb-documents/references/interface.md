@@ -1088,6 +1088,7 @@ Each series must contain the same number of values as `categories`.
 type TableOperation =
   | "deleteRow" | "deleteCol" | "deleteTable"
   | "rowAbove" | "rowBelow" | "colLeft" | "colRight"
+  | "mergeRight" | "mergeDown" | "splitCell"
   | { kind: "cellShading"; fill: "RRGGBB" | null }
   | { kind: "cellVAlign"; v: "top" | "center" | "bottom" }
   | { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number };

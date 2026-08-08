@@ -415,20 +415,25 @@ function applyIntentInner(
       if (!paraEl) return false;
       const target = firstTextDescendant(paraEl) ?? paraEl;
       const isInsert = intent.op === "rowAbove" || intent.op === "rowBelow" || intent.op === "colLeft" || intent.op === "colRight";
-      // For insert ops, snapshot the tracked-node set so we can find the new
-      // nodes afterward and give them the carried ids.
-      const before = isInsert ? trackedSet(ids, doc) : null;
+      // mergeDown mints a fresh continuation paragraph, splitCell fresh cells;
+      // both also retire ids (the merged/replaced content), so they take
+      // carried ids like the inserts AND prune like the deletes.
+      const createsNodes = isInsert || intent.op === "mergeDown" || intent.op === "splitCell";
+      // For node-creating ops, snapshot the tracked-node set so we can find
+      // the new nodes afterward and give them the carried ids.
+      const before = createsNodes ? trackedSet(ids, doc) : null;
       const ok = applyTableOp(doc, target, intent.op as never, suggestMeta(doc, intent.suggest));
       if (!ok) return false;
-      if (isInsert && before && intent.nodeIds) {
+      if (before && intent.nodeIds) {
         // Assign carried ids to the newly created tracked nodes in doc order.
         const fresh: XmlElement[] = [];
         walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
         for (let k = 0; k < fresh.length && k < intent.nodeIds.length; k++) {
           ids.reassign(fresh[k], intent.nodeIds[k]);
         }
-      } else {
-        // Delete/shading ops: retire stale ids for removed content.
+      }
+      if (!isInsert) {
+        // Delete/merge/split/shading ops: retire stale ids for removed content.
         ids.prune(doc.editableRoots());
       }
       return true;

@@ -328,7 +328,7 @@ const lineNumberingPatch = closedObject({
 
 const tableOperation = {
   anyOf: [
-    { enum: ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight"] },
+    { enum: ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight", "mergeRight", "mergeDown", "splitCell"] },
     closedObject({ kind: { const: "cellShading" }, fill: { anyOf: [rgb, { type: "null" }] } }, ["kind", "fill"]),
     closedObject({ kind: { const: "cellVAlign" }, v: { enum: ["top", "center", "bottom"] } }, ["kind", "v"]),
     closedObject({
@@ -429,7 +429,7 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
 const ENUMS: Record<string, readonly unknown[]> = {
   "formatParagraph.align": ["left", "center", "right", "justify"],
   "setListType.listKind": ["bullet", "number", null],
-  "tableOp.op": ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight"],
+  "tableOp.op": ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight", "mergeRight", "mergeDown", "splitCell"],
   "insertBreak.breakKind": ["page", "column"],
   "insertSeparator.separator": ["br", "tab"],
   "insertShape.preset": ["line", "verticalLine", "rectangle", "roundedRectangle", "ellipse", "diamond", "textBox"],

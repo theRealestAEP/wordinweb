@@ -213,11 +213,12 @@ export interface FormatRangeIntent extends IntentBase {
 }
 
 /**
- * A table operation that does NOT create new tracked nodes (so no carried ids
- * are needed and the transform is identity): delete row/column/table, cell
- * shading, cell vertical align. The target cell is addressed by the stable id
- * of a paragraph inside it. Row/column INSERTION (which creates cells with new
- * paragraphs and runs needing carried ids) is a documented harder extension.
+ * A table operation addressed by the stable id of a paragraph inside the
+ * target cell. Every op is position-stable (no surviving run's offsets move),
+ * so the transform is identity; concurrent edits into removed cells fail
+ * cleanly at apply (retired ids). Ops that create tracked nodes (the inserts,
+ * mergeDown's fresh continuation paragraph, splitCell's new cells) take their
+ * ids from `nodeIds`; ops that remove content prune the retired ids at apply.
  */
 export interface TableOpIntent extends IntentBase {
   /** Stable id of a paragraph inside the target cell. */
@@ -231,12 +232,15 @@ export interface TableOpIntent extends IntentBase {
     | "rowBelow"
     | "colLeft"
     | "colRight"
+    | "mergeRight"
+    | "mergeDown"
+    | "splitCell"
     | { kind: "cellShading"; fill: string | null }
     | { kind: "cellVAlign"; v: "top" | "center" | "bottom" }
     | { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number };
-  /** For INSERT ops (rowAbove/rowBelow/colLeft/colRight): carried ids for the
-   * new tracked nodes (p / r) in document order, so replicas address them
-   * alike. */
+  /** For ops that create tracked nodes (rowAbove/rowBelow/colLeft/colRight,
+   * mergeDown, splitCell): carried ids for the new nodes (p / r) in document
+   * order, so replicas address them alike. */
   nodeIds?: StableId[];
   /**
    * Tracked-change (suggesting) metadata; see FormatParagraphIntent. Only the

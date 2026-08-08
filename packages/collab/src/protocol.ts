@@ -105,8 +105,12 @@ export interface SealedCheckpoint {
  *       tableOp("deleteTable") from the selection-delete path. An e14 peer
  *       rejects the very intents an e15 peer applies — fork on the first
  *       soft-break delete.
+ *   e16 cell merge/split on the wire: tableOp now carries mergeRight/
+ *       mergeDown/splitCell (they existed only as local mutations, a silent
+ *       local-only divergence in shared documents). An e15 peer rejects the
+ *       very intent an e16 peer applies — fork on the first merged cell.
  */
-export const ENGINE_VERSION = "e15";
+export const ENGINE_VERSION = "e16";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-

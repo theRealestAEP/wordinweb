@@ -432,7 +432,7 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "tableOp": {
       const op = intent.op;
       if (typeof op === "string") {
-        return ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight"].includes(op)
+        return ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight", "mergeRight", "mergeDown", "splitCell"].includes(op)
           ? null
           : "tableOp: bad operation";
       }
