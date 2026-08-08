@@ -1241,6 +1241,233 @@ function ContentsMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/**
+ * The References citations cluster: insert a citation (picker over the
+ * document's sources), manage sources (new / edit / delete), pick the
+ * citation style, and insert the generated bibliography. One popover in the
+ * chart-data-editor idiom — the source form is the only multi-field surface
+ * the cluster needs.
+ */
+function CitationsMenu({ api }: { api: DocxViewApi | null }) {
+  type Source = ReturnType<NonNullable<typeof api>["listCitationSources"]>[number];
+  const SOURCE_TYPES = [
+    ["book", "Book"],
+    ["article", "Journal article"],
+    ["website", "Website"],
+    ["report", "Report"],
+  ] as const;
+  type SourceType = (typeof SOURCE_TYPES)[number][0];
+  const [open, setOpen] = useState(false);
+  const [sources, setSources] = useState<Source[]>([]);
+  const [style, setStyle] = useState("APA");
+  /** null = list view; "" = new-source form; a tag = edit that source. */
+  const [editing, setEditing] = useState<string | null>(null);
+  const [type, setType] = useState<SourceType>("book");
+  const [tag, setTag] = useState("");
+  const [authors, setAuthors] = useState("");
+  const [corporate, setCorporate] = useState("");
+  const [title, setTitle] = useState("");
+  const [year, setYear] = useState("");
+  const [container, setContainer] = useState("");
+  const [error, setError] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const refresh = () => {
+    setSources(api?.listCitationSources() ?? []);
+    setStyle(api?.getCitationStyle() ?? "APA");
+  };
+  const toggle = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    refresh();
+    setEditing(null);
+    setError("");
+    setOpen(true);
+  };
+
+  const containerLabel = type === "article" ? "Journal" : type === "website" ? "URL" : "Publisher";
+  const parseAuthors = (text: string): { last: string; first?: string }[] =>
+    text
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const [last, first] = part.split(",").map((half) => half.trim());
+        return first ? { last, first } : { last };
+      })
+      .filter((person) => person.last);
+  const defaultTag = (): string => {
+    const stem = (parseAuthors(authors)[0]?.last ?? corporate ?? title ?? "Source")
+      .replace(/[^A-Za-z0-9_-]/g, "")
+      .slice(0, 20) || "Source";
+    const base = `${stem}${year.slice(-2)}`;
+    let candidate = base;
+    for (let n = 2; sources.some((source) => source.tag === candidate); n++) candidate = `${base}_${n}`;
+    return candidate;
+  };
+  const openForm = (source: Source | null) => {
+    setEditing(source?.tag ?? "");
+    setType(
+      source?.sourceType === "JournalArticle" ? "article"
+        : source?.sourceType === "InternetSite" ? "website"
+          : source?.sourceType === "Report" ? "report" : "book",
+    );
+    setTag(source?.tag ?? "");
+    setAuthors((source?.authors ?? []).map((person) => (person.first ? `${person.last}, ${person.first}` : person.last)).join("; "));
+    setCorporate(source?.corporate ?? "");
+    setTitle(source?.title ?? "");
+    setYear(source?.year ?? "");
+    setContainer(source?.journal ?? source?.publisher ?? source?.url ?? "");
+    setError("");
+  };
+  const submitForm = () => {
+    const fields = {
+      type,
+      authors: parseAuthors(authors),
+      corporate: parseAuthors(authors).length > 0 ? "" : corporate.trim(),
+      title: title.trim(),
+      year: year.trim(),
+      publisher: type === "book" || type === "report" ? container.trim() : "",
+      journal: type === "article" ? container.trim() : "",
+      url: type === "website" ? container.trim() : "",
+    };
+    const done = editing
+      ? api?.editCitationSource(editing, fields)
+      : api?.createCitationSource({ tag: tag.trim() || defaultTag(), ...fields });
+    if (!done) {
+      setError(editing ? "Could not update the source." : "Could not add the source — is the tag already in use?");
+      return;
+    }
+    setEditing(null);
+    refresh();
+  };
+  const remove = (sourceTag: string) => {
+    if (api?.deleteCitationSource(sourceTag)) {
+      setError("");
+      refresh();
+    } else {
+      setError("The source is cited in the document. Remove its citations first.");
+    }
+  };
+
+  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
+  const viewportWidth = typeof window === "undefined" ? 396 : window.innerWidth;
+  const popoverWidth = Math.min(380, viewportWidth - 16);
+  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
+  const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+  const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
+  const rowBtn: React.CSSProperties = { border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif", padding: "3px 8px" };
+
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Citations and bibliography" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>
+        Citations
+      </button>
+      {open && (
+        <div data-dxw-citations-menu="" style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, maxHeight: "calc(100vh - 48px)", overflow: "auto", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <strong style={{ color: T.fg, font: "600 13px system-ui, sans-serif" }}>Citations</strong>
+          <label style={{ ...fieldLabelStyle, gridTemplateColumns: "auto 1fr", alignItems: "center", display: "grid", gap: 6 }}>
+            <span>Style</span>
+            <select
+              aria-label="Citation style"
+              value={style === "MLA" ? "MLA" : "APA"}
+              onChange={(event) => {
+                const next = event.target.value as "APA" | "MLA";
+                api?.setCitationStyle(next);
+                refresh();
+              }}
+              style={fieldStyle}
+            >
+              <option value="APA">APA</option>
+              <option value="MLA">MLA</option>
+            </select>
+          </label>
+          {editing === null ? (
+            <>
+              <div role="list" aria-label="Bibliography sources" style={{ display: "grid", gap: 5 }}>
+                {sources.length === 0 && (
+                  <div style={{ color: T.muted, font: "12px system-ui, sans-serif" }}>No sources yet. Add one to cite it.</div>
+                )}
+                {sources.map((source) => (
+                  <div key={source.tag} role="listitem" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.fg, font: "12px system-ui, sans-serif" }} title={source.title ?? source.tag}>
+                      {source.title || source.tag}
+                      {source.year ? ` (${source.year})` : ""}
+                    </span>
+                    <button type="button" title={`Cite ${source.tag}`} style={rowBtn} onClick={() => { if (api?.insertCitation(source.tag)) setOpen(false); }}>Cite</button>
+                    <button type="button" title={`Edit ${source.tag}`} style={rowBtn} onClick={() => openForm(source)}>Edit</button>
+                    <button type="button" title={`Delete ${source.tag}`} style={rowBtn} onClick={() => remove(source.tag)}>✕</button>
+                  </div>
+                ))}
+              </div>
+              {error && <div role="alert" style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</div>}
+              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>
+                <button type="button" style={rowBtn} onClick={() => openForm(null)}>New source</button>
+                <button type="button" style={pillBtn} onClick={() => { if (api?.insertBibliography()) setOpen(false); }}>Insert bibliography</button>
+              </div>
+            </>
+          ) : (
+            <div role="group" aria-label={editing ? "Edit source" : "New source"} style={{ display: "grid", gap: 7 }}>
+              <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{editing ? `Edit source (${editing})` : "New source"}</strong>
+              <label style={fieldLabelStyle}>
+                <span>Type</span>
+                <select aria-label="Source type" value={type} onChange={(event) => setType(event.target.value as SourceType)} style={fieldStyle}>
+                  {SOURCE_TYPES.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={fieldLabelStyle}>
+                <span>Authors — Last, First; Last, First</span>
+                <input aria-label="Authors" value={authors} onChange={(event) => setAuthors(event.target.value)} placeholder="Doe, Jane; Smith, Ada" style={fieldStyle} />
+              </label>
+              <label style={fieldLabelStyle}>
+                <span>Corporate author (when no person author)</span>
+                <input aria-label="Corporate author" value={corporate} onChange={(event) => setCorporate(event.target.value)} style={fieldStyle} />
+              </label>
+              <label style={fieldLabelStyle}>
+                <span>Title</span>
+                <input aria-label="Title" value={title} onChange={(event) => setTitle(event.target.value)} style={fieldStyle} />
+              </label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 6 }}>
+                <label style={fieldLabelStyle}>
+                  <span>Year</span>
+                  <input aria-label="Year" value={year} onChange={(event) => setYear(event.target.value)} style={fieldStyle} />
+                </label>
+                <label style={fieldLabelStyle}>
+                  <span>{containerLabel}</span>
+                  <input aria-label={containerLabel} value={container} onChange={(event) => setContainer(event.target.value)} style={fieldStyle} />
+                </label>
+              </div>
+              {!editing && (
+                <label style={fieldLabelStyle}>
+                  <span>Tag (blank = automatic)</span>
+                  <input aria-label="Source tag" value={tag} onChange={(event) => setTag(event.target.value)} placeholder={defaultTag()} style={fieldStyle} />
+                </label>
+              )}
+              {error && <div role="alert" style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</div>}
+              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                <button type="button" style={rowBtn} onClick={() => { setEditing(null); setError(""); }}>Cancel</button>
+                <button type="button" style={pillBtn} onClick={submitForm}>{editing ? "Save" : "Add source"}</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
 const SYMBOLS = ["Ω", "±", "×", "÷", "≤", "≥", "≠", "≈", "∞", "∑", "√", "∫", "→", "↔", "©", "®", "™", "€", "£", "¥", "✓", "•", "§", "¶"];
 
 function SymbolMenu({ api }: { api: DocxViewApi | null }) {
@@ -4708,6 +4935,7 @@ export type ToolbarFeature =
   | "crossReference"
   | "dateTime"
   | "field"
+  | "citations"
   | "equation"
   | "symbol"
   | "shape"
@@ -4772,6 +5000,11 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   // carried id allocation can be sized for a mutation whose size comes from
   // the document rather than from its arguments.
   { command: "insertToc", feature: "field" },
+  // Citations are fields too, but they get their own group: the whole
+  // References cluster (insert citation, bibliography, source manager,
+  // style) hangs together and a host hides or shows it as one.
+  { command: "insertCitation", feature: "citations" },
+  { command: "insertBibliography", feature: "citations" },
   { command: "insertDateTime", feature: "dateTime" },
   { command: "insertCrossReference", feature: "crossReference" },
   { command: "insertBreak", feature: "break" },
@@ -5586,6 +5819,7 @@ export function DocxToolbar({
             />
           )}
           {on("field") && <ContentsMenu api={api} />}
+          {on("citations") && <CitationsMenu api={api} />}
           {on("equation") && <EquationMenu api={api} />}
           {on("symbol") && <SymbolMenu api={api} />}
           {on("dropCap") && (
@@ -5660,6 +5894,7 @@ export function DocxToolbar({
                 <ActionMenu label="Field" title="Insert a Word field" width={68} groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]} onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)} />
               )}
               {on("field") && <ContentsMenu api={api} />}
+              {on("citations") && <CitationsMenu api={api} />}
               {on("equation") && <EquationMenu api={api} />}
               {on("symbol") && <SymbolMenu api={api} />}
               {on("dropCap") && <ActionMenu label="Drop cap" title="Drop cap" width={84} groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]} onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")} />}

@@ -154,6 +154,10 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertPageNumber: (api) => api.insertPageNumber("page"),
   insertField: (api) => api.insertField("AUTHOR", "me"),
   insertToc: (api) => api.insertToc(),
+  // A blank room has no sources part, so the citation is the honest no-op
+  // path in collab (emits nothing, mutates nothing) — allowed by the rule.
+  insertCitation: (api) => api.insertCitation("Doe03"),
+  insertBibliography: (api) => api.insertBibliography(),
   insertDateTime: (api) => api.insertDateTime("date"),
   insertCrossReference: (api) => api.insertCrossReference("Anchor1", "page"),
   insertBreak: (api) => api.insertBreak("page"),
