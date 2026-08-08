@@ -53,6 +53,9 @@ import {
   setLink,
   setParagraphDivider,
   setParagraphSpacing,
+  setTabStops,
+  tabStopsAt,
+  type TabStopSpec,
   setDropCapAt,
   transformCase,
   exactLineHeightAt,
@@ -389,6 +392,11 @@ export interface DocxViewApi {
   setParagraphDivider(divider: ParagraphDivider | null): boolean;
   /** Direct bottom-border divider on the caret paragraph. */
   getParagraphDivider(): ParagraphDivider | null;
+  /** Replace the selected paragraphs' direct tab stops (w:tabs). An empty
+   * list removes them, so style stops and the default grid apply again. */
+  setTabStops(stops: TabStopSpec[]): boolean;
+  /** Direct tab stops on the caret paragraph, sorted by position. */
+  getTabStops(): TabStopSpec[];
   /** Apply or remove a native Word drop cap on the caret paragraph. */
   setDropCap(mode: "drop" | "margin" | null, lines?: number): boolean;
   /** Remove direct character formatting from the selection. */
@@ -2682,6 +2690,26 @@ export function DocxView({
           getParagraphDivider: () => {
             const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
             return target ? paragraphDividerAt(doc, target) : null;
+          },
+          setTabStops: (stops) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const caret = editor?.getCaretTarget();
+            const targets = segs.length > 0
+              ? segs.map((segment) => segment.t).filter((target): target is NonNullable<typeof target> => !!target)
+              : caret
+                ? [caret.t]
+                : [];
+            if (targets.length === 0) return false;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => operationBody("setTabStops", blockId, { stops, suggest }) as never)) return true;
+            history.checkpoint();
+            if (!setTabStops(doc, targets, stops, suggestMeta(doc, suggest))) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          getTabStops: () => {
+            const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
+            return target ? tabStopsAt(doc, target) : [];
           },
           setDropCap: (mode, lines = 3) => {
             if (collabOp((a, ids) => ({ kind: "setDropCap", blockId: a.blockId, mode, nodeIds: ids(8) }))) return true;

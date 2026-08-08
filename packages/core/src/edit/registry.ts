@@ -32,6 +32,13 @@ import {
 } from "./styles.js";
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
 import {
+  MAX_TAB_STOP_PT,
+  TAB_STOP_ALIGNMENTS,
+  TAB_STOP_LEADERS,
+  setTabStops,
+  type TabStopSpec,
+} from "./paragraph.js";
+import {
   PAGE_NUMBER_FORMATS,
   setEvenOddHeaders,
   setPageNumberFormat,
@@ -861,6 +868,37 @@ function cellAnchor(target: OperationTarget): XmlElement | null {
 
 
 /** Set or clear per-edge borders on one cell or on the whole table. */
+/** Replace a paragraph's DIRECT tab stops (w:tabs, §17.3.1.38). An empty
+ * list removes the element so style stops and the default grid apply again.
+ * Position-stable (pPr only), so the transform is identity; with `suggest`
+ * the paragraph records its prior properties in a w:pPrChange. */
+const setTabStopsOperation = defineOperation<{
+  blockId: StableId;
+  stops: TabStopSpec[];
+} & SuggestablePayload>()({
+  kind: "setTabStops",
+  address: "block",
+  category: "paragraph",
+  description: "Replace the paragraph's tab stops (position, alignment, leader). An empty list removes them.",
+  fields: [{ name: "stops" }, SUGGEST_FIELD],
+  validate: (payload) => {
+    const stops = payload.stops;
+    if (!Array.isArray(stops) || stops.length > 64) return "setTabStops: bad stops";
+    for (const stop of stops) {
+      if (!stop || typeof stop !== "object") return "setTabStops: bad stop";
+      if (typeof stop.posPt !== "number" || !Number.isFinite(stop.posPt) ||
+          stop.posPt < -MAX_TAB_STOP_PT || stop.posPt > MAX_TAB_STOP_PT) {
+        return "setTabStops: bad pos";
+      }
+      if (!(TAB_STOP_ALIGNMENTS as readonly string[]).includes(stop.align)) return "setTabStops: bad align";
+      if (!(TAB_STOP_LEADERS as readonly string[]).includes(stop.leader)) return "setTabStops: bad leader";
+    }
+    return badSuggest("setTabStops", payload);
+  },
+  apply: ({ doc, target, payload }) =>
+    setTabStops(doc, [target.t ?? target.el], payload.stops, suggestMeta(doc, payload.suggest)),
+});
+
 const setTableBordersOperation = defineOperation<{
   cellParagraphId: StableId;
   scope: "cell" | "table";
@@ -1580,6 +1618,7 @@ const OPERATIONS = [
   deleteStyleOperation,
   setNumberingLevelOperation,
   setNumberingRestartOperation,
+  setTabStopsOperation,
   setTableBordersOperation,
   setTableStyleOperation,
   setTableLookOperation,

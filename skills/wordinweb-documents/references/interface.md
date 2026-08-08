@@ -698,6 +698,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `setDivider` | Set or clear a paragraph divider | `blockRef`, `divider` |
 | `setNumberingLevel` | Change a list level's number format, label text, or indent | `blockRef`, `ilvl`, `patch` |
 | `setNumberingRestart` | Restart list numbering here, or continue the preceding list | `blockRef`, `start` |
+| `setTabStops` | Replace the paragraph's tab stops (position, alignment, leader); an empty list removes them | `blockRef`, `stops`; optional: `suggest` |
 
 ### Review
 

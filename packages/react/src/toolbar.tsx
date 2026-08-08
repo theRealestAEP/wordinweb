@@ -9,6 +9,7 @@ import {
   TABLE_BORDER_STYLES,
   TABLE_SCOPE_EDGES,
   type SelectionFormat,
+  type TabStopSpec,
   type TableBorderEdge,
   type TableBorderStyle,
 } from "@wordinweb/core";
@@ -2902,6 +2903,124 @@ function CustomBorderDialog({
   );
 }
 
+const TAB_ALIGN_NAMES: Record<TabStopSpec["align"], string> = {
+  left: "Left",
+  center: "Center",
+  right: "Right",
+  decimal: "Decimal",
+  bar: "Bar",
+};
+
+const TAB_LEADER_NAMES: Record<TabStopSpec["leader"], string> = {
+  none: "None",
+  dot: "Dots ….",
+  hyphen: "Hyphens ---",
+  underscore: "Underline ___",
+  middleDot: "Middle dots ···",
+};
+
+/**
+ * Word's Tabs dialog, popover-sized: the paragraph's direct tab stops as
+ * editable rows (position in points, alignment, leader), plus add and
+ * remove. Apply replaces the whole list; applying an empty list clears
+ * w:tabs so style stops and the default grid take over again.
+ */
+function TabStopsDialog({
+  api,
+  anchorRef,
+  onClose,
+}: {
+  api: DocxViewApi | null;
+  anchorRef: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+}) {
+  const [rows, setRows] = useState<{ pos: string; align: TabStopSpec["align"]; leader: TabStopSpec["leader"] }[]>(
+    () => (api?.getTabStops() ?? []).map((stop) => ({ pos: showPt(stop.posPt), align: stop.align, leader: stop.leader })),
+  );
+  const parsed = rows.map((row) => ({ ...row, posPt: typedNumber(row.pos) }));
+  const valid = parsed.every((row) => row.posPt !== null && row.posPt >= 0 && row.posPt <= 1584);
+  const patch = (index: number, part: Partial<(typeof rows)[number]>) =>
+    setRows((current) => current.map((row, i) => (i === index ? { ...row, ...part } : row)));
+  const apply = () => {
+    if (!valid) return;
+    api?.setTabStops(parsed.map((row) => ({ posPt: row.posPt!, align: row.align, leader: row.leader })));
+    onClose();
+  };
+  return (
+    <AnchoredDialog
+      anchorRef={anchorRef}
+      title="Tab stops"
+      width={288}
+      onClose={onClose}
+      onApply={apply}
+      applyDisabled={!valid}
+    >
+      {rows.length === 0 && (
+        <span style={{ fontSize: 12, color: T.muted }}>
+          No custom stops — tabs use the default half-inch grid.
+        </span>
+      )}
+      {rows.map((row, index) => (
+        <div key={index} style={{ display: "grid", gridTemplateColumns: "64px 1fr 1fr 22px", gap: 6, alignItems: "center" }}>
+          <input
+            aria-label={`Tab stop ${index + 1} position (points)`}
+            type="number"
+            min={0}
+            max={1584}
+            step={1}
+            value={row.pos}
+            onChange={(event) => patch(index, { pos: event.target.value })}
+            style={dialogInput}
+          />
+          <select
+            aria-label={`Tab stop ${index + 1} alignment`}
+            value={row.align}
+            onChange={(event) => patch(index, { align: event.target.value as TabStopSpec["align"] })}
+            style={dialogInput}
+          >
+            {(Object.keys(TAB_ALIGN_NAMES) as TabStopSpec["align"][]).map((align) => (
+              <option key={align} value={align}>{TAB_ALIGN_NAMES[align]}</option>
+            ))}
+          </select>
+          <select
+            aria-label={`Tab stop ${index + 1} leader`}
+            value={row.leader}
+            onChange={(event) => patch(index, { leader: event.target.value as TabStopSpec["leader"] })}
+            style={dialogInput}
+          >
+            {(Object.keys(TAB_LEADER_NAMES) as TabStopSpec["leader"][]).map((leader) => (
+              <option key={leader} value={leader}>{TAB_LEADER_NAMES[leader]}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            aria-label={`Remove tab stop ${index + 1}`}
+            title="Remove this stop"
+            onClick={() => setRows((current) => current.filter((_, i) => i !== index))}
+            style={{ ...pillBtn, background: T.popoverBg, color: T.fg, padding: "2px 6px" }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <div>
+        <button
+          type="button"
+          onClick={() =>
+            setRows((current) => {
+              const last = typedNumber(current[current.length - 1]?.pos ?? "");
+              return [...current, { pos: showPt((last ?? 0) + 36), align: "left", leader: "none" }];
+            })
+          }
+          style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}
+        >
+          Add stop
+        </button>
+      </div>
+    </AnchoredDialog>
+  );
+}
+
 /** Menu value standing for "remove the style reference". */
 const NO_TABLE_STYLE = "(no table style)";
 
@@ -4835,6 +4954,8 @@ export function DocxToolbar({
     setTab(next);
   };
   const [helpOpen, setHelpOpen] = useState(false);
+  const [tabStopsOpen, setTabStopsOpen] = useState(false);
+  const tabStopsAnchorRef = useRef<HTMLSpanElement | null>(null);
   const apple = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const shortcut = (key: string) => apple ? `⌘${key}` : `Ctrl+${key}`;
   const closeHelp = useCallback(() => setHelpOpen(false), []);
@@ -5262,6 +5383,12 @@ export function DocxToolbar({
           <>
             <Btn label={<IndentIcon dir={-1} />} title="Decrease indent" onClick={() => api?.adjustIndent(-1)} />
             <Btn label={<IndentIcon dir={1} />} title="Increase indent" onClick={() => api?.adjustIndent(1)} />
+            <span ref={tabStopsAnchorRef} style={{ display: "inline-flex" }}>
+              <Btn label={"⇥"} title="Tab stops" onClick={() => setTabStopsOpen(true)} />
+            </span>
+            {tabStopsOpen && (
+              <TabStopsDialog api={api} anchorRef={tabStopsAnchorRef} onClose={() => setTabStopsOpen(false)} />
+            )}
           </>
         ),
       });

@@ -423,6 +423,19 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setNumberingLevel.ilvl": { anyOf: [integer(0, 8), { type: "null" }] },
   "setNumberingLevel.patch": numberingLevelPatch,
   "setNumberingRestart.start": { anyOf: [integer(0, 32767), { type: "null" }] },
+  // The registry's own validate is the wire authority (count and range caps).
+  "setTabStops.stops": {
+    type: "array",
+    maxItems: 64,
+    items: closedObject(
+      {
+        posPt: number(-1584, 1584),
+        align: { enum: ["left", "center", "right", "decimal", "bar"] },
+        leader: { enum: ["none", "dot", "hyphen", "underscore", "middleDot"] },
+      },
+      ["posPt", "align", "leader"],
+    ),
+  },
   // w:pgNumType. null clears the attribute (fmt back to decimal; start back
   // to "continue from previous section").
   "setPageNumberFormat.fmt": {

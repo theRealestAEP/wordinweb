@@ -5,7 +5,7 @@ import { applyRunFormat, SelectionSegment, selectionTextLogical } from "../src/e
 import { addComment } from "../src/edit/comments.js";
 import { setListType, setListLevel } from "../src/edit/lists.js";
 import { setLink, removeLink, linkAt } from "../src/edit/links.js";
-import { adjustIndent, paragraphDividerAt, setDropCapAt, setParagraphDivider, setParagraphSpacing } from "../src/edit/paragraph.js";
+import { adjustIndent, paragraphDividerAt, setDropCapAt, setParagraphDivider, setParagraphSpacing, setTabStops, tabStopsAt } from "../src/edit/paragraph.js";
 import { compileReplaceAll, findAll, replaceAll, transformCase } from "../src/edit/find.js";
 import { applyTableOp, cellShadingAt, resizeDrawing, setTableHeaderRows, sortTableRows } from "../src/edit/tables.js";
 import {
@@ -2360,6 +2360,53 @@ describe("find & replace depth (whole word, stories, cross-paragraph)", () => {
     expect(tail.t.text).toBe("Beta");
     expect(tail.offset).toBe(4);
     expect(bookmarkTextTarget(doc, "missing")).toBeNull();
+  });
+});
+
+describe("tab stops (setTabStops / tabStopsAt)", () => {
+  const firstT = (doc: DocxDocument) =>
+    ((doc.sections[0].blocks[0] as Paragraph).children[0] as Run).content.find((c) => c.kind === "text")!.srcT!;
+
+  it("writes w:tabs with val/leader/pos, sorted, and reads them back", () => {
+    const doc = loadDoc(p("resume line"));
+    expect(tabStopsAt(doc, firstT(doc))).toEqual([]);
+    expect(setTabStops(doc, [firstT(doc)], [
+      { posPt: 216, align: "right", leader: "dot" },
+      { posPt: 72, align: "left", leader: "none" },
+    ])).toBe(true);
+    expect(tabStopsAt(doc, firstT(doc))).toEqual([
+      { posPt: 72, align: "left", leader: "none" },
+      { posPt: 216, align: "right", leader: "dot" },
+    ]);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain(`<w:tab w:val="left" w:pos="1440"/>`);
+    expect(xml).toContain(`<w:tab w:val="right" w:leader="dot" w:pos="4320"/>`);
+    // The parsed model the layout reads carries the stops.
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    expect(para.props.tabs?.map((t) => t.align)).toEqual(["left", "right"]);
+    // Survives save/load in schema order.
+    const reloaded = DocxDocument.load(doc.save());
+    const rt = ((reloaded.sections[0].blocks[0] as Paragraph).children[0] as Run).content.find((c) => c.kind === "text")!.srcT!;
+    expect(tabStopsAt(reloaded, rt)).toHaveLength(2);
+  });
+
+  it("an empty list removes w:tabs; w:tabs lands before w:jc", () => {
+    const doc = loadDoc(`<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">x</w:t></w:r></w:p>`);
+    expect(setTabStops(doc, [firstT(doc)], [{ posPt: 36, align: "center", leader: "none" }])).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml.indexOf("<w:tabs>")).toBeLessThan(xml.indexOf("<w:jc"));
+    expect(setTabStops(doc, [firstT(doc)], [])).toBe(true);
+    expect(serializeXml(doc.docRoot)).not.toContain("w:tabs");
+  });
+
+  it("suggesting records the prior properties in a w:pPrChange", () => {
+    const doc = loadDoc(p("tracked"));
+    const meta = { author: "R", date: "2026-08-08T00:00:00Z", nextId: () => doc.nextRevisionId() };
+    expect(setTabStops(doc, [firstT(doc)], [{ posPt: 144, align: "decimal", leader: "hyphen" }], meta)).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain("w:pPrChange");
+    expect(xml).toContain(`w:author="R"`);
+    expect(xml).toContain(`<w:tab w:val="decimal" w:leader="hyphen" w:pos="2880"/>`);
   });
 });
 
