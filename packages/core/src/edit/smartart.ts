@@ -273,10 +273,6 @@ export function normalizeSmartArtData(data: SmartArtData): SmartArtData {
   return { layout: data.layout, items: items.length ? items : [""] };
 }
 
-function line(modelId: string, x1: number, y1: number, x2: number, y2: number): DiagramShape {
-  return { modelId, x: x1, y: y1, width: x2 - x1, height: y2 - y1, geometry: "line" };
-}
-
 function diagramShapes(data: SmartArtData): DiagramShape[] {
   const n = data.items.length;
   const gap = 95_250;
@@ -289,6 +285,9 @@ function diagramShapes(data: SmartArtData): DiagramShape[] {
     }));
   }
   if (data.layout === "hierarchy") {
+    // No connectors: the composite layoutDef declares none, so Word draws
+    // none, and the cache must agree (the cycle campaign's one-sided-drop
+    // lesson, #94).
     const rootW = Math.min(WIDTH_EMU * 0.42, 1_600_000);
     const rootH = 560_000;
     const rootX = (WIDTH_EMU - rootW) / 2;
@@ -300,7 +299,6 @@ function diagramShapes(data: SmartArtData): DiagramShape[] {
     const shapes: DiagramShape[] = [{ modelId: "1", x: rootX, y: gap, width: rootW, height: rootH, text: data.items[0], geometry: "roundRect", color: COLORS[0] }];
     data.items.slice(1).forEach((text, index) => {
       const x = gap + index * (childW + gap);
-      shapes.push(line(String(n + index + 2), WIDTH_EMU / 2, gap + rootH, x + childW / 2, childY));
       shapes.push({ modelId: String(index + 2), x, y: childY, width: childW, height: childH, text, geometry: "roundRect", color: COLORS[(index + 1) % COLORS.length] });
     });
     return shapes;
@@ -341,13 +339,13 @@ function diagramShapes(data: SmartArtData): DiagramShape[] {
   const width = Math.max((WIDTH_EMU - gap * (n + 1)) / n, 260_000);
   const height = 850_000;
   const y = (HEIGHT_EMU - height) / 2;
-  const nodes = data.items.map((text, index) => ({
+  // No connectors between process steps: the composite layoutDef declares
+  // none, so Word draws none, and the cache must agree (#94).
+  return data.items.map((text, index) => ({
     modelId: String(index + 1),
     x: gap + index * (width + gap), y, width, height, text,
     geometry: "roundRect" as const, color: COLORS[index % COLORS.length],
   }));
-  const connectors = nodes.slice(0, -1).map((node, index) => line(String(n + index + 2), node.x + node.width, y + height / 2, nodes[index + 1].x, y + height / 2));
-  return [...connectors, ...nodes];
 }
 
 function drawingShapeXml(shape: DiagramShape, index: number): string {
@@ -434,22 +432,50 @@ export function buildSmartArtLayoutXml(input: SmartArtData): string {
       `<dgm:ruleLst/>` +
       `</dgm:layoutNode></dgm:forEach></dgm:layoutNode></dgm:layoutDef>`;
   }
+  // list / process / hierarchy: a COMPOSITE layoutDef whose per-node l/t/w/h
+  // constraints are computed from the SAME diagramShapes() the cached
+  // dsp:drawing is built from, as refType="w"/"h" fractions of the canvas.
+  // buildSmartArtLayoutXml is regenerated with the data on every insert and
+  // edit, so the node count is known and the two descriptions of the art
+  // agree by construction — the property #94's cycle campaign established
+  // Word honors exactly (refType fractions reproduced to 0.01pt). The font
+  // is pinned (primFontSz, no autofit rule), matching the explicit 12pt bold
+  // white rPr the data model carries.
+  const shapes = diagramShapes(data);
+  const frac = (v: number) => (Math.round((v / WIDTH_EMU) * 100000) / 100000).toString();
+  const fracH = (v: number) => (Math.round((v / HEIGHT_EMU) * 100000) / 100000).toString();
+  const constraints = shapes
+    .map(
+      (s, i) =>
+        `<dgm:constr type="l" for="ch" forName="node${i + 1}" refType="w" fact="${frac(s.x)}"/>` +
+        `<dgm:constr type="t" for="ch" forName="node${i + 1}" refType="h" fact="${fracH(s.y)}"/>` +
+        `<dgm:constr type="w" for="ch" forName="node${i + 1}" refType="w" fact="${frac(s.width)}"/>` +
+        `<dgm:constr type="h" for="ch" forName="node${i + 1}" refType="h" fact="${fracH(s.height)}"/>`,
+    )
+    .join("");
+  const nodes = shapes
+    .map(
+      (s, i) =>
+        `<dgm:forEach axis="ch" ptType="node" st="${i + 1}" cnt="1">` +
+        `<dgm:layoutNode name="node${i + 1}" styleLbl="node0">` +
+        `<dgm:varLst><dgm:bulletEnabled val="true"/></dgm:varLst><dgm:alg type="tx"/>` +
+        `<dgm:shape type="${s.geometry ?? "roundRect"}"/><dgm:presOf axis="desOrSelf" ptType="node"/>` +
+        `<dgm:constrLst><dgm:constr type="primFontSz" val="12"/>` +
+        `<dgm:constr type="tMarg" refType="primFontSz" fact="0.3"/>` +
+        `<dgm:constr type="bMarg" refType="primFontSz" fact="0.3"/><dgm:constr type="lMarg" refType="primFontSz" fact="0.3"/>` +
+        `<dgm:constr type="rMarg" refType="primFontSz" fact="0.3"/></dgm:constrLst>` +
+        `<dgm:ruleLst/>` +
+        `</dgm:layoutNode></dgm:forEach>`,
+    )
+    .join("");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
     `<dgm:layoutDef xmlns:dgm="${NS_DGM}" xmlns:a="${NS_A}" uniqueId="urn:wordinweb:smartart:${data.layout}">` +
     `<dgm:title val="${data.layout}"/><dgm:desc val="WordInWeb ${data.layout} diagram"/>` +
     `<dgm:catLst><dgm:cat type="${data.layout}" pri="1000"/></dgm:catLst>` +
-    `<dgm:layoutNode name="diagram"><dgm:alg type="lin"/><dgm:shape/><dgm:presOf/>` +
-    `<dgm:constrLst><dgm:constr type="w" for="ch" forName="node" refType="w"/>` +
-    `<dgm:constr op="equ" type="h" for="ch" forName="node"/>` +
-    `<dgm:constr op="equ" type="primFontSz" for="ch" forName="node" val="65"/></dgm:constrLst><dgm:ruleLst/>` +
-    `<dgm:forEach axis="ch" ptType="node"><dgm:layoutNode name="node" styleLbl="node0">` +
-    `<dgm:varLst><dgm:bulletEnabled val="true"/></dgm:varLst><dgm:alg type="tx"/>` +
-    `<dgm:shape type="roundRect"/><dgm:presOf axis="desOrSelf" ptType="node"/>` +
-    `<dgm:constrLst><dgm:constr type="tMarg" refType="primFontSz" fact="0.3"/>` +
-    `<dgm:constr type="bMarg" refType="primFontSz" fact="0.3"/><dgm:constr type="lMarg" refType="primFontSz" fact="0.3"/>` +
-    `<dgm:constr type="rMarg" refType="primFontSz" fact="0.3"/></dgm:constrLst>` +
-    `<dgm:ruleLst><dgm:rule type="primFontSz" val="5"/></dgm:ruleLst>` +
-    `</dgm:layoutNode></dgm:forEach></dgm:layoutNode></dgm:layoutDef>`;
+    `<dgm:layoutNode name="diagram"><dgm:alg type="composite"/><dgm:shape/><dgm:presOf/>` +
+    `<dgm:constrLst>${constraints}</dgm:constrLst><dgm:ruleLst/>` +
+    nodes +
+    `</dgm:layoutNode></dgm:layoutDef>`;
 }
 
 export function buildSmartArtStyleXml(): string {
