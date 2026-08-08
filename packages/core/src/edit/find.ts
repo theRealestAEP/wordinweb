@@ -25,6 +25,10 @@ export interface FindOptions {
   /** Match whole words only: the characters adjacent to the hit must not be
    * letters, digits, or underscores (Word's "Find whole words only"). */
   wholeWord?: boolean;
+  /** Word's wildcard pattern language (the subset below). Like Word, wildcard
+   * matching is always case-sensitive and ignores wholeWord — the pattern's
+   * own `<` and `>` express word boundaries. */
+  wildcards?: boolean;
 }
 
 export interface FindMatch {
@@ -79,17 +83,188 @@ function runsOf(para: Paragraph): Run[] {
 const isWordChar = (ch: string | undefined): boolean =>
   ch !== undefined && /[\p{L}\p{N}_]/u.test(ch);
 
+// ---------------------------------------------------------------------------
+// Query compilation: special characters and wildcards
+// ---------------------------------------------------------------------------
+
+/**
+ * Longest query either mode compiles. The cap bounds what a pattern can cost:
+ * a wildcard query becomes a regular expression run over every story, and an
+ * unbounded pattern is an unbounded amount of backtracking to hand an
+ * arbitrary caller.
+ */
+export const MAX_FIND_PATTERN = 256;
+
+/** Most `*` / `@` quantifiers one wildcard pattern may hold. Each quantifier
+ * multiplies the regex engine's worst-case backtracking, so the count is
+ * capped rather than trusted (input-length caps alone do not bound it). */
+const MAX_WILDCARDS = 8;
+
+const escapeRegex = (ch: string): string => ch.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&");
+
+/** The word-boundary classes Word's `<` and `>` (and wholeWord) use — the
+ * same rule as isWordChar above. */
+const NOT_BEFORE_WORD = "(?<![\\p{L}\\p{N}_])";
+const NOT_AFTER_WORD = "(?![\\p{L}\\p{N}_])";
+
+/**
+ * Translate the LITERAL mode's caret escapes (Word's "special characters").
+ * The modeled subset, against the story text this module builds:
+ *
+ *   ^p  paragraph mark ("\n" join)   ^t  tab            ^l  line break (w:br)
+ *   ^#  any digit                    ^$  any letter     ^?  any character
+ *   ^w  white space (a run of it)    ^s  nonbreaking space
+ *   ^~  nonbreaking hyphen (U+2011)  ^-  optional hyphen (w:softHyphen)
+ *   ^^  a caret
+ *
+ * An unknown escape stays literal text, so a stray caret finds itself. Null
+ * when the query needs no translation — the caller keeps the plain
+ * substring path.
+ */
+function literalPattern(query: string): string | null {
+  if (!query.includes("^")) return null;
+  let out = "";
+  for (let i = 0; i < query.length; i++) {
+    const ch = query[i];
+    if (ch !== "^" || i + 1 >= query.length) {
+      out += escapeRegex(ch);
+      continue;
+    }
+    const code = query[++i];
+    switch (code) {
+      case "p": out += "\\n"; break;
+      case "t": out += "\\t"; break;
+      case "l": out += "\\v"; break;
+      case "#": out += "[0-9]"; break;
+      case "$": out += "\\p{L}"; break;
+      case "?": out += "[^\\n]"; break;
+      case "w": out += "[ \\t\\u00A0]+"; break;
+      case "s": out += "\\u00A0"; break;
+      case "~": out += "\\u2011"; break;
+      case "-": out += "\\u00AD"; break;
+      case "^": out += "\\^"; break;
+      default: out += `\\^${escapeRegex(code)}`;
+    }
+  }
+  return out;
+}
+
+/**
+ * Translate Word's WILDCARD pattern language — the documented subset:
+ *
+ *   ?         any single character            *   any run of characters (lazy)
+ *   [abc]     a character in the set          [!abc]  one not in the set
+ *   [a-z]     a range (sets may mix both)     @   one or more of the previous
+ *   <  start of a word                        >   end of a word
+ *   \x        the literal character x         ^13 paragraph mark   ^9 tab
+ *
+ * NOT modeled (Word has them; a pattern using one stays literal or is
+ * refused): `{n,m}` counts, `(…)` groups with `\n` back-references in the
+ * replacement, and the `^0nnn` character codes beyond ^13/^9. `?`, `*` and
+ * sets never cross a paragraph mark — Word's wildcards do not either.
+ *
+ * Null when the pattern is malformed (unterminated set, `@` with nothing
+ * before it, too many quantifiers): the caller reports zero matches rather
+ * than guessing.
+ */
+function wildcardPattern(query: string): string | null {
+  let out = "";
+  /** The last single unit emitted, for `@` to quantify; "" when the last
+   * token cannot be quantified. */
+  let last = "";
+  let quantifiers = 0;
+  const emit = (unit: string) => {
+    out += unit;
+    last = unit;
+  };
+  for (let i = 0; i < query.length; i++) {
+    const ch = query[i];
+    if (ch === "?") { emit("[^\\n]"); continue; }
+    if (ch === "*") {
+      if (++quantifiers > MAX_WILDCARDS) return null;
+      out += "[^\\n]*?";
+      last = "";
+      continue;
+    }
+    if (ch === "@") {
+      if (last === "") return null;
+      if (++quantifiers > MAX_WILDCARDS) return null;
+      out = out.slice(0, out.length - last.length) + `(?:${last})+`;
+      last = "";
+      continue;
+    }
+    if (ch === "<") { out += NOT_BEFORE_WORD; last = ""; continue; }
+    if (ch === ">") { out += NOT_AFTER_WORD; last = ""; continue; }
+    if (ch === "\\") {
+      if (i + 1 >= query.length) return null;
+      emit(escapeRegex(query[++i]));
+      continue;
+    }
+    if (ch === "^") {
+      const m = /^\^(13|9)/.exec(query.slice(i));
+      if (!m) return null; // other ^nnn codes are not modeled
+      emit(m[1] === "13" ? "\\n" : "\\t");
+      i += m[1].length;
+      continue;
+    }
+    if (ch === "[") {
+      const negated = query[i + 1] === "!";
+      let j = i + (negated ? 2 : 1);
+      let body = "";
+      for (; j < query.length && query[j] !== "]"; j++) {
+        // A range keeps its "-" when it sits between two set members.
+        if (query[j] === "-" && body.length > 0 && j + 1 < query.length && query[j + 1] !== "]") body += "-";
+        else body += escapeRegex(query[j]);
+      }
+      if (j >= query.length || body.length === 0) return null; // unterminated or empty
+      emit(`[${negated ? "^" : ""}${body}]`);
+      i = j;
+      continue;
+    }
+    emit(escapeRegex(ch));
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** A compiled query: the plain-substring fast path, a regular expression, or
+ * null for a query with no possible matches (empty, over the cap, or a
+ * malformed wildcard pattern). */
+type CompiledQuery = { literal: string } | { re: RegExp } | null;
+
+export function compileFindQuery(query: string, opts?: FindOptions): CompiledQuery {
+  if (!query || query.length > MAX_FIND_PATTERN) return null;
+  if (opts?.wildcards) {
+    const source = wildcardPattern(query);
+    if (source === null) return null;
+    try {
+      // Always case-sensitive, Word's wildcard rule.
+      return { re: new RegExp(source, "gu") };
+    } catch {
+      return null;
+    }
+  }
+  const source = literalPattern(query);
+  if (source === null) return { literal: opts?.matchCase ? query : query.toLowerCase() };
+  const wrapped = opts?.wholeWord ? `${NOT_BEFORE_WORD}(?:${source})${NOT_AFTER_WORD}` : source;
+  try {
+    return { re: new RegExp(wrapped, opts?.matchCase ? "gu" : "giu") };
+  } catch {
+    return null;
+  }
+}
+
 /** All matches of `query`, body first, then headers/footers/notes. */
 export function findAll(doc: DocxDocument, query: string, opts?: FindOptions): FindMatch[] {
-  if (!query) return [];
-  const norm = (s: string) => (opts?.matchCase ? s : s.toLowerCase());
-  const q = norm(query);
+  const compiled = compileFindQuery(query, opts);
+  if (!compiled) return [];
   const matches: FindMatch[] = [];
 
   for (const unit of storyUnits(doc)) {
     let text = "";
-    // One entry per character of `text`; null at a "\n" paragraph mark,
-    // which has no w:t to select or replace.
+    // One entry per character of `text`; null at a "\n" paragraph mark, a
+    // "\t" tab, or a "\v" line break — characters with no w:t to select or
+    // replace. A match containing one keeps it through a replacement, the
+    // paragraph-mark rule extended.
     const refs: (CharRef | null)[] = [];
     for (const para of unit.paragraphs) {
       if (refs.length > 0) {
@@ -98,31 +273,63 @@ export function findAll(doc: DocxDocument, query: string, opts?: FindOptions): F
       }
       for (const run of runsOf(para)) {
         for (const c of run.content) {
-          if (c.kind !== "text" || !c.srcT) continue;
-          const t = c.srcT as XmlElement;
-          for (let i = 0; i < c.text.length; i++) {
-            text += c.text[i];
-            refs.push({ t, offset: i });
+          if (c.kind === "tab") {
+            text += "\t";
+            refs.push(null);
+          } else if (c.kind === "break" && c.breakType === "line") {
+            text += "\v";
+            refs.push(null);
+          } else if (c.kind === "text" && c.srcT) {
+            const t = c.srcT as XmlElement;
+            for (let i = 0; i < c.text.length; i++) {
+              text += c.text[i];
+              refs.push({ t, offset: i });
+            }
           }
         }
       }
     }
-    const hay = norm(text);
-    let from = 0;
-    for (;;) {
-      const idx = hay.indexOf(q, from);
-      if (idx === -1) break;
-      from = idx + q.length;
-      if (opts?.wholeWord && (isWordChar(text[idx - 1]) || isWordChar(text[idx + q.length]))) continue;
-      // Convert char span -> per-t ranges (paragraph marks have none).
+
+    // Match spans over `text`, non-overlapping, left to right in both paths.
+    const spans: [number, number][] = [];
+    if ("literal" in compiled) {
+      const hay = opts?.matchCase ? text : text.toLowerCase();
+      const q = compiled.literal;
+      let from = 0;
+      for (;;) {
+        const idx = hay.indexOf(q, from);
+        if (idx === -1) break;
+        from = idx + q.length;
+        if (opts?.wholeWord && (isWordChar(text[idx - 1]) || isWordChar(text[idx + q.length]))) continue;
+        spans.push([idx, idx + q.length]);
+      }
+    } else {
+      compiled.re.lastIndex = 0;
+      for (;;) {
+        const m = compiled.re.exec(text);
+        if (!m) break;
+        // A zero-length match selects nothing; step past it rather than loop.
+        if (m[0].length === 0) {
+          compiled.re.lastIndex++;
+          continue;
+        }
+        spans.push([m.index, m.index + m[0].length]);
+      }
+    }
+
+    for (const [from, to] of spans) {
+      // Convert char span -> per-t ranges (paragraph marks, tabs and line
+      // breaks have none).
       const ranges: FormattedRange[] = [];
-      for (let i = idx; i < idx + q.length; i++) {
+      for (let i = from; i < to; i++) {
         const ref = refs[i];
         if (!ref) continue;
         const last = ranges[ranges.length - 1];
         if (last && last.t === ref.t && last.end === ref.offset) last.end = ref.offset + 1;
         else ranges.push({ t: ref.t, start: ref.offset, end: ref.offset + 1 });
       }
+      // A match must cover at least one real text character: a hit made only
+      // of paragraph marks/tabs has nothing to select or replace.
       if (ranges.length > 0) matches.push({ ranges, story: unit.story });
     }
   }

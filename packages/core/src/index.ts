@@ -135,7 +135,7 @@ export type { NumberingPresetId, LevelPatch, NumberFormat } from "./edit/numberi
 export { setLink, removeLink, linkAt } from "./edit/links.js";
 export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpacing, setDropCapAt, setTabStops, tabStopsAt, MAX_TAB_STOP_PT, TAB_STOP_ALIGNMENTS, TAB_STOP_LEADERS, PARAGRAPH_BORDER_EDGES, paragraphBordersAt, setParagraphBorders } from "./edit/paragraph.js";
 export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode, TabStopSpec, ParagraphBorderEdge, ParagraphBordersPatch } from "./edit/paragraph.js";
-export { compileReplaceAll, compileReplaceMatch, findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
+export { MAX_FIND_PATTERN, compileFindQuery, compileReplaceAll, compileReplaceMatch, findAll, replaceMatch, replaceAll, transformCase } from "./edit/find.js";
 export { imageAltText, setImageAltText, replaceImageBlip } from "./edit/images.js";
 export { insertEndnote, insertFootnote } from "./edit/notes.js";
 export {

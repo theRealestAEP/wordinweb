@@ -5015,6 +5015,7 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
   const [replacement, setReplacement] = useState("");
   const [matchCase, setMatchCase] = useState(false);
   const [wholeWord, setWholeWord] = useState(false);
+  const [wildcards, setWildcards] = useState(false);
   const [gotoPage, setGotoPage] = useState("");
   const [status, setStatus] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
@@ -5028,7 +5029,7 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
-  const opts = { matchCase, wholeWord };
+  const opts = { matchCase, wholeWord, wildcards };
   const runFind = () => {
     const n = api?.find(query, opts) ?? 0;
     setStatus(n === 1 ? "1 match" : `${n} matches`);
@@ -5086,14 +5087,21 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
             onChange={(e) => setReplacement(e.target.value)}
             style={field}
           />
-          <div style={{ display: "flex", gap: 10 }}>
-            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
-              <input type="checkbox" checked={matchCase} onChange={(e) => setMatchCase(e.target.checked)} />
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {/* Wildcard matching is always case-sensitive and carries its own
+                word boundaries (< >), so the two flags grey out — Word's own
+                dialog behavior. */}
+            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12, opacity: wildcards ? 0.5 : 1 }}>
+              <input type="checkbox" disabled={wildcards} checked={matchCase} onChange={(e) => setMatchCase(e.target.checked)} />
               Match case
             </label>
-            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
-              <input type="checkbox" checked={wholeWord} onChange={(e) => setWholeWord(e.target.checked)} />
+            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12, opacity: wildcards ? 0.5 : 1 }}>
+              <input type="checkbox" disabled={wildcards} checked={wholeWord} onChange={(e) => setWholeWord(e.target.checked)} />
               Whole word
+            </label>
+            <label title="Word's wildcard patterns: ? * [ ] [! ] @ < > \" style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
+              <input type="checkbox" checked={wildcards} onChange={(e) => setWildcards(e.target.checked)} />
+              Wildcards
             </label>
           </div>
           {status && <div data-dxw-find-status="" style={{ color: T.muted, fontSize: 12 }}>{status}</div>}

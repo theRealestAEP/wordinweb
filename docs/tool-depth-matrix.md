@@ -492,3 +492,19 @@ insertCaption, ensureRefBookmark, insertToc.captionLabel).
   boolean/rounding functions (IF/AND/OR/ABS/INT/MOD/ROUND…), bookmark
   operands, cross-table references, gridSpan-aware cell addressing; arriving
   fields holding those render their cached result and keep it.
+- §5 Editing: Advanced find residue closed to CORE — wildcards + special
+  characters (format search remains). Wildcard mode (`FindOptions.wildcards`,
+  "Wildcards" checkbox) implements Word's documented subset: `? * [abc]
+  [!abc] [a-z] @ < > \x ^13 ^9` — translated to a JS regex by a per-token
+  compiler (never string splicing), pattern capped at 256 chars and 8
+  quantifiers, malformed patterns report zero matches; always case-sensitive
+  and wholeWord-free, Word's own dialog rule (the checkboxes grey out). NOT
+  modeled: `{n,m}` counts, `(…)` groups/backrefs, `^0nnn` codes beyond
+  ^13/^9. Literal mode now interprets Word's caret escapes: ^p (paragraph
+  mark over the existing "\n" join), ^t (real w:tab — tabs and line breaks
+  now join the searchable text as unaddressable characters), ^l (w:br), ^#
+  ^$ ^? ^w ^s ^~ ^- ^^; unknown escapes stay literal. Limits documented in
+  find.ts: a match must cover at least one real text character, and matched
+  paragraph marks/tabs survive a replacement (only text is replaced);
+  replacement strings take no escapes. Works in rooms unchanged — replace
+  compiles to per-match intents on the originator, so no wire change.

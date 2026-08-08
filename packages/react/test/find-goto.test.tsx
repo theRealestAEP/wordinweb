@@ -87,6 +87,20 @@ describe("find & replace depth through the view api", () => {
     await t.unmount();
   });
 
+  it("threads wildcard and special-character options through the api", async () => {
+    const t = await mount();
+    // Wildcards: sets and word anchors, always case-sensitive, every story.
+    expect(t.api.find("c[au]t", { wildcards: true })).toBe(4); // 3x "cat" + the one inside "concatenate"
+    expect(t.api.find("<cat>", { wildcards: true })).toBe(3);
+    expect(t.api.find("CAT", { wildcards: true })).toBe(0);
+    expect(t.api.find("[bad", { wildcards: true })).toBe(0); // malformed: zero, never a throw
+    // Literal-mode escapes: ^p crosses the paragraph mark, ^# a digit.
+    expect(t.api.find("one^pSecond")).toBe(1);
+    const replaced = t.api.replaceAll("S^$cond", "2nd");
+    expect(replaced.total).toBe(1);
+    await t.unmount();
+  });
+
   it("goes to a page and a bookmark", async () => {
     const t = await mount();
     expect(t.api.goToPage(1)).toBe(true);
