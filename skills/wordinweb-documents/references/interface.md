@@ -862,6 +862,10 @@ the equation into something else.
 | `createStyle` | Create a paragraph, character, table, or numbering style definition | `style` |
 | `modifyStyle` | Change an existing style definition | `styleId`, `patch` |
 | `deleteStyle` | Delete a style definition; content using it falls back to the style it was based on | `styleId` |
+| `createCitationSource` | Add a bibliography source (book, article, website, report), creating the sources part when the document has none | `source` |
+| `editCitationSource` | Change a bibliography source's fields, by tag; run `updateFields` afterwards to refresh citation text | `tag`, `patch` |
+| `deleteCitationSource` | Delete a bibliography source; refused while a CITATION field still cites it | `tag` |
+| `setCitationStyle` | Select the citation style (APA or MLA) for citations and the bibliography | `style` |
 
 ## Nested value shapes
 
@@ -914,6 +918,31 @@ harmless, too small leaves the last entries without replicated ids.
 Page numbers land as placeholders. They come from a layout, and a layout
 depends on the host's font metrics, so they are the value `updateFields`
 exists to carry rather than recompute — run the update pass to fill them in.
+
+### Citation source spec (`createCitationSource.source`)
+
+```ts
+{
+  tag: string;                // [A-Za-z0-9_-], up to 64 chars — what a CITATION cites
+  type: "book" | "article" | "website" | "report";
+  authors?: { last: string; first?: string }[];   // up to 20; or use corporate
+  corporate?: string;         // corporate author — mutually exclusive with authors
+  title?: string;
+  year?: string;
+  publisher?: string;         // books and reports
+  journal?: string;           // articles
+  url?: string;               // websites
+}
+```
+
+`editCitationSource.patch` is the same shape without `tag`; every field is
+optional, an omitted one is left alone, and an empty string clears the field.
+The sources live in the package's own b:Sources custom XML part, which
+`createCitationSource` creates on first use. After editing a source or
+switching the citation style, run `updateFields` so every CITATION field's
+display text is recomputed; `insertBibliography` entries regenerate the same
+way. `deleteCitationSource` is refused while any CITATION field still cites
+the tag — remove the citations first.
 
 ### Style spec (`createStyle.style`)
 

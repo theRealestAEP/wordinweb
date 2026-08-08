@@ -33,6 +33,7 @@ import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
 import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
 import { extractOlePackage } from "./parse/ole.js";
+import { isSourcesRoot } from "./citations.js";
 import {
   buildSmartArtColorsXml,
   buildSmartArtDataXml,
@@ -213,6 +214,15 @@ export class DocxDocument {
   private endnotesRoot: XmlElement | null = null;
   private endnotesDirty = false;
   private endnotesRels: Relationships = new Map();
+  /** Retained bibliography sources part (the customXml b:Sources data of
+   * ECMA-376 §22.6), when present. Source-management editing mutates this
+   * tree in place; a document with none gets the part on first create. */
+  private sourcesPart: string | null = null;
+  private sourcesRoot: XmlElement | null = null;
+  private sourcesDirty = false;
+  /** Companion parts written when THIS session created the sources part
+   * (itemProps + its .rels); an arriving part keeps its own companions. */
+  private sourcesAux: Record<string, string> | null = null;
   /** Serialize retained optional parts only once actually mutated, keeping
    * untouched parts byte-identical through save(). */
   private stylesDirty = false;
@@ -300,6 +310,26 @@ export class DocxDocument {
     this.hydrateCorePropertyControls(docRoot, coreProperties);
     this.repairLegacyWordInWebObjects();
     this.documentRels = parseRelationships(this.relsRoot ?? undefined, docPart);
+
+    // Bibliography sources: probe every customXml relationship for a
+    // b:Sources root (how Word's own packages are found without hard-coding
+    // the item1.xml file name) and retain the first, so source-management
+    // editing can mutate it and save() can serialize the mutated tree.
+    for (const rel of this.documentRels.values()) {
+      if (!rel.type.endsWith("/customXml") || rel.external) continue;
+      const text = this.pkg.text(rel.target);
+      if (!text) continue;
+      let root: XmlElement;
+      try {
+        root = parseXml(text);
+      } catch {
+        continue;
+      }
+      if (!isSourcesRoot(root)) continue;
+      this.sourcesPart = rel.target;
+      this.sourcesRoot = root;
+      break;
+    }
 
     if (settings) {
       this.evenAndOddHeaders = onOff(child(settings, "evenAndOddHeaders")) ?? false;
@@ -1195,6 +1225,118 @@ export class DocxDocument {
   }
 
   /**
+   * Retained bibliography sources tree (b:Sources), or null when the package
+   * has no sources part. With create=true, a missing part is created and
+   * registered the way Word lays one out (ECMA-376 §22.6 + Part 2 custom XML
+   * data storage): the data itself as customXml/itemN.xml, a datastore-item
+   * properties part (itemPropsN.xml) declaring the Bibliography schema URI as
+   * its schemaRef, a .rels from the item to its properties, a customXml
+   * relationship from the main document part, and the content-type overrides.
+   *
+   * DETERMINISM. Everything written is a pure function of the package —
+   * the item number is the first free one, and the datastore itemID GUID is a
+   * fixed constant rather than Word's random draw — so two replicas creating
+   * the part through the same sequenced operation write identical bytes.
+   */
+  sourcesTree(create = false): XmlElement | null {
+    if (this.sourcesRoot || !create) return this.sourcesRoot;
+    let n = 1;
+    while (this.pkg.has(`customXml/item${n}.xml`) || this.pkg.has(`customXml/itemProps${n}.xml`)) n++;
+    this.sourcesPart = `customXml/item${n}.xml`;
+    this.sourcesRoot = {
+      name: "b:Sources",
+      attrs: {
+        SelectedStyle: "\\APASixthEditionOfficeOnline.xsl",
+        StyleName: "APA",
+        Version: "6",
+        "xmlns:b": "http://schemas.openxmlformats.org/officeDocument/2006/bibliography",
+        xmlns: "http://schemas.openxmlformats.org/officeDocument/2006/bibliography",
+      },
+      children: [],
+      text: "",
+    };
+    // The datastore properties part and its relationship, as Word writes
+    // them. The itemID is a GUID in Word; a FIXED one keeps replica creation
+    // byte-identical, and uniqueness only matters within this package, which
+    // holds at most one part this engine creates.
+    this.sourcesAux = {
+      [`customXml/itemProps${n}.xml`]:
+        `<?xml version="1.0" encoding="UTF-8" standalone="no"?>\r\n` +
+        `<ds:datastoreItem ds:itemID="{4AA3A060-2A83-4A31-8C77-13810E5B4FAB}" ` +
+        `xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml">` +
+        `<ds:schemaRefs><ds:schemaRef ds:uri="http://schemas.openxmlformats.org/officeDocument/2006/bibliography"/>` +
+        `</ds:schemaRefs></ds:datastoreItem>`,
+      [`customXml/_rels/item${n}.xml.rels`]:
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n` +
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rId1" ` +
+        `Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" ` +
+        `Target="itemProps${n}.xml"/></Relationships>`,
+    };
+    {
+      const rels = this.ensureRelsRoot();
+      let maxId = 0;
+      for (const r of rels.children) {
+        const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+        if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+      }
+      const relId = `rId${maxId + 1}`;
+      rels.children.push({
+        name: "Relationship",
+        attrs: {
+          Id: relId,
+          Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml",
+          Target: `../customXml/item${n}.xml`,
+        },
+        children: [],
+        text: "",
+      });
+      this.documentRels.set(relId, {
+        id: relId,
+        type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml",
+        target: this.sourcesPart,
+        external: false,
+      });
+    }
+    if (this.contentTypesRoot) {
+      const overrides: [string, string][] = [
+        // The item part is application/xml. Word covers it with the package's
+        // Default rule for the xml extension; declare the override only when
+        // that Default is missing, so the created package stays valid either
+        // way without touching packages that already carry the Default.
+        ...(this.contentTypesRoot.children.some(
+          (c) => localName(c.name) === "Default" && c.attrs["Extension"] === "xml",
+        )
+          ? []
+          : [["/" + this.sourcesPart, "application/xml"] as [string, string]]),
+        [`/customXml/itemProps${n}.xml`, "application/vnd.openxmlformats-officedocument.customXmlProperties+xml"],
+      ];
+      for (const [partName, contentType] of overrides) {
+        if (this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) continue;
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: { PartName: partName, ContentType: contentType },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    this.sourcesDirty = true;
+    return this.sourcesRoot;
+  }
+
+  /**
+   * Invalidate what a sources-part edit changes downstream. Like
+   * markStylesChanged, the part is addressed by no paragraph's XML: a
+   * CITATION field's painted text resolves from the part at layout, so the
+   * layout signature has to drop for unchanged paragraph XML to repaint.
+   */
+  markSourcesChanged(): void {
+    this.sourcesDirty = true;
+    this._layoutGlobalSig = null;
+  }
+
+  /**
    * Retained footnotes tree. With create=true, a missing footnotes.xml part
    * is created and registered (with Word's required separator footnotes) so
    * inserted footnotes serialize and round-trip.
@@ -1986,6 +2128,12 @@ export class DocxDocument {
     }
     if (this.endnotesDirty && this.endnotesRoot && this.endnotesPart) {
       files[this.endnotesPart] = strToU8(serializeXml(this.endnotesRoot, true));
+    }
+    if (this.sourcesDirty && this.sourcesRoot && this.sourcesPart) {
+      files[this.sourcesPart] = strToU8(serializeXml(this.sourcesRoot, true));
+    }
+    if (this.sourcesAux) {
+      for (const [name, xml] of Object.entries(this.sourcesAux)) files[name] = strToU8(xml);
     }
     if (this.settingsDirty) files[this.settingsPart] = strToU8(serializeXml(this.settingsRoot, true));
     if (this.relsRoot) this.writeModeledXml(files, this.relsPath, this.relsRoot);

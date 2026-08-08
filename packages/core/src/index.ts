@@ -149,8 +149,24 @@ export {
   isValidCitationTag,
   isValidMergeFieldName,
 } from "./edit/fields.js";
-export { citationText, documentBibliography } from "./citations.js";
-export type { Bibliography, BibliographySource } from "./citations.js";
+export {
+  BIBLIOGRAPHY_EMPTY_TEXT,
+  CITATION_STYLES,
+  bibliographyEntries,
+  bibliographyEntryText,
+  citationText,
+  documentBibliography,
+} from "./citations.js";
+export type { Bibliography, BibliographyPerson, BibliographySource, CitationStyle } from "./citations.js";
+export {
+  CITATION_SOURCE_TYPES,
+  citedSourceTags,
+  createCitationSource,
+  deleteCitationSource,
+  editCitationSource,
+  setCitationStyle,
+} from "./edit/sources.js";
+export type { CitationSourcePatch, CitationSourceSpec, CitationSourceType } from "./edit/sources.js";
 export {
   UPDATABLE_FIELD_KEYWORDS,
   applyFieldResults,

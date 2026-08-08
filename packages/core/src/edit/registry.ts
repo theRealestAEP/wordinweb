@@ -1,5 +1,5 @@
 import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
-import { citationText, documentBibliography } from "../citations.js";
+import { CITATION_STYLES, citationText, documentBibliography, type CitationStyle } from "../citations.js";
 import { DocxDocument } from "../docx.js";
 import { Run } from "../model.js";
 import { XmlElement, localName } from "../xml.js";
@@ -31,6 +31,16 @@ import {
   type StylePatch,
 } from "./styles.js";
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
+import {
+  badCitationSource,
+  badCitationSourcePatch,
+  createCitationSource,
+  deleteCitationSource,
+  editCitationSource,
+  setCitationStyle,
+  type CitationSourcePatch,
+  type CitationSourceSpec,
+} from "./sources.js";
 import {
   PAGE_NUMBER_FORMATS,
   setEvenOddHeaders,
@@ -1261,6 +1271,70 @@ const insertCitationOperation = defineOperation<{
 });
 
 // ---------------------------------------------------------------------------
+// Bibliography sources
+// ---------------------------------------------------------------------------
+
+/**
+ * The four operations below edit the bibliography SOURCES part (the customXml
+ * b:Sources data of ECMA-376 §22.6) rather than content, so they are
+ * DOCUMENT-scoped like the style-definition operations, and for the same
+ * reasons: the part is sequenced state, every property comes out of the
+ * payload, and no run's text moves. The rejection predicate is the source
+ * tag — createCitationSource rejects a tag the part already declares, edit
+ * and delete reject one it does not — plus deleteCitationSource's honesty
+ * clause: a source a CITATION field still references is refused, not
+ * orphaned. Creating the part itself (first source in a fresh document) is
+ * deterministic; see DocxDocument.sourcesTree.
+ */
+
+const createCitationSourceOperation = defineOperation<{ source: CitationSourceSpec }>()({
+  kind: "createCitationSource",
+  address: "document",
+  category: "document",
+  description: "Add a bibliography source (book, article, website, or report) to the document's citation sources, creating the sources part when the document has none.",
+  fields: [{ name: "source" }],
+  validate: ({ source }) => badCitationSource(source, "createCitationSource"),
+  apply: ({ doc, payload }) => createCitationSource(doc, payload.source),
+});
+
+const editCitationSourceOperation = defineOperation<{
+  tag: string;
+  patch: CitationSourcePatch;
+}>()({
+  kind: "editCitationSource",
+  address: "document",
+  category: "document",
+  description: "Change a bibliography source's fields, by source tag. Run updateFields afterwards to refresh citation text.",
+  fields: [{ name: "tag" }, { name: "patch" }],
+  validate: ({ tag, patch }) =>
+    isValidCitationTag(tag)
+      ? badCitationSourcePatch(patch, "editCitationSource")
+      : "editCitationSource: bad tag",
+  apply: ({ doc, payload }) => editCitationSource(doc, payload.tag, payload.patch),
+});
+
+const deleteCitationSourceOperation = defineOperation<{ tag: string }>()({
+  kind: "deleteCitationSource",
+  address: "document",
+  category: "document",
+  description: "Delete a bibliography source, by tag. Refused while any CITATION field still references it.",
+  fields: [{ name: "tag" }],
+  validate: ({ tag }) => (isValidCitationTag(tag) ? null : "deleteCitationSource: bad tag"),
+  apply: ({ doc, payload }) => deleteCitationSource(doc, payload.tag),
+});
+
+const setCitationStyleOperation = defineOperation<{ style: CitationStyle }>()({
+  kind: "setCitationStyle",
+  address: "document",
+  category: "document",
+  description: "Select the citation style (APA or MLA) for citations and the bibliography. Run updateFields afterwards to refresh citation text.",
+  fields: [{ name: "style" }],
+  validate: ({ style }) =>
+    CITATION_STYLES.includes(style) ? null : "setCitationStyle: bad style",
+  apply: ({ doc, payload }) => setCitationStyle(doc, payload.style),
+});
+
+// ---------------------------------------------------------------------------
 // Watermarks
 // ---------------------------------------------------------------------------
 
@@ -1596,6 +1670,10 @@ const OPERATIONS = [
   setModel3DRotationOperation,
   insertMergeFieldOperation,
   insertCitationOperation,
+  createCitationSourceOperation,
+  editCitationSourceOperation,
+  deleteCitationSourceOperation,
+  setCitationStyleOperation,
   insertWatermarkOperation,
   removeWatermarkOperation,
   setTitlePageOperation,

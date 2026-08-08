@@ -1,4 +1,4 @@
-import { registeredOperationCapabilities, STYLE_TYPES, TOC_LEADERS, type RegisteredOperationKind } from "@wordinweb/core";
+import { CITATION_SOURCE_TYPES, CITATION_STYLES, registeredOperationCapabilities, STYLE_TYPES, TOC_LEADERS, type RegisteredOperationKind } from "@wordinweb/core";
 import { INTENT_KINDS, type Intent } from "@wordinweb/collab/client";
 
 export interface AgentEditCapability {
@@ -363,6 +363,27 @@ const cellMarginsPt = {
   ],
 };
 
+/** One bibliography-source tag: Word's Source-Manager shape, shared with the
+ * insertCitation row below. */
+const citationTag = { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$" };
+
+/** The editable fields of a bibliography source, minus its identity; the
+ * source spec and the edit patch share them so the two cannot drift. */
+const citationSourceFields: Record<string, JsonSchema> = {
+  type: { enum: [...CITATION_SOURCE_TYPES] },
+  authors: {
+    type: "array",
+    maxItems: 20,
+    items: closedObject({ last: string(100, 1), first: string(100) }, ["last"]),
+  },
+  corporate: string(255),
+  title: string(512),
+  year: string(16),
+  publisher: string(255),
+  journal: string(255),
+  url: string(2048),
+};
+
 const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "formatRun.patch": runFormatPatch,
   "formatRange.patch": runFormatPatch,
@@ -415,7 +436,14 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   // or backslash in a name; Word's alphanumeric tag shape); the schema carries
   // the length caps and the tag pattern.
   "insertMergeField.name": string(64, 1),
-  "insertCitation.tag": { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$" },
+  "insertCitation.tag": citationTag,
+  "createCitationSource.source": closedObject(
+    { tag: citationTag, ...citationSourceFields },
+    ["tag", "type"],
+  ),
+  "editCitationSource.tag": citationTag,
+  "editCitationSource.patch": closedObject(citationSourceFields),
+  "deleteCitationSource.tag": citationTag,
   "createStyle.style": styleSpec,
   "modifyStyle.styleId": styleId,
   "modifyStyle.patch": stylePatch,
@@ -465,6 +493,7 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "sortTableRows.compare": ["text", "number"],
   "convertTextToTable.separator": ["tab", "comma"],
   "convertTableToText.separator": ["tab", "comma"],
+  "setCitationStyle.style": [...CITATION_STYLES],
 };
 
 function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
