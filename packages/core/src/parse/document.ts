@@ -752,6 +752,16 @@ function parseRun(
     src: r,
   };
 
+  // A w:sym glyph is set in the font the SYM declares, not the run's rFonts,
+  // and that font's metrics govern the line: us-courts-answer's Symbol-font
+  // minus signs make Word's 11pt Times lines ~18.0px tall (the Office Symbol
+  // face's 1.225em box) where a plain line reads ~16.7 — measured line by
+  // line against the reference PDF. When a run's visible text is entirely
+  // sym-drawn, resolve the run to the sym's font so measurement charges the
+  // right box; mixed runs keep their rFonts (per-glyph fonts are unmodeled).
+  let symFont: string | undefined;
+  let nonSymText = false;
+
   for (const el of r.children) {
     const ln = localName(el.name);
     switch (ln) {
@@ -767,7 +777,10 @@ function parseRun(
         // conflated).
         const text = decodeSymbolText(el.text, run.props.font).replace(/­/g, "‑");
         if (field.mode === "result" && !field.live) field.cachedResult += text;
-        else if (field.mode !== "instr") run.content.push({ kind: "text", text, srcT: el });
+        else if (field.mode !== "instr") {
+          run.content.push({ kind: "text", text, srcT: el });
+          if (text.length) nonSymText = true;
+        }
         break;
       }
       case "delText": {
@@ -919,6 +932,7 @@ function parseRun(
               ? SYMBOL_CHAR_MAP[code]
               : undefined;
           run.content.push({ kind: "text", text: mapped ?? String.fromCharCode(code) });
+          if (font) symFont = symFont === undefined || symFont === font ? font : "";
         }
         break;
       }
@@ -980,6 +994,10 @@ function parseRun(
         break;
       }
     }
+  }
+
+  if (symFont && !nonSymText) {
+    run.props = { ...run.props, font: symFont, fontHAnsi: symFont };
   }
 
   return run;

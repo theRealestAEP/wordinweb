@@ -1153,7 +1153,11 @@ describe("SmartArt insertion", () => {
     expect(drawingRelId).toBeTruthy();
     expect(saved.pkg.text("word/_rels/document.xml.rels")).toContain(`Id="${drawingRelId}" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="diagrams/drawing1.xml"`);
     expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain("urn:wordinweb:smartart:process");
-    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain('<dgm:forEach axis="ch" ptType="node">');
+    // Composite layoutDef: per-node l/t/w/h constraints computed from the
+    // cache's own geometry (#94 phase 2), one selecting forEach per node.
+    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain('<dgm:alg type="composite"/>');
+    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain('<dgm:forEach axis="ch" ptType="node" st="1" cnt="1">');
+    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain('forName="node3"');
     expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain(
       '<dgm:presOf axis="desOrSelf" ptType="node"/>',
     );
@@ -1182,7 +1186,9 @@ describe("SmartArt insertion", () => {
         expect(Number(cx)).toBeGreaterThan(0);
         expect(Number(cy)).toBeGreaterThan(0);
       }
-      if (layout === "hierarchy") expect(xml).toMatch(/<a:xfrm[^>]+flip[HV]="1"/);
+      // Connectors are dropped on both sides — the layoutDef declares none,
+      // so Word draws none and the cache agrees (#94 phase 2).
+      if (layout === "hierarchy") expect(xml).not.toContain("Connector");
       for (const id of ["1", "2", "3"]) expect(xml).toContain(`modelId="${id}"`);
       const dataXml = buildSmartArtDataXml({ layout, items: ["One", "Two", "Three"] }, "rIdDrawing");
       for (const [, id] of xml.matchAll(/<dsp:sp modelId="([^"]+)"/g)) {

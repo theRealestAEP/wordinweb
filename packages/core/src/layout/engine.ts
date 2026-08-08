@@ -2212,9 +2212,16 @@ class Engine {
       this.docGridDropBefore = true;
     }
     if (sp.marginBottom >= 0) {
+      // A footer PART reserves at least its w:footer distance even when its
+      // flow height is zero: us-courts-answer (footer = a page-anchored frame
+      // + one empty paragraph, footerDistance 38.4px > marginBottom 28.8px)
+      // paginates on a 1017.6px bottom — Word moves the spacer row that
+      // would end at ~1023 and keeps the one ending at 992, and the corpus
+      // 7x0.00 baseline was reproduced only at exactly this bottom. With no
+      // footer part at all the margin alone governs, as before.
       page.bodyBottom = Math.min(
         sp.pageHeight - sp.marginBottom,
-        footerH > 0 ? sp.pageHeight - sp.footerDistance - footerH : sp.pageHeight,
+        footer ? sp.pageHeight - sp.footerDistance - footerH : sp.pageHeight,
       );
     }
 
@@ -6640,8 +6647,23 @@ class Engine {
     const origin = reserveBodyClearance
       ? { x: page.sp.marginLeft + page.sp.gutter, y: page.sp.headerDistance }
       : undefined;
+    // A FOOTER paragraph framed to the PAGE (w:framePr vAnchor="page") is
+    // positioned absolutely and consumes no footer flow, so it must not
+    // enter the height that clamps the body bottom. us-courts-answer's
+    // footer is a page-anchored 'Page N of M' frame plus one empty
+    // paragraph; charging the frame put our clamp at 986.9px where every
+    // Word row decision on that fixture brackets the bottom in [992, 1005]
+    // — the empty paragraph's own line (~16.9px off the 1017.6 footer
+    // distance) is what remains charged.
+    const measureBlocks = reserveBodyClearance
+      ? hf.blocks
+      : hf.blocks.filter(
+          (block) =>
+            !(block.type === "paragraph" && this.doc.effectiveParaProps(block).frame?.vAnchor === "page"),
+        );
+    if (measureBlocks.length === 0) return 0;
     const { height, contentBottom } = this.layoutFrame(
-      hf.blocks,
+      measureBlocks,
       contentWidth,
       fields,
       origin,
@@ -7503,12 +7525,15 @@ class Engine {
       return Math.max(0, trHeight + topPad);
     }
     if (this.doc.compatibilityMode < 15) {
-      const legacyBottomPad = bottomPad >= ptToPx(1) ? bottomPad : 0;
-      const legacyTopPad =
-        row.props.heightRule === "atLeast" && (row.props.height ?? 0) >= ptToPx(30)
-          ? Math.max(topPad - ptToPx(0.25), 0)
-          : topPad;
-      return Math.max(contentHeight, trHeight + legacyTopPad + legacyBottomPad);
+      // A pre-15 atLeast floor charges BOTH cell margins in full, exactly
+      // like the compat-15 formula minus the border share. Measured on the
+      // us-courts spacer verbatim (probe-uscourtsblock2 S0: trHeight 624tw
+      // + tcMar top 58 / bottom 29->14tw reads 46.40px = 41.60 + 3.87 +
+      // 0.93 in compat 11 and 15 alike, each package exported twice). The
+      // haircuts this branch used to take — topPad-0.25pt on atLeast>=30pt
+      // rows, bottomPad dropped under 1pt — carried no probe and this
+      // construct contradicts both.
+      return Math.max(contentHeight, trHeight + topPad + bottomPad);
     }
     const borderPad = this.rowBorderShare(tbl, ri);
     return Math.max(contentHeight, trHeight + topPad + bottomPad + borderPad);
@@ -7579,23 +7604,6 @@ class Engine {
     return this.exactInsetRow(tbl.rows[ri]) ? w : w / 2;
   }
 
-  /** The tblBorders top rule width that row 0's all-nil cell borders suppress
-   * (rowBorderWidths charges zero at that outer edge). A continuation page's
-   * repeated tblHeader stack still charges it in full: the us-courts answer
-   * body table declares top nil on row 0 under a live sz-8 tblBorders, and
-   * its pages 2-7 hold 0.00 only with the charge kept — probe-exactouter
-   * pins the zero at the table's TRUE start, and no probe measures a
-   * repeated-header segment top, so that path keeps the fixture-calibrated
-   * charge. */
-  private nilSuppressedOuterTop(tbl: Table): number {
-    const first = tbl.rows[0];
-    if (!first || first.cells.length === 0) return 0;
-    if (!first.cells.every((c) => c.props.borders?.top?.style === "none")) return 0;
-    const b = tbl.props.borders?.top;
-    if (!b || b.style === "none") return 0;
-    return this.borderPaintWidth({ style: b.style, width: b.rawWidth ?? b.width });
-  }
-
   /** Widths of the horizontal rules above and below a row. A rule can be
    * defined table-wide (tblBorders insideH/top/bottom) OR only per cell
    * (tcBorders), so use the thickest declaration at each boundary. */
@@ -7621,62 +7629,61 @@ class Engine {
     // LightGrid's firstRow bottom rule is sz-18 (2.25pt) against a sz-8
     // insideH, and Word makes the header and first body row each taller by
     // half the difference (wild-multicolumn p30).
-    const condEdge = (r: number, edge: "top" | "bottom"): number => {
-      let w = 0;
+    // A boundary is resolved per GRID COLUMN, and the table-wide rule enters
+    // only through a side whose cell is SILENT there. A cell that declares
+    // its edge — w:val="nil" (zero) or any width — replaces the table rule
+    // on its side; a silent side falls back to its conditional table-style
+    // edge, then to the table-wide rule. A column's charge is the wider of
+    // its two sides, and the boundary charges the widest column.
+    //
+    // Evidence, one case per branch:
+    //  - both sides nil -> 0 (probe-nilborder B, probe-exactnil RN);
+    //  - nil vs SILENT -> the silent side's insideH in full (probe-nilborder
+    //    C, probe-exactnil RO/RU, probe-mixedbound ECU/ECL/CEU/CEL: one-sided
+    //    nil suppresses nothing);
+    //  - declared width vs silent -> the wider of it and insideH
+    //    (probe-nilborder E/F: sz-12 restating the rule adds nothing, sz-24
+    //    adds exactly 2.00px over it);
+    //  - insideH does NOT contend when BOTH sides declare:
+    //    probe-uscourtsblock SN vs CN (the us-courts spacer construct,
+    //    compat 11 and 15, each package exported twice) reads the
+    //    spacer/spacer boundary at 0.01px under a live sz-8 insideH — cell 0
+    //    nil/nil, cell 1 sz-1/nil — where charging the insideH would read
+    //    1.33px. Its round-1 sweep V2 (insideH removed) leaves the fixture's
+    //    block pitch unchanged for the same reason.
+    //  - conditional style edges charge through silent sides: LightGrid's
+    //    firstRow bottom sz-18 against a sz-8 insideH (wild-multicolumn p30).
+    //
+    // Outer edges take the same per-column resolution against the table's
+    // top/bottom rule (probe-exactouter11/15: a live outer rule charges in
+    // full, an all-nil row zeroes it, compat-invariant).
+    const colWidths = (r: number, side: "top" | "bottom", fallback?: Border): number[] => {
+      const out: number[] = [];
       let colStart = 0;
       for (const c of rows[r].cells) {
-        const cond = this.condFor(tbl, r, colStart, c.props.gridSpan, nRows, nCols);
-        w = Math.max(w, bw(cond?.borders?.[edge]));
+        const own = c.props.borders?.[side];
+        let w: number;
+        if (own !== undefined) w = bw(own);
+        else {
+          const cond = this.condFor(tbl, r, colStart, c.props.gridSpan, nRows, nCols)?.borders?.[side];
+          w = cond !== undefined ? bw(cond) : bw(fallback);
+        }
+        for (let i = 0; i < Math.max(1, c.props.gridSpan); i++) out.push(w);
         colStart += c.props.gridSpan;
       }
-      return w;
+      while (out.length < nCols) out.push(bw(fallback));
+      return out;
     };
-    const cellTop = (r: number) =>
-      Math.max(0, condEdge(r, "top"), ...rows[r].cells.map((c) => bw(c.props.borders?.top)));
-    const cellBot = (r: number) =>
-      Math.max(0, condEdge(r, "bottom"), ...rows[r].cells.map((c) => bw(c.props.borders?.bottom)));
-    // A w:val="nil" cell border is a declaration of ZERO, not silence: when
-    // BOTH cells facing an interior boundary declare it, the table's insideH
-    // rule is overridden and the boundary costs nothing. paintCellEdges
-    // already draws nothing there, so this is what keeps the row height and
-    // the ink agreeing. Both sides are required — a nil on ONE side leaves the
-    // other cell painting the table rule, and Word charges it in full
-    // (probe-nilborder, parity dc68b0f: against the 15.33 no-rule control, the
-    // sz-12 rule costs 2.00 and both-nil returns to 15.33 exactly, while
-    // one-sided nil stays at 17.33 with the rule).
-    //
-    // Measured in BOTH row-sizing regimes. probe-nilborder pins content-sized
-    // (atLeast) rows through their heights; probe-exactnil (parity 02dff8a)
-    // pins hRule="exact" rows through their content inset, and Word gives the
-    // same answer in each: a live rule costs its full width, a both-nil
-    // boundary costs zero, and a one-sided nil suppresses nothing (the probe's
-    // RO and RU orderings agree to the digit). An earlier guard kept exact
-    // rows charging here on the strength of wild2-legal-ca-agreement's 44.00
-    // signature-row reading; probe-exactnil reads the both-nil exact boundary
-    // at 33.00 against 35.00 with the rule, so that guard is gone. A MIXED
-    // exact/content boundary sits between the two measured endpoints and is
-    // itself unmeasured; it takes the same zero.
-    const declaredNil = (r: number, side: "top" | "bottom") =>
-      rows[r].cells.length > 0 &&
-      rows[r].cells.every((c) => c.props.borders?.[side]?.style === "none");
-    // An OUTER edge has only one cell facing it, so the row's own nil alone
-    // overrides the table's top/bottom rule — no second declarer exists.
-    // Measured by probe-exactouter11/15 (parity #100, each package exported
-    // with the self-reproduction control): against the no-border controls a
-    // live sz-12 outer rule charges the flow its full 1.5pt (content rows on
-    // both edges, exact rows at the bottom edge), and every nil variant —
-    // XFN/XLN/YFN/YLN/CFN/CLN — reads the control to the digit, in compat 11
-    // and 15 alike. probe-exactmar's V1 first showed the overcharge: all-nil
-    // cells under a live sz-8 tblBorders read +2.0pt (one rule per outer
-    // edge) against Word until the nils are honored here.
     const boundary = (k: number): number => {
-      if (k === 0) return declaredNil(0, "top") ? 0 : Math.max(bw(tb?.top), cellTop(0));
+      if (k === 0) return Math.max(0, ...colWidths(0, "top", tb?.top));
       if (k === rows.length)
-        return declaredNil(rows.length - 1, "bottom")
-          ? 0
-          : Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
-      if (declaredNil(k - 1, "bottom") && declaredNil(k, "top")) return 0;
-      return Math.max(bw(tb?.insideH), cellBot(k - 1), cellTop(k));
+        return Math.max(0, ...colWidths(rows.length - 1, "bottom", tb?.bottom));
+      const above = colWidths(k - 1, "bottom", tb?.insideH);
+      const below = colWidths(k, "top", tb?.insideH);
+      const n = Math.max(above.length, below.length);
+      let w = 0;
+      for (let i = 0; i < n; i++) w = Math.max(w, Math.max(above[i] ?? 0, below[i] ?? 0));
+      return w;
     };
     return { top: boundary(ri), bottom: boundary(ri + 1) };
   }
@@ -7690,10 +7697,26 @@ class Engine {
    * table-wide (tblBorders insideH/top/bottom) OR only per cell (tcBorders):
    * doerfp's roster tables draw sz-4 rules purely via cell bottom borders and
    * no tblBorders, so the share must also see the adjacent cells' borders or
-   * every row runs 0.5pt short and the 22-row grid drifts ~15px. */
+   * every row runs 0.5pt short and the 22-row grid drifts ~15px.
+   *
+   * A MIXED exact/content boundary is not split. Word gives the whole rule
+   * to the row BELOW the boundary: below an exact row a content row grows by
+   * the FULL rule and insets its content the same amount, and above an exact
+   * row a content row takes NOTHING — the rule belongs to the exact row,
+   * which absorbs it into its fixed height (probe-mixedbound, compat 11 and
+   * 15 digit-identical, each package exported twice: ECR/ECU/ECL read
+   * MK-UP +2.00 and flow +2.00 for a sz-12 rule against our half; ECW
+   * doubles both with sz-24; CER/CEW read flow ZERO with the full width as
+   * the exact row's content inset; one-sided nils suppress nothing;
+   * both-nil charges nothing. Content/content keeps the half/half split —
+   * CCR's marks agree with it exactly, and the corpus is calibrated on
+   * it.) */
   private rowBorderShare(tbl: Table, ri: number): number {
     const { top, bottom } = this.rowBorderWidths(tbl, ri);
-    return (top + bottom) / 2;
+    const rows = tbl.rows;
+    const topShare = ri > 0 && this.exactInsetRow(rows[ri - 1]) ? top : top / 2;
+    const bottomShare = ri < rows.length - 1 && this.exactInsetRow(rows[ri + 1]) ? 0 : bottom / 2;
+    return topShare + bottomShare;
   }
 
   private cellMarginsOf(
@@ -7950,11 +7973,16 @@ class Engine {
         segPage = this.cur;
         segHasRows = false;
         const firstRowIdx = !row.props.tblHeader && headerRows.length > 0 ? 0 : ri;
-        // A repeated header stack keeps the nil-suppressed outer top charge
-        // (half as segment lead, half in row 0's instance — the split the
-        // pre-nil arithmetic used); see nilSuppressedOuterTop.
-        const nilTop = firstRowIdx === 0 && ri !== 0 ? this.nilSuppressedOuterTop(tbl) : 0;
-        this.y += this.rowTopLead(tbl, firstRowIdx) + nilTop / 2;
+        // A repeated-header continuation top takes the table's TRUE outer-top
+        // arithmetic, nils included: probe-repeathdr (11 and 15, exported
+        // twice each) reads every continuation page's repeated row 0 at the
+        // body top exactly — a live sz-12/sz-24 top rule charges the flow its
+        // full width above a content row 0 and nothing above an exact row 0,
+        // and a row-0 all-nil zeroes it, digit-identical to the first-page
+        // instance. The fixture-calibrated nilSuppressedOuterTop charge this
+        // path used to keep contradicted all four nil cases by exactly its
+        // own width.
+        this.y += this.rowTopLead(tbl, firstRowIdx);
         // Repeat header rows at the top of the continuation page. A repeated
         // header advances by its FULL row height — content + border share +
         // any trHeight floor — exactly like its first-page instance (Word's
@@ -7975,7 +8003,6 @@ class Engine {
             if (this.doc.compatibilityMode < 15 && hr.props.heightRule === "exact") {
               hH -= this.rowBottomPad(tbl, hr) / 2;
             }
-            if (hIdx === 0) hH += nilTop / 2;
             markTableStart();
             this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hH);
             segHasRows = true;
@@ -8005,15 +8032,18 @@ class Engine {
       // EXACT-height row has no leading — its box bottom is hard content —
       // so it gets no allowance (staging-longtable p8/p9: Word moves the
       // 240-exact row #195 that would overhang the body bottom by 1pt).
+      // A cantSplit row gets NO allowance: probe-rowfit11 (us-courts base,
+      // compat 11, exported twice) sweeps the room under a 32.00px cantSplit
+      // row in 2px steps and Word moves it at room 30 and keeps it at room
+      // 32 — the threshold is the row's full height, with and without a
+      // footer, so the old footer-height allowance kept rows Word moves
+      // (us-courts-answer p6's signature row overhangs ~19px and Word moves
+      // it). The probe's splittable control also splits a two-line row 1+1
+      // at rooms 26..30, so the whole-row fit rarely decides those.
       const overhang =
-        noteReserve > 0 || row.props.heightRule === "exact"
+        noteReserve > 0 || row.props.heightRule === "exact" || row.props.cantSplit
           ? 0
-          : row.props.cantSplit
-            ? this.doc.compatibilityMode < 15 &&
-              (row.props.heightRule !== "atLeast" || (row.props.height ?? 0) >= ptToPx(2))
-              ? this.cur.footerHeight
-              : 0
-            : ROW_OVERHANG_TOL;
+          : ROW_OVERHANG_TOL;
       while (this.y + rowHeight > this.bodyBottom - this.rowNoteHeight(laid) + overhang + 0.01 && guard++ < 50) {
         // w:cantSplit is honored only while the row CAN fit on one page:
         // a row taller than the page body must split regardless (Word does —
@@ -8806,14 +8836,14 @@ class Engine {
     // height already established by its ordinary/nested cells.
     let maxH = 0;
     let measuredContentH = 0;
-    const effectiveBottomPad = (bottom: number | undefined) =>
-      this.doc.compatibilityMode < 15 &&
-      row.props.heightRule === "atLeast" &&
-      (row.props.height ?? 0) < ptToPx(2)
-        ? (bottom ?? 0) >= ptToPx(2)
-          ? (bottom ?? 0) / 2
-          : (bottom ?? 0) / 4
-        : (bottom ?? 0);
+    // The bottom cell margin is charged in FULL in every measured regime.
+    // A compat-11 haircut here (half for margins over 2pt, quarter under,
+    // on sub-2pt atLeast rows) was canceling the insideH overcharge that
+    // rowBorderWidths' per-pair rule has since removed: us-courts-answer's
+    // signature rows (trHeight 20tw, tcMar top 58 / bottom 43) measure
+    // 23.6px in Word = line + both margins exactly, and probe-uscourtsblock2
+    // CN pins the same for a plain content row's (58, 14).
+    const effectiveBottomPad = (bottom: number | undefined) => bottom ?? 0;
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
       const { x, width: w, margins: m } = geometry[ci];
@@ -9020,8 +9050,15 @@ class Engine {
       // takes no half-rule flow lead in exchange (see exactInsetRow).
       const rowSpan = cell.props.vMerge === "restart" ? this.vMergeRowSpan(tbl, rowIdx, colStart) : 1;
       const topWidth = this.rowBorderWidths(tbl, rowIdx).top;
-      const topInset = this.exactInsetRow(row) ? topWidth : topWidth / 2;
-      const bottomInset = this.rowBorderWidths(tbl, rowIdx + rowSpan - 1).bottom / 2;
+      // A content row bordering an exact row takes the whole boundary on the
+      // exact row's terms (probe-mixedbound; see rowBorderShare): BELOW an
+      // exact row it insets the full rule, and ABOVE one it insets nothing —
+      // the rule went to the exact row's fixed height.
+      const belowExact = rowIdx > 0 && this.exactInsetRow(tbl.rows[rowIdx - 1]);
+      const topInset = this.exactInsetRow(row) || belowExact ? topWidth : topWidth / 2;
+      const lastIdx = rowIdx + rowSpan - 1;
+      const aboveExact = lastIdx < tbl.rows.length - 1 && this.exactInsetRow(tbl.rows[lastIdx + 1]);
+      const bottomInset = aboveExact ? 0 : this.rowBorderWidths(tbl, lastIdx).bottom / 2;
       const contentH = Math.max(0, cellH - topInset - bottomInset);
       let dy = topInset;
       if (!cellLay.rotated && cell.props.verticalAlign === "center") {
