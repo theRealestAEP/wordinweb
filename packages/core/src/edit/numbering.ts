@@ -40,6 +40,56 @@ export interface LevelPatch {
   hangingPt?: number;
 }
 
+/**
+ * Word's multilevel-list gallery, expressed as per-level patches over the
+ * deep numbering ops (setNumberingLevel). One entry per preset; index = ilvl.
+ */
+export const NUMBERING_PRESETS: Record<string, { name: string; levels: LevelPatch[] }> = (() => {
+  const nested = (i: number): string => Array.from({ length: i + 1 }, (_, k) => `%${k + 1}`).join(".") + ".";
+  const indent = (i: number): Pick<LevelPatch, "indentLeftPt" | "hangingPt"> => ({ indentLeftPt: 18 * (i + 1) + 18, hangingPt: 18 + 4 * i });
+  return {
+    // 1. / 1.1. / 1.1.1. — the numbered-outline default of specs and contracts.
+    decimalNested: {
+      name: "1.  1.1.  1.1.1.",
+      levels: Array.from({ length: 9 }, (_, i) => ({ format: "decimal" as const, text: nested(i), ...indent(i) })),
+    },
+    // I. / A. / 1. / a) — Word's classic outline.
+    outline: {
+      name: "I.  A.  1.  a)",
+      levels: ([
+        { format: "upperRoman", text: "%1." },
+        { format: "upperLetter", text: "%2." },
+        { format: "decimal", text: "%3." },
+        { format: "lowerLetter", text: "%4)" },
+        { format: "lowerRoman", text: "%5)" },
+        { format: "decimal", text: "(%6)" },
+        { format: "lowerLetter", text: "(%7)" },
+        { format: "lowerRoman", text: "(%8)" },
+        { format: "decimal", text: "%9." },
+      ] as readonly { format: NumberFormat; text: string }[]).map((lvl, i) => ({ ...lvl, ...indent(i) })),
+    },
+    // Article I / Section 1.01 — the legal-drafting gallery entry.
+    articleSection: {
+      name: "Article I  /  Section 1.01",
+      levels: [
+        { format: "upperRoman" as const, text: "Article %1", indentLeftPt: 0, hangingPt: 0 },
+        { format: "decimalZero" as const, text: "Section %1.%2", indentLeftPt: 0, hangingPt: 0 },
+        ...Array.from({ length: 7 }, (_, k) => ({ format: "decimal" as const, text: nested(k + 2), ...indent(k + 2) })),
+      ],
+    },
+    // Chapter 1 — heading-chapter numbering; deeper levels stay unnumbered.
+    chapter: {
+      name: "Chapter 1",
+      levels: [
+        { format: "decimal" as const, text: "Chapter %1", indentLeftPt: 0, hangingPt: 0 },
+        ...Array.from({ length: 8 }, () => ({ format: "none" as const, text: "" })),
+      ],
+    },
+  };
+})();
+
+export type NumberingPresetId = keyof typeof NUMBERING_PRESETS;
+
 function el(name: string, attrs: Record<string, string> = {}, children: XmlElement[] = []): XmlElement {
   return { name, attrs, children, text: "" };
 }

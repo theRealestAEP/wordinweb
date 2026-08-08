@@ -8,6 +8,8 @@ import {
   CELL_SCOPE_EDGES,
   TABLE_BORDER_STYLES,
   TABLE_SCOPE_EDGES,
+  NUMBERING_PRESETS,
+  type NumberingPresetId,
   type SelectionFormat,
   type TabStopSpec,
   type TableBorderEdge,
@@ -5700,6 +5702,16 @@ export function DocxToolbar({
               title="Numbered list"
               active={listKind === "number"}
               onClick={() => { api?.toggleList("number"); refresh(); }}
+            />
+            <ActionMenu
+              label="⇶"
+              title="Multilevel list gallery"
+              width={44}
+              groups={[{
+                label: "Multilevel list",
+                items: Object.entries(NUMBERING_PRESETS).map(([id, preset]) => [id, preset.name] as [string, string]),
+              }]}
+              onPick={(value) => { api?.applyNumberingPreset(value as NumberingPresetId); refresh(); }}
             />
             <Sep />
           </>

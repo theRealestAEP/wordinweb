@@ -121,7 +121,7 @@ export type {
   StyleGalleryEntry,
   StyleType,
 } from "./edit/styles.js";
-export {
+export { NUMBERING_PRESETS,
   NUMBER_FORMATS,
   listInstanceAt,
   setNumberingLevel,
@@ -131,7 +131,7 @@ export {
   continueNumberingAt,
   detachNumbering,
 } from "./edit/numbering.js";
-export type { LevelPatch, NumberFormat } from "./edit/numbering.js";
+export type { NumberingPresetId, LevelPatch, NumberFormat } from "./edit/numbering.js";
 export { setLink, removeLink, linkAt } from "./edit/links.js";
 export { adjustIndent, paragraphDividerAt, setParagraphDivider, setParagraphSpacing, setDropCapAt, setTabStops, tabStopsAt, MAX_TAB_STOP_PT, TAB_STOP_ALIGNMENTS, TAB_STOP_LEADERS, PARAGRAPH_BORDER_EDGES, paragraphBordersAt, setParagraphBorders } from "./edit/paragraph.js";
 export type { ParagraphDivider, ParagraphDividerStyle, ParagraphSpacingPatch, DropCapMode, TabStopSpec, ParagraphBorderEdge, ParagraphBordersPatch } from "./edit/paragraph.js";

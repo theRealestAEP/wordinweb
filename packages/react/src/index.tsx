@@ -171,6 +171,8 @@ import {
   deleteStyle,
   listStyles,
   setNumberingLevelAt,
+  NUMBERING_PRESETS,
+  type NumberingPresetId,
   restartNumberingAt,
   continueNumberingAt,
   formatPatchFrom,
@@ -491,6 +493,13 @@ export interface DocxViewApi {
   setCharacterStyle(styleId: string | null): void;
   /** Change a list level's number format, label text, or indent. */
   setNumberingLevel(ilvl: number | null, patch: LevelPatch): boolean;
+  /**
+   * Apply a preset multilevel definition (Word's multilevel gallery) to the
+   * caret's list — the paragraphs join a numbered list first when they are
+   * not in one. Compiles onto the existing per-level patch operation, so it
+   * rides the same wire ops and converges like any level edit.
+   */
+  applyNumberingPreset(preset: NumberingPresetId): boolean;
   /** Restart list numbering at the caret, or (null) continue the preceding list. */
   setNumberingRestart(start: number | null): boolean;
   /** Format painter, half one: the selection's formatting, or null. */
@@ -603,6 +612,13 @@ export interface DocxViewApi {
 }
 
 export type ScreenshotInsertResult = "inserted" | "unsupported" | "cancelled" | "error" | "no-caret";
+
+/**
+ * Word's multilevel-list gallery, expressed as per-level patches over the
+ * existing deep numbering ops. One entry per preset; index = ilvl.
+ */
+export { NUMBERING_PRESETS } from "@wordinweb/core";
+export type { NumberingPresetId } from "@wordinweb/core";
 
 /**
  * Image formats a SHARED document accepts, and the single source of truth for
@@ -3113,6 +3129,16 @@ export function DocxView({
             if (!setNumberingLevelAt(doc, caret.t, ilvl, patch)) return false;
             pages = rerender(doc, undefined, "global");
             return true;
+          },
+          applyNumberingPreset: (preset) => {
+            const spec = NUMBERING_PRESETS[preset];
+            if (!spec) return false;
+            if (api.getListType() !== "number") api.toggleList("number");
+            let applied = true;
+            for (let ilvl = 0; ilvl < spec.levels.length; ilvl++) {
+              applied = api.setNumberingLevel(ilvl, spec.levels[ilvl]) && applied;
+            }
+            return applied;
           },
           setNumberingRestart: (start) => {
             const caret = editor?.getCaretTarget();
