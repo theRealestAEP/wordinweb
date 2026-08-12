@@ -100,6 +100,7 @@ const btnStyle = (active: boolean): React.CSSProperties => ({
   fontSize: 13,
   padding: "0 5px",
   color: T.fg,
+  transition: "background-color 120ms ease",
 });
 
 const PAGE_SIZES = [
@@ -153,21 +154,48 @@ function OverflowIcon() {
  * "More" (⋮) menu holding the toolbar groups that don't fit the current width.
  * On a phone/tablet the low-frequency groups collapse in here (Google-Docs
  * pattern) so the primary row stays a single clean strip; every control stays
- * reachable. The grouped controls render stacked, wrapping as needed.
+ * reachable.
+ *
+ * Groups render one per row (each still free to wrap internally if it has
+ * more controls than the popover is wide) rather than as one flat wrapped
+ * bag — a flat bag let unrelated controls share a wrapped line and left a
+ * group's trailing separator stranded mid-line. Deliberately NOT given
+ * `marginLeft: "auto"`: that fought the expand chevron's own auto margin for
+ * the same flex line's free space, which is what left the ⋮ trigger floating
+ * in the middle of the toolbar row instead of sitting beside the controls it
+ * summarizes. The chevron is the only control pinned to the true right edge.
  */
-function OverflowMenu({ children }: { children: React.ReactNode }) {
+function OverflowMenu({ groups }: { groups: { key: string; node: React.ReactNode }[] }) {
   const [open, setOpen] = useState(false);
+  const [shown, setShown] = useState(false);
   const rootRef = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setShown(false);
+      return;
+    }
+    const frame = requestAnimationFrame(() => setShown(true));
     const close = (e: MouseEvent) => {
       if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
     };
     document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("mousedown", close);
+    };
   }, [open]);
+  // Viewport-clamped `position: fixed`, matching every other toolbar popover
+  // (Equation, Citations, Quick Parts, Symbol, …) — not the plain
+  // `position: absolute; right: 0` this used to have. That was never
+  // clamped to the viewport, so on a narrow toolbar where the ⋮ trigger
+  // sits left of center the 280px-wide popover ran off the left edge of the
+  // window with no way to scroll it into view.
+  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
+  const viewportWidth = typeof window === "undefined" ? 340 : window.innerWidth;
+  const popoverWidth = Math.min(280, viewportWidth - 16);
+  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
   return (
-    <span ref={rootRef} style={{ position: "relative", display: "inline-flex", marginLeft: "auto" }}>
+    <span ref={rootRef} style={{ position: "relative", display: "inline-flex" }}>
       <button
         title="More tools"
         data-dxw-overflow=""
@@ -181,14 +209,23 @@ function OverflowMenu({ children }: { children: React.ReactNode }) {
         <div
           data-dxw-overflow-menu=""
           style={{
-            position: "absolute", top: 30, right: 0, zIndex: 100, background: T.popoverBg,
+            position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
-            padding: 8, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4,
-            width: "min(280px, calc(100vw - 16px))",
+            padding: 8, display: "flex", flexDirection: "column", gap: 6,
+            width: popoverWidth,
+            maxHeight: "calc(100vh - 48px)",
+            overflow: "auto",
             boxSizing: "border-box",
+            opacity: shown ? 1 : 0,
+            transform: shown ? "translateY(0)" : "translateY(-4px)",
+            transition: "opacity 120ms ease, transform 120ms ease",
           }}
         >
-          {children}
+          {groups.map((g) => (
+            <div key={g.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4 }}>
+              {g.node}
+            </div>
+          ))}
         </div>
       )}
     </span>
@@ -6092,6 +6129,19 @@ export interface DocxToolbarProps {
 /** localStorage key for the expand/collapse chevron choice. */
 const EXPANDED_KEY = "dxw-toolbar-expanded";
 
+/**
+ * Tier breakpoints, in the toolbar's own clientWidth (not window width — see
+ * the measure() effect). Each boundary has a fold width and an unfold width
+ * 40px above it: shrinking past FOLD moves to the higher tier, but growing
+ * back needs to clear the higher UNFOLD width before returning to the lower
+ * tier. Without that gap, a width that lands exactly on a breakpoint (or
+ * jitters by a device pixel during layout) flips tiers on every
+ * ResizeObserver tick — groups fold and unfold in a loop the user sees as
+ * flicker. The 40px margin is comfortably larger than any such jitter.
+ */
+const TIER_FOLD_WIDTH = [1280, 720] as const;
+const TIER_UNFOLD_WIDTH = [1320, 760] as const;
+
 export function DocxToolbar({
   api,
   onSave,
@@ -6277,7 +6327,16 @@ export function DocxToolbar({
     if (!el || typeof ResizeObserver === "undefined") return;
     const measure = () => {
       const w = Math.min(el.clientWidth, window.innerWidth);
-      setTier(w >= 1280 ? 0 : w >= 720 ? 1 : 2);
+      setTier((prev) => {
+        // Tier 0 <-> 1: already folded (prev > 0) needs the wider unfold
+        // width to go back to 0; still unfolded (prev === 0) only needs to
+        // clear the fold width to stay there.
+        const atLeast1 = prev === 0 ? w < TIER_FOLD_WIDTH[0] : w < TIER_UNFOLD_WIDTH[0];
+        if (!atLeast1) return 0;
+        // Tier 1 <-> 2: same hysteresis, one boundary down.
+        const atLeast2 = prev <= 1 ? w < TIER_FOLD_WIDTH[1] : w < TIER_UNFOLD_WIDTH[1];
+        return atLeast2 ? 2 : 1;
+      });
     };
     const ro = new ResizeObserver(measure);
     ro.observe(el);
@@ -6674,13 +6733,21 @@ export function DocxToolbar({
         ),
       });
 
-    // Per-tier overflow: which group keys fold into ⋮. Tier 0 keeps all inline.
+    // Per-tier overflow: which group keys fold into ⋮. Tier 0 keeps all
+    // inline; "history" and "format" (undo/redo, bold/italic/underline/…)
+    // never fold — they're the controls used on nearly every edit, at any
+    // width. Tier 1 and 2 fold progressively more of the rest, chosen so
+    // each tier's remaining inline groups actually fit one row instead of
+    // spilling a couple of stray controls onto a mostly-empty second line.
     const overflowKeys =
       effectiveTier === 0
         ? new Set<string>()
         : effectiveTier === 1
-          ? new Set(["styles", "indent", "spacing"])
-          : new Set(["styles", "font", "size", "color", "highlight", "alignment", "indent", "spacing"]);
+          ? new Set(["styles", "indent", "spacing", "borders", "charStyles", "formatPainter"])
+          : new Set([
+              "styles", "font", "size", "color", "highlight", "alignment", "indent", "spacing",
+              "borders", "charStyles", "formatPainter", "lists",
+            ]);
     const inline = groups.filter((g) => !overflowKeys.has(g.key));
     const overflow = groups.filter((g) => overflowKeys.has(g.key));
     return (
@@ -6688,13 +6755,7 @@ export function DocxToolbar({
         {inline.map((g) => (
           <Fragment key={g.key}>{g.node}</Fragment>
         ))}
-        {overflow.length > 0 && (
-          <OverflowMenu>
-            {overflow.map((g) => (
-              <Fragment key={g.key}>{g.node}</Fragment>
-            ))}
-          </OverflowMenu>
-        )}
+        {overflow.length > 0 && <OverflowMenu groups={overflow} />}
       </>
     );
   };
@@ -6845,184 +6906,123 @@ export function DocxToolbar({
         </>
       )}
       {(mode === "simple" || tab === "home") && renderHome()}
-      {mode === "advanced" && tab === "insert" && (
-        <>
-          {on("coverPage") && <CoverPageMenu api={api} />}
-          {on("table") && <TableMenu api={api} />}
-          {on("image") && (
-            <span style={{ position: "relative", display: "inline-flex" }}>
-              <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
-              {imageStatus && (
-                <span
-                  role="alert"
-                  data-dxw-image-status=""
-                  style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 230, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
-                >
-                  {imageStatus}
-                </span>
-              )}
-            </span>
-          )}
-          {on("icon") && <Btn label="Icons" title="Insert SVG icon" onClick={() => iconInput.current?.click()} />}
-          {on("screenshot") && <ScreenshotButton api={api} />}
-          {effectiveTier === 0 ? (
-            <>
-          {on("model3D") && <Btn label="3D Models" title="Insert a GLB 3D model" onClick={() => modelInput.current?.click()} />}
-          {on("smartArt") && <SmartArtMenu api={api} />}
-          {on("chart") && <ChartMenu api={api} />}
-          {on("media") && <MediaMenu api={api} />}
-          {on("shape") && <ShapeMenu api={api} />}
-          {on("divider") && <DividerMenu api={api} />}
-          {on("textBox") && <TextBoxMenu api={api} />}
-          {on("wordArt") && <WordArtMenu api={api} />}
-          {on("link") && <LinkMenu api={api} />}
-          {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
-          {on("footnote") && <NoteMenu api={api} kind="footnote" />}
-          {on("footnote") && <NoteMenu api={api} kind="endnote" />}
-          {on("footnote") && <NoteOptionsMenu api={api} />}
-          {on("bookmark") && <BookmarkMenu api={api} />}
-          {on("crossReference") && <CrossReferenceMenu api={api} />}
-          {on("crossReference") && <CaptionMenu api={api} />}
-          {on("headerFooter") && <HeaderFooterMenu api={api} />}
-          {on("watermark") && <WatermarkMenu api={api} />}
-          <Sep />
-          {on("pageNumber") && <PageNumberMenu api={api} />}
-          {on("break") && (
-            <>
-              <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />
-              <ActionMenu
-                label="Break"
-                title="Insert a page, column or section break at the caret"
-                width={64}
-                groups={[
-                  { label: "Breaks", items: [["br:page", "Page break"], ["br:column", "Column break"]] },
-                  { label: "Section breaks", items: [["br:next", "Section break (next page)"], ["br:cont", "Section break (continuous)"]] },
-                ]}
-                onPick={(v) => {
-                  if (v === "br:page") api?.insertBreak("page");
-                  else if (v === "br:column") api?.insertBreak("column");
-                  else if (v === "br:next") api?.insertBreak("sectionNextPage");
-                  else if (v === "br:cont") api?.insertBreak("sectionContinuous");
-                }}
-              />
-            </>
-          )}
-          {on("dateTime") && (
-            <ActionMenu
-              label="Date & time"
-              title="Insert an automatically updating date or time"
-              width={100}
-              groups={[
-                { label: "Date", items: [["date:short", "Short date"], ["date:long", "Long date"], ["date:intl", "Day month year"]] },
-                { label: "Time", items: [["time:12", "12-hour time"], ["time:24", "24-hour time"]] },
-              ]}
-              onPick={(value) => {
-                if (value === "date:short") api?.insertDateTime("date", "M/d/yyyy");
-                else if (value === "date:long") api?.insertDateTime("date", "MMMM d, yyyy");
-                else if (value === "date:intl") api?.insertDateTime("date", "d MMMM yyyy");
-                else if (value === "time:12") api?.insertDateTime("time", "h:mm am/pm");
-                else if (value === "time:24") api?.insertDateTime("time", "HH:mm");
-              }}
-            />
-          )}
-          {on("field") && (
-            <ActionMenu
-              label="Field"
-              title="Insert a Word field"
-              width={68}
-              groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]}
-              onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)}
-            />
-          )}
-          {on("field") && <ContentsMenu api={api} />}
-          {on("citations") && <CitationsMenu api={api} />}
-          {on("quickParts") && <QuickPartsMenu api={api} />}
-          {on("equation") && <EquationMenu api={api} />}
-          {on("symbol") && <SymbolMenu api={api} />}
-          {on("dropCap") && (
-            <ActionMenu
-              label="Drop cap"
-              title="Drop cap"
-              width={84}
-              groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]}
-              onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")}
-            />
-          )}
-          {on("object") && <Btn label="Object" title="Embed a file in this document" onClick={() => objectInput.current?.click()} />}
-            </>
-          ) : (
-            <OverflowMenu>
-              {on("model3D") && <Btn label="3D Models" title="Insert a GLB 3D model" onClick={() => modelInput.current?.click()} />}
-              {on("smartArt") && <SmartArtMenu api={api} />}
-              {on("chart") && <ChartMenu api={api} />}
-              {on("media") && <MediaMenu api={api} />}
-              {on("shape") && <ShapeMenu api={api} />}
-              {on("divider") && <DividerMenu api={api} />}
-              {on("textBox") && <TextBoxMenu api={api} />}
-              {on("wordArt") && <WordArtMenu api={api} />}
-              {on("link") && <LinkMenu api={api} />}
-              {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
-              {on("footnote") && <NoteMenu api={api} kind="footnote" />}
-              {on("footnote") && <NoteMenu api={api} kind="endnote" />}
-              {on("footnote") && <NoteOptionsMenu api={api} />}
-              {on("bookmark") && <BookmarkMenu api={api} />}
-              {on("crossReference") && <CrossReferenceMenu api={api} />}
-              {on("crossReference") && <CaptionMenu api={api} />}
-              {on("headerFooter") && <HeaderFooterMenu api={api} />}
-              {on("watermark") && <WatermarkMenu api={api} />}
-              {on("pageNumber") && <PageNumberMenu api={api} />}
-              {on("break") && (
-                <>
-                  <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />
-                  <ActionMenu
-                    label="Break"
-                    title="Insert a page, column or section break at the caret"
-                    width={64}
-                    groups={[
-                      { label: "Breaks", items: [["br:page", "Page break"], ["br:column", "Column break"]] },
-                      { label: "Section breaks", items: [["br:next", "Section break (next page)"], ["br:cont", "Section break (continuous)"]] },
-                    ]}
-                    onPick={(v) => {
-                      if (v === "br:page") api?.insertBreak("page");
-                      else if (v === "br:column") api?.insertBreak("column");
-                      else if (v === "br:next") api?.insertBreak("sectionNextPage");
-                      else if (v === "br:cont") api?.insertBreak("sectionContinuous");
-                    }}
-                  />
-                </>
-              )}
-              {on("dateTime") && (
+      {mode === "advanced" && tab === "insert" && (() => {
+        // The rest of the Insert tab (galleries, references, page parts,
+        // fields…) is one block: at the narrow tiers it folds as a unit into
+        // ⋮ rather than per-group, so it's built once here and rendered
+        // either inline or handed to OverflowMenu as its single group —
+        // previously this ~70-node block was duplicated verbatim for the two
+        // cases, and the copies had already drifted apart by one <Sep />.
+        const rest = (
+          <>
+            {on("model3D") && <Btn label="3D Models" title="Insert a GLB 3D model" onClick={() => modelInput.current?.click()} />}
+            {on("smartArt") && <SmartArtMenu api={api} />}
+            {on("chart") && <ChartMenu api={api} />}
+            {on("media") && <MediaMenu api={api} />}
+            {on("shape") && <ShapeMenu api={api} />}
+            {on("divider") && <DividerMenu api={api} />}
+            {on("textBox") && <TextBoxMenu api={api} />}
+            {on("wordArt") && <WordArtMenu api={api} />}
+            {on("link") && <LinkMenu api={api} />}
+            {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
+            {on("footnote") && <NoteMenu api={api} kind="footnote" />}
+            {on("footnote") && <NoteMenu api={api} kind="endnote" />}
+            {on("footnote") && <NoteOptionsMenu api={api} />}
+            {on("bookmark") && <BookmarkMenu api={api} />}
+            {on("crossReference") && <CrossReferenceMenu api={api} />}
+            {on("crossReference") && <CaptionMenu api={api} />}
+            {on("headerFooter") && <HeaderFooterMenu api={api} />}
+            {on("watermark") && <WatermarkMenu api={api} />}
+            <Sep />
+            {on("pageNumber") && <PageNumberMenu api={api} />}
+            {on("break") && (
+              <>
+                <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />
                 <ActionMenu
-                  label="Date & time"
-                  title="Insert an automatically updating date or time"
-                  width={100}
+                  label="Break"
+                  title="Insert a page, column or section break at the caret"
+                  width={64}
                   groups={[
-                    { label: "Date", items: [["date:short", "Short date"], ["date:long", "Long date"], ["date:intl", "Day month year"]] },
-                    { label: "Time", items: [["time:12", "12-hour time"], ["time:24", "24-hour time"]] },
+                    { label: "Breaks", items: [["br:page", "Page break"], ["br:column", "Column break"]] },
+                    { label: "Section breaks", items: [["br:next", "Section break (next page)"], ["br:cont", "Section break (continuous)"]] },
                   ]}
-                  onPick={(value) => {
-                    if (value === "date:short") api?.insertDateTime("date", "M/d/yyyy");
-                    else if (value === "date:long") api?.insertDateTime("date", "MMMM d, yyyy");
-                    else if (value === "date:intl") api?.insertDateTime("date", "d MMMM yyyy");
-                    else if (value === "time:12") api?.insertDateTime("time", "h:mm am/pm");
-                    else if (value === "time:24") api?.insertDateTime("time", "HH:mm");
+                  onPick={(v) => {
+                    if (v === "br:page") api?.insertBreak("page");
+                    else if (v === "br:column") api?.insertBreak("column");
+                    else if (v === "br:next") api?.insertBreak("sectionNextPage");
+                    else if (v === "br:cont") api?.insertBreak("sectionContinuous");
                   }}
                 />
-              )}
-              {on("field") && (
-                <ActionMenu label="Field" title="Insert a Word field" width={68} groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]} onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)} />
-              )}
-              {on("field") && <ContentsMenu api={api} />}
-              {on("citations") && <CitationsMenu api={api} />}
-              {on("quickParts") && <QuickPartsMenu api={api} />}
-              {on("equation") && <EquationMenu api={api} />}
-              {on("symbol") && <SymbolMenu api={api} />}
-              {on("dropCap") && <ActionMenu label="Drop cap" title="Drop cap" width={84} groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]} onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")} />}
-              {on("object") && <Btn label="Object" title="Embed a file in this document" onClick={() => objectInput.current?.click()} />}
-            </OverflowMenu>
-          )}
-        </>
-      )}
+              </>
+            )}
+            {on("dateTime") && (
+              <ActionMenu
+                label="Date & time"
+                title="Insert an automatically updating date or time"
+                width={100}
+                groups={[
+                  { label: "Date", items: [["date:short", "Short date"], ["date:long", "Long date"], ["date:intl", "Day month year"]] },
+                  { label: "Time", items: [["time:12", "12-hour time"], ["time:24", "24-hour time"]] },
+                ]}
+                onPick={(value) => {
+                  if (value === "date:short") api?.insertDateTime("date", "M/d/yyyy");
+                  else if (value === "date:long") api?.insertDateTime("date", "MMMM d, yyyy");
+                  else if (value === "date:intl") api?.insertDateTime("date", "d MMMM yyyy");
+                  else if (value === "time:12") api?.insertDateTime("time", "h:mm am/pm");
+                  else if (value === "time:24") api?.insertDateTime("time", "HH:mm");
+                }}
+              />
+            )}
+            {on("field") && (
+              <ActionMenu
+                label="Field"
+                title="Insert a Word field"
+                width={68}
+                groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]}
+                onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)}
+              />
+            )}
+            {on("field") && <ContentsMenu api={api} />}
+            {on("citations") && <CitationsMenu api={api} />}
+            {on("quickParts") && <QuickPartsMenu api={api} />}
+            {on("equation") && <EquationMenu api={api} />}
+            {on("symbol") && <SymbolMenu api={api} />}
+            {on("dropCap") && (
+              <ActionMenu
+                label="Drop cap"
+                title="Drop cap"
+                width={84}
+                groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]}
+                onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")}
+              />
+            )}
+            {on("object") && <Btn label="Object" title="Embed a file in this document" onClick={() => objectInput.current?.click()} />}
+          </>
+        );
+        return (
+          <>
+            {on("coverPage") && <CoverPageMenu api={api} />}
+            {on("table") && <TableMenu api={api} />}
+            {on("image") && (
+              <span style={{ position: "relative", display: "inline-flex" }}>
+                <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
+                {imageStatus && (
+                  <span
+                    role="alert"
+                    data-dxw-image-status=""
+                    style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 230, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
+                  >
+                    {imageStatus}
+                  </span>
+                )}
+              </span>
+            )}
+            {on("icon") && <Btn label="Icons" title="Insert SVG icon" onClick={() => iconInput.current?.click()} />}
+            {on("screenshot") && <ScreenshotButton api={api} />}
+            {effectiveTier === 0 ? rest : <OverflowMenu groups={[{ key: "insert-more", node: rest }]} />}
+          </>
+        );
+      })()}
       {mode === "advanced" && tab === "draw" && on("drawing") && <DrawTab api={api} />}
       {mode === "advanced" && tab === "format" && objectContext && (
         <ObjectFormatTab api={api} context={objectContext} showArrange={on("arrange")} />
