@@ -699,7 +699,10 @@ export function lineNumberingAt(
   return {
     countBy: parseInt(attr(ln, "countBy") ?? "1", 10) || 1,
     restart: restart === "continuous" || restart === "newSection" ? restart : "newPage",
-    start: parseInt(attr(ln, "start") ?? "1", 10) || 1,
+    // The XML attribute is a raw offset (0 implicit when absent) added to the
+    // running count; the number a user actually sees on the first line is
+    // one more than that (see setLineNumbering below and model.ts).
+    start: (parseInt(attr(ln, "start") ?? "0", 10) || 0) + 1,
   };
 }
 
@@ -755,8 +758,14 @@ export function setLineNumbering(doc: DocxDocument, patch: LineNumberingPatch, t
       else setA("restart", patch.restart);
     }
     if (patch.start !== undefined) {
+      // patch.start is the first line's own displayed number. Word reads a
+      // WRITTEN w:start as an offset one below that (probe-linenum2:
+      // explicit start="1" prints 2, start="10" prints 11) — an absent
+      // attribute is the only way to get the bare count starting at 1, so
+      // start=1 omits the attribute and any other value is written as
+      // (start - 1).
       if (patch.start === 1) delA("start");
-      else setA("start", String(patch.start));
+      else setA("start", String(patch.start - 1));
     }
   }
   doc.refresh();

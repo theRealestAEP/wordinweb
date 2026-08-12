@@ -862,7 +862,7 @@ the equation into something else.
 | Kind | Purpose | Fields |
 | --- | --- | --- |
 | `setPageLayout` | Set margins, page size, columns, or borders | `patch` |
-| `setLineNumbering` | Configure margin line numbers | `patch` |
+| `setLineNumbering` | Configure margin line numbers. Counts every real line (each wrapped continuation, each blank paragraph); table content is skipped entirely (not counted, not numbered). A fixed count of numbered lines per page (a numbered ruled-paper layout) requires exact, evenly spaced lines — pair this with `setSpacing` (`exactLinePt` at the desired pitch, `beforePt`/`afterPt: 0`) on the affected paragraphs, since auto/single spacing lets far more real lines fit a page than a fixed-pitch grid does | `patch` |
 | `ensureHeaderFooter` | Create a header or footer story | `hfKind` |
 | `setTitlePage` | Toggle different-first-page headers and footers; enabling creates the empty first-page parts | `enabled` |
 | `setEvenOddHeaders` | Toggle different odd & even page headers and footers; enabling creates the empty even-page parts | `enabled` |

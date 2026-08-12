@@ -1027,7 +1027,10 @@ export interface SectionProps {
   vAlign?: "top" | "center" | "both" | "bottom";
   /** w:pgBorders. Offsets (border.space, px) measure from text or page edge. */
   pageBorders?: { top?: Border; bottom?: Border; left?: Border; right?: Border; offsetFrom: "text" | "page" };
-  /** w:lnNumType: margin line numbering. distance px from the text edge. */
+  /** w:lnNumType: margin line numbering. distance px from the text edge.
+   * start is the raw w:start OFFSET (0 when the attribute is absent, its
+   * literal value otherwise) added to the running per-line count — see
+   * parse/section.ts for why an absent attribute isn't just "start 1". */
   lineNumbering?: {
     countBy: number;
     start: number;

@@ -396,7 +396,12 @@ export class SemanticInspector {
         breakType: section.props.type,
         verticalAlignment: section.props.vAlign,
         pageBorders: section.props.pageBorders ? JSON.parse(JSON.stringify(section.props.pageBorders)) : undefined,
-        lineNumbering: section.props.lineNumbering ? { ...section.props.lineNumbering } : undefined,
+        // section.props.lineNumbering.start is the raw w:start OFFSET (see
+        // core/model.ts); report the human-meaningful first-line number
+        // instead, matching what setLineNumbering's own patch.start expects.
+        lineNumbering: section.props.lineNumbering
+          ? { ...section.props.lineNumbering, start: section.props.lineNumbering.start + 1 }
+          : undefined,
       })),
       stories: [...this.stories.values()].map((story) => ({ id: story.id, kind: story.kind, blocks: this.entries.get(story.id)?.length ?? 0 })),
       blocks: { paragraphs, tables },

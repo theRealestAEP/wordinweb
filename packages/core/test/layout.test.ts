@@ -4896,6 +4896,96 @@ describe("margin line numbers (w:lnNumType)", () => {
     expect(num.glyphBoxH).toBeCloseTo(m.ascent + m.descent, 3);
     // Number sits in the left margin, right-aligned against the distance gap.
     expect(num.x + num.width).toBeLessThan(body.x);  });
+
+  // probe-linenum2 (parity repo, self-reproducing Word export): a WRITTEN
+  // w:start attribute is an offset added to the running count, not the first
+  // printed number — Word prints (start + 1) on the scope's first line even
+  // for w:start="1", and only an ABSENT attribute prints the bare count
+  // (1,2,3...). Confirmed with start="1" (prints 2,3,4,5,6) and start="10"
+  // (prints 11,12,13,14,15) in isolated single-section documents.
+  it("prints (w:start + 1) on the first line when w:start is written explicitly", () => {
+    const sect =
+      `<w:sectPr><w:lnNumType w:countBy="1" w:start="10"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("one") + p("two") + p("three") + sect),
+    });
+    const numbers = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+$/.test(i.text))
+      .map((i) => (i as { text: string }).text);
+    expect(numbers).toEqual(["11", "12", "13"]);
+  });
+
+  it("omitting w:start prints the bare count starting at 1", () => {
+    const sect =
+      `<w:sectPr><w:lnNumType w:countBy="1"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("one") + p("two") + sect),
+    });
+    const numbers = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+$/.test(i.text))
+      .map((i) => (i as { text: string }).text);
+    expect(numbers).toEqual(["1", "2"]);
+  });
+
+  // probe-linenum (parity repo, self-reproducing Word export): table content
+  // consumes ZERO line numbers — neither displayed nor counted — and the
+  // count resumes correctly with the paragraph after the table.
+  it("skips table rows entirely and resumes the count after the table", () => {
+    const sect =
+      `<w:sectPr><w:lnNumType w:countBy="1"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const tbl =
+      `<w:tbl><w:tblPr><w:tblW w:w="4500" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="4500"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="4500" w:type="dxa"/></w:tcPr>${p("in a cell")}</w:tc></w:tr></w:tbl>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("before") + tbl + p("after") + sect),
+    });
+    const numbers = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+$/.test(i.text))
+      .map((i) => (i as { text: string }).text);
+    expect(numbers).toEqual(["1", "2"]);
+  });
+
+  // probe-linenum: an empty paragraph consumes a line number just like a
+  // text paragraph does.
+  it("counts an empty paragraph as a numbered line", () => {
+    const sect =
+      `<w:sectPr><w:lnNumType w:countBy="1"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("first") + "<w:p/>" + p("third") + sect),
+    });
+    const numbers = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+$/.test(i.text))
+      .map((i) => (i as { text: string }).text);
+    expect(numbers).toEqual(["1", "2", "3"]);
+  });
+
+  // probe-linenum (case F): each visual line of a paragraph is numbered
+  // individually, including wrapped/broken continuation lines within ONE
+  // w:p — not just once per paragraph.
+  it("numbers every visual line of a multi-line paragraph, not once per paragraph", () => {
+    const sect =
+      `<w:sectPr><w:lnNumType w:countBy="1"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const threeLines =
+      `<w:p><w:r><w:t>one</w:t><w:br/><w:t>two</w:t><w:br/><w:t>three</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(threeLines + p("after") + sect),
+    });
+    const numbers = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+$/.test(i.text))
+      .map((i) => (i as { text: string }).text);
+    expect(numbers).toEqual(["1", "2", "3", "4"]);
+  });
 });
 
 describe("tail parity rules (textboxes/nccih/hf2/yiddish)", () => {

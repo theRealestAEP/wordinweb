@@ -5111,7 +5111,9 @@ class Engine {
       this.lnResetEpoch = this.lnSectionEpoch;
     }
     this.lnCounter++;
-    const n = ln.start - 1 + this.lnCounter;
+    // ln.start is already the raw offset (0 when w:start was absent; see
+    // model.ts), so the printed number is just offset + running count.
+    const n = ln.start + this.lnCounter;
     // countBy N prints only every Nth line (but every line is still counted).
     if (ln.countBy > 1 && n % ln.countBy !== 0) return;
     const font = this.lineNumberFont();
