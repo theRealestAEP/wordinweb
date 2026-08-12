@@ -796,10 +796,41 @@ function refableChildren(node: JsonSchema): JsonSchema[] {
   return children;
 }
 
+/**
+ * Property names that hold an address — where in the document an operation
+ * acts — rather than content. Shapes reached under one of these stay written
+ * out in full wherever they appear.
+ *
+ * The reason is measured, not aesthetic. Hoisting *every* repeated shape saved
+ * 14.3% of the input tokens and cost `object-insert` 1.8 rounds (mean 6.7 ->
+ * 8.5 over 40 runs an arm, against a 0.5-round noise floor from an A/A
+ * control). The transcripts put the divergence at the first `word_document_edit`:
+ * behind `$ref`s the model composed smaller first transactions. Composing a
+ * transaction is reasoning about where each operation lands, so the addressing
+ * shapes are the ones it has to hold in mind while it does that, and they are
+ * also the cheapest to leave alone — keeping them inline gives back about a
+ * quarter of the bytes the full hoist saved.
+ *
+ * `offset` is here so an `at` reads end to end with no indirection in it; it
+ * shares its shape with `start` and `end`, which address character ranges, and
+ * the whole exclusion costs 30 characters.
+ */
+const ADDRESSING_PROPERTIES = new Set([
+  "at",
+  "blockRef",
+  "cellRef",
+  "afterBlockRef",
+  "runRef",
+  "objectRef",
+  "offset",
+  "start",
+  "end",
+]);
+
 /** Walk every refable position, keyed by the property name it first appears
  * under so the generated `$defs` key reads like the thing it describes. */
-function censusSubschemas(root: JsonSchema): Map<string, { count: number; hint: string }> {
-  const census = new Map<string, { count: number; hint: string }>();
+function censusSubschemas(root: JsonSchema): Map<string, { count: number; hint: string; addressing: boolean }> {
+  const census = new Map<string, { count: number; hint: string; addressing: boolean }>();
   const visit = (node: JsonSchema, hint: string): void => {
     const properties = node.properties;
     const named = new Map<JsonSchema, string>();
@@ -816,8 +847,13 @@ function censusSubschemas(root: JsonSchema): Map<string, { count: number; hint: 
       const childHint = named.get(child) ?? hint;
       const key = JSON.stringify(child);
       const entry = census.get(key);
-      if (entry) entry.count += 1;
-      else census.set(key, { count: 1, hint: childHint });
+      const addressing = ADDRESSING_PROPERTIES.has(childHint);
+      if (entry) {
+        entry.count += 1;
+        // One appearance under an address name keeps the shape inline
+        // everywhere, so a reader never meets it in two forms.
+        entry.addressing ||= addressing;
+      } else census.set(key, { count: 1, hint: childHint, addressing });
       visit(child, childHint);
     }
   };
@@ -835,17 +871,19 @@ function definitionName(hint: string, taken: Set<string>): string {
 }
 
 /**
- * Collapse every subschema that appears more than once into one `$defs` entry
- * and a `$ref` at each site. Shapes that would cost more as a reference than
- * as themselves are left alone. The resolved schema is identical to the input,
- * so no caller and no model behaviour depends on which form it gets.
+ * Collapse every repeated subschema that describes *what to write* into one
+ * `$defs` entry and a `$ref` at each site. Shapes that describe *where to
+ * write* (see `ADDRESSING_PROPERTIES`) and shapes that would cost more as a
+ * reference than as themselves are left alone. The resolved schema is
+ * identical to the input, so no caller and no model behaviour depends on which
+ * form it gets.
  */
 export function hoistRepeatedSubschemas(schema: JsonSchema): JsonSchema {
   const census = censusSubschemas(schema);
   const taken = new Set<string>();
   const chosen = new Map<string, string>();
   const candidates = [...census.entries()]
-    .filter(([, entry]) => entry.count > 1)
+    .filter(([, entry]) => entry.count > 1 && !entry.addressing)
     // Largest first, so a shape that contains another gets the readable name.
     .sort((a, b) => b[0].length - a[0].length);
   for (const [key, entry] of candidates) {

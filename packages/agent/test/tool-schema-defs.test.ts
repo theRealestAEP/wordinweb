@@ -77,6 +77,24 @@ describe("tool schema $defs hoisting", () => {
     expect(JSON.stringify(hoisted)).toContain('"$ref"');
   });
 
+  it("writes an address out in full rather than behind a reference", () => {
+    const shipped = AgentDocument.create().tools().find((t) => t.name === "word_document_edit")!.inputSchema;
+    const wire = JSON.stringify(shipped);
+    const defs = JSON.stringify(shipped.$defs);
+    // The three reference patterns are the most repeated shapes in the union
+    // and the most attractive to hoist. They ship spelled out, at every site,
+    // and nothing in $defs stands in for one.
+    for (const pattern of ["^block:[0-9]+$", "^run:[0-9]+$", "^object:[0-9]+:[0-9]+$"]) {
+      expect(wire.split(pattern).length - 1).toBeGreaterThan(10);
+    }
+    expect(defs).not.toContain("block:[0-9]");
+    expect(defs).not.toContain("run:[0-9]");
+    expect(defs).not.toContain("object:[0-9]");
+    for (const name of ["at", "blockRef", "runRef", "objectRef", "cellRef", "afterBlockRef", "offset"]) {
+      expect(wire).not.toContain(`{"$ref":"#/$defs/${name}"}`);
+    }
+  });
+
   it("is a fixed point: hoisting the result changes nothing", () => {
     const schema = AgentDocument.create().tools().find((t) => t.name === "word_document_edit")!.inputSchema;
     expect(hoistRepeatedSubschemas(schema)).toEqual(schema);
