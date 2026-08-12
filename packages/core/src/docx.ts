@@ -1,6 +1,6 @@
-import { Package, FIXED_ZIP_MTIME } from "./zip.js";
+import { Package, FIXED_ZIP_MTIME, resolvePartPath } from "./zip.js";
 import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName, cyrb53 } from "./xml.js";
-import { strToU8, zip, zipSync } from "fflate";
+import { strFromU8, strToU8, zip, zipSync } from "fflate";
 import { pxToTwips, twipsToPx } from "./units.js";
 import {
   Block,
@@ -2364,9 +2364,91 @@ export class DocxDocument {
       files[this.glossaryPart] = strToU8(serializeXml(this.glossaryRoot, true));
     }
     if (this.settingsDirty) files[this.settingsPart] = strToU8(serializeXml(this.settingsRoot, true));
+    this.dropOrphanChartParts(files);
     if (this.relsRoot) this.writeModeledXml(files, this.relsPath, this.relsRoot);
     if (this.contentTypesRoot) this.writeModeledXml(files, "[Content_Types].xml", this.contentTypesRoot);
     return files;
+  }
+
+  /**
+   * Leave out the chart parts the document no longer references.
+   *
+   * Deleting a chart splices its w:drawing out of the story, but the chart
+   * part, its rels part, its embedded workbook, the document relationship, and
+   * the two [Content_Types].xml overrides all stay. An agent that inserts a
+   * chart, deletes it, and inserts a replacement therefore saves TWO chart
+   * parts for the one chart the document shows.
+   *
+   * The release happens here, at save time, rather than when the drawing goes,
+   * because undo restores the drawing XML — r:id and all — from a snapshot
+   * that models package parts but no relationship state. Dropping the
+   * relationship early would make undo produce a chart pointing at nothing.
+   * The live tree keeps everything; only the written bytes lose the orphans,
+   * and the saveJournal puts back the two trees this touches.
+   *
+   * Relationship ids are scoped to the part that owns the rels file, so the
+   * document body is the only place that can reference these ids, and reading
+   * it is a complete check. Headers, footers, and notes carry their own rels.
+   */
+  private dropOrphanChartParts(files: Record<string, Uint8Array>): void {
+    const relsRoot = this.relsRoot;
+    if (!relsRoot) return;
+    const orphans = relsRoot.children.filter(
+      (rel) => (rel.attrs.Type ?? "").endsWith("/relationships/chart") && rel.attrs.Id !== undefined,
+    );
+    if (orphans.length === 0) return;
+
+    const used = new Set<string>();
+    const scan = (element: XmlElement): void => {
+      for (const value of Object.values(element.attrs)) {
+        if (/^rId\d+$/.test(value)) used.add(value);
+      }
+      for (const item of element.children) scan(item);
+    };
+    scan(this.docRoot);
+
+    const dropped = orphans.filter((rel) => !used.has(rel.attrs.Id!));
+    if (dropped.length === 0) return;
+
+    // Restore by replacing each child list wholesale: putting the entries back
+    // in their original order is what keeps the live tree byte-identical to
+    // before the save.
+    const contentTypesRoot = this.contentTypesRoot;
+    const relsBefore = [...relsRoot.children];
+    const overridesBefore = contentTypesRoot ? [...contentTypesRoot.children] : null;
+    if (this.saveJournal) {
+      this.saveJournal.push(() => {
+        relsRoot.children.splice(0, relsRoot.children.length, ...relsBefore);
+        if (contentTypesRoot && overridesBefore) {
+          contentTypesRoot.children.splice(0, contentTypesRoot.children.length, ...overridesBefore);
+        }
+      });
+    }
+
+    for (const rel of dropped) {
+      const part = resolvePartPath(this.docPart, rel.attrs.Target ?? "");
+      const partRels = relsPathFor(part);
+      // The chart's own rels name its embedded workbook; that part is the
+      // chart's alone, so it goes with it.
+      const satellites = [part, partRels];
+      const relsXml = files[partRels];
+      if (relsXml) {
+        for (const match of strFromU8(relsXml).matchAll(/Target="([^"]+)"/g)) {
+          satellites.push(resolvePartPath(part, match[1]));
+        }
+      }
+      for (const name of satellites) delete files[name];
+
+      if (contentTypesRoot) {
+        for (const name of satellites) {
+          const index = contentTypesRoot.children.findIndex(
+            (item) => localName(item.name) === "Override" && item.attrs.PartName === `/${name}`,
+          );
+          if (index >= 0) contentTypesRoot.children.splice(index, 1);
+        }
+      }
+      relsRoot.children.splice(relsRoot.children.indexOf(rel), 1);
+    }
   }
 
   /** Fresh unique docPr id for inserted drawings. Seeded once past the

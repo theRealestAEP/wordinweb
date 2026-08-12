@@ -21,6 +21,7 @@ import {
   setImageAltText,
   setImageCrop,
 } from "../src/edit/images.js";
+import { removeDrawingRun } from "../src/edit/editor.js";
 import { insertEndnote, insertFootnote } from "../src/edit/notes.js";
 import { insertDateTimeField, insertField, insertPageField } from "../src/edit/fields.js";
 import { insertBlankPageAt, insertBreakAt, insertCoverPage, sectionContextAt } from "../src/edit/sections.js";
@@ -1098,6 +1099,57 @@ describe("chart insertion", () => {
     expect(drawing.width).toBeCloseTo(480, 0);
     expect(drawing.height).toBeCloseTo(288, 0);
     expect(drawing.srcDrawing).toBeTruthy();
+  });
+
+  it("saves one chart part after a chart is deleted and replaced", () => {
+    // An agent that inserts a chart, cannot build around it, deletes it, and
+    // inserts a replacement used to save TWO chart parts for the one chart the
+    // document shows. Deleting a drawing leaves the part, its rels, its
+    // workbook, the relationship, and the content-type overrides behind; the
+    // save drops the ones nothing references.
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertChartAt(doc, t, DATA);
+
+    const findDrawing = (element: XmlElement): XmlElement | undefined => {
+      if (localName(element.name) === "drawing") return element;
+      for (const item of element.children) {
+        const found = findDrawing(item);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const src = findDrawing(doc.docRoot);
+    if (!src) throw new Error("chart drawing missing");
+    expect(removeDrawingRun(doc, src)).toBe(true);
+
+    const afterDelete = DocxDocument.load(doc.save());
+    expect(afterDelete.pkg.names().filter((n) => /^word\/charts\/chart\d*\.xml$/.test(n))).toEqual([]);
+    expect(afterDelete.pkg.names()).not.toContain("word/embeddings/Microsoft_Excel_Worksheet1.xlsx");
+    expect(afterDelete.pkg.text("word/_rels/document.xml.rels")).not.toContain("charts/chart1.xml");
+    expect(afterDelete.pkg.text("[Content_Types].xml")).not.toContain("charts/chart1.xml");
+
+    // The live document keeps every part, so undo can still restore the
+    // drawing it snapshotted along with the chart it pointed at.
+    expect(doc.pkg.names()).toContain("word/charts/chart1.xml");
+
+    insertChartAt(doc, t, DATA);
+    const afterReplace = DocxDocument.load(doc.save());
+    const parts = afterReplace.pkg.names().filter((n) => /^word\/charts\/chart\d*\.xml$/.test(n));
+    expect(parts).toHaveLength(1);
+    const documentXml = afterReplace.pkg.text("word/document.xml") ?? "";
+    expect((documentXml.match(/<c:chart\b/g) ?? [])).toHaveLength(1);
+    expect(afterReplace.pkg.text(parts[0])).toContain("Quarterly sales");
+  });
+
+  it("keeps a chart part the document still references", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertChartAt(doc, t, DATA);
+    const saved = DocxDocument.load(doc.save());
+    expect(saved.pkg.names()).toContain("word/charts/chart1.xml");
+    expect(saved.pkg.names()).toContain("word/charts/_rels/chart1.xml.rels");
+    expect(saved.pkg.names()).toContain("word/embeddings/Microsoft_Excel_Worksheet1.xlsx");
   });
 
   it("updates a selected chart's ChartML and workbook with undo and redo", async () => {
