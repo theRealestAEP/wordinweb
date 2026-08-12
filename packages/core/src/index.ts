@@ -5,7 +5,7 @@ export type { XmlElement } from "./xml.js";
 export { Package, resolvePartPath, FIXED_ZIP_MTIME } from "./zip.js";
 export { DocxDocument } from "./docx.js";
 export { layoutDocument, layoutDocumentAsync, relayoutHeadersFooters } from "./layout/engine.js";
-export type { LayoutOptions, AsyncLayoutOptions } from "./layout/engine.js";
+export type { LayoutOptions, AsyncLayoutOptions, MergeRecord } from "./layout/engine.js";
 export { clearBreakCache } from "./layout/inline.js";
 export * from "./layout/types.js";
 export {
@@ -213,6 +213,7 @@ export {
   applyFieldResults,
   collectFieldSites,
   computeFieldResults,
+  documentMergeFieldNames,
   updateFields,
 } from "./edit/update-fields.js";
 export type { FieldUpdateOptions } from "./edit/update-fields.js";

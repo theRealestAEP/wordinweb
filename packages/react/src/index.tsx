@@ -76,6 +76,7 @@ import {
   bibliographyEntryCount,
   citationText,
   documentBibliography,
+  documentMergeFieldNames,
   findBibliographyFields,
   insertBibliography,
   refreshBibliographies,
@@ -193,6 +194,7 @@ import {
   type TextMeasurer,
   layoutDocument,
   layoutDocumentAsync,
+  type MergeRecord,
   relayoutHeadersFooters,
   detectMissingFonts,
   type MissingFont,
@@ -331,6 +333,18 @@ export interface DocxViewApi {
    * for the reason insertToc gives.
    */
   refreshTocs(): boolean;
+  /**
+   * Every data column this document's MERGEFIELD fields name, in document
+   * order, once each — headers and footers included.
+   *
+   * A mail-merge UI compares this against its data source's headers to report
+   * which fields the data does not supply. Those keep their «Name» placeholder
+   * while previewing, so the user sees an unbound field instead of a blank.
+   *
+   * Read-only, like the whole preview path: no operation, no undo entry, no
+   * collab traffic. Set the values through the `mergeRecord` prop.
+   */
+  listMergeFieldNames(): string[];
   /** The bibliography sources the document's sources part declares, in part
    * order — what a citation picker and the source manager list. */
   listCitationSources(): BibliographySource[];
@@ -910,6 +924,22 @@ export interface DocxViewProps {
    * render (unavailable, or lacking the document's script) — the page is
    * silently substituting and may differ from Word. Empty array = all good. */
   onMissingFonts?: (missing: MissingFont[]) => void;
+  /**
+   * Mail-merge PREVIEW: the active record's column values, painted into the
+   * document's MERGEFIELD fields. Absent (or undefined) shows the «Name»
+   * placeholders — that is preview "off".
+   *
+   * Nothing is written to the document. The values are resolved as the pages
+   * are laid out, so they cannot reach a saved file, an undo entry or the
+   * collab wire; preview is per-viewer state by construction. Changing this
+   * prop relays the pages without re-parsing the .docx.
+   *
+   * A column the record does NOT carry keeps its «Name» placeholder, so the
+   * user can see which fields the data leaves unbound. Word renders such a
+   * field blank; this is a deliberate divergence. A column that IS present but
+   * empty renders empty and suppresses the field's \b and \f switch texts.
+   */
+  mergeRecord?: MergeRecord;
 }
 
 export interface AgentDocumentViewBinding {
@@ -1089,11 +1119,17 @@ export function DocxView({
   showComments = true,
   revisions = "final",
   onMissingFonts,
+  mergeRecord,
   collab,
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const commentMentionsRef = useRef(commentMentions);
   commentMentionsRef.current = commentMentions;
+  /** Mail-merge preview record, read by every layout call below. Held in a ref
+   * so a record step never re-runs the load effect (which would re-parse the
+   * .docx); the repaint effect further down relays the pages instead. */
+  const mergeRecordRef = useRef(mergeRecord);
+  mergeRecordRef.current = mergeRecord;
   /** The keyboard format painter's clipboard (⌥⌘C copies, ⌥⌘V pastes). */
   const painterRef = useRef<SelectionFormat | null>(null);
   const [error, setError] = useState<Error | null>(null);
@@ -1378,7 +1414,7 @@ export function DocxView({
         if (cancelled || job !== layoutJob || abort.signal.aborted) return;
         const started = performance.now();
         if (preferHeadersOnly && prevLayout) {
-          const fast = relayoutHeadersFooters(doc, prevLayout, measurer);
+          const fast = relayoutHeadersFooters(doc, prevLayout, measurer, mergeRecordRef.current);
           if (fast) {
             if (doc.modelVersion === modelVersion) paintLayout(doc, fast, performance.now() - started);
             layoutAbort = null;
@@ -1395,6 +1431,7 @@ export function DocxView({
           measurer,
           signal: abort.signal,
           windowModel: true,
+          mergeRecord: mergeRecordRef.current,
         }).then((layout) => {
           if (cancelled || job !== layoutJob || abort.signal.aborted) return;
           if (doc.modelVersion !== startModelVersion || layoutDirty) {
@@ -1409,7 +1446,12 @@ export function DocxView({
              * job LANDS instead of being thrown away and restarted forever.
              */
             countJob("bgRepaired");
-            layout = layoutDocument(doc, { measurer, windowModel: true, prev: layout });
+            layout = layoutDocument(doc, {
+              measurer,
+              windowModel: true,
+              prev: layout,
+              mergeRecord: mergeRecordRef.current,
+            });
           }
           layoutDirty = false;
           paintLayout(doc, layout, performance.now() - started);
@@ -1523,11 +1565,12 @@ export function DocxView({
       const started = performance.now();
       const layout =
         headerFooterOnly && prevLayout
-          ? relayoutHeadersFooters(doc, prevLayout, measurer) ??
-            layoutDocument(doc, { measurer, windowModel: true })
+          ? relayoutHeadersFooters(doc, prevLayout, measurer, mergeRecordRef.current) ??
+            layoutDocument(doc, { measurer, windowModel: true, mergeRecord: mergeRecordRef.current })
           : layoutDocument(doc, {
               measurer,
               windowModel: true,
+              mergeRecord: mergeRecordRef.current,
               prev: globalChange ? undefined : prevLayout ?? undefined,
               dirtyHint: globalChange ? undefined : dirtyBlock,
               dirtySource: globalChange ? undefined : dirtySource,
@@ -2429,6 +2472,7 @@ export function DocxView({
             }
             return true;
           },
+          listMergeFieldNames: () => documentMergeFieldNames(doc),
           listCitationSources: () => [...(documentBibliography(doc)?.sources.values() ?? [])],
           getCitationStyle: () => documentBibliography(doc)?.styleName ?? null,
           setCitationStyle: (style) => {
@@ -3835,6 +3879,29 @@ export function DocxView({
     if (repaintTimerRef.current !== undefined) clearTimeout(repaintTimerRef.current);
   }, []);
 
+  /**
+   * Step the mail-merge preview to another record.
+   *
+   * Keyed on the record's CONTENT: a host rebuilds the record object on every
+   * render, and keying on identity would relay the whole document on every
+   * keystroke. The mount paint already used the first record, so the ref starts
+   * equal and the first run of this effect does nothing.
+   *
+   * "doc" scope forces a full relayout. The engine gates reuse on the record
+   * too (LayoutOptions.mergeRecord), because stepping records changes no
+   * blocks — so nothing in the document can tell the incremental path that the
+   * painted text is now stale.
+   */
+  const mergeKey = mergeRecord ? JSON.stringify(mergeRecord) : "";
+  const paintedMergeKeyRef = useRef(mergeKey);
+  useEffect(() => {
+    if (paintedMergeKeyRef.current === mergeKey) return;
+    paintedMergeKeyRef.current = mergeKey;
+    const doc = docCacheRef.current?.doc;
+    const rerender = rerenderRef.current;
+    if (doc && rerender) rerender(doc, { kind: "doc" });
+  }, [mergeKey]);
+
   const hotBtn = (label: string, title: string, onClick: () => void) => (
     <button
       title={title}
@@ -3951,7 +4018,7 @@ export function DocxView({
 }
 
 export { DocxDocument, layoutDocument, renderToDom, printPages } from "@wordinweb/core";
-export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset, WireRange, EncodedCaret, HostShortcutSection } from "@wordinweb/core";
+export type { CoverPageContent, DrawingTool, MergeRecord, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset, WireRange, EncodedCaret, HostShortcutSection } from "@wordinweb/core";
 export { DocxToolbar, ToolbarMenuSelect, INSERT_COMMANDS } from "./toolbar.js";
 export type {
   DocxToolbarProps,

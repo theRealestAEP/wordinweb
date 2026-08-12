@@ -99,6 +99,20 @@ export interface FieldContext {
    * so the painted text and the written cache stay equal). Absent keeps the
    * cache. */
   textStats?: () => { words: number; characters: number };
+  /** MERGEFIELD: the active mail-merge record's value for a column name.
+   *
+   * Installed only by LAYOUT (engine.ts fieldCtx), never by the field-update
+   * pass that writes caches back into the XML — which is what makes a previewed
+   * value structurally unable to reach a saved file rather than merely guarded.
+   *
+   * Two absences are distinct and must stay distinct:
+   *   undefined — the data has no such column. The caller keeps the cache, so
+   *               the «Name» placeholder stays visible. This is a DELIBERATE
+   *               divergence from Word (which renders nothing for an unbound
+   *               field): an unbound field should be seen, not silently blank.
+   *   ""        — the column exists and is empty for this record. Renders
+   *               empty, and suppresses the \b and \f switch texts. */
+  mergeField?: (name: string) => string | undefined;
 }
 
 // ---------- atoms ----------
@@ -4090,6 +4104,51 @@ function buildAtoms(
 
 // ---------- fields ----------
 
+/** The data column a MERGEFIELD instruction names, quoted or bare. Shared with
+ * the host-facing listing (edit/update-fields.ts documentMergeFieldNames) so
+ * the names the UI reports as unmatched are exactly the ones resolved here. */
+export function mergeFieldName(instruction: string): string | undefined {
+  const m = /^MERGEFIELD\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(instruction.trim());
+  return m?.[1] ?? m?.[2];
+}
+
+/** MERGEFIELD `\b` (text inserted BEFORE the result) and `\f` (AFTER). Both
+ * carry either a quoted string or one bare token, like the field name itself. */
+const MERGE_BEFORE_TEXT = /\\b\s+(?:"([^"]*)"|([^\s\\]+))/i;
+const MERGE_AFTER_TEXT = /\\f\s+(?:"([^"]*)"|([^\s\\]+))/i;
+
+function mergeSwitchText(instr: string, re: RegExp): string {
+  const m = re.exec(instr);
+  return m?.[1] ?? m?.[2] ?? "";
+}
+
+/** A MERGEFIELD's `\*` case switch, applied to the composed result (Word's
+ * format switch formats the field RESULT, and the `\b`/`\f` texts are part of
+ * it — so `\b "dear " \* Caps` paints "Dear Alex", not "dear Alex").
+ *
+ * The remainder of each capitalized word is lowered, which is what makes these
+ * switches useful on merge data: normalizing an ALL-CAPS CSV export is the
+ * reason a template carries `\* Caps` in the first place. */
+function mergeCaseFormat(instr: string, text: string): string {
+  const capitalize = (w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  switch (/\\\*\s+([A-Za-z]+)/.exec(instr)?.[1].toLowerCase()) {
+    case "upper":
+      return text.toUpperCase();
+    case "lower":
+      return text.toLowerCase();
+    case "firstcap":
+      return capitalize(text);
+    case "caps":
+      return text.replace(/\S+/g, capitalize);
+    default:
+      // `\* MERGEFORMAT` is a NO-OP by construction, not by omission: it means
+      // "keep the formatting of the previous result", and substituting text
+      // into the field's existing run preserves that run's formatting anyway.
+      // Worth stating because our own inserter writes it (edit/fields.ts).
+      return text;
+  }
+}
+
 export function resolveField(instruction: string, cachedResult: string, ctx: FieldContext, fieldKey?: object): string {
   const instr = instruction.trim();
   const keyword = instr.split(/\s+/)[0]?.toUpperCase();
@@ -4188,13 +4247,26 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
     case "AUTHOR":
       return ctx.author !== undefined ? ctx.author : cachedResult || "";
     case "MERGEFIELD": {
-      // No mail-merge data source is ever attached here, which is Word's
-      // "no data source" state: the field shows its cached result (the last
-      // merged value, or the «Name» placeholder Word wrote on insertion), and
-      // a field that has never held one shows the placeholder.
+      const name = mergeFieldName(instr);
+      // Mail-merge PREVIEW. ctx.mergeField is installed by layout only, so a
+      // previewed value is painted and never written to the XML.
+      const value = name === undefined ? undefined : ctx.mergeField?.(name);
+      if (value !== undefined) {
+        // \b and \f insert their texts only when the value is NOT blank, so a
+        // record with no first name renders "Dear," rather than "Dear ,".
+        if (value === "") return "";
+        return mergeCaseFormat(
+          instr,
+          mergeSwitchText(instr, MERGE_BEFORE_TEXT) + value + mergeSwitchText(instr, MERGE_AFTER_TEXT),
+        );
+      }
+      // No data source attached, or the data has no such column — Word's "no
+      // data source" state: the field shows its cached result (the last merged
+      // value, or the «Name» placeholder Word wrote on insertion), and a field
+      // that has never held one shows the placeholder. Keeping the placeholder
+      // for an UNBOUND column diverges from Word deliberately, so the user sees
+      // which fields the data does not supply. See FieldContext.mergeField.
       if (cachedResult) return cachedResult;
-      const m = /^MERGEFIELD\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(instr);
-      const name = m?.[1] ?? m?.[2];
       return name ? `«${name}»` : "";
     }
     case "CITATION": {

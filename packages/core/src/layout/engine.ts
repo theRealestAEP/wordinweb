@@ -62,10 +62,31 @@ const INITIAL_MODEL_WINDOW_PAGES = 12;
 const LOOKAHEAD_BREAK = { cache: true, metricsOnly: true } as const;
 const PAINTED_LOOKAHEAD_BREAK = { cache: true } as const;
 
+/** One mail-merge data record: column name → this record's value. The host
+ * parses the data file and hands over plain strings; the engine never learns a
+ * path, a connection string or a query. */
+export type MergeRecord = Readonly<Record<string, string>>;
+
+/** Identity of a merge record for the incremental-reuse gate below.
+ *
+ * Content, not object identity: a React host rebuilds the record object on
+ * every render, and gating on identity would defeat incremental layout for
+ * every keystroke typed while preview is on. Two records with equal content lay
+ * out identically, so equal keys are always safe to reuse. Key order follows
+ * the CSV's column order, which is stable for one file; if it ever were not,
+ * the only cost is a full layout that was not needed. */
+function mergeRecordKey(record: MergeRecord | undefined): string {
+  return record ? JSON.stringify(record) : "";
+}
+
 export interface LayoutOptions {
   measurer?: TextMeasurer;
   /** Retain positioned items only for a viewport-sized page window. */
   windowModel?: boolean;
+  /** Mail-merge PREVIEW: the active record's column values, substituted into
+   * MERGEFIELD fields as they are painted. Nothing is written to the document —
+   * see FieldContext.mergeField. Absent renders the «Name» placeholders. */
+  mergeRecord?: MergeRecord;
   /** Previous layout result (from an earlier layoutDocument call on the same
    * document). Enables incremental relayout: pages whose input blocks and
    * lead-in state are unchanged are reused instead of re-laid. The engine falls
@@ -101,10 +122,11 @@ export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): 
       measurer,
       undefined,
       options.windowModel === true,
+      options.mergeRecord,
     ).runIncremental(options.prev, options.dirtyHint, options.dirtySource);
     if (attempt) return attempt;
   }
-  return layoutWithBodyPageTotal(doc, measurer, options.windowModel === true);
+  return layoutWithBodyPageTotal(doc, measurer, options.windowModel === true, options.mergeRecord);
 }
 
 function bodyHasPageTotal(el: XmlElement): boolean {
@@ -114,13 +136,18 @@ function bodyHasPageTotal(el: XmlElement): boolean {
   return el.children.some(bodyHasPageTotal);
 }
 
-function layoutWithBodyPageTotal(doc: DocxDocument, measurer: TextMeasurer, windowModel: boolean): LayoutResult {
-  let result = new Engine(doc, measurer, undefined, windowModel).run();
+function layoutWithBodyPageTotal(
+  doc: DocxDocument,
+  measurer: TextMeasurer,
+  windowModel: boolean,
+  mergeRecord?: MergeRecord,
+): LayoutResult {
+  let result = new Engine(doc, measurer, undefined, windowModel, mergeRecord).run();
   if (!bodyHasPageTotal(doc.docRoot)) return result;
 
   for (let pass = 0; pass < 2; pass++) {
     const total = result.totalPages;
-    result = new Engine(doc, measurer, total, windowModel).run();
+    result = new Engine(doc, measurer, total, windowModel, mergeRecord).run();
     if (result.totalPages === total) break;
   }
   return result;
@@ -134,8 +161,9 @@ export function relayoutHeadersFooters(
   doc: DocxDocument,
   prev: LayoutResult,
   measurer: TextMeasurer = createMeasurer(),
+  mergeRecord?: MergeRecord,
 ): LayoutResult | null {
-  return new Engine(doc, measurer).runHeadersFootersOnly(prev);
+  return new Engine(doc, measurer, undefined, false, mergeRecord).runHeadersFootersOnly(prev);
 }
 
 /** Full layout that yields between top-level blocks for large interactive
@@ -147,7 +175,7 @@ export async function layoutDocumentAsync(
 ): Promise<LayoutResult> {
   options.signal?.throwIfAborted();
   const measurer = options.measurer ?? createMeasurer();
-  const engine = new Engine(doc, measurer, undefined, options.windowModel === true);
+  const engine = new Engine(doc, measurer, undefined, options.windowModel === true, options.mergeRecord);
   if (!engine.canRunAsync()) {
     await yieldToMain(options.signal);
     return layoutDocument(doc, options);
@@ -164,6 +192,7 @@ export async function layoutDocumentAsync(
       measurer,
       total,
       options.windowModel === true,
+      options.mergeRecord,
     ).runAsync(options.signal, sliceMs);
     if (result.totalPages === total) break;
   }
@@ -369,6 +398,15 @@ export interface IncrData {
   seqAssigned: WeakMap<object, string>;
   refFieldPosition: WeakMap<object, "above" | "below">;
   refFieldParaNumber: WeakMap<object, string>;
+  /** Mail-merge record this layout painted (mergeRecordKey; "" for none).
+   *
+   * Stepping to the next record changes NO blocks — the document XML is
+   * byte-identical, which is the whole point of resolving merge values at
+   * layout time. So every other signal the incremental path checks says
+   * "reuse is safe", and it would repaint the PREVIOUS record's values under a
+   * counter reading "Record 3 of 40". This is the one input to the painted
+   * output that lives outside the document, so it has to be gated explicitly. */
+  mergeKey: string;
 }
 
 interface HeaderFooterData {
@@ -673,6 +711,7 @@ class Engine {
     private measurer: TextMeasurer,
     private knownTotalPages?: number,
     private windowModel = false,
+    private mergeRecord?: MergeRecord,
   ) {}
 
   run(): LayoutResult {
@@ -804,6 +843,7 @@ class Engine {
         result._incr as IncrData,
         this.pages,
         fontSamples,
+        this.mergeRecord,
       );
     }
     return result;
@@ -1041,6 +1081,7 @@ class Engine {
         seqAssigned: this.seqAssigned,
         refFieldPosition: this.refFieldPosition,
         refFieldParaNumber: this.refFieldParaNumber,
+        mergeKey: mergeRecordKey(this.mergeRecord),
       } satisfies IncrData;
     }
     if (this.windowActive && result._incr && pages.length > 20) {
@@ -1056,6 +1097,7 @@ class Engine {
           incremental,
           this.pages,
           this.windowFontSamples,
+          this.mergeRecord,
         );
       }
     }
@@ -1634,6 +1676,10 @@ class Engine {
     // undo replaces the XML descendants). Plain in-place text edits keep the
     // generation stable and are the incremental fast path.
     if (!sameModel) return fallback("model-version");
+    // Mail-merge preview: the active record is an input to the painted text
+    // that is NOT in the document, so no block signature can see it change.
+    // Stepping records must therefore force a full layout. See IncrData.mergeKey.
+    if (inc.mergeKey !== mergeRecordKey(this.mergeRecord)) return fallback("merge-record");
     // A retained incremental result proves the previous model was eligible.
     // An in-place text edit cannot introduce a disqualifying structural field,
     // frame, section, or note, so avoid rescanning the complete XML tree.
@@ -1964,6 +2010,7 @@ class Engine {
         seqAssigned: this.seqAssigned,
         refFieldPosition: this.refFieldPosition,
         refFieldParaNumber: this.refFieldParaNumber,
+        mergeKey: mergeRecordKey(this.mergeRecord),
       } satisfies IncrData,
       _incremental: true,
       _incrementalStructuralPrefixEnd: structuralPrefixEnd,
@@ -1981,6 +2028,7 @@ class Engine {
         result._incr as IncrData,
         outInternal,
         fontSamples,
+        this.mergeRecord,
       );
     }
     if (result._window) {
@@ -2583,6 +2631,14 @@ class Engine {
       styleRefBody: (_name, key) => engine.resolveBodyStyleRef(key),
       citation: (instruction) => engine.resolveCitation(instruction),
       textStats: () => engine.resolveTextStats(),
+      // Mail-merge preview. Own-property lookup, so a column named
+      // "constructor" or "toString" reads as absent rather than as a function
+      // off Object.prototype. Absent column -> undefined -> the «Name»
+      // placeholder survives; present-but-empty -> "" -> renders empty.
+      mergeField: (name) => {
+        const record = engine.mergeRecord;
+        return record && Object.prototype.hasOwnProperty.call(record, name) ? record[name] : undefined;
+      },
     };
   }
 
@@ -9269,6 +9325,7 @@ class LayoutWindowController implements LayoutWindow {
     private data: IncrData,
     private pages: InternalPage[],
     private fontSamples = new Map<string, LayoutFontSample>(),
+    private mergeRecord?: MergeRecord,
   ) {
     this.retained = new Set(
       pages.flatMap((page, index) => page.discarded ? [] : [index]),
@@ -9291,6 +9348,7 @@ class LayoutWindowController implements LayoutWindow {
         this.measurer,
         undefined,
         true,
+        this.mergeRecord,
       ).materializeRange(this.data, start, end);
       const byIndex = new Map(rebuilt.map((page) => [page.physIndex - 1, page]));
       for (let index = start; index <= end; index++) {

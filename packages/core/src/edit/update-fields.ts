@@ -2,7 +2,7 @@ import { citationText, documentBibliography } from "../citations.js";
 import { evaluateTableFormula } from "./formula.js";
 import { documentTextStatistics, type TextStatistics } from "../word-count.js";
 import { DocxDocument } from "../docx.js";
-import { FieldContext, resolveField } from "../layout/inline.js";
+import { FieldContext, mergeFieldName, resolveField } from "../layout/inline.js";
 import { LayoutResult } from "../layout/types.js";
 import { bodyStyleRefText } from "../style-ref.js";
 import { Block, FieldContent, Run } from "../model.js";
@@ -173,6 +173,24 @@ export function collectFieldSites(doc: DocxDocument): FieldSite[] {
   for (const header of doc.headers.values()) visitBlocks(header.blocks, singleValued);
   for (const footer of doc.footers.values()) visitBlocks(footer.blocks, singleValued);
   return sites;
+}
+
+/**
+ * Every data column this document's MERGEFIELD fields name, in document order,
+ * once each. A host uses it to tell the user which fields its data source does
+ * not supply — those keep their «Name» placeholder in preview rather than
+ * rendering blank, which is this engine's deliberate divergence from Word.
+ *
+ * Read-only: it reads instructions and writes nothing.
+ */
+export function documentMergeFieldNames(doc: DocxDocument): string[] {
+  const names: string[] = [];
+  for (const site of collectFieldSites(doc)) {
+    if (keywordOf(site.field.instruction) !== "MERGEFIELD") continue;
+    const name = mergeFieldName(site.field.instruction);
+    if (name && !names.includes(name)) names.push(name);
+  }
+  return names;
 }
 
 // ---------------------------------------------------------------------------
