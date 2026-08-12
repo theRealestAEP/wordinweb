@@ -14,9 +14,13 @@
  * - Collapsed — exactly one line. Controls that do not fit are hidden, lowest
  *   fold priority first, and the chevron's own width is reserved before the
  *   first fit test so the answer cannot change when the chevron appears.
- * - Expanded — nothing is hidden; the controls wrap onto as many full-width
- *   lines as they need. The lines are balanced (see `balancedWidth`) so the
- *   last one is never left holding one stray control.
+ * - Expanded — nothing is hidden; the controls wrap onto as many lines as they
+ *   need. The lines are balanced (see `balancedWidth`) so the last one is never
+ *   left holding one stray control.
+ *
+ * Expanding costs the bar a whole line, so this module also decides whether
+ * the chevron is offered at all — see `MIN_REVEAL`. Both rules exist because
+ * the affordance was reported for advertising tools and delivering a gap.
  */
 
 /** One measured control on the bar, in document order. */
@@ -40,9 +44,9 @@ export interface RibbonPlan {
   hidden: boolean[];
   /** Expanded: the controls take full-width lines below the tab strip. */
   stacked: boolean;
-  /** The controls do not all fit on one line beside the tabs. */
-  overflows: boolean;
-  /** How many controls the collapsed line hides. */
+  /** Offer the expand chevron: there is a line's worth of tools behind it. */
+  offerExpand: boolean;
+  /** How many controls (dividers do not count) the collapsed line hides. */
   hiddenCount: number;
   /**
    * Width to constrain the wrapping container to when expanded, or 0 to leave
@@ -135,46 +139,27 @@ function trimSeparators(items: RibbonItem[], hidden: boolean[]): void {
 }
 
 /**
- * Decide what the bar shows.
+ * The fewest folded controls worth offering the chevron for.
  *
- * `inlineAvailable <= 0` means nothing has been measured yet (a server render,
- * or jsdom, which has no layout): the honest answer there is to hide nothing,
- * because hiding a control the code cannot measure is how controls disappear
- * on a screen that had room for them.
+ * Expanding costs the bar a whole line whatever it reveals, so the trade is
+ * only worth making when the line comes back full of tools. Measured in the
+ * app across a 1600→700px sweep: the Home tab folds two controls at 1600px
+ * (the borders menu and the multilevel list gallery, the last two on the
+ * line) and five by 1500px; the Insert tab folds fifteen even at 1600px.
+ * Spending a line of the window on those two was the "it does nothing except
+ * add a weird space" the affordance was reported for, so the band where a
+ * handful fold is the band where the bar says nothing.
  */
-export function planRibbon(items: RibbonItem[], space: RibbonSpace, expanded: boolean): RibbonPlan {
+export const MIN_REVEAL = 4;
+
+/** Hide controls, lowest fold priority first, until the line fits `budget`. */
+function foldToFit(items: RibbonItem[], gap: number, budget: number): boolean[] {
   const hidden = new Array<boolean>(items.length).fill(false);
-  const idle: RibbonPlan = { hidden, stacked: false, overflows: false, hiddenCount: 0, rowMaxWidth: 0, needsScroll: false };
-  if (items.length === 0 || space.inlineAvailable <= 0) return idle;
-  if (lineWidth(items, hidden, space.gap) <= space.inlineAvailable) return idle;
-
-  if (expanded) {
-    const widths = items.map((item) => item.width);
-    // Full-width lines below the tabs, or narrower lines beside them?
-    // Stacking buys width but spends a whole line on the tab strip, so it only
-    // pays when it saves at least that line. At 1300px the Home tab wraps onto
-    // two lines either way, and stacking there made a three-line bar whose
-    // controls used half of it — width the beside layout spends on controls.
-    const beside = lineCount(widths, space.gap, space.inlineAvailable);
-    const stacked = 1 + lineCount(widths, space.gap, space.fullAvailable) <= beside;
-    const room = stacked ? space.fullAvailable : space.inlineAvailable;
-    trimSeparators(items, hidden);
-    return {
-      hidden,
-      stacked,
-      overflows: true,
-      hiddenCount: hidden.filter(Boolean).length,
-      rowMaxWidth: balancedWidth(widths, space.gap, room),
-      needsScroll: Math.max(...widths) > room,
-    };
-  }
-
-  const budget = space.inlineAvailable - space.reserve;
   const order = items
     .map((_, i) => i)
     .sort((a, b) => items[b].fold - items[a].fold || b - a);
   let next = 0;
-  while (next < order.length && lineWidth(items, hidden, space.gap) > budget) {
+  while (next < order.length && lineWidth(items, hidden, gap) > budget) {
     hidden[order[next++]] = true;
   }
   // Folding stops at the first control that fits, which can leave a wide
@@ -185,17 +170,71 @@ export function planRibbon(items: RibbonItem[], space: RibbonSpace, expanded: bo
   for (let k = order.length - 1; k >= 0; k--) {
     const index = order[k];
     if (!hidden[index] || items[index].separator) continue;
-    if (lineWidth(items, hidden, space.gap) + space.gap + items[index].width <= budget) {
+    if (lineWidth(items, hidden, gap) + gap + items[index].width <= budget) {
       hidden[index] = false;
     }
   }
   trimSeparators(items, hidden);
+  return hidden;
+}
+
+/** Folded controls a user would call tools: dividers are not tools. */
+function foldedControls(items: RibbonItem[], hidden: boolean[]): number {
+  let count = 0;
+  for (let i = 0; i < items.length; i++) if (hidden[i] && !items[i].separator) count++;
+  return count;
+}
+
+/**
+ * Decide what the bar shows.
+ *
+ * `inlineAvailable <= 0` means nothing has been measured yet (a server render,
+ * or jsdom, which has no layout): the honest answer there is to hide nothing,
+ * because hiding a control the code cannot measure is how controls disappear
+ * on a screen that had room for them.
+ */
+export function planRibbon(items: RibbonItem[], space: RibbonSpace, expanded: boolean): RibbonPlan {
+  const none = new Array<boolean>(items.length).fill(false);
+  const idle: RibbonPlan = { hidden: none, stacked: false, offerExpand: false, hiddenCount: 0, rowMaxWidth: 0, needsScroll: false };
+  if (items.length === 0 || space.inlineAvailable <= 0) return idle;
+  if (lineWidth(items, none, space.gap) <= space.inlineAvailable) return idle;
+
+  // The one-line bar, with room kept at its end for the chevron.
+  const folded = foldToFit(items, space.gap, space.inlineAvailable - space.reserve);
+  const reveal = foldedControls(items, folded);
+  if (reveal < MIN_REVEAL) {
+    // Too few to spend a line on: no chevron, and therefore no room kept for
+    // one, which puts some of those controls back on the bar. Widening the
+    // budget can only un-fold, never fold, so `reveal` cannot climb back over
+    // the threshold and the answer cannot flip between the two fits.
+    const tight = foldToFit(items, space.gap, space.inlineAvailable);
+    return { ...idle, hidden: tight, hiddenCount: foldedControls(items, tight) };
+  }
+  if (!expanded) {
+    return { hidden: folded, stacked: false, offerExpand: true, hiddenCount: reveal, rowMaxWidth: 0, needsScroll: false };
+  }
+
+  const widths = items.map((item) => item.width);
+  // Full-width lines below the tabs, or narrower lines beside them?
+  //
+  // Stacking buys width but spends a whole line on the tab strip — a line
+  // holding a row of tabs and then a void the width of the window, which is
+  // the "random weird space" this bar was reported for. So it has to SAVE a
+  // line, not merely break even: on a tie the controls stay beside the tabs,
+  // where the first line is the collapsed line the user was already looking at
+  // and the extra tools land under it. Only when the tab strip has eaten most
+  // of the line — a narrow window — does full width win a line back.
+  const beside = lineCount(widths, space.gap, space.inlineAvailable);
+  const stacked = 1 + lineCount(widths, space.gap, space.fullAvailable) < beside;
+  const room = stacked ? space.fullAvailable : space.inlineAvailable;
+  const hidden = new Array<boolean>(items.length).fill(false);
+  trimSeparators(items, hidden);
   return {
     hidden,
-    stacked: false,
-    overflows: true,
-    hiddenCount: hidden.filter(Boolean).length,
-    rowMaxWidth: 0,
-    needsScroll: false,
+    stacked,
+    offerExpand: true,
+    hiddenCount: reveal,
+    rowMaxWidth: balancedWidth(widths, space.gap, room),
+    needsScroll: Math.max(...widths) > room,
   };
 }
