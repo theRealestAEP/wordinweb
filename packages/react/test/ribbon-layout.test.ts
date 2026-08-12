@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { balancedWidth, lineCount, planRibbon, type RibbonItem } from "../src/ribbon-layout.js";
+import { MIN_REVEAL, balancedWidth, lineCount, planRibbon, type RibbonItem } from "../src/ribbon-layout.js";
 
 /**
  * The arithmetic behind the toolbar's two states. These are the guarantees a
  * width sweep in a real window is supposed to demonstrate, stated as maths so
  * a regression names itself instead of showing up as a screenshot nobody
- * looked at: nothing is ever placed where it does not fit, and the expanded
- * bar never ends on a line holding one stray control.
+ * looked at: nothing is ever placed where it does not fit, the expanded bar
+ * never ends on a line holding one stray control, and the chevron is only
+ * offered when the line it costs comes back full of tools.
  */
 
 const GAP = 2;
@@ -70,7 +71,7 @@ describe("the collapsed line", () => {
   it("never places a control where it does not fit, at any width", () => {
     for (const available of AVAILABLE) {
       const plan = collapsed(HOME, available);
-      const budget = plan.overflows ? available - RESERVE : available;
+      const budget = plan.offerExpand ? available - RESERVE : available;
       expect(visibleWidth(HOME, plan.hidden), `${available}px`).toBeLessThanOrEqual(budget);
     }
   });
@@ -86,7 +87,7 @@ describe("the collapsed line", () => {
 
   it("folds nothing when everything fits, and offers no chevron", () => {
     const plan = collapsed(HOME, 2000);
-    expect(plan.overflows).toBe(false);
+    expect(plan.offerExpand).toBe(false);
     expect(plan.hiddenCount).toBe(0);
     expect(plan.hidden.some(Boolean)).toBe(false);
   });
@@ -107,8 +108,41 @@ describe("the collapsed line", () => {
     // jsdom and server renders have no layout. Folding on a width of zero
     // would hide every control on a screen that had room for all of them.
     const plan = collapsed(HOME, 0);
-    expect(plan.overflows).toBe(false);
+    expect(plan.offerExpand).toBe(false);
     expect(plan.hidden.some(Boolean)).toBe(false);
+  });
+
+  it("offers no chevron for a line's worth of nothing, and spends the reserve on tools", () => {
+    // The reported bug, as arithmetic. A hair too narrow folds one or two of
+    // the least-used controls; expanding for them would spend a whole line of
+    // the window on a line that comes back nearly empty. So the bar keeps
+    // quiet — and since no chevron is coming, the width kept free for one
+    // goes back to the controls.
+    const total = HOME.reduce((sum, item) => sum + item.width, 0) + GAP * (HOME.length - 1);
+    const plan = collapsed(HOME, total - 20);
+    expect(plan.offerExpand, "no chevron for one control").toBe(false);
+    expect(plan.hiddenCount).toBeLessThan(MIN_REVEAL);
+    expect(plan.hiddenCount, "something did have to fold").toBeGreaterThan(0);
+    expect(visibleWidth(HOME, plan.hidden)).toBeLessThanOrEqual(total - 20);
+    // The whole line is the budget: the bar keeps no seat for a chevron it is
+    // not going to show, so it lands on the same line a bar with no chevron
+    // at all would.
+    const noSeat = planRibbon(
+      HOME,
+      { gap: GAP, inlineAvailable: total - 20, fullAvailable: total - 20, reserve: 0 },
+      false,
+    );
+    expect(plan.hidden).toEqual(noSeat.hidden);
+  });
+
+  it("offers the chevron once a line's worth of tools is behind it", () => {
+    const total = HOME.reduce((sum, item) => sum + item.width, 0) + GAP * (HOME.length - 1);
+    const plan = collapsed(HOME, total - 300);
+    expect(plan.offerExpand).toBe(true);
+    expect(plan.hiddenCount).toBeGreaterThanOrEqual(MIN_REVEAL);
+    // Dividers are not tools: the count is what the chevron's label promises.
+    expect(plan.hiddenCount).toBeLessThan(plan.hidden.filter(Boolean).length);
+    expect(visibleWidth(HOME, plan.hidden)).toBeLessThanOrEqual(total - 300 - RESERVE);
   });
 
   it("answers the same at a width however the window got there", () => {
@@ -133,6 +167,18 @@ describe("the expanded lines", () => {
       true,
     );
     expect(beside.stacked).toBe(false);
+    // A TIE is not a saving. Two lines beside the tabs, or a tab line plus one
+    // full-width line: both are two lines tall, but the stacked one spends its
+    // first on a row of tabs and a window's width of empty bar. That void is
+    // what the expand chevron was reported for, so ties stay beside the tabs.
+    const tie = planRibbon(
+      HOME,
+      { gap: GAP, inlineAvailable: Math.ceil(total / 2) + 40, fullAvailable: total + 10, reserve: RESERVE },
+      true,
+    );
+    expect(lineCount(widths, GAP, Math.ceil(total / 2) + 40), "two lines beside").toBe(2);
+    expect(1 + lineCount(widths, GAP, total + 10), "two lines stacked").toBe(2);
+    expect(tie.stacked, "a tie stays beside the tabs").toBe(false);
     // Narrow bar: the tab strip has eaten most of the line, and full width
     // saves lines, so the controls take the bar's whole width below it.
     const stacked = planRibbon(
@@ -153,7 +199,7 @@ describe("the expanded lines", () => {
     );
     // Every control stays; only a divider left dangling at the end goes.
     expect(HOME.filter((item, i) => plan.hidden[i] && !item.separator)).toEqual([]);
-    expect(plan.overflows).toBe(true);
+    expect(plan.offerExpand).toBe(true);
     // Same number of lines as the plain wrap, in less width: the leftovers
     // that a greedy wrap dumps on the last line are spread over all of them.
     expect(lineCount(widths, GAP, plan.rowMaxWidth)).toBe(lineCount(widths, GAP, available));

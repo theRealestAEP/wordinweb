@@ -74,6 +74,10 @@ function lineWidth(container: HTMLElement): number {
   return shown.reduce((sum, el) => sum + controlWidth(el), 0) + 2 * Math.max(0, shown.length - 1);
 }
 
+function chevron(container: HTMLElement): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>("[data-dxw-toolbar-expand]");
+}
+
 /** The controls on the bar, named by their tooltip. */
 function names(container: HTMLElement): string[] {
   return visibleControls(container).map(
@@ -102,8 +106,10 @@ describe("the bar across a width sweep", () => {
       await selectTab(t.container, tabName);
       for (const width of [...WIDTHS, ...[...WIDTHS].reverse()]) {
         await resizeTo(t.container, width);
-        const folded = ribbon(t.container).querySelectorAll("[data-dxw-folded]").length > 0;
-        const room = availableWidth(t.container) - (folded ? RESERVE : 0);
+        // The seat at the end of the line is kept for a chevron that is going
+        // to be there. When the bar decides not to offer one, the line gets
+        // that width back, and the controls are allowed to use it.
+        const room = availableWidth(t.container) - (chevron(t.container) ? RESERVE : 0);
         expect(lineWidth(t.container), `${tabName} at ${width}px`).toBeLessThanOrEqual(room);
       }
       await t.unmount();
@@ -132,6 +138,29 @@ describe("the bar across a width sweep", () => {
     }
     // And the way to everything else is offered exactly once.
     expect(t.container.querySelectorAll("[data-dxw-toolbar-expand]").length).toBe(1);
+    await t.unmount();
+  });
+
+  it("keeps the tab strip's line in use rather than emptying it", async () => {
+    // What the user saw and reported: expanding moved every control onto a
+    // line of its own, leaving the tab strip alone on the first line with a
+    // window's width of empty bar beside it. The controls only leave that
+    // line when going full-width saves the bar a whole line.
+    const t = await mountToolbar();
+    await selectTab(t.container, "home");
+    for (const width of [1500, 1400, 1300, 1200]) {
+      await resizeTo(t.container, width);
+      const toggle = chevron(t.container);
+      if (!toggle) continue;
+      await act(async () => {
+        toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+      expect(visibleControls(t.container).length, `controls beside the tabs at ${width}px`).toBeGreaterThan(0);
+      expect(ribbon(t.container).parentElement!.style.flex, `${width}px stays beside the tabs`).toBe("1 1 0%");
+      await act(async () => {
+        chevron(t.container)!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+    }
     await t.unmount();
   });
 

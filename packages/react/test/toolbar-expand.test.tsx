@@ -3,15 +3,16 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { DocxViewApi } from "../src/index.js";
+import { MIN_REVEAL } from "../src/ribbon-layout.js";
 import { DocxToolbar } from "../src/toolbar.js";
 import { measureLikeABrowser, resizeTo, ribbon, visibleControls } from "./toolbar-measure.js";
 
 /**
  * The expand chevron — the toolbar's one and only "there is more" affordance
  * since the ⋮ overflow menu was removed. What is checked: it appears only
- * when controls are actually folded away, expanding puts every control of the
- * tab straight into the bar (no popover, nothing behind a menu), and the
- * choice survives a remount.
+ * when there is a line's worth of tools behind it, expanding puts every
+ * control of the tab straight into the bar (no popover, nothing behind a
+ * menu), and the choice survives a remount.
  *
  * jsdom has no layout, so control widths are stubbed (see toolbar-measure).
  * Without that the bar measures a width of zero, correctly refuses to fold
@@ -75,6 +76,14 @@ function control(container: HTMLElement, tip: string): HTMLElement | undefined {
 
 function chevron(container: HTMLElement): HTMLButtonElement | null {
   return container.querySelector<HTMLButtonElement>("[data-dxw-toolbar-expand]");
+}
+
+/** Folded controls a user would call tools: the dividers between them are
+ * folded too, and counting those is how "Show 4 more tools" once meant two. */
+function foldedControls(container: HTMLElement): number {
+  return Array.from(ribbon(container).querySelectorAll<HTMLElement>("[data-dxw-folded]")).filter(
+    (el) => el.dataset.dxwSep === undefined,
+  ).length;
 }
 
 async function openInsertTab(container: HTMLElement) {
@@ -145,6 +154,30 @@ describe("the toolbar expand chevron", () => {
     const t = await mountToolbar(3000);
     expect(chevron(t.container), "no chevron on a wide bar").toBeNull();
     expect(ribbon(t.container).querySelectorAll("[data-dxw-folded]").length).toBe(0);
+    await t.unmount();
+  });
+
+  it("offers no chevron when expanding would spend a line on one or two controls", async () => {
+    // The reported bug: just below the width where everything fits, the bar
+    // folded a control or two and then advertised them — and clicking cost a
+    // whole line of the window to put two icons back. The affordance waits
+    // until it has a line's worth of tools to give.
+    //
+    // Swept rather than pinned to one width, so the promise holds everywhere:
+    // a chevron on the bar always means MIN_REVEAL controls behind it.
+    const t = await mountToolbar();
+    let sawTheQuietBand = false;
+    for (let width = 2000; width >= 700; width -= 20) {
+      await resizeTo(t.container, width);
+      const waiting = foldedControls(t.container);
+      if (chevron(t.container)) {
+        expect(waiting, `chevron at ${width}px promises tools`).toBeGreaterThanOrEqual(MIN_REVEAL);
+      } else {
+        expect(waiting, `silent bar at ${width}px hides little`).toBeLessThan(MIN_REVEAL);
+        if (waiting > 0) sawTheQuietBand = true;
+      }
+    }
+    expect(sawTheQuietBand, "the sweep crossed the band the bug lived in").toBe(true);
     await t.unmount();
   });
 });

@@ -6242,7 +6242,7 @@ export function DocxToolbar({
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const trailingRef = useRef<HTMLDivElement | null>(null);
   const ribbonRef = useRef<HTMLDivElement | null>(null);
-  const [overflows, setOverflows] = useState(false);
+  const [canExpand, setCanExpand] = useState(false);
   const [hiddenCount, setHiddenCount] = useState(0);
   // Bumped when the bar's own width changes, to re-run the layout effect.
   const [, remeasure] = useReducer((n: number) => n + 1, 0);
@@ -6419,7 +6419,7 @@ export function DocxToolbar({
     });
     if (plan.rowMaxWidth > 0) line.style.maxWidth = `${plan.rowMaxWidth}px`;
     if (plan.needsScroll) line.style.overflowX = "auto";
-    if (plan.overflows !== overflows) setOverflows(plan.overflows);
+    if (plan.offerExpand !== canExpand) setCanExpand(plan.offerExpand);
     // A nested line is already a line of its own, so the bar always gives it
     // one rather than squeezing it in beside the tabs.
     const wantsStack = nested !== null || plan.stacked;
@@ -7148,10 +7148,12 @@ export function DocxToolbar({
       </div>
       {/*
         * The one "there is more" affordance on this bar. It appears only when
-        * controls are actually folded away, so at a width where everything
-        * fits there is no chrome offering to reveal nothing.
+        * there is a line's worth of tools behind it (see MIN_REVEAL): at a
+        * width where everything fits, and at a width where expanding would
+        * spend a line to reveal one or two controls, there is no chrome
+        * offering to reveal nothing.
         */}
-      {overflows && (
+      {canExpand && (
         <button
           type="button"
           title={expandLabel}
