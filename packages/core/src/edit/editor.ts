@@ -217,6 +217,8 @@ const REVISION_LABEL: Record<RevisionKind, { text: string; ink: string }> = {
   markInsertion: { text: "Suggested paragraph split", ink: "#188038" },
   deletion: { text: "Suggested deletion", ink: "#D93025" },
   markDeletion: { text: "Suggested paragraph merge", ink: "#D93025" },
+  rowInsertion: { text: "Suggested row insertion", ink: "#188038" },
+  rowDeletion: { text: "Suggested row deletion", ink: "#D93025" },
   runFormat: { text: "Suggested text formatting", ink: "#1a73e8" },
   paragraphFormat: { text: "Suggested paragraph formatting", ink: "#1a73e8" },
   tableFormat: { text: "Suggested table formatting", ink: "#1a73e8" },

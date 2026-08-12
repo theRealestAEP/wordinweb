@@ -176,11 +176,14 @@ describe("tracked table formatting (w:tblPrChange)", () => {
     expect(tblPrXml(doc)).toBe(`<w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr>`);
   });
 
-  it("rejects a table that had no properties by removing the tblPr", () => {
+  it("rejects a table that had no properties by emptying the tblPr, not removing it", () => {
+    // CT_Tbl requires w:tblPr (minOccurs=1) even when it carries nothing, so
+    // an emptied one stays where an emptied w:rPr or w:pPr would be dropped.
+    // Removing it leaves a table Word will not open.
     const doc = load(tableXml(2, 2));
     setTableLook(doc, tblOf(doc), { firstRow: false }, meta());
     rejectRevision(doc, collectRevisions(doc)[0]);
-    expect(tblOf(doc).children.some((c) => localName(c.name) === "tblPr")).toBe(false);
+    expect(tblPrXml(doc)).toBe(`<w:tblPr/>`);
   });
 
   it("records table-scoped borders and cell margins on the table", () => {
@@ -189,7 +192,7 @@ describe("tracked table formatting (w:tblPrChange)", () => {
     setTableCellMargins(doc, findT(doc, "r0c0"), "table", { left: 6 }, meta());
     expect(collectRevisions(doc).map((r) => r.kind)).toEqual(["tableFormat"]);
     rejectAllRevisions(doc);
-    expect(tblOf(doc).children.some((c) => localName(c.name) === "tblPr")).toBe(false);
+    expect(tblPrXml(doc)).toBe(`<w:tblPr/>`);
   });
 });
 
@@ -239,18 +242,50 @@ describe("tracked row formatting (w:trPrChange)", () => {
       `<w:trPr><w:tblHeader/><w:ins w:id="90" w:author="Word" w:date="2026-01-01T00:00:00Z"/>` +
         `<w:trPrChange w:id="1" w:author="Alex" w:date="2026-07-12T00:00:00Z"><w:trPr/></w:trPrChange></w:trPr>`,
     );
-    rejectAllRevisions(doc);
+    // Reject only the FORMATTING revision: the row's own structural revision
+    // is a separate one, and reviewing the formatting must not disturb it.
+    rejectRevision(doc, collectRevisions(doc).find((r) => r.kind === "rowFormat")!);
     expect(rowXml(doc, 0)).toContain(`<w:trPr><w:ins w:id="90" w:author="Word" w:date="2026-01-01T00:00:00Z"/></w:trPr>`);
   });
 
-  it("never collects a row's structural w:ins as a run-level revision", () => {
+  it("collects a row's structural w:ins as a ROW revision, never a run-level one", () => {
     const doc = load(
       `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>` +
         `<w:tr><w:trPr><w:ins w:id="90" w:author="Word" w:date="2026-01-01T00:00:00Z"/></w:trPr>` +
-        `<w:tc><w:tcPr/>${p("r0c0")}</w:tc></w:tr></w:tbl>`,
+        `<w:tc><w:tcPr/>${p("r0c0")}</w:tc></w:tr>` +
+        `<w:tr><w:tc><w:tcPr/>${p("r1c0")}</w:tc></w:tr></w:tbl>`,
     );
-    // Unwrapping it as an "insertion" would splice its children into the trPr.
-    expect(collectRevisions(doc)).toHaveLength(0);
+    // "rowInsertion", never "insertion": unwrapping it as a run-level revision
+    // would splice its children into the trPr.
+    expect(collectRevisions(doc).map((r) => r.kind)).toEqual(["rowInsertion"]);
+    // Accepting keeps the row and retires the record; the emptied trPr goes.
+    expect(acceptAllRevisions(doc)).toBe(1);
+    expect(rowXml(doc, 0)).toContain("r0c0");
+    expect(rowXml(doc, 0)).not.toContain("trPr");
+  });
+
+  it("rejects a row insertion by removing the row", () => {
+    const doc = load(
+      `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>` +
+        `<w:tr><w:tc><w:tcPr/>${p("keep")}</w:tc></w:tr>` +
+        `<w:tr><w:trPr><w:ins w:id="90" w:author="Word" w:date="2026-01-01T00:00:00Z"/></w:trPr>` +
+        `<w:tc><w:tcPr/>${p("gone")}</w:tc></w:tr></w:tbl>`,
+    );
+    expect(rejectAllRevisions(doc)).toBe(1);
+    expect(serializeXml(doc.docRoot)).toContain("keep");
+    expect(serializeXml(doc.docRoot)).not.toContain("gone");
+  });
+
+  it("removes the table when reviewing away its last row", () => {
+    // A w:tbl with no w:tr is not a table, so the row revision that empties it
+    // takes the table with it.
+    const doc = load(
+      `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>` +
+        `<w:tr><w:trPr><w:del w:id="90" w:author="Word" w:date="2026-01-01T00:00:00Z"/></w:trPr>` +
+        `<w:tc><w:tcPr/>${p("only")}</w:tc></w:tr></w:tbl>`,
+    );
+    expect(acceptAllRevisions(doc)).toBe(1);
+    expect(serializeXml(doc.docRoot)).not.toContain("w:tbl");
   });
 });
 
