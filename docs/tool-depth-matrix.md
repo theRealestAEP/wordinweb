@@ -806,3 +806,60 @@ ZERO existing support for OOXML's glossary document." §12 row moves:
   in-place editing of a stored block short of delete-and-resave.
 
 §12 counts: DEEP 2 · CORE 5 · STUB 0 · ABSENT 1.
+
+---
+
+## Scope-out costing (2026-08-12) — corrections to this document
+
+The "deliberate scope-outs" above were a hand-wave. They have now been costed in
+WAVE LANES, sized against what actually shipped (index-field.ts 431 lines,
+sources.ts 337 + bibliography.ts 208, hf-gallery.ts 296, quick-parts.ts 223 —
+each one lane of core + toolbar + tests). Full analysis:
+scratchpad/scope-out-costing.md. Seven rows here are wrong:
+
+- **Index — ALREADY BUILT. This document is stale.** Wave 3 lane A moved it
+  ABSENT → CORE. Delete the scope-out row. Only Table of Authorities remains,
+  and it is now ~½-1 lane because index-field.ts is a working template for the
+  same machine (mark field + build field + PAGEREF over hidden bookmarks +
+  refresh on the wire); TOA adds only category grouping and the passim rule.
+- **Mail-merge execution — the stated reason is factually wrong.** The posture
+  in fields.ts:66-90 guards RESOURCE-NAMING instructions: w:mailMerge persists a
+  data-source CONNECTION that the next opener resolves, which is the injection
+  surface. Merging against a CSV the user picks in a file dialog persists no such
+  element — only substituted text enters the document. Preview is ~1 lane;
+  finish-to-N-documents is ~½ more on compose.ts's existing precedent.
+- **Compare / combine — over-costed.** suggest.ts already exports
+  insertSuggestedText, deleteSuggestedRange, markParagraphGlyph, the four
+  record*Change functions, collectRevisions and acceptRevision, all carrying
+  per-author RevisionMeta. That IS Compare's output format. The only missing
+  piece is alignment — no diff code exists anywhere in the tree — and diff
+  (BSD-3), fast-diff and diff-match-patch (Apache-2.0) are MIT-compatible. ~1
+  lane for the text tier. The risk is alignment QUALITY, not plumbing.
+- **Restrict editing / IRM / signatures — one row conflating three costs.**
+  Tier A (honor + author w:documentProtection as an editor mode) is ~½ lane and
+  maps onto surfaces that exist; ship it with Word's own honesty that the
+  password is a hash, not encryption. Tier B (real ECMA-376 Part 2 package
+  encryption) is 1-2 lanes plus a crypto review. Tier C (IRM, digital
+  signatures) needs AD RMS/Azure and a certificate trust chain — permanent.
+- **"Online services" conflates two different things.** Read Aloud is platform
+  speech synthesis, not a cloud call — HOURS, and selectRange (Wave 2 lane A) is
+  exactly what word-level highlight-as-you-speak needs. It is accessibility, not
+  convenience. Thesaurus/Translate/Researcher/Smart Lookup are already ANSWERED
+  by the AI panel; listing them ABSENT undercounts the product against itself.
+- **Master documents — permanent, but for a better reason.** w:subDoc is a
+  cross-file reference, the same class fields.ts already excludes alongside
+  INCLUDETEXT/INCLUDEPICTURE/DDE/LINK. Building it would REVERSE a documented
+  security posture. State that, not "legacy and discouraged".
+- **VBA — permanent, and an unclaimed win.** No MIT-compatible interpreter of
+  any maturity exists, and executing code from arriving documents inside Electron
+  is the macro-virus vector Word spent two decades containing. BUT
+  buildPackageFiles (docx.ts:2316) starts from `{ ...this.pkg.raw() }`, and
+  nothing special-cases vbaProject.bin or .docm — so **macros already round-trip
+  byte-identically today**. "Preserved, never executed" is a true claim that
+  costs nothing and is a better product line than silence.
+
+Legacy import (.doc/RTF): the cheap path is detecting `soffice` on PATH and
+shelling out to `--convert-to docx` (MPL-2.0, separate process, no linking, so
+MIT is unaffected) — one filter to widen at main/index.ts:39, and it unlocks a
+dozen formats at once. A text-only .doc reader would be worse than none for a
+product whose identity is 0.004% divergence.
