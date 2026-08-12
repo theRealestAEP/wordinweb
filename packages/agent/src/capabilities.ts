@@ -754,3 +754,146 @@ export function agentCapabilities(category?: AgentEditCapability["category"], re
       };
     });
 }
+
+// --- $defs hoisting ---------------------------------------------------------
+
+/**
+ * The 125-branch operations union spells the same subschema out over and over:
+ * `^run:[0-9]+$` appears 38 times, `^block:[0-9]+$` 44 times, and the border
+ * edge object 6 times inside setParagraphBorders alone. Those bytes ship on
+ * every request of every round.
+ *
+ * The Messages API accepts `$defs` and `$ref` inside a tool's `input_schema`
+ * and charges the definition once — a live probe against claude-opus-5 counted
+ * 783 input tokens for a shape written out three times and 584 for the same
+ * shape behind three `$ref`s, and the model filled the referenced shape in
+ * correctly, including through an `anyOf` branch. So the repetition is pure
+ * cost with no meaning attached, and collapsing it changes nothing the model
+ * can observe except the byte count.
+ *
+ * Only the top-level combinator is forbidden (see model.ts validateRequestShape),
+ * and `$defs` is not one.
+ */
+
+/** Every subschema a `$ref` could stand in for: the values of `properties`,
+ * of `items`, and the branches of `anyOf`. */
+function refableChildren(node: JsonSchema): JsonSchema[] {
+  const children: JsonSchema[] = [];
+  const properties = node.properties;
+  if (properties && typeof properties === "object") {
+    for (const value of Object.values(properties as Record<string, unknown>)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) children.push(value as JsonSchema);
+    }
+  }
+  const items = node.items;
+  if (items && typeof items === "object" && !Array.isArray(items)) children.push(items as JsonSchema);
+  const anyOf = node.anyOf;
+  if (Array.isArray(anyOf)) {
+    for (const branch of anyOf) {
+      if (branch && typeof branch === "object" && !Array.isArray(branch)) children.push(branch as JsonSchema);
+    }
+  }
+  return children;
+}
+
+/** Walk every refable position, keyed by the property name it first appears
+ * under so the generated `$defs` key reads like the thing it describes. */
+function censusSubschemas(root: JsonSchema): Map<string, { count: number; hint: string }> {
+  const census = new Map<string, { count: number; hint: string }>();
+  const visit = (node: JsonSchema, hint: string): void => {
+    const properties = node.properties;
+    const named = new Map<JsonSchema, string>();
+    if (properties && typeof properties === "object") {
+      for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+        // First key wins: one subschema object can sit under several property
+        // names, and the $defs key should not depend on iteration order.
+        if (value && typeof value === "object" && !Array.isArray(value) && !named.has(value as JsonSchema)) {
+          named.set(value as JsonSchema, key);
+        }
+      }
+    }
+    for (const child of refableChildren(node)) {
+      const childHint = named.get(child) ?? hint;
+      const key = JSON.stringify(child);
+      const entry = census.get(key);
+      if (entry) entry.count += 1;
+      else census.set(key, { count: 1, hint: childHint });
+      visit(child, childHint);
+    }
+  };
+  visit(root, "value");
+  return census;
+}
+
+/** A `$defs` key that reads as the shape it names, unique within the schema. */
+function definitionName(hint: string, taken: Set<string>): string {
+  const base = /^[A-Za-z][A-Za-z0-9]*$/.test(hint) ? hint : "shape";
+  let name = base;
+  for (let suffix = 2; taken.has(name); suffix++) name = `${base}${suffix}`;
+  taken.add(name);
+  return name;
+}
+
+/**
+ * Collapse every subschema that appears more than once into one `$defs` entry
+ * and a `$ref` at each site. Shapes that would cost more as a reference than
+ * as themselves are left alone. The resolved schema is identical to the input,
+ * so no caller and no model behaviour depends on which form it gets.
+ */
+export function hoistRepeatedSubschemas(schema: JsonSchema): JsonSchema {
+  const census = censusSubschemas(schema);
+  const taken = new Set<string>();
+  const chosen = new Map<string, string>();
+  const candidates = [...census.entries()]
+    .filter(([, entry]) => entry.count > 1)
+    // Largest first, so a shape that contains another gets the readable name.
+    .sort((a, b) => b[0].length - a[0].length);
+  for (const [key, entry] of candidates) {
+    const name = definitionName(entry.hint, new Set(taken));
+    const refLength = `{"$ref":"#/$defs/${name}"}`.length;
+    // Cost of keeping it: count copies. Cost of hoisting: one definition, its
+    // key, and one reference per site.
+    const kept = entry.count * key.length;
+    const hoisted = key.length + name.length + 4 + entry.count * refLength;
+    if (hoisted >= kept) continue;
+    taken.add(name);
+    chosen.set(key, name);
+  }
+  if (chosen.size === 0) return schema;
+
+  /** Substitution happens only where a `$ref` is legal — the same positions
+   * the census walked — so a `properties` map or an `enum` entry that happens
+   * to look like a hoisted shape is left alone. */
+  const asRefOrRewritten = (node: JsonSchema): unknown => {
+    const name = chosen.get(JSON.stringify(node));
+    return name === undefined ? rewriteBody(node) : { $ref: `#/$defs/${name}` };
+  };
+  function rewriteBody(node: JsonSchema): JsonSchema {
+    const output: Record<string, unknown> = { ...node };
+    if (node.properties && typeof node.properties === "object") {
+      output.properties = Object.fromEntries(
+        Object.entries(node.properties as Record<string, unknown>).map(([key, value]) => [
+          key,
+          value && typeof value === "object" && !Array.isArray(value) ? asRefOrRewritten(value as JsonSchema) : value,
+        ]),
+      );
+    }
+    if (node.items && typeof node.items === "object" && !Array.isArray(node.items)) {
+      output.items = asRefOrRewritten(node.items as JsonSchema);
+    }
+    if (Array.isArray(node.anyOf)) {
+      output.anyOf = node.anyOf.map((branch) =>
+        branch && typeof branch === "object" && !Array.isArray(branch) ? asRefOrRewritten(branch as JsonSchema) : branch,
+      );
+    }
+    return output;
+  }
+
+  const $defs: Record<string, unknown> = {};
+  for (const [key, name] of chosen) $defs[name] = rewriteBody(JSON.parse(key) as JsonSchema);
+  const { $defs: existing, ...rest } = schema;
+  return {
+    ...rewriteBody(rest),
+    $defs: { ...(existing as Record<string, unknown> | undefined), ...$defs },
+  };
+}

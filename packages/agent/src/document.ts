@@ -1,6 +1,6 @@
 import { DocxDocument, localName, runWireLength, serializeXml, type Block, type Paragraph, type Run, type StableIds, type XmlElement } from "@wordinweb/core";
 import { INTENT_KINDS, applyIntentScoped, resyncScope, type Intent, type IntentBody, type PresencePosition } from "@wordinweb/collab/client";
-import { agentCapabilities, agentOperationSchema, type AgentEditCapability } from "./capabilities.js";
+import { agentCapabilities, agentOperationSchema, hoistRepeatedSubschemas, type AgentEditCapability } from "./capabilities.js";
 import { AGENT_COMPOSE_SCHEMA, composeDocxBytes } from "./compose.js";
 import { compileAgentOperation, localMedia } from "./edit.js";
 import { SemanticInspector } from "./inspect.js";
@@ -320,7 +320,11 @@ const inspectToolSchema: Record<string, unknown> = {
   additionalProperties: false,
 };
 
-const editToolSchema: Record<string, unknown> = {
+// The operations union is by far the largest thing the panel sends, and it
+// ships on every request of every round. hoistRepeatedSubschemas collapses the
+// shapes it spells out more than once into one $defs entry each; the schema a
+// reader resolves is unchanged.
+const editToolSchema: Record<string, unknown> = hoistRepeatedSubschemas({
   type: "object",
   properties: {
     revision: { type: "string", minLength: 1 },
@@ -333,7 +337,7 @@ const editToolSchema: Record<string, unknown> = {
   },
   required: ["revision", "operations"],
   additionalProperties: false,
-};
+});
 
 const projectionWindowSchema: Record<string, Record<string, unknown>> = {
   story: { type: "string", minLength: 1 },
