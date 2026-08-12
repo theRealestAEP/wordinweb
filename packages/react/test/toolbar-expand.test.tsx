@@ -4,15 +4,18 @@ import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { DocxViewApi } from "../src/index.js";
 import { DocxToolbar } from "../src/toolbar.js";
+import { measureLikeABrowser, resizeTo, ribbon, visibleControls } from "./toolbar-measure.js";
 
 /**
- * The expand/collapse chevron. jsdom has no layout, so a stub ResizeObserver
- * lets the toolbar's measure() run: clientWidth is 0 there, which lands on
- * the narrowest tier and folds the low-frequency groups into the ⋮ overflow
- * menu — exactly the situation the chevron exists to undo. What is checked:
- * expanding puts the folded Insert controls straight into the DOM (no popover
- * needed), the choice persists in localStorage across a remount, and
- * collapsing restores the folding.
+ * The expand chevron — the toolbar's one and only "there is more" affordance
+ * since the ⋮ overflow menu was removed. What is checked: it appears only
+ * when controls are actually folded away, expanding puts every control of the
+ * tab straight into the bar (no popover, nothing behind a menu), and the
+ * choice survives a remount.
+ *
+ * jsdom has no layout, so control widths are stubbed (see toolbar-measure).
+ * Without that the bar measures a width of zero, correctly refuses to fold
+ * anything, and there is nothing here to test.
  */
 
 class StubResizeObserver {
@@ -21,6 +24,7 @@ class StubResizeObserver {
   disconnect() {}
 }
 (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = StubResizeObserver;
+measureLikeABrowser();
 
 function stubApi(): DocxViewApi {
   const methods = {
@@ -40,13 +44,14 @@ function stubApi(): DocxViewApi {
   }) as unknown as DocxViewApi;
 }
 
-async function mountToolbar() {
+async function mountToolbar(width = 900) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   await act(async () => {
     root.render(createElement(DocxToolbar, { api: stubApi() }));
   });
+  await resizeTo(container, width);
   return {
     container,
     unmount: async () => {
@@ -62,10 +67,14 @@ async function click(element: HTMLElement) {
   });
 }
 
-function button(container: HTMLElement, tip: string): HTMLButtonElement | undefined {
-  return [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
-    (b.getAttribute("title") ?? b.getAttribute("data-tip") ?? "").includes(tip),
+function control(container: HTMLElement, tip: string): HTMLElement | undefined {
+  return visibleControls(container).find((el) =>
+    (el.getAttribute("title") ?? el.getAttribute("data-tip") ?? "").includes(tip),
   );
+}
+
+function chevron(container: HTMLElement): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>("[data-dxw-toolbar-expand]");
 }
 
 async function openInsertTab(container: HTMLElement) {
@@ -74,61 +83,68 @@ async function openInsertTab(container: HTMLElement) {
   await click(tab!);
 }
 
-// A control the narrow tiers fold into ⋮ on the Insert tab.
-const DEEP_CONTROL = "Insert blank page";
+// A control at the far end of the Insert tab: the first thing to fold away.
+const DEEP_CONTROL = "Embed a file in this document";
 
 beforeEach(() => {
   localStorage.clear();
 });
 
 describe("the toolbar expand chevron", () => {
-  it("expanding reveals folded Insert controls inline, without any popover", async () => {
-    const t = await mountToolbar();
+  it("expanding brings every folded control onto the bar", async () => {
+    const t = await mountToolbar(900);
     await openInsertTab(t.container);
-    // Collapsed at the narrow tier: the deep control lives behind ⋮ and is
-    // not in the DOM until that menu opens.
-    expect(button(t.container, DEEP_CONTROL)).toBeUndefined();
-    expect(t.container.querySelector("[data-dxw-overflow]")).toBeTruthy();
+    expect(control(t.container, DEEP_CONTROL), "folded while collapsed").toBeUndefined();
 
-    const toggle = button(t.container, "Expand the toolbar");
-    expect(toggle, "expand toggle").toBeTruthy();
+    const toggle = chevron(t.container);
+    expect(toggle, "chevron offered").toBeTruthy();
     expect(toggle!.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle!.getAttribute("aria-label")).toMatch(/^Show \d+ more tools?$/);
     await click(toggle!);
 
-    // Expanded: the control is directly in the DOM, nothing is folded, and
-    // the ⋮ button is gone. The toggle reads pressed.
-    expect(button(t.container, DEEP_CONTROL)).toBeTruthy();
-    expect(t.container.querySelector("[data-dxw-overflow]")).toBeNull();
-    const pressed = button(t.container, "Collapse the toolbar");
-    expect(pressed).toBeTruthy();
-    expect(pressed!.getAttribute("aria-expanded")).toBe("true");
-    expect(pressed!.style.background).not.toBe("transparent");
+    expect(control(t.container, DEEP_CONTROL), "on the bar once expanded").toBeTruthy();
+    expect(
+      ribbon(t.container).querySelectorAll("[data-dxw-folded]").length,
+      "nothing left folded",
+    ).toBe(0);
+    const pressed = chevron(t.container)!;
+    expect(pressed.getAttribute("aria-expanded")).toBe("true");
+    expect(pressed.getAttribute("aria-label")).toBe("Hide the extra tools");
     await t.unmount();
   });
 
   it("persists the choice in localStorage and restores it on remount", async () => {
-    const t = await mountToolbar();
-    await click(button(t.container, "Expand the toolbar")!);
+    const t = await mountToolbar(900);
+    await openInsertTab(t.container);
+    await click(chevron(t.container)!);
     expect(localStorage.getItem("dxw-toolbar-expanded")).toBe("1");
     await t.unmount();
 
-    const again = await mountToolbar();
+    const again = await mountToolbar(900);
     await openInsertTab(again.container);
-    expect(button(again.container, "Collapse the toolbar")).toBeTruthy();
-    expect(button(again.container, DEEP_CONTROL)).toBeTruthy();
+    expect(chevron(again.container)!.getAttribute("aria-expanded")).toBe("true");
+    expect(control(again.container, DEEP_CONTROL)).toBeTruthy();
     await again.unmount();
   });
 
-  it("collapsing restores the folding and records the choice", async () => {
+  it("collapsing folds the extra controls away again", async () => {
     localStorage.setItem("dxw-toolbar-expanded", "1");
-    const t = await mountToolbar();
+    const t = await mountToolbar(900);
     await openInsertTab(t.container);
-    expect(button(t.container, DEEP_CONTROL)).toBeTruthy();
+    expect(control(t.container, DEEP_CONTROL)).toBeTruthy();
 
-    await click(button(t.container, "Collapse the toolbar")!);
+    await click(chevron(t.container)!);
     expect(localStorage.getItem("dxw-toolbar-expanded")).toBe("0");
-    expect(button(t.container, DEEP_CONTROL)).toBeUndefined();
-    expect(t.container.querySelector("[data-dxw-overflow]")).toBeTruthy();
+    expect(control(t.container, DEEP_CONTROL)).toBeUndefined();
+    await t.unmount();
+  });
+
+  it("offers no chevron at a width where every control fits", async () => {
+    // Nothing is folded, so there is nothing to reveal and no chrome
+    // pretending otherwise.
+    const t = await mountToolbar(3000);
+    expect(chevron(t.container), "no chevron on a wide bar").toBeNull();
+    expect(ribbon(t.container).querySelectorAll("[data-dxw-folded]").length).toBe(0);
     await t.unmount();
   });
 });
