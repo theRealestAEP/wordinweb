@@ -516,16 +516,40 @@ function componentBlock(block: AgentComposeBlock): boolean {
 }
 
 /** An operation compiled but the engine could not place it. Name the usual
- * cause and the working alternative, so the model is never stranded. */
+ * cause and the working alternative, so the model is never stranded. The
+ * sentence about what survived belongs to the rollback wrapper below, which
+ * every write path shares. */
 function applyFailure(kind: string): Error {
   const paragraphHint = kind === "splitParagraph"
     ? ' To create paragraphs, one insertText whose text contains "\\n" between paragraphs also works, in one operation.'
     : "";
   return new Error(
     `${kind} could not apply to the referenced document state. `
-    + "A reference or offset is likely stale: an earlier operation in this transaction can restructure the runs it touched. "
-    + `Re-inspect and send the remaining operations in a new transaction.${paragraphHint}`,
+    + `A reference or offset is likely stale: an earlier operation in this transaction can restructure the runs it touched.${paragraphHint}`,
   );
+}
+
+// Every write path here applies to a trial clone and adopts it only once the
+// whole request succeeds, so a throw leaves the document byte-for-byte as it
+// was. An error has to say so: a caller told to "send the rest" resumes from a
+// state that never existed and inserts the earlier operations a second time.
+const EDIT_ROLLBACK =
+  "NOTHING was applied. The transaction is all or nothing, so the document is unchanged "
+  + "and no earlier operation in this transaction landed either. "
+  + "Re-inspect the document, then send every operation again.";
+
+const PATCH_ROLLBACK =
+  "NOTHING was applied. The patch is all or nothing, so the document is unchanged "
+  + "and no earlier hunk in this patch landed either. "
+  + "Re-project the story, then send every edit again.";
+
+const COMPOSE_ROLLBACK =
+  "NOTHING was created. Compose is all or nothing, so the document is unchanged. "
+  + "Send the whole compose request again.";
+
+function rolledBack(error: unknown, resolution: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(`${message} ${resolution}`);
 }
 
 export class AgentDocument {
@@ -671,6 +695,14 @@ export class AgentDocument {
   }
 
   async patch(request: AgentPatchRequest): Promise<AgentPatchResult> {
+    try {
+      return await this.patchWindow(request);
+    } catch (error) {
+      throw rolledBack(error, PATCH_ROLLBACK);
+    }
+  }
+
+  private async patchWindow(request: AgentPatchRequest): Promise<AgentPatchResult> {
     if (!request || typeof request !== "object" || typeof request.revision !== "string") {
       throw new Error("A patch needs the revision its projection came from");
     }
@@ -716,7 +748,7 @@ export class AgentDocument {
     if (operations.length === 0) {
       return { revision: this.revision, status: this.target ? "submitted" : "applied", operations: [], projection: refresh() };
     }
-    const result = await this.edit({ revision: this.revision, operations });
+    const result = await this.editTransaction({ revision: this.revision, operations });
     return { ...result, projection: refresh() };
   }
 
@@ -725,6 +757,14 @@ export class AgentDocument {
   }
 
   async compose(request: AgentComposeRequest): Promise<AgentComposeResult> {
+    try {
+      return await this.composeDocument(request);
+    } catch (error) {
+      throw rolledBack(error, COMPOSE_ROLLBACK);
+    }
+  }
+
+  private async composeDocument(request: AgentComposeRequest): Promise<AgentComposeResult> {
     if (!this.composeAvailable || this.target) throw new Error("Composition is available on a new AgentDocument.create() document");
     if (request.revision !== this.revision) throw new Error("The document revision is stale");
     const trial = new AgentDocument(DocxDocument.load(composeDocxBytes(request)), null, this.provenance);
@@ -747,7 +787,7 @@ export class AgentDocument {
       });
     }
     for (let offset = 0; offset < operations.length; offset += 100) {
-      await trial.edit({ revision: trial.revision, operations: operations.slice(offset, offset + 100) });
+      await trial.editTransaction({ revision: trial.revision, operations: operations.slice(offset, offset + 100) });
     }
 
     const adjustments: AgentOperation[] = [];
@@ -762,7 +802,7 @@ export class AgentDocument {
       });
     }
     for (let offset = 0; offset < adjustments.length; offset += 100) {
-      await trial.edit({ revision: trial.revision, operations: adjustments.slice(offset, offset + 100) });
+      await trial.editTransaction({ revision: trial.revision, operations: adjustments.slice(offset, offset + 100) });
     }
 
     this.localDoc = trial.document;
@@ -785,6 +825,17 @@ export class AgentDocument {
   }
 
   async edit(request: AgentEditRequest): Promise<AgentEditResult> {
+    try {
+      return await this.editTransaction(request);
+    } catch (error) {
+      throw rolledBack(error, EDIT_ROLLBACK);
+    }
+  }
+
+  /** The transaction itself. patch() and compose() call this rather than
+   * edit(), so each states the rollback in its own caller's terms instead of
+   * telling a patch author to resend "operations" it never sent. */
+  private async editTransaction(request: AgentEditRequest): Promise<AgentEditResult> {
     if (!request || typeof request !== "object" || !Array.isArray(request.operations) || request.operations.length === 0) throw new Error("At least one edit operation is required");
     if (request.operations.length > 100) throw new Error("A transaction can contain at most 100 operations");
     if (!this.revisionMatchesEdit(request)) throw new Error("The document revision is stale");
