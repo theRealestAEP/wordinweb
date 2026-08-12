@@ -14,33 +14,31 @@ interface CompileContext {
   prepareMedia(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number; iv?: string }>;
 }
 
-/** Operations whose agent-facing `suggest: true` compiles to carried
+/**
+ * Operations whose agent-facing `suggest: true` compiles to carried
  * author/date. Each one has a tracked OOXML form: w:ins for an insertion or a
- * split mark, a `*PrChange` for a formatting change, a struck paragraph mark
- * for a merge. */
-const SUGGESTABLE_KINDS = new Set<Intent["kind"]>([
-  "insertText",
-  "insertSeparator",
-  "deleteSeparator",
-  "splitParagraph",
-  "mergeParagraph",
-  "formatRun",
-  "formatRange",
-  "formatParagraph",
-  "setListType",
-  "adjustIndent",
-  "setSpacing",
-  // Table formatting: w:tblPrChange, w:trPrChange, w:tcPrChange.
-  "tableOp",
-  "setTableBorders",
-  "setTableStyle",
-  "setTableLook",
-  "setTableWidth",
-  "setTableColumnWidth",
-  "setTableLayout",
-  "setTableCellMargins",
-  "setTableHeaderRows",
-]);
+ * split mark, a `*PrChange` for a formatting change (w:rPrChange, w:pPrChange,
+ * and the table's w:tblPrChange, w:trPrChange and w:tcPrChange), a struck
+ * paragraph mark for a merge.
+ *
+ * The set is READ from the capability map rather than written out again. That
+ * map is where an operation declares the fields it takes, so a declaration
+ * that offers `suggest` and a compiler that then drops the flag is a
+ * contradiction this file can no longer hold — the drift that left
+ * setParagraphBorders and setTabStops advertising the flag and failing on it.
+ * Every caller that has to know which kinds track — the CLI's suggesting
+ * mode, the LikeOffice AI panel — reads the same one declaration.
+ */
+const SUGGESTABLE_KINDS = new Set<Intent["kind"]>(
+  (Object.keys(AGENT_EDIT_CAPABILITIES) as Intent["kind"][])
+    .filter((kind) => AGENT_EDIT_CAPABILITIES[kind].optional?.includes("suggest")),
+);
+
+/** Whether `suggest: true` on this kind records a revision. A kind outside the
+ * set applies outright, so the flag is dropped rather than promised. */
+export function isSuggestable(kind: unknown): boolean {
+  return typeof kind === "string" && SUGGESTABLE_KINDS.has(kind as Intent["kind"]);
+}
 
 /**
  * The tableOp operations that carry a tracked form: the three that change
