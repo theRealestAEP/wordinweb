@@ -49,9 +49,22 @@ const WP = 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordproce
 const A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
 const WPS = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"';
 
-export function anchorBox(id: number, x: number, y: number, color: string): string {
-  const width = 914400;
-  const height = 914400;
+/** An anchored DrawingML text box, with the size, body text, and bodyPr
+ * autofit element a fit test needs to control. */
+export function anchorTextBox(options: {
+  id: number;
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  color?: string;
+  text?: string;
+  autofit?: string;
+}): string {
+  const { id, x, y } = options;
+  const width = options.width ?? 914400;
+  const height = options.height ?? 914400;
+  const fill = options.color ? `<a:solidFill><a:srgbClr val="${options.color}"/></a:solidFill>` : "";
   return (
     `<w:r><w:drawing><wp:anchor ${WP} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${id}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">` +
     `<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page"><wp:posOffset>${x}</wp:posOffset></wp:positionH>` +
@@ -59,8 +72,13 @@ export function anchorBox(id: number, x: number, y: number, color: string): stri
     `<wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="${id}" name="Box ${id}"/><wp:cNvGraphicFramePr/>` +
     `<a:graphic ${A}><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp ${WPS}>` +
     `<wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${width}" cy="${height}"/></a:xfrm>` +
-    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="${color}"/></a:solidFill></wps:spPr>` +
-    `<wps:txbx><w:txbxContent><w:p><w:r><w:t>Box ${id}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr><a:noAutofit/></wps:bodyPr>` +
+    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>${fill}</wps:spPr>` +
+    `<wps:txbx><w:txbxContent><w:p><w:r><w:t xml:space="preserve">${options.text ?? `Box ${id}`}</w:t></w:r></w:p></w:txbxContent></wps:txbx>` +
+    `<wps:bodyPr>${options.autofit ?? "<a:noAutofit/>"}</wps:bodyPr>` +
     `</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`
   );
+}
+
+export function anchorBox(id: number, x: number, y: number, color: string): string {
+  return anchorTextBox({ id, x, y, color });
 }

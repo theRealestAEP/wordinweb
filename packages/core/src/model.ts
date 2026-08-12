@@ -461,6 +461,13 @@ export interface ShapeTextbox {
    * plus the top/bottom insets (the stored cy is only Word's last cached
    * value). Width is fixed. */
   autofitHeight?: boolean;
+  /** bodyPr a:normAutofit — "shrink text on overflow". The mode is recorded
+   * because the fit report names it, NOT because it changes the layout:
+   * probe-shapefit measured fourteen normAutofit shapes through desktop Word
+   * and every one paints at its authored size and clips at the box bottom,
+   * exactly like a:noAutofit. `clipText` is set alongside this and is what the
+   * layout reads. */
+  shrinkText?: boolean;
   /** Linked text-box chain id (wps:txbx/@id or wps:linkedTxbx/@id): boxes with
    * the same id form one story. The seq-0 box (wps:txbx) holds the content;
    * later boxes (wps:linkedTxbx, chainSeq>0) are empty sinks that continue the

@@ -7,7 +7,7 @@ import { SemanticInspector } from "./inspect.js";
 import { hunksFromUnifiedDiff, patchOperations } from "./patch.js";
 import { projectStory, projectedLines } from "./project.js";
 import { blockRef, objectRef, runRef } from "./refs.js";
-import { spatialInspect } from "./spatial.js";
+import { fitInspect, spatialInspect } from "./spatial.js";
 import type {
   AgentAsset,
   AgentCollaborativeTarget,
@@ -284,9 +284,9 @@ const inspectToolSchema: Record<string, unknown> = {
   type: "object",
   properties: {
     kind: {
-      enum: ["overview", "context", "read", "search", "object", "spatial"],
+      enum: ["overview", "context", "read", "search", "object", "spatial", "fit"],
       description:
-        "overview: whole-document shape. context: bulk text for stories. read: one story range. search: find text (requires query). object: one object (requires ref). spatial: page geometry.",
+        "overview: whole-document shape. context: bulk text for stories. read: one story range. search: find text (requires query). object: one object (requires ref). spatial: page geometry. fit: per-drawing text fit plus page fill — check it after inserting or resizing a drawing, to see whether the drawing's text still fits its box.",
     },
     stories: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1 }, description: "context only" },
     maxBlocks: { type: "integer", minimum: 1, maximum: 200, description: "context or read" },
@@ -312,7 +312,7 @@ const inspectToolSchema: Record<string, unknown> = {
       },
       required: ["start", "count"],
       additionalProperties: false,
-      description: "spatial only",
+      description: "spatial or fit",
     },
     includeOverlaps: { type: "boolean", description: "spatial only" },
   },
@@ -603,6 +603,7 @@ export class AgentDocument {
       case "search": result = inspector.search(request.query, request.maxResults); break;
       case "object": result = inspector.object(request.ref); break;
       case "spatial": result = spatialInspect(this.document, this.document.enableStableIds(), this.revision, inspector, request.pages, request.includeOverlaps); break;
+      case "fit": result = fitInspect(this.document, this.document.enableStableIds(), this.revision, inspector, request.pages); break;
       default: {
         const exhaustive: never = request;
         return exhaustive;

@@ -202,6 +202,30 @@ export interface ChartItem {
   data: ChartData;
 }
 
+/** bodyPr autofit mode: how a shape reconciles its text with its box.
+ * "resizeShape" is a:spAutoFit (grow the box), "shrinkText" is a:normAutofit
+ * (scale the text down), "none" is a:noAutofit or no bodyPr autofit at all. */
+export type ShapeAutofit = "none" | "resizeShape" | "shrinkText";
+
+/** What a text-bearing shape's laid-out text measured, beside the frame that
+ * holds it. The layout already measures the text to place it; recording the
+ * measurement here is what lets an agent see whether the text fits without
+ * re-measuring anything. */
+export interface DrawingTextFit {
+  /** Widest laid line, px (the text extent, not the box). It can exceed the
+   * box's inset width by a trailing space or an unbreakable token. */
+  textW: number;
+  /** Full laid text height, px. */
+  textH: number;
+  /** The text is taller than the box's insets leave room for. Overflow is a
+   * vertical question: the text is wrapped to the box width by construction,
+   * and a token too wide to wrap spends its excess on extra LINES. */
+  overflow: boolean;
+  /** Lines the box hides because they fall past its bottom. */
+  clippedLines: number;
+  autofit: ShapeAutofit;
+}
+
 /** Interactive resize zone over a table boundary (column or row). */
 export interface DrawingHitItem {
   kind: "drawingHit";
@@ -229,6 +253,9 @@ export interface DrawingHitItem {
   behind?: boolean;
   /** The drawing owns an independently editable text-box story. */
   textboxStory?: boolean;
+  /** Measured text extent for a text-bearing shape (agent fit inspection).
+   * Absent on drawings that flow no text: pictures, lines, charts, WordArt. */
+  textFit?: DrawingTextFit;
   rotate?: { deg: number; ox: number; oy: number };
   z?: number;
 }

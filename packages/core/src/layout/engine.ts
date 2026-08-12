@@ -43,6 +43,7 @@ import {
 } from "./inline.js";
 import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
 import {
+  DrawingHitItem,
   FontSpec,
   LaidOutPage,
   LayoutFontSample,
@@ -5318,10 +5319,12 @@ class Engine {
           // (by + tIns + bw) — using bw/2 there floats page-bottom callouts ~2px
           // high (wild-gatech p7 bottom box).
           const bw = tb.stroke ? tb.stroke.weight : 0;
-          const inner = this.layoutFrame(tb.blocks, Math.max(w - ins.l - ins.r - bw, 1), this.fieldCtx(), {
+          const innerWidth = Math.max(w - ins.l - ins.r - bw, 1);
+          const inner = this.layoutFrame(tb.blocks, innerWidth, this.fieldCtx(), {
             x: bx + ins.l + bw / 2,
             y: by + ins.t + bw,
           });
+          const textW = measuredTextWidth(inner.items);
           let innerTop = by + ins.t + bw;
           if (tb.textAnchor === "middle") innerTop = by + (h - inner.height) / 2;
           else if (tb.textAnchor === "bottom") innerTop = by + h - ins.b - inner.height;
@@ -5330,7 +5333,25 @@ class Engine {
             page.items.push(it);
           }
           if (span.drawing.srcDrawing) {
-            page.items.push({ kind: "drawingHit", x: bx, y: by, width: w, height: h, src: span.drawing.srcDrawing, anchored: false });
+            page.items.push({
+              kind: "drawingHit",
+              x: bx,
+              y: by,
+              width: w,
+              height: h,
+              src: span.drawing.srcDrawing,
+              anchored: false,
+              // An inline box never clips and never autofits: its extent is
+              // the space it reserved in the line, and overflowing text is
+              // simply painted past the bottom edge.
+              textFit: {
+                textW,
+                textH: inner.height,
+                overflow: inner.height > h - ins.t - ins.b + 0.5,
+                clippedLines: 0,
+                autofit: "none",
+              },
+            });
           }
           continue;
         }
@@ -6476,7 +6497,8 @@ class Engine {
         // even without noAutofit.
         const chained = shape.chainId !== undefined;
         const capacity = height - ins.t - ins.b;
-        const inner = this.layoutFrame(storyBlocks, Math.max(width - ins.l - ins.r, 1), fields, { x: ox + ins.l, y: oy + ins.t });
+        const innerWidth = Math.max(width - ins.l - ins.r, 1);
+        const inner = this.layoutFrame(storyBlocks, innerWidth, fields, { x: ox + ins.l, y: oy + ins.t });
         // a:prstTxWarp — the shape's text is bent onto a preset envelope filling
         // the box, not flowed as ordinary lines. Reuse the frame's resolved font
         // and color (theme/style resolution already applied), then hand the box
@@ -6545,8 +6567,13 @@ class Engine {
         // story text so glyph clicks can enter text editing while blank parts
         // of the box still select the object.
         const independentStory = !!shape.textboxStory && !shape.wordArt;
+        // Held so the measured text extent can be recorded on it once the
+        // emit loop below has counted the lines the box hides. The width is
+        // read here, while the items are still frame-local.
+        const textW = measuredTextWidth(inner.items);
+        let hit: DrawingHitItem | undefined;
         if (shape.srcDrawing) {
-          page.items.push({
+          hit = {
             kind: "drawingHit",
             x: ox - fx,
             y: oy - fy,
@@ -6559,8 +6586,10 @@ class Engine {
             ...(independentStory ? { textboxStory: true } : {}),
             ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
             z: shape.wordArt ? (shape.z ?? 0) + 1 : shape.z,
-          });
+          };
+          page.items.push(hit);
         }
+        let clippedLines = 0;
         for (const it of inner.items) {
           if (it.kind === "text") {
             if (shape.wordArtOpacity !== undefined) it.opacity = shape.wordArtOpacity;
@@ -6568,8 +6597,10 @@ class Engine {
             // Chained boxes hide whole lines outside their own [skipTopY,
             // content-bottom] window (overflow flows to the next box); a plain
             // noAutofit box clips at the box bottom edge (unchanged).
-            if (chained && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) continue;
-            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) continue;
+            if (chained && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) { clippedLines++; continue; }
+            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) { clippedLines++; continue; }
+            // Content above skipTopY was PAINTED by an earlier box in the
+            // chain, so skipping it here hides nothing.
             if (isContinuation && it.lineTop < skipTopY - 0.5) continue;
           }
           offsetItem(it, ox + ins.l - fx, innerTop - skipTopY - fy);
@@ -6583,6 +6614,15 @@ class Engine {
           if (front && (it.kind === "text" || it.kind === "rect" || it.kind === "edge")) it.front = true;
           if (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit") it.z = shape.z;
           page.items.push(it);
+        }
+        if (hit) {
+          hit.textFit = {
+            textW,
+            textH: inner.height,
+            overflow: inner.height > capacity + 0.5,
+            clippedLines,
+            autofit: shape.autofitHeight ? "resizeShape" : shape.shrinkText ? "shrinkText" : "none",
+          };
         }
 
         // Body text flows around a wrapping text box (square / tight / topAndBottom).
@@ -9741,6 +9781,15 @@ function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run: Run } 
     }
   }
   return undefined; // break with nothing after it (break-only paragraph)
+}
+
+/** The widest laid line in a shape's freshly measured frame, px. Must be read
+ * BEFORE the items are offsetItem'd into page space, while their x is still
+ * relative to the text origin. */
+function measuredTextWidth(items: PageItem[]): number {
+  let widest = 0;
+  for (const item of items) if (item.kind === "text") widest = Math.max(widest, item.x + item.width);
+  return widest;
 }
 
 function offsetItem(item: PageItem, dx: number, dy: number): void {

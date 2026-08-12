@@ -26,7 +26,14 @@ Use the smallest detailed request when required:
 { "kind": "search", "query": "revenue", "maxResults": 50 }
 { "kind": "object", "ref": "object:12:0" }
 { "kind": "spatial", "pages": { "start": 1, "count": 5 }, "includeOverlaps": true }
+{ "kind": "fit", "pages": { "start": 1, "count": 5 } }
 ```
+
+After inserting or resizing a drawing, check `fit`. It reports each
+text-bearing drawing's box against the extent its text laid into, whether the
+text overflows, how many lines the box hides, and the shape's autofit mode,
+plus how full each page is. Resolve an overflow with `setDrawingTextFit`
+(`resizeShape`) or by resizing the drawing.
 
 `overview` returns story counts, section geometry, the outline, component
 counts, and semantic `objectCounts`. `read` returns formatting, hyperlinks,

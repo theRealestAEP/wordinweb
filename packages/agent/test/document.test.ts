@@ -531,7 +531,7 @@ describe("AgentDocument local tools", () => {
     expect(composeSchema).toMatchObject({ type: "object", additionalProperties: false });
     const inspectSchema = agent.tools().find((tool) => tool.name === "word_document_inspect")?.inputSchema;
     expect(inspectSchema).toMatchObject({ type: "object", additionalProperties: false, required: ["kind"] });
-    expect((inspectSchema?.properties as Record<string, Record<string, unknown>>).kind.enum).toHaveLength(6);
+    expect((inspectSchema?.properties as Record<string, Record<string, unknown>>).kind.enum).toHaveLength(7);
     const editSchema = agent.tools().find((tool) => tool.name === "word_document_edit")?.inputSchema;
     const operationSchemas = (((editSchema?.properties as Record<string, unknown>).operations as Record<string, unknown>).items as Record<string, unknown>).anyOf;
     expect(operationSchemas).toHaveLength(INTENT_KINDS.length);

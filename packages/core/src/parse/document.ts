@@ -1524,6 +1524,16 @@ function parseDrawing(
     // fontScale / lnSpcReduction that shrinks the text to fit the fixed box,
     // but Word IGNORES those on import and renders at full size, clipping the
     // overflow exactly like a:noAutofit. Treat both non-grow modes as clip.
+    //
+    // Measured twice. probe3-shape-autofit pinned one authored cache; probe-
+    // shapefit (2026-08-11) then swept six text lengths at two box heights
+    // with a BARE <a:normAutofit/> plus two authored caches, exported through
+    // desktop Word twice under the self-reproduction control, and resaved as
+    // DOCX. Word painted all fourteen at the authored 11pt, clipped each at
+    // its box bottom line-for-line with the noAutofit control, and wrote every
+    // bodyPr back byte-identically — it computed no fontScale for the bare
+    // ones and consumed neither authored one. So normAutofit is a clip on the
+    // file path, and its cache is carried, never applied.
     const spAutoFit = bodyPr ? !!child(bodyPr, "spAutoFit") : false;
     const normAutofit = bodyPr ? !!child(bodyPr, "normAutofit") : false;
     const noAutofit = bodyPr ? (!!child(bodyPr, "noAutofit") || normAutofit) : false;
@@ -1568,6 +1578,7 @@ function parseDrawing(
           ? { geom: { viewW: cx, viewH: cy, paths: resolvePresetPaths(presetGeom, fill, !!strokeColor) } }
           : {}),
         ...(noAutofit ? { clipText: true } : {}),
+        ...(normAutofit ? { shrinkText: true } : {}),
         ...(spAutoFit ? { autofitHeight: true } : {}),
         ...(warp ? { warp } : {}),
         ...(wordArt ? { wordArt: true } : {}),

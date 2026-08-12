@@ -219,13 +219,41 @@ export interface AgentSpatialResult {
   overlaps: AgentOverlap[];
 }
 
+/** One text-bearing drawing's frame measured against its own laid-out text. */
+export interface AgentDrawingFit {
+  objectRef: AgentReference;
+  page: number;
+  /** The frame the shape draws, px. */
+  boxPx: { w: number; h: number };
+  /** The extent the text actually laid into, px. */
+  textPx: { w: number; h: number };
+  /** The text is taller than the box's insets leave room for. */
+  overflow: boolean;
+  /** Lines the box hides because they fall past its bottom. */
+  clippedLines: number;
+  /** The shape's bodyPr autofit mode. Only "resizeShape" makes an overflow
+   * resolve itself: Word paints "shrinkText" at full size and clips it. */
+  autofit: "none" | "resizeShape" | "shrinkText";
+}
+
+export interface AgentFitResult {
+  revision: string;
+  layout: { quality: "exact" | "approximate"; profile: string };
+  totalPages: number;
+  /** How full each requested page is: where its lowest body content ends, and
+   * where the body box ends. */
+  pages: Array<{ page: number; contentBottomPx: number; pageBottomPx: number }>;
+  drawings: AgentDrawingFit[];
+}
+
 export type AgentInspectRequest =
   | { kind: "overview" }
   | { kind: "context"; stories?: string[]; maxBlocks?: number; maxCharacters?: number; include?: Array<"bookmarks" | "objects">; includeEmpty?: boolean }
   | { kind: "read"; story?: string; cursor?: AgentCursor; maxBlocks?: number; maxCharacters?: number }
   | { kind: "search"; query: string; maxResults?: number }
   | { kind: "object"; ref: AgentReference }
-  | { kind: "spatial"; pages?: { start: number; count: number }; includeOverlaps?: boolean };
+  | { kind: "spatial"; pages?: { start: number; count: number }; includeOverlaps?: boolean }
+  | { kind: "fit"; pages?: { start: number; count: number } };
 
 export type AgentInspectResult =
   | AgentOverview
@@ -233,7 +261,8 @@ export type AgentInspectResult =
   | AgentReadResult
   | AgentSearchResult
   | AgentObjectResult
-  | AgentSpatialResult;
+  | AgentSpatialResult
+  | AgentFitResult;
 
 export type AgentProjectionMode = "text" | "md" | "outline";
 

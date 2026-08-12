@@ -138,7 +138,35 @@ Inspect document content progressively.
 { "kind": "search", "query": "revenue", "maxResults": 50 }
 { "kind": "object", "ref": "object reference" }
 { "kind": "spatial", "pages": { "start": 1, "count": 10 }, "includeOverlaps": true }
+{ "kind": "fit", "pages": { "start": 1, "count": 10 } }
 ```
+
+`fit` reports rendered output for text-bearing drawings, so a drawing that was
+just inserted or resized can be checked instead of guessed at:
+
+```json
+{
+  "revision": "17",
+  "layout": { "quality": "approximate", "profile": "headless-approx" },
+  "totalPages": 3,
+  "pages": [{ "page": 1, "contentBottomPx": 812.4, "pageBottomPx": 960 }],
+  "drawings": [
+    {
+      "objectRef": "object:12:0",
+      "page": 1,
+      "boxPx": { "w": 192, "h": 96 },
+      "textPx": { "w": 172.8, "h": 148.5 },
+      "overflow": true,
+      "clippedLines": 4,
+      "autofit": "none"
+    }
+  ]
+}
+```
+
+`autofit` is the shape's bodyPr mode. Only `resizeShape` resolves an overflow
+on its own; Word paints `shrinkText` at full size and clips it, exactly like
+`none`. Use `setDrawingTextFit` to change the mode.
 
 Limits:
 
@@ -150,6 +178,7 @@ Limits:
 - `search.query`: 1–1,000 characters
 - `search.maxResults`: 1–500
 - `spatial.pages.count`: 1–100
+- `fit.pages.count`: 1–100
 
 ### `word_document_edit`
 
