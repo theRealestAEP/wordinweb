@@ -2684,9 +2684,6 @@ export function DocxView({
           getSelectedSmartArtTextFormat: () => editor?.getSelectedSmartArtTextFormat() ?? null,
           setSelectedSmartArtTextFormat: (patch) => editor?.setSelectedSmartArtTextFormat(patch) ?? false,
           addComment: (text) => {
-            // Collab: selected-object updates are not intent-anchored yet;
-            // no-op rather than make a local-only (diverging) edit.
-            if (collabRef.current?.submitOp) return false;
             const segs = editor?.getSelectionSegments() ?? [];
             const segments = segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : [];
             if (segments.length === 0) return false;
