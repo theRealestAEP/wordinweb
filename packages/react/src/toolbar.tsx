@@ -19,6 +19,7 @@ import {
   type TableBorderStyle,
   type CoverPageLayout,
 } from "@wordinweb/core";
+import { planRibbon, type RibbonItem } from "./ribbon-layout.js";
 import type { DocxViewApi } from "./index.js";
 import { HelpGuide } from "./help.js";
 
@@ -120,11 +121,12 @@ const PAGE_SIZES = [
   { value: "envelope10", label: "Envelope #10", description: '4.13" × 9.5"', width: 4.13, height: 9.5 },
 ] as const;
 
-function Btn({ label, title, active, onClick, buttonRef }: { label: React.ReactNode; title: string; active?: boolean; onClick: () => void; buttonRef?: React.Ref<HTMLButtonElement> }) {
+function Btn({ label, title, active, onClick, buttonRef, fold }: { label: React.ReactNode; title: string; active?: boolean; onClick: () => void; buttonRef?: React.Ref<HTMLButtonElement>; fold?: number }) {
   return (
     <button
       ref={buttonRef}
       title={title}
+      data-dxw-fold={fold}
       style={btnStyle(!!active)}
       onMouseDown={(e) => e.preventDefault()}
       onMouseEnter={(e) => ((e.target as HTMLElement).style.background = active ? T.activeBg : T.hoverBg)}
@@ -136,100 +138,10 @@ function Btn({ label, title, active, onClick, buttonRef }: { label: React.ReactN
   );
 }
 
+/** Group divider. Marked so the layout engine can drop one that would be left
+ * starting or ending a line with nothing on the other side of it. */
 function Sep() {
-  return <span style={{ width: 1, height: 18, background: T.border, margin: "0 4px", flexShrink: 0 }} />;
-}
-
-function OverflowIcon() {
-  return (
-    <svg style={icon} viewBox="0 0 16 16" fill="currentColor">
-      <circle cx="8" cy="3" r="1.4" />
-      <circle cx="8" cy="8" r="1.4" />
-      <circle cx="8" cy="13" r="1.4" />
-    </svg>
-  );
-}
-
-/**
- * "More" (⋮) menu holding the toolbar groups that don't fit the current width.
- * On a phone/tablet the low-frequency groups collapse in here (Google-Docs
- * pattern) so the primary row stays a single clean strip; every control stays
- * reachable.
- *
- * Groups render one per row (each still free to wrap internally if it has
- * more controls than the popover is wide) rather than as one flat wrapped
- * bag — a flat bag let unrelated controls share a wrapped line and left a
- * group's trailing separator stranded mid-line. Deliberately NOT given
- * `marginLeft: "auto"`: that fought the expand chevron's own auto margin for
- * the same flex line's free space, which is what left the ⋮ trigger floating
- * in the middle of the toolbar row instead of sitting beside the controls it
- * summarizes. The chevron is the only control pinned to the true right edge.
- */
-function OverflowMenu({ groups }: { groups: { key: string; node: React.ReactNode }[] }) {
-  const [open, setOpen] = useState(false);
-  const [shown, setShown] = useState(false);
-  const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) {
-      setShown(false);
-      return;
-    }
-    const frame = requestAnimationFrame(() => setShown(true));
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => {
-      cancelAnimationFrame(frame);
-      document.removeEventListener("mousedown", close);
-    };
-  }, [open]);
-  // Viewport-clamped `position: fixed`, matching every other toolbar popover
-  // (Equation, Citations, Quick Parts, Symbol, …) — not the plain
-  // `position: absolute; right: 0` this used to have. That was never
-  // clamped to the viewport, so on a narrow toolbar where the ⋮ trigger
-  // sits left of center the 280px-wide popover ran off the left edge of the
-  // window with no way to scroll it into view.
-  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
-  const viewportWidth = typeof window === "undefined" ? 340 : window.innerWidth;
-  const popoverWidth = Math.min(280, viewportWidth - 16);
-  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
-  return (
-    <span ref={rootRef} style={{ position: "relative", display: "inline-flex" }}>
-      <button
-        title="More tools"
-        data-dxw-overflow=""
-        style={btnStyle(open)}
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setOpen(!open)}
-      >
-        <OverflowIcon />
-      </button>
-      {open && (
-        <div
-          data-dxw-overflow-menu=""
-          style={{
-            position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, background: T.popoverBg,
-            border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
-            padding: 8, display: "flex", flexDirection: "column", gap: 6,
-            width: popoverWidth,
-            maxHeight: "calc(100vh - 48px)",
-            overflow: "auto",
-            boxSizing: "border-box",
-            opacity: shown ? 1 : 0,
-            transform: shown ? "translateY(0)" : "translateY(-4px)",
-            transition: "opacity 120ms ease, transform 120ms ease",
-          }}
-        >
-          {groups.map((g) => (
-            <div key={g.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4 }}>
-              {g.node}
-            </div>
-          ))}
-        </div>
-      )}
-    </span>
-  );
+  return <span data-dxw-sep="" style={{ width: 1, height: 18, background: T.border, margin: "0 4px", flexShrink: 0 }} />;
 }
 
 const icon = { width: 16, height: 16, display: "block" } as const;
@@ -281,6 +193,23 @@ export interface ToolbarMenuSelectProps {
   menuWidth?: number;
   className?: string;
   style?: React.CSSProperties;
+  /** Fold priority for the bar's layout engine; see RibbonItem.fold. */
+  fold?: number;
+}
+
+/**
+ * Where a menu opened from a bar control should hang from.
+ *
+ * The toolbar can be several lines tall once it is expanded, and a menu
+ * anchored to its own control's bottom edge would then open over the controls
+ * on the lines below it — the bar covering itself. Menus hang from the bottom
+ * of the whole bar instead, so they only ever cover the document. Controls
+ * outside the bar are unaffected: they fall back to their own bottom edge.
+ */
+function menuAnchorBottom(anchor: Element | null | undefined, rect: { bottom: number }): number {
+  const bar = anchor?.closest("[data-dxw-toolbar-mode]");
+  const barBottom = bar?.getBoundingClientRect().bottom;
+  return barBottom === undefined ? rect.bottom : Math.max(rect.bottom, barBottom);
 }
 
 /** CSS-overridable replacement for visible native selects. An inert,
@@ -298,6 +227,7 @@ export function ToolbarMenuSelect({
   menuWidth,
   className,
   style,
+  fold,
 }: ToolbarMenuSelectProps) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 8, top: 8, width: menuWidth ?? 180, maxHeight: 320 });
@@ -314,18 +244,19 @@ export function ToolbarMenuSelect({
       const trigger = triggerRef.current;
       if (!trigger) return;
       const rect = trigger.getBoundingClientRect();
+      const bottom = menuAnchorBottom(trigger, rect);
       const nextWidth = Math.min(
         window.innerWidth - 16,
         menuWidth ?? Math.max(rect.width, menuRef.current?.scrollWidth ?? 180),
       );
-      const below = window.innerHeight - rect.bottom - 8;
+      const below = window.innerHeight - bottom - 8;
       const above = rect.top - 8;
       const placeAbove = below < 140 && above > below;
       const maxHeight = Math.max(96, Math.min(320, placeAbove ? above : below));
       const shownHeight = Math.min(menuRef.current?.scrollHeight ?? maxHeight, maxHeight);
       setPosition({
         left: Math.max(8, Math.min(rect.left, window.innerWidth - nextWidth - 8)),
-        top: placeAbove ? Math.max(8, rect.top - shownHeight - 4) : rect.bottom + 4,
+        top: placeAbove ? Math.max(8, rect.top - shownHeight - 4) : bottom + 4,
         width: nextWidth,
         maxHeight,
       });
@@ -397,6 +328,7 @@ export function ToolbarMenuSelect({
       ref={rootRef}
       className={`dxw-menu-select${className ? ` ${className}` : ""}`}
       data-dxw-menu-select=""
+      data-dxw-fold={fold}
       style={{ position: "relative", display: "inline-flex", width }}
     >
       <select
@@ -667,10 +599,11 @@ function ColorMenu({
     const update = () => {
       const rect = triggerRef.current?.getBoundingClientRect();
       if (!rect) return;
+      const bottom = menuAnchorBottom(triggerRef.current, rect);
       const width = Math.min(236, window.innerWidth - 16);
       const menuHeight = menuRef.current?.offsetHeight ?? 188;
-      const top = window.innerHeight - rect.bottom >= menuHeight + 8
-        ? rect.bottom + 4
+      const top = window.innerHeight - bottom >= menuHeight + 8
+        ? bottom + 4
         : Math.max(8, rect.top - menuHeight - 4);
       setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)), top });
     };
@@ -3352,9 +3285,10 @@ function useAnchoredPopover(
       // Clamped against the popover's OWN height once it has one, so a tall
       // form near the bottom of a short window still fits on screen.
       const height = rootRef.current?.offsetHeight ?? 0;
+      const bottom = menuAnchorBottom(anchorRef.current, rect);
       setPosition({
         left: Math.max(8, Math.min(rect.left, window.innerWidth - w - 8)),
-        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - height - 8)),
+        top: Math.max(8, Math.min(bottom + 4, window.innerHeight - height - 8)),
       });
     };
     const outside = (event: MouseEvent) => {
@@ -6144,18 +6078,20 @@ export interface DocxToolbarProps {
 /** localStorage key for the expand/collapse chevron choice. */
 const EXPANDED_KEY = "dxw-toolbar-expanded";
 
+/** Gap between two controls on the bar, in px (the flex `gap` below). */
+const RIBBON_GAP = 2;
+
 /**
- * Tier breakpoints, in the toolbar's own clientWidth (not window width — see
- * the measure() effect). Each boundary has a fold width and an unfold width
- * 40px above it: shrinking past FOLD moves to the higher tier, but growing
- * back needs to clear the higher UNFOLD width before returning to the lower
- * tier. Without that gap, a width that lands exactly on a breakpoint (or
- * jitters by a device pixel during layout) flips tiers on every
- * ResizeObserver tick — groups fold and unfold in a loop the user sees as
- * flicker. The 40px margin is comfortably larger than any such jitter.
+ * Width kept free at the right end of the first line for the expand chevron.
+ *
+ * Reserved whether or not the chevron is rendered, so the fit test cannot
+ * depend on its own answer: measuring the free space with the chevron absent
+ * says "everything fits" and renders nothing, while measuring it present says
+ * "one control too many" — a bar that flips between the two on every resize
+ * tick. A constant reservation makes the decision monotone in the window
+ * width, which is also why this file no longer needs hysteresis.
  */
-const TIER_FOLD_WIDTH = [1280, 720] as const;
-const TIER_UNFOLD_WIDTH = [1320, 760] as const;
+const EXPAND_RESERVE = 30;
 
 export function DocxToolbar({
   api,
@@ -6278,16 +6214,20 @@ export function DocxToolbar({
               : "That file could not be read as an image.",
     );
   };
-  // Responsive collapse: measure the toolbar width and pick a tier; the higher
-  // the tier the more low-frequency Home groups fold into the ⋮ overflow menu,
-  // so the strip stays single-row-clean on phones and tablets (Google Docs
-  // does exactly this). Full width keeps everything inline, so desktop and the
-  // e2e specs (1400px) are unchanged.
+  /**
+   * Responsive layout. The bar measures its own controls and fits them to the
+   * space it actually has (see ribbon-layout.ts). The expand chevron is the
+   * single affordance for the controls that do not fit, and the choice
+   * persists across reloads.
+   */
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const [tier, setTier] = useState(0);
-  // Expanded: the chevron at the right edge disables the overflow folding so
-  // every group of the active tab stays inline and wraps onto extra rows (the
-  // toolbar grows downward). Persisted so the choice survives reloads.
+  const tabsRef = useRef<HTMLDivElement | null>(null);
+  const trailingRef = useRef<HTMLDivElement | null>(null);
+  const ribbonRef = useRef<HTMLDivElement | null>(null);
+  const [overflows, setOverflows] = useState(false);
+  const [hiddenCount, setHiddenCount] = useState(0);
+  // Bumped when the bar's own width changes, to re-run the layout effect.
+  const [, remeasure] = useReducer((n: number) => n + 1, 0);
   const [expanded, setExpanded] = useState(() => {
     try {
       const stored = localStorage.getItem(EXPANDED_KEY);
@@ -6307,7 +6247,13 @@ export function DocxToolbar({
       }
       return next;
     });
-  const effectiveTier = expanded ? 0 : tier;
+  // Whether the expanded controls take full-width lines below the tab strip;
+  // the layout engine decides, since it is the one that knows how many lines
+  // each arrangement costs.
+  const [stacked, setStacked] = useState(false);
+  const expandLabel = expanded
+    ? "Hide the extra tools"
+    : `Show ${hiddenCount} more tool${hiddenCount === 1 ? "" : "s"}`;
   useEffect(() => {
     if (!on("help")) return;
     const keydown = (event: KeyboardEvent) => {
@@ -6337,31 +6283,132 @@ export function DocxToolbar({
     document.addEventListener("dxw-object-selection", refreshObject);
     return () => document.removeEventListener("dxw-object-selection", refreshObject);
   }, [api]);
+  // A width change is the one thing that does not re-render the toolbar by
+  // itself, so it has to be announced. Only a real change counts: folding a
+  // control changes what is inside the bar, never the bar's own width, so the
+  // engine below cannot feed itself.
   useEffect(() => {
     const el = rootRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
-    const measure = () => {
-      const w = Math.min(el.clientWidth, window.innerWidth);
-      setTier((prev) => {
-        // Tier 0 <-> 1: already folded (prev > 0) needs the wider unfold
-        // width to go back to 0; still unfolded (prev === 0) only needs to
-        // clear the fold width to stay there.
-        const atLeast1 = prev === 0 ? w < TIER_FOLD_WIDTH[0] : w < TIER_UNFOLD_WIDTH[0];
-        if (!atLeast1) return 0;
-        // Tier 1 <-> 2: same hysteresis, one boundary down.
-        const atLeast2 = prev <= 1 ? w < TIER_FOLD_WIDTH[1] : w < TIER_UNFOLD_WIDTH[1];
-        return atLeast2 ? 2 : 1;
-      });
+    let last = el.clientWidth;
+    const announce = () => {
+      const next = el.clientWidth;
+      if (next === last) return;
+      last = next;
+      remeasure();
     };
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    window.addEventListener("resize", measure);
-    measure();
+    const observer = new ResizeObserver(announce);
+    observer.observe(el);
+    window.addEventListener("resize", announce);
     return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", measure);
+      observer.disconnect();
+      window.removeEventListener("resize", announce);
     };
   }, []);
+
+  /**
+   * The layout engine: measure every control, then fit them.
+   *
+   * It runs after each commit rather than on a dependency list, because the
+   * controls themselves come and go (selecting a table adds a tab; a document
+   * with no character styles drops a menu) and a stale measurement is exactly
+   * what cuts a control in half at the window edge. Measuring means un-folding
+   * first: a control folded on the last pass has no width until it is shown
+   * again. All of it runs in a layout effect, before the browser paints, so
+   * the fully-unfolded state it passes through is never on screen.
+   *
+   * Only controls the engine itself folded are shown again (the `dxwFolded`
+   * mark): clearing `display` on every child would reveal the file inputs and
+   * status bubbles that are hidden by their own render.
+   */
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const ribbon = ribbonRef.current;
+    if (!root || !ribbon) return;
+    /**
+     * The Layout tab renders one element that claims a whole line of the bar
+     * and wraps its own controls inside it. Its width is therefore whatever
+     * the bar gives it, so measuring IT measures nothing — and folding on that
+     * measurement fed itself: the fit changed the line, the line changed the
+     * width, and React stopped the bar with "maximum update depth exceeded".
+     * Descend into such an element and fit the controls it holds instead.
+     */
+    const only = ribbon.children.length === 1 ? (ribbon.firstElementChild as HTMLElement) : null;
+    const nested = only && getComputedStyle(only).flexBasis === "100%" ? only : null;
+    const line = nested ?? ribbon;
+    const children = Array.from(line.children) as HTMLElement[];
+    for (const child of children) {
+      if (child.dataset.dxwFolded === "1") {
+        child.style.display = "";
+        delete child.dataset.dxwFolded;
+      }
+      // Never squeeze a control to make it fit: a squeezed control is a
+      // clipped label, the bug this engine exists to make impossible.
+      child.style.flexShrink = "0";
+    }
+    line.style.maxWidth = "";
+    line.style.overflowX = "";
+
+    const measured: { el: HTMLElement; item: RibbonItem }[] = [];
+    for (const child of children) {
+      const childStyle = getComputedStyle(child);
+      // A popover or dialog a control renders beside itself is out of flow: it
+      // takes no room on the line and must not be folded away.
+      if (childStyle.position === "fixed" || childStyle.position === "absolute") continue;
+      // Margins count. A group divider is a 1px hairline with 4px either side,
+      // and reading only its box left the line 8px short per divider — enough
+      // over a Home tab's five dividers to wrap two controls onto a second row
+      // that the engine believed did not exist.
+      const width = Math.ceil(
+        child.getBoundingClientRect().width +
+          (parseFloat(childStyle.marginLeft) || 0) +
+          (parseFloat(childStyle.marginRight) || 0),
+      );
+      if (width === 0) continue;
+      measured.push({
+        el: child,
+        item: {
+          width,
+          fold: Number(child.dataset.dxwFold ?? 0),
+          separator: child.dataset.dxwSep !== undefined,
+        },
+      });
+    }
+
+    const rootStyle = getComputedStyle(root);
+    const padding = (parseFloat(rootStyle.paddingLeft) || 0) + (parseFloat(rootStyle.paddingRight) || 0);
+    const content = root.clientWidth - padding;
+    const tabsWidth = tabsRef.current?.offsetWidth ?? 0;
+    const trailingWidth = trailingRef.current?.offsetWidth ?? 0;
+    const plan = planRibbon(
+      measured.map((entry) => entry.item),
+      {
+        gap: RIBBON_GAP,
+        // What is left of the line once the tab strip and the trailing
+        // controls (Download, Help) have taken their share. The chevron is
+        // deliberately NOT part of the trailing measurement; it is reserved as
+        // a constant so its own presence cannot change the answer. A nested
+        // line already spans the bar, so for it the whole width is the share.
+        inlineAvailable: nested ? content : content - tabsWidth - trailingWidth - RIBBON_GAP * 3,
+        fullAvailable: content,
+        reserve: EXPAND_RESERVE,
+      },
+      expanded,
+    );
+    measured.forEach((entry, index) => {
+      if (!plan.hidden[index]) return;
+      entry.el.style.display = "none";
+      entry.el.dataset.dxwFolded = "1";
+    });
+    if (plan.rowMaxWidth > 0) line.style.maxWidth = `${plan.rowMaxWidth}px`;
+    if (plan.needsScroll) line.style.overflowX = "auto";
+    if (plan.overflows !== overflows) setOverflows(plan.overflows);
+    // A nested line is already a line of its own, so the bar always gives it
+    // one rather than squeezing it in beside the tabs.
+    const wantsStack = nested !== null || plan.stacked;
+    if (wantsStack !== stacked) setStacked(wantsStack);
+    if (plan.hiddenCount !== hiddenCount) setHiddenCount(plan.hiddenCount);
+  });
 
   const refresh = useCallback(() => {
     const sel = window.getSelection();
@@ -6421,8 +6468,8 @@ export function DocxToolbar({
         key: "history",
         node: (
           <>
-            <Btn label={"↶"} title="Undo (⌘Z)" onClick={() => { api?.undo(); refresh(); }} />
-            <Btn label={"↷"} title="Redo (⇧⌘Z)" onClick={() => { api?.redo(); refresh(); }} />
+            <Btn fold={-2} label={"↶"} title="Undo (⌘Z)" onClick={() => { api?.undo(); refresh(); }} />
+            <Btn fold={-2} label={"↷"} title="Redo (⇧⌘Z)" onClick={() => { api?.redo(); refresh(); }} />
             <Sep />
           </>
         ),
@@ -6515,6 +6562,7 @@ export function DocxToolbar({
         key: "font",
         node: (
           <ToolbarMenuSelect
+            fold={-1}
             title="Font"
             value={fmt?.fontFamily ?? ""}
             placeholder="Font"
@@ -6535,6 +6583,7 @@ export function DocxToolbar({
         node: (
           <>
           <ToolbarMenuSelect
+            fold={-1}
             title="Font size"
             value={fmt?.fontSizePt === undefined ? "" : String(fmt.fontSizePt)}
             placeholder="Size"
@@ -6552,9 +6601,9 @@ export function DocxToolbar({
         key: "format",
         node: (
           <>
-            <Btn label={<b>B</b>} title="Bold (⌘B)" active={!!fmt?.bold} onClick={() => apply({ bold: !fmt?.bold })} />
-            <Btn label={<i>I</i>} title="Italic" active={!!fmt?.italic} onClick={() => apply({ italic: !fmt?.italic })} />
-            <Btn label={<u>U</u>} title="Underline" active={!!fmt?.underline} onClick={() => apply({ underline: !fmt?.underline })} />
+            <Btn fold={-3} label={<b>B</b>} title="Bold (⌘B)" active={!!fmt?.bold} onClick={() => apply({ bold: !fmt?.bold })} />
+            <Btn fold={-3} label={<i>I</i>} title="Italic" active={!!fmt?.italic} onClick={() => apply({ italic: !fmt?.italic })} />
+            <Btn fold={-3} label={<u>U</u>} title="Underline" active={!!fmt?.underline} onClick={() => apply({ underline: !fmt?.underline })} />
             <Btn label={<s>S</s>} title="Strikethrough" active={!!fmt?.strike} onClick={() => apply({ strike: !fmt?.strike })} />
             <Btn
               label={<span style={{ fontSize: 12 }}>x<sup style={{ fontSize: 9 }}>2</sup></span>}
@@ -6748,31 +6797,10 @@ export function DocxToolbar({
         ),
       });
 
-    // Per-tier overflow: which group keys fold into ⋮. Tier 0 keeps all
-    // inline; "history" and "format" (undo/redo, bold/italic/underline/…)
-    // never fold — they're the controls used on nearly every edit, at any
-    // width. Tier 1 and 2 fold progressively more of the rest, chosen so
-    // each tier's remaining inline groups actually fit one row instead of
-    // spilling a couple of stray controls onto a mostly-empty second line.
-    const overflowKeys =
-      effectiveTier === 0
-        ? new Set<string>()
-        : effectiveTier === 1
-          ? new Set(["styles", "indent", "spacing", "borders", "charStyles", "formatPainter"])
-          : new Set([
-              "styles", "font", "size", "color", "highlight", "alignment", "indent", "spacing",
-              "borders", "charStyles", "formatPainter", "lists",
-            ]);
-    const inline = groups.filter((g) => !overflowKeys.has(g.key));
-    const overflow = groups.filter((g) => overflowKeys.has(g.key));
-    return (
-      <>
-        {inline.map((g) => (
-          <Fragment key={g.key}>{g.node}</Fragment>
-        ))}
-        {overflow.length > 0 && <OverflowMenu groups={overflow} />}
-      </>
-    );
+    // Every group renders on the bar; the layout engine folds control by
+    // control from the measured widths, so what leaves the line at a given
+    // width is what does not fit, never what a breakpoint table guessed.
+    return groups.map((group) => <Fragment key={group.key}>{group.node}</Fragment>);
   };
 
   return (
@@ -6791,8 +6819,9 @@ export function DocxToolbar({
         maxWidth: "100%",
         minWidth: 0,
         boxSizing: "border-box",
-        gap: 2,
-        alignItems: "center",
+        gap: RIBBON_GAP,
+        rowGap: 4,
+        alignItems: "flex-start",
         padding: "4px 10px",
         borderBottom: `1px solid ${T.border}`,
         background: T.bg,
@@ -6823,8 +6852,11 @@ export function DocxToolbar({
         </div>
       )}
       {mode === "advanced" && (
-        <>
-          <div style={{ display: "flex", gap: 2, marginRight: 8 }}>
+        <div
+          ref={tabsRef}
+          data-dxw-toolbar-tabs=""
+          style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 2, minHeight: 30, flexShrink: 0 }}
+        >
             {(["home", "insert", "draw", "layout", "review"] as const)
               .filter((t) => (t !== "draw" || on("drawing")) && (t !== "layout" || on("layout")) && (t !== "review" || on("review")))
               .map((t) => (
@@ -6916,134 +6948,205 @@ export function DocxToolbar({
                 Help
               </button>
             )}
-          </div>
           <Sep />
-        </>
+        </div>
       )}
-      {(mode === "simple" || tab === "home") && renderHome()}
-      {mode === "advanced" && tab === "insert" && (() => {
-        // The rest of the Insert tab (galleries, references, page parts,
-        // fields…) is one block: at the narrow tiers it folds as a unit into
-        // ⋮ rather than per-group, so it's built once here and rendered
-        // either inline or handed to OverflowMenu as its single group —
-        // previously this ~70-node block was duplicated verbatim for the two
-        // cases, and the copies had already drifted apart by one <Sep />.
-        const rest = (
-          <>
-            {on("model3D") && <Btn label="3D Models" title="Insert a GLB 3D model" onClick={() => modelInput.current?.click()} />}
-            {on("smartArt") && <SmartArtMenu api={api} />}
-            {on("chart") && <ChartMenu api={api} />}
-            {on("media") && <MediaMenu api={api} />}
-            {on("shape") && <ShapeMenu api={api} />}
-            {on("divider") && <DividerMenu api={api} />}
-            {on("textBox") && <TextBoxMenu api={api} />}
-            {on("wordArt") && <WordArtMenu api={api} />}
-            {on("link") && <LinkMenu api={api} />}
-            {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
-            {on("footnote") && <NoteMenu api={api} kind="footnote" />}
-            {on("footnote") && <NoteMenu api={api} kind="endnote" />}
-            {on("footnote") && <NoteOptionsMenu api={api} />}
-            {on("bookmark") && <BookmarkMenu api={api} />}
-            {on("crossReference") && <CrossReferenceMenu api={api} />}
-            {on("crossReference") && <CaptionMenu api={api} />}
-            {on("headerFooter") && <HeaderFooterMenu api={api} />}
-            {on("watermark") && <WatermarkMenu api={api} />}
-            <Sep />
-            {on("pageNumber") && <PageNumberMenu api={api} />}
-            {on("break") && (
-              <>
-                <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />
+      {/*
+        * The controls of the active tab, and the only children the layout
+        * engine measures. Collapsed it is one line beside the tabs; expanded
+        * it takes a full-width line of its own below them, because a second
+        * line indented past the tab strip would waste ~350px of every row it
+        * adds — the width that decides whether the extra lines are dense or
+        * ragged.
+        */}
+      <div
+        style={{
+          display: "flex",
+          minWidth: 0,
+          // Two elements, because the line break and the line width are
+          // different jobs: this one claims a whole line of the bar when the
+          // controls are stacked below the tabs, while the one inside it is
+          // squeezed to the width that balances the wrapped lines. Done on one
+          // element, the squeeze shrank the flex item back under the tab
+          // strip's leftover space and the "own line" break stopped happening
+          // at some widths and not others.
+          flex: stacked ? "1 1 100%" : "1 1 0%",
+          order: stacked ? 2 : 0,
+        }}
+      >
+      <div
+        ref={ribbonRef}
+        data-dxw-toolbar-ribbon=""
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: RIBBON_GAP,
+          rowGap: 4,
+          minWidth: 0,
+          minHeight: 30,
+          width: "100%",
+        }}
+      >
+        {(mode === "simple" || tab === "home") && renderHome()}
+        {mode === "advanced" && tab === "insert" && (() => {
+          // The rest of the Insert tab (galleries, references, page parts,
+          // fields…). It renders as plain siblings so the layout engine can fold
+          // it control by control; it used to fold as one all-or-nothing block,
+          // which is how a 1400px-wide tab became five icons and a ⋮.
+          const rest = (
+            <>
+              {on("model3D") && <Btn label="3D Models" title="Insert a GLB 3D model" onClick={() => modelInput.current?.click()} />}
+              {on("smartArt") && <SmartArtMenu api={api} />}
+              {on("chart") && <ChartMenu api={api} />}
+              {on("media") && <MediaMenu api={api} />}
+              {on("shape") && <ShapeMenu api={api} />}
+              {on("divider") && <DividerMenu api={api} />}
+              {on("textBox") && <TextBoxMenu api={api} />}
+              {on("wordArt") && <WordArtMenu api={api} />}
+              {on("link") && <LinkMenu api={api} />}
+              {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
+              {on("footnote") && <NoteMenu api={api} kind="footnote" />}
+              {on("footnote") && <NoteMenu api={api} kind="endnote" />}
+              {on("footnote") && <NoteOptionsMenu api={api} />}
+              {on("bookmark") && <BookmarkMenu api={api} />}
+              {on("crossReference") && <CrossReferenceMenu api={api} />}
+              {on("crossReference") && <CaptionMenu api={api} />}
+              {on("headerFooter") && <HeaderFooterMenu api={api} />}
+              {on("watermark") && <WatermarkMenu api={api} />}
+              <Sep />
+              {on("pageNumber") && <PageNumberMenu api={api} />}
+              {on("break") && (
+                <>
+                  <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />
+                  <ActionMenu
+                    label="Break"
+                    title="Insert a page, column or section break at the caret"
+                    width={64}
+                    groups={[
+                      { label: "Breaks", items: [["br:page", "Page break"], ["br:column", "Column break"]] },
+                      { label: "Section breaks", items: [["br:next", "Section break (next page)"], ["br:cont", "Section break (continuous)"]] },
+                    ]}
+                    onPick={(v) => {
+                      if (v === "br:page") api?.insertBreak("page");
+                      else if (v === "br:column") api?.insertBreak("column");
+                      else if (v === "br:next") api?.insertBreak("sectionNextPage");
+                      else if (v === "br:cont") api?.insertBreak("sectionContinuous");
+                    }}
+                  />
+                </>
+              )}
+              {on("dateTime") && (
                 <ActionMenu
-                  label="Break"
-                  title="Insert a page, column or section break at the caret"
-                  width={64}
+                  label="Date & time"
+                  title="Insert an automatically updating date or time"
+                  width={100}
                   groups={[
-                    { label: "Breaks", items: [["br:page", "Page break"], ["br:column", "Column break"]] },
-                    { label: "Section breaks", items: [["br:next", "Section break (next page)"], ["br:cont", "Section break (continuous)"]] },
+                    { label: "Date", items: [["date:short", "Short date"], ["date:long", "Long date"], ["date:intl", "Day month year"]] },
+                    { label: "Time", items: [["time:12", "12-hour time"], ["time:24", "24-hour time"]] },
                   ]}
-                  onPick={(v) => {
-                    if (v === "br:page") api?.insertBreak("page");
-                    else if (v === "br:column") api?.insertBreak("column");
-                    else if (v === "br:next") api?.insertBreak("sectionNextPage");
-                    else if (v === "br:cont") api?.insertBreak("sectionContinuous");
+                  onPick={(value) => {
+                    if (value === "date:short") api?.insertDateTime("date", "M/d/yyyy");
+                    else if (value === "date:long") api?.insertDateTime("date", "MMMM d, yyyy");
+                    else if (value === "date:intl") api?.insertDateTime("date", "d MMMM yyyy");
+                    else if (value === "time:12") api?.insertDateTime("time", "h:mm am/pm");
+                    else if (value === "time:24") api?.insertDateTime("time", "HH:mm");
                   }}
                 />
-              </>
-            )}
-            {on("dateTime") && (
-              <ActionMenu
-                label="Date & time"
-                title="Insert an automatically updating date or time"
-                width={100}
-                groups={[
-                  { label: "Date", items: [["date:short", "Short date"], ["date:long", "Long date"], ["date:intl", "Day month year"]] },
-                  { label: "Time", items: [["time:12", "12-hour time"], ["time:24", "24-hour time"]] },
-                ]}
-                onPick={(value) => {
-                  if (value === "date:short") api?.insertDateTime("date", "M/d/yyyy");
-                  else if (value === "date:long") api?.insertDateTime("date", "MMMM d, yyyy");
-                  else if (value === "date:intl") api?.insertDateTime("date", "d MMMM yyyy");
-                  else if (value === "time:12") api?.insertDateTime("time", "h:mm am/pm");
-                  else if (value === "time:24") api?.insertDateTime("time", "HH:mm");
-                }}
-              />
-            )}
-            {on("field") && (
-              <ActionMenu
-                label="Field"
-                title="Insert a Word field"
-                width={68}
-                groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]}
-                onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)}
-              />
-            )}
-            {on("field") && <ContentsMenu api={api} />}
-            {on("citations") && <CitationsMenu api={api} />}
-            {on("quickParts") && <QuickPartsMenu api={api} />}
-            {on("equation") && <EquationMenu api={api} />}
-            {on("symbol") && <SymbolMenu api={api} />}
-            {on("dropCap") && (
-              <ActionMenu
-                label="Drop cap"
-                title="Drop cap"
-                width={84}
-                groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]}
-                onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")}
-              />
-            )}
-            {on("object") && <Btn label="Object" title="Embed a file in this document" onClick={() => objectInput.current?.click()} />}
-          </>
-        );
-        return (
-          <>
-            {on("coverPage") && <CoverPageMenu api={api} />}
-            {on("table") && <TableMenu api={api} />}
-            {on("image") && (
-              <span style={{ position: "relative", display: "inline-flex" }}>
-                <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
-                {imageStatus && (
-                  <span
-                    role="alert"
-                    data-dxw-image-status=""
-                    style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 230, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
-                  >
-                    {imageStatus}
-                  </span>
-                )}
-              </span>
-            )}
-            {on("icon") && <Btn label="Icons" title="Insert SVG icon" onClick={() => iconInput.current?.click()} />}
-            {on("screenshot") && <ScreenshotButton api={api} />}
-            {effectiveTier === 0 ? rest : <OverflowMenu groups={[{ key: "insert-more", node: rest }]} />}
-          </>
-        );
-      })()}
-      {mode === "advanced" && tab === "draw" && on("drawing") && <DrawTab api={api} />}
-      {mode === "advanced" && tab === "format" && objectContext && (
-        <ObjectFormatTab api={api} context={objectContext} showArrange={on("arrange")} />
-      )}
-      {mode === "advanced" && tab === "tableFormat" && tableCellFill !== undefined && (
-        <TableFormatTab api={api} fill={tableCellFill} onChanged={refresh} />
+              )}
+              {on("field") && (
+                <ActionMenu
+                  label="Field"
+                  title="Insert a Word field"
+                  width={68}
+                  groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]}
+                  onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)}
+                />
+              )}
+              {on("field") && <ContentsMenu api={api} />}
+              {on("citations") && <CitationsMenu api={api} />}
+              {on("quickParts") && <QuickPartsMenu api={api} />}
+              {on("equation") && <EquationMenu api={api} />}
+              {on("symbol") && <SymbolMenu api={api} />}
+              {on("dropCap") && (
+                <ActionMenu
+                  label="Drop cap"
+                  title="Drop cap"
+                  width={84}
+                  groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]}
+                  onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")}
+                />
+              )}
+              {on("object") && <Btn label="Object" title="Embed a file in this document" onClick={() => objectInput.current?.click()} />}
+            </>
+          );
+          return (
+            <>
+              {on("coverPage") && <CoverPageMenu api={api} />}
+              {on("table") && <TableMenu api={api} />}
+              {on("image") && (
+                <span style={{ position: "relative", display: "inline-flex" }}>
+                  <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
+                  {imageStatus && (
+                    <span
+                      role="alert"
+                      data-dxw-image-status=""
+                      style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 230, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
+                    >
+                      {imageStatus}
+                    </span>
+                  )}
+                </span>
+              )}
+              {on("icon") && <Btn label="Icons" title="Insert SVG icon" onClick={() => iconInput.current?.click()} />}
+              {on("screenshot") && <ScreenshotButton api={api} />}
+              {rest}
+            </>
+          );
+        })()}
+        {mode === "advanced" && tab === "draw" && on("drawing") && <DrawTab api={api} />}
+        {mode === "advanced" && tab === "format" && objectContext && (
+          <ObjectFormatTab api={api} context={objectContext} showArrange={on("arrange")} />
+        )}
+        {mode === "advanced" && tab === "tableFormat" && tableCellFill !== undefined && (
+          <TableFormatTab api={api} fill={tableCellFill} onChanged={refresh} />
+        )}
+        {mode === "advanced" && tab === "layout" && on("layout") && <LayoutTab api={api} showArrange={on("arrange")} />}
+        {mode === "advanced" && tab === "review" && on("review") && (
+          <ReviewTab api={api} onChanged={refresh} showComment={on("comment")} mentions={commentMentions} />
+        )}
+      </div>
+      </div>
+      <div
+        ref={trailingRef}
+        data-dxw-toolbar-trailing=""
+        style={{ display: "flex", alignItems: "center", gap: 2, minHeight: 30, marginLeft: "auto", flexShrink: 0, order: 1 }}
+      >
+        {mode === "simple" && on("help") && (
+          <Btn buttonRef={helpTrigger} label="Help" title={`Help and keyboard shortcuts (${shortcut("/")})`} onClick={() => setHelpOpen(true)} />
+        )}
+        {on("download") && onSave && (
+          <Btn label="Download" title="Save edited .docx" onClick={() => api && onSave(api.save())} />
+        )}
+      </div>
+      {/*
+        * The one "there is more" affordance on this bar. It appears only when
+        * controls are actually folded away, so at a width where everything
+        * fits there is no chrome offering to reveal nothing.
+        */}
+      {overflows && (
+        <button
+          type="button"
+          title={expandLabel}
+          aria-label={expandLabel}
+          aria-expanded={expanded}
+          data-dxw-toolbar-expand=""
+          style={{ ...btnStyle(expanded), flexShrink: 0, order: 1 }}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={toggleExpanded}
+        >
+          <ExpandChevronIcon up={expanded} />
+        </button>
       )}
       <input
         ref={imageInput}
@@ -7094,32 +7197,6 @@ export function DocxToolbar({
           e.target.value = "";
         }}
       />
-      {mode === "advanced" && tab === "layout" && on("layout") && <LayoutTab api={api} showArrange={on("arrange")} />}
-      {mode === "advanced" && tab === "review" && on("review") && (
-        <ReviewTab api={api} onChanged={refresh} showComment={on("comment")} mentions={commentMentions} />
-      )}
-      {mode === "simple" && on("help") && (
-        <span style={{ marginLeft: "auto" }}>
-          <Btn buttonRef={helpTrigger} label="Help" title={`Help and keyboard shortcuts (${shortcut("/")})`} onClick={() => setHelpOpen(true)} />
-        </span>
-      )}
-      {on("download") && onSave && (
-        <>
-          <span style={{ flex: 1 }} />
-          <Btn label="Download" title="Save edited .docx" onClick={() => api && onSave(api.save())} />
-        </>
-      )}
-      <button
-        type="button"
-        title={expanded ? "Collapse the toolbar" : "Expand the toolbar"}
-        aria-expanded={expanded}
-        data-dxw-toolbar-expand=""
-        style={{ ...btnStyle(expanded), marginLeft: "auto", flexShrink: 0 }}
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={toggleExpanded}
-      >
-        <ExpandChevronIcon up={expanded} />
-      </button>
       <HelpGuide open={helpOpen} onClose={closeHelp} returnFocus={helpTrigger} />
     </div>
   );
