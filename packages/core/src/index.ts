@@ -224,10 +224,11 @@ export {
   isValidShapePreset,
   setDrawingFill,
   setDrawingLineStyle,
+  setDrawingTextFit,
   setDrawingWordArtStyle,
   setDrawingWordArtText,
 } from "./edit/drawings.js";
-export type { DrawingLineDash, DrawingTool, InkPoint, RunTextEffectPatch, ShapePreset, WordArtPreset, WordArtStyle } from "./edit/drawings.js";
+export type { DrawingLineDash, DrawingTextFitMode, DrawingTool, InkPoint, RunTextEffectPatch, ShapePreset, WordArtPreset, WordArtStyle } from "./edit/drawings.js";
 export {
   isKnownShapeGeometry,
   knownShapeGeometryNames,

@@ -633,3 +633,53 @@ export function insertInkAt(
   if (refreshModel) doc.refresh();
   return drawing;
 }
+
+/** bodyPr's autofit choice: grow the shape, shrink the text, or neither. */
+export type DrawingTextFitMode = "none" | "resizeShape" | "shrinkText";
+
+/** The three members of CT_TextBodyProperties' autofit choice group. */
+const AUTOFIT_ELEMENTS = ["noAutofit", "normAutofit", "spAutoFit"];
+
+/**
+ * Set a shape's bodyPr autofit mode (ECMA-376 CT_TextBodyProperties).
+ *
+ * "resizeShape" writes a:spAutoFit, which Word honors: it grows the box to the
+ * text and ignores the cached cy. "shrinkText" writes a:normAutofit with an
+ * optional fontScale. That one is a CACHE, not an instruction — probe-shapefit
+ * put fourteen normAutofit shapes through desktop Word (six text lengths at
+ * two box heights with a bare <a:normAutofit/>, plus two authored scales), and
+ * Word painted every one at its authored font size, clipped each at its box
+ * bottom line for line with the a:noAutofit control, and wrote every bodyPr
+ * back byte-identically. It computed no scale for the bare ones, so there is
+ * no ladder to quantize onto, and it consumed neither authored one. The
+ * percentage is therefore written through exactly as given, in ECMA-376's
+ * thousandths of a percent, and the layout keeps clipping — matching Word.
+ *
+ * A drawing with no bodyPr (a VML text box, a picture) is a clean no-op.
+ */
+export function setDrawingTextFit(
+  doc: DocxDocument,
+  drawingEl: XmlElement,
+  mode: DrawingTextFitMode,
+  fontScalePct?: number,
+): boolean {
+  const bodyPr = descendant(drawingEl, "bodyPr");
+  if (!bodyPr) return false;
+  const autofit =
+    mode === "resizeShape"
+      ? el("a:spAutoFit")
+      : mode === "shrinkText"
+        ? el("a:normAutofit", fontScalePct === undefined ? {} : { fontScale: String(Math.round(fontScalePct * 1000)) })
+        : el("a:noAutofit");
+  const existing = bodyPr.children.findIndex((child) => AUTOFIT_ELEMENTS.includes(localName(child.name)));
+  if (existing !== -1) {
+    bodyPr.children.splice(existing, 1, autofit);
+  } else {
+    // The choice group follows a:prstTxWarp and precedes everything else in
+    // the sequence, so it goes directly after the warp when there is one.
+    const warp = bodyPr.children.findIndex((child) => localName(child.name) === "prstTxWarp");
+    bodyPr.children.splice(warp + 1, 0, autofit);
+  }
+  doc.refresh();
+  return true;
+}

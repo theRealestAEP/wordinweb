@@ -796,6 +796,7 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `setImageAltText` | Set image accessibility text | `objectRef`, `alt` |
 | `setCrop` | Crop an image to part of its bitmap | `objectRef`, `crop` |
 | `setImageWrap` | Set inline or floating wrapping | `objectRef`, `mode` |
+| `setDrawingTextFit` | Set a shape's autofit mode | `objectRef`, `mode`; optional: `fontScalePct` |
 | `setDrawingWordArtText` | Replace WordArt text | `objectRef`, `text` |
 | `setDrawingWordArtStyle` | Set WordArt glyph color and opacity | `objectRef`, `color`, `opacity` |
 | `setChartData` | Replace chart data | `objectRef`, `chart` |
@@ -806,6 +807,13 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 
 Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
 `widthPx` and `dash` when `color` contains an RGB value.
+
+`setDrawingTextFit.mode` is `resizeShape` (grow the box to its text),
+`shrinkText` (cache a smaller font scale), or `none` (clip). Use
+`resizeShape` to resolve an overflow that `kind: "fit"` reported: Word grows
+that box, but it paints `shrinkText` at full size and clips it just like
+`none`. `fontScalePct` (1–100) is `shrinkText`'s cached percentage and is
+rejected with any other mode.
 
 ### Table
 

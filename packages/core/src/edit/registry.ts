@@ -10,6 +10,7 @@ import {
   isValidCitationTag,
   isValidMergeFieldName,
 } from "./fields.js";
+import { setDrawingTextFit, type DrawingTextFitMode } from "./drawings.js";
 import { setImageCrop, type ImageCrop } from "./images.js";
 import { setListType } from "./lists.js";
 import { insertEndnote } from "./notes.js";
@@ -1480,6 +1481,40 @@ const setModel3DRotationOperation = defineOperation<{
 });
 
 /**
+ * Set how a shape reconciles its text with its box: bodyPr autofit.
+ *
+ * OBJECT-addressed like setCrop and setModel3DRotation above. Nothing is
+ * derived from this window's layout — the mode, and the cached percentage that
+ * may ride with it, are the whole payload — so every replica writes the same
+ * bytes.
+ */
+const setDrawingTextFitOperation = defineOperation<{
+  runId: StableId;
+  objectIndex?: number;
+  mode: DrawingTextFitMode;
+  fontScalePct?: number;
+}>()({
+  kind: "setDrawingTextFit",
+  address: "object",
+  category: "drawing",
+  description:
+    "Set a shape's autofit: resizeShape grows the box to its text, shrinkText caches a font scale, none clips. Only resizeShape resolves an overflow — Word paints shrinkText at full size.",
+  fields: [{ name: "mode" }, { name: "fontScalePct", optional: true }],
+  validate: ({ mode, fontScalePct }) => {
+    if (mode !== "none" && mode !== "resizeShape" && mode !== "shrinkText") return "setDrawingTextFit: bad mode";
+    if (fontScalePct === undefined) return null;
+    // The scale is a:normAutofit's cache and belongs to no other mode.
+    if (mode !== "shrinkText") return "setDrawingTextFit: fontScalePct needs mode shrinkText";
+    if (typeof fontScalePct !== "number" || !Number.isFinite(fontScalePct)) return "setDrawingTextFit: bad fontScalePct";
+    // ST_TextFontScalePercentOrPercentString: 1% to 100%, in thousandths.
+    if (fontScalePct < 1 || fontScalePct > 100) return "setDrawingTextFit: fontScalePct out of range";
+    return null;
+  },
+  apply: ({ doc, target, payload }) =>
+    target.drawing ? setDrawingTextFit(doc, target.drawing, payload.mode, payload.fontScalePct) : false,
+});
+
+/**
  * Insert a MERGEFIELD at the end of the anchor run. With no mail-merge data
  * source attached — this editor never attaches one — the field displays the
  * «Name» placeholder, which is what Word inserts too; the placeholder is
@@ -2264,6 +2299,7 @@ const OPERATIONS = [
   insertEndnoteOperation,
   setCropOperation,
   setModel3DRotationOperation,
+  setDrawingTextFitOperation,
   insertMergeFieldOperation,
   insertCitationOperation,
   insertBibliographyOperation,

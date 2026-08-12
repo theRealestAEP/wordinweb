@@ -84,6 +84,29 @@ describe("fit inspection", () => {
     expect(() => agent.inspect({ kind: "fit", pages: { start: 0, count: 1 } })).toThrow("Invalid page range");
   });
 
+  it("resolves a reported overflow through setDrawingTextFit", async () => {
+    // The round trip the in-app model was missing: see the overflow, fix it,
+    // see that it is gone. resizeShape is the mode that works, because it is
+    // the one Word honors.
+    const shape = anchorTextBox({ id: 1, x: 457200, y: 457200, width: 914400, height: 457200, text: OVERFULL, autofit: "<a:noAutofit/>" });
+    const agent = AgentDocument.load(makeDocx(body(`<w:p>${shape}<w:r><w:t>host</w:t></w:r></w:p>`)));
+    const before = agent.inspect({ kind: "fit" });
+    if (!("drawings" in before)) throw new Error("fit result missing");
+    expect(before.drawings[0].overflow).toBe(true);
+
+    const result = await agent.edit({
+      revision: agent.revision,
+      operations: [{ kind: "setDrawingTextFit", objectRef: before.drawings[0].objectRef, mode: "resizeShape" }],
+    });
+    expect(result.status).toBe("applied");
+
+    const after = agent.inspect({ kind: "fit" });
+    if (!("drawings" in after)) throw new Error("fit result missing");
+    expect(after.drawings[0].autofit).toBe("resizeShape");
+    expect(after.drawings[0].boxPx.h).toBeGreaterThan(before.drawings[0].boxPx.h);
+    expect(after.drawings[0].overflow).toBe(false);
+  });
+
   it("says nothing about drawings that flow no text", () => {
     // A picture has a box but no laid-out text, so it carries no fit entry
     // rather than a zero-sized one that would read as "fits".

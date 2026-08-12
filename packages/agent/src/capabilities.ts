@@ -570,6 +570,7 @@ const ENUMS: Record<string, readonly unknown[]> = {
   "insertWordArt.preset": ["plain", "archUp", "archDown", "wave", "chevron", "circle", "button", "chevronDown"],
   "insertDateTimeField.dtKind": ["date", "time"],
   "setDrawingLineStyle.dash": ["solid", "dashed", "dotted"],
+  "setDrawingTextFit.mode": ["none", "resizeShape", "shrinkText"],
   "setImageWrap.mode": ["inline", "square", "topAndBottom", "none", "behind"],
   "setDrawingOrder.order": ["front", "back"],
   "ensureHeaderFooter.hfKind": ["header", "footer"],
@@ -642,6 +643,8 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
   if (field === "start" || field === "end") return integer(0);
   if (field === "degrees") return number();
   if (field === "opacity") return number(0, 1);
+  // a:normAutofit's cached scale, as a percentage of the authored font size.
+  if (field === "fontScalePct") return number(1, 100);
   if (field === "widthPx" || field === "heightPx") return number(1, kind === "resizeTableRow" ? 20000 : 5000);
   if (field === "xPx" || field === "yPx") return number(-5000, kind === "moveTable" ? 20000 : 5000);
   if (field === "deltaPx") return number(-5000, 5000);

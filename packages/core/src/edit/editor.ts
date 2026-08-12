@@ -22,6 +22,7 @@ import {
   isDrawingWordArt,
   setDrawingFill,
   setDrawingLineStyle,
+  setDrawingTextFit,
   setDrawingWordArtText,
   type DrawingTool,
 } from "./drawings.js";
@@ -84,6 +85,9 @@ export type SelectedObjectCommand =
   | "wrapTopAndBottom"
   | "wrapFront"
   | "wrapBehind"
+  | "autofitNone"
+  | "autofitResizeShape"
+  | "autofitShrinkText"
   | "bringForward"
   | "sendBackward"
   | "reset3d"
@@ -114,6 +118,9 @@ export const SELECTED_OBJECT_COMMANDS: readonly SelectedObjectCommand[] = [
   "wrapTopAndBottom",
   "wrapFront",
   "wrapBehind",
+  "autofitNone",
+  "autofitResizeShape",
+  "autofitShrinkText",
   "size",
   "position",
   "crop",
@@ -148,6 +155,10 @@ export function availableObjectCommands(
   if (kind === "line") commands.push("lineStyle");
   if (kind === "image" || kind === "model3d") commands.push("altText");
   commands.push("wrapInline", "wrapSquare", "wrapTopAndBottom", "wrapFront", "wrapBehind");
+  // bodyPr autofit is a property of a SHAPE's text body. Word offers it for
+  // every shape, whether or not one holds text yet; a picture, chart, SmartArt
+  // frame or connector has no text body to write it into.
+  if (kind === "shape") commands.push("autofitNone", "autofitResizeShape", "autofitShrinkText");
   commands.push("size", "position");
   // Cropping selects part of a BITMAP. A shape, line, chart or SmartArt frame
   // has no bitmap behind it, and a 3D model is re-projected rather than
@@ -1514,6 +1525,19 @@ export class DocxEditor {
       const marginLeft = this.host.doc.sections[0]?.props.marginLeft ?? 96;
       const position = binding ? { x: binding.item.x - marginLeft, y: 0 } : undefined;
       if (!setImageWrap(this.host.doc, src, mode, position)) return false;
+      this.host.rerender(undefined, "global");
+      reselect();
+      return true;
+    }
+    if (command.startsWith("autofit")) {
+      const mode = command === "autofitResizeShape" ? "resizeShape"
+        : command === "autofitShrinkText" ? "shrinkText" : "none";
+      this.host.history?.checkpoint();
+      // The scale is left off: it is a:normAutofit's cache and Word neither
+      // computes nor applies one (probe-shapefit).
+      if (!setDrawingTextFit(this.host.doc, src, mode)) return false;
+      if (collabTarget !== null) this.host.onIntent?.({ kind: "setDrawingTextFit", ...collabTarget, mode });
+      // resizeShape changes the frame height, which reflows wrapped body text.
       this.host.rerender(undefined, "global");
       reselect();
       return true;

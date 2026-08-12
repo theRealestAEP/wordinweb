@@ -2,6 +2,8 @@ import {
   layoutDocument,
   type Block,
   type DocxDocument,
+  type LaidOutPage,
+  type LayoutResult,
   type PageItem,
   type Paragraph,
   type Run,
@@ -219,9 +221,9 @@ function topObject(a: InternalObject, b: InternalObject): string | undefined {
 
 /** The requested window of laid-out pages, defaulting to the first ten. */
 function selectPages(
-  result: ReturnType<typeof layoutDocument>,
+  result: LayoutResult,
   pageRange?: { start: number; count: number },
-): ReturnType<typeof layoutDocument>["pages"] {
+): LaidOutPage[] {
   const start = pageRange?.start ?? 1;
   const count = pageRange?.count ?? Math.min(result.totalPages, 10);
   if (!Number.isInteger(start) || start < 1 || !Number.isInteger(count) || count < 1 || count > 100) throw new Error("Invalid page range");

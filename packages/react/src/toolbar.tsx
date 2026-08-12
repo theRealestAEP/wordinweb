@@ -5931,6 +5931,20 @@ function ObjectFormatTab({
       onPick={(value) => run(value as Parameters<DocxViewApi["runSelectedObjectCommand"]>[0])}
     />
   );
+  const autofitItems = ([
+    ["autofitNone", "Do not autofit"],
+    ["autofitResizeShape", "Resize shape to fit text"],
+    ["autofitShrinkText", "Shrink text on overflow"],
+  ] as [Parameters<DocxViewApi["runSelectedObjectCommand"]>[0], string][]).filter(([command]) => offered.has(command));
+  const autofit = autofitItems.length > 0 && (
+    <ActionMenu
+      label="Autofit"
+      title="How the shape's text and its box fit each other"
+      width={82}
+      groups={[{ items: autofitItems }]}
+      onPick={(value) => run(value as Parameters<DocxViewApi["runSelectedObjectCommand"]>[0])}
+    />
+  );
   return (
     <span data-dxw-object-format="" style={{ display: "contents" }}>
       {context.kind === "chart" && <ChartMenu api={api} label="Edit data" />}
@@ -5954,6 +5968,7 @@ function ObjectFormatTab({
       {offered.has("lineStyle") && <Btn label="Line style" title="Line color, weight, and style" onClick={() => run("lineStyle")} />}
       {offered.has("altText") && <Btn label="Alt text" title="Alternative text" onClick={() => run("altText")} />}
       {wrap}
+      {autofit}
       {offered.has("size") && <Btn label="Size" title="Exact size" onClick={() => run("size")} />}
       {offered.has("position") && <Btn label="Position" title="Exact page position" onClick={() => run("position")} />}
       {offered.has("crop") && <Btn label="Crop" title="Crop to part of the picture" onClick={() => run("crop")} />}

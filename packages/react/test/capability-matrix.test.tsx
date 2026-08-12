@@ -134,6 +134,20 @@ const EXCEPTIONS: { fixture: string; command: SelectedObjectCommand; reason: str
       "so there is no document change for this audit to see. The write path is covered " +
       "by core's setImageCrop tests and collab's setCrop intent tests.",
   },
+  // The Autofit menu is a three-way state choice, and every shape this matrix
+  // can insert starts in the "none" state (insertShapeAt and insertWordArtAt
+  // both author a:noAutofit). Picking the state a shape is already in writes
+  // the same bytes, so it reads as inert here; the other two members of the
+  // same menu mutate on the same fixtures, which is what proves the control
+  // is live.
+  ...(["shape", "wordArt"] as const).map((fixture) => ({
+    fixture,
+    command: "autofitNone" as SelectedObjectCommand,
+    reason:
+      "Re-selecting the autofit mode the shape already has. Both fixtures are " +
+      "inserted with a:noAutofit, so this writes the bytes that are already there; " +
+      "autofitResizeShape and autofitShrinkText mutate the same fixtures.",
+  })),
 ];
 
 // -------------------------------------------------------------------- mounts
