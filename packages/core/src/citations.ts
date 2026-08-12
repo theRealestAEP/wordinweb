@@ -282,7 +282,7 @@ export const BIBLIOGRAPHY_EMPTY_TEXT = "There are no sources in the current docu
  */
 export function bibliographyEntries(bib: Bibliography): string[] {
   const entries = [...bib.sources.values()].map((source) => ({
-    key: `${bibliographyEntryText(source, bib.styleName)} ${source.tag}`,
+    key: `${bibliographyEntryText(source, bib.styleName)}\u0000${source.tag}`,
     text: bibliographyEntryText(source, bib.styleName),
   }));
   entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));

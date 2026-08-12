@@ -213,7 +213,7 @@ describe("tracked paragraph formatting (w:pPrChange)", () => {
   });
 
   it("leaves the paragraph mark's rPr out of the record and in place", () => {
-    const doc = loadDoc(p("Hi "));
+    const doc = loadDoc(p("Hi\u0000"));
     // The mark revision from a suggested split lives in pPr/rPr, which
     // CT_PPrBase cannot carry — it stays live and keeps its schema position.
     markParagraphGlyph(paraEl(doc), "ins", meta());

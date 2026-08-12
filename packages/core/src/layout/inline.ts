@@ -939,7 +939,7 @@ function compactOf(b: BrokenParagraph): CompactBreak {
       if (!text) continue;
       // Mirror collectPageMetadata's preference for a sample that exercises the
       // face past Latin Extended-B, so the preload list keeps its widest witness.
-      const key = span.font.family + " " + (span.font.bold ? 1 : 0) + (span.font.italic ? 1 : 0);
+      const key = span.font.family + "\u0000" + (span.font.bold ? 1 : 0) + (span.font.italic ? 1 : 0);
       const existing = samples.get(key);
       const sample = text.slice(0, 40);
       if (!existing || (!NON_LATIN.test(existing.text) && NON_LATIN.test(sample))) {
