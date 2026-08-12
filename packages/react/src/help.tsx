@@ -273,13 +273,34 @@ interface ShortcutSection {
 }
 
 /**
+ * The combos inside one printed keys string. A row can cover more than one:
+ * the sheet writes alternates as "⇧⌘L or ⇧⌘8" and related keys as
+ * "⌘X / ⌘C / ⌘V".
+ */
+function combosIn(keys: string): string[] {
+  return keys.split(/ or | \/ /).map((combo) => combo.trim()).filter(Boolean);
+}
+
+/**
  * The shortcuts tab is BUILT from the table the editor binds
  * (`EDITOR_SHORTCUTS`) plus the keys it documents without binding
  * (`EDITOR_KEY_NOTES`) and the toolbar's own help hotkey. Nothing here is
  * written by hand, so the sheet cannot promise a shortcut the editor does not
  * have — which the previous hand-kept copy had started to do.
+ *
+ * The host's menu accelerators follow, minus every combo the editor's own
+ * rows already print. A desktop menu deliberately mirrors editor bindings so
+ * that its accelerator routes to the same behaviour, so listing both halves
+ * unfiltered printed ⌘B twice — once under "Text formatting", again under
+ * "Format menu". What survives is the keyboard only the menu owns: ⌘F, ⌘S,
+ * ⌥⌘G. A menu section every one of whose rows mirrored the editor comes back
+ * empty, and empty sections do not render.
  */
-function shortcutSections(helpCombos: KeyCombo[], hostShortcuts: HostShortcutSection[]): ShortcutSection[] {
+function shortcutSections(
+  helpCombos: KeyCombo[],
+  hostShortcuts: HostShortcutSection[],
+  apple: boolean,
+): ShortcutSection[] {
   const order: ShortcutGroupName[] = [
     "History and selection",
     "Text formatting",
@@ -307,13 +328,21 @@ function shortcutSections(helpCombos: KeyCombo[], hostShortcuts: HostShortcutSec
     action: "Open this help guide",
     keys: (apple) => helpCombos.map((combo) => formatCombo(combo, apple)).join(" or "),
   });
-  return [
-    ...sections,
-    ...hostShortcuts.map((section) => ({
-      title: section.title,
-      items: section.items.map((item) => ({ action: item.label, keys: () => item.keys, detail: item.detail })),
-    })),
-  ];
+
+  const taken = new Set(
+    sections.flatMap((section) => section.items.flatMap((item) => combosIn(item.keys(apple)))),
+  );
+  const hostSections = hostShortcuts.map((section) => ({
+    title: section.title,
+    items: section.items
+      .filter((item) => {
+        if (taken.has(item.keys)) return false;
+        taken.add(item.keys);
+        return true;
+      })
+      .map((item) => ({ action: item.label, keys: () => item.keys, detail: item.detail })),
+  }));
+  return [...sections, ...hostSections];
 }
 
 const panel: React.CSSProperties = {
@@ -355,7 +384,7 @@ export function HelpGuide({ open, onClose, returnFocus, helpCombos, hostShortcut
       !needle || `${group.title} ${item.title} ${item.description} ${(item.steps ?? []).join(" ")}`.toLowerCase().includes(needle),
     ),
   })).filter((group) => group.items.length > 0), [needle]);
-  const shortcutGroups = useMemo(() => shortcutSections(helpCombos, hostShortcuts ?? []).map((group) => ({
+  const shortcutGroups = useMemo(() => shortcutSections(helpCombos, hostShortcuts ?? [], apple).map((group) => ({
     ...group,
     items: group.items.filter((item) =>
       !needle || `${group.title} ${item.action} ${item.keys(apple)} ${item.detail ?? ""}`.toLowerCase().includes(needle),

@@ -36,11 +36,21 @@ async function openShortcutsTab(hostShortcuts?: HostShortcutSection[]) {
   const tab = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
     .find((button) => /shortcut/i.test(button.textContent ?? ""))!;
   await act(async () => { tab.click(); });
-  const rows = [...document.querySelectorAll<HTMLElement>("[data-dxw-help-shortcut]")].map((row) => ({
-    action: row.dataset.dxwHelpShortcut!,
-    keys: row.querySelector("kbd")!.textContent!,
+  const readRows = (scope: ParentNode) =>
+    [...scope.querySelectorAll<HTMLElement>("[data-dxw-help-shortcut]")].map((row) => ({
+      action: row.dataset.dxwHelpShortcut!,
+      keys: row.querySelector("kbd")!.textContent!,
+    }));
+  const sections = [...document.querySelectorAll("section")].map((section) => ({
+    title: section.querySelector("h3")!.textContent!,
+    rows: readRows(section),
   }));
-  return { rows, unmount: () => act(async () => { root.unmount(); }) };
+  return { rows: readRows(document), sections, unmount: () => act(async () => { root.unmount(); }) };
+}
+
+/** The combos inside one printed keys string ("⇧⌘L or ⇧⌘8", "⌘X / ⌘C / ⌘V"). */
+function combosIn(keys: string): string[] {
+  return keys.split(/ or | \/ /).map((combo) => combo.trim()).filter(Boolean);
 }
 
 /** A KeyboardEvent that presses exactly this combo (jsdom = non-Apple). */
@@ -92,6 +102,40 @@ describe("the help sheet lists exactly the bound set", () => {
     expect(printed.get("Save")).toBe("⌘S");
     // …and the editor's own rows are still all there.
     expect(printed.get("Strikethrough")).toBe(formatShortcutKeys(EDITOR_SHORTCUTS.find((s) => s.command === "strikethrough")!, false));
+    await unmount();
+  });
+
+  it("prints no combo twice: a menu row that mirrors an editor binding drops out", async () => {
+    // A desktop menu binds the editor's own keys on purpose, so the
+    // accelerator routes to the same behaviour. Listing both halves
+    // unfiltered printed ⌘B under "Text formatting" AND under "Format menu".
+    const { rows, sections, unmount } = await openShortcutsTab([
+      { title: "Format menu", items: [
+        { label: "Bold", keys: "Ctrl+B" },
+        // The editor prints this one as "Ctrl+Shift+L or Ctrl+Shift+8"; the
+        // menu binds a single alternate and still counts as the same key.
+        { label: "Bulleted List", keys: "Ctrl+Shift+L" },
+      ] },
+      { title: "Edit menu", items: [
+        { label: "Undo", keys: "Ctrl+Z" },
+        { label: "Find…", keys: "Ctrl+F" },
+      ] },
+    ]);
+    const isMenu = (title: string) => title.endsWith(" menu");
+    const editorCombos = new Set(
+      sections.filter((s) => !isMenu(s.title)).flatMap((s) => s.rows.flatMap((r) => combosIn(r.keys))),
+    );
+    const menuCombos = sections.filter((s) => isMenu(s.title)).flatMap((s) => s.rows.flatMap((r) => combosIn(r.keys)));
+    expect(menuCombos.filter((combo) => editorCombos.has(combo))).toEqual([]);
+
+    // ⌘F is the menu's alone, so its row is the reason the section is here.
+    expect(sections.find((s) => s.title === "Edit menu")?.rows).toEqual([{ action: "Find…", keys: "Ctrl+F" }]);
+    // Every Format row mirrored a binding, so that heading never renders.
+    expect(sections.map((s) => s.title)).not.toContain("Format menu");
+    // The editor keeps its own rows, including ⌘\, which no menu claims.
+    expect(rows.find((r) => r.action === "Clear formatting")?.keys).toBe("Ctrl+\\");
+    expect(rows.find((r) => r.action === "Bold")?.keys).toBe("Ctrl+B");
+    expect(rows.find((r) => r.action === "Bulleted list")?.keys).toBe("Ctrl+Shift+L or Ctrl+Shift+8");
     await unmount();
   });
 
