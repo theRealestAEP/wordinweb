@@ -18,10 +18,18 @@ import {
   type TableBorderEdge,
   type TableBorderStyle,
   type CoverPageLayout,
+  formatCombo,
+  isApplePlatform,
+  matchCombo,
+  type HostShortcutSection,
+  type KeyCombo,
 } from "@wordinweb/core";
 import { planRibbon, type RibbonItem } from "./ribbon-layout.js";
 import type { DocxViewApi } from "./index.js";
 import { HelpGuide } from "./help.js";
+
+/** The keys that open the help guide — bound below, listed by the guide. */
+export const HELP_COMBOS: KeyCombo[] = [{ key: "F1" }, { key: "/", mod: true }];
 
 /**
  * Chrome theme tokens. Every color the toolbar paints routes through a CSS
@@ -6073,6 +6081,15 @@ export interface DocxToolbarProps {
    * rows). A choice the user makes via the chevron toggle is persisted in
    * localStorage and wins over this default. */
   defaultExpanded?: boolean;
+  /**
+   * Shortcuts the embedding application owns, listed in the help guide
+   * alongside the editor's own. A desktop menu accelerator is consumed by the
+   * menu before the editor sees the key, so the engine cannot discover it;
+   * the app declares it once and passes it here, and the reference stays
+   * complete. Electron hosts can read the live menu rather than repeat it:
+   * walk Menu.getApplicationMenu() for {label, accelerator} pairs.
+   */
+  hostShortcuts?: HostShortcutSection[];
 }
 
 /** localStorage key for the expand/collapse chevron choice. */
@@ -6102,6 +6119,7 @@ export function DocxToolbar({
   style,
   commentMentions,
   defaultExpanded = false,
+  hostShortcuts,
 }: DocxToolbarProps) {
   const on = (k: ToolbarFeature) => features?.[k] !== false;
   // Ribbon-style tabs: complex tool groups get their own surface instead of
@@ -6121,7 +6139,7 @@ export function DocxToolbar({
   const tabStopsAnchorRef = useRef<HTMLSpanElement | null>(null);
   const [paraBordersOpen, setParaBordersOpen] = useState(false);
   const paraBordersAnchorRef = useRef<HTMLSpanElement | null>(null);
-  const apple = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const apple = isApplePlatform();
   const shortcut = (key: string) => apple ? `⌘${key}` : `Ctrl+${key}`;
   const closeHelp = useCallback(() => setHelpOpen(false), []);
   const iconInput = useRef<HTMLInputElement | null>(null);
@@ -6257,14 +6275,13 @@ export function DocxToolbar({
   useEffect(() => {
     if (!on("help")) return;
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "F1" || ((event.metaKey || event.ctrlKey) && event.key === "/")) {
-        event.preventDefault();
-        setHelpOpen(true);
-      }
+      if (!HELP_COMBOS.some((combo) => matchCombo(event, combo, apple))) return;
+      event.preventDefault();
+      setHelpOpen(true);
     };
     document.addEventListener("keydown", keydown);
     return () => document.removeEventListener("keydown", keydown);
-  }, [features]);
+  }, [apple, features]);
   useEffect(() => {
     const refreshObject = () => {
       const next = api?.getSelectedObjectContext() ?? null;
@@ -7197,7 +7214,7 @@ export function DocxToolbar({
           e.target.value = "";
         }}
       />
-      <HelpGuide open={helpOpen} onClose={closeHelp} returnFocus={helpTrigger} />
+      <HelpGuide open={helpOpen} onClose={closeHelp} returnFocus={helpTrigger} helpCombos={HELP_COMBOS} hostShortcuts={hostShortcuts} />
     </div>
   );
 }

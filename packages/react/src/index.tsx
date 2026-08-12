@@ -223,6 +223,7 @@ import {
   suggestMeta,
   runWireLength,
   wireOffsetOf,
+  type HostCommand,
 } from "@wordinweb/core";
 import type {
   StyleGalleryEntry,
@@ -964,6 +965,105 @@ async function toBytes(source: DocxViewProps["source"]): Promise<Uint8Array> {
 
 const BACKGROUND_LAYOUT_PAGE_THRESHOLD = 50;
 
+/** Word's font-size ladder, which grow/shrink steps along. */
+const FONT_SIZE_STEPS = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
+
+function steppedFontSize(current: number, direction: 1 | -1): number {
+  if (direction === 1) return FONT_SIZE_STEPS.find((size) => size > current) ?? Math.min(current + 10, 1638);
+  return [...FONT_SIZE_STEPS].reverse().find((size) => size < current) ?? Math.max(current - 1, 1);
+}
+
+/**
+ * Run a keyboard command through the public API.
+ *
+ * Every case calls exactly what the matching toolbar button calls, which is
+ * what makes a shortcut and its button emit the same collaboration intent and
+ * record the same tracked change in suggesting mode. `painter` is the format
+ * painter's clipboard, shared with nothing else — the toolbar keeps its own.
+ */
+function runHostCommand(
+  api: DocxViewApi,
+  command: Exclude<HostCommand, "link" | "comment" | "goToPage">,
+  painter: { current: SelectionFormat | null },
+): void {
+  const format = api.getSelectionFormat();
+  switch (command) {
+    case "bullet":
+    case "number":
+      api.toggleList(command);
+      break;
+    case "alignLeft":
+      api.setAlignment("left");
+      break;
+    case "alignCenter":
+      api.setAlignment("center");
+      break;
+    case "alignRight":
+      api.setAlignment("right");
+      break;
+    case "justify":
+      api.setAlignment("justify");
+      break;
+    case "indentIn":
+      api.adjustIndent(1);
+      break;
+    case "indentOut":
+      api.adjustIndent(-1);
+      break;
+    case "lineSpacingSingle":
+      api.setParagraphSpacing({ lineMultiple: 1 });
+      break;
+    case "lineSpacingOneAndHalf":
+      api.setParagraphSpacing({ lineMultiple: 1.5 });
+      break;
+    case "lineSpacingDouble":
+      api.setParagraphSpacing({ lineMultiple: 2 });
+      break;
+    case "strikethrough":
+      api.applyFormat({ strike: !format?.strike });
+      break;
+    case "superscript":
+      api.applyFormat({ verticalAlign: format?.verticalAlign === "superscript" ? null : "superscript" });
+      break;
+    case "subscript":
+      api.applyFormat({ verticalAlign: format?.verticalAlign === "subscript" ? null : "subscript" });
+      break;
+    case "clearFormatting":
+      api.applyFormat({ clear: true });
+      break;
+    case "copyFormatting":
+      painter.current = api.copyFormatting();
+      break;
+    case "pasteFormatting":
+      if (painter.current) api.applyCopiedFormatting(painter.current);
+      break;
+    case "growFont":
+    case "shrinkFont":
+      // A selection of mixed sizes reports none, and there is no one size to
+      // step from — Word would grow each run separately, which no single
+      // patch expresses. Declining beats picking a size the user never had.
+      if (format?.fontSizePt !== undefined) {
+        api.applyFormat({ fontSizePt: steppedFontSize(format.fontSizePt, command === "growFont" ? 1 : -1) });
+      }
+      break;
+    case "nextComment":
+      api.stepComment(1);
+      break;
+    case "previousComment":
+      api.stepComment(-1);
+      break;
+    case "trackChanges":
+      api.setSuggesting(!api.isSuggesting());
+      break;
+    case "tableRowBelow":
+      api.tableOp("rowBelow");
+      break;
+  }
+  // Tell the toolbar its buttons may have changed state (the same
+  // announcement the editor makes after a selection-changing edit).
+  document.dispatchEvent(new CustomEvent("dxw-selection"));
+}
+
 /**
  * High-fidelity paginated DOCX viewer (and, with `editable`, editor).
  *
@@ -994,6 +1094,8 @@ export function DocxView({
   const containerRef = useRef<HTMLDivElement>(null);
   const commentMentionsRef = useRef(commentMentions);
   commentMentionsRef.current = commentMentions;
+  /** The keyboard format painter's clipboard (⌥⌘C copies, ⌥⌘V pastes). */
+  const painterRef = useRef<SelectionFormat | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [layoutBusy, setLayoutBusy] = useState(false);
   // Fit-to-width scale (page-width / container-width) recomputed on resize, and
@@ -1126,7 +1228,6 @@ export function DocxView({
     let onReplyComment: ((id: string, text: string) => void) | undefined;
     let onResolveComment: ((id: string, resolved: boolean) => void) | undefined;
     let onEditComment: ((id: string, text: string) => void) | undefined;
-    let applyStyleShortcut: ((styleId: string | null) => void) | undefined;
     // Mutable current zoom for this document's lifetime: rerender() reads it and
     // applyZoomRef updates it in place, so a zoom change re-paints without
     // re-running this effect (which would reparse and drop editor/undo state).
@@ -1654,7 +1755,14 @@ export function DocxView({
             else if (formatted.length > 0) editor?.selectRanges(formatted);
             document.dispatchEvent(new CustomEvent("dxw-selection"));
           },
-          onStyleShortcut: (styleId) => applyStyleShortcut?.(styleId),
+          // Through the public API, exactly like the style gallery button.
+          // A private copy of the mutation used to run here instead, and it
+          // emitted NO intent — ⌘⌥1 changed the heading for the person who
+          // pressed it and nobody else.
+          onStyleShortcut: (styleId) => {
+            apiRef.current?.setParagraphStyle(styleId);
+            document.dispatchEvent(new CustomEvent("dxw-selection"));
+          },
           // Collaboration: forward each local edit as an intent. The editor
           // emits only when doc.stableIds is populated, so enable it here.
           onIntent: collab ? (intent) => collabRef.current?.submit(intent) : undefined,
@@ -1705,30 +1813,24 @@ export function DocxView({
               }).then((text) => {
                 if (text?.trim()) current.addComment(text.trim());
               });
-            } else if (command === "bullet" || command === "number") {
-              current.toggleList(command);
+            } else if (command === "goToPage") {
+              const anchor = containerRef.current;
+              if (!anchor) return;
+              void requestTextInputDialog(anchor, {
+                title: "Go to page",
+                label: `Page number (1–${current.pageCount()})`,
+                value: "",
+              }).then((text) => {
+                const page = Number(text?.trim());
+                if (Number.isInteger(page) && page > 0) current.goToPage(page);
+              });
             } else {
-              current.setAlignment(
-                command === "alignLeft" ? "left" :
-                command === "alignCenter" ? "center" :
-                command === "alignRight" ? "right" : "justify",
-              );
+              runHostCommand(current, command, painterRef);
             }
           },
         };
         editor = new DocxEditor(editorConfig);
         editor.attach();
-        applyStyleShortcut = (styleId) => {
-          const caret = editor?.getCaretTarget();
-          const segs = editor?.getSelectionSegments() ?? [];
-          const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
-          if (targets.length === 0) return;
-          history.checkpoint();
-          if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId, suggestMeta(doc, editor?.suggestionMeta()))) {
-            pages = rerender(doc);
-            document.dispatchEvent(new CustomEvent("dxw-selection"));
-          }
-        };
         onDeleteComment = (id) => {
           if (collabDocOp(() => ({ kind: "deleteComment", commentId: id }))) return;
           history.checkpoint();
@@ -3852,7 +3954,7 @@ export function DocxView({
 }
 
 export { DocxDocument, layoutDocument, renderToDom, printPages } from "@wordinweb/core";
-export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset, WireRange, EncodedCaret } from "@wordinweb/core";
+export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset, WireRange, EncodedCaret, HostShortcutSection } from "@wordinweb/core";
 export { DocxToolbar, ToolbarMenuSelect, INSERT_COMMANDS } from "./toolbar.js";
 export type {
   DocxToolbarProps,

@@ -1,10 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import {
+  EDITOR_KEY_NOTES,
+  EDITOR_SHORTCUTS,
+  formatCombo,
+  formatShortcutKeys,
+  isApplePlatform,
+  type KeyCombo,
+  type HostShortcutSection,
+  type ShortcutGroup as ShortcutGroupName,
+} from "@wordinweb/core";
 
 interface HelpGuideProps {
   open: boolean;
   onClose: () => void;
   returnFocus?: { current: HTMLElement | null };
+  /** The combos that open this guide, so the sheet can list itself. */
+  helpCombos: KeyCombo[];
+  /**
+   * Shortcuts the embedding application owns (desktop menu accelerators).
+   * A menu accelerator never reaches the editor's keydown handler, so the
+   * engine cannot discover these — the host passes them in, and the sheet
+   * covers the whole keyboard instead of the engine's half of it.
+   */
+  hostShortcuts?: HostShortcutSection[];
 }
 
 interface GuideItem {
@@ -248,71 +267,54 @@ interface ShortcutItem {
   detail?: string;
 }
 
-interface ShortcutGroup {
+interface ShortcutSection {
   title: string;
   items: ShortcutItem[];
 }
 
-const mod = (apple: boolean, key: string): string => apple ? `⌘${key}` : `Ctrl+${key}`;
-const modShift = (apple: boolean, key: string): string => apple ? `⇧⌘${key}` : `Ctrl+Shift+${key}`;
-
-const SHORTCUT_GROUPS: ShortcutGroup[] = [
-  {
-    title: "History and clipboard",
+/**
+ * The shortcuts tab is BUILT from the table the editor binds
+ * (`EDITOR_SHORTCUTS`) plus the keys it documents without binding
+ * (`EDITOR_KEY_NOTES`) and the toolbar's own help hotkey. Nothing here is
+ * written by hand, so the sheet cannot promise a shortcut the editor does not
+ * have — which the previous hand-kept copy had started to do.
+ */
+function shortcutSections(helpCombos: KeyCombo[], hostShortcuts: HostShortcutSection[]): ShortcutSection[] {
+  const order: ShortcutGroupName[] = [
+    "History and selection",
+    "Text formatting",
+    "Paragraphs and lists",
+    "Insert and structure",
+    "Review",
+    "Navigation",
+  ];
+  const sections = order.map((title): ShortcutSection => ({
+    title,
     items: [
-      { action: "Undo", keys: (apple) => mod(apple, "Z") },
-      { action: "Redo", keys: (apple) => apple ? "⇧⌘Z" : "Ctrl+Y or Ctrl+Shift+Z" },
-      { action: "Cut", keys: (apple) => mod(apple, "X") },
-      { action: "Copy", keys: (apple) => mod(apple, "C") },
-      { action: "Paste", keys: (apple) => mod(apple, "V") },
-      { action: "Select all in the active story", keys: (apple) => mod(apple, "A") },
-      { action: "Find and replace in the demo", keys: (apple) => mod(apple, "F") },
+      ...EDITOR_SHORTCUTS.filter((s) => s.group === title).map((s) => ({
+        action: s.label,
+        keys: (apple: boolean) => formatShortcutKeys(s, apple),
+        detail: s.detail,
+      })),
+      ...EDITOR_KEY_NOTES.filter((n) => n.group === title).map((n) => ({
+        action: n.label,
+        keys: n.keys,
+        detail: n.detail,
+      })),
     ],
-  },
-  {
-    title: "Text and paragraphs",
-    items: [
-      { action: "Bold", keys: (apple) => mod(apple, "B"), detail: "Requires selected text." },
-      { action: "Italic", keys: (apple) => mod(apple, "I"), detail: "Requires selected text." },
-      { action: "Underline", keys: (apple) => mod(apple, "U"), detail: "Requires selected text." },
-      { action: "Insert or edit link", keys: (apple) => mod(apple, "K"), detail: "Requires selected text." },
-      { action: "New comment", keys: (apple) => apple ? "⌘⌥A" : "Ctrl+Alt+M", detail: "Requires selected text." },
-      { action: "Bulleted list", keys: (apple) => modShift(apple, "L") },
-      { action: "Numbered list", keys: (apple) => modShift(apple, "7") },
-      { action: "Align left", keys: (apple) => mod(apple, "L") },
-      { action: "Center", keys: (apple) => mod(apple, "E") },
-      { action: "Align right", keys: (apple) => mod(apple, "R") },
-      { action: "Justify", keys: (apple) => mod(apple, "J") },
-      { action: "Heading 1–6", keys: (apple) => apple ? "⌘⌥1–6" : "Ctrl+Alt+1–6" },
-      { action: "Normal paragraph", keys: (apple) => apple ? "⌘⌥0" : "Ctrl+Alt+0" },
-    ],
-  },
-  {
-    title: "Structure and navigation",
-    items: [
-      { action: "Page break", keys: (apple) => mod(apple, "Enter") },
-      { action: "Column break", keys: (apple) => modShift(apple, "Enter") },
-      { action: "Move by character or visual line", keys: () => "Arrow keys" },
-      { action: "Select by character or visual line", keys: () => "Shift+Arrow keys" },
-      { action: "Move to visual line edge", keys: () => "Home / End" },
-      { action: "Select to visual line edge", keys: () => "Shift+Home / Shift+End" },
-      { action: "Move to line edge or adjacent paragraph", keys: (apple) => apple ? "⌘+Arrow keys" : "Ctrl+Arrow keys" },
-      { action: "Extend to line edge or adjacent paragraph", keys: (apple) => apple ? "⇧⌘+Arrow keys" : "Ctrl+Shift+Arrow keys" },
-      { action: "Next or previous table cell", keys: () => "Tab / Shift+Tab" },
-      { action: "Change list level", keys: () => "Tab / Shift+Tab" },
-    ],
-  },
-  {
-    title: "Objects and editing modes",
-    items: [
-      { action: "Nudge selected floating object or ink", keys: () => "Arrow keys", detail: "Moves one pixel." },
-      { action: "Nudge selected object farther", keys: () => "Shift+Arrow keys", detail: "Moves ten pixels." },
-      { action: "Delete selected object", keys: () => "Delete / Backspace" },
-      { action: "Leave drawing, text-box, header/footer, or object selection", keys: () => "Escape" },
-      { action: "Open this help guide", keys: (apple) => `${mod(apple, "/")} or F1` },
-    ],
-  },
-];
+  }));
+  sections[0].items.push({
+    action: "Open this help guide",
+    keys: (apple) => helpCombos.map((combo) => formatCombo(combo, apple)).join(" or "),
+  });
+  return [
+    ...sections,
+    ...hostShortcuts.map((section) => ({
+      title: section.title,
+      items: section.items.map((item) => ({ action: item.label, keys: () => item.keys, detail: item.detail })),
+    })),
+  ];
+}
 
 const panel: React.CSSProperties = {
   background: "var(--dxw-popover-bg, #fff)",
@@ -321,12 +323,12 @@ const panel: React.CSSProperties = {
   borderRadius: 12,
 };
 
-export function HelpGuide({ open, onClose, returnFocus }: HelpGuideProps) {
+export function HelpGuide({ open, onClose, returnFocus, helpCombos, hostShortcuts }: HelpGuideProps) {
   const [tab, setTab] = useState<"guides" | "shortcuts">("guides");
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement | null>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
-  const apple = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const apple = isApplePlatform();
 
   useEffect(() => {
     if (!open) return;
@@ -353,12 +355,12 @@ export function HelpGuide({ open, onClose, returnFocus }: HelpGuideProps) {
       !needle || `${group.title} ${item.title} ${item.description} ${(item.steps ?? []).join(" ")}`.toLowerCase().includes(needle),
     ),
   })).filter((group) => group.items.length > 0), [needle]);
-  const shortcutGroups = useMemo(() => SHORTCUT_GROUPS.map((group) => ({
+  const shortcutGroups = useMemo(() => shortcutSections(helpCombos, hostShortcuts ?? []).map((group) => ({
     ...group,
     items: group.items.filter((item) =>
       !needle || `${group.title} ${item.action} ${item.keys(apple)} ${item.detail ?? ""}`.toLowerCase().includes(needle),
     ),
-  })).filter((group) => group.items.length > 0), [apple, needle]);
+  })).filter((group) => group.items.length > 0), [apple, helpCombos, hostShortcuts, needle]);
 
   if (!open) return null;
   return createPortal(
@@ -479,7 +481,7 @@ export function HelpGuide({ open, onClose, returnFocus }: HelpGuideProps) {
               <h3 style={{ margin: "0 0 8px", fontSize: 15 }}>{group.title}</h3>
               <div style={{ ...panel, overflow: "hidden" }}>
                 {group.items.map((item, index) => (
-                  <div key={item.action} style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1fr) minmax(150px, auto)", gap: 16, alignItems: "center", padding: "10px 12px", borderTop: index ? "1px solid var(--dxw-toolbar-border, #e6e8eb)" : 0 }}>
+                  <div key={item.action} data-dxw-help-shortcut={item.action} style={{ display: "grid", gridTemplateColumns: "minmax(180px, 1fr) minmax(150px, auto)", gap: 16, alignItems: "center", padding: "10px 12px", borderTop: index ? "1px solid var(--dxw-toolbar-border, #e6e8eb)" : 0 }}>
                     <div>
                       <div style={{ fontSize: 13 }}>{item.action}</div>
                       {item.detail && <div style={{ color: "var(--dxw-toolbar-muted, #5f6368)", fontSize: 11.5, marginTop: 2 }}>{item.detail}</div>}

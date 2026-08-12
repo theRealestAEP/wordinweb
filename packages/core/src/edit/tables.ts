@@ -444,6 +444,18 @@ function firstTextOfCell(tc: XmlElement, w: string): XmlElement | null {
  * is not inside a table or navigation is a no-op — the caller then leaves the
  * key to its normal handling.
  */
+/**
+ * True when the caret sits in the last cell of a table's last row — the one
+ * place where Tab adds a row instead of moving. Callers that can replicate the
+ * row (the editor, via the host's table operation) check this first, so the
+ * new row rides the wire rather than appearing only here.
+ */
+export function isLastCellOfTable(doc: DocxDocument, target: XmlElement): boolean {
+  const ctx = cellContextOf(doc, target);
+  if (!ctx) return false;
+  return ctx.rowIdx === rowsOf(ctx.tbl).length - 1 && ctx.cellIdx === cellsOf(ctx.tr).length - 1;
+}
+
 export function advanceCell(doc: DocxDocument, target: XmlElement, dir: 1 | -1): { t: XmlElement } | null {
   const ctx = cellContextOf(doc, target);
   if (!ctx) return null;

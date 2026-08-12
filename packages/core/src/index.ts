@@ -19,6 +19,25 @@ export { renderToDom } from "./render/dom.js";
 export type { RenderHandle, RenderOptions, TextBinding } from "./render/dom.js";
 export { formatNumber } from "./parse/numbering.js";
 export { applyRunFormat, summarizeSelection, formatPatchFrom } from "./edit/commands.js";
+export {
+  EDITOR_SHORTCUTS,
+  EDITOR_KEY_NOTES,
+  formatCombo,
+  formatShortcutKeys,
+  isApplePlatform,
+  matchCombo,
+  matchShortcut,
+} from "./edit/shortcuts.js";
+export type {
+  EditorCommand,
+  EditorKeyNote,
+  EditorLocalCommand,
+  EditorShortcut,
+  HostCommand,
+  HostShortcutSection,
+  KeyCombo,
+  ShortcutGroup,
+} from "./edit/shortcuts.js";
 export type { RunFormatPatch, SelectionSegment, SelectionFormat, FormattedRange } from "./edit/commands.js";
 export { selectionToSegments } from "./edit/selection.js";
 export {
@@ -86,6 +105,7 @@ export { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSepa
 export type { EditCaret, MutationCtx, SplitResult, DeleteSeparatorResult } from "./edit/mutations.js";
 export { defaultProvenance, recordedProvenance } from "./edit/provenance.js";
 export type { EditProvenance } from "./edit/provenance.js";
+export { isLastCellOfTable } from "./edit/tables.js";
 export { insertTableAfter, convertTextToTable, convertTableToText, plainTextOf, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, siblingParagraph, paragraphOf, topLevelBlockOf, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";
 export { applyTableOp, cellContextOf, resizeDrawing, resizeTableColumn, resizeTableRow, moveTableTo, setTableTextWrapping } from "./edit/tables.js";
 export {

@@ -7,10 +7,11 @@ import { TextItem } from "../layout/types.js";
 import { selectionToSegments } from "./selection.js";
 import { runWireLength, wireOffsetOf, wireOffsetOfSeparator, type EncodedCaret } from "./ids.js";
 import { EditHistory } from "./history.js";
-import { advanceCell, applyTableOp, cellRangeBetween, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
+import { advanceCell, applyTableOp, isLastCellOfTable, cellRangeBetween, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
 import { pxToTwips } from "../units.js";
 import { listLevelAt, listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
+import { isApplePlatform, matchShortcut, type EditorCommand, type HostCommand } from "./shortcuts.js";
 import { documentOperationBody, operationBody, type RegisteredOperationBody } from "./registry.js";
 import { deleteMath, isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
 import {
@@ -265,10 +266,10 @@ export interface EditorHost {
   onFormatShortcut?: (kind: "bold" | "italic" | "underline") => void;
   /** Cmd/Ctrl+Alt+1..6 / 0 handler: apply Heading N / Normal (null). */
   onStyleShortcut?: (styleId: string | null) => void;
-  /** Text-context and keyboard commands implemented by the public editor API. */
-  onTextCommand?: (
-    command: "link" | "comment" | "alignLeft" | "alignCenter" | "alignRight" | "justify" | "bullet" | "number",
-  ) => void;
+  /** Text-context and keyboard commands implemented by the public editor API.
+   * The host runs each one through the same call the toolbar button makes, so
+   * a shortcut and its button emit the same collaboration intent. */
+  onTextCommand?: (command: HostCommand) => void;
   /**
    * Collaboration hook (plan doc 06): called after a local edit that maps to a
    * replicable intent, with the intent's kind, its position(s) as stable ids
@@ -6281,54 +6282,14 @@ export class DocxEditor {
       }
       return;
     }
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && this.caret) {
-      // Word: Cmd/Ctrl+Enter inserts a page break; adding Shift inserts a
-      // column break.
+    // Every modifier shortcut comes from the one declared table (shortcuts.ts),
+    // which the help sheet renders — so what the sheet promises and what the
+    // keys do cannot drift apart. Tab and the plain editing keys stay below:
+    // their meaning depends on where the caret is, so they name no command.
+    const shortcut = matchShortcut(e, isApplePlatform());
+    if (shortcut) {
       e.preventDefault();
-      this.host.history?.checkpoint();
-      const breakKind: "page" | "column" = e.shiftKey ? "column" : "page";
-      // Collab: this was a silent LOCAL-ONLY mutation (user repro: Cmd+Enter
-      // didn't create the page for anyone else). Apply the CANONICAL form —
-      // the break at the END of the caret run's first w:t, the exact shape
-      // the remote insertBreak apply produces — with carried ids, then emit.
-      if (this.host.onIntent && this.host.doc.stableIds) {
-        const enc = this.encodeCaretForIntent();
-        let runEl: XmlElement | null = null;
-        for (let cur: XmlElement | null = this.caret.t; cur; cur = this.host.doc.findParentOf(cur) ?? null) {
-          if (localName(cur.name) === "r") {
-            runEl = cur;
-            break;
-          }
-        }
-        const firstT = runEl ? firstTextOf(runEl) : null;
-        if (enc && runEl && firstT) {
-          const nodeIds = this.host.allocIds?.(8) ?? [];
-          const before = this.trackedNodeSet();
-          const destination = insertBreakAt(this.host.doc, firstT, firstT.text.length, breakKind);
-          if (destination) {
-            this.assignFreshTrackedIds(before, nodeIds);
-            this.host.onIntent({ kind: "insertBreak", runId: enc.runId, breakKind, nodeIds });
-            this.caret = { ...this.caret, ...destination };
-            this.commit();
-          }
-        }
-        return;
-      }
-      const destination = insertBreakAt(this.host.doc, this.caret.t, this.caret.offset, breakKind);
-      if (destination) {
-        this.caret = { ...this.caret, ...destination };
-        this.commit();
-      }
-      return;
-    }
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
-      e.preventDefault();
-      this.applyHistory(e.shiftKey ? "redo" : "undo");
-      return;
-    }
-    if (e.ctrlKey && e.key.toLowerCase() === "y") {
-      e.preventDefault();
-      this.applyHistory("redo");
+      this.runShortcut(shortcut, e);
       return;
     }
     // Tab inside a table moves to the next cell (Shift+Tab previous), wrapping
@@ -6336,6 +6297,21 @@ export class DocxEditor {
     // over list-indent and never inserts a literal tab character. Checked
     // before the list handler because a list can live inside a table cell.
     if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey && this.caret) {
+      // Word: Tab in the last cell adds a row. That row is a structural change
+      // with a wire form, so it goes through the host's table operation — the
+      // same call the toolbar's Insert row below makes. advanceCell would
+      // otherwise append it privately, and in a room only this replica got it.
+      if (!e.shiftKey && this.host.onTextCommand && isLastCellOfTable(this.host.doc, this.caret.t)) {
+        e.preventDefault();
+        this.host.onTextCommand("tableRowBelow");
+        const appended = advanceCell(this.host.doc, this.caret.t, 1);
+        if (appended) {
+          this.clearSelection();
+          this.caret = { t: appended.t, run: this.caret.run, offset: 0 };
+          this.commit();
+        }
+        return;
+      }
       const dest = advanceCell(this.host.doc, this.caret.t, e.shiftKey ? -1 : 1);
       if (dest) {
         e.preventDefault();
@@ -6382,84 +6358,9 @@ export class DocxEditor {
         return;
       }
     }
-    const meta = e.metaKey || e.ctrlKey;
-    // Word: Ctrl+Alt+M (Windows) / Cmd+Option+A (Mac) adds a comment.
-    const isApplePlatform = /Mac|iPhone|iPad/.test(navigator.platform);
-    if (
-      isApplePlatform
-        ? e.metaKey && e.altKey && e.key.toLowerCase() === "a"
-        : e.ctrlKey && e.altKey && e.key.toLowerCase() === "m"
-    ) {
-      e.preventDefault();
-      if (this.hasSelection()) this.host.onTextCommand?.("comment");
-      return;
-    }
-    // Word parity: Ctrl/Cmd+Alt+1..6 apply Heading 1..6; +0 back to Normal.
-    if (meta && e.altKey && /^[0-6]$/.test(e.key)) {
-      e.preventDefault();
-      this.host.onStyleShortcut?.(e.key === "0" ? null : `Heading${e.key}`);
-      return;
-    }
-    if (meta && !e.altKey) {
-      const k = e.key.toLowerCase();
-      if (k === "a") {
-        e.preventDefault();
-        this.selectAll();
-        return;
-      }
-      if (k === "b" || k === "i" || k === "u") {
-        const kind = k === "b" ? "bold" : k === "i" ? "italic" : "underline";
-        if (this.hasSelection()) {
-          e.preventDefault();
-          this.host.onFormatShortcut?.(kind);
-        } else if (this.caret) {
-          // Word's pending format: with no selection the shortcut queues a
-          // toggle for the NEXT typed text (consumed by insertText; the same
-          // shortcut again cancels it).
-          e.preventDefault();
-          const pending = (this.pendingFormat ??= new Set());
-          if (pending.has(kind)) pending.delete(kind);
-          else pending.add(kind);
-        }
-        return;
-      }
-      if (!e.shiftKey && k === "k") {
-        e.preventDefault();
-        if (this.hasSelection()) this.host.onTextCommand?.("link");
-        return;
-      }
-      if (e.shiftKey && (k === "l" || k === "8")) {
-        e.preventDefault();
-        this.host.onTextCommand?.("bullet");
-        return;
-      }
-      if (e.shiftKey && k === "7") {
-        e.preventDefault();
-        this.host.onTextCommand?.("number");
-        return;
-      }
-      if (!e.shiftKey && (k === "l" || k === "e" || k === "r" || k === "j")) {
-        e.preventDefault();
-        this.host.onTextCommand?.(
-          k === "l" ? "alignLeft" : k === "e" ? "alignCenter" : k === "r" ? "alignRight" : "justify",
-        );
-        return;
-      }
-      // Cmd+Left/Right = line edge; Cmd+Up/Down = adjacent paragraph start.
-      if (e.key.startsWith("Arrow")) {
-        e.preventDefault();
-        const extend = e.shiftKey;
-        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-          this.moveFocus((pt) => this.lineEdgePoint(pt, e.key === "ArrowLeft" ? "start" : "end"), extend);
-        } else {
-          this.moveFocus((pt) => this.paragraphPoint(pt, e.key === "ArrowUp" ? -1 : 1), extend);
-        }
-        this.revealCaret();
-        return;
-      }
-      return; // other shortcuts pass through (undo handled above, copy/cut above)
-    }
-    if (e.altKey) return;
+    // Any other modifier combo belongs to the browser or the host app
+    // (copy/cut/paste, the desktop menus) — never to typing.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     const hasRange = this.hasSelection();
     if (!this.caret && !hasRange) return;
 
@@ -6510,6 +6411,180 @@ export class DocxEditor {
       this.moveFocus((pt) => this.lineEdgePoint(pt, e.key === "Home" ? "start" : "end"), e.shiftKey);
     }
   };
+
+  /**
+   * Carry out one command from the shortcut table.
+   *
+   * Commands the editor owns (caret movement, history, the pending caret
+   * format) run here; everything else goes to the host, which runs the same
+   * public API call its toolbar button runs — so a shortcut and its button
+   * emit the same collaboration intent and record the same tracked change.
+   */
+  private runShortcut(command: EditorCommand, e: KeyboardEvent): void {
+    switch (command) {
+      case "bold":
+      case "italic":
+      case "underline": {
+        if (this.hasSelection()) {
+          this.host.onFormatShortcut?.(command);
+        } else if (this.caret) {
+          // Word's pending format: with no selection the shortcut queues a
+          // toggle for the NEXT typed text (consumed by insertText; the same
+          // shortcut again cancels it).
+          const pending = (this.pendingFormat ??= new Set());
+          if (pending.has(command)) pending.delete(command);
+          else pending.add(command);
+        }
+        return;
+      }
+      case "selectAll":
+        this.selectAll();
+        return;
+      case "undo":
+      case "redo":
+        this.applyHistory(command);
+        return;
+      case "pageBreak":
+        this.insertBreakAtCaret("page");
+        return;
+      case "columnBreak":
+        this.insertBreakAtCaret("column");
+        return;
+      case "bodyText":
+        this.host.onStyleShortcut?.(null);
+        return;
+      case "heading1":
+      case "heading2":
+      case "heading3":
+      case "heading4":
+      case "heading5":
+      case "heading6":
+        this.host.onStyleShortcut?.(`Heading${command.slice(-1)}`);
+        return;
+      case "lineStart":
+      case "lineEnd":
+        this.moveFocus((pt) => this.lineEdgePoint(pt, command === "lineStart" ? "start" : "end"), e.shiftKey);
+        this.revealCaret();
+        return;
+      case "paragraphUp":
+      case "paragraphDown":
+        this.moveFocus((pt) => this.paragraphPoint(pt, command === "paragraphUp" ? -1 : 1), e.shiftKey);
+        this.revealCaret();
+        return;
+      case "documentStart":
+      case "documentEnd":
+        this.moveFocus(() => this.documentEdgePoint(command === "documentStart" ? "start" : "end"), e.shiftKey);
+        this.revealCaret();
+        return;
+      case "pageUp":
+      case "pageDown":
+        this.moveFocus((pt) => this.pageStartPoint(pt, command === "pageUp" ? -1 : 1), e.shiftKey);
+        this.revealCaret();
+        return;
+      case "link":
+      case "comment":
+        // Both open a dialog about the selected text; without a selection
+        // there is nothing to link or annotate.
+        if (this.hasSelection()) this.host.onTextCommand?.(command);
+        return;
+      default:
+        this.host.onTextCommand?.(command);
+    }
+  }
+
+  /** Cmd/Ctrl+Enter (page) and Shift+Cmd/Ctrl+Enter (column). */
+  private insertBreakAtCaret(breakKind: "page" | "column"): void {
+    if (!this.caret) return;
+    this.host.history?.checkpoint();
+    // Collab: this was a silent LOCAL-ONLY mutation (user repro: Cmd+Enter
+    // didn't create the page for anyone else). Apply the CANONICAL form —
+    // the break at the END of the caret run's first w:t, the exact shape
+    // the remote insertBreak apply produces — with carried ids, then emit.
+    if (this.host.onIntent && this.host.doc.stableIds) {
+      const enc = this.encodeCaretForIntent();
+      let runEl: XmlElement | null = null;
+      for (let cur: XmlElement | null = this.caret.t; cur; cur = this.host.doc.findParentOf(cur) ?? null) {
+        if (localName(cur.name) === "r") {
+          runEl = cur;
+          break;
+        }
+      }
+      const firstT = runEl ? firstTextOf(runEl) : null;
+      if (enc && runEl && firstT) {
+        const nodeIds = this.host.allocIds?.(8) ?? [];
+        const before = this.trackedNodeSet();
+        const destination = insertBreakAt(this.host.doc, firstT, firstT.text.length, breakKind);
+        if (destination) {
+          this.assignFreshTrackedIds(before, nodeIds);
+          this.host.onIntent({ kind: "insertBreak", runId: enc.runId, breakKind, nodeIds });
+          this.caret = { ...this.caret, ...destination };
+          this.commit();
+        }
+      }
+      return;
+    }
+    const destination = insertBreakAt(this.host.doc, this.caret.t, this.caret.offset, breakKind);
+    if (destination) {
+      this.caret = { ...this.caret, ...destination };
+      this.commit();
+    }
+  }
+
+  /** First/last point of the story being edited (body, header/footer, or the
+   * text-box being typed in) — the same span Select All covers. */
+  private documentEdgePoint(edge: "start" | "end"): SelPoint | null {
+    const items = this.activeTextItems();
+    if (items.length === 0) return null;
+    if (edge === "start") {
+      const src = items[0].src!;
+      return { t: src.t as XmlElement, offset: src.offset };
+    }
+    const last = items[items.length - 1];
+    return { t: last.src!.t as XmlElement, offset: last.src!.offset + last.text.length, bias: "end" };
+  }
+
+  /**
+   * Start of the previous/next laid-out page, for Page Up / Page Down.
+   *
+   * A screenful and a page are the same unit in a paginated editor, and the
+   * page boundary is the one the layout already knows — no viewport
+   * arithmetic, and it lands somewhere the reader recognizes. Past the last
+   * page (or before the first) it settles on the story edge, like Word.
+   */
+  private pageStartPoint(pt: SelPoint, dir: -1 | 1): SelPoint | null {
+    const handle = this.host.getHandle();
+    if (!handle?._pages) return null;
+    const firsts: (SelPoint | null)[] = [];
+    let current = -1;
+    for (let page = 0; page < handle._pages.length; page++) {
+      let first: SelPoint | null = null;
+      for (const item of handle._pages[page].page.items) {
+        if (item.kind !== "text" || !item.src?.t) continue;
+        if (!this.inActiveRegion(item.src.t as XmlElement)) continue;
+        if (
+          item.src.t === pt.t &&
+          pt.offset >= item.src.offset &&
+          pt.offset <= item.src.offset + item.text.length
+        ) {
+          current = page;
+        }
+        first ??= { t: item.src.t as XmlElement, offset: item.src.offset };
+      }
+      firsts.push(first);
+    }
+    if (current === -1) return null;
+    for (let page = current + dir; page >= 0 && page < firsts.length; page += dir) {
+      const first = firsts[page];
+      if (!first) continue;
+      const target = handle._pages[page];
+      if (!target.mounted) {
+        target.el.scrollIntoView({ block: "center", behavior: "instant" });
+        handle.updateViewport?.();
+      }
+      return first;
+    }
+    return this.documentEdgePoint(dir === -1 ? "start" : "end");
+  }
 
   /** Move to the visually adjacent line, keeping the horizontal position.
    * Structural, not probe-based: a caret in a trailing table row or before a

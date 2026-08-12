@@ -3,6 +3,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { HelpGuide } from "../src/help.js";
+import { HELP_COMBOS } from "../src/toolbar.js";
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -19,7 +20,7 @@ describe("HelpGuide layout", () => {
     document.body.appendChild(host);
     const root = createRoot(host);
     await act(async () => {
-      root.render(createElement(HelpGuide, { open: true, onClose: () => {} }));
+      root.render(createElement(HelpGuide, { open: true, onClose: () => {}, helpCombos: HELP_COMBOS }));
     });
 
     const dialog = document.querySelector('[data-dxw-help-dialog]')!;
