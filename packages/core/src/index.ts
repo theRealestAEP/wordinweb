@@ -76,6 +76,10 @@ export {
   deleteSuggestedRange,
   markParagraphGlyph,
   paragraphGlyphRevision,
+  markRowRevision,
+  rowRevision,
+  revisionWrapper,
+  markDeletedText,
   revisionForText,
   acceptRevision,
   rejectRevision,
@@ -98,6 +102,9 @@ export type {
   CaretTarget,
   DeleteRange,
 } from "./edit/suggest.js";
+export { compareDocuments } from "./edit/compare/index.js";
+export type { CompareOptions, CompareNote } from "./edit/compare/index.js";
+export { COMPARE_TUNING } from "./edit/compare/text.js";
 export { EditHistory } from "./edit/history.js";
 export { StableIds, textsUnderRun, resolveRunOffset, resolveWireRange, runContentItems, runWireLength, wireOffsetOf, wireOffsetOfSeparator, separatorAtWireOffset } from "./edit/ids.js";
 export type { EncodedCaret } from "./edit/ids.js";

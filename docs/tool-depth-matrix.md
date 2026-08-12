@@ -285,7 +285,7 @@ Counts: DEEP 0 · CORE 1 · STUB 0 · ABSENT 5
 | Accept / Reject | DEEP | At caret + all, live revision count — editor.ts:6761-6828, toolbar.tsx:4333-4356 |
 | Display for review | CORE | "final" and "markup" views — index.tsx:647-648, 1271. Gap: Original view, Simple Markup balloons, show-markup filters (by author/type), reviewing pane |
 | Lock tracking | ABSENT | |
-| Compare / Combine | ABSENT | |
+| Compare / Combine | CORE | `compareDocuments(original, revised, {author, date})` — edit/compare/. Histogram diff over a text/style/numbering fingerprint, Dice-over-bigrams inside the gaps, word-level inner diff; output is ordinary w:ins/w:del/*PrChange, so accept-all yields `revised` and reject-all yields `original` (core/test/compare-roundtrip). Text, paragraph split/merge, formatting and table rows/cells. Gap: no move detection (needs w:moveFrom/w:moveTo primitives), no Combine, headers/footers/notes/styles not compared, a paragraph holding a hyperlink or content control is struck and reinserted whole |
 | Protect / restrict editing | STUB | `writeProtection` and doc-protection settings survive round-trip in the settings preserve list — docx.ts:1555; nothing enforces or edits them |
 
 Counts: DEEP 3 · CORE 1 · STUB 1 · ABSENT 7
@@ -371,7 +371,9 @@ footnote options dialog, image paste from clipboard, zoom UI, navigation pane.
 Separated so scope decisions stay visible. Each is ABSENT today AND has a defensible
 reason to stay out of a v1 editor:
 
-- **Compare / Combine documents** — a diff engine of its own; distinct product surface.
+- **Combine (merge revisions from several reviewers)** — Compare itself now
+  ships (see the row above); combining N documents into one revision set is
+  the part still out.
 - **Macros / VBA, add-ins** — code execution; out of scope by construction.
 - **Mail-merge execution pipeline** (data sources, preview, finish, envelopes, labels) —
   the engine deliberately never writes `w:mailMerge` (fields.ts:77-80); MERGEFIELD
@@ -828,13 +830,19 @@ scratchpad/scope-out-costing.md. Seven rows here are wrong:
   surface. Merging against a CSV the user picks in a file dialog persists no such
   element — only substituted text enters the document. Preview is ~1 lane;
   finish-to-N-documents is ~½ more on compose.ts's existing precedent.
-- **Compare / combine — over-costed.** suggest.ts already exports
+- **Compare / combine — over-costed. BUILT 2026-08-12, and the costing held.**
+  suggest.ts already exports
   insertSuggestedText, deleteSuggestedRange, markParagraphGlyph, the four
   record*Change functions, collectRevisions and acceptRevision, all carrying
   per-author RevisionMeta. That IS Compare's output format. The only missing
   piece is alignment — no diff code exists anywhere in the tree — and diff
   (BSD-3), fast-diff and diff-match-patch (Apache-2.0) are MIT-compatible. ~1
   lane for the text tier. The risk is alignment QUALITY, not plumbing.
+  Outcome: one lane, `diff` taken for the LCS core only. The alignment call
+  was histogram (not patience — patience finds no anchor at all among three
+  identical "Introduction" headings), and the prediction that quality was the
+  risk was right: the plumbing worked early, and the effort went into the
+  coalescing pass that stops a rewritten sentence coming out as confetti.
 - **Restrict editing / IRM / signatures — one row conflating three costs.**
   Tier A (honor + author w:documentProtection as an editor mode) is ~½ lane and
   maps onto surfaces that exist; ship it with Word's own honesty that the

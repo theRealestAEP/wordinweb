@@ -68,16 +68,21 @@ export type RevisionKind =
   | "deletion"
   | "markInsertion"
   | "markDeletion"
+  | "rowInsertion"
+  | "rowDeletion"
   | FormatRevisionKind;
 
 export interface RevisionRef {
-  /** The w:ins / w:del element (run-level, or the mark ins/del inside rPr),
-   * or the w:rPrChange / w:pPrChange / w:tblPrChange / w:trPrChange /
-   * w:tcPrChange element for a format revision. */
+  /** The w:ins / w:del element (run-level, the mark ins/del inside rPr, or the
+   * structural one inside a row's w:trPr), or the w:rPrChange / w:pPrChange /
+   * w:tblPrChange / w:trPrChange / w:tcPrChange element for a format
+   * revision. */
   el: XmlElement;
   kind: RevisionKind;
   /** For mark revisions: the owning w:p. */
   paragraph?: XmlElement;
+  /** For row revisions: the owning w:tr. */
+  row?: XmlElement;
   author?: string;
 }
 
@@ -130,6 +135,38 @@ function findRun(doc: DocxDocument, t: XmlElement): { rEl: XmlElement; parent: X
 /** True when rEl sits directly inside a w:ins/w:del authored by `author`. */
 function ownRevisionWrapper(parent: XmlElement, kind: "ins" | "del", author: string): boolean {
   return localName(parent.name) === kind && attrByLocal(parent, "author") === author;
+}
+
+/**
+ * A w:ins or w:del wrapping `content` — runs already built, whatever their
+ * properties. `sample` only supplies the namespace prefix.
+ *
+ * The caret-driven helpers above (insertSuggestedText, deleteSuggestedRange)
+ * are shaped for a keystroke: they take plain text or a character range and
+ * split the run under the caret. A bulk producer such as compareDocuments
+ * already knows the exact runs on both sides and must keep their properties
+ * intact, so it builds the wrapper directly — through here, so the id/author/
+ * date attributes stay defined in one place.
+ *
+ * Content destined for a w:del must be retyped first; see markDeletedText.
+ */
+export function revisionWrapper(
+  sample: XmlElement,
+  kind: "ins" | "del",
+  content: XmlElement[],
+  meta: RevisionMeta,
+): XmlElement {
+  const w = prefixOf(sample);
+  return el(`${w}${kind}`, revAttrs(w, meta), content);
+}
+
+/** Retype every w:t below `el` as w:delText, the form a w:del must hold. */
+export function markDeletedText(el: XmlElement): void {
+  const walk = (e: XmlElement): void => {
+    if (localName(e.name) === "t") e.name = e.name.replace(/t$/, "delText");
+    for (const c of e.children) walk(c);
+  };
+  walk(el);
 }
 
 // ---------- insertion ----------
@@ -574,6 +611,49 @@ export function paragraphGlyphRevision(pEl: XmlElement, kind: "ins" | "del"): Xm
   return rPr?.children.find((c) => localName(c.name) === kind) ?? null;
 }
 
+// ---------- table row revisions (w:trPr/w:ins, w:trPr/w:del) ----------
+
+/** CT_TrPr closes with ins, del and trPrChange, in that order. */
+const TR_TAIL = ["ins", "del", "trPrChange"];
+
+/**
+ * Mark a whole ROW as inserted or deleted. Word records this on the row itself
+ * (`w:trPr/w:ins`, `w:trPr/w:del`) rather than on its cells, because the row's
+ * existence is the change; the cells' content carries its own w:ins / w:del
+ * alongside so the text also shows struck or underlined.
+ *
+ * Accepting a row deletion removes the row; rejecting a row insertion removes
+ * it. Either one that empties its table removes the table too, since a w:tbl
+ * with no w:tr is not a table.
+ */
+export function markRowRevision(trEl: XmlElement, kind: "ins" | "del", meta: RevisionMeta): XmlElement {
+  const w = prefixOf(trEl);
+  let trPr = trEl.children.find((c) => localName(c.name) === "trPr");
+  if (!trPr) {
+    trPr = el(`${w}trPr`);
+    trEl.children.unshift(trPr);
+  }
+  const mark = el(`${w}${kind}`, revAttrs(w, meta));
+  const existing = trPr.children.findIndex((c) => localName(c.name) === kind);
+  if (existing !== -1) {
+    trPr.children[existing] = mark;
+    return mark;
+  }
+  const order = TR_TAIL.indexOf(kind);
+  const at = trPr.children.findIndex((c) => {
+    const i = TR_TAIL.indexOf(localName(c.name));
+    return i !== -1 && i > order;
+  });
+  trPr.children.splice(at === -1 ? trPr.children.length : at, 0, mark);
+  return mark;
+}
+
+/** Whether a row already carries a structural w:ins/w:del of `kind`. */
+export function rowRevision(trEl: XmlElement, kind: "ins" | "del"): XmlElement | null {
+  const trPr = trEl.children.find((c) => localName(c.name) === "trPr");
+  return trPr?.children.find((c) => localName(c.name) === kind) ?? null;
+}
+
 // ---------- formatting revisions (w:rPrChange / w:pPrChange) ----------
 
 /**
@@ -761,6 +841,12 @@ export function revisionForText(doc: DocxDocument, t: XmlElement): RevisionRef |
       if (delMark) return { el: delMark, kind: "markDeletion", paragraph: cur };
       insideParagraph = false;
     }
+    if (ln === "tr") {
+      const insRow = rowRevision(cur, "ins");
+      if (insRow) return { el: insRow, kind: "rowInsertion", row: cur, author: attrByLocal(insRow, "author") };
+      const delRow = rowRevision(cur, "del");
+      if (delRow) return { el: delRow, kind: "rowDeletion", row: cur, author: attrByLocal(delRow, "author") };
+    }
     const kind = FORMAT_KIND_BY_OWNER[ln];
     if (kind && !format) {
       const change = formatChangeIn(cur, kind);
@@ -808,6 +894,30 @@ function removeEl(doc: DocxDocument, el: XmlElement): boolean {
   return true;
 }
 
+/**
+ * Containers that hold runs but no properties of their own, so one holding
+ * nothing after a revision is removed is an empty shell, not content.
+ */
+const RUN_CONTAINERS = ["hyperlink", "smartTag", "dir", "bdo"];
+
+/**
+ * Remove a whole revision wrapper, and the run container it emptied.
+ *
+ * A revision may not sit AROUND a w:hyperlink — the schema puts w:ins and
+ * w:del inside it — so a wholly inserted or deleted link is a link wrapping a
+ * revision. Reviewing that revision away has to take the link with it, or the
+ * document keeps a hyperlink with no text: a live relationship pointing at
+ * nothing a reader can see or click.
+ */
+function removeRevisionAndEmptyHost(doc: DocxDocument, el: XmlElement): boolean {
+  const parent = doc.findParentOf(el);
+  if (!removeEl(doc, el)) return false;
+  if (parent && RUN_CONTAINERS.includes(localName(parent.name)) && parent.children.length === 0) {
+    removeEl(doc, parent);
+  }
+  return true;
+}
+
 /** Join pEl with the paragraph that follows it (accept a deleted mark / reject
  * an inserted mark): move the next paragraph's runs into pEl, drop the next. */
 function joinWithNext(doc: DocxDocument, pEl: XmlElement): boolean {
@@ -843,6 +953,24 @@ export function collectRevisions(doc: DocxDocument): RevisionRef[] {
         author: attrByLocal(el, "author"),
       });
     }
+    // A row's own structural w:ins / w:del decides whether the row exists, so
+    // it is collected at the row, AHEAD of its formatting record and of the
+    // cell content it governs: in reverse order (the order accept-all and
+    // reject-all apply) those are resolved before the row is removed.
+    if (ln === "tr") {
+      const trPr = el.children.find((c) => localName(c.name) === "trPr");
+      for (const c of trPr?.children ?? []) {
+        const cn = localName(c.name);
+        if (cn === "ins" || cn === "del") {
+          out.push({
+            el: c,
+            kind: cn === "ins" ? "rowInsertion" : "rowDeletion",
+            row: el,
+            author: attrByLocal(c, "author"),
+          });
+        }
+      }
+    }
     // Run, table, row and cell formatting revisions are collected AT their
     // owner, ahead of its content, because properties precede what they
     // format. The paragraph is the exception and is skipped here: the pilcrow
@@ -855,8 +983,8 @@ export function collectRevisions(doc: DocxDocument): RevisionRef[] {
     }
     // A row's w:trPr may hold its own structural w:ins / w:del. Those are not
     // run-level revisions, and unwrapping one would splice its children into
-    // the trPr, so never descend into a trPr — its trPrChange is already
-    // collected.
+    // the trPr, so never descend into a trPr — its trPrChange and its
+    // structural revisions are already collected.
     if (ln === "trPr") return;
     for (const c of el.children) walk(c);
     // The paragraph-mark revision is the pilcrow at the paragraph's END, so
@@ -890,13 +1018,18 @@ function applyAccept(doc: DocxDocument, ref: RevisionRef): boolean {
     case "insertion":
       return unwrap(doc, ref.el);
     case "deletion":
-      return removeEl(doc, ref.el);
+      return removeRevisionAndEmptyHost(doc, ref.el);
     case "markInsertion":
       return removeMarkRevision(ref);
     case "markDeletion":
       if (!ref.paragraph) return false;
       removeMarkRevision(ref);
       return joinWithNext(doc, ref.paragraph);
+    case "rowInsertion":
+      // The row is already there; accepting just retires the record.
+      return removeRowRevision(doc, ref);
+    case "rowDeletion":
+      return removeRow(doc, ref);
     case "runFormat":
     case "paragraphFormat":
     case "tableFormat":
@@ -929,8 +1062,19 @@ function removeFormatChange(doc: DocxDocument, ref: RevisionRef): boolean {
     const gridChange = gridChangeBeside(doc, props);
     if (gridChange) removeEl(doc, gridChange);
   }
-  if (props.children.length === 0) removeEl(doc, props);
+  dropEmptyProps(doc, props);
   return true;
+}
+
+/**
+ * A properties element left holding nothing is not a property, so it goes —
+ * EXCEPT w:tblPr, which CT_Tbl requires. Dropping that one would leave a table
+ * Word refuses to open.
+ */
+function dropEmptyProps(doc: DocxDocument, props: XmlElement): void {
+  if (props.children.length > 0) return;
+  if (localName(props.name) === "tblPr") return;
+  removeEl(doc, props);
 }
 
 /**
@@ -959,7 +1103,7 @@ function restoreFormatChange(doc: DocxDocument, ref: RevisionRef): boolean {
   });
   if (ref.kind === "tableFormat") restoreGridChange(doc, props);
   props.children = [...restored, ...kept];
-  if (props.children.length === 0) removeEl(doc, props);
+  dropEmptyProps(doc, props);
   return true;
 }
 
@@ -975,7 +1119,7 @@ function restoreGridChange(doc: DocxDocument, props: XmlElement): void {
 function applyReject(doc: DocxDocument, ref: RevisionRef): boolean {
   switch (ref.kind) {
     case "insertion":
-      return removeEl(doc, ref.el);
+      return removeRevisionAndEmptyHost(doc, ref.el);
     case "deletion":
       convertDelTextToText(ref.el);
       return unwrap(doc, ref.el);
@@ -985,6 +1129,10 @@ function applyReject(doc: DocxDocument, ref: RevisionRef): boolean {
       return joinWithNext(doc, ref.paragraph);
     case "markDeletion":
       return removeMarkRevision(ref);
+    case "rowInsertion":
+      return removeRow(doc, ref);
+    case "rowDeletion":
+      return removeRowRevision(doc, ref);
     case "runFormat":
     case "paragraphFormat":
     case "tableFormat":
@@ -1062,14 +1210,50 @@ function applyToAll(doc: DocxDocument, apply: (doc: DocxDocument, ref: RevisionR
   return n;
 }
 
-/** Remove a mark revision element (the w:ins/w:del inside pPr/rPr). */
+/**
+ * Remove a mark revision element (the w:ins/w:del inside pPr/rPr), and with it
+ * the pPr/rPr scaffolding the mark needed if nothing else is left in it. A
+ * paragraph that carried no properties before it was suggested into must carry
+ * none after the suggestion is reviewed — an empty `<w:rPr/>` is not a
+ * property, and leaving one behind would mean a reviewed document never
+ * returns to the shape it started in. restoreFormatChange already refuses to
+ * keep an emptied mark rPr for the same reason.
+ */
 function removeMarkRevision(ref: RevisionRef): boolean {
-  const rPr = ref.paragraph
-    ? ref.paragraph.children.find((c) => localName(c.name) === "pPr")?.children.find((c) => localName(c.name) === "rPr")
-    : undefined;
-  if (!rPr) return false;
+  const pPr = ref.paragraph?.children.find((c) => localName(c.name) === "pPr");
+  const rPr = pPr?.children.find((c) => localName(c.name) === "rPr");
+  if (!pPr || !rPr || !ref.paragraph) return false;
   const idx = rPr.children.indexOf(ref.el);
   if (idx === -1) return false;
   rPr.children.splice(idx, 1);
+  if (rPr.children.length === 0) {
+    pPr.children.splice(pPr.children.indexOf(rPr), 1);
+    if (pPr.children.length === 0) {
+      ref.paragraph.children.splice(ref.paragraph.children.indexOf(pPr), 1);
+    }
+  }
+  return true;
+}
+
+/** Drop a row's structural w:ins/w:del, and the w:trPr if it held nothing else. */
+function removeRowRevision(doc: DocxDocument, ref: RevisionRef): boolean {
+  const trPr = doc.findParentOf(ref.el);
+  if (!trPr || !ref.row) return false;
+  const idx = trPr.children.indexOf(ref.el);
+  if (idx === -1) return false;
+  trPr.children.splice(idx, 1);
+  if (trPr.children.length === 0) ref.row.children.splice(ref.row.children.indexOf(trPr), 1);
+  return true;
+}
+
+/** Remove a whole row — and its table, if that was the last row in it. */
+function removeRow(doc: DocxDocument, ref: RevisionRef): boolean {
+  if (!ref.row) return false;
+  const tbl = doc.findParentOf(ref.row);
+  if (!tbl) return false;
+  const idx = tbl.children.indexOf(ref.row);
+  if (idx === -1) return false;
+  tbl.children.splice(idx, 1);
+  if (!tbl.children.some((c) => localName(c.name) === "tr")) removeEl(doc, tbl);
   return true;
 }

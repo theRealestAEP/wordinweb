@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { comparedName, downloadDocx, pickAndCompare } from "./compare.js";
 import {
   availableObjectCommands,
   requestTextInputDialog,
@@ -5785,6 +5786,8 @@ function ReviewTab({
       <Btn label="◀" title="Go to previous comment" onClick={() => api?.stepComment(-1)} />
       <Btn label="▶" title="Go to next comment" onClick={() => api?.stepComment(1)} />
       <FindReplaceMenu api={api} />
+      <Sep />
+      <CompareEntry api={api} />
     </>
   );
 }
@@ -7218,5 +7221,48 @@ export function DocxToolbar({
       />
       <HelpGuide open={helpOpen} onClose={closeHelp} returnFocus={helpTrigger} helpCombos={HELP_COMBOS} hostShortcuts={hostShortcuts} />
     </div>
+  );
+}
+
+/**
+ * Review ▸ Compare Documents… — Word's "legal blackline".
+ *
+ * The document on screen is the ORIGINAL and the picked file is the REVISED
+ * one, which is the direction Word's dialog defaults to. The result downloads
+ * as a new file: every difference is a tracked change, so accepting them all
+ * gives the picked file back and rejecting them all gives this one back.
+ *
+ * Anything the tracked-change model could not express is named beside the
+ * button rather than swallowed. A comparison that silently skipped something
+ * is worse than one that says what it skipped.
+ */
+function CompareEntry({ api }: { api: DocxViewApi | null }) {
+  const [status, setStatus] = useState("");
+  return (
+    <>
+      <Btn
+        label="Compare…"
+        title="Compare this document with another file (Word's legal blackline)"
+        onClick={() => {
+          if (!api) return;
+          setStatus("Comparing…");
+          void pickAndCompare(api.save(), {
+            onResult: (result) => {
+              downloadDocx(result.bytes, comparedName(result.revisedName));
+              setStatus(result.notes.length === 0 ? "Compared" : `Compared — ${result.notes.length} not tracked`);
+            },
+          })
+            .then((picked) => {
+              if (!picked) setStatus("");
+            })
+            .catch(() => setStatus("Could not read that file"));
+        }}
+      />
+      {status && (
+        <span style={{ color: T.muted, font: "12px system-ui, sans-serif", padding: "0 4px", whiteSpace: "nowrap" }}>
+          {status}
+        </span>
+      )}
+    </>
   );
 }
