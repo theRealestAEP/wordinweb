@@ -400,26 +400,57 @@ function anchoredPanelPosition(
 }
 
 /**
- * Keeps an open panel placed against its anchor and inside the window.
+ * Every panel that is open right now, in the order they opened.
  *
- * The one implementation of this in the file, on purpose. Three controls had
- * grown their own and drifted apart; two dozen more never grew any, and opened
- * straight off the right edge of a narrow window (#148). Adding a second
- * implementation is how that comes back.
+ * Escape closes the LAST one only. Popovers nest — a colour menu opens inside
+ * a dialog, and that dialog inside nothing — and each of them listens on the
+ * document, so without an order they would all take the same Escape and the
+ * user would lose the dialog they were filling in as well as the swatch grid
+ * they meant to dismiss.
+ */
+const openPanels: { close: () => void }[] = [];
+
+/** The control to put focus back on when a panel closes from the keyboard. */
+function panelTrigger(anchor: HTMLElement | null): HTMLElement | null {
+  if (!anchor) return null;
+  // The anchor is either the trigger itself or the span wrapping it.
+  if (anchor.matches("button, [tabindex]")) return anchor;
+  return anchor.querySelector<HTMLElement>("button, [tabindex]");
+}
+
+/**
+ * Keeps an open panel placed against its anchor and inside the window, and —
+ * given `onClose` — dismisses it on Escape or a click outside.
  *
- * Callers own opening, closing and focus. This owns placement only, and
- * returns coordinates for a `position: fixed` panel. Panels may stay inside
- * their trigger's DOM subtree — `fixed` takes them out of flow, so an
- * outside-click check that asks whether the click landed in that subtree keeps
- * working.
+ * The one implementation of both in the file, on purpose. Three controls had
+ * grown their own placement and drifted apart; two dozen more never grew any,
+ * and opened straight off the right edge of a narrow window (#148). Those same
+ * two dozen each hand-rolled an outside-click listener and NOTHING else, so
+ * Escape did not close them and a keyboard user had no way out at all (#151).
+ * Both defects are the same absence, so they get the same cure: one hook the
+ * panels share rather than a boilerplate effect each.
+ *
+ * Callers still own opening. This owns placement, dismissal and returning
+ * focus to the trigger, and returns coordinates for a `position: fixed` panel.
+ * Panels may stay inside their trigger's DOM subtree — `fixed` takes them out
+ * of flow, so an outside-click check that asks whether the click landed in
+ * that subtree keeps working; portalled panels are covered because the panel
+ * itself is checked too.
  */
 function useAnchoredPanel(
   anchorRef: React.RefObject<HTMLElement | null>,
   panelRef: React.RefObject<HTMLElement | null>,
   open: boolean,
-  options: { width?: number; align?: PanelAlign; maxHeight?: number; hangFromBar?: boolean } = {},
+  options: {
+    width?: number;
+    align?: PanelAlign;
+    maxHeight?: number;
+    hangFromBar?: boolean;
+    /** Dismiss this panel. Omit for panels the caller dismisses itself. */
+    onClose?: () => void;
+  } = {},
 ): AnchoredPanelPosition {
-  const { width, align, maxHeight, hangFromBar = true } = options;
+  const { width, align, maxHeight, hangFromBar = true, onClose } = options;
   const [position, setPosition] = useState<AnchoredPanelPosition>({ left: PANEL_MARGIN, top: PANEL_MARGIN, width: width ?? 0, maxHeight: maxHeight ?? 320 });
   useLayoutEffect(() => {
     if (!open) return;
@@ -428,7 +459,7 @@ function useAnchoredPanel(
       if (!anchor) return;
       const rect = anchor.getBoundingClientRect();
       const panel = panelRef.current;
-      setPosition(anchoredPanelPosition(
+      const next = anchoredPanelPosition(
         rect,
         // Menus clear the whole bar; a tooltip belongs under its own control.
         hangFromBar ? menuAnchorBottom(anchor, rect) : rect.bottom + 2,
@@ -437,7 +468,15 @@ function useAnchoredPanel(
         { width: width ?? panel?.offsetWidth ?? 0, height: panel?.offsetHeight ?? 0 },
         { width: window.innerWidth, height: window.innerHeight },
         { align, maxHeight },
-      ));
+      );
+      // Only when something moved: this runs on every scroll event, and a new
+      // object each time would re-render the whole panel for nothing.
+      setPosition((current) =>
+        current.left === next.left && current.top === next.top
+          && current.width === next.width && current.maxHeight === next.maxHeight
+          ? current
+          : next,
+      );
     };
     update();
     // Second pass once the panel is in the DOM and has a measurable box.
@@ -450,7 +489,62 @@ function useAnchoredPanel(
       window.removeEventListener("scroll", update, true);
     };
   }, [open, anchorRef, panelRef, width, align, maxHeight, hangFromBar]);
+
+  useDismissablePanel(anchorRef, panelRef, open, onClose);
   return position;
+}
+
+/**
+ * Closes an open panel on Escape or on a click outside it, and hands focus
+ * back to the control that opened it.
+ *
+ * Twenty-four panels in this bar each added a document "mousedown" listener
+ * and nothing else, so a click elsewhere dismissed them and the keyboard had
+ * no way out at all (#151). `useAnchoredPanel` calls this for everything it
+ * places; the SmartArt modal, which has no anchor to be placed against, calls
+ * it directly.
+ */
+function useDismissablePanel(
+  anchorRef: React.RefObject<HTMLElement | null>,
+  panelRef: React.RefObject<HTMLElement | null>,
+  open: boolean,
+  onClose: (() => void) | undefined,
+): void {
+  // Held in a ref, not read from the deps: every call site passes an inline
+  // arrow, so depending on it would re-subscribe on each render.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    if (!open || !closeRef.current) return;
+    const entry = { close: () => closeRef.current?.() };
+    openPanels.push(entry);
+    const landedInside = (target: Node | null) =>
+      !!target && (!!panelRef.current?.contains(target) || !!anchorRef.current?.contains(target));
+    const onMouseDown = (event: MouseEvent) => {
+      if (!landedInside(event.target as Node)) entry.close();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      // Innermost only, so a swatch grid inside a dialog gives the dialog
+      // back rather than closing it too.
+      if (event.key !== "Escape" || openPanels[openPanels.length - 1] !== entry) return;
+      const hadFocus = panelRef.current?.contains(document.activeElement);
+      entry.close();
+      // Closing a panel the user was inside would otherwise strand focus on
+      // the body, leaving the keyboard nowhere.
+      if (hadFocus) {
+        const trigger = panelTrigger(anchorRef.current);
+        requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      const at = openPanels.indexOf(entry);
+      if (at >= 0) openPanels.splice(at, 1);
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, anchorRef, panelRef]);
 }
 
 /** CSS-overridable replacement for visible native selects. An inert,
@@ -487,7 +581,7 @@ export function ToolbarMenuSelect({
   // The trigger's own width is the floor, so the menu is never narrower than
   // the control it drops from; the widest option can push it wider.
   const [intrinsicWidth, setIntrinsicWidth] = useState(menuWidth ?? 180);
-  const position = useAnchoredPanel(triggerRef, menuRef, open, { width: intrinsicWidth, maxHeight: 320 });
+  const position = useAnchoredPanel(triggerRef, menuRef, open, { width: intrinsicWidth, maxHeight: 320 , onClose: () => setOpen(false) });
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -505,22 +599,9 @@ export function ToolbarMenuSelect({
       item?.focus({ preventScroll: true });
       keyboardOpen.current = null;
     });
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-        requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
-      }
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
     window.addEventListener("resize", measure);
     return () => {
       cancelAnimationFrame(frame);
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
       window.removeEventListener("resize", measure);
     };
   }, [open, menuWidth]);
@@ -846,15 +927,7 @@ function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: stri
   const panelRef = useRef<HTMLDivElement | null>(null);
   // One swatch per highlight plus the "no highlight" tile: 20px each, 4px
   // apart, inside 8px of padding.
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: (HIGHLIGHTS.length + 1) * 24 + 12 });
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: (HIGHLIGHTS.length + 1) * 24 + 12 , onClose: () => setOpen(false) });
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button
@@ -867,6 +940,7 @@ function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: stri
       </button>
       {open && (
         <div
+          ref={panelRef}
           onMouseDown={(e) => e.preventDefault()}
           style={{
             position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
@@ -933,25 +1007,10 @@ function ColorMenu({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const valid = normalizedColor(custom);
-  const position = useAnchoredPanel(triggerRef, menuRef, open);
+  const position = useAnchoredPanel(triggerRef, menuRef, open, { onClose: () => setOpen(false) });
+  // Reopening shows the colour the selection has now, not the last one typed.
   useLayoutEffect(() => {
-    if (!open) return;
-    setCustom(current);
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-        requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
-      }
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
-    };
+    if (open) setCustom(current);
   }, [open, current]);
   const pick = (value: string) => {
     onPick(value);
@@ -1095,15 +1154,7 @@ function TextEffectsMenu({ apply }: { apply: (patch: Parameters<DocxViewApi["app
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 216 });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 216 , onClose: () => setOpen(false) });
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Text Effects and Typography" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
@@ -1154,17 +1205,12 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
   const [url, setUrl] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 260 });
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 260 , onClose: () => setOpen(false) });
   const inputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!open) return;
     setUrl(api?.getLinkAt() ?? "");
     inputRef.current?.focus();
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open, api]);
   const submit = () => {
     const v = url.trim();
@@ -1178,6 +1224,7 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
       </button>
       {open && (
         <div
+          ref={panelRef}
           style={{
             position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
@@ -1251,16 +1298,11 @@ function NoteMenu({ api, kind }: { api: DocxViewApi | null; kind: "footnote" | "
   const [hint, setHint] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" });
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" , onClose: () => setOpen(false) });
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const submit = () => {
     const added = kind === "footnote" ? api?.addFootnote(text) : api?.addEndnote(text);
@@ -1279,6 +1321,7 @@ function NoteMenu({ api, kind }: { api: DocxViewApi | null; kind: "footnote" | "
       </button>
       {open && (
         <div
+          ref={panelRef}
           style={{
             position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
@@ -1424,18 +1467,13 @@ function NoteOptionsMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 278, align: "end" });
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 278, align: "end" , onClose: () => setOpen(false) });
   const [fn, setFn] = useState<FootnoteOpts>(() => api?.getFootnoteOptions() ?? { fmt: "decimal", start: null, restart: "continuous", pos: "pageBottom" });
   const [en, setEn] = useState<EndnoteOpts>(() => api?.getEndnoteOptions() ?? { fmt: "lowerRoman", start: null, restart: "continuous", pos: "docEnd" });
   useEffect(() => {
     if (!open) return;
     if (api?.getFootnoteOptions) setFn(api.getFootnoteOptions());
     if (api?.getEndnoteOptions) setEn(api.getEndnoteOptions());
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
   return (
@@ -1480,16 +1518,11 @@ function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions
   const [text, setText] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" });
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" , onClose: () => setOpen(false) });
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const submit = () => {
     if (api?.addComment(text)) {
@@ -1521,6 +1554,7 @@ function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions
       </button>
       {open && (
         <div
+          ref={panelRef}
           style={{
             position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
@@ -1585,16 +1619,11 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 280 });
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 280 , onClose: () => setOpen(false) });
   const inputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const submit = () => {
     const value = name.trim();
@@ -1644,7 +1673,7 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
   const [choice, setChoice] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 280 });
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 280 , onClose: () => setOpen(false) });
   const bookmarks = open && refType === "bookmark" ? api?.listBookmarks() ?? [] : [];
   const targets = open && refType !== "bookmark"
     ? (api?.listCrossRefTargets() ?? []).filter((target) => target.kind === refType)
@@ -1653,14 +1682,6 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
     ? bookmarks.map((name) => ({ value: `b:${name}`, label: name }))
     : targets.map((target) => ({ value: `t:${target.key}`, label: target.text }));
   const selected = options.some((option) => option.value === choice) ? choice : options[0]?.value ?? "";
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
   const insert = (kind: "text" | "page") => {
     if (!selected) return;
     const done = selected.startsWith("b:")
@@ -1726,15 +1747,7 @@ function CaptionMenu({ api }: { api: DocxViewApi | null }) {
   const [position, setPosition] = useState<"below" | "above">("below");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const panelPosition = useAnchoredPanel(rootRef, panelRef, open, { width: 250 });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const panelPosition = useAnchoredPanel(rootRef, panelRef, open, { width: 250 , onClose: () => setOpen(false) });
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert a caption for the selected object or table" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
@@ -1828,15 +1841,10 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 340 });
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 340 , onClose: () => setOpen(false) });
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const submit = (text: string) => {
     if (api?.insertEquation(text)) {
@@ -1969,15 +1977,7 @@ function CitationsMenu({ api }: { api: DocxViewApi | null }) {
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 380 });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 380 , onClose: () => setOpen(false) });
 
   const refresh = () => {
     setSources(api?.listCitationSources() ?? []);
@@ -2178,15 +2178,7 @@ function QuickPartsMenu({ api }: { api: DocxViewApi | null }) {
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 320 });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 320 , onClose: () => setOpen(false) });
 
   const refresh = () => setBlocks(api?.listBuildingBlocks() ?? []);
   const toggle = () => {
@@ -2291,15 +2283,7 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
   const [custom, setCustom] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 264 });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 264 , onClose: () => setOpen(false) });
   const insertCustom = () => {
     if (api?.insertSymbol(custom)) {
       setCustom("");
@@ -2371,15 +2355,7 @@ function DividerMenu({ api }: { api: DocxViewApi | null }) {
   const [spacePt, setSpacePt] = useState(1);
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 270, align: "end" });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 270, align: "end" , onClose: () => setOpen(false) });
   const toggle = () => {
     if (!open) {
       const current = api?.getParagraphDivider();
@@ -2453,15 +2429,7 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
   const [lineDash, setLineDash] = useState<"solid" | "dashed" | "dotted">("solid");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 290, align: "end" });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 290, align: "end" , onClose: () => setOpen(false) });
   const insert = (preset: Parameters<DocxViewApi["insertShape"]>[0]) => {
     const isLine = preset === "line" || preset === "verticalLine";
     const width = Number(lineWidth);
@@ -2570,15 +2538,7 @@ function TextBoxMenu({ api }: { api: DocxViewApi | null }) {
   const [text, setText] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" , onClose: () => setOpen(false) });
   const insert = () => {
     if (api?.insertShape("textBox", text)) {
       setText("");
@@ -2765,15 +2725,7 @@ function WatermarkMenu({ api }: { api: DocxViewApi | null }) {
   const [diagonal, setDiagonal] = useState(true);
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" , onClose: () => setOpen(false) });
   const stamp = (value: string) => {
     if (api?.insertWatermark({ text: value, diagonal })) setOpen(false);
   };
@@ -2860,15 +2812,7 @@ function WordArtMenu({ api }: { api: DocxViewApi | null }) {
   const [styleIndex, setStyleIndex] = useState(0);
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 270, align: "end" });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 270, align: "end" , onClose: () => setOpen(false) });
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert WordArt" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
@@ -2948,15 +2892,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 440 });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 440 , onClose: () => setOpen(false) });
   const sliced = type === "pie" || type === "doughnut";
   const stackable = type === "column" || type === "bar" || type === "area";
   const submit = () => {
@@ -3242,6 +3178,8 @@ function SmartArtMenu({ api, label = "SmartArt" }: { api: DocxViewApi | null; la
   const [layout, setLayout] = useState<SmartArt["layout"]>("process");
   const [items, setItems] = useState([""]);
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useDismissablePanel(rootRef, dialogRef, open, () => setOpen(false));
   const submit = () => {
     const values = items.map((value) => value.trim()).filter(Boolean);
     if (!values.length) return;
@@ -3278,7 +3216,7 @@ function SmartArtMenu({ api, label = "SmartArt" }: { api: DocxViewApi | null; la
       <button title="Insert or edit SmartArt" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>{label}</button>
       {open && createPortal(
         <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 16, background: "rgba(0,0,0,.34)" }} onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
-          <div role="dialog" aria-modal="true" aria-label={editing ? "Edit SmartArt" : "Insert SmartArt"} style={{ width: "min(560px,calc(100vw - 32px))", maxHeight: "calc(100vh - 32px)", overflow: "auto", boxSizing: "border-box", padding: 18, display: "grid", gap: 14, color: T.fg, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: T.popoverShadow }}>
+          <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={editing ? "Edit SmartArt" : "Insert SmartArt"} style={{ width: "min(560px,calc(100vw - 32px))", maxHeight: "calc(100vh - 32px)", overflow: "auto", boxSizing: "border-box", padding: 18, display: "grid", gap: 14, color: T.fg, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: T.popoverShadow }}>
             <div>
               <strong style={{ display: "block", font: "600 18px system-ui, sans-serif" }}>{step === "layout" ? "Choose a SmartArt layout" : editing ? "Edit SmartArt" : "Add SmartArt text"}</strong>
               <span style={{ color: T.muted, font: "12px system-ui, sans-serif" }}>{step === "layout" ? "Choose one of the supported layout families." : layouts.find((item) => item.value === layout)?.label}</span>
@@ -3325,15 +3263,7 @@ function MediaMenu({ api }: { api: DocxViewApi | null }) {
   const [url, setUrl] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 300, align: "end" });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 300, align: "end" , onClose: () => setOpen(false) });
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert online video" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Media</button>
@@ -3420,7 +3350,7 @@ function ScreenshotButton({ api }: { api: DocxViewApi | null }) {
   const [status, setStatus] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLSpanElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, status !== "", { width: 210 });
+  const position = useAnchoredPanel(rootRef, panelRef, status !== "", { width: 210, onClose: () => setStatus("") });
   const capture = async () => {
     setStatus("Capturing screenshot…");
     const result = await api?.insertScreenshot();
@@ -3465,15 +3395,7 @@ function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
   const [layout, setLayout] = useState<CoverPageLayout>("title");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 260 });
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 260 , onClose: () => setOpen(false) });
   const insert = () => {
     if (!title.trim() || !api?.insertCoverPage({ title, subtitle, author, layout })) return;
     setOpen(false);
@@ -3536,16 +3458,8 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const ROWS = 8, COLS = 10;
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: COLS * 18 + 16 });
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: COLS * 18 + 16 , onClose: () => setOpen(false) });
 
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
 
   const ops: [string, string][] = [
     ["rowAbove", "Insert row above"],
@@ -3578,6 +3492,7 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
       </button>
       {open && (
         <div
+          ref={panelRef}
           style={{
             position: "fixed",
             top: position.top,
@@ -3687,24 +3602,7 @@ function useAnchoredPopover(
   width: number,
   onClose: () => void,
 ): AnchoredPanelPosition {
-  const position = useAnchoredPanel(anchorRef, rootRef, true, { width });
-  useEffect(() => {
-    const outside = (event: MouseEvent) => {
-      if (rootRef.current?.contains(event.target as Node)) return;
-      if (anchorRef.current?.contains(event.target as Node)) return;
-      onClose();
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("mousedown", outside);
-    document.addEventListener("keydown", keydown);
-    return () => {
-      document.removeEventListener("mousedown", outside);
-      document.removeEventListener("keydown", keydown);
-    };
-  }, [anchorRef, rootRef, onClose]);
-  return position;
+  return useAnchoredPanel(anchorRef, rootRef, true, { width, onClose });
 }
 
 /**
@@ -5213,7 +5111,7 @@ function LayoutMenu({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const keyboardOpen = useRef<"first" | "last" | null>(null);
-  const position = useAnchoredPanel(triggerRef, menuRef, open, { maxHeight: 480 });
+  const position = useAnchoredPanel(triggerRef, menuRef, open, { maxHeight: 480 , onClose: () => onOpenChange(false) });
   const [portalTokens, setPortalTokens] = useState<React.CSSProperties>({});
   useLayoutEffect(() => {
     if (!open) return;
@@ -5244,24 +5142,9 @@ function LayoutMenu({
       keyboardOpen.current = null;
     }
     const frame = requestAnimationFrame(update);
-    const close = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) onOpenChange(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        const restore = menuRef.current?.contains(document.activeElement);
-        onOpenChange(false);
-        if (restore) requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
-      }
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
     window.addEventListener("resize", update);
     return () => {
       cancelAnimationFrame(frame);
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
       window.removeEventListener("resize", update);
     };
   }, [open]);
@@ -5394,22 +5277,7 @@ function MarginMenu({
   const [values, setValues] = useState({ top: "1", bottom: "1", left: "1", right: "1" });
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
-  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 224 });
-  useEffect(() => {
-    if (!customOpen) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCustomOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
-    };
-  }, [customOpen]);
+  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 224 , onClose: () => setCustomOpen(false) });
 
   const pick = (value: string) => {
     if (value === "m:custom") {
@@ -5524,22 +5392,7 @@ function PageSizeMenu({
   const [values, setValues] = useState({ width: "8.5", height: "11" });
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
-  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 224 });
-  useEffect(() => {
-    if (!customOpen) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCustomOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
-    };
-  }, [customOpen]);
+  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 224 , onClose: () => setCustomOpen(false) });
 
   const valid = Object.values(values).every((value) =>
     value.trim() !== "" && Number.isFinite(Number(value)) && Number(value) > 0,
@@ -5654,22 +5507,7 @@ function PageBorderMenu({
   const [widthPt, setWidthPt] = useState("1");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
-  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 236 });
-  useEffect(() => {
-    if (!customOpen) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCustomOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
-    };
-  }, [customOpen]);
+  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 236 , onClose: () => setCustomOpen(false) });
 
   const validColor = normalizedColor(color);
   const width = Number(widthPt);
@@ -5945,16 +5783,11 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
   const [status, setStatus] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
-  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240 });
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240 , onClose: () => setOpen(false) });
   const inputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const opts = { matchCase, wholeWord, wildcards };
   const runFind = () => {
@@ -6563,7 +6396,7 @@ export function DocxToolbar({
   const [imageStatus, setImageStatus] = useState("");
   const imageStatusAnchor = useRef<HTMLSpanElement | null>(null);
   const imageStatusRef = useRef<HTMLSpanElement | null>(null);
-  const imageStatusPosition = useAnchoredPanel(imageStatusAnchor, imageStatusRef, imageStatus !== "", { width: 230 });
+  const imageStatusPosition = useAnchoredPanel(imageStatusAnchor, imageStatusRef, imageStatus !== "", { width: 230, onClose: () => setImageStatus("") });
   useEffect(() => {
     if (!imageStatus) return;
     const t = setTimeout(() => setImageStatus(""), 8000);

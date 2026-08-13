@@ -42,9 +42,54 @@ interface Box { left: number; top: number; width: number; height: number }
 /** Rects the test has decided on: the bar, and the control being opened. */
 const placed = new WeakMap<Element, Box>();
 
+/**
+ * A CSS length in pixels, or null when there is no declaration at all.
+ *
+ * It resolves the three shapes toolbar.tsx writes: a plain `Npx`, a
+ * `var(--name, Npx)` reduced to its fallback, and `min(a, calc(100vw - Npx))`
+ * reduced against this viewport. The colour menu and the layout menu declare
+ * their widths as themable tokens, so a parser that only read `Npx` would
+ * treat a 236px panel as having none.
+ *
+ * It THROWS on a declaration it cannot read rather than returning null. A
+ * parser with a `?? guess` behind it is how a measurement quietly becomes an
+ * estimate and an assertion quietly stops being able to fail.
+ */
 function cssPx(value: string): number | null {
-  const plain = /^(-?\d+(?:\.\d+)?)px$/.exec(value ?? "");
-  return plain ? Number(plain[1]) : null;
+  const text = (value ?? "").trim();
+  if (text === "") return null;
+  const plain = /^(-?\d+(?:\.\d+)?)px$/.exec(text);
+  if (plain) return Number(plain[1]);
+  // var(--name, 236px) → 236
+  const token = /^var\(\s*--[\w-]+\s*,\s*(-?\d+(?:\.\d+)?)px\s*\)$/.exec(text);
+  if (token) return Number(token[1]);
+  // min(<a>, calc(100vw - Npx)) → min(a, viewport - N), either order
+  const clamp = /^min\((.+)\)$/.exec(text);
+  if (clamp) {
+    const parts = splitTopLevel(clamp[1]).map((part) => {
+      const vw = /^calc\(\s*100vw\s*-\s*(\d+(?:\.\d+)?)px\s*\)$/.exec(part.trim());
+      return vw ? VIEWPORT.width - Number(vw[1]) : cssPx(part.trim());
+    });
+    if (parts.every((n): n is number => n !== null)) return Math.min(...parts);
+  }
+  throw new Error(`the layout model cannot read the CSS length ${JSON.stringify(text)}`);
+}
+
+/** Split "a, calc(b - c)" on its top-level commas only. */
+function splitTopLevel(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "(") depth++;
+    else if (text[i] === ")") depth--;
+    else if (text[i] === "," && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
 }
 
 function positionedAncestor(el: HTMLElement): HTMLElement | null {
@@ -59,6 +104,14 @@ function positionedAncestor(el: HTMLElement): HTMLElement | null {
  * A box with no width of its own is as wide as its text. jsdom measures
  * nothing, so this stands in for text measurement the same way the canvas
  * stub in setup.ts does — the tooltip is the box that needs it.
+ *
+ * ONE LIMIT WORTH KNOWING. jsdom keeps a CSS value it cannot validate only
+ * when it contains `var()`; `min(560px, calc(100vw - 32px))` with no token is
+ * dropped outright, so `style.width` reads "" and this fallback fires with no
+ * way to tell it apart from a box that never declared a width. The SmartArt
+ * modal is the one panel in the file written that way, and it is centred by
+ * its overlay rather than anchored to a control, so a clamp assertion on it
+ * would be meaningless anyway — do not add one and assume it holds.
  */
 function intrinsicWidth(el: HTMLElement): number {
   return Math.min(VIEWPORT.width - 2 * MARGIN, (el.textContent ?? "").length * 7 + 16);
@@ -337,6 +390,105 @@ describe("#148 · toolbar panels stay inside the window", () => {
     expect(cap, "no max-height, so a tall panel would run off the bottom").not.toBeNull();
     expect(boxOf(panel).top + Math.min(PANEL_HEIGHT, cap!)).toBeLessThanOrEqual(200);
     expect(["auto", "scroll"]).toContain(panel.style.overflowY || panel.style.overflow);
+  });
+
+  /**
+   * The parser above is only useful if it returns the number a browser
+   * returns. These two panels declare their widths as theme tokens, and a
+   * parser that only read `Npx` would have silently called the colour menu
+   * ~51px wide (its swatches have no text), placing its right edge 185px
+   * inside the truth and passing a panel that was off screen.
+   *
+   * Chromium, demo at 900x600: the colour menu measures 236 and the layout
+   * menu 304, from these same declarations. The model has to agree.
+   */
+  it("resolves themable widths to the same number a browser measures", async () => {
+    restoreLayout = installLayout();
+    mounted = await mount();
+    await selectTab(mounted.bar, "home");
+    const colorMenu = await open(mounted.bar, "Text color");
+    expect(colorMenu.style.width).toContain("var(--dxw-color-menu-width");
+    expect(boxOf(colorMenu).width, "the colour menu should model as 236, as Chromium measures it").toBe(236);
+    expectInsideViewport(colorMenu, "Text color");
+
+    await selectTab(mounted.bar, "layout");
+    const layoutMenu = await open(mounted.bar, "Margins");
+    expect(layoutMenu.style.width).toContain("var(--dxw-layout-menu-width");
+    expect(boxOf(layoutMenu).width, "the layout menu should model as 304, as Chromium measures it").toBe(304);
+    expectInsideViewport(layoutMenu, "Margins");
+  });
+
+  it("refuses to guess a width it cannot read", async () => {
+    restoreLayout = installLayout();
+    const box = document.createElement("div");
+    box.style.position = "fixed";
+    box.style.setProperty("width", "min(var(--x, 40px), 12em)");
+    // Silence would mean the next unreadable declaration becomes an estimate
+    // and the assertion built on it can no longer fail.
+    expect(() => boxOf(box)).toThrow(/cannot read the CSS length/);
+  });
+
+  /**
+   * #151. Escape did nothing in 24 of these panels, so a keyboard user who
+   * opened one had no way back out. Closing one and leaving focus on the
+   * body is the same bug in a smaller form, so the trigger has to get it.
+   */
+  for (const [tab, tip] of [["home", "Text Effects and Typography"], ["insert", "Insert link"]] as const) {
+    it(`Escape closes ${tip} and hands focus back to its trigger`, async () => {
+      restoreLayout = installLayout();
+      mounted = await mount();
+      await selectTab(mounted.bar, tab);
+      const trigger = controlByTip(mounted.bar, tip);
+      const panel = await open(mounted.bar, tip);
+      // Restoring focus needs the panel's own ref, so this also catches a
+      // panel that reads its placement but never attached one — five did,
+      // which a browser found and a rect assertion never would.
+      const inner = panel.querySelector<HTMLElement>("button, input, textarea")!;
+      inner.focus();
+      expect(document.activeElement, "the test never got focus into the panel").toBe(inner);
+
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      await tick(20);
+      expect(panel.isConnected, "Escape left the panel open").toBe(false);
+      expect(document.activeElement, "Escape closed the panel but stranded focus").toBe(trigger);
+    });
+  }
+
+  /**
+   * Popovers nest: the shape gallery holds a colour menu. Both listen on the
+   * document, so without an order one Escape takes the gallery away as well
+   * as the swatch grid the user meant to dismiss.
+   */
+  it("Escape closes only the innermost of two stacked panels", async () => {
+    restoreLayout = installLayout();
+    mounted = await mount();
+    await selectTab(mounted.bar, "insert");
+    const gallery = await open(mounted.bar, "Insert shape");
+    const colorTrigger = gallery.querySelector<HTMLElement>("[data-dxw-color-trigger]");
+    expect(colorTrigger, "the shape gallery no longer holds a colour menu").toBeTruthy();
+    await act(async () => {
+      colorTrigger!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      colorTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await tick();
+    const swatches = document.querySelector("[data-dxw-color-menu]");
+    expect(swatches, "the colour menu never opened").toBeTruthy();
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await tick(20);
+    expect(document.querySelector("[data-dxw-color-menu]"), "Escape left the colour menu open").toBeNull();
+    expect(gallery.isConnected, "Escape took the shape gallery away with the colour menu").toBe(true);
+
+    // A second Escape then closes the gallery, which is the way out.
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await tick(20);
+    expect(gallery.isConnected, "a second Escape did not close the gallery").toBe(false);
   });
 
   it("the tooltip under a control at the right edge stays on screen", async () => {
