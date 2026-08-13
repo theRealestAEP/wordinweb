@@ -7976,15 +7976,16 @@ export class DocxEditor {
     const insertedBefore = this.host.onIntent ? null : this.insertBlankParagraphBeforeAtStart();
     if (insertedBefore) {
       const reparsed = this.host.doc.insertDirectBodyParagraphBefore(insertedBefore.reference, insertedBefore.blank);
-      if (reparsed) {
-        const run = reparsed.children
-          .flatMap((child) => child.type === "run" ? [child] : child.runs)
-          .find((candidate) =>
-            candidate.content.some((content) => content.kind === "text" && content.srcT === insertedBefore.text),
-          );
-        if (run) this.caret = { t: insertedBefore.text, run, offset: 0 };
-        invalidateParagraphSignature(insertedBefore.blank);
-      }
+      // The caret STAYS on the original paragraph, which the blank has just
+      // pushed down a line. This path used to move it into the blank instead,
+      // so the caret held the y it already had and the content slid out from
+      // under it: Enter at a paragraph start left the caret above the text it
+      // was in front of, and Enter on an EMPTY paragraph — every Enter after
+      // the first — did not appear to move at all while empty paragraphs piled
+      // up below. Reported as "when I hit enter the cursor doesnt follow".
+      // Leaving it put also matches the general split path, which hands the
+      // caret to whichever paragraph carries the text it was in front of.
+      if (reparsed) invalidateParagraphSignature(insertedBefore.blank);
       this.commit(false, "local", !!reparsed);
       this.focusText();
       return;
