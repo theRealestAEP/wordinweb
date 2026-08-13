@@ -6882,7 +6882,18 @@ export class DocxEditor {
   }
 
   /** Accept (keep insertion / drop deletion) the given revision, or the one at
-   * the caret. Re-renders and returns whether anything changed. */
+   * the caret. Re-renders and returns whether anything changed.
+   *
+   * The index is the revision's ADDRESS on the wire, so it is only computed in
+   * a room, and a room refuses what it cannot address: applying a revision
+   * with no index would change this replica and reach no other, which is the
+   * fork this whole class of gate exists to prevent. The two enumerations
+   * agree today — revisionForText walks up from the caret and collectRevisions
+   * walks down from doc.revisionRoots(), over the same body, header/footer and
+   * note trees, and over the same kinds — so `index < 0` should be
+   * unreachable. It stays as the cheap guard on that assumption rather than as
+   * a known gap. DELIBERATE divergence: do not "align" it by dropping the
+   * guard. */
   acceptRevisionRef(ref?: RevisionRef): boolean {
     const target = ref ?? this.revisionAtCaret();
     if (!target) return false;
@@ -6901,7 +6912,8 @@ export class DocxEditor {
   }
 
   /** Reject (drop insertion / restore deletion) the given revision, or the one
-   * at the caret. */
+   * at the caret. The `index < 0` refusal is deliberate — see
+   * acceptRevisionRef. */
   rejectRevisionRef(ref?: RevisionRef): boolean {
     const target = ref ?? this.revisionAtCaret();
     if (!target) return false;
