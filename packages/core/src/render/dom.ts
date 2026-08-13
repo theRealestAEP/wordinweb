@@ -2502,8 +2502,19 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
             ) as ArrayBuffer;
             return URL.createObjectURL(new Blob([buffer], { type: "model/gltf-binary" }));
           });
+          // The poster bitmap is NOT added to the frame. model-viewer paints
+          // that same image itself through poster= until the GLB loads, so
+          // appending it as well left two copies stacked: the viewer draws on
+          // a transparent background, and any part the model does not cover
+          // showed the poster underneath. Rotate the model and they separate
+          // completely — the reported "same copy artifact behind it doubling
+          // it up". `node` (the <img>, or its crop viewport) is deliberately
+          // dropped here and only its src survives, as the poster.
+          //
+          // This branch is interactive-only, so a read-only render — which is
+          // what the parity corpus captures — still paints exactly the <img>
+          // it painted before.
           const frame = document.createElement("div");
-          frame.appendChild(node);
           const viewer = document.createElement("model-viewer");
           viewer.dataset.dxwModel3dViewer = "1";
           viewer.setAttribute("src", modelUrl);
@@ -2511,8 +2522,29 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
           viewer.setAttribute("alt", "3D model");
           viewer.setAttribute("loading", "eager");
           viewer.setAttribute("interaction-prompt", "none");
+          // pointer-events:none is what gives the object back its ordinary
+          // gestures. The viewer used to cover the whole box and swallow every
+          // pointerdown for rotation, so a drag NEVER reached the editor and a
+          // 3D object simply could not be moved — it spun under the cursor
+          // instead. Rotation now lives on the small centre handle below,
+          // which is also where Word puts it.
           viewer.style.cssText =
-            "position:absolute;inset:0;width:100%;height:100%;background:transparent;cursor:grab;touch-action:none;";
+            "position:absolute;inset:0;width:100%;height:100%;background:transparent;pointer-events:none;touch-action:none;";
+          // Word's 3D rotate control: a puck at the centre of the object.
+          // Only this takes the pointer, so dragging anywhere else on the
+          // object reaches the editor and moves it as any other drawing.
+          const handle = document.createElement("div");
+          handle.dataset.dxwModel3dRotate = "1";
+          handle.title = "Drag to rotate the 3D model";
+          handle.style.cssText =
+            "position:absolute;left:50%;top:50%;width:44px;height:44px;margin:-22px 0 0 -22px;" +
+            "border-radius:50%;background:rgba(255,255,255,.82);border:1px solid rgba(0,0,0,.22);" +
+            "box-shadow:0 1px 3px rgba(0,0,0,.28);cursor:grab;touch-action:none;" +
+            "display:grid;place-items:center;color:#3c4043;";
+          handle.innerHTML =
+            '<svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">' +
+            '<ellipse cx="12" cy="12" rx="9" ry="4.2"/><ellipse cx="12" cy="12" rx="4.2" ry="9"/></svg>';
+
           let rotation = { x: 0, y: 0, z: 0, ...item.model3D.rotation };
           const orient = (): void => {
             // model-viewer expects roll(Z), pitch(X), yaw(Y); Office stores X/Y/Z.
@@ -2524,7 +2556,7 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
           let startY = 0;
           let startRotation = rotation;
           let moved = false;
-          viewer.addEventListener("pointerdown", (event) => {
+          handle.addEventListener("pointerdown", (event) => {
             if (event.button !== 0) return;
             event.preventDefault();
             event.stopPropagation();
@@ -2533,10 +2565,10 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
             startY = event.clientY;
             startRotation = rotation;
             moved = false;
-            viewer.setPointerCapture(event.pointerId);
-            viewer.style.cursor = "grabbing";
+            handle.setPointerCapture(event.pointerId);
+            handle.style.cursor = "grabbing";
           });
-          viewer.addEventListener("pointermove", (event) => {
+          handle.addEventListener("pointermove", (event) => {
             if (pointerId !== event.pointerId) return;
             const dx = event.clientX - startX;
             const dy = event.clientY - startY;
@@ -2551,23 +2583,24 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
           });
           const finish = (event: PointerEvent, commit: boolean): void => {
             if (pointerId !== event.pointerId) return;
-            if (viewer.hasPointerCapture(event.pointerId)) viewer.releasePointerCapture(event.pointerId);
+            if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
             pointerId = null;
-            viewer.style.cursor = "grab";
+            handle.style.cursor = "grab";
             if (!moved) return;
             if (!commit) {
               rotation = startRotation;
               orient();
               return;
             }
-            viewer.dispatchEvent(new CustomEvent("dxw-model3d-rotate", {
+            handle.dispatchEvent(new CustomEvent("dxw-model3d-rotate", {
               bubbles: true,
               detail: rotation,
             }));
           };
-          viewer.addEventListener("pointerup", (event) => finish(event, true));
-          viewer.addEventListener("pointercancel", (event) => finish(event, false));
+          handle.addEventListener("pointerup", (event) => finish(event, true));
+          handle.addEventListener("pointercancel", (event) => finish(event, false));
           frame.appendChild(viewer);
+          frame.appendChild(handle);
           node = frame;
         }
       }
