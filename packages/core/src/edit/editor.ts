@@ -3226,14 +3226,29 @@ export class DocxEditor {
   private wordArtTextEditor: { input: HTMLInputElement; finish: (commit: boolean, reselect: boolean) => void } | null = null;
   private smartArtTextEditor: { input: HTMLInputElement; finish: (commit: boolean, reselect: boolean) => void } | null = null;
 
+  /**
+   * The model under an event, resolved from the OBJECT FRAME rather than from
+   * the `<model-viewer>` inside it.
+   *
+   * It used to look for `[data-dxw-model3d-viewer]`, and that broke both
+   * gestures at once the moment the viewer became `pointer-events: none`
+   * (#147). A `pointer-events: none` element is never an event target, and the
+   * frame is the viewer's PARENT, so walking up from the real target could
+   * never reach it: selection died, and rotation died with it because the
+   * rotate puck is the viewer's SIBLING and was never inside it either.
+   *
+   * The frame is the right anchor regardless — it is the binding element, and
+   * it is what every part of the object is inside.
+   */
   private model3DBinding(target: EventTarget | null): ImageBinding | undefined {
-    const viewer = (target as HTMLElement | null)?.closest?.("[data-dxw-model3d-viewer]");
-    return viewer
-      ? this.host.getHandle()?.images.find((binding) => binding.el.contains(viewer))
+    const frame = (target as HTMLElement | null)?.closest?.("[data-dxw-model3d]");
+    return frame
+      ? this.host.getHandle()?.images.find((binding) => binding.el === frame || binding.el.contains(frame))
       : undefined;
   }
 
-  /** First press selects a model; subsequent drags belong to its 3D viewport. */
+  /** First press selects a model; later presses fall through, so a drag on the
+   * body moves the object and the centre puck rotates it. */
   private onModel3DPointerDown = (event: PointerEvent): void => {
     const binding = this.model3DBinding(event.target);
     const src = binding?.item.src;
@@ -4494,6 +4509,18 @@ export class DocxEditor {
       // participant whose bytes never arrive could not remove the box at all.
       // Matching on the media-state marker covers BOTH skeleton states:
       // "fetching" (still coming) and "unavailable" (nobody online has it).
+      //
+      // A 3D MODEL DELIBERATELY DOES NOT MATCH HERE. It paints as a
+      // <model-viewer> in a frame div and has no <img>, so it has never been
+      // draggable — before or after d618708. Adding it is one clause, and it
+      // was tried: the object then lands in the wrong place. Measured on
+      // coverletter-anon, a +100px horizontal drag moved it +178.8px
+      // horizontally and +389.3px VERTICALLY, from a drag with no vertical
+      // component at all; the same drag moves a plain floating image exactly
+      // +100/0. So the move path needs work of its own before a model can use
+      // it, and shipping the clause alone would trade "cannot move" for
+      // "moves somewhere else". Tracked separately; rotation and selection
+      // work.
       const handle = this.host.getHandle();
       const el = target.tagName === "IMG" ? target : target.closest<HTMLElement>("[data-dxw-media-state]")!;
       imageBinding = handle?.images.find((b) => b.el === el || b.el.contains(el));

@@ -149,6 +149,48 @@ describe("a 3D model paints once and stays draggable", () => {
     container.remove();
   });
 
+  it("selects the model from a press that targets the FRAME, as a real one does", async () => {
+    // #147, and the reason the tests above could not catch it.
+    //
+    // The editor used to resolve a model with
+    // `target.closest("[data-dxw-model3d-viewer]")`. The tests above drive the
+    // viewer with `dispatchEvent`, which makes the viewer the target whatever
+    // its `pointer-events` are — so that lookup always succeeded HERE and
+    // always failed in the browser, where a `pointer-events: none` element is
+    // never a target and the frame is its PARENT. Selection died, rotation
+    // died with it, and this suite stayed green.
+    //
+    // This one dispatches from the FRAME, which is what real hit-testing
+    // produces. It fails against the viewer-anchored lookup.
+    const { container, root, model } = await mount(true);
+
+    const viewer = model.querySelector<HTMLElement>("[data-dxw-model3d-viewer]")!;
+    // The premise: a real press cannot land on the viewer...
+    expect(viewer.style.pointerEvents, "the viewer is untargetable").toBe("none");
+    // ...the frame carries the marker the editor must key on instead...
+    expect(model.matches("[data-dxw-model3d]")).toBe(true);
+    // ...and the puck is inside the FRAME but outside the VIEWER, which is
+    // why one anchor serves both gestures and the old one served neither.
+    const handle = model.querySelector<HTMLElement>("[data-dxw-model3d-rotate]")!;
+    expect(model.contains(handle)).toBe(true);
+    expect(viewer.contains(handle), "the puck is the viewer's sibling, not its child").toBe(false);
+
+    await act(async () => {
+      model.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerId: 1 }),
+      );
+    });
+    await tick();
+
+    expect(
+      container.querySelector("[data-dxw-object-selection]"),
+      "a press on the object's own frame selects it",
+    ).toBeTruthy();
+
+    await act(async () => { root.unmount(); });
+    container.remove();
+  });
+
   it("keeps the read-only render exactly as it was — the corpus measures that one", async () => {
     // A parity capture loads with editable=0, so the whole viewer branch is
     // skipped and the poster <img> IS the render. coverletter-anon scores
