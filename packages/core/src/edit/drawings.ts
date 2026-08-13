@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, localName } from "../xml.js";
+import { nextRelativeHeight } from "./images.js";
 import { isKnownShapeGeometry } from "../preset-geometry.js";
 
 const EMU_PER_PX = 9525;
@@ -149,7 +150,7 @@ export function insertShapeAt(
     el("wp:anchor", {
       "xmlns:wp": NS_WP,
       distT: "0", distB: "0", distL: "114300", distR: "114300",
-      simplePos: "0", relativeHeight: "251658240", behindDoc: "0",
+      simplePos: "0", relativeHeight: nextRelativeHeight(doc, caretRun), behindDoc: "0",
       locked: "0", layoutInCell: "1", allowOverlap: "1",
     }, [
       el("wp:simplePos", { x: "0", y: "0" }),
@@ -591,7 +592,7 @@ export function insertInkAt(
     el("wp:anchor", {
       "xmlns:wp": NS_WP,
       distT: "0", distB: "0", distL: "0", distR: "0",
-      simplePos: "0", relativeHeight: "251658240", behindDoc: "0",
+      simplePos: "0", relativeHeight: nextRelativeHeight(doc, caretRun), behindDoc: "0",
       locked: "0", layoutInCell: "1", allowOverlap: "1",
     }, [
       el("wp:simplePos", { x: "0", y: "0" }),

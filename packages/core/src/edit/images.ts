@@ -235,7 +235,7 @@ export function setImageWrap(
     {
       "xmlns:wp": NS_WP,
       distT: "0", distB: "0", distL: "114300", distR: "114300",
-      simplePos: "0", relativeHeight: "251658240", behindDoc: behind ? "1" : "0",
+      simplePos: "0", relativeHeight: nextRelativeHeight(doc, drawingEl), behindDoc: behind ? "1" : "0",
       locked: "0", layoutInCell: "1", allowOverlap: "1",
     },
     [
@@ -437,6 +437,55 @@ export function setDrawingRotation(doc: DocxDocument, drawingEl: XmlElement, deg
 }
 
 /** Move a floating object to the front or back of the other anchors in its part. */
+/**
+ * Word's lowest ordinary `relativeHeight`, and where a part with no floating
+ * objects yet starts counting.
+ */
+const FIRST_RELATIVE_HEIGHT = 251658240;
+
+/** Every `wp:anchor` in the part `near` belongs to, with its height. */
+function anchorsNear(doc: DocxDocument, near: XmlElement): {
+  anchors: XmlElement[];
+  keyOf: (anchor: XmlElement) => string;
+  heightOf: (anchor: XmlElement) => number;
+} {
+  let root: XmlElement = near;
+  for (;;) {
+    const parent = doc.findParentOf(root);
+    if (!parent) break;
+    root = parent;
+  }
+  const anchors: XmlElement[] = [];
+  const walk = (node: XmlElement): void => {
+    if (localName(node.name) === "anchor") anchors.push(node);
+    for (const c of node.children) walk(c);
+  };
+  walk(root);
+  const keyOf = (anchor: XmlElement) =>
+    Object.keys(anchor.attrs).find((key) => localName(key) === "relativeHeight") ?? "relativeHeight";
+  const heightOf = (anchor: XmlElement) => parseInt(anchor.attrs[keyOf(anchor)] ?? "0", 10) || 0;
+  return { anchors, keyOf, heightOf };
+}
+
+/**
+ * The `relativeHeight` a newly floating object should carry: one above every
+ * anchor already in its part, so the thing the user just made or just dragged
+ * is on top — which is the rule Word follows.
+ *
+ * Every creation site used to stamp the constant 251658240. That is Word's
+ * own LOWEST starting value, so anything we created or floated landed under
+ * every picture Word had already written (measured across the corpus at
+ * 251659264 and up), and from then on the picture took every click aimed at
+ * it. The number is written into the file, so the object stayed buried across
+ * save and reopen — "dragged it once and couldn't drag it anymore" (#159).
+ *
+ * Scoped to the part, like setDrawingOrder: a header's stack is its own.
+ */
+export function nextRelativeHeight(doc: DocxDocument, near: XmlElement): string {
+  const { anchors, heightOf } = anchorsNear(doc, near);
+  return String(Math.max(...anchors.map(heightOf), FIRST_RELATIVE_HEIGHT - 1) + 1);
+}
+
 export function setDrawingOrder(
   doc: DocxDocument,
   drawingEl: XmlElement,
@@ -462,21 +511,7 @@ export function setDrawingOrder(
     doc.refresh();
     return true;
   }
-  let root: XmlElement = drawingEl;
-  for (;;) {
-    const parent = doc.findParentOf(root);
-    if (!parent) break;
-    root = parent;
-  }
-  const anchors: XmlElement[] = [];
-  const walk = (node: XmlElement): void => {
-    if (localName(node.name) === "anchor") anchors.push(node);
-    for (const c of node.children) walk(c);
-  };
-  walk(root);
-  const keyOf = (anchor: XmlElement) =>
-    Object.keys(anchor.attrs).find((key) => localName(key) === "relativeHeight") ?? "relativeHeight";
-  const heightOf = (anchor: XmlElement) => parseInt(anchor.attrs[keyOf(anchor)] ?? "0", 10) || 0;
+  const { anchors, keyOf, heightOf } = anchorsNear(doc, drawingEl);
   const heights = anchors.map(heightOf);
   if (order === "front") {
     selected.attrs[keyOf(selected)] = String(Math.max(...heights, 0) + 1);
