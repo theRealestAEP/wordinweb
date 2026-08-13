@@ -88,6 +88,32 @@ describe("#141: the toolbar draws its own form controls", () => {
     expect(untagged, `add data-dxw-number="" at toolbar.tsx line(s) ${untagged.join(", ")}`).toEqual([]);
   });
 
+  it("gives every text-like field the attribute its focus rule selects", () => {
+    // #145: eight boxes set `outline: none` and put nothing in its place, so
+    // keyboard focus was invisible on them. The ring now comes from a rule
+    // keyed on this attribute, and an untagged field silently opts out —
+    // invisible unless someone tabs, which is exactly the user who needed it.
+    const selfPainted = ["checkbox", "button", "file", "color"];
+    const untagged = [...openingTags(SOURCE, "input"), ...openingTags(SOURCE, "textarea")]
+      .filter(({ tag }) => !selfPainted.some((t) => tag.includes(`type="${t}"`)))
+      .filter(({ tag }) => !tag.includes("data-dxw-field"))
+      .map(({ line }) => line);
+    expect(untagged, `add data-dxw-field="" at toolbar.tsx line(s) ${untagged.join(", ")}`).toEqual([]);
+  });
+
+  it("never suppresses a focus ring without drawing one", () => {
+    // `outline: none` is legitimate only inside the rule that puts a
+    // box-shadow ring in its place. In a style OBJECT it is the #145 defect,
+    // and it was copied into eight of them before anyone noticed. The rule
+    // lives in a string, so a source line carrying the JSX-object spelling is
+    // the thing to catch.
+    const offenders = SOURCE.split("\n")
+      .map((line, i) => ({ line, n: i + 1 }))
+      .filter(({ line }) => /outline:\s*"none"/.test(line))
+      .map(({ n }) => n);
+    expect(offenders, `outline suppressed in a style object at line(s) ${offenders.join(", ")}`).toEqual([]);
+  });
+
   it("keeps exactly one of each native element, so the guards are not vacuous", () => {
     // If a refactor deleted the markers, the two guards above would pass by
     // finding nothing at all. These are the counterweight.

@@ -199,6 +199,62 @@ describe("#141: the toolbar's dropdowns are all the same control", () => {
   });
 });
 
+describe("#145: the toolbar's fields have a focus ring again", () => {
+  it("injects one stylesheet carrying the focus rule and the spinner rule", () => {
+    // Importing the module is what installs it, so it is already here.
+    const style = document.getElementById("dxw-toolbar-field-style");
+    expect(style, "the toolbar installed its stylesheet on import").toBeTruthy();
+
+    const css = style!.textContent ?? "";
+    expect(css, "a ring is DRAWN, not merely the outline removed").toContain("box-shadow:0 0 0 2px");
+    expect(css, "on focus, not always").toContain("[data-dxw-field]:focus-visible");
+    expect(css, "the spinner rule shares the sheet").toContain("-webkit-inner-spin-button");
+    // A border-color here would lose to the fields' inline `border` shorthand
+    // and do nothing. Measured, and then left out rather than made !important.
+    expect(css, "no declaration that an inline style would outrank").not.toContain("border-color");
+    // Themed, not hard-coded: T is CSS variables all the way down, so a host
+    // that restyles the toolbar restyles the ring with it.
+    expect(css, "the ring colour is a variable a host can override").toContain("var(--dxw-accent");
+    // NOT the pale selection blue. Measured: #e8f0fe is 1.15:1 against a
+    // white field and 1.2:1 against its border, so a ring in it is a focus
+    // indicator nobody can see — this ticket's own defect in a new colour.
+    // The accent is 4.51:1 and 3.28:1, clearing WCAG 2.2's 3:1 bar.
+    expect(css, "a ring nobody can see is the same as no ring").not.toContain("--dxw-tab-active-bg");
+  });
+
+  it("installs it exactly once, however many toolbars mount", async () => {
+    const t = await mountToolbar();
+    try {
+      expect(document.querySelectorAll("#dxw-toolbar-field-style")).toHaveLength(1);
+    } finally {
+      await t.unmount();
+    }
+  });
+
+  it("marks the fields the rule selects, and leaves the self-painted ones alone", async () => {
+    const t = await mountToolbar();
+    try {
+      const insert = t.bar.querySelector<HTMLButtonElement>('button[data-tab="insert"]');
+      if (insert) await click(insert);
+      const bookmark = [...t.bar.querySelectorAll<HTMLButtonElement>("button")]
+        .find((b) => b.title === "Insert bookmark")!;
+      await click(bookmark);
+
+      const box = document.querySelector<HTMLInputElement>('input[aria-label="Bookmark name"], input:not([type])');
+      expect(box, "the bookmark box is on screen").toBeTruthy();
+      expect(box!.hasAttribute("data-dxw-field"), "it opts into the ring").toBe(true);
+      // ToolbarCheckbox draws its own ring from React state, so it must NOT
+      // also take this one or focus would paint twice.
+      expect(
+        document.querySelector("input[data-dxw-checkbox-input][data-dxw-field]"),
+        "the checkbox is not double-ringed",
+      ).toBeNull();
+    } finally {
+      await t.unmount();
+    }
+  });
+});
+
 describe("#141: ToolbarCheckbox keeps the native element it repaints", () => {
   async function mountBox(props: Partial<Parameters<typeof ToolbarCheckbox>[0]> = {}) {
     const container = document.createElement("div");

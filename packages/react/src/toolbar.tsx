@@ -129,31 +129,52 @@ const dialogInput: React.CSSProperties = {
 };
 
 /**
- * Take the browser's spinner arrows off our number boxes.
+ * The two things this toolbar's fields need that an inline style cannot say:
+ * a pseudo-ELEMENT (the number spinners) and a pseudo-CLASS (focus).
  *
- * `appearance: textfield` is the usual inline answer and Chrome ignores it —
- * measured, not assumed: on Chrome 150 a number input carrying it still
- * paints both arrows on hover, identically to one without. The arrows are a
- * `::-webkit-*-spin-button` pseudo-element, which no inline style can reach,
- * so a rule is the only way. Idempotent injected <style> with an id, the same
- * shape the engine already uses for `ensureDrawingCursorStyle`, and scoped to
- * `[data-dxw-number]` so it touches only the fields this toolbar draws.
+ * Idempotent injected <style> with an id — the same shape the engine already
+ * uses for `ensureDrawingCursorStyle`, for the same reason — and scoped to
+ * our own data attributes so it touches only the fields this toolbar draws.
+ * `T` is CSS variables all the way down, so the rule text themes itself.
  */
-function ensureNumberFieldStyle(): void {
-  if (typeof document === "undefined" || document.getElementById("dxw-number-field-style")) return;
+function ensureToolbarFieldStyles(): void {
+  if (typeof document === "undefined" || document.getElementById("dxw-toolbar-field-style")) return;
   const style = document.createElement("style");
-  style.id = "dxw-number-field-style";
+  style.id = "dxw-toolbar-field-style";
   style.textContent =
-    // The `appearance` half is for Firefox and Safari, which do honour it;
-    // the pseudo-element half is what Chrome needs. Both live in the rule so
-    // no call site has to carry either, and the six number boxes that keep
-    // bespoke widths keep them.
+    // Spinner arrows. The `appearance` half is for Firefox and Safari, which
+    // do honour it; the pseudo-element half is what Chrome needs. Measured:
+    // on Chrome 150 `appearance: textfield` alone changes nothing at all.
+    // Both live here so no call site carries either, and the six number boxes
+    // with bespoke widths keep them.
     "[data-dxw-number]{-webkit-appearance:textfield;appearance:textfield}" +
     "[data-dxw-number]::-webkit-inner-spin-button,[data-dxw-number]::-webkit-outer-spin-button" +
-    "{-webkit-appearance:none;appearance:none;margin:0}";
+    "{-webkit-appearance:none;appearance:none;margin:0}" +
+    // Focus ring (#145). Eight popover boxes used to set `outline: none` and
+    // put nothing in its place, so focus was invisible on them. This is the
+    // same ring ToolbarCheckbox already draws for itself, so the whole panel
+    // agrees on what focus looks like.
+    //
+    // THE ACCENT, not the pale selection blue. Measured rather than eyeballed:
+    // `--dxw-tab-active-bg` (#e8f0fe) is 1.15:1 against a white field and
+    // 1.2:1 against the field's own border, so a ring drawn in it is a focus
+    // indicator you cannot see — this ticket's defect over again in a
+    // different colour. The accent is 4.51:1 and 3.28:1, which clears the
+    // WCAG 2.2 focus-appearance bar of 3:1 against adjacent colours.
+    //
+    // BOX-SHADOW ONLY, deliberately. A `border-color` here would be dead on
+    // arrival: the fields set `border` as an inline shorthand, and an inline
+    // style outranks any stylesheet rule, so it would silently not apply.
+    // Measured too — the shadow lands, the border-color did not.
+    //
+    // `:focus-visible` rather than `:focus` because it is the better default
+    // for anything non-textual marked later. For the text boxes it currently
+    // marks the two are the same: per spec a control that takes text keyboard
+    // input always matches :focus-visible, mouse-clicked or not.
+    `[data-dxw-field]:focus-visible{outline:none;box-shadow:0 0 0 2px ${T.accent}}`;
   document.head.appendChild(style);
 }
-ensureNumberFieldStyle();
+ensureToolbarFieldStyles();
 
 /** The roomier variant, for the tall stacked-label popovers (Citations, Quick
  * Parts, Chart, Media). Those four each declared these three objects in their
@@ -168,16 +189,19 @@ const rowBtn: React.CSSProperties = { border: `1px solid ${T.border}`, borderRad
  * Six components spelled this out identically, a seventh differed only by a
  * margin and an eighth only by `flex: 1`.
  *
- * NOTE `outline: "none"`. It is carried over verbatim from all eight, so this
- * consolidation changes nothing on screen — but it does remove the focus ring
- * from every one of these boxes, and nothing replaces it. That is a real
- * accessibility defect, older than #141 and deliberately not fixed here,
- * because a focus style is a visible change and this commit is a
- * like-for-like merge.
+ * All eight carried `outline: "none"` with nothing in its place, so tabbing
+ * into one showed nothing at all (#145). The suppression is gone; the ring
+ * now comes from `ensureToolbarFieldStyles` via `data-dxw-field`.
  */
 const popoverInput: React.CSSProperties = {
   width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`,
-  borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none",
+  borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif",
+};
+
+/** The comment and link popovers' multi-line box: `popoverInput` that grows.
+ * Both spelled it out identically, and both hid their focus ring too. */
+const popoverTextarea: React.CSSProperties = {
+  ...popoverInput, minHeight: 54, resize: "vertical", padding: 6,
 };
 
 /** The little colour well beside a hex box. Two of these, at two sizes. */
@@ -659,7 +683,13 @@ export function ToolbarCheckbox({ label, checked, onChange, ariaLabel, disabled,
           placeItems: "center",
           font: "700 10px system-ui, sans-serif",
           lineHeight: 1,
-          boxShadow: focused ? `0 0 0 2px ${T.tabActiveBg}` : "none",
+          // A gap in the panel colour, then the accent — the box itself is
+          // filled with the accent once ticked, and a ring drawn straight
+          // onto it would disappear. Accent rather than the pale selection
+          // blue for the reason measured in `ensureToolbarFieldStyles`: at
+          // 1.15:1 against white that ring is invisible, which is the same
+          // defect as having none (#145).
+          boxShadow: focused ? `0 0 0 2px ${T.popoverBg}, 0 0 0 4px ${T.accent}` : "none",
         }}
       >
         {checked ? "✓" : ""}
@@ -886,6 +916,7 @@ function ColorMenu({
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
             <span aria-hidden="true" style={{ width: 24, height: 24, borderRadius: 4, border: `1px solid ${T.border}`, background: valid ?? current, flexShrink: 0 }} />
             <input
+              data-dxw-field=""
               aria-label="Custom hex color"
               className="dxw-color-value"
               value={custom}
@@ -1054,6 +1085,7 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
           }}
         >
           <input
+              data-dxw-field=""
             ref={inputRef}
             type="url"
             value={url}
@@ -1151,6 +1183,7 @@ function NoteMenu({ api, kind }: { api: DocxViewApi | null; kind: "footnote" | "
           }}
         >
           <textarea
+              data-dxw-field=""
             ref={inputRef}
             value={text}
             placeholder={kind === "footnote" ? "Footnote text…" : "Endnote text…"}
@@ -1161,11 +1194,7 @@ function NoteMenu({ api, kind }: { api: DocxViewApi | null; kind: "footnote" | "
                 submit();
               }
             }}
-            style={{
-              width: "100%", minHeight: 54, resize: "vertical", boxSizing: "border-box",
-              border: `1px solid ${T.border}`, borderRadius: 6, padding: 6,
-              font: "13px system-ui, sans-serif", outline: "none",
-            }}
+            style={popoverTextarea}
           />
           {hint && <div style={{ color: "#c5221f", fontSize: 12, marginTop: 4 }}>{hint}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
@@ -1246,6 +1275,7 @@ function NoteOptionsFields({
         <label style={noteOptionsLabelStyle}>
           <span>Start at</span>
           <input
+              data-dxw-field=""
             aria-label={`${fieldPrefix} start at`}
             type="number"
               data-dxw-number=""
@@ -1390,6 +1420,7 @@ function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions
           }}
         >
           <textarea
+              data-dxw-field=""
             ref={inputRef}
             value={text}
             placeholder="Comment on the selection…"
@@ -1400,11 +1431,7 @@ function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions
                 submit();
               }
             }}
-            style={{
-              width: "100%", minHeight: 54, resize: "vertical", boxSizing: "border-box",
-              border: `1px solid ${T.border}`, borderRadius: 6, padding: 6,
-              font: "13px system-ui, sans-serif", outline: "none",
-            }}
+            style={popoverTextarea}
           />
           {mentions.length > 0 && (
             <div aria-label="Mention a collaborator" style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center", marginTop: 6 }}>
@@ -1481,6 +1508,7 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
         <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 280, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 6, color: T.fg }}>Bookmark name</div>
           <input
+              data-dxw-field=""
             ref={inputRef}
             value={name}
             placeholder="Quarterly_Revenue"
@@ -1615,7 +1643,7 @@ function CaptionMenu({ api }: { api: DocxViewApi | null }) {
           </label>
           <label style={dialogFieldRow}>
             <span>Text</span>
-            <input aria-label="Caption text" value={text} onChange={(event) => setText(event.target.value)} placeholder="optional" style={dialogInput} />
+            <input data-dxw-field="" aria-label="Caption text" value={text} onChange={(event) => setText(event.target.value)} placeholder="optional" style={dialogInput} />
           </label>
           <label style={dialogFieldRow}>
             <span>Position</span>
@@ -1730,6 +1758,7 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
           </div>
           <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg, borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>Linear equation</div>
           <input
+              data-dxw-field=""
             ref={inputRef}
             aria-label="Linear equation"
             value={linear}
@@ -1985,30 +2014,30 @@ function CitationsMenu({ api }: { api: DocxViewApi | null }) {
               </label>
               <label style={fieldLabelStyle}>
                 <span>Authors — Last, First; Last, First</span>
-                <input aria-label="Authors" value={authors} onChange={(event) => setAuthors(event.target.value)} placeholder="Doe, Jane; Smith, Ada" style={fieldStyle} />
+                <input data-dxw-field="" aria-label="Authors" value={authors} onChange={(event) => setAuthors(event.target.value)} placeholder="Doe, Jane; Smith, Ada" style={fieldStyle} />
               </label>
               <label style={fieldLabelStyle}>
                 <span>Corporate author (when no person author)</span>
-                <input aria-label="Corporate author" value={corporate} onChange={(event) => setCorporate(event.target.value)} style={fieldStyle} />
+                <input data-dxw-field="" aria-label="Corporate author" value={corporate} onChange={(event) => setCorporate(event.target.value)} style={fieldStyle} />
               </label>
               <label style={fieldLabelStyle}>
                 <span>Title</span>
-                <input aria-label="Title" value={title} onChange={(event) => setTitle(event.target.value)} style={fieldStyle} />
+                <input data-dxw-field="" aria-label="Title" value={title} onChange={(event) => setTitle(event.target.value)} style={fieldStyle} />
               </label>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 6 }}>
                 <label style={fieldLabelStyle}>
                   <span>Year</span>
-                  <input aria-label="Year" value={year} onChange={(event) => setYear(event.target.value)} style={fieldStyle} />
+                  <input data-dxw-field="" aria-label="Year" value={year} onChange={(event) => setYear(event.target.value)} style={fieldStyle} />
                 </label>
                 <label style={fieldLabelStyle}>
                   <span>{containerLabel}</span>
-                  <input aria-label={containerLabel} value={container} onChange={(event) => setContainer(event.target.value)} style={fieldStyle} />
+                  <input data-dxw-field="" aria-label={containerLabel} value={container} onChange={(event) => setContainer(event.target.value)} style={fieldStyle} />
                 </label>
               </div>
               {!editing && (
                 <label style={fieldLabelStyle}>
                   <span>Tag (blank = automatic)</span>
-                  <input aria-label="Source tag" value={tag} onChange={(event) => setTag(event.target.value)} placeholder={defaultTag()} style={fieldStyle} />
+                  <input data-dxw-field="" aria-label="Source tag" value={tag} onChange={(event) => setTag(event.target.value)} placeholder={defaultTag()} style={fieldStyle} />
                 </label>
               )}
               {error && <div role="alert" style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</div>}
@@ -2129,11 +2158,11 @@ function QuickPartsMenu({ api }: { api: DocxViewApi | null }) {
             <div role="group" aria-label="Save selection as Quick Part" style={{ display: "grid", gap: 7 }}>
               <label style={fieldLabelStyle}>
                 <span>Name</span>
-                <input aria-label="Quick Part name" autoFocus value={name} onChange={(event) => setName(event.target.value)} style={fieldStyle} />
+                <input data-dxw-field="" aria-label="Quick Part name" autoFocus value={name} onChange={(event) => setName(event.target.value)} style={fieldStyle} />
               </label>
               <label style={fieldLabelStyle}>
                 <span>Category (blank = General)</span>
-                <input aria-label="Quick Part category" value={category} onChange={(event) => setCategory(event.target.value)} placeholder="General" style={fieldStyle} />
+                <input data-dxw-field="" aria-label="Quick Part category" value={category} onChange={(event) => setCategory(event.target.value)} placeholder="General" style={fieldStyle} />
               </label>
               {error && <div role="alert" style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</div>}
               <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
@@ -2188,6 +2217,7 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
             <label style={{ display: "block", color: T.muted, font: "11.5px system-ui, sans-serif", marginBottom: 4 }} htmlFor="dxw-advanced-symbol">Any Unicode symbol</label>
             <div style={{ display: "flex", gap: 6 }}>
               <input
+              data-dxw-field=""
                 id="dxw-advanced-symbol"
                 aria-label="Advanced symbol characters"
                 value={custom}
@@ -2289,11 +2319,11 @@ function DividerMenu({ api }: { api: DocxViewApi | null }) {
             </label>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
               Width (pt)
-              <input aria-label="Divider width in points" type="number" data-dxw-number="" min="0.25" step="0.25" value={widthPt} onChange={(event) => setWidthPt(Number(event.target.value))} style={{ ...dialogInput, padding: "5px 6px" }} />
+              <input data-dxw-field="" aria-label="Divider width in points" type="number" data-dxw-number="" min="0.25" step="0.25" value={widthPt} onChange={(event) => setWidthPt(Number(event.target.value))} style={{ ...dialogInput, padding: "5px 6px" }} />
             </label>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
               Gap (pt)
-              <input aria-label="Divider gap in points" type="number" data-dxw-number="" min="0" step="1" value={spacePt} onChange={(event) => setSpacePt(Number(event.target.value))} style={{ ...dialogInput, padding: "5px 6px" }} />
+              <input data-dxw-field="" aria-label="Divider gap in points" type="number" data-dxw-number="" min="0" step="1" value={spacePt} onChange={(event) => setSpacePt(Number(event.target.value))} style={{ ...dialogInput, padding: "5px 6px" }} />
             </label>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
@@ -2338,6 +2368,7 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
       {open && (
         <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 290, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <input
+              data-dxw-field=""
             aria-label="Shape text"
             value={text}
             placeholder="Shape text (optional)"
@@ -2360,6 +2391,7 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "10.5px system-ui, sans-serif" }}>
               Weight (px)
               <input
+              data-dxw-field=""
                 aria-label="Line width in pixels"
                 type="number"
               data-dxw-number=""
@@ -2447,6 +2479,7 @@ function TextBoxMenu({ api }: { api: DocxViewApi | null }) {
         <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 240, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <label htmlFor="dxw-text-box-text" style={{ display: "block", color: T.muted, font: "11.5px system-ui, sans-serif", marginBottom: 4 }}>Initial text</label>
           <input
+              data-dxw-field=""
             id="dxw-text-box-text"
             aria-label="Text box text"
             value={text}
@@ -2649,6 +2682,7 @@ function WatermarkMenu({ api }: { api: DocxViewApi | null }) {
             ))}
           </div>
           <input
+              data-dxw-field=""
             aria-label="Watermark text"
             value={text}
             onChange={(event) => setText(event.target.value)}
@@ -2726,6 +2760,7 @@ function WordArtMenu({ api }: { api: DocxViewApi | null }) {
       {open && (
         <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 270, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <input
+              data-dxw-field=""
             aria-label="WordArt text"
             value={text}
             onChange={(event) => setText(event.target.value)}
@@ -2955,7 +2990,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
           )}
           <label style={fieldLabelStyle}>
             <span>Chart title (optional)</span>
-            <input aria-label="Chart title" value={title} onChange={(event) => setTitle(event.target.value)} style={fieldStyle} />
+            <input data-dxw-field="" aria-label="Chart title" value={title} onChange={(event) => setTitle(event.target.value)} style={fieldStyle} />
           </label>
           <div role="group" aria-label="Chart data" style={{ display: "grid", gap: 7 }}>
             <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{sliced ? "Slices" : "Chart data"}</strong>
@@ -2976,6 +3011,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                           <label style={fieldLabelStyle}>
                             <span>Slice {index + 1}</span>
                             <input
+              data-dxw-field=""
                               aria-label={`Chart slice ${index + 1} label`}
                               value={category}
                               onChange={(event) => setCategories(categories.map((value, itemIndex) => itemIndex === index ? event.target.value : value))}
@@ -2985,6 +3021,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                         </th>
                         <td style={tableCellStyle}>
                           <input
+              data-dxw-field=""
                             aria-label={`Chart slice ${index + 1} value`}
                             type="number"
               data-dxw-number=""
@@ -3015,6 +3052,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                           <label style={fieldLabelStyle}>
                             <span>Series {seriesIndex + 1} name</span>
                             <input
+              data-dxw-field=""
                               aria-label={`Chart series ${seriesIndex + 1} name`}
                               value={entry.name}
                               onChange={(event) => setSeries(series.map((value, itemIndex) => itemIndex === seriesIndex ? { ...value, name: event.target.value } : value))}
@@ -3034,6 +3072,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                           <label style={fieldLabelStyle}>
                             <span>{type === "scatter" ? `X value ${categoryIndex + 1}` : `Category ${categoryIndex + 1}`}</span>
                             <input
+              data-dxw-field=""
                               aria-label={`Chart category ${categoryIndex + 1}`}
                               value={category}
                               onChange={(event) => setCategories(categories.map((value, itemIndex) => itemIndex === categoryIndex ? event.target.value : value))}
@@ -3044,6 +3083,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                         {series.map((entry, seriesIndex) => (
                           <td key={seriesIndex} style={{ ...tableCellStyle, minWidth: 82 }}>
                             <input
+              data-dxw-field=""
                               aria-label={`Chart series ${seriesIndex + 1} value ${categoryIndex + 1}`}
                               type="number"
               data-dxw-number=""
@@ -3141,7 +3181,7 @@ function SmartArtMenu({ api, label = "SmartArt" }: { api: DocxViewApi | null; la
               <div role="group" aria-label="SmartArt items" style={{ display: "grid", gap: 7 }}>
                 {items.map((item, index) => (
                   <div key={index} style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 5 }}>
-                    <input aria-label={`SmartArt item ${index + 1}`} value={item} placeholder="Item" onChange={(event) => setItems(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} style={fieldStyle} />
+                    <input data-dxw-field="" aria-label={`SmartArt item ${index + 1}`} value={item} placeholder="Item" onChange={(event) => setItems(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} style={fieldStyle} />
                     <button type="button" aria-label={`Move SmartArt item ${index + 1} up`} disabled={index === 0} onClick={() => setItems(items.map((value, itemIndex) => itemIndex === index - 1 ? items[index] : itemIndex === index ? items[index - 1] : value))} style={{ ...pillBtn, padding: "0 8px" }}>↑</button>
                     <button type="button" aria-label={`Move SmartArt item ${index + 1} down`} disabled={index === items.length - 1} onClick={() => setItems(items.map((value, itemIndex) => itemIndex === index ? items[index + 1] : itemIndex === index + 1 ? items[index] : value))} style={{ ...pillBtn, padding: "0 8px" }}>↓</button>
                     <button type="button" aria-label={`Remove SmartArt item ${index + 1}`} disabled={items.length === 1} onClick={() => setItems(items.filter((_, itemIndex) => itemIndex !== index))} style={{ ...pillBtn, padding: "0 8px" }}>×</button>
@@ -3182,7 +3222,7 @@ function MediaMenu({ api }: { api: DocxViewApi | null }) {
       <button title="Insert online video" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Media</button>
       {open && (
         <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 300, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <input aria-label="Online video URL" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" style={fieldStyle} />
+          <input data-dxw-field="" aria-label="Online video URL" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" style={fieldStyle} />
           <button
             disabled={!url.trim()}
             onClick={() => void api?.insertOnlineVideo(url).then((inserted) => inserted && setOpen(false))}
@@ -3320,6 +3360,7 @@ function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
   };
   const input = (label: string, value: string, set: (value: string) => void) => (
     <input
+              data-dxw-field=""
       aria-label={label}
       placeholder={label}
       value={value}
@@ -3665,6 +3706,7 @@ function TableFormulaDialog({ api, onChanged }: { api: DocxViewApi | null; onCha
           <label style={dialogFieldRow}>
             <span>Formula</span>
             <input
+              data-dxw-field=""
               aria-label="Formula"
               value={formula}
               onChange={(event) => setFormula(event.target.value)}
@@ -3674,6 +3716,7 @@ function TableFormulaDialog({ api, onChanged }: { api: DocxViewApi | null; onCha
           <label style={dialogFieldRow}>
             <span>Number format</span>
             <input
+              data-dxw-field=""
               aria-label="Number format"
               placeholder="#,##0.00"
               value={numFmt}
@@ -3791,6 +3834,7 @@ function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; on
     <label key={side} style={{ display: "grid", gap: 3, fontSize: 11, color: T.muted }}>
       <span>{label}</span>
       <input
+              data-dxw-field=""
         aria-label={`${label} cell margin (points)`}
         type="number"
               data-dxw-number=""
@@ -3842,6 +3886,7 @@ function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; on
                 }
               />
               <input
+              data-dxw-field=""
                 aria-label="Table width"
                 type="number"
               data-dxw-number=""
@@ -3857,6 +3902,7 @@ function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; on
           <label style={dialogFieldRow}>
             <span>{`Column ${initial.columnIdx + 1} of ${initial.columnCount}`}</span>
             <input
+              data-dxw-field=""
               aria-label="Column width (points)"
               type="number"
               data-dxw-number=""
@@ -3877,6 +3923,7 @@ function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; on
           <label style={dialogFieldRow}>
             <span>Header rows</span>
             <input
+              data-dxw-field=""
               aria-label="Repeating header rows"
               type="number"
               data-dxw-number=""
@@ -4132,6 +4179,7 @@ function TabStopsDialog({
       {rows.map((row, index) => (
         <div key={index} style={{ display: "grid", gridTemplateColumns: "64px 1fr 1fr 22px", gap: 6, alignItems: "center" }}>
           <input
+              data-dxw-field=""
             aria-label={`Tab stop ${index + 1} position (points)`}
             type="number"
               data-dxw-number=""
@@ -4824,6 +4872,7 @@ function StylesPane({ api, onChanged }: { api: DocxViewApi | null; onChanged: ()
               <label style={dialogFieldRow}>
                 <span>Name</span>
                 <input
+              data-dxw-field=""
                   aria-label="Style name"
                   autoFocus
                   value={form.name}
@@ -4871,6 +4920,7 @@ function StylesPane({ api, onChanged }: { api: DocxViewApi | null; onChanged: ()
               <label style={dialogFieldRow}>
                 <span>Size (pt)</span>
                 <input
+              data-dxw-field=""
                   aria-label="Style font size (points)"
                   type="number"
               data-dxw-number=""
@@ -5297,6 +5347,7 @@ function MarginMenu({
     <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
       <span>{label}</span>
       <input
+              data-dxw-field=""
         aria-label={`${label} margin (inches)`}
         type="number"
               data-dxw-number=""
@@ -5418,6 +5469,7 @@ function PageSizeMenu({
     <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
       <span>{label}</span>
       <input
+              data-dxw-field=""
         aria-label={`Page ${side} (inches)`}
         type="number"
               data-dxw-number=""
@@ -5598,7 +5650,7 @@ function PageBorderMenu({
             <span>Color</span>
             <span style={{ display: "flex", gap: 6 }}>
               <input aria-label="Page border color picker" type="color" value={validColor ?? "#4472c4"} onChange={(event) => setColor(event.target.value)} style={{ ...colorSwatch, width: 34, height: 28, padding: 1 }} />
-              <input aria-label="Page border color" autoFocus value={color} onChange={(event) => setColor(event.target.value)} onKeyDown={(event) => event.key === "Enter" && applyCustom()} spellCheck={false} style={{ ...dialogInput, width: 92 }} />
+              <input data-dxw-field="" aria-label="Page border color" autoFocus value={color} onChange={(event) => setColor(event.target.value)} onKeyDown={(event) => event.key === "Enter" && applyCustom()} spellCheck={false} style={{ ...dialogInput, width: 92 }} />
             </span>
           </label>
           <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
@@ -5861,6 +5913,7 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
       {open && (
         <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 240, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 6 }}>
           <input
+              data-dxw-field=""
             ref={inputRef}
             aria-label="Find text"
             placeholder="Find…"
@@ -5875,6 +5928,7 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
             style={field}
           />
           <input
+              data-dxw-field=""
             aria-label="Replace with"
             placeholder="Replace with…"
             value={replacement}
@@ -5901,6 +5955,7 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center", borderTop: `1px solid ${T.border}`, paddingTop: 6 }}>
             <input
+              data-dxw-field=""
               aria-label="Go to page"
               placeholder="Page…"
               inputMode="numeric"
