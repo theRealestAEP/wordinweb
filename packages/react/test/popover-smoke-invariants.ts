@@ -1,5 +1,5 @@
 /**
- * #146: the five checks every popover and dialog on the bar must pass.
+ * #146: the six checks every popover and dialog on the bar must pass.
  *
  * They live here, in one function, so that the plain bar, the Table Format
  * tab and the Format tab all run the SAME checks rather than three drifting
@@ -20,6 +20,7 @@ import {
   openSurface,
   pressKey,
   tick,
+  unnamedControls,
   type ConsoleWatch,
 } from "./popover-smoke-harness.js";
 
@@ -31,7 +32,7 @@ export interface SmokeContext {
 }
 
 /**
- * Declare the five tests for one surface.
+ * Declare the six tests for one surface.
  *
  * `context` is a getter rather than a value because the toolbar is mounted in
  * a `beforeEach`, which has not run when this function is called.
@@ -52,6 +53,16 @@ export function surfaceInvariants(tip: string, what: string, context: () => Smok
       `"${tip}" opened a ${what} with no keyboard-reachable control. ` +
         `Panel HTML: ${panel.outerHTML.slice(0, 400)}`,
     ).toBeGreaterThan(0);
+  });
+
+  it("gives every control it renders a name", async () => {
+    const { bar } = context();
+    const { panel } = await openSurface(bar, tip);
+    const unnamed = unnamedControls(panel);
+    expect(
+      unnamed.map((element) => element.outerHTML.slice(0, 140)),
+      `"${tip}" renders ${unnamed.length} control(s) that announce as nothing`,
+    ).toEqual([]);
   });
 
   it("closes on Escape", async () => {

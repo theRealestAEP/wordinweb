@@ -293,6 +293,65 @@ export function focusableControls(panel: HTMLElement): HTMLElement[] {
   );
 }
 
+/**
+ * The name a screen reader would announce for `element`, or "" when it has
+ * none.
+ *
+ * This is the accessible-name computation cut down to the sources this bar
+ * actually uses, in the order the spec resolves them. `placeholder` is last
+ * and is a genuine fallback for a text input, but only that — a button whose
+ * only content is an icon resolves to "" here, which is exactly what a screen
+ * reader announces for it.
+ */
+export function accessibleName(element: HTMLElement): string {
+  const aria = element.getAttribute("aria-label");
+  if (aria?.trim()) return aria.trim();
+
+  const labelledBy = element.getAttribute("aria-labelledby");
+  if (labelledBy) {
+    const text = labelledBy
+      .split(/\s+/)
+      .map((id) => element.ownerDocument.getElementById(id)?.textContent ?? "")
+      .join(" ")
+      .trim();
+    if (text) return text;
+  }
+
+  const id = element.getAttribute("id");
+  // Walked rather than selected: an id may hold characters a CSS selector
+  // would have to escape, and jsdom has no CSS.escape to do it with.
+  const forLabel = id
+    ? [...element.ownerDocument.querySelectorAll("label")].find((label) => label.htmlFor === id)
+    : null;
+  const wrapping = element.closest("label");
+  const labelText = (forLabel?.textContent ?? wrapping?.textContent ?? "").trim();
+  if (labelText) return labelText;
+
+  // Content only names a control that can take its name from content —
+  // a text input is named by its label, never by the text sitting next to it.
+  const namedByContent = !(element instanceof HTMLInputElement)
+    && !(element instanceof HTMLTextAreaElement)
+    && !(element instanceof HTMLSelectElement);
+  const content = (element.textContent ?? "").trim();
+  if (namedByContent && content) return content;
+
+  const title = element.getAttribute("title");
+  if (title?.trim()) return title.trim();
+
+  const alt = element.querySelector("img[alt]")?.getAttribute("alt");
+  if (namedByContent && alt?.trim()) return alt.trim();
+
+  const placeholder = element.getAttribute("placeholder");
+  if (placeholder?.trim()) return placeholder.trim();
+
+  return "";
+}
+
+/** Reachable controls inside `panel` that announce as nothing. */
+export function unnamedControls(panel: HTMLElement): HTMLElement[] {
+  return focusableControls(panel).filter((element) => !accessibleName(element));
+}
+
 /** An element outside every panel and outside the bar, to click on. */
 export function outsideTarget(): HTMLElement {
   const existing = document.getElementById("dxw-smoke-outside");
