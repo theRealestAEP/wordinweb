@@ -113,6 +113,28 @@ const btnStyle = (active: boolean): React.CSSProperties => ({
   transition: "background-color 120ms ease",
 });
 
+/**
+ * The one box shape for a labelled control inside a popover or dialog.
+ *
+ * Declared up here because popovers all over the file use it. It used to have
+ * near-identical siblings — `noteOptionsFieldStyle`, four component-local
+ * copies of `fieldStyle`, and five inline literals — which is how the
+ * popovers came to disagree with each other about padding and corner radius
+ * (#141). `ToolbarMenuSelect variant="field"` paints this same box, so a
+ * select and a text input in one dialog row match.
+ */
+const dialogInput: React.CSSProperties = {
+  width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`,
+  borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg,
+};
+
+/** The roomier variant, for the tall stacked-label popovers (Citations, Quick
+ * Parts, Chart, Media). Those four each declared these three objects in their
+ * own body, byte for byte the same, before #141 collapsed them. */
+const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
+const rowBtn: React.CSSProperties = { border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif", padding: "3px 8px" };
+
 const PAGE_SIZES = [
   { value: "letter", label: "Letter", description: '8.5" × 11"', width: 8.5, height: 11 },
   { value: "legal", label: "Legal", description: '8.5" × 14"', width: 8.5, height: 14 },
@@ -202,6 +224,19 @@ export interface ToolbarMenuSelectProps {
   menuWidth?: number;
   className?: string;
   style?: React.CSSProperties;
+  /** Greys the control and refuses to open it. Distinct from an option's own
+   * `disabled`, which only rules out that one choice. */
+  disabled?: boolean;
+  /**
+   * `"bar"` (default) sits in the ribbon: no border, no background, 26px.
+   * `"field"` sits in a popover or dialog beside a label, where the control
+   * has to read as an input — visible box, full width, popover background.
+   *
+   * A preset rather than a style object at each call site: the 23 selects
+   * this replaced carried four different near-identical style sources between
+   * them, which is how they drifted apart in the first place.
+   */
+  variant?: "bar" | "field";
   /** Fold priority for the bar's layout engine; see RibbonItem.fold. */
   fold?: number;
 }
@@ -236,9 +271,16 @@ export function ToolbarMenuSelect({
   menuWidth,
   className,
   style,
+  disabled,
+  variant = "bar",
   fold,
 }: ToolbarMenuSelectProps) {
-  const [open, setOpen] = useState(false);
+  // Derived rather than guarded at each handler: a control can be disabled
+  // while its menu is open (Find & Replace turns three fields off the moment
+  // Wildcards is ticked), and the menu has to shut on its own when that
+  // happens.
+  const [openState, setOpen] = useState(false);
+  const open = openState && !disabled;
   const [position, setPosition] = useState({ left: 8, top: 8, width: menuWidth ?? 180, maxHeight: 320 });
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -338,13 +380,14 @@ export function ToolbarMenuSelect({
       className={`dxw-menu-select${className ? ` ${className}` : ""}`}
       data-dxw-menu-select=""
       data-dxw-fold={fold}
-      style={{ position: "relative", display: "inline-flex", width }}
+      style={{ position: "relative", display: "inline-flex", width: width ?? (variant === "field" ? "100%" : undefined) }}
     >
       <select
         tabIndex={-1}
         title={title}
         aria-label={ariaLabel}
         aria-hidden="true"
+        disabled={disabled}
         value={value}
         onChange={(event) => pick(event.target.value)}
         data-dxw-native-bridge=""
@@ -370,6 +413,7 @@ export function ToolbarMenuSelect({
         data-tip={title}
         className="dxw-menu-select-trigger"
         data-dxw-menu-select-trigger=""
+        disabled={disabled}
         onMouseDown={(event) => event.preventDefault()}
         onClick={() => setOpen(!open)}
         onKeyDown={(event) => {
@@ -382,18 +426,26 @@ export function ToolbarMenuSelect({
         style={{
           width: "100%",
           minWidth: 0,
-          height: "var(--dxw-select-height, 26px)",
-          border: "1px solid var(--dxw-select-border, transparent)",
-          borderRadius: "var(--dxw-select-radius, 4px)",
-          background: "var(--dxw-select-bg, transparent)",
-          color: "var(--dxw-select-fg, var(--dxw-toolbar-fg, #3c4043))",
-          padding: "var(--dxw-select-padding, 0 6px)",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "space-between",
           gap: 6,
-          cursor: "pointer",
-          font: "var(--dxw-select-font, 13px system-ui, sans-serif)",
+          cursor: disabled ? "default" : "pointer",
+          opacity: disabled ? 0.5 : 1,
+          // A field reads as an input beside its label: same box as
+          // `dialogInput`, so a select and a text box in one dialog row line
+          // up. A bar control reads as part of the ribbon: no box at all.
+          ...(variant === "field"
+            ? { boxSizing: "border-box", minHeight: 26, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, padding: "4px 6px", font: "inherit", textAlign: "left" as const }
+            : {
+                height: "var(--dxw-select-height, 26px)",
+                border: "1px solid var(--dxw-select-border, transparent)",
+                borderRadius: "var(--dxw-select-radius, 4px)",
+                background: "var(--dxw-select-bg, transparent)",
+                color: "var(--dxw-select-fg, var(--dxw-toolbar-fg, #3c4043))",
+                padding: "var(--dxw-select-padding, 0 6px)",
+                font: "var(--dxw-select-font, 13px system-ui, sans-serif)",
+              }),
           ...style,
         }}
       >
@@ -995,8 +1047,23 @@ type EndnoteOpts = ReturnType<NonNullable<DocxViewApi>["getEndnoteOptions"]>;
 type FootnotePatch = Parameters<NonNullable<DocxViewApi>["setFootnoteOptions"]>[0];
 type EndnotePatch = Parameters<NonNullable<DocxViewApi>["setEndnoteOptions"]>[0];
 
-const noteOptionsFieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 7px", font: "12.5px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+const noteOptionsFieldStyle: React.CSSProperties = { ...dialogInput, font: "12.5px system-ui, sans-serif" };
 const noteOptionsLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
+
+const NOTE_FORMAT_OPTIONS = [
+  { value: "decimal", label: "1, 2, 3" },
+  { value: "lowerRoman", label: "i, ii, iii" },
+  { value: "upperRoman", label: "I, II, III" },
+  { value: "lowerLetter", label: "a, b, c" },
+  { value: "upperLetter", label: "A, B, C" },
+  { value: "chicago", label: "*, †, ‡, §" },
+];
+
+const NOTE_RESTART_OPTIONS = [
+  { value: "continuous", label: "Continuous" },
+  { value: "eachSect", label: "Each section" },
+  { value: "eachPage", label: "Each page" },
+];
 
 /** One note type's fields (number format, restart rule, start-at, position):
  * shared markup for the footnote and endnote halves of NoteOptionsMenu — the
@@ -1015,27 +1082,30 @@ function NoteOptionsFields({
   posOptions: readonly (readonly [string, string])[];
 }) {
   return (
-    <div style={{ display: "grid", gap: 6 }}>
-      <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{title}</strong>
+    <div style={{ display: "grid", gap: 6, padding: 8, border: `1px solid ${T.border}`, borderRadius: 6, background: T.bg }}>
+      <strong style={{ color: T.fg, font: "600 12px system-ui, sans-serif", letterSpacing: .2 }}>{title}</strong>
       <label style={noteOptionsLabelStyle}>
         <span>Number format</span>
-        <select aria-label={`${fieldPrefix} number format`} value={values.fmt} onChange={(event) => onPatch({ fmt: event.target.value })} style={noteOptionsFieldStyle}>
-          <option value="decimal">1, 2, 3</option>
-          <option value="lowerRoman">i, ii, iii</option>
-          <option value="upperRoman">I, II, III</option>
-          <option value="lowerLetter">a, b, c</option>
-          <option value="upperLetter">A, B, C</option>
-          <option value="chicago">*, †, ‡, §</option>
-        </select>
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel={`${fieldPrefix} number format`}
+          value={values.fmt}
+          options={NOTE_FORMAT_OPTIONS}
+          onChange={(fmt) => onPatch({ fmt })}
+          style={noteOptionsFieldStyle}
+        />
       </label>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
         <label style={noteOptionsLabelStyle}>
           <span>Restart</span>
-          <select aria-label={`${fieldPrefix} restart`} value={values.restart} onChange={(event) => onPatch({ restart: event.target.value })} style={noteOptionsFieldStyle}>
-            <option value="continuous">Continuous</option>
-            <option value="eachSect">Each section</option>
-            <option value="eachPage">Each page</option>
-          </select>
+          <ToolbarMenuSelect
+            variant="field"
+            ariaLabel={`${fieldPrefix} restart`}
+            value={values.restart}
+            options={NOTE_RESTART_OPTIONS}
+            onChange={(restart) => onPatch({ restart })}
+            style={noteOptionsFieldStyle}
+          />
         </label>
         <label style={noteOptionsLabelStyle}>
           <span>Start at</span>
@@ -1050,17 +1120,22 @@ function NoteOptionsFields({
               const n = raw === "" ? null : parseInt(raw, 10);
               if (n === null || (Number.isInteger(n) && n >= 0)) onPatch({ start: n });
             }}
-            style={noteOptionsFieldStyle}
+            // The spinner arrows are the one part of a number box the browser
+            // draws for itself, and they do not follow the theme.
+            style={{ ...noteOptionsFieldStyle, appearance: "textfield", MozAppearance: "textfield" }}
           />
         </label>
       </div>
       <label style={noteOptionsLabelStyle}>
         <span>Position</span>
-        <select aria-label={`${fieldPrefix} position`} value={values.pos} onChange={(event) => onPatch({ pos: event.target.value })} style={noteOptionsFieldStyle}>
-          {posOptions.map(([value, label]) => (
-            <option key={value} value={value}>{label}</option>
-          ))}
-        </select>
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel={`${fieldPrefix} position`}
+          value={values.pos}
+          options={posOptions.map(([value, label]) => ({ value, label }))}
+          onChange={(pos) => onPatch({ pos })}
+          style={noteOptionsFieldStyle}
+        />
       </label>
     </div>
   );
@@ -1098,7 +1173,11 @@ function NoteOptionsMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ fontSize: 12.5 }}>Note options</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 250, padding: 10, display: "grid", gap: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        // 278 wide, not 250: at 250 the side-by-side Restart and Start-at
+        // boxes were narrower than the words above them. The gap between the
+        // two halves is 14 and each is boxed, because a hairline alone left
+        // eight fields reading as one unbroken column (#141).
+        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 278, padding: 10, display: "grid", gap: 14, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <NoteOptionsFields
             title="Footnotes"
             fieldPrefix="Footnote"
@@ -1108,7 +1187,6 @@ function NoteOptionsMenu({ api }: { api: DocxViewApi | null }) {
               if (api?.setFootnoteOptions(patch as FootnotePatch)) setFn({ ...fn, ...patch } as FootnoteOpts);
             }}
           />
-          <div style={{ borderTop: `1px solid ${T.border}` }} />
           <NoteOptionsFields
             title="Endnotes"
             fieldPrefix="Endnote"
@@ -1388,11 +1466,17 @@ function CaptionMenu({ api }: { api: DocxViewApi | null }) {
         <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 250, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 7 }}>
           <label style={dialogFieldRow}>
             <span>Label</span>
-            <select aria-label="Caption label" value={label} onChange={(event) => setLabel(event.target.value)} style={dialogInput}>
-              <option value="Figure">Figure</option>
-              <option value="Table">Table</option>
-              <option value="Equation">Equation</option>
-            </select>
+            <ToolbarMenuSelect
+              variant="field"
+              ariaLabel="Caption label"
+              value={label}
+              options={[
+                { value: "Figure", label: "Figure" },
+                { value: "Table", label: "Table" },
+                { value: "Equation", label: "Equation" },
+              ]}
+              onChange={setLabel}
+            />
           </label>
           <label style={dialogFieldRow}>
             <span>Text</span>
@@ -1400,10 +1484,16 @@ function CaptionMenu({ api }: { api: DocxViewApi | null }) {
           </label>
           <label style={dialogFieldRow}>
             <span>Position</span>
-            <select aria-label="Caption position" value={position} onChange={(event) => setPosition(event.target.value as "below" | "above")} style={dialogInput}>
-              <option value="below">Below</option>
-              <option value="above">Above</option>
-            </select>
+            <ToolbarMenuSelect
+              variant="field"
+              ariaLabel="Caption position"
+              value={position}
+              options={[
+                { value: "below", label: "Below" },
+                { value: "above", label: "Above" },
+              ]}
+              onChange={(value) => setPosition(value as "below" | "above")}
+            />
           </label>
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
             <button
@@ -1694,9 +1784,6 @@ function CitationsMenu({ api }: { api: DocxViewApi | null }) {
   const viewportWidth = typeof window === "undefined" ? 396 : window.innerWidth;
   const popoverWidth = Math.min(380, viewportWidth - 16);
   const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
-  const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
-  const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
-  const rowBtn: React.CSSProperties = { border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif", padding: "3px 8px" };
 
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
@@ -1708,19 +1795,20 @@ function CitationsMenu({ api }: { api: DocxViewApi | null }) {
           <strong style={{ color: T.fg, font: "600 13px system-ui, sans-serif" }}>Citations</strong>
           <label style={{ ...fieldLabelStyle, gridTemplateColumns: "auto 1fr", alignItems: "center", display: "grid", gap: 6 }}>
             <span>Style</span>
-            <select
-              aria-label="Citation style"
+            <ToolbarMenuSelect
+              variant="field"
+              ariaLabel="Citation style"
               value={style === "MLA" ? "MLA" : "APA"}
-              onChange={(event) => {
-                const next = event.target.value as "APA" | "MLA";
-                api?.setCitationStyle(next);
+              options={[
+                { value: "APA", label: "APA" },
+                { value: "MLA", label: "MLA" },
+              ]}
+              onChange={(next) => {
+                api?.setCitationStyle(next as "APA" | "MLA");
                 refresh();
               }}
               style={fieldStyle}
-            >
-              <option value="APA">APA</option>
-              <option value="MLA">MLA</option>
-            </select>
+            />
           </label>
           {editing === null ? (
             <>
@@ -1751,11 +1839,14 @@ function CitationsMenu({ api }: { api: DocxViewApi | null }) {
               <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{editing ? `Edit source (${editing})` : "New source"}</strong>
               <label style={fieldLabelStyle}>
                 <span>Type</span>
-                <select aria-label="Source type" value={type} onChange={(event) => setType(event.target.value as SourceType)} style={fieldStyle}>
-                  {SOURCE_TYPES.map(([value, label]) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
+                <ToolbarMenuSelect
+                  variant="field"
+                  ariaLabel="Source type"
+                  value={type}
+                  options={SOURCE_TYPES.map(([value, label]) => ({ value, label }))}
+                  onChange={(value) => setType(value as SourceType)}
+                  style={fieldStyle}
+                />
               </label>
               <label style={fieldLabelStyle}>
                 <span>Authors — Last, First; Last, First</span>
@@ -1864,9 +1955,6 @@ function QuickPartsMenu({ api }: { api: DocxViewApi | null }) {
   const viewportWidth = typeof window === "undefined" ? 340 : window.innerWidth;
   const popoverWidth = Math.min(320, viewportWidth - 16);
   const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
-  const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
-  const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
-  const rowBtn: React.CSSProperties = { border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif", padding: "3px 8px" };
 
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
@@ -2045,13 +2133,19 @@ function DividerMenu({ api }: { api: DocxViewApi | null }) {
           <div aria-hidden="true" style={{ height: 12, borderBottom: `${Math.max(widthPt, 1)}px ${previewStyle} ${color}` }} />
           <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
             Style
-            <select aria-label="Divider style" value={style} onChange={(event) => setStyle(event.target.value as Divider["style"])} style={{ border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 7px", background: T.popoverBg, color: T.fg }}>
-              <option value="single">Single</option>
-              <option value="double">Double</option>
-              <option value="dashed">Dashed</option>
-              <option value="dotted">Dotted</option>
-              <option value="thinThickSmallGap">Thin + thick</option>
-            </select>
+            <ToolbarMenuSelect
+              variant="field"
+              ariaLabel="Divider style"
+              value={style}
+              options={[
+                { value: "single", label: "Single" },
+                { value: "double", label: "Double" },
+                { value: "dashed", label: "Dashed" },
+                { value: "dotted", label: "Dotted" },
+                { value: "thinThickSmallGap", label: "Thin + thick" },
+              ]}
+              onChange={(value) => setStyle(value as Divider["style"])}
+            />
           </label>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 7 }}>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
@@ -2142,16 +2236,18 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
             </label>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "10.5px system-ui, sans-serif" }}>
               Style
-              <select
-                aria-label="Line style"
+              <ToolbarMenuSelect
+                variant="field"
+                ariaLabel="Line style"
                 value={lineDash}
-                onChange={(event) => setLineDash(event.target.value as typeof lineDash)}
-                style={{ width: "100%", height: 28, border: `1px solid ${T.border}`, borderRadius: 5, padding: "3px 4px", color: T.fg, background: T.popoverBg }}
-              >
-                <option value="solid">Solid</option>
-                <option value="dashed">Dashed</option>
-                <option value="dotted">Dotted</option>
-              </select>
+                options={[
+                  { value: "solid", label: "Solid" },
+                  { value: "dashed", label: "Dashed" },
+                  { value: "dotted", label: "Dotted" },
+                ]}
+                onChange={(value) => setLineDash(value as typeof lineDash)}
+                style={{ height: 28, padding: "3px 4px" }}
+              />
             </label>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
@@ -2638,8 +2734,6 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
   const viewportWidth = typeof window === "undefined" ? 456 : window.innerWidth;
   const popoverWidth = Math.min(440, viewportWidth - 16);
   const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
-  const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
-  const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
   const tableHeaderStyle: React.CSSProperties = { padding: "0 3px 4px", textAlign: "left", verticalAlign: "bottom", color: T.muted, font: "600 11px system-ui, sans-serif" };
   const tableCellStyle: React.CSSProperties = { padding: 3, verticalAlign: "bottom" };
   const toggle = () => {
@@ -2710,16 +2804,18 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
           {stackable && (
             <label style={fieldLabelStyle}>
               <span>Grouping</span>
-              <select
-                aria-label="Series grouping"
+              <ToolbarMenuSelect
+                variant="field"
+                ariaLabel="Series grouping"
                 value={grouping}
-                onChange={(event) => setGrouping(event.target.value as typeof grouping)}
+                options={[
+                  { value: "clustered", label: type === "area" ? "Standard" : "Clustered" },
+                  { value: "stacked", label: "Stacked" },
+                  { value: "percentStacked", label: "100% stacked" },
+                ]}
+                onChange={(value) => setGrouping(value as typeof grouping)}
                 style={fieldStyle}
-              >
-                <option value="clustered">{type === "area" ? "Standard" : "Clustered"}</option>
-                <option value="stacked">Stacked</option>
-                <option value="percentStacked">100% stacked</option>
-              </select>
+              />
             </label>
           )}
           <label style={fieldLabelStyle}>
@@ -2860,7 +2956,6 @@ function SmartArtMenu({ api, label = "SmartArt" }: { api: DocxViewApi | null; la
     const data: SmartArt = { layout, items: values };
     if (api?.updateSelectedSmartArt(data) || api?.insertSmartArt(data)) setOpen(false);
   };
-  const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
   const toggle = () => {
     if (open) {
       setOpen(false);
@@ -3378,11 +3473,6 @@ const dialogFieldRow: React.CSSProperties = {
   display: "grid", gridTemplateColumns: "78px 1fr", gap: 8, alignItems: "center", fontSize: 12,
 };
 
-const dialogInput: React.CSSProperties = {
-  width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`,
-  borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg,
-};
-
 /** A number the user typed, or null when the box is empty or not a number. */
 function typedNumber(value: string): number | null {
   const trimmed = value.trim();
@@ -3599,18 +3689,20 @@ function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; on
           <label style={dialogFieldRow}>
             <span>Table width</span>
             <span style={{ display: "flex", gap: 6 }}>
-              <select
-                aria-label="Table width unit"
+              <ToolbarMenuSelect
+                variant="field"
+                ariaLabel="Table width unit"
                 value={form.widthUnit}
-                onChange={(event) =>
-                  setForm({ ...form, widthUnit: event.target.value as Form["widthUnit"] })
+                width={78}
+                options={[
+                  { value: "auto", label: "Auto" },
+                  { value: "pt", label: "Points" },
+                  { value: "pct", label: "Percent" },
+                ]}
+                onChange={(widthUnit) =>
+                  setForm({ ...form, widthUnit: widthUnit as Form["widthUnit"] })
                 }
-                style={{ ...dialogInput, width: 78 }}
-              >
-                <option value="auto">Auto</option>
-                <option value="pt">Points</option>
-                <option value="pct">Percent</option>
-              </select>
+              />
               <input
                 aria-label="Table width"
                 type="number"
@@ -3680,6 +3772,11 @@ const BORDER_STYLE_NAMES: Record<TableBorderStyle, string> = {
   wave: "Wave",
   none: "None (suppress)",
 };
+
+/** The style and weight lists as menu options. Shared by the table and
+ * paragraph border dialogs, which offer exactly the same two vocabularies. */
+const BORDER_STYLE_OPTIONS = TABLE_BORDER_STYLES.map((value) => ({ value, label: BORDER_STYLE_NAMES[value] }));
+const BORDER_WIDTH_OPTIONS = BORDER_WIDTHS_PT.map((pt) => ({ value: String(pt), label: `${pt} pt` }));
 
 const EDGE_NAMES: Record<TableBorderEdge, string> = {
   top: "Top",
@@ -3759,42 +3856,37 @@ function CustomBorderDialog({
     >
       <label style={dialogFieldRow}>
         <span>Apply to</span>
-        <select
-          aria-label="Border scope"
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel="Border scope"
           value={scope}
-          onChange={(event) => setScope(event.target.value as "table" | "cell")}
-          style={dialogInput}
-        >
-          <option value="table">Whole table</option>
-          <option value="cell">This cell</option>
-        </select>
+          options={[
+            { value: "table", label: "Whole table" },
+            { value: "cell", label: "This cell" },
+          ]}
+          onChange={(value) => setScope(value as "table" | "cell")}
+        />
       </label>
       <label style={dialogFieldRow}>
         <span>Style</span>
-        <select
-          aria-label="Border style"
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel="Border style"
           value={style}
-          onChange={(event) => setStyle(event.target.value as TableBorderStyle)}
-          style={dialogInput}
-        >
-          {TABLE_BORDER_STYLES.map((value) => (
-            <option key={value} value={value}>{BORDER_STYLE_NAMES[value]}</option>
-          ))}
-        </select>
+          options={BORDER_STYLE_OPTIONS}
+          onChange={(value) => setStyle(value as TableBorderStyle)}
+        />
       </label>
       <label style={dialogFieldRow}>
         <span>Weight</span>
-        <select
-          aria-label="Border width (points)"
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel="Border width (points)"
           value={widthPt}
           disabled={style === "none"}
-          onChange={(event) => setWidthPt(event.target.value)}
-          style={dialogInput}
-        >
-          {BORDER_WIDTHS_PT.map((pt) => (
-            <option key={pt} value={String(pt)}>{`${pt} pt`}</option>
-          ))}
-        </select>
+          options={BORDER_WIDTH_OPTIONS}
+          onChange={setWidthPt}
+        />
       </label>
       <span style={dialogFieldRow}>
         <span>Color</span>
@@ -3853,6 +3945,11 @@ const TAB_LEADER_NAMES: Record<TabStopSpec["leader"], string> = {
   middleDot: "Middle dots ···",
 };
 
+const TAB_ALIGN_OPTIONS = (Object.keys(TAB_ALIGN_NAMES) as TabStopSpec["align"][])
+  .map((value) => ({ value, label: TAB_ALIGN_NAMES[value] }));
+const TAB_LEADER_OPTIONS = (Object.keys(TAB_LEADER_NAMES) as TabStopSpec["leader"][])
+  .map((value) => ({ value, label: TAB_LEADER_NAMES[value] }));
+
 /**
  * Word's Tabs dialog, popover-sized: the paragraph's direct tab stops as
  * editable rows (position in points, alignment, leader), plus add and
@@ -3906,26 +4003,20 @@ function TabStopsDialog({
             onChange={(event) => patch(index, { pos: event.target.value })}
             style={dialogInput}
           />
-          <select
-            aria-label={`Tab stop ${index + 1} alignment`}
+          <ToolbarMenuSelect
+            variant="field"
+            ariaLabel={`Tab stop ${index + 1} alignment`}
             value={row.align}
-            onChange={(event) => patch(index, { align: event.target.value as TabStopSpec["align"] })}
-            style={dialogInput}
-          >
-            {(Object.keys(TAB_ALIGN_NAMES) as TabStopSpec["align"][]).map((align) => (
-              <option key={align} value={align}>{TAB_ALIGN_NAMES[align]}</option>
-            ))}
-          </select>
-          <select
-            aria-label={`Tab stop ${index + 1} leader`}
+            options={TAB_ALIGN_OPTIONS}
+            onChange={(align) => patch(index, { align: align as TabStopSpec["align"] })}
+          />
+          <ToolbarMenuSelect
+            variant="field"
+            ariaLabel={`Tab stop ${index + 1} leader`}
             value={row.leader}
-            onChange={(event) => patch(index, { leader: event.target.value as TabStopSpec["leader"] })}
-            style={dialogInput}
-          >
-            {(Object.keys(TAB_LEADER_NAMES) as TabStopSpec["leader"][]).map((leader) => (
-              <option key={leader} value={leader}>{TAB_LEADER_NAMES[leader]}</option>
-            ))}
-          </select>
+            options={TAB_LEADER_OPTIONS}
+            onChange={(leader) => patch(index, { leader: leader as TabStopSpec["leader"] })}
+          />
           <button
             type="button"
             aria-label={`Remove tab stop ${index + 1}`}
@@ -4019,30 +4110,24 @@ function ParagraphBorderDialog({
     >
       <label style={dialogFieldRow}>
         <span>Style</span>
-        <select
-          aria-label="Paragraph border style"
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel="Paragraph border style"
           value={style}
-          onChange={(event) => setStyle(event.target.value as TableBorderStyle)}
-          style={dialogInput}
-        >
-          {TABLE_BORDER_STYLES.map((value) => (
-            <option key={value} value={value}>{BORDER_STYLE_NAMES[value]}</option>
-          ))}
-        </select>
+          options={BORDER_STYLE_OPTIONS}
+          onChange={(value) => setStyle(value as TableBorderStyle)}
+        />
       </label>
       <label style={dialogFieldRow}>
         <span>Weight</span>
-        <select
-          aria-label="Paragraph border width (points)"
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel="Paragraph border width (points)"
           value={widthPt}
           disabled={style === "none"}
-          onChange={(event) => setWidthPt(event.target.value)}
-          style={dialogInput}
-        >
-          {BORDER_WIDTHS_PT.map((pt) => (
-            <option key={pt} value={String(pt)}>{`${pt} pt`}</option>
-          ))}
-        </select>
+          options={BORDER_WIDTH_OPTIONS}
+          onChange={setWidthPt}
+        />
       </label>
       <span style={dialogFieldRow}>
         <span>Color</span>
@@ -4616,34 +4701,34 @@ function StylesPane({ api, onChanged }: { api: DocxViewApi | null; onChanged: ()
               {!editing.entry && (
                 <label style={dialogFieldRow}>
                   <span>Type</span>
-                  <select
-                    aria-label="Style type"
+                  <ToolbarMenuSelect
+                    variant="field"
+                    ariaLabel="Style type"
                     value={form.type}
-                    onChange={(event) =>
-                      setEditing({ ...editing, form: { ...form, type: event.target.value as StyleForm["type"] } })
+                    options={[
+                      { value: "paragraph", label: "Paragraph" },
+                      { value: "character", label: "Character" },
+                    ]}
+                    onChange={(type) =>
+                      setEditing({ ...editing, form: { ...form, type: type as StyleForm["type"] } })
                     }
-                    style={dialogInput}
-                  >
-                    <option value="paragraph">Paragraph</option>
-                    <option value="character">Character</option>
-                  </select>
+                  />
                 </label>
               )}
               <label style={dialogFieldRow}>
                 <span>Based on</span>
-                <select
-                  aria-label="Based on"
+                <ToolbarMenuSelect
+                  variant="field"
+                  ariaLabel="Based on"
                   value={form.basedOn}
-                  onChange={(event) => setEditing({ ...editing, form: { ...form, basedOn: event.target.value } })}
-                  style={dialogInput}
-                >
-                  <option value="">(none)</option>
-                  {entries
-                    .filter((other) => other.type === form.type && other.id !== editing.entry?.id)
-                    .map((other) => (
-                      <option key={other.id} value={other.id}>{other.name}</option>
-                    ))}
-                </select>
+                  options={[
+                    { value: "", label: "(none)" },
+                    ...entries
+                      .filter((other) => other.type === form.type && other.id !== editing.entry?.id)
+                      .map((other) => ({ value: other.id, label: other.name })),
+                  ]}
+                  onChange={(basedOn) => setEditing({ ...editing, form: { ...form, basedOn } })}
+                />
               </label>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 {check("Bold", form.bold, (bold) => setEditing({ ...editing, form: { ...form, bold } }))}
@@ -4683,20 +4768,21 @@ function StylesPane({ api, onChanged }: { api: DocxViewApi | null; onChanged: ()
               {form.type === "paragraph" && (
                 <label style={dialogFieldRow}>
                   <span>Alignment</span>
-                  <select
-                    aria-label="Style alignment"
+                  <ToolbarMenuSelect
+                    variant="field"
+                    ariaLabel="Style alignment"
                     value={form.alignment}
-                    onChange={(event) =>
-                      setEditing({ ...editing, form: { ...form, alignment: event.target.value as StyleForm["alignment"] } })
+                    options={[
+                      { value: "", label: "(unchanged)" },
+                      { value: "left", label: "Left" },
+                      { value: "center", label: "Center" },
+                      { value: "right", label: "Right" },
+                      { value: "both", label: "Justified" },
+                    ]}
+                    onChange={(alignment) =>
+                      setEditing({ ...editing, form: { ...form, alignment: alignment as StyleForm["alignment"] } })
                     }
-                    style={dialogInput}
-                  >
-                    <option value="">(unchanged)</option>
-                    <option value="left">Left</option>
-                    <option value="center">Center</option>
-                    <option value="right">Right</option>
-                    <option value="both">Justified</option>
-                  </select>
+                  />
                 </label>
               )}
               {check("Show in the quick-style gallery", form.quickStyle, (quickStyle) =>
@@ -5268,6 +5354,16 @@ function PageSizeMenu({
   );
 }
 
+/** Word's page-border weights. Written as fractions, unlike the table and
+ * paragraph border dialogs, which spell the same values as decimals. */
+const BORDER_WEIGHT_OPTIONS = [
+  { value: "0.5", label: "½ pt" },
+  { value: "1", label: "1 pt" },
+  { value: "1.5", label: "1½ pt" },
+  { value: "2.25", label: "2¼ pt" },
+  { value: "3", label: "3 pt" },
+];
+
 function PageBorderMenu({
   scope,
   onApply,
@@ -5371,13 +5467,14 @@ function PageBorderMenu({
           </label>
           <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
             <span>Weight</span>
-            <select aria-label="Page border width" value={widthPt} onChange={(event) => setWidthPt(event.target.value)} style={{ width: 132, border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg }}>
-              <option value="0.5">½ pt</option>
-              <option value="1">1 pt</option>
-              <option value="1.5">1½ pt</option>
-              <option value="2.25">2¼ pt</option>
-              <option value="3">3 pt</option>
-            </select>
+            <ToolbarMenuSelect
+              variant="field"
+              ariaLabel="Page border width"
+              value={widthPt}
+              width={132}
+              options={BORDER_WEIGHT_OPTIONS}
+              onChange={setWidthPt}
+            />
           </label>
           <span style={{ color: T.muted, fontSize: 11 }}>
             Applies to {scope === "section" ? "this section" : "the whole document"}.
@@ -5689,21 +5786,23 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
               style={{ ...field, width: 64 }}
             />
             <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} disabled={!gotoPage} onClick={runGoToPage}>Go</button>
-            <select
-              aria-label="Go to bookmark"
-              value=""
-              disabled={bookmarks.length === 0}
-              onChange={(e) => {
-                const name = e.target.value;
-                if (name) setStatus(api?.goToBookmark(name) ? `Bookmark ${name}` : `Bookmark ${name} not found`);
-              }}
-              style={{ flex: 1, minWidth: 0, border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 4px", background: T.popoverBg, color: T.fg, font: "12px system-ui, sans-serif" }}
-            >
-              <option value="">Bookmark…</option>
-              {bookmarks.map((name) => (
-                <option key={name} value={name}>{name}</option>
-              ))}
-            </select>
+            {/* The wrapper carries the flex sizing: `style` lands on the
+                trigger button, and it is the control's own root that is this
+                row's flex item. */}
+            <span style={{ flex: 1, minWidth: 0, display: "flex" }}>
+              <ToolbarMenuSelect
+                variant="field"
+                ariaLabel="Go to bookmark"
+                value=""
+                placeholder="Bookmark…"
+                disabled={bookmarks.length === 0}
+                options={bookmarks.map((name) => ({ value: name, label: name }))}
+                onChange={(name) => {
+                  if (name) setStatus(api?.goToBookmark(name) ? `Bookmark ${name}` : `Bookmark ${name} not found`);
+                }}
+                style={{ font: "12px system-ui, sans-serif" }}
+              />
+            </span>
           </div>
         </div>
       )}
