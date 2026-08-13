@@ -330,6 +330,30 @@ function menuAnchorBottom(anchor: Element | null | undefined, rect: { bottom: nu
   return barBottom === undefined ? rect.bottom : Math.max(rect.bottom, barBottom);
 }
 
+/**
+ * A run patch as it would read back on the selection, so the bar can show what
+ * the user just asked for without waiting for the engine to catch up.
+ *
+ * Only the keys `SelectionFormat` actually has: a patch also carries `clear`
+ * and `textEffect`, which the toolbar does not paint a state from. `null` in a
+ * patch means "remove", which reads back as absent.
+ */
+function appliedRunFormat(patch: Parameters<DocxViewApi["applyFormat"]>[0]): Partial<SelectionFormat> {
+  if (patch.clear) return { bold: false, italic: false, underline: false, strike: false };
+  const out: Partial<SelectionFormat> = {};
+  if (patch.bold !== undefined) out.bold = patch.bold;
+  if (patch.italic !== undefined) out.italic = patch.italic;
+  if (patch.underline !== undefined) out.underline = patch.underline;
+  if (patch.strike !== undefined) out.strike = patch.strike;
+  if (patch.fontSizePt !== undefined) out.fontSizePt = patch.fontSizePt;
+  if (patch.fontFamily !== undefined) out.fontFamily = patch.fontFamily;
+  if (patch.color !== undefined) out.color = patch.color ?? undefined;
+  if (patch.highlight !== undefined) out.highlight = patch.highlight ?? undefined;
+  if (patch.verticalAlign !== undefined) out.verticalAlign = patch.verticalAlign ?? undefined;
+  if (patch.characterStyleId !== undefined) out.characterStyleId = patch.characterStyleId;
+  return out;
+}
+
 /** The gap every anchored panel keeps between itself and the window edge. */
 const PANEL_MARGIN = 8;
 
@@ -6789,10 +6813,42 @@ export function DocxToolbar({
     }
   };
 
-  const apply = (patch: Parameters<DocxViewApi["applyFormat"]>[0]) => {
+  /**
+   * Apply a run-format patch, deciding it from the selection as it is NOW.
+   *
+   * The toggles used to read the CACHED `fmt` to decide what to send, and
+   * `fmt` was refreshed here from a read taken immediately after applyFormat.
+   * The engine's model does not update synchronously: measured on
+   * wild2-med-phase23-protocol, `getSelectionFormat()` still reported the old
+   * value at 0ms, at a microtask, at two animation frames and at 50ms, and
+   * only told the truth by 100ms. So this cached the PREVIOUS answer and the
+   * next click computed its toggle from it, asking for the state the text was
+   * already in — a click that did nothing. Bold went on, stuck, off, stuck,
+   * which is why turning it off took three clicks (#160).
+   *
+   * Taking a builder rather than a patch is what fixes it: the value is
+   * decided from a live read, after the selection is restored, at the moment
+   * of the click. That is what the keyboard path has always done (index.tsx
+   * reads `api.getSelectionFormat()` before its switch), which is why ⌘B
+   * never had this bug while the button beside it did.
+   *
+   * No delay anywhere, deliberately. 50ms was too early and 100ms was enough
+   * on one document on one machine, so a wait here would be a race dressed up
+   * as a fix.
+   */
+  const apply = (
+    patch:
+      | Parameters<DocxViewApi["applyFormat"]>[0]
+      | ((live: SelectionFormat | null) => Parameters<DocxViewApi["applyFormat"]>[0]),
+  ) => {
     restoreSelection();
-    api?.applyFormat(patch);
-    setFmt(api?.getSelectionFormat() ?? null);
+    const live = api?.getSelectionFormat() ?? null;
+    const next = typeof patch === "function" ? patch(live) : patch;
+    api?.applyFormat(next);
+    // Show what the user just asked for rather than what the engine can answer
+    // this instant, so the button's own highlight is right between the click
+    // and the engine catching up. A later selectionchange re-reads the truth.
+    setFmt(live ? { ...live, ...appliedRunFormat(next) } : null);
   };
 
   // Home-tab controls as ordered groups so the low-frequency ones can fold into
@@ -6937,21 +6993,21 @@ export function DocxToolbar({
         key: "format",
         node: (
           <>
-            <Btn fold={-3} label={<b>B</b>} title="Bold (⌘B)" active={!!fmt?.bold} onClick={() => apply({ bold: !fmt?.bold })} />
-            <Btn fold={-3} label={<i>I</i>} title="Italic" active={!!fmt?.italic} onClick={() => apply({ italic: !fmt?.italic })} />
-            <Btn fold={-3} label={<u>U</u>} title="Underline" active={!!fmt?.underline} onClick={() => apply({ underline: !fmt?.underline })} />
-            <Btn label={<s>S</s>} title="Strikethrough" active={!!fmt?.strike} onClick={() => apply({ strike: !fmt?.strike })} />
+            <Btn fold={-3} label={<b>B</b>} title="Bold (⌘B)" active={!!fmt?.bold} onClick={() => apply((live) => ({ bold: !live?.bold }))} />
+            <Btn fold={-3} label={<i>I</i>} title="Italic" active={!!fmt?.italic} onClick={() => apply((live) => ({ italic: !live?.italic }))} />
+            <Btn fold={-3} label={<u>U</u>} title="Underline" active={!!fmt?.underline} onClick={() => apply((live) => ({ underline: !live?.underline }))} />
+            <Btn label={<s>S</s>} title="Strikethrough" active={!!fmt?.strike} onClick={() => apply((live) => ({ strike: !live?.strike }))} />
             <Btn
               label={<span style={{ fontSize: 12 }}>x<sup style={{ fontSize: 9 }}>2</sup></span>}
               title="Superscript"
               active={fmt?.verticalAlign === "superscript"}
-              onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "superscript" ? null : "superscript" })}
+              onClick={() => apply((live) => ({ verticalAlign: live?.verticalAlign === "superscript" ? null : "superscript" }))}
             />
             <Btn
               label={<span style={{ fontSize: 12 }}>x<sub style={{ fontSize: 9 }}>2</sub></span>}
               title="Subscript"
               active={fmt?.verticalAlign === "subscript"}
-              onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "subscript" ? null : "subscript" })}
+              onClick={() => apply((live) => ({ verticalAlign: live?.verticalAlign === "subscript" ? null : "subscript" }))}
             />
             <TextEffectsMenu apply={apply} />
             <Btn label={<ClearFormatIcon />} title="Clear formatting" onClick={() => apply({ clear: true })} />
