@@ -14,13 +14,26 @@
  * - Collapsed — exactly one line. Controls that do not fit are hidden, lowest
  *   fold priority first, and the chevron's own width is reserved before the
  *   first fit test so the answer cannot change when the chevron appears.
- * - Expanded — nothing is hidden; the controls wrap onto as many lines as they
- *   need. The lines are balanced (see `balancedWidth`) so the last one is never
- *   left holding one stray control.
+ * - Expanded — that same line, untouched, and the folded controls on the lines
+ *   below it.
  *
- * Expanding costs the bar a whole line, so this module also decides whether
- * the chevron is offered at all — see `MIN_REVEAL`. Both rules exist because
- * the affordance was reported for advertising tools and delivering a gap.
+ * **Expanding adds tools below and changes nothing else.** The bar used to
+ * re-wrap every control across balanced lines when it opened, which squeezed
+ * the first line and pushed controls the user was already pointing at down a
+ * row. Reported as "why is it bringing items from the top that are already
+ * available down a line?" — and it is the same complaint as the "random weird
+ * space" before it: the affordance moved the furniture instead of adding to it.
+ * So the collapsed line is now frozen on open, and `revealed` says which
+ * controls go under it.
+ *
+ * The controls stay beside the tab strip when open. Giving them the full bar
+ * width buys room for the revealed rows, but only by moving the collapsed line
+ * below the tabs — motion, and a tab strip followed by a window-wide void.
+ * A narrow window therefore gets more revealed rows rather than a bar that
+ * rearranges itself at some widths and not others.
+ *
+ * Expanding costs the bar a line whatever it reveals, so this module also
+ * decides whether the chevron is offered at all — see `MIN_REVEAL`.
  */
 
 /** One measured control on the bar, in document order. */
@@ -40,19 +53,18 @@ export interface RibbonItem {
 }
 
 export interface RibbonPlan {
-  /** Per item, in the order given: hidden from the collapsed line. */
+  /** Per item, in the order given: not rendered at all. */
   hidden: boolean[];
-  /** Expanded: the controls take full-width lines below the tab strip. */
-  stacked: boolean;
+  /**
+   * Expanded: laid out below the collapsed line rather than on it. Empty of
+   * `true` when collapsed. The caller renders these after a forced line break,
+   * which is what keeps the line above them from re-wrapping.
+   */
+  revealed: boolean[];
   /** Offer the expand chevron: there is a line's worth of tools behind it. */
   offerExpand: boolean;
   /** How many controls (dividers do not count) the collapsed line hides. */
   hiddenCount: number;
-  /**
-   * Width to constrain the wrapping container to when expanded, or 0 to leave
-   * it at its natural width.
-   */
-  rowMaxWidth: number;
   /** A single control is wider than the line, so that line must scroll. */
   needsScroll: boolean;
 }
@@ -62,8 +74,6 @@ export interface RibbonSpace {
   gap: number;
   /** Width the controls may use while they share a line with the tab strip. */
   inlineAvailable: number;
-  /** Width of a line that spans the whole bar (the expanded state). */
-  fullAvailable: number;
   /** Width kept free for the expand chevron. */
   reserve: number;
 }
@@ -80,47 +90,16 @@ function lineWidth(items: RibbonItem[], hidden: boolean[], gap: number): number 
   return count === 0 ? 0 : total + gap * (count - 1);
 }
 
-/** How many lines a greedy wrap needs for `widths` at `width`. */
-export function lineCount(widths: number[], gap: number, width: number): number {
-  if (widths.length === 0) return 0;
-  let lines = 1;
-  let used = 0;
-  for (const w of widths) {
-    const need = used === 0 ? w : used + gap + w;
-    if (need <= width || used === 0) used = need;
-    else {
-      lines++;
-      used = w;
-    }
-  }
-  return lines;
-}
-
 /**
- * The narrowest width that still wraps into the same number of lines.
+ * Hide separators that would start a line, end it, or double up.
  *
- * A greedy wrap fills each line to the brim and leaves the remainder on the
- * last one, which is how a 13-control tab ends up as a full line and then a
- * line holding one lonely icon. Squeezing the container to the narrowest width
- * that keeps the same line count spreads the same controls evenly across those
- * lines instead — same number of lines, no stray tail.
+ * `region` is the run of items that share the line — the whole bar when
+ * collapsed, and each of the two regions separately once the bar is open, so
+ * the divider left dangling at the end of the frozen line is trimmed there
+ * without hiding the one that legitimately starts the row beneath it.
  */
-export function balancedWidth(widths: number[], gap: number, width: number): number {
-  const lines = lineCount(widths, gap, width);
-  if (lines <= 1) return width;
-  let low = Math.max(...widths);
-  let high = width;
-  while (low < high) {
-    const mid = Math.floor((low + high) / 2);
-    if (lineCount(widths, gap, mid) <= lines) high = mid;
-    else low = mid + 1;
-  }
-  return low;
-}
-
-/** Hide separators that would start the line, end it, or double up. */
-function trimSeparators(items: RibbonItem[], hidden: boolean[]): void {
-  const visible = items.map((_, i) => i).filter((i) => !hidden[i]);
+function trimSeparators(items: RibbonItem[], hidden: boolean[], region?: number[]): void {
+  const visible = (region ?? items.map((_, i) => i)).filter((i) => !hidden[i]);
   let previousWasSeparator = true; // line start: a leading separator is stray
   for (const i of visible) {
     if (!items[i].separator) {
@@ -195,7 +174,13 @@ function foldedControls(items: RibbonItem[], hidden: boolean[]): number {
  */
 export function planRibbon(items: RibbonItem[], space: RibbonSpace, expanded: boolean): RibbonPlan {
   const none = new Array<boolean>(items.length).fill(false);
-  const idle: RibbonPlan = { hidden: none, stacked: false, offerExpand: false, hiddenCount: 0, rowMaxWidth: 0, needsScroll: false };
+  const idle: RibbonPlan = {
+    hidden: none,
+    revealed: new Array<boolean>(items.length).fill(false),
+    offerExpand: false,
+    hiddenCount: 0,
+    needsScroll: false,
+  };
   if (items.length === 0 || space.inlineAvailable <= 0) return idle;
   if (lineWidth(items, none, space.gap) <= space.inlineAvailable) return idle;
 
@@ -211,30 +196,30 @@ export function planRibbon(items: RibbonItem[], space: RibbonSpace, expanded: bo
     return { ...idle, hidden: tight, hiddenCount: foldedControls(items, tight) };
   }
   if (!expanded) {
-    return { hidden: folded, stacked: false, offerExpand: true, hiddenCount: reveal, rowMaxWidth: 0, needsScroll: false };
+    return { ...idle, hidden: folded, offerExpand: true, hiddenCount: reveal };
   }
 
-  const widths = items.map((item) => item.width);
-  // Full-width lines below the tabs, or narrower lines beside them?
-  //
-  // Stacking buys width but spends a whole line on the tab strip — a line
-  // holding a row of tabs and then a void the width of the window, which is
-  // the "random weird space" this bar was reported for. So it has to SAVE a
-  // line, not merely break even: on a tie the controls stay beside the tabs,
-  // where the first line is the collapsed line the user was already looking at
-  // and the extra tools land under it. Only when the tab strip has eaten most
-  // of the line — a narrow window — does full width win a line back.
-  const beside = lineCount(widths, space.gap, space.inlineAvailable);
-  const stacked = 1 + lineCount(widths, space.gap, space.fullAvailable) < beside;
-  const room = stacked ? space.fullAvailable : space.inlineAvailable;
+  // Open. The collapsed line is exactly what it was a moment ago — the same
+  // controls, in the same places — and everything it folded moves to the rows
+  // underneath. Note that the folded set is NOT a suffix: foldToFit hides by
+  // priority, so it can hide a control from the middle of the bar and keep a
+  // later one. The caller must therefore ORDER the revealed controls below,
+  // not merely break the line at some index; there is no index that separates
+  // these two sets.
+  const revealed = [...folded];
   const hidden = new Array<boolean>(items.length).fill(false);
-  trimSeparators(items, hidden);
+  const above: number[] = [];
+  const below: number[] = [];
+  for (let i = 0; i < items.length; i++) (revealed[i] ? below : above).push(i);
+  trimSeparators(items, hidden, above);
+  trimSeparators(items, hidden, below);
   return {
     hidden,
-    stacked,
+    revealed,
     offerExpand: true,
     hiddenCount: reveal,
-    rowMaxWidth: balancedWidth(widths, space.gap, room),
-    needsScroll: Math.max(...widths) > room,
+    // The revealed rows get the same width the collapsed line had, so a
+    // control too wide for that line is too wide for these too.
+    needsScroll: Math.max(...items.map((item) => item.width)) > space.inlineAvailable,
   };
 }

@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { DocxViewApi } from "../src/index.js";
 import { DocxToolbar } from "../src/toolbar.js";
-import { availableWidth, controlWidth, measureLikeABrowser, resizeTo, ribbon, visibleControls } from "./toolbar-measure.js";
+import { availableWidth, controlWidth, firstLineControls, measureLikeABrowser, resizeTo, ribbon, visibleControls } from "./toolbar-measure.js";
 
 /**
  * The bar across a width sweep. This file replaces the tier-hysteresis test:
@@ -78,16 +78,20 @@ function chevron(container: HTMLElement): HTMLButtonElement | null {
   return container.querySelector<HTMLButtonElement>("[data-dxw-toolbar-expand]");
 }
 
+/** One control, named by its tooltip. */
+function nameOf(el: HTMLElement): string {
+  return (
+    el.getAttribute("title") ??
+    el.getAttribute("data-tip") ??
+    el.querySelector("[title],[data-tip]")?.getAttribute("title") ??
+    el.querySelector("[title],[data-tip]")?.getAttribute("data-tip") ??
+    ""
+  );
+}
+
 /** The controls on the bar, named by their tooltip. */
 function names(container: HTMLElement): string[] {
-  return visibleControls(container).map(
-    (el) =>
-      el.getAttribute("title") ??
-      el.getAttribute("data-tip") ??
-      el.querySelector("[title],[data-tip]")?.getAttribute("title") ??
-      el.querySelector("[title],[data-tip]")?.getAttribute("data-tip") ??
-      "",
-  );
+  return visibleControls(container).map(nameOf);
 }
 
 // The chevron's reservation, kept free at the right end of the line.
@@ -164,24 +168,30 @@ describe("the bar across a width sweep", () => {
     await t.unmount();
   });
 
-  it("expanded, holds every control and leaves no line hanging", async () => {
+  it("expanded, holds every control and moves none of the ones already on the bar", async () => {
     const t = await mountToolbar();
     await selectTab(t.container, "insert");
     await resizeTo(t.container, 900);
     const foldedCount = ribbon(t.container).querySelectorAll("[data-dxw-folded]").length;
     expect(foldedCount, "controls are folded while collapsed").toBeGreaterThan(0);
+    const before = names(t.container);
 
     await act(async () => {
       t.container
         .querySelector<HTMLButtonElement>("[data-dxw-toolbar-expand]")!
         .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
+    // Every control is reachable...
     expect(ribbon(t.container).querySelectorAll("[data-dxw-folded]").length).toBe(0);
-    // The wrapping container is squeezed to the width that spreads the
-    // controls evenly over the same number of lines.
-    const squeezed = parseFloat(ribbon(t.container).style.maxWidth);
-    expect(squeezed).toBeGreaterThan(0);
-    expect(squeezed).toBeLessThanOrEqual(availableWidth(t.container) + 400);
+    expect(visibleControls(t.container).length).toBeGreaterThan(before.length);
+    // ...and the line the user was already pointing at did not move. This is
+    // the reported bug: opening the bar used to re-wrap the whole tab, which
+    // pushed controls that were already visible down a row.
+    expect(firstLineControls(t.container).map(nameOf)).toEqual(before);
+    // Held below by a forced break, not by squeezing the container — the
+    // squeeze is what moved the first line.
+    expect(ribbon(t.container).querySelector("[data-dxw-ribbon-break]")).toBeTruthy();
+    expect(ribbon(t.container).style.maxWidth).toBe("");
     await t.unmount();
   });
 });

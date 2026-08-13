@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MIN_REVEAL, balancedWidth, lineCount, planRibbon, type RibbonItem } from "../src/ribbon-layout.js";
+import { MIN_REVEAL, planRibbon, type RibbonItem } from "../src/ribbon-layout.js";
 
 /**
  * The arithmetic behind the toolbar's two states. These are the guarantees a
@@ -60,7 +60,16 @@ function visibleWidth(items: RibbonItem[], hidden: boolean[]): number {
 }
 
 function collapsed(items: RibbonItem[], available: number) {
-  return planRibbon(items, { gap: GAP, inlineAvailable: available, fullAvailable: available, reserve: RESERVE }, false);
+  return planRibbon(items, { gap: GAP, inlineAvailable: available, reserve: RESERVE }, false);
+}
+
+function opened(items: RibbonItem[], available: number) {
+  return planRibbon(items, { gap: GAP, inlineAvailable: available, reserve: RESERVE }, true);
+}
+
+/** The controls that share the bar's first line, by index. */
+function firstLine(items: RibbonItem[], plan: { hidden: boolean[]; revealed: boolean[] }): number[] {
+  return items.map((_, i) => i).filter((i) => !plan.hidden[i] && !plan.revealed[i]);
 }
 
 describe("the collapsed line", () => {
@@ -127,11 +136,7 @@ describe("the collapsed line", () => {
     // The whole line is the budget: the bar keeps no seat for a chevron it is
     // not going to show, so it lands on the same line a bar with no chevron
     // at all would.
-    const noSeat = planRibbon(
-      HOME,
-      { gap: GAP, inlineAvailable: total - 20, fullAvailable: total - 20, reserve: 0 },
-      false,
-    );
+    const noSeat = planRibbon(HOME, { gap: GAP, inlineAvailable: total - 20, reserve: 0 }, false);
     expect(plan.hidden).toEqual(noSeat.hidden);
   });
 
@@ -156,84 +161,50 @@ describe("the collapsed line", () => {
 });
 
 describe("the expanded lines", () => {
-  it("takes full-width lines below the tabs only when that saves a line", () => {
-    const widths = HOME.map((item) => item.width);
-    const total = widths.reduce((sum, w) => sum + w, 0) + GAP * (widths.length - 1);
-    // Wide bar: two lines beside the tabs, or a tab line plus two full-width
-    // lines. Stacking would cost a line and buy nothing, so it stays beside.
-    const beside = planRibbon(
-      HOME,
-      { gap: GAP, inlineAvailable: Math.ceil(total / 2) + 40, fullAvailable: total - 10, reserve: RESERVE },
-      true,
-    );
-    expect(beside.stacked).toBe(false);
-    // A TIE is not a saving. Two lines beside the tabs, or a tab line plus one
-    // full-width line: both are two lines tall, but the stacked one spends its
-    // first on a row of tabs and a window's width of empty bar. That void is
-    // what the expand chevron was reported for, so ties stay beside the tabs.
-    const tie = planRibbon(
-      HOME,
-      { gap: GAP, inlineAvailable: Math.ceil(total / 2) + 40, fullAvailable: total + 10, reserve: RESERVE },
-      true,
-    );
-    expect(lineCount(widths, GAP, Math.ceil(total / 2) + 40), "two lines beside").toBe(2);
-    expect(1 + lineCount(widths, GAP, total + 10), "two lines stacked").toBe(2);
-    expect(tie.stacked, "a tie stays beside the tabs").toBe(false);
-    // Narrow bar: the tab strip has eaten most of the line, and full width
-    // saves lines, so the controls take the bar's whole width below it.
-    const stacked = planRibbon(
-      HOME,
-      { gap: GAP, inlineAvailable: 300, fullAvailable: 700, reserve: RESERVE },
-      true,
-    );
-    expect(stacked.stacked).toBe(true);
+  it("leaves the collapsed line exactly as it was", () => {
+    // The reported bug, as arithmetic: "why is it bringing items from the top
+    // that are already available down a line?" Opening the bar used to re-wrap
+    // every control across balanced lines, which squeezed the first line and
+    // pushed controls the user could already see down a row. Opening may only
+    // ADD rows.
+    for (const available of [1240, 940, 740, 640, 540, 440, 340]) {
+      const shut = collapsed(HOME, available);
+      if (!shut.offerExpand) continue;
+      const open = opened(HOME, available);
+      const before = HOME.map((_, i) => i).filter((i) => !shut.hidden[i]);
+      expect(firstLine(HOME, open), `at ${available}px`).toEqual(before);
+    }
   });
 
-  it("hides nothing and balances the lines", () => {
-    const widths = HOME.map((item) => item.width);
-    const available = 700;
-    const plan = planRibbon(
-      HOME,
-      { gap: GAP, inlineAvailable: 400, fullAvailable: available, reserve: RESERVE },
-      true,
-    );
-    // Every control stays; only a divider left dangling at the end goes.
-    expect(HOME.filter((item, i) => plan.hidden[i] && !item.separator)).toEqual([]);
-    expect(plan.offerExpand).toBe(true);
-    // Same number of lines as the plain wrap, in less width: the leftovers
-    // that a greedy wrap dumps on the last line are spread over all of them.
-    expect(lineCount(widths, GAP, plan.rowMaxWidth)).toBe(lineCount(widths, GAP, available));
-    expect(plan.rowMaxWidth).toBeLessThan(available);
+  it("reveals every folded control, and hides none of them", () => {
+    const available = 740;
+    const shut = collapsed(HOME, available);
+    const open = opened(HOME, available);
+    HOME.forEach((item, i) => {
+      if (!shut.hidden[i] || item.separator) return;
+      expect(open.revealed[i], "a folded control is revealed below").toBe(true);
+      expect(open.hidden[i], "and is not hidden as well").toBe(false);
+    });
+    // Every control is reachable once open; only dividers may still go.
+    expect(HOME.filter((item, i) => open.hidden[i] && !item.separator)).toEqual([]);
+    expect(open.offerExpand).toBe(true);
   });
 
-  it("never leaves one control alone on the last line", () => {
-    // A tab whose greedy wrap ends on a single icon: nine 100px controls in
-    // 420px fills four to a line and strands the ninth.
-    const widths = Array.from({ length: 9 }, () => 100);
-    const available = 420;
-    expect(lastLineCount(widths, GAP, available)).toBe(1);
-    expect(lastLineCount(widths, GAP, balancedWidth(widths, GAP, available))).toBeGreaterThan(1);
+  it("strands no divider at the edge of either region", () => {
+    // The two regions are two lines, so each one owns its own ends. A divider
+    // that fell at the end of the collapsed line goes; so does one that would
+    // now start the revealed row beneath it.
+    const open = opened(HOME, 740);
+    for (const region of [firstLine(HOME, open), HOME.map((_, i) => i).filter((i) => open.revealed[i] && !open.hidden[i])]) {
+      expect(region.length).toBeGreaterThan(0);
+      expect(HOME[region[0]].separator, "no leading divider").toBe(false);
+      expect(HOME[region[region.length - 1]].separator, "no trailing divider").toBe(false);
+    }
   });
 
-  it("leaves a single-line tab alone", () => {
-    const widths = [100, 100, 100];
-    expect(balancedWidth(widths, GAP, 800)).toBe(800);
+  it("reports a control too wide for the line so it can scroll", () => {
+    const wide: RibbonItem[] = [...HOME, { width: 900, fold: 0, separator: false }];
+    expect(opened(wide, 400).needsScroll).toBe(true);
+    expect(opened(HOME, 400).needsScroll).toBe(false);
   });
 });
-
-/** How many items the greedy wrap leaves on the final line. */
-function lastLineCount(widths: number[], gap: number, width: number): number {
-  let used = 0;
-  let count = 0;
-  for (const w of widths) {
-    const need = used === 0 ? w : used + gap + w;
-    if (need <= width || used === 0) {
-      used = need;
-      count++;
-    } else {
-      used = w;
-      count = 1;
-    }
-  }
-  return count;
-}

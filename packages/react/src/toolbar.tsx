@@ -6353,6 +6353,10 @@ export function DocxToolbar({
      * width, and React stopped the bar with "maximum update depth exceeded".
      * Descend into such an element and fit the controls it holds instead.
      */
+    // Take last pass's line break out before anything reads the DOM. It is a
+    // full-width element, so leaving it in would both add a bogus control to
+    // the measurement and make the single-child test below miscount.
+    ribbon.querySelector("[data-dxw-ribbon-break]")?.remove();
     const only = ribbon.children.length === 1 ? (ribbon.firstElementChild as HTMLElement) : null;
     const nested = only && getComputedStyle(only).flexBasis === "100%" ? only : null;
     const line = nested ?? ribbon;
@@ -6365,8 +6369,8 @@ export function DocxToolbar({
       // Never squeeze a control to make it fit: a squeezed control is a
       // clipped label, the bug this engine exists to make impossible.
       child.style.flexShrink = "0";
+      child.style.order = "";
     }
-    line.style.maxWidth = "";
     line.style.overflowX = "";
 
     const measured: { el: HTMLElement; item: RibbonItem }[] = [];
@@ -6410,22 +6414,38 @@ export function DocxToolbar({
         // a constant so its own presence cannot change the answer. A nested
         // line already spans the bar, so for it the whole width is the share.
         inlineAvailable: nested ? content : content - tabsWidth - trailingWidth - RIBBON_GAP * 3,
-        fullAvailable: content,
         reserve: EXPAND_RESERVE,
       },
       expanded,
     );
+    let anyRevealed = false;
     measured.forEach((entry, index) => {
-      if (!plan.hidden[index]) return;
-      entry.el.style.display = "none";
-      entry.el.dataset.dxwFolded = "1";
+      if (plan.hidden[index]) {
+        entry.el.style.display = "none";
+        entry.el.dataset.dxwFolded = "1";
+      }
+      // Flex `order`, not DOM order: the revealed controls are not a suffix of
+      // the bar, so the ones that belong below cannot be separated from the
+      // ones that stay by any single cut. Ordering moves them past the break
+      // without touching the tree React owns.
+      if (plan.revealed[index]) {
+        entry.el.style.order = "2";
+        anyRevealed = true;
+      }
     });
-    if (plan.rowMaxWidth > 0) line.style.maxWidth = `${plan.rowMaxWidth}px`;
+    if (anyRevealed) {
+      // A zero-height full-width flex item: the line above it is the collapsed
+      // line, unchanged, and the revealed controls wrap beneath.
+      const brk = document.createElement("div");
+      brk.dataset.dxwRibbonBreak = "";
+      brk.style.cssText = "flex:0 0 100%;height:0;margin:0;order:1";
+      line.appendChild(brk);
+    }
     if (plan.needsScroll) line.style.overflowX = "auto";
     if (plan.offerExpand !== canExpand) setCanExpand(plan.offerExpand);
     // A nested line is already a line of its own, so the bar always gives it
     // one rather than squeezing it in beside the tabs.
-    const wantsStack = nested !== null || plan.stacked;
+    const wantsStack = nested !== null;
     if (wantsStack !== stacked) setStacked(wantsStack);
     if (plan.hiddenCount !== hiddenCount) setHiddenCount(plan.hiddenCount);
   });

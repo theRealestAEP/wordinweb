@@ -68,8 +68,17 @@ export function ribbon(container: HTMLElement): HTMLElement {
 /** The controls the bar is showing right now, in bar order. */
 export function visibleControls(container: HTMLElement): HTMLElement[] {
   return (Array.from(ribbon(container).children) as HTMLElement[]).filter(
-    (el) => el.style.display !== "none" && el.offsetWidth > 0,
+    (el) =>
+      el.dataset.dxwRibbonBreak === undefined && el.style.display !== "none" && el.offsetWidth > 0,
   );
+}
+
+/**
+ * The controls sharing the bar's FIRST line: everything the open bar did not
+ * order below the break. Collapsed, that is the whole bar.
+ */
+export function firstLineControls(container: HTMLElement): HTMLElement[] {
+  return visibleControls(container).filter((el) => el.style.order !== "2");
 }
 
 /** Resize the window the way a user does, and let the bar re-fit. */
