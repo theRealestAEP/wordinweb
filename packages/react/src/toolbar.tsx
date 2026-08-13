@@ -951,18 +951,32 @@ function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: stri
           }}
         >
           {HIGHLIGHTS.map((h) => (
-            <div
+            <button
               key={h.name}
+              type="button"
               title={h.name}
+              aria-label={`Highlight ${h.name}`}
+              aria-pressed={current === h.name}
+              data-dxw-highlight={h.name}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => { onPick(h.name); setOpen(false); }}
-              style={{ width: 20, height: 20, background: h.css, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer" }}
+              style={{
+                width: 20, height: 20, padding: 0, background: h.css, borderRadius: 3, cursor: "pointer",
+                border: current === h.name ? `2px solid ${T.accent}` : `1px solid ${T.border}`,
+              }}
             />
           ))}
-          <div
+          <button
+            type="button"
             title="No highlight"
+            aria-label="No highlight"
+            aria-pressed={!current}
+            data-dxw-highlight=""
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => { onPick(null); setOpen(false); }}
             style={{
-              width: 20, height: 20, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer",
+              width: 20, height: 20, padding: 0, borderRadius: 3, cursor: "pointer",
+              border: !current ? `2px solid ${T.accent}` : `1px solid ${T.border}`,
               background: "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
             }}
           />
@@ -3454,11 +3468,59 @@ function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
 /** Google-Docs-style table menu: hover grid picker + row/column operations. */
 function TableMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
-  const [hover, setHover] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
+  /**
+   * The size the grid is showing — set by hovering a cell OR by arrowing to
+   * one, because those are the same gesture with different hardware.
+   *
+   * It used to be called `hover`, and that name was the defect: the size was
+   * reachable only by a pointer, and the grid was the only route to inserting
+   * a table anywhere in the product (#152).
+   */
+  const [size, setSize] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const ROWS = 8, COLS = 10;
   const position = useAnchoredPanel(rootRef, panelRef, open, { width: COLS * 18 + 16 , onClose: () => setOpen(false) });
+
+  /**
+   * The one cell in the tab order. A grid of 80 tab stops would technically
+   * be reachable and unusable, so the grid is a single stop and the arrows
+   * move within it — the roving tabindex pattern.
+   */
+  const cursor = { r: Math.max(1, size.r), c: Math.max(1, size.c) };
+  const gridRef = useRef<HTMLDivElement | null>(null);
+
+  /** Move the size by one cell, stopping at the edges rather than wrapping. */
+  const moveCursor = (dr: number, dc: number) => {
+    setSize({
+      r: Math.min(ROWS, Math.max(1, cursor.r + dr)),
+      c: Math.min(COLS, Math.max(1, cursor.c + dc)),
+    });
+  };
+
+  /**
+   * Keep focus on the chosen cell, which is also the only cell in the tab
+   * order — leaving it behind would strand focus on a `tabindex="-1"` cell
+   * and the next arrow would have nowhere to come from.
+   *
+   * Guarded on the grid ALREADY holding focus, so that a pointer sweeping the
+   * cells does not snatch focus away from whatever the user was typing in.
+   * Done in an effect rather than after a frame: tying focus to the paint
+   * clock leaves it one step behind the size, and clicking then inserts the
+   * cell before the one on screen.
+   */
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (!grid?.contains(document.activeElement)) return;
+    const cell = grid.querySelector<HTMLButtonElement>(`[data-dxw-table-size="${cursor.r}x${cursor.c}"]`);
+    if (cell && cell !== document.activeElement) cell.focus();
+  }, [cursor.r, cursor.c]);
+
+  const insert = (r: number, c: number) => {
+    api?.insertTable(r, c);
+    setOpen(false);
+    setSize({ r: 0, c: 0 });
+  };
 
 
   const ops: [string, string][] = [
@@ -3486,7 +3548,10 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
         title="Table"
         style={btnStyle(open)}
         onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setOpen(!open)}
+        // Reopening starts from nothing selected: a size left over from a
+        // pointer that swept the grid and then dismissed it is not a choice
+        // the user made.
+        onClick={() => { setSize({ r: 0, c: 0 }); setOpen(!open); }}
       >
         Table ▾
       </button>
@@ -3511,26 +3576,46 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
           }}
           onMouseDown={(e) => e.preventDefault()}
         >
-          <div style={{ fontSize: 12, color: T.muted, marginBottom: 4 }}>
-            {hover.r > 0 ? `${hover.r} × ${hover.c}` : "Insert table"}
+          <div aria-live="polite" style={{ fontSize: 12, color: T.muted, marginBottom: 4 }}>
+            {size.r > 0 ? `${size.r} × ${size.c}` : "Insert table"}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 16px)`, gap: 2 }}>
+          <div
+            ref={gridRef}
+            role="group"
+            aria-label="Table size"
+            onKeyDown={(e) => {
+              const step: Record<string, [number, number]> = {
+                ArrowRight: [0, 1], ArrowLeft: [0, -1], ArrowDown: [1, 0], ArrowUp: [-1, 0],
+              };
+              const move = step[e.key];
+              if (move) {
+                // Or the arrows scroll the panel instead of moving the size.
+                e.preventDefault();
+                moveCursor(move[0], move[1]);
+              }
+            }}
+            style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 16px)`, gap: 2 }}
+          >
             {Array.from({ length: ROWS * COLS }, (_, i) => {
               const r = Math.floor(i / COLS) + 1;
               const c = (i % COLS) + 1;
-              const lit = r <= hover.r && c <= hover.c;
+              const lit = r <= size.r && c <= size.c;
               return (
-                <div
+                <button
                   key={i}
-                  onMouseEnter={() => setHover({ r, c })}
-                  onClick={() => {
-                    api?.insertTable(r, c);
-                    setOpen(false);
-                    setHover({ r: 0, c: 0 });
-                  }}
+                  type="button"
+                  aria-label={`${r} × ${c} table`}
+                  data-dxw-table-size={`${r}x${c}`}
+                  tabIndex={r === cursor.r && c === cursor.c ? 0 : -1}
+                  // Same value means the same object, so React bails out
+                  // rather than re-rendering the grid on every focus echo.
+                  onFocus={() => setSize((s) => (s.r === r && s.c === c ? s : { r, c }))}
+                  onMouseEnter={() => setSize((s) => (s.r === r && s.c === c ? s : { r, c }))}
+                  onClick={() => insert(r, c)}
                   style={{
                     width: 16,
                     height: 16,
+                    padding: 0,
                     border: `1px solid ${lit ? T.accent : T.border}`,
                     background: lit ? T.activeBg : T.popoverBg,
                     borderRadius: 2,
@@ -3542,8 +3627,9 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
           </div>
           <div style={{ borderTop: "1px solid #eee", marginTop: 8, paddingTop: 4 }}>
             {ops.map(([op, label]) => (
-              <div
+              <button
                 key={op}
+                type="button"
                 onClick={() => {
                   if (op.startsWith("valign:")) {
                     api?.tableOp({ kind: "cellVAlign", v: op.slice(7) as "top" | "center" | "bottom" });
@@ -3556,28 +3642,36 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
                   }
                   setOpen(false);
                 }}
-                style={{ padding: "4px 6px", fontSize: 13, cursor: "pointer", borderRadius: 4, color: T.fg }}
-                onMouseEnter={(e) => ((e.target as HTMLElement).style.background = T.hoverBg)}
-                onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
+                style={{
+                  display: "block", width: "100%", textAlign: "left", border: 0,
+                  padding: "4px 6px", fontSize: 13, cursor: "pointer", borderRadius: 4,
+                  color: T.fg, background: "transparent", font: "inherit",
+                }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = T.hoverBg)}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
               >
                 {label}
-              </div>
+              </button>
             ))}
             <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 6px" }}>
               <span style={{ fontSize: 12, color: T.muted, marginRight: 2 }}>Cell fill</span>
               {CELL_FILLS.map((f) => (
-                <div
+                <button
                   key={f}
+                  type="button"
                   title={`#${f}`}
+                  aria-label={`Cell fill #${f}`}
                   onClick={() => { api?.tableOp({ kind: "cellShading", fill: f }); setOpen(false); }}
-                  style={{ width: 16, height: 16, background: `#${f}`, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer" }}
+                  style={{ width: 16, height: 16, padding: 0, background: `#${f}`, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer" }}
                 />
               ))}
-              <div
+              <button
+                type="button"
                 title="No fill"
+                aria-label="No cell fill"
                 onClick={() => { api?.tableOp({ kind: "cellShading", fill: null }); setOpen(false); }}
                 style={{
-                  width: 16, height: 16, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer",
+                  width: 16, height: 16, padding: 0, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer",
                   background: "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
                 }}
               />
