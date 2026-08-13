@@ -279,11 +279,23 @@ export async function selectAShape(t: MountedToolbar) {
  * as keyboard-operable.
  */
 export function focusableControls(panel: HTMLElement): HTMLElement[] {
+  return interactiveControls(panel).filter((element) => !element.hasAttribute("disabled"));
+}
+
+/**
+ * The same controls, disabled ones included.
+ *
+ * `focusableControls` drops disabled controls, because a user cannot operate
+ * them — right for "is this panel usable at all". Wrong for comparing two
+ * opens: a control that comes back switched off would read as a control that
+ * vanished, which points at the wrong defect.
+ */
+export function interactiveControls(panel: HTMLElement): HTMLElement[] {
   const selector = [
-    "button:not([disabled])",
-    "input:not([disabled])",
-    "select:not([disabled])",
-    "textarea:not([disabled])",
+    "button",
+    "input",
+    "select",
+    "textarea",
     "a[href]",
     "[tabindex]:not([tabindex='-1'])",
     "[contenteditable='true']",
@@ -350,6 +362,24 @@ export function accessibleName(element: HTMLElement): string {
 /** Reachable controls inside `panel` that announce as nothing. */
 export function unnamedControls(panel: HTMLElement): HTMLElement[] {
   return focusableControls(panel).filter((element) => !accessibleName(element));
+}
+
+/**
+ * What a panel offers, in a form two opens can be compared by.
+ *
+ * Deliberately NOT the panel's HTML. Inline `left`/`top` differ between opens
+ * for a panel that measures its anchor, and a diff of two 4KB style strings
+ * says nothing a reader can act on. What matters for "works once, then not
+ * again" is what the user can still do: which controls are there, what they
+ * announce as, and whether they are switched off.
+ */
+export function panelSignature(panel: HTMLElement): string[] {
+  return interactiveControls(panel).map((element) => {
+    const tag = element.tagName.toLowerCase();
+    const type = element.getAttribute("type") ?? "";
+    const disabled = element.hasAttribute("disabled") ? " disabled" : "";
+    return `${tag}${type ? `[${type}]` : ""} "${accessibleName(element)}"${disabled}`;
+  });
 }
 
 /** An element outside every panel and outside the bar, to click on. */

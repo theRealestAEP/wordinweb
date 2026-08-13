@@ -1,5 +1,5 @@
 /**
- * #146: the six checks every popover and dialog on the bar must pass.
+ * #146: the eight checks every popover and dialog on the bar must pass.
  *
  * They live here, in one function, so that the plain bar, the Table Format
  * tab and the Format tab all run the SAME checks rather than three drifting
@@ -18,6 +18,7 @@ import {
   focusableControls,
   isOpen,
   openSurface,
+  panelSignature,
   pressKey,
   tick,
   unnamedControls,
@@ -32,7 +33,7 @@ export interface SmokeContext {
 }
 
 /**
- * Declare the six tests for one surface.
+ * Declare the eight tests for one surface.
  *
  * `context` is a getter rather than a value because the toolbar is mounted in
  * a `beforeEach`, which has not run when this function is called.
@@ -90,4 +91,52 @@ export function surfaceInvariants(tip: string, what: string, context: () => Smok
     await tick(0);
     expect(watch.messages, `opening, closing and reopening "${tip}" logged to the console`).toEqual([]);
   });
+
+  it("offers the same thing the second time it is opened", async () => {
+    // "Works once, then not again" is the shape of several defects the user
+    // has hit, and a panel that keeps state across a close is where it comes
+    // from: a form left on step two, a control left disabled, a list left
+    // filtered. Nothing is typed into the panel here — the second open should
+    // be indistinguishable from the first purely by virtue of being reopened.
+    const { bar } = context();
+    const first = await openSurface(bar, tip);
+    const before = panelSignature(first.panel);
+    await closeSurface(first);
+
+    const second = await openSurface(bar, tip);
+    expect(panelSignature(second.panel), `"${tip}" offers different controls on its second open`)
+      .toEqual(before);
+    await closeSurface(second);
+  });
+
+  it("dismisses the same way the second time it is opened", async () => {
+    // Measured against the FIRST open, not against an absolute. A surface
+    // that has never closed on Escape must not fail here as well — that is
+    // #151, recorded once. What this catches is a surface that closed one way
+    // the first time and stops doing so after a round trip, which is the
+    // dismissal half of "works once, then not again".
+    const { bar } = context();
+    const firstEscape = await opensThenCloses(bar, tip, "escape");
+    const secondEscape = await opensThenCloses(bar, tip, "escape");
+    expect(secondEscape, `"${tip}" answered Escape differently on its second open`).toBe(firstEscape);
+
+    const firstOutside = await opensThenCloses(bar, tip, "outside");
+    const secondOutside = await opensThenCloses(bar, tip, "outside");
+    expect(secondOutside, `"${tip}" answered a click outside differently on its second open`)
+      .toBe(firstOutside);
+  });
+}
+
+/** Open the surface, try one dismissal, report whether it worked, and tidy up. */
+async function opensThenCloses(bar: HTMLElement, tip: string, how: "escape" | "outside"): Promise<boolean> {
+  const opened = await openSurface(bar, tip);
+  if (how === "escape") {
+    await pressKey(opened.panel, "Escape");
+    await tick(0);
+  } else {
+    await clickOutside(opened.panel);
+  }
+  const closed = !isOpen(opened.panel);
+  await closeSurface(opened);
+  return closed;
 }
