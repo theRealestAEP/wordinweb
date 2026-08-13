@@ -575,7 +575,14 @@ export class DocxEditor {
    * pending suggestion shows live (underlined/struck) as you type. */
   private suggesting = false;
   private revisionAuthor = "You";
-  /** Revision view active before suggesting mode forced markup; restored on off. */
+  /**
+   * The view the reader chose, held from the moment suggesting first forces
+   * markup until the restore is actually made. It survives a suggesting
+   * session that ends with changes still pending, because that restore is
+   * only deferred — re-reading the view at the start of the next session
+   * would capture the forced "markup" and owe the reader their own view back
+   * forever.
+   */
   private viewBeforeSuggesting: "final" | "markup" | null = null;
   /** Accept/reject popover for a clicked suggestion. */
   private suggestionPopover: HTMLElement | null = null;
@@ -6770,22 +6777,37 @@ export class DocxEditor {
   // ---------- suggesting mode (tracked changes editing) ----------
 
   /** Turn suggesting mode on/off. When on, every edit records as an OOXML
-   * revision and the view switches to markup so the suggestion shows live;
-   * turning off restores the prior revision view. `author` stamps w:author. */
+   * revision and the view switches to markup so the suggestion shows live.
+   * Turning off restores the prior view, but ONLY once nothing is left to
+   * review — see below. `author` stamps w:author. */
   setSuggesting(on: boolean, author?: string): void {
     if (author) this.revisionAuthor = author;
     if (on === this.suggesting) return;
     this.suggesting = on;
     this.dismissSuggestionPopover();
     if (on) {
-      this.viewBeforeSuggesting = this.host.doc.revisionView;
+      // Only when no restore is already owed — see viewBeforeSuggesting.
+      if (this.viewBeforeSuggesting === null) this.viewBeforeSuggesting = this.host.doc.revisionView;
       if (this.host.doc.revisionView !== "markup") {
         this.host.doc.setRevisionView("markup");
         this.host.rerender();
         this.positionCaret();
       }
-    } else if (this.viewBeforeSuggesting && this.viewBeforeSuggesting !== this.host.doc.revisionView) {
-      this.host.doc.setRevisionView(this.viewBeforeSuggesting);
+      return;
+    }
+    // Whether changes are RECORDED and whether they are SHOWN are two
+    // questions, and restoring the view answered the second with the first.
+    // The AI panel turns suggesting on for its turn and off again at the end,
+    // so a suggestion appeared, then the view snapped back to "final" and the
+    // tracked-change styling vanished a moment later — the edit read as
+    // already applied, with nothing to accept or reject. Word keeps markup on
+    // screen while changes are pending, and so does this: the prior view comes
+    // back only when there is nothing left to hide.
+    if (this.viewBeforeSuggesting === null || this.revisionCount() > 0) return;
+    const restore = this.viewBeforeSuggesting;
+    this.viewBeforeSuggesting = null;
+    if (restore !== this.host.doc.revisionView) {
+      this.host.doc.setRevisionView(restore);
       this.host.rerender();
       this.positionCaret();
     }

@@ -616,12 +616,48 @@ export class AgentDocument {
     return new SemanticInspector(doc, doc.enableStableIds(), revision);
   }
 
+  /**
+   * Read the document the way its READER reads it, whatever is on screen.
+   *
+   * The model these reads walk is derived per revision view, and markup view
+   * keeps deleted runs in it so a reviewer can see the strike-through. Right
+   * for a screen, wrong for an agent: the AI panel turns suggesting on for its
+   * turn, which forces markup, so a SECOND suggestion projected the pending
+   * insertion and the pending deletion interleaved — "The quick brown fox
+   * leajumps over the lazy dog" for a document that reads "leaps". The model
+   * then either rewrote a string no human had ever seen, or, because deleted
+   * runs are not editable text, got "cannot be rewritten across a non-text
+   * atom" and could not stack a second change at all.
+   *
+   * So every model-derived read runs in final view: insertions are text,
+   * deletions are gone — the document as it will read once the suggestions are
+   * accepted. Only the READS move. The operations they produce address runs by
+   * stable id, at offsets within a run's own text; both are properties of the
+   * XML and mean the same thing in either view, so applying them needs no
+   * switch and the view on screen never flickers.
+   */
+  private inFinalView<T>(read: () => T): T {
+    const doc = this.document;
+    const shown = doc.revisionView;
+    if (shown === "final") return read();
+    doc.setRevisionView("final");
+    try {
+      return read();
+    } finally {
+      doc.setRevisionView(shown);
+    }
+  }
+
   asset(ref: string): AgentAsset {
     return this.addedAssets.get(ref) ?? this.inspector().asset(ref);
   }
 
   inspect(request: AgentInspectRequest): AgentInspectResult {
     if (!request || typeof request !== "object") throw new Error("Inspection request is required");
+    return this.inFinalView(() => this.inspectFinal(request));
+  }
+
+  private inspectFinal(request: AgentInspectRequest): AgentInspectResult {
     const inspector = this.inspector();
     let result: AgentInspectResult;
     switch (request.kind) {
@@ -654,17 +690,22 @@ export class AgentDocument {
     }
   }
 
+  /** Fingerprints are recorded during a final-view read, so they have to be
+   * re-taken in one: compared across views, every block holding a tracked
+   * change reads as concurrently edited and the patch dies as "stale". */
   private fingerprintsMatch(revision: string, refs: Set<string>): boolean {
     const observed = this.inspectedTargets.get(revision);
     if (!observed) return false;
-    const inspector = this.inspector();
-    const xmlByScope = new WeakMap<XmlElement, string>();
-    for (const ref of refs) {
-      const before = observed.get(ref);
-      const current = referenceFingerprint(this.document, inspector, ref, xmlByScope);
-      if (before === undefined || current === null || before !== current) return false;
-    }
-    return true;
+    return this.inFinalView(() => {
+      const inspector = this.inspector();
+      const xmlByScope = new WeakMap<XmlElement, string>();
+      for (const ref of refs) {
+        const before = observed.get(ref);
+        const current = referenceFingerprint(this.document, inspector, ref, xmlByScope);
+        if (before === undefined || current === null || before !== current) return false;
+      }
+      return true;
+    });
   }
 
   private revisionMatchesEdit(request: AgentEditRequest): boolean {
@@ -678,6 +719,10 @@ export class AgentDocument {
    * the rendered-to-wire translation. Read-only: nothing here mutates. */
   project(request: AgentProjectRequest = {}): AgentProjectResult {
     if (!request || typeof request !== "object") throw new Error("Projection request is required");
+    return this.inFinalView(() => this.projectFinal(request));
+  }
+
+  private projectFinal(request: AgentProjectRequest): AgentProjectResult {
     const doc = this.document;
     const result = projectStory(
       doc,
