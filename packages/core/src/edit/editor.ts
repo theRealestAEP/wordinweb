@@ -1136,7 +1136,9 @@ export class DocxEditor {
       const b = bindings[i];
       const item = b.item;
       const src = item.src;
-      if (!src?.t) continue;
+      // A line the text box hides has no glyphs on screen; painting its rect
+      // would put a selection block below the box's bottom edge.
+      if (!src?.t || item.hidden) continue;
       let x0 = item.x;
       let x1 = item.x + item.width;
       const surface = b.el.parentElement;

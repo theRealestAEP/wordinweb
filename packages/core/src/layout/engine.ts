@@ -230,6 +230,9 @@ type ResolvedFrame = NonNullable<ParaProps["frame"]> & {
 
 interface InternalPage {
   items: PageItem[];
+  /** Text-box lines hidden past a noAutofit box's bottom edge; see
+   * LaidOutPage.hiddenText. */
+  hiddenText?: TextItem[];
   /** The page shell remains, but positioned items can be rematerialized. */
   discarded?: boolean;
   sp: SectionProps;
@@ -284,6 +287,7 @@ interface LayoutSnapshot {
   pagesLen: number;
   page: InternalPage;
   itemsLen: number;
+  hiddenTextLen: number;
   bandTop: number;
   bannerTop: number | undefined;
   colXs: number[];
@@ -477,6 +481,7 @@ function laidOutPage(p: InternalPage): LaidOutPage {
     index: p.physIndex,
     number: p.displayNumber,
     items: p.items,
+    ...(p.hiddenText ? { hiddenText: p.hiddenText } : {}),
     bodyTop: p.bodyTop,
     bodyBottom: p.bodyBottom,
     hfStart: p.hfStart ?? p.items.length,
@@ -2442,6 +2447,7 @@ class Engine {
       pagesLen: this.pages.length,
       page: p,
       itemsLen: p.items.length,
+      hiddenTextLen: p.hiddenText?.length ?? 0,
       bandTop: p.bandTop,
       bannerTop: p.bannerTop,
       colXs: [...p.colXs],
@@ -2482,6 +2488,7 @@ class Engine {
     for (const rp of removed) this.floats.delete(rp);
     const p = s.page;
     p.items.length = s.itemsLen;
+    if (p.hiddenText) p.hiddenText.length = s.hiddenTextLen;
     p.bandTop = s.bandTop;
     p.bannerTop = s.bannerTop;
     p.colXs = s.colXs;
@@ -6646,15 +6653,21 @@ class Engine {
           page.items.push(hit);
         }
         let clippedLines = 0;
+        // A noAutofit line past the box bottom is not painted, but the story
+        // is still editable, so it keeps its geometry in page.hiddenText —
+        // otherwise a caret pushed onto that line (Enter on the last line that
+        // fits) has no binding to sit on and vanishes.
         for (const it of inner.items) {
+          let clipped = false;
           if (it.kind === "text") {
             if (shape.wordArtOpacity !== undefined) it.opacity = shape.wordArtOpacity;
             if (independentStory && shape.srcDrawing) it.textboxStory = shape.srcDrawing;
             // Chained boxes hide whole lines outside their own [skipTopY,
-            // content-bottom] window (overflow flows to the next box); a plain
-            // noAutofit box clips at the box bottom edge (unchanged).
+            // content-bottom] window (overflow flows to the next box, which
+            // paints them and owns their caret); a plain noAutofit box clips
+            // at the box bottom edge with nowhere else for the line to go.
             if (chained && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) { clippedLines++; continue; }
-            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) { clippedLines++; continue; }
+            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) { clippedLines++; clipped = true; }
             // Content above skipTopY was PAINTED by an earlier box in the
             // chain, so skipping it here hides nothing.
             if (isContinuation && it.lineTop < skipTopY - 0.5) continue;
@@ -6669,7 +6682,12 @@ class Engine {
           if (behind && (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit")) it.behind = true;
           if (front && (it.kind === "text" || it.kind === "rect" || it.kind === "edge")) it.front = true;
           if (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit") it.z = shape.z;
-          page.items.push(it);
+          if (clipped && it.kind === "text") {
+            it.hidden = true;
+            (page.hiddenText ??= []).push(it);
+          } else {
+            page.items.push(it);
+          }
         }
         if (hit) {
           hit.textFit = {

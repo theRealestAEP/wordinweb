@@ -97,6 +97,11 @@ export interface TextItem {
   href?: string;
   /** Present for editable text (absent on numbering labels etc.). */
   src?: TextSource;
+  /** This line is one a fixed-size text box hides past its bottom edge (see
+   * LaidOutPage.hiddenText). It mounts unpainted so a caret can bind to it, so
+   * anything that draws from item geometry — selection, comment highlights —
+   * must skip it or it paints a block where there is no text. */
+  hidden?: true;
   /** Source drawing when this text belongs to an independently editable
    * text-box story. */
   textboxStory?: XmlElement;
@@ -366,6 +371,11 @@ export interface LaidOutPage {
   /** Column geometry for editor hit-testing. A page can contain more than one
    * band when a continuous section changes the column layout mid-page. */
   columnBands: Array<{ top: number; colXs: number[]; colWidths: number[] }>;
+  /** Lines a fixed-size text box (a:noAutofit) hides past its bottom edge.
+   * Held apart from `items` so nothing that paints, measures, or reads the
+   * page picks them up: they exist only so a caret that lands in the hidden
+   * part of a text-box story still has a place to be. */
+  hiddenText?: TextItem[];
 }
 
 /** Internal page-model window used by the DOM virtualizer. */

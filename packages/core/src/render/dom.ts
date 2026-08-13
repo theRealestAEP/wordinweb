@@ -204,12 +204,16 @@ function pageEq(a: LaidOutPage, b: LaidOutPage): boolean {
     a.bodyBottom !== b.bodyBottom ||
     a.hfStart !== b.hfStart ||
     JSON.stringify(a.columnBands) !== JSON.stringify(b.columnBands) ||
-    a.items.length !== b.items.length
+    a.items.length !== b.items.length ||
+    (a.hiddenText?.length ?? 0) !== (b.hiddenText?.length ?? 0)
   ) {
     return false;
   }
   for (let i = 0; i < a.items.length; i++) {
     if (!itemEq(a.items[i], b.items[i], 0)) return false;
+  }
+  for (let i = 0; i < (a.hiddenText?.length ?? 0); i++) {
+    if (!itemEq(a.hiddenText![i], b.hiddenText![i], 0)) return false;
   }
   return true;
 }
@@ -989,6 +993,19 @@ function renderPage(
       }
     }
   }
+  // Lines a fixed-size text box hides past its bottom edge. They mount so the
+  // editor can bind a caret to them, and are display:none so they paint
+  // nothing, measure 0x0, and never answer elementFromPoint — the caret falls
+  // back to the item's own layout geometry, which is what it wants anyway.
+  for (const item of page.hiddenText ?? []) {
+    const node = renderItem(doc, item, urls, options.interactive === true);
+    if (!node) continue;
+    node.style.display = "none";
+    node.dataset.dxwItemKind = "text";
+    if (item.textboxStory) node.dataset.dxwTextboxStory = "1";
+    surface.appendChild(node);
+    bindings.push({ el: node, item });
+  }
   const moveGrips = grips.filter((binding) => binding.item.axis === "move");
   if (moveGrips.length > 0) {
     let armed: GripBinding | undefined;
@@ -1170,7 +1187,7 @@ function renderComments(
     };
     for (const b of bindingsByComment.get(id) ?? []) {
       const surface = b.el.parentElement;
-      if (!surface) continue;
+      if (!surface || b.item.hidden) continue;
       const x0 = b.item.x;
       const x1 = b.item.x + b.item.width;
       if (run && (run.surface !== surface || run.top !== b.item.lineTop)) flush();
