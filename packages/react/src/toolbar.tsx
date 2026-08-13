@@ -162,6 +162,29 @@ const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box"
 const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
 const rowBtn: React.CSSProperties = { border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif", padding: "3px 8px" };
 
+/**
+ * The single text box that IS a popover — Bookmark, Text Box, WordArt,
+ * Watermark, Shape, Link. Same box as `fieldStyle` at a tighter vertical pad.
+ * Six components spelled this out identically, a seventh differed only by a
+ * margin and an eighth only by `flex: 1`.
+ *
+ * NOTE `outline: "none"`. It is carried over verbatim from all eight, so this
+ * consolidation changes nothing on screen — but it does remove the focus ring
+ * from every one of these boxes, and nothing replaces it. That is a real
+ * accessibility defect, older than #141 and deliberately not fixed here,
+ * because a focus style is a visible change and this commit is a
+ * like-for-like merge.
+ */
+const popoverInput: React.CSSProperties = {
+  width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`,
+  borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none",
+};
+
+/** The little colour well beside a hex box. Two of these, at two sizes. */
+const colorSwatch: React.CSSProperties = {
+  border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg,
+};
+
 const PAGE_SIZES = [
   { value: "letter", label: "Letter", description: '8.5" × 11"', width: 8.5, height: 11 },
   { value: "legal", label: "Legal", description: '8.5" × 14"', width: 8.5, height: 14 },
@@ -870,7 +893,7 @@ function ColorMenu({
               onKeyDown={(event) => { if (event.key === "Enter" && valid) pick(valid); }}
               spellCheck={false}
               placeholder="#1a73e8"
-              style={{ minWidth: 0, flex: 1, height: 28, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "3px 6px", color: T.fg, background: T.popoverBg }}
+              style={{ ...dialogInput, minWidth: 0, flex: 1, height: 28, padding: "3px 6px" }}
             />
             <button type="button" disabled={!valid} onClick={() => valid && pick(valid)} style={pillBtn}>Apply</button>
           </div>
@@ -1037,7 +1060,7 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
             placeholder="Paste or type a link"
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && submit()}
-            style={{ flex: 1, border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={{ ...popoverInput, flex: 1 }}
           />
           <button style={pillBtn} disabled={!url.trim()} onClick={submit}>Apply</button>
           {api?.getLinkAt() && (
@@ -1463,7 +1486,7 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
             placeholder="Quarterly_Revenue"
             onChange={(event) => { setName(event.target.value); setError(""); }}
             onKeyDown={(event) => event.key === "Enter" && submit()}
-            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={popoverInput}
           />
           {error && <div style={{ color: "#c5221f", fontSize: 11.5, marginTop: 5 }}>{error}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
@@ -1712,7 +1735,7 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
             value={linear}
             onChange={(event) => { setLinear(event.target.value); setError(""); }}
             onKeyDown={(event) => event.key === "Enter" && submit(linear)}
-            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "15px 'Cambria Math', serif", outline: "none" }}
+            style={{ ...popoverInput, padding: "6px 8px", font: "15px 'Cambria Math', serif" }}
           />
           <div style={{ color: T.muted, fontSize: 11.5, marginTop: 5 }}>Use ^, _, /, √&#123;…&#125;, ∫, matrices [a&amp;b;c&amp;d], and grouped &#123;…&#125; expressions.</div>
           {error && <div style={{ color: "#c5221f", fontSize: 11.5, marginTop: 5 }}>{error}</div>}
@@ -2171,7 +2194,7 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
                 onChange={(event) => setCustom(event.target.value)}
                 onKeyDown={(event) => event.key === "Enter" && insertCustom()}
                 placeholder="Paste or type a symbol"
-                style={{ minWidth: 0, flex: 1, border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 7px", background: T.popoverBg, color: T.fg, font: "15px 'Cambria Math', serif" }}
+                style={{ ...dialogInput, minWidth: 0, flex: 1, padding: "5px 7px", font: "15px 'Cambria Math', serif" }}
               />
               <button type="button" disabled={!custom} onClick={insertCustom} style={pillBtn}>Insert</button>
             </div>
@@ -2262,7 +2285,7 @@ function DividerMenu({ api }: { api: DocxViewApi | null }) {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 7 }}>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
               Color
-              <input aria-label="Divider color" type="color" value={color} onChange={(event) => setColor(event.target.value)} style={{ width: "100%", height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg }} />
+              <input aria-label="Divider color" type="color" value={color} onChange={(event) => setColor(event.target.value)} style={{ ...colorSwatch, width: "100%", height: 30 }} />
             </label>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
               Width (pt)
@@ -2319,7 +2342,7 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
             value={text}
             placeholder="Shape text (optional)"
             onChange={(event) => setText(event.target.value)}
-            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={popoverInput}
           />
           <div style={{ marginTop: 9, color: T.muted, font: "11.5px system-ui, sans-serif" }}>Line appearance</div>
           <div style={{ display: "grid", gridTemplateColumns: "auto 82px 88px", gap: 6, alignItems: "end", marginTop: 5 }}>
@@ -2430,7 +2453,7 @@ function TextBoxMenu({ api }: { api: DocxViewApi | null }) {
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => event.key === "Enter" && insert()}
             placeholder="Text box"
-            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={popoverInput}
           />
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
             <button type="button" onClick={insert} style={pillBtn}>Insert</button>
@@ -2629,7 +2652,7 @@ function WatermarkMenu({ api }: { api: DocxViewApi | null }) {
             aria-label="Watermark text"
             value={text}
             onChange={(event) => setText(event.target.value)}
-            style={{ width: "100%", boxSizing: "border-box", marginTop: 8, border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={{ ...popoverInput, marginTop: 8 }}
           />
           <div style={{ marginTop: 8 }}>
             <ToolbarCheckbox label="Diagonal" checked={diagonal} onChange={setDiagonal} />
@@ -2706,7 +2729,7 @@ function WordArtMenu({ api }: { api: DocxViewApi | null }) {
             aria-label="WordArt text"
             value={text}
             onChange={(event) => setText(event.target.value)}
-            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={popoverInput}
           />
           <div style={{ marginTop: 8, color: T.muted, font: "11px system-ui, sans-serif" }}>Style</div>
           <div role="radiogroup" aria-label="WordArt style" style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginTop: 4 }}>
@@ -3159,7 +3182,7 @@ function MediaMenu({ api }: { api: DocxViewApi | null }) {
       <button title="Insert online video" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Media</button>
       {open && (
         <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 300, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <input aria-label="Online video URL" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg }} />
+          <input aria-label="Online video URL" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" style={fieldStyle} />
           <button
             disabled={!url.trim()}
             onClick={() => void api?.insertOnlineVideo(url).then((inserted) => inserted && setOpen(false))}
@@ -3301,7 +3324,7 @@ function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
       placeholder={label}
       value={value}
       onChange={(event) => set(event.target.value)}
-      style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif" }}
+      style={fieldStyle}
     />
   );
   return (
@@ -5574,8 +5597,8 @@ function PageBorderMenu({
           <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
             <span>Color</span>
             <span style={{ display: "flex", gap: 6 }}>
-              <input aria-label="Page border color picker" type="color" value={validColor ?? "#4472c4"} onChange={(event) => setColor(event.target.value)} style={{ width: 34, height: 28, padding: 1, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg }} />
-              <input aria-label="Page border color" autoFocus value={color} onChange={(event) => setColor(event.target.value)} onKeyDown={(event) => event.key === "Enter" && applyCustom()} spellCheck={false} style={{ width: 92, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg }} />
+              <input aria-label="Page border color picker" type="color" value={validColor ?? "#4472c4"} onChange={(event) => setColor(event.target.value)} style={{ ...colorSwatch, width: 34, height: 28, padding: 1 }} />
+              <input aria-label="Page border color" autoFocus value={color} onChange={(event) => setColor(event.target.value)} onKeyDown={(event) => event.key === "Enter" && applyCustom()} spellCheck={false} style={{ ...dialogInput, width: 92 }} />
             </span>
           </label>
           <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
@@ -5824,10 +5847,7 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
     setStatus(api?.goToPage(n) ? `Page ${n}` : `No page ${n}`);
   };
   const bookmarks = open ? api?.listBookmarks() ?? [] : [];
-  const field: React.CSSProperties = {
-    width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`,
-    borderRadius: 6, padding: 6, font: "13px system-ui, sans-serif", outline: "none",
-  };
+  const field: React.CSSProperties = { ...popoverInput, padding: 6 };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button
